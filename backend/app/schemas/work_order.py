@@ -619,6 +619,26 @@ class WorkOrderOperationResponse(WorkOrderOperationBase):
     laser_nest: Optional[LaserNestOperationInfo] = None
     cancelled_nest_id: Optional[int] = None
 
+    # Owner ruling 1 (short count at completion). ``quantity_short_declared`` is the column
+    # an explicit close writes (received - good, when it closed short covered by scrap; null
+    # otherwise). The other three are NOT ORM columns: injected in memory by
+    # ``work_orders._enrich_work_order_operations`` from ``stage_accounting`` -- target units
+    # that never reached this operation (an upstream close declared them short), the most
+    # good the server accepts here, and received units still neither good nor scrapped.
+    # ``quantity_ordered`` keeps meaning the target; received = target - upstream short.
+    quantity_short_declared: Optional[float] = None
+    upstream_quantity_short: Optional[float] = None
+    quantity_good_ceiling: Optional[float] = None
+    quantity_unaccounted: Optional[float] = None
+    # Also injected by ``_enrich_work_order_operations``: on a POOLED work order, units an
+    # earlier whole-order operation declared short (NOT credited -- the client warns not to
+    # scrap them again); whether the operation has ANY TimeEntry; and its evidence-floored
+    # good. The office modal requires ``quantity_override_reason`` exactly when the server
+    # does: good above ``quantity_recorded_good`` on an operation ``has_labor_evidence``.
+    upstream_short_uncredited: Optional[float] = None
+    has_labor_evidence: Optional[bool] = None
+    quantity_recorded_good: Optional[float] = None
+
     # WHY this operation is held, WHO held it and WHEN -- so the Work Order page can disclose the
     # reason BEFORE anyone clicks Clear Hold. NOT an ORM column: injected as an in-memory attr by
     # ``work_orders._enrich_work_order_operations`` (like ``work_center_name`` above), and only for
@@ -776,8 +796,8 @@ class WorkOrderUpdate(BaseModel):
     # Flipping False -> True also DEMOTES un-started READY operations the pooled rule
     # had promoted (see work_orders.update_work_order), through the one demotion core
     # (work_order_state_service.demote_ready_operations, whose other callers are a
-    # work-order resume landing DRAFT and this same update moving a job to DRAFT), and it
-    # is audited per operation.
+    # work-order resume landing DRAFT, this same update moving a job to DRAFT, and the
+    # office reduce-production reopen), and it is audited per operation.
     sequential_operations: Optional[bool] = Field(
         default=None,
         description="True = a sequenced ROUTING: an operation becomes READY only once every lower-sequence "
@@ -885,6 +905,13 @@ class WorkOrderResponse(WorkOrderBase):
     operation_count: int = 0
     operations_complete: int = 0
     operation_progress_percent: float = 0.0
+    # Owner ruling 1, computed (not columns) by ``work_orders._enrich_work_order_operations``
+    # from the SAME bounds ``POST /work-orders/{id}/complete`` enforces: the most the floor's
+    # recorded good supports (above it a force-complete needs quantity_override_reason) and
+    # the units the floor already accounted as lost (a shortfall must be covered by
+    # max(this, work-order scrap)).
+    quantity_deliverable: Optional[float] = None
+    quantity_accounted_loss: Optional[float] = None
     created_at: datetime
     updated_at: datetime
     operations: List[WorkOrderOperationResponse] = Field(default_factory=list)

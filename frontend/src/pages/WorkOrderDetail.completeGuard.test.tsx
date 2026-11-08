@@ -174,7 +174,9 @@ describe('FEPERF-4: WorkOrderDetail Complete double-submit guard', () => {
 
     const dialog = await openCompleteModal();
 
-    // The modal's own submit fires the mutation (default qty = ordered, scrap 0).
+    // Owner ruling 1: the totals prefill with what is RECORDED (header 4), so book
+    // the full order before submitting (the server's deliverable is unknown here).
+    fireEvent.change(within(dialog).getByLabelText(/Quantity completed/i), { target: { value: '10' } });
     const submit = within(dialog).getByRole('button', { name: /^Complete$/ });
     fireEvent.click(submit);
 
@@ -193,18 +195,29 @@ describe('FEPERF-4: WorkOrderDetail Complete double-submit guard', () => {
     });
   });
 
-  it('passes the entered quantities to api.completeWorkOrder (no scrap → no reason)', async () => {
+  it('prefills the RECORDED totals, not the order (owner ruling 1)', async () => {
+    renderDetail();
+
+    const dialog = await openCompleteModal();
+    expect(within(dialog).getByLabelText(/Quantity completed/i)).toHaveValue(4);
+    expect(within(dialog).getByLabelText(/Quantity scrapped/i)).toHaveValue(0);
+    expect(within(dialog).getByRole('button', { name: /Use full count \(10\)/ })).toBeInTheDocument();
+  });
+
+  it('passes the entered quantities to api.completeWorkOrder (no scrap → no reason, scrap untouched)', async () => {
     mockedApi.completeWorkOrder.mockResolvedValue({ id: 42, status: 'complete' });
 
     renderDetail();
 
     const dialog = await openCompleteModal();
+    fireEvent.click(within(dialog).getByRole('button', { name: /Use full count \(10\)/ }));
+    expect(within(dialog).getByLabelText(/Quantity completed/i)).toHaveValue(10);
     fireEvent.click(within(dialog).getByRole('button', { name: /^Complete$/ }));
 
     await waitFor(() => {
-      // qty complete defaults to ordered (10), scrap 0, scrapReason and
-      // scrapReasonCodeId (Lean Phase 1) both undefined.
-      expect(mockedApi.completeWorkOrder).toHaveBeenCalledWith(42, 10, 0, undefined, undefined);
+      // An unchanged scrap total is OMITTED (null) so the recorded work-order
+      // scrap is never overwritten; no reason, no code, no override reason.
+      expect(mockedApi.completeWorkOrder).toHaveBeenCalledWith(42, 10, null, undefined, undefined, undefined);
     });
   });
 
@@ -215,7 +228,9 @@ describe('FEPERF-4: WorkOrderDetail Complete double-submit guard', () => {
 
     const dialog = await openCompleteModal();
 
-    // Enter a positive scrap quantity — the reason field appears and submit blocks.
+    // 8 good + 2 scrap accounts for the order of 10. A positive scrap rise makes
+    // the reason field appear and blocks submit until one is chosen.
+    fireEvent.change(within(dialog).getByLabelText(/Quantity completed/i), { target: { value: '8' } });
     const scrapInput = within(dialog).getByLabelText(/Quantity scrapped/i);
     fireEvent.change(scrapInput, { target: { value: '2' } });
 
@@ -235,7 +250,7 @@ describe('FEPERF-4: WorkOrderDetail Complete double-submit guard', () => {
 
     await waitFor(() => {
       // Legacy fallback (no company scrap codes): text reason, no code id.
-      expect(mockedApi.completeWorkOrder).toHaveBeenCalledWith(42, 10, 2, 'Out of tolerance', undefined);
+      expect(mockedApi.completeWorkOrder).toHaveBeenCalledWith(42, 8, 2, 'Out of tolerance', undefined, undefined);
     });
   });
 });

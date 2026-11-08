@@ -30,8 +30,10 @@ from app.services.laser_nest_text import (
     normalize_thickness,
 )
 from app.services.material_consumption_service import cancel_allocations_for_operations
+from app.services.operation_action_gates import operation_has_recorded_work
 from app.services.storage_service import get_storage, resolve_upload_dir, sanitize_ext
 from app.services.work_center_type_service import get_work_center_group
+from app.services.work_order_state_service import QTY_EPSILON
 
 if TYPE_CHECKING:
     from app.schemas.work_order import LaserNestManualCreate
@@ -502,6 +504,100 @@ def create_nest_material_allocation(
     return allocation
 
 
+def laser_import_wipe_operation_ids(db: Session, *, child_work_order: WorkOrder, company_id: int) -> list[int]:
+    """The ids of every operation a package import onto ``child_work_order`` would DELETE.
+
+    IMPORT REPLACES EVERYTHING: the wipe in ``build_laser_nest_child_work_order`` takes every
+    operation on the laser work order whose ``operation_group`` is ``LASER`` plus every
+    operation a nest (live or tombstoned) points at -- ops derive ``operation_group`` from
+    THEIR work center, so a nest op on an unusually-named work center may not carry group
+    ``LASER``, and the id list keeps the wipe exhaustive regardless. One definition, read by
+    the wipe itself, by the import route's operation lock (taken first, in the floor's SFI-1
+    order) and by its API-token refusal, so the three can never judge different sets. A pure,
+    tenant-scoped read: it writes nothing.
+    """
+    nest_backed_operation_ids = [
+        row[0]
+        for row in (
+            db.query(LaserNest.work_order_operation_id)
+            .join(WorkOrderOperation, LaserNest.work_order_operation_id == WorkOrderOperation.id)
+            .filter(
+                LaserNest.company_id == company_id,
+                WorkOrderOperation.work_order_id == child_work_order.id,
+            )
+            .all()
+        )
+        if row[0] is not None
+    ]
+    operation_wipe_filter = WorkOrderOperation.operation_group == "LASER"
+    if nest_backed_operation_ids:
+        operation_wipe_filter = or_(operation_wipe_filter, WorkOrderOperation.id.in_(nest_backed_operation_ids))
+    return [
+        row[0]
+        for row in db.query(WorkOrderOperation.id)
+        .filter(
+            WorkOrderOperation.company_id == company_id,
+            WorkOrderOperation.work_order_id == child_work_order.id,
+            operation_wipe_filter,
+        )
+        .all()
+    ]
+
+
+def import_would_wipe_recorded_work(db: Session, *, laser_work_order: Optional[WorkOrder], company_id: int) -> bool:
+    """True when a package import onto ``laser_work_order`` would erase recorded work.
+
+    The predicate behind the route's API_TOKEN_NEST_REIMPORT refusal (this PR's extension of
+    the 2026-11-07 decision, not part of it). IMPORT REPLACES EVERYTHING does two destructive
+    things, and each is judged:
+
+    * it DELETES every operation in ``laser_import_wipe_operation_ids`` -- refused when any of
+      them has ``operation_action_gates.operation_has_recorded_work`` (good, scrap, a start, or
+      ANY tenant-scoped ``TimeEntry``), the one per-operation rule the ``planned_runs`` and
+      ``quantity_ordered`` lowerings use too;
+    * it ZEROES the laser work order's header ``quantity_complete`` / ``quantity_scrapped``
+      unconditionally -- refused when either is already above zero, which covers counts a
+      person set on the header by hand and work recorded on an operation outside the wipe set.
+
+    Both reads come from the DATABASE, not the session's identity map: the route asks once
+    before the upload is unpacked and again under the import's lock, in one request
+    transaction, so without ``populate_existing()`` the re-check would reuse the first check's
+    loaded operations and miss a desk edit committed in between (the header is read as plain
+    columns, which never touch the identity map). The route's re-check runs right after the
+    import has row-locked and refreshed this same set (``_lock_laser_import_wipe_operations``
+    in ``work_orders.py``, the first thing its transaction does), so it judges the locked rows,
+    which nobody can change before the wipe; and since nothing writes these rows before that
+    lock, refreshing them here discards nothing.
+
+    ``None`` (no laser work order yet: a standalone import, or a classic parent with no live
+    laser child) wipes nothing. A pure read: callers raise the refusal before any write and
+    before any audit row.
+    """
+    if laser_work_order is None:
+        return False
+    operation_ids = laser_import_wipe_operation_ids(db, child_work_order=laser_work_order, company_id=company_id)
+    if operation_ids:
+        operations = (
+            db.query(WorkOrderOperation)
+            .filter(
+                WorkOrderOperation.company_id == company_id,
+                WorkOrderOperation.id.in_(operation_ids),
+            )
+            .populate_existing()
+            .all()
+        )
+        if any(operation_has_recorded_work(db, operation, company_id) for operation in operations):
+            return True
+    header = (
+        db.query(WorkOrder.quantity_complete, WorkOrder.quantity_scrapped)
+        .filter(WorkOrder.company_id == company_id, WorkOrder.id == laser_work_order.id)
+        .first()
+    )
+    if header is None:
+        return False
+    return float(header[0] or 0) > QTY_EPSILON or float(header[1] or 0) > QTY_EPSILON
+
+
 def build_laser_nest_child_work_order(
     db: Session,
     *,
@@ -566,44 +662,16 @@ def build_laser_nest_child_work_order(
     # paths are never mixed, so an import is the authoritative source of truth and
     # cleanly supersedes prior manual entry. Do not soften this into coexistence.
     #
-    # Capture the operation ids behind this WO's nests BEFORE the packages (and
-    # their nests, via cascade) are deleted: ops now derive operation_group from
-    # THEIR work center, so a nest op on an unusually-named work center may not
-    # carry group "LASER" -- the id list keeps the wipe exhaustive regardless.
-    nest_backed_operation_ids = [
-        row[0]
-        for row in (
-            db.query(LaserNest.work_order_operation_id)
-            .join(WorkOrderOperation, LaserNest.work_order_operation_id == WorkOrderOperation.id)
-            .filter(
-                LaserNest.company_id == company_id,
-                WorkOrderOperation.work_order_id == child_work_order.id,
-            )
-            .all()
-        )
-        if row[0] is not None
-    ]
-    operation_wipe_filter = WorkOrderOperation.operation_group == "LASER"
-    if nest_backed_operation_ids:
-        operation_wipe_filter = or_(operation_wipe_filter, WorkOrderOperation.id.in_(nest_backed_operation_ids))
-
     # Resolve the operations this rebuild will destroy BEFORE anything is deleted, so
     # the material-tie guard can run first. Deleting an operation out from under posted
     # consumption would orphan the ISSUE rows that carry its lot genealogy, so a wipe
     # touching a CONSUMED allocation raises MaterialAllocationConsumedError (-> 409) and
     # nothing is destroyed; untouched ties are CANCELLED with an audit row. Computing
     # the ids here rather than after the package delete is equivalent -- the package
-    # cascade removes nests, never operations.
-    wipe_operation_ids = [
-        row[0]
-        for row in db.query(WorkOrderOperation.id)
-        .filter(
-            WorkOrderOperation.company_id == company_id,
-            WorkOrderOperation.work_order_id == child_work_order.id,
-            operation_wipe_filter,
-        )
-        .all()
-    ]
+    # cascade removes nests, never operations. The same helper is what the import
+    # route's API-token refusal reads (``import_would_wipe_recorded_work``), so the set
+    # it judges is exactly the set this wipe deletes.
+    wipe_operation_ids = laser_import_wipe_operation_ids(db, child_work_order=child_work_order, company_id=company_id)
     cancel_allocations_for_operations(
         db,
         work_order=child_work_order,

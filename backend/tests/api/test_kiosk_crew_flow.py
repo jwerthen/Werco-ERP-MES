@@ -221,11 +221,19 @@ def test_complete_auto_closes_all_and_names_the_crew(client: TestClient, db_sess
     charlie, charlie_token = crew["charlie"]
     assert _clock_in(client, alice_token, crew).status_code == 200
     assert _clock_in(client, bob_token, crew).status_code == 200
+    # Owner ruling 1: COMPLETE closes at the good the floor RECORDED -- it books none of
+    # its own. Alice reports the full 10 first; a full count needs no acknowledgement.
+    report = client.post(
+        f"/api/v1/shop-floor/operations/{crew['op'].id}/production",
+        headers=bearer(alice_token),
+        json={"quantity_complete_delta": 10, "source": "kiosk"},
+    )
+    assert report.status_code == status.HTTP_200_OK, report.text
 
     resp = client.post(
         f"/api/v1/shop-floor/operations/{crew['op'].id}/complete",
         headers=bearer(charlie_token),
-        json={"quantity_complete": 10, "source": "kiosk"},
+        json={"source": "kiosk"},
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
     body = resp.json()
@@ -242,12 +250,14 @@ def test_complete_auto_closes_all_and_names_the_crew(client: TestClient, db_sess
     assert op.status == OperationStatus.COMPLETE
     assert op.completed_by == charlie.id
 
-    # Every crew entry is closed with a real duration (the durable labor record).
+    # Every crew entry is closed with a real duration (the durable labor record), and
+    # with its OWN count -- the completion credits nothing to anyone.
     entries = db_session.query(TimeEntry).filter(TimeEntry.operation_id == crew["op"].id).all()
     assert len(entries) == 2
     for entry in entries:
         assert entry.clock_out is not None
         assert entry.duration_hours is not None and entry.duration_hours >= 0
+    assert {entry.user_id: float(entry.quantity_produced or 0) for entry in entries} == {alice.id: 10, bob.id: 0}
 
     # The completed operation leaves the crew board.
     queue_resp = client.get(queue_url(crew["wc"].id), headers=bearer(crew["station_token"]))
@@ -263,18 +273,25 @@ def test_second_complete_rejected_409(client: TestClient, db_session: Session, c
     alice, alice_token = crew["alice"]
     charlie, charlie_token = crew["charlie"]
     assert _clock_in(client, alice_token, crew).status_code == 200
+    # The recorded 10 the close books (ruling 1: COMPLETE records no good of its own).
+    report = client.post(
+        f"/api/v1/shop-floor/operations/{crew['op'].id}/production",
+        headers=bearer(alice_token),
+        json={"quantity_complete_delta": 10, "source": "kiosk"},
+    )
+    assert report.status_code == status.HTTP_200_OK, report.text
 
     first = client.post(
         f"/api/v1/shop-floor/operations/{crew['op'].id}/complete",
         headers=bearer(charlie_token),
-        json={"quantity_complete": 10, "source": "kiosk"},
+        json={"source": "kiosk"},
     )
     assert first.status_code == status.HTTP_200_OK, first.text
 
     second = client.post(
         f"/api/v1/shop-floor/operations/{crew['op'].id}/complete",
         headers=bearer(alice_token),
-        json={"quantity_complete": 10, "source": "kiosk"},
+        json={"source": "kiosk"},
     )
     assert second.status_code == status.HTTP_409_CONFLICT, second.text
     assert second.json()["detail"] == "cannot complete operation: work order is complete"

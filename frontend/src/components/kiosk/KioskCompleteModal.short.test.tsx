@@ -1,0 +1,375 @@
+/**
+ * The kiosk COMPLETE / CLOCK OUT · KEEP OPEN overlay under owner ruling 1
+ * (2026-11-05): a short count at operation completion is reported as scrap with a
+ * reason, or the operation stays open — never closed short at the counted quantity.
+ *
+ * The server enforces it (`/complete` refuses 409 and writes nothing); what is pinned
+ * here is that the overlay shows the same arithmetic BEFORE the tap:
+ *  - FINISH pre-fills GOOD at what is still unaccounted for; KEEP OPEN pre-fills 0, and
+ *    switching from finish resets an untouched prefill (a walk-away must never record
+ *    phantom good);
+ *  - SHORT n shows as a tile and a status panel, and COMPLETE is disabled while short;
+ *  - "Report n as scrap" fills scrap and brings up the REQUIRED reason grid;
+ *  - the leave-open verb is ALWAYS reachable, short or not;
+ *  - a crewmate on the roster disables a SHORT finish and promotes leave-open;
+ *  - a laser nest says runs; the received count follows the server's upstream short;
+ *  - a clock-out refusal renders inline as an alert.
+ */
+
+import React from 'react';
+import { render, screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import KioskCompleteModal from './KioskCompleteModal';
+import type { KioskRosterEntry } from './kioskConstants';
+import type { ActiveJob, LaserNestInfo } from '../../types';
+
+const JOB: ActiveJob = {
+  time_entry_id: 501,
+  clock_in: '2026-11-07T12:00:00Z',
+  entry_type: 'run',
+  work_order_id: 9,
+  operation_id: 31,
+  work_order_number: 'WO-2026-0142',
+  operation_number: '20',
+  operation_name: 'Deburr',
+  quantity_ordered: 10,
+  quantity_complete: 2,
+  quantity_scrapped: 0,
+};
+
+const ME: KioskRosterEntry = {
+  time_entry_id: 501,
+  user_id: 3,
+  operator_name: 'Rosa V',
+  employee_id: 'E003',
+  entry_type: 'run',
+  clock_in: '2026-11-07T12:00:00Z',
+};
+const BOB: KioskRosterEntry = { ...ME, time_entry_id: 502, user_id: 11, operator_name: 'Bob T', employee_id: 'E011' };
+
+const renderModal = (props: Partial<React.ComponentProps<typeof KioskCompleteModal>> = {}) =>
+  render(
+    <KioskCompleteModal
+      job={JOB}
+      nowMs={Date.parse('2026-11-07T13:00:00Z')}
+      busy={false}
+      online
+      operationScrapped={0}
+      currentUserId={3}
+      roster={[ME]}
+      onCancel={jest.fn()}
+      onConfirm={jest.fn()}
+      onLeaveOpen={jest.fn()}
+      {...props}
+    />
+  );
+
+const goodWell = () => screen.getByTestId('kiosk-qty-good');
+const scrapWell = () => screen.getByTestId('kiosk-qty-scrap');
+const complete = () => screen.getByTestId('kiosk-qty-confirm');
+
+async function keyGood(user: ReturnType<typeof userEvent.setup>, digits: string) {
+  await user.click(goodWell());
+  await user.click(screen.getByRole('button', { name: 'Clear' }));
+  for (const d of digits) await user.click(screen.getByRole('button', { name: d }));
+}
+
+describe('KioskCompleteModal — short count (owner ruling 1)', () => {
+  describe('prefill', () => {
+    it('FINISH pre-fills GOOD at what is still unaccounted for (received − good − scrap)', () => {
+      renderModal({ operationScrapped: 1 });
+      // 10 target, 2 good + 1 scrap recorded → 7.
+      expect(within(goodWell()).getByText('7')).toBeInTheDocument();
+      expect(screen.queryByTestId('kiosk-complete-short')).not.toBeInTheDocument();
+      expect(complete()).toBeEnabled();
+    });
+
+    it('KEEP OPEN pre-fills 0 — only the pieces finished this session', () => {
+      renderModal({ mode: 'leave_open' });
+      expect(within(goodWell()).getByText('0')).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: 'Clock out · keep open' })).toBeInTheDocument();
+      expect(screen.getByTestId('kiosk-complete-leave-open-confirm')).toHaveTextContent('Clock out · leave Op 20 open');
+    });
+
+    it('switching FINISH → KEEP OPEN resets an untouched prefill to 0, with the hint', async () => {
+      const user = userEvent.setup();
+      renderModal();
+      expect(within(goodWell()).getByText('8')).toBeInTheDocument();
+
+      await user.click(screen.getByTestId('kiosk-complete-leave-open'));
+      expect(within(goodWell()).getByText('0')).toBeInTheDocument();
+      expect(screen.getByTestId('kiosk-complete-leave-open-hint')).toHaveTextContent(
+        'Enter the pieces you finished this session'
+      );
+
+      // ...and back: the untouched prefill returns.
+      await user.click(screen.getByTestId('kiosk-complete-switch-finish'));
+      expect(within(goodWell()).getByText('8')).toBeInTheDocument();
+    });
+
+    it('keeps a count the operator keyed when switching modes', async () => {
+      const user = userEvent.setup();
+      const onLeaveOpen = jest.fn();
+      renderModal({ onLeaveOpen });
+      await keyGood(user, '3');
+
+      await user.click(screen.getByTestId('kiosk-complete-leave-open'));
+      expect(within(goodWell()).getByText('3')).toBeInTheDocument();
+      await user.click(screen.getByTestId('kiosk-complete-leave-open-confirm'));
+      // 10 − 2 recorded − 3 keyed: 5 left open, and not a full count.
+      expect(onLeaveOpen).toHaveBeenCalledWith(3, 0, null, null, { fullCount: false, unaccountedAfter: 5 });
+    });
+  });
+
+  describe('SHORT', () => {
+    it('shows a SHORT tile and status panel, and disables COMPLETE while short', async () => {
+      const user = userEvent.setup();
+      const onConfirm = jest.fn();
+      renderModal({ onConfirm });
+      await keyGood(user, '6');
+
+      // 2 + 6 of 10: 2 short.
+      expect(screen.getByTestId('kiosk-complete-short-tile')).toHaveTextContent('2');
+      const panel = screen.getByTestId('kiosk-complete-short');
+      expect(panel).toHaveAttribute('role', 'status');
+      expect(panel).toHaveTextContent(
+        '2 of 10 not yet accounted for — record finished pieces, report lost pieces as scrap, or leave Op 20 open'
+      );
+      expect(complete()).toBeDisabled();
+      await user.click(complete());
+      expect(onConfirm).not.toHaveBeenCalled();
+    });
+
+    it('"Report n as scrap" fills scrap and requires a reason before COMPLETE', async () => {
+      const user = userEvent.setup();
+      const onConfirm = jest.fn();
+      renderModal({ onConfirm });
+      await keyGood(user, '6');
+
+      await user.click(screen.getByTestId('kiosk-complete-report-scrap'));
+      expect(within(scrapWell()).getByText('2')).toBeInTheDocument();
+      expect(scrapWell()).toHaveAttribute('aria-pressed', 'true');
+      expect(screen.queryByTestId('kiosk-complete-short')).not.toBeInTheDocument();
+      // Covered — but scrap needs a reason first.
+      expect(complete()).toBeDisabled();
+      expect(screen.getByText('Choose a scrap reason to continue.')).toBeInTheDocument();
+
+      await user.click(
+        within(screen.getByRole('group', { name: 'Scrap reason' })).getByRole('button', { name: 'Material defect' })
+      );
+      expect(complete()).toBeEnabled();
+      await user.click(complete());
+      // Covered by scrap, so nothing is left — but it is NOT a full good count: the host
+      // must close it explicitly, with the scrap on that close.
+      expect(onConfirm).toHaveBeenCalledWith(6, 2, 'Material defect', null, {
+        fullCount: false,
+        unaccountedAfter: 0,
+      });
+    });
+
+    it('keeps the leave-open verb visible at SHORT 0 as well as when short', async () => {
+      const user = userEvent.setup();
+      renderModal();
+      // Full count prefilled: not short, leave-open still one tap away.
+      expect(screen.queryByTestId('kiosk-complete-short')).not.toBeInTheDocument();
+      expect(screen.getByTestId('kiosk-complete-leave-open')).toHaveTextContent('Clock out · leave Op 20 open');
+
+      await keyGood(user, '1');
+      expect(screen.getByTestId('kiosk-complete-short')).toBeInTheDocument();
+      expect(screen.getByTestId('kiosk-complete-leave-open')).toBeEnabled();
+    });
+
+    it('works from the RECEIVED count the server reports, and says what never reached the op', async () => {
+      const user = userEvent.setup();
+      // 10 target, 2 closed short upstream → 8 received; 2 good already recorded.
+      renderModal({ upstreamShort: 2, goodCeiling: 8 });
+      expect(within(goodWell()).getByText('6')).toBeInTheDocument();
+      expect(complete()).toBeEnabled();
+
+      await keyGood(user, '5');
+      const panel = screen.getByTestId('kiosk-complete-short');
+      expect(panel).toHaveTextContent('1 of 8 not yet accounted for');
+      expect(panel).toHaveTextContent('2 pcs never reached it — closed short upstream.');
+    });
+
+    it('says runs, not pieces, on a laser nest', async () => {
+      const user = userEvent.setup();
+      const nest: LaserNestInfo = {
+        id: 5,
+        nest_name: 'nest-p001',
+        cnc_file_name: 'nest-1.cnc',
+        planned_runs: 10,
+        completed_runs: 2,
+        remaining_runs: 8,
+      };
+      renderModal({ job: { ...JOB, laser_nest: nest }, upstreamShort: 1, goodCeiling: 9 });
+      await keyGood(user, '5');
+      expect(screen.getByTestId('kiosk-complete-short-tile')).toHaveTextContent(/2\s*Short · runs/);
+      expect(screen.getByTestId('kiosk-complete-short')).toHaveTextContent('1 run never reached it');
+    });
+  });
+
+  describe('the decision figures it hands the host', () => {
+    // The host decides where covering scrap rides from `fullCount` (a full good count
+    // completes the operation at clock-out, so no `/complete` follows). It must be the
+    // overlay's OWN reading of the job it renders — the live poll — never the host's
+    // recomputation from the snapshot the overlay opened on.
+    const props = (onConfirm: jest.Mock, onLeaveOpen: jest.Mock) => ({
+      nowMs: Date.parse('2026-11-07T13:00:00Z'),
+      busy: false,
+      online: true,
+      operationScrapped: 0,
+      currentUserId: 3,
+      roster: [ME],
+      onCancel: jest.fn(),
+      onConfirm,
+      onLeaveOpen,
+    });
+
+    it('a crewmate report that lands while the overlay is open turns the entry into a full count', async () => {
+      const user = userEvent.setup();
+      const onConfirm = jest.fn();
+      const onLeaveOpen = jest.fn();
+      // Opened at 2 of 10; the poll then brings 6 (a crewmate reported 4).
+      const { rerender } = render(<KioskCompleteModal job={JOB} {...props(onConfirm, onLeaveOpen)} />);
+      rerender(<KioskCompleteModal job={{ ...JOB, quantity_complete: 6 }} {...props(onConfirm, onLeaveOpen)} />);
+
+      // 4 good (6 + 4 = the full 10) and 1 REPLACEMENT scrap with its reason.
+      await keyGood(user, '4');
+      await user.click(scrapWell());
+      await user.click(screen.getByRole('button', { name: '1' }));
+      await user.click(
+        within(screen.getByRole('group', { name: 'Scrap reason' })).getByRole('button', { name: 'Material defect' })
+      );
+      await user.click(complete());
+
+      expect(onConfirm).toHaveBeenCalledWith(4, 1, 'Material defect', null, { fullCount: true, unaccountedAfter: 0 });
+    });
+
+    it('KEEP OPEN reports what is left from the live job, not the snapshot', async () => {
+      const user = userEvent.setup();
+      const onConfirm = jest.fn();
+      const onLeaveOpen = jest.fn();
+      const { rerender } = render(
+        <KioskCompleteModal job={JOB} mode="leave_open" {...props(onConfirm, onLeaveOpen)} />
+      );
+      rerender(
+        <KioskCompleteModal
+          job={{ ...JOB, quantity_complete: 6 }}
+          mode="leave_open"
+          {...props(onConfirm, onLeaveOpen)}
+        />
+      );
+      await keyGood(user, '3');
+      await user.click(screen.getByTestId('kiosk-complete-leave-open-confirm'));
+
+      // 10 − 6 − 3 = 1 (the snapshot would have said 5).
+      expect(onLeaveOpen).toHaveBeenCalledWith(3, 0, null, null, { fullCount: false, unaccountedAfter: 1 });
+    });
+  });
+
+  describe('roster', () => {
+    it('a crewmate still clocked in disables a SHORT finish and promotes leave-open', async () => {
+      const user = userEvent.setup();
+      renderModal({ roster: [ME, BOB] });
+      // With Bob on the roster nothing is pre-filled: some of the 8 may be his.
+      expect(within(goodWell()).getByText('0')).toBeInTheDocument();
+      await keyGood(user, '6');
+
+      // No one-tap "Report n as scrap": Bob's unreported pieces are not scrap.
+      expect(screen.queryByTestId('kiosk-complete-report-scrap')).not.toBeInTheDocument();
+      expect(screen.getByTestId('kiosk-complete-short-with-others')).toHaveTextContent(
+        'Some of these may still be with Bob T, who has not reported yet.'
+      );
+      // Scrap the operator really made is still theirs to key.
+      await user.click(scrapWell());
+      await user.click(screen.getByRole('button', { name: '2' }));
+      await user.click(
+        within(screen.getByRole('group', { name: 'Scrap reason' })).getByRole('button', { name: 'Material defect' })
+      );
+
+      // Covered by scrap, but it is a SHORT close — refused while Bob is clocked in.
+      expect(screen.getByTestId('kiosk-complete-others')).toHaveTextContent(
+        'Bob T still clocked in — they must clock out with their count first'
+      );
+      expect(complete()).toBeDisabled();
+      expect(complete()).toHaveAttribute('aria-describedby', expect.stringContaining('kiosk-complete-others'));
+      expect(screen.getByTestId('kiosk-complete-leave-open')).toHaveClass('bg-fd-blue/15');
+    });
+
+    it('a crewmate does not block a FULL-count finish (nothing is declared short)', async () => {
+      const user = userEvent.setup();
+      renderModal({ roster: [ME, BOB] });
+      await keyGood(user, '8');
+      expect(screen.queryByTestId('kiosk-complete-others')).not.toBeInTheDocument();
+      expect(complete()).toBeEnabled();
+    });
+
+    it('never counts the operator themself as "someone else"', async () => {
+      const user = userEvent.setup();
+      renderModal({ roster: [ME] });
+      await keyGood(user, '6');
+      await user.click(screen.getByTestId('kiosk-complete-report-scrap'));
+      await user.click(
+        within(screen.getByRole('group', { name: 'Scrap reason' })).getByRole('button', { name: 'Material defect' })
+      );
+      expect(screen.queryByTestId('kiosk-complete-others')).not.toBeInTheDocument();
+      expect(complete()).toBeEnabled();
+    });
+  });
+
+  it('says pieces never started are not scrap, next to the one-tap scrap fill', async () => {
+    const user = userEvent.setup();
+    renderModal();
+    await keyGood(user, '5');
+    expect(screen.getByTestId('kiosk-complete-never-started')).toHaveTextContent(
+      'Pieces never started? They are not scrap — clock out and keep Op 20 open, and ask a supervisor to lower the quantity.'
+    );
+    expect(screen.getByTestId('kiosk-complete-report-scrap')).toHaveClass('min-h-12');
+    expect(complete()).toHaveAttribute('aria-describedby', 'kiosk-complete-short');
+  });
+
+  it('on a POOLED job whose earlier operation already declared the loss, warns not to scrap it again', async () => {
+    const user = userEvent.setup();
+    renderModal({ uncreditedUpstream: 2 });
+    await keyGood(user, '6');
+    expect(screen.getByTestId('kiosk-complete-uncredited')).toHaveTextContent(
+      "2 pcs were already closed short at an earlier operation, but this job's operations are not sequenced"
+    );
+    expect(screen.getByTestId('kiosk-complete-uncredited')).toHaveTextContent(
+      'ask a supervisor to turn on Sequential operations'
+    );
+    // No one-tap fill: it would record the same loss twice and consume material for it.
+    expect(screen.queryByTestId('kiosk-complete-report-scrap')).not.toBeInTheDocument();
+  });
+
+  it('a clock-out that would complete on its own is judged on the hard ceiling, not the soft feed', async () => {
+    // 10 target, 2 recorded, 1 lost to component feed (received 9) — the ceiling is still 10.
+    const user = userEvent.setup();
+    renderModal({ mode: 'leave_open', upstreamShort: 1, goodCeiling: 10 });
+    await keyGood(user, '7');
+    expect(screen.queryByTestId('kiosk-complete-leave-open-full')).not.toBeInTheDocument();
+    await keyGood(user, '8');
+    expect(screen.getByTestId('kiosk-complete-leave-open-full')).toBeInTheDocument();
+  });
+
+  it('notes on KEEP OPEN that a full count completes the operation on clock-out', async () => {
+    const user = userEvent.setup();
+    renderModal({ mode: 'leave_open' });
+    expect(screen.queryByTestId('kiosk-complete-leave-open-full')).not.toBeInTheDocument();
+    await keyGood(user, '8');
+    expect(screen.getByTestId('kiosk-complete-leave-open-full')).toHaveTextContent(
+      'That is the full count — clocking out completes Op 20.'
+    );
+  });
+
+  it('renders a clock-out refusal INLINE as an alert, entry intact', () => {
+    renderModal({
+      error: 'Op 20 is already complete; clock out with 0 pieces and tell a supervisor about any extra pieces.',
+    });
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Op 20 is already complete; clock out with 0 pieces and tell a supervisor about any extra pieces.'
+    );
+    expect(within(goodWell()).getByText('8')).toBeInTheDocument();
+  });
+});

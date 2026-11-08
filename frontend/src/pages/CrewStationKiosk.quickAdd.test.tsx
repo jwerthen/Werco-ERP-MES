@@ -147,22 +147,24 @@ describe('CrewStationKiosk quantity quick adds', () => {
     expect(quickAdd('+25')).toBeDisabled();
   });
 
-  it('COMPLETE offers the row at the same ceiling its good field pre-fills to', async () => {
+  it("COMPLETE pre-fills what is still unaccounted for, and bounds the row at the server's good ceiling", async () => {
     renderKiosk();
     await openJobDetail();
     fireEvent.click(screen.getByRole('button', { name: /^complete$/i }));
 
-    // Final-entry good pre-fills at the ceiling, so the row arrives disabled —
-    // it is there for rebuilding a cleared count, not for passing the target.
+    // Owner ruling 1: 50 target, 37 good + 2 scrap recorded → 11 still unaccounted
+    // for, which is the prefill. The ceiling is GOOD-only (50 - 37 = 13): the 2
+    // scrapped pieces may still be replaced, so the row is live above the prefill.
     expect(await screen.findByTestId('kiosk-qty-quickadd-label')).toHaveTextContent('Quick add to good · max 13');
-    expect(within(goodWell()).getByText('13')).toBeInTheDocument();
-    expect(quickAdd('+1')).toBeDisabled();
+    expect(within(goodWell()).getByText('11')).toBeInTheDocument();
+    expect(quickAdd('+1')).toBeEnabled();
 
-    // Clear the field and the row comes alive, still bounded at 13.
+    // Clear the field and the row is still bounded at 13.
     fireEvent.click(goodWell());
     fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
     fireEvent.click(quickAdd('+25'));
     expect(within(goodWell()).getByText('13')).toBeInTheDocument();
+    expect(quickAdd('+1')).toBeDisabled();
   });
 
   it('LEAVE offers the row for a job on this station queue', async () => {

@@ -28,7 +28,8 @@ class ProductionReductionRequest(BaseModel):
         gt=0,
         description="Good-count quantity to REMOVE from this operation. Must be > 0 and no greater "
         "than the unapproved evidence the endpoint may walk down (the caller's own entries for the "
-        "shop-floor verb; any operator's for the office verb).",
+        "shop-floor verb; any operator's for the office verb -- or, on an operation nobody ever "
+        "clocked in to, the office verb's bound is its recorded good count).",
     )
     # Correction reason for the tamper-evident audit trail -- this is NOT a scrap reason
     # (no scrap moves here). Required and non-blank so every walk-back is explainable.
@@ -51,6 +52,16 @@ class ProductionReductionRequest(BaseModel):
         None,
         description="Optional extra note. On the shop-floor verb it is appended to the caller's "
         "active time entry; on the office verb it is recorded on the audit row only.",
+    )
+    # Owner ruling 1: a COMPLETE operation cannot be short. When an office correction would
+    # leave one short, the same request must say reopen_operation -- the operation returns to
+    # IN_PROGRESS (refused while a later stage of its chain is COMPLETE). Office verb only:
+    # the operator's verb refuses true with 422.
+    reopen_operation: bool = Field(
+        False,
+        description="Office verb only. Required when lowering a COMPLETE operation's count would leave it "
+        "short: the operation returns to in progress. Refused while a later operation of the same chain is "
+        "complete. The shop-floor verb rejects true (422).",
     )
 
     @field_validator("quantity_delta")
@@ -213,6 +224,10 @@ class TimeEntryResponse(TimeEntryBase):
     # but required steps lack records — the op stayed IN_PROGRESS (never trapped the
     # entry; labor closed normally). Backward-compatible: null when not applicable.
     steps_incomplete: Optional[StepsIncompleteInfo] = None
+    # Owner ruling 1: the operation's status AFTER this clock-out ("complete" when the
+    # clock-out itself completed it at a full good count), so a client that clocks out and
+    # then closes knows whether a close is still needed. Null on clock-in / when N/A.
+    operation_status: Optional[str] = None
 
     class Config:
         from_attributes = True

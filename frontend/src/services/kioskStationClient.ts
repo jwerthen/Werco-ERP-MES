@@ -21,7 +21,12 @@
  *    the station token really is dead the next 10s queue poll 401s and locks.
  */
 
-import type { DispatchNotice, OperationDocumentsResponse, ResumeOperationResult } from '../types';
+import type {
+  DispatchNotice,
+  OperationDocumentsResponse,
+  ResumeOperationResult,
+  ShopFloorCompleteOperationRequest,
+} from '../types';
 import type {
   KioskBadgeTokenResponse,
   KioskClosedTimeEntry,
@@ -356,13 +361,18 @@ export async function reduceProduction(
 }
 
 /**
- * POST /shop-floor/operations/{id}/complete — auto-closes ALL operators' open
- * entries; the response's `closed_time_entries` names who was clocked out.
+ * POST /shop-floor/operations/{id}/complete — a CLOSE verb (owner ruling 1): it books
+ * the good the crew already recorded and auto-closes ALL operators' open entries; the
+ * response's `closed_time_entries` names who was clocked out. A short count is refused
+ * 409 with nothing written unless scrap declared here (with a reason) covers it, and a
+ * SHORT close while anyone else is clocked in needs `acknowledge_open_entries`.
  */
+export type CompleteOperationBody = ShopFloorCompleteOperationRequest & { source: string };
+
 export async function completeOperation(
   operatorToken: string,
   operationId: number,
-  data: { quantity_complete: number; source: string }
+  data: CompleteOperationBody
 ): Promise<{ closed_time_entries?: KioskClosedTimeEntry[] }> {
   return operatorFetch(operatorToken, 'POST', `/shop-floor/operations/${operationId}/complete`, data);
 }

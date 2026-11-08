@@ -27,6 +27,7 @@ import {
   KioskQueueWorkCenter,
   LaserNestInfo,
   OperationHold,
+  OperationShortCountFields,
 } from '../../types';
 
 // Re-exported so the kiosk components keep importing their tie shape from the
@@ -98,7 +99,7 @@ export const HOLD_REASONS: KioskReason[] = [
  * single-operation kiosk surfaces. All optional — pre-feature payloads and
  * pre-existing fixtures still typecheck.
  */
-export interface KioskQueueItem extends KioskJobInstructions {
+export interface KioskQueueItem extends KioskJobInstructions, OperationShortCountFields {
   operation_id: number;
   work_order_id: number;
   work_order_number: string;
@@ -158,6 +159,13 @@ export interface KioskQueueItem extends KioskJobInstructions {
   // render nothing at all (no placeholder, no "not tied" nag): an untied work
   // order must look byte-identical to its pre-feature self.
   material_ties?: KioskMaterialTie[] | null;
+  // Who is clocked in to this operation right now (one row per open LABOR entry).
+  // The server has always sent it on every queue and held row, to both principals;
+  // the crew station types it required (`KioskCrewQueueItem`). The single-operator
+  // kiosk reads it for one decision: a SHORT close is refused while anyone OTHER than
+  // the closer is still clocked in (owner ruling 1), so the COMPLETE overlay must
+  // know before the operator taps. Optional so pre-feature fixtures still typecheck.
+  roster?: KioskRosterEntry[];
   // The WORK ORDER's status, and the server's verbatim refusal text when that
   // status blocks every start: not released yet (draft), held by a supervisor
   // (on hold), or terminal. Both ride queue AND held rows (one row builder).

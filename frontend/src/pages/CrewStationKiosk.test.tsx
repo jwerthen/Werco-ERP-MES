@@ -201,6 +201,21 @@ describe('CrewStationKiosk', () => {
     );
   });
 
+  it('LEAVE with the full count says the operation completed — not just "clocked out"', async () => {
+    unlockedStation();
+    mocked.mintBadgeToken.mockResolvedValue(BOB_MINT);
+    mocked.clockOut.mockResolvedValue({ operation_status: 'complete' });
+    renderKiosk();
+
+    await openJobDetail();
+    fireEvent.click(screen.getByRole('button', { name: /join \/ leave/i }));
+    scanBadge('E011');
+    expect(await screen.findByText(/clock out — bob t/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
+
+    expect(await screen.findByText(/^Bob T clocked out — Op .* completed$/)).toBeInTheDocument();
+  });
+
   it('400 "already clocked in" surfaces as an info toast and refreshes the roster', async () => {
     unlockedStation();
     mocked.mintBadgeToken.mockResolvedValue(ALICE_MINT);
@@ -343,16 +358,22 @@ describe('CrewStationKiosk', () => {
 
     await openJobDetail();
     fireEvent.click(screen.getByRole('button', { name: /^complete$/i }));
-    // Final-pieces screen prefills the remaining quantity (50 - 37 = 13).
-    expect(await screen.findByTestId('kiosk-qty-good')).toHaveTextContent('13');
+    // Final-pieces screen prefills what is still unaccounted for (50 - 37 good - 2 scrap = 11).
+    expect(await screen.findByTestId('kiosk-qty-good')).toHaveTextContent('11');
     fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
 
     const dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getByText(/everyone currently clocked in will be clocked out/i)).toBeInTheDocument();
+    // The roster is what the signer acknowledges (owner ruling 1), so the caption
+    // says what clocking them out means for their unreported pieces.
+    expect(
+      within(dialog).getByText(
+        /everyone currently clocked in will be clocked out — pieces they have not reported are not counted/i
+      )
+    ).toBeInTheDocument();
     const list = within(dialog).getByRole('list', { name: /will be clocked out/i });
     expect(within(list).getByText('Bob T')).toBeInTheDocument();
     expect(within(list).getByText('Charlie M')).toBeInTheDocument();
-    expect(within(dialog).getByText(/final pieces to record: 13 good/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/final pieces to record: 11 good/i)).toBeInTheDocument();
 
     // Cancel is a no-op: no mint, no mutations.
     fireEvent.click(within(dialog).getByRole('button', { name: /cancel/i }));
@@ -362,9 +383,11 @@ describe('CrewStationKiosk', () => {
     expect(mocked.reportProduction).not.toHaveBeenCalled();
   });
 
-  it('COMPLETE: badge scan inside the modal reports final pieces FIRST, then completes, and names who was clocked out', async () => {
+  it('COMPLETE: a rostered badge reports final pieces FIRST, then closes with only the acknowledgement, and names who was clocked out', async () => {
     unlockedStation();
-    mocked.mintBadgeToken.mockResolvedValue(ALICE_MINT);
+    // Bob holds an entry on this operation (he is on the roster), so his final pieces
+    // ride /production under his own badge.
+    mocked.mintBadgeToken.mockResolvedValue(BOB_MINT);
     mocked.reportProduction.mockResolvedValue({});
     mocked.completeOperation.mockResolvedValue({
       closed_time_entries: [
@@ -379,19 +402,18 @@ describe('CrewStationKiosk', () => {
     fireEvent.click(await screen.findByTestId('kiosk-qty-confirm'));
 
     await screen.findByRole('dialog');
-    scanBadge('E013');
+    scanBadge('E011');
 
     await waitFor(() =>
-      expect(mocked.completeOperation).toHaveBeenCalledWith('op-token-alice', 31, {
-        quantity_complete: 50,
+      expect(mocked.completeOperation).toHaveBeenCalledWith('op-token-bob', 31, {
         source: 'kiosk',
+        acknowledge_open_entries: true,
       })
     );
-    expect(mocked.reportProduction).toHaveBeenCalledWith('op-token-alice', 31, {
+    expect(mocked.reportProduction).toHaveBeenCalledWith('op-token-bob', 31, {
       request_id: expect.any(String),
-      quantity_complete_delta: 13,
+      quantity_complete_delta: 11,
       quantity_scrapped_delta: 0,
-      scrap_reason: undefined,
       source: 'kiosk',
     });
     // Production (the operator's final pieces) lands BEFORE the complete-all.
@@ -405,6 +427,9 @@ describe('CrewStationKiosk', () => {
 
   it('COMPLETE: a 409 (someone completed it first) surfaces verbatim and refreshes', async () => {
     unlockedStation();
+    // Everything already recorded (48 good + 2 scrap of 50): nothing left to enter, so
+    // this is a pure close with no production report.
+    mocked.getQueue.mockResolvedValue({ ...QUEUE_RES, queue: [{ ...ITEM, quantity_complete: 48 }] });
     mocked.mintBadgeToken.mockResolvedValue(ALICE_MINT);
     mocked.completeOperation.mockRejectedValue(
       new KioskApiError(409, 'Operation already completed by Dana R', 'Operation already completed by Dana R')
@@ -413,8 +438,7 @@ describe('CrewStationKiosk', () => {
 
     await openJobDetail();
     fireEvent.click(screen.getByRole('button', { name: /^complete$/i }));
-    // Clear the prefilled GOOD so no production report happens (pure complete).
-    fireEvent.click(await screen.findByTestId('kiosk-key-clear'));
+    expect(await screen.findByTestId('kiosk-qty-good')).toHaveTextContent('0');
     fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
 
     await screen.findByRole('dialog');

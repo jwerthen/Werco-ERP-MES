@@ -371,11 +371,25 @@ def complete_operation(client: TestClient, user: User, op: WorkOrderOperation, *
     )
 
 
-def office_reduce(client: TestClient, user: User, op: WorkOrderOperation, *, delta: float, reason: str = "over-count"):
+def office_reduce(
+    client: TestClient,
+    user: User,
+    op: WorkOrderOperation,
+    *,
+    delta: float,
+    reason: str = "over-count",
+    reopen: bool = False,
+):
+    """Owner ruling 1: lowering a COMPLETE operation's count so it would be short needs
+    ``reopen`` -- the operation goes back to IN_PROGRESS. The consumption it drew stays
+    drawn (never auto-reversed), which is what the return verb these tests exercise is for."""
+    body: dict = {"quantity_delta": delta, "reason": reason}
+    if reopen:
+        body["reopen_operation"] = True
     return client.post(
         f"/api/v1/work-orders/operations/{op.id}/reduce-production",
         headers=headers_for(user),
-        json={"quantity_delta": delta, "reason": reason},
+        json=body,
     )
 
 
@@ -516,7 +530,7 @@ def _corrected_and_returned(client: TestClient, db_session: Session):
     assert db_session.get(WorkOrderMaterialAllocation, allocation.id).qty_consumed == 5.0
     assert on_hand(db_session, sheet) == 15.0
 
-    reduced = office_reduce(client, supervisor, op1, delta=2, reason="counted the scrap tray twice")
+    reduced = office_reduce(client, supervisor, op1, delta=2, reason="counted the scrap tray twice", reopen=True)
     assert reduced.status_code == status.HTTP_200_OK, reduced.text
     db_session.expire_all()
     assert db_session.get(WorkOrderOperation, op1.id).quantity_complete == 3.0
@@ -582,11 +596,11 @@ def test_reconcile_on_read_must_not_redraw_returned_material(client: TestClient,
     including reconcile-on-read; if a page load can re-issue the material, the bound is
     not a bound and the two-intent split buys nothing.
 
-    What actually happens today: the reconcile pushes the corrected operation count from
-    3 back to its target of 5, the target-based delta becomes +2, and the engine posts a
-    second ISSUE of 2 sheets attributed to whoever loaded the page. The tie's OWN
-    arithmetic is correct throughout — it is the operation quantity underneath it that
-    moves — which is why this is marked as an open defect rather than a return-verb bug.
+    The historical failure: the reconcile pushed the corrected operation count from 3 back
+    to its target of 5, the target-based delta became +2, and the engine posted a second
+    ISSUE of 2 sheets attributed to whoever loaded the page. Since owner ruling 1 the
+    correction REOPENS the operation (a completed operation cannot be short) and a read
+    never closes a short, so the count underneath the tie cannot be lifted by a GET.
     """
     supervisor, operator, sheet, _lot, wo, _op1, op2, allocation, settled = _corrected_and_returned(client, db_session)
     settled_on_hand = on_hand(db_session, sheet)
@@ -596,9 +610,17 @@ def test_reconcile_on_read_must_not_redraw_returned_material(client: TestClient,
     assert read.status_code == status.HTTP_200_OK, read.text
     db_session.rollback()
     db_session.expire_all()
+    # Owner ruling 1 makes this leg STRONGER: the correction reopened op1 (a completed
+    # operation cannot be short), and a read never closes a short -- so the GET cannot
+    # push the corrected count back up to its target, and has nothing to re-draw against.
+    # The read must still really have reconciled THIS work order, or the leg proves
+    # nothing: op2's closed labor evidence is what it completes on the way through.
     assert (
-        db_session.get(WorkOrder, wo.id).status == WorkOrderStatus.COMPLETE
-    ), "the GET must really have completed the work order, or this leg proves nothing"
+        db_session.get(WorkOrderOperation, op2.id).status == OperationStatus.COMPLETE
+    ), "the GET must really have reconciled the work order, or this leg proves nothing"
+    assert db_session.get(WorkOrderOperation, _op1.id).status == OperationStatus.IN_PROGRESS
+    assert db_session.get(WorkOrderOperation, _op1.id).quantity_complete == 3.0, "the read rewrote the correction"
+    assert db_session.get(WorkOrder, wo.id).status != WorkOrderStatus.COMPLETE
 
     assert allocation_movements(db_session, allocation) == settled, "reconcile-on-read re-drew the returned material"
     assert db_session.get(WorkOrderMaterialAllocation, allocation.id).qty_consumed == 3.0
@@ -631,7 +653,7 @@ def test_correction_past_the_live_bound_is_422_and_names_return_and_untie(client
 
     closed_entry(db_session, operator, op, quantity_produced=5)
     assert complete_operation(client, operator, op, quantity=5).status_code == status.HTTP_200_OK
-    assert office_reduce(client, supervisor, op, delta=2).status_code == status.HTTP_200_OK
+    assert office_reduce(client, supervisor, op, delta=2, reopen=True).status_code == status.HTTP_200_OK
     db_session.expire_all()
 
     frozen = ledger_fingerprint(db_session)
@@ -968,7 +990,7 @@ def test_a_spilled_consumption_returns_to_those_lots_newest_first(client: TestCl
     """
     supervisor, _operator, sheet, old_lot, new_lot, wo, op, allocation = _spilled_scenario(client, db_session)
 
-    assert office_reduce(client, supervisor, op, delta=4).status_code == status.HTTP_200_OK
+    assert office_reduce(client, supervisor, op, delta=4, reopen=True).status_code == status.HTTP_200_OK
     db_session.expire_all()
 
     # target is now 1, consumed 5 => 4 correctable. Take 3 first.
@@ -1014,7 +1036,7 @@ def test_the_ledger_not_the_cache_caps_what_can_come_back(client: TestClient, db
     """
     supervisor, _operator, sheet, _old_lot, _new_lot, wo, op, allocation = _spilled_scenario(client, db_session)
 
-    assert office_reduce(client, supervisor, op, delta=5).status_code == status.HTTP_200_OK
+    assert office_reduce(client, supervisor, op, delta=5, reopen=True).status_code == status.HTTP_200_OK
     # Drive the cache above the ledger without touching the ledger itself.
     live = db_session.get(WorkOrderMaterialAllocation, allocation.id)
     live.qty_consumed = 9.0
@@ -1049,7 +1071,7 @@ def test_the_consumption_read_previews_exactly_what_a_return_will_do(client: Tes
         (old_lot.id, 2.0, 0.0, 2.0),
     ], "newest source lot first — the order a return credits in"
 
-    assert office_reduce(client, supervisor, op, delta=4).status_code == status.HTTP_200_OK
+    assert office_reduce(client, supervisor, op, delta=4, reopen=True).status_code == status.HTTP_200_OK
     assert (
         do_return(client, supervisor, wo, allocation, quantity=3, intent="correct_over_consumption").status_code
         == status.HTTP_200_OK
@@ -1299,7 +1321,7 @@ def test_a_shortage_driven_negative_lot_is_unwound_by_a_return(client: TestClien
     db_session.expire_all()
     assert db_session.get(InventoryItem, lot.id).quantity_on_hand == -3.0, "the shortage drove the lot negative"
 
-    assert office_reduce(client, supervisor, op, delta=2).status_code == status.HTTP_200_OK
+    assert office_reduce(client, supervisor, op, delta=2, reopen=True).status_code == status.HTTP_200_OK
     resp = do_return(client, supervisor, wo, allocation, quantity=2, intent="correct_over_consumption")
     assert resp.status_code == status.HTTP_200_OK, resp.text
 
@@ -1350,13 +1372,28 @@ def _fg_lot_scenario(
     assert db_session.get(WorkOrderMaterialAllocation, allocation.id).qty_consumed == consume
 
     if reduce_by:
-        reduced = office_reduce(client, admin, op, delta=reduce_by, reason="counted the scrap tray twice")
+        reduced = office_reduce(client, admin, op, delta=reduce_by, reason="counted the scrap tray twice", reopen=True)
         assert reduced.status_code == status.HTTP_200_OK, reduced.text
         db_session.expire_all()
         assert db_session.get(WorkOrderOperation, op.id).quantity_complete == consume - reduce_by
-
-    closed_entry(db_session, operator, closer, quantity_produced=consume)
-    assert complete_operation(client, operator, closer, quantity=consume).status_code == status.HTTP_200_OK
+        # Owner ruling 1: the corrected operation is back on the floor (a completed
+        # operation cannot be short), so the job closes through the supervisor's
+        # work-order completion at what was really made, the shortfall stated with a
+        # reason. Force-complete books no per-operation counts, so the tie's live target
+        # stays at the corrected count and the over-consumption stays returnable.
+        closed = client.post(
+            f"/api/v1/work-orders/{wo.id}/complete",
+            headers=headers_for(admin),
+            params={
+                "quantity_complete": consume - reduce_by,
+                "quantity_scrapped": reduce_by,
+                "scrap_reason": "sheets never cut",
+            },
+        )
+        assert closed.status_code == status.HTTP_200_OK, closed.text
+    else:
+        closed_entry(db_session, operator, closer, quantity_produced=consume)
+        assert complete_operation(client, operator, closer, quantity=consume).status_code == status.HTTP_200_OK
     db_session.expire_all()
 
     live_wo = db_session.get(WorkOrder, wo.id)
@@ -1570,7 +1607,7 @@ def test_a_return_is_not_counted_as_more_usage_by_the_reorder_predictor(client: 
     predictor = PredictionService(db_session, COMPANY_A)
     assert predictor._calculate_daily_usage(sheet.id) == pytest.approx(4.0 / 90)
 
-    assert office_reduce(client, supervisor, op, delta=2).status_code == status.HTTP_200_OK
+    assert office_reduce(client, supervisor, op, delta=2, reopen=True).status_code == status.HTTP_200_OK
     assert (
         do_return(client, supervisor, wo, allocation, quantity=2, intent="correct_over_consumption").status_code
         == status.HTTP_200_OK
@@ -1671,13 +1708,14 @@ def test_office_corrects_a_completed_operation_while_the_operator_verb_still_ref
     assert refused.status_code == status.HTTP_409_CONFLICT, refused.text
     assert "supervisor" in refused.json()["detail"]
 
-    # (b) the office verb: succeeds, and the operation stays COMPLETE with a truthful count.
-    allowed = office_reduce(client, supervisor, op, delta=2, reason="counted the scrap tray twice")
+    # (b) the office verb: succeeds -- and since owner ruling 1 a completed operation cannot
+    # be short, so the correction reopens it (it goes back to the floor with a truthful count).
+    allowed = office_reduce(client, supervisor, op, delta=2, reason="counted the scrap tray twice", reopen=True)
     assert allowed.status_code == status.HTTP_200_OK, allowed.text
     db_session.expire_all()
     live_op = db_session.get(WorkOrderOperation, op.id)
     assert live_op.quantity_complete == 3.0
-    assert live_op.status == OperationStatus.COMPLETE, "a corrected COMPLETE operation stays COMPLETE"
+    assert live_op.status == OperationStatus.IN_PROGRESS, "a corrected-short operation is reopened"
 
 
 @pytest.mark.parametrize("wo_status", [WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELLED])
@@ -1817,7 +1855,7 @@ def test_no_return_path_ever_writes_closed(client: TestClient, db_session: Sessi
     """
     supervisor, _operator, _sheet, _lot, wo, op, allocation = _consumed_scenario(client, db_session)
 
-    assert office_reduce(client, supervisor, op, delta=1).status_code == status.HTTP_200_OK
+    assert office_reduce(client, supervisor, op, delta=1, reopen=True).status_code == status.HTTP_200_OK
     assert (
         do_return(client, supervisor, wo, allocation, quantity=1, intent="correct_over_consumption").status_code
         == status.HTTP_200_OK

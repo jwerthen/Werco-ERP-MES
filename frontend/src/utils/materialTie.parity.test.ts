@@ -31,13 +31,14 @@
  * WHAT THIS FILE IS NOT ABOUT: *when* the engine runs. Consumption moved from
  * work-order completion to OPERATION completion and not one case below changed,
  * because the arithmetic never referenced the trigger — it reads live operation
- * state at whatever moment it is called. The client's `finalComplete` is still
- * the ORDERED quantity for the same reason it always was (`/complete` asserts
- * `quantity_complete = quantity_ordered`, and the clock-out path clamps to the
- * same target), and per-operation timing only makes that basis tighter: the
- * number predicted here is now posted inside the very request the operator
- * fires, rather than reconciled later. If the trigger moves again, this table
- * still should not need to.
+ * state at whatever moment it is called. Nor did owner ruling 1 (2026-11-05)
+ * change one: the floor `/complete` now books the good the floor RECORDED rather
+ * than asserting `quantity_complete = quantity_ordered`, so the kiosk passes the
+ * final good (recorded + entered) as the input still named `quantityOrdered` —
+ * a change of what the CALLER feeds in, not of this arithmetic. Per-operation
+ * timing only makes the basis tighter: the number predicted here is posted
+ * inside the very request the operator fires, rather than reconciled later. If
+ * the trigger moves again, this table still should not need to.
  *
  * ONE DELIBERATE DIFFERENCE, asserted at the bottom: the client's float-residue
  * threshold is LOOSER than the engine's (1e-6 vs 1e-9). That direction is the safe
@@ -91,10 +92,10 @@ const tie = (overrides: Partial<KioskMaterialTie> = {}): KioskMaterialTie => ({
 });
 
 /**
- * The client's `finalComplete` is the ORDERED quantity, because `/complete`
- * asserts `quantity_complete = quantity_ordered` regardless of what was keyed —
- * so the engine's `operation.quantity_complete` at consume time IS that number.
- * `finalScrapped` is the operation's recorded scrap plus what is on the keypad.
+ * The client's `finalComplete` (input `quantityOrdered`, a historical name) is the
+ * good the close will record — so the engine's `operation.quantity_complete` at
+ * consume time IS that number. `finalScrapped` is the operation's recorded scrap
+ * plus what is on the keypad.
  */
 interface Case {
   name: string;

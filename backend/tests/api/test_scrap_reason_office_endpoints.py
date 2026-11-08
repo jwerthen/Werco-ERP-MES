@@ -427,7 +427,9 @@ def test_complete_operation_scrap_without_reason_is_422_and_persists_nothing(cli
         headers=headers_for(operator),
     )
     assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
-    assert resp.json()["detail"] == SCRAP_REASON_DETAIL
+    # Owner ruling 1: the office op-complete accepts a structured code too, so it words the
+    # rule like the force-complete and the floor close.
+    assert resp.json()["detail"] == SCRAP_REASON_OR_CODE_DETAIL
 
     db_session.expire_all()
     op = db_session.get(WorkOrderOperation, op_id)
@@ -491,6 +493,10 @@ def test_complete_operation_scrap_with_reason_succeeds_and_persists_reason(clien
     op = db_session.get(WorkOrderOperation, op_id)
     assert op.quantity_scrapped == 2
     assert op.scrap_reason == "Cracked weld"
+    # Owner ruling 1: 8 good + 2 scrapped accounts for all 10, so the operation closes,
+    # declaring the 2 short.
+    assert op.status == OperationStatus.COMPLETE
+    assert op.quantity_short_declared == 2
 
 
 def test_complete_operation_zero_scrap_no_reason_succeeds(client: TestClient, db_session: Session):
@@ -597,6 +603,8 @@ def test_complete_work_order_scrap_with_reason_succeeds_and_persists_reason(clie
     assert wo.quantity_scrapped == 2
     assert wo.scrap_reason == "Failed final inspection"
     assert wo.status == WorkOrderStatus.COMPLETE
+    # Owner ruling 1 (INT1): the header is the declared quantity, never snapped back to 10.
+    assert wo.quantity_complete == 8
 
 
 def test_complete_work_order_zero_scrap_no_reason_succeeds(client: TestClient, db_session: Session):

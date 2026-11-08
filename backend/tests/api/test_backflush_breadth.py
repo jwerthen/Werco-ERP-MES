@@ -1512,11 +1512,12 @@ def test_untie_is_permitted_once_a_full_return_nets_the_ledger_to_zero(client: T
     supervisor, wo, op, sheet, _lot, allocation = _consumed_tie_via_operation_completion(client, db_session)
 
     # Walk the operation's count back to zero: the live target goes to zero with it,
-    # which is exactly what opens a full ``correct_over_consumption`` allowance.
+    # which is exactly what opens a full ``correct_over_consumption`` allowance. Owner
+    # ruling 1: a completed operation cannot be short, so the correction reopens it.
     reduced = client.post(
         f"/api/v1/work-orders/operations/{op.id}/reduce-production",
         headers=headers_for(supervisor),
-        json={"quantity_delta": 3, "reason": "the whole tray was double-scanned"},
+        json={"quantity_delta": 3, "reason": "the whole tray was double-scanned", "reopen_operation": True},
     )
     assert reduced.status_code == status.HTTP_200_OK, reduced.text
 

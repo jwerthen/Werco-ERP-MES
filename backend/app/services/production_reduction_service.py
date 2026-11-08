@@ -22,6 +22,29 @@ FG effects had fired and could not be walked back; the reasoned RETURN verb
 office path passes ``allow_completed_operation=True`` and the operator path does not.
 The terminal-WORK-ORDER refusal is unchanged on BOTH verbs.
 
+Owner ruling 1 (2026-11-05) narrows that: a COMPLETE operation cannot be SHORT. When the
+corrected count would leave received units unaccounted (``OperationAccounting.unaccounted``),
+the office correction is refused 409 unless the same request says ``reopen_operation`` --
+then the operation returns to IN_PROGRESS through ``reopen_completed_operation`` (refused
+while a later stage of the same chain is COMPLETE), and the reopen is REQUIRED audit
+evidence. A correction that keeps the operation accounted (scrap covers it) leaves it
+COMPLETE; when it raises the short the operation now closes with, its declaration is
+RE-STAMPED (REQUIRED audit) so the later stages are credited with the real loss -- refused
+409 when a later stage already holds more good than that lets through. Every reopen and
+re-stamp is judged by ``accounting_change_strands`` too, so a change can never strand a
+COMPLETE operation in another chain (a component chain feeds the assembly chain).
+
+The office verb also corrects an operation nobody ever clocked in to (no TimeEntry at all --
+the office's labor-less close): there is no evidence to walk, so the good count the office
+entered is lowered directly, bounded by it (``no_labor_recorded``, re-checked under the locks),
+with the same reopen, re-stamp, strand and audit rules.
+
+A standing API token may not correct counts on either verb (**403**, before any lock or
+write -- ``api_token_reduction_refusal``). That is this PR's extension of the owner's
+2026-11-07 decision, which covered scrap and short closes only: a reopen erases a person's
+close and a re-stamp re-declares its short, and the operation PUT already refuses any count
+edit by a token. A crew-station badge token is a person and still corrects its own count.
+
 The quantity math itself lives in
 ``work_order_state_service.reduce_operation_produced_quantity`` (the walk across
 eligible entries + the recomputed WO rollup); this module owns eligibility,
@@ -40,17 +63,37 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 
+from app.api.audit_guard import required_audit
+from app.core.credentials import is_api_token_credential
 from app.models.time_entry import TimeEntry
 from app.models.user import User
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
 from app.services.audit_service import AuditService
 from app.services.laser_nest_service import sync_laser_nest_from_operation
+from app.services.operation_action_gates import (
+    API_TOKEN_COUNT_JUDGMENT,
+    API_TOKEN_SHORT_CLOSE,
+    CORRECTION_AUDIT_UNAVAILABLE,
+    accounting_strand_message,
+    operation_has_labor_evidence,
+    reduce_would_leave_short_message,
+    reopen_blocked_by_later_message,
+)
 from app.services.operational_event_service import OperationalEventService
 from app.services.work_order_state_service import (
+    QTY_EPSILON,
     TERMINAL_WO_STATUSES,
+    OperationAccounting,
     OperationQuantityReduction,
+    accounting_change_strands,
+    accounting_extra_data,
+    active_work_order_operations,
+    later_completed_chain_operation,
+    log_demotions_required,
+    operation_accounting,
     operation_target_quantity,
     reduce_operation_produced_quantity,
+    reopen_completed_operation,
 )
 
 # The OPERATOR's refusal, for both the pre-lock gate and the TOCTOU re-check. It is
@@ -98,6 +141,71 @@ def _assert_reduction_in_scope(
         raise HTTPException(status_code=409, detail=MSG_TERMINAL_WORK_ORDER)
     if operation.status == OperationStatus.COMPLETE and not allow_completed_operation:
         raise HTTPException(status_code=409, detail=MSG_COMPLETED_WORK)
+
+
+def _corrected_accounting(
+    work_order: WorkOrder,
+    operation: WorkOrderOperation,
+    active_operations: list[WorkOrderOperation],
+    delta: float,
+) -> OperationAccounting:
+    """A COMPLETE operation's accounting at the good count the correction would leave."""
+    corrected_good = max(0.0, float(operation.quantity_complete or 0) - float(delta))
+    return operation_accounting(work_order, operation, active_operations, good=corrected_good)
+
+
+def _redeclared_short(acct: OperationAccounting) -> Optional[float]:
+    """The declaration an accounted COMPLETE operation would close with after the correction."""
+    return acct.closing_short if acct.closing_short > QTY_EPSILON else None
+
+
+def _declaration_changes(new_declared: Optional[float], old_declared: Optional[float]) -> bool:
+    return abs(float(new_declared or 0) - float(old_declared or 0)) > QTY_EPSILON
+
+
+def api_token_reduction_refusal(
+    actor: User, work_order: WorkOrder, operation: WorkOrderOperation, delta: float
+) -> Optional[str]:
+    """The **403** text when a standing API token asks for a correction, else ``None``.
+
+    This PR's extension of the owner's 2026-11-07 decision (that decision covered scrap and
+    short closes; this one is not part of it): lowering a recorded good count is a judgment
+    about where pieces went, made by a person -- the same reading under which
+    ``PUT /work-orders/operations/{id}`` refuses ANY count edit by a token. So EVERY
+    reduction by an API token is refused, on both verbs, not only the two branches that are
+    plainly short closes in disguise: a REOPEN (it clears the short a person declared and
+    walks other operators' labor down) and a RE-STAMP (it re-declares the short the later
+    stages are credited with). A re-stamp that would SET a declaration gets
+    ``API_TOKEN_SHORT_CLOSE`` -- it is a short close by another door; everything else gets
+    ``API_TOKEN_COUNT_JUDGMENT``. A crew-station badge token is a person and passes
+    (``is_api_token_credential``), as does an interactive session.
+
+    Both routes call this on the unlocked rows right after their 404 / scope checks (so the
+    refusal precedes every lock, eligibility query and write), and
+    ``perform_production_reduction`` calls it again under the row locks -- the same text
+    selection, because it reuses the core's own re-stamp arithmetic.
+    """
+    if not is_api_token_credential(actor):
+        return None
+    if operation.status == OperationStatus.COMPLETE:
+        acct = _corrected_accounting(work_order, operation, active_work_order_operations(work_order), delta)
+        new_declared = _redeclared_short(acct)
+        if (
+            acct.unaccounted <= QTY_EPSILON
+            and new_declared is not None
+            and _declaration_changes(new_declared, operation.quantity_short_declared)
+        ):
+            return API_TOKEN_SHORT_CLOSE
+    return API_TOKEN_COUNT_JUDGMENT
+
+
+def assert_reduction_credential_or_http(
+    actor: User, work_order: WorkOrder, operation: WorkOrderOperation, delta: float
+) -> None:
+    """Raise the **403** of ``api_token_reduction_refusal``; nothing when the actor may correct."""
+    refusal = api_token_reduction_refusal(actor, work_order, operation, delta)
+    if refusal is not None:
+        raise HTTPException(status_code=403, detail=refusal)
 
 
 def load_operation_for_reduction_or_http(
@@ -225,6 +333,8 @@ def perform_production_reduction(
     event_source_module: str,
     path: str,
     allow_completed_operation: bool = False,
+    reopen_operation: bool = False,
+    no_labor_recorded: bool = False,
 ) -> ProductionReductionOutcome:
     """The shared transactional body of both reduce-production endpoints.
 
@@ -266,6 +376,18 @@ def perform_production_reduction(
     ``load_operation_for_reduction_or_http`` -- it is the office verb's opt-in to
     correcting a COMPLETE operation, and the two gates are the same predicate evaluated
     before and under the locks.
+
+    ``reopen_operation`` (office only) is the explicit yes for a correction that would
+    leave a COMPLETE operation short (owner ruling 1); without it that correction is
+    refused 409 before anything is written. With it, the operation returns to IN_PROGRESS
+    and the un-worked READY operations it now blocks to PENDING, with REQUIRED audit rows
+    (503 and nothing saved when they cannot be written).
+
+    ``no_labor_recorded`` (office only) says the caller found NO TimeEntry on the operation at
+    all, so ``entries`` is empty and the correction lowers the office's own good count
+    directly (bounded by it, not by evidence). Both facts are re-checked under the row locks
+    -- a clock-in or another correction landing in between is a 409, nothing written. The
+    default ``False`` leaves every other call byte-identical.
     """
     # SFI-1: same locks, same order as report_operation_production / complete_operation.
     operation = (
@@ -301,6 +423,24 @@ def perform_production_reduction(
     # half this re-check exists for -- is not.)
     _assert_reduction_in_scope(work_order, operation, allow_completed_operation=allow_completed_operation)
 
+    # A standing API token may not correct counts (this PR's extension of the 2026-11-07
+    # decision). Both routes already refused it before their first lock; this is the same
+    # check under the locks, ahead of every other refusal and the first write.
+    assert_reduction_credential_or_http(actor, work_order, operation, delta)
+
+    # The labor-less correction's two facts, re-read under the locks: still nobody clocked in,
+    # and still at least ``delta`` good on record. A walk over an empty ``entries`` list would
+    # otherwise lower a count that a concurrent clock-in now backs, or below zero.
+    if no_labor_recorded and (
+        entries
+        or operation_has_labor_evidence(db, operation.id, company_id)
+        or delta > float(operation.quantity_complete or 0) + QTY_EPSILON
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="This operation was modified concurrently. Refresh and retry.",
+        )
+
     target_qty = operation_target_quantity(operation, work_order)
 
     # Siblings loaded under the WO row lock so the service can RECOMPUTE the rollup
@@ -309,9 +449,69 @@ def perform_production_reduction(
     # lowered count the walk is about to set).
     work_order_operations = list(work_order.operations)
 
+    # Owner ruling 1: a COMPLETE operation cannot be short. Decided BEFORE the walk, so a
+    # refusal writes nothing. Only reachable on the office verb (the scope gate above
+    # refuses a COMPLETE operation on the operator's).
+    reopening = False
+    reopen_accounting = None
+    # A correction that keeps a COMPLETE operation accounted (scrap still covers it) but
+    # raises the short it now closes with RE-STAMPS its declaration -- otherwise the later
+    # stages would keep being credited with the old figure and have to cover real loss
+    # with scrap that never happened there.
+    restamp: Optional[tuple[Optional[float], Optional[float]]] = None
+    if operation.status == OperationStatus.COMPLETE:
+        active_operations = active_work_order_operations(work_order)
+        reopen_accounting = _corrected_accounting(work_order, operation, active_operations, delta)
+        corrected_good = reopen_accounting.good
+        if reopen_accounting.unaccounted > QTY_EPSILON:
+            if not reopen_operation:
+                raise HTTPException(
+                    status_code=409,
+                    detail=reduce_would_leave_short_message(operation, delta, reopen_accounting.unaccounted),
+                )
+            later = later_completed_chain_operation(work_order, operation, active_operations)
+            if later is not None:
+                raise HTTPException(status_code=409, detail=reopen_blocked_by_later_message(later))
+            # Chain identity is not the whole story: a component chain's declaration feeds the
+            # assembly chain, so reopening it (its declaration cleared) can strand a COMPLETE
+            # assembly stage in ANOTHER chain. Judged on the accounting itself.
+            strand = accounting_change_strands(
+                work_order,
+                active_operations,
+                changed=operation,
+                status=OperationStatus.IN_PROGRESS,
+                quantity_short_declared=None,
+                quantity_complete=corrected_good,
+            )
+            if strand is not None:
+                raise HTTPException(status_code=409, detail=accounting_strand_message(strand))
+            reopening = True
+        else:
+            new_declared = _redeclared_short(reopen_accounting)
+            old_declared = operation.quantity_short_declared
+            if _declaration_changes(new_declared, old_declared):
+                strand = accounting_change_strands(
+                    work_order,
+                    active_operations,
+                    changed=operation,
+                    status=OperationStatus.COMPLETE,
+                    quantity_short_declared=new_declared,
+                    quantity_complete=corrected_good,
+                )
+                if strand is not None:
+                    raise HTTPException(status_code=409, detail=accounting_strand_message(strand))
+                restamp = (
+                    float(old_declared) if old_declared is not None else None,
+                    new_declared,
+                )
+
     # Walk the delta across the eligible evidence + lower the op total + recompute the
     # WO rollup (see the service docstring for why this stays reconcile-safe).
     reduction = reduce_operation_produced_quantity(operation, work_order, entries, delta, work_order_operations)
+
+    reopened_from = operation.status.value if reopening and operation.status else None
+    if restamp is not None:
+        operation.quantity_short_declared = restamp[1]
 
     operation.updated_at = datetime.utcnow()
     sync_laser_nest_from_operation(operation)
@@ -347,6 +547,23 @@ def perform_production_reduction(
             detail="This operation was modified concurrently. Refresh and retry.",
         ) from exc
 
+    # The reopen, AFTER the walk landed under the guard above (we hold this operation's row
+    # lock and just wrote it, so its second write in this transaction cannot be stale):
+    # back to IN_PROGRESS, current_operation_id, and the demotions through the ONE demotion
+    # core (scope "blocked_by"). Flushed under the same guard BEFORE any audit write --
+    # ``log_demotions_required`` requires it (invariant 4).
+    demoted_operations: list[WorkOrderOperation] = []
+    if reopening:
+        demoted_operations = reopen_completed_operation(db, work_order, operation)
+        try:
+            db.flush()
+        except StaleDataError as exc:
+            db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail="This operation was modified concurrently. Refresh and retry.",
+            ) from exc
+
     primary_entry_id = reduction.time_entry_reductions[0].time_entry_id if reduction.time_entry_reductions else None
 
     # Best-effort telemetry (never fails the request); emitted BEFORE commit because
@@ -381,7 +598,9 @@ def perform_production_reduction(
     # lowered by a positive delta, so log_update's empty-diff skip can never fire and a
     # correction can never commit unaudited (defense-in-depth). Per-entry before/after
     # slices ride extra_data so a reviewer can reconstruct exactly which evidence rows
-    # were walked down, by how much, and in what order.
+    # were walked down, by how much, and in what order. On an operation nobody clocked in to
+    # (``no_labor_recorded``) no entry is walked, but quantity_complete itself drops by the
+    # positive delta (bounded by it under the lock), so the diff is never empty there either.
     audit.log_update(
         resource_type="work_order_operation",
         resource_id=operation.id,
@@ -414,8 +633,75 @@ def perform_production_reduction(
             "work_order_quantity_complete_after": reduction.work_order_quantity_complete_after,
             # F5: disambiguate the two correction verbs on the audit chain.
             "path": path,
+            "reopened_operation": reopening,
+            # An operation nobody clocked in to: no evidence was walked, the office's own good
+            # count was lowered (the diff's quantity_complete carries it). Absent otherwise.
+            **({"no_labor_recorded": True} if no_labor_recorded else {}),
         },
     )
+
+    # The reopen is REQUIRED evidence (invariant 2, fail-closed): a completed operation
+    # moved back to the floor, and the operations it demoted, must not land without their
+    # rows -- otherwise the whole correction rolls back and the caller gets a 503.
+    if reopening and reopen_accounting is not None:
+        with required_audit(db, CORRECTION_AUDIT_UNAVAILABLE):
+            audit.log_required(
+                action=audit.ACTIONS["STATUS_CHANGE"],
+                resource_type="work_order_operation",
+                resource_id=operation.id,
+                resource_identifier=operation.operation_number,
+                description=(
+                    f"Reopened operation {operation.operation_number} on WO {work_order.work_order_number}: "
+                    f"lowering it by {delta:g} would have left a completed operation short. Reason: {reason}"
+                ),
+                old_values={"status": reopened_from},
+                new_values={"status": OperationStatus.IN_PROGRESS.value},
+                extra_data={
+                    **accounting_extra_data(reopen_accounting),
+                    "reason": reason,
+                    "quantity_delta": delta,
+                    "quantity_unaccounted": reopen_accounting.unaccounted,
+                    "transition": "reopened_by_correction",
+                    "operation_number": operation.operation_number,
+                    "sequence": operation.sequence,
+                    "demoted_operation_ids": [op.id for op in demoted_operations],
+                    "path": path,
+                },
+            )
+            log_demotions_required(
+                audit,
+                demoted_operations,
+                reason=(
+                    f"operation {operation.operation_number} was reopened by an over-count correction and is no "
+                    "longer complete"
+                ),
+                extra={"transition": "predecessor_reopened", "reopened_operation_id": operation.id},
+            )
+
+    # The re-stamped declaration moves what the later stages are credited with: REQUIRED
+    # evidence (invariant 2, fail-closed), like the reopen.
+    if restamp is not None and reopen_accounting is not None:
+        with required_audit(db, CORRECTION_AUDIT_UNAVAILABLE):
+            audit.log_required(
+                action=audit.ACTIONS["UPDATE"],
+                resource_type="work_order_operation",
+                resource_id=operation.id,
+                resource_identifier=operation.operation_number,
+                description=(
+                    f"Re-declared the short on completed operation {operation.operation_number} for WO "
+                    f"{work_order.work_order_number}: lowering it by {delta:g} leaves "
+                    f"{float(restamp[1] or 0):g} of what reached it scrapped. Reason: {reason}"
+                ),
+                old_values={"quantity_short_declared": restamp[0]},
+                new_values={"quantity_short_declared": restamp[1]},
+                extra_data={
+                    **accounting_extra_data(reopen_accounting),
+                    "reason": reason,
+                    "quantity_delta": delta,
+                    "transition": "short_redeclared_by_correction",
+                    "path": path,
+                },
+            )
 
     # F3 (per-entry audit discoverability): the operation-level row above is the
     # aggregate, but an auditor sampling a SPECIFIC TimeEntry needs a resource-keyed

@@ -484,18 +484,19 @@ describe('ShopFloorSimple phone workspace', () => {
     expect(stored.drafts['101']).toBeUndefined();
   });
 
-  it('requires confirmation to complete full quantity and keeps Check Out a separate action', async () => {
+  it('requires confirmation to complete an accounted-for operation and keeps Check Out a separate action', async () => {
     mockedApi.getMyActiveJob.mockResolvedValue({ active_jobs: [job(101, { quantity_complete: 20 })] });
     renderPage();
     fireEvent.click(await screen.findByRole('button', { name: 'Complete operation' }));
-    const dialog = await screen.findByRole('dialog', { name: 'Complete operation at full quantity?' });
+    const dialog = await screen.findByRole('dialog', { name: 'Complete this operation?' });
     expect(mockedApi.completeOperation).not.toHaveBeenCalled();
     fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     expect(screen.getByRole('button', { name: 'Check Out' })).toBeEnabled();
     fireEvent.click(screen.getByRole('button', { name: 'Complete operation' }));
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Complete Operation' }));
     await waitFor(() => expect(mockedApi.completeOperation).toHaveBeenCalledTimes(1));
-    expect(mockedApi.completeOperation.mock.calls[0][0]).toBe(101);
+    // Owner ruling 1: the close sends no quantity — the server books what was recorded.
+    expect(mockedApi.completeOperation).toHaveBeenCalledWith(101, { source: 'desktop' });
     expect(mockedApi.clockOut).not.toHaveBeenCalled();
   });
 });

@@ -80,6 +80,7 @@ from app.services.work_order_state_service import (
     operations_worked_out_of_sequence,
     work_order_allows_same_work_center,
 )
+from tests.api.completion_test_helpers import seed_recorded_good
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 
@@ -499,7 +500,8 @@ class TestPromotionAndTheActionVerbsAgree:
             work_centers=[wc, wc],
             statuses=[OperationStatus.IN_PROGRESS, OperationStatus.READY],
         )
-        add_time_entry(db_session, user=user, op=ops[1])
+        # The labor evidence carries the piece: the floor close books recorded good (ruling 1).
+        seed_recorded_good(db_session, ops[1], 1, user)
 
         resp = client.post(
             f"/api/v1/shop-floor/operations/{ops[1].id}/complete",
@@ -552,6 +554,8 @@ class TestPromotionAndTheActionVerbsAgree:
             },
         )
         assert clock_in.status_code == 200, clock_in.text
+        # The floor close books the good the floor recorded (owner ruling 1).
+        seed_recorded_good(db_session, ops[0], 1, admin)
 
         complete = client.post(
             f"/api/v1/shop-floor/operations/{ops[0].id}/complete",

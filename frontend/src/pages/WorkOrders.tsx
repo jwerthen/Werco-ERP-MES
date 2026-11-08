@@ -781,11 +781,13 @@ export default function WorkOrders() {
       const result = await api.completeWorkOrder(
         completeTarget.id,
         values.quantityComplete,
-        // Browse summaries don't contain recorded scrap. Omit an unchanged zero
-        // so quick completion cannot erase scrap already recorded on the order.
-        values.quantityScrapped > 0 ? values.quantityScrapped : null,
+        // Browse summaries don't contain recorded scrap, so the modal treats the
+        // recorded total as unknown and returns null for an unchanged zero — quick
+        // completion cannot erase scrap already recorded on the order.
+        values.quantityScrapped,
         values.scrapReason,
-        values.scrapReasonCodeId
+        values.scrapReasonCodeId,
+        values.overrideReason
       );
       await currentReload.current();
       setCompleteTarget(null);
@@ -1901,7 +1903,17 @@ export default function WorkOrders() {
           open
           title={`Complete work order ${completeTarget.work_order_number}`}
           subtitle={`Ordered: ${completeTarget.quantity_ordered}. Completes all remaining operations.`}
-          defaultQuantityComplete={Number(completeTarget.quantity_ordered)}
+          // Owner ruling 1: the list row is a SUMMARY. It carries the recorded
+          // header (the prefill) but neither recorded scrap nor the floor's
+          // deliverable / accounted loss, and opening the work order to fetch them
+          // would run its reconcile-on-read. So those stay UNKNOWN: the modal's
+          // shortfall readout is advisory here and the server's 409s (shown inline)
+          // decide — a refusal asking for an override reason turns the field on.
+          mode="work_order"
+          target={Number(completeTarget.quantity_ordered)}
+          recordedComplete={Number(completeTarget.quantity_complete || 0)}
+          recordedScrapped={null}
+          subjectLabel={completeTarget.work_order_number}
           scrapHint="Enter total scrap to update it; leave 0 to keep recorded scrap."
           submitting={completing}
           error={completeError}

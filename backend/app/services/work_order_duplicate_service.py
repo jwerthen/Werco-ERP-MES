@@ -798,7 +798,10 @@ def _copy_operations(
     ``actual_start`` / ``actual_end`` / ``started_by`` / ``completed_by`` /
     ``last_reported_*`` / ``inspection_complete`` / ``scrap_reason`` /
     ``scrap_reason_code_id`` / ``scheduled_start`` / ``scheduled_end`` / ``version``
-    left at their defaults.
+    left at their defaults. ``quantity_short_declared`` (migration 117) is the one
+    ``quantity_*`` left NULL rather than 0: it is the short a named person declared when
+    closing the SOURCE operation (owner ruling 1), NULL means never declared, and a
+    fresh copy has declared nothing.
 
     Reset (scheduling OUTPUT, not the plan): ``run_order``. See the module docstring —
     it is the manager's dispatch ranking for one machine's board, the same class of thing

@@ -317,6 +317,15 @@ class WorkOrderOperation(Base, TenantMixin):
     # Lean Phase 1: structured scrap categorization. Nullable -- historical rows and
     # scrap=0 writes have no code; the free-text scrap_reason stays as narrative detail.
     scrap_reason_code_id = Column(Integer, ForeignKey("scrap_reason_codes.id"), nullable=True)
+    # Owner ruling 1 (2026-11-05): the short this operation was DECLARED to close with
+    # (received - good, covered by scrap), written ONLY by the explicit close verbs at
+    # the moment a named person closes it short. Downstream chain credit and the
+    # all-complete header read it; nothing re-derives it from the counts later, so a
+    # later edit cannot retroactively change what the next stage was credited with.
+    # NULL = never declared (every pre-117 row; correct-forward, no backfill) and reads
+    # as zero credit. Server-written only -- keep it off every request schema.
+    # Lock-step with migration 117_operation_short_declared.
+    quantity_short_declared = Column(Float, nullable=True)
 
     # Kiosk telemetry (Foundry redesign): the most recent production-evidence report
     # on this operation -- stamped by POST /shop-floor/operations/{id}/production and

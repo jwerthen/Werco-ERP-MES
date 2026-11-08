@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import api from '../services/api';
 import { workOrderBrowseFixture } from '../testUtils/workOrderBrowseFixture';
+import type { OfficeOperationCompleteResult } from '../types';
 import WorkOrders from './WorkOrders';
 
 jest.mock('../services/api', () => ({
@@ -96,6 +97,14 @@ async function openCompletion() {
   const form = await screen.findByRole('dialog', { name: 'Complete operation "Cut"' });
   return within(form);
 }
+/**
+ * Owner ruling 1: the good total prefills with what is RECORDED (0 on these READY
+ * rows), and an unchanged short submit is disabled — so the desk books the count.
+ * Nobody has clocked into a READY, never-started operation, so no override reason.
+ */
+function enterGood(form: ReturnType<typeof within>, good: number) {
+  fireEvent.change(form.getByLabelText(/Quantity completed/), { target: { value: String(good) } });
+}
 
 beforeEach(() => {
   jest.resetAllMocks();
@@ -180,16 +189,17 @@ it('uses progressive operation numbers for mobile labels and completion when seq
   await within(popup).findByText('Op 20 · Bend');
   fireEvent.click(within(popup).getByRole('button', { name: 'Complete operation 20: Bend' }));
   const form = await screen.findByRole('dialog', { name: 'Complete operation "Bend"' });
+  enterGood(within(form), 10);
   fireEvent.click(within(form).getByRole('button', { name: 'Complete' }));
 
   expect(await within(popup).findByText('Operation 20 (Bend) completed.')).toBeInTheDocument();
-  expect(mockedApi.completeWOOperation).toHaveBeenCalledWith(72, 10, 0, undefined);
+  expect(mockedApi.completeWOOperation).toHaveBeenCalledWith(72, 10, { quantityScrapped: null });
   expect(mockedApi.completeWOOperation).toHaveBeenCalledTimes(1);
   expect(mockedApi.completeWorkOrder).not.toHaveBeenCalled();
 });
 
 it('completes an operation once, keeps the popup open, and refreshes progress and the list', async () => {
-  let resolve!: (value: unknown) => void;
+  let resolve!: (value: OfficeOperationCompleteResult) => void;
   mockedApi.completeWOOperation.mockReturnValueOnce(
     new Promise(done => {
       resolve = done;
@@ -199,6 +209,7 @@ it('completes an operation once, keeps the popup open, and refreshes progress an
   const popup = await openPopup();
   expect(within(popup).getByRole('button', { name: 'Complete operation 20: Bend' })).toBeDisabled();
   const form = await openCompletion();
+  enterGood(form, 10);
   fireEvent.click(form.getByRole('button', { name: 'Complete' }));
   const pendingButton = form.getByRole('button', { name: /Completing/ });
   expect(pendingButton).toBeDisabled();
@@ -206,7 +217,7 @@ it('completes an operation once, keeps the popup open, and refreshes progress an
   fireEvent.keyDown(window, { key: 'Escape' });
   expect(screen.getAllByRole('dialog')).toHaveLength(2);
   expect(mockedApi.completeWOOperation).toHaveBeenCalledTimes(1);
-  expect(mockedApi.completeWOOperation).toHaveBeenCalledWith(71, 10, 0, undefined);
+  expect(mockedApi.completeWOOperation).toHaveBeenCalledWith(71, 10, { quantityScrapped: null });
   expect(within(popup).getByText('0 / 2 operations complete')).toBeInTheDocument();
 
   job.operations[0].status = 'complete';
@@ -230,16 +241,30 @@ it('reports partial progress honestly and retains server refusals inside the qua
   renderList();
   const popup = await openPopup();
   const form = await openCompletion();
+  enterGood(form, 10);
   fireEvent.click(form.getByRole('button', { name: 'Complete' }));
   expect(await form.findByRole('alert')).toHaveTextContent('Measure slot (SN-01)');
   expect(mockedApi.getWorkOrder).toHaveBeenCalledTimes(1);
-  fireEvent.change(form.getByLabelText(/Quantity completed/), { target: { value: '4' } });
+  enterGood(form, 4);
+  // Owner ruling 1: 4 of 10 is SHORT — the submit says it saves and leaves the
+  // operation open, and the readout says what a close still needs.
+  expect(form.getByTestId('complete-work-short')).toHaveTextContent('6 of 10 not yet accounted for');
   job.operations[0].quantity_complete = 4;
   job.operations[0].status = 'in_progress';
-  mockedApi.completeWOOperation.mockResolvedValueOnce({ message: 'Progress updated' });
-  fireEvent.click(form.getByRole('button', { name: 'Complete' }));
-  expect(await within(popup).findByText('Progress saved for operation 10 (Cut).')).toBeInTheDocument();
+  mockedApi.completeWOOperation.mockResolvedValueOnce({
+    message: 'Progress updated',
+    is_fully_complete: false,
+    operation: { id: 71, status: 'in_progress', quantity_complete: 4, quantity_scrapped: 0, quantity_unaccounted: 6 },
+  });
+  fireEvent.click(form.getByRole('button', { name: 'Save progress · leave open' }));
+  // A partial result: warning tone (an alert), never "completed".
+  const notice = await within(popup).findByText(
+    'Progress saved — operation 10 (Cut) left open, 6 pcs not yet accounted for.'
+  );
+  expect(notice).toHaveAttribute('role', 'alert');
+  expect(mockedApi.completeWOOperation).toHaveBeenLastCalledWith(71, 4, { quantityScrapped: null });
   expect(await within(popup).findByText('4 / 10 completed')).toBeInTheDocument();
+  expect(within(popup).getByText(/6 unaccounted/)).toBeInTheDocument();
   expect(within(popup).getByText('0 / 2 operations complete')).toBeInTheDocument();
 });
 
@@ -247,6 +272,8 @@ it('requires a scrap reason before posting completion', async () => {
   renderList();
   await openPopup();
   const form = await openCompletion();
+  // 9 good + 1 scrap accounts for all 10 — the scrap rise still needs its reason.
+  enterGood(form, 9);
   fireEvent.change(form.getByLabelText('Quantity scrapped'), { target: { value: '1' } });
   expect(form.getByRole('button', { name: 'Complete' })).toBeDisabled();
   expect(mockedApi.completeWOOperation).not.toHaveBeenCalled();
@@ -306,12 +333,13 @@ it('keeps a successful whole-order completion visible when the active list remov
   fireEvent.click(within(popup).getByRole('button', { name: 'Complete work order' }));
   const form = within(await screen.findByRole('dialog', { name: 'Complete work order WO-0042' }));
   expect(form.getByText(/This completes all remaining operations/)).toBeInTheDocument();
+  fireEvent.click(form.getByRole('button', { name: 'Use full count (10)' }));
   fireEvent.click(form.getByRole('button', { name: 'Complete' }));
   expect(await within(popup).findByText('2 / 2 operations complete')).toBeInTheDocument();
   expect(within(popup).getByText(/Completed with 1 step record bypassed: Measure slot/)).toBeInTheDocument();
   expect(await screen.findByText('No work orders found')).toBeInTheDocument();
   expect(screen.getByRole('dialog', { name: 'Operations for WO-0042' })).toBeInTheDocument();
-  expect(mockedApi.completeWorkOrder).toHaveBeenCalledWith(42, 10, 0, undefined, undefined);
+  expect(mockedApi.completeWorkOrder).toHaveBeenCalledWith(42, 10, null, undefined, undefined, undefined);
 });
 
 it('disables stale actions after a post-save refresh fails and recovers without repeating the write', async () => {
@@ -319,6 +347,7 @@ it('disables stale actions after a post-save refresh fails and recovers without 
   const popup = await openPopup();
   const form = await openCompletion();
   mockedApi.getWorkOrder.mockRejectedValueOnce(new Error('Offline'));
+  enterGood(form, 10);
   fireEvent.click(form.getByRole('button', { name: 'Complete' }));
   expect(await within(popup).findByRole('alert')).toHaveTextContent('Displayed operations may be out of date');
   expect(within(popup).getByRole('button', { name: 'Complete operation 10: Cut' })).toBeDisabled();

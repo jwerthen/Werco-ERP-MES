@@ -97,6 +97,8 @@ def tie_material(db: Session, wo: WorkOrder, op: WorkOrderOperation) -> Part:
 
 
 def closed_entry(db: Session, user, op: WorkOrderOperation) -> TimeEntry:
+    """A closed entry carrying the full QTY: the floor verb is a CLOSE at the recorded good
+    (owner ruling 1), so the completion under test must have its pieces on record."""
     entry = TimeEntry(
         user_id=user.id,
         work_order_id=op.work_order_id,
@@ -105,6 +107,7 @@ def closed_entry(db: Session, user, op: WorkOrderOperation) -> TimeEntry:
         entry_type=TimeEntryType.RUN,
         clock_in=datetime.utcnow() - timedelta(hours=1),
         clock_out=datetime.utcnow() - timedelta(minutes=5),
+        quantity_produced=float(QTY),
         company_id=user.company_id,
     )
     db.add(entry)

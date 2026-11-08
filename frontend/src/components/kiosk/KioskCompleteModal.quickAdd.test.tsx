@@ -18,9 +18,10 @@
  *    ceiling turns the owner's `+1` into a guaranteed refusal that aborts the
  *    whole completion — the operator stays clocked in with nothing recorded.
  *
- * 3. It is data entry only: the material deduction notice is computed from the
- *    ORDERED quantity, and a quick add must not move it, exactly as the good
- *    keypad must not (see KioskCompleteModal.materialTie.test.tsx).
+ * 3. The material deduction notice follows the FINAL good (recorded + entered) —
+ *    owner ruling 1: the close books the good the floor recorded — so a quick add
+ *    moves it exactly as the good keypad does (see
+ *    KioskCompleteModal.materialTie.test.tsx).
  *
  * 4. It is the SAME row the REPORT modal shows — same amounts, order and labels,
  *    off `quantityQuickAdds.ts`. An operator learns it once.
@@ -186,15 +187,17 @@ describe('KioskCompleteModal — quantity quick adds', () => {
   it('sends the quick-added count as the good quantity on confirm', async () => {
     const user = userEvent.setup();
     const onConfirm = jest.fn();
-    renderModal({ onConfirm });
+    // 20 of 25 recorded: the last 5 are what a finish must account for.
+    renderModal({ job: { ...JOB, quantity_complete: 20 }, onConfirm });
     await clearGood(user);
 
     await user.click(quickAdd('+5'));
     await user.click(screen.getByTestId('kiosk-qty-confirm'));
 
-    // Unchanged completion semantics: good rides the clock-out, scrap is 0 and
-    // carries no reason. The host still asserts completion at the target qty.
-    expect(onConfirm).toHaveBeenCalledWith(5, 0, null, null);
+    // Good rides the clock-out, scrap is 0 and carries no reason. The host then
+    // closes the operation without asserting any quantity (owner ruling 1).
+    // 20 + 5 of 25 is a full good count, and the overlay hands that reading over too.
+    expect(onConfirm).toHaveBeenCalledWith(5, 0, null, null, { fullCount: true, unaccountedAfter: 0 });
   });
 
   it('is disabled while a mutation is in flight', async () => {
@@ -216,14 +219,26 @@ describe('KioskCompleteModal — quantity quick adds', () => {
     expect(quickAdd('+1')).toBeDisabled();
   });
 
-  it('does not move the material deduction notice — quick adds are data entry only', async () => {
+  it('moves the material deduction notice with the good it adds — the close books recorded good', async () => {
     const user = userEvent.setup();
     renderModal({ materialTies: [TIE], operationScrapped: 0 });
+
+    // The prefill (25) predicts the full nest; clear it and the prediction follows.
+    expect(screen.getByTestId('kiosk-complete-material')).toHaveTextContent('25 EA · SHT-.125-304');
+    await clearGood(user);
+    await user.click(quickAdd('+5'));
+    expect(screen.getByTestId('kiosk-complete-material')).toHaveTextContent('5 EA · SHT-.125-304');
+  });
+
+  it("is bounded by the server's good ceiling, not the target, when an upstream close declared a short", async () => {
+    const user = userEvent.setup();
+    // Target 25, 3 never reached this operation: the most good the server takes is 22.
+    renderModal({ upstreamShort: 3, goodCeiling: 22 });
     await clearGood(user);
 
-    expect(screen.getByTestId('kiosk-complete-material')).toHaveTextContent('25 EA · SHT-.125-304');
-    await user.click(quickAdd('+5'));
-    expect(screen.getByTestId('kiosk-complete-material')).toHaveTextContent('25 EA · SHT-.125-304');
+    expect(screen.getByTestId('kiosk-complete-quickadd-label')).toHaveTextContent('max 22');
+    await user.click(quickAdd('+25'));
+    expect(within(goodWell()).getByText('22')).toBeInTheDocument();
   });
 
   describe('full-nest tap', () => {

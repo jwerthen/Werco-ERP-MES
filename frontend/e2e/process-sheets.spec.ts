@@ -227,16 +227,14 @@ test.describe('Process sheets — author → release → attach → serialized W
     await expect(page.getByText(/Recorded — Deburred all edges/).first()).toBeVisible({ timeout: 10_000 });
 
     // ---- 5. Complete the operation — the steps gate is satisfied -----------
-    // Pure complete (clear the prefilled GOOD, crew-e2e precedent): reporting
-    // the full final quantity at clock-out auto-completes the WO from labor
-    // evidence first, and the follow-up complete call then refuses with
-    // "work order is complete" — an error toast for a successful outcome.
+    // Owner ruling 1: GOOD pre-fills at what is still unaccounted for, so the
+    // prefilled full count is the honest finish. The clock-out completes the
+    // operation on its own (its response says operation_status "complete"), and
+    // the kiosk sends no follow-up /complete — the old "clear GOOD" workaround
+    // existed only because that follow-up call used to be refused.
     await page.getByRole('button', { name: /back/i }).first().click();
-    // Foundry redesign: COMPLETE OP opens the summary modal; tapping the GOOD
-    // well reveals the keypad, CLR zeroes the prefilled remaining quantity.
     await page.getByRole('button', { name: /^complete op$/i }).click();
-    await page.getByTestId('kiosk-qty-good').click();
-    await page.getByTestId('kiosk-key-clear').click();
+    await expect(page.getByTestId('kiosk-complete-short')).toHaveCount(0);
     await page.getByTestId('kiosk-qty-confirm').click();
     await expect(page.getByText(new RegExp(`Completed ${woNumber}`)).first()).toBeVisible({ timeout: 15_000 });
     await expect(page.getByTestId('kiosk-steps-missing')).toHaveCount(0);

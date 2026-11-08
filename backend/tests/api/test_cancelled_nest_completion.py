@@ -19,6 +19,7 @@ from app.services.work_order_state_service import (
     reduce_operation_produced_quantity,
 )
 from tests.api import test_laser_nest_pool_quantity_rollup as pool_fixtures
+from tests.api.completion_test_helpers import seed_recorded_good
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 upload_dir = pool_fixtures.upload_dir
@@ -49,6 +50,7 @@ def _complete(
     surface="office",
     work_order_id=None,
     work_center_id=None,
+    db=None,
 ):
     quantity = operation["laser_nest"]["planned_runs"]
     headers = pool_fixtures.headers_for(admin)
@@ -64,6 +66,9 @@ def _complete(
             },
         )
         assert clocked.status_code == 200, clocked.text
+        # The floor close books the good the floor recorded (owner ruling 1), so the runs
+        # are on a labor entry before the close.
+        seed_recorded_good(db, db.get(WorkOrderOperation, operation["id"]), quantity, admin)
         response = client.post(
             f"/api/v1/shop-floor/operations/{operation['id']}/complete",
             headers=headers,
@@ -104,6 +109,7 @@ def test_last_live_nest_completes_work_order_without_completing_cancelled_nest(c
             surface=surface,
             work_order_id=work_order["id"],
             work_center_id=work_center.id,
+            db=db_session,
         )
 
     db_session.expire_all()

@@ -33,7 +33,7 @@ import ProductionRecoveryNotice from '../components/kiosk/ProductionRecoveryNoti
 import { useProductionReportRequest } from '../components/kiosk/useProductionReportRequest';
 import { KioskApiError } from '../services/kioskStationClient';
 import { getKioskStationId } from '../utils/kiosk';
-import { startBlockedLabel } from '../utils/startBlock';
+import { startBlockKind, startBlockedLabel } from '../utils/startBlock';
 import { useKioskIdleLogout } from '../hooks/useKioskIdleLogout';
 import { usePageTitle } from '../hooks/usePageTitle';
 import { useWakeLock } from '../hooks/useWakeLock';
@@ -83,6 +83,13 @@ import {
   stepsIncompleteMessage,
 } from '../utils/processSheetErrors';
 import { formatCentralTime } from '../utils/centralTime';
+import {
+  clockOutOperationStatus,
+  closingShortAfterEntry,
+  formatShortQuantity,
+  goodCeiling as resolveGoodCeiling,
+  operationUnaccounted,
+} from '../utils/shortCount';
 import type { ResumeOpenBlocker } from '../types';
 import type { KioskStationSummary } from '../types/kioskStation';
 import type { ScrapReasonCodeOption } from '../types/scrapReason';
@@ -874,8 +881,22 @@ export default function CrewStationKiosk() {
           showToast('info', clockedOutStepsMessage(pendingSteps));
           setView({ name: 'board' });
         } else {
-          showToast('success', `${view.operator.user.full_name} clocked out`);
-          setView(view.operationId != null ? { name: 'job', operationId: view.operationId } : { name: 'board' });
+          // A full good count completes the operation at clock-out (and deducts its tied
+          // material) — say so instead of a bare "clocked out" the operator would read as
+          // "still open".
+          const leftItem = view.operationId != null ? findItem(view.operationId) : null;
+          const completedIt = clockOutOperationStatus(clockOutRes) === 'complete';
+          showToast(
+            'success',
+            completedIt
+              ? `${view.operator.user.full_name} clocked out — ${
+                  leftItem ? formatOperationLabel(leftItem.operation_number) : 'the operation'
+                } completed`
+              : `${view.operator.user.full_name} clocked out`
+          );
+          setView(
+            view.operationId != null && !completedIt ? { name: 'job', operationId: view.operationId } : { name: 'board' }
+          );
         }
         await bumpAndRefresh();
       } catch (err) {
@@ -885,7 +906,7 @@ export default function CrewStationKiosk() {
         setBusy(false);
       }
     },
-    [view, mutationsBlocked, showToast, bumpAndRefresh]
+    [view, mutationsBlocked, showToast, bumpAndRefresh, findItem]
   );
 
   /**
@@ -1036,7 +1057,24 @@ export default function CrewStationKiosk() {
     [view, findItem, mutationsBlocked, showToast, bumpAndRefresh]
   );
 
-  /** COMPLETE — production first (if final pieces entered), then complete-all. */
+  /**
+   * COMPLETE — badge-signed, crew-wide (owner ruling 1).
+   *
+   * WHERE the final pieces ride depends on the signer:
+   *  - the signer holds an entry on this operation (is on the roster) → good AND scrap
+   *    ride `/production` as that operator (the idempotent, request-id'd report), then
+   *    `/complete` closes with nothing but the acknowledgement;
+   *  - the signer holds NO entry (a lead closing out a crew's job) → `/production` would
+   *    refuse them, so good cannot be recorded under this badge at all: with good > 0
+   *    nothing is sent and the screen says which badge to scan; with only scrap, the
+   *    scrap rides `/complete` itself (declared at the close, with its reason).
+   *
+   * `acknowledge_open_entries` is sent because the confirm modal listed everyone who
+   * will be clocked out ("pieces they have not reported are not counted") — that list
+   * on screen is the acknowledgement. A `/complete` refusal writes nothing, so when the
+   * scrap rode it the operator is told "Nothing was saved"; when it rode `/production`
+   * the report stands and the toast says the completion failed.
+   */
   const handleCompleteBadge = useCallback(
     async (badgeId: string) => {
       const item = view.name === 'completeConfirm' ? findItem(view.operationId) : null;
@@ -1045,24 +1083,94 @@ export default function CrewStationKiosk() {
       setBusy(true);
       setBadgeError(null);
       let produced = false;
+      let scrapOnComplete = false;
       let minted: Awaited<ReturnType<typeof kioskClient.mintBadgeToken>> | null = null;
       try {
         minted = await kioskClient.mintBadgeToken(badgeId);
-        if (good > 0 || scrap > 0) {
-          const productionToken = minted.access_token;
-          await reportRequest.submit(minted.user.id, item.operation_id, {
-            quantity_complete_delta: good,
-            quantity_scrapped_delta: scrap,
-            scrap_reason: scrap > 0 && reason ? reason : undefined,
-            scrap_reason_code_id: scrap > 0 && reasonCodeId != null ? reasonCodeId : undefined,
-            source: KIOSK_SOURCE,
-          }, data => kioskClient.reportProduction(productionToken, item.operation_id, data));
-          produced = true;
-        }
-        const res = await kioskClient.completeOperation(minted.access_token, item.operation_id, {
-          quantity_complete: Number(item.quantity_ordered || 0),
-          source: KIOSK_SOURCE,
+        const signerId = minted.user.id;
+        const signerOnRoster = (item.roster || []).some((entry) => entry.user_id === signerId);
+        const scrapFields =
+          scrap > 0
+            ? {
+                scrap_reason: reason || undefined,
+                scrap_reason_code_id: reasonCodeId != null ? reasonCodeId : undefined,
+              }
+            : {};
+        // Scrap that COVERS A SHORT (the good alone leaves units unaccounted) rides the close,
+        // where the server re-checks it against what is still unaccounted under the row lock
+        // and refuses an over-statement from a stale board; replacement scrap on a full good
+        // count rides /production with the pieces.
+        const closingShort = closingShortAfterEntry({
+          target: item.quantity_ordered,
+          upstreamShort: item.upstream_quantity_short,
+          complete: item.quantity_complete,
+          scrapped: item.quantity_scrapped,
+          good,
         });
+        const scrapCoversShort = scrap > 0 && closingShort > 0;
+        let completeBody: kioskClient.CompleteOperationBody;
+        if (signerOnRoster) {
+          const productionScrap = scrapCoversShort ? 0 : scrap;
+          if (good > 0 || productionScrap > 0) {
+            const productionToken = minted.access_token;
+            await reportRequest.submit(signerId, item.operation_id, {
+              quantity_complete_delta: good,
+              quantity_scrapped_delta: productionScrap,
+              ...(productionScrap > 0 ? scrapFields : {}),
+              source: KIOSK_SOURCE,
+            }, data => kioskClient.reportProduction(productionToken, item.operation_id, data));
+            produced = true;
+          }
+          completeBody = {
+            source: KIOSK_SOURCE,
+            acknowledge_open_entries: true,
+            ...(scrapCoversShort ? { quantity_scrapped: scrap, ...scrapFields } : {}),
+          };
+          scrapOnComplete = scrapCoversShort;
+        } else {
+          if (good > 0) {
+            // Nothing sent: this badge has no entry to record good against. On a job
+            // the work order refuses to start (draft / on hold) JOIN is refused too,
+            // so the way out is only a badge that is already clocked in — and when
+            // nobody is, there is no floor way out at all: say so, not "scan a badge",
+            // and name the office way out that actually exists:
+            //  - HELD: the office books the pieces on the held job as it stands (the
+            //    running operation is closable on the Work Order page). Never "once a
+            //    supervisor resumes it" — a hold is not lifted just to close running work.
+            //  - DRAFT: no office surface offers Complete on a draft, so the supervisor
+            //    releases first; then the crew can JOIN, or the office records them. No
+            //    new completion door on drafts (an open owner question).
+            //  - a refusal startBlockKind does not recognise: generic, no button named.
+            // Scrap entered alongside the good is named too: nothing is sent, so when the
+            // supervisor has to record it, the scrap and its reason have to be given again.
+            const qty =
+              scrap > 0
+                ? `${formatShortQuantity(good)} good and ${formatShortQuantity(scrap)} scrap`
+                : `${formatShortQuantity(good)} good`;
+            const nothingSaved = scrap > 0 ? ' Nothing was saved, including the scrap reason.' : '';
+            const nobodyClockedIn = (item.roster || []).length === 0;
+            const blockKind = startBlockKind(item.work_order_status, item.start_blocked_reason);
+            setBadgeError(
+              blockKind === null
+                ? `This badge is not clocked in to this job — scan a badge that is, or JOIN first, to record the ${qty}.`
+                : !nobodyClockedIn
+                  ? `This badge is not clocked in to this job — scan a badge that is clocked in to this job to record the ${qty}.`
+                  : blockKind === 'on_hold'
+                    ? `No one is clocked in to this job, and it can't be joined while it is on hold. Ask a supervisor to record the ${qty} from the work order page.${nothingSaved}`
+                    : blockKind === 'draft'
+                      ? `No one is clocked in to this job, and it can't be joined while it is in draft. Ask a supervisor to release the work order first — then the ${qty} can be recorded here or from the work order page.${nothingSaved}`
+                      : `No one is clocked in to this job, and it can't be joined right now. Ask a supervisor how to record the ${qty}.${nothingSaved}`
+            );
+            return;
+          }
+          completeBody = {
+            source: KIOSK_SOURCE,
+            acknowledge_open_entries: true,
+            ...(scrap > 0 ? { quantity_scrapped: scrap, ...scrapFields } : {}),
+          };
+          scrapOnComplete = scrap > 0;
+        }
+        const res = await kioskClient.completeOperation(minted.access_token, item.operation_id, completeBody);
         const closed = res.closed_time_entries || [];
         showToast(
           'success',
@@ -1084,7 +1192,11 @@ export default function CrewStationKiosk() {
           const stepsMessage = stepsIncompleteMessage(missing);
           showToast(
             'error',
-            produced ? `Saved production, but completing failed: ${stepsMessage}` : stepsMessage
+            produced
+              ? `Saved production, but completing failed: ${stepsMessage}`
+              : scrapOnComplete
+                ? `Nothing was saved — ${stepsMessage}`
+                : stepsMessage
           );
           setView({
             name: 'steps',
@@ -1095,15 +1207,25 @@ export default function CrewStationKiosk() {
           await bumpAndRefresh();
           return;
         }
-        const message = kioskErrorMessage(err, 'Could not complete. Try again.');
+        const detail = kioskErrorMessage(err, 'Could not complete. Try again.');
+        // A /complete refusal writes nothing — so when the scrap rode it, say so
+        // plainly rather than let "Saved…" or a bare detail imply it was kept.
+        const message = scrapOnComplete ? `Nothing was saved — ${detail}` : detail;
         if (produced) {
           // Two-step verb: the production report landed but completion was
-          // refused — say so honestly AND keep the gating detail verbatim.
-          showToast('error', `Saved production, but completing failed: ${message}`);
+          // refused — say so honestly AND keep the gating detail verbatim. Scrap that
+          // was to cover the short rode the refused close, so it was NOT saved.
+          showToast(
+            'error',
+            scrapOnComplete
+              ? `Saved production, but completing failed (the ${formatShortQuantity(scrap)} scrap was not saved): ${detail}`
+              : `Saved production, but completing failed: ${detail}`
+          );
           setView({ name: 'job', operationId: item.operation_id });
           await bumpAndRefresh();
         } else if (err instanceof KioskApiError && err.status === 409) {
-          // Someone else completed/changed it first — verbatim + refresh.
+          // Refused on state (someone completed/changed it first, still short, a
+          // crewmate still clocked in) — verbatim + refresh.
           showToast('error', message);
           setView({ name: 'job', operationId: item.operation_id });
           await bumpAndRefresh();
@@ -1260,24 +1382,38 @@ export default function CrewStationKiosk() {
 
 
   /**
-   * What is left to record on an operation: its target less what is already
-   * recorded — which is also the most GOOD quantity the server will accept for
-   * one more entry. COMPLETE pre-fills its final-entry field with it and all
-   * three quantity screens bound their quick-add row by it, off this one
-   * expression so a pre-fill and a ceiling can never disagree.
+   * The most GOOD quantity the server will accept for one more entry: the operation's
+   * good ceiling less what is already recorded. All three quantity screens bound their
+   * quick-add row by it, off this one expression.
    *
-   * `quantity_ordered` on a queue row is already the OPERATION target — the
-   * server sends `operation_target_quantity(op, wo)`, i.e. `component_quantity`
-   * when the operation carries one, else the work order's quantity — so this is
-   * the same number both writers behind the quantity screen measure their
-   * refusal against (`/production` 400 "Quantity (N) cannot exceed quantity
-   * ordered (T)"; clock-out 400 "Quantity produced exceeds quantity ordered").
-   * It bounds the quick-add row only; the keypad and the confirm are unchanged,
-   * and the server stays the enforcement — the queue is polled, so this figure
-   * can be one crewmate's report out of date.
+   * `quantity_ordered` on a queue row is already the OPERATION target — the server
+   * sends `operation_target_quantity(op, wo)`, i.e. `component_quantity` when the
+   * operation carries one, else the work order's quantity — and `quantity_good_ceiling`
+   * is that target less anything an upstream close declared short (owner ruling 1), the
+   * figure both writers behind the quantity screen measure their refusal against
+   * (`/production` and clock-out, 400). An older payload without the ceiling reads as
+   * the target. It bounds the quick-add row only; the keypad and the confirm are
+   * unchanged, and the server stays the enforcement — the queue is polled, so this
+   * figure can be one crewmate's report out of date.
    */
   const remainingOnOperation = (item: KioskCrewQueueItem): number =>
-    Math.max(0, Number(item.quantity_ordered || 0) - Number(item.quantity_complete || 0));
+    Math.max(
+      0,
+      resolveGoodCeiling(item.quantity_ordered, item.quantity_good_ceiling) - Number(item.quantity_complete || 0)
+    );
+
+  /**
+   * What COMPLETE must still account for: received units recorded neither good nor
+   * scrapped (owner ruling 1). The COMPLETE screen pre-fills its final GOOD at this —
+   * a one-tap honest finish for a crew that reports at the end — and goes SHORT the
+   * moment the entry leaves any of it unaccounted for.
+   */
+  const shortBaselineFor = (item: KioskCrewQueueItem) => ({
+    target: item.quantity_ordered,
+    upstreamShort: item.upstream_quantity_short,
+    complete: item.quantity_complete,
+    scrapped: item.quantity_scrapped,
+  });
 
   // --- Guard: no station id in the URL -----------------------------------------
   if (stationId == null) {
@@ -1861,15 +1997,34 @@ export default function CrewStationKiosk() {
                   {formatStepsChip(viewItem)}
                 </button>
               )}
-              <button
-                type="button"
-                disabled={mutationsBlocked}
-                aria-describedby={!online ? OFFLINE_HINT_ID : undefined}
-                onClick={() => setView({ name: 'completeQty', operationId: viewItem.operation_id })}
-                className="min-h-20 rounded border border-fd-green bg-fd-green/15 px-4 text-xl font-bold uppercase tracking-wide text-fd-green transition-colors hover:bg-fd-green/25 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                Complete
-              </button>
+              {/* Completing a READY operation STARTS it, which the server refuses on a draft /
+                  held job (the gates' 409) — so the verb is disabled there with the reason,
+                  instead of walking the lead through a quantity screen to a refusal. */}
+              {(() => {
+                const completeBlocked =
+                  viewItem.status === 'ready' && viewItem.start_blocked_reason ? viewItem.start_blocked_reason : null;
+                return (
+                  <>
+                    <button
+                      type="button"
+                      data-testid="crew-complete-verb"
+                      disabled={mutationsBlocked || completeBlocked !== null}
+                      aria-describedby={
+                        !online ? OFFLINE_HINT_ID : completeBlocked ? 'crew-complete-blocked' : undefined
+                      }
+                      onClick={() => setView({ name: 'completeQty', operationId: viewItem.operation_id })}
+                      className="min-h-20 rounded border border-fd-green bg-fd-green/15 px-4 text-xl font-bold uppercase tracking-wide text-fd-green transition-colors hover:bg-fd-green/25 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      Complete
+                    </button>
+                    {completeBlocked && (
+                      <p id="crew-complete-blocked" className="col-span-full text-sm text-fd-amber">
+                        {completeBlocked}
+                      </p>
+                    )}
+                  </>
+                );
+              })()}
               <button
                 type="button"
                 disabled={mutationsBlocked}
@@ -2121,18 +2276,24 @@ export default function CrewStationKiosk() {
         )}
 
         {/* COMPLETE — final quantities, then the crew-wide confirm modal.
-            Final-entry good PRE-FILLS at the ceiling (the same expression, so
-            the two can't disagree), which means the row arrives disabled on a
-            normal complete and comes alive only after an operator clears the
-            field to rebuild a partial count — exactly as it behaves on the
-            single-operator kiosk's COMPLETE overlay. Recording MORE than the
-            operation target is an office over-count, not a tap here. */}
+            Owner ruling 1: final-entry good PRE-FILLS at what is still
+            unaccounted for, and the screen goes SHORT (Continue disabled, "Report
+            n as scrap" offered) whenever the entry leaves any of it unaccounted —
+            a short count is reported as scrap with a reason, or the job stays
+            open. The quick-add row is bounded by the server's good ceiling;
+            recording MORE than that is an office over-count, not a tap here. */}
         {view.name === 'completeQty' && viewItem && (
           <KioskQuantityScreen
             title="Complete job"
             jobLabel={crewJobLabel(viewItem)}
             confirmLabel="Continue"
-            initialGood={remainingOnOperation(viewItem)}
+            initialGood={operationUnaccounted(shortBaselineFor(viewItem))}
+            shortBaseline={shortBaselineFor(viewItem)}
+            shortInRuns={viewItem.laser_nest != null}
+            // Pooled job whose earlier operation already declared a loss: those units
+            // are not credited here, so the one-tap scrap fill is withheld (it would
+            // scrap pieces this operation never received) — same rule as the kiosk.
+            uncreditedUpstream={viewItem.upstream_short_uncredited}
             requireTotalPositive={false}
             tallyBanner={`CREW TOTAL SO FAR: ${formatCrewTally(viewItem)} — enter only NEW pieces`}
             scrapCodes={scrapCodes}
@@ -2481,7 +2642,7 @@ export default function CrewStationKiosk() {
           // the office tie API (/work-orders/...) is never reachable from here.
           materialTies={viewItem.material_ties}
           operationScrapped={viewItem.quantity_scrapped}
-          quantityOrdered={viewItem.quantity_ordered}
+          quantityCompleteSoFar={viewItem.quantity_complete}
           workOrderNumber={viewItem.work_order_number}
           busy={mutationsBlocked}
           error={badgeError}

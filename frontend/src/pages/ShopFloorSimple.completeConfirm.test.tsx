@@ -1,10 +1,14 @@
 /**
- * Shop-floor full-quantity completion confirm — /shop-floor/operations
+ * Shop-floor completion confirm — /shop-floor/operations
  *
- * Batch 1 shop-floor safety: "Complete Operation" on a target-reached op no
- * longer fires the irreversible completeOperation call on the first click. It
- * opens a ConfirmDialog ("Complete operation at full quantity?…") first.
- * Cancel must NOT call the API; only Confirm does.
+ * Batch 1 shop-floor safety: "Complete Operation" on an accounted-for op does
+ * not fire the irreversible completeOperation call on the first click. It opens
+ * a ConfirmDialog ("Complete this operation?…") first, which states the counts
+ * the close will book. Cancel must NOT call the API; only Confirm does.
+ *
+ * Owner ruling 1: the close sends NO quantity — the server books the good the
+ * floor recorded — and an op whose short is covered by recorded scrap surfaces
+ * the same Complete Operation path.
  *
  * Note: ShopFloorSimple emits pre-existing act() warnings around its async
  * polling effects. Those warnings are noise here — every assertion below is on
@@ -142,8 +146,8 @@ describe('ShopFloorSimple full-quantity complete confirm', () => {
     fireEvent.click(completeBtn);
 
     // A confirm dialog appears; the API has NOT been called yet.
-    expect(await screen.findByText('Complete operation at full quantity?')).toBeInTheDocument();
-    expect(screen.getByText(/closes the operation and cannot be undone/i)).toBeInTheDocument();
+    expect(await screen.findByText('Complete this operation?')).toBeInTheDocument();
+    expect(screen.getByText('This closes Op 10 at 25 good and cannot be undone.')).toBeInTheDocument();
     expect(mockedApi.completeOperation).not.toHaveBeenCalled();
   });
 
@@ -152,22 +156,22 @@ describe('ShopFloorSimple full-quantity complete confirm', () => {
     await screen.findByTestId('shop-floor-op-101');
 
     fireEvent.click(await screen.findByRole('button', { name: /complete operation/i }));
-    await screen.findByText('Complete operation at full quantity?');
+    await screen.findByText('Complete this operation?');
 
     fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }));
 
     await waitFor(() =>
-      expect(screen.queryByText('Complete operation at full quantity?')).not.toBeInTheDocument()
+      expect(screen.queryByText('Complete this operation?')).not.toBeInTheDocument()
     );
     expect(mockedApi.completeOperation).not.toHaveBeenCalled();
   });
 
-  it('Confirm completes the operation at the full ordered quantity', async () => {
+  it('Confirm closes the operation with NO quantity — the server books what the floor recorded', async () => {
     renderShopFloor();
     await screen.findByTestId('shop-floor-op-101');
 
     fireEvent.click(await screen.findByRole('button', { name: /complete operation/i }));
-    await screen.findByText('Complete operation at full quantity?');
+    await screen.findByText('Complete this operation?');
 
     // The dialog's confirm button carries the "Complete Operation" label; the
     // queue card's button is now behind the modal, so scope to the dialog.
@@ -175,8 +179,63 @@ describe('ShopFloorSimple full-quantity complete confirm', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: /complete operation/i }));
 
     await waitFor(() =>
-      expect(mockedApi.completeOperation).toHaveBeenCalledWith(101, { quantity_complete: 25 })
+      expect(mockedApi.completeOperation).toHaveBeenCalledWith(101, { source: 'desktop' })
     );
     expect(mockedApi.completeOperation).toHaveBeenCalledTimes(1);
+  });
+
+  it('a short covered by recorded scrap is "all pieces accounted for" and closes the same way', async () => {
+    const covered = { ...TARGET_REACHED_OP, quantity_complete: 23, quantity_scrapped: 2 };
+    mockedApi.getShopFloorOperations.mockResolvedValue({ operations: [covered] });
+    renderShopFloor();
+    await screen.findByTestId('shop-floor-op-101');
+
+    expect(await screen.findByText('All pieces accounted for')).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: /complete operation/i }));
+    expect(await screen.findByText('This closes Op 10 at 23 good · 2 scrapped and cannot be undone.')).toBeInTheDocument();
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: /complete operation/i }));
+
+    await waitFor(() => expect(mockedApi.completeOperation).toHaveBeenCalledWith(101, { source: 'desktop' }));
+  });
+
+  it('a short with nothing covering it offers no Complete — the operation stays open', async () => {
+    const short = { ...TARGET_REACHED_OP, quantity_complete: 23, quantity_scrapped: 0 };
+    mockedApi.getShopFloorOperations.mockResolvedValue({ operations: [short] });
+    renderShopFloor();
+    await screen.findByTestId('shop-floor-op-101');
+
+    expect(screen.queryByText('Target quantity reached')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /complete operation/i })).not.toBeInTheDocument();
+  });
+
+  it('works from the RECEIVED count: units closed short upstream never count against this operation', async () => {
+    // Target 25, 2 never reached this operation (an upstream close declared them short).
+    const downstream = { ...TARGET_REACHED_OP, quantity_complete: 23, upstream_quantity_short: 2 };
+    mockedApi.getShopFloorOperations.mockResolvedValue({ operations: [downstream] });
+    renderShopFloor();
+    await screen.findByTestId('shop-floor-op-101');
+
+    expect(await screen.findByText('Target quantity reached')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /complete operation/i })).toBeInTheDocument();
+  });
+
+  it('surfaces a close refusal verbatim (e.g. a crewmate still clocked in)', async () => {
+    mockedApi.completeOperation.mockRejectedValue({
+      response: {
+        status: 409,
+        data: { detail: 'Bob T is still clocked in to Op OP10 — have them clock out with their count first, or leave the operation open.' },
+      },
+    });
+    renderShopFloor();
+    await screen.findByTestId('shop-floor-op-101');
+
+    fireEvent.click(await screen.findByRole('button', { name: /complete operation/i }));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: /complete operation/i }));
+
+    expect(
+      await screen.findByText(
+        'Bob T is still clocked in to Op OP10 — have them clock out with their count first, or leave the operation open.'
+      )
+    ).toBeInTheDocument();
   });
 });

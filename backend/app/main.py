@@ -24,6 +24,7 @@ from app.core.observability import capture_exception_to_sentry
 from app.core.observability import init_sentry as _init_sentry
 from app.core.queue import log_redis_target as _log_redis_target
 from app.db.database import Base, engine
+from app.db.mixins import STALE_WRITE_CONFLICT_DETAIL
 from app.middleware.fabrication_quote_body_limit import FabricationQuoteBodyLimitMiddleware
 from app.middleware.logging_middleware import (
     CorrelationIdMiddleware,
@@ -867,7 +868,7 @@ async def stale_data_exception_handler(request: Request, exc: StaleDataError):
     logger.warning(f"Optimistic-lock conflict (StaleDataError) on {request.method} {request.url.path}: {exc}")
     response = JSONResponse(
         status_code=409,
-        content={"detail": "This record was modified by someone else. Refresh and try again."},
+        content={"detail": STALE_WRITE_CONFLICT_DETAIL},
     )
     origin = request.headers.get("origin")
     return add_cors_headers(response, origin)

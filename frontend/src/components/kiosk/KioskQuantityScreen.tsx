@@ -4,6 +4,14 @@ import KioskReasonGrid from './KioskReasonGrid';
 import { activeScrapCodes, resolveScrapSelection, scrapReasonTiles } from './scrapReasonOptions';
 import { applyQuickAdd, kioskQuickAdds, QUICK_ADD_BUTTON_CLASSES } from './quantityQuickAdds';
 import { ScrapReasonCodeOption } from '../../types/scrapReason';
+import {
+  ShortCountInput,
+  formatShortQuantity,
+  operationReceived,
+  shortAfterEntry,
+  shortUnitLabel,
+  uncreditedUpstreamWarning,
+} from '../../utils/shortCount';
 
 interface KioskQuantityScreenProps {
   title: string;
@@ -73,6 +81,27 @@ interface KioskQuantityScreenProps {
    * confirm can never race a pending auto-post into two reports for one run.
    */
   confirmLockedLabel?: string | null;
+  /**
+   * COMPLETE only (owner ruling 1). The operation's recorded counts — target, what
+   * never reached it upstream, good and scrap so far. With it the screen shows SHORT n
+   * whenever the entry would leave received units unaccounted for, offers "Report n as
+   * scrap", and disables confirm: a short count is reported as scrap with a reason, or
+   * the operation stays open. Omit it (the production-report usage) and the screen is
+   * exactly as before.
+   */
+  shortBaseline?: ShortCountInput | null;
+  /** The baseline counts sheet RUNS (a laser nest), not pieces. */
+  shortInRuns?: boolean;
+  /**
+   * COMPLETE only. `upstream_short_uncredited` off the queue row: on a POOLED work order,
+   * units an earlier operation already closed short. Pooled operations get no chain
+   * credit, so those units still read as SHORT here — but they never reached this
+   * operation, and reporting them as scrap again would record a defect that never
+   * happened. When > 0 the screen withholds the one-tap "Report n as scrap" fill and
+   * says why (the same rule, and the same words, as the single-operator kiosk's overlay).
+   * The operator can still key scrap that really happened, with its reason.
+   */
+  uncreditedUpstream?: number | null;
   busy: boolean;
   /**
    * scrapReason: free text stored in TimeEntry.scrap_reason (legacy tile value,
@@ -103,6 +132,9 @@ export default function KioskQuantityScreen({
   fullNestQuantity,
   oneTapLane,
   confirmLockedLabel,
+  shortBaseline,
+  shortInRuns = false,
+  uncreditedUpstream,
   busy,
   onConfirm,
   onCancel,
@@ -130,7 +162,18 @@ export default function KioskQuantityScreen({
   const needsReason = scrapQty > 0 && !scrapReason;
   const totalInvalid = requireTotalPositive && goodQty <= 0 && scrapQty <= 0;
   const confirmLocked = confirmLockedLabel != null;
-  const confirmDisabled = busy || needsReason || totalInvalid || confirmLocked;
+  const short = shortBaseline ? shortAfterEntry({ ...shortBaseline, good: goodQty, scrap: scrapQty }) : 0;
+  const received = shortBaseline ? operationReceived(shortBaseline) : 0;
+  const shortUnit = shortUnitLabel(shortInRuns, short);
+  const uncredited = shortBaseline ? Math.max(0, Number(uncreditedUpstream || 0)) : 0;
+  const confirmDisabled = busy || needsReason || totalInvalid || confirmLocked || short > 0;
+
+  const reportShortAsScrap = () => {
+    setScrap(formatShortQuantity(scrapQty + short));
+    // The keypad follows to SCRAP so the figure stays editable, and the required
+    // reason grid below is now on screen.
+    setActiveField('scrap');
+  };
 
   // Quick adds: the same row, off the same definition (quantityQuickAdds.ts), as
   // the single-operator kiosk's REPORT and COMPLETE overlays — an operator who
@@ -316,6 +359,46 @@ export default function KioskQuantityScreen({
         </>
       )}
 
+      {/* SHORT readout (COMPLETE only). It never files anything on its own — "Report as
+          scrap" only fills the scrap field, which still needs a reason and a confirm. */}
+      {short > 0 && (
+        <div
+          role="status"
+          data-testid="kiosk-qty-short"
+          className="mt-5 rounded border border-fd-amber/50 bg-fd-amber/10 px-4 py-3"
+        >
+          <p className="font-mono text-xl font-bold uppercase text-fd-amber">
+            Short {formatShortQuantity(short)} {shortUnit}
+          </p>
+          <p className="mt-1 text-lg text-fd-body">
+            {formatShortQuantity(short)} of {formatShortQuantity(received)} not yet accounted for — record finished
+            pieces, report lost pieces as scrap, or leave the job open.
+          </p>
+          {/* Owner decision: pieces never started are never scrap. */}
+          <p data-testid="kiosk-qty-never-started" className="mt-1 text-base text-fd-body">
+            Pieces never started? They are not scrap — Cancel, leave the job open, and ask a supervisor to lower the
+            quantity.
+          </p>
+          {uncredited > 0 ? (
+            // Pooled job, loss already declared upstream: no one-tap fill — it would turn
+            // pieces this operation never received into scrap a second time.
+            <p data-testid="kiosk-qty-uncredited" className="mt-1 text-base font-semibold text-fd-amber">
+              {uncreditedUpstreamWarning(uncredited, shortInRuns)}
+            </p>
+          ) : (
+            <button
+              type="button"
+              data-testid="kiosk-qty-report-scrap"
+              disabled={busy}
+              onClick={reportShortAsScrap}
+              className="mt-3 min-h-14 rounded border border-fd-red bg-fd-red/10 px-4 text-lg font-bold uppercase tracking-wide text-fd-red transition-colors hover:bg-fd-red/20 disabled:opacity-40"
+            >
+              Report {formatShortQuantity(short)} as scrap
+            </button>
+          )}
+        </div>
+      )}
+
       {scrapQty > 0 && (
         <div className="mt-5">
           <p className="mb-2 text-lg font-semibold text-fd-red">Scrap reason — required</p>
@@ -361,6 +444,13 @@ export default function KioskQuantityScreen({
         </button>
       </div>
       {needsReason && <p className="mt-3 text-center text-base text-fd-red">Choose a scrap reason to continue.</p>}
+      {short > 0 && (
+        <p data-testid="kiosk-qty-short-hint" className="mt-3 text-center text-base text-fd-amber">
+          {uncredited > 0
+            ? `${formatShortQuantity(short)} short — Cancel, have each operator LEAVE with their count, and ask a supervisor`
+            : `${formatShortQuantity(short)} short — report as scrap, or Cancel and have each operator LEAVE with their count`}
+        </p>
+      )}
     </section>
   );
 }

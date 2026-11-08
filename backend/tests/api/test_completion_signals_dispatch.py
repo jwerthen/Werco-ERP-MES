@@ -57,6 +57,7 @@ from app.models.work_order import (
     WorkOrderOperation,
     WorkOrderStatus,
 )
+from tests.api.completion_test_helpers import make_closed_time_entry
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 
@@ -199,34 +200,6 @@ def make_open_time_entry(
     return entry
 
 
-def make_closed_time_entry(
-    db: Session,
-    *,
-    user: User,
-    wo: WorkOrder,
-    op: WorkOrderOperation,
-    wc: WorkCenter,
-    quantity_produced: float,
-    company_id: int = COMPANY_A,
-) -> TimeEntry:
-    entry = TimeEntry(
-        user_id=user.id,
-        work_order_id=wo.id,
-        operation_id=op.id,
-        work_center_id=wc.id,
-        entry_type=TimeEntryType.RUN,
-        clock_in=datetime.utcnow() - timedelta(hours=2),
-        clock_out=datetime.utcnow() - timedelta(hours=1),
-        duration_hours=1.0,
-        quantity_produced=quantity_produced,
-        company_id=company_id,
-    )
-    db.add(entry)
-    db.commit()
-    db.refresh(entry)
-    return entry
-
-
 def make_shipment(db: Session, *, wo: WorkOrder, company_id: int = COMPANY_A) -> Shipment:
     # Dispatch tests exercise the final completed allocation.
     wo.quantity_complete = wo.quantity_ordered
@@ -304,10 +277,10 @@ def test_shop_floor_complete_operation_enqueues_signals_on_wo_complete(
     wo, _ = make_wo(db_session, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=10)
     wc = make_work_center(db_session)
     op = make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.IN_PROGRESS)
-    # The floor verb requires labor on the operation. Closed + zero pieces, so the
-    # enqueue-once behavior under test is unaffected.
-    make_closed_time_entry(db_session, user=admin, wo=wo, op=op, wc=wc, quantity_produced=0)
-    db_session.commit()
+    # The floor verb requires labor on the operation and books only the good the floor
+    # recorded (owner ruling 1), so the closed entry carries the 10. The enqueue-once
+    # behavior under test is unaffected.
+    make_closed_time_entry(db_session, user=admin, wo=wo, op=op, wc=wc, quantity_produced=10)
 
     resp = client.post(
         f"/api/v1/shop-floor/operations/{op.id}/complete",

@@ -82,6 +82,9 @@ def prepare_task(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
+    """Prepare a typed task for review; nothing is executed. A standing API token may not prepare
+    a report_production task that reports scrap (403, owner decision 2026-11-07): a person reports
+    scrap. A good-only production report is unaffected."""
     service = HankTaskService(db, user, company_id)
     return _command(db, service, lambda: service.prepare(payload, audit))
 
@@ -95,6 +98,9 @@ def execute_task(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
+    """Execute a reviewed task as its owner. A standing API token may not execute a
+    report_production task that reports scrap (403, owner decision 2026-11-07); nothing is
+    written. A good-only production report is unaffected."""
     service = HankTaskService(db, user, company_id)
     return _command(db, service, lambda: service.execute(task_id, payload, audit))
 

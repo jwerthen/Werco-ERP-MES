@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 
 from app.models.work_order import OperationStatus, WorkOrderOperation
 from app.models.work_order_blocker import WorkOrderBlocker, WorkOrderBlockerStatus
+from tests.api.completion_test_helpers import seed_recorded_good
 from tests.api.kiosk_test_helpers import (
     COMPANY_A,
     make_user,
@@ -351,6 +352,8 @@ class TestNextOperation:
         wo, op10 = make_wo_with_operation(db_session, work_center=wc_a, quantity_ordered=5)
         add_second_operation(db_session, wo, wc_b, sequence=20, name="Weld out")
         clock_in(client, headers, wo, op10)
+        # The floor close books the good the floor recorded (owner ruling 1).
+        seed_recorded_good(db_session, op10, 5, operator)
 
         resp = client.post(
             f"/api/v1/shop-floor/operations/{op10.id}/complete",
@@ -368,6 +371,8 @@ class TestNextOperation:
         wc = make_work_center(db_session)
         wo, op = make_wo_with_operation(db_session, work_center=wc, quantity_ordered=5)
         clock_in(client, headers, wo, op)
+        # The floor close books the good the floor recorded (owner ruling 1).
+        seed_recorded_good(db_session, op, 5, operator)
 
         resp = client.post(
             f"/api/v1/shop-floor/operations/{op.id}/complete",

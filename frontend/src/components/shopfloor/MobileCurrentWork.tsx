@@ -3,6 +3,7 @@ import { ActiveJob } from '../../types';
 import { UnitBadge } from '../ui';
 import { formatOperationLabel } from '../../utils/operationLabel';
 import LaserNestOperatorPanel from '../laser/LaserNestOperatorPanel';
+import { formatShortQuantity, goodCeiling, operationReceived, operationUnaccounted } from '../../utils/shortCount';
 
 interface Props {
   jobs: ActiveJob[];
@@ -20,11 +21,13 @@ interface Props {
   disabled: boolean;
   operationAvailable: boolean;
   elapsed: string;
+  /** The operation's status from the list row, when loaded — a COMPLETE one offers no Complete. */
+  operationStatus?: string | null;
 }
 
 /** The operator's own work is separate from the manager's ordered queue. */
 export default function MobileCurrentWork({ jobs, selected, onSelect, onQueue, onReport, onAddOne, onDrawing,
-  onNest, onInstructions, onHold, onCheckOut, onComplete, disabled, operationAvailable, elapsed }: Props) {
+  onNest, onInstructions, onHold, onCheckOut, onComplete, disabled, operationAvailable, elapsed, operationStatus }: Props) {
   if (!selected) {
     return (
       <section className="card space-y-4 text-center" aria-label="My current work">
@@ -35,9 +38,26 @@ export default function MobileCurrentWork({ jobs, selected, onSelect, onQueue, o
     );
   }
 
+  // Owner ruling 1: work from what REACHED the operation (target less any upstream
+  // short) and count recorded scrap as accounted for. `operation_quantity_scrapped` is
+  // the OPERATION total — `quantity_scrapped` on this payload is only this session's.
   const complete = Number(selected.quantity_complete || 0);
   const target = Number(selected.quantity_ordered || 0);
-  const remaining = Math.max(0, target - complete);
+  const counts = {
+    target,
+    upstreamShort: selected.upstream_quantity_short,
+    complete,
+    scrapped: selected.operation_quantity_scrapped,
+  };
+  const received = operationReceived(counts);
+  const remaining = operationUnaccounted(counts);
+  // `/production` refuses good past the server's ceiling, so +1 stops there. The room for
+  // GOOD is that ceiling — NOT "remaining": scrap never counts for an implicit completion, so
+  // an operator re-running replacements for scrapped pieces keeps +1 until the ceiling.
+  const ceiling = goodCeiling(target, selected.quantity_good_ceiling);
+  const atCeiling = complete + 1 > ceiling;
+  const goodRoom = ceiling - complete > 1e-9;
+  const operationComplete = String(operationStatus ?? '').toLowerCase() === 'complete';
   return (
     <section aria-label="My current work" className="space-y-3">
       {jobs.length > 1 && (
@@ -61,15 +81,16 @@ export default function MobileCurrentWork({ jobs, selected, onSelect, onQueue, o
           <p className="mt-2 break-words text-sm text-slate-300">{selected.part_number} {selected.part_name && `· ${selected.part_name}`}</p>
         </div>
         <div className="flex items-end justify-between gap-3">
-          <div><p className="text-sm text-slate-300">Completed</p><p className="text-3xl font-bold text-white">{complete}<span className="text-lg text-slate-400"> / {target}</span></p></div>
-          <p className="pb-1 text-sm text-emerald-200">{remaining} remaining</p>
+          <div><p className="text-sm text-slate-300">Completed</p><p className="text-3xl font-bold text-white">{complete}<span className="text-lg text-slate-400"> / {formatShortQuantity(received)}</span></p></div>
+          <p className="pb-1 text-sm text-emerald-200">{formatShortQuantity(remaining)} remaining</p>
         </div>
-        {remaining > 0 ? (
-          <button type="button" onClick={onAddOne} disabled={disabled || !operationAvailable}
+        {!operationComplete && (remaining > 0 || goodRoom) && (
+          <button type="button" onClick={onAddOne} disabled={disabled || !operationAvailable || atCeiling}
             className="btn-success min-h-14 w-full text-lg disabled:opacity-50">+1 Complete</button>
-        ) : (
+        )}
+        {!operationComplete && remaining <= 0 && (
           <button type="button" onClick={onComplete} disabled={disabled || !operationAvailable || target <= 0}
-            className="btn-success min-h-14 w-full disabled:opacity-50">Complete operation</button>
+            className={`${goodRoom ? 'btn-secondary' : 'btn-success'} min-h-14 w-full disabled:opacity-50`}>Complete operation</button>
         )}
         {!operationAvailable && <p role="status" className="text-sm text-amber-300">Refresh to load this operation before recording work.</p>}
       </div>

@@ -40,9 +40,12 @@
  * present tense: the operator is about to fire the completion that posts it.
  *
  * Two further facts the copy has to carry, because both read as bugs otherwise:
- *  - the GOOD keypad does not move the number. `/complete` asserts
- *    `quantity_complete = quantity_ordered` regardless of what was keyed, so the
- *    prediction is computed from the ORDERED quantity;
+ *  - the GOOD count moves the number. Since owner ruling 1 (2026-11-05) the
+ *    floor `/complete` is a close that books the good the floor RECORDED — it no
+ *    longer asserts `quantity_complete = quantity_ordered` — so the prediction is
+ *    computed from the FINAL good (recorded so far + the entry being made). A short
+ *    close covered by scrap therefore predicts exactly what the engine posts:
+ *    `per_run × (good + scrapped)`;
  *  - SCRAP RAISES it. A scrapped run physically used its sheet (posted as ISSUE,
  *    not SCRAP, so lot genealogy keeps it), so keying 2 scrap predicts 2 EXTRA
  *    sheets.
@@ -75,9 +78,11 @@
  *    `qty_remaining` is `qty_planned − qty_consumed` (server-derived, floored at
  *    0) — a PLAN-versus-REPORTED gap, not a forecast. Lower `qty_consumed` and it
  *    rises. On a still-open operation that is harmless and in fact right: ties are
- *    created with `qty_planned == per_run × ordered`, `/complete` asserts
+ *    created with `qty_planned == per_run × ordered`, and a full-count close records
  *    `quantity_complete = quantity_ordered`, so the plan gap and the engine's
- *    delta are the same number and the material really will be drawn. On a
+ *    delta are the same number and the material really will be drawn. (A short
+ *    close changes nothing here: since ruling 1 the short is reported as scrap, and
+ *    scrap draws exactly like good.) On a
  *    COMPLETE operation it is a straight falsehood: `correct_over_consumption` is
  *    bounded by `qty_consumed − live_target`, so the server leaves the tie at
  *    `qty_consumed >= target` and the engine's delta is `<= 0` FOREVER, on every
@@ -425,9 +430,12 @@ export interface ConsumptionPrediction {
 export interface ConsumptionPredictionInput {
   ties: readonly KioskMaterialTie[] | null | undefined;
   /**
-   * The operation's ORDERED/target quantity. `/complete` asserts
-   * `quantity_complete = quantity_ordered`, so the GOOD keypad never moves the
-   * prediction — this is what the completion will actually record.
+   * The GOOD total the completion will record — the name is historical. Until owner
+   * ruling 1 the floor `/complete` asserted `quantity_complete = quantity_ordered`, so
+   * callers passed the ordered quantity; it now books the good the floor recorded, so
+   * the kiosk COMPLETE screens pass recorded-so-far + the good being entered. The name
+   * is kept so the parity table against the engine (`materialTie.parity.test.ts`)
+   * stays a straight transcription.
    */
   quantityOrdered: number | null | undefined;
   /** The OPERATION's scrap total already recorded. NEVER this session's count. */
@@ -456,17 +464,17 @@ function sumDeltas(ties: readonly KioskMaterialTie[], finalComplete: number, fin
  * Mirrors `material_consumption_service._consume_one_allocation`:
  *
  * ```
- * finalComplete  = quantity_ordered                    // what /complete asserts
+ * finalComplete  = the good the close records          // input.quantityOrdered
  * finalScrapped  = operationScrapped + scrapEntered
  * target         = (qty_per_run ?? 1.0) * (finalComplete + finalScrapped)
  * predictedDelta = max(0, target - qty_consumed)       // per tie; summed per part
  * ```
  *
- * `finalComplete` is the ORDERED quantity and stays so under per-operation
- * timing: `/complete` asserts `quantity_complete = quantity_ordered` and the
- * clock-out path clamps at the same target, so at the instant the operation
- * flips COMPLETE — which is now the instant consumption posts — the engine reads
- * exactly that number.
+ * `finalComplete` is the good the close will record. Since owner ruling 1 that is
+ * the good the floor RECORDED (the close never raises it to the target; a short is
+ * reported as scrap instead), so at the instant the operation flips COMPLETE —
+ * which is the instant consumption posts — the engine reads exactly
+ * `finalComplete + finalScrapped`.
  *
  * `qty_consumed` is an input for a reason: leaving it out over-states a
  * partially-consumed tie (an earlier completion, a replay, or a reconcile-on-read

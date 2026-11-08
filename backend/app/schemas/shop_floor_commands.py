@@ -2,7 +2,7 @@
 
 from typing import Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.time_entry import TimeEntrySource
 from app.models.work_order_blocker import WorkOrderBlockerCategory, WorkOrderBlockerSeverity
@@ -73,6 +73,66 @@ class ProductionReportRequest(BaseModel):
                 "scrap_reason or scrap_reason_code_id is required when quantity_scrapped_delta is greater than 0"
             )
         return self
+
+
+class OperationCompleteRequest(BaseModel):
+    """Body of ``POST /shop-floor/operations/{id}/complete`` -- a CLOSE, not a count.
+
+    The verb books the operation COMPLETE at the good count the floor already recorded
+    (clock-outs and production reports); it records no good pieces of its own. Owner
+    ruling 1 (2026-11-05): when that good count does not cover every unit that reached the
+    operation, the shortfall is either declared here as scrap with a reason or the close
+    is refused 409 and the operation stays open -- it is never closed short at the
+    counted quantity. Unknown keys are refused (422) so a client that still sends a field
+    this verb no longer honors learns that instead of being silently ignored.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    quantity_complete: Optional[float] = Field(
+        None,
+        description="DEPRECATED, optional: the good count the caller expects is recorded. An expectation check "
+        "only -- it is never stored. Refused 409 when it exceeds the good already recorded on the operation; "
+        "omit it.",
+    )
+    quantity_scrapped: float = Field(
+        0.0,
+        description="Pieces LOST at this operation that were never reported, declared by the person closing it "
+        "(an ADDITIVE delta on the operation's scrap, refused 409 above what is still unaccounted). Requires "
+        "scrap_reason or scrap_reason_code_id.",
+    )
+    # max_length matches the WorkOrderOperation.scrap_reason String(255) column.
+    scrap_reason: Optional[str] = Field(
+        None,
+        max_length=255,
+        description="Reason for the scrap declared at close; never clears a reason already recorded.",
+    )
+    scrap_reason_code_id: Optional[int] = Field(
+        None,
+        description="Id of a predefined scrap reason code (see /quality/scrap-reason-codes); either this or "
+        "scrap_reason satisfies the scrap-requires-a-reason rule.",
+    )
+    acknowledge_open_entries: bool = Field(
+        False,
+        description="A short close clocks everyone still clocked in out WITHOUT counting pieces they have not "
+        "reported, so it is refused 409 naming them unless this is true. Not needed for a full-count close.",
+    )
+    notes: Optional[str] = None
+    # A0.1 adoption telemetry: client channel (kiosk/desktop/scanner/import/backfill).
+    # Optional -- omitted means unknown; unknown values are rejected with a 422.
+    source: Optional[TimeEntrySource] = Field(
+        None,
+        description="Adoption-telemetry channel of this completion (kiosk | desktop | scanner | "
+        "backfill). Also fills the channel on auto-closed open entries that have none; never overwrites "
+        "a recorded channel. Omit when unknown. 'import' is rejected (422) here (reserved for the "
+        "bulk-migration loaders); a kiosk-scoped operator token forces 'kiosk' regardless of this hint.",
+    )
+
+    # The scrap-reason rule (scrap declared at close carries a code or non-blank text,
+    # AS9100D defect traceability) is enforced in the HANDLER, after the work-order start
+    # rung, not as a model validator here: a READY operation on a held or draft job must get
+    # the gates' 409 before any input check (the office twin's ladder), and a Pydantic
+    # validator would answer 422 first.
 
 
 class OperationHoldRequest(BaseModel):

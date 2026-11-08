@@ -145,13 +145,17 @@ describe('OperatorKiosk scrap-code payloads', () => {
     );
   });
 
-  it('COMPLETE carries the code id on the clock-out leg, then completes at target', async () => {
-    mockedApi.clockOut.mockResolvedValue({});
+  it('COMPLETE that covers a short carries the scrap and its code id on the close, not the clock-out', async () => {
+    mockedApi.clockOut.mockResolvedValue({ operation_status: 'in_progress' });
     mockedApi.completeOperation.mockResolvedValue({});
     renderKiosk();
 
     fireEvent.click(await screen.findByRole('button', { name: /^complete op$/i }));
-    // GOOD prefills with the remaining quantity (50 - 5 = 45); add 2 scrap.
+    // 45 are still unaccounted for (50 - 5): 43 good + 2 scrap covers them (owner ruling 1).
+    fireEvent.click(screen.getByTestId('kiosk-qty-good'));
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    fireEvent.click(screen.getByTestId('kiosk-key-4'));
+    fireEvent.click(screen.getByTestId('kiosk-key-3'));
     fireEvent.click(screen.getByTestId('kiosk-qty-scrap'));
     fireEvent.click(screen.getByTestId('kiosk-key-2'));
     fireEvent.click(screen.getByRole('button', { name: 'OT — Out of tolerance' }));
@@ -159,13 +163,19 @@ describe('OperatorKiosk scrap-code payloads', () => {
 
     await waitFor(() => expect(mockedApi.completeOperation).toHaveBeenCalled());
     expect(mockedApi.clockOut).toHaveBeenCalledWith(501, {
-      quantity_produced: 45,
-      quantity_scrapped: 2,
+      quantity_produced: 43,
+      quantity_scrapped: 0,
       scrap_reason: undefined,
-      scrap_reason_code_id: 7,
+      scrap_reason_code_id: undefined,
       source: 'kiosk',
     });
-    expect(mockedApi.completeOperation).toHaveBeenCalledWith(31, { quantity_complete: 50, source: 'kiosk' });
+    // The scrap that covers the short (and its code) rides the CLOSE, where the server
+    // re-checks it against what is still unaccounted under the row lock; no good quantity.
+    expect(mockedApi.completeOperation).toHaveBeenCalledWith(31, {
+      source: 'kiosk',
+      quantity_scrapped: 2,
+      scrap_reason_code_id: 7,
+    });
   });
 
   it('fails soft to the legacy reason tiles (text payload, no code id) when the codes fetch rejects', async () => {

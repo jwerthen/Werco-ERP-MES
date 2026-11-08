@@ -7,6 +7,13 @@ from datetime import datetime
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer
 from sqlalchemy.orm import declared_attr, relationship
 
+# The 409 detail for a ``StaleDataError`` (a ``version_id_col`` check that matched no row: someone
+# else saved the row after this request read it). The app-wide handler in ``app/main.py`` answers
+# with it, and so does the laser nest package import's own handler, which has to catch the error
+# before its broader ``SQLAlchemyError`` branch turns it into a 400 -- one condition, one string
+# there. (Older endpoint-local handlers still word their own "modified concurrently" text.)
+STALE_WRITE_CONFLICT_DETAIL = "This record was modified by someone else. Refresh and try again."
+
 
 class SoftDeleteMixin:
     """

@@ -69,6 +69,7 @@ from app.models.time_entry import TimeEntry, TimeEntryType
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
+from tests.api.completion_test_helpers import make_closed_time_entry, seed_recorded_good
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 
@@ -198,35 +199,6 @@ def make_op(
     return op
 
 
-def make_closed_time_entry(
-    db: Session,
-    *,
-    user: User,
-    wo: WorkOrder,
-    op: WorkOrderOperation,
-    wc: WorkCenter,
-    quantity_produced: float,
-    quantity_scrapped: float = 0,
-) -> TimeEntry:
-    entry = TimeEntry(
-        user_id=user.id,
-        work_order_id=wo.id,
-        operation_id=op.id,
-        work_center_id=wc.id,
-        entry_type=TimeEntryType.RUN,
-        clock_in=datetime.utcnow() - timedelta(hours=2),
-        clock_out=datetime.utcnow() - timedelta(hours=1),
-        duration_hours=1.0,
-        quantity_produced=quantity_produced,
-        quantity_scrapped=quantity_scrapped,
-        company_id=COMPANY_A,
-    )
-    db.add(entry)
-    db.commit()
-    db.refresh(entry)
-    return entry
-
-
 def make_open_time_entry(
     db: Session,
     *,
@@ -334,9 +306,10 @@ def test_shop_floor_complete_caps_absolute_quantity_at_target(client: TestClient
 
 
 def test_shop_floor_complete_floors_at_evidence_not_lowered(client: TestClient, db_session: Session):
-    """shop_floor complete_operation (absolute): requesting BELOW durable produced
-    evidence stores the evidence, never the lowered request (SFI-5) -- the
-    shop-floor twin of batch3's office assertion."""
+    """shop_floor complete_operation: a quantity BELOW durable produced evidence is never
+    stored (SFI-5) -- and since owner ruling 1 the verb is a CLOSE at the recorded good,
+    so 6 recorded on a target of 10 is SHORT: refused 409, nothing written, the op stays
+    IN_PROGRESS at its evidence. The shop-floor twin of batch3's office assertion."""
     admin = make_user(db_session)
     wo, _ = make_wo(db_session, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=10)
     wc = make_work_center(db_session)
@@ -348,11 +321,11 @@ def test_shop_floor_complete_floors_at_evidence_not_lowered(client: TestClient, 
         headers=headers_for(admin),
         json={"quantity_complete": 4},
     )
-    assert resp.status_code == status.HTTP_200_OK, resp.text
+    assert resp.status_code == status.HTTP_409_CONFLICT, resp.text
+    assert "4 of 10 not yet accounted for (6 good, 0 scrapped)" in resp.json()["detail"]
 
     refreshed = _reload(db_session, WorkOrderOperation, op.id)
     assert refreshed.quantity_complete == 6, "absolute /complete must not drop below produced evidence"
-    # 6 < 10 target -> not fully complete; op stays IN_PROGRESS.
     assert refreshed.status == OperationStatus.IN_PROGRESS
 
 
@@ -508,11 +481,11 @@ def test_wo_quantity_does_not_regress_when_earlier_op_completed_after_later(clie
     wc = make_work_center(db_session)
     op1 = make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.IN_PROGRESS, quantity_complete=3)
     op2 = make_op(db_session, wo, wc, sequence=20, status_=OperationStatus.IN_PROGRESS, quantity_complete=3)
-    # Both ops are completed from the floor below, which requires labor on each.
-    # Zero-quantity closed entries: the seeded quantities are what this test measures.
-    make_closed_time_entry(db_session, user=admin, wo=wo, op=op1, wc=wc, quantity_produced=0)
-    make_closed_time_entry(db_session, user=admin, wo=wo, op=op2, wc=wc, quantity_produced=0)
-    db_session.commit()
+    # Both ops are closed from the floor below. Since owner ruling 1 the floor close books
+    # the good the floor RECORDED (it records none itself), so each op's 10 is put on a
+    # closed labor entry first, the way a kiosk clock-out does.
+    seed_recorded_good(db_session, op1, 10, admin)
+    seed_recorded_good(db_session, op2, 10, admin)
 
     # Complete the LATER op (seq 20) to full first. allow_same_work_center lets this
     # proceed despite op1 (seq 10) being incomplete in the same work center.
@@ -582,10 +555,10 @@ def test_shop_floor_complete_completion_stamps_actual_start(client: TestClient, 
     wo, _ = make_wo(db_session, status_=WorkOrderStatus.RELEASED, quantity_ordered=5)
     wc = make_work_center(db_session)
     op = make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.READY)
-    # Labor evidence the floor verb requires. Closed and zero-quantity, so the
-    # actual_start stamping under test still comes from the completion itself.
-    make_closed_time_entry(db_session, user=admin, wo=wo, op=op, wc=wc, quantity_produced=0)
-    db_session.commit()
+    # Labor evidence the floor verb requires, carrying the 5 good the close books (owner
+    # ruling 1: the verb records none itself). A closed entry, so the actual_start
+    # stamping under test still comes from the completion itself.
+    seed_recorded_good(db_session, op, 5, admin)
 
     resp = client.post(
         f"/api/v1/shop-floor/operations/{op.id}/complete",
@@ -629,10 +602,10 @@ def test_same_work_center_completion_releases_lower_sequence_pending(client: Tes
     op10 = make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.PENDING)
     op20 = make_op(db_session, wo, wc, sequence=20, status_=OperationStatus.IN_PROGRESS)
     op30 = make_op(db_session, wo, wc, sequence=30, status_=OperationStatus.PENDING)
-    # op20 is completed from the floor below, which requires labor on it. Zero-quantity
-    # and closed, so only the promotion of its siblings is under test.
-    make_closed_time_entry(db_session, user=admin, wo=wo, op=op20, wc=wc, quantity_produced=0)
-    db_session.commit()
+    # op20 is closed from the floor below, which books the good the floor recorded (owner
+    # ruling 1), so its 5 sit on a closed labor entry. Only the promotion of its siblings
+    # is under test.
+    seed_recorded_good(db_session, op20, 5, admin)
 
     resp = client.post(
         f"/api/v1/shop-floor/operations/{op20.id}/complete",
@@ -943,11 +916,11 @@ def test_shop_floor_complete_emits_completion_events(client: TestClient, db_sess
     wo, _ = make_wo(db_session, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=10)
     wc = make_work_center(db_session)
     op = make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.IN_PROGRESS)
-    # The floor verb refuses an operation with no labor recorded against it at all, so
-    # give it the closed entry every real floor flow leaves behind (the kiosk clocks out
-    # before completing). Zero quantity, so it changes nothing this test measures.
-    make_closed_time_entry(db_session, user=admin, wo=wo, op=op, wc=wc, quantity_produced=0)
-    db_session.commit()
+    # The floor verb refuses an operation with no labor recorded against it at all and
+    # books only the good the floor recorded (owner ruling 1), so give it the closed entry
+    # every real floor flow leaves behind -- the kiosk clocks out with its count before
+    # completing.
+    seed_recorded_good(db_session, op, 10, admin)
 
     resp = client.post(
         f"/api/v1/shop-floor/operations/{op.id}/complete",
