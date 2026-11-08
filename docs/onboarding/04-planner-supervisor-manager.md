@@ -137,6 +137,7 @@ On a job that's on hold, an operation row's **Complete** is greyed out for any s
 - Raising the order quantity after a step has completed is refused — open a new work order for the extra units.
 - If someone is **still clocked in** when you close a step short, the window says who and offers **Clock them out and close** — they're clocked out without counting pieces they haven't reported, so check with them first.
 - Rows with work in progress show an **n unaccounted** chip next to the quantity, so you can see which steps still need a count, scrap, or a decision.
+- If the job changed while the window was open — put on hold, released, or a step closed from the floor — the refusal stays in the window and the page reloads underneath it, so the row's buttons and the window's figures show the job as it is now. Check them before you submit again.
 - On a routed job a step left open short holds up the steps after it — that's deliberate: account for the pieces or re-plan the quantity.
 
 **Keying paper labor for a held job.** A back-entry clock-in on the Shop Floor **Time Clock** is refused on a job that's on hold, the same as a live one. Resume the work order, key the labor, then put it back on hold.

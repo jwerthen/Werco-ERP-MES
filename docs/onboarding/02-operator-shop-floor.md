@@ -174,7 +174,7 @@ If the job comes up short — say 8 good out of 10 — **the step does not close
 
 If the system refuses with "not yet accounted for", nothing was saved — read the message, account for the pieces, or leave it open. On a routed job, the next station can't start the work until this step closes, so tell your lead when you leave one open short.
 
-If you find scrap after a step was already completed, clock out with 0 and tell your supervisor — they can add it, with a reason, from the work order.
+If you find scrap after a step was already completed, clock out with 0 and tell your supervisor — they correct the step's counts from the work order.
 
 > Tip: Always enter scrap when it happens, not at the end of the day from memory. Accurate scrap counts are part of our quality records.
 

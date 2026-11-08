@@ -464,6 +464,15 @@ a parity test holds it to the Python):
   counts from the work order: scrap can be added there only into pieces still unaccounted, so good
   pieces later found bad are corrected by lowering the good count (Correct count, reopening the
   operation) and closing it again with the scrap.
+- **The desktop pages follow the same rules.** The desk Time Clock's **Clock Out** starts Quantity
+  Produced at **0** — the pieces finished this session, like KEEP OPEN here — never at the remaining
+  quantity, which was a full count that completed the operation (or a 400 above the good ceiling).
+  The Operations page's **Check Out** judges against `my-active-job`'s figures when the operation is
+  not on its loaded list (the "checked into" banner, My Work), and on a pooled job whose earlier
+  operation already declared the loss its hint shows the same *"… were already closed short at an
+  earlier operation …"* warning and *"Check out and leave it open."* instead of suggesting scrap.
+  When the scrap covering a short rode a close that was refused after the check-out landed, its
+  message adds *"(the n scrap was not saved)"*.
 
 ## Job instructions on screen
 

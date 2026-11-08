@@ -1010,7 +1010,9 @@ count, in which case there is nothing left to close.
     convenience tools; every representative tool in §5, every call in the §12 sessions, every
     tool-name claim elsewhere in this file (§6.2 excepted — it discusses function names on
     purpose), in `CLAUDE.md`'s `mcp/` bullet and in `API.md`'s MCP section exists in the live
-    catalog; the names the package's own instructions and descriptions quote exist too; and
+    catalog; the names the package's own instructions and descriptions quote exist too, and so do
+    those a generated tool's description quotes (its route's summary and first docstring paragraph,
+    with a minimal allowlist of field names that look like tool names); and
     `.cursor/mcp.json.example` is a bare `mcpServers` map with no comment keys.
   - `backend/tests/test_mcp_cli.py` — the stdio bridge's process boundary: argument parsing,
     the remote-mode placeholder environment (fills only what is missing, boots `Settings` without a
