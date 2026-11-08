@@ -254,10 +254,15 @@ def test_the_409_audit_row_is_station_keyed_and_uses_the_existing_action(client:
     vocabulary the code no longer uses.
     """
     station = make_kiosk_station(db_session, company_id=COMPANY_A)
-    make_user(db_session, company_id=COMPANY_A, employee_id="EMP-42")
-    make_user(db_session, company_id=COMPANY_A, employee_id="OP-0042")
+    # The scan is seven digits on purpose: the station label is "Crew Kiosk {n}" from the
+    # helpers' process-wide counter, so a short scan ("42") turns up in the label itself once
+    # enough tests have run on one xdist worker (n = 42, 142, 420-429, ...) and the leak check
+    # below fails with nothing leaking. Both rows still normalize to the same badge ("2424").
+    scanned = "4242424"
+    make_user(db_session, company_id=COMPANY_A, employee_id="EMP-4242424")
+    make_user(db_session, company_id=COMPANY_A, employee_id="OP-04242424")
 
-    assert mint_badge_token(client, kiosk_token_for(station), "42").status_code == status.HTTP_409_CONFLICT
+    assert mint_badge_token(client, kiosk_token_for(station), scanned).status_code == status.HTTP_409_CONFLICT
 
     db_session.rollback()
     rows = (
@@ -270,7 +275,7 @@ def test_the_409_audit_row_is_station_keyed_and_uses_the_existing_action(client:
     ], f"the 409 must reuse the route's existing failure action: {[row.action for row in rows]}"
     (row,) = rows
     assert row.resource_identifier == station.label
-    assert "42" not in (row.resource_identifier or ""), "the scanned badge must not be logged here"
+    assert scanned not in (row.resource_identifier or ""), "the scanned badge must not be logged here"
     assert row.error_message == _AUDIT_ERROR_EMPLOYEE_ID_AMBIGUOUS
 
 
