@@ -486,7 +486,21 @@ def promote_ready_operations(
     anchors on the EARLIEST event (``flow_metrics_service._ready_times_by_operation``
     is ``func.min(occurred_at)``). Do not rewrite a consumer to last-wins without
     dealing with this -- it would silently erase queue time on every held job.
+
+    NEVER PROMOTES A DRAFT OR TERMINAL WORK ORDER -- the rule itself, at all four seams, not
+    only the read heal. Release is the authorization step and the record of who put work on
+    the floor, so nothing but Release (which writes RELEASED *before* it calls
+    ``release_first_ready_operation``) may put a draft's operations on the dispatch board and
+    the kiosk. This is what keeps resume-to-DRAFT's required, audited demotions demoted: a
+    job resumed to DRAFT can still carry labor that was running when it was held (that
+    labor stays closable, by rule), and finishing it reaches the completion seam
+    (``release_next_ready_operation``) -- which used to promote the successors, and on a
+    laser pool every demoted nest, straight back onto the board with no audit row. ON_HOLD
+    keeps promoting, as documented: a held work order is not a terminal one, and every start
+    verb still refuses its operations until Resume Work Order.
     """
+    if work_order.status == WorkOrderStatus.DRAFT or work_order.status in TERMINAL_WO_STATUSES:
+        return []
     company_id = work_order.company_id
     scoped_ops = [
         op
@@ -624,7 +638,8 @@ def operations_worked_out_of_sequence(db: Session, work_order: WorkOrder) -> lis
 #                     only what the strict routing rule now blocks (via the thin wrapper
 #                     ``demote_operations_for_sequencing``, whose call site is unchanged).
 #   "all_unworked" -- POST /work-orders/{id}/resume landing a held job back at DRAFT (no
-#                     release on record): every un-worked READY operation, laser nests
+#                     release on record), and PUT /work-orders/{id} moving a non-DRAFT job
+#                     to ``status: draft``: every un-worked READY operation, laser nests
 #                     included (``exempt_laser=False``), because a DRAFT work order must
 #                     not leave cards on the dispatch board and the kiosk.
 #   "blocked_by"   -- POST /work-orders/operations/{id}/reduce-production with
@@ -703,8 +718,8 @@ def demote_ready_operations(
     worked material would strand real labor behind a gate the operator already passed.
 
     ``exempt_laser`` (default True) makes a laser dispatch pool a no-op -- the sequencing
-    flag is inert there. The resume-to-DRAFT caller passes ``False``: a DRAFT nest package
-    must not leave READY nests on the floor's board either.
+    flag is inert there. The two DRAFT callers (resume-to-DRAFT, PUT to draft) pass
+    ``False``: a DRAFT nest package must not leave READY nests on the floor's board either.
 
     The ``"sequencing"`` scope is also a no-op on a POOLED work order: switching
     sequencing OFF needs no demotion, promotion heals that direction by itself on the next
@@ -2911,6 +2926,13 @@ def reconcile_work_orders_from_completion_evidence(
     for work_order in non_terminal_work_orders:
         stage_figures.update(stage_accounting(work_order, active_work_order_operations(work_order)))
 
+    # Ruling 2: a read never STARTS work on a job the start gate refuses -- the same reason
+    # ``_promote_stranded_ready_operations`` skips DRAFT. Checked inline off the status
+    # (operation_action_gates imports this module, so its helper cannot be imported here).
+    start_withheld_work_order_ids = {
+        wo.id for wo in non_terminal_work_orders if wo.status in (WorkOrderStatus.DRAFT, WorkOrderStatus.ON_HOLD)
+    }
+
     for operation in operations:
         produced_qty, scrapped_qty = produced_by_operation.get(operation.id, (0.0, 0.0))
         if produced_qty > float(operation.quantity_complete or 0):
@@ -2937,6 +2959,7 @@ def reconcile_work_orders_from_completion_evidence(
             (closed_produced + QTY_EPSILON >= acct.ceiling) if credited else closed_produced >= target_qty,
             completion_gated=operation.id in step_gated_operation_ids,
             accounting=acct if credited else None,
+            start_withheld=operation.work_order_id in start_withheld_work_order_ids,
         )
         if (
             op_changed
@@ -3015,6 +3038,7 @@ def _sync_operation_status_from_quantity(
     has_closed_completion_evidence: bool = False,
     completion_gated: bool = False,
     accounting: Optional[OperationAccounting] = None,
+    start_withheld: bool = False,
 ) -> bool:
     """Reconcile an operation's status from its quantities + closed labor evidence.
 
@@ -3029,6 +3053,13 @@ def _sync_operation_status_from_quantity(
     then THE implicit rule the clock-out uses, ``OperationAccounting.is_full_count`` (a
     full GOOD count of the units that can reach it, never above that), re-evaluated on
     the reconciled counts. ``None`` keeps the pre-117 target comparison exactly.
+
+    ``start_withheld`` (ruling 2): True when the operation's work order is DRAFT or
+    ON_HOLD. The PENDING/READY -> IN_PROGRESS lift IS a start, and a read must not start
+    work the start gate (``operation_action_gates.work_order_start_blocker``) refuses --
+    otherwise "record a count on a not-started operation, read, complete" walked round
+    the gate. Only the lift is withheld; quantities still reconcile and the next read
+    after Release / Resume performs it.
     """
     target_qty = operation_target_quantity(operation)
     if target_qty <= 0:
@@ -3073,7 +3104,11 @@ def _sync_operation_status_from_quantity(
         # MS-5: free the schedule reservation for a reconcile-driven completion too.
         release_operation_schedule_reservation(operation)
         changed = True
-    elif quantity_complete > 0 and operation.status in (OperationStatus.PENDING, OperationStatus.READY):
+    elif (
+        quantity_complete > 0
+        and operation.status in (OperationStatus.PENDING, OperationStatus.READY)
+        and not start_withheld
+    ):
         operation.status = OperationStatus.IN_PROGRESS
         operation.actual_start = operation.actual_start or (latest_entry.clock_in if latest_entry else None)
         operation.started_by = operation.started_by or (latest_entry.user_id if latest_entry else None)

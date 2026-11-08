@@ -612,7 +612,7 @@ with a 422 that names it, never accepted-and-ignored.
 | `create_work_order` | `POST /work-orders/` | `part_id`, `quantity_ordered` (required); `work_order_type`, `parent_work_order_id`, `priority`, `due_date`, `customer_name`, `customer_po`, `unit_number`, `notes`, `special_instructions`, `sequential_operations`, `serial_numbers`, `auto_routing` (query, default `true`). **No `status` argument** — passing one is a 422 | See [DRAFT guarantees](#9-draft-guarantees). Refuses `work_order_type: "laser_cutting"` **before** calling, with the API's own wording |
 | `add_operation` | `POST /work-orders/{id}/operations` | `work_order_id`, `name`, `work_center` (required; **int id or name/code string**); `sequence` (10–990, multiple of 10); passthrough `operation_number`, `description`, `setup_instructions`, `run_instructions`, `setup_time_hours`, `run_time_hours`, `run_time_per_piece`, `requires_inspection`, `inspection_type`, `component_part_id`, `component_quantity`, `operation_group`. `quantity` is accepted by the schema only to be **refused 422 with an explanation** | **Name guard** (below). Work center by name: exact match on name or code → substring → refuses **404** on none, **409** naming the candidates on more than one ("Pass the id"). `sequence` omitted → `GET /work-orders/{id}` and use the next multiple of 10 after the current maximum (10 on an empty plan). **An operation has no quantity of its own** — it runs the work order's `quantity_ordered`; `component_quantity` is the BOM component demand for the step (the per-operation piece target on a batch job), not an operation quantity, so the spec's `quantity` is not aliased to it. Not for laser WOs (the route refuses 400) |
 | `get_work_order` | `GET /work-orders/{id}` or `/work-orders/by-number/{n}` | `work_order_id` **or** `work_order_number` (percent-encoded into the path, so `../` or `?` cannot steer the call onto another route) | Full `WorkOrderResponse`: operations, nests (`operations[].laser_nest`), status, `version` |
-| `update_work_order` | `PUT /work-orders/{id}` | `work_order_id`, `version` (required); `quantity_ordered`, `priority`, `status`, `sequential_operations`, `due_date`, `customer_name`, `customer_po`, `unit_number`, `notes`, `special_instructions`, `quantity_complete`, `quantity_scrapped`, `scrap_reason` — every `WorkOrderUpdate` field, pinned to the route's own schema by a catalog test | The header edit verb, version-gated (409 when stale). **`status` accepts `draft` / `on_hold` / `cancelled` only** (and `on_hold` only on a released or in-progress job — the route refuses a draft **409**, it has nothing on the floor to hold): `released` and `in_progress` are refused **422** naming the real verbs (`release_work_order`, `work_orders_start_work_order`; the `in_progress` refusal also names `work_orders_resume_work_order`, because the start verb takes released jobs only and a hold is lifted by the resume tool) — the route's blind `setattr` would accept them with no `released_at` / `released_by` and no operation promotion; `complete` / `closed` are refused by the route itself. `status: "draft"` is how a released-but-unstarted job is put back (the nest tools use the same PUT). With an API token, a `quantity_scrapped` above the header's recorded scrap is refused **403** by the route (owner decision 2026-11-07 — a person reports scrap); so are, as this PR's extension, a changed `scrap_reason`, any other change to the header's `quantity_complete` / `quantity_scrapped` (either direction) and lowering `quantity_ordered` once work is recorded. Omitting those fields or re-sending the recorded values works |
+| `update_work_order` | `PUT /work-orders/{id}` | `work_order_id`, `version` (required); `quantity_ordered`, `priority`, `status`, `sequential_operations`, `due_date`, `customer_name`, `customer_po`, `unit_number`, `notes`, `special_instructions`, `quantity_complete`, `quantity_scrapped`, `scrap_reason` — every `WorkOrderUpdate` field, pinned to the route's own schema by a catalog test | The header edit verb, version-gated (409 when stale). **`status` accepts `draft` / `on_hold` / `cancelled` only** (and `on_hold` only on a released or in-progress job — the route refuses a draft **409**, it has nothing on the floor to hold): `released` and `in_progress` are refused **422** naming the real verbs (`release_work_order`, `work_orders_start_work_order`; both refusals also name `work_orders_resume_work_order`, because the release verb takes draft jobs only, the start verb takes released jobs only, and a hold is lifted by the resume tool) — the route's blind `setattr` would accept them with no `released_at` / `released_by` and no operation promotion; `complete` / `closed` are refused by the route itself. `status: "draft"` is how a released-but-unstarted job is put back (the nest tools use the same PUT); the route then returns every un-worked READY operation to PENDING itself, one required audit row each (**503**, nothing changed, when those rows cannot be written). With an API token, a `quantity_scrapped` above the header's recorded scrap is refused **403** by the route (owner decision 2026-11-07 — a person reports scrap); so are, as this PR's extension, a changed `scrap_reason`, any other change to the header's `quantity_complete` / `quantity_scrapped` (either direction) and lowering `quantity_ordered` once work is recorded. Omitting those fields or re-sending the recorded values works |
 | `duplicate_work_order` | `POST /work-orders/{id}/duplicate` | `work_order_id`, `quantity_ordered` (both required — the route requires the quantity; a laser job ignores it and derives its own from the copied nests), `due_date` | Copies the *plan* onto a new DRAFT (`WORK_ORDER_TEMPLATES.md` / duplicate service); post-checks DRAFT |
 | `release_work_order` | `POST /work-orders/{id}/release` | `work_order_id` | Explicit only; the route refuses anything not DRAFT. The **only** tool that releases work |
 | `import_laser_nest_package` | `POST /work-orders/laser-nest-packages/standalone/import` or `POST /work-orders/{id}/laser-nest-packages/import` | `work_order_id` (omit for standalone), `file` `{filename, content_base64, content_type?}` **or** `source_path`, `rows` (list → sent as the JSON string the route expects, or a string), `work_center_id`, `due_date` (standalone only), `sheet_match_provenance`, `release` (default `false`) | See [Nest import demotion](#10-nest-import-demotion). Returns `{import, work_order, demoted_to_draft, operations_returned_to_pending, note}` |
@@ -682,7 +682,7 @@ apply — which have no tool and no replacement. Adding a convenience tool whose
   generated tool over a route that itself lands DRAFT), and not the header update: the generic
   `PUT /work-orders/{id}` is shadowed by `update_work_order`, which refuses `status: released` and
   `status: in_progress` (422 naming `release_work_order` / `work_orders_start_work_order`, and for
-  `in_progress` also `work_orders_resume_work_order`) because
+  both also `work_orders_resume_work_order`) because
   the route's blind `setattr` would accept them with no `released_at` / `released_by` and no
   operation promotion — a release the audit trail could not attribute. The two Excel-cutover
   loaders that mint work orders RELEASED / IN_PROGRESS outright are not tools (§6.1). The nest
@@ -710,20 +710,27 @@ unstamped — an existing stamp is kept — and both **keep an on-hold laser wor
    a fresh standalone laser work order instead"); `add_laser_nest` refuses **409** when the job's
    nests came from a package import (`cnc_file_name` set), because the next import would replace
    the hand-keyed nest silently. Both refusals run before anything is uploaded or written.
-2. **Demote to DRAFT after a successful import, unless `release=true` — header AND operations.**
-   The route's response carries `child_work_order` (a full `WorkOrderResponse`, RELEASED,
-   `work_order_type='laser_cutting'`, operations READY). The tool issues
-   `PUT /work-orders/{child.id}` `{"version": child.version, "status": "draft"}` — the ordinary,
-   audited, version-gated update verb — and **then** `PUT /work-orders/operations/{id}`
-   `{"version", "status": "pending"}` for every READY operation, in that order: the app's
-   reconcile-on-read promotes the PENDING operations of a RELEASED work order but never those of a
-   DRAFT one, so a read between the two steps cannot race the demote back. The second step is not
-   optional: a DRAFT header alone is **not** a draft — the dispatch board and the kiosk queue
-   filter on terminal statuses only, so READY nests would stay on the board and be startable by
-   badge, an operator start would flip the job to IN_PROGRESS with no release ever recorded, and
-   the planner's later `release_work_order` would be refused. The result is
+2. **Demote to DRAFT after a successful import, unless `release=true` or the job is on hold —
+   header AND operations.** The route's response carries `child_work_order` (a full
+   `WorkOrderResponse`, `work_order_type='laser_cutting'`, operations READY) whose status is
+   **RELEASED — or ON_HOLD**, because the route keeps an on-hold laser work order on hold. A held
+   job is **left held** whatever `release` says (`demoted_to_draft: false`, and the `note` says the
+   job is still ON HOLD and names `work_orders_resume_work_order`) — exactly as `add_laser_nest`
+   leaves it (rule 3): demoting it would lift the hold with no Resume Work Order and no required
+   hold-cleared audit row. Otherwise the tool issues `PUT /work-orders/{child.id}`
+   `{"version": child.version, "status": "draft"}` — the ordinary, audited, version-gated update verb,
+   which itself returns every **un-worked** READY operation to PENDING with one required audit row
+   each (the route's own rule: a draft leaves no cards on the dispatch board or the kiosk) — and
+   **then** `PUT /work-orders/operations/{id}` `{"version", "status": "pending"}` for any operation
+   still READY (one the route leaves READY because labor is already recorded against it), in that
+   order: the app's reconcile-on-read promotes the PENDING operations of a RELEASED work order but
+   never those of a DRAFT one, so a read between the two steps cannot race the demote back. For a
+   freshly imported package the second step usually has nothing to send. Either way the tool's
+   contract holds: a job it hands back DRAFT carries no READY operation, so no nest stays on the board
+   startable by badge. The result is
    `{"import": <raw import response>, "work_order": <re-read WO>, "demoted_to_draft": true,
-   "operations_returned_to_pending": N, "note": …}`; the `note` discloses what the demote cannot
+   "operations_returned_to_pending": N, "note": …}`, where `N` counts the operations the header `PUT`
+   demoted plus any the tool demoted itself; the `note` discloses what the demote cannot
    undo — `released_at` / `released_by` still carry the release the route recorded, and
    `release_work_order` re-stamps them when the planner releases. (A stamp on a DRAFT job is
    harmless: `update_work_order` cannot put a draft on hold, and the next release re-stamps.) With `release=true` the tool
@@ -735,7 +742,8 @@ unstamped — an existing stamp is kept — and both **keep an on-hold laser wor
    back DRAFT with PENDING operations exactly as in rule 2; a job that was released / in progress /
    on hold before the nest was added is left as the route set it (`demoted_to_draft: false` plus a
    `note` saying why) — adding a nest to a running job must never take the job off the floor. The
-   route itself **keeps an on-hold job on hold** (and so does a package import with `release=true`):
+   route itself **keeps an on-hold job on hold** (and so does a package import, with or without
+   `release=true` — rule 2):
    the `note` then says the job is still ON HOLD and that its nests are refused by clock-in and every
    start verb until `work_orders_resume_work_order` runs. The route now also records the release it
    performs (`released_by` / `released_at`) on a new or previously-DRAFT laser work order, keeping an
@@ -750,19 +758,21 @@ unstamped — an existing stamp is kept — and both **keep an on-hold laser wor
    back to DRAFT from the UI or with `update_work_order` (`work_order_id`, `version`,
    `status: "draft"`). If the header landed but an operation `PUT` failed, the message says exactly
    that (**`… is DRAFT, BUT N of its operations are still READY`**, naming them with the route's
-   own detail) and `operations_returned_to_pending` counts the ones that did land.
+   own detail) and `operations_returned_to_pending` counts the ones that did land (the header's
+   included).
 
 Either `file` or `source_path` is required (422 otherwise). `rows` given as a list is serialised to
 the JSON string the multipart route expects; `due_date` is sent only on the standalone path.
 The upload decodes on the bridge side under `WERCO_MCP_MAX_UPLOAD_BYTES` (413-shaped tool error
 over it) and is then subject to the route's own `LASER_UPLOAD_MAX_BYTES` (50 MB).
 
-**What this is not.** The demote is the owner's rule for the *MCP* layer; it does not close the
-application's own gap that `PUT /shop-floor/operations/{id}/start` accepts an operation whose work
-order is DRAFT and flips the job to IN_PROGRESS with no work-order status-change audit row. With
-the operations at PENDING the kiosk and the dispatch board no longer show them, which is what makes
-the DRAFT real from the floor's side; a 409 on a DRAFT parent in that shop-floor route would close
-the hole for every path, and is an owner decision rather than something made here.
+**What this is not.** The demote is the owner's rule for the *MCP* layer, not what makes a draft
+unstartable. That is the application's own gate (owner ruling 2026-11-05): clock-in and every start
+verb refuse **409** on a DRAFT work order, `PUT /shop-floor/operations/{id}/start` no longer lifts a
+DRAFT job to IN_PROGRESS, and the header `PUT` to `draft` takes un-worked READY operations off the
+board itself. What the tool adds is the default — a freshly imported job comes back un-released —
+and a final sweep of any operation the route leaves READY, so a job it hands back DRAFT is listed
+nowhere on the floor rather than showing a card every start refuses.
 
 ---
 
@@ -943,7 +953,7 @@ count, in which case there is nothing left to close.
 | `{"status": 403, "detail": "Insufficient permissions"}` | The user's role does not allow that route (`require_role`) — the SPA would refuse too | Use a user with the right role; nothing in MCP can widen it |
 | `{"status": 409, ...}` on `update_work_order` | Stale `version` (optimistic locking) | `get_work_order` → resend with the current `version` |
 | `{"status": 422, ...}` from `update_work_order` naming `release_work_order` / `work_orders_start_work_order` | `status: released` or `in_progress` was written through the header update | Call the named verb; the header update never releases or starts work (§9). To lift a work-order hold, call `work_orders_resume_work_order` |
-| `{"status": 409, "detail": "This work order has not been released — release first…"}` or `"This work order is on hold…"` from `clock_in`, `shop_floor_start_operation`, `work_orders_start_operation`, `work_orders_start_work_order`, a complete of a READY operation, or `work_orders_update_operation` setting `status: in_progress` (or `status: ready` on a draft) | The work order is DRAFT or ON_HOLD — the floor cannot start work on it | A person with the role decides: `release_work_order` for a draft, `work_orders_resume_work_order` for a held job (Admin / Manager / Supervisor) |
+| `{"status": 409, "detail": "This work order has not been released — release first…"}` or `"This work order is on hold…"` from `clock_in`, `shop_floor_start_operation`, `work_orders_start_operation`, `work_orders_start_work_order`, a complete of a READY operation, or `work_orders_update_operation` setting `status: in_progress` (or `status: ready` on a draft, or raising `quantity_complete` on a not-started operation) | The work order is DRAFT or ON_HOLD — the floor cannot start work on it | A user with the role decides — an agent's API token included: `release_work_order` for a draft, `work_orders_resume_work_order` for a held job (Admin / Manager / Supervisor) |
 | `{"status": 409, "detail": "A draft work order has not been released, so there is nothing on the floor to hold…"}` from `update_work_order` | `status: on_hold` on a DRAFT | Leave it in draft; hold only released / in-progress work |
 | `{"status": 409, "detail": "Op 20: 2 of 10 not yet accounted for (8 good, 0 scrapped)…"}` from `shop_floor_complete_operation`, or `"…unaccounted for…"` from `work_orders_complete_work_order` | The count is short and nobody has said where the missing pieces went (owner ruling 1) — nothing was written | Leave the work open and tell the user. Recording the pieces, or reporting them as scrap with a reason, is a decision for the person who knows; never invent scrap, a reason or a quantity to make the close succeed |
 | `{"status": 403, "detail": "Scrap must be reported by a person (at the kiosk, with a crew badge, or signed in at a desk), not an API token…"}` from `clock_out`, `report_operation_production`, `prepare_task` / `execute_task` (`report_production`), a complete tool, `work_orders_update_operation` or `update_work_order` | An API token tried to report scrap (owner decision 2026-11-07), or to write or change a scrap reason — nothing was written | Record good pieces only (send no scrap and no reason), or leave the work open and tell the user — a person reports the scrap. Nothing an API token holds changes this |

@@ -14,6 +14,7 @@ import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import KioskBlockerStillOpenScreen from './KioskBlockerStillOpenScreen';
 import type { ResumeOpenBlocker } from '../../types';
+import { WORK_ORDER_ON_HOLD_REASON } from './heldOperationFixtures';
 
 const MACHINE: ResumeOpenBlocker = {
   id: 5,
@@ -194,5 +195,51 @@ describe('KioskBlockerStillOpenScreen', () => {
     expect(done).toHaveTextContent('Back to board');
     await userEvent.click(done);
     expect(onDone).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * Resume lifts the OPERATION's hold only. Under a held work order the job comes
+ * back still refused, so "Job resumed — the job is running again" would be false
+ * on the one screen that has to be believed.
+ */
+describe('KioskBlockerStillOpenScreen under a held work order', () => {
+  it('says only the operation hold lifted, and shows the work-order reason verbatim', () => {
+    render(
+      <KioskBlockerStillOpenScreen
+        blockers={[MACHINE]}
+        jobLabel="WO-HELD-0001 · Op 20 Deburr"
+        doneLabel="Back to queue"
+        onDone={jest.fn()}
+        startBlockedReason={WORK_ORDER_ON_HOLD_REASON}
+        workOrderStatus="on_hold"
+      />
+    );
+
+    expect(screen.getByRole('heading', { name: 'Operation hold lifted' })).toBeInTheDocument();
+    const panel = screen.getByTestId('kiosk-blocker-open-start-blocked');
+    expect(panel).toHaveTextContent(WORK_ORDER_ON_HOLD_REASON);
+    expect(within(panel).getByTestId('kiosk-start-blocked-chip')).toHaveTextContent('WO on hold');
+    expect(screen.queryByText(/job resumed/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/running again/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/The operation hold is lifted, but this problem is still recorded and open/)).toBeInTheDocument();
+    // The blocker half is unchanged: the open record is still named verbatim.
+    expect(screen.getByText('Machine Down: OP20 Deburr')).toBeInTheDocument();
+  });
+
+  it('reads exactly as before without a work-order refusal', () => {
+    render(
+      <KioskBlockerStillOpenScreen
+        blockers={[MACHINE]}
+        jobLabel="WO-HELD-0001 · Op 20 Deburr"
+        doneLabel="Back to queue"
+        onDone={jest.fn()}
+        startBlockedReason={null}
+      />
+    );
+
+    expect(screen.getByRole('heading', { name: 'Job resumed' })).toBeInTheDocument();
+    expect(screen.queryByTestId('kiosk-blocker-open-start-blocked')).not.toBeInTheDocument();
+    expect(screen.getByText(/The job is running again, but this problem is still recorded and open/)).toBeInTheDocument();
   });
 });

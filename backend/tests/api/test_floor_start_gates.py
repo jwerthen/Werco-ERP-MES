@@ -32,6 +32,14 @@ Pinned here, on the DATABASE ROWS as well as the HTTP answer:
    ``/shop-floor/operations``, ``/shop-floor/operations/{id}`` (operation AND all_operations)
    and the kiosk queue + held rows -- for a user token and a crew-station token -- and list
    membership is unchanged.
+
+7. The generic ``PUT /work-orders/operations/{id}`` refuses a hand-set start (IN_PROGRESS) the
+   gate refuses, and READY on a DRAFT.
+
+8. The same PUT 404s an operation of a soft-deleted work order for the whole verb, and refuses
+   a ``quantity_complete`` RAISE on a not-started operation of a DRAFT / ON_HOLD job; the
+   reconciling read no longer lifts such an operation to IN_PROGRESS. Together they close the
+   "PUT a count, read, office-complete" path the cross-PR review reproduced.
 """
 
 from datetime import datetime, timedelta
@@ -685,3 +693,190 @@ def test_the_put_then_office_complete_door_is_closed_on_a_held_job(client, db_se
     row = db_session.query(WorkOrderOperation).filter(WorkOrderOperation.id == op.id).one()
     assert row.status == OperationStatus.READY
     assert float(row.quantity_complete or 0) == 0
+
+
+# =========================================================================== 8. the operation PUT: deleted job, counts
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [{"status": "in_progress"}, {"name": "should not land"}, {"quantity_complete": 3}],
+    ids=["start", "rename", "count"],
+)
+def test_generic_operation_put_on_a_soft_deleted_work_order_is_a_404_for_the_whole_verb(
+    client, db_session, floor, fields
+):
+    """Soft delete keeps the work order's status (RELEASED here), so the start gate alone
+    passes: the operation PUT must 404 a tombstone's operation like every other start door,
+    and refuse ANY field, not only a status write (invariant 3)."""
+    wc, _, supervisor = floor
+    wo, op = make_wo_with_operation(
+        db_session, work_center=wc, wo_status=WorkOrderStatus.RELEASED, op_status=OperationStatus.READY
+    )
+    original_name = op.name
+    wo.soft_delete(supervisor.id)
+    db_session.commit()
+    before = snapshot(db_session, wo, op)
+
+    resp = put_operation(client, op, supervisor, **fields)
+
+    assert resp.status_code == 404, resp.text
+    assert resp.json()["detail"] == "Work order not found"
+    assert_no_pending_writes(db_session)
+    assert snapshot(db_session, wo, op) == before
+    assert _name_of(db_session, op) == original_name
+    assert float(db_session.query(WorkOrderOperation).filter_by(id=op.id).one().quantity_complete or 0) == 0
+    # Paired with test_generic_operation_put_start_on_a_released_work_order_still_lands_positive_control,
+    # which runs the identical query on a live job and finds exactly one row.
+    assert operation_update_rows(db_session, op.id) == []
+
+
+@pytest.mark.parametrize("wo_status", [WorkOrderStatus.DRAFT, WorkOrderStatus.ON_HOLD])
+@pytest.mark.parametrize("op_status", [OperationStatus.PENDING, OperationStatus.READY])
+def test_generic_operation_put_refuses_a_count_raise_that_would_start_a_draft_or_held_job(
+    client, db_session, floor, wo_status, op_status
+):
+    """Recorded good quantity on a not-started operation is what the reconciling read treats
+    as a start -- so the count is refused with the start gate's own text, before any write."""
+    wc, _, supervisor = floor
+    wo, op = make_wo_with_operation(db_session, work_center=wc, wo_status=wo_status, op_status=op_status)
+    original_name = op.name
+    before = snapshot(db_session, wo, op)
+
+    resp = put_operation(client, op, supervisor, quantity_complete=10, name="should not land")
+
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"] == REASON_BY_STATUS[wo_status]
+    assert_no_pending_writes(db_session)
+    assert snapshot(db_session, wo, op) == before
+    assert _name_of(db_session, op) == original_name
+    assert float(db_session.query(WorkOrderOperation).filter_by(id=op.id).one().quantity_complete or 0) == 0
+    assert operation_update_rows(db_session, op.id) == []
+
+
+def test_a_count_raise_paired_with_a_hand_set_ready_on_a_held_job_is_refused_too(client, db_session, floor):
+    """The status this write LEAVES decides it: un-holding an operation by hand (the
+    supervisor override) and recording a count in the same call is a start in two steps."""
+    wc, _, supervisor = floor
+    wo, op = make_wo_with_operation(
+        db_session, work_center=wc, wo_status=WorkOrderStatus.ON_HOLD, op_status=OperationStatus.ON_HOLD
+    )
+    before = snapshot(db_session, wo, op)
+
+    resp = put_operation(client, op, supervisor, status="ready", quantity_complete=4)
+
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"] == MSG_WORK_ORDER_ON_HOLD
+    assert_no_pending_writes(db_session)
+    assert snapshot(db_session, wo, op) == before
+
+
+@pytest.mark.parametrize(
+    "wo_status, op_status, start_qty, new_qty",
+    [
+        # Positive control: the same raise on a RELEASED job lands.
+        (WorkOrderStatus.RELEASED, OperationStatus.READY, 0, 10),
+        # Labor already running on a held job stays correctable -- the gate is a START gate.
+        (WorkOrderStatus.ON_HOLD, OperationStatus.IN_PROGRESS, 2, 6),
+        # Lowering a count is never a start.
+        (WorkOrderStatus.DRAFT, OperationStatus.PENDING, 5, 3),
+        # Re-sending the current count is not a raise.
+        (WorkOrderStatus.ON_HOLD, OperationStatus.READY, 5, 5),
+    ],
+    ids=["released-raise", "held-running-raise", "draft-lower", "held-resend"],
+)
+def test_count_writes_that_are_not_a_start_still_land(
+    client, db_session, floor, wo_status, op_status, start_qty, new_qty
+):
+    wc, _, supervisor = floor
+    wo, op = make_wo_with_operation(db_session, work_center=wc, wo_status=wo_status, op_status=op_status)
+    op.quantity_complete = start_qty
+    db_session.commit()
+    db_session.refresh(op)
+
+    resp = put_operation(client, op, supervisor, quantity_complete=new_qty)
+
+    assert resp.status_code == 200, resp.text
+    db_session.expire_all()
+    assert float(db_session.query(WorkOrderOperation).filter_by(id=op.id).one().quantity_complete) == new_qty
+    assert len(operation_update_rows(db_session, op.id)) == 1
+
+
+def _reread_op(db: Session, op_id: int) -> WorkOrderOperation:
+    db.expire_all()
+    return db.query(WorkOrderOperation).filter(WorkOrderOperation.id == op_id).one()
+
+
+@pytest.mark.parametrize("wo_status", [WorkOrderStatus.DRAFT, WorkOrderStatus.ON_HOLD])
+@pytest.mark.parametrize("op_status", [OperationStatus.PENDING, OperationStatus.READY])
+def test_a_reconciling_read_does_not_start_a_counted_operation_of_a_draft_or_held_job(
+    client, db_session, floor, wo_status, op_status
+):
+    """The read half: a not-started operation that already carries good quantity (a legacy
+    row, or a count written before the PUT refusal existed) is NOT lifted to IN_PROGRESS by
+    a reconciling read of a draft / held job -- so the office complete still meets the
+    READY / PENDING rung instead of an ungated IN_PROGRESS one."""
+    wc, _, supervisor = floor
+    wo, op = make_wo_with_operation(db_session, work_center=wc, wo_status=wo_status, op_status=op_status)
+    op.quantity_complete = 10
+    db_session.commit()
+
+    read = client.get(f"/api/v1/work-orders/{wo.id}", headers=user_headers(supervisor))
+    assert read.status_code == 200, read.text
+
+    row = _reread_op(db_session, op.id)
+    # PROMOTION is not a start: a held job keeps promoting (PENDING -> READY, documented),
+    # a draft does not. What the read must never do on either is the IN_PROGRESS lift.
+    not_started = (OperationStatus.PENDING, OperationStatus.READY)
+    assert row.status in not_started, "the read must not start work the start gate refuses"
+    assert float(row.quantity_complete) == 10, "quantities are untouched by the withheld lift"
+    assert row.actual_start is None
+
+    complete = client.post(
+        f"/api/v1/work-orders/operations/{op.id}/complete",
+        params={"quantity_complete": 10},
+        headers=user_headers(supervisor),
+    )
+    assert complete.status_code in (400, 409), complete.text
+    row = _reread_op(db_session, op.id)
+    assert row.status in not_started
+    assert db_session.query(WorkOrder).filter(WorkOrder.id == wo.id).one().status == wo_status
+
+
+def test_a_reconciling_read_still_starts_a_counted_operation_of_a_released_job_positive_control(
+    client, db_session, floor
+):
+    wc, _, supervisor = floor
+    wo, op = make_wo_with_operation(
+        db_session, work_center=wc, wo_status=WorkOrderStatus.RELEASED, op_status=OperationStatus.READY
+    )
+    op.quantity_complete = 4
+    db_session.commit()
+
+    read = client.get(f"/api/v1/work-orders/{wo.id}", headers=user_headers(supervisor))
+    assert read.status_code == 200, read.text
+
+    assert _reread_op(db_session, op.id).status == OperationStatus.IN_PROGRESS
+
+
+@pytest.mark.parametrize("wo_status", [WorkOrderStatus.DRAFT, WorkOrderStatus.ON_HOLD])
+def test_the_put_count_then_read_then_office_complete_door_is_closed(client, db_session, floor, wo_status):
+    """The composed bypass the cross-PR review reproduced: PUT a count on a not-started
+    operation, let any reconciling read lift it, then office-complete it ungated. Every step
+    is now refused or inert: nothing completes, nothing is booked, the job is unchanged."""
+    wc, _, supervisor = floor
+    wo, op = make_wo_with_operation(db_session, work_center=wc, wo_status=wo_status, op_status=OperationStatus.READY)
+
+    assert put_operation(client, op, supervisor, quantity_complete=10).status_code == 409
+    assert client.get(f"/api/v1/work-orders/{wo.id}", headers=user_headers(supervisor)).status_code == 200
+    resp = client.post(
+        f"/api/v1/work-orders/operations/{op.id}/complete",
+        params={"quantity_complete": 10},
+        headers=user_headers(supervisor),
+    )
+
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"] == REASON_BY_STATUS[wo_status]
+    row = _reread_op(db_session, op.id)
+    assert row.status == OperationStatus.READY and float(row.quantity_complete or 0) == 0
+    assert db_session.query(WorkOrder).filter(WorkOrder.id == wo.id).one().status == wo_status

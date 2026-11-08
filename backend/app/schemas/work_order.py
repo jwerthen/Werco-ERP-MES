@@ -795,9 +795,9 @@ class WorkOrderUpdate(BaseModel):
     # 081. Optional, so an update that never mentions sequencing never changes it.
     # Flipping False -> True also DEMOTES un-started READY operations the pooled rule
     # had promoted (see work_orders.update_work_order), through the one demotion core
-    # (work_order_state_service.demote_ready_operations, whose other callers include a
-    # work-order resume landing DRAFT and the office reduce-production reopen), and it is
-    # audited per operation.
+    # (work_order_state_service.demote_ready_operations, whose other callers are a
+    # work-order resume landing DRAFT, this same update moving a job to DRAFT, and the
+    # office reduce-production reopen), and it is audited per operation.
     sequential_operations: Optional[bool] = Field(
         default=None,
         description="True = a sequenced ROUTING: an operation becomes READY only once every lower-sequence "

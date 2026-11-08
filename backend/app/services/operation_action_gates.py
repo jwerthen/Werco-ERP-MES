@@ -89,6 +89,14 @@ MSG_DRAFT_CANNOT_BE_HELD = (
     "A draft work order has not been released, so there is nothing on the floor to hold. "
     "Leave it in draft until it is ready, then release it."
 )
+# PUT /work-orders/{id} {status: draft} on a released / in-progress / held job returns its
+# un-worked READY operations to PENDING (a draft leaves no cards on the dispatch board or the
+# kiosk) with one REQUIRED audit row each. When those rows cannot be written the whole PUT is
+# rolled back (503) -- the same fail-closed posture as POST /work-orders/{id}/resume.
+MSG_RETURN_TO_DRAFT_AUDIT_UNAVAILABLE = (
+    "The audit record for taking this work order's operations off the floor could not be saved; nothing was "
+    "changed. Retry."
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -587,7 +595,10 @@ def work_order_start_blocker(work_order: Optional[WorkOrder]) -> Optional[str]:
     ``POST /work-orders/operations/{id}/complete`` -- completing a READY operation STARTS
     it first), the generic ``PUT /work-orders/operations/{id}`` when it writes ``status``
     IN_PROGRESS (a hand-set start; READY on a DRAFT is refused there with
-    :data:`MSG_WORK_ORDER_NOT_RELEASED` as well), :func:`clock_in_blockers` and
+    :data:`MSG_WORK_ORDER_NOT_RELEASED` as well) or RAISES ``quantity_complete`` on an
+    operation it leaves PENDING / READY of a DRAFT / ON_HOLD job (the reconciling read
+    treats that count as a start -- and that read withholds the lift on such a job too,
+    inline, because this module imports the state service), :func:`clock_in_blockers` and
     :func:`complete_blockers` (the scanner), and the floor read payloads'
     ``start_blocked_reason`` (``/shop-floor/operations`` rows,
     ``/shop-floor/operations/{id}``, the kiosk queue and held rows).

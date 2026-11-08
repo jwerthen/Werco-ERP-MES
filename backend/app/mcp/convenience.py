@@ -13,9 +13,11 @@ rules for agent use (brief rules 5-8) need a place to live that is NOT a route c
   real verbs.
 - ``import_laser_nest_package``: the app's import is born RELEASED (that is what the
   planners' import button means) with its nest operations READY; the tool
-  immediately PUTs the child back to DRAFT -- the header AND each READY operation
-  back to PENDING, in that order, because a DRAFT header alone leaves the nests on
-  the dispatch board and startable -- unless ``release=true``, and refuses to mix a
+  immediately PUTs the child back to DRAFT -- the header (whose PUT now returns the
+  un-worked READY operations to PENDING itself) and then any operation still READY,
+  in that order, because a DRAFT that keeps READY nests leaves them on the dispatch
+  board -- unless ``release=true`` or the route kept the job ON HOLD (a held job is
+  left held, as ``add_laser_nest`` leaves it), and refuses to mix a
   package import onto a job that already carries manually entered nests (import
   REPLACES every nest on the job). The manual-nest check reads the LASER work order:
   a production parent's nests live on its laser child, never on its own operations.
@@ -650,6 +652,13 @@ async def _update_work_order(ctx: ToolContext, args: Dict[str, Any]) -> types.Ca
                 f" {verb} starts RELEASED jobs only: an on-hold job is resumed with {RESUME_WORK_ORDER_TOOL}, and a "
                 "draft job is released first with release_work_order."
             )
+        elif requested == "released":
+            # "released" is the natural way to ask for a hold to come off, and release_work_order
+            # answers 400 on anything but a DRAFT -- so name the door that actually does it.
+            detail += (
+                f" {verb} releases DRAFT jobs only: an on-hold job is put back on the floor with "
+                f"{RESUME_WORK_ORDER_TOOL}, which never re-releases it."
+            )
         raise ctx.fail(
             status=422,
             detail=detail,
@@ -749,8 +758,9 @@ _IMPORT_NEST_SCHEMA: Dict[str, Any] = {
         "release": {
             "type": "boolean",
             "default": False,
-            "description": "The route creates the laser work order RELEASED. By default this tool immediately sets it "
-            "back to DRAFT; pass true to leave it RELEASED.",
+            "description": "The route creates the laser work order RELEASED (an on-hold job stays on hold). By default "
+            "this tool immediately sets it back to DRAFT; pass true to leave it RELEASED. A job that was on hold is "
+            "left on hold either way.",
         },
     },
 }
@@ -824,19 +834,28 @@ async def _demote_to_draft(
     """Put a laser work order the route left RELEASED back to DRAFT, operations included.
 
     Header FIRST (``PUT /work-orders/{id}`` ``{version, status: "draft"}``), then every
-    READY operation back to PENDING (``PUT /work-orders/operations/{id}``): the app's
+    operation still READY back to PENDING (``PUT /work-orders/operations/{id}``): the app's
     reconcile-on-read promotes PENDING operations of a RELEASED work order but never
-    those of a DRAFT one, so this order cannot be raced back by a read in between. A
-    DRAFT header alone is not enough -- the nest operations the route minted READY
-    would stay on the dispatch board and the kiosk queue, startable, on a job that
-    says DRAFT (the dispatch views filter on terminal statuses only). Every failure is
-    loud and carries ``evidence`` (the import / nest payload) so the caller knows what
-    exists and in what state.
+    those of a DRAFT one, so this order cannot be raced back by a read in between. The
+    header ``PUT`` itself now returns every UN-WORKED READY operation to PENDING (one
+    required audit row each, the route's own rule: a draft leaves no cards on the
+    dispatch board or the kiosk), so for a freshly imported or added nest the loop below
+    has nothing left to do. It stays for an operation the route deliberately leaves READY
+    because labor was already recorded against it -- this tool's contract is that a job
+    it hands back DRAFT carries no READY operation at all. ``operations_returned_to_pending``
+    counts both: the rows the header ``PUT`` demoted and the rows the loop demoted. Every
+    failure is loud and carries ``evidence`` (the import / nest payload) so the caller
+    knows what exists and in what state.
     """
     work_order_id = int(work_order["id"])
     label = _wo_label(work_order, work_order_id)
     header_path = f"{API}/work-orders/{work_order_id}"
     current: Dict[str, Any] = dict(work_order)
+    ready_before = {
+        op.get("id")
+        for op in current.get("operations") or []
+        if isinstance(op, dict) and op.get("status") == OP_READY and op.get("id") is not None
+    }
     if current.get("status") != WO_DRAFT:
         demoted = await ctx.call("PUT", header_path, json={"version": current.get("version"), "status": WO_DRAFT})
         if demoted.status >= 400 or not demoted.is_json:
@@ -852,6 +871,12 @@ async def _demote_to_draft(
             )
         current = demoted.json()
 
+    # What the header PUT already took off the floor (READY before it, PENDING in its answer).
+    returned_by_header = sum(
+        1
+        for op in current.get("operations") or []
+        if isinstance(op, dict) and op.get("id") in ready_before and op.get("status") == OP_PENDING
+    )
     ready = [op for op in current.get("operations") or [] if isinstance(op, dict) and op.get("status") == OP_READY]
     failures: List[str] = []
     failure_status = 409
@@ -877,7 +902,7 @@ async def _demote_to_draft(
                 **evidence,
                 "work_order": current,
                 "demoted_to_draft": True,
-                "operations_returned_to_pending": len(ready) - len(failures),
+                "operations_returned_to_pending": returned_by_header + len(ready) - len(failures),
             },
         )
     # Re-read so the returned work order is what the database says, operations included
@@ -886,7 +911,7 @@ async def _demote_to_draft(
     return {
         "work_order": final,
         "demoted_to_draft": True,
-        "operations_returned_to_pending": len(ready),
+        "operations_returned_to_pending": returned_by_header + len(ready),
         "note": RELEASE_STAMP_NOTE,
     }
 
@@ -941,7 +966,12 @@ async def _import_laser_nest_package(ctx: ToolContext, args: Dict[str, Any]) -> 
     if not isinstance(child, dict) or child.get("id") is None:
         return ctx.finish(imported, tool=tool, method="POST", path=path)
 
-    if args.get("release"):
+    # A held job is left held whatever ``release`` says, exactly as add_laser_nest leaves it:
+    # the route kept the hold (bad nests are the usual reason to hold a package, and this
+    # re-import is the fix), and demoting it to DRAFT would lift that hold without Resume
+    # Work Order -- no required ``work_order_hold_cleared`` row -- while RELEASE_STAMP_NOTE
+    # told the agent the route had put the job RELEASED, which it had not.
+    if args.get("release") or child.get("status") == WO_ON_HOLD:
         released: Dict[str, Any] = {"import": payload, "work_order": child, "demoted_to_draft": False}
         if child.get("status") == WO_ON_HOLD:
             released["note"] = ON_HOLD_KEPT_NOTE
@@ -1301,8 +1331,8 @@ CONVENIENCE_TOOLS: Tuple[ConvenienceTool, ...] = (
         "import_laser_nest_package",
         "POST /api/v1/work-orders/laser-nest-packages/standalone/import or /{id}/laser-nest-packages/import — Import a "
         "nest package (ZIP or nest PDF) into a laser work order. The route creates it RELEASED with its nest "
-        "operations READY (an on-hold job stays on hold); this tool sets it back to DRAFT and the operations to "
-        "PENDING unless release=true, and "
+        "operations READY (an on-hold job stays on hold, and this tool leaves it held); this tool sets it back to "
+        "DRAFT and the operations to PENDING unless release=true, and "
         "refuses a target whose laser work order already carries manually entered nests. Returns {import, "
         "work_order, demoted_to_draft, operations_returned_to_pending, note}. [Work Orders]",
         _strict(_IMPORT_NEST_SCHEMA),

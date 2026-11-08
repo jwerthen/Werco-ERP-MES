@@ -724,6 +724,18 @@ moved here: it stays in the queue with the **WO ON HOLD** / **NOT RELEASED** chi
 CLOCK IN, and RESUME on the kiosk cannot lift it — a supervisor runs **Resume Work Order** on the
 work order (see `docs/API.md` → Work Orders → "Draft and on-hold work orders refuse every start").
 
+**An operation hold can sit under a held work order, and RESUME lifts only the operation's.**
+Held rows carry `work_order_status` and `start_blocked_reason` too (one row builder), and the
+server puts an un-started operation of an `ON_HOLD` job back to `READY`, so the job returns to the
+queue still refused. Every floor surface says so rather than reporting it resumed: the held card
+wears the same **WO ON HOLD** / **NOT RELEASED** chip; the RESUME confirm shows the server's
+reason verbatim and drops its "starts the job again" sentences; afterwards both kiosks raise an
+*info* toast *"WO-… operation hold lifted — &lt;server reason&gt;"* instead of a green *resumed*,
+and the hold-still-open screen is headed **Operation hold lifted** with the same reason above the
+blocker list. The desk **Clear Hold** pages (`ShopFloorSimple`, the Time Clock) raise the same
+sentence as a `warning`. The Work Order page keeps its *hold cleared* wording on purpose — its
+header already reads On Hold beside **Resume Work Order** on the same screen.
+
 The held card is deliberately **not** a `KioskQueueCard`: it is inert markup with exactly one
 interactive element, **RESUME**. A held job must never be startable, and the operator has to lift
 the hold first — which is also what the server enforces.

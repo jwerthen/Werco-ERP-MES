@@ -609,7 +609,8 @@ image cannot boot until the database is stamped back to `116` — see
 
 No migration and no environment variable. After this deploy, clock-in, both operation-start verbs and completing a
 READY operation refuse **409** on a work order that is DRAFT or ON_HOLD (so does a hand-set
-`status: in_progress` through `PUT /api/v1/work-orders/operations/{id}`), and a held work order goes
+`status: in_progress`, or a `quantity_complete` raise on a not-started operation, through
+`PUT /api/v1/work-orders/operations/{id}`), and a held work order goes
 back to the floor through **Resume Work Order** (`POST /api/v1/work-orders/{id}/resume`), which
 resumes to DRAFT when no release is on record. Before deploying, run these two **read-only** queries against
 production (Supabase SQL editor; status enum labels are stored uppercase) and have a supervisor

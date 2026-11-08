@@ -107,8 +107,9 @@ an API token is accepted, as the one user it is bound to. The one thing
 the MCP layer *adds* is stricter, not looser: its hand-written tools force new and duplicated work
 orders to land DRAFT, keep release an explicit separate call (the header-update tool refuses
 `status: released` / `in_progress`, which the raw `PUT` would have accepted with no release stamp),
-set an imported or hand-keyed nest package back to DRAFT with its operations pending, never mix
-manual nests with a package import, and refuse operation names that are file names — see
+set an imported or hand-keyed nest package back to DRAFT with its operations pending (a job on hold
+is left on hold), never mix manual nests with a package import, and refuse operation names that are
+file names — see
 [MCP.md → DRAFT guarantees](MCP.md#9-draft-guarantees). The two Excel-cutover loaders are not
 tools at all, and neither is AI **Accept & apply** (`POST /ai/recommendations/{id}/apply`): under
 owner ruling 3 only a person signed in to the app runs an AI recommendation's action, so it is in
@@ -153,13 +154,16 @@ Recommendations):
 | **Closing work short** — a short close by either operation-complete verb whose scrap is already on record (one declaring new scrap gets `API_TOKEN_SCRAP` first), a force-complete below the order, and an office reduce-production re-stamp that would set a declared short | `is_api_token_credential` (reduce-production through `production_reduction_service.api_token_reduction_refusal`) | **403** `API_TOKEN_SHORT_CLOSE` (`Closing work short must be done by a person …`) | Owner decision 2026-11-07 (a token keeps only the full-count close); the re-stamp case is **this PR's extension** |
 | **The other count judgments** — good above the floor's labor record (office operation complete, override reason or not; force-complete above `deliverable`); `PUT /work-orders/operations/{id}` changing `quantity_complete` or a `quantity_scrapped` that is not a rise; `PUT /work-orders/{id}` changing the header's `quantity_complete` / `quantity_scrapped` in either direction; **every** correction through `POST /work-orders/operations/{id}/reduce-production` or `POST /shop-floor/operations/{id}/reduce-production`; lowering `quantity_ordered` once any operation has recorded good, scrap or labor; lowering a laser nest's `planned_runs` through `PATCH /laser-nests/{id}` once that nest's operation has recorded good, scrap, a start or any labor (`operation_action_gates.operation_has_recorded_work` — its runs are the operation's target, and the laser work order's order is derived from them) | `is_api_token_credential` (reduce-production through `api_token_reduction_refusal`, re-checked under the row locks) | **403** `API_TOKEN_COUNT_JUDGMENT` (`Recording more good than the floor counted, …`) | **This PR's extension** of the same principle — the owner was asked about scrap and short closes, not these |
 
-Deliberately **not** refused — current behavior, not owner decisions:
+Deliberately **not** refused:
 
 - A **crew-station badge token** is a person standing at the kiosk with their own badge, so it
-  passes every `is_api_token_credential` rule above. (`is_interactive_person` refuses it, and its
-  path fence keeps it on `/api/v1/shop-floor` anyway.)
+  passes every `is_api_token_credential` rule above. For declaring scrap and closing work short that
+  is the owner's decision (it names the crew badge: "kiosk, crew badge, desk"); for the count-judgment
+  and scrap-reason rows it is this PR's reading. (`is_interactive_person` refuses it, and its path
+  fence keeps it on `/api/v1/shop-floor` anyway.)
 - An agent presenting a **person's own interactive access JWT** (an MCP client signed in as that
-  person) is that person's session to both predicates and is not refused. The 2026-11-07 decision
+  person) is that person's session to both predicates and is not refused — current behavior, not an
+  owner decision. The 2026-11-07 decision
   covered standing API tokens only; whether an agent on a person's JWT may make these writes was
   not part of it.
 - Scrap fields that are not production scrap records: `POST /fabrication-quotes/{quote_id}/actuals`
@@ -173,8 +177,8 @@ The role gate still applies after the credential check: the person must hold a r
 apply the action. `hank_task_service.py` and its siblings carry older inline copies of the stricter
 predicate.
 
-Judgment-shaped writes the owner decided to leave open, so no predicate applies (the role gate and
-the route's own fences still do):
+Judgment-shaped writes deliberately left open, so no predicate applies (the role gate and the
+route's own fences still do):
 
 | Write | Open to | Decision |
 |---|---|---|
@@ -336,8 +340,8 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > audited door (**Release** or **Resume Work Order**). The office verbs carry the same state gate:
 > `POST /work-orders/operations/{id}/start`, and the generic `PUT /work-orders/operations/{id}`
 > (Admin / Manager / Supervisor) when it hand-sets `status: in_progress` — or `status: ready` on a
-> draft — so the generic edit cannot stand in for the start verb it sits beside. Paper back-entry has
-> no exemption. Labor already running when a job is held stays closable (clock-out, production
+> draft, or raises `quantity_complete` on a not-started operation — so the generic edit cannot stand
+> in for the start verb it sits beside. Paper back-entry has no exemption. Labor already running when a job is held stays closable (clock-out, production
 > report, completing an IN_PROGRESS operation).
 
 > **Short count at completion (owner ruling 1, 2026-11-05) — state and credential rules; no role

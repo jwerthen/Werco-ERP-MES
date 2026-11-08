@@ -175,7 +175,15 @@ type CrewView =
   | { name: 'resumeSign'; operationId: number }
   // Resume landed but left blockers OPEN. NO operationId on purpose — same as
   // ncrFiled: the ghost-guard must not yank this off the screen mid-read.
-  | { name: 'blockerStillOpen'; blockers: ResumeOpenBlocker[]; jobLabel: string }
+  | {
+      name: 'blockerStillOpen';
+      blockers: ResumeOpenBlocker[];
+      jobLabel: string;
+      // The held row's work-order start refusal (verbatim) and status, frozen
+      // at the resume: only the operation's hold came off.
+      startBlockedReason?: string | null;
+      workOrderStatus?: string | null;
+    }
   | { name: 'operatorSheet'; operator: OperatorSession; openJobs: OperatorOpenJob[] }
   // Process steps: a badge scan gates entry so every record is attributed to
   // the badge-identified operator (5-minute token; a 401 mid-flow re-scans).
@@ -1318,12 +1326,21 @@ export default function CrewStationKiosk() {
         const result = await kioskClient.resumeOperation(minted.access_token, item.operation_id);
         const open = stillOpenBlockers(result);
         if (open.length > 0) {
-          setView({ name: 'blockerStillOpen', blockers: open, jobLabel: crewJobLabel(item) });
+          setView({
+            name: 'blockerStillOpen',
+            blockers: open,
+            jobLabel: crewJobLabel(item),
+            startBlockedReason: item.start_blocked_reason ?? null,
+            workOrderStatus: item.work_order_status ?? null,
+          });
         } else {
           // Not always "resumed": a hold lifted off a PENDING operation lands
-          // back on PENDING and the job does not rejoin the queue. resumeToast
-          // says which happened rather than claiming a card that will not appear.
-          const toast = resumeToast(result, item.work_order_number);
+          // back on PENDING and the job does not rejoin the queue, and a job
+          // whose WORK ORDER is on hold (or unreleased) comes back still refused.
+          // resumeToast says which happened — the second from the held row's own
+          // start_blocked_reason (read live by findItem), since the resume
+          // response does not carry it.
+          const toast = resumeToast(result, item.work_order_number, item.start_blocked_reason);
           showToast(toast.type, toast.message);
           resetToBoard();
         }
@@ -2415,6 +2432,8 @@ export default function CrewStationKiosk() {
             blockers={view.blockers}
             jobLabel={view.jobLabel}
             doneLabel="Back to board"
+            startBlockedReason={view.startBlockedReason}
+            workOrderStatus={view.workOrderStatus}
             onDone={resetToBoard}
           />
         )}

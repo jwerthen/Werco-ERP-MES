@@ -141,6 +141,7 @@ from app.services.operation_action_gates import (
     MSG_DRAFT_CANNOT_BE_HELD,
     MSG_OPERATION_ON_HOLD_NO_START,
     MSG_PREDECESSORS_INCOMPLETE,
+    MSG_RETURN_TO_DRAFT_AUDIT_UNAVAILABLE,
     MSG_SCRAP_REASON_OR_CODE_REQUIRED,
     MSG_WORK_ORDER_NOT_RELEASED,
     MSG_WORK_ORDER_ON_HOLD,
@@ -219,6 +220,7 @@ from app.services.work_order_state_service import (
     begin_operation_progress,
     completed_chain_operation,
     demote_operations_for_sequencing,
+    demote_ready_operations,
     finalize_operation_completion,
     find_parent_to_advance,
     is_laser_dispatch_work_order,
@@ -3887,6 +3889,12 @@ def update_work_order(
     Lowering ``quantity_ordered`` below the good + scrap a whole-order operation has already
     accounted for is refused **409** naming the operation: lower the order only by units no
     operation has started.
+
+    Moving a released / in-progress / on-hold work order to ``status: draft`` takes it off
+    the floor: every un-worked READY operation (laser nests included) is returned to
+    PENDING, one REQUIRED audited status change each (the resume-to-draft recipe), so a
+    draft leaves no cards on the dispatch board or the kiosk. Worked operations are left
+    as they are. **503** (nothing changed) when those audit rows cannot be written.
     """
     work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id).first()
     if not work_order:
@@ -4093,6 +4101,11 @@ def update_work_order(
             if strand is not None:
                 raise HTTPException(status_code=409, detail=accounting_strand_message(strand))
 
+    # Likewise remembered before the setattr loop: a non-DRAFT -> DRAFT move takes the job
+    # off the floor, so its un-worked READY operations are demoted below. Terminal -> DRAFT
+    # was refused above; DRAFT -> DRAFT (a re-send) is not a move and demotes nothing.
+    returning_to_draft = new_status == WorkOrderStatus.DRAFT and work_order.status != WorkOrderStatus.DRAFT
+
     # Refuse BEFORE the first setattr, so a refused flip leaves the row untouched.
     # Every completion verb re-evaluates the predecessor gate at action time, so an
     # operation being worked ahead of its predecessors would become uncompletable the
@@ -4200,6 +4213,27 @@ def update_work_order(
             },
         )
 
+    # A draft must not leave cards on the dispatch board or the kiosk, and every promotion
+    # seam is forward-only (and never promotes a draft), so nothing else would ever take
+    # these READY operations back off the floor before Release. The resume-to-DRAFT recipe,
+    # exactly: the one demotion core with scope "all_unworked" (laser nests included), flush
+    # BEFORE the first audit call (invariant 4 -- WorkOrder and WorkOrderOperation both map
+    # version_id_col, so a concurrent clock-in surfaces as the app-wide 409, not a swallowed
+    # StaleDataError), then one REQUIRED row per demotion, rolled back with the whole PUT
+    # (503) when any row cannot be written. Worked operations are never touched.
+    draft_demoted_operations = (
+        demote_ready_operations(db, work_order, scope="all_unworked", exempt_laser=False) if returning_to_draft else []
+    )
+    if draft_demoted_operations:
+        db.flush()
+        with required_audit(db, MSG_RETURN_TO_DRAFT_AUDIT_UNAVAILABLE):
+            log_demotions_required(
+                audit,
+                draft_demoted_operations,
+                reason=f"work order {work_order.work_order_number} was returned to draft.",
+                extra={"transition": "work_order_returned_to_draft"},
+            )
+
     _emit_work_order_event(
         db,
         company_id=company_id,
@@ -4208,7 +4242,7 @@ def update_work_order(
         event_type="work_order_updated",
         payload={
             "updated_fields": list(update_data.keys()),
-            "operations_returned_to_pending": len(demoted_operations),
+            "operations_returned_to_pending": len(demoted_operations) + len(draft_demoted_operations),
         },
     )
 
@@ -5741,6 +5775,12 @@ def update_operation(
     refused **409** too (it would put unreleased work on the dispatch board). Both are
     raised before any field is written. Re-sending the operation's current status is
     not a transition and is accepted.
+
+    Raising ``quantity_complete`` on an operation that is (or this write leaves) PENDING
+    or READY is refused **409** with the same start-gate text when the work order is a
+    draft or on hold: recorded good quantity on a not-started operation is what the next
+    reconciling read treats as a start. Returns **404** when the operation's work order is
+    missing or soft-deleted.
     """
     operation = (
         db.query(WorkOrderOperation)
@@ -5749,6 +5789,15 @@ def update_operation(
     )
     if not operation:
         raise HTTPException(status_code=404, detail="Operation not found")
+    # Invariant 3: an operation of a soft-deleted work order is part of a tombstone, and
+    # soft delete leaves the work order's status (e.g. RELEASED) as it was -- so without
+    # this the start gate below passes and a supervisor could hand-start, re-count or
+    # re-route a deleted job. Refused for the WHOLE verb, before the version check, the
+    # start gate and the first setattr, exactly as every other start door 404s (clock-in,
+    # both start verbs, /start, /release). The records-vs-selection exceptions do not
+    # cover editing a deleted job's routing.
+    if operation.work_order is None or operation.work_order.is_deleted:
+        raise HTTPException(status_code=404, detail="Work order not found")
 
     # Capture old values for audit. This generic update writes domain data (including
     # quantity_scrapped/scrap_reason) via a blind setattr loop; previously it committed
@@ -5912,6 +5961,28 @@ def update_operation(
                 status_blocked_reason = MSG_WORK_ORDER_NOT_RELEASED
         if status_blocked_reason:
             raise HTTPException(status_code=409, detail=status_blocked_reason)
+
+    # The same gate's other door: a quantity_complete RAISE on an operation nobody has
+    # started. The reconciling read lifts a PENDING / READY operation carrying good
+    # quantity to IN_PROGRESS, and the office complete verb then accepts it ungated -- so
+    # without this, "PUT a count, GET, complete" started and finished work (tied material
+    # included) on a job nobody released or a supervisor stopped. The read now withholds
+    # that lift on a DRAFT / ON_HOLD job too (reconcile_work_orders_from_completion_
+    # evidence); this refusal also covers readers that never reconcile. Narrow on purpose:
+    # only a RAISE of good quantity, only on an operation this write leaves PENDING / READY,
+    # only on a DRAFT / ON_HOLD work order (a terminal one is not this gate's business,
+    # and scrap never triggers the lift). The text is the start gate's own (no inline twin).
+    work_order_for_gate = operation.work_order
+    if (
+        work_order_for_gate.status in (WorkOrderStatus.DRAFT, WorkOrderStatus.ON_HOLD)
+        and update_data.get("quantity_complete") is not None
+        and float(update_data["quantity_complete"]) > float(operation.quantity_complete or 0)
+        and (new_op_status if new_op_status is not None else operation.status)
+        in (OperationStatus.PENDING, OperationStatus.READY)
+    ):
+        count_blocked_reason = work_order_start_blocker(work_order_for_gate)
+        if count_blocked_reason:
+            raise HTTPException(status_code=409, detail=count_blocked_reason)
 
     # Work-center reassignment (planner action, e.g. re-dispatching a laser nest to
     # another laser -- but legitimate for any operation between compatible work

@@ -1,6 +1,7 @@
 import React from 'react';
 import { ExclamationTriangleIcon } from '@heroicons/react/24/solid';
 import { openBlockerLine, openBlockerMeta, openBlockersFreeTextWithheld } from './heldOperations';
+import { KioskStartBlockedChip } from './KioskQueueCard';
 import type { ResumeOpenBlocker } from '../../types';
 
 interface KioskBlockerStillOpenScreenProps {
@@ -10,6 +11,14 @@ interface KioskBlockerStillOpenScreenProps {
   /** "Back to queue" (operator kiosk) / "Back to board" (crew station). */
   doneLabel: string;
   onDone: () => void;
+  /**
+   * The WORK ORDER's start refusal from the held row that was resumed (its
+   * `start_blocked_reason`, verbatim), and that row's `work_order_status` for the
+   * chip. Set, the screen stops saying the job is running: only the operation's
+   * hold came off, and every start is still refused.
+   */
+  startBlockedReason?: string | null;
+  workOrderStatus?: string | null;
 }
 
 /**
@@ -31,20 +40,43 @@ interface KioskBlockerStillOpenScreenProps {
  * unattended tablet — so each row falls back to its category and the panel says a
  * written reason exists rather than leaving a bare category to read as "nobody
  * gave one". Same split, same reason, as the held card one screen earlier.
+ *
+ * Resume lifts the OPERATION's hold only. When the work order itself is on hold
+ * (or not released) the job is back on the queue but still refused, so the
+ * screen says "Operation hold lifted", shows the work order's reason verbatim —
+ * the same text a clock-in would 409 with — and never claims the job is running.
  */
 export default function KioskBlockerStillOpenScreen({
   blockers,
   jobLabel,
   doneLabel,
   onDone,
+  startBlockedReason,
+  workOrderStatus,
 }: KioskBlockerStillOpenScreenProps) {
   const many = blockers.length > 1;
   const textWithheld = openBlockersFreeTextWithheld(blockers);
+  const startBlocked = (startBlockedReason || '').trim() || null;
   return (
     <section aria-label="Hold still open" className="mx-auto w-full max-w-2xl text-center">
       <ExclamationTriangleIcon className="mx-auto h-16 w-16 text-fd-amber" aria-hidden="true" />
-      <h2 className="mt-3 text-3xl font-bold text-fd-ink">Job resumed</h2>
+      <h2 className="mt-3 text-3xl font-bold text-fd-ink">{startBlocked ? 'Operation hold lifted' : 'Job resumed'}</h2>
       <p className="mt-1 font-mono text-lg text-fd-mute">{jobLabel}</p>
+
+      {/* The work order still refuses every start — the server's words, never
+          reworded. Above the blocker panel: it is why nothing can run yet. */}
+      {startBlocked && (
+        <div
+          role="status"
+          data-testid="kiosk-blocker-open-start-blocked"
+          className="mt-5 rounded border-2 border-fd-amber/60 bg-fd-amber/10 px-5 py-4 text-left"
+        >
+          <KioskStartBlockedChip
+            item={{ start_blocked_reason: startBlocked, work_order_status: workOrderStatus ?? null }}
+          />
+          <p className="mt-2 text-lg text-fd-body">{startBlocked}</p>
+        </div>
+      )}
 
       <div className="mt-5 rounded border-2 border-fd-amber bg-fd-amber/10 px-5 py-6 text-left">
         <p className="text-center font-mono text-xs font-bold uppercase tracking-[0.25em] text-fd-amber">
@@ -79,7 +111,8 @@ export default function KioskBlockerStillOpenScreen({
         )}
 
         <p className="mt-4 text-lg text-fd-body">
-          The job is running again, but {many ? 'these problems are' : 'this problem is'} still recorded and open.
+          {startBlocked ? 'The operation hold is lifted' : 'The job is running again'}, but{' '}
+          {many ? 'these problems are' : 'this problem is'} still recorded and open.
         </p>
         <p data-testid="kiosk-blocker-open-followup" className="mt-2 text-lg text-fd-body">
           If {many ? 'they were' : 'it was'} a mistake, tell a supervisor to clear {many ? 'them' : 'it'} — resuming
