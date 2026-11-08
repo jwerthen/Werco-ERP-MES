@@ -301,8 +301,8 @@ or mint, list or revoke tokens, including through the three tools that front tho
 The fence blocks those direct verbs only: an **Admin**-held token is still an Admin on `/users`
 (`create_user`, `update_user`, `reset_user_password`), so the bound user's role is the real
 boundary. Credential rules sit on top of the role, whatever the user's role — a standing API
-token does not make these judgments; a person does (the one full list, with the judgment writes the
-owner left open to a token, is linked below):
+token does not make these judgments; a person does (the one full list is linked just after this
+list):
 - **An API token may not declare scrap (owner decision 2026-11-07).** Only a person — at the kiosk,
   with a crew badge, or signed in at a desk — declares scrap, because a scrap count is quality
   evidence someone has to have seen. Every tool whose call would raise a recorded scrap quantity
@@ -340,15 +340,19 @@ owner left open to a token, is linked below):
   after work was recorded must be done by a person signed in to the app, not an API token."`.
 - **Nor close an AI action card** (owner ruling 3): `accept_ai_recommendation` on an action card
   (record-only, "Mark handled") answers **403** to an API token, and AI Accept & apply is not a tool
-  at all. `dismiss_ai_recommendation`, snooze and feedback stay open to every credential.
+  at all.
+- **Deliberately left open.** `work_orders_resume_work_order` lifts a work-order hold for a token
+  whose user holds Admin / Manager / Supervisor, audited as that user (owner decision 2026-11-07).
+  `dismiss_ai_recommendation`, snooze and feedback stay open to every credential — a design decision
+  of the AI governance change, which the owner confirmed 2026-11-07 for Dismiss on an action card.
 
 An interactive access JWT —
 the person's own session, which the MCP client approves call by call — is not refused by any of
 these: current behavior, not part of the 2026-11-07 decision, which covered standing API tokens
 only. No token is ever bound to a superuser / `platform_admin` (409 at mint, refused at use),
 deactivating a token's user revokes it, and every audit row a token writes carries
-`extra_data.credential` naming the token. A few judgment writes refuse a token whatever its role,
-and the owner left others open to one — `work_orders_resume_work_order` among them (2026-11-07): see
+`extra_data.credential` naming the token. The one full list of these credential rules — what
+refuses a token, what is deliberately left open and who decided each — is
 [RBAC_PERMISSIONS.md → Credential policy for judgment writes](RBAC_PERMISSIONS.md#credential-policy-for-judgment-writes).
 Full reference: [API.md → API tokens](API.md#api-tokens-bots-and-mcp-clients).
 

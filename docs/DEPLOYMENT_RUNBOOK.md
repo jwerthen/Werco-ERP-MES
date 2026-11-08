@@ -697,12 +697,30 @@ or report scrap anywhere (**403**; owner decision 2026-11-07).
    order recorded, which is as low as `PUT /work-orders/{id}` lets `quantity_ordered` go):
    - **`order_floor` equals the legacy stage's good** (no stage recorded more, and the legacy stage
      scrapped nothing): the missing units were never started, so lower `quantity_ordered` to that
-     good (Work Order detail → edit; restated per-operation targets follow it).
+     good (restated per-operation targets follow it). No screen edits a work order's quantity, so
+     this is `PUT /api/v1/work-orders/{id}` with `quantity_ordered` and the current `version` (the MCP
+     `update_work_order` tool fronts it), sent under a person's own sign-in: a standing API token is
+     refused **403** lowering an order once work is recorded, which it always is here.
    - **`order_floor` is above it** — an earlier stage recorded more (the usual legacy case: Op 10 at
      10 good, Op 20 closed at 8) or the legacy stage scrapped some: those units existed and were
      lost, so lowering the order would misstate them as never started, and it is refused **409**
-     anyway. Force-complete the work order at the work-order grain (`POST /work-orders/{id}/complete`,
-     Work Order detail → Complete) with the work-order scrap and a reason covering the shortfall.
+     anyway. Force-complete the work order at the work-order grain (`POST /work-orders/{id}/complete`)
+     with the work-order scrap and a reason covering the shortfall. The screens offer it only on
+     released or in-progress work, so the route depends on the query's `wo_status`:
+     - **IN_PROGRESS** — Work Order page → **Complete** (the header button renders only in this
+       status), or the Work Orders list → click the row → **Complete work order** in the operations
+       popup.
+     - **RELEASED** — the operations popup's **Complete work order**, or **Start** on the Work Order
+       page and then **Complete**.
+     - **ON_HOLD** — **Resume Work Order** first: the popup's button is disabled on a held job and
+       Start refuses one. With a release record it resumes to IN_PROGRESS (the legacy COMPLETE
+       operation counts as work done); with none it resumes to **DRAFT** (floor-gates item 2 above
+       lists those) — continue as for DRAFT.
+     - **DRAFT** — **Release** on the Work Order page first (neither screen offers Complete on a
+       draft), then continue as for RELEASED.
+
+     Either way the verb refuses **409** while any of the job's operations is itself on hold —
+     **Clear hold** on that operation's row first.
 
    ```sql
    SELECT wo.company_id, wo.work_order_number, wo.status AS wo_status,

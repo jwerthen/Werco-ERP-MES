@@ -671,7 +671,8 @@ bot permission — the token is exactly as powerful as the user it belongs to, a
 > - **This PR's extension of that decision** (the owner was asked about scrap and short closes, not
 >   these): writing or changing a scrap reason or code; good above the floor's record; operation and
 >   work-order header count edits; every correction through either reduce-production verb; lowering an
->   order, or a laser nest's planned runs, once work is recorded — **403**. See Work Orders → "Short count at completion" → "API tokens
+>   order, or a laser nest's planned runs, once work is recorded; re-importing a nest package over
+>   nest operations with recorded work — **403**. See Work Orders → "Short count at completion" → "API tokens
 >   may not declare scrap or make count judgments".
 > - **Left open.** **Resume Work Order** (`POST /work-orders/{id}/resume`): a token whose user holds
 >   Admin / Manager / Supervisor may lift a work-order hold, audited as that user with
@@ -2185,7 +2186,7 @@ company-scoped.
 > apply to a standing per-user API token (`app.core.credentials.is_api_token_credential`) whatever
 > its user's role, and are raised before any write and before any audit row. This block says where
 > each sits on its route; the policy list across all credential rules — the AI ones included, and the
-> writes the owner left open to a token — is
+> judgment writes deliberately left open to a token — is
 > [RBAC → Credential policy for judgment writes](RBAC_PERMISSIONS.md#credential-policy-for-judgment-writes).
 >
 > - **Scrap — owner decision 2026-11-07.** A standing API token may not declare scrap, anywhere: only

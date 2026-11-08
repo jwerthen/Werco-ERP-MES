@@ -86,7 +86,7 @@ Agents reach the API through the MCP server in `backend/app/mcp/` ([docs/MCP.md]
 either the Streamable HTTP door at `/mcp` (off by default, `WERCO_MCP_HTTP_ENABLED`) or the stdio
 bridge `python -m app.mcp`. **Nothing in this document changes for them** (the credential rules on
 top of the role — the writes an API token is refused whatever its user's role, such as declaring
-scrap or closing work short, and the judgment writes the owner left open to one — are listed once,
+scrap or closing work short, and the judgment writes deliberately left open to one — are listed once,
 in [Credential policy for judgment writes](#credential-policy-for-judgment-writes), and apply to an
 API token however it is presented). Every tool call is a
 real request dispatched through the same routers with a real user's bearer — a 15-minute access JWT
@@ -127,11 +127,15 @@ and `/api-tokens` so it can never mint another credential.
 
 ### Credential policy for judgment writes
 
-A few writes record a **person's judgment** — not just a permitted action — and the owner rulings
-of 2026-11-05 restrict which *credential* may carry them, on top of the role gate. This section is
-the **one list** of those credential rules — what refuses a credential, what the owner left open,
-and what is deliberately not refused — across the AI governance (ruling 3), floor-gates (ruling 2)
-and short-count (ruling 1) changes; other documents point here. The predicates live once, in
+A few writes record a **person's judgment** — not just a permitted action — and some of them are
+restricted to certain *credentials*, on top of the role gate. The restrictions have three sources,
+and each row below names its own: owner ruling 3 of 2026-11-05 (the two AI rows), the owner's
+decision of 2026-11-07 (a standing API token may not declare scrap or close work short), and this
+PR's extensions of that decision (scrap reasons, the re-stamp short close and the other count
+judgments). This section is the **one list** of those credential rules — what refuses a credential,
+what is deliberately left open (and who decided each), and what is deliberately not refused —
+across the AI governance (ruling 3), floor-gates (ruling 2) and short-count (ruling 1) changes;
+other documents point here. The predicates live once, in
 `backend/app/core/credentials.py`, and read the credential `get_current_user` stamped on the
 request:
 
