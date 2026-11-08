@@ -25,8 +25,10 @@ import type { KioskCrewQueueItem } from '../components/kiosk/kioskConstants';
 import {
   BARE_HOLD,
   CREW_HELD_ROW,
+  CREW_HELD_ROW_ON_HELD_WORK_ORDER,
   CREW_QUEUE_ROW,
   UNRECORDED_HOLD,
+  WORK_ORDER_ON_HOLD_REASON,
   crewHeldRowWith,
 } from '../components/kiosk/heldOperationFixtures';
 
@@ -251,6 +253,45 @@ describe('CrewStationKiosk — held operations', () => {
     const toast = await screen.findByText(/hold lifted/i);
     expect(toast).toBeInTheDocument();
     expect(screen.queryByText('WO-HELD-0001 resumed')).not.toBeInTheDocument();
+  });
+
+  it('says the work order still refuses a start, instead of "resumed", under a held work order', async () => {
+    // The station hold shape — the start refusal is static server text, so a
+    // station principal receives it (unlike the blocker's free text).
+    mocked.getQueue.mockResolvedValue(queuePayload([], []));
+    mocked.getQueue.mockResolvedValueOnce(queuePayload([], [CREW_HELD_ROW_ON_HELD_WORK_ORDER]));
+    mocked.resumeOperation.mockResolvedValue({ message: 'Operation resumed', status: 'ready', open_blockers: [] });
+    renderKiosk();
+
+    const card = await screen.findByTestId('kiosk-held-card');
+    expect(within(card).getByTestId('kiosk-start-blocked-chip')).toHaveTextContent('WO on hold');
+    await userEvent.click(within(card).getByTestId('kiosk-held-resume'));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByTestId('kiosk-resume-start-blocked')).toHaveTextContent(WORK_ORDER_ON_HOLD_REASON);
+    await userEvent.click(within(dialog).getByTestId('kiosk-resume-confirm'));
+    await screen.findByTestId('crew-resume-badge-display');
+    await userEvent.keyboard('4217{Enter}');
+
+    expect(
+      await screen.findByText(`WO-HELD-0001 operation hold lifted — ${WORK_ORDER_ON_HOLD_REASON}`)
+    ).toBeInTheDocument();
+    expect(screen.queryByText('WO-HELD-0001 resumed')).not.toBeInTheDocument();
+  });
+
+  it('keeps the work-order refusal on the hold-still-open screen too', async () => {
+    mocked.getQueue.mockResolvedValue(queuePayload([], [CREW_HELD_ROW_ON_HELD_WORK_ORDER]));
+    mocked.resumeOperation.mockResolvedValue({
+      message: 'Operation resumed',
+      status: 'ready',
+      open_blockers: [{ id: 5, category: 'machine_down', severity: 'high', status: 'open' }],
+    });
+    renderKiosk();
+
+    await resumeWithBadge();
+
+    expect(await screen.findByRole('heading', { name: 'Operation hold lifted' })).toBeInTheDocument();
+    expect(screen.getByTestId('kiosk-blocker-open-start-blocked')).toHaveTextContent(WORK_ORDER_ON_HOLD_REASON);
+    expect(screen.queryByText(/running again/i)).not.toBeInTheDocument();
   });
 
   it('renders a server refusal VERBATIM and inline on the sign screen', async () => {

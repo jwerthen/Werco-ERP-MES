@@ -837,8 +837,10 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
    * The toast is composed from what the SERVER returned, never from the absence
    * of a throw: resume RESTORES the operation and deliberately does not resolve
    * the blocker, and it lands PENDING (off the board) when the parent is
-   * unreleased or a predecessor is incomplete. `clearHoldToast` folds both
-   * shortfalls into ONE warning; only a clean lift is `success`.
+   * unreleased or a predecessor is incomplete. And it lifts only the
+   * OPERATION's hold: a work order that is itself on hold still refuses every
+   * start, which the row's `start_blocked_reason` says. `clearHoldToast` folds
+   * every shortfall into ONE warning; only a clean lift is `success`.
    */
   const handleClearHold = async (operation: Operation) => {
     if (actionLoading !== null || productionSave.mutationsBlocked) return;
@@ -850,7 +852,9 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
       // moved it. Clear Hold is server-GATED (409 on a cancelled-nest tombstone,
       // 400 when the operation is not actually held).
       await Promise.all([loadOperations(), loadActiveJobs(), loadDashboardCounts()]);
-      const { type, message } = clearHoldToast(result, operation.work_order_number);
+      // The row's own start_blocked_reason: an operation hold can sit under a
+      // held (or unreleased) WORK ORDER, which this resume does not lift.
+      const { type, message } = clearHoldToast(result, operation.work_order_number, operation.start_blocked_reason);
       showToast(type, message);
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || err.message || 'Failed to clear the hold');

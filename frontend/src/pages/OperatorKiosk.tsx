@@ -101,7 +101,15 @@ type KioskView =
   | { name: 'resumeConfirm'; item: KioskQueueItem }
   // The resume landed but left blockers OPEN. Its own view, like ncrFiled, so
   // the 15s queue poll can't yank the warning off the screen mid-read.
-  | { name: 'blockerStillOpen'; blockers: ResumeOpenBlocker[]; jobLabel: string }
+  | {
+      name: 'blockerStillOpen';
+      blockers: ResumeOpenBlocker[];
+      jobLabel: string;
+      // The held row's work-order start refusal (verbatim) and status, frozen
+      // at the resume: only the operation's hold came off.
+      startBlockedReason?: string | null;
+      workOrderStatus?: string | null;
+    }
   | { name: 'steps'; operationId: number; jobLabel: string; missing?: MissingStepInfo[] | null }
   // Full-screen drawing / nest viewer (Foundry 1h).
   | { name: 'viewer'; operationId: number; initialTab: KioskDocTab }
@@ -970,12 +978,20 @@ export default function OperatorKiosk() {
           item.operation_name || ''
         }`.trim();
         if (open.length > 0) {
-          setView({ name: 'blockerStillOpen', blockers: open, jobLabel: label });
+          setView({
+            name: 'blockerStillOpen',
+            blockers: open,
+            jobLabel: label,
+            startBlockedReason: item.start_blocked_reason ?? null,
+            workOrderStatus: item.work_order_status ?? null,
+          });
         } else {
           // Not always "resumed": a hold lifted off a PENDING operation lands
-          // back on PENDING and the job does not rejoin the queue. resumeToast
-          // says which happened rather than claiming a card that will not appear.
-          const toast = resumeToast(result, item.work_order_number);
+          // back on PENDING and the job does not rejoin the queue, and a job
+          // whose WORK ORDER is on hold (or unreleased) comes back still refused.
+          // resumeToast says which happened — the second from the held row's own
+          // start_blocked_reason, since the resume response does not carry it.
+          const toast = resumeToast(result, item.work_order_number, item.start_blocked_reason);
           showToast(toast.type, toast.message);
           setView({ name: 'queue' });
         }
@@ -1021,6 +1037,16 @@ export default function OperatorKiosk() {
       ? { reason: live.start_blocked_reason, status: live.work_order_status ?? null }
       : null;
   }, [confirmItem, queue]);
+
+  // The held row behind the RESUME confirm, read LIVE from `held` when it is
+  // still there (the confirm keeps the row it was opened with, and a poll can
+  // land a supervisor's Hold Work Order — or Resume Work Order — while it is up),
+  // else that snapshot. It feeds both the overlay's work-order refusal panel and
+  // the post-resume toast, so the two read the same row.
+  const resumeConfirmItem = useMemo(() => {
+    if (view.name !== 'resumeConfirm') return null;
+    return held.find((h) => h.operation_id === view.item.operation_id) ?? view.item;
+  }, [view, held]);
 
   const operatorInitials = `${(user?.first_name || ' ')[0] || ''}${(user?.last_name || ' ')[0] || ''}`
     .trim()
@@ -1895,6 +1921,8 @@ export default function OperatorKiosk() {
                 blockers={view.blockers}
                 jobLabel={view.jobLabel}
                 doneLabel="Back to queue"
+                startBlockedReason={view.startBlockedReason}
+                workOrderStatus={view.workOrderStatus}
                 onDone={() => setView({ name: 'queue' })}
               />
             </div>
@@ -1958,14 +1986,14 @@ export default function OperatorKiosk() {
         />
       )}
 
-      {view.name === 'resumeConfirm' && (
+      {resumeConfirmItem && (
         <KioskResumeConfirmModal
-          item={view.item}
+          item={resumeConfirmItem}
           busy={busy}
           online={online}
           offlineHintId={OFFLINE_HINT_ID}
           onCancel={() => setView({ name: 'queue' })}
-          onConfirm={() => void handleResume(view.item)}
+          onConfirm={() => void handleResume(resumeConfirmItem)}
         />
       )}
 

@@ -140,6 +140,38 @@ export const CREW_HELD_ROW: KioskCrewQueueItem = {
   roster: [],
 };
 
+/**
+ * The server's verbatim refusal for an ON_HOLD work order —
+ * `operation_action_gates.MSG_WORK_ORDER_ON_HOLD`, which every floor row carries
+ * as `start_blocked_reason` and every start verb 409s with. Byte-identical on
+ * purpose: the floor renders it, never rewords it.
+ */
+export const WORK_ORDER_ON_HOLD_REASON =
+  "This work order is on hold — work cannot start until a supervisor resumes it (Resume Work Order on the work order). Resuming or clearing an operation's hold does not lift it.";
+
+/** `MSG_WORK_ORDER_NOT_RELEASED`, verbatim — the DRAFT twin of the above. */
+export const WORK_ORDER_NOT_RELEASED_REASON =
+  'This work order has not been released — release first. Work cannot start until a supervisor releases it.';
+
+/**
+ * An operation hold sitting UNDER a held work order. Held rows come out of the
+ * same row builder as queue rows, so they carry the work order's status and its
+ * start refusal too. Resume lifts the operation's hold only; this row is how a
+ * surface knows the job will still not start afterwards.
+ */
+export const HELD_ROW_ON_HELD_WORK_ORDER: KioskQueueItem = {
+  ...HELD_ROW,
+  work_order_status: 'on_hold',
+  start_blocked_reason: WORK_ORDER_ON_HOLD_REASON,
+};
+
+/** Crew twin of `HELD_ROW_ON_HELD_WORK_ORDER` (the station hold shape). */
+export const CREW_HELD_ROW_ON_HELD_WORK_ORDER: KioskCrewQueueItem = {
+  ...CREW_HELD_ROW,
+  work_order_status: 'on_hold',
+  start_blocked_reason: WORK_ORDER_ON_HOLD_REASON,
+};
+
 /** Swap in a different hold block (bare, unrecorded, custom) on a held row. */
 export function heldRowWith(hold: OperationHold | null): KioskQueueItem {
   return { ...HELD_ROW, hold };

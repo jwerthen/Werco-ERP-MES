@@ -13,6 +13,7 @@
  */
 
 import {
+  clearHoldOutcome,
   clearHoldToast,
   formatHoldAttribution,
   hasHoldReason,
@@ -32,6 +33,7 @@ import {
 } from './heldOperations';
 import type { OperationHold, ResumeOpenBlocker } from '../../types';
 import type { BlockerOperationOutcome, WorkOrderBlockerWriteResult } from '../../types/aiForward';
+import { WORK_ORDER_NOT_RELEASED_REASON, WORK_ORDER_ON_HOLD_REASON } from './heldOperationFixtures';
 
 /** A still-open blocker as an IDENTIFIED session gets it back from resume. */
 const TITLED_BLOCKER: ResumeOpenBlocker = {
@@ -274,6 +276,55 @@ describe('resumeToast', () => {
     expect(resumeToast(null, null).message).toBe('Operation resumed');
     expect(resumeToast(undefined, undefined).type).toBe('success');
   });
+
+  // The server puts an un-started operation of an ON_HOLD work order back to
+  // READY, so the card returns — still refused. The held row's reason is the
+  // only thing that says so; the resume response does not.
+  it('does NOT claim "resumed" when the work order itself is still on hold', () => {
+    expect(resumeToast({ status: 'ready' }, 'WO-1001', WORK_ORDER_ON_HOLD_REASON)).toEqual({
+      type: 'info',
+      message: `WO-1001 operation hold lifted — ${WORK_ORDER_ON_HOLD_REASON}`,
+    });
+  });
+
+  it('keeps both facts when the job also stayed off the queue', () => {
+    expect(resumeToast({ status: 'pending' }, 'WO-1001', WORK_ORDER_NOT_RELEASED_REASON)).toEqual({
+      type: 'info',
+      message: `WO-1001 operation hold lifted — ${WORK_ORDER_NOT_RELEASED_REASON} It did not return to the queue.`,
+    });
+  });
+
+  it('leaves every message exactly as it was for a row with no work-order refusal', () => {
+    for (const reason of [null, undefined, '', '   ']) {
+      expect(resumeToast({ status: 'ready' }, 'WO-1001', reason)).toEqual({
+        type: 'success',
+        message: 'WO-1001 resumed',
+      });
+      expect(resumeToast({ status: 'pending' }, 'WO-1001', reason)).toEqual(resumeToast({ status: 'pending' }, 'WO-1001'));
+    }
+  });
+});
+
+describe('clearHoldOutcome (the one verdict all three Clear Hold screens take)', () => {
+  it('counts a work-order refusal on the held row as falling short', () => {
+    expect(clearHoldOutcome({ status: 'ready', open_blockers: [] }, WORK_ORDER_ON_HOLD_REASON)).toEqual({
+      landedPending: false,
+      openBlockers: [],
+      workOrderBlocked: WORK_ORDER_ON_HOLD_REASON,
+      fellShort: true,
+    });
+  });
+
+  it('is unchanged for a caller that passes no reason — the Work Order page', () => {
+    expect(clearHoldOutcome({ status: 'ready', open_blockers: [] })).toEqual({
+      landedPending: false,
+      openBlockers: [],
+      workOrderBlocked: null,
+      fellShort: false,
+    });
+    expect(clearHoldOutcome({ status: 'pending', open_blockers: [] }, '  ').fellShort).toBe(true);
+    expect(clearHoldOutcome({ status: 'pending', open_blockers: [] }, '  ').workOrderBlocked).toBeNull();
+  });
 });
 
 describe('clearHoldToast (the desk screens: ShopFloor + ShopFloorSimple)', () => {
@@ -335,6 +386,45 @@ describe('clearHoldToast (the desk screens: ShopFloor + ShopFloorSimple)', () =>
     expect(clearHoldToast({ status: 'ready' }, '  ').message).toBe('Operation hold cleared');
     expect(clearHoldToast(null, null).message).toBe('Operation hold cleared');
     expect(clearHoldToast(undefined, undefined).type).toBe('success');
+  });
+
+  it('warns, in the server words, when the work order itself is still on hold', () => {
+    expect(clearHoldToast({ status: 'ready', open_blockers: [] }, 'WO-1001', WORK_ORDER_ON_HOLD_REASON)).toEqual({
+      type: 'warning',
+      message: `WO-1001 operation hold lifted — ${WORK_ORDER_ON_HOLD_REASON}`,
+    });
+  });
+
+  it('leads with the work-order refusal and folds the other shortfalls in, as ONE warning', () => {
+    const toast = clearHoldToast(
+      { status: 'pending', open_blockers: [TITLED_BLOCKER] },
+      'WO-1001',
+      WORK_ORDER_ON_HOLD_REASON
+    );
+    expect(toast).toEqual({
+      type: 'warning',
+      message:
+        `WO-1001 operation hold lifted — ${WORK_ORDER_ON_HOLD_REASON} Also: the job did not return to the queue ` +
+        '(still waiting on release or an earlier operation); 1 blocker still open: Machine Down: OP20 Deburr.',
+    });
+  });
+
+  it('separates a reason that does not end in a full stop', () => {
+    const terminal = 'cannot start operation: work order is complete';
+    expect(clearHoldToast({ status: 'ready', open_blockers: [TITLED_BLOCKER] }, 'WO-1001', terminal).message).toBe(
+      `WO-1001 operation hold lifted — ${terminal}. Also: 1 blocker still open: Machine Down: OP20 Deburr.`
+    );
+  });
+
+  it('leaves every message exactly as it was for a row with no work-order refusal', () => {
+    for (const result of [
+      { status: 'ready', open_blockers: [] },
+      { status: 'pending', open_blockers: [] },
+      { status: 'pending', open_blockers: [TITLED_BLOCKER] },
+    ]) {
+      expect(clearHoldToast(result, 'WO-1001', null)).toEqual(clearHoldToast(result, 'WO-1001'));
+      expect(clearHoldToast(result, 'WO-1001', '')).toEqual(clearHoldToast(result, 'WO-1001'));
+    }
   });
 });
 
