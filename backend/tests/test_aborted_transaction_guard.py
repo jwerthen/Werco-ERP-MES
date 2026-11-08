@@ -22,6 +22,7 @@ vacuous. ``scripts/verify_audit_deadlock_postgres.py`` proves the same on real P
 """
 
 import itertools
+import logging
 import sqlite3
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -1007,3 +1008,120 @@ async def test_a_failed_tenant_does_not_poison_the_next_one(
     result = await getattr(module, task)()
     assert result["companies_processed"] == 1
     assert result["runs"] == [{"company_id": 2}]
+
+
+class _PoisoningSession:
+    """A job's shared session whose first query on ``poison_on`` fails the way a database error does.
+
+    It fails a flush first (two parts, one number: IntegrityError), which leaves the real session
+    needing a rollback -- the state a Postgres error, aborted transaction or refused COMMIT also
+    leaves -- then raises. Every other call goes to the real session.
+    """
+
+    def __init__(self, real: Session, poison_on) -> None:
+        self._real = real
+        self._poison_on = poison_on
+        self.poisoned = False
+
+    def query(self, *entities, **kwargs):
+        if not self.poisoned and entities and entities[0] is self._poison_on:
+            self.poisoned = True
+            _poison(self._real)
+        return self._real.query(*entities, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def _poison(db: Session) -> None:
+    number = f"ABORT-JOB-{next(_ids)}"
+    for name in ("first", "duplicate"):
+        db.add(Part(part_number=number, name=name, part_type="manufactured", unit_of_measure="each", company_id=1))
+    db.flush()  # IntegrityError: the session now needs a rollback
+
+
+def _job_failures(caplog, company_id: int) -> list:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno >= logging.ERROR and f"company {company_id}" in record.getMessage()
+    ]
+
+
+@pytest.mark.parametrize(
+    "module_name, task, first_query",
+    [
+        ("notification_jobs", "check_calibrations_task", "app.models.calibration:Equipment"),
+        ("notification_jobs", "check_late_work_orders_task", "app.models.work_order:WorkOrder"),
+        ("notification_jobs", "check_low_stock_task", "app.models.inventory:InventoryItem"),
+        ("notification_jobs", "check_quote_expiring_task", "app.models.quote:Quote"),
+        ("shipping_jobs", "poll_tracking_task", "app.models.carrier_account:CompanyShippingProfile"),
+    ],
+)
+async def test_a_failed_tenant_does_not_fail_the_next_one_in_the_digest_and_tracking_loops(
+    db_session: Session, monkeypatch, caplog, module_name, task, first_query
+):
+    """The same reset as mrp/scheduling: tenant 1's failed transaction must not fail tenant 2.
+
+    Each loop's first statement for tenant 1 fails and leaves the shared session needing a rollback.
+    Without the reset in the loop's ``except``, tenant 2's first statement fails on it too.
+    """
+    import importlib
+
+    module = importlib.import_module(f"app.jobs.{module_name}")
+    model_module, model_name = first_query.split(":")
+    model = getattr(importlib.import_module(model_module), model_name)
+    db_session.add(Company(id=2, name="Second tenant", slug=f"second-{next(_ids)}", is_active=True))
+    db_session.commit()
+    session = _PoisoningSession(db_session, model)
+    monkeypatch.setattr(module, "SessionLocal", lambda: session)
+    if module_name == "notification_jobs":
+        monkeypatch.setattr(module, "_active_company_ids", lambda _db: [1, 2])
+
+    await getattr(module, task)()
+
+    assert session.poisoned
+    assert _job_failures(caplog, 1), "tenant 1 was meant to fail"
+    assert _job_failures(caplog, 2) == []
+
+
+@pytest.mark.parametrize("failing_step", ["get_tracking", "apply"])
+async def test_a_failed_shipment_does_not_fail_the_next_one_in_the_tracking_poll(
+    db_session: Session, monkeypatch, test_work_order, failing_step
+):
+    """``_poll_tracking_for_company`` swallows one shipment's failure; the next shipment must still apply."""
+    from app.jobs import shipping_jobs
+    from app.services.shipping_service import ShippingService
+
+    for n in (1, 2):
+        db_session.add(
+            Shipment(
+                shipment_number=f"SHP-GUARD-{next(_ids)}",
+                work_order_id=test_work_order.id,
+                tracking_number=f"TRACK-{n}",
+                company_id=1,
+            )
+        )
+    db_session.commit()
+    calls = {"fetch": 0, "apply": 0}
+
+    async def fetch(_service, _company_id, _shipment):
+        calls["fetch"] += 1
+        if failing_step == "get_tracking" and calls["fetch"] == 1:
+            _poison(db_session)
+        db_session.query(Shipment).count()  # PendingRollbackError if the loop did not reset the session
+        return ["event"]
+
+    def apply(self, **_kwargs):
+        calls["apply"] += 1
+        if failing_step == "apply" and calls["apply"] == 1:
+            _poison(self.db)
+        self.db.query(Shipment).count()
+        return ["inserted"]
+
+    monkeypatch.setattr(shipping_jobs, "_fetch_tracking", fetch)
+    monkeypatch.setattr(ShippingService, "record_tracking_events", apply)
+
+    polled, updated = await shipping_jobs._poll_tracking_for_company(db_session, 1)
+
+    assert (polled, updated) == ((1, 1) if failing_step == "get_tracking" else (2, 1))

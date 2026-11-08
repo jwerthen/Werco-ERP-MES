@@ -29,7 +29,7 @@ COMPLIANCE:
 import logging
 from typing import List, Optional
 
-from app.db.session import SessionLocal
+from app.db.session import SessionLocal, reset_session_after_failure
 from app.models.carrier_account import CompanyShippingProfile
 from app.models.company import Company
 from app.models.shipping import Shipment
@@ -127,6 +127,8 @@ async def poll_tracking_task() -> dict:
                 updated += u
             except Exception:  # noqa: BLE001 - one tenant must not abort the others
                 logger.exception("poll_tracking: company %s failed", cid)
+                # Reset the shared session, or every later tenant inherits this one's failed transaction.
+                reset_session_after_failure(db, f"poll_tracking for company {cid}")
         return {"companies_polled": companies_polled, "shipments_polled": polled, "shipments_updated": updated}
     finally:
         db.close()
@@ -149,6 +151,9 @@ async def _poll_tracking_for_company(db, company_id: int) -> tuple[int, int]:
     polled = 0
     updated = 0
     for shipment in shipments:
+        # Read while the session is healthy: after a failed apply, the except below must not have to
+        # load an expired attribute from a transaction that is waiting for its rollback.
+        shipment_id = shipment.id
         status_value = (shipment.tracking_status or "").strip().lower()
         if status_value in _TERMINAL_TRACKING_STATUSES:
             continue
@@ -157,7 +162,9 @@ async def _poll_tracking_for_company(db, company_id: int) -> tuple[int, int]:
         try:
             events = await _fetch_tracking(service, company_id, shipment)
         except Exception:  # noqa: BLE001 - never leak internals/secrets; keep polling
-            logger.warning("poll_tracking: get_tracking failed for shipment %s (company %s)", shipment.id, company_id)
+            logger.warning("poll_tracking: get_tracking failed for shipment %s (company %s)", shipment_id, company_id)
+            # Resolving the provider reads the database; reset the shared session before the next shipment.
+            reset_session_after_failure(db, f"get_tracking for shipment {shipment_id}")
             continue
         polled += 1
         if not events:
@@ -165,14 +172,16 @@ async def _poll_tracking_for_company(db, company_id: int) -> tuple[int, int]:
         try:
             inserted = service.record_tracking_events(
                 company_id=company_id,
-                shipment_id=shipment.id,
+                shipment_id=shipment_id,
                 events=events,
                 source="poll",
             )
             if inserted:
                 updated += 1
         except Exception:  # noqa: BLE001 - a bad apply must not abort the rest
-            logger.exception("poll_tracking: applying events failed for shipment %s", shipment.id)
+            logger.exception("poll_tracking: applying events failed for shipment %s", shipment_id)
+            # Reset the shared session, or every later shipment inherits this one's failed transaction.
+            reset_session_after_failure(db, f"applying tracking events for shipment {shipment_id}")
     return polled, updated
 
 
