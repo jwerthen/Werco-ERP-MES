@@ -8459,7 +8459,9 @@ when an estimate is approved and handed off in Fabrication Quoting (`/fabricatio
 >   `accepted` quote), an UPDATE carrying the line → work-order links.
 >
 > These are best-effort, like `POST /work-orders/`: a failed audit write is logged and does not refuse
-> the change. Refusals are raised before the first field is written and write nothing.
+> the change. The exception is a database error that already aborted the transaction: the request
+> fails and nothing is saved (see [Conflict (409)](#conflict-409)). Refusals are raised before the
+> first field is written and write nothing.
 >
 > **`PUT` refusals.** **409** when `expected_updated_at` is stale; **409** on a content edit, or a move
 > back to `draft` / `pending`, once any line is linked to a work order; **409** on a content edit of a
@@ -12096,6 +12098,32 @@ authentication.
 }
 ```
 
+### Conflict (409)
+```json
+{
+  "detail": "This record was modified by someone else. Refresh and try again."
+}
+```
+
+Any endpoint can return this body. It has two causes:
+
+- A version check found that another writer saved the row after this request read it
+  (`StaleDataError`).
+- PostgreSQL rolled the request's transaction back to settle a lock conflict: a deadlock
+  (SQLSTATE `40P01`) or a serialization failure (`40001`). The usual case is an audited write
+  waiting for the global audit-chain lock while the writer that holds it waits for a row this request
+  locked (see [Why the flag exists](AUDIT_LOG_RETENTION_RUNBOOK.md#why-the-flag-exists)).
+
+In both cases nothing the request wrote was saved, its audit row included, so it is safe to retry
+after a refresh. A route that catches database errors itself keeps its own answer. A write whose
+audit row is required (`log_required` and the other required-audit paths) answers **503** instead,
+and saves nothing either.
+
+Until 2026-11-08 a lost lock race answered **500**. When the audit write was the victim, the error
+was swallowed and the request could answer **200** for a write that was never saved and had no
+audit row. An engine-level COMMIT guard (`app/db/database.py`) now refuses to commit a transaction
+PostgreSQL already aborted. When the abort was not a lost lock race, the request answers **500**.
+
 ### Internal Server Error (500)
 ```json
 {
@@ -12475,9 +12503,11 @@ declared with a `max_length` and a value over it is a **422** before the export 
 | `GET /exports/inventory/transactions/export` | `transaction_type` | 40 |
 
 Each bound matches the column the filter compares against, so no request that could match a row is
-refused. (Auditing is best-effort in the usual repo-wide sense: `AuditService.log` never propagates
-a failure to the caller, so a chain-write failure lets the export stream unrecorded rather than
-failing the request.)
+refused. (Auditing is best-effort in the usual repo-wide sense: `AuditService.log` swallows a failure
+that a savepoint contains or that never reaches the database, so such a chain-write failure lets the
+export stream unrecorded rather than failing the request. A database error that aborted the
+transaction is re-raised instead, and the request fails with no file streamed; see
+[Conflict (409)](#conflict-409).)
 
 `GET /consumables/checkouts/export.csv` also requires Admin/Manager. It records
 the `consumable_checkout` export with a required audit in its own transaction;
@@ -12657,7 +12687,7 @@ log. `unconfigured` means every enqueue will fail and no background job or cron 
 | 401 | Unauthorized |
 | 403 | Forbidden (also returned to a caller below `ADMIN` / `MANAGER` on any bulk-export endpoint — see [Access: bulk export is `ADMIN` / `MANAGER`](#access-bulk-export-is-admin--manager-and-every-export-is-audited)) |
 | 404 | Not Found |
-| 409 | Conflict — concurrent modification of an operation / work order / time entry on a completion or clock endpoint (the row was updated by another writer between read and commit; refresh and retry) |
+| 409 | Conflict — concurrent modification of an operation / work order / time entry on a completion or clock endpoint (the row was updated by another writer between read and commit; refresh and retry). Any endpoint also answers 409 when PostgreSQL rolled its transaction back to settle a lock conflict (deadlock or serialization failure); nothing was saved, so it is safe to retry. See [Conflict (409)](#conflict-409) |
 | 413 | Content Too Large — a JSON body over `MAX_JSON_BODY_BYTES` (default 256 KB, rejected by middleware before the route runs), or a file upload over its endpoint's own cap (e.g. 50 MB `LASER_UPLOAD_MAX_BYTES`). See [Request Size Limits](#request-size-limits) |
 | 422 | Validation Error — including a paging or window parameter outside its range (`limit`, `skip`/`offset`, `days`, `max_levels`), and a free-text `/exports/*` filter over its `max_length` (`warehouse` 50, `customer` 255, `transaction_type` 40); see [Bounds on paging and window parameters](#bounds-on-paging-and-window-parameters) |
 | 429 | Too Many Requests |

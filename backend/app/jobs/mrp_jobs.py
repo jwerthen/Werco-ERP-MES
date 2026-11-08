@@ -47,6 +47,9 @@ async def run_mrp_task(
                 )
             except Exception as e:
                 logger.error(f"MRP job failed for company {cid}: {e}")
+                # Reset the shared session, or every later tenant inherits its failed
+                # transaction (a refused COMMIT leaves it "prepared"; a DB error, aborted).
+                db.rollback()
                 # Continue with the remaining tenants; one tenant's failure must
                 # not abort planning for the others.
 

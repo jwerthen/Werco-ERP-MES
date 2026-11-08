@@ -52,6 +52,9 @@ async def run_scheduling_task(
                 )
             except Exception as e:
                 logger.error(f"Scheduling job failed for company {cid}: {e}")
+                # Reset the shared session, or every later tenant inherits its failed
+                # transaction (a refused COMMIT leaves it "prepared"; a DB error, aborted).
+                db.rollback()
                 # Continue with remaining tenants; one tenant's failure must not
                 # abort scheduling for the others.
 

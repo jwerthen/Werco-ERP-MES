@@ -209,7 +209,8 @@ def record_operator_qualification_exceptions(
     * Emits ONE ``OperationalEvent`` (severity ``warning``) for AI / realtime context.
 
     Best-effort and defensive: a failure to record a warning must never break the
-    start itself. ``AuditService.log`` already swallows its own failures; the
+    start itself. ``AuditService.log`` swallows its own failures, except a database
+    error that already aborted the transaction (the start is lost then anyway); the
     ``OperationalEvent`` emit is guarded here.
     """
     if not exceptions:

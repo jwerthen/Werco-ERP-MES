@@ -114,8 +114,8 @@ while waiting for a row lock somebody else may hold. Every sibling stock mutator
 audit write; this one used to write line 1's audit rows inside the drain loop and
 then ask for line 2's target row, which deadlocks against a ``/receive`` onto that
 row that already holds it and is about to write its own audit row. Postgres aborts
-a victim, and there is no DBAPI deadlock handler, so it surfaced as a 500 on a
-stock verb. Two things now prevent it, deliberately belt-and-braces: every target
+a victim, which surfaced as a 500 on a stock verb (a lost lock race now answers the
+app-wide 409 -- still a failed request). Two things now prevent it, deliberately belt-and-braces: every target
 landing row is resolved and locked BEFORE the first write, and the per-line audit
 calls are BUFFERED and emitted after the drain loop. Do not move an audit write
 back inside the loop.
@@ -1837,8 +1837,8 @@ def combine_inventory(
     # takes a global ``pg_advisory_xact_lock`` held to transaction end, so writing
     # line 1's audit rows and THEN asking for line 2's target row lock deadlocks
     # against any ``/receive`` that already holds that row and is about to write its
-    # own audit row -- surfacing as a 500 on a stock verb, because there is no DBAPI
-    # deadlock handler. Every row lock this verb needs is taken above; the chain lock
+    # own audit row -- a failed stock verb (a 500 then; the app-wide lost-lock-race 409
+    # now). Every row lock this verb needs is taken above; the chain lock
     # is taken last, once, after the loop. Do not move these calls back inside it.
     pending_audit: List[Dict[str, object]] = []
     rows_by_id = {row.id: row for row in source_rows}
