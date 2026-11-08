@@ -78,8 +78,16 @@ Idempotent and reversible
 Downgrade is LOSSY -- read before running it
 --------------------------------------------
 Dropping the column discards every declared short. Pre-117 code never reads it, so a
-code rollback does NOT need this downgrade (old code ignores an extra nullable column).
-If it is run anyway and the column is later re-added, every operation that had closed
+code rollback does NOT need this downgrade -- it needs a STAMP. A pre-117 image cannot
+boot against a database that ran this revision: its start command runs
+``alembic upgrade head`` first, which cannot locate ``117_operation_short_declared`` and
+exits non-zero, so uvicorn never starts. Before redeploying such an image, run
+``alembic stamp 116_business_keys_per_company`` from a checkout of the CURRENT release.
+The column and every declaration stay, and the next forward upgrade re-runs this revision
+as a ``_has_column`` no-op that keeps them. Pre-117 code neither reads nor maintains the
+column, so after rolling forward again, review the declarations on operations whose
+counts the old code changed (the export query below lists every declaration).
+If the downgrade is run anyway and the column is later re-added, every operation that had closed
 short reads NULL again: the later stages of its work order lose their upstream credit
 (they would then need scrap declared again, or stay open) and the all-complete header
 falls back to the no-declaration snap. The declarations are still recorded in the

@@ -601,7 +601,9 @@ the new commit alone. An old worker image still contains the agent. That agent a
 
 **Rollback:** rolling back to an image older than this PR **re-arms the agent** unless
 `AI_AUTO_EXECUTE_ENABLED=false` is set on that service. Set it before redeploying the older
-commit. No migration is involved.
+commit. This PR has no migration of its own, but once `117` (item 3) has been applied, an older
+image cannot boot until the database is stamped back to `116` — see
+[Rollback Backend](#rollback-backend-railway).
 
 ### 2. Floor gates — draft and on-hold work orders refuse every start (ruling 2)
 
@@ -668,26 +670,51 @@ or report scrap anywhere (**403**; owner decision 2026-11-07).
    The worker image never migrates, so deploy the **API before or with the worker**: a worker on the
    new code against a database that has not run `117` would select a column that does not exist yet.
    Every existing row reads `NULL` ("never declared"), so clock-out, reconcile-on-read and the
-   work-order header behave exactly as before on existing data. The downgrade drops the column and
-   with it every short declared since the deploy (pre-117 code never reads it).
+   work-order header behave exactly as before on existing data.
+
+   **Rollback: stamp to `116`, do not downgrade.** Once `117` has run, no older image can boot —
+   the floor-gates and AI governance images included — because its `alembic upgrade head` cannot
+   find `117`: uvicorn never starts and the rollback deploy fails `/health` (Railway keeps the
+   current deployment serving). Before redeploying one, from a checkout of **this** release run
+   `railway run --service werco-api alembic stamp 116_business_keys_per_company`. The column and
+   every declared short stay, and the next forward deploy re-runs `117` as a guarded no-op that
+   keeps them. Pre-117 code neither reads nor maintains the column, so after rolling forward again
+   review the declarations on any operation whose counts were changed while the old image served
+   (the export query is in the migration's docstring). The downgrade
+   (`alembic downgrade 116_business_keys_per_company`) is **not** a rollback step: it drops the
+   column and every short declared since the deploy. The rule for every migration is under
+   [Rollback Backend](#rollback-backend-railway).
 
 2. **Optional, read-only diagnostic — and the supervisor follow-up it finds.** Operations closed
    short before the rule existed (COMPLETE with good + scrap below their target, on a work order
    still open). The legacy operation itself reads exactly as before (no declaration, so no credit),
    but the **open later operations of the same work order can no longer close at what physically
    reached them**: they still owe the full target, and ruling 1 refuses to close them short without
-   scrap. **Do not have the floor scrap units that never reached them.** The supervisor remedy is one
-   of: lower `quantity_ordered` to what the legacy stage passed on (Work Order detail → edit — allowed
-   down to the largest good + scrap any whole-order stage recorded; restated per-operation targets
-   follow it), or force-complete the work order at the work-order grain (`POST
-   /work-orders/{id}/complete`) with the work-order scrap and a reason covering the shortfall.
+   scrap. **Do not have the floor scrap units that never reached them.** Which supervisor remedy
+   fits depends on whether the missing units ever existed — compare the good the legacy stage passed
+   on with the query's `order_floor` (the largest good + scrap any whole-order stage of that work
+   order recorded, which is as low as `PUT /work-orders/{id}` lets `quantity_ordered` go):
+   - **`order_floor` equals the legacy stage's good** (no stage recorded more, and the legacy stage
+     scrapped nothing): the missing units were never started, so lower `quantity_ordered` to that
+     good (Work Order detail → edit; restated per-operation targets follow it).
+   - **`order_floor` is above it** — an earlier stage recorded more (the usual legacy case: Op 10 at
+     10 good, Op 20 closed at 8) or the legacy stage scrapped some: those units existed and were
+     lost, so lowering the order would misstate them as never started, and it is refused **409**
+     anyway. Force-complete the work order at the work-order grain (`POST /work-orders/{id}/complete`,
+     Work Order detail → Complete) with the work-order scrap and a reason covering the shortfall.
 
    ```sql
    SELECT wo.company_id, wo.work_order_number, wo.status AS wo_status,
           op.id AS operation_id, op.sequence, op.operation_number,
           CASE WHEN op.component_quantity > 0 THEN op.component_quantity
                ELSE wo.quantity_ordered END AS target,
-          op.quantity_complete, op.quantity_scrapped
+          op.quantity_complete, op.quantity_scrapped,
+          (SELECT MAX(COALESCE(m.quantity_complete, 0) + COALESCE(m.quantity_scrapped, 0))
+             FROM work_order_operations m
+            WHERE m.work_order_id = wo.id AND m.company_id = wo.company_id
+              AND m.component_part_id IS NULL
+              AND COALESCE(NULLIF(m.component_quantity, 0), wo.quantity_ordered) = wo.quantity_ordered
+          ) AS order_floor
    FROM work_order_operations op
    JOIN work_orders wo ON wo.id = op.work_order_id AND wo.company_id = op.company_id
    WHERE wo.is_deleted = false
@@ -699,18 +726,17 @@ or report scrap anywhere (**403**; owner decision 2026-11-07).
    ORDER BY wo.company_id, wo.work_order_number, op.sequence;
    ```
 
-3. **During the deploy window — promote the API first.** Vercel (SPA) and Railway (API) both
-   auto-deploy from `main`, and the SPA usually goes live first. For this release that order
-   matters: the NEW floor clients send `/shop-floor/operations/{id}/complete` without
-   `quantity_complete`, which the OLD API requires, so every kiosk / crew / desktop Complete answers
-   **422** (*"Clocked out, but completing failed: …quantity_complete…"*) until the API is live. It
-   fails closed — nothing is half-written; the operation stays open and Complete works once the API
-   is up. To avoid the window, hold the Vercel promotion (or redeploy the frontend) until Railway
-   reports the new API SUCCESS and `/health` answers from it. The reverse case: a kiosk or tablet
-   still running the OLD bundle sends `{"quantity_complete": <target>}` after a short clock-out; it
-   now gets the *"…exceeds the n good recorded…"* 409 and the operator sees *"Clocked out, but
-   completing failed"*. The operation is left open, which is what the rule requires — reload every
-   kiosk and floor tablet after the deploy. An MCP agent or script that relied on a partial floor
+3. **During the deploy window — nothing to hold; reload the floor devices.** The pipeline already
+   releases this API-first: `ci-cd.yml` deploys `werco-api` and waits until it serves this commit
+   before it deploys the Railway frontend and the worker, and it promotes the public Vercel website
+   only after the live API reports a compatible release (`.github/scripts/promote_vercel.py`, which
+   also refuses to run while the Vercel project assigns its domains automatically). So a NEW floor
+   client never meets the OLD API (which would answer every Complete **422** for the missing
+   `quantity_complete`), and no manual Vercel hold is needed. The exposure is the reverse: a kiosk or
+   tablet still running the OLD bundle against the new API sends `{"quantity_complete": <target>}`
+   after a short clock-out; it now gets the *"…exceeds the n good recorded…"* 409 and the operator
+   sees *"Clocked out, but completing failed"*. The operation is left open, which is what the rule
+   requires — reload every kiosk and floor tablet after the deploy. An MCP agent or script that relied on a partial floor
    `/complete` now gets 409, and any standing API token that closed work short, booked good above
    the floor's count, edited operation or work-order header counts, corrected a count through either
    reduce-production verb, changed a scrap reason, or lowered an order after work was recorded now
@@ -892,6 +918,32 @@ git push origin --delete hotfix/description-of-fix
 ## Rollback Procedures
 
 ### Rollback Backend (Railway)
+
+> **An older image cannot boot against a newer schema — stamp first, don't downgrade.** The API
+> image runs `alembic upgrade head` before uvicorn (`backend/Dockerfile`'s `CMD`, `backend/start.sh`
+> under `set -e`). If the database is already at a revision the older image does not ship, that
+> command fails (*"Can't locate revision identified by …"*), uvicorn never starts, and the rollback
+> deploy fails `/health` — Railway keeps the current deployment serving, so nothing goes down, but
+> the rollback never takes effect. Both options below hit this, the dashboard redeploy included.
+> So before redeploying an image older than the database, from a checkout of the **current**
+> release (its Alembic knows the newer revisions; the older image's cannot read past them):
+>
+> ```powershell
+> railway run --service werco-api alembic current            # where the database is
+> railway run --service werco-api alembic stamp <revision>    # the newest revision the older image ships
+> ```
+>
+> `<revision>` is the head revision of the commit being redeployed (`alembic heads` in a checkout
+> of it — the newest-numbered file in its `backend/alembic/versions/`), for example
+> `116_business_keys_per_company` to go back past the Wave 2 short-count release. A
+> stamp rewrites only `alembic_version`: the additive tables, columns and their rows stay, which is
+> this runbook's standing "keep additive schema on application rollback" rule, and the next forward
+> deploy re-runs those revisions, which are required to be idempotent (existence-guarded, and
+> `tests/test_migration_fresh_bootstrap.py` runs the chain over an already-built schema) — read a
+> revision's docstring before stamping past one that backfills or rewrites rows. A downgrade is not
+> part of an ordinary rollback: it drops what the revision added (see
+> [Rollback Database Migration](#rollback-database-migration) and the change's own notes, e.g.
+> Wave 2 item 3 for `117`).
 
 **Option 1: Redeploy Previous Commit**
 ```powershell
