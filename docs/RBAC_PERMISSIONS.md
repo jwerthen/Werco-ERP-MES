@@ -2512,13 +2512,15 @@ and writes an `EXPORT` audit row through `AuditService`:
 > to declare one. Coverage: `backend/tests/api/test_export_gate_and_audit.py`.
 >
 > **"Audited" here is best-effort, as it is everywhere else in the app.** `AuditService.log` swallows
-> an audit failure that a savepoint contains or that never reaches the database
-> (`app/services/audit_service.py`), so if the chain write fails that way the export still streams and
-> goes unrecorded. A database error that aborted the transaction (for example a deadlock on the chain
-> lock) is re-raised, and the export fails with no file streamed. That is the repo-wide contract, not
-> something specific to exports — the same is true of the visitor-log export and every audited write
-> path — but read the row above as "every export writes an audit row on the success path", not as an
-> absolute guarantee that no byte can leave without one.
+> an audit failure that its savepoints contain (a `sequence_number` collision that outlasts the
+> retries) and a Python-side failure in its own work, such as a value its JSON columns cannot
+> serialize, which it rolls back to the audit INSERT's savepoint (`app/services/audit_service.py`). If
+> the chain write fails either way, the export still streams and goes unrecorded. A database error
+> that aborted the transaction (for example a deadlock on the chain lock) is re-raised, and the export
+> fails with no file streamed. That is the repo-wide contract, not something specific to exports —
+> the same is true of the visitor-log export and every audited write path — but read the row above
+> as "every export writes an audit row on the success path", not as an absolute guarantee that no
+> byte can leave without one.
 
 > **Not bulk exports, deliberately ungated:** single-record documents — `GET /shipping/{id}/coc/pdf`,
 > `POST /quotes/{id}/generate-pdf`, `GET /laser-nests/{id}/document`,

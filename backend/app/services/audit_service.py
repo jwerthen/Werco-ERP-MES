@@ -371,18 +371,22 @@ class AuditService:
     def acquire_chain_lock(self) -> None:
         """Take the global audit-chain lock now, as the caller's own statement, ahead of its audit rows.
 
-        ``log()`` takes this lock inside an ``except`` that swallows every error -- right for an
-        audit failure, wrong for a lost lock race: when Postgres rolls the caller back as a deadlock
-        victim (40P01) while it waits there, the error is eaten, the transaction stays aborted, and
-        the caller's next statement fails as something unrelated. A caller that holds row locks and
-        must answer a lost race as such (``app.db.locks.is_lost_lock_race``) takes the lock here
-        first, after its row locks (invariant 4) and before its first audit row; the error then
-        reaches it unchanged. The later ``log()`` calls stack on the lock -- a transaction-level
-        advisory lock is re-entrant -- and it is released when the transaction ends.
+        For lock ordering. ``log()`` takes this lock at the caller's first audit row, wherever that
+        row falls in the transaction; a caller whose lock order needs the chain at a fixed point --
+        after its row locks (invariant 4), before the writes that come between them and its first
+        audit row -- takes it here instead. The nest-package import does, once it holds the
+        operations it replaces: a writer holding the chain and waiting on one of those rows then
+        meets the import at this statement, before the wipe and rebuild, rather than at whichever
+        audit row the import happens to write first. A lost race here
+        (``app.db.locks.is_lost_lock_race``) reaches the caller unchanged, exactly as it would from
+        ``log()``, which re-raises every database error no savepoint contained (until 2026-11-08
+        ``log()`` swallowed it, which is why this method was first added). The later ``log()``
+        calls stack on the lock -- a transaction-level advisory lock is re-entrant -- and it is
+        released when the transaction ends.
 
         Exactly the lock ``log()`` would take: none while the hash chain is paused
         (``AUDIT_HASH_CHAIN_ENABLED`` false, the lock-free allocator), and a no-op off PostgreSQL.
-        Writes nothing. Not swallowed -- deliberately.
+        Writes nothing, and never swallows an error.
         """
         if settings.AUDIT_HASH_CHAIN_ENABLED:
             self._acquire_chain_lock()
@@ -723,13 +727,14 @@ class AuditService:
 
         A database error that ``log()`` re-raises (it aborted the transaction) is
         reported as ``AuditWriteError`` too, chained to that error. On an HTTP
-        request the answer is always a 503 with nothing saved: a caller that
-        translates the error itself (``app.api.audit_guard.required_audit`` or its
-        own ``except AuditWriteError``) rolls back and answers its own 503 text,
-        and one that lets it escape gets ``app.main``'s app-wide handler, which
-        answers 503 "Unable to save audit record" after ``get_db``'s teardown has
-        rolled the session back. A non-HTTP caller (a job, a script) must roll
-        back itself.
+        request the answer is a 503 and the transaction is rolled back: a caller
+        that translates the error itself (``app.api.audit_guard.required_audit``
+        or its own ``except AuditWriteError``) rolls back and answers its own 503
+        text, and one that lets it escape gets ``app.main``'s app-wide handler,
+        which answers 503 "Unable to save audit record" after ``get_db``'s
+        teardown has rolled the session back. The exception is a caller that
+        absorbs it on purpose: the user CSV import records it as that row's error
+        and carries on. A non-HTTP caller (a job, a script) must roll back itself.
         """
         try:
             entry = self.log(action=action, resource_type=resource_type, **kwargs)

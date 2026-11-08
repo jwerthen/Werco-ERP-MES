@@ -1651,9 +1651,9 @@ def _lock_laser_import_rows(db: Session, *, laser_work_order: WorkOrder, company
     laser job with nothing to replace still holds its work order's row lock from the header check,
     so a writer that takes the chain first and then waits on that work order (a shop-floor start
     on a non-nest operation of the job, say) can meet the import at the import's first audit row.
-    The import's loss there happens inside ``AuditService.log`` and answers the 400, not the 409;
-    nothing of it commits. That needs a laser job with no nest operation that the floor is
-    writing at the same moment.
+    The import's loss there happens inside ``AuditService.log``, which re-raises it, so it answers
+    the same lost-race 409 as a loss anywhere else; nothing of it commits. That needs a laser job
+    with no nest operation that the floor is writing at the same moment.
     """
     for attempt in range(1, _LASER_IMPORT_LOCK_ATTEMPTS + 1):
         try:
@@ -1688,9 +1688,10 @@ def _check_laser_header_before_audit(db: Session, *, work_order: WorkOrder, comp
 
     The package import writes this header twice: the release and the zeroed counts just before
     this runs (a draft, an unstamped or a hand-counted job), and ``quantity_ordered`` re-derived
-    after the rebuild. ``AuditService.log`` flushes the whole session inside a ``begin_nested()``
-    savepoint and swallows every exception, so when an audit call is what flushes a header someone
-    else saved mid-import, the ``StaleDataError`` is eaten there and the next statement fails as a
+    after the rebuild. ``AuditService.log`` flushes the whole session as it opens its
+    ``begin_nested()`` savepoint and swallows every error there that is not a database
+    (``DBAPIError``) error, so when an audit call is what flushes a header someone else saved
+    mid-import, the ``StaleDataError`` is eaten there and the next statement fails as a
     ``PendingRollbackError`` -- answered as the 400 for a conflicting nest row, the wrong cause.
     So, before any audit row:
 
@@ -3356,9 +3357,9 @@ async def _run_laser_nest_import(
     nest-PDF blob writes that come before it. A concurrent edit to the job, a work order that stays
     busy through every try, or a lock race Postgres settles by rolling this import back
     (40P01 / 40001) answers 409 with the app-wide "refresh and try again" text; nothing of the
-    import commits. The one exception: on an existing job with nothing to replace, a race lost at
-    the first audit row is lost inside ``AuditService.log`` and answers the 400 (see
-    ``_lock_laser_import_rows``).
+    import commits. That includes a race lost at the first audit row on an existing job with
+    nothing to replace: ``AuditService.log`` re-raises it, and the ``except`` below classifies it
+    like any other (see ``_lock_laser_import_rows``).
     """
     # This PR's extension (see the helper): a standing API token may not re-import over nest
     # operations that carry recorded work. Checked FIRST -- before the rows parse, the upload
@@ -3577,17 +3578,18 @@ async def _run_laser_nest_import(
                 _check_laser_header_before_audit(db, work_order=child_work_order, company_id=company_id)
                 # The global audit-chain lock as this import's OWN statement, once its row locks
                 # are held and before the first audit row -- but only when it is replacing existing
-                # operations, i.e. holds their row locks. AuditService.log takes the same lock
-                # inside an except that swallows everything, so a lock race the import lost THERE
-                # (Postgres rolling it back as the deadlock victim against a writer that holds the
-                # chain and waits for one of these rows) surfaced on the next statement as the 400
-                # for a conflicting nest row. Here it reaches the lost-race 409 below; the later
-                # audit rows stack on the lock (it is re-entrant). With nothing replaced there is no
-                # operation lock for such a writer to wait on: a standalone job or a freshly created
-                # classic child is not yet visible to any other writer, and an existing job with no
-                # nest operation holds only the work order's row lock from the header check (a writer
-                # holding the chain and waiting on that row can still meet the import at its first
-                # audit row; the import's loss there answers the 400 -- see the helper). Taking
+                # operations, i.e. holds their row locks. This is lock ORDER (invariant 4): a writer
+                # that holds the chain and waits for one of these rows meets the import here, before
+                # the wipe and rebuild, not at whichever audit row comes first (with no superseded
+                # nest to audit, that row falls inside or after the rebuild). Postgres settles that
+                # cycle by rolling one side back; when it is the import, the error reaches the
+                # lost-race 409 below, as it would from AuditService.log, which re-raises it. The
+                # later audit rows stack on the lock (it is re-entrant). With nothing replaced there
+                # is no operation lock for such a writer to wait on: a standalone job or a freshly
+                # created classic child is not yet visible to any other writer, and an existing job
+                # with no nest operation holds only the work order's row lock from the header check
+                # (a writer holding the chain and waiting on that row can still meet the import at
+                # its first audit row; the import's loss there answers the same 409). Taking
                 # the all-tenant lock here would then only hold it across the whole rebuild -- every
                 # nest PDF's blob write included -- and put it ahead of the work-center KEY SHARE the
                 # rebuild's operation inserts take. There the first audit row takes it (a material
@@ -3654,10 +3656,11 @@ async def _run_laser_nest_import(
                 )
                 # The rebuild re-derives quantity_ordered (and, for a classic child, the parent
                 # link) after its last flush. Flush it HERE, before the work-order audit row below
-                # (or the standalone CREATE row): AuditService.log flushes inside a savepoint and
-                # swallows every error, so a failed header UPDATE would otherwise surface on the
-                # next statement as the 400 for a conflicting nest row (invariant 4: flush before
-                # audit). The row lock is already held from the header check above.
+                # (or the standalone CREATE row): AuditService.log flushes as it opens its savepoint
+                # and swallows a StaleDataError there, so a header UPDATE that lost a version race
+                # would otherwise surface on the next statement as the 400 for a conflicting nest row
+                # (invariant 4: flush before audit). The row lock is already held from the header
+                # check above.
                 db.flush()
 
                 if pre_import_wo_values is not None:
@@ -4554,11 +4557,11 @@ def update_work_order(
         # Flush the demotions BEFORE the first audit call, and this ordering is load-bearing
         # (invariant 4). WorkOrderOperation maps version_id_col, so a concurrent clock-in or
         # hold on one of these rows makes the UPDATE stale. AuditService.log() flushes the
-        # whole session inside a begin_nested() savepoint and swallows every exception, so
-        # if the first log_status_change is what flushes them, the StaleDataError is eaten
-        # there, the savepoint is left deactivated, and the terminal flush below raises
-        # PendingRollbackError -- which no handler matches, turning the 409 this endpoint
-        # promises into an opaque 500. Flushing here raises StaleDataError to the app-wide
+        # whole session as it opens a begin_nested() savepoint and swallows every exception
+        # there but a database (DBAPIError) one, so if the first log_status_change is what
+        # flushes them, the StaleDataError is eaten there, the savepoint is left deactivated,
+        # and the terminal flush below raises PendingRollbackError -- which no handler
+        # matches, turning the 409 this endpoint promises into an opaque 500. Flushing here raises StaleDataError to the app-wide
         # handler instead, and mints audit rows only for demotions that actually landed.
         db.flush()
     for demoted_op in demoted_operations:
