@@ -1236,7 +1236,10 @@ AST_GUARDED_WRITERS = {
 AST_EXEMPT_WRITERS = {
     ("app.api.endpoints.work_orders", "_enrich_work_order_operations"): "NULL -> 0 for serialization on a read",
     ("app.api.endpoints.work_orders", "get_work_order"): "NULL -> 0 for serialization on a read",
-    ("app.api.endpoints.work_orders", "_run_laser_nest_import"): "a nest import resets its laser child to 0",
+    ("app.api.endpoints.work_orders", "_run_laser_nest_import"): (
+        "a nest import resets its laser child to 0 -- a standing API token is refused (403 count-judgment) when "
+        "any operation the import would delete has recorded work (TestApiTokenNestReimportOverRecordedWork)"
+    ),
     ("app.services.work_order_duplicate_service", "_copy_operations"): "a duplicate's operations start at 0",
     ("app.services.material_readiness_service", "material_readiness"): "a SimpleNamespace preview, not a row",
     (

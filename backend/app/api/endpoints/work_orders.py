@@ -117,6 +117,7 @@ from app.services.laser_nest_service import (
     create_manual_laser_nest,
     create_nest_material_allocation,
     extract_laser_nest_zip,
+    import_would_wipe_recorded_work,
     manual_nest_response_dict,
     package_has_pdfs,
     parse_laser_nest_folder,
@@ -161,6 +162,7 @@ from app.services.operation_action_gates import (
     open_count_above_recorded_message,
     operation_blocked_by_predecessors,
     operation_has_labor_evidence,
+    operation_has_recorded_work,
     others_clocked_in_message,
     override_reason_required_message,
     quantity_ordered_floor_message,
@@ -1273,6 +1275,45 @@ def _laser_package_name(file: Optional[UploadFile], source_path: Optional[str]) 
     return "Laser nest package"
 
 
+def _live_laser_child_work_order(db: Session, *, parent_work_order: WorkOrder, company_id: int) -> Optional[WorkOrder]:
+    """The parent's LIVE (not soft-deleted) LASER_CUTTING child, or ``None``. A pure, tenant-scoped read.
+
+    ``is_deleted == False`` is load-bearing -- see ``_ensure_laser_child_work_order``.
+    """
+    return (
+        db.query(WorkOrder)
+        .filter(
+            WorkOrder.company_id == company_id,
+            WorkOrder.parent_work_order_id == parent_work_order.id,
+            WorkOrder.work_order_type == WorkOrderType.LASER_CUTTING.value,
+            WorkOrder.is_deleted == False,  # noqa: E712
+        )
+        .first()
+    )
+
+
+def _refuse_api_token_reimport_over_recorded_work(
+    db: Session, *, current_user: User, laser_work_order: Optional[WorkOrder], company_id: int
+) -> None:
+    """403 API_TOKEN_COUNT_JUDGMENT when a standing API token's package import would wipe recorded work.
+
+    This PR's extension of the 2026-11-07 decision (NOT part of it -- the owner was asked about
+    scrap and short closes): IMPORT REPLACES EVERYTHING deletes every nest operation on the laser
+    work order and zeroes its header counts, so a re-import over a nest someone worked erases a
+    person's good count, scrap and any declared short -- strictly more than the ``planned_runs``
+    lowering ``PATCH /laser-nests/{id}`` already refuses a token. Judged on exactly the set the
+    wipe deletes (``laser_nest_service.import_would_wipe_recorded_work``). A person's re-import,
+    a crew-station badge (which cannot reach this route anyway), and a token's import onto a job
+    with no worked nest operation are untouched. ``None`` -- a standalone import, or a parent
+    with no live laser child yet -- wipes nothing. Pure: writes nothing, so a refusal leaves
+    every row and the audit chain as they were.
+    """
+    if not is_api_token_credential(current_user):
+        return
+    if import_would_wipe_recorded_work(db, laser_work_order=laser_work_order, company_id=company_id):
+        raise HTTPException(status_code=403, detail=API_TOKEN_COUNT_JUDGMENT)
+
+
 def _ensure_laser_child_work_order(
     db: Session,
     *,
@@ -1302,17 +1343,8 @@ def _ensure_laser_child_work_order(
     # `reopen_allocations_cancelled_by_delete` never ran, so its material demand stayed
     # cancelled while the work order ran). The direct-address route already refuses
     # this -- `_load_parent_work_order` filters soft-deleted rows and 404s -- so this
-    # was the one door left open.
-    child = (
-        db.query(WorkOrder)
-        .filter(
-            WorkOrder.company_id == company_id,
-            WorkOrder.parent_work_order_id == parent_work_order.id,
-            WorkOrder.work_order_type == WorkOrderType.LASER_CUTTING.value,
-            WorkOrder.is_deleted == False,  # noqa: E712
-        )
-        .first()
-    )
+    # was the one door left open. (The filter lives in `_live_laser_child_work_order`.)
+    child = _live_laser_child_work_order(db, parent_work_order=parent_work_order, company_id=company_id)
     if child:
         return child
 
@@ -1398,6 +1430,19 @@ def _resolve_laser_target(
         acquire_generator_lock(db, f"laser_child_work_order:{work_order.id}", company_id)
         return work_order.parent_work_order, work_order
     return work_order, _ensure_laser_child_work_order(db, parent_work_order=work_order, company_id=company_id)
+
+
+def _existing_laser_target(db: Session, *, work_order: WorkOrder, company_id: int) -> Optional[WorkOrder]:
+    """The laser work order ``_resolve_laser_target`` would operate on, if it exists -- read-only.
+
+    The same branch as ``_resolve_laser_target`` (a ``laser_cutting`` WO is its own target; an
+    assembly parent's target is its live laser child) with no advisory lock and no creation, so
+    a refusal judged against it can run before the import does any work. ``None`` when a parent
+    has no live laser child yet (the import would create a fresh, empty one).
+    """
+    if work_order.work_order_type == WorkOrderType.LASER_CUTTING.value:
+        return work_order
+    return _live_laser_child_work_order(db, parent_work_order=work_order, company_id=company_id)
 
 
 def _load_parent_work_order(db: Session, work_order_id: int, company_id: int) -> WorkOrder:
@@ -3070,7 +3115,27 @@ async def _run_laser_nest_import(
     import wipes ALL prior nests/operations for the laser WO, so each wipe is
     recorded before the rebuild and each created nest is recorded after. The
     standalone path additionally audits the CREATE of the fresh work order.
+
+    Both paths refuse a standing API token (403 API_TOKEN_COUNT_JUDGMENT) when the wipe
+    would delete an operation with recorded work -- checked first, and again under the
+    import's advisory lock before the first write
+    (``_refuse_api_token_reimport_over_recorded_work``). The standalone path wipes nothing
+    and is never refused here.
     """
+    # This PR's extension (see the helper): a standing API token may not re-import over nest
+    # operations that carry recorded work. Checked FIRST -- before the rows parse, the upload
+    # copy / extraction and any write -- against the laser work order the import would rebuild,
+    # resolved read-only (the classic flow's live child; nothing is created here). Re-checked
+    # under the import's advisory lock inside the transaction, since the floor may record work
+    # while the package is being extracted.
+    if target_work_order is not None:
+        _refuse_api_token_reimport_over_recorded_work(
+            db,
+            current_user=current_user,
+            laser_work_order=_existing_laser_target(db, work_order=target_work_order, company_id=company_id),
+            company_id=company_id,
+        )
+
     package_name = _laser_package_name(file, source_path)
     temp_path = None
     package_dir = os.path.join(_resolve_laser_upload_root(), str(uuid.uuid4()))
@@ -3220,6 +3285,11 @@ async def _run_laser_nest_import(
                 else:
                     parent_work_order, child_work_order = _resolve_laser_target(
                         db, work_order=target_work_order, company_id=company_id
+                    )
+                    # The token refusal again, now under the import's advisory lock and
+                    # before the first write to this work order and the first audit row.
+                    _refuse_api_token_reimport_over_recorded_work(
+                        db, current_user=current_user, laser_work_order=child_work_order, company_id=company_id
                     )
                     # Snapshot BEFORE the rebuild mutates the WO: the import
                     # force-sets RELEASED and zeroes the produced quantities, and
@@ -3577,6 +3647,13 @@ async def import_laser_nest_package(
     ``sheet_match_provenance`` is the same observational, audit-only breadcrumb
     documented on the standalone import: it never resolves anything and never
     creates a tie.
+
+    The import REPLACES every nest operation on the laser work order and zeroes its
+    produced counts, so a standing API token is refused **403** (the count-judgment text,
+    this PR's extension of the 2026-11-07 decision) when any operation it would delete has
+    recorded good, scrap, a start or any labor -- before the upload is unpacked, before any
+    write and before any audit row. A person's re-import is unchanged, and so is a token's
+    import onto a job none of whose nest operations has been worked.
     """
     target_work_order = _load_parent_work_order(db, work_order_id, company_id)
     return await _run_laser_nest_import(
@@ -3888,7 +3965,9 @@ def update_work_order(
 
     Lowering ``quantity_ordered`` below the good + scrap a whole-order operation has already
     accounted for is refused **409** naming the operation: lower the order only by units no
-    operation has started.
+    operation has started. A standing API token lowering it at all once any operation has
+    recorded good, scrap, a start or any labor (``operation_has_recorded_work``) is refused
+    **403** (this PR's extension, not the owner's decision); a person may, down to that floor.
 
     Moving a released / in-progress / on-hold work order to ``status: draft`` takes it off
     the floor: every un-worked READY operation (laser nests included) is returned to
@@ -4050,14 +4129,15 @@ def update_work_order(
                     status_code=409,
                     detail=quantity_ordered_floor_message(floor_operation, ordered_floor),
                 )
-            # This PR's credential rule: lowering the order once work was recorded against it
-            # decides that the missing pieces were never started -- the ruling-1 judgment
-            # behind every short close, so a person makes it, not a standing API token.
+            # This PR's credential rule (not part of the owner's decision): lowering the order
+            # once work was recorded against it decides that the missing pieces were never
+            # started -- the ruling-1 judgment behind every short close, so a person makes it,
+            # not a standing API token. "Recorded" is the one per-operation rule the nest
+            # lowering and the nest re-import use (good, scrap, a start, or ANY tenant-scoped
+            # TimeEntry -- a clock-in with zero pieces is still work someone did), never an
+            # inline twin of it. Pure reads, before the first setattr.
             if is_api_token_credential(current_user) and any(
-                float(op.quantity_complete or 0) > QTY_EPSILON
-                or float(op.quantity_scrapped or 0) > QTY_EPSILON
-                or op.status in (OperationStatus.IN_PROGRESS, OperationStatus.COMPLETE)
-                for op in active_ops
+                operation_has_recorded_work(db, op, company_id) for op in active_ops
             ):
                 raise HTTPException(status_code=403, detail=API_TOKEN_COUNT_JUDGMENT)
         else:
@@ -5779,7 +5859,10 @@ def update_operation(
     Raising ``quantity_complete`` on an operation that is (or this write leaves) PENDING
     or READY is refused **409** with the same start-gate text when the work order is a
     draft or on hold: recorded good quantity on a not-started operation is what the next
-    reconciling read treats as a start. Returns **404** when the operation's work order is
+    reconciling read treats as a start. Both start-gate refusals answer BEFORE the open-operation
+    count refusals above (the good-ceiling and labor-record 409s), so a draft or held job's
+    not-started operation gets "release first" / "Resume Work Order" rather than a count text
+    naming doors that job keeps shut. Returns **404** when the operation's work order is
     missing or soft-deleted.
     """
     operation = (
@@ -5900,29 +5983,6 @@ def update_operation(
                     detail=completed_scrap_over_received_message(operation, stored_acct, terminal_status),
                 )
         completed_scrap_correction = bool(count_changes)
-    elif "quantity_complete" in count_changes and update_data["quantity_complete"] is not None:
-        # An OPEN operation: this generic PUT may not raise good past the rules every
-        # dedicated verb enforces -- above what can reach the operation after an upstream
-        # short close (the header and FG receipt would book units that never existed), or
-        # above the floor's labor record (INT7: that assertion needs the office Complete's
-        # quantity_override_reason, which keeps the reason on the record). Lowering, and an
-        # operation nobody clocked into, are unchanged.
-        requested_good = float(update_data["quantity_complete"])
-        if requested_good > float(operation.quantity_complete or 0) + QTY_EPSILON and operation.work_order is not None:
-            put_acct = operation_accounting(operation.work_order, operation, good=requested_good)
-            if put_acct.exceeds_ceiling:
-                raise HTTPException(
-                    status_code=409, detail=open_count_above_ceiling_message(operation, requested_good, put_acct)
-                )
-            if operation_has_labor_evidence(db, operation.id, company_id):
-                recorded_good = resolve_absolute_operation_quantity(
-                    db, operation, 0.0, operation_target_quantity(operation, operation.work_order)
-                )
-                if requested_good > recorded_good + QTY_EPSILON:
-                    raise HTTPException(
-                        status_code=409,
-                        detail=open_count_above_recorded_message(operation, requested_good, recorded_good),
-                    )
 
     # Refuse status=COMPLETE via this generic PUT: it would be a FIFTH completion path
     # outside the four wired handlers -- no ``finalize_operation_completion``, no
@@ -5983,6 +6043,40 @@ def update_operation(
         count_blocked_reason = work_order_start_blocker(work_order_for_gate)
         if count_blocked_reason:
             raise HTTPException(status_code=409, detail=count_blocked_reason)
+
+    # An OPEN operation: this generic PUT may not raise good past the rules every
+    # dedicated verb enforces -- above what can reach the operation after an upstream
+    # short close (the header and FG receipt would book units that never existed), or
+    # above the floor's labor record (INT7: that assertion needs the office Complete's
+    # quantity_override_reason, which keeps the reason on the record). Lowering, and an
+    # operation nobody clocked into, are unchanged. Deliberately AFTER the start gates
+    # above: on a DRAFT / ON_HOLD job every door the labor-record text names (clock-out,
+    # Report production, the office Complete) is shut to a not-started operation, so the
+    # caller must read "release first" / "Resume Work Order" -- the one thing that unblocks
+    # it -- not a count text that sends them to a refused verb. Nothing above reads what
+    # this block computes. Never on a COMPLETE operation: its counts are judged by the
+    # completion-record locks above. Pure reads, like every check before the first setattr.
+    if (
+        operation.status != OperationStatus.COMPLETE
+        and "quantity_complete" in count_changes
+        and update_data["quantity_complete"] is not None
+    ):
+        requested_good = float(update_data["quantity_complete"])
+        if requested_good > float(operation.quantity_complete or 0) + QTY_EPSILON and operation.work_order is not None:
+            put_acct = operation_accounting(operation.work_order, operation, good=requested_good)
+            if put_acct.exceeds_ceiling:
+                raise HTTPException(
+                    status_code=409, detail=open_count_above_ceiling_message(operation, requested_good, put_acct)
+                )
+            if operation_has_labor_evidence(db, operation.id, company_id):
+                recorded_good = resolve_absolute_operation_quantity(
+                    db, operation, 0.0, operation_target_quantity(operation, operation.work_order)
+                )
+                if requested_good > recorded_good + QTY_EPSILON:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=open_count_above_recorded_message(operation, requested_good, recorded_good),
+                    )
 
     # Work-center reassignment (planner action, e.g. re-dispatching a laser nest to
     # another laser -- but legitimate for any operation between compatible work

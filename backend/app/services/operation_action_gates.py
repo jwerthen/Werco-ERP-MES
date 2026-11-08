@@ -145,9 +145,11 @@ API_TOKEN_SHORT_CLOSE = "Closing work short must be done by a person signed in t
 # reason change, which are API_TOKEN_SCRAP); hand-editing the work-order header's
 # ``quantity_complete`` / ``quantity_scrapped`` through its PUT, in either direction (a
 # scrap rise is API_TOKEN_SCRAP); lowering the order once work has been recorded against
-# it -- the work order's ``quantity_ordered``, or a laser nest's ``planned_runs`` (its
-# operation's target, from which the laser work order's order is derived) once that nest
-# has recorded work (``operation_has_recorded_work``); and EVERY over-count correction
+# it -- the work order's ``quantity_ordered`` once any operation has, or a laser nest's
+# ``planned_runs`` (its operation's target, from which the laser work order's order is
+# derived) once that nest has (both ``operation_has_recorded_work``); re-importing a nest
+# package over nest operations with recorded work (the import deletes them and zeroes the
+# laser work order's counts); and EVERY over-count correction
 # through either reduce-production verb -- a reopen
 # erases a person's close, a re-stamp re-declares its short (API_TOKEN_SHORT_CLOSE when it
 # would set one). The 2026-11-07 question asked about scrap and short closes only; these
@@ -648,11 +650,13 @@ def get_open_time_entry(db: Session, user_id: int, operation_id: int) -> Optiona
 def operation_has_recorded_work(db: Session, operation: Optional[WorkOrderOperation], company_id: int) -> bool:
     """True when anything has been recorded against ``operation``: good, scrap, a start, or labor.
 
-    The "once work was recorded" test behind API_TOKEN_COUNT_JUDGMENT on a laser nest's
-    ``planned_runs`` lowering (``PATCH /laser-nests/{id}``) -- the per-nest reading of the rule
-    ``PUT /work-orders/{id}`` applies to ``quantity_ordered`` across a work order's operations,
-    plus any ``TimeEntry`` (a clock-in with zero pieces is still work someone did). ``None``
-    (a nest with no operation) has nothing recorded.
+    THE one "once work was recorded" test behind three API_TOKEN_COUNT_JUDGMENT refusals: a
+    laser nest's ``planned_runs`` lowering (``PATCH /laser-nests/{id}``, for its own operation),
+    ``PUT /work-orders/{id}`` lowering ``quantity_ordered`` (for each active operation), and a
+    nest package re-import (``POST /work-orders/{id}/laser-nest-packages/import``, for each
+    operation the import would delete -- ``laser_nest_service.import_would_wipe_recorded_work``).
+    Any ``TimeEntry`` counts (a clock-in with zero pieces is still work someone did), read
+    tenant-scoped. Add no inline twins. ``None`` (a nest with no operation) has nothing recorded.
     """
     if operation is None:
         return False
