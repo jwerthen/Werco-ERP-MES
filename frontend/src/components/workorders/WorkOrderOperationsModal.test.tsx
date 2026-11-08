@@ -115,7 +115,13 @@ describe('WorkOrderOperationsModal — held work order copy', () => {
   });
 
   it('leaves an IN_PROGRESS operation completable on a held job, exactly as the server does', async () => {
-    mockedApi.getWorkOrder.mockResolvedValue({ ...heldWorkOrder, operations: [READY_OP, RUNNING_OP] } as never);
+    // A full recorded count, so the completion window (which pre-fills what is recorded —
+    // owner ruling 1) offers Complete rather than "Save progress · leave open".
+    const fullCountRunningOp = { ...RUNNING_OP, quantity_complete: 10 };
+    mockedApi.getWorkOrder.mockResolvedValue({
+      ...heldWorkOrder,
+      operations: [READY_OP, fullCountRunningOp],
+    } as never);
     mockedApi.completeWOOperation.mockResolvedValue({ message: 'Operation completed' } as never);
     renderModal();
 
@@ -132,7 +138,11 @@ describe('WorkOrderOperationsModal — held work order copy', () => {
     await userEvent.click(running);
     await userEvent.click(await screen.findByRole('button', { name: /^Complete$/ }));
 
-    expect(mockedApi.completeWOOperation).toHaveBeenCalledWith(72, 10, 0, undefined);
+    expect(mockedApi.completeWOOperation).toHaveBeenCalledWith(
+      72,
+      10,
+      expect.objectContaining({ quantityScrapped: null })
+    );
     expect(await screen.findByText('Operation 20 (Deburr) completed.')).toBeInTheDocument();
   });
 });
