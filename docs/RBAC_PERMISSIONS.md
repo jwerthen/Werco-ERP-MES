@@ -84,7 +84,11 @@ tier, that tier stands — this rule is a floor, never a loosening.
 
 Agents reach the API through the MCP server in `backend/app/mcp/` ([docs/MCP.md](MCP.md)) —
 either the Streamable HTTP door at `/mcp` (off by default, `WERCO_MCP_HTTP_ENABLED`) or the stdio
-bridge `python -m app.mcp`. **Nothing in this document changes for them.** Every tool call is a
+bridge `python -m app.mcp`. **Nothing in this document changes for them** (the credential rules on
+top of the role — the writes an API token is refused whatever its user's role, such as declaring
+scrap or closing work short, and the judgment writes deliberately left open to one — are listed once,
+in [Credential policy for judgment writes](#credential-policy-for-judgment-writes), and apply to an
+API token however it is presented). Every tool call is a
 real request dispatched through the same routers with a real user's bearer — a 15-minute access JWT
 or a long-lived, Admin-issued **API token** bound to one user (see the API tokens callout under
 [Admin](#admin)): `get_current_user` resolves the user, tenancy comes from the token's active
@@ -103,8 +107,9 @@ an API token is accepted, as the one user it is bound to. The one thing
 the MCP layer *adds* is stricter, not looser: its hand-written tools force new and duplicated work
 orders to land DRAFT, keep release an explicit separate call (the header-update tool refuses
 `status: released` / `in_progress`, which the raw `PUT` would have accepted with no release stamp),
-set an imported or hand-keyed nest package back to DRAFT with its operations pending, never mix
-manual nests with a package import, and refuse operation names that are file names — see
+set an imported or hand-keyed nest package back to DRAFT with its operations pending (a job on hold
+is left on hold), never mix manual nests with a package import, and refuse operation names that are
+file names — see
 [MCP.md → DRAFT guarantees](MCP.md#9-draft-guarantees). The two Excel-cutover loaders are not
 tools at all, and neither is AI **Accept & apply** (`POST /ai/recommendations/{id}/apply`): under
 owner ruling 3 only a person signed in to the app runs an AI recommendation's action, so it is in
@@ -122,26 +127,68 @@ and `/api-tokens` so it can never mint another credential.
 
 ### Credential policy for judgment writes
 
-A few writes record a **person's judgment** — not just a permitted action — and the owner rulings
-of 2026-11-05 restrict which *credential* may carry them, on top of the role gate. The predicates
-live once, in `backend/app/core/credentials.py`, and read the credential `get_current_user`
-stamped on the request:
+A few writes record a **person's judgment** — not just a permitted action — and some of them are
+restricted to certain *credentials*, on top of the role gate. The restrictions have three sources,
+and each row below names its own: owner ruling 3 of 2026-11-05 (the two AI rows), the owner's
+decision of 2026-11-07 (a standing API token may not declare scrap or close work short), and this
+PR's extensions of that decision (scrap reasons, the re-stamp short close and the other count
+judgments). This section is the **one list** of those credential rules — what refuses a credential,
+what is deliberately left open (and who decided each), and what is deliberately not refused —
+across the AI governance (ruling 3), floor-gates (ruling 2) and short-count (ruling 1) changes;
+other documents point here. The predicates live once, in
+`backend/app/core/credentials.py`, and read the credential `get_current_user` stamped on the
+request:
 
 | Predicate | Refuses | Allows |
 |---|---|---|
 | `is_interactive_person` | A long-lived **API token**, and any station- or badge-scoped (`kiosk`) token | A person signed in with their own access JWT |
 | `is_api_token_credential` (the write is refused when true) | A long-lived **API token** | An interactive session, and a crew-station badge token (a person standing at the kiosk) |
 
-Writes that apply them:
+Writes that apply them — each refused before any write and before any audit row (the 403 texts
+live in `ai_action_applier.py` and `operation_action_gates.py`; where each sits in its route's
+check order is in `docs/API.md` → Work Orders → "Short count at completion" and → AI
+Recommendations):
 
-| Write | Predicate | Refusal |
-|---|---|---|
-| AI **Accept & apply** — `POST /ai/recommendations/{id}/apply` (owner ruling 3) | `is_interactive_person` | **403**; also not an MCP tool |
-| **Mark handled** — record-only `POST /ai/recommendations/{id}/accept` on an AI action card (owner ruling 3) | `is_interactive_person` | **403** |
+| Write | Predicate | Refusal | Decided by |
+|---|---|---|---|
+| AI **Accept & apply** — `POST /ai/recommendations/{id}/apply` | `is_interactive_person` | **403**; also not an MCP tool | Owner ruling 3 |
+| **Mark handled** — record-only `POST /ai/recommendations/{id}/accept` on an AI action card | `is_interactive_person` | **403** | Owner ruling 3 |
+| **Declaring scrap** — any request that would raise a recorded `quantity_scrapped` (an operation's, a time entry's or a work-order header's), by any positive amount: `POST /shop-floor/clock-out/{id}`, `POST /shop-floor/operations/{id}/production` (with or without `open_ncr`), the Hank `report_production` task (`POST /hank/tasks` and `…/execute`), both operation-complete verbs, force-complete (`POST /work-orders/{id}/complete`), `PUT /work-orders/operations/{id}` and `PUT /work-orders/{id}` | `is_api_token_credential`, through `operation_action_gates.api_token_declares_scrap` (a non-finite delta fails closed) | **403** `API_TOKEN_SCRAP` (`Scrap must be reported by a person …`) | Owner decision 2026-11-07: only a person — kiosk, crew badge, desk — declares scrap, because a scrap count is quality evidence someone has to have seen |
+| **Writing or changing a scrap reason or code** (`scrap_reason` / `scrap_reason_code_id`), even with no new scrap: clock-out (onto the caller's own time entry), `PUT /work-orders/{id}`, force-complete re-sending the recorded scrap with a different reason or code (or with none over a recorded one), `PUT /work-orders/operations/{id}`. Sending no reason, or the stored one, is no change | `is_api_token_credential`, through `api_token_changes_scrap_reason` | **403** `API_TOKEN_SCRAP` | **This PR's extension** of the 2026-11-07 decision: re-categorizing a person's scrap is the same evidence (the scrap Pareto groups by the code) |
+| **Closing work short** — a short close by either operation-complete verb whose scrap is already on record (one declaring new scrap gets `API_TOKEN_SCRAP` first), a force-complete below the order, and an office reduce-production re-stamp that would set a declared short | `is_api_token_credential` (reduce-production through `production_reduction_service.api_token_reduction_refusal`) | **403** `API_TOKEN_SHORT_CLOSE` (`Closing work short must be done by a person …`) | Owner decision 2026-11-07 (a token keeps only the full-count close); the re-stamp case is **this PR's extension** |
+| **The other count judgments** — good above the floor's labor record (office operation complete, override reason or not; force-complete above `deliverable`); `PUT /work-orders/operations/{id}` changing `quantity_complete` or a `quantity_scrapped` that is not a rise; `PUT /work-orders/{id}` changing the header's `quantity_complete` / `quantity_scrapped` in either direction; **every** correction through `POST /work-orders/operations/{id}/reduce-production` or `POST /shop-floor/operations/{id}/reduce-production`; lowering `quantity_ordered` once any operation has recorded good, scrap, a start or any labor; lowering a laser nest's `planned_runs` through `PATCH /laser-nests/{id}` once that nest's operation has (its runs are the operation's target, and the laser work order's order is derived from them). Both lowerings read one rule, `operation_action_gates.operation_has_recorded_work` (good, scrap, a start — IN_PROGRESS / COMPLETE status or a stamped `actual_start` — or any `TimeEntry`) | `is_api_token_credential` (reduce-production through `api_token_reduction_refusal`, re-checked under the row locks) | **403** `API_TOKEN_COUNT_JUDGMENT` (`Recording more good than the floor counted, …`) | **This PR's extension** of the same principle — the owner was asked about scrap and short closes, not these |
+| **Re-importing a nest package onto a laser job with recorded work** — `POST /work-orders/{id}/laser-nest-packages/import` (either import shape; the MCP tool `import_laser_nest_package` with a `work_order_id`) when any operation the import would delete has recorded work (the same `operation_has_recorded_work` rule), or the laser work order's header already carries good or scrap: the import replaces every nest operation and zeroes the header counts, erasing a person's good, scrap and any declared short. Refused before the upload is unpacked, and again under the import's lock reading the database rather than the rows the first check loaded; a token's import onto un-worked nests with a zero header, and the standalone import, which wipes nothing, are unchanged | `is_api_token_credential` (`laser_nest_service.import_would_wipe_recorded_work`) | **403** `API_TOKEN_NEST_REIMPORT` (`Re-importing a nest package replaces nests that already have recorded work …`) — its own text, so the caller is told which action was refused | **This PR's extension** of the same principle — the owner was asked about scrap and short closes, not this |
+
+Deliberately **not** refused:
+
+- A **crew-station badge token** is a person standing at the kiosk with their own badge, so it
+  passes every `is_api_token_credential` rule above. For declaring scrap and closing work short that
+  is the owner's decision (it names the crew badge: "kiosk, crew badge, desk"); for the count-judgment
+  and scrap-reason rows it is this PR's reading. (`is_interactive_person` refuses it, and its path
+  fence keeps it on `/api/v1/shop-floor` anyway.)
+- An agent presenting a **person's own interactive access JWT** (an MCP client signed in as that
+  person) is that person's session to both predicates and is not refused — current behavior, not an
+  owner decision. The 2026-11-07 decision
+  covered standing API tokens only; whether an agent on a person's JWT may make these writes was
+  not part of it.
+- Scrap fields that are not production scrap records: `POST /fabrication-quotes/{quote_id}/actuals`
+  (the MCP tool `record_actuals`) takes a `scrap_quantity` but stores it as a quoting-calibration
+  observation (`FabricationQuoteActual.observation_json`), and a BOM line's `scrap_factor` is a
+  planning allowance. Neither is refused. `tests/api/test_api_token_scrap_refusal.py` lists both as
+  exempt with their reasons, and fails CI on any new scrap writer that is neither guarded nor
+  listed.
 
 The role gate still applies after the credential check: the person must hold a role that could
-apply the action. Dismiss, snooze and feedback on a recommendation stay open to any credential.
-`hank_task_service.py` and its siblings carry older inline copies of the stricter predicate.
+apply the action. `hank_task_service.py` and its siblings carry older inline copies of the stricter
+predicate.
+
+Judgment-shaped writes deliberately left open, so no predicate applies (the role gate and the
+route's own fences still do):
+
+| Write | Open to | Decision |
+|---|---|---|
+| **Resume Work Order** — `POST /work-orders/{id}/resume` (lifts a work-order hold) | Any credential of a user holding Admin / Manager / Supervisor, a standing **API token** included (the MCP tool `work_orders_resume_work_order`); kiosk badge and station tokens are refused by their path fence, as on every `/work-orders` route. Each call's required audit rows are written as the token's user with `extra_data.credential` | Owner decision 2026-11-07: an agent may lift a work-order hold |
+| **Dismiss**, snooze and feedback on a recommendation, action cards included | Every authenticated user and every credential | A design decision of the AI governance change; for Dismiss on an action card, confirmed by the owner 2026-11-07 (it does not take the Mark handled gate) — see [AI recommendations (Action Inbox)](#ai-recommendations-action-inbox) |
 
 ## Permission Matrix
 
@@ -170,6 +217,9 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 | View deleted work orders (the restore view) | ✓ | ✓ | | | | | |
 | Restore a deleted work order | ✓ | ✓ | | | | | |
 | Release | ✓ | ✓ | ✓ | | | | |
+| Start work order (released only) | ✓ | ✓ | ✓ | | | | |
+| Hold work order (`PUT` `status: on_hold`; released / in-progress only) | ✓ | ✓ | ✓ | | | | |
+| Resume work order (lift a work-order hold) | ✓ | ✓ | ✓ | | | | |
 | Start operation (office verb) | ✓ | ✓ | ✓ | | ✓ | | |
 | Start operation (shop-floor verb) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Complete (office verb) | ✓ | ✓ | ✓ | | ✓ | | |
@@ -245,18 +295,102 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > **The shop-floor rows above are ticked for every role on purpose — that is what the code does, not
 > an aspiration.** `PUT /shop-floor/operations/{id}/start` and `POST /shop-floor/operations/{id}/complete`
 > both take a bare `Depends(get_current_user)`, so a **Viewer** or **Shipping** user can clock in and
-> then complete an operation — booking it at target quantity, receiving finished goods, consuming tied
-> material and writing chain rows. The new labor-evidence gate on floor completion does **not** close
+> then complete an operation — closing it at the good count recorded on the floor (or declaring the
+> shortfall as scrap with a reason), receiving finished goods, consuming tied material and writing
+> chain rows. The new labor-evidence gate on floor completion does **not** close
 > this: it is a record-quality check, not an authorization one, and the same caller satisfies it with
 > one extra clock-in request. This is **pre-existing** and was not introduced by the pooling work, but
 > pooling widens its reach (1 reachable operation on a batch WO becomes N). Ticking the cells honestly
 > is deliberate: a matrix that claimed a gate here would be worse than one that admits there isn't one.
 > Closing it means `require_role([...])` on those two verbs — an open owner decision, tracked, not done.
 >
-> No role gained anything. The office verb has **no UI caller today** — the app's only Start control
-> (`ShopFloorSimple`) calls the shop-floor verb — so the gate closes an API-reachable hole rather than
-> hiding a button; wire any future office Start control to `work_orders:edit` so the hidden control
-> and the refused call agree. See `docs/API.md` → Work Orders.
+> No role gained anything. The office operation-start verb has **no UI caller today** — the floor's
+> operation Start / Check In controls (`ShopFloorSimple`, the Time Clock, both kiosks) call
+> `POST /shop-floor/clock-in` or the shop-floor start verb, and Work Order detail's **Start** button is
+> the *work-order* start (`POST /work-orders/{id}/start`, below), not this verb — so the gate closes an
+> API-reachable hole rather than hiding a button; wire any future office operation-Start control to
+> `work_orders:edit` so the hidden control and the refused call agree. See `docs/API.md` → Work Orders.
+
+> **Start / Hold / Resume work order — Admin / Manager / Supervisor (owner ruling 2026-11-05).**
+> - `POST /api/v1/work-orders/{id}/start` is now enforced in code to
+>   `require_role([ADMIN, MANAGER, SUPERVISOR])`. It previously took a bare `get_current_user`, so
+>   **any** authenticated tenant user — Operator, Quality, Shipping and Viewer included — could move a
+>   released work order to IN_PROGRESS **and lift a work-order hold** with it (the verb accepted
+>   ON_HOLD). Those four roles **lose** that capability on purpose: the verb now accepts RELEASED only
+>   and refuses 409 on a draft or held job.
+> - **Hold work order** is the existing `PUT /api/v1/work-orders/{id}` (already Admin / Manager /
+>   Supervisor) with `status: on_hold`; it now refuses 409 on a **draft**, so a hold is only ever
+>   placed on released work.
+> - **Resume work order** is the new `POST /api/v1/work-orders/{id}/resume`,
+>   `require_role([ADMIN, MANAGER, SUPERVISOR])`, with required (fail-closed) audit rows. It never
+>   releases a job: with no release on record the job returns to DRAFT and goes back through
+>   **Release**.
+>   It is also the MCP tool `work_orders_resume_work_order`, and a standing per-user API token
+>   holding one of those roles may call it — the same posture as `release_work_order` (**owner
+>   decision 2026-11-07**: an agent may lift a work-order hold; each call is audited as the token's
+>   user with `extra_data.credential`).
+>
+> Work Order detail shows **Start** (released), **Hold Work Order** (released / in progress) and
+> **Resume Work Order** (on hold) only to users holding `work_orders:edit` (or a superuser) — the same
+> Admin / Manager / Supervisor set — so a hidden control and a refused call agree; `customPermissions`
+> can still diverge at runtime, and the server stays authoritative (a mismatch surfaces as the
+> verbatim 403). Superuser and Platform Admin pass through `require_role` as everywhere else. See
+> `docs/API.md` → Work Orders → "Draft and on-hold work orders refuse every start".
+
+> **The shop-floor verbs stay operator-open, but now refuse draft and on-hold work orders.**
+> `POST /shop-floor/clock-in`, `PUT /shop-floor/operations/{id}/start` and the READY auto-start inside
+> both operation-complete verbs refuse **409** for **every** role — Admin included — when the
+> operation's work order is DRAFT ("release first") or ON_HOLD ("Resume Work Order"). This is a
+> state gate, not a role gate: no role cell above changed, and a supervisor's only way past it is the
+> audited door (**Release** or **Resume Work Order**). The office verbs carry the same state gate:
+> `POST /work-orders/operations/{id}/start`, and the generic `PUT /work-orders/operations/{id}`
+> (Admin / Manager / Supervisor) when it hand-sets `status: in_progress` — or `status: ready` on a
+> draft, or raises `quantity_complete` on a not-started operation — so the generic edit cannot stand
+> in for the start verb it sits beside (answered before its open-operation count 409s, so the refusal
+> names Release / Resume rather than a door the job keeps shut). Paper back-entry has no exemption. Labor already running when a job is held stays closable (clock-out, production
+> report, completing an IN_PROGRESS operation).
+
+> **Short count at completion (owner ruling 1, 2026-11-05) — state and credential rules; no role
+> cell changed.** A short count at operation completion is reported as scrap with a reason, or the
+> operation stays open; it is never closed at the counted quantity. The role gates are exactly the
+> rows above — what changed is what each verb will close, and for whom:
+> - **Complete (shop-floor verb)** — still every role (see the note above). It is now a **close**:
+>   it books the good already recorded on the floor and refuses **409**, writing nothing, while any
+>   received unit is unaccounted. It credits nothing to anyone's time entry, and a short close
+>   with someone else still clocked in needs `acknowledge_open_entries` (their unreported pieces will
+>   not be counted).
+> - **Complete (office verb)** — still Admin / Manager / Supervisor / Quality. It closes only when
+>   good + scrap cover every unit that reached the operation (otherwise it saves progress), recording
+>   more good than the floor's labor evidence needs a `quantity_override_reason` written as required
+>   audit evidence, and a short close with anyone clocked in needs `acknowledge_open_entries`. An
+>   operation **nobody ever clocked into** still closes from the desk with no reason — the owner's
+>   office-exempt asymmetry with the shop-floor labor gate is unchanged.
+> - **Force-complete** (`POST /work-orders/{id}/complete`, Admin / Manager / Supervisor / Quality) —
+>   bounded by what the floor recorded (an override reason to exceed it, required audit) and refused
+>   when the shortfall is not covered by scrap with a reason.
+> - **Correcting a completed operation** — the office reduce-production verb stays **Admin / Manager
+>   / Supervisor** (the existing gate), and is now the only way to correct a COMPLETE operation's
+>   count: a correction that would leave it short must send `reopen_operation` (it returns to in
+>   progress, with required audit rows). On an operation nobody ever clocked in to it lowers the
+>   desk-entered good count directly (there is no labor to walk). The operator's twin refuses
+>   `reopen_operation` (**422**), and
+>   `PUT /work-orders/operations/{id}` refuses good / status edits and scrap LOWERING on a COMPLETE
+>   operation (**409**) — the same Admin / Manager / Supervisor gate may still ADD scrap found after
+>   the close, with a reason, as required audit evidence, but only into units still unaccounted
+>   (zero on an accounted close; a rise past that is **409** — on a live work order, pieces counted
+>   good and later found bad go through reduce-production with `reopen_operation`, then a re-close
+>   with the scrap; on a complete / closed / cancelled one no operation-level correction exists, and
+>   the 409 says to record them as a nonconformance (NCR) instead).
+> - **An API token may not declare scrap, change a scrap reason, close work short or make the
+>   related count judgments** — a credential rule, not a role rule; no role cell changed. A standing
+>   per-user API token (`app.core.credentials.is_api_token_credential`) is refused **403** on those
+>   writes whatever its user's role, and a crew-station badge token is a person and passes. Which
+>   routes, which 403 text, and which parts the owner decided on 2026-11-07 (scrap, short closes)
+>   versus which this PR extends (scrap reasons, the other count judgments, every reduce-production
+>   correction) are listed once, in
+>   [Credential policy for judgment writes](#credential-policy-for-judgment-writes).
+>
+> See `docs/API.md` → Work Orders → "Short count at completion".
 
 > **Hold / resume are operator-facing; resolving the blocker behind a hold is not.** Both rows above
 > are new to this matrix; **neither gate changed**. `PUT /api/v1/shop-floor/operations/{id}/hold` and
@@ -398,6 +532,11 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > self-unapproval), then reduce. Same tenant-scoped **404** and tamper-evident audit row as the
 > shop-floor verb.
 >
+> **Neither verb takes a standing API token** (**403** before any lock or write, whatever the bound
+> user's role) — a count correction is a person's judgment; see "An API token may not declare scrap
+> or make count judgments" above. A crew-station badge is a person and still corrects its own count
+> on the shop-floor verb.
+>
 > **The office/operator split on a COMPLETE operation is a role decision, not a mechanism detail.**
 > The office verb passes `allow_completed_operation=True` and the operator verb does not, so a
 > completed operation is correctable **only** by Admin / Manager / Supervisor; a **terminal work
@@ -410,8 +549,12 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > back, so neither half can be exercised without the authority to do the other. The supervisor's
 > optional note is recorded on
 > the **audit row only**, never written onto another operator's labor record. In the UI this is
-> the **Correct count** action on the work-order detail page, gated on `work_orders:edit`. See
-> `docs/API.md` → Work Orders → "Over-count correction … (supervisor/office)".
+> the **Correct count** action on the work-order detail page, gated on `work_orders:edit`. Since owner
+> ruling 1 a correction that would leave a COMPLETE operation short also needs `reopen_operation`
+> (the dialog's explicit **Reopen Op N and correct** step) and returns it to in progress — the same
+> Admin / Manager / Supervisor tier, no new permission; the operator verb refuses `reopen_operation`
+> with **422**. See `docs/API.md` → Work Orders → "Over-count correction … (supervisor/office)" and
+> "Short count at completion".
 
 > **Renumber a part — endpoint mapping.** `POST /api/v1/parts/{id}/renumber` (change a part's
 > number in place, retiring the old one) is enforced in code to `require_role([ADMIN, MANAGER])` —

@@ -4,7 +4,7 @@ import logging
 import math
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Iterable, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Any, Iterable, Literal, Optional, Sequence, Union
 
 from sqlalchemy import and_, func, or_
 from sqlalchemy.exc import PendingRollbackError
@@ -20,6 +20,9 @@ from app.models.work_order import (
     WorkOrderStatus,
     WorkOrderType,
 )
+
+if TYPE_CHECKING:  # pragma: no cover - typing only; this module writes no audit rows itself
+    from app.services.audit_service import AuditService
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +199,11 @@ class StatusTransition:
     # scheduled-load query, so the persisted availability_rate would otherwise stay
     # understated). Empty for operation transitions and non-completion transitions.
     work_center_ids: list[int] = field(default_factory=list)
+    # Owner ruling 1 (INT3): for an operation -> COMPLETE transition, the accounting the
+    # flip was decided on -- ``{target, received, upstream_quantity_short}`` -- merged into
+    # the audit row's extra_data by both reconcile audit emitters, so a stage completed at
+    # fewer than its target because an upstream close was declared short says so.
+    extra_data: dict = field(default_factory=dict)
 
 
 def report_reconcile_leg_failure(
@@ -478,7 +486,21 @@ def promote_ready_operations(
     anchors on the EARLIEST event (``flow_metrics_service._ready_times_by_operation``
     is ``func.min(occurred_at)``). Do not rewrite a consumer to last-wins without
     dealing with this -- it would silently erase queue time on every held job.
+
+    NEVER PROMOTES A DRAFT OR TERMINAL WORK ORDER -- the rule itself, at all four seams, not
+    only the read heal. Release is the authorization step and the record of who put work on
+    the floor, so nothing but Release (which writes RELEASED *before* it calls
+    ``release_first_ready_operation``) may put a draft's operations on the dispatch board and
+    the kiosk. This is what keeps resume-to-DRAFT's required, audited demotions demoted: a
+    job resumed to DRAFT can still carry labor that was running when it was held (that
+    labor stays closable, by rule), and finishing it reaches the completion seam
+    (``release_next_ready_operation``) -- which used to promote the successors, and on a
+    laser pool every demoted nest, straight back onto the board with no audit row. ON_HOLD
+    keeps promoting, as documented: a held work order is not a terminal one, and every start
+    verb still refuses its operations until Resume Work Order.
     """
+    if work_order.status == WorkOrderStatus.DRAFT or work_order.status in TERMINAL_WO_STATUSES:
+        return []
     company_id = work_order.company_id
     scoped_ops = [
         op
@@ -608,39 +630,120 @@ def operations_worked_out_of_sequence(db: Session, work_order: WorkOrder) -> lis
     ]
 
 
-def demote_operations_for_sequencing(db: Session, work_order: WorkOrder) -> list[WorkOrderOperation]:
-    """READY -> PENDING for work the pooled rule promoted that a sequenced routing forbids.
+# The rule-driven ways an operation can move BACKWARDS (READY -> PENDING). One core,
+# ``demote_ready_operations``, with an explicit scope per caller -- never a second copy of
+# the "has anyone worked it?" test or of the tenant-scoped candidate read.
+#
+#   "sequencing"   -- PUT /work-orders/{id} turning ``sequential_operations`` ON: demote
+#                     only what the strict routing rule now blocks (via the thin wrapper
+#                     ``demote_operations_for_sequencing``, whose call site is unchanged).
+#   "all_unworked" -- POST /work-orders/{id}/resume landing a held job back at DRAFT (no
+#                     release on record), and PUT /work-orders/{id} moving a non-DRAFT job
+#                     to ``status: draft``: every un-worked READY operation, laser nests
+#                     included (``exempt_laser=False``), because a DRAFT work order must
+#                     not leave cards on the dispatch board and the kiosk.
+#   "blocked_by"   -- POST /work-orders/operations/{id}/reduce-production with
+#                     ``reopen_operation`` (owner ruling 1): a COMPLETE operation an
+#                     over-count correction would leave short goes back to IN_PROGRESS, and
+#                     the un-worked READY operations it NOW blocks -- under the work order's
+#                     own rule (``work_order_allows_same_work_center``), and only those whose
+#                     block is that operation (``blocked_by``) -- return to PENDING. Reached
+#                     through ``reopen_completed_operation``.
+#
+# A later scope adds one ``DemotionScope`` literal and one branch in
+# ``_selected_for_demotion`` -- nothing else. Scheduling's
+# ``PUT /scheduling/work-orders/{id}/unschedule`` also writes READY -> PENDING, but that is
+# a transient scheduling reset the next reconciling read re-promotes, not a gate decision;
+# it deliberately does not go through this core.
+DemotionScope = Literal["sequencing", "all_unworked", "blocked_by"]
+DEMOTION_SCOPES: tuple[str, ...] = ("sequencing", "all_unworked", "blocked_by")
 
-    THE ONE PLACE anything in this system moves an operation BACKWARDS as a rule (holds
-    and resume are actor decisions about a specific operation; this is a rule change
-    applied to a route). It exists because promotion is strictly forward-only: every seam
-    only ever writes PENDING -> READY, so switching ``sequential_operations`` on would
-    otherwise leave the operations the pooled rule already promoted sitting READY
-    forever -- the exact rows the owner is trying to take off the board. Turning the flag
-    on without this fixes only the NEXT work order, never the one being looked at.
 
-    Refuses to demote anything that has been WORKED. An operation is left alone when it is
-    not READY (IN_PROGRESS / ON_HOLD / COMPLETE / already PENDING are all somebody else's
-    state to own), when it carries an ``actual_start``, when it has booked good or scrapped
-    quantity, or when ANY TimeEntry exists against it -- open or closed, the same
-    existence-only evidence test the floor's completion gate uses. Demoting worked
-    material would strand real labor behind a gate the operator already passed.
+def _selected_for_demotion(
+    scope: DemotionScope,
+    operation: WorkOrderOperation,
+    incomplete: list[WorkOrderOperation],
+    *,
+    allow_same_work_center: bool = True,
+    blocked_by: Optional[WorkOrderOperation] = None,
+) -> bool:
+    """Does ``scope`` take this (READY, un-worked) operation off the board?"""
+    if scope == "sequencing":
+        # The strict rule, unconditionally (allow_same_work_center=False): the lowest
+        # startable operation of the route stays READY, so the floor is never left with a
+        # work order it cannot start at all.
+        return operation_blocked_by_incomplete_predecessors(operation, incomplete, allow_same_work_center=False)
+    if scope == "all_unworked":
+        return True
+    if scope == "blocked_by":
+        # Blocked now, under the work order's OWN rule, and only because of the re-opened
+        # operation: without it in the incomplete set the gate would pass. An operation
+        # some other incomplete predecessor already blocks is not this caller's business.
+        assert blocked_by is not None  # guarded by demote_ready_operations
+        if not operation_blocked_by_incomplete_predecessors(
+            operation, incomplete, allow_same_work_center=allow_same_work_center
+        ):
+            return False
+        without = [other for other in incomplete if other.id != blocked_by.id]
+        return not operation_blocked_by_incomplete_predecessors(
+            operation, without, allow_same_work_center=allow_same_work_center
+        )
+    raise ValueError(f"unknown demotion scope {scope!r}")  # pragma: no cover - guarded by the caller
 
-    Only demotes what the NEW rule actually blocks: the gate runs with
-    ``allow_same_work_center=False``, so the lowest startable operation of the route stays
-    READY and the floor is never left with a work order it cannot start at all.
 
-    Laser dispatch pools are exempt (the flag is inert there), and a pooled work order is
-    a no-op -- switching sequencing OFF needs no demotion, promotion heals that direction
-    by itself on the next reconciling read.
+def demote_ready_operations(
+    db: Session,
+    work_order: WorkOrder,
+    *,
+    scope: DemotionScope,
+    exempt_laser: bool = True,
+    blocked_by: Optional[WorkOrderOperation] = None,
+) -> list[WorkOrderOperation]:
+    """READY -> PENDING for un-worked operations ``scope`` selects. THE demotion core.
+
+    The only rule-driven way anything in this system moves an operation BACKWARDS (holds
+    and op-level resume are actor decisions about one specific operation; this is a rule
+    applied to a route). It exists because promotion is strictly forward-only: every
+    promotion seam only ever writes PENDING -> READY, so a change that makes READY wrong
+    -- sequencing switched on, a held job resumed to DRAFT, a completed operation reopened
+    by an office correction -- would otherwise leave those
+    cards on the dispatch board and the kiosk forever. Callers and scopes are listed above
+    ``DemotionScope``.
+
+    Refuses to demote anything that has been WORKED, in every scope. An operation is left
+    alone when it is not READY (IN_PROGRESS / ON_HOLD / COMPLETE / already PENDING are all
+    somebody else's state to own), when it carries an ``actual_start``, when it has booked
+    good or scrapped quantity, or when ANY TimeEntry exists against it -- open or closed,
+    the same existence-only evidence test the floor's completion gate uses. Demoting
+    worked material would strand real labor behind a gate the operator already passed.
+
+    ``exempt_laser`` (default True) makes a laser dispatch pool a no-op -- the sequencing
+    flag is inert there. The two DRAFT callers (resume-to-DRAFT, PUT to draft) pass
+    ``False``: a DRAFT nest package must not leave READY nests on the floor's board either.
+
+    The ``"sequencing"`` scope is also a no-op on a POOLED work order: switching
+    sequencing OFF needs no demotion, promotion heals that direction by itself on the next
+    reconciling read.
+
+    The ``"blocked_by"`` scope needs ``blocked_by`` (the re-opened operation, already
+    written back to a not-COMPLETE status) and evaluates the gate with the work order's
+    own ``work_order_allows_same_work_center`` value, resolved once here.
 
     Returns the demoted operations WITH THEIR STATUS ALREADY WRITTEN, so the caller (which
     holds ``current_user`` and an ``AuditService``) can log a status change per row before
-    its commit -- invariant 2. This function writes no audit row itself, the same division
-    of labor ``reconcile_work_orders_from_completion_evidence`` uses via StatusTransition.
+    its commit -- invariant 2 (``log_demotions_required`` is the fail-closed emitter). This
+    function writes no audit row itself, the same division of labor
+    ``reconcile_work_orders_from_completion_evidence`` uses via StatusTransition.
     """
-    if is_laser_dispatch_work_order(work_order) or work_order_allows_same_work_center(work_order):
+    if scope not in DEMOTION_SCOPES:
+        raise ValueError(f"unknown demotion scope {scope!r}")
+    if scope == "blocked_by" and blocked_by is None:
+        raise ValueError("the 'blocked_by' demotion scope needs the re-opened operation")
+    if exempt_laser and is_laser_dispatch_work_order(work_order):
         return []
+    if scope == "sequencing" and work_order_allows_same_work_center(work_order):
+        return []
+    allow_same_work_center = work_order_allows_same_work_center(work_order) if scope == "blocked_by" else True
 
     # Invariant 1: scoped to the work order's OWN company_id, off the WO row the caller
     # already resolved tenant-scoped -- this both selects the rows to WRITE and supplies
@@ -664,11 +767,162 @@ def demote_operations_for_sequencing(db: Session, work_order: WorkOrder) -> list
     for op in candidates:
         if _operation_has_been_worked(op, worked_operation_ids):
             continue
-        if not operation_blocked_by_incomplete_predecessors(op, incomplete, allow_same_work_center=False):
+        if not _selected_for_demotion(
+            scope, op, incomplete, allow_same_work_center=allow_same_work_center, blocked_by=blocked_by
+        ):
             continue
         op.status = OperationStatus.PENDING
         demoted.append(op)
     return demoted
+
+
+def demote_operations_for_sequencing(db: Session, work_order: WorkOrder) -> list[WorkOrderOperation]:
+    """READY -> PENDING for work the pooled rule promoted that a sequenced routing forbids.
+
+    A thin wrapper over :func:`demote_ready_operations` (scope ``"sequencing"``, laser
+    pools exempt), kept so the ``PUT /work-orders/{id}`` flip's call site and every test
+    pinning it stay byte-identical. Turning the flag on without this fixes only the NEXT
+    work order, never the one being looked at.
+
+    Only demotes what the NEW rule actually blocks: the gate runs with
+    ``allow_same_work_center=False``, so the lowest startable operation of the route stays
+    READY and the floor is never left with a work order it cannot start at all. A pooled
+    work order is a no-op. Never touches worked operations -- see the core's docstring.
+    """
+    return demote_ready_operations(db, work_order, scope="sequencing")
+
+
+def log_demotions_required(
+    audit: "AuditService",
+    operations: Sequence[WorkOrderOperation],
+    *,
+    reason: str,
+    extra: Optional[dict[str, Any]] = None,
+) -> None:
+    """One REQUIRED ``STATUS_CHANGE`` ready -> pending audit row per demoted operation.
+
+    The fail-closed emitter for :func:`demote_ready_operations`: ``log_required`` raises
+    ``AuditWriteError`` when a row cannot be written, and the caller must roll the WHOLE
+    unit back (``app.api.audit_guard.required_audit`` turns that into a 503). ``reason``
+    is the human sentence recorded as the row's description; ``extra`` is merged into
+    ``extra_data`` beside ``operation_number`` / ``sequence`` (every other
+    work_order_operation audit row identifies the operation by operation_number, so a
+    filter on that identifier still finds the demotion beside its history).
+
+    CALLERS FLUSH FIRST. ``WorkOrderOperation`` maps ``version_id_col``; if the first
+    audit write is what flushes the demotions, a concurrent writer's StaleDataError is
+    swallowed inside ``AuditService.log``'s savepoint instead of reaching the app-wide 409
+    handler (the invariant-4 note in ``work_orders.update_work_order``).
+
+    The sequencing flip keeps its own BEST-EFFORT rows (``log_status_change``) on purpose;
+    this emitter is for callers whose demotion must not land without evidence.
+    """
+    for op in operations:
+        work_order = op.work_order
+        work_order_number = work_order.work_order_number if work_order is not None else str(op.work_order_id)
+        audit.log_required(
+            action=audit.ACTIONS["STATUS_CHANGE"],
+            resource_type="work_order_operation",
+            resource_id=op.id,
+            resource_identifier=f"{work_order_number} OP{op.sequence}",
+            description=f"Operation returned to pending: {reason}",
+            old_values={"status": OperationStatus.READY.value},
+            new_values={"status": OperationStatus.PENDING.value},
+            extra_data={
+                **(extra or {}),
+                "operation_number": op.operation_number,
+                "sequence": op.sequence,
+            },
+        )
+
+
+# Where POST /work-orders/{id}/resume sends a held work order, and why.
+HoldRestoreBasis = Literal["release_record_with_work", "release_record", "no_release_record"]
+
+
+def work_order_hold_restore_target(
+    work_order: WorkOrder,
+    operations: Sequence[WorkOrderOperation],
+    worked_operation_ids: set[int],
+) -> tuple[WorkOrderStatus, HoldRestoreBasis]:
+    """The status an ON_HOLD work order resumes to, and the basis it was decided on. Pure.
+
+    Resume must never RELEASE a job: Release is the authorization step and the record of
+    who put work on the floor. So a non-DRAFT target requires a RELEASE RECORD
+    (``released_at`` or ``released_by``):
+
+    * release record + work evidence -> IN_PROGRESS (``"release_record_with_work"``);
+    * release record, no work evidence -> RELEASED (``"release_record"``);
+    * no release record -> DRAFT (``"no_release_record"``) -- the caller demotes its
+      un-worked READY operations and the job goes back through Release.
+
+    Work evidence is any of: ``work_order.actual_start``, any COMPLETE operation, or any
+    operation :func:`_operation_has_been_worked` reports (IN_PROGRESS, ``actual_start``,
+    booked good/scrap quantity, any TimeEntry -- ``worked_operation_ids`` from
+    :func:`_worked_operation_ids`). ``actual_start`` alone would be wrong: the read heal
+    lifts RELEASED -> IN_PROGRESS without stamping it.
+
+    No laser carve-out and no audit-row lookup: a best-effort audit row is not a state
+    source (it can be missing), and since ``PUT /work-orders/{id}`` refuses DRAFT ->
+    ON_HOLD every hold placed now is on released work. A legacy unstamped hold resumes to
+    DRAFT -- the restrictive answer, one Release click to fix and immediately visible.
+    """
+    has_release_record = work_order.released_at is not None or work_order.released_by is not None
+    if not has_release_record:
+        return WorkOrderStatus.DRAFT, "no_release_record"
+    has_work = work_order.actual_start is not None or any(
+        op.status == OperationStatus.COMPLETE or _operation_has_been_worked(op, worked_operation_ids)
+        for op in operations
+    )
+    if has_work:
+        return WorkOrderStatus.IN_PROGRESS, "release_record_with_work"
+    return WorkOrderStatus.RELEASED, "release_record"
+
+
+@dataclass(frozen=True)
+class WorkOrderResumeOutcome:
+    """What :func:`apply_work_order_resume` wrote (nothing audited, nothing committed)."""
+
+    previous_status: WorkOrderStatus
+    status: WorkOrderStatus
+    restore_basis: HoldRestoreBasis
+    demoted_operations: list[WorkOrderOperation]
+    # Every work center the work order's operations sit at (sorted, de-duplicated) -- the
+    # shop-floor channels the caller broadcasts ``work_order_resumed`` on, taken from the
+    # operations this function already read so the route issues no second query.
+    work_center_ids: tuple[int, ...] = ()
+
+
+def apply_work_order_resume(db: Session, work_order: WorkOrder) -> WorkOrderResumeOutcome:
+    """Lift a work-order hold: write the restore target and, for DRAFT, the demotions.
+
+    The caller (``POST /work-orders/{id}/resume``) has already refused a work order that
+    is not ON_HOLD and holds the actor: it flushes, writes the REQUIRED audit rows and
+    commits. This function writes statuses only -- no audit row, no commit, no event.
+
+    Reads the operations tenant-scoped off the work order's own ``company_id`` (invariant
+    1) and the TimeEntry evidence in ONE query. A DRAFT target demotes every un-worked
+    READY operation, laser nests included, through the one demotion core.
+    """
+    operations = (
+        tenant_query(db, WorkOrderOperation, work_order.company_id)
+        .filter(WorkOrderOperation.work_order_id == work_order.id)
+        .all()
+    )
+    worked_operation_ids = _worked_operation_ids(db, work_order.company_id, operations)
+    target, basis = work_order_hold_restore_target(work_order, operations, worked_operation_ids)
+    previous_status = WorkOrderStatus(getattr(work_order.status, "value", work_order.status))
+    work_order.status = target
+    demoted: list[WorkOrderOperation] = []
+    if target == WorkOrderStatus.DRAFT:
+        demoted = demote_ready_operations(db, work_order, scope="all_unworked", exempt_laser=False)
+    return WorkOrderResumeOutcome(
+        previous_status=previous_status,
+        status=target,
+        restore_basis=basis,
+        demoted_operations=demoted,
+        work_center_ids=tuple(sorted({op.work_center_id for op in operations if op.work_center_id})),
+    )
 
 
 def release_first_ready_operation(
@@ -745,14 +999,20 @@ def _operation_produced_evidence(db: Session, operation: WorkOrderOperation) -> 
     ``quantity_complete`` below what the operator already booked on durable
     TimeEntry evidence, otherwise a later read-time reconcile silently bumps it
     back up with no audit of the discrepancy. Returns 0 for an unsaved operation.
+
+    Invariant 1: scoped to the operation's own company, exactly like
+    ``operation_labor_evidence`` -- the floor close books this figure and the force-complete
+    bounds read the batched twin, so a mis-tenanted entry on a colliding operation id must be
+    ignored by both or the two would disagree on the same data.
     """
     if operation.id is None:
         return 0.0
-    total = (
-        db.query(func.coalesce(func.sum(TimeEntry.quantity_produced), 0.0))
-        .filter(TimeEntry.operation_id == operation.id)
-        .scalar()
+    query = db.query(func.coalesce(func.sum(TimeEntry.quantity_produced), 0.0)).filter(
+        TimeEntry.operation_id == operation.id
     )
+    if operation.company_id is not None:
+        query = query.filter(TimeEntry.company_id == operation.company_id)
+    total = query.scalar()
     return float(total or 0.0)
 
 
@@ -1002,6 +1262,1021 @@ def active_work_order_operations(work_order: WorkOrder) -> list[WorkOrderOperati
     return [op for op in operations if not _operation_nest_is_deleted(op)]
 
 
+# --------------------------------------------------------------------------- #
+# Short-count accounting (owner ruling 1, 2026-11-05).
+#
+# A short count at operation completion is never closed at the counted quantity:
+# every piece that reached an operation is accounted for as good or as scrap with a
+# reason, or the operation stays open. THIS is the one implementation of that
+# arithmetic. Every verb, read model and seam calls ``operation_accounting`` /
+# ``stage_accounting`` / ``record_short_declaration`` /
+# ``finished_quantity_at_all_complete`` -- never an inline ``good + scrap >= target``.
+#
+# Two completion rules, deliberately different:
+#
+# * IMPLICIT auto-complete (clock-out, reconcile-on-read) fires on
+#   ``OperationAccounting.is_full_count`` -- a full GOOD count of the units that
+#   reached the operation. Scrap never counts there, so an operator who scrapped two
+#   and is re-running replacements is never closed out from under them, and a read
+#   (no actor, no reason) never closes a short.
+# * EXPLICIT close (the floor and office complete verbs) requires
+#   ``OperationAccounting.is_accounted`` -- every received unit is good or scrapped --
+#   and stamps the short it closed with on ``quantity_short_declared`` via
+#   ``record_short_declaration``. That column is the ONLY input to upstream credit:
+#   nothing re-derives a short from the counts later, so a later edit cannot change
+#   what the next stage was credited with, and every pre-117 row (NULL) reads as zero.
+#
+# Credit flows along CHAINS, by sequence (``operation_chain_key``): all operations of
+# one component part (always credited), and the work order's own whole-order
+# operations (credited only on a SEQUENCED work order -- on a pooled one they cannot
+# be told apart from same-target line items, so they get none). Laser dispatch pools
+# and line items are singletons and never receive credit.
+# --------------------------------------------------------------------------- #
+
+QTY_EPSILON = 1e-9
+_QTY_EPSILON = QTY_EPSILON
+
+MAIN_CHAIN_KEY: tuple = ("main",)
+
+
+def _qty(value: Any) -> float:
+    return float(value or 0)
+
+
+def _declared_short(operation: WorkOrderOperation) -> float:
+    """The short this operation was explicitly closed with (0 when never declared)."""
+    return max(0.0, _qty(getattr(operation, "quantity_short_declared", None)))
+
+
+def _loaded_nest_is_deleted(operation: WorkOrderOperation) -> bool:
+    """``_operation_nest_is_deleted`` without ever triggering a relationship load."""
+    nest = operation.__dict__.get("laser_nest")
+    if nest is not None:
+        return bool(getattr(nest, "is_deleted", False))
+    return getattr(operation, "cancelled_nest_id", None) is not None
+
+
+def operation_chain_key(work_order: Optional[WorkOrder], operation: WorkOrderOperation) -> Optional[tuple]:
+    """Which unit-flow chain an operation belongs to, or ``None`` for a singleton.
+
+    * ``None`` for every operation of a laser dispatch pool (each nest is its own
+      dispatch item) and for a cancelled-nest tombstone;
+    * ``("component", component_part_id)`` for a component operation -- all operations
+      making one component part form one chain;
+    * ``MAIN_CHAIN_KEY`` (``("main",)``) for a whole-order operation: no component part
+      and a target equal to ``quantity_ordered``;
+    * ``None`` otherwise -- a line item carrying its own piece target.
+
+    Pure; reads only already-loaded attributes (never ``operation.laser_nest`` lazily).
+    """
+    if work_order is None or is_laser_dispatch_work_order(work_order):
+        return None
+    if _loaded_nest_is_deleted(operation):
+        return None
+    if operation.component_part_id:
+        return ("component", operation.component_part_id)
+    ordered = _qty(work_order.quantity_ordered)
+    if ordered > QTY_EPSILON and abs(operation_target_quantity(operation, work_order) - ordered) <= QTY_EPSILON:
+        return MAIN_CHAIN_KEY
+    return None
+
+
+def chain_credit_enabled(work_order: Optional[WorkOrder], key: Optional[tuple]) -> bool:
+    """Does a short declared upstream in this chain reduce what reaches the next stage?
+
+    Component chains: always (a component part is a positive marker of one unit flow).
+    The main chain: only on a SEQUENCED work order, read through THE one resolver
+    (``work_order_allows_same_work_center`` -> False). Singletons: never.
+    """
+    if key is None:
+        return False
+    if key[0] == "component":
+        return True
+    return not work_order_allows_same_work_center(work_order)
+
+
+@dataclass(frozen=True)
+class StageFigures:
+    """Upstream figures for one operation, from ``stage_accounting``."""
+
+    chain_upstream: float = 0.0  # HARD: declared shorts earlier in the same chain
+    feed_short: float = 0.0  # SOFT: component losses that cannot reach this assembly stage
+
+
+def _ceil_units(value: float) -> float:
+    return float(math.ceil(value - QTY_EPSILON)) if value > QTY_EPSILON else 0.0
+
+
+def stage_accounting(
+    work_order: WorkOrder,
+    operations: Iterable[Any],
+    *,
+    main_credit: Optional[bool] = None,
+) -> dict[int, StageFigures]:
+    """``{operation_id: StageFigures}`` for every operation that receives credit. Pure.
+
+    ``operations`` is the work order's ACTIVE operations (``active_work_order_operations``);
+    an id missing from the result has zero figures. ``main_credit`` overrides whether the
+    whole-order chain is credited (``None`` = the work order's own setting) -- only the
+    what-if check behind a sequencing flip (``accounting_change_strands``) passes it.
+
+    * ``chain_upstream(i)`` = SUM of ``quantity_short_declared`` over COMPLETE operations
+      of the same chain with a LOWER sequence, when the chain is credited. There is
+      deliberately no same-work-center waiver: a chain is a unit flow.
+    * ``feed_short(i)`` (main-chain operations of a credited main chain only): the units
+      a component loss keeps from this assembly stage beyond its hard ceiling. A component
+      chain's declared loss counts in assemblies as ``ceil(lost / qty_per)`` with
+      ``qty_per = component target / quantity_ordered``. It is walked along the main
+      chain so a loss declared at an earlier main stage and a component loss are not
+      counted twice: what reaches a stage is
+      ``min(what left the previous main stage, ordered - component loss so far)``, and
+      ``feed_short`` is that figure's distance below the hard ceiling. SOFT: it changes
+      the accounting (how much a short close must cover) and never caps recorded good.
+      A main stage whose every operation is COMPLETE passes on what it actually made when
+      that is MORE than the walk expected (its components were replenished), and the
+      component losses before it stop counting for the stages after it -- a completed
+      stage's output already embodies whatever was fed into it.
+    """
+    ops = [op for op in (operations or []) if op.id is not None]
+
+    def credited(key: tuple) -> bool:
+        if main_credit is not None and key == MAIN_CHAIN_KEY:
+            return main_credit
+        return chain_credit_enabled(work_order, key)
+
+    chains: dict[tuple, list[Any]] = {}
+    for op in ops:
+        key = operation_chain_key(work_order, op)
+        if key is not None and credited(key):
+            chains.setdefault(key, []).append(op)
+    if not chains:
+        return {}
+
+    figures: dict[int, StageFigures] = {}
+    for chain in chains.values():
+        for op in chain:
+            seq = op.sequence or 0
+            upstream = sum(
+                _declared_short(other)
+                for other in chain
+                if other.status == OperationStatus.COMPLETE and (other.sequence or 0) < seq
+            )
+            figures[op.id] = StageFigures(chain_upstream=upstream)
+
+    main_chain = chains.get(MAIN_CHAIN_KEY)
+    ordered = _qty(work_order.quantity_ordered)
+    if not main_chain or ordered <= QTY_EPSILON:
+        return figures
+
+    # Component losses in ASSEMBLY units, per component chain: (sequence, units).
+    losses: dict[tuple, list[tuple[int, float]]] = {}
+    for key, chain in chains.items():
+        if key[0] != "component":
+            continue
+        for op in chain:
+            declared = _declared_short(op)
+            target = operation_target_quantity(op, work_order)
+            if op.status != OperationStatus.COMPLETE or declared <= QTY_EPSILON or target <= QTY_EPSILON:
+                continue
+            losses.setdefault(key, []).append((op.sequence or 0, declared * ordered / target))
+    if not losses:
+        return figures
+
+    def component_loss_between(after: Optional[int], sequence: int) -> float:
+        return max(
+            (
+                _ceil_units(sum(units for seq, units in items if seq < sequence and (after is None or seq > after)))
+                for items in losses.values()
+            ),
+            default=0.0,
+        )
+
+    # Walk the main chain by sequence: ``available`` is what left the previous stage, and
+    # ``absorbed`` the last fully-COMPLETE main stage (component losses up to it are already
+    # inside ``available``).
+    available = ordered
+    absorbed: Optional[int] = None
+    for sequence in sorted({op.sequence or 0 for op in main_chain}):
+        group = [op for op in main_chain if (op.sequence or 0) == sequence]
+        reaching = max(0.0, min(available, ordered - component_loss_between(absorbed, sequence)))
+        for op in group:
+            current = figures[op.id]
+            ceiling = max(0.0, operation_target_quantity(op, work_order) - current.chain_upstream)
+            figures[op.id] = StageFigures(
+                chain_upstream=current.chain_upstream,
+                feed_short=max(0.0, ceiling - reaching),
+            )
+        available = reaching - sum(_declared_short(op) for op in group if op.status == OperationStatus.COMPLETE)
+        if all(op.status == OperationStatus.COMPLETE for op in group):
+            # A replenished stage made more than the walk expected: that is what moves on.
+            available = max(available, min(_qty(op.quantity_complete) for op in group))
+            absorbed = sequence
+    return figures
+
+
+def uncredited_upstream_by_operation(work_order: WorkOrder, operations: Iterable[Any]) -> dict[int, float]:
+    """``{operation_id: units}`` an earlier whole-order operation of a POOLED work order declared short.
+
+    The pooled main chain gets NO credit (owner decision: its same-target operations cannot
+    be told apart from line items). These figures change no accounting -- they exist so the
+    floor is told NOT to report those units as scrap at a later stage it never received them
+    at (that would double-count the loss and consume tied material for runs that never
+    happened), and to ask a supervisor to turn on Sequential operations instead. Pure; empty
+    on a sequenced or laser work order.
+    """
+    if work_order is None or not work_order_allows_same_work_center(work_order):
+        return {}
+    main_ops = [
+        op for op in (operations or []) if op.id is not None and operation_chain_key(work_order, op) == MAIN_CHAIN_KEY
+    ]
+    result: dict[int, float] = {}
+    for op in main_ops:
+        seq = op.sequence or 0
+        declared = sum(
+            _declared_short(other)
+            for other in main_ops
+            if other.status == OperationStatus.COMPLETE and (other.sequence or 0) < seq
+        )
+        if declared > QTY_EPSILON:
+            result[op.id] = declared
+    return result
+
+
+@dataclass(frozen=True)
+class OperationAccounting:
+    """Where every unit that reached one operation went. Pure value object.
+
+    ``target`` is ``operation_target_quantity``; ``good`` / ``scrapped`` the counts being
+    evaluated (the stored ones, or a proposed write); ``chain_upstream`` / ``feed_short``
+    come from ``stage_accounting``. The frontend twin (``utils/shortCount.ts``) transcribes
+    these properties -- change both together.
+    """
+
+    target: float
+    good: float
+    scrapped: float
+    chain_upstream: float = 0.0
+    feed_short: float = 0.0
+    # INFORMATIONAL only (no property reads it): units an earlier whole-order operation of a
+    # POOLED work order declared short. They never reached this operation either, but the
+    # pooled main chain gets no credit (owner decision), so the floor must be told NOT to
+    # report them as scrap here. Filled by the read models and the close refusals, never by
+    # ``operation_accounting`` (which reads no siblings on an uncredited chain).
+    uncredited_upstream: float = 0.0
+
+    @property
+    def ceiling(self) -> float:
+        """The server's HARD cap on recorded good: units an upstream close did not lose."""
+        return max(0.0, self.target - self.chain_upstream)
+
+    @property
+    def received(self) -> float:
+        """Units that reached this operation (the ceiling less soft component feed loss)."""
+        return max(0.0, self.ceiling - self.feed_short)
+
+    @property
+    def upstream_short(self) -> float:
+        """Units of the target that never reached this operation."""
+        return self.target - self.received
+
+    @property
+    def unaccounted(self) -> float:
+        """Received units recorded neither good nor scrapped."""
+        return max(0.0, self.received - self.good - self.scrapped)
+
+    @property
+    def closing_short(self) -> float:
+        """What an explicit close right now would declare short (received - good)."""
+        return max(0.0, self.received - self.good)
+
+    @property
+    def exceeds_ceiling(self) -> bool:
+        """More good is recorded than can have reached the operation after an upstream short.
+
+        Only meaningful when the ceiling is BELOW the target (a credited chain carrying a
+        declared short): an uncredited operation keeps its pre-117 target comparisons, so a
+        legacy count above the target is not re-judged by this rule.
+        """
+        return self.ceiling < self.target - QTY_EPSILON and self.good > self.ceiling + QTY_EPSILON
+
+    @property
+    def is_full_count(self) -> bool:
+        """IMPLICIT auto-complete: every unit that can reach the operation is recorded GOOD.
+
+        Judged against the HARD ``ceiling``, never the soft ``received``: soft component feed
+        loss lowers only what an EXPLICIT close must account for, so an assembly whose
+        components were replenished is never closed out from under the crew at the
+        feed-reduced count (a closed stage could never record the replenished units).
+        Scrap never counts here, and a count above the ceiling (``exceeds_ceiling``) is never
+        auto-completed -- it is an error to correct, not a finish.
+        """
+        return self.ceiling > QTY_EPSILON and self.good + QTY_EPSILON >= self.ceiling and not self.exceeds_ceiling
+
+    @property
+    def is_accounted(self) -> bool:
+        """EXPLICIT close: every received unit is recorded good or scrapped."""
+        return self.target > QTY_EPSILON and self.unaccounted <= QTY_EPSILON
+
+
+def operation_accounting(
+    work_order: WorkOrder,
+    operation: WorkOrderOperation,
+    operations: Optional[Iterable[WorkOrderOperation]] = None,
+    *,
+    good: Optional[float] = None,
+    scrapped: Optional[float] = None,
+) -> OperationAccounting:
+    """``OperationAccounting`` for one operation, optionally at a proposed good/scrap.
+
+    ``operations`` defaults to ``active_work_order_operations(work_order)``. A singleton or
+    an uncredited chain never reads the sibling operations at all, so a laser pool or a
+    pooled work order costs no relationship load here.
+    """
+    target = operation_target_quantity(operation, work_order)
+    good_value = _qty(operation.quantity_complete) if good is None else float(good)
+    scrapped_value = _qty(operation.quantity_scrapped) if scrapped is None else float(scrapped)
+    key = operation_chain_key(work_order, operation)
+    if key is None or not chain_credit_enabled(work_order, key):
+        return OperationAccounting(target=target, good=good_value, scrapped=scrapped_value)
+    siblings = active_work_order_operations(work_order) if operations is None else list(operations)
+    figures = stage_accounting(work_order, siblings).get(operation.id, StageFigures())
+    return OperationAccounting(
+        target=target,
+        good=good_value,
+        scrapped=scrapped_value,
+        chain_upstream=figures.chain_upstream,
+        feed_short=figures.feed_short,
+    )
+
+
+def accounting_extra_data(acct: OperationAccounting) -> dict[str, float]:
+    """The ``{target, received, upstream_quantity_short}`` audit stamp (INT3)."""
+    return {
+        "target": acct.target,
+        "received": acct.received,
+        "upstream_quantity_short": acct.upstream_short,
+    }
+
+
+def record_short_declaration(operation: WorkOrderOperation, acct: OperationAccounting) -> None:
+    """Persist the short an EXPLICIT close declares (``acct.closing_short``), else NULL.
+
+    Called ONLY by the floor and office explicit close verbs, with the accounting they
+    just verified ``is_accounted``. Never by clock-out, the reconcile, or a correction.
+    """
+    operation.quantity_short_declared = acct.closing_short if acct.closing_short > QTY_EPSILON else None
+
+
+def finished_quantity_at_all_complete(
+    work_order: WorkOrder,
+    operations: Iterable[WorkOrderOperation],
+    existing: float,
+) -> float:
+    """The work-order header when every active operation is COMPLETE (a SET, not a max).
+
+    ONE implementation for the live finalizer (``sync_work_order_quantity_complete``) and
+    the reconcile twin (``_sync_work_order_status_from_operations``). Laser pools never
+    reach it -- their header is the pooled sum.
+
+    * No active operation carries a declared short -> ``quantity_ordered`` (today's snap,
+      now clamped to the order; ``existing`` when nothing is ordered).
+    * A main chain exists -> what actually came out of the last whole-order stage: the
+      LOWEST good across the operations sharing its highest sequence (a parallel final
+      stage that lost units binds), each capped at its own ceiling (defense in depth: a
+      count above what can have reached a stage is never booked), and at the order.
+    * Line items only, whose targets sum to the order -> ``min(ordered, SUM min(good,
+      target))``.
+    * Otherwise -- a routing made only of component operations (the batch / assembly
+      shapes with no whole-order stage) or lines that do not split the order -> the order
+      less the worst chain's declared loss in finished units (``ceil(declared x ordered /
+      target)`` summed along each chain). Never ``existing``: the partial rollup never
+      raises the header from a component operation, so that would book 0.
+    """
+    ordered = _qty(work_order.quantity_ordered)
+    ops = list(operations or [])
+    if ordered <= QTY_EPSILON:
+        return existing
+    if not any(_declared_short(op) > QTY_EPSILON for op in ops):
+        return ordered
+    main_ops = [op for op in ops if operation_chain_key(work_order, op) == MAIN_CHAIN_KEY]
+    if main_ops:
+        figures = stage_accounting(work_order, ops)
+        final_sequence = max(op.sequence or 0 for op in main_ops)
+        finals = [op for op in main_ops if (op.sequence or 0) == final_sequence]
+        produced = min(
+            min(
+                _qty(op.quantity_complete),
+                max(
+                    0.0,
+                    operation_target_quantity(op, work_order) - figures.get(op.id, StageFigures()).chain_upstream,
+                ),
+            )
+            for op in finals
+        )
+        return max(0.0, min(ordered, produced))
+    lines = [op for op in ops if not op.component_part_id]
+    if lines:
+        targets = [operation_target_quantity(op, work_order) for op in lines]
+        if abs(sum(targets) - ordered) <= QTY_EPSILON:
+            return min(ordered, sum(min(_qty(op.quantity_complete), target) for op, target in zip(lines, targets)))
+    return max(0.0, ordered - _worst_chain_loss_in_finished_units(work_order, ops))
+
+
+def _worst_chain_loss_in_finished_units(work_order: WorkOrder, operations: Iterable[Any]) -> float:
+    """The largest declared loss any one chain carries, in finished units (``ceil``).
+
+    Component chains group by part; every other non-main operation is its own chain. A
+    chain's declarations along its stages are successive (each was declared against what
+    reached it), so they SUM; ``ordered / target`` converts component pieces to finished
+    units (``qty_per`` = target / ordered).
+    """
+    ordered = _qty(work_order.quantity_ordered)
+    per_chain: dict[Any, float] = {}
+    for op in operations or []:
+        declared = _declared_short(op)
+        target = operation_target_quantity(op, work_order)
+        if declared <= QTY_EPSILON or target <= QTY_EPSILON or op.status != OperationStatus.COMPLETE:
+            continue
+        key = ("component", op.component_part_id) if op.component_part_id else ("op", op.id)
+        per_chain[key] = per_chain.get(key, 0.0) + declared * ordered / target
+    return max((_ceil_units(units) for units in per_chain.values()), default=0.0)
+
+
+@dataclass(frozen=True)
+class WorkOrderCompletionBounds:
+    """What a force-complete may book, from floor evidence (``work_order_completion_bounds``).
+
+    ``deliverable`` -- the most the floor's recorded evidence supports (above it needs an
+    override reason); ``physical_max`` -- the most that can exist at all once declared
+    shorts are taken out (never exceeded, even with a reason); ``floor_loss`` -- units the
+    floor already accounted as lost; ``binding_operation_id`` -- the operation that sets
+    ``deliverable`` (``None`` when nothing binds).
+    """
+
+    deliverable: float
+    physical_max: float
+    floor_loss: float
+    binding_operation_id: Optional[int] = None
+    # The HARD part of ``floor_loss`` (declared shorts and covered scrap, never the soft
+    # component feed, which replenished components can make up): ``quantity_complete +
+    # hard_loss`` may never exceed the order, override reason or not.
+    hard_loss: float = 0.0
+
+
+def work_order_completion_bounds(
+    work_order: WorkOrder,
+    operations: Iterable[WorkOrderOperation],
+    recorded_good_by_op: dict[int, float],
+    has_evidence_by_op: dict[int, bool],
+) -> WorkOrderCompletionBounds:
+    """Evidence bounds for ``POST /work-orders/{id}/complete`` (the force-complete). Pure.
+
+    ``recorded_good_by_op`` is each operation's evidence-floored good (``min(target,
+    max(stored, TimeEntry sum))``); ``has_evidence_by_op`` is True when the operation is
+    COMPLETE, carries any TimeEntry, or has good/scrap > 0. An operation WITHOUT evidence
+    caps at what reaches it (it was simply never reported, so it does not bind).
+
+    * Main chain present: ``deliverable`` = min over main-chain caps;
+      ``physical_max`` = what can still leave the last stage once declared shorts (and
+      component feed) are taken out; ``floor_loss`` = covered loss along the chain --
+      a COMPLETE operation's declared short, an open operation's ``min(scrap,
+      closing_short)``, plus feed into the last stage. On a credited (sequenced) main
+      chain the stages' losses are successive and SUM; on an uncredited (pooled) one each
+      stage processes every unit independently, so the worst stage's loss is taken
+      (summing would invent loss and let a smaller quantity through unscrapped).
+    * Laser pools and line items whose targets sum to the order: ``deliverable`` =
+      SUM of caps, ``floor_loss`` = SUM ``min(scrap, target - good)``.
+    * Otherwise (component-only routings): the worst chain's declared loss in finished
+      units comes off the order (``deliverable = physical_max = ordered - loss``); with
+      nothing declared nothing binds.
+
+    ``hard_loss`` is ``floor_loss`` without the soft component feed; the force-complete
+    refuses ``quantity_complete + hard_loss > ordered`` with or without a reason.
+    """
+    ordered = _qty(work_order.quantity_ordered)
+    ops = [op for op in (operations or []) if op.id is not None]
+
+    def cap_for(op: WorkOrderOperation, acct: OperationAccounting) -> float:
+        if has_evidence_by_op.get(op.id, False):
+            return min(acct.target, _qty(recorded_good_by_op.get(op.id, op.quantity_complete)))
+        return acct.received
+
+    main_ops = sorted(
+        (op for op in ops if operation_chain_key(work_order, op) == MAIN_CHAIN_KEY),
+        key=lambda op: (op.sequence or 0, op.id),
+    )
+    if main_ops:
+        figures = stage_accounting(work_order, ops)
+        credited = chain_credit_enabled(work_order, MAIN_CHAIN_KEY)
+        deliverable = ordered
+        binding: Optional[int] = None
+        losses: list[float] = []
+        for op in main_ops:
+            fig = figures.get(op.id, StageFigures())
+            good = _qty(recorded_good_by_op.get(op.id, op.quantity_complete))
+            acct = OperationAccounting(
+                target=operation_target_quantity(op, work_order),
+                good=good,
+                scrapped=_qty(op.quantity_scrapped),
+                chain_upstream=fig.chain_upstream,
+                feed_short=fig.feed_short,
+            )
+            cap = cap_for(op, acct)
+            if cap < deliverable - QTY_EPSILON:
+                # The FIRST (lowest-sequence) operation at the minimum binds.
+                deliverable = cap
+                binding = op.id
+            if op.status == OperationStatus.COMPLETE:
+                losses.append(_declared_short(op))
+            elif has_evidence_by_op.get(op.id, False):
+                losses.append(min(acct.scrapped, acct.closing_short))
+            else:
+                losses.append(0.0)
+        # The final stage is every operation at the highest sequence: a parallel final stage
+        # that lost units binds the whole group.
+        final_sequence = main_ops[-1].sequence or 0
+        finals = [op for op in main_ops if (op.sequence or 0) == final_sequence]
+        final_feed = max(figures.get(op.id, StageFigures()).feed_short for op in finals)
+        if credited:
+            hard_loss = sum(losses)
+            floor_loss = hard_loss + final_feed
+            physical_max = min(
+                max(
+                    0.0,
+                    operation_target_quantity(op, work_order)
+                    - figures.get(op.id, StageFigures()).chain_upstream
+                    - figures.get(op.id, StageFigures()).feed_short
+                    - (_declared_short(op) if op.status == OperationStatus.COMPLETE else 0.0),
+                )
+                for op in finals
+            )
+        else:
+            hard_loss = max(losses, default=0.0)
+            floor_loss = hard_loss
+            physical_max = max(0.0, ordered - max((_declared_short(op) for op in main_ops), default=0.0))
+        return WorkOrderCompletionBounds(
+            deliverable=max(0.0, min(deliverable, ordered)),
+            physical_max=min(ordered, physical_max),
+            floor_loss=floor_loss,
+            binding_operation_id=binding,
+            hard_loss=hard_loss,
+        )
+
+    if is_laser_dispatch_work_order(work_order):
+        lines = [op for op in ops if not op.component_part_id and not _loaded_nest_is_deleted(op)]
+    else:
+        lines = [op for op in ops if not op.component_part_id]
+    targets = [operation_target_quantity(op, work_order) for op in lines]
+    if lines and abs(sum(targets) - ordered) <= QTY_EPSILON:
+        caps = []
+        floor_loss = 0.0
+        for op, target in zip(lines, targets):
+            acct = OperationAccounting(
+                target=target,
+                good=_qty(recorded_good_by_op.get(op.id, op.quantity_complete)),
+                scrapped=_qty(op.quantity_scrapped),
+            )
+            caps.append(cap_for(op, acct))
+            floor_loss += min(acct.scrapped, max(0.0, target - acct.good))
+        return WorkOrderCompletionBounds(
+            deliverable=min(ordered, sum(caps)),
+            physical_max=ordered,
+            floor_loss=floor_loss,
+            binding_operation_id=None,
+            hard_loss=floor_loss,
+        )
+    # No whole-order stage and no line split (component-only routings): what the worst chain
+    # declared lost, in finished units -- the same figure the all-complete header books.
+    if is_laser_dispatch_work_order(work_order) or ordered <= QTY_EPSILON:
+        return WorkOrderCompletionBounds(deliverable=ordered, physical_max=ordered, floor_loss=0.0)
+    chain_loss = min(ordered, _worst_chain_loss_in_finished_units(work_order, ops))
+    return WorkOrderCompletionBounds(
+        deliverable=ordered - chain_loss,
+        physical_max=ordered - chain_loss,
+        floor_loss=chain_loss,
+        hard_loss=chain_loss,
+    )
+
+
+def upstream_figures_by_operation(
+    db: Session,
+    company_id: int,
+    operations: Sequence[WorkOrderOperation],
+) -> dict[int, OperationAccounting]:
+    """``{operation_id: OperationAccounting}`` for a page of operations, in ONE query.
+
+    For the read models (kiosk queue, ``/shop-floor/operations``): one tenant-scoped
+    ``load_only`` read of every operation on the rows' work orders, then
+    ``stage_accounting`` per work order, in memory. Callers should already have each
+    row's ``work_order`` loaded (joined / contains-eager) -- an unloaded one is lazy-loaded
+    here, which is correct but costs a query per work order. Invariant 1: scoped to
+    ``company_id``, so a foreign row sharing a ``work_order_id`` never contributes.
+    """
+    from sqlalchemy.orm import load_only
+
+    rows = [op for op in operations if op is not None and op.id is not None]
+    work_orders: dict[int, WorkOrder] = {}
+    for op in rows:
+        wo = op.__dict__.get("work_order") or op.work_order
+        if wo is not None and wo.id is not None:
+            work_orders[wo.id] = wo
+    if not work_orders:
+        return {}
+    siblings = (
+        tenant_query(db, WorkOrderOperation, company_id)
+        .options(
+            load_only(
+                WorkOrderOperation.id,
+                WorkOrderOperation.work_order_id,
+                WorkOrderOperation.sequence,
+                WorkOrderOperation.component_part_id,
+                WorkOrderOperation.component_quantity,
+                WorkOrderOperation.quantity_complete,
+                WorkOrderOperation.quantity_scrapped,
+                WorkOrderOperation.quantity_short_declared,
+                WorkOrderOperation.status,
+            )
+        )
+        .filter(WorkOrderOperation.work_order_id.in_(list(work_orders)))
+        .all()
+    )
+    by_work_order: dict[int, list[WorkOrderOperation]] = {}
+    for sibling in siblings:
+        by_work_order.setdefault(sibling.work_order_id, []).append(sibling)
+    figures_by_work_order = {
+        wo_id: stage_accounting(work_orders[wo_id], ops) for wo_id, ops in by_work_order.items() if wo_id in work_orders
+    }
+    uncredited_by_work_order = {
+        wo_id: uncredited_upstream_by_operation(work_orders[wo_id], ops)
+        for wo_id, ops in by_work_order.items()
+        if wo_id in work_orders
+    }
+    result: dict[int, OperationAccounting] = {}
+    for op in rows:
+        wo = work_orders.get(op.work_order_id)
+        if wo is None:
+            continue
+        figures = figures_by_work_order.get(wo.id, {}).get(op.id, StageFigures())
+        result[op.id] = OperationAccounting(
+            target=operation_target_quantity(op, wo),
+            good=_qty(op.quantity_complete),
+            scrapped=_qty(op.quantity_scrapped),
+            chain_upstream=figures.chain_upstream,
+            feed_short=figures.feed_short,
+            uncredited_upstream=uncredited_by_work_order.get(wo.id, {}).get(op.id, 0.0),
+        )
+    return result
+
+
+@dataclass(frozen=True)
+class OperationLaborEvidence:
+    """One operation's durable labor record: SUM(quantity_produced) and how many entries."""
+
+    produced: float = 0.0
+    entries: int = 0
+
+
+def operation_labor_evidence(
+    db: Session,
+    company_id: int,
+    operation_ids: Iterable[Optional[int]],
+) -> dict[int, OperationLaborEvidence]:
+    """``{operation_id: OperationLaborEvidence}`` in ONE grouped, tenant-scoped query.
+
+    Any TimeEntry counts, open or closed -- the same existence test the floor's labor gate
+    uses. An operation with no entries is absent from the result. Invariant 1: a foreign
+    company's entry on a colliding operation id never contributes.
+    """
+    ids = sorted({op_id for op_id in operation_ids if op_id is not None})
+    if not ids:
+        return {}
+    rows = (
+        db.query(
+            TimeEntry.operation_id,
+            func.coalesce(func.sum(TimeEntry.quantity_produced), 0.0),
+            func.count(TimeEntry.id),
+        )
+        .filter(TimeEntry.company_id == company_id, TimeEntry.operation_id.in_(ids))
+        .group_by(TimeEntry.operation_id)
+        .all()
+    )
+    return {
+        row[0]: OperationLaborEvidence(produced=float(row[1] or 0.0), entries=int(row[2] or 0))
+        for row in rows
+        if row[0] is not None
+    }
+
+
+def recorded_good_from_evidence(
+    work_order: WorkOrder, operation: WorkOrderOperation, evidence: Optional[OperationLaborEvidence]
+) -> float:
+    """The evidence-floored good an operation has recorded: ``min(target, max(stored, SUM))``.
+
+    The same clamp ``resolve_absolute_operation_quantity`` applies with nothing requested,
+    computed from an already-batched evidence read instead of one query per operation.
+    """
+    floor = max(_qty(operation.quantity_complete), evidence.produced if evidence is not None else 0.0)
+    target = operation_target_quantity(operation, work_order)
+    if target > 0:
+        floor = min(floor, target)
+    return max(0.0, floor)
+
+
+def work_order_completion_bounds_from_evidence(
+    work_order: WorkOrder,
+    operations: Sequence[WorkOrderOperation],
+    evidence: dict[int, OperationLaborEvidence],
+) -> WorkOrderCompletionBounds:
+    """``work_order_completion_bounds`` fed from one ``operation_labor_evidence`` read.
+
+    Shared by the force-complete (``POST /work-orders/{id}/complete``) and the work-order
+    read model (``quantity_accounted_loss`` / ``quantity_deliverable``), so the figure a
+    supervisor is shown is the figure the verb enforces. An operation has evidence when it
+    is COMPLETE, carries any TimeEntry, or has good / scrap above zero.
+    """
+    recorded: dict[int, float] = {}
+    has_evidence: dict[int, bool] = {}
+    for op in operations:
+        if op.id is None:
+            continue
+        op_evidence = evidence.get(op.id)
+        recorded[op.id] = recorded_good_from_evidence(work_order, op, op_evidence)
+        has_evidence[op.id] = (
+            op.status == OperationStatus.COMPLETE
+            or (op_evidence is not None and op_evidence.entries > 0)
+            or _qty(op.quantity_complete) > QTY_EPSILON
+            or _qty(op.quantity_scrapped) > QTY_EPSILON
+        )
+    return work_order_completion_bounds(work_order, operations, recorded, has_evidence)
+
+
+def quantity_ordered_floor(
+    work_order: WorkOrder, operations: Iterable[WorkOrderOperation]
+) -> tuple[float, Optional[WorkOrderOperation]]:
+    """The lowest ``quantity_ordered`` a ``PUT /work-orders/{id}`` may set, and the stage that sets it.
+
+    The largest ``good + scrapped`` any whole-order (main-chain) operation has already
+    accounted for, judged against the CURRENT order (call it before the new value is
+    written). Lowering the order below it would leave that stage holding more units than
+    were ordered -- an after-the-fact short close of everything downstream. Laser pools
+    and line items carry their own targets and set no floor. ``(0.0, None)`` when nothing
+    binds.
+    """
+    floor = 0.0
+    binding: Optional[WorkOrderOperation] = None
+    for op in operations or []:
+        if operation_chain_key(work_order, op) != MAIN_CHAIN_KEY:
+            continue
+        accounted = _qty(op.quantity_complete) + _qty(op.quantity_scrapped)
+        if accounted > floor + QTY_EPSILON:
+            floor = accounted
+            binding = op
+    return floor, binding
+
+
+def later_completed_chain_operation(
+    work_order: WorkOrder,
+    operation: WorkOrderOperation,
+    operations: Iterable[WorkOrderOperation],
+) -> Optional[WorkOrderOperation]:
+    """The lowest-sequence COMPLETE operation AFTER ``operation`` in the same chain, if any.
+
+    The refusal behind re-opening a completed operation: a later stage of the same unit
+    flow already completed with units that passed through it, so it has to be corrected
+    first. Chain membership is ``operation_chain_key`` whether or not the chain is
+    credited -- a pooled whole-order chain still moves the same units. A singleton (line
+    item, laser nest) has no later chain stage.
+    """
+    key = operation_chain_key(work_order, operation)
+    if key is None:
+        return None
+    sequence = operation.sequence or 0
+    later = [
+        other
+        for other in operations or []
+        if other.id != operation.id
+        and other.status == OperationStatus.COMPLETE
+        and (other.sequence or 0) > sequence
+        and operation_chain_key(work_order, other) == key
+    ]
+    return min(later, key=lambda other: ((other.sequence or 0), other.id or 0)) if later else None
+
+
+_WHAT_IF_ATTRS = (
+    "id",
+    "work_order_id",
+    "sequence",
+    "operation_number",
+    "status",
+    "quantity_short_declared",
+    "component_part_id",
+    "component_quantity",
+    "quantity_complete",
+    "quantity_scrapped",
+    "cancelled_nest_id",
+)
+
+
+class _OperationWhatIf:
+    """A plain stand-in for one operation with some attributes changed -- never an ORM row,
+    so a what-if computation can never dirty the session it reads from."""
+
+    def __init__(self, operation: WorkOrderOperation, **overrides: Any) -> None:
+        for name in _WHAT_IF_ATTRS:
+            setattr(self, name, getattr(operation, name, None))
+        nest = operation.__dict__.get("laser_nest")
+        if nest is not None:
+            self.laser_nest = nest
+        for name, value in overrides.items():
+            setattr(self, name, value)
+
+
+@dataclass(frozen=True)
+class AccountingStrand:
+    """Another operation a change would strand (``accounting_change_strands``).
+
+    ``reason`` is ``"unaccounted"`` (a COMPLETE operation that adds up today would not --
+    it would become a completed operation that is short) or ``"over_ceiling"`` (its
+    recorded good fits what can reach it today and would not).
+    """
+
+    operation: WorkOrderOperation
+    reason: Literal["unaccounted", "over_ceiling"]
+    before: OperationAccounting
+    after: OperationAccounting
+
+
+def _accounting_from_figures(
+    work_order: WorkOrder, operation: Any, figures: dict[int, StageFigures]
+) -> OperationAccounting:
+    figure = figures.get(operation.id, StageFigures())
+    return OperationAccounting(
+        target=operation_target_quantity(operation, work_order),
+        good=_qty(operation.quantity_complete),
+        scrapped=_qty(operation.quantity_scrapped),
+        chain_upstream=figure.chain_upstream,
+        feed_short=figure.feed_short,
+    )
+
+
+def accounting_change_strands(
+    work_order: WorkOrder,
+    operations: Iterable[WorkOrderOperation],
+    *,
+    changed: Optional[WorkOrderOperation] = None,
+    main_credit: Optional[bool] = None,
+    **overrides: Any,
+) -> Optional[AccountingStrand]:
+    """Would this change strand ANOTHER operation's accounting? The first one it would, or ``None``.
+
+    THE what-if behind every write that moves upstream credit after the fact (owner ruling 1:
+    a completed operation can never be short, and no stage may hold more good than can
+    have reached it):
+
+    * a close that DECLARES a short (``changed`` + ``status=COMPLETE`` and the new
+      ``quantity_short_declared`` / counts) -- a later stage already holding more good than
+      the declaration lets reach it would be over its ceiling;
+    * an office correction that re-stamps a COMPLETE operation's declaration, or REOPENS it
+      (``status=IN_PROGRESS``, ``quantity_short_declared=None``) -- across chains too: a
+      component chain's declaration feeds the assembly chain, so reopening it can strand a
+      completed assembly stage that is not in its own chain;
+    * a sequencing flip (``main_credit``), which turns the whole-order chain's credit on or off.
+
+    Only a NEW strand counts: an operation already short or over its ceiling before the
+    change (legacy data) never blocks it. Pure -- the changed operation is evaluated through
+    a plain stand-in, so the session is never dirtied by asking.
+    """
+    ops = [op for op in (operations or []) if op.id is not None]
+    before = stage_accounting(work_order, ops)
+    if changed is not None:
+        proxied: list[Any] = [_OperationWhatIf(op, **overrides) if op.id == changed.id else op for op in ops]
+    else:
+        proxied = list(ops)
+    after = stage_accounting(work_order, proxied, main_credit=main_credit)
+    for op in sorted(ops, key=lambda item: (item.sequence or 0, item.id or 0)):
+        if changed is not None and op.id == changed.id:
+            continue
+        acct_before = _accounting_from_figures(work_order, op, before)
+        acct_after = _accounting_from_figures(work_order, op, after)
+        if op.status == OperationStatus.COMPLETE and acct_before.is_accounted and not acct_after.is_accounted:
+            return AccountingStrand(op, "unaccounted", acct_before, acct_after)
+        if acct_before.good <= acct_before.ceiling + QTY_EPSILON and acct_after.good > acct_after.ceiling + QTY_EPSILON:
+            return AccountingStrand(op, "over_ceiling", acct_before, acct_after)
+    return None
+
+
+def sequencing_flip_conflict(
+    work_order: WorkOrder,
+    operations: Iterable[WorkOrderOperation],
+    *,
+    turning_on: bool,
+) -> Optional[tuple[WorkOrderOperation, WorkOrderOperation]]:
+    """``(declaring, later)`` when a ``sequential_operations`` flip would change what a declared short meant.
+
+    Whole-order credit is read at the work order's CURRENT setting, so a flip after a stage
+    was closed short re-interprets that declaration:
+
+    * turning sequencing OFF withdraws the credit every later whole-order stage was given
+      (an open one would have to account for units that never reached it; a completed one
+      would become short) -- refused while any COMPLETE whole-order stage that has a later
+      stage carries a declaration;
+    * turning it ON credits declarations stamped under the pooled rule, where a later stage
+      had to cover the same loss itself -- refused once any later whole-order stage has
+      already COMPLETED after the declaring one. Before that (the floor refused a stage that
+      never received the units, and a supervisor turns sequencing on so it is credited) the
+      flip is exactly the remedy.
+
+    ``None`` when nothing was declared, which is every work order flipped today.
+    """
+    main_ops = sorted(
+        (op for op in (operations or []) if operation_chain_key(work_order, op) == MAIN_CHAIN_KEY),
+        key=lambda op: (op.sequence or 0, op.id or 0),
+    )
+    for declaring in main_ops:
+        if declaring.status != OperationStatus.COMPLETE or _declared_short(declaring) <= QTY_EPSILON:
+            continue
+        later = [op for op in main_ops if (op.sequence or 0) > (declaring.sequence or 0)]
+        if not later:
+            continue
+        if not turning_on:
+            return declaring, later[0]
+        completed_later = next((op for op in later if op.status == OperationStatus.COMPLETE), None)
+        if completed_later is not None:
+            return declaring, completed_later
+    return None
+
+
+def completed_chain_operation(
+    work_order: WorkOrder, operations: Iterable[WorkOrderOperation]
+) -> Optional[WorkOrderOperation]:
+    """The lowest-sequence COMPLETE operation whose target follows the order, if any.
+
+    The refusal behind RAISING ``quantity_ordered``: a whole-order operation's target is the
+    order and a component operation's is re-derived from it, so a raise would turn a stage
+    that already completed at the old order into a completed operation that is short.
+    Line items and laser nests carry their own targets and never bind.
+    """
+    completed = [
+        op
+        for op in (operations or [])
+        if op.status == OperationStatus.COMPLETE and operation_chain_key(work_order, op) is not None
+    ]
+    return min(completed, key=lambda op: (op.sequence or 0, op.id or 0)) if completed else None
+
+
+def rescale_restated_operation_targets(
+    work_order: WorkOrder, operations: Iterable[WorkOrderOperation], old_ordered: float, new_ordered: float
+) -> list[tuple[WorkOrderOperation, float]]:
+    """Move whole-order targets that were RESTATED as ``component_quantity`` along with the order.
+
+    The new-work-order wizard persists an assembly's own routing operations with
+    ``component_quantity`` = the order (no component part). ``operation_target_quantity``
+    prefers that column, so after ``PUT /work-orders/{id}`` changed ``quantity_ordered`` those
+    operations would keep demanding the OLD count -- after owner ruling 1 an uncloseable
+    target, because units never started are never scrap. Only a non-component operation
+    whose stored value equals the old order is moved (a deliberately different line target
+    is not); laser nests (``component_quantity`` = planned runs) never are. Returns
+    ``[(operation, old_value)]`` for the caller's audit rows; writes the column, nothing else.
+    """
+    if is_laser_dispatch_work_order(work_order) or old_ordered <= QTY_EPSILON:
+        return []
+    moved: list[tuple[WorkOrderOperation, float]] = []
+    for op in operations or []:
+        stored = _qty(op.component_quantity)
+        if op.component_part_id or stored <= QTY_EPSILON or abs(stored - old_ordered) > QTY_EPSILON:
+            continue
+        op.component_quantity = new_ordered
+        moved.append((op, stored))
+    return moved
+
+
+def reopen_completed_operation(
+    db: Session, work_order: WorkOrder, operation: WorkOrderOperation
+) -> list[WorkOrderOperation]:
+    """COMPLETE -> IN_PROGRESS for an office over-count correction that would leave it short.
+
+    Owner ruling 1: a completed operation cannot be short, so a correction that lowers its
+    good count below what reached it (``POST /work-orders/operations/{id}/reduce-production``
+    with ``reopen_operation``) returns it to the floor instead of leaving a short close
+    behind. Clears ``actual_end`` / ``completed_by`` and the declared short (the next
+    explicit close declares again), points ``current_operation_id`` back at the route, and
+    demotes the un-worked READY operations it now blocks through the ONE demotion core
+    (scope ``"blocked_by"``). Never touches consumed material: consumption never
+    auto-reverses (invariant 6); the reasoned return verb is the walk-back.
+
+    The caller holds the op -> WO locks, has already refused when
+    ``later_completed_chain_operation`` names a later completed stage, and owns the
+    REQUIRED audit rows (``log_required`` status change + ``log_demotions_required``).
+    Writes statuses only -- no audit row, no commit.
+    """
+    operation.status = OperationStatus.IN_PROGRESS
+    operation.actual_end = None
+    operation.completed_by = None
+    operation.quantity_short_declared = None
+    work_order.current_operation_id = _active_operation_id(work_order)
+    return demote_ready_operations(db, work_order, scope="blocked_by", blocked_by=operation)
+
+
 def sync_work_order_quantity_complete(
     work_order: WorkOrder,
     operation: WorkOrderOperation,
@@ -1020,6 +2295,14 @@ def sync_work_order_quantity_complete(
     all-complete branch must NOT snap to ``quantity_ordered``: a nest completed
     short would then assert sheets that were never cut (AS9100D production-records
     honesty). Still ``max()``-guarded (monotonic-up).
+
+    The all-complete branch of a non-pool work order is a SET through
+    ``finished_quantity_at_all_complete`` (owner ruling 1): with no declared short
+    anywhere it is today's snap to ``quantity_ordered`` (clamped to the order); once an
+    operation was closed short it is what actually left the last stage, so the header --
+    and the FG receipt and backflush basis read from it -- never asserts units that were
+    declared scrapped. It is the one place this rollup can LOWER the header, and only
+    when a declaration exists.
     """
     existing = float(work_order.quantity_complete or 0)
     target = float(work_order.quantity_ordered or 0)
@@ -1027,7 +2310,9 @@ def sync_work_order_quantity_complete(
         pooled = pooled_quantity_complete(work_order, work_order.operations or [])
         work_order.quantity_complete = max(existing, pooled)
     elif all_operations_complete:
-        work_order.quantity_complete = max(existing, target)
+        work_order.quantity_complete = finished_quantity_at_all_complete(
+            work_order, active_work_order_operations(work_order), existing
+        )
     elif not operation.component_part_id:
         candidate = float(operation.quantity_complete or 0)
         if target > 0:
@@ -1632,6 +2917,22 @@ def reconcile_work_orders_from_completion_evidence(
 
     step_gated_operation_ids = gated_operation_ids(db, operations)
 
+    # Owner ruling 1: what can REACH each operation, from the already-collected rows (no
+    # query). An operation whose upstream stage was declared short auto-completes at its
+    # hard ceiling (``is_full_count`` -- never the soft feed figure, never above the
+    # ceiling); scrap still never counts here, so a read never closes a short. Without
+    # credit the figures are empty and every check below is the pre-117 one.
+    stage_figures: dict[int, StageFigures] = {}
+    for work_order in non_terminal_work_orders:
+        stage_figures.update(stage_accounting(work_order, active_work_order_operations(work_order)))
+
+    # Ruling 2: a read never STARTS work on a job the start gate refuses -- the same reason
+    # ``_promote_stranded_ready_operations`` skips DRAFT. Checked inline off the status
+    # (operation_action_gates imports this module, so its helper cannot be imported here).
+    start_withheld_work_order_ids = {
+        wo.id for wo in non_terminal_work_orders if wo.status in (WorkOrderStatus.DRAFT, WorkOrderStatus.ON_HOLD)
+    }
+
     for operation in operations:
         produced_qty, scrapped_qty = produced_by_operation.get(operation.id, (0.0, 0.0))
         if produced_qty > float(operation.quantity_complete or 0):
@@ -1641,11 +2942,24 @@ def reconcile_work_orders_from_completion_evidence(
             operation.quantity_scrapped = scrapped_qty
             changed = True
         old_op_status = operation.status.value if operation.status else None
+        target_qty = operation_target_quantity(operation)
+        figures = stage_figures.get(operation.id)
+        acct = OperationAccounting(
+            target=target_qty,
+            good=float(operation.quantity_complete or 0),
+            scrapped=float(operation.quantity_scrapped or 0),
+            chain_upstream=figures.chain_upstream if figures else 0.0,
+            feed_short=figures.feed_short if figures else 0.0,
+        )
+        credited = acct.ceiling < target_qty - QTY_EPSILON
+        closed_produced = closed_produced_by_operation.get(operation.id, 0.0)
         op_changed = _sync_operation_status_from_quantity(
             operation,
             latest_entry_by_operation.get(operation.id),
-            closed_produced_by_operation.get(operation.id, 0.0) >= operation_target_quantity(operation),
+            (closed_produced + QTY_EPSILON >= acct.ceiling) if credited else closed_produced >= target_qty,
             completion_gated=operation.id in step_gated_operation_ids,
+            accounting=acct if credited else None,
+            start_withheld=operation.work_order_id in start_withheld_work_order_ids,
         )
         if (
             op_changed
@@ -1662,6 +2976,7 @@ def reconcile_work_orders_from_completion_evidence(
                 work_order_number=operation.work_order.work_order_number if operation.work_order else None,
                 work_order_id=operation.work_order_id,
                 time_entry_ids=entry_ids_by_operation.get(operation.id, []),
+                extra_data=accounting_extra_data(acct),
             )
         changed = op_changed or changed
 
@@ -1692,6 +3007,7 @@ def _record_transition(
     work_order_number: Optional[str] = None,
     work_order_id: Optional[int] = None,
     time_entry_ids: Optional[list[int]] = None,
+    extra_data: Optional[dict] = None,
 ) -> None:
     if transitions is None or resource_id is None:
         return
@@ -1705,6 +3021,7 @@ def _record_transition(
             work_order_number=work_order_number,
             work_order_id=work_order_id,
             time_entry_ids=list(time_entry_ids or []),
+            extra_data=dict(extra_data or {}),
         )
     )
 
@@ -1720,6 +3037,8 @@ def _sync_operation_status_from_quantity(
     latest_entry: Optional[TimeEntry] = None,
     has_closed_completion_evidence: bool = False,
     completion_gated: bool = False,
+    accounting: Optional[OperationAccounting] = None,
+    start_withheld: bool = False,
 ) -> bool:
     """Reconcile an operation's status from its quantities + closed labor evidence.
 
@@ -1728,12 +3047,35 @@ def _sync_operation_status_from_quantity(
     withheld (quantities and the PENDING/READY -> IN_PROGRESS lift still apply), so
     the read-time reconcile can never complete an operation the /complete endpoints
     and the clock-out path would refuse.
+
+    ``accounting`` (owner ruling 1): passed when an upstream close in the operation's
+    chain declared a short, so its ceiling is below the target. The COMPLETE flip is
+    then THE implicit rule the clock-out uses, ``OperationAccounting.is_full_count`` (a
+    full GOOD count of the units that can reach it, never above that), re-evaluated on
+    the reconciled counts. ``None`` keeps the pre-117 target comparison exactly.
+
+    ``start_withheld`` (ruling 2): True when the operation's work order is DRAFT or
+    ON_HOLD. The PENDING/READY -> IN_PROGRESS lift IS a start, and a read must not start
+    work the start gate (``operation_action_gates.work_order_start_blocker``) refuses --
+    otherwise "record a count on a not-started operation, read, complete" walked round
+    the gate. Only the lift is withheld; quantities still reconcile and the next read
+    after Release / Resume performs it.
     """
     target_qty = operation_target_quantity(operation)
     if target_qty <= 0:
         return False
 
     quantity_complete = float(operation.quantity_complete or 0)
+    if accounting is None:
+        reached_full_count = quantity_complete >= target_qty
+    else:
+        reached_full_count = OperationAccounting(
+            target=accounting.target,
+            good=quantity_complete,
+            scrapped=float(operation.quantity_scrapped or 0),
+            chain_upstream=accounting.chain_upstream,
+            feed_short=accounting.feed_short,
+        ).is_full_count
     changed = False
     if operation.status == OperationStatus.COMPLETE:
         if not operation.actual_end and latest_entry:
@@ -1750,7 +3092,7 @@ def _sync_operation_status_from_quantity(
             changed = True
     elif (
         operation.status != OperationStatus.ON_HOLD
-        and quantity_complete >= target_qty
+        and reached_full_count
         and has_closed_completion_evidence
         and not completion_gated
     ):
@@ -1762,7 +3104,11 @@ def _sync_operation_status_from_quantity(
         # MS-5: free the schedule reservation for a reconcile-driven completion too.
         release_operation_schedule_reservation(operation)
         changed = True
-    elif quantity_complete > 0 and operation.status in (OperationStatus.PENDING, OperationStatus.READY):
+    elif (
+        quantity_complete > 0
+        and operation.status in (OperationStatus.PENDING, OperationStatus.READY)
+        and not start_withheld
+    ):
         operation.status = OperationStatus.IN_PROGRESS
         operation.actual_start = operation.actual_start or (latest_entry.clock_in if latest_entry else None)
         operation.started_by = operation.started_by or (latest_entry.user_id if latest_entry else None)
@@ -1837,11 +3183,16 @@ def _sync_work_order_status_from_operations(
             changed = True
             _record_wo_complete_transition(work_order, operations, transitions, entry_ids_by_operation, old_wo_status)
         # Pool WOs already healed to the pooled SUM above and must NOT snap to
-        # quantity_ordered (no-snap honesty rule -- see the is_pool block).
-        target_qty = float(work_order.quantity_ordered or 0)
-        if not is_pool and target_qty > 0 and float(work_order.quantity_complete or 0) < target_qty:
-            work_order.quantity_complete = target_qty
-            changed = True
+        # quantity_ordered (no-snap honesty rule -- see the is_pool block). Everything
+        # else takes THE all-complete header rule the live finalizer uses (owner ruling
+        # 1): the snap to ordered with no declared short, otherwise what left the last
+        # stage. One helper, so a read and a live completion can never disagree.
+        if not is_pool:
+            existing_qty = float(work_order.quantity_complete or 0)
+            finished_qty = finished_quantity_at_all_complete(work_order, operations, existing_qty)
+            if abs(finished_qty - existing_qty) > QTY_EPSILON:
+                work_order.quantity_complete = finished_qty
+                changed = True
         # RUP-1: a completed WO is no longer sitting on any operation.
         if work_order.current_operation_id is not None:
             work_order.current_operation_id = None

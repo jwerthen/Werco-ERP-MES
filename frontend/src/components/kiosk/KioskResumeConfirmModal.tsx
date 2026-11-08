@@ -1,10 +1,13 @@
 import React from 'react';
 import KioskModal, { KioskModalClose } from './KioskModal';
 import { KioskQueueItem, formatOperationLabel } from './kioskConstants';
+import { KioskStartBlockedChip } from './KioskQueueCard';
 import {
   formatHoldAttribution, hasHoldReason, holdFreeTextWithheld, holdNoteText,
   holdReasonFields, holdReasonLabel,
 } from './heldOperations';
+
+const START_BLOCKED_ID = 'kiosk-resume-start-blocked';
 
 interface KioskResumeConfirmModalProps {
   item: KioskQueueItem;
@@ -30,6 +33,13 @@ interface KioskResumeConfirmModalProps {
  *
  * An ordinary nest hold clears with Resume. Only an explicit blocker earns the
  * separate warning that its record remains open after the operation resumes.
+ *
+ * Resume lifts the OPERATION's hold and nothing else. When the row carries the
+ * WORK ORDER's start refusal (`start_blocked_reason`: the job is on hold, or not
+ * released), the job will not run after this tap either, so the overlay says
+ * so BEFORE it — the "WO on hold" chip and the server's reason verbatim — and
+ * drops its "starts again" sentences, which would be false. A null reason
+ * renders exactly as before.
  */
 export default function KioskResumeConfirmModal({
   item,
@@ -51,6 +61,8 @@ export default function KioskResumeConfirmModal({
   // warning panel: WHO stopped this job is exactly what separates a mis-tap from
   // a real stop somebody else placed.
   const showWarning = reasonKnown || attribution !== null;
+  // The work order's refusal, verbatim. Null = no work-order refusal, never "startable".
+  const startBlockedReason = (item.start_blocked_reason || '').trim() || null;
 
   return (
     <KioskModal
@@ -109,7 +121,8 @@ export default function KioskResumeConfirmModal({
             {blocker ? (
               <>
                 <p className="mt-2.5 text-base text-fd-body">
-                  The job starts running again, but this stays on the supervisor&apos;s list until someone clears it.
+                  {startBlockedReason ? 'The operation hold lifts' : 'The job starts running again'}, but this stays
+                  on the supervisor&apos;s list until someone clears it.
                 </p>
                 <p className="mt-1.5 text-base text-fd-body">
                   Tapped hold by mistake? Resume it, then ask a supervisor to clear the hold — it will not clear
@@ -120,14 +133,35 @@ export default function KioskResumeConfirmModal({
               <p data-testid="kiosk-resume-bare-hold" className="mt-2.5 text-base text-fd-body">
                 {reasonKnown
                   ? 'Resuming clears this hold. There is no blocker left to resolve.'
-                  : 'No reason was filed with this hold, so there is nothing left open. Resuming starts the job again.'}
+                  : `No reason was filed with this hold, so there is nothing left open.${
+                      startBlockedReason ? '' : ' Resuming starts the job again.'
+                    }`}
               </p>
             )}
           </div>
         ) : (
           <p data-testid="kiosk-resume-no-reason" className="text-base text-fd-body">
-            No hold reason was recorded for this operation. Resuming starts the job again.
+            No hold reason was recorded for this operation.{startBlockedReason ? '' : ' Resuming starts the job again.'}
           </p>
+        )}
+
+        {/* The WORK ORDER still refuses every start — the server's words, never
+            reworded here; they are what a clock-in after this tap would 409 with. */}
+        {startBlockedReason && (
+          <div
+            role="status"
+            id={START_BLOCKED_ID}
+            data-testid="kiosk-resume-start-blocked"
+            className="rounded-[4px] border border-fd-amber/60 bg-fd-amber/10 px-4 py-3.5"
+          >
+            <div className="flex flex-wrap items-center gap-2.5">
+              <KioskStartBlockedChip item={item} />
+              <p className="font-mono text-[11px] font-bold uppercase tracking-[0.12em] text-fd-amber">
+                Lifts the operation hold only
+              </p>
+            </div>
+            <p className="mt-1.5 text-lg text-fd-body">{startBlockedReason}</p>
+          </div>
         )}
       </div>
 
@@ -145,7 +179,7 @@ export default function KioskResumeConfirmModal({
           type="button"
           data-testid="kiosk-resume-confirm"
           disabled={busy || !online}
-          aria-describedby={!online ? offlineHintId : undefined}
+          aria-describedby={!online ? offlineHintId : startBlockedReason ? START_BLOCKED_ID : undefined}
           onClick={onConfirm}
           className="h-[60px] flex-1 rounded-[4px] bg-fd-amber font-mono text-[15px] font-bold uppercase tracking-[0.1em] text-[#171003] transition-transform duration-150 ease-out active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
         >

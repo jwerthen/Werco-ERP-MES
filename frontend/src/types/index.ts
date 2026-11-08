@@ -160,6 +160,21 @@ export interface WorkOrder {
   operation_count?: number;
   operations_complete?: number;
   operation_progress_percent?: number;
+  /**
+   * Owner ruling 1 (short count at completion) — computed by the server from the SAME
+   * bounds `POST /work-orders/{id}/complete` enforces, so the office modal's readout is
+   * the server's, not a client re-derivation:
+   *
+   * - `quantity_deliverable` — the most the floor's recorded good supports. A
+   *   force-complete above it needs `quantity_override_reason` (409 otherwise).
+   * - `quantity_accounted_loss` — units the floor already accounted as lost. A
+   *   force-complete below the order must be covered by max(this, work-order scrap).
+   *
+   * Optional: absent from an older API and from list rows (`WorkOrderSummary` never
+   * carries them). Absent means UNKNOWN, never zero — a client must not refuse on it.
+   */
+  quantity_deliverable?: number | null;
+  quantity_accounted_loss?: number | null;
   created_at: string;
   updated_at: string;
   operations: WorkOrderOperation[];
@@ -167,7 +182,22 @@ export interface WorkOrder {
 
 export type WorkOrderStatus = 'draft' | 'released' | 'in_progress' | 'on_hold' | 'complete' | 'closed' | 'cancelled';
 
-export interface WorkOrderOperation {
+/**
+ * Office operation rows (`GET /work-orders/{id}`) carry the floor's short-count
+ * figures (see `OperationShortCountFields`) plus the declaration column itself:
+ * `quantity_short_declared` — what an explicit close declared short (received − good,
+ * covered by scrap), null on every operation that never closed short.
+ */
+export interface WorkOrderOperation extends OperationShortCountFields {
+  quantity_short_declared?: number | null;
+  /**
+   * The floor's own labor record, from the server's batched evidence read: whether the
+   * operation has ANY time entry, and its evidence-floored good. The office modal asks for
+   * `quantity_override_reason` exactly when the server will — good above
+   * `quantity_recorded_good` on an operation that `has_labor_evidence`.
+   */
+  has_labor_evidence?: boolean | null;
+  quantity_recorded_good?: number | null;
   id: number;
   version: number;  // For optimistic locking
   work_order_id: number;
@@ -558,6 +588,25 @@ export interface WorkOrderRestoreSkippedAllocation {
 export interface WorkOrderRestoreResponse {
   message: string;
   skipped_material_allocations: WorkOrderRestoreSkippedAllocation[];
+}
+
+/**
+ * `POST /work-orders/{id}/resume` — "Resume Work Order" (Admin/Manager/Supervisor).
+ *
+ * Where a held job goes back to is decided by the server from the RELEASE RECORD,
+ * never guessed: `in_progress` when the job was released and work had started,
+ * `released` when it was released but nothing ran, and `draft` when no release is
+ * on record — in which case its un-worked READY operations are returned to
+ * PENDING and the job needs a Release click before the floor can start it. Show
+ * `message` verbatim; it already says which of the three happened.
+ */
+export interface WorkOrderResumeResponse {
+  work_order_id: number;
+  message: string;
+  status: 'in_progress' | 'released' | 'draft';
+  restore_basis: 'release_record_with_work' | 'release_record' | 'no_release_record';
+  /** Non-zero only when the job returned to DRAFT. */
+  operations_returned_to_pending: number;
 }
 
 /**
@@ -1583,6 +1632,23 @@ export interface QueueItem {
    * the kiosks render server order and only DISPLAY this rank.
    */
   run_order?: number | null;
+  /**
+   * The WORK ORDER's status (`draft`, `released`, `in_progress`, `on_hold`, …).
+   * Rides every queue and held row so a floor screen can say WHY a job cannot be
+   * started without a second request. Optional: an SPA bundle can be live
+   * against a backend that predates the field.
+   */
+  work_order_status?: string | null;
+  /**
+   * The server's verbatim refusal text when the WORK ORDER blocks every start —
+   * not released yet (draft), held by a supervisor (on hold), or terminal. Render
+   * it as-is; `utils/startBlock.ts` only picks the short button label.
+   *
+   * `null`/absent means "no work-order refusal", NEVER "startable": the
+   * operation's own status, predecessors, the work center and open entries are
+   * still decided by the server at the moment of the action.
+   */
+  start_blocked_reason?: string | null;
 }
 
 /**
@@ -1604,6 +1670,12 @@ export interface HeldQueueItem extends QueueItem {
    * purpose: whether a QUEUED operation may actually start is decided by the
    * server gates at the moment of the action, so a poll asserting
    * `startable: true` would make a claim this read cannot honor.
+   *
+   * The same holds for `start_blocked_reason` (inherited from `QueueItem`): a
+   * held row carries it too, and a null reason means "no work-order refusal",
+   * never "startable". A WORK-ORDER hold does not move rows onto this list — a
+   * READY operation of an on-hold work order stays on `queue` with the reason
+   * set; only an OPERATION-level hold lands here.
    */
   startable?: false;
   /**
@@ -2314,7 +2386,120 @@ export interface KioskJobInstructions {
   operation_run_instructions?: string | null;
 }
 
-export interface ActiveJob extends KioskJobInstructions {
+/**
+ * Short-count figures (owner ruling 1, 2026-11-05) every floor job payload carries —
+ * the kiosk queue and held rows, `GET /shop-floor/my-active-job`, and
+ * `GET /shop-floor/operations`. Server-derived, so no client re-implements the chain
+ * credit; `utils/shortCount.ts` does only the per-operation arithmetic on them.
+ *
+ * - `upstream_quantity_short` — units of the target (`quantity_ordered`) that never
+ *   reached this operation because an upstream close in its chain declared them short.
+ *   0 almost everywhere; received = `quantity_ordered − upstream_quantity_short`.
+ * - `quantity_good_ceiling` — the most good the server will accept here.
+ * - `quantity_unaccounted` — received units recorded neither good nor scrapped: what a
+ *   Complete must still account for.
+ *
+ * Optional because the SPA and API deploy independently — a payload without them reads
+ * as "nothing lost upstream", which is what every pre-ruling row is.
+ */
+export interface OperationShortCountFields {
+  upstream_quantity_short?: number | null;
+  quantity_good_ceiling?: number | null;
+  quantity_unaccounted?: number | null;
+  /**
+   * POOLED work order only: units an earlier whole-order operation already closed short.
+   * NOT credited (no accounting change) — the screen warns not to report them as scrap a
+   * second time and to have a supervisor turn on Sequential operations instead.
+   */
+  upstream_short_uncredited?: number | null;
+}
+
+/**
+ * Body of `POST /shop-floor/operations/{id}/complete` (owner ruling 1). The floor verb is
+ * a CLOSE: it books the good the floor already recorded (clock-out / Report production)
+ * and refuses 409 — writing nothing — while any received unit is unaccounted for. The
+ * server forbids unknown keys (422).
+ */
+export interface ShopFloorCompleteOperationRequest {
+  /**
+   * Deprecated: an expectation check only — the close never RAISES good to it, and a
+   * value above the recorded good is a 409. Floor clients omit it.
+   */
+  quantity_complete?: number;
+  /** Scrap declared AT the close (an additive delta), to cover a short. Needs a reason. */
+  quantity_scrapped?: number;
+  scrap_reason?: string;
+  scrap_reason_code_id?: number;
+  /**
+   * The closer has seen who else is still clocked in: a SHORT close then clocks them out
+   * too, and pieces they have not reported are not counted. Without it a short close is
+   * refused while anyone else holds an open entry.
+   */
+  acknowledge_open_entries?: boolean;
+  notes?: string;
+  source?: string;
+}
+
+/**
+ * Options of the OFFICE operation complete, `POST /work-orders/operations/{id}/complete`
+ * (owner ruling 1). Query params on the wire; `api.completeWOOperation` maps them.
+ *
+ * The office verb closes only when good + scrap account for every unit that reached the
+ * operation; otherwise it saves progress and leaves the operation open (or, when nothing
+ * would change, writes nothing at all).
+ */
+export interface OfficeOperationCompleteOptions {
+  /**
+   * The scrap TOTAL, which never lowers on the server (max with what is recorded). `null`
+   * / omitted leaves recorded scrap untouched — the default, so a plain call can never
+   * touch the scrap the floor recorded. A rise needs a reason or a code.
+   */
+  quantityScrapped?: number | null;
+  scrapReason?: string | null;
+  scrapReasonCodeId?: number | null;
+  /**
+   * Why the desk books more good than the floor counted. The server requires it (422)
+   * only on an operation someone clocked labor into; desk cleanup of never-clocked work
+   * needs no reason (the owner's floor-requires-labor / office-exempt asymmetry).
+   */
+  overrideReason?: string | null;
+  /**
+   * The caller read the server's "still clocked in" refusal and chose to close anyway: a
+   * SHORT close then clocks those operators out, and pieces they never reported are not
+   * counted.
+   */
+  acknowledgeOpenEntries?: boolean;
+}
+
+/** One operator a short close the caller acknowledged clocked out. */
+export interface ClosedTimeEntrySummary {
+  time_entry_id: number;
+  user_id: number | null;
+  operator_name?: string | null;
+}
+
+/**
+ * Response of the office operation complete. `is_fully_complete: false` means SAVED BUT
+ * STILL OPEN (or, for the "No change — Op N left open" message, nothing was written): the
+ * units still unaccounted for are `operation.quantity_unaccounted`.
+ */
+export interface OfficeOperationCompleteResult {
+  message?: string;
+  is_fully_complete?: boolean;
+  operation?: {
+    id: number;
+    status: OperationStatus;
+    quantity_complete: number;
+    quantity_scrapped: number;
+    upstream_quantity_short?: number | null;
+    quantity_unaccounted?: number | null;
+    quantity_short_declared?: number | null;
+  };
+  closed_time_entries?: ClosedTimeEntrySummary[];
+  quality_exceptions?: unknown[];
+}
+
+export interface ActiveJob extends KioskJobInstructions, OperationShortCountFields {
   time_entry_id: number;
   clock_in: string;
   entry_type: TimeEntryType;

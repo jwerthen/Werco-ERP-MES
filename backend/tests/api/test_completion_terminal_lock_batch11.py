@@ -55,6 +55,7 @@ from app.models.work_order import (
     WorkOrderStatus,
 )
 from app.services.work_order_state_service import TERMINAL_WO_STATUSES
+from tests.api.completion_test_helpers import make_closed_time_entry
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 
@@ -164,33 +165,6 @@ def make_wo_with_op(
     db.refresh(wo)
     db.refresh(op)
     return wo, op, wc
-
-
-def make_closed_time_entry(
-    db: Session,
-    *,
-    user: User,
-    wo: WorkOrder,
-    op: WorkOrderOperation,
-    wc: WorkCenter,
-    quantity_produced: float,
-) -> TimeEntry:
-    entry = TimeEntry(
-        user_id=user.id,
-        work_order_id=wo.id,
-        operation_id=op.id,
-        work_center_id=wc.id,
-        entry_type=TimeEntryType.RUN,
-        clock_in=datetime.utcnow() - timedelta(hours=2),
-        clock_out=datetime.utcnow() - timedelta(hours=1),
-        duration_hours=1.0,
-        quantity_produced=quantity_produced,
-        company_id=COMPANY_A,
-    )
-    db.add(entry)
-    db.commit()
-    db.refresh(entry)
-    return entry
 
 
 def make_open_time_entry(

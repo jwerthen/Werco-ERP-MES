@@ -273,7 +273,7 @@ def test_hours_sum_across_multiple_operators_on_one_operation(client, db_session
     db_session.commit()
 
     resp = client.post(
-        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(admin),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
@@ -301,7 +301,7 @@ def test_setup_and_run_hours_split_by_entry_type(client, db_session, monkeypatch
     db_session.commit()
 
     resp = client.post(
-        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=3",
+        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=3&quantity_override_reason=desk+count",
         headers=headers_for(admin),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
@@ -338,6 +338,16 @@ def test_shop_floor_complete_rolls_auto_closed_entry_hours(client, db_session, m
     make_open_entry(db_session, welder_b, wo, op, hours_ago=3.0)
     db_session.commit()
 
+    # Owner ruling 1: the close books only the good the floor recorded, so welder B reports
+    # the 5 on his own open entry first (the crew-station shape) -- no extra labor row, so
+    # the hours under test are still exactly the two auto-closed entries'.
+    reported = client.post(
+        f"/api/v1/shop-floor/operations/{op.id}/production",
+        json={"quantity_complete_delta": 5},
+        headers=headers_for(welder_b),
+    )
+    assert reported.status_code == status.HTTP_200_OK, reported.text
+
     resp = client.post(
         f"/api/v1/shop-floor/operations/{op.id}/complete",
         json={"quantity_complete": 5},
@@ -371,7 +381,7 @@ def test_flag_off_does_not_populate_cost_or_hours(client, db_session, monkeypatc
     db_session.commit()
 
     resp = client.post(
-        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(admin),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
@@ -397,7 +407,7 @@ def test_flag_off_does_not_sync_job_cost(client, db_session, monkeypatch):
     db_session.commit()
 
     resp = client.post(
-        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(admin),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
@@ -427,7 +437,7 @@ def test_flag_on_syncs_linked_job_cost(client, db_session, monkeypatch):
     db_session.commit()
 
     resp = client.post(
-        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(admin),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
@@ -468,7 +478,7 @@ def test_no_labor_recorded_signal_fires_with_flag_off(client, db_session, monkey
     db_session.commit()
 
     resp = client.post(
-        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(admin),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
@@ -490,7 +500,7 @@ def test_no_labor_recorded_signal_absent_when_labor_present(client, db_session, 
     db_session.commit()
 
     resp = client.post(
-        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(admin),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
@@ -567,7 +577,7 @@ def test_flag_off_live_complete_no_cost_no_jobcost_but_calculate_still_works(cli
     db_session.commit()
 
     resp = client.post(
-        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(admin),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
@@ -659,7 +669,7 @@ def test_flag_on_actual_cost_is_labor_plus_material_plus_overhead(client, db_ses
     db_session.commit()
 
     resp = client.post(
-        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(admin),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
@@ -689,7 +699,7 @@ def test_flag_on_jobcost_completed_with_recomputed_actuals(client, db_session, m
     db_session.commit()
 
     resp = client.post(
-        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(admin),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
@@ -730,7 +740,7 @@ def test_rate_falls_back_to_default_when_work_center_has_no_rate(client, db_sess
     db_session.commit()
 
     resp = client.post(
-        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(admin),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
@@ -758,12 +768,12 @@ def test_two_work_centers_cost_each_operation_at_its_own_rate(client, db_session
 
     # Complete op_a, then op_b (the second completion drives the WO to COMPLETE).
     r1 = client.post(
-        f"/api/v1/work-orders/operations/{op_a.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op_a.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(admin),
     )
     assert r1.status_code == status.HTTP_200_OK, r1.text
     r2 = client.post(
-        f"/api/v1/work-orders/operations/{op_b.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op_b.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(admin),
     )
     assert r2.status_code == status.HTTP_200_OK, r2.text
@@ -789,7 +799,7 @@ def test_get_cost_analysis_uses_same_rate_and_is_not_structurally_zero(client, d
     db_session.commit()
 
     done = client.post(
-        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(admin),
     )
     assert done.status_code == status.HTTP_200_OK, done.text
@@ -874,7 +884,7 @@ def test_no_labor_recorded_signal_fires_with_flag_on(client, db_session, monkeyp
     db_session.commit()
 
     resp = client.post(
-        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(admin),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
@@ -918,7 +928,7 @@ def test_completion_ignores_other_tenant_issued_material(client, db_session, mon
     db_session.commit()
 
     resp = client.post(
-        f"/api/v1/work-orders/operations/{op_a.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op_a.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(admin_a),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
@@ -945,7 +955,7 @@ def test_completion_does_not_sync_other_tenant_job_cost(client, db_session, monk
     db_session.commit()
 
     resp = client.post(
-        f"/api/v1/work-orders/operations/{op_a.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op_a.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(admin_a),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
@@ -1067,7 +1077,7 @@ def test_get_cost_analysis_computes_labor_flag_on(client, db_session, monkeypatc
     db_session.commit()
 
     done = client.post(
-        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(admin),
     )
     assert done.status_code == status.HTTP_200_OK, done.text

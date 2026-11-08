@@ -42,6 +42,9 @@ def test_authorized_operator_gets_all_three_ledger_shapes_without_costs_or_forei
                 notes='SECRET_PRIVATE_NOTE',
             )
         )
+    # The leak markers below are six digits on purpose: fixture part and work-order numbers come
+    # from a process-wide counter (KP-00555, KWO-00666), so a three-digit marker turns up in the
+    # response as soon as enough tests have run on one xdist worker.
     db_session.add(
         InventoryTransaction(
             company_id=2,
@@ -49,7 +52,7 @@ def test_authorized_operator_gets_all_three_ledger_shapes_without_costs_or_forei
             reference_type='work_order',
             reference_id=wo.id,
             transaction_type=TransactionType.ADJUST,
-            quantity=555,
+            quantity=424242,
             created_by=foreign.id,
             created_at=when,
         )
@@ -61,7 +64,7 @@ def test_authorized_operator_gets_all_three_ledger_shapes_without_costs_or_forei
             reference_type='work_order',
             reference_id=other.id,
             transaction_type=TransactionType.ADJUST,
-            quantity=666,
+            quantity=313131,
             created_by=operator.id,
             created_at=when,
         )
@@ -73,7 +76,8 @@ def test_authorized_operator_gets_all_three_ledger_shapes_without_costs_or_forei
     assert len(rows) == 3 and all(row['actor_id'] is None and row['actor_name'] is None for row in rows)
     assert all('work_order_id=' + str(wo.id) in row['source_url'] for row in rows)
     assert all(
-        secret not in response.text for secret in ['98765', 'SECRET_PRIVATE_NOTE', '555', '666', foreign.full_name]
+        secret not in response.text
+        for secret in ['98765', 'SECRET_PRIVATE_NOTE', '424242', '313131', foreign.full_name]
     )
 
 

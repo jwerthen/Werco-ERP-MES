@@ -17,8 +17,10 @@ import KioskResumeConfirmModal from './KioskResumeConfirmModal';
 import {
   BARE_HOLD,
   HELD_ROW,
+  HELD_ROW_ON_HELD_WORK_ORDER,
   HOLD_WITH_BLOCKER_STATION,
   UNRECORDED_HOLD,
+  WORK_ORDER_ON_HOLD_REASON,
   heldRowWith,
 } from './heldOperationFixtures';
 
@@ -149,5 +151,70 @@ describe('KioskResumeConfirmModal', () => {
   it('lets the crew station relabel the CTA for its badge-signature hand-off', () => {
     renderModal({ confirmLabel: 'Continue — scan badge' });
     expect(screen.getByTestId('kiosk-resume-confirm')).toHaveTextContent('Continue — scan badge');
+  });
+});
+
+/**
+ * Resume lifts the OPERATION's hold. When the row carries the WORK ORDER's start
+ * refusal, the job will not run after the tap either, so the overlay says so
+ * BEFORE it — and stops promising that the job "starts again".
+ */
+describe('KioskResumeConfirmModal — the work order still refuses a start', () => {
+  const onHeldWorkOrder = (hold: Parameters<typeof heldRowWith>[0]) => ({
+    ...heldRowWith(hold),
+    work_order_status: 'on_hold',
+    start_blocked_reason: WORK_ORDER_ON_HOLD_REASON,
+  });
+
+  it('shows the WO ON HOLD chip and the server reason verbatim, and points the CTA at it', () => {
+    renderModal({ item: HELD_ROW_ON_HELD_WORK_ORDER });
+
+    const panel = screen.getByTestId('kiosk-resume-start-blocked');
+    expect(panel).toHaveTextContent('Lifts the operation hold only');
+    expect(panel).toHaveTextContent(WORK_ORDER_ON_HOLD_REASON);
+    expect(screen.getByTestId('kiosk-start-blocked-chip')).toHaveTextContent('WO on hold');
+    // The tap is still allowed — lifting the operation hold is not refused.
+    const confirm = screen.getByTestId('kiosk-resume-confirm');
+    expect(confirm).toBeEnabled();
+    expect(confirm).toHaveAttribute('aria-describedby', 'kiosk-resume-start-blocked');
+  });
+
+  it('never promises the job "starts running again" under a held work order', () => {
+    renderModal({ item: HELD_ROW_ON_HELD_WORK_ORDER });
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).not.toHaveTextContent(/starts running again|starts the job again/i);
+    // The blocker half of the warning is unchanged: the record stays open.
+    expect(screen.getByTestId('kiosk-resume-blocker-warning')).toHaveTextContent(
+      "The operation hold lifts, but this stays on the supervisor's list until someone clears it."
+    );
+  });
+
+  it('drops the "starts again" sentence from the bare and unrecorded cases too', () => {
+    const { unmount } = render(
+      <KioskResumeConfirmModal
+        item={onHeldWorkOrder({ ...BARE_HOLD, held_by_name: 'Dana R.' })}
+        busy={false}
+        online
+        onCancel={jest.fn()}
+        onConfirm={jest.fn()}
+      />
+    );
+    expect(screen.getByTestId('kiosk-resume-bare-hold')).toHaveTextContent(
+      /^No reason was filed with this hold, so there is nothing left open\.$/
+    );
+    unmount();
+
+    renderModal({ item: onHeldWorkOrder(UNRECORDED_HOLD) });
+    expect(screen.getByTestId('kiosk-resume-no-reason')).toHaveTextContent(
+      /^No hold reason was recorded for this operation\.$/
+    );
+  });
+
+  it('renders exactly as before on a released job', () => {
+    renderModal({ item: { ...HELD_ROW, work_order_status: 'released', start_blocked_reason: null } });
+    expect(screen.queryByTestId('kiosk-resume-start-blocked')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('kiosk-start-blocked-chip')).not.toBeInTheDocument();
+    expect(screen.getByTestId('kiosk-resume-blocker-warning')).toHaveTextContent(/starts running again/i);
+    expect(screen.getByTestId('kiosk-resume-confirm')).not.toHaveAttribute('aria-describedby');
   });
 });

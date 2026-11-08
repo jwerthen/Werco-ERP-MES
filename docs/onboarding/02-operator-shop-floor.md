@@ -32,8 +32,9 @@ Run through this every time you start, before you touch a part:
 Some cells have a dedicated wall or machine-side touchscreen that runs a simpler, big-button version of the kiosk, set up by IT for that one station. If your cell has one, it works like this:
 
 1. **Scan your badge** (or type your employee number on the on-screen pad and press the arrow). You don't need to tap anything first — just scan.
-2. The screen shows **your station's queue**. Tap a job, then tap **CLOCK IN**. That's it — two taps. Jobs your manager put in a running order are at the top, each marked **RUN 1**, **RUN 2**, and so on — work them in that order unless your lead says otherwise. Jobs with no RUN mark come after them. The order is a recommendation: you can still start any job on the list.
-3. While you're on a job, a banner stays pinned at the top with three big buttons: **REPORT PRODUCTION** (enter good and scrap on the keypad — any scrap makes you pick a reason from the grid, no skipping it), **COMPLETE** (closes your time and finishes the step), and **HOLD** (pick why the job is stopping — material missing, machine down, and so on). A smaller **CORRECT OVER-COUNT** button sits below them for fixing a miscount — see [Fixing an over-count](#fixing-an-over-count-you-entered-too-many).
+2. The screen shows **your station's queue**. Tap a job, then tap **CLOCK IN**. That's it — two taps. Jobs your manager put in a running order are at the top, each marked **RUN 1**, **RUN 2**, and so on — work them in that order unless your lead says otherwise. Jobs with no RUN mark come after them. The order is a recommendation: you can still start any job on the list — except one marked **NOT RELEASED** or **WO ON HOLD**: its work order isn't released yet or is on hold, so **CLOCK IN** is greyed out and the screen says why. Only a supervisor can clear that.
+3. While you're on a job, a banner stays pinned at the top with three big buttons: **REPORT PRODUCTION** (enter good and scrap on the keypad — any scrap makes you pick a reason from the grid, no skipping it), **COMPLETE** (closes your time and finishes the step), and **HOLD** (pick why the job is stopping — material missing, machine down, and so on). A smaller **CORRECT OVER-COUNT** button sits beside them for fixing a miscount — see [Fixing an over-count](#fixing-an-over-count-you-entered-too-many) — and **CLOCK OUT · KEEP OPEN** sits below them for ending your session without finishing the step (enter only the pieces you made this session; the step stays open for the next shift).
+   - **COMPLETE** fills in the pieces still to be accounted for. If your count comes up short, the screen shows **SHORT** and won't complete until every piece is accounted for: record the pieces you finished, tap **Report as scrap** for pieces that were lost (pick a reason), or keep the step open. See [When your count comes up short](#when-your-count-comes-up-short).
 4. **It logs you out by itself** after about 4 minutes of no touching, with a countdown warning first — tap anywhere to stay on. Always scan in as yourself; never work under someone else's badge.
 
 If the screen shows a red **OFFLINE** banner, the kiosk lost its connection — what you've typed stays on screen, but nothing saves until it reconnects. If a button refuses with a message (an earlier step at another station isn't done, something on your machine is on hold), that's the same sequence protection described below — read the message, then run the next job and tell your lead.
@@ -93,6 +94,14 @@ If the **Check In** button is greyed out or shows **Waiting**, the job isn't rea
   So "I could check into this five minutes ago and now I can't" usually means a teammate or your lead
   just held one of the other items on your machine.
 - **The job is on hold.** Someone paused this operation itself. See "Resuming held work" below.
+- **The button says "Not released".** The work order is still a draft — a supervisor hasn't released
+  it to the floor yet. You can't start it, and nothing you do here will. Ask your supervisor to
+  release it.
+- **The button says "WO on hold".** A supervisor has put the whole **work order** on hold. You can't
+  check in to or start any of its steps until a supervisor resumes it (**Resume Work Order** on the
+  work order). Resuming an operation's hold won't lift it: the screen says **operation hold lifted**
+  and names the work-order hold, and the job comes back to your list still marked **WO on hold**. If
+  you were already clocked in when the hold landed, you can still clock out and record what you made.
 - **The job is blocked.** There may be a reported problem (missing material, machine down, quality hold) stopping it.
 
 What to do: pick the next job in the list and let your supervisor know the top job is stuck — but if
@@ -150,7 +159,23 @@ Record what you make as you go. There are three ways, depending on how you like 
 ### How partial vs. full completion works
 
 - If your total completed quantity is **less than the ordered quantity**, the operation stays **in progress**. The progress bar shows how far along it is. You (or the next shift) can pick it right back up.
-- When the completed quantity **reaches the ordered quantity**, the operation is finished. When the target is reached you'll see a green **Target quantity reached** banner with a **Complete Operation** button — tap it to close the step out.
+- When your **good** parts reach the ordered quantity, checking out finishes the step for you. Scrap doesn't finish it on its own — if you scrapped some and are making replacements, the step stays open until you're done.
+- When every piece is accounted for — good parts plus scrap you reported — you'll see a green **Target quantity reached** (or **All pieces accounted for**) banner with a **Complete Operation** button — tap it to close the step out. The confirmation tells you exactly how many good and scrapped pieces it will close at.
+- On the **Check Out** window you can tick **Complete Op N after checking out** to check out and close the step in one go. The box only unlocks once your check-out accounts for every piece; until then it tells you how many are still unaccounted for.
+
+### When your count comes up short
+
+If the job comes up short — say 8 good out of 10 — **the step does not close at 8.** Every piece has to be accounted for:
+
+- **Pieces you finished but haven't entered yet:** record them (check out with your count, or use **More** / **REPORT PRODUCTION**).
+- **Pieces that were lost or ruined:** report them as **scrap with a reason**. Then the step can close at 8 good, 2 scrapped.
+- **Pieces that were never started** (material ran out, sheets weren't cut): these are **not** scrap. Check out and leave the step open, and tell your supervisor — they lower the quantity on the work order.
+- **Someone else is still clocked in:** they need to clock out with their count first, or leave the step open. The kiosk doesn't fill in the count or offer **Report as scrap** while they are on the step — some of those pieces may be theirs.
+- **The step before yours already reported the loss** (on a job whose steps aren't sequenced): don't scrap pieces you never received. The screen says so — ask your supervisor to turn on **Sequential operations** for the job.
+
+If the system refuses with "not yet accounted for", nothing was saved — read the message, account for the pieces, or leave it open. On a routed job, the next station can't start the work until this step closes, so tell your lead when you leave one open short.
+
+If you find scrap after a step was already completed, clock out with 0 and tell your supervisor — they decide how it gets recorded (correcting the step's counts while the job is open, or a nonconformance once it is finished).
 
 > Tip: Always enter scrap when it happens, not at the end of the day from memory. Accurate scrap counts are part of our quality records.
 
@@ -224,8 +249,11 @@ Before you leave, leave the floor clean for the next shift:
 | Symptom | What to do |
 | --- | --- |
 | **Check In won't work / shows "Waiting"** | An earlier step at **another** station isn't done yet, or the job is on hold or blocked. Earlier steps at *your own* station don't block you — unless one of them is **on hold**, which stops every item of that job on your machine until it's cleared. Run the next job and tell your supervisor; if the whole group greyed out at once, that's a hold and your lead clears it. |
+| **Check In shows "Not released" or "WO on hold"** | The work order hasn't been released yet, or a supervisor has put the whole work order on hold. Only a supervisor can fix it (**Release**, or **Resume Work Order**). Run the next job and tell your supervisor which work order it is. |
 | **My completion says "Clock in to this operation before completing it"** | Nobody has ever clocked in to that operation, so it can't be booked as finished. Check in first (even briefly), then complete. Your own session doesn't have to still be open — any recorded time on the operation satisfies it. |
 | **My completion was rejected** | Make sure the quantity is a whole, non-negative number and isn't more than what's ordered. Try again and add a note. If it keeps failing, get your supervisor. |
+| **Complete says "not yet accounted for"** | Your good count is short of what reached the step. Record the pieces you finished, report lost pieces as **scrap with a reason**, or check out and leave the step open — pieces that were never started aren't scrap; tell your supervisor so they can lower the quantity. See [When your count comes up short](#when-your-count-comes-up-short). |
+| **Check out says the step "is already complete"** | Someone (a supervisor or your lead) closed the step while you were still clocked in. Check out with **0** pieces and tell your supervisor about any extra parts you made. |
 | **Correct over-count won't remove the parts** | You can only remove what *you* recorded on this operation (your current check-in plus your own earlier ones), and only before the step is finished. If it says to *ask a supervisor*, the operation is already complete — a supervisor fixes it in the office. If it says you can only remove a smaller number, that's all you personally counted that isn't already approved — approved labor and a teammate's count need a supervisor's **Correct count** on the work-order page. |
 | **The queue looks wrong or empty** | You probably have a filter on. Tap **All**, turn off **Due Today**, clear the **Search** box, and confirm the right station is selected. Tap **Refresh** if needed. |
 | **Priority looks incorrect** | Don't re-order jobs on your own outside of policy. Raise it to your supervisor with the work order number and the reason. |

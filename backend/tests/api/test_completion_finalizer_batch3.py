@@ -197,7 +197,12 @@ def test_office_complete_preserves_scrap_when_param_omitted(client: TestClient, 
     assert refreshed.quantity_complete == 5
 
 
-def test_office_complete_updates_scrap_when_explicitly_provided(client: TestClient, db_session: Session):
+def test_office_complete_scrap_total_never_lowers_recorded_scrap(client: TestClient, db_session: Session):
+    """Owner ruling 1: the office scrap param is an absolute TOTAL that never lowers.
+
+    It used to be an overwrite (3 -> 1 here), which could zero scrap the floor recorded and
+    null its reason. A value below what is recorded is now a no-op for scrap.
+    """
     admin = make_user(db_session)
     wo, _ = make_wo(db_session, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=10)
     wc = make_work_center(db_session)
@@ -217,7 +222,7 @@ def test_office_complete_updates_scrap_when_explicitly_provided(client: TestClie
 
     db_session.expire_all()
     refreshed = db_session.get(WorkOrderOperation, op.id)
-    assert refreshed.quantity_scrapped == 1
+    assert refreshed.quantity_scrapped == 3, "a lower scrap total never lowers what is recorded"
 
 
 # ---------------------------------------------------------------------------

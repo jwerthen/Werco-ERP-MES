@@ -133,3 +133,53 @@ describe('KioskQueueCard moved-up chip', () => {
     expect(onSelect).toHaveBeenCalledWith(baseItem);
   });
 });
+
+/**
+ * The WORK-ORDER start refusal chip (owner ruling 2026-11-05). A READY operation
+ * of a draft or on-hold work order stays on `queue` carrying the server's
+ * `start_blocked_reason`, so the card has to say so — and say nothing at all on
+ * an ordinary row.
+ */
+describe('KioskQueueCard work-order start refusal chip', () => {
+  const ON_HOLD =
+    "This work order is on hold — work cannot start until a supervisor resumes it (Resume Work Order on the work order). Resuming or clearing an operation's hold does not lift it.";
+
+  it('renders nothing when the row carries no reason', () => {
+    render(<KioskQueueCard onSelect={jest.fn()} item={baseItem} />);
+    expect(screen.queryByTestId('kiosk-start-blocked-chip')).not.toBeInTheDocument();
+  });
+
+  it('renders nothing for a null reason, even with a work-order status present', () => {
+    render(
+      <KioskQueueCard
+        onSelect={jest.fn()}
+        item={{ ...baseItem, work_order_status: 'released', start_blocked_reason: null }}
+      />
+    );
+    expect(screen.queryByTestId('kiosk-start-blocked-chip')).not.toBeInTheDocument();
+  });
+
+  it('names a held work order, carries the server text as its title, and stays selectable', () => {
+    const onSelect = jest.fn();
+    const item = { ...baseItem, work_order_status: 'on_hold', start_blocked_reason: ON_HOLD };
+    render(<KioskQueueCard onSelect={onSelect} item={item} />);
+
+    const chip = screen.getByTestId('kiosk-start-blocked-chip');
+    expect(chip).toHaveTextContent('WO on hold');
+    expect(chip).toHaveAttribute('title', ON_HOLD);
+    const card = screen.getByRole('button');
+    expect(card).toHaveAccessibleName(/wo on hold$/i);
+    card.click();
+    expect(onSelect).toHaveBeenCalledWith(item);
+  });
+
+  it('names an unreleased work order', () => {
+    render(
+      <KioskQueueCard
+        onSelect={jest.fn()}
+        item={{ ...baseItem, work_order_status: 'draft', start_blocked_reason: 'release first' }}
+      />
+    );
+    expect(screen.getByTestId('kiosk-start-blocked-chip')).toHaveTextContent('Not released');
+  });
+});

@@ -70,6 +70,11 @@ API_DOC = REPO / "docs" / "API.md"
 CLAUDE_MD = REPO / "CLAUDE.md"
 CURSOR_EXAMPLE = REPO / ".cursor" / "mcp.json.example"
 
+# Field / column names in generated tool descriptions that the claim rule reads as tool names
+# (``audit_log`` and ``metadata`` are live function names; ``audit_id`` / ``routing_id`` end in
+# ``_`` + one). Not tool claims -- see TestPackageProse.test_generated_tool_descriptions_name_only_live_tools.
+GENERATED_DESCRIPTION_FIELD_NAMES: FrozenSet[str] = frozenset({"audit_id", "audit_log", "metadata", "routing_id"})
+
 # Sections of MCP.md exempt from the claim rule: 6.2 explains the naming policy and must
 # be able to say "``list_work_orders`` is ``work_orders_list_work_orders`` because ...".
 EXEMPT_SECTIONS: FrozenSet[str] = frozenset({"6.2"})
@@ -306,6 +311,33 @@ class TestPackageProse:
         # The instructions really do quote generated names, so this test is not vacuous.
         quoted = {word for word in _PROSE_WORD.findall(DEFAULT_INSTRUCTIONS) if live.is_claim(word)}
         assert {"work_orders_start_work_order", "shop_floor_start_operation"} <= quoted
+
+    def test_generated_tool_descriptions_name_only_live_tools(self, live):
+        """A route docstring is agent-facing text too, but only its FIRST paragraph (plus the
+        summary) becomes the generated tool's description (``catalog.describe_operation``), so
+        that is all this checks -- a name quoted in a later paragraph never reaches an agent.
+
+        ``GENERATED_DESCRIPTION_FIELD_NAMES`` are field and column names the claim rule mistakes
+        for tool names (each IS a live function name or ends in ``_`` + one). The allowlist must
+        stay minimal: every entry has to still be hit, so a reworded docstring removes it.
+        """
+        catalog = build_catalog(app.openapi(), shadowed=SHADOWED_OPERATIONS, reserved_names=CONVENIENCE_TOOL_NAMES)
+        hits: Dict[str, List[str]] = {tool.name: live.stale(_PROSE_WORD.findall(tool.description)) for tool in catalog}
+        stale = {
+            name: sorted(set(words) - GENERATED_DESCRIPTION_FIELD_NAMES)
+            for name, words in hits.items()
+            if set(words) - GENERATED_DESCRIPTION_FIELD_NAMES
+        }
+        assert stale == {}, f"generated tool descriptions quote tool names that do not exist: {stale}"
+        used = {word for words in hits.values() for word in words}
+        assert (
+            GENERATED_DESCRIPTION_FIELD_NAMES <= used
+        ), f"allowlist entries no description uses any more: {sorted(GENERATED_DESCRIPTION_FIELD_NAMES - used)}"
+        # The route docstrings really do quote generated names in their first paragraph, so this
+        # is not vacuous: the operation PUT points agents at the office count correction.
+        by_name = {tool.name: tool for tool in catalog}
+        assert "reduce_operation_production_office" in live.tools
+        assert "reduce_operation_production_office" in by_name["work_orders_update_operation"].description
 
 
 # --------------------------------------------------------------------------- .cursor/mcp.json.example

@@ -15,15 +15,21 @@ The blocker MESSAGES are kept verbatim from the endpoints so a kiosk that shows
 a resolver blocker and a kiosk that gets the endpoint's 400 show the same text.
 """
 
-from typing import List, Optional
+import math
+import re
+from typing import Any, Iterable, List, Optional, Sequence
 
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
+from app.core.credentials import is_api_token_credential
 from app.models.time_entry import TimeEntry
-from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
+from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.services.work_order_state_service import (
+    QTY_EPSILON,
     TERMINAL_WO_STATUSES,
+    AccountingStrand,
+    OperationAccounting,
     has_incomplete_predecessors,
     is_laser_dispatch_work_order,
     work_order_allows_same_work_center,
@@ -54,6 +60,582 @@ MSG_NOT_ON_HOLD = "Operation is not on hold"
 # clocked out -- telling them "you must be clocked in" there would send them looking for
 # a state they correctly left. Worded as the action to take, not the row that is missing.
 MSG_NO_LABOR_RECORDED = "Clock in to this operation before completing it — no one has clocked in to it yet."
+# Verbatim from PUT /shop-floor/operations/{id}/start, now shared with its office twin.
+MSG_ALREADY_IN_PROGRESS = "Operation is already in progress"
+
+# Work-order status gates (owner ruling 2026-11-05: the floor cannot start work on a job a
+# supervisor has not released, or on one a supervisor has put on hold). Static strings on
+# purpose -- no work-order number interpolated -- so the scanner resolver's blocker text,
+# the read payloads' ``start_blocked_reason`` and every write verb's 409 are byte-identical
+# and a doc can quote them exactly. Every surface renders a plain-string ``detail``
+# verbatim, so these are what the operator reads.
+MSG_WORK_ORDER_NOT_RELEASED = (
+    "This work order has not been released — release first. Work cannot start until a supervisor releases it."
+)
+MSG_WORK_ORDER_ON_HOLD = (
+    "This work order is on hold — work cannot start until a supervisor resumes it (Resume Work Order on the "
+    "work order). Resuming or clearing an operation's hold does not lift it."
+)
+# Both start verbs used to flip an ON_HOLD operation straight to IN_PROGRESS, silently
+# lifting the hold (and leaving its blocker open). Starting is not how a hold is lifted.
+MSG_OPERATION_ON_HOLD_NO_START = (
+    "This operation is on hold — lift it with Resume (kiosk) or Clear Hold (desk) first. "
+    "Starting it does not lift a hold."
+)
+# PUT /work-orders/{id} {status: on_hold} on a DRAFT. Every hold placed from now on is on
+# RELEASED work, which is what lets POST /work-orders/{id}/resume decide where a held job
+# goes back to without guessing whether it was ever authorized for the floor.
+MSG_DRAFT_CANNOT_BE_HELD = (
+    "A draft work order has not been released, so there is nothing on the floor to hold. "
+    "Leave it in draft until it is ready, then release it."
+)
+# PUT /work-orders/{id} {status: draft} on a released / in-progress / held job returns its
+# un-worked READY operations to PENDING (a draft leaves no cards on the dispatch board or the
+# kiosk) with one REQUIRED audit row each. When those rows cannot be written the whole PUT is
+# rolled back (503) -- the same fail-closed posture as POST /work-orders/{id}/resume.
+MSG_RETURN_TO_DRAFT_AUDIT_UNAVAILABLE = (
+    "The audit record for taking this work order's operations off the floor could not be saved; nothing was "
+    "changed. Retry."
+)
+
+
+# --------------------------------------------------------------------------- #
+# Short count at completion (owner ruling 1, 2026-11-05): a short count is reported as
+# scrap with a reason, or the operation stays open -- never short-closed at the counted
+# quantity. The refusals below are PLAIN STRINGS from one module, so every kiosk,
+# desktop and MCP surface renders them verbatim. Each names the operation by its
+# ``operation_label`` and says what to do next. The arithmetic behind them is
+# ``work_order_state_service.OperationAccounting`` -- never re-derive it here.
+# --------------------------------------------------------------------------- #
+
+# Owner decision 2026-11-07: a standing machine credential
+# (``app.core.credentials.is_api_token_credential`` -- the Werco Assistant over MCP, any
+# bot) may NOT declare scrap, anywhere. Only a person -- at the kiosk, with a crew badge or
+# signed in at a desk -- declares scrap, because a scrap count is quality evidence someone
+# has to have seen. Every request by an API token that would RAISE a recorded scrap
+# quantity (an operation's, a time entry's or a work order header's ``quantity_scrapped``),
+# and with it attach a scrap reason to new scrap, is refused 403 with API_TOKEN_SCRAP
+# before any write and before any audit row: clock-out, /production (whose command the
+# Hank production task also runs -- refused there at preparation and at execution), both
+# close verbs, force-complete and both generic PUTs. ``api_token_declares_scrap`` is the
+# one predicate they all call. A request whose scrap delta is zero is untouched, so a
+# token's full-count close, good-only production report and good-only clock-out still work.
+# A crew-station badge token is a person (``_token_scope == "kiosk"``, no
+# ``_api_token_id``) and is never refused here. ``tests/api/test_api_token_scrap_refusal.py``
+# enumerates every scrap writer (ORM writes, request schemas, MCP tools): a new one fails CI.
+# This PR's extension of the decision (not part of it): a scrap REASON is the same evidence
+# (the scrap Pareto groups by it), so a token's request that would write or change one --
+# even with no new scrap -- is refused with the same text through
+# ``api_token_changes_scrap_reason``: clock-out onto the caller's own time entry,
+# PUT /work-orders/{id}, force-complete re-sending the recorded scrap, and the operation PUT.
+# A token's request that sends no reason, or re-sends the stored one, is untouched.
+API_TOKEN_SCRAP = (
+    "Scrap must be reported by a person (at the kiosk, with a crew badge, or signed in at a desk), not an API "
+    "token: a scrap count is quality evidence someone has to have seen. Record good pieces only, or leave the "
+    "work open for that person."
+)
+# The same decision's close half: a token may close a full count but never closes work
+# short -- declaring where missing pieces went is a judgment a named person makes. It is
+# what a token meets on a short close whose scrap is ALREADY on record (the request adds
+# none); a short close that declares new scrap is refused API_TOKEN_SCRAP first.
+API_TOKEN_SHORT_CLOSE = "Closing work short must be done by a person signed in to the app, not an API token."
+# The count judgments that are not scrap, refused under the same principle (a person makes
+# the judgment, not a standing token): booking more good than the floor recorded;
+# hand-editing an operation's counts through its PUT (any change but a scrap rise or a
+# reason change, which are API_TOKEN_SCRAP); hand-editing the work-order header's
+# ``quantity_complete`` / ``quantity_scrapped`` through its PUT, in either direction (a
+# scrap rise is API_TOKEN_SCRAP); lowering the order once work has been recorded against
+# it -- the work order's ``quantity_ordered`` once any operation has, or a laser nest's
+# ``planned_runs`` (its operation's target, from which the laser work order's order is
+# derived) once that nest has (both ``operation_has_recorded_work``); and EVERY over-count
+# correction through either reduce-production verb -- a reopen
+# erases a person's close, a re-stamp re-declares its short (API_TOKEN_SHORT_CLOSE when it
+# would set one). The 2026-11-07 question asked about scrap and short closes only; these
+# are this PR's extension of the same rule, not part of the owner's decision.
+API_TOKEN_COUNT_JUDGMENT = (
+    "Recording more good than the floor counted, editing an operation's counts, or lowering the order "
+    "after work was recorded must be done by a person signed in to the app, not an API token."
+)
+# This PR's extension too (NOT part of the owner's 2026-11-07 decision): a token's nest
+# package re-import (``POST /work-orders/{id}/laser-nest-packages/import``, the MCP tool
+# ``import_laser_nest_package`` with a ``work_order_id``) onto a laser job with recorded work
+# -- a nest operation the import would delete has ``operation_has_recorded_work``, or the
+# laser work order's header already carries good or scrap -- because IMPORT REPLACES
+# EVERYTHING deletes those operations and zeroes the header (judged by
+# ``laser_nest_service.import_would_wipe_recorded_work``). Its own text rather than
+# API_TOKEN_COUNT_JUDGMENT's, so the caller is told which action was refused and what to do
+# instead: the count-judgment text names three actions an importer did not attempt.
+API_TOKEN_NEST_REIMPORT = (
+    "Re-importing a nest package replaces nests that already have recorded work (good, scrap, a start or labor) "
+    "and resets the job's counts, so it must be done by a person signed in to the app, not an API token. Leave "
+    "the re-import for that person."
+)
+
+
+def api_token_declares_scrap(user: Any, scrap_delta: Optional[float]) -> bool:
+    """True when a standing API token's request would RAISE a recorded scrap quantity.
+
+    The one predicate behind API_TOKEN_SCRAP (owner decision 2026-11-07). ``scrap_delta``
+    is how much the request would ADD to the stored scrap it writes: ``None`` (omitted),
+    zero and a negative (a lowering, which the verbs that refuse it refuse for everyone)
+    never count, so a token's zero-scrap request is untouched. A crew-station badge token is
+    a person and is never refused (``is_api_token_credential``).
+
+    A delta that is not a finite number FAILS CLOSED. NaN slips past every ``> 0`` / ``< 0``
+    comparison, so a caller that forgot its own non-finite check would otherwise write NaN
+    scrap. Every caller today refuses a non-finite number for everyone before it asks (a 400
+    in the handler -- clock-out included -- or a 422 in its schema) or, at the office close,
+    never derives one; this is the backstop, not the gate.
+
+    ANY positive delta counts -- deliberately ``> 0``, not ``> QTY_EPSILON``. The writers
+    behind this predicate store scrap, overwrite its reason and file an NCR at ``> 0``
+    (clock-out, /production, the floor close, both PUTs' setattr, force-complete), so a
+    tolerance here was room for a token to slip a 5e-10 "declaration" past the refusal and
+    have it written -- an NCR in the bound user's name, a person's scrap reason replaced.
+    ``QTY_EPSILON`` is a comparison tolerance for counts, not a licence to write scrap.
+    Exact zero (a re-sent total minus the same stored float) still never counts.
+    """
+    if not is_api_token_credential(user):
+        return False
+    if scrap_delta is None:
+        return False
+    try:
+        delta = float(scrap_delta)
+    except (TypeError, ValueError):
+        return True
+    if not math.isfinite(delta):
+        return True
+    return delta > 0
+
+
+def api_token_changes_scrap_reason(user: Any, *writes: tuple[Any, Any]) -> bool:
+    """True when a standing API token's request would write a scrap reason or code that differs
+    from the one stored.
+
+    The scrap-REASON half of API_TOKEN_SCRAP (this PR's extension of the 2026-11-07 decision:
+    re-categorizing scrap a person declared is the same quality judgment, and the scrap
+    Pareto groups by the code). Each ``writes`` pair is ``(value the request would store,
+    value stored now)`` for one ``scrap_reason`` / ``scrap_reason_code_id`` column; the caller
+    passes what its own write would put there (an omitted field stores the current value, an
+    overwrite stores ``None`` when nothing was sent). Text compares exactly, so blanking a
+    reason is a change; a request that sends no reason, or re-sends the stored one, never
+    counts. A crew-station badge token and an interactive session are never refused.
+    """
+    if not is_api_token_credential(user):
+        return False
+    return any(new != old for new, old in writes)
+
+
+# The floor completion audit row is REQUIRED evidence on a short close or a scrap
+# declaration (``AuditService.log_required``); when it cannot be written nothing is saved.
+COMPLETION_AUDIT_UNAVAILABLE = "The completion audit could not be saved; nothing was changed. Please retry."
+
+# An existing "Op"/"Operation" prefix (followed by a separator or a digit) or a
+# self-labeled "Nest N" identifier is NOT prefixed again -- the server-side twin of the
+# display rule in ``frontend/src/utils/operationLabel.ts``, so a legacy "Op 10" row or a
+# laser nest never reads "Op Op 10" / "Op Nest 3". The stored value is never rewritten.
+_ALREADY_LABELED = re.compile(r"^\s*(?:op(?:eration)?(?=[\s\-_.:#]|\d)|nest\s)", re.IGNORECASE)
+
+
+def operation_label(operation: WorkOrderOperation) -> str:
+    """``"Op 10"`` for messages: ``operation_number``, else the sequence."""
+    ident = str(operation.operation_number or operation.sequence or operation.id or "").strip()
+    if _ALREADY_LABELED.match(ident):
+        return ident
+    return f"Op {ident}"
+
+
+def _qty_text(value: float) -> str:
+    """``8`` / ``0.5`` -- float noise rounded off, no trailing ``.0``."""
+    return f"{round(float(value or 0), 6):g}"
+
+
+def _join_names(names: Sequence[str]) -> str:
+    names = [name for name in names if name]
+    if len(names) <= 1:
+        return names[0] if names else "Another operator"
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def short_count_message(operation: WorkOrderOperation, acct: OperationAccounting) -> str:
+    """409: the close would leave received units unaccounted -- nothing was written."""
+    message = (
+        f"{operation_label(operation)}: {_qty_text(acct.unaccounted)} of {_qty_text(acct.received)} not yet "
+        f"accounted for ({_qty_text(acct.good)} good, {_qty_text(acct.scrapped)} scrapped). Record finished pieces "
+        "(clock out with your count, or Report production), report lost pieces as scrap with a reason, or leave "
+        "the operation open. Pieces never started: ask a supervisor to lower the quantity."
+    )
+    if acct.upstream_short > 1e-9:
+        message += f" ({_qty_text(acct.upstream_short)} never reached it — closed short upstream.)"
+    if acct.uncredited_upstream > 1e-9:
+        # A POOLED work order: the whole-order chain gets no upstream credit (owner decision),
+        # so the loss an earlier stage declared is counted against this one too. Scrapping it
+        # here would record the same loss twice and consume tied material for runs that never
+        # happened -- say so, and name the remedy (the audited sequencing flip credits it).
+        message += (
+            f" {_qty_text(acct.uncredited_upstream)} were already closed short at an earlier operation, but this "
+            "work order's operations are not sequenced, so that loss is not credited here. Do not report pieces "
+            "you never received as scrap — ask a supervisor to turn on Sequential operations for this work order."
+        )
+    return message
+
+
+def others_clocked_in_message(operation: WorkOrderOperation, names: Sequence[str], *, office: bool = False) -> str:
+    """409: a short close would clock out other operators before they reported their count."""
+    verb = "is" if len([name for name in names if name]) <= 1 else "are"
+    message = (
+        f"{_join_names(names)} {verb} still clocked in to {operation_label(operation)} — have them clock out with "
+        "their count first, or leave the operation open."
+    )
+    if office:
+        message += (
+            " Resubmit with acknowledge_open_entries to clock them out; pieces they have not reported will not be "
+            "counted."
+        )
+    return message
+
+
+def serialized_short_message(operation: WorkOrderOperation, short: float, serials: Iterable[str]) -> str:
+    """409: a short close on a serialized work order whose per-serial step records are missing."""
+    serial_list = [str(serial) for serial in serials if serial]
+    missing_for = ", ".join(serial_list) if serial_list else "this operation"
+    return (
+        f"{operation_label(operation)} is {_qty_text(short)} short on a serialized work order and required step "
+        f"records are missing for {missing_for}. Scrapped serials can't be recorded yet — leave the operation open "
+        "and ask a supervisor. Never record steps for a part that was scrapped."
+    )
+
+
+def ceiling_exceeded_message(operation: WorkOrderOperation, quantity: float, acct: OperationAccounting) -> str:
+    """400: more good than can reach this operation once upstream closes declared shorts."""
+    return (
+        f"Quantity ({_qty_text(quantity)}) exceeds the {_qty_text(acct.ceiling)} units that can reach "
+        f"{operation_label(operation)} — {_qty_text(acct.chain_upstream)} were closed short upstream."
+    )
+
+
+def exceeds_recorded_message(operation: WorkOrderOperation, quantity: float, recorded_good: float) -> str:
+    """409: the floor close asserted more good than the floor recorded (it records none itself)."""
+    return (
+        f"quantity_complete ({_qty_text(quantity)}) exceeds the {_qty_text(recorded_good)} good recorded on "
+        f"{operation_label(operation)}; record the pieces through clock-out or Report production, or report the "
+        "shortfall as scrap with a reason."
+    )
+
+
+def scrap_overdeclare_message(operation: WorkOrderOperation, unaccounted: float, declared: float) -> str:
+    """409: the scrap declared at close is more than is still unaccounted (a stale screen)."""
+    return (
+        f"{operation_label(operation)} has only {_qty_text(unaccounted)} unaccounted; declaring "
+        f"{_qty_text(declared)} scrap would over-state it. Refresh and re-enter; extra scrap belongs on clock-out "
+        "or Report production."
+    )
+
+
+def completed_operation_clock_out_message(operation: WorkOrderOperation) -> str:
+    """409: a quantity-carrying clock-out on an operation someone already completed.
+
+    Only raised on a live work order (a terminal one makes the clock-out labor-only). It
+    promises no particular correction: pieces counted good and later found bad can be
+    corrected from the work order (Correct count, which reopens the operation), but scrap
+    from extra runs nobody recorded before the close has no operation-level door yet.
+    """
+    return (
+        f"{operation_label(operation)} is already complete; clock out with 0 pieces and tell a supervisor about any "
+        "extra pieces."
+    )
+
+
+def completed_scrap_over_received_message(
+    operation: WorkOrderOperation, acct: OperationAccounting, work_order_status: Optional[str] = None
+) -> str:
+    """409: the generic operation PUT raising a COMPLETE operation's scrap past what reached it.
+
+    ``acct`` is the operation's accounting at its STORED counts: the rise may fill only its
+    ``unaccounted`` remainder (zero on an accounted close). The remedy depends on the work
+    order: on a live one, pieces counted good and later found bad are corrected by lowering
+    the good count (reduce-production, which reopens the operation -- an operation nobody
+    clocked in to included) and closing it again with the scrap. ``work_order_status`` is the
+    work order's status value when it is COMPLETE / CLOSED / CANCELLED: reduce-production
+    refuses every terminal work order, so the text names the record that still exists -- a
+    nonconformance (NCR) against the finished work -- instead of a door that is shut.
+    """
+    message = (
+        f"{operation_label(operation)} is complete with {_qty_text(acct.good)} good and {_qty_text(acct.scrapped)} "
+        f"scrapped of the {_qty_text(acct.received)} that reached it, so only {_qty_text(acct.unaccounted)} more can "
+        "be recorded as scrap."
+    )
+    if work_order_status is not None:
+        return message + (
+            f" This work order is {work_order_status}, so its recorded production can no longer be corrected: "
+            "record pieces later found bad as a nonconformance (NCR) against the finished work or its lot, not on "
+            "the operation."
+        )
+    return message + (
+        " Pieces counted good and later found bad: lower the good count with reduce-production (reopen the "
+        "operation), then complete it again with the scrap and a reason."
+    )
+
+
+def no_labor_reduction_exceeds_message(operation: WorkOrderOperation, recorded_good: float) -> str:
+    """400: the office correction lowering an operation nobody clocked in to by more than its good count."""
+    return (
+        f"Only {_qty_text(recorded_good)} good piece(s) are recorded on {operation_label(operation)}, which nobody "
+        "clocked in to; the correction cannot exceed them."
+    )
+
+
+def nest_planned_runs_raise_message(nest_label: str, planned_runs: float, work_order_status: Optional[str]) -> str:
+    """409: ``PATCH /laser-nests/{id}`` raising planned_runs on a finished nest or job.
+
+    ``work_order_status`` is the laser work order's status value when IT is terminal (the
+    nest may not be complete -- a cancelled job), else ``None`` (the nest itself is complete).
+    """
+    if work_order_status is not None:
+        return (
+            f"This laser work order is {work_order_status}; {nest_label}'s planned runs can no longer be raised. "
+            "Open a new work order for the extra runs."
+        )
+    return (
+        f"{nest_label} is already complete at {_qty_text(planned_runs)} runs; raising its planned runs would leave a "
+        "completed operation short. Add a nest for the extra runs."
+    )
+
+
+def good_above_ceiling_message(operation: WorkOrderOperation, acct: OperationAccounting) -> str:
+    """409: a close of an operation whose recorded good is above what can have reached it."""
+    return (
+        f"{operation_label(operation)} records {_qty_text(acct.good)} good, but only {_qty_text(acct.ceiling)} can "
+        f"have reached it — {_qty_text(acct.chain_upstream)} were closed short upstream. Correct the count at the "
+        "desk (Correct count / reduce-production) before closing it."
+    )
+
+
+def accounting_strand_message(strand: AccountingStrand) -> str:
+    """409: the change would strand another operation's accounting (``accounting_change_strands``)."""
+    label = operation_label(strand.operation)
+    if strand.reason == "unaccounted":
+        return f"{label} is already complete with these units and would no longer add up; correct {label} first."
+    return (
+        f"{label} already records {_qty_text(strand.after.good)} good, more than the {_qty_text(strand.after.ceiling)} "
+        f"that could reach it after this change; correct {label} first (Correct count / reduce-production)."
+    )
+
+
+def approved_open_entry_message(operation: WorkOrderOperation, entries: Sequence[TimeEntry]) -> str:
+    """409: a short close would clock out a time entry a supervisor already approved."""
+    names = []
+    for entry in entries:
+        user = getattr(entry, "user", None)
+        name = " ".join(part for part in (getattr(user, "first_name", None), getattr(user, "last_name", None)) if part)
+        names.append(name or "another operator")
+    return (
+        f"{_join_names(names)} {'has' if len(names) <= 1 else 'have'} an APPROVED time entry still open on "
+        f"{operation_label(operation)}; approval locks it, so closing short would rewrite signed-off labor. Unapprove "
+        "it (or have them clock out) first."
+    )
+
+
+# The office twins of the floor refusals above (owner ruling 1). Same module, same
+# plain-string contract, same ``operation_label`` naming.
+
+# 422 on the office op-complete when the scrap TOTAL rises without a reason or code --
+# the same sentence the floor schema and the force-complete use.
+MSG_SCRAP_REASON_OR_CODE_REQUIRED = (
+    "scrap_reason or scrap_reason_code_id is required when quantity_scrapped is greater than 0"
+)
+# 422 on the OPERATOR's reduce-production verb: re-opening a completed operation is a
+# supervised correction, never operator self-service.
+MSG_REOPEN_IS_OFFICE_ONLY = "reopen_operation is an office correction"
+# 503 when the reopen's REQUIRED audit rows cannot be written (nothing was changed).
+CORRECTION_AUDIT_UNAVAILABLE = "The correction audit could not be saved; nothing was changed. Please retry."
+
+
+def stale_scrap_message(operation: WorkOrderOperation, entered_good: float, recorded_good: float) -> str:
+    """409: the office raised scrap against a good count older than the one on record."""
+    return (
+        f"{operation_label(operation)} now records {_qty_text(recorded_good)} good, more than the "
+        f"{_qty_text(entered_good)} entered; the scrap was worked out against an older count. Refresh and re-enter."
+    )
+
+
+def open_count_above_ceiling_message(operation: WorkOrderOperation, quantity: float, acct: OperationAccounting) -> str:
+    """409: the generic operation PUT setting good above what can reach the operation."""
+    return (
+        f"quantity_complete ({_qty_text(quantity)}) exceeds the {_qty_text(acct.ceiling)} units that can reach "
+        f"{operation_label(operation)} — {_qty_text(acct.chain_upstream)} were closed short upstream."
+    )
+
+
+def open_count_above_recorded_message(operation: WorkOrderOperation, quantity: float, recorded: float) -> str:
+    """409: the generic operation PUT raising good above the floor's labor record."""
+    return (
+        f"quantity_complete ({_qty_text(quantity)}) is more than the {_qty_text(recorded)} counted on the floor for "
+        f"{operation_label(operation)}. Record the pieces through clock-out or Report production, or record them "
+        "from the office Complete with quantity_override_reason, which keeps the reason on the record."
+    )
+
+
+def quantity_ordered_raise_message(operation: WorkOrderOperation, ordered: float) -> str:
+    """409: ``PUT /work-orders/{id}`` raising the order after a stage completed at the old one."""
+    return (
+        f"{operation_label(operation)} is already complete at the order of {_qty_text(ordered)}; raising it would "
+        "leave a completed operation short. Open a new work order for the extra units."
+    )
+
+
+def sequencing_flip_blocked_message(
+    declaring: WorkOrderOperation, later: WorkOrderOperation, *, turning_on: bool
+) -> str:
+    """409: a ``sequential_operations`` flip would change what a declared short meant."""
+    short = _qty_text(float(declaring.quantity_short_declared or 0))
+    if turning_on:
+        return (
+            f"cannot switch this work order to sequential operations: {operation_label(declaring)} was closed {short} "
+            f"short and {operation_label(later)} has already completed under the current setting, so its counts "
+            "would no longer add up. Complete the work order from the office instead."
+        )
+    return (
+        f"cannot switch this work order off sequential operations: {operation_label(declaring)} was closed {short} "
+        f"short and {operation_label(later)} and the operations after it are credited with that; switching would "
+        "make them account for units that never reached them."
+    )
+
+
+def office_no_change_message(operation: WorkOrderOperation) -> str:
+    """200 on the office op-complete when nothing would change: nothing was written."""
+    return f"No change — {operation_label(operation)} left open"
+
+
+def override_reason_required_message(operation: WorkOrderOperation, recorded: float) -> str:
+    """422: the desk recorded more good than the floor counted without saying why."""
+    return (
+        f"quantity_override_reason is required to record more good than the {_qty_text(recorded)} counted on the "
+        f"floor for {operation_label(operation)}"
+    )
+
+
+def completed_counts_locked_message(operation: WorkOrderOperation) -> str:
+    """409: the generic operation PUT editing a COMPLETE operation's counts or status."""
+    return (
+        f"{operation_label(operation)} is complete; its counts are the completion record. Correct the good count "
+        "with reduce-production (it can reopen the operation)."
+    )
+
+
+def reduce_would_leave_short_message(operation: WorkOrderOperation, delta: float, short: float) -> str:
+    """409: an office over-count correction would leave a COMPLETE operation short."""
+    return (
+        f"Lowering {operation_label(operation)} by {_qty_text(delta)} would leave it {_qty_text(short)} short, and a "
+        "completed operation cannot be short. Resubmit with reopen_operation to reopen it (it returns to in "
+        "progress)."
+    )
+
+
+def reopen_blocked_by_later_message(later: WorkOrderOperation) -> str:
+    """409: a later stage of the same chain already completed with these units."""
+    label = operation_label(later)
+    return f"{label} is already complete with these units; correct {label} first."
+
+
+def quantity_ordered_floor_message(operation: WorkOrderOperation, floor: float) -> str:
+    """409: ``PUT /work-orders/{id}`` lowering the order below what a stage accounted for."""
+    return (
+        f"{operation_label(operation)} has already accounted for {_qty_text(floor)} units; lower the order only by "
+        "units no operation has started."
+    )
+
+
+def force_complete_exceeds_recorded_message(
+    quantity: float, deliverable: float, binding: Optional[WorkOrderOperation]
+) -> str:
+    """409: a force-complete books more than the floor recorded, with no override reason."""
+    where = f" at {operation_label(binding)}" if binding is not None else ""
+    return (
+        f"quantity_complete ({_qty_text(quantity)}) exceeds the {_qty_text(deliverable)} the floor recorded{where}; "
+        "record the pieces there, or give quantity_override_reason"
+    )
+
+
+def force_complete_exceeds_physical_message(quantity: float, physical_max: float, lost: float) -> str:
+    """400: even with an override, more than can exist once declared shorts are out."""
+    return (
+        f"quantity_complete ({_qty_text(quantity)}) exceeds the {_qty_text(physical_max)} that can still be "
+        f"delivered; {_qty_text(lost)} were reported scrapped short"
+    )
+
+
+def force_complete_unaccounted_message(short: float, ordered: float, quantity: float, scrapped: float) -> str:
+    """409: a force-complete would close the work order short with the shortfall unaccounted."""
+    return (
+        f"cannot complete work order: {_qty_text(short)} of {_qty_text(ordered)} unaccounted for "
+        f"({_qty_text(quantity)} complete, {_qty_text(scrapped)} scrapped); report the short as scrap with a "
+        "reason, or leave the work order open"
+    )
+
+
+def _status_value(status: object) -> str:
+    """Wire value of a status that may be an enum member or an already-plain string."""
+    value = getattr(status, "value", status)
+    return str(value)
+
+
+def work_order_start_blocker(work_order: Optional[WorkOrder]) -> Optional[str]:
+    """Why NO operation of this work order may be STARTED right now, or ``None``.
+
+    THE one copy of the work-order-status half of the start gate. Add no inline twins:
+    copies of a gate are how the office and floor rules drifted apart before.
+
+    * terminal (COMPLETE / CLOSED / CANCELLED) -> ``"cannot start operation: work order
+      is <status>"``, byte-identical to the f-string the shop-floor start verb has always
+      raised;
+    * DRAFT -> :data:`MSG_WORK_ORDER_NOT_RELEASED` -- Release is the authorization step
+      and the record of who put the job on the floor, so the floor never starts work the
+      release has not authorized (and never releases it as a side effect);
+    * ON_HOLD -> :data:`MSG_WORK_ORDER_ON_HOLD` -- put back on the floor by
+      ``POST /work-orders/{id}/resume`` ("Resume Work Order"), never by starting.
+
+    ``None`` means "no WORK-ORDER refusal", never "startable": the operation's own
+    status, the predecessor gate, the work center and open entries are decided by the
+    write verb at the moment of the action. A soft-deleted work order is the RESOLVER's
+    404, not this helper's business. ``work_order=None`` returns ``None`` for the same
+    reason -- the caller's resolver owns that 404.
+
+    Callers (every one of them, so a reader can check the rule is one rule):
+    ``POST /shop-floor/clock-in`` (kiosk, crew JOIN, desk Check In, Time Clock, paper
+    back-entry -- no exemption), ``PUT /shop-floor/operations/{id}/start``,
+    ``POST /work-orders/operations/{id}/start``, the READY auto-start branch of BOTH
+    complete verbs (``POST /shop-floor/operations/{id}/complete`` and
+    ``POST /work-orders/operations/{id}/complete`` -- completing a READY operation STARTS
+    it first), the generic ``PUT /work-orders/operations/{id}`` when it writes ``status``
+    IN_PROGRESS (a hand-set start; READY on a DRAFT is refused there with
+    :data:`MSG_WORK_ORDER_NOT_RELEASED` as well) or RAISES ``quantity_complete`` on an
+    operation it leaves PENDING / READY of a DRAFT / ON_HOLD job (the reconciling read
+    treats that count as a start -- and that read withholds the lift on such a job too,
+    inline, because this module imports the state service), :func:`clock_in_blockers` and
+    :func:`complete_blockers` (the scanner), and the floor read payloads'
+    ``start_blocked_reason`` (``/shop-floor/operations`` rows,
+    ``/shop-floor/operations/{id}``, the kiosk queue and held rows).
+
+    Deliberately NOT called by: op-level resume, blocker resolve/dismiss, production
+    reporting, completing an operation that is already IN_PROGRESS, and clock-out.
+    Labor already running when a job is held must always be closable, and the kiosk's
+    finish flow completes an IN_PROGRESS operation after clocking out.
+
+    It reads only THIS operation's work order: a laser child does NOT inherit its
+    assembly parent's DRAFT or ON_HOLD (the child is born RELEASED by the nest routes).
+    Hold the laser work order itself to stop its nests.
+    """
+    if work_order is None:
+        return None
+    status = work_order.status
+    if status in TERMINAL_WO_STATUSES:
+        return f"cannot start operation: work order is {_status_value(status)}"
+    if status == WorkOrderStatus.DRAFT:
+        return MSG_WORK_ORDER_NOT_RELEASED
+    if status == WorkOrderStatus.ON_HOLD:
+        return MSG_WORK_ORDER_ON_HOLD
+    return None
 
 
 def get_open_time_entry(db: Session, user_id: int, operation_id: int) -> Optional[TimeEntry]:
@@ -75,6 +657,32 @@ def get_open_time_entry(db: Session, user_id: int, operation_id: int) -> Optiona
         )
         .first()
     )
+
+
+def operation_has_recorded_work(db: Session, operation: Optional[WorkOrderOperation], company_id: int) -> bool:
+    """True when anything has been recorded against ``operation``: good, scrap, a start, or labor.
+
+    THE one "once work was recorded" test behind three API-token refusals: a laser nest's
+    ``planned_runs`` lowering (``PATCH /laser-nests/{id}``, for its own operation) and
+    ``PUT /work-orders/{id}`` lowering ``quantity_ordered`` (for each active operation), both
+    API_TOKEN_COUNT_JUDGMENT, and a nest package re-import (API_TOKEN_NEST_REIMPORT,
+    ``POST /work-orders/{id}/laser-nest-packages/import``, for each operation the import would
+    delete -- ``laser_nest_service.import_would_wipe_recorded_work``). "A start" is the status
+    (IN_PROGRESS / COMPLETE) OR a stamped ``actual_start``: an operation started from the office
+    and then held, or resumed back to PENDING, keeps its start record and no longer shows the
+    status -- the same signal ``work_order_state_service._operation_has_been_worked`` reads.
+    Any ``TimeEntry`` counts (a clock-in with zero pieces is still work someone did), read
+    tenant-scoped. Add no inline twins. ``None`` (a nest with no operation) has nothing recorded.
+    """
+    if operation is None:
+        return False
+    if float(operation.quantity_complete or 0) > QTY_EPSILON or float(operation.quantity_scrapped or 0) > QTY_EPSILON:
+        return True
+    if operation.status in (OperationStatus.IN_PROGRESS, OperationStatus.COMPLETE):
+        return True
+    if operation.actual_start is not None:
+        return True
+    return operation_has_labor_evidence(db, operation.id, company_id)
 
 
 def operation_has_labor_evidence(db: Session, operation_id: int, company_id: int) -> bool:
@@ -167,7 +775,8 @@ def clock_in_blockers(
     """Reasons POST /shop-floor/clock-in would refuse this user on this operation.
 
     Mirrors the handler's gate order: duplicate open entry -> work center ->
-    status -> predecessors. Empty list == the clock-in gates pass.
+    work-order status (:func:`work_order_start_blocker`: terminal / draft / on hold) ->
+    operation status -> predecessors. Empty list == the clock-in gates pass.
 
     ``work_center_id`` is the station the caller would clock in FROM (the
     handler's ``clock_in_data.work_center_id``); when provided and it differs
@@ -180,6 +789,9 @@ def clock_in_blockers(
         reasons.append(MSG_ALREADY_CLOCKED_IN)
     if work_center_id is not None and operation.work_center_id != work_center_id:
         reasons.append(MSG_WRONG_WORK_CENTER)
+    work_order_reason = work_order_start_blocker(operation.work_order)
+    if work_order_reason:
+        reasons.append(work_order_reason)
     if operation.status not in CLOCK_IN_ALLOWED_STATUSES:
         reasons.append(MSG_NOT_READY_TO_START)
     if operation_blocked_by_predecessors(db, operation):
@@ -208,6 +820,12 @@ def complete_blockers(db: Session, operation: WorkOrderOperation, work_order: Wo
     labor-evidence gate below -- a supervisor or quality user closing an operation from
     the desk, including cleanup of work that was never clocked, is a decision the owner
     kept. Do not "align" the two; the asymmetry is the point and a test pins it.
+
+    Completing a READY operation STARTS it first (both complete verbs auto-start it), so a
+    READY operation under a DRAFT or ON_HOLD work order reports the start refusal
+    (:func:`work_order_start_blocker`) -- the same 409 both verbs raise. An IN_PROGRESS
+    operation does not: work already running when a job is held stays completable. A
+    terminal work order is reported once, by its own completion text above it.
     """
     reasons: List[str] = []
     if work_order.status in TERMINAL_WO_STATUSES:
@@ -221,6 +839,10 @@ def complete_blockers(db: Session, operation: WorkOrderOperation, work_order: Wo
         else:
             status_value = operation.status.value if hasattr(operation.status, "value") else str(operation.status)
             reasons.append(f"Cannot complete operation with status: {status_value}")
+    if operation.status == OperationStatus.READY and work_order.status not in TERMINAL_WO_STATUSES:
+        start_reason = work_order_start_blocker(work_order)
+        if start_reason:
+            reasons.append(start_reason)
     if operation_blocked_by_predecessors(db, operation):
         reasons.append(MSG_PREDECESSORS_INCOMPLETE)
     if operation.id is not None and not operation_has_labor_evidence(db, operation.id, company_id):

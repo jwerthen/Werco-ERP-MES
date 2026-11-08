@@ -58,6 +58,7 @@ from app.services.completion_inventory_service import (
 )
 from app.services.mrp_service import MRPService
 from app.services.operational_event_service import OperationalEventService
+from tests.api.completion_test_helpers import seed_recorded_good
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 
@@ -705,23 +706,10 @@ def test_fg_receipt_via_shop_floor_complete_operation(client: TestClient, db_ses
     wo = make_wo(db_session, part, quantity_ordered=8)
     wc = make_work_center(db_session)
     op = make_op(db_session, wo, wc, sequence=10)
-    # The floor verb requires labor on the operation. Closed + zero pieces, so the single
-    # FG receipt under test is still driven entirely by the completion.
-    db_session.add(
-        TimeEntry(
-            user_id=admin.id,
-            work_order_id=wo.id,
-            operation_id=op.id,
-            work_center_id=wc.id,
-            entry_type=TimeEntryType.RUN,
-            clock_in=datetime.utcnow() - timedelta(hours=2),
-            clock_out=datetime.utcnow() - timedelta(hours=1),
-            duration_hours=1.0,
-            quantity_produced=0,
-            company_id=admin.company_id,
-        )
-    )
-    db_session.commit()
+    # The floor verb requires labor on the operation and books only the good the floor
+    # recorded (owner ruling 1), so the 8 sit on a closed entry -- the kiosk clock-out
+    # shape. The single FG receipt under test is still driven entirely by the completion.
+    seed_recorded_good(db_session, op, 8, admin)
 
     resp = client.post(
         f"/api/v1/shop-floor/operations/{op.id}/complete",

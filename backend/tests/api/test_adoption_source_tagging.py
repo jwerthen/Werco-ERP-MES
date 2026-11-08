@@ -52,6 +52,7 @@ from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from tests.api import kiosk_test_helpers as kiosk
+from tests.api.completion_test_helpers import seed_recorded_good
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 
@@ -582,6 +583,9 @@ def test_complete_fills_missing_source_without_overwriting(client: TestClient, d
     kiosk_entry = make_open_entry(db_session, operator_kiosk, wo, op, source="kiosk")
     unknown_entry = make_open_entry(db_session, operator_unknown, wo, op)
     kiosk_entry_id, unknown_entry_id = kiosk_entry.id, unknown_entry.id
+    # A full-count close (owner ruling 1: the verb books only the good the floor recorded),
+    # so the auto-close of both open entries needs no acknowledgement.
+    seed_recorded_good(db_session, op, 10, operator_kiosk)
 
     resp = client.post(
         f"/api/v1/shop-floor/operations/{op.id}/complete",
@@ -619,6 +623,9 @@ def test_complete_without_source_never_fills_or_guesses(client: TestClient, db_s
     kiosk_entry = make_open_entry(db_session, operator_kiosk, wo, op, source="kiosk")
     unknown_entry = make_open_entry(db_session, operator_unknown, wo, op)
     kiosk_entry_id, unknown_entry_id = kiosk_entry.id, unknown_entry.id
+    # A full-count close (owner ruling 1: the verb books only the good the floor recorded),
+    # so the auto-close of both open entries needs no acknowledgement.
+    seed_recorded_good(db_session, op, 10, operator_kiosk)
 
     resp = client.post(
         f"/api/v1/shop-floor/operations/{op.id}/complete",

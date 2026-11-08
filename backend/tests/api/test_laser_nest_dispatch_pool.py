@@ -688,9 +688,9 @@ class TestFloorCompletionNeedsLaborEvidence:
         assert clock_in.status_code == status.HTTP_200_OK, clock_in.text
         entry_id = clock_in.json()["id"]
 
-        # The kiosk books the SESSION's pieces on the clock-out, then asserts the target
-        # on the completion call. Booking the full target here would let the clock-out
-        # finish the operation on its own and the completion would never reach the gate.
+        # The kiosk books the SESSION's pieces on the clock-out, then closes. Booking the
+        # full target here would let the clock-out finish the operation on its own and
+        # the completion would never reach the gate.
         clock_out = client.post(
             f"/api/v1/shop-floor/clock-out/{entry_id}",
             headers=headers_for(operator),
@@ -702,13 +702,51 @@ class TestFloorCompletionNeedsLaborEvidence:
         assert db_session.get(WorkOrderOperation, ops[0].id).status != OperationStatus.COMPLETE
         assert db_session.get(TimeEntry, entry_id).clock_out is not None, "the caller's entry is CLOSED"
 
+        # Owner ruling 1: 2 of 5 recorded is SHORT -- the close is refused and the
+        # operation stays open at its real count (the labor gate passed: it is a 409, not
+        # MSG_NO_LABOR_RECORDED)...
+        short = client.post(
+            f"/api/v1/shop-floor/operations/{ops[0].id}/complete",
+            headers=headers_for(operator),
+            json={},
+        )
+        assert short.status_code == status.HTTP_409_CONFLICT, short.text
+        assert "3 of 5 not yet accounted for" in short.json()["detail"]
+        db_session.expire_all()
+        assert float(db_session.get(WorkOrderOperation, ops[0].id).quantity_complete) == 2
+
+        # ...until the operator reports the 3 lost runs as scrap with a reason.
         resp = client.post(
             f"/api/v1/shop-floor/operations/{ops[0].id}/complete",
             headers=headers_for(operator),
-            json={"quantity_complete": 5},
+            json={"quantity_scrapped": 3, "scrap_reason": "sheet warped"},
         )
         assert resp.status_code == status.HTTP_200_OK, resp.text
 
+        db_session.expire_all()
+        closed = db_session.get(WorkOrderOperation, ops[0].id)
+        assert closed.status == OperationStatus.COMPLETE
+        assert (closed.quantity_complete, closed.quantity_scrapped, closed.quantity_short_declared) == (2, 3, 3)
+
+    def test_kiosk_shaped_full_count_clock_out_completes_on_its_own(self, client, db_session):
+        """The full-count variant: a clock-out carrying all 5 runs completes the nest itself,
+        so the kiosk makes no separate close call (``operation_status`` says so)."""
+        operator = make_user(db_session, role=UserRole.OPERATOR)
+        wc = make_laser_work_center(db_session)
+        wo, ops = make_routed_wo(
+            db_session,
+            work_centers=[wc],
+            statuses=[OperationStatus.READY],
+        )
+        clock_in = _clock_in(client, operator, wo_id=wo.id, op=ops[0])
+        assert clock_in.status_code == status.HTTP_200_OK, clock_in.text
+        clock_out = client.post(
+            f"/api/v1/shop-floor/clock-out/{clock_in.json()['id']}",
+            headers=headers_for(operator),
+            json={"quantity_produced": 5},
+        )
+        assert clock_out.status_code == status.HTTP_200_OK, clock_out.text
+        assert clock_out.json()["operation_status"] == "complete"
         db_session.expire_all()
         assert db_session.get(WorkOrderOperation, ops[0].id).status == OperationStatus.COMPLETE
 
@@ -729,17 +767,27 @@ class TestFloorCompletionNeedsLaborEvidence:
             statuses=[OperationStatus.READY],
         )
 
-        # The crew member is clocked in; the lead never is.
-        assert _clock_in(client, crew_member, wo_id=wo.id, op=ops[0]).status_code == status.HTTP_200_OK
+        # The crew member is clocked in and reports the 5 runs; the lead never clocks in.
+        clock_in = _clock_in(client, crew_member, wo_id=wo.id, op=ops[0])
+        assert clock_in.status_code == status.HTTP_200_OK
+        report = client.post(
+            f"/api/v1/shop-floor/operations/{ops[0].id}/production",
+            headers=headers_for(crew_member),
+            json={"quantity_complete_delta": 5},
+        )
+        assert report.status_code == status.HTTP_200_OK, report.text
 
         resp = client.post(
             f"/api/v1/shop-floor/operations/{ops[0].id}/complete",
             headers=headers_for(lead),
-            json={"quantity_complete": 5},
+            json={},
         )
         assert resp.status_code == status.HTTP_200_OK, resp.text
-        # The crew member was auto-clocked-out by the completion, as designed.
+        # The crew member was auto-clocked-out by the completion, as designed -- holding
+        # exactly the 5 they reported (the close credits nothing).
         assert [entry["user_id"] for entry in resp.json()["closed_time_entries"]] == [crew_member.id]
+        db_session.expire_all()
+        assert float(db_session.get(TimeEntry, clock_in.json()["id"]).quantity_produced) == 5
 
     def test_office_completion_is_deliberately_not_gated(self, client, db_session):
         """The asymmetry is intentional: a supervisor may close an operation from the desk

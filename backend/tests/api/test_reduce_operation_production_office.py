@@ -236,8 +236,11 @@ def test_office_reduce_approved_evidence_needs_unapprove_first(client: TestClien
     assert db_session.get(WorkOrderOperation, op.id).quantity_complete == 8
 
 
-def test_office_reduce_completed_operation_is_allowed(client: TestClient, db_session: Session):
-    """PR 3: a COMPLETE operation IS correctable through the office verb.
+def test_office_reduce_completed_operation_requires_reopen_when_it_would_leave_it_short(
+    client: TestClient, db_session: Session
+):
+    """PR 3: a COMPLETE operation IS correctable through the office verb -- and, since owner
+    ruling 1 (2026-11-05), a correction that would leave it SHORT must reopen it.
 
     This asserted 409 until the reasoned RETURN verb landed. The refusal's whole
     justification was that a completed operation's downstream inventory / cost / FG
@@ -258,9 +261,21 @@ def test_office_reduce_completed_operation_is_allowed(client: TestClient, db_ses
     db_session.get(WorkOrderOperation, op.id).quantity_complete = 5
     db_session.commit()
 
-    resp = client.post(
+    # Without the explicit yes: a completed operation cannot be short -- refused, untouched.
+    refused = client.post(
         office_reduce_url(op),
         json={"quantity_delta": 1, "reason": "counted the scrap tray twice"},
+        headers=headers_for(supervisor),
+    )
+    assert refused.status_code == status.HTTP_409_CONFLICT, refused.text
+    assert "would leave it" in refused.json()["detail"] and "reopen_operation" in refused.json()["detail"]
+    db_session.expire_all()
+    assert db_session.get(TimeEntry, entry.id).quantity_produced == 5
+    assert db_session.get(WorkOrderOperation, op.id).status == OperationStatus.COMPLETE
+
+    resp = client.post(
+        office_reduce_url(op),
+        json={"quantity_delta": 1, "reason": "counted the scrap tray twice", "reopen_operation": True},
         headers=headers_for(supervisor),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
@@ -269,7 +284,7 @@ def test_office_reduce_completed_operation_is_allowed(client: TestClient, db_ses
     assert db_session.get(TimeEntry, entry.id).quantity_produced == 4
     live_op = db_session.get(WorkOrderOperation, op.id)
     assert live_op.quantity_complete == 4
-    assert live_op.status == OperationStatus.COMPLETE, "a corrected COMPLETE operation stays COMPLETE"
+    assert live_op.status == OperationStatus.IN_PROGRESS, "a corrected-short operation goes back to the floor"
 
 
 def test_office_reduce_survives_a_reconcile_on_read(client: TestClient, db_session: Session):
@@ -291,7 +306,7 @@ def test_office_reduce_survives_a_reconcile_on_read(client: TestClient, db_sessi
     assert (
         client.post(
             office_reduce_url(op),
-            json={"quantity_delta": 1, "reason": "counted the scrap tray twice"},
+            json={"quantity_delta": 1, "reason": "counted the scrap tray twice", "reopen_operation": True},
             headers=headers_for(supervisor),
         ).status_code
         == status.HTTP_200_OK
@@ -310,6 +325,9 @@ def test_office_reduce_survives_a_reconcile_on_read(client: TestClient, db_sessi
     assert (
         db_session.get(WorkOrderOperation, op.id).quantity_complete == 4
     ), "a read reverted the supervisor's audited correction back to the planned target"
+    assert (
+        db_session.get(WorkOrderOperation, op.id).status == OperationStatus.IN_PROGRESS
+    ), "the read did not re-complete it: 4 good cannot account for the 5 that reached it"
 
 
 @pytest.mark.parametrize(

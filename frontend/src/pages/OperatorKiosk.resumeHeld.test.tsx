@@ -22,8 +22,10 @@ import { useAuth } from '../context/AuthContext';
 import {
   BARE_HOLD,
   HELD_ROW,
+  HELD_ROW_ON_HELD_WORK_ORDER,
   QUEUE_ROW,
   UNRECORDED_HOLD,
+  WORK_ORDER_ON_HOLD_REASON,
   heldRowWith,
 } from '../components/kiosk/heldOperationFixtures';
 
@@ -188,6 +190,57 @@ describe('OperatorKiosk — held operations', () => {
     await waitFor(() => expect(mockedApi.resumeOperation).toHaveBeenCalled());
     expect(screen.queryByTestId('kiosk-open-blockers')).not.toBeInTheDocument();
     expect(await screen.findByText(/WO-HELD-0001 resumed/i)).toBeInTheDocument();
+  });
+
+  // An operation hold under a held WORK ORDER: the server puts the operation
+  // back to READY, so the card returns to the queue — still refused. "Resumed"
+  // in green would report a job as back on the floor when every start 409s.
+  it('says the work order still refuses a start, before the tap and after it', async () => {
+    mockedApi.getWorkCenterQueue
+      .mockResolvedValueOnce({ queue: [], held: [HELD_ROW_ON_HELD_WORK_ORDER] })
+      .mockResolvedValue({
+        queue: [{ ...HELD_ROW_ON_HELD_WORK_ORDER, status: 'ready', hold: null, startable: undefined }],
+        held: [],
+      });
+    mockedApi.resumeOperation.mockResolvedValue({ message: 'Operation resumed', status: 'ready', open_blockers: [] });
+    renderKiosk();
+
+    const card = await screen.findByTestId('kiosk-held-card');
+    expect(within(card).getByTestId('kiosk-start-blocked-chip')).toHaveTextContent('WO on hold');
+    await userEvent.click(within(card).getByTestId('kiosk-held-resume'));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByTestId('kiosk-resume-start-blocked')).toHaveTextContent(WORK_ORDER_ON_HOLD_REASON);
+    await userEvent.click(within(dialog).getByTestId('kiosk-resume-confirm'));
+
+    await waitFor(() => expect(mockedApi.resumeOperation).toHaveBeenCalledWith(41));
+    expect(
+      await screen.findByText(`WO-HELD-0001 operation hold lifted — ${WORK_ORDER_ON_HOLD_REASON}`)
+    ).toBeInTheDocument();
+    expect(screen.queryByText('WO-HELD-0001 resumed')).not.toBeInTheDocument();
+    // The job is back on the queue, wearing the chip, as the toast said.
+    const back = await screen.findByRole('button', { name: /^Work order WO-HELD-0001/i });
+    expect(within(back).getByTestId('kiosk-start-blocked-chip')).toHaveTextContent('WO on hold');
+  });
+
+  it('keeps the work-order refusal on the hold-still-open screen too', async () => {
+    // Any hold with a note files a blocker, so this is the COMMON path, not
+    // the toast: the screen must not say the job is running.
+    mockedApi.getWorkCenterQueue.mockResolvedValue({ queue: [], held: [HELD_ROW_ON_HELD_WORK_ORDER] });
+    mockedApi.resumeOperation.mockResolvedValue({
+      message: 'Operation resumed',
+      status: 'ready',
+      open_blockers: [
+        { id: 5, title: 'Machine Down: OP20 Deburr', category: 'machine_down', severity: 'high', status: 'open' },
+      ],
+    });
+    renderKiosk();
+
+    await resumeHeldJob();
+
+    expect(await screen.findByRole('heading', { name: 'Operation hold lifted' })).toBeInTheDocument();
+    expect(screen.getByTestId('kiosk-blocker-open-start-blocked')).toHaveTextContent(WORK_ORDER_ON_HOLD_REASON);
+    expect(screen.getByText('Machine Down: OP20 Deburr')).toBeInTheDocument();
+    expect(screen.queryByText(/running again/i)).not.toBeInTheDocument();
   });
 
   it('surfaces a server refusal VERBATIM and stays non-optimistic', async () => {

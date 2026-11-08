@@ -866,6 +866,7 @@ class TestTheProductionRecordIsLeftBehind:
             quantity_complete=37.0,
             quantity_scrapped=3.0,
             quantity_reworked=1.0,
+            quantity_short_declared=3.0,
             actual_setup_hours=2.75,
             actual_run_hours=44.0,
             actual_start=datetime(2026, 5, 4, 13, 0),
@@ -952,6 +953,7 @@ class TestTheProductionRecordIsLeftBehind:
         assert (copied.quantity_complete or 0) == 0
         assert (copied.quantity_scrapped or 0) == 0
         assert (copied.quantity_reworked or 0) == 0
+        assert copied.quantity_short_declared is None, "a copy has declared no short (ruling 1)"
         assert (copied.actual_setup_hours or 0) == 0
         assert (copied.actual_run_hours or 0) == 0
         assert copied.actual_start is None

@@ -69,7 +69,12 @@ from app.services.operation_action_gates import (
 # _active_operation_id is module-private by convention but is the canonical
 # "which operation is the WO on" rule (first IN_PROGRESS, else first READY,
 # else first non-COMPLETE, by sequence); reuse it rather than fork the logic.
-from app.services.work_order_state_service import _active_operation_id, operation_target_quantity
+from app.services.work_order_state_service import (
+    _active_operation_id,
+    operation_accounting,
+    operation_target_quantity,
+    resolve_absolute_operation_quantity,
+)
 
 OP_PREFIX = "OP:"
 WO_PREFIX = "WO:"
@@ -212,6 +217,14 @@ def _resolve_operation(
     revision_check, warning = _routing_revision_check(db, company_id, work_order)
 
     part = work_order.part
+    # Owner ruling 1: what reached the operation and what a close must still account for,
+    # on the evidence-floored good (the count the floor close would actually book).
+    target_qty = float(operation_target_quantity(operation, work_order) or 0)
+    acct = operation_accounting(
+        work_order,
+        operation,
+        good=resolve_absolute_operation_quantity(db, operation, 0.0, target_qty),
+    )
     summary = OperationScanSummary(
         id=operation.id,
         sequence=operation.sequence,
@@ -227,7 +240,9 @@ def _resolve_operation(
         work_center_name=operation.work_center.name if operation.work_center else None,
         work_center_match=(operation.work_center_id == work_center_id) if work_center_id is not None else None,
         quantity_complete=float(operation.quantity_complete or 0),
-        target_quantity=float(operation_target_quantity(operation, work_order) or 0),
+        target_quantity=target_qty,
+        upstream_quantity_short=acct.upstream_short,
+        quantity_unaccounted=acct.unaccounted,
     )
     return OperationScanResult(
         code=raw,

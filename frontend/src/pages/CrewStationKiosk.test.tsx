@@ -201,6 +201,21 @@ describe('CrewStationKiosk', () => {
     );
   });
 
+  it('LEAVE with the full count says the operation completed — not just "clocked out"', async () => {
+    unlockedStation();
+    mocked.mintBadgeToken.mockResolvedValue(BOB_MINT);
+    mocked.clockOut.mockResolvedValue({ operation_status: 'complete' });
+    renderKiosk();
+
+    await openJobDetail();
+    fireEvent.click(screen.getByRole('button', { name: /join \/ leave/i }));
+    scanBadge('E011');
+    expect(await screen.findByText(/clock out — bob t/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
+
+    expect(await screen.findByText(/^Bob T clocked out — Op .* completed$/)).toBeInTheDocument();
+  });
+
   it('400 "already clocked in" surfaces as an info toast and refreshes the roster', async () => {
     unlockedStation();
     mocked.mintBadgeToken.mockResolvedValue(ALICE_MINT);
@@ -343,16 +358,22 @@ describe('CrewStationKiosk', () => {
 
     await openJobDetail();
     fireEvent.click(screen.getByRole('button', { name: /^complete$/i }));
-    // Final-pieces screen prefills the remaining quantity (50 - 37 = 13).
-    expect(await screen.findByTestId('kiosk-qty-good')).toHaveTextContent('13');
+    // Final-pieces screen prefills what is still unaccounted for (50 - 37 good - 2 scrap = 11).
+    expect(await screen.findByTestId('kiosk-qty-good')).toHaveTextContent('11');
     fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
 
     const dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getByText(/everyone currently clocked in will be clocked out/i)).toBeInTheDocument();
+    // The roster is what the signer acknowledges (owner ruling 1), so the caption
+    // says what clocking them out means for their unreported pieces.
+    expect(
+      within(dialog).getByText(
+        /everyone currently clocked in will be clocked out — pieces they have not reported are not counted/i
+      )
+    ).toBeInTheDocument();
     const list = within(dialog).getByRole('list', { name: /will be clocked out/i });
     expect(within(list).getByText('Bob T')).toBeInTheDocument();
     expect(within(list).getByText('Charlie M')).toBeInTheDocument();
-    expect(within(dialog).getByText(/final pieces to record: 13 good/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/final pieces to record: 11 good/i)).toBeInTheDocument();
 
     // Cancel is a no-op: no mint, no mutations.
     fireEvent.click(within(dialog).getByRole('button', { name: /cancel/i }));
@@ -362,9 +383,11 @@ describe('CrewStationKiosk', () => {
     expect(mocked.reportProduction).not.toHaveBeenCalled();
   });
 
-  it('COMPLETE: badge scan inside the modal reports final pieces FIRST, then completes, and names who was clocked out', async () => {
+  it('COMPLETE: a rostered badge reports final pieces FIRST, then closes with only the acknowledgement, and names who was clocked out', async () => {
     unlockedStation();
-    mocked.mintBadgeToken.mockResolvedValue(ALICE_MINT);
+    // Bob holds an entry on this operation (he is on the roster), so his final pieces
+    // ride /production under his own badge.
+    mocked.mintBadgeToken.mockResolvedValue(BOB_MINT);
     mocked.reportProduction.mockResolvedValue({});
     mocked.completeOperation.mockResolvedValue({
       closed_time_entries: [
@@ -379,19 +402,18 @@ describe('CrewStationKiosk', () => {
     fireEvent.click(await screen.findByTestId('kiosk-qty-confirm'));
 
     await screen.findByRole('dialog');
-    scanBadge('E013');
+    scanBadge('E011');
 
     await waitFor(() =>
-      expect(mocked.completeOperation).toHaveBeenCalledWith('op-token-alice', 31, {
-        quantity_complete: 50,
+      expect(mocked.completeOperation).toHaveBeenCalledWith('op-token-bob', 31, {
         source: 'kiosk',
+        acknowledge_open_entries: true,
       })
     );
-    expect(mocked.reportProduction).toHaveBeenCalledWith('op-token-alice', 31, {
+    expect(mocked.reportProduction).toHaveBeenCalledWith('op-token-bob', 31, {
       request_id: expect.any(String),
-      quantity_complete_delta: 13,
+      quantity_complete_delta: 11,
       quantity_scrapped_delta: 0,
-      scrap_reason: undefined,
       source: 'kiosk',
     });
     // Production (the operator's final pieces) lands BEFORE the complete-all.
@@ -405,6 +427,9 @@ describe('CrewStationKiosk', () => {
 
   it('COMPLETE: a 409 (someone completed it first) surfaces verbatim and refreshes', async () => {
     unlockedStation();
+    // Everything already recorded (48 good + 2 scrap of 50): nothing left to enter, so
+    // this is a pure close with no production report.
+    mocked.getQueue.mockResolvedValue({ ...QUEUE_RES, queue: [{ ...ITEM, quantity_complete: 48 }] });
     mocked.mintBadgeToken.mockResolvedValue(ALICE_MINT);
     mocked.completeOperation.mockRejectedValue(
       new KioskApiError(409, 'Operation already completed by Dana R', 'Operation already completed by Dana R')
@@ -413,8 +438,7 @@ describe('CrewStationKiosk', () => {
 
     await openJobDetail();
     fireEvent.click(screen.getByRole('button', { name: /^complete$/i }));
-    // Clear the prefilled GOOD so no production report happens (pure complete).
-    fireEvent.click(await screen.findByTestId('kiosk-key-clear'));
+    expect(await screen.findByTestId('kiosk-qty-good')).toHaveTextContent('0');
     fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
 
     await screen.findByRole('dialog');
@@ -734,5 +758,90 @@ describe('CrewStationKiosk', () => {
         })
       );
     });
+  });
+});
+
+/**
+ * Owner ruling 2026-11-05: the floor never starts work on a job a supervisor has
+ * not released or has put on hold. A WORK-ORDER refusal stays on `queue` (unlike
+ * an operation hold, which moves to `held`) with `start_blocked_reason` set, and
+ * the server refuses JOIN with a 409 — deliberately not a 400, because this page
+ * turns every clock-in 400 into "already clocked in".
+ */
+describe('CrewStationKiosk — a job the work order refuses', () => {
+  const WO_ON_HOLD =
+    "This work order is on hold — work cannot start until a supervisor resumes it (Resume Work Order on the work order). Resuming or clearing an operation's hold does not lift it.";
+  const HELD_ITEM = { ...ITEM, work_order_status: 'on_hold', start_blocked_reason: WO_ON_HOLD };
+
+  beforeEach(() => {
+    unlockedStation();
+    mocked.getQueue.mockResolvedValue({ ...QUEUE_RES, queue: [HELD_ITEM] });
+  });
+
+  it('chips the board card and keeps it tappable', async () => {
+    renderKiosk();
+
+    const card = await screen.findByRole('button', { name: /WO-2026-0142/i });
+    expect(within(card).getByTestId('kiosk-start-blocked-chip')).toHaveTextContent('WO on hold');
+    expect(card).toBeEnabled();
+  });
+
+  it('job-first JOIN: the 409 renders inline on the scan screen, never as "already clocked in"', async () => {
+    mocked.mintBadgeToken.mockResolvedValue(ALICE_MINT);
+    mocked.clockIn.mockRejectedValue(new KioskApiError(409, WO_ON_HOLD, WO_ON_HOLD));
+    renderKiosk();
+
+    await openJobDetail();
+    fireEvent.click(screen.getByRole('button', { name: /join \/ leave/i }));
+    scanBadge('E013');
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(WO_ON_HOLD);
+    // Still on the scan screen — the 400 branch would have moved to the job view.
+    expect(screen.getByText(/scan badge to join or leave/i)).toBeInTheDocument();
+    expect(screen.queryByText('Already clocked in.')).not.toBeInTheDocument();
+  });
+
+  it('job-first LEAVE stays available to a rostered badge on a held job (no pre-block)', async () => {
+    mocked.mintBadgeToken.mockResolvedValue(BOB_MINT);
+    renderKiosk();
+
+    await openJobDetail();
+    fireEvent.click(screen.getByRole('button', { name: /join \/ leave/i }));
+    scanBadge('E011');
+
+    expect(await screen.findByText(/clock out — bob t/i)).toBeInTheDocument();
+    expect(mocked.clockIn).not.toHaveBeenCalled();
+  });
+
+  it('operator sheet: lists the held job disabled, with the server reason as secondary text', async () => {
+    mocked.mintBadgeToken.mockResolvedValue(ALICE_MINT);
+    renderKiosk();
+
+    await screen.findByRole('button', { name: /WO-2026-0142/i });
+    scanBadge('E013');
+
+    expect(await screen.findByRole('region', { name: /your jobs/i })).toBeInTheDocument();
+    const row = screen.getByTestId('crew-join-row-31');
+    expect(row).toBeDisabled();
+    expect(row).toHaveTextContent(WO_ON_HOLD);
+    expect(row).toHaveTextContent(/WO on hold/i);
+    expect(row).not.toHaveTextContent(/tap to join/i);
+
+    fireEvent.click(row);
+    expect(mocked.clockIn).not.toHaveBeenCalled();
+  });
+
+  it('operator sheet: a released job keeps its enabled "Tap to join" row (control)', async () => {
+    mocked.getQueue.mockResolvedValue(QUEUE_RES);
+    mocked.mintBadgeToken.mockResolvedValue(ALICE_MINT);
+    renderKiosk();
+
+    await screen.findByRole('button', { name: /WO-2026-0142/i });
+    scanBadge('E013');
+
+    await screen.findByRole('region', { name: /your jobs/i });
+    const row = screen.getByTestId('crew-join-row-31');
+    expect(row).toBeEnabled();
+    expect(row).toHaveTextContent(/tap to join \(run\)/i);
   });
 });

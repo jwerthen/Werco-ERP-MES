@@ -10,13 +10,14 @@ credential that carried the request:
 * ``_token_scope`` -- ``"api"`` for an API token, ``"kiosk"`` for a badge-minted
   crew-station operator token, ``None`` for an ordinary interactive session.
 
-Two predicates exist on purpose, because the owner rulings of 2026-11-05 draw two
-different lines:
+Two predicates exist on purpose, because the credential rules draw two different lines
+(owner ruling 3 of 2026-11-05 for the AI writes; the owner's decision of 2026-11-07, and
+this PR's extensions of it, for scrap, short closes and count judgments):
 
 * :func:`is_api_token_credential` -- a standing machine credential. A crew-station badge
   token is a PERSON at the kiosk (the badge is theirs and they are standing there), so it
   is not refused by this predicate. Used where a person on the floor may act but a bot
-  may not, e.g. closing an operation short (ruling 1).
+  may not, e.g. declaring scrap or closing an operation short (the 2026-11-07 decision).
 * :func:`is_interactive_person` -- a person signed in to the app in their own session:
   not an API token and not a station/badge-scoped token. Used where the ruling asks for
   "a named person clicking Accept" (ruling 3: AI recommendations are applied only by a

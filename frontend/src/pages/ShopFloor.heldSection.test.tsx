@@ -26,6 +26,7 @@ import { MemoryRouter } from 'react-router-dom';
 import api from '../services/api';
 import ShopFloor from './ShopFloor';
 import type { HeldQueueItem, QueueItem } from '../types';
+import { WORK_ORDER_ON_HOLD_REASON } from '../components/kiosk/heldOperationFixtures';
 
 jest.mock('../services/api', () => ({
   __esModule: true,
@@ -298,6 +299,25 @@ describe('ShopFloor Clear Hold', () => {
     const notice = await screen.findByRole('alert');
     expect(notice).toHaveTextContent('1 blocker still open');
     expect(notice).toHaveTextContent('Material Missing: OP20 Laser Cut');
+  });
+
+  it('WARNS, in the server words, when the work order itself is still on hold', async () => {
+    // Clear Hold lifts the OPERATION's hold. Under a held work order the job
+    // comes back still refused, so "hold cleared" in green would report it as
+    // ready to run.
+    mockedApi.getWorkCenterQueue.mockResolvedValue({
+      queue: [queueItem],
+      held: [{ ...heldItem, work_order_status: 'on_hold', start_blocked_reason: WORK_ORDER_ON_HOLD_REASON }],
+    });
+    renderShopFloor();
+    await screen.findByTestId('shop-floor-held-section');
+
+    fireEvent.click(within(heldSection()).getByRole('button', { name: /clear hold on WO-9002/i }));
+
+    const notice = await screen.findByRole('alert');
+    expect(notice).toHaveTextContent(`WO-9002 operation hold lifted — ${WORK_ORDER_ON_HOLD_REASON}`);
+    expect(notice).not.toHaveTextContent(/hold cleared/i);
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
   });
 
   it('surfaces the server refusal verbatim and leaves the row held', async () => {

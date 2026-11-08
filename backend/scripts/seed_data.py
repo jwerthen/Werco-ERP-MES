@@ -6,7 +6,7 @@ Run with: python -m scripts.seed_data
 
 import os
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import text
 
@@ -116,6 +116,20 @@ def _get_or_create_part(db, company_id: int, part_number: str, data: dict):
     part = Part(company_id=company_id, **data)
     db.add(part)
     return part, True
+
+
+def _release_record(status: WorkOrderStatus, released_by: int, released_at: datetime) -> dict:
+    """The release stamp a seeded work order carries, as POST /work-orders/{id}/release writes it.
+
+    Every non-DRAFT seeded job is "released by" the seed admin. Without the stamp, Resume
+    Work Order (which decides its restore target from released_at / released_by) sent every
+    seeded released / in-progress job to DRAFT -- so the demo's Hold -> Resume flow and the
+    E2E suite exercised only the restrictive no_release_record branch. A DRAFT job carries
+    no release, exactly as in the app.
+    """
+    if status == WorkOrderStatus.DRAFT:
+        return {}
+    return {"released_by": released_by, "released_at": released_at}
 
 
 def _get_or_create_work_order(db, company_id: int, work_order_number: str, data: dict):
@@ -413,6 +427,7 @@ def seed_database():
                     "due_date": due,
                     "lot_number": f"LOT-{wo_num[-3:]}",
                     "created_by": admin.id,
+                    **_release_record(status, admin.id, datetime.utcnow()),
                 },
             )
             created_counts["work_orders"] += int(created)

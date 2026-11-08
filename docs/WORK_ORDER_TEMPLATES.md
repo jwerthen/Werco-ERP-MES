@@ -44,7 +44,7 @@ Using a template produces a work order in `DRAFT` whose operations are all `PEND
 
 ### Import Nest Package is unchanged, and still releases
 
-None of the three import doors changed. They still force-set `RELEASED`, and that is deliberate rather than an oversight this feature forgot to clean up: nest import is how the laser floor gets loaded, and it is used at the point where the planner has *just* reviewed every extracted row in the wizard, so releasing is what they meant. Templates are the **draft door** — the path for re-running a plan the planner has not re-reviewed, where landing on the board unreviewed is exactly the wrong outcome. Two doors, two postures, on purpose.
+None of the three import doors changed for templates. They still force-set `RELEASED` (since the 2026-11-05 floor gates they keep an on-hold laser job on hold and record the release as the importer's — see `docs/API.md` → Laser Nests), and that is deliberate rather than an oversight this feature forgot to clean up: nest import is how the laser floor gets loaded, and it is used at the point where the planner has *just* reviewed every extracted row in the wizard, so releasing is what they meant. Templates are the **draft door** — the path for re-running a plan the planner has not re-reviewed, where landing on the board unreviewed is exactly the wrong outcome. Two doors, two postures, on purpose.
 
 If the release-on-import posture is ever revisited, that is its own change with its own argument; do not fold it into this feature.
 

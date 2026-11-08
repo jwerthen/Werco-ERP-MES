@@ -303,12 +303,28 @@ describe('CrewStationKiosk process steps', () => {
 
     await openJobDetail();
     fireEvent.click(screen.getByRole('button', { name: /^complete$/i }));
-    // Clear the prefilled GOOD so no production report happens (pure complete).
+    // A lead with no entry closes the job short: no good under this badge, the 11
+    // still unaccounted for reported as scrap — so the scrap rides /complete itself.
     fireEvent.click(await screen.findByTestId('kiosk-key-clear'));
+    fireEvent.click(screen.getByTestId('kiosk-qty-report-scrap'));
+    fireEvent.click(screen.getByRole('button', { name: 'Material defect' }));
     fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
 
     await screen.findByRole('dialog');
     scanBadge('E013');
+
+    await waitFor(() =>
+      expect(mocked.completeOperation).toHaveBeenCalledWith('op-token-alice', 31, {
+        source: 'kiosk',
+        acknowledge_open_entries: true,
+        quantity_scrapped: 11,
+        scrap_reason: 'Material defect',
+        scrap_reason_code_id: undefined,
+      })
+    );
+    expect(mocked.reportProduction).not.toHaveBeenCalled();
+    // The refusal wrote nothing — and the toast says so.
+    expect(await screen.findByText(/^Nothing was saved — /)).toBeInTheDocument();
 
     // The badge that signed the completion attempt carries into the steps view.
     const banner = await screen.findByTestId('kiosk-steps-missing');

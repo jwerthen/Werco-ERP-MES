@@ -8,6 +8,7 @@ import {
   LaserNestInfo,
   MyActiveJobResponse,
   OperationHold,
+  OperationShortCountFields,
   ShopFloorOperationsDispatchFields,
   User,
   WorkCenterQueueResponse,
@@ -50,6 +51,17 @@ import {
 import { useScrapReasonCodes } from '../hooks/useScrapReasonCodes';
 import { getKioskDept, getKioskWorkCenterCode, getKioskWorkCenterId, isKioskMode } from '../utils/kiosk';
 import { formatOperationLabel } from '../utils/operationLabel';
+import { startBlockedLabel } from '../utils/startBlock';
+import {
+  clockOutOperationStatus,
+  closingShortAfterEntry,
+  formatShortQuantity,
+  goodCeiling as resolveGoodCeiling,
+  implicitFullCountAfterEntry,
+  operationUnaccounted,
+  shortAfterEntry,
+  uncreditedUpstreamWarning,
+} from '../utils/shortCount';
 import { ScanResolveResult } from '../types/scan';
 import { useAuth } from '../context/AuthContext';
 import { useCompany } from '../context/CompanyContext';
@@ -67,7 +79,12 @@ import DispatchNoticeBanner from '../components/kiosk/DispatchNoticeBanner';
 import { useDispatchNotice } from '../hooks/useDispatchNotice';
 import type { DispatchNoticeSource } from '../hooks/useDispatchNotice';
 
-interface Operation {
+/**
+ * One `GET /shop-floor/operations` row. It carries the short-count figures (owner
+ * ruling 1, `OperationShortCountFields`) so "remaining" is computed from what actually
+ * REACHED the operation — the received count — and scrap counts as accounted for.
+ */
+interface Operation extends OperationShortCountFields {
   id: number;
   work_order_id: number;
   work_order_number: string;
@@ -96,6 +113,16 @@ interface Operation {
   requires_inspection: boolean;
   can_check_in?: boolean;
   blocked_by_previous_operations?: boolean;
+  /**
+   * The server's verbatim refusal text when the WORK ORDER blocks every start
+   * (not released, on hold, terminal) — and the work order's status, which only
+   * picks the short button label. `can_check_in` is false whenever this is set,
+   * so it is checked FIRST: otherwise the card would blame earlier operations
+   * for a refusal that is really "a supervisor has not released this job".
+   * Null/absent is "no work-order refusal", never "startable".
+   */
+  start_blocked_reason?: string | null;
+  work_order_status?: string | null;
   laser_nest?: LaserNestInfo | null;
   /**
    * WHY this operation is held, WHO placed it and WHEN — sent by
@@ -169,6 +196,20 @@ const INITIAL_PRODUCTION_DATA = {
 };
 
 const formatScanActions = (actions: string[]) => actions.map((action) => action.replace(/_/g, ' ')).join(', ');
+
+/**
+ * Owner ruling 1's server figures for the operation behind a check-in, off
+ * `GET /shop-floor/my-active-job` — which carries them for every check-in, including
+ * one whose operation is not in the loaded list (another station, a search, a filter).
+ * The job's value wins when present (it is the fresher read, as for the counts); the
+ * list row's otherwise. Absent everywhere reads as "nothing lost upstream".
+ */
+const shortCountFieldsFromJob = (job: ActiveJob, row?: OperationShortCountFields): OperationShortCountFields => ({
+  upstream_quantity_short: job.upstream_quantity_short ?? row?.upstream_quantity_short ?? null,
+  quantity_good_ceiling: job.quantity_good_ceiling ?? row?.quantity_good_ceiling ?? null,
+  quantity_unaccounted: job.quantity_unaccounted ?? row?.quantity_unaccounted ?? null,
+  upstream_short_uncredited: job.upstream_short_uncredited ?? row?.upstream_short_uncredited ?? null,
+});
 
 const isActiveJobOperation = (job: ActiveJob, operation: Operation) =>
   job.operation_id != null
@@ -261,6 +302,9 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
   const [expandedOperationId, setExpandedOperationId] = useState<number | null>(null);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const [checkOutData, setCheckOutData] = useState({ quantity_produced: 0, quantity_scrapped: 0, scrap: EMPTY_SCRAP_SELECTION, notes: '' });
+  // "Complete Op N after checking out" (owner ruling 1): the desk/phone floor's short
+  // close. Offered only once this check-out accounts for every received unit.
+  const [checkOutCompleteAfter, setCheckOutCompleteAfter] = useState(false);
   const [productionData, setProductionData] = useState(INITIAL_PRODUCTION_DATA);
   useEffect(() => {
     if (productionModal) productionSave.saveDraft(productionModal.operation.id, { timeEntryId: productionModal.job.time_entry_id, data: productionData });
@@ -392,7 +436,15 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
           work_order_quantity_ordered: item.work_order_quantity_ordered,
           component_quantity: item.component_quantity,
           quantity_complete: item.quantity_complete,
-          quantity_scrapped: 0,
+          // The REAL operation scrap total (the queue row has always sent it) — the
+          // received-aware remaining subtracts scrap, so a hard-coded 0 here would
+          // over-state what is left on every job with recorded scrap.
+          quantity_scrapped: Number(item.quantity_scrapped || 0),
+          // Owner ruling 1: the same server figures the list rows carry.
+          upstream_quantity_short: item.upstream_quantity_short ?? null,
+          quantity_good_ceiling: item.quantity_good_ceiling ?? null,
+          quantity_unaccounted: item.quantity_unaccounted ?? null,
+          upstream_short_uncredited: item.upstream_short_uncredited ?? null,
           priority: item.priority,
           due_date: item.due_date,
           customer_name: null,
@@ -403,6 +455,10 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
           requires_inspection: false,
           can_check_in: item.can_check_in,
           blocked_by_previous_operations: item.blocked_by_previous_operations,
+          // Kiosk queue rows carry no `can_check_in`, so without these two a
+          // draft or held job would render an ENABLED Check In on this path.
+          start_blocked_reason: item.start_blocked_reason ?? null,
+          work_order_status: item.work_order_status ?? null,
           laser_nest: item.laser_nest,
           run_order: item.run_order ?? null,
         }));
@@ -675,18 +731,6 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
     () => (actionableOnly ? operations.filter(op => actionableStatuses.has(op.status)) : operations),
     [actionableOnly, operations, actionableStatuses]
   );
-  // Operations render in SERVER order — no client re-sort. GET
-  // /shop-floor/operations returns the canonical dispatch order (manager-dictated
-  // run_order first, then priority/due date/sequence, grouped by work center), so
-  // a single-work-center filter shows EXACTLY the work-center-queue order the
-  // kiosks honor. Re-sorting here (the old dispatch-score sort) broke the
-  // Dispatch Board's promise that its run order is what operators see.
-  const priorityFocusQueue = useMemo(() => {
-    return visibleOperations
-      .filter((op) => ['pending', 'ready', 'in_progress', 'on_hold'].includes(op.status))
-      .slice(0, 5);
-  }, [visibleOperations]);
-
   const selectedWorkCenter = useMemo(
     () => workCenters.find((wc) => wc.id === workCenterId) || null,
     [workCenters, workCenterId]
@@ -717,6 +761,27 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
       activeJobs.find((job) => isActiveJobOperation(job, operation)) || null,
     [activeJobs]
   );
+
+  // Operations render in SERVER order — no client re-sort. GET
+  // /shop-floor/operations returns the canonical dispatch order (manager-dictated
+  // run_order first, then priority/due date/sequence, grouped by work center), so
+  // a single-work-center filter shows EXACTLY the work-center-queue order the
+  // kiosks honor. Re-sorting here (the old dispatch-score sort) broke the
+  // Dispatch Board's promise that its run order is what operators see.
+  //
+  // Filtering is not re-sorting: a row the WORK ORDER refuses (not released, on
+  // hold) is dropped from this strip, because server order is not keyed on
+  // work-order status and the phone's only "Next Job" would otherwise be a job
+  // nobody can start. Two blocked rows stay, because their button is not a start:
+  // an op-level hold (its button is Clear Hold) and a job this operator is already
+  // checked in to (its button is Check Out — labor must always be closable). The
+  // full grid still lists every blocked row with its reason.
+  const priorityFocusQueue = useMemo(() => {
+    return visibleOperations
+      .filter((op) => ['pending', 'ready', 'in_progress', 'on_hold'].includes(op.status))
+      .filter((op) => !(op.start_blocked_reason && op.status !== 'on_hold' && !getActiveJobForOperation(op)))
+      .slice(0, 5);
+  }, [visibleOperations, getActiveJobForOperation]);
 
   const selectCurrentJob = (job: ActiveJob) => {
     updateWorkspace({ selectedOperationId: job.operation_id || null, activeTimeEntryId: job.time_entry_id, view: 'my-work' });
@@ -793,8 +858,16 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
     return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
   }, [nowMs]);
 
+  // What is still unaccounted for on an operation (owner ruling 1): units that REACHED
+  // it (target less any upstream short) recorded neither good nor scrapped. This is
+  // what a close must still cover, so it is also what "Remaining" fills in.
   const getRemainingQuantity = useCallback((operation: Operation) => {
-    return Math.max(0, Number(operation.quantity_ordered || 0) - Number(operation.quantity_complete || 0));
+    return operationUnaccounted({
+      target: operation.quantity_ordered,
+      upstreamShort: operation.upstream_quantity_short,
+      complete: operation.quantity_complete,
+      scrapped: operation.quantity_scrapped,
+    });
   }, []);
 
   /**
@@ -813,8 +886,10 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
    * The toast is composed from what the SERVER returned, never from the absence
    * of a throw: resume RESTORES the operation and deliberately does not resolve
    * the blocker, and it lands PENDING (off the board) when the parent is
-   * unreleased or a predecessor is incomplete. `clearHoldToast` folds both
-   * shortfalls into ONE warning; only a clean lift is `success`.
+   * unreleased or a predecessor is incomplete. And it lifts only the
+   * OPERATION's hold: a work order that is itself on hold still refuses every
+   * start, which the row's `start_blocked_reason` says. `clearHoldToast` folds
+   * every shortfall into ONE warning; only a clean lift is `success`.
    */
   const handleClearHold = async (operation: Operation) => {
     if (actionLoading !== null || productionSave.mutationsBlocked) return;
@@ -826,7 +901,9 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
       // moved it. Clear Hold is server-GATED (409 on a cancelled-nest tombstone,
       // 400 when the operation is not actually held).
       await Promise.all([loadOperations(), loadActiveJobs(), loadDashboardCounts()]);
-      const { type, message } = clearHoldToast(result, operation.work_order_number);
+      // The row's own start_blocked_reason: an operation hold can sit under a
+      // held (or unreleased) WORK ORDER, which this resume does not lift.
+      const { type, message } = clearHoldToast(result, operation.work_order_number, operation.start_blocked_reason);
       showToast(type, message);
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || err.message || 'Failed to clear the hold');
@@ -844,6 +921,16 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
     // and a silent fall-through would put the old two-write path back.
     if (operation.status === 'on_hold') {
       showToast('info', 'This operation is on hold — clear the hold before checking in.');
+      return;
+    }
+
+    // The WORK ORDER refuses every start (not released / on hold / terminal).
+    // Checked before `can_check_in`, which the server also sets false here, so
+    // the operator reads the real reason — the server's text, verbatim — rather
+    // than the predecessor message. The server still refuses 409 on its own if
+    // this payload is stale.
+    if (operation.start_blocked_reason) {
+      showToast('info', operation.start_blocked_reason);
       return;
     }
 
@@ -875,6 +962,11 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
       }
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || err.message || 'Failed to check in');
+      // A 409 means the row was stale — the job was held or put back to draft since
+      // the list loaded. Re-read it now so the server's start_blocked_reason chip and
+      // the disabled button appear at once, instead of an enabled Check In that will
+      // be refused again until the next poll.
+      if (err?.response?.status === 409) await loadOperations();
     } finally {
       setActionLoading(null);
     }
@@ -884,6 +976,7 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
     selectCurrentJob(job);
     setCheckOutModal({ operation, job });
     setCheckOutData({ quantity_produced: 0, quantity_scrapped: 0, scrap: EMPTY_SCRAP_SELECTION, notes: '' });
+    setCheckOutCompleteAfter(false);
   };
 
   const handleOpenProductionModal = (operation: Operation, job: ActiveJob) => {
@@ -903,6 +996,8 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
       quantity_ordered: job.quantity_ordered ?? matchingOperation.quantity_ordered,
       quantity_complete: job.quantity_complete ?? matchingOperation.quantity_complete,
       quantity_scrapped: job.operation_quantity_scrapped ?? matchingOperation.quantity_scrapped,
+      // Owner ruling 1's server figures, fresher on the check-in for the same reason.
+      ...shortCountFieldsFromJob(job, matchingOperation),
       laser_nest: job.laser_nest ?? matchingOperation.laser_nest,
     };
 
@@ -923,6 +1018,10 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
       component_quantity: job.component_quantity,
       quantity_complete: job.quantity_complete || 0,
       quantity_scrapped: job.operation_quantity_scrapped || 0,
+      // Without these the check-out judged against the full target: it over-stated
+      // "not yet accounted for", missed the full count the server auto-completes, and
+      // told the operator to scrap units an upstream close had already declared short.
+      ...shortCountFieldsFromJob(job),
       priority: 5,
       due_date: null,
       customer_name: null,
@@ -949,6 +1048,7 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
   const closeCheckOutModal = () => {
     setCheckOutModal(null);
     setCheckOutData({ quantity_produced: 0, quantity_scrapped: 0, scrap: EMPTY_SCRAP_SELECTION, notes: '' });
+    setCheckOutCompleteAfter(false);
   };
 
   const closeProductionModal = () => {
@@ -1067,14 +1167,15 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
     }
   };
 
+  // Owner ruling 1: `/complete` is a CLOSE. It books the good the floor already
+  // recorded — no quantity is sent — and refuses (writing nothing) while the count is
+  // short or a crewmate is still clocked in. The refusal is shown verbatim.
   const handleCompleteOperation = async (operation: Operation) => {
     if (actionLoading !== null || productionSave.mutationsBlocked) return;
     setCompleteConfirm(null);
     setActionLoading(operation.id);
     try {
-      await api.completeOperation(operation.id, {
-        quantity_complete: Number(operation.quantity_ordered || 0),
-      });
+      await api.completeOperation(operation.id, { source: 'desktop' });
       showToast('success', `Completed ${operation.work_order_number}`);
       await Promise.all([loadOperations(), loadActiveJobs(), loadDashboardCounts()]);
     } catch (err: any) {
@@ -1084,27 +1185,112 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
     }
   };
 
+  // What this check-out would still leave unaccounted for, and so whether "complete
+  // after" may be offered: only once good + scrap (recorded and entered) cover every
+  // received unit — the same arithmetic the server's close decides on.
+  const checkOutUnaccountedAfter = checkOutModal
+    ? shortAfterEntry({
+        target: checkOutModal.operation.quantity_ordered,
+        upstreamShort: checkOutModal.operation.upstream_quantity_short,
+        complete: checkOutModal.operation.quantity_complete,
+        scrapped: checkOutModal.operation.quantity_scrapped,
+        good: checkOutData.quantity_produced,
+        scrap: checkOutData.quantity_scrapped,
+      })
+    : 0;
+  // Pooled work order only: units an earlier operation already closed short, NOT
+  // credited here — the hint must not tell the operator to scrap them.
+  const checkOutUncredited = checkOutModal
+    ? Math.max(0, Number(checkOutModal.operation.upstream_short_uncredited || 0))
+    : 0;
+  const checkOutCanComplete = Boolean(
+    checkOutModal &&
+      checkOutModal.operation.status !== 'complete' &&
+      Number(checkOutModal.operation.quantity_ordered || 0) > 0 &&
+      checkOutUnaccountedAfter <= 0
+  );
+  // A full GOOD count completes the operation at clock-out on its own (the server's implicit
+  // rule) — ticked or not. Said up front instead of a checkbox that reads like an opt-in.
+  const checkOutFullCount = Boolean(
+    checkOutModal &&
+      checkOutModal.operation.status !== 'complete' &&
+      implicitFullCountAfterEntry({
+        target: checkOutModal.operation.quantity_ordered,
+        ceiling: checkOutModal.operation.quantity_good_ceiling,
+        complete: checkOutModal.operation.quantity_complete,
+        good: checkOutData.quantity_produced,
+      })
+  );
+
+  /**
+   * Check Out — and, when ticked, complete the operation right after (the floor's
+   * short close for an operator-only desktop/phone shop, owner ruling 1).
+   *
+   * Two writes, in order, each reported honestly: the clock-out (good, scrap and its
+   * reason land on the time entry), then `/complete` with no quantity. When the
+   * clock-out completed the operation on its own (a full good count — its
+   * `operation_status` says so) there is nothing left to close, so no `/complete`.
+   */
   const handleClockOut = async () => {
     if (!checkOutModal || actionLoading !== null || productionSave.mutationsBlocked) return;
 
-    setActionLoading(checkOutModal.operation.id);
+    const { operation } = checkOutModal;
+    const completeAfter = checkOutCompleteAfter && checkOutCanComplete;
+    const scrapEntered = Number(checkOutData.quantity_scrapped || 0);
+    // Scrap that COVERS A SHORT on a "check out & complete" rides the close (the server
+    // re-checks it against what is still unaccounted under the row lock); otherwise — a
+    // plain check-out, or replacement scrap on a full good count — it rides the clock-out.
+    const scrapAtClose = completeAfter && !checkOutFullCount && scrapEntered > 0;
+    const clockOutScrap = scrapAtClose ? 0 : scrapEntered;
+    const scrapPayload = scrapEntered > 0 ? scrapSelectionPayload(scrapCodes, checkOutData.scrap) : {};
+    setActionLoading(operation.id);
+    let clockedOut = false;
     try {
-      await api.clockOut(checkOutModal.job.time_entry_id, {
+      const res: unknown = await api.clockOut(checkOutModal.job.time_entry_id, {
         quantity_produced: Number(checkOutData.quantity_produced || 0),
-        quantity_scrapped: Number(checkOutData.quantity_scrapped || 0),
+        quantity_scrapped: clockOutScrap,
         notes: checkOutData.notes || undefined,
         // Structured scrap reason (company code id and/or free text) required
         // when scrap > 0 (compliance/traceability), mirroring the kiosk.
         // Omitted entirely when nothing was scrapped.
-        ...(Number(checkOutData.quantity_scrapped || 0) > 0
-          ? scrapSelectionPayload(scrapCodes, checkOutData.scrap)
-          : {}),
+        ...(clockOutScrap > 0 ? scrapPayload : {}),
       });
-      showToast('success', `Checked out of ${checkOutModal.operation.work_order_number}`);
+      clockedOut = true;
+      if (clockOutOperationStatus(res) === 'complete') {
+        showToast(
+          scrapAtClose ? 'warning' : 'success',
+          scrapAtClose
+            ? `Completed ${operation.work_order_number} with the pieces already recorded — the ${formatShortQuantity(scrapEntered)} scrap entered was not recorded.`
+            : `Completed ${operation.work_order_number}`
+        );
+      } else if (completeAfter) {
+        await api.completeOperation(
+          operation.id,
+          scrapAtClose ? { source: 'desktop', quantity_scrapped: scrapEntered, ...scrapPayload } : { source: 'desktop' }
+        );
+        showToast('success', `Completed ${operation.work_order_number}`);
+      } else {
+        showToast('success', `Checked out of ${operation.work_order_number}`);
+      }
       closeCheckOutModal();
       await Promise.all([loadOperations(), loadActiveJobs(), loadDashboardCounts()]);
     } catch (err: any) {
-      showToast('error', err.response?.data?.detail || 'Failed to check out');
+      const detail = err.response?.data?.detail;
+      if (clockedOut) {
+        // The labor landed; only the close was refused. Say both, verbatim — and when the
+        // scrap covering the short rode that refused close (the clock-out carried 0), say
+        // it was not saved, as the crew station does.
+        showToast(
+          'error',
+          scrapAtClose
+            ? `Checked out, but completing failed (the ${formatShortQuantity(scrapEntered)} scrap was not saved): ${detail || 'Failed to complete operation'}`
+            : `Checked out, but completing failed: ${detail || 'Failed to complete operation'}`
+        );
+        closeCheckOutModal();
+        await Promise.all([loadOperations(), loadActiveJobs(), loadDashboardCounts()]);
+      } else {
+        showToast('error', detail || 'Failed to check out');
+      }
     } finally {
       setActionLoading(null);
     }
@@ -1442,6 +1628,7 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
               onHold={() => { if (currentOperation) openHoldModal(currentOperation); }}
               onCheckOut={() => { if (currentOperation && selectedActiveJob) handleOpenCheckOut(currentOperation, selectedActiveJob); }}
               onComplete={() => setCompleteConfirm(currentOperation)}
+              operationStatus={currentOperation?.status ?? null}
             />
           ) : (
             <div className="space-y-3">
@@ -1946,7 +2133,10 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
 
       {/* Mobile Next Job */}
       {priorityFocusQueue[0] && (
-        <div className="md:hidden rounded-sm border border-werco-500/30 bg-werco-500/10 p-4">
+        <div
+          data-testid="shop-floor-next-job"
+          className="md:hidden rounded-sm border border-werco-500/30 bg-werco-500/10 p-4"
+        >
           {(() => {
             const op = priorityFocusQueue[0];
             const activeJob = getActiveJobForOperation(op);
@@ -2061,9 +2251,30 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
             const overdue = isOverdue(op.due_date);
             const activeJob = getActiveJobForOperation(op);
             const canCheckIn = op.can_check_in !== false;
+            // The WORK ORDER refuses every start (not released / on hold). Read
+            // before `canCheckIn` — the server sets that false too — so the card
+            // never blames earlier operations for a supervisor's release or hold.
+            const startBlockedReason = op.start_blocked_reason || null;
+            const startBlockedReasonId = `shop-floor-start-blocked-${op.id}`;
             const showCheckIn = op.status === 'pending' || op.status === 'ready' || (op.status === 'in_progress' && !activeJob);
             const remainingQuantity = getRemainingQuantity(op);
+            // Every received unit is recorded good or scrapped — the operation can close
+            // (owner ruling 1). Covered by scrap when the good alone falls short.
             const targetReached = Boolean(activeJob && op.status === 'in_progress' && remainingQuantity <= 0);
+            const coveredByScrap = closingShortAfterEntry({
+              target: op.quantity_ordered,
+              upstreamShort: op.upstream_quantity_short,
+              complete: op.quantity_complete,
+            }) > 0;
+            // Room left for GOOD is the server's ceiling, not "unaccounted": the server keeps
+            // accepting good up to it (scrap never counts for an implicit completion), so an
+            // operator re-running replacements for scrapped pieces is never cut off — the
+            // "accounted, can close" banner shows BESIDE the production actions then.
+            const goodRoom = Math.max(
+              0,
+              resolveGoodCeiling(op.quantity_ordered, op.quantity_good_ceiling) - Number(op.quantity_complete || 0)
+            );
+            const showProductionActions = op.status === 'in_progress' && Boolean(activeJob) && (!targetReached || goodRoom > 0);
             
             return (
               <div
@@ -2170,8 +2381,14 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
                   <div className="mb-3 rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3">
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                       <div>
-                        <p className="text-sm font-semibold text-emerald-300">Target quantity reached</p>
-                        <p className="text-xs text-emerald-200/80">Stay clocked in, complete the operation, or check out.</p>
+                        <p className="text-sm font-semibold text-emerald-300">
+                          {coveredByScrap ? 'All pieces accounted for' : 'Target quantity reached'}
+                        </p>
+                        <p className="text-xs text-emerald-200/80">
+                          {coveredByScrap
+                            ? `${formatShortQuantity(Number(op.quantity_complete || 0))} good · ${formatShortQuantity(Number(op.quantity_scrapped || 0))} scrapped — complete the operation, or check out.`
+                            : 'Stay clocked in, complete the operation, or check out.'}
+                        </p>
                       </div>
                       <div className="flex gap-2">
                         <button
@@ -2225,7 +2442,16 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
                   </div>
                 </div>
                 
-                {showCheckIn && !canCheckIn && (
+                {showCheckIn && startBlockedReason && (
+                  <p
+                    id={startBlockedReasonId}
+                    data-testid={startBlockedReasonId}
+                    className="mb-3 text-sm text-amber-300"
+                  >
+                    {startBlockedReason}
+                  </p>
+                )}
+                {showCheckIn && !startBlockedReason && !canCheckIn && (
                   <p className="mb-3 text-sm text-amber-300">
                     Waiting for earlier operations on this work order to be completed. Open Details to review the routing.
                   </p>
@@ -2233,13 +2459,13 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
 
                 {/* Action Buttons */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2" data-tour="sf-complete">
-                  {op.status === 'in_progress' && activeJob && !targetReached && (
+                  {showProductionActions && activeJob && (
                     <>
                       <button
                         onClick={() => reportProduction(op, 1)}
-                        disabled={actionLoading === op.id || productionSave.mutationsBlocked || remainingQuantity <= 0}
+                        disabled={actionLoading === op.id || productionSave.mutationsBlocked || goodRoom <= 0}
                         className="flex-1 btn-success text-base sm:text-sm py-3 sm:py-2.5 w-full disabled:opacity-50 disabled:cursor-not-allowed"
-                        title={remainingQuantity <= 0 ? 'Target quantity reached' : 'Add one completed part'}
+                        title={goodRoom <= 0 ? 'Target quantity reached' : 'Add one completed part'}
                       >
                         {actionLoading === op.id ? (
                           <ArrowPathIcon className="h-4 w-4 animate-spin mx-auto" />
@@ -2264,12 +2490,26 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
                   {showCheckIn && (
                     <button
                       onClick={() => handleCheckIn(op)}
-                      disabled={actionLoading === op.id || productionSave.mutationsBlocked || !canCheckIn}
+                      disabled={
+                        actionLoading === op.id || productionSave.mutationsBlocked || !canCheckIn || !!startBlockedReason
+                      }
                       className="flex-1 btn-primary text-base sm:text-sm py-3 sm:py-2.5 w-full disabled:opacity-50 disabled:cursor-not-allowed"
-                      title={canCheckIn ? 'Check in' : 'Waiting for earlier operations on this work order'}
+                      title={
+                        startBlockedReason
+                          ? startBlockedReason
+                          : canCheckIn
+                            ? 'Check in'
+                            : 'Waiting for earlier operations on this work order'
+                      }
+                      aria-describedby={startBlockedReason ? startBlockedReasonId : undefined}
                     >
                       {actionLoading === op.id ? (
                         <ArrowPathIcon className="h-4 w-4 animate-spin mx-auto" />
+                      ) : startBlockedReason ? (
+                        <>
+                          <PauseIcon className="h-4 w-4 mr-1.5" />
+                          <span>{startBlockedLabel(op.work_order_status)}</span>
+                        </>
                       ) : !canCheckIn ? (
                         <>
                           <ClockIcon className="h-4 w-4 mr-1.5" />
@@ -2363,11 +2603,22 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
         {documentView && <KioskDocViewer operationId={documentView.operationId} initialTab={documentView.tab} transport={SHOP_FLOOR_DOCS} onBack={() => setDocumentView(null)} />}
       </Modal>
 
-      {/* Confirm full-quantity completion (closes the operation, no undo) */}
+      {/* Confirm the close (no undo). It books what the floor recorded — the message
+          says exactly that, never "full quantity" (owner ruling 1). */}
       <ConfirmDialog
         open={completeConfirm !== null}
-        title="Complete operation at full quantity?"
-        message="This closes the operation and cannot be undone."
+        title="Complete this operation?"
+        message={
+          completeConfirm
+            ? `This closes ${formatOperationLabel(completeConfirm.operation_number)} at ${formatShortQuantity(
+                Number(completeConfirm.quantity_complete || 0)
+              )} good${
+                Number(completeConfirm.quantity_scrapped || 0) > 0
+                  ? ` · ${formatShortQuantity(Number(completeConfirm.quantity_scrapped || 0))} scrapped`
+                  : ''
+              } and cannot be undone.`
+            : 'This closes the operation and cannot be undone.'
+        }
         confirmLabel="Complete Operation"
         cancelLabel="Cancel"
         variant="warning"
@@ -2724,7 +2975,8 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
                   </button>
                 </div>
                 <p className="mt-2 text-xs text-slate-400">
-                  Use this only for parts not already added with +1 Complete. Remaining: {getRemainingQuantity(checkOutModal.operation)}
+                  Use this only for parts not already added with +1 Complete. Not yet accounted for:{' '}
+                  {formatShortQuantity(getRemainingQuantity(checkOutModal.operation))}
                 </p>
               </div>
 
@@ -2752,6 +3004,51 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
                   onChange={(scrap) => setCheckOutData({ ...checkOutData, scrap })}
                 />
               )}
+
+              {/* Owner ruling 1: closing the operation from here is offered only once
+                  every received unit is recorded good or scrapped. Short, the honest
+                  options are scrap with a reason, or checking out and leaving it open. */}
+              <div>
+                <label
+                  htmlFor="shopfloor-checkout-complete-after"
+                  className={`flex min-h-11 items-center gap-3 text-sm ${checkOutCanComplete ? 'text-white' : 'text-slate-400'}`}
+                >
+                  <input
+                    id="shopfloor-checkout-complete-after"
+                    type="checkbox"
+                    className="h-5 w-5"
+                    checked={checkOutFullCount || (checkOutCompleteAfter && checkOutCanComplete)}
+                    disabled={!checkOutCanComplete || checkOutFullCount}
+                    onChange={(e) => setCheckOutCompleteAfter(e.target.checked)}
+                    aria-describedby={
+                      checkOutFullCount
+                        ? 'shopfloor-checkout-full-count-hint'
+                        : !checkOutCanComplete
+                          ? 'shopfloor-checkout-complete-after-hint'
+                          : undefined
+                    }
+                  />
+                  Complete {formatOperationLabel(checkOutModal.operation.operation_number)} after checking out
+                </label>
+                {checkOutFullCount && (
+                  <p id="shopfloor-checkout-full-count-hint" className="mt-1 text-xs text-emerald-300">
+                    That is the full count — checking out completes{' '}
+                    {formatOperationLabel(checkOutModal.operation.operation_number)} (and deducts any tied material).
+                  </p>
+                )}
+                {!checkOutCanComplete && checkOutUnaccountedAfter > 0 && (
+                  <p id="shopfloor-checkout-complete-after-hint" className="mt-1 text-xs text-amber-300">
+                    {checkOutUncredited > 0
+                      ? // Pooled job, loss already declared upstream: "enter lost pieces as
+                        // scrap" would scrap units this operation never received.
+                        `${formatShortQuantity(checkOutUnaccountedAfter)} not yet accounted for — ${uncreditedUpstreamWarning(
+                          checkOutUncredited,
+                          !!checkOutModal.operation.laser_nest
+                        )} Check out and leave it open.`
+                      : `${formatShortQuantity(checkOutUnaccountedAfter)} not yet accounted for — enter lost pieces as scrap with a reason, or check out and leave it open`}
+                  </p>
+                )}
+              </div>
 
               <div>
                 <label htmlFor="shopfloor-checkout-notes" className="label">Notes (optional)</label>
@@ -2787,7 +3084,9 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
                 ) : (
                   <>
                     <CheckCircleIcon className="h-5 w-5 mr-2" />
-                    End time and save
+                    {checkOutFullCount || (checkOutCompleteAfter && checkOutCanComplete)
+                      ? 'Check out & complete'
+                      : 'End time and save'}
                   </>
                 )}
               </button>

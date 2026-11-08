@@ -839,6 +839,21 @@ class TestWorkOrdersAPI:
         data = response.json()
         assert data["status"] == "released"
 
+    def test_release_refuses_a_soft_deleted_work_order(
+        self, client: TestClient, auth_headers: dict, db_session, test_work_order: WorkOrder, test_user
+    ):
+        """Invariant 3: releasing a tombstone would put its operations on the floor's board."""
+        test_work_order.soft_delete(test_user.id)
+        db_session.commit()
+
+        response = client.post(f"/api/v1/work-orders/{test_work_order.id}/release", headers=auth_headers)
+
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+        db_session.expire_all()
+        row = db_session.query(WorkOrder).filter(WorkOrder.id == test_work_order.id).one()
+        assert row.status == WorkOrderStatus.DRAFT
+        assert row.released_at is None and row.released_by is None
+
     def test_search_work_orders(self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder):
         """Test searching work orders by customer name."""
         response = client.get(
@@ -854,6 +869,11 @@ class TestWorkOrdersAPI:
         self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder
     ):
         """Started/completed operator IDs should be visible on work order operations."""
+        # The fixture work order is DRAFT, and starting an operation of a draft is refused
+        # 409 (ruling 2: release first) -- release it the way the floor would get it.
+        release_response = client.post(f"/api/v1/work-orders/{test_work_order.id}/release", headers=auth_headers)
+        assert release_response.status_code == status.HTTP_200_OK, release_response.text
+
         work_order_response = client.get(f"/api/v1/work-orders/{test_work_order.id}", headers=auth_headers)
         assert work_order_response.status_code == status.HTTP_200_OK
         operation_id = work_order_response.json()["operations"][0]["id"]
@@ -1547,9 +1567,8 @@ class TestWorkOrdersAPI:
         assert shop_floor_operation["work_order_quantity_ordered"] == 3
         assert shop_floor_operation["component_quantity"] == 6
 
-        # Clock in first: the floor's completion verb (which also serves partial progress)
-        # refuses an operation with no labor recorded against it at all. A real operator
-        # reporting progress is always clocked in; this fixture used to skip that step.
+        # Clock in first: a real operator reporting progress is always clocked in, and the
+        # floor's verbs refuse an operation with no labor recorded against it at all.
         clock_in_response = client.post(
             "/api/v1/shop-floor/clock-in",
             headers=auth_headers,
@@ -1562,12 +1581,24 @@ class TestWorkOrdersAPI:
         )
         assert clock_in_response.status_code == status.HTTP_200_OK, clock_in_response.text
 
-        partial_response = client.post(
+        # Owner ruling 1: the floor /complete is a CLOSE verb with no partial branch -- it
+        # books only the good the floor recorded (none here), so asserting 4 is refused.
+        floor_partial = client.post(
             f"/api/v1/shop-floor/operations/{operation['id']}/complete",
             headers=auth_headers,
             json={"quantity_complete": 4},
         )
-        assert partial_response.status_code == status.HTTP_200_OK
+        assert floor_partial.status_code == status.HTTP_409_CONFLICT, floor_partial.text
+
+        # The partial is the office verb's now. The operation has labor (the clock-in), so
+        # recording more good than the floor counted needs an override reason.
+        partial_response = client.post(
+            f"/api/v1/work-orders/operations/{operation['id']}/complete",
+            headers=auth_headers,
+            params={"quantity_complete": 4, "quantity_override_reason": "counted 4 at the cell"},
+        )
+        assert partial_response.status_code == status.HTTP_200_OK, partial_response.text
+        assert partial_response.json()["is_fully_complete"] is False
 
         db_session.expire_all()
         refreshed_operation = db_session.get(WorkOrderOperation, operation["id"])

@@ -16,10 +16,12 @@ from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
+from app.core.credentials import is_api_token_credential
 from app.db.database import get_db
 from app.models.document import Document
 from app.models.laser_nest import LaserNest
 from app.models.user import User, UserRole
+from app.models.work_order import OperationStatus
 from app.schemas.work_order import (
     LaserNestAttachDocument,
     LaserNestManualResponse,
@@ -35,7 +37,14 @@ from app.services.laser_nest_service import (
     sync_laser_nest_to_operation,
 )
 from app.services.laser_nest_text import normalize_material, normalize_sheet_size, normalize_thickness
+from app.services.operation_action_gates import (
+    API_TOKEN_COUNT_JUDGMENT,
+    nest_planned_runs_raise_message,
+    operation_has_recorded_work,
+    operation_label,
+)
 from app.services.storage_service import is_s3_ref, open_ref_stream, ref_exists
+from app.services.work_order_state_service import TERMINAL_WO_STATUSES
 
 router = APIRouter()
 
@@ -135,13 +144,64 @@ def update_laser_nest(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Edit a manual laser nest. Lowering planned_runs below completed_runs is
-    allowed (over-run is acceptable); only the schema's ``ge=1`` floor applies."""
+    """Edit a manual laser nest. Lowering planned_runs below completed_runs is allowed (over-run is
+    acceptable); RAISING it on a completed nest, or on a finished laser work order, is refused 409.
+    An API token may not lower planned_runs once work is recorded on the nest (403).
+
+    A nest's planned runs are its operation's target, so raising them on a COMPLETE nest would
+    turn a completed operation into a short one with nothing declared (owner ruling 1: a
+    completed operation is never short), and on a COMPLETE / CLOSED / CANCELLED laser work order
+    would re-target a finished job. Refused before any write; add a nest (or a new work order)
+    for the extra runs instead. Every other field stays editable, at any status.
+
+    A standing API token LOWERING planned_runs once the nest's operation has recorded good,
+    scrap, a start or any labor is refused **403** (``API_TOKEN_COUNT_JUDGMENT``), before any
+    write: it lowers the operation's target and the laser work order's derived order, deciding
+    the missing runs were never started -- this PR's extension of the 2026-11-07 decision, the
+    per-nest twin of the token rule on ``quantity_ordered``. A person, and a token lowering an
+    untouched nest, are unchanged.
+    """
     nest = _load_nest(db, laser_nest_id, company_id)
     old_values = _nest_old_values(nest)
 
     fields = payload.model_dump(exclude_unset=True)
     planned_runs_changed = "planned_runs" in fields and fields["planned_runs"] != nest.planned_runs
+
+    # Owner ruling 1 (the same rule PUT /work-orders/{id} applies to raising quantity_ordered
+    # after a stage completed): judged before the first write, so a refusal leaves the nest,
+    # its operation and the work order's derived quantity untouched.
+    if (
+        planned_runs_changed
+        and fields["planned_runs"] is not None
+        and float(fields["planned_runs"]) > float(nest.planned_runs or 0)
+    ):
+        operation = nest.operation
+        laser_work_order = operation.work_order if operation is not None else None
+        nest_label = operation_label(operation) if operation is not None else (nest.cnc_number or nest.nest_name)
+        if laser_work_order is not None and laser_work_order.status in TERMINAL_WO_STATUSES:
+            status_value = getattr(laser_work_order.status, "value", laser_work_order.status)
+            raise HTTPException(
+                status_code=409,
+                detail=nest_planned_runs_raise_message(nest_label, float(nest.planned_runs or 0), str(status_value)),
+            )
+        if operation is not None and operation.status == OperationStatus.COMPLETE:
+            raise HTTPException(
+                status_code=409,
+                detail=nest_planned_runs_raise_message(nest_label, float(nest.planned_runs or 0), None),
+            )
+
+    # This PR's credential rule (the per-nest twin of PUT /work-orders/{id}'s token refusal on
+    # lowering quantity_ordered): lowering a nest's runs once work was recorded on it decides
+    # the missing runs were never started, and the next read can complete the nest -- and the
+    # laser job -- at what was recorded. A person makes that call, not a standing API token.
+    if (
+        planned_runs_changed
+        and fields["planned_runs"] is not None
+        and float(fields["planned_runs"]) < float(nest.planned_runs or 0)
+        and is_api_token_credential(current_user)
+        and operation_has_recorded_work(db, nest.operation, company_id)
+    ):
+        raise HTTPException(status_code=403, detail=API_TOKEN_COUNT_JUDGMENT)
 
     if "cnc_number" in fields:
         cnc = (fields["cnc_number"] or "").strip()

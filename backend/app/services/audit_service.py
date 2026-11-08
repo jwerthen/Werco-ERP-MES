@@ -368,6 +368,25 @@ class AuditService:
             return
         self.db.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _AUDIT_CHAIN_LOCK_KEY})
 
+    def acquire_chain_lock(self) -> None:
+        """Take the global audit-chain lock now, as the caller's own statement, ahead of its audit rows.
+
+        ``log()`` takes this lock inside an ``except`` that swallows every error -- right for an
+        audit failure, wrong for a lost lock race: when Postgres rolls the caller back as a deadlock
+        victim (40P01) while it waits there, the error is eaten, the transaction stays aborted, and
+        the caller's next statement fails as something unrelated. A caller that holds row locks and
+        must answer a lost race as such (``app.db.locks.is_lost_lock_race``) takes the lock here
+        first, after its row locks (invariant 4) and before its first audit row; the error then
+        reaches it unchanged. The later ``log()`` calls stack on the lock -- a transaction-level
+        advisory lock is re-entrant -- and it is released when the transaction ends.
+
+        Exactly the lock ``log()`` would take: none while the hash chain is paused
+        (``AUDIT_HASH_CHAIN_ENABLED`` false, the lock-free allocator), and a no-op off PostgreSQL.
+        Writes nothing. Not swallowed -- deliberately.
+        """
+        if settings.AUDIT_HASH_CHAIN_ENABLED:
+            self._acquire_chain_lock()
+
     def _next_sequence_paused(self) -> int:
         """Allocate ``sequence_number`` while the hash chain is paused.
 

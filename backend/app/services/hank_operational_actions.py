@@ -16,6 +16,7 @@ from app.schemas.hank_tasks import HankTaskPreview, HankTaskResult
 from app.schemas.purchasing import DeliveryReceiptCreate
 from app.schemas.shop_floor_commands import ProductionReportRequest
 from app.services.hank_task_service import PLAN_ROW_LIMIT, _digest, _reference, _row_values
+from app.services.operation_action_gates import API_TOKEN_SCRAP, api_token_declares_scrap
 from app.services.receiving_delivery_service import post_delivery_command
 from app.services.shipment_commands import _allocated_quantity, create_shipment_command
 from app.services.shop_floor_commands import hold_operation_command, report_production_command
@@ -186,6 +187,11 @@ class HankOperationalActions:
         entries = self.rows(TimeEntry, (TimeEntry.operation_id == operation.id) & TimeEntry.clock_out.is_(None), locked)
         if not any(row.user_id == self.user.id for row in entries):
             raise HTTPException(409, 'You must be clocked into this operation before reporting production')
+        # Owner decision 2026-11-07: a standing API token may not declare scrap. Refused at
+        # preparation (no task row, no audit row) as well as at execution, where
+        # report_production_command refuses it again; a good-only report is unchanged.
+        if api_token_declares_scrap(self.user, payload.quantity_scrapped_delta):
+            raise HTTPException(403, API_TOKEN_SCRAP)
         reasons = (
             self.rows(ScrapReasonCode, ScrapReasonCode.id == payload.scrap_reason_code_id, locked)
             if payload.scrap_reason_code_id

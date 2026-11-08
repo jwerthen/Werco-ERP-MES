@@ -109,8 +109,11 @@ test.describe('Crew-station kiosk', () => {
     await expect(page.getByTestId('kiosk-job-tally')).not.toHaveText(tallyBefore, { timeout: 10_000 });
 
     // COMPLETE: the confirm dialog must NAME the other welder before closing all.
+    // Owner ruling 1: GOOD pre-fills at what is still unaccounted for — clearing it
+    // would be a short the screen refuses — and badge A is on the roster, so the
+    // final pieces ride /production under A before the close.
     await page.getByRole('button', { name: /^complete$/i }).click();
-    await page.getByTestId('kiosk-key-clear').click(); // no additional final pieces
+    await expect(page.getByTestId('kiosk-qty-short')).toHaveCount(0);
     await page.getByTestId('kiosk-qty-confirm').click();
     const dialog = page.getByRole('dialog');
     await expect(dialog.getByText(/everyone currently clocked in will be clocked out/i)).toBeVisible();

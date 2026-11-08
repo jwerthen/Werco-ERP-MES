@@ -8,6 +8,7 @@ from app.models.audit_log import AuditLog
 from app.models.part import Part
 from app.models.time_entry import TimeEntry, TimeEntryType
 from app.models.work_order import OperationStatus, WorkOrderOperation, WorkOrderStatus
+from tests.api.completion_test_helpers import seed_recorded_good
 from tests.api.kiosk_test_helpers import make_user, make_wo_with_operation, make_work_center, user_headers
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
@@ -128,6 +129,9 @@ def test_mobile_completion_and_reads_never_complete_same_sequence_siblings(
     )
     assert clock_in.status_code == 200, clock_in.text
     if completion_verb == "complete":
+        # The floor close books the good the floor recorded (owner ruling 1), so the two
+        # pieces are on the source's labor first -- never on a sibling's.
+        seed_recorded_good(db_session, source, 2, operator)
         response = client.post(
             f"/api/v1/shop-floor/operations/{source.id}/complete",
             headers=headers,

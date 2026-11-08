@@ -53,6 +53,7 @@ from app.models.work_order import (
     WorkOrderOperation,
     WorkOrderStatus,
 )
+from tests.api.completion_test_helpers import make_closed_time_entry
 from tests.conftest import engine as test_engine
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
@@ -190,33 +191,6 @@ def make_op(
     db.add(op)
     db.flush()
     return op
-
-
-def make_closed_time_entry(
-    db: Session,
-    *,
-    user: User,
-    wo: WorkOrder,
-    op: WorkOrderOperation,
-    wc: WorkCenter = None,
-    quantity_produced: float,
-) -> TimeEntry:
-    entry = TimeEntry(
-        user_id=user.id,
-        work_order_id=wo.id,
-        operation_id=op.id,
-        work_center_id=wc.id if wc else None,
-        entry_type=TimeEntryType.RUN,
-        clock_in=datetime.utcnow() - timedelta(hours=2),
-        clock_out=datetime.utcnow() - timedelta(hours=1),
-        duration_hours=1.0,
-        quantity_produced=quantity_produced,
-        quantity_scrapped=0,
-        company_id=COMPANY_A,
-    )
-    db.add(entry)
-    db.flush()
-    return entry
 
 
 # ===========================================================================
@@ -819,10 +793,10 @@ def test_perf5_shop_floor_complete_operation_atomic_and_invalidates_cache(client
     wo = make_wo(db_session, status_=WorkOrderStatus.RELEASED, quantity_ordered=5)
     op = make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.READY)
     # The floor verb requires labor on the operation (an operation nobody worked cannot be
-    # booked complete there). Closed + zero quantity, matching the kiosk's clock-out-then-
-    # complete order, so nothing this test measures moves.
-    make_closed_time_entry(db_session, user=admin, wo=wo, op=op, wc=wc, quantity_produced=0)
-    db_session.commit()
+    # booked complete there) and books only the good the floor recorded (owner ruling 1).
+    # A closed entry carrying the 5, matching the kiosk's clock-out-then-complete order,
+    # so nothing this test measures moves.
+    make_closed_time_entry(db_session, user=admin, wo=wo, op=op, wc=wc, quantity_produced=5)
 
     with patch.object(sf, "invalidate_work_centers_cache") as mock_inv:
         resp = client.post(

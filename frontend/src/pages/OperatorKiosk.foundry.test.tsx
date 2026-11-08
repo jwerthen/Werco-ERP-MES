@@ -163,9 +163,10 @@ describe('OperatorKiosk — Foundry flows', () => {
   });
 
   describe('complete modal — chained next-job start (decision 6)', () => {
-    it('announces the chain on the CTA and clocks in to the next queue item after a successful complete', async () => {
-      mockedApi.clockOut.mockResolvedValue({});
-      mockedApi.completeOperation.mockResolvedValue({});
+    it('announces the chain on the CTA and clocks in to the next queue item once a full-count clock-out completed the op', async () => {
+      // Owner ruling 1: the full-count clock-out completes the operation on its own —
+      // the response says so — so the chain follows the CLOCK-OUT, with no /complete.
+      mockedApi.clockOut.mockResolvedValue({ operation_status: 'complete' });
       mockedApi.clockIn.mockResolvedValue({ id: 601 });
       render(kioskTree());
 
@@ -183,11 +184,74 @@ describe('OperatorKiosk — Foundry flows', () => {
           source: 'kiosk',
         })
       );
-      // Strictly AFTER the complete landed — never an optimistic pre-start.
-      expect(mockedApi.completeOperation.mock.invocationCallOrder[0]).toBeLessThan(
+      expect(mockedApi.completeOperation).not.toHaveBeenCalled();
+      // Strictly AFTER the operation closed — never an optimistic pre-start.
+      expect(mockedApi.clockOut.mock.invocationCallOrder[0]).toBeLessThan(
         mockedApi.clockIn.mock.invocationCallOrder[0]
       );
       expect(await screen.findByText('Clocked in to WO-2026-0143')).toBeInTheDocument();
+    });
+
+    it('chains after /complete when the clock-out left the op open (a covered short), strictly after the close', async () => {
+      mockedApi.clockOut.mockResolvedValue({ operation_status: 'in_progress' });
+      mockedApi.completeOperation.mockResolvedValue({});
+      mockedApi.clockIn.mockResolvedValue({ id: 601 });
+      render(kioskTree());
+
+      fireEvent.click(await screen.findByRole('button', { name: /^complete op$/i }));
+      fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
+
+      await waitFor(() => expect(mockedApi.clockIn).toHaveBeenCalled());
+      expect(mockedApi.completeOperation).toHaveBeenCalledWith(31, { source: 'kiosk' });
+      expect(mockedApi.completeOperation.mock.invocationCallOrder[0]).toBeLessThan(
+        mockedApi.clockIn.mock.invocationCallOrder[0]
+      );
+    });
+
+    it('PIN (gates + short): the chain after a full-count clock-out skips a start-blocked next item', async () => {
+      // A READY operation of an ON_HOLD work order stays on `queue` carrying the
+      // server's refusal; the chain must aim past it at the next startable job.
+      const blocked = {
+        ...NEXT_ITEM,
+        operation_id: 33,
+        work_order_id: 11,
+        work_order_number: 'WO-2026-0144',
+        work_order_status: 'on_hold',
+        start_blocked_reason: 'Work order is on hold — a supervisor must Resume Work Order first',
+      };
+      mockedApi.getWorkCenterQueue.mockResolvedValue({ queue: [ACTIVE_ITEM, blocked, NEXT_ITEM] });
+      mockedApi.clockOut.mockResolvedValue({ operation_status: 'complete' });
+      mockedApi.clockIn.mockResolvedValue({ id: 601 });
+      render(kioskTree());
+
+      fireEvent.click(await screen.findByRole('button', { name: /^complete op$/i }));
+      const cta = screen.getByTestId('kiosk-qty-confirm');
+      expect(cta).toHaveTextContent(/start WO-2026-0143/i);
+      expect(cta).not.toHaveTextContent(/WO-2026-0144/);
+      fireEvent.click(cta);
+
+      await waitFor(() => expect(mockedApi.clockIn).toHaveBeenCalledTimes(1));
+      expect(mockedApi.clockIn).toHaveBeenCalledWith(expect.objectContaining({ operation_id: 32, work_order_id: 10 }));
+      expect(mockedApi.clockIn).not.toHaveBeenCalledWith(expect.objectContaining({ operation_id: 33 }));
+      expect(mockedApi.completeOperation).not.toHaveBeenCalled();
+    });
+
+    it('never chains when the only next item is start-blocked', async () => {
+      const blocked = {
+        ...NEXT_ITEM,
+        work_order_status: 'draft',
+        start_blocked_reason: 'Work order is not released — a supervisor must release it first',
+      };
+      mockedApi.getWorkCenterQueue.mockResolvedValue({ queue: [ACTIVE_ITEM, blocked] });
+      mockedApi.clockOut.mockResolvedValue({ operation_status: 'complete' });
+      render(kioskTree());
+
+      fireEvent.click(await screen.findByRole('button', { name: /^complete op$/i }));
+      expect(screen.getByTestId('kiosk-qty-confirm')).toHaveTextContent(/^complete op 20$/i);
+      fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
+
+      expect(await screen.findByText('Completed WO-2026-0142')).toBeInTheDocument();
+      expect(mockedApi.clockIn).not.toHaveBeenCalled();
     });
 
     it('surfaces a chained clock-in refusal VERBATIM and lands on the queue', async () => {

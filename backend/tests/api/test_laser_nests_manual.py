@@ -15,9 +15,11 @@ from sqlalchemy.orm import Session
 
 import app.api.endpoints.work_orders as work_orders_endpoint
 from app.core.security import create_access_token
+from app.models.audit_log import AuditLog
 from app.models.company import Company
 from app.models.laser_nest import LaserNest
 from app.models.part import Part
+from app.models.time_entry import TimeEntry, TimeEntryType
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
@@ -26,6 +28,11 @@ from app.models.work_order_blocker import (
     WorkOrderBlockerCategory,
     WorkOrderBlockerSeverity,
     WorkOrderBlockerStatus,
+)
+from app.services.operation_action_gates import (
+    API_TOKEN_COUNT_JUDGMENT,
+    nest_planned_runs_raise_message,
+    operation_has_recorded_work,
 )
 from app.services.work_center_type_service import get_work_center_group
 
@@ -352,6 +359,211 @@ class TestEditNest:
         db_session.expire_all()
         nest = db_session.query(LaserNest).filter(LaserNest.id == nest_id).first()
         assert nest.planned_runs == 2  # 2 < completed (4) is allowed
+
+
+class TestPlannedRunsRaiseOnAFinishedNest:
+    """Owner ruling 1: a completed operation is never short. A nest's planned runs ARE its
+    operation's target, so raising them on a COMPLETE nest -- or on a finished laser work order
+    -- would turn a completed operation into a short one with nothing declared (the critic's
+    probe: 200, nest COMPLETE at 2 of 6, the laser WO COMPLETE at 5 of 9). Refused 409 before
+    any write; lowering, re-sending and every other field stay editable."""
+
+    def _completed_nest(self, client, db_session, laser_setup, *, planned: int = 2):
+        headers = headers_for(laser_setup["admin"])
+        created = _create_manual_nest(
+            client, headers, laser_setup["parent"].id, {"cnc_number": f"PRG-9{_next()}", "planned_runs": planned}
+        ).json()
+        nest = db_session.query(LaserNest).filter(LaserNest.id == created["id"]).first()
+        nest.completed_runs = float(planned)
+        nest.operation.quantity_complete = float(planned)
+        nest.operation.status = OperationStatus.COMPLETE
+        db_session.commit()
+        return headers, nest
+
+    def _state(self, db_session, nest_id: int):
+        db_session.expire_all()
+        nest = db_session.query(LaserNest).filter(LaserNest.id == nest_id).first()
+        child = db_session.query(WorkOrder).filter(WorkOrder.id == nest.operation.work_order_id).first()
+        audit_rows = (
+            db_session.query(AuditLog)
+            .filter(AuditLog.resource_type == "laser_nest", AuditLog.resource_id == nest_id)
+            .count()
+        )
+        return (
+            nest.planned_runs,
+            float(nest.operation.component_quantity or 0),
+            nest.operation.status,
+            float(child.quantity_ordered),
+            child.status,
+            audit_rows,
+        )
+
+    def test_raising_a_completed_nest_is_refused_writing_nothing(self, client, db_session, laser_setup):
+        headers, nest = self._completed_nest(client, db_session, laser_setup)
+        before = self._state(db_session, nest.id)
+
+        resp = client.patch(f"/api/v1/laser-nests/{nest.id}", headers=headers, json={"planned_runs": 6})
+        assert resp.status_code == status.HTTP_409_CONFLICT, resp.text
+        assert resp.json()["detail"] == nest_planned_runs_raise_message(nest.operation.operation_number, 2, None)
+        assert resp.json()["detail"].endswith(
+            "is already complete at 2 runs; raising its planned runs would leave a completed operation short. "
+            "Add a nest for the extra runs."
+        )
+        assert self._state(db_session, nest.id) == before
+
+    def test_raising_a_nest_on_a_finished_laser_work_order_is_refused(self, client, db_session, laser_setup):
+        headers = headers_for(laser_setup["admin"])
+        created = _create_manual_nest(
+            client, headers, laser_setup["parent"].id, {"cnc_number": f"PRG-8{_next()}", "planned_runs": 3}
+        ).json()
+        nest = db_session.query(LaserNest).filter(LaserNest.id == created["id"]).first()
+        child = db_session.query(WorkOrder).filter(WorkOrder.id == nest.operation.work_order_id).first()
+        child.status = "cancelled"
+        db_session.commit()
+        before = self._state(db_session, nest.id)
+
+        resp = client.patch(f"/api/v1/laser-nests/{nest.id}", headers=headers, json={"planned_runs": 5})
+        assert resp.status_code == status.HTTP_409_CONFLICT, resp.text
+        assert resp.json()["detail"].startswith("This laser work order is cancelled;")
+        assert self._state(db_session, nest.id) == before
+
+    @pytest.mark.parametrize("body", [{"planned_runs": 1}, {"planned_runs": 2}, {"material": "SS304"}])
+    def test_lowering_re_sending_and_other_fields_stay_editable(self, client, db_session, laser_setup, body):
+        headers, nest = self._completed_nest(client, db_session, laser_setup)
+        resp = client.patch(f"/api/v1/laser-nests/{nest.id}", headers=headers, json=body)
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+
+    def test_raising_an_open_nest_still_reverse_syncs(self, client, db_session, laser_setup):
+        headers = headers_for(laser_setup["admin"])
+        created = _create_manual_nest(
+            client, headers, laser_setup["parent"].id, {"cnc_number": f"PRG-7{_next()}", "planned_runs": 2}
+        ).json()
+        resp = client.patch(f"/api/v1/laser-nests/{created['id']}", headers=headers, json={"planned_runs": 6})
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        assert resp.json()["planned_runs"] == 6
+
+
+class TestApiTokenLoweringAWorkedNest:
+    """This PR's extension of the 2026-11-07 decision (not part of it): a standing API token may
+    not lower a nest's planned runs once work is recorded on it. The runs are the operation's
+    target and the laser work order's order is derived from them, so lowering them decides the
+    missing runs were never started -- the critic's probe: the token's PUT of quantity_ordered
+    was 403, its PATCH of planned_runs 200, and the next read completed the nest and the laser
+    job at the 1 run recorded. Refused before any write; a person, an untouched nest, a raise and
+    every other field are unchanged."""
+
+    def _token_headers(self, client, db_session, laser_setup) -> dict:
+        bound = make_user(db_session, role=UserRole.SUPERVISOR)
+        issued = client.post(
+            "/api/v1/api-tokens/",
+            json={"user_id": bound.id, "label": "nest lowering probe"},
+            headers=headers_for(laser_setup["admin"]),
+        )
+        assert issued.status_code == status.HTTP_201_CREATED, issued.text
+        return {"Authorization": f"Bearer {issued.json()['token']}", "X-Requested-With": "XMLHttpRequest"}
+
+    def _nest(self, client, db_session, laser_setup, *, recorded: str = "none", planned: int = 3) -> LaserNest:
+        created = _create_manual_nest(
+            client,
+            headers_for(laser_setup["admin"]),
+            laser_setup["parent"].id,
+            {"cnc_number": f"PRG-6{_next()}", "planned_runs": planned},
+        )
+        assert created.status_code == status.HTTP_201_CREATED, created.text
+        nest = db_session.query(LaserNest).filter(LaserNest.id == created.json()["id"]).first()
+        operation = nest.operation
+        if recorded in ("run", "labor"):
+            operator = make_user(db_session, role=UserRole.OPERATOR)
+            now = datetime.utcnow()
+            db_session.add(
+                TimeEntry(
+                    user_id=operator.id,
+                    work_order_id=operation.work_order_id,
+                    operation_id=operation.id,
+                    work_center_id=operation.work_center_id,
+                    entry_type=TimeEntryType.RUN,
+                    clock_in=now - timedelta(hours=1),
+                    clock_out=(now - timedelta(minutes=5)) if recorded == "run" else None,
+                    quantity_produced=1.0 if recorded == "run" else 0.0,
+                    quantity_scrapped=0.0,
+                    company_id=operation.company_id,
+                )
+            )
+        if recorded == "run":
+            operation.status = OperationStatus.IN_PROGRESS
+            operation.quantity_complete = 1.0
+        if recorded == "scrap":
+            operation.quantity_scrapped = 1.0
+            operation.scrap_reason = "burr"
+        db_session.commit()
+        db_session.refresh(nest)
+        return nest
+
+    def _state(self, db_session, nest_id: int):
+        db_session.expire_all()
+        nest = db_session.query(LaserNest).filter(LaserNest.id == nest_id).first()
+        child = db_session.query(WorkOrder).filter(WorkOrder.id == nest.operation.work_order_id).first()
+        return (
+            nest.planned_runs,
+            float(nest.operation.component_quantity or 0),
+            nest.operation.status,
+            float(nest.operation.quantity_complete or 0),
+            float(child.quantity_ordered),
+            child.status,
+            child.version,
+            db_session.query(AuditLog).count(),
+        )
+
+    @pytest.mark.parametrize("recorded", ["run", "labor", "scrap"])
+    def test_a_token_lowering_a_worked_nest_is_refused_writing_nothing(self, client, db_session, laser_setup, recorded):
+        nest = self._nest(client, db_session, laser_setup, recorded=recorded)
+        headers = self._token_headers(client, db_session, laser_setup)
+        before = self._state(db_session, nest.id)
+
+        resp = client.patch(f"/api/v1/laser-nests/{nest.id}", headers=headers, json={"planned_runs": 1})
+        assert resp.status_code == status.HTTP_403_FORBIDDEN, resp.text
+        assert resp.json()["detail"] == API_TOKEN_COUNT_JUDGMENT
+        assert self._state(db_session, nest.id) == before
+
+        # The refused write stays refused on the next read: nothing completes at the 1 recorded run.
+        assert client.get(f"/api/v1/work-orders/{nest.operation.work_order_id}", headers=headers).status_code == 200
+        assert self._state(db_session, nest.id)[:5] == before[:5]
+
+    def test_a_person_may_still_lower_a_worked_nest(self, client, db_session, laser_setup):
+        nest = self._nest(client, db_session, laser_setup, recorded="run")
+        resp = client.patch(
+            f"/api/v1/laser-nests/{nest.id}", headers=headers_for(laser_setup["admin"]), json={"planned_runs": 1}
+        )
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        assert resp.json()["planned_runs"] == 1
+
+    @pytest.mark.parametrize("body", [{"planned_runs": 1}, {"planned_runs": 5}, {"material": "SS304"}])
+    def test_a_token_re_planning_an_untouched_nest_is_unchanged(self, client, db_session, laser_setup, body):
+        nest = self._nest(client, db_session, laser_setup)
+        headers = self._token_headers(client, db_session, laser_setup)
+        resp = client.patch(f"/api/v1/laser-nests/{nest.id}", headers=headers, json=body)
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+
+    @pytest.mark.parametrize("body", [{"planned_runs": 3}, {"planned_runs": 5}, {"material": "SS304"}])
+    def test_a_token_may_still_re_send_raise_or_edit_other_fields_on_a_worked_nest(
+        self, client, db_session, laser_setup, body
+    ):
+        nest = self._nest(client, db_session, laser_setup, recorded="run")
+        headers = self._token_headers(client, db_session, laser_setup)
+        resp = client.patch(f"/api/v1/laser-nests/{nest.id}", headers=headers, json=body)
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+
+    def test_the_predicate(self, client, db_session, laser_setup):
+        untouched = self._nest(client, db_session, laser_setup)
+        assert operation_has_recorded_work(db_session, untouched.operation, COMPANY_A) is False
+        assert operation_has_recorded_work(db_session, None, COMPANY_A) is False
+        worked = {}
+        for recorded in ("run", "labor", "scrap"):
+            worked[recorded] = self._nest(client, db_session, laser_setup, recorded=recorded)
+            assert operation_has_recorded_work(db_session, worked[recorded].operation, COMPANY_A) is True, recorded
+        # Labor is the only signal on the labor-only nest, and the labor read is tenant-scoped:
+        # read under another tenant's id it is not this tenant's work.
+        assert operation_has_recorded_work(db_session, worked["labor"].operation, COMPANY_B) is False
 
 
 # --------------------------------------------------------------------------- #

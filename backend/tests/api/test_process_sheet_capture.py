@@ -10,7 +10,6 @@ tenant isolation, PHOTO/FILE evidence upload, and the tamper-evident audit rows.
 """
 
 import json
-from datetime import datetime, timedelta
 from io import BytesIO
 
 import pytest
@@ -25,10 +24,10 @@ from app.models.document import Document, DocumentType
 from app.models.part import Part
 from app.models.process_sheet import OperationStepRecord, ProcessSheet, ProcessSheetStep, WOOperationStep
 from app.models.routing import Routing, RoutingOperation
-from app.models.time_entry import TimeEntry, TimeEntryType
 from app.models.user import UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
+from tests.api.completion_test_helpers import make_closed_time_entry
 from tests.api.kiosk_test_helpers import (
     bearer,
     ensure_company,
@@ -180,8 +179,23 @@ def _add_wo_step(
     return step
 
 
-def _capture_fixture(db: Session, *, serials: list = None, op_status=OperationStatus.IN_PROGRESS):
-    """Work center + IN_PROGRESS WO/operation + a manager header for capture tests."""
+def _capture_fixture(
+    db: Session,
+    *,
+    serials: list = None,
+    op_status=OperationStatus.IN_PROGRESS,
+    recorded_good: float = 0.0,
+):
+    """Work center + IN_PROGRESS WO/operation (target 10) + a manager header for capture tests.
+
+    The floor's completion verb refuses an operation with no labor recorded against it
+    at all, so the operation always gets one CLOSED entry -- the shape the real kiosk
+    leaves behind (it clocks out with its count, then completes). Since owner ruling 1
+    that verb is a CLOSE at the good the floor recorded, so the tests that close from the
+    floor pass ``recorded_good=10`` (the target) and the step gate is then the only thing
+    deciding completion. The default 0 adds no produced quantity, so the read-time
+    reconcile still sees 0 against the target and the capture tests are unaffected.
+    """
     work_center = make_work_center(db)
     work_order, operation = make_wo_with_operation(
         db,
@@ -194,27 +208,7 @@ def _capture_fixture(db: Session, *, serials: list = None, op_status=OperationSt
         db.commit()
     user = make_user(db, role=UserRole.MANAGER)
     headers = bearer(create_access_token(subject=user.id, company_id=1))
-    # The floor's completion verb refuses an operation with no labor recorded against it
-    # at all, and the completion-gating tests below drive that verb. A CLOSED, zero-piece
-    # entry is the shape the real kiosk leaves behind (it clocks out, then completes) and
-    # it moves nothing these tests measure: it adds no produced quantity, so the
-    # read-time reconcile still sees 0 against the target and the step gate stays the
-    # only thing deciding completion.
-    entry = TimeEntry(
-        user_id=user.id,
-        work_order_id=work_order.id,
-        operation_id=operation.id,
-        work_center_id=work_center.id,
-        entry_type=TimeEntryType.RUN,
-        clock_in=datetime.utcnow() - timedelta(hours=2),
-        clock_out=datetime.utcnow() - timedelta(hours=1),
-        duration_hours=1.0,
-        quantity_produced=0,
-        quantity_scrapped=0,
-        company_id=1,
-    )
-    db.add(entry)
-    db.commit()
+    make_closed_time_entry(db, user=user, op=operation, quantity_produced=recorded_good)
     return work_order, operation, user, headers
 
 
@@ -828,7 +822,7 @@ class TestSupersede:
     def test_supersede_chain_gate_and_view_use_only_the_latest(self, client: TestClient, db_session: Session):
         # Chain r1 -> r2 -> r3: every non-tip record is stamped exactly once and
         # can never be superseded again; the gate and the view see ONLY the tip.
-        work_order, operation, user, headers = _capture_fixture(db_session)
+        work_order, operation, user, headers = _capture_fixture(db_session, recorded_good=10)
         step = _add_wo_step(db_session, operation, step_type="checkbox", config=None, label="Chained")
         record_url = RECORDS_URL.format(op=operation.id, step=step.id)
 
@@ -896,7 +890,7 @@ class TestSupersede:
 
 class TestCompletionGating:
     def test_missing_required_step_blocks_completion(self, client: TestClient, db_session: Session):
-        work_order, operation, user, headers = _capture_fixture(db_session)
+        work_order, operation, user, headers = _capture_fixture(db_session, recorded_good=10)
         step = _add_wo_step(db_session, operation, step_type="checkbox", config=None, label="Torque verified")
 
         response = client.post(COMPLETE_URL.format(op=operation.id), json={"quantity_complete": 10}, headers=headers)
@@ -918,7 +912,7 @@ class TestCompletionGating:
         assert response.json()["is_fully_complete"] is True
 
     def test_per_serial_gating(self, client: TestClient, db_session: Session):
-        work_order, operation, user, headers = _capture_fixture(db_session, serials=["SN-1", "SN-2"])
+        work_order, operation, user, headers = _capture_fixture(db_session, serials=["SN-1", "SN-2"], recorded_good=10)
         step = _add_wo_step(db_session, operation, step_type="checkbox", config=None, label="Serial check")
         record_url = RECORDS_URL.format(op=operation.id, step=step.id)
 
@@ -941,21 +935,61 @@ class TestCompletionGating:
         assert done.status_code == 200
 
     def test_zero_step_operation_completes_exactly_as_today(self, client: TestClient, db_session: Session):
-        work_order, operation, user, headers = _capture_fixture(db_session)
+        work_order, operation, user, headers = _capture_fixture(db_session, recorded_good=10)
         response = client.post(COMPLETE_URL.format(op=operation.id), json={"quantity_complete": 10}, headers=headers)
         assert response.status_code == 200, response.text
         assert response.json()["is_fully_complete"] is True
 
-    def test_partial_progress_update_is_not_gated(self, client: TestClient, db_session: Session):
+    def test_partial_progress_report_is_not_gated_and_a_short_close_is(self, client: TestClient, db_session: Session):
+        # Owner ruling 1 removed the floor /complete partial branch: progress is recorded
+        # through Report production (or clock-out), which never closes the operation and
+        # so is never step-gated. Closing at that short count is refused as SHORT -- the
+        # operation stays open -- ahead of the step gate; and once the shortfall is
+        # declared as scrap the short close IS a close, so the step gate applies to it.
         work_order, operation, user, headers = _capture_fixture(db_session)
-        _add_wo_step(db_session, operation, step_type="checkbox", config=None)
+        step = _add_wo_step(db_session, operation, step_type="checkbox", config=None, label="Short gate")
+        clocked = client.post(
+            "/api/v1/shop-floor/clock-in",
+            json={
+                "work_order_id": work_order.id,
+                "operation_id": operation.id,
+                "work_center_id": operation.work_center_id,
+                "entry_type": "run",
+            },
+            headers=headers,
+        )
+        assert clocked.status_code == 200, clocked.text
 
-        response = client.post(COMPLETE_URL.format(op=operation.id), json={"quantity_complete": 4}, headers=headers)
-        assert response.status_code == 200, response.text
-        assert response.json()["is_fully_complete"] is False
+        reported = client.post(
+            f"/api/v1/shop-floor/operations/{operation.id}/production",
+            json={"quantity_complete_delta": 4},
+            headers=headers,
+        )
+        assert reported.status_code == 200, reported.text
+        db_session.expire_all()
+        assert operation.status == OperationStatus.IN_PROGRESS
+        assert operation.quantity_complete == 4
+
+        short = client.post(COMPLETE_URL.format(op=operation.id), json={}, headers=headers)
+        assert short.status_code == status.HTTP_409_CONFLICT, short.text
+        assert "6 of 10 not yet accounted for (4 good, 0 scrapped)" in short.json()["detail"]
+        db_session.expire_all()
+        assert operation.status == OperationStatus.IN_PROGRESS  # left open, nothing written
+
+        declared = client.post(
+            COMPLETE_URL.format(op=operation.id),
+            json={"quantity_scrapped": 6, "scrap_reason": "bent in the brake"},
+            headers=headers,
+        )
+        assert declared.status_code == status.HTTP_409_CONFLICT, declared.text
+        assert declared.json()["detail"]["code"] == "STEPS_INCOMPLETE"
+        assert declared.json()["detail"]["missing"] == [{"step_id": step.id, "label": "Short gate", "serials": []}]
+        db_session.expire_all()
+        assert operation.status == OperationStatus.IN_PROGRESS
+        assert operation.quantity_scrapped in (None, 0)
 
     def test_optional_and_instruction_steps_do_not_gate(self, client: TestClient, db_session: Session):
-        work_order, operation, user, headers = _capture_fixture(db_session)
+        work_order, operation, user, headers = _capture_fixture(db_session, recorded_good=10)
         _add_wo_step(db_session, operation, step_type="checkbox", config=None, is_required=False)
         _add_wo_step(db_session, operation, step_type="instruction", config=None, is_required=False)
 
@@ -963,7 +997,7 @@ class TestCompletionGating:
         assert response.status_code == 200
 
     def test_superseded_and_nonconforming_records_do_not_satisfy_gate(self, client: TestClient, db_session: Session):
-        work_order, operation, user, headers = _capture_fixture(db_session)
+        work_order, operation, user, headers = _capture_fixture(db_session, recorded_good=10)
         step = _add_wo_step(db_session, operation, step_type="measurement")
         # Simulate a live NON-conforming record (the PR 4 NCR path will create these):
         # it must not satisfy the gate.
@@ -985,7 +1019,7 @@ class TestCompletionGating:
     def test_unchecked_checkbox_blocks_until_superseded_true(self, client: TestClient, db_session: Session):
         # A required CHECKBOX recorded False is honest evidence but NON-conforming:
         # it must not satisfy the gate. Supersede-to-true is the correction route.
-        work_order, operation, user, headers = _capture_fixture(db_session)
+        work_order, operation, user, headers = _capture_fixture(db_session, recorded_good=10)
         step = _add_wo_step(db_session, operation, step_type="checkbox", config=None, label="Guard installed")
         recorded = client.post(
             RECORDS_URL.format(op=operation.id, step=step.id), json={"value_bool": False}, headers=headers
@@ -1015,7 +1049,7 @@ class TestCompletionGating:
         # second call is rejected by the pre-existing re-checks under the same lock
         # (here the single-op WO went terminal, so the G6-A 409 fires) — the steps
         # gate never lets a stale completer through ahead of them.
-        work_order, operation, user, headers = _capture_fixture(db_session)
+        work_order, operation, user, headers = _capture_fixture(db_session, recorded_good=10)
         step = _add_wo_step(db_session, operation, step_type="checkbox", config=None)
         client.post(RECORDS_URL.format(op=operation.id, step=step.id), json={"value_bool": True}, headers=headers)
 
@@ -1039,7 +1073,7 @@ class TestOfficeCompletionGating:
 
         response = client.post(
             self.OFFICE_COMPLETE_URL.format(op=operation.id),
-            params={"quantity_complete": 10},
+            params={"quantity_complete": 10, "quantity_override_reason": "desk count"},
             headers=headers,
         )
         assert response.status_code == status.HTTP_409_CONFLICT, response.text
@@ -1060,7 +1094,7 @@ class TestOfficeCompletionGating:
 
         response = client.post(
             self.OFFICE_COMPLETE_URL.format(op=operation.id),
-            params={"quantity_complete": 10},
+            params={"quantity_complete": 10, "quantity_override_reason": "desk count"},
             headers=headers,
         )
         assert response.status_code == 200, response.text
@@ -1073,7 +1107,7 @@ class TestOfficeCompletionGating:
 
         response = client.post(
             self.OFFICE_COMPLETE_URL.format(op=operation.id),
-            params={"quantity_complete": 4},
+            params={"quantity_complete": 4, "quantity_override_reason": "desk count"},
             headers=headers,
         )
         assert response.status_code == 200, response.text
@@ -1091,7 +1125,7 @@ class TestOfficeCompletionGating:
 
         blocked = client.post(
             self.OFFICE_COMPLETE_URL.format(op=operation.id),
-            params={"quantity_complete": 10},
+            params={"quantity_complete": 10, "quantity_override_reason": "desk count"},
             headers=headers,
         )
         assert blocked.status_code == status.HTTP_409_CONFLICT
@@ -1103,8 +1137,10 @@ class TestOfficeCompletionGating:
         self, client: TestClient, db_session: Session
     ):
         # Same WO, same gate: both endpoints refuse with the IDENTICAL structured
-        # payload; once the step is recorded, EITHER endpoint completes the op.
-        work_order, operation, user, headers = _capture_fixture(db_session)
+        # payload; once the step is recorded, EITHER endpoint completes the op. The floor
+        # recorded the full 10 (owner ruling 1: the floor close books recorded good), so
+        # neither verb needs an override and the step gate is the only difference-maker.
+        work_order, operation, user, headers = _capture_fixture(db_session, recorded_good=10)
         step = _add_wo_step(db_session, operation, step_type="checkbox", config=None, label="Cross gate")
         record_url = RECORDS_URL.format(op=operation.id, step=step.id)
 
@@ -1112,24 +1148,30 @@ class TestOfficeCompletionGating:
             COMPLETE_URL.format(op=operation.id), json={"quantity_complete": 10}, headers=headers
         )
         office_blocked = client.post(
-            self.OFFICE_COMPLETE_URL.format(op=operation.id), params={"quantity_complete": 10}, headers=headers
+            self.OFFICE_COMPLETE_URL.format(op=operation.id),
+            params={"quantity_complete": 10},
+            headers=headers,
         )
         assert shop_blocked.status_code == office_blocked.status_code == status.HTTP_409_CONFLICT
         assert shop_blocked.json()["detail"] == office_blocked.json()["detail"]  # byte-for-byte parity
 
         assert client.post(record_url, json={"value_bool": True}, headers=headers).status_code == 201
         done = client.post(
-            self.OFFICE_COMPLETE_URL.format(op=operation.id), params={"quantity_complete": 10}, headers=headers
+            self.OFFICE_COMPLETE_URL.format(op=operation.id),
+            params={"quantity_complete": 10},
+            headers=headers,
         )
         assert done.status_code == 200, done.text
         db_session.expire_all()
         assert operation.status == OperationStatus.COMPLETE
 
         # Mirror direction: blocked via office, satisfied, completed via shop-floor.
-        work_order2, operation2, user2, headers2 = _capture_fixture(db_session)
+        work_order2, operation2, user2, headers2 = _capture_fixture(db_session, recorded_good=10)
         step2 = _add_wo_step(db_session, operation2, step_type="checkbox", config=None, label="Cross gate 2")
         blocked2 = client.post(
-            self.OFFICE_COMPLETE_URL.format(op=operation2.id), params={"quantity_complete": 10}, headers=headers2
+            self.OFFICE_COMPLETE_URL.format(op=operation2.id),
+            params={"quantity_complete": 10},
+            headers=headers2,
         )
         assert blocked2.status_code == status.HTTP_409_CONFLICT
         assert blocked2.json()["detail"]["code"] == "STEPS_INCOMPLETE"
@@ -1208,7 +1250,7 @@ class TestStepsView:
     def test_steps_view_readable_on_a_complete_operation(self, client: TestClient, db_session: Session):
         # Evidence review after the fact: the record trail stays readable once the
         # operation (and the single-op WO) have gone COMPLETE.
-        work_order, operation, user, headers = _capture_fixture(db_session)
+        work_order, operation, user, headers = _capture_fixture(db_session, recorded_good=10)
         step = _add_wo_step(db_session, operation, step_type="checkbox", config=None, label="Reviewed later")
         recorded = client.post(
             RECORDS_URL.format(op=operation.id, step=step.id), json={"value_bool": True}, headers=headers

@@ -27,6 +27,7 @@ import {
   KioskQueueWorkCenter,
   LaserNestInfo,
   OperationHold,
+  OperationShortCountFields,
 } from '../../types';
 
 // Re-exported so the kiosk components keep importing their tie shape from the
@@ -98,7 +99,7 @@ export const HOLD_REASONS: KioskReason[] = [
  * single-operation kiosk surfaces. All optional — pre-feature payloads and
  * pre-existing fixtures still typecheck.
  */
-export interface KioskQueueItem extends KioskJobInstructions {
+export interface KioskQueueItem extends KioskJobInstructions, OperationShortCountFields {
   operation_id: number;
   work_order_id: number;
   work_order_number: string;
@@ -158,6 +159,22 @@ export interface KioskQueueItem extends KioskJobInstructions {
   // render nothing at all (no placeholder, no "not tied" nag): an untied work
   // order must look byte-identical to its pre-feature self.
   material_ties?: KioskMaterialTie[] | null;
+  // Who is clocked in to this operation right now (one row per open LABOR entry).
+  // The server has always sent it on every queue and held row, to both principals;
+  // the crew station types it required (`KioskCrewQueueItem`). The single-operator
+  // kiosk reads it for one decision: a SHORT close is refused while anyone OTHER than
+  // the closer is still clocked in (owner ruling 1), so the COMPLETE overlay must
+  // know before the operator taps. Optional so pre-feature fixtures still typecheck.
+  roster?: KioskRosterEntry[];
+  // The WORK ORDER's status, and the server's verbatim refusal text when that
+  // status blocks every start: not released yet (draft), held by a supervisor
+  // (on hold), or terminal. Both ride queue AND held rows (one row builder).
+  // A work-order hold does NOT move a row onto `held` — a READY operation of an
+  // on-hold job stays on `queue` with the reason set, so the card can say why it
+  // will not start instead of vanishing. A null reason is "no work-order
+  // refusal", never "startable". Optional so pre-feature payloads still typecheck.
+  work_order_status?: string | null;
+  start_blocked_reason?: string | null;
   // --- `held` rows only (never `queue`) -------------------------------------
   // Stated explicitly by the server on held rows, with no `true` twin on queue
   // rows on purpose: whether a QUEUED operation may actually start is decided by

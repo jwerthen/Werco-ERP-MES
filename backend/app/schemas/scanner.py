@@ -77,6 +77,12 @@ class OperationScanSummary(BaseModel):
     )
     quantity_complete: float = 0.0
     target_quantity: float = 0.0
+    # Owner ruling 1: target units that never reached this operation (an upstream close in
+    # its chain declared them short), and received units recorded neither good nor scrapped
+    # -- figured on the EVIDENCE-floored good. Informational: ``legal_actions`` /
+    # ``blockers`` stay state-only, so "complete" is never advertised as "short".
+    upstream_quantity_short: float = 0.0
+    quantity_unaccounted: float = 0.0
 
 
 class OperationScanResult(BaseModel):

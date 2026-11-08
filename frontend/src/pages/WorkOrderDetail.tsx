@@ -3,7 +3,15 @@ import JobForecastPanel from '../components/workorders/JobForecastPanel';
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
-import { OperationHold, User, WorkOrder, WorkOrderOperation, LaserNestInfo, WorkCenter } from '../types';
+import {
+  OfficeOperationCompleteResult,
+  OperationHold,
+  User,
+  WorkOrder,
+  WorkOrderOperation,
+  LaserNestInfo,
+  WorkCenter,
+} from '../types';
 import { WorkOrderBlocker, WorkOrderBlockerCategory, WorkOrderBlockerSeverity } from '../types/aiForward';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
@@ -48,6 +56,15 @@ import {
 import { useUnsavedChanges } from '../hooks/useUnsavedChanges';
 import { formatCentralDate, formatCentralDateTime, getCentralDateStamp } from '../utils/centralTime';
 import { formatOperationLabel, operationNumberText, sortOperationsForDisplay } from '../utils/operationLabel';
+import { formatShortQuantity, shortUnitLabel, SHORT_EPSILON } from '../utils/shortCount';
+import {
+  isOpenEntriesRefusal,
+  isOverrideReasonRefusal,
+  isReopenRequiredRefusal,
+  joinOperatorNames,
+  operationMayHaveLabor,
+  operationUnaccountedChip,
+} from '../utils/officeCompletion';
 // The held-operation vocabulary the two kiosks already speak. Imported rather
 // than re-derived so the office page and the floor name one hold the same way:
 // same category labels, same "Held by Dana R. · <Central time>" attribution line,
@@ -104,6 +121,49 @@ import {
 
 const CURRENT_WORK_ORDER_STATUSES = ['released', 'in_progress', 'on_hold'];
 
+/** Why Complete is disabled on a READY operation of a held work order (the server refuses it 409). */
+const WORK_ORDER_HOLD_COMPLETE_TITLE = 'Resume the work order first — completing would start this operation';
+
+/**
+ * Resume Work Order confirm copy: where the job goes back to is the server's call, made
+ * from its release record FIRST — a job with work done but no release on record still
+ * lands in Draft, so the release condition leads each clause rather than the work one.
+ */
+const RESUME_WORK_ORDER_MESSAGE =
+  'Lift the hold on this work order?\n\n' +
+  'It goes back to In Progress if it was released and work had started, to Released if it was released ' +
+  'but nothing has run, and otherwise to Draft — then release it to put it back on the floor.\n\n' +
+  'Holds on individual operations stay in place; clear those separately.';
+
+/**
+ * A Start / Resume refusal that means the work order's state moved under the page
+ * (400 wrong status, 404 gone, 409 draft / on hold / concurrent write): the only useful
+ * next step is to re-read it. A 503, 403 or network error is not one — the job is as
+ * the page shows it, and the user may retry or cancel.
+ */
+const isStateMovedRefusal = (err: any): boolean => [400, 404, 409].includes(err?.response?.status);
+
+/**
+ * A Complete refusal that means the job moved under the open modal (the generic state
+ * refusal above) — EXCEPT the two the modal answers itself: "still clocked in" (it offers
+ * the acknowledge-and-close resubmit) and "say why you are booking more" (it raises the
+ * override-reason field). Those leave the page as it is; every other one re-reads it, so
+ * the header, the row's buttons and the modal's own recorded / upstream-short / ceiling
+ * figures stop describing a job that no longer exists (realtime is dark — nothing else
+ * would refresh them).
+ */
+const isCompleteStateMovedRefusal = (err: any): boolean => {
+  if (!isStateMovedRefusal(err)) return false;
+  const detail = err?.response?.data?.detail;
+  return !isOpenEntriesRefusal(detail) && !isOverrideReasonRefusal(detail);
+};
+
+/** Hold Work Order confirm copy. */
+const HOLD_WORK_ORDER_MESSAGE =
+  'Put this work order on hold?\n\n' +
+  'The floor cannot check in to or start any of its operations until it is resumed. ' +
+  'Operators already clocked in can still clock out and record what they made.';
+
 /**
  * Cap for the inline Notes / Special Instructions editor.
  *
@@ -159,6 +219,7 @@ function describeChangedFields(
 function operationRunTarget(op: WorkOrderOperation, quantityOrdered: number | null | undefined): number {
   return Number(op.laser_nest?.planned_runs || op.component_quantity || quantityOrdered || 0);
 }
+
 
 interface MaterialRequirement {
   bom_item_id: number;
@@ -484,6 +545,12 @@ export default function WorkOrderDetail() {
   // SUPERVISOR). Named separately so the gate reads at its call site.
   const canEditNotes = canCorrectCount;
   const canEditUnitNumber = canCorrectCount;
+  // Start / Resume Work Order / Hold Work Order are all ADMIN/MANAGER/SUPERVISOR
+  // on the backend (`POST /work-orders/{id}/start`, `POST /work-orders/{id}/resume`,
+  // and the `PUT /work-orders/{id}` status write) — exactly what work_orders:edit
+  // maps to. Named separately so the gate reads at its call site: an operator
+  // offered Start would only meet a 403.
+  const canStartWorkOrder = canCorrectCount;
   // Material-tie PATCH/untie is require_role([ADMIN, MANAGER, SUPERVISOR]) on
   // the backend — the same tier work_orders:edit maps to. Reads are open to any
   // authenticated tenant user, so the panel itself is not gated.
@@ -548,6 +615,15 @@ export default function WorkOrderDetail() {
   const [error, setError] = useState('');
   const [deleting, setDeleting] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  // Work-order Start / Resume / Hold. All three are server-GATED (the server may
+  // refuse: a draft, a hold, a stale version, the role), so each keeps its own
+  // in-flight flag and the page reflects only what the server returns after a
+  // reload — never an optimistic status flip.
+  const [starting, setStarting] = useState(false);
+  const [resumeConfirmOpen, setResumeConfirmOpen] = useState(false);
+  const [resuming, setResuming] = useState(false);
+  const [holdConfirmOpen, setHoldConfirmOpen] = useState(false);
+  const [holding, setHolding] = useState(false);
   const [duplicateOpen, setDuplicateOpen] = useState(false);
   const [saveTemplateOpen, setSaveTemplateOpen] = useState(false);
   // In-flight flag for the "Sequential operations" switch. It ONLY drives the
@@ -573,11 +649,21 @@ export default function WorkOrderDetail() {
   // list sitting directly beneath it.
   const [tieRefreshToken, setTieRefreshToken] = useState(0);
   // Drives the CompleteWorkModal: either the work-order-level completion or a
-  // specific operation. `null` = closed. The modal collects qty complete + qty
-  // scrapped + a scrap reason (required when scrap > 0) before we call the API.
+  // specific operation. `null` = closed. The modal collects the good and scrap
+  // TOTALS (prefilled with what is recorded), a scrap reason when the scrap total
+  // rises, and — owner ruling 1 — an override reason when the desk books more good
+  // than the floor counted, before we call the API.
+  //
+  // An operation target stores only the ID: the operation the modal renders is looked
+  // up in the CURRENT work order (`completeOperation` below), so a re-read after a
+  // refusal refreshes the figures the modal reasons with, not just the page around it.
   const [completeTarget, setCompleteTarget] = useState<
-    { kind: 'work_order' } | { kind: 'operation'; operation: WorkOrderOperation } | null
+    { kind: 'work_order' } | { kind: 'operation'; operationId: number } | null
   >(null);
+  // The server's refusal of the current completion attempt, rendered INLINE in the
+  // modal (verbatim) so the entered totals stay put for a retry. Cleared on open and
+  // on every submit.
+  const [completeError, setCompleteError] = useState<string | null>(null);
   // Supervisor "Correct count" (office reduce-production): the target operation,
   // its small quantity+reason form, and the server refusal rendered INLINE in
   // the modal (verbatim — the whole point of a server-gated correction is that
@@ -586,6 +672,11 @@ export default function WorkOrderDetail() {
   const [correctTarget, setCorrectTarget] = useState<WorkOrderOperation | null>(null);
   const [correctData, setCorrectData] = useState({ quantity: 1, reason: '' });
   const [correctError, setCorrectError] = useState<string | null>(null);
+  // Owner ruling 1: a COMPLETE operation cannot be short, so the server refuses a
+  // correction that would leave one short (409) unless the request reopens it. True
+  // while that refusal is on screen: the primary action becomes the explicit
+  // "Reopen … and correct" confirm. Any edit to the quantity withdraws the offer.
+  const [correctReopenOffered, setCorrectReopenOffered] = useState(false);
   const [correctingOpId, setCorrectingOpId] = useState<number | null>(null);
   const [materialReqs, setMaterialReqs] = useState<MaterialRequirementsResponse | null>(null);
   const [blockers, setBlockers] = useState<WorkOrderBlocker[]>([]);
@@ -948,12 +1039,77 @@ export default function WorkOrderDetail() {
     }
   };
 
+  // Start a RELEASED work order. Non-optimistic: the status shown is whatever the
+  // reload returns. A refusal (409 draft / on hold, 400 not released, 403 role)
+  // is shown verbatim, and a state refusal (400 / 404 / 409) re-reads the page:
+  // the job's status moved under us (e.g. a supervisor held it), and with
+  // realtime pushes off nothing else would refresh the header.
   const handleStart = async () => {
+    if (!workOrder || starting) return;
+    setStarting(true);
     try {
-      await api.startWorkOrder(workOrder!.id);
-      loadWorkOrder();
+      const result = await api.startWorkOrder(workOrder.id);
+      const message = typeof result?.message === 'string' && result.message ? result.message : 'Work order started';
+      showToast('success', message);
+      await loadWorkOrder();
     } catch (err: any) {
-      showToast('error', err.response?.data?.detail || 'Failed to start work order');
+      const detail = err?.response?.data?.detail;
+      showToast('error', typeof detail === 'string' && detail ? detail : 'Failed to start work order');
+      if (isStateMovedRefusal(err)) await loadWorkOrder();
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  // "Resume Work Order" — lifts a WORK-ORDER hold. The server decides where the
+  // job goes back to from its release record and says so in `message`, which is
+  // shown verbatim. A DRAFT landing is a `warning`: the call succeeded, but the
+  // job is NOT back on the floor until someone releases it — `success` would
+  // hide that, `error` would claim a failure that did not happen.
+  //
+  // On a refusal the toast carries the server's text either way, and then:
+  //  - 400 (not on hold) / 404 / 409 (concurrent write): the job moved under the
+  //    page — someone else resumed or edited it. Retrying can never succeed, so
+  //    close the dialog and re-read, and the header shows the job as it is now.
+  //  - anything else (503 audit not saved — nothing changed, safe to retry; 403;
+  //    a network error): keep the dialog open beside the action that failed.
+  const handleConfirmResume = async () => {
+    if (!workOrder || resuming) return;
+    setResuming(true);
+    try {
+      const result = await api.resumeWorkOrder(workOrder.id);
+      const message = result?.message || 'Work order resumed';
+      showToast(result?.status === 'draft' ? 'warning' : 'success', message);
+      setResumeConfirmOpen(false);
+      await loadWorkOrder();
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      showToast('error', typeof detail === 'string' && detail ? detail : 'Failed to resume work order');
+      if (isStateMovedRefusal(err)) {
+        setResumeConfirmOpen(false);
+        await loadWorkOrder();
+      }
+    } finally {
+      setResuming(false);
+    }
+  };
+
+  // "Hold Work Order" — the existing version-gated PUT (status: on_hold), through
+  // the page's one shared writer so the stale-version 409 is handled in one place.
+  const handleConfirmHold = async () => {
+    if (!workOrder || holding) return;
+    setHolding(true);
+    try {
+      await saveWorkOrderPatch(
+        { status: 'on_hold' },
+        {
+          successMessage: `${workOrder.work_order_number} is on hold. Resume Work Order puts it back on the floor.`,
+          failureMessage: 'Failed to put the work order on hold',
+          onSuccess: () => setHoldConfirmOpen(false),
+        }
+      );
+    } finally {
+      setHolding(false);
     }
   };
 
@@ -983,29 +1139,43 @@ export default function WorkOrderDetail() {
   // returns (non-optimistic).
   const handleComplete = () => {
     if (completing) return;
+    setCompleteError(null);
     setCompleteTarget({ kind: 'work_order' });
   };
 
   const handleCompleteOperation = (operation: WorkOrderOperation) => {
     if (completingOpId === operation.id) return;
-    setCompleteTarget({ kind: 'operation', operation });
+    setCompleteError(null);
+    setCompleteTarget({ kind: 'operation', operationId: operation.id });
   };
+
+  // The operation the Complete modal is for, read from the CURRENT work order — so a
+  // re-read (after a refusal that means the job moved) refreshes every figure the modal
+  // reasons with. Null when the target is the work order, or when the operation is no
+  // longer on the job (the modal then has nothing to complete and closes).
+  const completeOperation =
+    completeTarget?.kind === 'operation'
+      ? (workOrder?.operations || []).find((op) => op.id === completeTarget.operationId) ?? null
+      : null;
 
   const handleCompleteSubmit = async (values: CompleteWorkSubmit) => {
     if (!completeTarget) return;
-    const { quantityComplete, quantityScrapped, scrapReason, scrapReasonCodeId } = values;
+    const { quantityComplete, quantityScrapped, scrapReason, scrapReasonCodeId, overrideReason } = values;
+    setCompleteError(null);
     if (completeTarget.kind === 'work_order') {
       setCompleting(true);
       try {
-        // The WO-level endpoint understands the structured scrap code id; the
-        // operation-level endpoint below is text-only (the modal guarantees a
-        // non-blank scrapReason whenever scrap > 0, so both stay valid).
+        // Force-complete (owner ruling 1 at the work-order grain): the server
+        // bounds the booked quantity by what the floor recorded (override reason
+        // to exceed it) and refuses a shortfall the scrap does not cover. A null
+        // scrap total leaves the recorded work-order scrap untouched.
         const completeRes: unknown = await api.completeWorkOrder(
           workOrder!.id,
           quantityComplete,
           quantityScrapped,
           scrapReason,
-          scrapReasonCodeId
+          scrapReasonCodeId,
+          overrideReason
         );
         setCompleteTarget(null);
         // Force-complete override summary: an authorized user completed the WO
@@ -1017,19 +1187,55 @@ export default function WorkOrderDetail() {
         }
         loadWorkOrder();
       } catch (err: any) {
-        // Server-gated: surface the server's verbatim refusal, never a success.
-        // (String guard: object details must never reach the toast renderer.)
+        // Server-gated: the verbatim refusal stays INLINE beside the totals the
+        // user entered, never a success. (String guard: object details must
+        // never reach the renderer.)
         const detail = err.response?.data?.detail;
-        showToast('error', typeof detail === 'string' && detail ? detail : 'Failed to complete work order');
+        setCompleteError(typeof detail === 'string' && detail ? detail : 'Failed to complete work order');
+        // The job moved under the modal: re-read it (the refusal stays on screen).
+        if (isCompleteStateMovedRefusal(err)) await loadWorkOrder();
       } finally {
         setCompleting(false);
       }
     } else {
-      const operationId = completeTarget.operation.id;
+      const operation = completeOperation;
+      if (!operation) return;
+      const operationId = operation.id;
       setCompletingOpId(operationId);
       try {
-        await api.completeWOOperation(operationId, quantityComplete, quantityScrapped, scrapReason);
+        const result: OfficeOperationCompleteResult = await api.completeWOOperation(operationId, quantityComplete, {
+          quantityScrapped,
+          scrapReason,
+          scrapReasonCodeId,
+          overrideReason,
+          acknowledgeOpenEntries: values.acknowledgeOpenEntries,
+        });
         setCompleteTarget(null);
+        const label = operationLabel(operation);
+        if (result?.is_fully_complete === false) {
+          // Owner ruling 1: saved, but the operation stays OPEN — a partial
+          // result, so the warning tone, never "completed". The "No change"
+          // answer wrote nothing at all and says so verbatim.
+          const message = typeof result.message === 'string' ? result.message : '';
+          if (message.startsWith('No change')) {
+            showToast('info', message);
+          } else {
+            const left = Math.max(0, Number(result.operation?.quantity_unaccounted ?? 0));
+            const unit = shortUnitLabel(!!operation.laser_nest, left);
+            showToast(
+              'warning',
+              left > SHORT_EPSILON
+                ? `Progress saved — ${label} left open, ${formatShortQuantity(left)} ${unit} not yet accounted for`
+                : `Progress saved — ${label} left open`
+            );
+          }
+        } else {
+          // An acknowledged short close clocked the operators still on the
+          // operation out — say who, because their unreported pieces were not
+          // counted.
+          const closedNames = joinOperatorNames((result?.closed_time_entries ?? []).map(entry => entry.operator_name));
+          if (closedNames) showToast('info', `${label} completed — clocked out ${closedNames}`);
+        }
         loadWorkOrder();
       } catch (err: any) {
         // 409 STEPS_INCOMPLETE: required process-sheet steps lack conforming
@@ -1042,8 +1248,15 @@ export default function WorkOrderDetail() {
           setCompleteTarget(null);
           setStepsOpenOpId(operationId);
         } else {
+          // Every other refusal (short-count, still-clocked-in, override reason,
+          // hold, sequence) stays INLINE and verbatim; the modal offers the
+          // follow-up the refusal names.
           const detail = err.response?.data?.detail;
-          showToast('error', typeof detail === 'string' && detail ? detail : 'Failed to complete operation');
+          setCompleteError(typeof detail === 'string' && detail ? detail : 'Failed to complete operation');
+          // A refusal that means the job moved (held meanwhile, a stale short or
+          // scrap figure, completed elsewhere) re-reads the page; the modal's figures
+          // follow, because it renders the operation from the reloaded work order.
+          if (isCompleteStateMovedRefusal(err)) await loadWorkOrder();
         }
       } finally {
         setCompletingOpId(null);
@@ -1059,15 +1272,20 @@ export default function WorkOrderDetail() {
     setCorrectTarget(operation);
     setCorrectData({ quantity: 1, reason: '' });
     setCorrectError(null);
+    setCorrectReopenOffered(false);
   };
 
   const closeCorrectModal = () => {
     setCorrectTarget(null);
     setCorrectData({ quantity: 1, reason: '' });
     setCorrectError(null);
+    setCorrectReopenOffered(false);
   };
 
-  const handleCorrectSubmit = async () => {
+  // `reopen` is sent ONLY from the explicit confirm the server's "would leave it
+  // short" refusal unlocks — never on a first attempt — so a correction can never
+  // reopen a completed operation as a side effect.
+  const handleCorrectSubmit = async (reopen = false) => {
     if (!correctTarget || correctingOpId !== null) return;
     const quantity = Number(correctData.quantity || 0);
     const reason = correctData.reason.trim();
@@ -1079,8 +1297,15 @@ export default function WorkOrderDetail() {
         quantity_delta: quantity,
         reason,
         source: 'desktop',
+        ...(reopen ? { reopen_operation: true } : {}),
       });
-      showToast('success', `Removed ${quantity} from operation ${operationNumberText(correctTarget.operation_number, correctTarget.sequence)} ${correctTarget.name}`);
+      const identity = `operation ${operationNumberText(correctTarget.operation_number, correctTarget.sequence)} ${correctTarget.name}`;
+      showToast(
+        'success',
+        reopen
+          ? `Removed ${quantity} from ${identity} and reopened it — it is in progress again`
+          : `Removed ${quantity} from ${identity}`
+      );
       closeCorrectModal();
       loadWorkOrder();
     } catch (err: any) {
@@ -1088,6 +1313,10 @@ export default function WorkOrderDetail() {
       // never reach the renderer).
       const detail = err.response?.data?.detail;
       setCorrectError(typeof detail === 'string' && detail ? detail : 'Failed to correct the completed quantity');
+      // Owner ruling 1: the one refusal that names its own way forward. A
+      // reopen attempt that is refused again (e.g. a later operation already
+      // completed with these units) withdraws the offer.
+      setCorrectReopenOffered(!reopen && isReopenRequiredRefusal(detail));
     } finally {
       setCorrectingOpId(null);
     }
@@ -1948,11 +2177,37 @@ export default function WorkOrderDetail() {
               Release
             </Button>
           )}
-          {workOrder.status === 'released' && (
-            <button onClick={handleStart} className="btn-success flex items-center">
-              <PlayIcon className="h-5 w-5 mr-2" />
+          {workOrder.status === 'released' && canStartWorkOrder && (
+            <LoadingButton
+              type="button"
+              onClick={handleStart}
+              loading={starting}
+              loadingText="Starting..."
+              className="btn-success flex items-center"
+            >
+              <PlayIcon className="h-5 w-5 mr-2" aria-hidden="true" />
               Start
-            </button>
+            </LoadingButton>
+          )}
+          {/* Work-order hold controls. "Resume Work Order", never "Clear Hold":
+              that label already names the OPERATION-level action on the
+              operations table below, and the two lift different holds. */}
+          {workOrder.status === 'on_hold' && canStartWorkOrder && (
+            <Button type="button" onClick={() => setResumeConfirmOpen(true)} className="flex items-center">
+              <PlayIcon className="h-5 w-5 mr-2" aria-hidden="true" />
+              Resume Work Order
+            </Button>
+          )}
+          {(workOrder.status === 'released' || workOrder.status === 'in_progress') && canStartWorkOrder && (
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => setHoldConfirmOpen(true)}
+              className="flex items-center"
+            >
+              <PauseIcon className="h-5 w-5 mr-2" aria-hidden="true" />
+              Hold Work Order
+            </Button>
           )}
           {workOrder.status === 'in_progress' && (
             <Button
@@ -2299,6 +2554,20 @@ export default function WorkOrderDetail() {
                         ? `Previous operations must be completed first — this work order runs its operations in sequence, and operation ${operationNumberText(lowestIncompleteOperation.operation_number, lowestIncompleteOperation.sequence)} (${lowestIncompleteOperation.name}) is not complete.`
                         : null;
 
+                    // Completing a READY operation STARTS it first, and the server
+                    // refuses a start on a held work order (409). Mirrored here so
+                    // the button does not offer what the server will refuse. An
+                    // IN_PROGRESS operation stays completable on a held job: work
+                    // already running when it was held must always be closable.
+                    const workOrderHoldBlocksComplete = op.status === 'ready' && workOrder.status === 'on_hold';
+
+                    // Owner ruling 1 (SF10): received units still neither good nor
+                    // scrapped, on an open operation that has progress (0 = no chip).
+                    // Advisory only: the Complete button stays governed by the
+                    // server-mirrored gates above, and the server decides what a
+                    // submit closes.
+                    const unaccountedChip = operationUnaccountedChip(op, operationTarget);
+
                     // WHY this row is held, for the compact in-row disclosure below.
                     // Computed once and reused by the confirm dialog's copy so the
                     // pre-click reason and the in-dialog reason cannot diverge.
@@ -2429,6 +2698,20 @@ export default function WorkOrderDetail() {
                             <span className="font-medium text-sm">{op.quantity_complete}</span>
                             <span className="text-slate-400 text-sm">/{operationTarget}</span>
                             {op.laser_nest && <div className="text-xs text-slate-400">runs</div>}
+                            {/* Owner ruling 1: what a Complete must still account for
+                                (good + scrap) on an open operation with progress. On a
+                                sequenced routing an operation left open short holds every
+                                later one, so the shortfall is shown where the count is. */}
+                            {unaccountedChip > SHORT_EPSILON && (
+                              <span
+                                id={`op-unaccounted-${op.id}`}
+                                data-testid={`op-unaccounted-${op.id}`}
+                                className="mt-1 inline-flex rounded-sm border border-fd-amber/50 bg-fd-amber/10 px-1.5 py-0.5 text-xs font-medium tabular-nums text-fd-amber"
+                                title="Received units recorded neither good nor scrapped. Completing needs them counted or reported as scrap with a reason."
+                              >
+                                {formatShortQuantity(unaccountedChip)} unaccounted
+                              </span>
+                            )}
                           </div>
                         </td>
                         <td className="px-4 py-3 text-sm">
@@ -2534,9 +2817,21 @@ export default function WorkOrderDetail() {
                             {canCompleteOperation && !cancelledNest && op.status !== 'complete' && workOrder.status !== 'draft' && (
                               <button
                                 onClick={() => handleCompleteOperation(op)}
-                                disabled={completingOpId === op.id || sequenceBlockReason !== null}
+                                // Both conditions ride this one control: the gates mirror
+                                // (READY on a held job, out of sequence) disables it, and
+                                // the row's "n unaccounted" chip is read with it.
+                                aria-describedby={unaccountedChip > SHORT_EPSILON ? `op-unaccounted-${op.id}` : undefined}
+                                disabled={
+                                  completingOpId === op.id ||
+                                  sequenceBlockReason !== null ||
+                                  workOrderHoldBlocksComplete
+                                }
                                 className="text-green-600 hover:text-green-300 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-                                title={sequenceBlockReason ?? 'Complete Operation'}
+                                title={
+                                  workOrderHoldBlocksComplete
+                                    ? WORK_ORDER_HOLD_COMPLETE_TITLE
+                                    : sequenceBlockReason ?? 'Complete Operation'
+                                }
                               >
                                 {completingOpId === op.id ? (
                                   <>
@@ -3526,7 +3821,12 @@ export default function WorkOrderDetail() {
                   inputMode="decimal"
                   min={0}
                   value={correctData.quantity}
-                  onChange={(e) => setCorrectData({ ...correctData, quantity: Number(e.target.value) || 0 })}
+                  onChange={(e) => {
+                    setCorrectData({ ...correctData, quantity: Number(e.target.value) || 0 });
+                    // The reopen offer was for the quantity the server refused;
+                    // a different quantity must be asked about again.
+                    setCorrectReopenOffered(false);
+                  }}
                   className="input h-12 text-center text-xl font-bold"
                   aria-label="Quantity to remove"
                   autoFocus
@@ -3562,6 +3862,16 @@ export default function WorkOrderDetail() {
                   {correctError}
                 </div>
               )}
+              {/* Owner ruling 1: the refusal above said this correction would leave a
+                  completed operation short. Reopening is a real status change (back
+                  to in progress, the operations it was releasing wait again), so it
+                  is a separate, explicit confirm — never folded into the first try. */}
+              {correctReopenOffered && (
+                <p data-testid="wo-correct-reopen-note" className="text-sm text-amber-200/90">
+                  Reopening returns {operationLabel(correctTarget)} to in progress. It must be completed again — with
+                  any short reported as scrap — and operations waiting on it go back to waiting.
+                </p>
+              )}
             </div>
 
             <div className="modal-footer">
@@ -3569,7 +3879,8 @@ export default function WorkOrderDetail() {
                 Cancel
               </Button>
               <button
-                onClick={handleCorrectSubmit}
+                type="button"
+                onClick={() => void handleCorrectSubmit(correctReopenOffered)}
                 disabled={
                   correctingOpId !== null ||
                   Number(correctData.quantity || 0) <= 0 ||
@@ -3579,6 +3890,11 @@ export default function WorkOrderDetail() {
               >
                 {correctingOpId !== null ? (
                   <ArrowPathIcon className="h-5 w-5 animate-spin" />
+                ) : correctReopenOffered ? (
+                  <>
+                    <ArrowPathIcon className="h-5 w-5 mr-2 inline" />
+                    Reopen {operationLabel(correctTarget)} and correct
+                  </>
                 ) : (
                   <>
                     <MinusCircleIcon className="h-5 w-5 mr-2 inline" />
@@ -3592,31 +3908,84 @@ export default function WorkOrderDetail() {
       </Modal>
 
       <CompleteWorkModal
-        open={completeTarget !== null}
+        open={completeTarget !== null && (completeTarget.kind === 'work_order' || completeOperation !== null)}
         onClose={() => {
           // Don't let the user dismiss mid-request; reflect only server state.
           if (completing || completingOpId !== null) return;
           setCompleteTarget(null);
         }}
         submitting={
-          completeTarget?.kind === 'operation' ? completingOpId === completeTarget.operation.id : completing
+          completeTarget?.kind === 'operation' ? completingOpId === completeTarget.operationId : completing
         }
         onSubmit={handleCompleteSubmit}
+        error={completeError}
         title={
-          completeTarget?.kind === 'operation'
-            ? `Complete operation "${completeTarget.operation.name}"`
+          completeOperation
+            ? `Complete operation "${completeOperation.name}"`
             : `Complete work order ${workOrder.work_order_number}`
         }
-        subtitle={
-          completeTarget?.kind === 'operation'
-            ? `Target: ${Number(completeTarget.operation.component_quantity || workOrder.quantity_ordered || 0)}`
-            : `Ordered: ${workOrder.quantity_ordered}`
-        }
-        defaultQuantityComplete={
-          completeTarget?.kind === 'operation'
-            ? Number(completeTarget.operation.component_quantity || workOrder.quantity_ordered || 0)
-            : workOrder.quantity_ordered
-        }
+        // Owner ruling 1: both fields are TOTALS prefilled with what is RECORDED,
+        // and every figure the modal reasons with is the server's (the S12 read
+        // model) — the operation's good ceiling / upstream short, the work order's
+        // deliverable / accounted loss.
+        {...(completeOperation
+          ? {
+              mode: 'operation' as const,
+              subtitle: `Target: ${formatShortQuantity(operationRunTarget(completeOperation, workOrder.quantity_ordered))}${completeOperation.laser_nest ? ' runs' : ''}. Enter the totals, including work already recorded.`,
+              target: operationRunTarget(completeOperation, workOrder.quantity_ordered),
+              recordedComplete: Number(completeOperation.quantity_complete || 0),
+              recordedScrapped: Number(completeOperation.quantity_scrapped || 0),
+              upstreamShort: completeOperation.upstream_quantity_short,
+              goodCeiling: completeOperation.quantity_good_ceiling,
+              laborRecorded: operationMayHaveLabor(completeOperation),
+              floorRecorded: completeOperation.quantity_recorded_good,
+              isNest: !!completeOperation.laser_nest,
+              subjectLabel: operationLabel(completeOperation),
+            }
+          : {
+              mode: 'work_order' as const,
+              subtitle: `Ordered: ${workOrder.quantity_ordered}. This completes all remaining operations and may bypass required process-step records.`,
+              target: Number(workOrder.quantity_ordered || 0),
+              recordedComplete: Number(workOrder.quantity_complete || 0),
+              recordedScrapped: Number(workOrder.quantity_scrapped || 0),
+              accountedLoss: workOrder.quantity_accounted_loss,
+              deliverable: workOrder.quantity_deliverable,
+              subjectLabel: workOrder.work_order_number,
+            })}
+      />
+
+      {/* Resume Work Order confirm. Non-optimistic: `pending` refuses backdrop /
+          Escape while the call is on the wire. A retryable refusal (503 audit not
+          saved, 403, network) keeps the dialog open beside the action; a refusal
+          that means the job moved (400 not on hold, 404, 409) closes it and
+          re-reads the page — see handleConfirmResume. */}
+      <ConfirmDialog
+        open={resumeConfirmOpen}
+        title="Resume Work Order"
+        message={RESUME_WORK_ORDER_MESSAGE}
+        confirmLabel="Resume Work Order"
+        cancelLabel="Keep it on hold"
+        pending={resuming}
+        variant="warning"
+        onConfirm={handleConfirmResume}
+        onCancel={() => {
+          if (!resuming) setResumeConfirmOpen(false);
+        }}
+      />
+
+      {/* Hold Work Order confirm — the version-gated PUT; closes only on success. */}
+      <ConfirmDialog
+        open={holdConfirmOpen}
+        title="Hold Work Order"
+        message={HOLD_WORK_ORDER_MESSAGE}
+        confirmLabel="Hold Work Order"
+        cancelLabel="Cancel"
+        pending={holding}
+        variant="warning"
+        onConfirm={handleConfirmHold}
+        onCancel={() => {
+          if (!holding) setHoldConfirmOpen(false);
+        }}
       />
 
       {/* Resolve-blocker note (replaces the native prompt) */}

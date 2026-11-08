@@ -60,8 +60,16 @@ for (const width of [1280, 390]) {
     await page.screenshot({ path: testInfo.outputPath(`quick-complete-${width}.png`), animations: 'disabled' });
     await quickComplete.click();
     const dialog = page.getByRole('dialog', { name: `Complete work order ${order.work_order_number}` });
-    await expect(dialog.getByRole('spinbutton', { name: 'Quantity completed' })).toHaveValue('10');
+    // Owner ruling 1: the good total prefills with the RECORDED header (8), never
+    // the order. The list summary carries no floor bounds, so the shortfall readout
+    // is advisory and the (synthetic) server decides; this unreported order passes
+    // its bounds at the full count, which the planner books explicitly.
+    const goodField = dialog.getByRole('spinbutton', { name: 'Quantity completed' });
+    await expect(goodField).toHaveValue('8');
     await expect(dialog.getByText('Completes all remaining operations.', { exact: false })).toBeVisible();
+    await expect(dialog.getByTestId('complete-work-short')).toContainText('2 below the order');
+    await goodField.fill('10');
+    await expect(dialog.getByTestId('complete-work-short')).toHaveCount(0);
     expect(detailCalls).toBe(0);
     await page.screenshot({ path: testInfo.outputPath(`quick-complete-dialog-${width}.png`), animations: 'disabled' });
     await dialog.getByRole('button', { name: 'Complete', exact: true }).click();

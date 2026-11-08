@@ -1,8 +1,42 @@
 import React from 'react';
-import { ArrowUpIcon, ArrowUpRightIcon } from '@heroicons/react/24/outline';
+import { ArrowUpIcon, ArrowUpRightIcon, PauseIcon } from '@heroicons/react/24/outline';
 import { formatCentralDate, isDateBeforeTodayInCentral, isDateTodayInCentral } from '../../utils/centralTime';
+import { startBlockedLabel } from '../../utils/startBlock';
 import { UnitBadge } from '../ui';
 import { KioskQueueItem, formatOperationLabel, formatStepsChip, operationNumberText } from './kioskConstants';
+
+/**
+ * "NOT RELEASED" / "WO ON HOLD" — the WORK ORDER refuses every start on this job
+ * (owner ruling 2026-11-05: the floor never starts work a supervisor has not
+ * released, or has put on hold). Renders nothing unless the row carries the
+ * server's `start_blocked_reason`; the chip names the state in two words and
+ * its `title` carries the server's full text, verbatim.
+ *
+ * Shared by the kiosk queue card and the crew job card so the two read alike.
+ * The card itself stays tappable: the confirm / job screen is where the reason
+ * is spelled out and the start control is disabled.
+ */
+export function KioskStartBlockedChip({
+  item,
+  size = 'kiosk',
+}: {
+  item: Pick<KioskQueueItem, 'start_blocked_reason' | 'work_order_status'>;
+  size?: 'kiosk' | 'crew';
+}) {
+  if (!item.start_blocked_reason) return null;
+  return (
+    <span
+      data-testid="kiosk-start-blocked-chip"
+      title={item.start_blocked_reason}
+      className={`inline-flex items-center gap-1 rounded-[3px] border border-fd-amber/60 bg-fd-amber/10 font-mono font-bold uppercase text-fd-amber ${
+        size === 'crew' ? 'px-2 py-1 text-xs tracking-widest' : 'px-1.5 py-0.5 text-[10px] tracking-[0.08em]'
+      }`}
+    >
+      <PauseIcon aria-hidden="true" className={size === 'crew' ? 'h-4 w-4' : 'h-3 w-3'} />
+      {startBlockedLabel(item.work_order_status)}
+    </span>
+  );
+}
 
 /**
  * "Steps 2/6" — required process-step progress for the operation. Hidden when
@@ -150,7 +184,9 @@ export default function KioskQueueCard({
       // for a new one -- the same operation, named two ways, in the same card.
       aria-label={`Work order ${item.work_order_number}, operation ${
         item.operation_name || operationNumberText(item.operation_number) || ''
-      }${movedUp ? ', moved up' : ''}`}
+      }${movedUp ? ', moved up' : ''}${
+        item.start_blocked_reason ? `, ${startBlockedLabel(item.work_order_status).toLowerCase()}` : ''
+      }`}
       className={`w-full rounded-[4px] border bg-fd-panel px-4 py-3.5 text-left transition-transform duration-150 ease-out active:scale-[0.99] ${
         active
           ? 'border-fd-line-bright border-l-2 border-l-fd-green'
@@ -175,6 +211,7 @@ export default function KioskQueueCard({
         >
           {active ? 'On machine' : inProgress ? 'In progress' : 'Ready'}
         </span>
+        <KioskStartBlockedChip item={item} />
         <KioskStepsChip item={item} />
         <div className="flex-1" />
         <span className="font-mono text-[15px] font-bold tabular-nums text-fd-ink">

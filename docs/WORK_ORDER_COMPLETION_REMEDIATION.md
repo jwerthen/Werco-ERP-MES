@@ -263,6 +263,36 @@ Findings: DUP-2, DUP-3, DUP-4, DUP-5, SFI-4, SFI-5, RUP-1, RUP-4, RUP-6, QG-5, B
 > follow-up decision. See `docs/API.md` → Laser Nests → "Pool WO header progress" and the
 > reduce-production notes there. Tests: `backend/tests/api/test_laser_nest_pool_quantity_rollup.py`.
 
+> **Update (2026-11-07) — owner ruling 1: a short count is scrap with a reason, or the operation
+> stays open (branch `fix/short-count-scrap-or-open`, migration `117`).** Three parts of the Batch-3
+> unified contract above no longer hold as written:
+> - **The shop-floor `/operations/{id}/complete` is no longer an absolute verb.** It is a **close**
+>   that books the good already recorded (`resolve_absolute_operation_quantity` with a requested
+>   quantity of 0 — the existing evidence floor and target cap) and refuses **409**, writing
+>   nothing, while recorded good + scrap leave any received unit unaccounted; its old partial branch
+>   and the block that credited the close's quantity delta to the first open TimeEntry are gone.
+>   The office `/work-orders/operations/{id}/complete` keeps the absolute
+>   `clamp(max(existing, requested, evidence), 0, target)` good total, but **closes** only when good +
+>   scrap cover every received unit (otherwise it saves progress) and needs a
+>   `quantity_override_reason` to record more good than the floor's labor evidence.
+> - **Office operation scrap no longer overwrites.** `quantity_scrapped` on the office op-complete is
+>   a total that **never lowers** (`max(stored, sent)`); its reason is required, and written, only
+>   when the total rises. The work-order force-complete keeps the DUP-3 overwrite-when-sent rule.
+> - **The work-order header is not monotonic-up at every step any more.** When every operation is
+>   COMPLETE it is **set** by `finished_quantity_at_all_complete` — `quantity_ordered` when no
+>   operation declared a short (the old snap, now clamped to the order), else what came out of the
+>   last whole-order stage — and force-complete sets it to the quantity it books instead of
+>   `max()`-ing it with the pre-loop header (the INT1 over-receipt: op 10 complete at 10 and op 20 at
+>   8 + 2 used to receive 10 finished goods). The partial-progress rollup is still the `max()` rule.
+>
+> Unchanged: the per-op `TimeEntry` evidence floor, the shared finalizer, the ON_HOLD / terminal /
+> `STEPS_INCOMPLETE` refusals, reconcile-on-read's audit, and laser pools' pooled-sum header (pools
+> never reach the all-complete rule). Implicit completion (clock-out, reconcile-on-read) now fires
+> only on a full **good** count of the units that reached the operation, so a read never closes a
+> short. The rule's arithmetic is one implementation in `work_order_state_service.py`
+> (`OperationAccounting` / `stage_accounting` / `record_short_declaration`); see `docs/API.md` →
+> Work Orders → "Short count at completion". Tests: `backend/tests/api/test_operation_short_count*.py`.
+
 ### Rank 7 — Quality gates on completion (warn-and-record) ☑ (Batch 4)
 > **Posture change from the original plan.** The original action proposed a hard block
 > (`assert_operation_completable(op)` refusing COMPLETE) with an audited QUALITY-role override. The

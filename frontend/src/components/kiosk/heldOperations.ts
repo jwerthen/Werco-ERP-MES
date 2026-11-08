@@ -197,6 +197,32 @@ export function stillOpenBlockers(result: ResumeOperationResult | null | undefin
 }
 
 /**
+ * The WORK ORDER's own start refusal, as carried on the held row that was
+ * tapped — the server's `start_blocked_reason`, trimmed — or null.
+ *
+ * Why a resume needs it: lifting an OPERATION hold does not lift a WORK-ORDER
+ * hold (owner ruling 2026-11-05: the floor starts nothing on a job that is
+ * unreleased or held). The server's resume puts an un-started operation of an
+ * ON_HOLD job back to READY, so the card DOES return to the queue — with a
+ * "WO on hold" chip and Clock in disabled. The resume RESPONSE says nothing
+ * about the parent; the held ROW does, because held and queue rows come out of
+ * one row builder and both carry the work-order half of the start gate. So the
+ * caller passes the row's reason in, and a green "resumed" can no longer
+ * report a job as back on the floor when every start on it would be refused.
+ *
+ * Verbatim, never reworded: it is the exact string a clock-in would 409 with.
+ */
+function workOrderStartBlock(reason: string | null | undefined): string | null {
+  const text = (reason || '').trim();
+  return text || null;
+}
+
+/** "A." + "B" -> "A. B"; "a" + "B" -> "a. B" — the server's text may not end in a stop. */
+function joinSentences(first: string, next: string): string {
+  return `${first}${/[.!?]$/.test(first) ? ' ' : '. '}${next}`;
+}
+
+/**
  * The toast a successful resume earns — and it is not always "success".
  *
  * Resume RESTORES, it does not release. An operation with no labor evidence is
@@ -206,6 +232,12 @@ export function stillOpenBlockers(result: ResumeOperationResult | null | undefin
  * and the job does NOT come back to the queue. A green "resumed" toast there
  * would send the operator looking for a card that is not going to appear.
  *
+ * And the job can come back and still not start: when the held row carried a
+ * WORK-ORDER refusal (`startBlockedReason` — the work order is on hold, or not
+ * released), the operation hold is lifted but the work order's is not, and the
+ * toast says so in the server's own words instead of "resumed". Pass the row's
+ * `start_blocked_reason`; a null reason leaves every message exactly as it was.
+ *
  * `info` rather than the shared Toast's `warning` variant on purpose: these two
  * station screens carry their own local success/error/info toast, and widening
  * that vocabulary is a styling change this does not need. What matters is that
@@ -213,10 +245,17 @@ export function stillOpenBlockers(result: ResumeOperationResult | null | undefin
  */
 export function resumeToast(
   result: ResumeOperationResult | null | undefined,
-  workOrderNumber: string | null | undefined
+  workOrderNumber: string | null | undefined,
+  startBlockedReason?: string | null
 ): { type: 'success' | 'info'; message: string } {
   const wo = (workOrderNumber || 'Operation').trim() || 'Operation';
-  if ((result?.status || '').trim() === 'pending') {
+  const landedPending = (result?.status || '').trim() === 'pending';
+  const blocked = workOrderStartBlock(startBlockedReason);
+  if (blocked) {
+    const lead = `${wo} operation hold lifted — ${blocked}`;
+    return { type: 'info', message: landedPending ? joinSentences(lead, 'It did not return to the queue.') : lead };
+  }
+  if (landedPending) {
     return { type: 'info', message: `${wo} hold lifted — still waiting on release or an earlier step.` };
   }
   return { type: 'success', message: `${wo} resumed` };
@@ -226,12 +265,17 @@ export function resumeToast(
  * THE ONE PLACE that decides whether a Clear Hold fell short — read off the
  * SERVER's answer, never off "the call did not throw".
  *
- * Two shortfalls, and either alone is enough:
+ * Three shortfalls, and any one alone is enough:
  *
  * 1. **`status === 'pending'`** — the hold came off but the job did NOT come
  *    back to the board (unreleased parent, or an incomplete predecessor).
  * 2. **`open_blockers` is non-empty** — resume RESTORES the operation and
  *    deliberately does not resolve the blocker.
+ * 3. **`startBlockedReason` is set** — the held row the caller acted on carried
+ *    the WORK ORDER's start refusal (on hold, or not released). The operation
+ *    hold is lifted, the work order's is not, and every start is still refused.
+ *    The resume response does not carry it; the row does, so the caller passes
+ *    the row's `start_blocked_reason` (see `workOrderStartBlock`).
  *
  * Extracted because THREE screens clear a hold — the Time Clock page,
  * ShopFloorSimple and the Work Order page — and they word the outcome
@@ -239,15 +283,31 @@ export function resumeToast(
  * JUDGEMENT has to be identical. A drifted copy of this rule is how one screen
  * ends up reporting a live quality stop as cleared. Compose the words at the
  * call site; take the verdict from here.
+ *
+ * The Work Order page deliberately passes no `startBlockedReason`: its header
+ * already reads On Hold beside the Resume Work Order button, on the same screen
+ * as the toast, so "hold cleared" there is true about the operation and cannot
+ * be mistaken for the job being back on the floor. Omitting it leaves the
+ * verdict exactly as it was before the work-order gate existed.
  */
-export function clearHoldOutcome(result: ResumeOperationResult | null | undefined): {
+export function clearHoldOutcome(
+  result: ResumeOperationResult | null | undefined,
+  startBlockedReason?: string | null
+): {
   landedPending: boolean;
   openBlockers: ResumeOpenBlocker[];
+  workOrderBlocked: string | null;
   fellShort: boolean;
 } {
   const openBlockers = stillOpenBlockers(result);
   const landedPending = (result?.status || '').trim() === 'pending';
-  return { landedPending, openBlockers, fellShort: landedPending || openBlockers.length > 0 };
+  const workOrderBlocked = workOrderStartBlock(startBlockedReason);
+  return {
+    landedPending,
+    openBlockers,
+    workOrderBlocked,
+    fellShort: landedPending || openBlockers.length > 0 || workOrderBlocked !== null,
+  };
 }
 
 /**
@@ -255,7 +315,8 @@ export function clearHoldOutcome(result: ResumeOperationResult | null | undefine
  * ShopFloorSimple — where the shared `<Toast>` carries a `warning` variant the
  * two station screens do not.
  *
- * Same two shortfalls `resumeToast` reasons about, plus the one it cannot say:
+ * The three shortfalls `clearHoldOutcome` judges, all worded here (the kiosk's
+ * `resumeToast` words two of them; the still-open blockers get a screen there):
  *
  * 1. **`status === 'pending'`** — the hold came off but the job did NOT come
  *    back to the board (unreleased parent, or an incomplete predecessor). A
@@ -264,10 +325,15 @@ export function clearHoldOutcome(result: ResumeOperationResult | null | undefine
  * 2. **`open_blockers` is non-empty** — resume RESTORES the operation and
  *    deliberately does not resolve the blocker, so the record stays open for
  *    somebody to close. Green would report a quality stop as handled.
+ * 3. **the held row carried a WORK-ORDER refusal** (`startBlockedReason`) —
+ *    the operation hold is lifted but the work order is still on hold (or not
+ *    released), so the job is no closer to running. That one LEADS the
+ *    message, in the server's own words ("operation hold lifted — <reason>"):
+ *    it is the reason nothing can start, and the other two follow as "Also:".
  *
- * Both can hold at once, and they compose into ONE warning rather than two
- * toasts: two toasts for one tap read as two things happening, and the second
- * would push the first off the stack before it was read.
+ * Any of them can hold at once, and they compose into ONE warning rather than
+ * several toasts: two toasts for one tap read as two things happening, and the
+ * second would push the first off the stack before it was read.
  *
  * `warning` and not `error`: the write SUCCEEDED. Claiming a failure would send
  * the operator to look for an operation that is, in fact, no longer held.
@@ -275,15 +341,22 @@ export function clearHoldOutcome(result: ResumeOperationResult | null | undefine
  * Deliberately NOT merged with `resumeToast`: that one serves the kiosk and
  * crew station, whose local toast vocabulary is success/error/info, and
  * widening it there is a styling change those screens do not need. The two
- * share every fact they read (`stillOpenBlockers`, `openBlockerLine`) so they
- * cannot disagree about what happened — only about which chrome says it.
+ * share every fact they read (`stillOpenBlockers`, `openBlockerLine`,
+ * `workOrderStartBlock`) so they cannot disagree about what happened — only
+ * about which chrome says it.
  */
 export function clearHoldToast(
   result: ResumeOperationResult | null | undefined,
-  workOrderNumber: string | null | undefined
+  workOrderNumber: string | null | undefined,
+  startBlockedReason?: string | null
 ): { type: 'success' | 'warning'; message: string } {
   const wo = (workOrderNumber || 'Operation').trim() || 'Operation';
-  const { landedPending, openBlockers: blockers, fellShort } = clearHoldOutcome(result);
+  const {
+    landedPending,
+    openBlockers: blockers,
+    workOrderBlocked,
+    fellShort,
+  } = clearHoldOutcome(result, startBlockedReason);
 
   if (!fellShort) {
     return { type: 'success', message: `${wo} hold cleared` };
@@ -297,6 +370,13 @@ export function clearHoldToast(
     shortfalls.push(
       `${blockers.length} blocker${blockers.length === 1 ? '' : 's'} still open: ${namedOpenBlockers(blockers)}`
     );
+  }
+  if (workOrderBlocked) {
+    const lead = `${wo} operation hold lifted — ${workOrderBlocked}`;
+    return {
+      type: 'warning',
+      message: shortfalls.length > 0 ? joinSentences(lead, `Also: ${shortfalls.join('; ')}.`) : lead,
+    };
   }
   return { type: 'warning', message: `${wo} hold cleared — ${shortfalls.join('; ')}.` };
 }
