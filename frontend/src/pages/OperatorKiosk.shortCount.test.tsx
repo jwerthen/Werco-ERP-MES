@@ -15,7 +15,9 @@
  *  - a crewmate on the queue row's roster blocks a SHORT finish in the overlay itself;
  *  - once the clock-out landed, a refused close is reported honestly — including that
  *    scrap which rode that close was NOT saved, and (on a draft / held job, where the
- *    floor cannot clock back in) without advising a clock-in;
+ *    floor cannot clock back in) without advising a clock-in: a held job goes to the
+ *    work order page (never "resume it"), a draft is released first (the office offers
+ *    no Complete on a draft);
  *  - the handler decides from the overlay's own figures, so a crewmate's report that
  *    lands while the overlay is open cannot strand a real replacement scrap.
  */
@@ -26,6 +28,7 @@ import { MemoryRouter } from 'react-router-dom';
 import OperatorKiosk from './OperatorKiosk';
 import api from '../services/api';
 import { useAuth } from '../context/AuthContext';
+import { WORK_ORDER_NOT_RELEASED_REASON, WORK_ORDER_ON_HOLD_REASON } from '../components/kiosk/heldOperationFixtures';
 
 jest.mock('../context/CompanyContext', () => ({ useCompany: () => ({ currentCompany: null }) }));
 
@@ -358,14 +361,17 @@ describe('OperatorKiosk — short count (owner ruling 1)', () => {
     );
   });
 
-  it('on a held work order the advice is the work order page — never a clock-in the floor cannot make', async () => {
-    const held =
-      "This work order is on hold — work cannot start until a supervisor resumes it (Resume Work Order on the work order). Resuming or clearing an operation's hold does not lift it.";
+  /**
+   * The clock-out landed and the close was refused on a job the WORK ORDER refuses to
+   * start, so the floor cannot clock back in — and the advice must name a way out that
+   * exists. HELD: the running operation is closable as it stands from the work order
+   * page (never "resume it"). DRAFT: the office offers no Complete on a draft, so "the
+   * work order page" alone would dead-end — the supervisor releases first.
+   */
+  const refusedCloseOn = async (row: Record<string, unknown>) => {
     const detail =
       'Bob T is still clocked in to Op 20 — have them clock out with their count first, or leave the operation open.';
-    mockedApi.getWorkCenterQueue.mockResolvedValue({
-      queue: [{ ...ACTIVE_ITEM, work_order_status: 'on_hold', start_blocked_reason: held }],
-    });
+    mockedApi.getWorkCenterQueue.mockResolvedValue({ queue: [{ ...ACTIVE_ITEM, ...row }] });
     mockedApi.clockOut.mockResolvedValue({ operation_status: 'in_progress' });
     mockedApi.completeOperation.mockRejectedValue({ response: { status: 409, data: { detail } } });
     renderKiosk();
@@ -373,11 +379,49 @@ describe('OperatorKiosk — short count (owner ruling 1)', () => {
     fireEvent.click(await screen.findByRole('button', { name: /^complete op$/i }));
     fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
 
-    const failed = await screen.findByText(/^Clocked out, but completing failed: Bob T is still clocked in/);
+    return screen.findByText(/^Clocked out, but completing failed: Bob T is still clocked in/);
+  };
+
+  it('on a held work order the advice is the work order page — never a clock-in the floor cannot make', async () => {
+    const failed = await refusedCloseOn({
+      work_order_status: 'on_hold',
+      start_blocked_reason: WORK_ORDER_ON_HOLD_REASON,
+    });
     expect(failed).toHaveTextContent('Op 20 is still open; ask a supervisor to complete it from the work order page.');
     expect(failed).not.toHaveTextContent(/clock in and Complete again/i);
     // Nor does it send anyone to resume a held job just to close the running work.
     expect(failed).not.toHaveTextContent(/resume/i);
+    expect(mockedApi.clockIn).not.toHaveBeenCalled();
+  });
+
+  it('on a DRAFT work order the supervisor releases first — "complete it from the work order page" would dead-end', async () => {
+    const failed = await refusedCloseOn({
+      work_order_status: 'draft',
+      start_blocked_reason: WORK_ORDER_NOT_RELEASED_REASON,
+    });
+    expect(failed).toHaveTextContent(
+      'Op 20 is still open; ask a supervisor to release the work order first — then it can be completed here or from the work order page.'
+    );
+    expect(failed).not.toHaveTextContent(/ask a supervisor to complete it from the work order page/);
+    expect(failed).not.toHaveTextContent(/resume/i);
+    expect(mockedApi.clockIn).not.toHaveBeenCalled();
+  });
+
+  it('a queue row without work_order_status still tells draft from held by the server reason text', async () => {
+    const failed = await refusedCloseOn({
+      work_order_status: undefined,
+      start_blocked_reason: WORK_ORDER_NOT_RELEASED_REASON,
+    });
+    expect(failed).toHaveTextContent('ask a supervisor to release the work order first');
+  });
+
+  it('a work-order refusal it cannot place (terminal) gets generic supervisor advice, no door named', async () => {
+    const failed = await refusedCloseOn({
+      work_order_status: 'complete',
+      start_blocked_reason: 'cannot start operation: work order is complete',
+    });
+    expect(failed).toHaveTextContent(/— Op 20 is still open; ask a supervisor\.$/);
+    expect(failed).not.toHaveTextContent(/work order page|clock in and Complete again|release|resume/i);
   });
 
   describe('a crewmate reports while the overlay is open', () => {

@@ -205,12 +205,19 @@ URL is all the station setup there is.
      refused close (the clock-out carried 0), the message says so — *"Clocked out, but completing
      failed (the n scrap was not saved): …"* — as the crew station does. On a **draft or held** work
      order (the queue row carries `start_blocked_reason`) the floor cannot clock back in, so the next
-     step reads *"Op N is still open; ask a supervisor to complete it from the work order page."*
-     instead — never "resume it": the running operation is closable as it stands. Whether an entry
-     is a full good count (so its scrap rides the clock-out) is the overlay's **own** reading of the
-     live job it renders, handed to the kiosk with the confirm — never recomputed from the snapshot
-     the overlay opened on, so a crewmate's report that lands while it is open cannot strand a real
-     replacement scrap on a close that never runs. A completion refused with **409
+     step names the way out that exists, which differs by refusal. **Held:** *"Op N is still open;
+     ask a supervisor to complete it from the work order page."* — never "resume it": the running
+     operation is closable as it stands. **Draft:** *"Op N is still open; ask a supervisor to release
+     the work order first — then it can be completed here or from the work order page."* — neither
+     office surface offers Complete on a draft (the Work Order page hides it; the operations popup
+     says to release first), so the work-order-page advice alone would dead-end. Any other refusal
+     (e.g. terminal) gets *"Op N is still open; ask a supervisor."* and names no button. Draft vs held
+     is read from the row's `work_order_status`, else from the server's reason text
+     (`utils/startBlock.ts` → `startBlockKind`, the one copy shared with the crew station). Whether
+     an entry is a full good count (so its scrap rides the clock-out) is the overlay's **own**
+     reading of the live job it renders, handed to the kiosk with the confirm — never recomputed from
+     the snapshot the overlay opened on, so a crewmate's report that lands while it is open cannot
+     strand a real replacement scrap on a close that never runs. A completion refused with **409
      `STEPS_INCOMPLETE`** (required process-sheet steps missing conforming records) opens the steps
      view with the outstanding steps rendered inline (see
      [Process steps](#process-steps-process-sheets-capture)).
@@ -1625,12 +1632,16 @@ measurement.
     the screen says *"This badge is not clocked in to this job — scan a badge that is, or JOIN
     first, to record the n good."* — and on a job carrying a `start_blocked_reason` (draft or held
     work order, where JOIN is refused) only *"…scan a badge that is clocked in to this job…"*, or,
-    when nobody is clocked in at all, *"No one is clocked in to this job, and it can't be joined while
-    it is on hold (in draft). Record the n good once a supervisor resumes (releases) it, or ask a
-    supervisor."* A READY job on such a work order shows COMPLETE disabled with the reason
-    (completing it would start it). With
-    only scrap entered, the scrap and its reason ride `complete` itself (declared at the close); a
-    refusal then reads *"Nothing was saved — …"*, because a refused close writes nothing.
+    when nobody is clocked in at all, the office way out that exists. **Held:** *"No one is clocked
+    in to this job, and it can't be joined while it is on hold. Ask a supervisor to record the n good
+    from the work order page."* — never "once a supervisor resumes it": the office books the pieces
+    on the held job as it stands. **Draft:** *"…while it is in draft. Ask a supervisor to release the
+    work order first — then the n good can be recorded here or from the work order page."* (the
+    office offers no Complete on a draft). Any other refusal: *"…can't be joined right now. Ask a
+    supervisor how to record the n good."* A READY job on such a work order shows COMPLETE disabled
+    with the reason (completing it would start it). With only scrap entered, the scrap and its
+    reason ride `complete` itself (declared at the close); a refusal then reads *"Nothing was saved
+    — …"*, because a refused close writes nothing.
 
   A concurrent 409 is surfaced verbatim and the board refreshes. The success toast names everyone
   auto-clocked-out (the complete response's `closed_time_entries`).

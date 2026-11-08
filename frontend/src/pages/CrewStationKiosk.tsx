@@ -33,7 +33,7 @@ import ProductionRecoveryNotice from '../components/kiosk/ProductionRecoveryNoti
 import { useProductionReportRequest } from '../components/kiosk/useProductionReportRequest';
 import { KioskApiError } from '../services/kioskStationClient';
 import { getKioskStationId } from '../utils/kiosk';
-import { startBlockedLabel } from '../utils/startBlock';
+import { startBlockKind, startBlockedLabel } from '../utils/startBlock';
 import { useKioskIdleLogout } from '../hooks/useKioskIdleLogout';
 import { usePageTitle } from '../hooks/usePageTitle';
 import { useWakeLock } from '../hooks/useWakeLock';
@@ -1132,19 +1132,28 @@ export default function CrewStationKiosk() {
             // Nothing sent: this badge has no entry to record good against. On a job
             // the work order refuses to start (draft / on hold) JOIN is refused too,
             // so the way out is only a badge that is already clocked in — and when
-            // nobody is, there is no floor way out at all: say so, not "scan a badge".
+            // nobody is, there is no floor way out at all: say so, not "scan a badge",
+            // and name the office way out that actually exists:
+            //  - HELD: the office books the pieces on the held job as it stands (the
+            //    running operation is closable on the Work Order page). Never "once a
+            //    supervisor resumes it" — a hold is not lifted just to close running work.
+            //  - DRAFT: no office surface offers Complete on a draft, so the supervisor
+            //    releases first; then the crew can JOIN, or the office records them. No
+            //    new completion door on drafts (an open owner question).
+            //  - a refusal startBlockKind does not recognise: generic, no button named.
             const qty = formatShortQuantity(good);
             const nobodyClockedIn = (item.roster || []).length === 0;
+            const blockKind = startBlockKind(item.work_order_status, item.start_blocked_reason);
             setBadgeError(
-              item.start_blocked_reason
-                ? nobodyClockedIn
-                  ? `No one is clocked in to this job, and it can't be joined while it is ${
-                      item.work_order_status === 'draft' ? 'in draft' : 'on hold'
-                    }. Record the ${qty} good once a supervisor ${
-                      item.work_order_status === 'draft' ? 'releases' : 'resumes'
-                    } it, or ask a supervisor.`
-                  : `This badge is not clocked in to this job — scan a badge that is clocked in to this job to record the ${qty} good.`
-                : `This badge is not clocked in to this job — scan a badge that is, or JOIN first, to record the ${qty} good.`
+              blockKind === null
+                ? `This badge is not clocked in to this job — scan a badge that is, or JOIN first, to record the ${qty} good.`
+                : !nobodyClockedIn
+                  ? `This badge is not clocked in to this job — scan a badge that is clocked in to this job to record the ${qty} good.`
+                  : blockKind === 'on_hold'
+                    ? `No one is clocked in to this job, and it can't be joined while it is on hold. Ask a supervisor to record the ${qty} good from the work order page.`
+                    : blockKind === 'draft'
+                      ? `No one is clocked in to this job, and it can't be joined while it is in draft. Ask a supervisor to release the work order first — then the ${qty} good can be recorded here or from the work order page.`
+                      : `No one is clocked in to this job, and it can't be joined right now. Ask a supervisor how to record the ${qty} good.`
             );
             return;
           }

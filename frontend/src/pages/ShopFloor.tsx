@@ -924,7 +924,7 @@ export default function ShopFloor() {
                               // The WORK ORDER refuses every start (not released /
                               // on hold). Disabled for back-entry too: the server
                               // refuses a source=backfill clock-in exactly like a
-                              // live one, so a supervisor resumes the job first.
+                              // live one, so a supervisor releases or resumes the job first.
                               // The reason is the server's text, verbatim.
                               <>
                                 <button

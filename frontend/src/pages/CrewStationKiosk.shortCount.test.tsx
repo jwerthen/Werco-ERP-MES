@@ -9,7 +9,9 @@
  *    AND scrap on `/production` (idempotent, request-id'd) and `/complete` carries only
  *    the acknowledgement; a badge with NO entry cannot record good (nothing is sent, and
  *    the screen says which badge to scan — without "JOIN" when the work order refuses a
- *    start, because JOIN is refused there too), and its scrap rides `/complete` itself;
+ *    start, because JOIN is refused there too — and, when nobody is clocked in, the
+ *    office way out: the work order page on a held job, release first on a draft), and
+ *    its scrap rides `/complete` itself;
  *  - a refusal of a `/complete` that carried the scrap says "Nothing was saved";
  *  - on a POOLED job whose earlier operation already declared the loss
  *    (`upstream_short_uncredited`), the one-tap scrap fill is withheld, as on the kiosk.
@@ -22,6 +24,7 @@ import CrewStationKiosk from './CrewStationKiosk';
 import * as kioskClient from '../services/kioskStationClient';
 import { KioskApiError } from '../services/kioskStationClient';
 import type { KioskCrewQueueItem } from '../components/kiosk/kioskConstants';
+import { WORK_ORDER_NOT_RELEASED_REASON, WORK_ORDER_ON_HOLD_REASON } from '../components/kiosk/heldOperationFixtures';
 
 jest.mock('../services/kioskStationClient', () => {
   const actual = jest.requireActual('../services/kioskStationClient');
@@ -271,28 +274,69 @@ describe('CrewStationKiosk — short count (owner ruling 1)', () => {
     expect(mocked.completeOperation).not.toHaveBeenCalled();
   });
 
-  it('on a held job nobody is clocked in to, it says there is no floor way to record the good — not "scan a badge"', async () => {
-    mocked.getQueue.mockResolvedValue(
-      queueWith({
-        ...ITEM,
-        roster: [],
-        work_order_status: 'on_hold',
-        start_blocked_reason: 'Work order is on hold — a supervisor must Resume Work Order first',
-      })
-    );
+  /**
+   * Nobody is clocked in and JOIN is refused, so there is no floor way to record the good.
+   * The advice names the office way out that ACTUALLY exists, which differs by refusal:
+   * a held job's running operation is closable as it stands from the work order page
+   * (never "once a supervisor resumes it" — a hold is not lifted just to close running
+   * work), while a draft offers no Complete in the office at all, so it is released first.
+   */
+  const nobodyClockedInAlert = async (row: Partial<KioskCrewQueueItem>) => {
+    mocked.getQueue.mockResolvedValue(queueWith({ ...ITEM, roster: [], ...row }));
     mocked.mintBadgeToken.mockResolvedValue(ALICE_MINT);
     renderKiosk();
     await openComplete();
     fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
     await screen.findByRole('dialog');
     scanBadge('E013');
+    return screen.findByRole('alert');
+  };
 
-    const alert = await screen.findByRole('alert');
+  it('on a HELD job nobody is clocked in to, the office records the good on the held job — never "resumes it"', async () => {
+    const alert = await nobodyClockedInAlert({
+      work_order_status: 'on_hold',
+      start_blocked_reason: WORK_ORDER_ON_HOLD_REASON,
+    });
     expect(alert).toHaveTextContent(
-      "No one is clocked in to this job, and it can't be joined while it is on hold. Record the 6 good once a supervisor resumes it, or ask a supervisor."
+      "No one is clocked in to this job, and it can't be joined while it is on hold. Ask a supervisor to record the 6 good from the work order page."
     );
+    expect(alert).not.toHaveTextContent(/resume/i);
     expect(alert).not.toHaveTextContent(/scan a badge/);
+    expect(mocked.reportProduction).not.toHaveBeenCalled();
     expect(mocked.completeOperation).not.toHaveBeenCalled();
+  });
+
+  it('on a DRAFT job nobody is clocked in to, the supervisor releases first — the work order page alone would dead-end', async () => {
+    const alert = await nobodyClockedInAlert({
+      work_order_status: 'draft',
+      start_blocked_reason: WORK_ORDER_NOT_RELEASED_REASON,
+    });
+    expect(alert).toHaveTextContent(
+      "No one is clocked in to this job, and it can't be joined while it is in draft. Ask a supervisor to release the work order first — then the 6 good can be recorded here or from the work order page."
+    );
+    expect(alert).not.toHaveTextContent(/resume/i);
+    expect(alert).not.toHaveTextContent(/on hold/);
+    expect(mocked.reportProduction).not.toHaveBeenCalled();
+    expect(mocked.completeOperation).not.toHaveBeenCalled();
+  });
+
+  it('a row without work_order_status still tells draft from held by the server reason text', async () => {
+    const alert = await nobodyClockedInAlert({
+      work_order_status: null,
+      start_blocked_reason: WORK_ORDER_NOT_RELEASED_REASON,
+    });
+    expect(alert).toHaveTextContent(/while it is in draft\. Ask a supervisor to release the work order first/);
+  });
+
+  it('a refusal it cannot place (terminal) falls back to generic advice — no draft/hold claim, no door named', async () => {
+    const alert = await nobodyClockedInAlert({
+      work_order_status: 'complete',
+      start_blocked_reason: 'cannot start operation: work order is complete',
+    });
+    expect(alert).toHaveTextContent(
+      "No one is clocked in to this job, and it can't be joined right now. Ask a supervisor how to record the 6 good."
+    );
+    expect(alert).not.toHaveTextContent(/on hold|in draft|work order page|resume|release/i);
   });
 
   it('a READY job the work order refuses to start: COMPLETE is disabled with the reason (completing would start it)', async () => {

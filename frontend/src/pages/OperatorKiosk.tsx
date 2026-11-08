@@ -17,7 +17,7 @@ import {
   saveKioskWorkstation,
 } from '../utils/kiosk';
 import { formatCentralDateTime, formatCentralTime } from '../utils/centralTime';
-import { startBlockedLabel } from '../utils/startBlock';
+import { startBlockKind, startBlockedLabel } from '../utils/startBlock';
 import { useKioskIdleLogout } from '../hooks/useKioskIdleLogout';
 import { usePageTitle } from '../hooks/usePageTitle';
 import { useWakeLock } from '../hooks/useWakeLock';
@@ -897,6 +897,8 @@ export default function OperatorKiosk() {
          * so the floor cannot clock back in to it — the recovery advice must not say to.
          */
         startBlockedReason?: string | null;
+        /** That row's `work_order_status` — which refusal it is (draft vs held) decides the advice. */
+        workOrderStatus?: string | null;
       }
     ) => {
       if (!job.operation_id) return;
@@ -1008,11 +1010,24 @@ export default function OperatorKiosk() {
             : 'Clocked out, but completing failed';
           // Name the next step (the steps view below is its own next step). On a draft or
           // held work order the floor cannot clock back in, so "clock in and Complete
-          // again" is impossible there — the running operation stays closable from the
-          // work order page. Never advise resuming the job just to close it.
-          const nextStep = context.startBlockedReason
-            ? `${opLabel} is still open; ask a supervisor to complete it from the work order page.`
-            : `${opLabel} is still open; clock in and Complete again, or ask a supervisor.`;
+          // again" is impossible there, and the two need DIFFERENT advice:
+          //  - HELD: the running operation is closable as it stands — from the work order
+          //    page. Never advise resuming the job just to close it.
+          //  - DRAFT: no office surface offers Complete on a draft (the Work Order page
+          //    hides it; the operations popup says to release first), so "the work order
+          //    page" would dead-end. The supervisor releases first; then the step can be
+          //    completed on the floor or from the work order page. No new completion door
+          //    on drafts — whether one may be completed that way is an open owner question.
+          //  - anything else the row refuses on: generic supervisor advice, no button named.
+          const blockKind = startBlockKind(context.workOrderStatus, context.startBlockedReason);
+          const nextStep =
+            blockKind === 'on_hold'
+              ? `${opLabel} is still open; ask a supervisor to complete it from the work order page.`
+              : blockKind === 'draft'
+                ? `${opLabel} is still open; ask a supervisor to release the work order first — then it can be completed here or from the work order page.`
+                : blockKind === 'other'
+                  ? `${opLabel} is still open; ask a supervisor.`
+                  : `${opLabel} is still open; clock in and Complete again, or ask a supervisor.`;
           showToast(
             'error',
             missing ? `${failedPrefix}: ${message}` : `${failedPrefix}: ${message} — ${nextStep}`
@@ -2213,6 +2228,7 @@ export default function OperatorKiosk() {
                 unaccountedAfter: figures.unaccountedAfter,
                 fullCount: figures.fullCount,
                 startBlockedReason: activeQueueItem?.start_blocked_reason ?? null,
+                workOrderStatus: activeQueueItem?.work_order_status ?? null,
               }
             )
           }
@@ -2226,6 +2242,7 @@ export default function OperatorKiosk() {
                 fullCount: figures.fullCount,
                 unaccountedAfter: figures.unaccountedAfter,
                 startBlockedReason: activeQueueItem?.start_blocked_reason ?? null,
+                workOrderStatus: activeQueueItem?.work_order_status ?? null,
               }
             )
           }
