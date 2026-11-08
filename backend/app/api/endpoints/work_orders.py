@@ -1530,9 +1530,11 @@ def _lock_laser_import_wipe_operations(
     lock (``_check_laser_header_before_audit``) and the chain lock (the superseded-nest
     ``log_delete`` rows) first and only reach the operations when the rebuild DELETEd them, so a
     nest completion landing mid-import closed a lock cycle Postgres breaks by rolling one side
-    back (40P01). Locking the wipe set here -- right after the target is resolved, before any other
+    back (40P01). Locking the wipe set first -- right after the target is resolved, before any other
     row lock and any write to an existing job -- puts the import on the floor's order: operations
-    -> work order -> audit chain (invariant 4: row locks before the global chain lock).
+    -> work order -> audit chain (invariant 4: row locks before the global chain lock). The caller
+    is ``_lock_laser_import_rows``, which then takes the work order without waiting while it holds
+    these.
 
     The set is ``laser_nest_service.laser_import_wipe_operation_ids`` -- the one definition the
     rebuild deletes and the API-token refusal judges -- locked in ascending id order, tenant-scoped.
@@ -1555,6 +1557,117 @@ def _lock_laser_import_wipe_operations(
     )
 
 
+# How many times the package import takes its operation locks and then tries the work order
+# before it gives up with the 409 (``_lock_laser_import_rows``). Each failed try lets go of the
+# operations and waits for the work order's holder to finish first, so a retry is only spent when
+# yet another writer took the work order in between.
+_LASER_IMPORT_LOCK_ATTEMPTS = 3
+
+
+class _LaserWorkOrderBusy(Exception):
+    """Internal to ``_lock_laser_import_rows``: another writer holds the laser work order's row lock."""
+
+
+def _try_lock_laser_work_order(db: Session, *, work_order: WorkOrder, company_id: int) -> bool:
+    """Take the import's ``work_orders`` row lock only if nobody holds a conflicting one -- never wait.
+
+    ``FOR NO KEY UPDATE SKIP LOCKED``: a row another writer holds comes back as no row, at once,
+    where a plain ``FOR UPDATE`` would queue. ``NO KEY UPDATE`` is the strength the import needs and
+    no more: it never changes the work order's key, it still blocks every other header ``UPDATE`` and
+    row lock (so ``_check_laser_header_before_audit``'s version check stays sound until commit), and
+    it does not conflict with the ``KEY SHARE`` a foreign-key check takes -- a time entry, event or
+    blocker inserted against this work order is not a reason to back off. Column-only, so the loaded
+    work order is never refreshed (the header check compares against it). SQLite renders no lock
+    clause, so there the row always comes back. True when the lock is held.
+    """
+    locked_version = (
+        tenant_filter(db.query(WorkOrder.version), WorkOrder, company_id)
+        .filter(WorkOrder.id == work_order.id)
+        .with_for_update(key_share=True, skip_locked=True)
+        .scalar()
+    )
+    return locked_version is not None
+
+
+def _wait_for_laser_work_order(db: Session, *, work_order: WorkOrder, company_id: int) -> None:
+    """Wait for the writer holding the laser work order to finish, holding no row lock while waiting.
+
+    Takes the same ``FOR NO KEY UPDATE`` the import needs inside its own savepoint and rolls the
+    savepoint straight back, which releases it: the call returns once the holder has committed or
+    rolled back. The import holds no row lock here (its operation locks went with the try's
+    savepoint; only its ``laser_child_work_order:*`` advisory locks remain, which no writer takes
+    while holding this row), so this wait cannot close a cycle.
+    """
+    waiter = db.begin_nested()
+    try:
+        (
+            tenant_filter(db.query(WorkOrder.id), WorkOrder, company_id)
+            .filter(WorkOrder.id == work_order.id)
+            .with_for_update(key_share=True)
+            .scalar()
+        )
+    finally:
+        waiter.rollback()
+
+
+def _lock_laser_import_rows(db: Session, *, laser_work_order: WorkOrder, company_id: int) -> None:
+    """Lock what the package import rewrites on an existing laser job: its operations, then the work order.
+
+    Two lock orders exist on a work order and its operations, and the import must never wait for
+    one half while it holds the other. The floor's SFI-1 verbs (completion, production report,
+    clock-out, reduce-production, material return) lock the OPERATION, then the WORK ORDER. Every
+    writer that dirties both through the unit of work without locking first flushes the WORK
+    ORDER's ``UPDATE`` before the operation's (a first clock-in or office start on a released job,
+    ``PUT /work-orders/{id}`` returning to draft, release, a reconcile heal), a time-entry or event
+    insert checks its work-order foreign key before its operation one, and force-complete, the
+    scheduling routes and nest restore lock the work order first outright. So:
+
+    1. the operations the wipe deletes, ascending id, blocking (``_lock_laser_import_wipe_operations``):
+       an SFI-1 verb already holding one finishes first, and cannot then queue on the work order,
+       which the import does not hold yet;
+    2. the work order, only if it is free (``_try_lock_laser_work_order``, ``SKIP LOCKED``). If a
+       work-order-first writer holds it, that writer may be about to queue on an operation the
+       import holds -- the cycle Postgres settles by rolling one side back. Instead the import rolls
+       its savepoint back, releasing the operation locks, waits for that writer to finish while
+       holding no row lock (``_wait_for_laser_work_order``), and starts again from step 1.
+
+    The import therefore never waits for the work order while it holds an operation, and never for
+    an operation while it holds the work order. After ``_LASER_IMPORT_LOCK_ATTEMPTS`` busy tries it
+    raises ``StaleDataError`` -- the route's 409 "refresh and try again" -- having written nothing.
+    Whatever a writer it waited for changed is judged as usual: the operations are re-read under
+    their lock, and a work order saved in the meantime fails the header check's version comparison
+    (409). Called first in the import's transaction on an existing laser job, before any write and
+    any audit row; a job with no operation to replace locks nothing here (the header check then
+    takes the work order, holding no operation lock).
+    """
+    for attempt in range(1, _LASER_IMPORT_LOCK_ATTEMPTS + 1):
+        try:
+            with db.begin_nested():
+                operations = _lock_laser_import_wipe_operations(
+                    db, laser_work_order=laser_work_order, company_id=company_id
+                )
+                if not operations:
+                    return
+                if not _try_lock_laser_work_order(db, work_order=laser_work_order, company_id=company_id):
+                    # Leaving the block this way rolls the savepoint back: the operation locks go too.
+                    raise _LaserWorkOrderBusy()
+            return
+        except _LaserWorkOrderBusy:
+            logger.info(
+                "Laser-nest import found work order %s held by another writer (try %s of %s); "
+                "released its operation locks to wait",
+                laser_work_order.id,
+                attempt,
+                _LASER_IMPORT_LOCK_ATTEMPTS,
+            )
+        if attempt < _LASER_IMPORT_LOCK_ATTEMPTS:
+            _wait_for_laser_work_order(db, work_order=laser_work_order, company_id=company_id)
+    raise StaleDataError(
+        f"work_orders row {laser_work_order.id} stayed locked by other writers through "
+        f"{_LASER_IMPORT_LOCK_ATTEMPTS} tries to lock it after its operations"
+    )
+
+
 def _check_laser_header_before_audit(db: Session, *, work_order: WorkOrder, company_id: int) -> None:
     """Version-check and row-lock the import's laser work order BEFORE its first audit row.
 
@@ -1568,7 +1681,7 @@ def _check_laser_header_before_audit(db: Session, *, work_order: WorkOrder, comp
 
     * ``db.flush()`` sends what the header has pending (the session is ``autoflush=False``), so
       its version-checked ``UPDATE`` raises ``StaleDataError`` here, outside the audit service;
-    * a ``FOR UPDATE`` read of the stored ``version`` covers a header with nothing pending yet.
+    * a ``FOR NO KEY UPDATE`` read of the stored ``version`` covers a header with nothing pending yet.
       Its first ``UPDATE`` may come only after the rebuild (a re-derived ``quantity_ordered``),
       or never: a re-import with the same total planned runs onto a released, stamped job with
       zero counts writes nothing to the header at all. Without the read, a count someone saved
@@ -1577,19 +1690,23 @@ def _check_laser_header_before_audit(db: Session, *, work_order: WorkOrder, comp
       edit, raised as the same error -- so that shape now answers 409, deliberately, where it
       used to answer 200.
 
-    Either step takes the ``work_orders`` row lock after the operation locks
-    (``_lock_laser_import_wipe_operations``, SFI-1) and before the global audit-chain lock (invariant
-    4), and once it is held nobody else can save the header before commit. The post-rebuild
-    ``UPDATE`` is still flushed by the caller before the work-order audit row, so a failure there
-    is never swallowed inside the audit service either. The read is column-only, so it never
-    refreshes the loaded row -- which would hide the very mismatch it checks. It writes nothing
+    On a job with operations to replace, ``_lock_laser_import_rows`` already holds this row lock
+    (taken after the operation locks, SFI-1, and only when free), so neither step waits here; on any
+    other job this is where the import takes it, holding no operation lock. Either way it comes
+    before the global audit-chain lock (invariant 4), and once it is held nobody else can save the
+    header before commit. ``NO KEY UPDATE`` matches that lock and is all the import needs (see
+    ``_try_lock_laser_work_order``): a stronger ``FOR UPDATE`` here would queue on a concurrent
+    insert's foreign-key ``KEY SHARE`` while the import holds the operations that insert waits for.
+    The post-rebuild ``UPDATE`` is still flushed by the caller before the work-order audit row, so a
+    failure there is never swallowed inside the audit service either. The read is column-only, so it
+    never refreshes the loaded row -- which would hide the very mismatch it checks. It writes nothing
     the import would not have.
     """
     db.flush()
     stored_version = (
         tenant_filter(db.query(WorkOrder.version), WorkOrder, company_id)
         .filter(WorkOrder.id == work_order.id)
-        .with_for_update()
+        .with_for_update(key_share=True)
         .scalar()
     )
     if stored_version != work_order.version:
@@ -3207,10 +3324,13 @@ async def _run_laser_nest_import(
     nothing and is never refused here.
 
     Lock order on an existing laser work order is the floor's (SFI-1): the operations the wipe
-    deletes (``_lock_laser_import_wipe_operations``), then the work order
-    (``_check_laser_header_before_audit``), then the audit chain. A concurrent edit to the job,
-    or a lock race Postgres settles by rolling this import back (40P01 / 40001), answers 409
-    with the app-wide "refresh and try again" text; nothing of the import commits.
+    deletes, then the work order -- taken only when free; while another writer holds it the
+    import lets go of the operations and waits (``_lock_laser_import_rows``) -- then the audit
+    chain, as the import's own statement before its first audit row
+    (``AuditService.acquire_chain_lock``). A concurrent edit to the job, a work order that stays
+    busy through every try, or a lock race Postgres settles by rolling this import back
+    (40P01 / 40001) answers 409 with the app-wide "refresh and try again" text; nothing of the
+    import commits.
     """
     # This PR's extension (see the helper): a standing API token may not re-import over nest
     # operations that carry recorded work. Checked FIRST -- before the rows parse, the upload
@@ -3377,17 +3497,19 @@ async def _run_laser_nest_import(
                     parent_work_order, child_work_order = _resolve_laser_target(
                         db, work_order=target_work_order, company_id=company_id
                     )
-                    # SFI-1: row-lock every operation the wipe deletes FIRST, before the work
-                    # order's row lock (the header check below) and the audit-chain lock (the
-                    # first audit row) -- the floor's order, so a nest completion landing
-                    # mid-import queues behind the import instead of deadlocking it. Nothing
-                    # between here and the header check writes an operation: the token
-                    # re-check and the work-center pick only read, and the release and the
-                    # zeroing below write the header alone.
-                    _lock_laser_import_wipe_operations(db, laser_work_order=child_work_order, company_id=company_id)
-                    # The token refusal again, now under the import's advisory lock and the
-                    # operation locks, judged on the rows just locked, and before the first
-                    # write to this work order and the first audit row.
+                    # SFI-1: row-lock every operation the wipe deletes FIRST, then the work
+                    # order -- taken only when free, letting go of the operations to wait
+                    # whenever another writer holds it -- and both before the audit-chain lock
+                    # below. A nest completion landing mid-import queues behind the import, and
+                    # a writer that locks the work order before its operations makes the
+                    # import step back instead of deadlocking it. Nothing between here and the
+                    # header check writes an operation: the token re-check and the
+                    # work-center pick only read, and the release and the zeroing below write
+                    # the header alone.
+                    _lock_laser_import_rows(db, laser_work_order=child_work_order, company_id=company_id)
+                    # The token refusal again, now under the import's advisory lock and its row
+                    # locks, judged on the rows just locked, and before the first write to this
+                    # work order and the first audit row.
                     _refuse_api_token_reimport_over_recorded_work(
                         db, current_user=current_user, laser_work_order=child_work_order, company_id=company_id
                     )
@@ -3421,6 +3543,14 @@ async def _run_laser_nest_import(
                 # writes just made. Before the first audit row, so a header someone else saved
                 # mid-import answers the 409 below rather than the 400 -- see the helper.
                 _check_laser_header_before_audit(db, work_order=child_work_order, company_id=company_id)
+                # The global audit-chain lock as this import's OWN statement, once its row locks
+                # are held and before the first audit row. AuditService.log takes the same lock
+                # inside an except that swallows everything, so a lock race the import lost THERE
+                # (Postgres rolling it back as the deadlock victim against a writer that holds the
+                # chain and waits for one of these rows) surfaced on the next statement as the 400
+                # for a conflicting nest row. Here it reaches the lost-race 409 below; the later
+                # audit rows stack on the lock (it is re-entrant).
+                audit.acquire_chain_lock()
                 parent_work_order_id = parent_work_order.id if parent_work_order is not None else None
 
                 # IMPORT-REPLACES-EVERYTHING wipes ALL prior non-deleted nests on
