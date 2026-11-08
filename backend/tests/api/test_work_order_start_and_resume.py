@@ -31,6 +31,7 @@ from app.services.work_order_state_service import (
     _worked_operation_ids,
     demote_operations_for_sequencing,
     demote_ready_operations,
+    promote_ready_operations,
     work_order_hold_restore_target,
 )
 from tests.api.kiosk_test_helpers import (
@@ -38,6 +39,7 @@ from tests.api.kiosk_test_helpers import (
     make_user,
     make_wo_with_operation,
     make_work_center,
+    queue_url,
     user_headers,
 )
 
@@ -574,3 +576,139 @@ class TestRestoreTargetAndDemotionCore:
         wo, _, _ = self._wo(db_session)
         with pytest.raises(ValueError):
             demote_ready_operations(db_session, wo, scope="everything")  # type: ignore[arg-type]
+
+
+# =========================================================================== a draft stays off the board
+
+
+def open_labor(db: Session, user, op: WorkOrderOperation) -> TimeEntry:
+    """An operator still clocked in to ``op`` -- labor running when the job was held."""
+    entry = TimeEntry(
+        user_id=user.id,
+        work_order_id=op.work_order_id,
+        operation_id=op.id,
+        work_center_id=op.work_center_id,
+        entry_type=TimeEntryType.RUN,
+        clock_in=datetime.utcnow() - timedelta(hours=1),
+        company_id=user.company_id,
+    )
+    db.add(entry)
+    db.commit()
+    db.refresh(entry)
+    return entry
+
+
+def queued_operation_ids(client, user, wc_id: int) -> set[int]:
+    resp = client.get(queue_url(wc_id), headers=user_headers(user))
+    assert resp.status_code == 200, resp.text
+    return {row["operation_id"] for row in resp.json()["queue"]}
+
+
+class TestCompletingRunningLaborOnADraftPromotesNothing:
+    """Resume-to-DRAFT keeps labor that was running when the job was held (always closable,
+    by rule). Finishing it reaches the completion seam, which must not put the operations
+    the resume just demoted -- with REQUIRED audit rows -- back on the board: a draft's
+    operations reach READY through Release only. (Decision of record: the completion itself
+    stays allowed.)"""
+
+    def test_laser_package_demoted_nests_stay_pending_after_the_running_nest_is_clocked_out(
+        self, client, db_session
+    ):
+        wc = make_work_center(db_session)
+        supervisor = make_user(db_session, role=UserRole.SUPERVISOR)
+        operator = make_user(db_session, role=UserRole.OPERATOR)
+        wo, nest1 = make_wo_with_operation(
+            db_session,
+            work_center=wc,
+            wo_status=WorkOrderStatus.ON_HOLD,
+            op_status=OperationStatus.IN_PROGRESS,
+            sequential_operations=False,
+        )
+        wo.work_order_type = WorkOrderType.LASER_CUTTING.value
+        nest1.component_quantity = 1
+        nest1.actual_start = datetime.utcnow() - timedelta(hours=1)
+        db_session.commit()
+        nest2 = add_op(db_session, wo, wc, sequence=20, status=OperationStatus.READY, component_quantity=1)
+        nest3 = add_op(db_session, wo, wc, sequence=30, status=OperationStatus.READY, component_quantity=1)
+        entry = open_labor(db_session, operator, nest1)
+
+        resumed = client.post(resume_url(wo.id), headers=user_headers(supervisor))
+        assert resumed.status_code == 200, resumed.text
+        assert resumed.json()["status"] == "draft" and resumed.json()["operations_returned_to_pending"] == 2
+
+        out = client.post(
+            f"/api/v1/shop-floor/clock-out/{entry.id}", json={"quantity_produced": 1}, headers=user_headers(operator)
+        )
+
+        assert out.status_code == 200, out.text
+        assert reread(db_session, WorkOrderOperation, nest1.id).status == OperationStatus.COMPLETE
+        statuses = [reread(db_session, WorkOrderOperation, n.id).status for n in (nest2, nest3)]
+        assert statuses == [OperationStatus.PENDING, OperationStatus.PENDING], "the demotions stand"
+        ready = db_session.query(WorkOrderOperation).filter_by(work_order_id=wo.id, status=OperationStatus.READY)
+        assert ready.count() == 0
+        assert reread(db_session, WorkOrder, wo.id).status == WorkOrderStatus.DRAFT
+        assert queued_operation_ids(client, operator, wc.id) & {nest1.id, nest2.id, nest3.id} == set()
+        # The only status rows on the demoted nests are the resume's own ready -> pending.
+        for nest in (nest2, nest3):
+            assert [(r.old_values, r.new_values) for r in op_status_rows(db_session, nest.id)] == [
+                ({"status": "ready"}, {"status": "pending"})
+            ]
+
+    def test_sequenced_job_successor_stays_pending_after_the_running_step_is_clocked_out(self, client, db_session):
+        wc_a = make_work_center(db_session)
+        wc_b = make_work_center(db_session)
+        supervisor = make_user(db_session, role=UserRole.SUPERVISOR)
+        operator = make_user(db_session, role=UserRole.OPERATOR)
+        wo, op10 = make_wo_with_operation(
+            db_session, work_center=wc_a, wo_status=WorkOrderStatus.ON_HOLD, op_status=OperationStatus.IN_PROGRESS
+        )
+        op10.actual_start = datetime.utcnow() - timedelta(hours=1)
+        db_session.commit()
+        op20 = add_op(db_session, wo, wc_b, sequence=20, status=OperationStatus.PENDING)
+        entry = open_labor(db_session, operator, op10)
+
+        resumed = client.post(resume_url(wo.id), headers=user_headers(supervisor))
+        assert resumed.status_code == 200, resumed.text
+        assert resumed.json()["status"] == "draft"
+
+        out = client.post(
+            f"/api/v1/shop-floor/clock-out/{entry.id}",
+            json={"quantity_produced": float(wo.quantity_ordered)},
+            headers=user_headers(operator),
+        )
+
+        assert out.status_code == 200, out.text
+        assert reread(db_session, WorkOrderOperation, op10.id).status == OperationStatus.COMPLETE
+        assert reread(db_session, WorkOrderOperation, op20.id).status == OperationStatus.PENDING
+        assert reread(db_session, WorkOrder, wo.id).status == WorkOrderStatus.DRAFT
+        assert op20.id not in queued_operation_ids(client, operator, wc_b.id)
+
+        # Release is still the door: one click promotes the successor normally.
+        released = client.post(f"/api/v1/work-orders/{wo.id}/release", headers=user_headers(supervisor))
+        assert released.status_code == 200, released.text
+        assert reread(db_session, WorkOrderOperation, op20.id).status == OperationStatus.READY
+
+    @pytest.mark.parametrize(
+        "wo_status", [WorkOrderStatus.DRAFT, WorkOrderStatus.COMPLETE, WorkOrderStatus.CANCELLED]
+    )
+    def test_the_rule_promotes_nothing_on_a_draft_or_terminal_work_order(self, db_session, wo_status):
+        wc = make_work_center(db_session)
+        wo, op = make_wo_with_operation(
+            db_session, work_center=wc, wo_status=wo_status, op_status=OperationStatus.PENDING
+        )
+
+        assert promote_ready_operations(wo, [op], db=db_session) == []
+        assert op.status == OperationStatus.PENDING
+        db_session.rollback()
+
+    @pytest.mark.parametrize("wo_status", [WorkOrderStatus.RELEASED, WorkOrderStatus.ON_HOLD])
+    def test_released_and_held_work_orders_still_promote_positive_control(self, db_session, wo_status):
+        """ON_HOLD keeps promoting, as documented -- every start verb still refuses its rows."""
+        wc = make_work_center(db_session)
+        wo, op = make_wo_with_operation(
+            db_session, work_center=wc, wo_status=wo_status, op_status=OperationStatus.PENDING
+        )
+
+        assert [p.id for p in promote_ready_operations(wo, [op], db=db_session)] == [op.id]
+        assert op.status == OperationStatus.READY
+        db_session.rollback()

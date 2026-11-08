@@ -481,7 +481,21 @@ def promote_ready_operations(
     anchors on the EARLIEST event (``flow_metrics_service._ready_times_by_operation``
     is ``func.min(occurred_at)``). Do not rewrite a consumer to last-wins without
     dealing with this -- it would silently erase queue time on every held job.
+
+    NEVER PROMOTES A DRAFT OR TERMINAL WORK ORDER -- the rule itself, at all four seams, not
+    only the read heal. Release is the authorization step and the record of who put work on
+    the floor, so nothing but Release (which writes RELEASED *before* it calls
+    ``release_first_ready_operation``) may put a draft's operations on the dispatch board and
+    the kiosk. This is what keeps resume-to-DRAFT's required, audited demotions demoted: a
+    job resumed to DRAFT can still carry labor that was running when it was held (that
+    labor stays closable, by rule), and finishing it reaches the completion seam
+    (``release_next_ready_operation``) -- which used to promote the successors, and on a
+    laser pool every demoted nest, straight back onto the board with no audit row. ON_HOLD
+    keeps promoting, as documented: a held work order is not a terminal one, and every start
+    verb still refuses its operations until Resume Work Order.
     """
+    if work_order.status == WorkOrderStatus.DRAFT or work_order.status in TERMINAL_WO_STATUSES:
+        return []
     company_id = work_order.company_id
     scoped_ops = [
         op

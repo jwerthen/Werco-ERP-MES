@@ -1629,10 +1629,15 @@ company-scoped.
 >   shop-floor operations/dashboard read, is what repairs it**, after which the board shows the pool.
 >   Because the operations list filters status in SQL, the load that heals is the one *before* the
 >   rows appear: the operator's next poll shows them.
-> - **DRAFT is never promoted by a read.** Release remains the authorization step and the record of
->   who authorized production, so a GET must not put unreleased work on the floor's board. A DRAFT WO
->   promotes at `POST /work-orders/{id}/release` exactly as before — the carve-out delays promotion
->   to the authorized moment, it does not lose it. Terminal WOs (COMPLETE / CLOSED / CANCELLED) are
+> - **DRAFT is never promoted by a read — or by anything else.** Release remains the authorization
+>   step and the record of who authorized production, so a GET must not put unreleased work on the
+>   floor's board. Since Wave 2 the carve-out lives in the promotion rule itself
+>   (`promote_ready_operations` returns nothing for a DRAFT or terminal work order), so it holds at all
+>   four seams: the completion seam no longer promotes on a draft either (finishing labor that was
+>   running when a job was resumed to DRAFT used to put the operations the resume had just demoted
+>   back on the board). A DRAFT WO promotes at `POST /work-orders/{id}/release` exactly as before —
+>   Release writes RELEASED before it promotes — so the carve-out delays promotion to the authorized
+>   moment, it does not lose it. Terminal WOs (COMPLETE / CLOSED / CANCELLED) are
 >   likewise skipped, including one this same pass just drove to COMPLETE. Every other non-terminal
 >   status promotes — a work order whose **header** is ON_HOLD included, matching what the completion
 >   seam already does; the **operation**-level ON_HOLD carve-out is the one that stops a pool.
@@ -1796,8 +1801,10 @@ company-scoped.
 > work-order ON_HOLD, so every hold placed from now on is on released work. Re-sending `on_hold` on a
 > held job, ON_HOLD → DRAFT and ON_HOLD → CANCELLED are unchanged. **Known gap, a follow-up:** the
 > `PUT`'s blind DRAFT / ON_HOLD → RELEASED / IN_PROGRESS status writes are still accepted from the API
-> (the MCP `update_work_order` tool refuses them), and `POST /work-orders/{id}/complete` has no
-> draft / on-hold gate. The hold itself is recorded by the `PUT`'s best-effort `log_update`.
+> (the MCP `update_work_order` tool refuses them), `POST /work-orders/{id}/complete` has no
+> draft / on-hold gate, and finishing the last running operation of a draft or held job completes the
+> work order (labor stays closable by rule; whether such a job may complete is the owner's call). The
+> hold itself is recorded by the `PUT`'s best-effort `log_update`.
 >
 > **Resume Work Order — `POST /work-orders/{id}/resume`** (Admin / Manager / Supervisor) is the one door
 > that puts a held job back on the floor under the release-record rule below. (`PUT` ON_HOLD → DRAFT and
@@ -1814,8 +1821,14 @@ company-scoped.
 > | no | — | `draft` | `no_release_record` |
 >
 > A **draft** result returns every un-worked READY operation — laser nests included — to PENDING, so a
-> draft leaves no cards on the dispatch board or the kiosk; release it with
-> `POST /work-orders/{id}/release`. A legacy hold with no stamp (an older laser package, an MRP
+> draft leaves no cards on the dispatch board or the kiosk, and nothing puts them back before Release:
+> the promotion rule never promotes a draft, so finishing labor that was still running when the job was
+> held (it stays closable, by rule) completes that operation without re-promoting its successors or the
+> demoted nests. Release it with `POST /work-orders/{id}/release`. **Finishing the last running
+> operation of a draft or held job completes the work order** — the always-closable-labor rule wins,
+> the completion is audited like any other, and whether a job with no release record (or one on hold)
+> may complete this way is an open owner follow-up beside `POST /work-orders/{id}/complete`'s missing
+> draft / on-hold gate. A legacy hold with no stamp (an older laser package, an MRP
 > auto-released or `PUT`-released job) therefore resumes to DRAFT: restrictive, visible, one Release
 > click to fix. Operation-level holds are untouched (lift them with Resume / Clear Hold). Refusals:
 > **400** `Work order is not on hold`, **404** `Work order not found` (missing, cross-tenant or
