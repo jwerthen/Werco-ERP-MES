@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from typing import Any, Iterator, Optional
 
 from fastapi import HTTPException
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 from app.core.security import get_password_hash
@@ -26,7 +27,13 @@ class RequiredSecurityAudit(AuditService):
     """
 
     def log(self, *args, **kwargs):
-        entry = super().log(*args, **kwargs)
+        # ``AuditService.log`` re-raises a database error that aborted the transaction.
+        # Report it as ``AuditWriteError`` too, as ``log_required`` does, so the
+        # security write answers its documented 503 rather than a generic 409/500.
+        try:
+            entry = super().log(*args, **kwargs)
+        except DBAPIError as exc:
+            raise AuditWriteError("The required audit record could not be saved") from exc
         if entry is None:
             raise AuditWriteError("The required audit record could not be saved")
         return entry

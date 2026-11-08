@@ -23,6 +23,7 @@ vacuous. ``scripts/verify_audit_deadlock_postgres.py`` proves the same on real P
 
 import itertools
 import sqlite3
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import psycopg2.extensions
@@ -50,6 +51,7 @@ from app.main import app
 from app.models.audit_log import AuditLog
 from app.models.company import Company
 from app.models.part import Part
+from app.models.quality import NonConformanceReport
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder
 from app.services import audit_service as audit_module
@@ -231,6 +233,20 @@ def test_commit_of_an_aborted_transaction_is_refused_with_its_cause(libpq_like):
     assert refused.value.orig.pgcode == "40P01"
     assert "FakeDeadlock" in refused.value.orig.cause
     assert is_lost_lock_race(refused.value)
+    assert _count_notes(libpq_like.engine) == 0
+
+
+def test_a_core_connection_commit_is_refused_too(libpq_like):
+    """The guard is on the engine, not the Session: an ``engine.begin()`` block cannot silently lose a write."""
+    _make_table(libpq_like.engine)
+    with pytest.raises(AbortedTransactionCommitError) as refused:
+        with libpq_like.engine.begin() as conn:
+            conn.execute(text("INSERT INTO notes (body) VALUES ('lost')"))
+            try:
+                conn.execute(text(DEADLOCK_SQL))
+            except DBAPIError:
+                pass  # swallowed; the block then exits normally and commits
+    assert refused.value.orig.pgcode == "40P01"
     assert _count_notes(libpq_like.engine) == 0
 
 
@@ -584,3 +600,83 @@ def test_route_retry_after_the_lost_race_succeeds_with_its_audit_row(routed, mon
     assert response.status_code == 200, response.text
     assert _priority(routed) == 1
     assert _work_order_audit_rows(routed) == 1
+
+
+# --------------------------------------------------------------------------------------------
+# Required-audit doors: required evidence lost to the race is audit loss, so rollback + 503
+# --------------------------------------------------------------------------------------------
+
+
+def _create_ncr(routed, client: TestClient):
+    """A ``log_required`` caller: ``POST /quality/ncr`` (``quality_record_transaction``)."""
+    response = client.post(
+        "/api/v1/quality/ncr",
+        json={
+            "source": "in_process",
+            "title": "Lost a lock race",
+            "description": "The required audit row's chain-lock wait was the deadlock victim.",
+        },
+        headers=routed.headers,
+    )
+    with Session(routed.engine) as session:
+        saved = session.query(NonConformanceReport).count() > 0
+    return response, saved
+
+
+def _unlock_a_locked_user(routed, client: TestClient):
+    """A ``RequiredSecurityAudit`` caller: ``POST /users/{id}/unlock`` (``atomic_security_write``)."""
+    with Session(routed.engine) as session:
+        target = User(
+            company_id=1,
+            email="guard-locked@example.test",
+            employee_id="GUARD-2",
+            first_name="Locked",
+            last_name="Out",
+            hashed_password="unused",
+            role=UserRole.OPERATOR,
+            is_active=True,
+            failed_login_attempts=5,
+            locked_until=datetime.utcnow() + timedelta(minutes=30),
+        )
+        session.add(target)
+        session.commit()
+        target_id = target.id
+    response = client.post(f"/api/v1/users/{target_id}/unlock", headers=routed.headers)
+    with Session(routed.engine) as session:
+        saved = session.get(User, target_id).failed_login_attempts != 5
+    return response, saved
+
+
+@pytest.mark.parametrize(
+    "door", [_create_ncr, _unlock_a_locked_user], ids=["log_required", "RequiredSecurityAudit.log"]
+)
+def test_required_audit_doors_answer_503_on_a_lost_chain_lock_race(routed, caplog, door):
+    """Both doors promise "503 on audit loss" (CLAUDE.md invariant 2; the unlock route's docstring).
+
+    ``test_account_provisioning_boundary`` pins that promise only for ``log`` returning None. Since
+    ``log`` now re-raises an un-contained ``DBAPIError``, each door must turn THAT into
+    ``AuditWriteError`` as well, or a lost race leaks out as the generic 409 (and a non-race error
+    as a 500) on the paths that documented 503.
+    """
+    response, saved = door(routed, TestClient(app))
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"] == "Unable to save audit record"
+    assert not saved
+    with Session(routed.engine) as session:
+        assert session.query(AuditLog).count() == 0
+    assert _guard_refusals(caplog) == 0
+
+
+@pytest.mark.parametrize("method", ["log", "log_create", "log_update", "log_status_change"])
+def test_hank_required_audit_reports_a_reraised_database_error_as_audit_write_error(method):
+    """``_RequiredCreateAudit`` makes every legacy audit call in a Hank action required: a re-raised
+    ``DBAPIError`` is required evidence lost, so it must be ``AuditWriteError`` like a ``None``."""
+    from app.services.hank_task_service import _RequiredCreateAudit
+
+    def lose(*_args, **_kwargs):
+        raise _driver_error("40P01")
+
+    required = _RequiredCreateAudit(SimpleNamespace(**{method: lose}))
+    with pytest.raises(AuditWriteError) as raised:
+        getattr(required, method)("work_order", 1, "WO-1")
+    assert raised.value.__cause__.orig.pgcode == "40P01"

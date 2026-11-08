@@ -7,6 +7,7 @@ from enum import Enum
 
 from fastapi import HTTPException
 from sqlalchemy import inspect
+from sqlalchemy.exc import DBAPIError
 
 from app.db.locks import acquire_generator_lock
 from app.db.tenant_filter import tenant_query
@@ -84,7 +85,12 @@ class _RequiredCreateAudit(AuditService):
         self._delegate = delegate
 
     def _call(self, method, *args, **kwargs):
-        entry = getattr(self._delegate, method)(*args, **kwargs)
+        # A database error ``AuditService.log`` re-raises (it aborted the transaction) is
+        # a lost required audit too: same AuditWriteError, so the same rollback and 503.
+        try:
+            entry = getattr(self._delegate, method)(*args, **kwargs)
+        except DBAPIError as exc:
+            raise AuditWriteError('Unable to save required domain audit record') from exc
         if entry is None:
             raise AuditWriteError('Unable to save required domain audit record')
         return entry
