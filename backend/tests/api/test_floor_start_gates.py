@@ -865,9 +865,7 @@ def test_the_put_count_then_read_then_office_complete_door_is_closed(client, db_
     operation, let any reconciling read lift it, then office-complete it ungated. Every step
     is now refused or inert: nothing completes, nothing is booked, the job is unchanged."""
     wc, _, supervisor = floor
-    wo, op = make_wo_with_operation(
-        db_session, work_center=wc, wo_status=wo_status, op_status=OperationStatus.READY
-    )
+    wo, op = make_wo_with_operation(db_session, work_center=wc, wo_status=wo_status, op_status=OperationStatus.READY)
 
     assert put_operation(client, op, supervisor, quantity_complete=10).status_code == 409
     assert client.get(f"/api/v1/work-orders/{wo.id}", headers=user_headers(supervisor)).status_code == 200

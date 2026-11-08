@@ -83,6 +83,14 @@ MSG_DRAFT_CANNOT_BE_HELD = (
     "A draft work order has not been released, so there is nothing on the floor to hold. "
     "Leave it in draft until it is ready, then release it."
 )
+# PUT /work-orders/{id} {status: draft} on a released / in-progress / held job returns its
+# un-worked READY operations to PENDING (a draft leaves no cards on the dispatch board or the
+# kiosk) with one REQUIRED audit row each. When those rows cannot be written the whole PUT is
+# rolled back (503) -- the same fail-closed posture as POST /work-orders/{id}/resume.
+MSG_RETURN_TO_DRAFT_AUDIT_UNAVAILABLE = (
+    "The audit record for taking this work order's operations off the floor could not be saved; nothing was "
+    "changed. Retry."
+)
 
 
 def _status_value(status: object) -> str:

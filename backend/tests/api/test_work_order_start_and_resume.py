@@ -611,9 +611,7 @@ class TestCompletingRunningLaborOnADraftPromotesNothing:
     operations reach READY through Release only. (Decision of record: the completion itself
     stays allowed.)"""
 
-    def test_laser_package_demoted_nests_stay_pending_after_the_running_nest_is_clocked_out(
-        self, client, db_session
-    ):
+    def test_laser_package_demoted_nests_stay_pending_after_the_running_nest_is_clocked_out(self, client, db_session):
         wc = make_work_center(db_session)
         supervisor = make_user(db_session, role=UserRole.SUPERVISOR)
         operator = make_user(db_session, role=UserRole.OPERATOR)
@@ -688,9 +686,7 @@ class TestCompletingRunningLaborOnADraftPromotesNothing:
         assert released.status_code == 200, released.text
         assert reread(db_session, WorkOrderOperation, op20.id).status == OperationStatus.READY
 
-    @pytest.mark.parametrize(
-        "wo_status", [WorkOrderStatus.DRAFT, WorkOrderStatus.COMPLETE, WorkOrderStatus.CANCELLED]
-    )
+    @pytest.mark.parametrize("wo_status", [WorkOrderStatus.DRAFT, WorkOrderStatus.COMPLETE, WorkOrderStatus.CANCELLED])
     def test_the_rule_promotes_nothing_on_a_draft_or_terminal_work_order(self, db_session, wo_status):
         wc = make_work_center(db_session)
         wo, op = make_wo_with_operation(

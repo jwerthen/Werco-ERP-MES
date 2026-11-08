@@ -30,6 +30,7 @@ import base64
 import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
 
@@ -47,7 +48,9 @@ from app.mcp.convenience import (
     CONVENIENCE_TOOL_NAMES,
     CONVENIENCE_TOOLS,
     LASER_CUTTING_CREATE_REFUSAL,
+    ON_HOLD_KEPT_NOTE,
     OPERATION_HAS_NO_QUANTITY,
+    RELEASE_STAMP_NOTE,
     SHADOWED_OPERATIONS,
     operation_name_rejection,
 )
@@ -58,6 +61,7 @@ from app.models.audit_log import AuditLog
 from app.models.company import Company
 from app.models.laser_nest import LaserNest, LaserNestPackage
 from app.models.part import Part
+from app.models.time_entry import TimeEntry, TimeEntryType
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.schemas.work_order import WorkOrderResponse
@@ -595,11 +599,13 @@ def fake_nest_import(monkeypatch, test_work_center):
     pooled, its nest operations READY -- one is minted on a fresh child, and an
     existing target's operations are set READY the way a rebuild leaves them).
     ``state.version_override`` lets one test hand the tool a stale version so the
-    demote PUT is refused 409.
+    demote PUT is refused 409. ``state.worked`` puts a closed labor entry on every nest
+    operation: the header PUT then leaves it READY (the route never demotes worked work),
+    which is the one case the tool's own per-operation demote still has to handle.
     """
     from app.api.endpoints import work_orders as work_orders_module
 
-    state = SimpleNamespace(calls=[], version_override=None)
+    state = SimpleNamespace(calls=[], version_override=None, worked=False)
 
     async def fake(
         *,
@@ -645,9 +651,24 @@ def fake_nest_import(monkeypatch, test_work_center):
             db.add(child)
             db.flush()
             _add_nest_operation(db, child, test_work_center, name=f"NEST-{len(state.calls)}", cnc_file_name="n.lst")
-        child.status = WorkOrderStatus.RELEASED
+        # The real route (_release_laser_work_order_for_nests) keeps an on-hold job on hold.
+        if child.status != WorkOrderStatus.ON_HOLD:
+            child.status = WorkOrderStatus.RELEASED
         for operation in db.query(WorkOrderOperation).filter_by(work_order_id=child.id).all():
             operation.status = OperationStatus.READY
+            if state.worked:
+                db.add(
+                    TimeEntry(
+                        user_id=current_user.id,
+                        work_order_id=child.id,
+                        operation_id=operation.id,
+                        work_center_id=operation.work_center_id,
+                        entry_type=TimeEntryType.RUN,
+                        clock_in=datetime.utcnow() - timedelta(hours=2),
+                        clock_out=datetime.utcnow() - timedelta(hours=1),
+                        company_id=company_id,
+                    )
+                )
         db.commit()
         db.refresh(child)
         payload = WorkOrderResponse.model_validate(child).model_dump(mode="json")
@@ -743,12 +764,63 @@ class TestLaserNestImport:
         assert seen["target_id"] is None and seen["filename"] == "pkg.zip"
         assert seen["rows"] == '[{"source_file": "n1.pdf", "planned_runs": 3}]'
         assert seen["work_center_id"] == 42 and str(seen["due_date"]) == "2026-12-01"
+        # The header PUT takes the un-worked nest off the floor itself (the route's own
+        # return-to-draft rule), so there is no per-operation demote left to send.
+        assert executor.calls == [
+            ("POST", "/api/v1/work-orders/laser-nest-packages/standalone/import"),
+            ("PUT", f"/api/v1/work-orders/{row.id}"),
+            ("GET", f"/api/v1/work-orders/{row.id}"),
+        ], "header, then a re-read"
+
+    async def test_a_worked_nest_the_header_put_leaves_ready_is_demoted_by_the_tool(
+        self, client, db_session, manager_headers, catalog, fake_nest_import
+    ):
+        """The route never demotes worked work, so a nest with labor against it survives the
+        header PUT READY; the tool's contract (a DRAFT it hands back carries no READY
+        operation) is kept by its own per-operation demote."""
+        fake_nest_import.worked = True
+        server, executor = make_server(catalog, headers=manager_headers)
+        result = await call(server, "import_laser_nest_package", {"source_path": "/staged/pkg.zip"})
+        assert not result.is_error, result.content
+        payload = result.structured_content
+        row = _row(db_session, payload["work_order"]["id"])
+        [operation] = _operation_rows(db_session, row.id)
+        assert row.status == WorkOrderStatus.DRAFT and operation.status == OperationStatus.PENDING
+        assert payload["operations_returned_to_pending"] == 1
         assert executor.calls == [
             ("POST", "/api/v1/work-orders/laser-nest-packages/standalone/import"),
             ("PUT", f"/api/v1/work-orders/{row.id}"),
             ("PUT", f"/api/v1/work-orders/operations/{operation.id}"),
             ("GET", f"/api/v1/work-orders/{row.id}"),
-        ], "header first, then the operation, then a re-read"
+        ], "header first, then the operation the route left READY, then a re-read"
+
+    async def test_a_held_job_is_left_held_by_a_default_reimport_and_says_so(
+        self, client, db_session, manager_headers, test_work_center, catalog, fake_nest_import
+    ):
+        """The usual reason to hold a package is bad nests, and the corrected re-import is the
+        fix: the route keeps the hold, so the tool must not demote the job to DRAFT (that
+        lifted the hold with no Resume Work Order and no required hold-cleared row) nor claim
+        the route RELEASED it. Same answer as add_laser_nest."""
+        target = _seed_laser_work_order_with_nest(db_session, test_work_center, cnc_file_name="nest_a.lst")
+        target.status = WorkOrderStatus.ON_HOLD
+        db_session.commit()
+        server, executor = make_server(catalog, headers=manager_headers)
+
+        result = await call(
+            server, "import_laser_nest_package", {"work_order_id": target.id, "source_path": "/staged/pkg.zip"}
+        )
+
+        assert not result.is_error, result.content
+        payload = result.structured_content
+        assert payload["demoted_to_draft"] is False
+        assert payload["note"] == ON_HOLD_KEPT_NOTE
+        assert payload["note"] != RELEASE_STAMP_NOTE
+        assert payload["work_order"]["status"] == "on_hold"
+        assert _row(db_session, target.id).status == WorkOrderStatus.ON_HOLD
+        assert executor.calls == [
+            ("GET", f"/api/v1/work-orders/{target.id}"),
+            ("POST", f"/api/v1/work-orders/{target.id}/laser-nest-packages/import"),
+        ], "no demote PUT is sent for a held job"
 
     async def test_release_true_leaves_the_import_released(
         self, client, db_session, manager_headers, catalog, fake_nest_import
@@ -797,9 +869,9 @@ class TestLaserNestImport:
             ("GET", f"/api/v1/work-orders/{target.id}"),
             ("POST", f"/api/v1/work-orders/{target.id}/laser-nest-packages/import"),
             ("PUT", f"/api/v1/work-orders/{target.id}"),
-            ("PUT", f"/api/v1/work-orders/operations/{operation.id}"),
             ("GET", f"/api/v1/work-orders/{target.id}"),
         ]
+        assert result.structured_content["operations_returned_to_pending"] == 1
 
     async def test_parent_target_checks_the_laser_child_for_manual_nests(
         self, client, db_session, manager_headers, test_work_order, test_work_center, catalog, fake_nest_import
@@ -827,6 +899,9 @@ class TestLaserNestImport:
     async def test_failed_operation_demote_is_reported_loudly_with_the_draft_work_order(
         self, client, db_session, manager_headers, catalog, fake_nest_import
     ):
+        # A nest with labor already against it: the header PUT leaves it READY on purpose,
+        # so the tool's own per-operation demote runs -- and here it is refused.
+        fake_nest_import.worked = True
         server, executor = make_server(catalog, headers=manager_headers)
         executor.refuse = lambda method, path: (
             ExecResult(
@@ -1183,6 +1258,26 @@ class TestWorkOrderHoldGates:
         detail = result.structured_content["detail"]
         assert "work_orders_start_work_order" in detail and "work_orders_resume_work_order" in detail
         assert executor.calls == []
+
+    async def test_released_refusal_names_the_resume_tool_for_a_held_job(
+        self, client, db_session, manager_headers, test_work_order, catalog
+    ):
+        """Asking for 'released' is the natural way to take a job off hold; release_work_order
+        refuses anything but a draft, so the refusal must name the door that lifts a hold."""
+        test_work_order.status = WorkOrderStatus.ON_HOLD
+        db_session.commit()
+        server, executor = make_server(catalog, headers=manager_headers)
+        result = await call(
+            server,
+            "update_work_order",
+            {"work_order_id": test_work_order.id, "version": test_work_order.version, "status": "released"},
+        )
+        assert result.is_error and result.structured_content["status"] == 422
+        detail = result.structured_content["detail"]
+        assert "release_work_order" in detail and "work_orders_resume_work_order" in detail
+        assert "DRAFT jobs only" in detail
+        assert executor.calls == []
+        assert _row(db_session, test_work_order.id).status == WorkOrderStatus.ON_HOLD
 
     async def test_holding_a_draft_returns_the_routes_409_verbatim(
         self, client, db_session, manager_headers, test_work_order, catalog

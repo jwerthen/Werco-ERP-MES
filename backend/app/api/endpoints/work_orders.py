@@ -134,6 +134,7 @@ from app.services.operation_action_gates import (
     MSG_DRAFT_CANNOT_BE_HELD,
     MSG_OPERATION_ON_HOLD_NO_START,
     MSG_PREDECESSORS_INCOMPLETE,
+    MSG_RETURN_TO_DRAFT_AUDIT_UNAVAILABLE,
     MSG_WORK_ORDER_NOT_RELEASED,
     MSG_WORK_ORDER_ON_HOLD,
     operation_blocked_by_predecessors,
@@ -181,6 +182,7 @@ from app.services.work_order_state_service import (
     apply_work_order_resume,
     begin_operation_progress,
     demote_operations_for_sequencing,
+    demote_ready_operations,
     finalize_operation_completion,
     find_parent_to_advance,
     is_laser_dispatch_work_order,
@@ -3773,6 +3775,12 @@ def update_work_order(
     rule had promoted but the sequenced rule forbids are returned READY -> PENDING, one
     audited status change each; operations anyone has worked are never touched. Turning
     it OFF needs no repair -- the next reconciling read re-promotes the pool.
+
+    Moving a released / in-progress / on-hold work order to ``status: draft`` takes it off
+    the floor: every un-worked READY operation (laser nests included) is returned to
+    PENDING, one REQUIRED audited status change each (the resume-to-draft recipe), so a
+    draft leaves no cards on the dispatch board or the kiosk. Worked operations are left
+    as they are. **503** (nothing changed) when those audit rows cannot be written.
     """
     work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id).first()
     if not work_order:
@@ -3890,6 +3898,10 @@ def update_work_order(
         and bool(update_data["sequential_operations"])
         and not bool(work_order.sequential_operations)
     )
+    # Likewise remembered before the setattr loop: a non-DRAFT -> DRAFT move takes the job
+    # off the floor, so its un-worked READY operations are demoted below. Terminal -> DRAFT
+    # was refused above; DRAFT -> DRAFT (a re-send) is not a move and demotes nothing.
+    returning_to_draft = new_status == WorkOrderStatus.DRAFT and work_order.status != WorkOrderStatus.DRAFT
 
     # Refuse BEFORE the first setattr, so a refused flip leaves the row untouched.
     # Every completion verb re-evaluates the predecessor gate at action time, so an
@@ -3964,6 +3976,27 @@ def update_work_order(
             },
         )
 
+    # A draft must not leave cards on the dispatch board or the kiosk, and every promotion
+    # seam is forward-only (and never promotes a draft), so nothing else would ever take
+    # these READY operations back off the floor before Release. The resume-to-DRAFT recipe,
+    # exactly: the one demotion core with scope "all_unworked" (laser nests included), flush
+    # BEFORE the first audit call (invariant 4 -- WorkOrder and WorkOrderOperation both map
+    # version_id_col, so a concurrent clock-in surfaces as the app-wide 409, not a swallowed
+    # StaleDataError), then one REQUIRED row per demotion, rolled back with the whole PUT
+    # (503) when any row cannot be written. Worked operations are never touched.
+    draft_demoted_operations = (
+        demote_ready_operations(db, work_order, scope="all_unworked", exempt_laser=False) if returning_to_draft else []
+    )
+    if draft_demoted_operations:
+        db.flush()
+        with required_audit(db, MSG_RETURN_TO_DRAFT_AUDIT_UNAVAILABLE):
+            log_demotions_required(
+                audit,
+                draft_demoted_operations,
+                reason=f"work order {work_order.work_order_number} was returned to draft.",
+                extra={"transition": "work_order_returned_to_draft"},
+            )
+
     _emit_work_order_event(
         db,
         company_id=company_id,
@@ -3972,7 +4005,7 @@ def update_work_order(
         event_type="work_order_updated",
         payload={
             "updated_fields": list(update_data.keys()),
-            "operations_returned_to_pending": len(demoted_operations),
+            "operations_returned_to_pending": len(demoted_operations) + len(draft_demoted_operations),
         },
     )
 
