@@ -308,13 +308,12 @@ token does not make these judgments; a person does:
   positive scrap counts, however small — there is no rounding tolerance, so a `5e-10` is refused
   like a `5`. The same call with no new scrap — a good-only report, a zero-scrap clock-out, a
   full-count close, re-sending the recorded scrap value exactly as read — works as before.
-  **Known residual (open, raised with the owner):** a call that adds no scrap can still change the
-  *reason* on scrap a person already recorded — `clock_out` with a `scrap_reason` /
-  `scrap_reason_code_id` and zero scrap (onto the caller's own time entry), `update_work_order`
-  with only a `scrap_reason`, and `work_orders_complete_work_order` re-sending the recorded header
-  scrap with a new reason. `work_orders_update_operation` already refuses a token's reason edit.
-  Closing these would change zero-scrap behavior, which this rule keeps unchanged, so they wait on
-  an owner decision; see [API.md → Short count at completion](API.md).
+  **Nor change a scrap reason** (this PR's extension of the same decision: re-categorizing scrap a
+  person declared is the same evidence) — the same **403**, even with no new scrap, from `clock_out`
+  sending a `scrap_reason` / `scrap_reason_code_id` that differs from the one on its own time entry,
+  `update_work_order` changing `scrap_reason`, `work_orders_complete_work_order` re-sending the
+  recorded header scrap with a different reason or code (or with none over a recorded one), and
+  `work_orders_update_operation` changing `scrap_reason`. Send no reason, or the stored one.
 - **Nor close work short** (the same decision: a token keeps only the full-count close) —
   `shop_floor_complete_operation` / `work_orders_complete_operation` on a short close whose scrap is
   already on record, and `work_orders_complete_work_order` below the order, answer **403**
@@ -322,7 +321,11 @@ token does not make these judgments; a person does:
 - **Nor make the related count judgments** (this PR's extension of the same rule; the owner was
   asked about scrap, not these): good above the floor's record (`work_orders_complete_operation`,
   `work_orders_complete_work_order`), any other count edit through `work_orders_update_operation`,
-  and lowering `quantity_ordered` (`update_work_order`) once work is recorded answer **403**
+  any change to the header's `quantity_complete` / `quantity_scrapped` through `update_work_order`
+  (either direction), **every** correction through `reduce_operation_production` or
+  `reduce_operation_production_office` (a re-stamp that would set a declared short answers the
+  short-close text above), and lowering `quantity_ordered` (`update_work_order`) once work is
+  recorded answer **403**
   `"Recording more good than the floor counted, editing an operation's counts, or lowering the order
   after work was recorded must be done by a person signed in to the app, not an API token."`.
 
@@ -928,9 +931,9 @@ count, in which case there is nothing left to close.
 | `{"status": 409, "detail": "This work order has not been released — release first…"}` or `"This work order is on hold…"` from `clock_in`, `shop_floor_start_operation`, `work_orders_start_operation`, `work_orders_start_work_order`, a complete of a READY operation, or `work_orders_update_operation` setting `status: in_progress` (or `status: ready` on a draft) | The work order is DRAFT or ON_HOLD — the floor cannot start work on it | A person with the role decides: `release_work_order` for a draft, `work_orders_resume_work_order` for a held job (Admin / Manager / Supervisor) |
 | `{"status": 409, "detail": "A draft work order has not been released, so there is nothing on the floor to hold…"}` from `update_work_order` | `status: on_hold` on a DRAFT | Leave it in draft; hold only released / in-progress work |
 | `{"status": 409, "detail": "Op 20: 2 of 10 not yet accounted for (8 good, 0 scrapped)…"}` from `shop_floor_complete_operation`, or `"…unaccounted for…"` from `work_orders_complete_work_order` | The count is short and nobody has said where the missing pieces went (owner ruling 1) — nothing was written | Leave the work open and tell the user. Recording the pieces, or reporting them as scrap with a reason, is a decision for the person who knows; never invent scrap, a reason or a quantity to make the close succeed |
-| `{"status": 403, "detail": "Scrap must be reported by a person (at the kiosk, with a crew badge, or signed in at a desk), not an API token…"}` from `clock_out`, `report_operation_production`, `prepare_task` / `execute_task` (`report_production`), a complete tool, `work_orders_update_operation` or `update_work_order` | An API token tried to report scrap (owner decision 2026-11-07) — nothing was written | Record good pieces only (send no scrap), or leave the work open and tell the user — a person reports the scrap. Nothing an API token holds changes this |
+| `{"status": 403, "detail": "Scrap must be reported by a person (at the kiosk, with a crew badge, or signed in at a desk), not an API token…"}` from `clock_out`, `report_operation_production`, `prepare_task` / `execute_task` (`report_production`), a complete tool, `work_orders_update_operation` or `update_work_order` | An API token tried to report scrap (owner decision 2026-11-07), or to write or change a scrap reason — nothing was written | Record good pieces only (send no scrap and no reason), or leave the work open and tell the user — a person reports the scrap. Nothing an API token holds changes this |
 | `{"status": 403, "detail": "Closing work short must be done by a person signed in to the app, not an API token."}` | An API token tried to close an operation or a work order short | A person closes it in the app; nothing an API token holds changes this |
-| `{"status": 403, "detail": "Recording more good than the floor counted, editing an operation's counts, or lowering the order after work was recorded…"}` | An API token tried to book good above the floor's record, edit an operation's counts, or lower an order once work was recorded | A person makes that correction in the app; nothing an API token holds changes this |
+| `{"status": 403, "detail": "Recording more good than the floor counted, editing an operation's counts, or lowering the order after work was recorded…"}` | An API token tried to book good above the floor's record, edit an operation's or a work order header's counts, correct a count through a reduce-production tool, or lower an order once work was recorded | A person makes that correction in the app; nothing an API token holds changes this |
 | `{"status": 409, "detail": "… is complete; its counts are the completion record…"}` from `work_orders_update_operation` | A count or status edit on a COMPLETE operation | Corrections go through `reduce_operation_production_office` (Admin / Manager / Supervisor), which can reopen the operation — a person's decision |
 | `{"status": 422, ...}` `"Additional properties are not allowed ('serach' was unexpected)"` | A misspelled argument — every schema is strict (§6.3) | Fix the argument name; nothing was dispatched |
 | `{"status": 409, ...}` from `add_operation` naming several work centers | Ambiguous `work_center` string | Pass the `id` (from `list_work_centers`) or a more specific name |

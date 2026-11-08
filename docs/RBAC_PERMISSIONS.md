@@ -85,9 +85,11 @@ tier, that tier stands — this rule is a floor, never a loosening.
 Agents reach the API through the MCP server in `backend/app/mcp/` ([docs/MCP.md](MCP.md)) —
 either the Streamable HTTP door at `/mcp` (off by default, `WERCO_MCP_HTTP_ENABLED`) or the stdio
 bridge `python -m app.mcp`. **Nothing in this document changes for them** (one credential rule —
-an API token may not declare scrap or close work short (owner decision 2026-11-07), nor record more
-good than the floor counted, edit an operation's counts, or lower an order once work was recorded — is
-below the Work Orders matrix, and applies to an API token however it is presented). Every tool call is a
+an API token may not declare scrap or close work short (owner decision 2026-11-07), nor change a scrap
+reason, record more good than the floor counted, edit an operation's or a work-order header's counts,
+correct a count through either reduce-production verb, or lower an order once work was recorded (this
+PR's extension of that decision) — is below the Work Orders matrix, and applies to an API token
+however it is presented). Every tool call is a
 real request dispatched through the same routers with a real user's bearer — a 15-minute access JWT
 or a long-lived, Admin-issued **API token** bound to one user (see the API tokens callout under
 [Admin](#admin)): `get_current_user` resolves the user, tenancy comes from the token's active
@@ -329,7 +331,9 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 >   progress, with required audit rows). The operator's twin refuses `reopen_operation` (**422**), and
 >   `PUT /work-orders/operations/{id}` refuses good / status edits and scrap LOWERING on a COMPLETE
 >   operation (**409**) — the same Admin / Manager / Supervisor gate may still ADD scrap found after
->   the close, with a reason, as required audit evidence.
+>   the close, with a reason, as required audit evidence, but only into units still unaccounted
+>   (zero on an accounted close; a rise past that is **409** — pieces counted good and later found
+>   bad go through reduce-production with `reopen_operation`, then a re-close with the scrap).
 > - **An API token may not declare scrap or make count judgments** — a credential rule, not a role
 >   rule; no role cell changed. A standing per-user API token
 >   (`app.core.credentials.is_api_token_credential`) is refused **403**, whatever its user's role.
@@ -347,16 +351,24 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 >     either complete verb (also one whose scrap is already on record) and a force-complete below the
 >     order are refused too. Any positive scrap counts, however small (no rounding tolerance). A
 >     request that declares no new scrap — a good-only production report or clock-out, a full-count
->     close, re-sending the recorded scrap value — works exactly as before. Known residual (open,
->     raised with the owner): such a zero-scrap request can still change the reason on scrap a person
->     already recorded, through clock-out, `PUT /work-orders/{id}` and force-complete (`docs/API.md`
->     → "Short count at completion" → "Known residual").
+>     close, re-sending the recorded scrap value — works exactly as before.
+>   - **Scrap reasons (this PR's extension of the same decision).** Re-categorizing scrap a person
+>     declared is the same quality evidence (the scrap Pareto groups by the code), so a token request
+>     that would write or change a `scrap_reason` / `scrap_reason_code_id` is refused with the same
+>     **403**, even with no new scrap: clock-out (onto the caller's own time entry), `PUT
+>     /work-orders/{id}`, force-complete re-sending the recorded `quantity_scrapped` with a different
+>     reason or code — or with none over a recorded one — and `PUT /work-orders/operations/{id}`.
+>     Sending no reason, or re-sending the stored one, still works.
 >   - **The other count judgments (this PR's extension of the same rule, not part of the question
 >     the owner answered).** A token is also refused recording good above the floor's labor count
 >     (office verb, override reason or not, and force-complete), any other count edit through
->     `PUT /work-orders/operations/{id}` (`quantity_complete`, `scrap_reason`, or a
->     `quantity_scrapped` change that is not a rise), and lowering `quantity_ordered` once any
->     operation has recorded good, scrap or labor.
+>     `PUT /work-orders/operations/{id}` (`quantity_complete`, or a `quantity_scrapped` change that
+>     is not a rise), any change to the header's `quantity_complete` / `quantity_scrapped` through
+>     `PUT /work-orders/{id}` (either direction), **every** correction through either
+>     reduce-production verb (`POST /work-orders/operations/{id}/reduce-production` and
+>     `POST /shop-floor/operations/{id}/reduce-production` — a re-stamp that would set a declared
+>     short gets the short-close text), and lowering `quantity_ordered` once any operation has
+>     recorded good, scrap or labor.
 >
 >   A **crew-station badge token is a person** and passes every one of these. An agent using a
 >   person's interactive JWT (an MCP client) is that person's own session and is not refused.
@@ -502,6 +514,11 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > `POST /shop-floor/time-entries/{id}/unapprove` (the audited Approve-labor row, which forbids
 > self-unapproval), then reduce. Same tenant-scoped **404** and tamper-evident audit row as the
 > shop-floor verb.
+>
+> **Neither verb takes a standing API token** (**403** before any lock or write, whatever the bound
+> user's role) — a count correction is a person's judgment; see "An API token may not declare scrap
+> or make count judgments" above. A crew-station badge is a person and still corrects its own count
+> on the shop-floor verb.
 >
 > **The office/operator split on a COMPLETE operation is a role decision, not a mechanism detail.**
 > The office verb passes `allow_completed_operation=True` and the operator verb does not, so a

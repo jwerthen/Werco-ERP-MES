@@ -451,7 +451,10 @@ a parity test holds it to the Python):
   crew station are people — a crew badge's scoped token is not an API token — so nothing here changes
   for them.
 - **Scrap found after a close.** A completed operation refuses a clock-out carrying pieces (clock
-  out with 0); a supervisor can add the scrap, with a reason, from the work order.
+  out with 0) and tells the operator to see a supervisor, who corrects the completed operation's
+  counts from the work order: scrap can be added there only into pieces still unaccounted, so good
+  pieces later found bad are corrected by lowering the good count (Correct count, reopening the
+  operation) and closing it again with the scrap.
 
 ## Job instructions on screen
 

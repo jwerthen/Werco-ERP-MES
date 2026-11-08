@@ -712,11 +712,15 @@ or report scrap anywhere (**403**; owner decision 2026-11-07).
    completing failed"*. The operation is left open, which is what the rule requires — reload every
    kiosk and floor tablet after the deploy. An MCP agent or script that relied on a partial floor
    `/complete` now gets 409, and any standing API token that closed work short, booked good above
-   the floor's count, edited operation counts or lowered an order after work was recorded now gets
-   403. So does any standing API token that reported scrap — through clock-out, a production report
-   (incl. scrap → NCR and the Hank `report_production` task), either close verb, force-complete, or
-   a `PUT` that raises `quantity_scrapped` (owner decision 2026-11-07: only a person declares scrap).
-   Its good-only reports, zero-scrap clock-outs and full-count closes are unchanged.
+   the floor's count, edited operation or work-order header counts, corrected a count through either
+   reduce-production verb, changed a scrap reason, or lowered an order after work was recorded now
+   gets 403. So does any standing API token that reported scrap — through clock-out, a production
+   report (incl. scrap → NCR and the Hank `report_production` task), either close verb,
+   force-complete, or a `PUT` that raises `quantity_scrapped` (owner decision 2026-11-07: only a
+   person declares scrap). Its good-only reports, zero-scrap clock-outs (with no reason) and
+   full-count closes are unchanged. A clock-out carrying a NaN / infinite quantity is now **400** for
+   everyone (it used to commit and then 500), and raising a COMPLETE laser nest's `planned_runs`, or
+   raising a COMPLETE operation's scrap past what is still unaccounted, is **409**.
    One deliberate read-path change on old data: a work order whose operations all completed but whose
    header sits ABOVE its order is lowered to the order at the next reconciling read (and its
    finished-goods receipt posts at the order) — the header is now clamped to `quantity_ordered`. To
