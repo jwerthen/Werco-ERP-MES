@@ -23,14 +23,15 @@ vacuous. ``scripts/verify_audit_deadlock_postgres.py`` proves the same on real P
 
 import itertools
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
+from decimal import Decimal
 from types import SimpleNamespace
 
 import psycopg2.extensions
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event, text
-from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError
+from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError, PendingRollbackError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -50,6 +51,7 @@ from app.db.mixins import STALE_WRITE_CONFLICT_DETAIL
 from app.main import app
 from app.models.audit_log import AuditLog
 from app.models.company import Company
+from app.models.operational_event import OperationalEvent
 from app.models.part import Part
 from app.models.quality import NonConformanceReport
 from app.models.shipping import Shipment
@@ -439,6 +441,53 @@ def test_a_python_side_audit_failure_stays_best_effort(db_session: Session, monk
     assert AuditService(db_session, company_id=1).log(action="CREATE", resource_type="part", resource_id=1) is None
     db_session.commit()
     assert db_session.query(Part).filter(Part.part_number == number).count() == 1
+
+
+@pytest.mark.parametrize("unbindable", [Decimal("1.50"), date(2026, 11, 8)], ids=["decimal", "date"])
+@pytest.mark.parametrize("chain_enabled", [True, False], ids=["chain", "paused"])
+def test_an_unbindable_audit_value_stays_best_effort_and_keeps_the_callers_write(
+    db_session: Session, monkeypatch, unbindable, chain_enabled
+):
+    """A Python-side failure INSIDE the INSERT savepoint: the JSON column cannot bind the value.
+
+    The integrity hash serializes with ``default=str`` and never notices; the bind does, during the
+    savepoint's flush, which deactivates the savepoint. ``log`` must roll the savepoint back so the
+    caller's transaction survives -- its write commits -- and no audit row is written.
+    """
+    monkeypatch.setattr(settings, "AUDIT_HASH_CHAIN_ENABLED", chain_enabled)
+    number = f"ABORT-GUARD-{next(_ids)}"
+    db_session.add(
+        Part(part_number=number, name="kept", part_type="manufactured", unit_of_measure="each", company_id=1)
+    )
+    db_session.flush()
+    audit_rows_before = db_session.query(AuditLog).count()
+
+    entry = AuditService(db_session, company_id=1).log(
+        action="CREATE", resource_type="part", resource_id=1, new_values={"quantity": unbindable}
+    )
+
+    assert entry is None
+    db_session.commit()
+    assert db_session.query(Part).filter(Part.part_number == number).count() == 1
+    assert db_session.query(AuditLog).count() == audit_rows_before
+
+
+def test_an_unbindable_value_in_the_callers_own_pending_row_still_fails_the_caller(db_session: Session, monkeypatch):
+    """The documented edge: ``begin_nested`` flushes the CALLER's pending rows outside any savepoint.
+
+    A Python-side failure there is the caller's own; ``log`` returns None, and the caller's commit
+    raises, exactly as its own flush would have. Nothing is silently half-saved.
+    """
+    monkeypatch.setattr(settings, "AUDIT_HASH_CHAIN_ENABLED", True)
+    db_session.add(
+        OperationalEvent(
+            company_id=1, event_type="abort_guard_probe", source_module="tests", event_payload={"q": Decimal("1")}
+        )
+    )
+    assert AuditService(db_session, company_id=1).log(action="UPDATE", resource_type="part", resource_id=1) is None
+    with pytest.raises(PendingRollbackError):
+        db_session.commit()
+    db_session.rollback()
 
 
 def test_paused_chain_takes_no_lock_so_its_failure_cannot_reach_log(db_session: Session, monkeypatch):
