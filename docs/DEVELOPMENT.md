@@ -694,6 +694,11 @@ After bootstrap, normal incremental `alembic upgrade head` is the standard path.
 >   definitions, policies and enum labels. It compares runs with each other, not with a pure
 >   `create_all`; the SQLite test above does that. On CI's role-less cluster it exercises the role
 >   guards' **skip** branch.
+> - **`verify_audit_deadlock_postgres`** runs after it, also before the seed, in its own scratch
+>   database. It runs no migration. It builds a deadlock on the global audit-chain lock and checks
+>   that the victim request answers the app-wide 409, saves nothing, and succeeds on retry. It covers
+>   both `AuditService.log`'s re-raise and the COMMIT guard in `app/db/database.py`, neither of which
+>   SQLite can reproduce. It refuses to run when `AUDIT_HASH_CHAIN_ENABLED` is off.
 >
 > *2026-11-02:* `089`–`098`, `106` and `107` shipped unguarded, so this path failed at `089`
 > (`python -m scripts.reset_dev_db` included) until guards were retrofitted to those twelve
@@ -851,8 +856,9 @@ After bootstrap, normal incremental `alembic upgrade head` is the standard path.
 ### Running the PostgreSQL verifiers locally
 
 The verifiers create and drop scratch schemas and databases (`DROP DATABASE … WITH (FORCE)`), so
-`verify_operations_postgres`, `verify_fabrication_quoting_postgres` and
-`verify_fresh_bootstrap_postgres` all refuse anything but a local, disposable test Postgres.
+`verify_operations_postgres`, `verify_fabrication_quoting_postgres`,
+`verify_fresh_bootstrap_postgres` and `verify_audit_deadlock_postgres` all refuse anything but a
+local, disposable test Postgres.
 They share one guard, `scripts/_pg_verify.py::require_local_test_postgres`, unit-tested by
 `tests/test_pg_verify_guard.py`. The guard requires all of these:
 
@@ -892,6 +898,7 @@ export SECRET_KEY=<any 32+ characters> REFRESH_TOKEN_SECRET_KEY=<another 32+ cha
 python -m scripts.verify_operations_postgres
 python scripts/verify_fabrication_quoting_postgres.py --database-url "$DATABASE_URL"
 python -m scripts.verify_fresh_bootstrap_postgres
+python -m scripts.verify_audit_deadlock_postgres
 
 docker rm -f werco-pg-verify
 ```

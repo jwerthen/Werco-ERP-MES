@@ -461,9 +461,9 @@ def _audit_reconcile_transitions(
                     "time_entry_ids": tr.time_entry_ids,
                 },
             )
-            # ``AuditService.log`` absorbs its own failures and returns None (e.g. a
-            # ``sequence_number`` collision that outlasts its savepoint retries), so a lost
-            # row never raises into the ``except`` below. Collect it and report it there.
+            # ``AuditService.log`` absorbs most failures and returns None (e.g. a
+            # ``sequence_number`` collision that outlasts its savepoint retries); only a
+            # transaction-aborting DB error raises into the ``except`` below. Collect a None.
             if entry is None:
                 unaudited.append(tr)
             # QG-4: a completion can happen on a GET via reconcile. The same
