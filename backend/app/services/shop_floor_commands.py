@@ -17,7 +17,7 @@ from app.models.work_order_blocker import WorkOrderBlockerCategory, WorkOrderBlo
 from app.schemas.work_order_blocker import WorkOrderBlockerCreate
 from app.services import dispatch_service
 from app.services.laser_nest_service import active_laser_nest, sync_laser_nest_from_operation
-from app.services.operation_action_gates import ceiling_exceeded_message
+from app.services.operation_action_gates import API_TOKEN_SCRAP, api_token_declares_scrap, ceiling_exceeded_message
 from app.services.operational_event_service import OperationalEventService, redact_event_payload
 from app.services.production_receipt_service import find_production_replay, record_production_receipt
 from app.services.scrap_reason_service import resolve_scrap_reason_code_or_http
@@ -109,6 +109,12 @@ def report_production_command(db, current_user, company_id, operation_id, produc
         raise HTTPException(status_code=400, detail="Quantity cannot be negative")
     if good_delta == 0 and scrap_delta == 0:
         raise HTTPException(status_code=400, detail="Enter a completed or scrap quantity")
+    # Owner decision 2026-11-07: a standing API token may not declare scrap. Refused here,
+    # in the one command both /production and the Hank production task run, before the
+    # scrap code is resolved, before any lock, write, NCR or audit row. A token's good-only
+    # report is unchanged, and a crew-station badge token is a person.
+    if api_token_declares_scrap(current_user, scrap_delta):
+        raise HTTPException(status_code=403, detail=API_TOKEN_SCRAP)
     # Scrap -> NCR (Kiosk Foundry redesign): an NCR documents scrap, so filing one
     # from a report that carries none is a client bug -- refuse before any mutation.
     if production_data.open_ncr and scrap_delta <= 0:

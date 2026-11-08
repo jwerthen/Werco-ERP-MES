@@ -32,6 +32,7 @@ from app.models.user import UserRole
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus, WorkOrderType
 from app.services.audit_service import AuditService
 from app.services.operation_action_gates import (
+    API_TOKEN_SCRAP,
     API_TOKEN_SHORT_CLOSE,
     MSG_NO_LABOR_RECORDED,
     MSG_WORK_ORDER_ON_HOLD,
@@ -588,7 +589,10 @@ class TestFloorCloseRefusals:
 
         resp = _complete(client, op, token_headers, quantity_scrapped=2, scrap_reason="crack")
         assert resp.status_code == 403, resp.text
-        assert resp.json()["detail"] == API_TOKEN_SHORT_CLOSE
+        # Owner decision 2026-11-07: the scrap this close would declare is refused first, with
+        # its own text (a short close with its scrap already on record still gets
+        # API_TOKEN_SHORT_CLOSE -- tests/api/test_api_token_scrap_refusal.py).
+        assert resp.json()["detail"] == API_TOKEN_SCRAP
         self._assert_nothing_written(db_session, op, before)
 
         add_entry(db_session, ann, op, produced=2)

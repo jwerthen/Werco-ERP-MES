@@ -31,6 +31,7 @@ from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
 from app.services.audit_service import AuditService
 from app.services.operation_action_gates import (
     API_TOKEN_COUNT_JUDGMENT,
+    API_TOKEN_SCRAP,
     API_TOKEN_SHORT_CLOSE,
     others_clocked_in_message,
     override_reason_required_message,
@@ -311,7 +312,14 @@ class TestOperationPutOnAnOpenOperation:
             headers=token,
         )
         assert refused.status_code == 403, refused.text
-        assert refused.json()["detail"] == API_TOKEN_COUNT_JUDGMENT
+        # Owner decision 2026-11-07: a scrap rise gets the scrap text ...
+        assert refused.json()["detail"] == API_TOKEN_SCRAP
+        # ... and any other count change keeps the count-judgment text.
+        good_edit = client.put(
+            OPERATION_PUT_URL.format(op=op.id), json={"version": op.version, "quantity_complete": 4}, headers=token
+        )
+        assert good_edit.status_code == 403, good_edit.text
+        assert good_edit.json()["detail"] == API_TOKEN_COUNT_JUDGMENT
         renamed = client.put(
             OPERATION_PUT_URL.format(op=op.id), json={"version": op.version, "name": "Renamed"}, headers=token
         )

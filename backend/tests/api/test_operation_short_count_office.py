@@ -28,6 +28,7 @@ from app.models.user import UserRole
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.services.audit_service import AuditService
 from app.services.operation_action_gates import (
+    API_TOKEN_SCRAP,
     API_TOKEN_SHORT_CLOSE,
     MSG_REOPEN_IS_OFFICE_ONLY,
     MSG_SCRAP_REASON_OR_CODE_REQUIRED,
@@ -295,7 +296,8 @@ class TestOfficeComplete:
 
         resp = _office(client, op, token_headers, quantity_complete=8, quantity_scrapped=2, scrap_reason="crack")
         assert resp.status_code == 403, resp.text
-        assert resp.json()["detail"] == API_TOKEN_SHORT_CLOSE
+        # Owner decision 2026-11-07: the scrap rise is refused first, with its own text.
+        assert resp.json()["detail"] == API_TOKEN_SCRAP
         assert _op_state(db_session, op.id) == before
 
         full = _office(client, op, token_headers, quantity_complete=10)
@@ -491,6 +493,12 @@ class TestForceComplete:
         token_headers = _token_headers(client, admin_headers, supervisor)
 
         resp = _force(client, wo, token_headers, quantity_complete=8, quantity_scrapped=2, scrap_reason="lost")
+        assert resp.status_code == 403, resp.text
+        # Owner decision 2026-11-07: the scrap rise is refused first, with its own text.
+        assert resp.json()["detail"] == API_TOKEN_SCRAP
+        assert fresh(db_session, WorkOrder, wo.id).status == WorkOrderStatus.RELEASED
+
+        resp = _force(client, wo, token_headers, quantity_complete=8)
         assert resp.status_code == 403, resp.text
         assert resp.json()["detail"] == API_TOKEN_SHORT_CLOSE
         assert fresh(db_session, WorkOrder, wo.id).status == WorkOrderStatus.RELEASED

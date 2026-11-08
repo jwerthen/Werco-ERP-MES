@@ -120,6 +120,7 @@ from app.services.labor_cost_service import is_labor_cost_rollup_enabled
 from app.services.laser_nest_service import active_laser_nest, sync_laser_nest_from_operation
 from app.services.material_tie_view import MaterialTieView, tie_views_for_operations
 from app.services.operation_action_gates import (
+    API_TOKEN_SCRAP,
     API_TOKEN_SHORT_CLOSE,
     CLOCK_IN_ALLOWED_STATUSES,
     COMPLETION_AUDIT_UNAVAILABLE,
@@ -131,6 +132,7 @@ from app.services.operation_action_gates import (
     MSG_SCRAP_REASON_OR_CODE_REQUIRED,
     MSG_WRONG_WORK_CENTER,
     accounting_strand_message,
+    api_token_declares_scrap,
     approved_open_entry_message,
     ceiling_exceeded_message,
     completed_operation_clock_out_message,
@@ -1903,7 +1905,14 @@ def clock_out(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Clock out from a work order operation"""
+    """Clock out from a work order operation, adding the pieces made and any scrap (scrap needs
+    scrap_reason or scrap_reason_code_id). A standing API token may not report scrap (403); its
+    zero-scrap clock-out works as before, and a crew-station badge is a person and may.
+
+    The scrap refusal (owner decision 2026-11-07: a scrap count is quality evidence someone has
+    to have seen) runs after the not-found / already-clocked-out / negative-quantity checks and
+    before any lock, write or audit row.
+    """
     time_entry = (
         db.query(TimeEntry)
         .filter(
@@ -1929,6 +1938,13 @@ def clock_out(
 
     if clock_out_data.quantity_produced < 0 or clock_out_data.quantity_scrapped < 0:
         raise HTTPException(status_code=400, detail="Quantities cannot be negative")
+
+    # Owner decision 2026-11-07: a standing API token may not declare scrap. A clock-out
+    # carrying scrap raises the entry's (and the operation's) recorded scrap, so it is
+    # refused here, before any lock, write or audit row. A zero-scrap clock-out by a token
+    # is unchanged, and a crew-station badge token is a person (``api_token_declares_scrap``).
+    if api_token_declares_scrap(current_user, clock_out_data.quantity_scrapped):
+        raise HTTPException(status_code=403, detail=API_TOKEN_SCRAP)
 
     # A0.1 adoption-telemetry channel for this write (kiosk-token forcing + import
     # guard). Resolved before any mutation so a disallowed 'import' 422s untouched.
@@ -4298,9 +4314,13 @@ def report_operation_production(
     audit_service: AuditService = Depends(get_audit_service),
 ):
     """
-    Add produced/scrapped quantity while keeping the operator clocked in.
+    Add produced/scrapped quantity while keeping the operator clocked in. A standing API token
+    may report good pieces only: any scrap (quantity_scrapped_delta > 0, with or without
+    open_ncr) is refused 403 -- a person reports scrap.
 
-    This is intentionally separate from checkout: it updates progress and the
+    The scrap refusal (owner decision 2026-11-07) runs after the operation / clock-in / quantity
+    checks and before the scrap code is resolved or anything is written. A crew-station badge
+    token is a person and may report scrap. This is intentionally separate from checkout: it updates progress and the
     active time entry production counters, but does not close time or complete
     the operation automatically when the target quantity is reached.
     """
@@ -4552,7 +4572,7 @@ def complete_operation(
     production reports) and clock out everyone still clocked in. Records no good pieces
     itself and never closes short on its own: if recorded good does not cover every unit
     that reached the operation, it is refused 409 and nothing is written -- record the
-    pieces first, or leave it open. An API token may not close short (403).
+    pieces first, or leave it open. An API token may not report scrap or close short (403).
 
     A CLOSE verb (owner ruling 1, 2026-11-05) -- there is no partial branch. On 200 the
     operation is COMPLETE, ``is_fully_complete`` is always true, and every open TimeEntry
@@ -4573,11 +4593,12 @@ def complete_operation(
     operation under a DRAFT / ON_HOLD work order **409** (completing it starts it); bad
     ``quantity_complete`` / missing target **400**; predecessors incomplete **400**; no
     labor ever recorded **400** (floor only -- the office twin deliberately has no such
-    gate); ``source`` 'import' **422**; bad scrap number **400**; scrap without a reason
-    **422**; unknown / inactive scrap code **404** / **422**; ``quantity_complete`` above
+    gate); ``source`` 'import' **422**; bad scrap number **400**; scrap declared by an API
+    token **403** (owner decision 2026-11-07; a token's zero-scrap close is unaffected); scrap
+    without a reason **422**; unknown / inactive scrap code **404** / **422**; ``quantity_complete`` above
     recorded good **409**; recorded good above what can reach the operation after an upstream
     short close **409**; scrap above unaccounted **409**; units still unaccounted **409**;
-    then, on a short close only: an API token **403**, others clocked in without
+    then, on a short close only: an API token **403** (the short's scrap already on record), others clocked in without
     acknowledgement **409**, an APPROVED open time entry **409**, a serialized work order with
     missing per-serial step records **409**, a later stage already holding more good than the
     declaration lets through **409**; finally required process-sheet steps missing **409**
@@ -4718,6 +4739,12 @@ def complete_operation(
         raise HTTPException(status_code=400, detail="Quantity must be a valid number")
     if scrap_delta < 0:
         raise HTTPException(status_code=400, detail="quantity_scrapped cannot be negative")
+    # Owner decision 2026-11-07: a standing API token may not declare scrap -- refused
+    # before the reason is even asked for, and before every quantity / accounting refusal
+    # below (the gates' work-order start rung above still answers first). A token's
+    # zero-scrap close goes on to the short-close rule further down unchanged.
+    if api_token_declares_scrap(current_user, scrap_delta):
+        raise HTTPException(status_code=403, detail=API_TOKEN_SCRAP)
     # AS9100D defect traceability: scrap declared at close carries a reason -- a code or
     # non-blank text. Here, after the work-order start rung, rather than as a schema
     # validator, so a held / draft job answers with the gates' 409 first.

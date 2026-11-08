@@ -610,7 +610,12 @@ _UPDATE_WORK_ORDER_SCHEMA: Dict[str, Any] = {
         "notes": {"type": "string", "maxLength": 2000},
         "special_instructions": {"type": "string", "maxLength": 2000},
         "quantity_complete": {"type": "number", "minimum": 0},
-        "quantity_scrapped": {"type": "number", "minimum": 0},
+        "quantity_scrapped": {
+            "type": "number",
+            "minimum": 0,
+            "description": "A value above the recorded scrap is refused 403 for an API token: only a person "
+            "reports scrap. Omit it, or re-send the recorded value.",
+        },
         "scrap_reason": {"type": "string", "maxLength": 255, "description": "Required when quantity_scrapped > 0."},
     },
     "required": ["work_order_id", "version"],
@@ -1257,7 +1262,8 @@ CONVENIENCE_TOOLS: Tuple[ConvenienceTool, ...] = (
     ConvenienceTool(
         "update_work_order",
         "PUT /api/v1/work-orders/{id} — Edit a work order's header (priority, due date, quantity, customer, unit #, "
-        "notes, sequencing, scrap) with its current version (409 when stale). status accepts draft / on_hold / "
+        "notes, sequencing) with its current version (409 when stale); raising scrap is refused 403 for an API "
+        "token -- a person reports scrap. status accepts draft / on_hold / "
         "cancelled only, and on_hold only for a released or in-progress job (the route refuses a draft 409): "
         "'released' and 'in_progress' are refused — releasing is release_work_order, starting is "
         "work_orders_start_work_order, and lifting a hold is work_orders_resume_work_order. [Work Orders]",

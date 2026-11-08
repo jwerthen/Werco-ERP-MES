@@ -133,6 +133,7 @@ from app.services.material_tie_part_gate import assert_part_is_tieable_material
 from app.services.migration_import_service import import_open_work_orders
 from app.services.operation_action_gates import (
     API_TOKEN_COUNT_JUDGMENT,
+    API_TOKEN_SCRAP,
     API_TOKEN_SHORT_CLOSE,
     COMPLETION_AUDIT_UNAVAILABLE,
     MSG_ALREADY_COMPLETE,
@@ -144,6 +145,7 @@ from app.services.operation_action_gates import (
     MSG_WORK_ORDER_NOT_RELEASED,
     MSG_WORK_ORDER_ON_HOLD,
     accounting_strand_message,
+    api_token_declares_scrap,
     approved_open_entry_message,
     ceiling_exceeded_message,
     completed_counts_locked_message,
@@ -3846,7 +3848,11 @@ def update_work_order(
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Update a work order.
+    """Update a work order. A standing API token may not raise quantity_scrapped (403): a person
+    reports scrap. Re-sending the recorded value is accepted.
+
+    The scrap refusal (owner decision 2026-11-07) runs right after the version check, before any
+    other refusal and any write.
 
     Optimistic locking: the required body ``version`` must equal the work order's
     current version (as returned on every work-order response) or the update is
@@ -3894,6 +3900,16 @@ def update_work_order(
             status_code=409,
             detail="Work order was modified by someone else. Refresh and try again.",
         )
+
+    # Owner decision 2026-11-07: a standing API token may not declare scrap. The blind
+    # setattr below would OVERWRITE the header's quantity_scrapped, so a value above what
+    # is recorded is a declaration -- refused before any other check and before any write.
+    # Re-sending the recorded value (or omitting it) is not, and a crew-station badge
+    # token cannot reach this route.
+    if update_data.get("quantity_scrapped") is not None and api_token_declares_scrap(
+        current_user, float(update_data["quantity_scrapped"]) - float(work_order.quantity_scrapped or 0)
+    ):
+        raise HTTPException(status_code=403, detail=API_TOKEN_SCRAP)
 
     # G6-A: this generic update applies `status` via a blind setattr with no
     # transition validation. Block the one dangerous transition -- resurrecting a
@@ -5029,8 +5045,13 @@ def complete_work_order(
     """Manually complete a work order (privileged override), booking quantity_complete as its
     finished count. It may not exceed what the floor recorded without quantity_override_reason
     (409 names the binding operation), and a shortfall below the order must be covered by scrap
-    the floor reported or by quantity_scrapped with a reason (409); an API token may not complete
-    short (403).
+    the floor reported or by quantity_scrapped with a reason (409); an API token may not raise
+    quantity_scrapped or complete short (403).
+
+    Owner decision 2026-11-07: a standing API token may not declare scrap. ``quantity_scrapped``
+    overwrites the header, so a value above its recorded scrap is refused **403** right after the
+    number checks -- before the scrap-reason **422**, the scrap-code checks and every quantity
+    refusal. Omitting it, or re-sending the recorded value, is not a declaration.
 
     Owner ruling 1 (2026-11-05), enforced at the WORK-ORDER grain: a short is reported as scrap
     with a reason, or the work order stays open. The bounds come from the floor's own evidence
@@ -5120,6 +5141,15 @@ def complete_work_order(
         raise HTTPException(status_code=400, detail="quantity_complete cannot be negative")
     if quantity_scrapped is not None and quantity_scrapped < 0:
         raise HTTPException(status_code=400, detail="quantity_scrapped cannot be negative")
+    # Owner decision 2026-11-07: a standing API token may not declare scrap. quantity_scrapped
+    # here OVERWRITES the header, so what it would declare is the rise over the header's
+    # recorded scrap -- refused before the reason is asked for and before every quantity
+    # refusal below. Omitted, or a value at or below what is recorded, is not a declaration
+    # (the token's full-count close still works; the short-close rule below still applies).
+    if quantity_scrapped is not None and api_token_declares_scrap(
+        current_user, float(quantity_scrapped) - float(work_order.quantity_scrapped or 0)
+    ):
+        raise HTTPException(status_code=403, detail=API_TOKEN_SCRAP)
     # AS9100D defect-traceability invariant (same rule as ClockOut/ProductionReportRequest):
     # any positive scrap MUST carry a reason. Lean Phase 1: EITHER a structured
     # scrap_reason_code_id OR non-blank free text satisfies the rule (code preferred;
@@ -5636,7 +5666,8 @@ def update_operation(
     """Update an operation. A COMPLETE operation's good count and status are its completion
     record and are refused 409 here (scrap may still rise, with a reason); correct good with
     reduce_operation_production_office. Raising an open operation's good past what can reach
-    it, or past the floor's labor count, is refused 409; an API token may not edit counts (403).
+    it, or past the floor's labor count, is refused 409; an API token may not add scrap or edit
+    counts (403).
 
     Requires the operation's current ``version`` (stale -> **409**). Also returns
     **409** when setting ``status`` to COMPLETE on a not-yet-complete operation:
@@ -5655,7 +5686,9 @@ def update_operation(
     upstream short close, or above the good the floor's labor record shows (when anyone ever
     clocked in), is refused **409** -- the office Complete's ``quantity_override_reason`` is the
     door for the latter. A standing API token may not change ``quantity_complete`` /
-    ``quantity_scrapped`` / ``scrap_reason`` at all (**403**).
+    ``quantity_scrapped`` / ``scrap_reason`` at all (**403**, right after the version check): a
+    scrap rise gets the scrap text (owner decision 2026-11-07 -- only a person declares scrap),
+    any other count change the count-judgment text.
 
     Setting ``status`` to IN_PROGRESS starts the operation, so it is refused **409**
     with the start gate's text when the work order is a draft ("release first":
@@ -5704,6 +5737,16 @@ def update_operation(
         for field in ("quantity_complete", "quantity_scrapped", "scrap_reason")
         if field in update_data and _differs_from_stored(update_data[field], getattr(operation, field))
     ]
+    # Owner decision 2026-11-07: a standing API token may not declare scrap -- a rise of
+    # quantity_scrapped (open or COMPLETE operation alike) is refused with the scrap text.
+    if (
+        "quantity_scrapped" in count_changes
+        and update_data["quantity_scrapped"] is not None
+        and api_token_declares_scrap(
+            current_user, float(update_data["quantity_scrapped"]) - float(operation.quantity_scrapped or 0)
+        )
+    ):
+        raise HTTPException(status_code=403, detail=API_TOKEN_SCRAP)
     # This PR's credential rule: hand-editing an operation's counts is a judgment about
     # where pieces went -- a person signed in to the app, not a standing API token.
     if count_changes and is_api_token_credential(current_user):
@@ -6296,7 +6339,7 @@ def complete_operation(
     every unit that reached it, otherwise it saves progress and stays open. quantity_complete
     is the absolute good total and quantity_scrapped an absolute scrap total that never lowers
     (a rise needs scrap_reason or scrap_reason_code_id); good above the floor's labor count
-    needs quantity_override_reason; an API token may not close short (403).
+    needs quantity_override_reason; an API token may not raise scrap or close short (403).
 
     Owner ruling 1 (2026-11-05): a short count is reported as scrap with a reason, or the operation
     stays open -- never closed at the counted quantity. The decision is
@@ -6309,17 +6352,19 @@ def complete_operation(
     order unless **ON_HOLD**; laser pools are exempt); bad ``quantity_complete`` / missing target
     **400**; already complete **400**; operation ON_HOLD **409** (other non-startable status
     **400**); a READY operation under a **draft** / **on-hold** work order **409** (completing it
-    starts it); negative scrap **400**; unknown / inactive scrap code **404** / **422**; a scrap
-    rise without a reason **422**; good above what can reach the operation after upstream short
-    closes **400**; good above the floor's labor evidence without ``quantity_override_reason``
-    **422** (an operation nobody clocked into needs no reason -- desk cleanup stays reason-free,
-    and there is deliberately no labor gate here, unlike the shop-floor twin). On a SHORT close
-    only: an API token **403**; anyone still clocked in without ``acknowledge_open_entries`` **409**
-    naming them; an APPROVED open time entry **409**; a serialized work order with missing
-    per-serial step records **409**; a later stage already holding more good than the declaration
-    lets through **409**. Then required process-sheet steps **409** ``STEPS_INCOMPLETE``. A scrap
-    rise entered against a good count below what the floor has since recorded is refused **409**
-    (stale screen), and a standing API token may not record good above the floor's count (**403**).
+    starts it); negative scrap **400**; a scrap rise by an API token **403** (owner decision
+    2026-11-07 -- only a person declares scrap; a call with no scrap rise is unaffected); unknown /
+    inactive scrap code **404** / **422**; a scrap rise without a reason **422**; good above what
+    can reach the operation after upstream short closes **400**; good above the floor's labor
+    evidence without ``quantity_override_reason`` **422** (an operation nobody clocked into needs no
+    reason -- desk cleanup stays reason-free, and there is deliberately no labor gate here, unlike
+    the shop-floor twin). On a SHORT close only: an API token **403** (a short whose scrap is
+    already on record); anyone still clocked in without ``acknowledge_open_entries`` **409** naming
+    them; an APPROVED open time entry **409**; a serialized work order with missing per-serial step
+    records **409**; a later stage already holding more good than the declaration lets through
+    **409**. Then required process-sheet steps **409** ``STEPS_INCOMPLETE``. A scrap rise entered
+    against a good count below what the floor has since recorded is refused **409** (stale screen),
+    and a standing API token may not record good above the floor's count (**403**).
 
     Nothing to change (same good, no scrap rise, still short) is a **200** "No change" that writes
     nothing -- not even the auto-start. A short close with ``acknowledge_open_entries`` clocks the
@@ -6437,15 +6482,21 @@ def complete_operation(
     # this path used to set quantity_complete and only then refuse a bad scrap value. ----
     if quantity_scrapped is not None and quantity_scrapped < 0:
         raise HTTPException(status_code=400, detail="quantity_scrapped cannot be negative")
-    # Lean Phase 1: resolve the structured code BEFORE any mutation (404 unknown /
-    # cross-tenant, 422 inactive). None passes through untouched.
-    scrap_code = resolve_scrap_reason_code_or_http(db, company_id, scrap_reason_code_id)
     # The scrap TOTAL never lowers (it used to be an overwrite that could zero scrap the
     # floor had recorded, and null its reason). A value below what is recorded is a no-op
     # for scrap; a rise is the declared delta and must carry a reason or a code.
     stored_scrap = float(operation.quantity_scrapped or 0)
     new_scrap = max(stored_scrap, float(quantity_scrapped)) if quantity_scrapped is not None else stored_scrap
     scrap_delta = new_scrap - stored_scrap
+    # Owner decision 2026-11-07: a standing API token may not declare scrap -- a rise is
+    # refused here, before the scrap code is resolved, the reason asked for, or any
+    # quantity / accounting refusal below (the gates' start rung above still answers
+    # first). A token's call with no scrap rise is unchanged.
+    if api_token_declares_scrap(current_user, scrap_delta):
+        raise HTTPException(status_code=403, detail=API_TOKEN_SCRAP)
+    # Lean Phase 1: resolve the structured code BEFORE any mutation (404 unknown /
+    # cross-tenant, 422 inactive). None passes through untouched.
+    scrap_code = resolve_scrap_reason_code_or_http(db, company_id, scrap_reason_code_id)
     has_reason_text = bool(scrap_reason and scrap_reason.strip())
     if scrap_delta > QTY_EPSILON and not (has_reason_text or scrap_code is not None):
         raise HTTPException(status_code=422, detail=MSG_SCRAP_REASON_OR_CODE_REQUIRED)

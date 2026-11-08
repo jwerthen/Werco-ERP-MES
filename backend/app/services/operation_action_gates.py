@@ -16,14 +16,16 @@ a resolver blocker and a kiosk that gets the endpoint's 400 show the same text.
 """
 
 import re
-from typing import Iterable, List, Optional, Sequence
+from typing import Any, Iterable, List, Optional, Sequence
 
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
+from app.core.credentials import is_api_token_credential
 from app.models.time_entry import TimeEntry
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.services.work_order_state_service import (
+    QTY_EPSILON,
     TERMINAL_WO_STATUSES,
     AccountingStrand,
     OperationAccounting,
@@ -97,18 +99,59 @@ MSG_DRAFT_CANNOT_BE_HELD = (
 # ``work_order_state_service.OperationAccounting`` -- never re-derive it here.
 # --------------------------------------------------------------------------- #
 
-# A standing machine credential (``app.core.credentials.is_api_token_credential``) may
-# close a full count but never closes work short: declaring where missing pieces went is
-# a judgment a named person makes. A crew-station badge token is a person and may.
+# Owner decision 2026-11-07: a standing machine credential
+# (``app.core.credentials.is_api_token_credential`` -- the Werco Assistant over MCP, any
+# bot) may NOT declare scrap, anywhere. Only a person -- at the kiosk, with a crew badge or
+# signed in at a desk -- declares scrap, because a scrap count is quality evidence someone
+# has to have seen. Every request by an API token that would RAISE a recorded scrap
+# quantity (an operation's, a time entry's or a work order header's ``quantity_scrapped``),
+# and with it attach a scrap reason to new scrap, is refused 403 with API_TOKEN_SCRAP
+# before any write and before any audit row: clock-out, /production (whose command the
+# Hank production task also runs -- refused there at preparation and at execution), both
+# close verbs, force-complete and both generic PUTs. ``api_token_declares_scrap`` is the one predicate they all call. A request
+# whose scrap delta is zero is untouched, so a token's full-count close, good-only
+# production report and good-only clock-out still work. A crew-station badge token is a
+# person (``_token_scope == "kiosk"``, no ``_api_token_id``) and is never refused here.
+API_TOKEN_SCRAP = (
+    "Scrap must be reported by a person (at the kiosk, with a crew badge, or signed in at a desk), not an API "
+    "token: a scrap count is quality evidence someone has to have seen. Record good pieces only, or leave the "
+    "work open for that person."
+)
+# The same decision's close half: a token may close a full count but never closes work
+# short -- declaring where missing pieces went is a judgment a named person makes. It is
+# what a token meets on a short close whose scrap is ALREADY on record (the request adds
+# none); a short close that declares new scrap is refused API_TOKEN_SCRAP first.
 API_TOKEN_SHORT_CLOSE = "Closing work short must be done by a person signed in to the app, not an API token."
-# The same rule's other judgment writes about the count (this PR's own reading of "standing
-# API tokens may not make judgment writes"; owner confirmation of the combined reading is
-# pending): booking more good than the floor recorded, hand-editing an operation's counts,
-# and lowering the order once work has been recorded against it.
+# The count judgments that are not scrap, refused under the same principle (a person makes
+# the judgment, not a standing token): booking more good than the floor recorded,
+# hand-editing an operation's counts through its PUT (any change but a scrap rise, which is
+# API_TOKEN_SCRAP), and lowering the order once work has been recorded against it. The
+# 2026-11-07 question asked about scrap and short closes; these three are this PR's
+# reading of the same rule.
 API_TOKEN_COUNT_JUDGMENT = (
     "Recording more good than the floor counted, editing an operation's counts, or lowering the order "
     "after work was recorded must be done by a person signed in to the app, not an API token."
 )
+
+
+def api_token_declares_scrap(user: Any, scrap_delta: Optional[float]) -> bool:
+    """True when a standing API token's request would RAISE a recorded scrap quantity.
+
+    The one predicate behind API_TOKEN_SCRAP (owner decision 2026-11-07). ``scrap_delta``
+    is how much the request would ADD to the stored scrap it writes: zero, a negative (a
+    lowering, which the verbs that refuse it refuse for everyone) and a non-number never
+    count, so a token's zero-scrap request is untouched. A crew-station badge token is a
+    person and is never refused (``is_api_token_credential``).
+    """
+    if not is_api_token_credential(user):
+        return False
+    try:
+        delta = float(scrap_delta or 0)
+    except (TypeError, ValueError):
+        return False
+    return delta > QTY_EPSILON
+
+
 # The floor completion audit row is REQUIRED evidence on a short close or a scrap
 # declaration (``AuditService.log_required``); when it cannot be written nothing is saved.
 COMPLETION_AUDIT_UNAVAILABLE = "The completion audit could not be saved; nothing was changed. Please retry."

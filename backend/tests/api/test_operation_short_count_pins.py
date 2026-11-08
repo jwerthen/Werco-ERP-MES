@@ -41,6 +41,7 @@ from app.models.user import UserRole
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus, WorkOrderType
 from app.services.audit_service import AuditService
 from app.services.operation_action_gates import (
+    API_TOKEN_SCRAP,
     API_TOKEN_SHORT_CLOSE,
     MSG_SCRAP_REASON_OR_CODE_REQUIRED,
     MSG_WORK_ORDER_ON_HOLD,
@@ -272,7 +273,8 @@ class TestACrewBadgeIsAPerson:
             headers=_token_headers(client, admin_headers, lead),
         )
         assert refused.status_code == 403, refused.text
-        assert refused.json()["detail"] == API_TOKEN_SHORT_CLOSE
+        # Owner decision 2026-11-07: a token may not declare the scrap at all.
+        assert refused.json()["detail"] == API_TOKEN_SCRAP
 
 
 class TestAFullCountCloseIsUnchanged:
@@ -662,7 +664,8 @@ class TestForceComplete:
             headers=token_headers,
         )
         assert resp.status_code == 403, resp.text
-        assert resp.json()["detail"] == API_TOKEN_SHORT_CLOSE
+        # Owner decision 2026-11-07: the scrap rise is refused first, with its own text.
+        assert resp.json()["detail"] == API_TOKEN_SCRAP
         _assert_nothing_written(db_session, wo, before)
 
     def test_the_labor_evidence_read_is_tenant_scoped(self, client, db_session, supervisor):
