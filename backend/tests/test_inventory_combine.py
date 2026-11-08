@@ -2405,9 +2405,9 @@ def test_every_row_lock_is_taken_before_the_first_audit_write(
     first audit write; the combine called ``_audit_combine_line`` INSIDE the drain
     loop, so line 1's audit grabbed the global chain lock and line 2 then asked for
     a NEW target row lock. Against a ``/receive`` that already held that row and was
-    about to write its own audit row, that is a textbook deadlock — and there is no
-    DBAPI deadlock handler in this app, so Postgres aborting the victim surfaces as
-    a **500 on a stock verb**.
+    about to write its own audit row, that is a textbook deadlock — and Postgres
+    aborting the victim surfaced as a **500 on a stock verb** (a lost lock race now
+    answers the app-wide 409, still a failed request).
 
     SQLite ignores ``FOR UPDATE``, so the lock itself cannot be observed here. What
     IS observable, and is the actual property, is the ORDER OF OPERATIONS: every

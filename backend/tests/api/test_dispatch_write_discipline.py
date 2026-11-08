@@ -229,7 +229,7 @@ class TestScheduleRoutesLockBeforeRowLocks:
     dispatch lock and THEN writes those very rows (the plan's rank UPDATE, the operation
     order, the column rewrite, the other two move verbs). A schedule route that took the
     dispatch lock AFTER its row locks would close that cycle, and Postgres would abort one
-    side with DeadlockDetected -- a 500. Neither lock exists on SQLite, so only the recorded
+    side with DeadlockDetected -- a failed request. Neither lock exists on SQLite, so only the recorded
     ORDER can show it."""
 
     @pytest.mark.parametrize("moves", [True, False], ids=["move", "same-machine-resend"])

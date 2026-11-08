@@ -199,7 +199,8 @@ def _lock_dispatch_order_if_move_requested(
     operations ``FOR UPDATE`` (``load_locked_material_readiness``) before they know whether
     the call moves anything. Every other dispatch-order writer takes the advisory lock FIRST
     and then writes those same rows, so a schedule route taking it after its row locks
-    closes a cycle Postgres breaks by aborting one side (``DeadlockDetected``, a 500). One
+    closes a cycle Postgres breaks by aborting one side (``DeadlockDetected``: a failed request, the app-wide
+    409 since the lost-lock-race handler). One
     lock order on every path: dispatch lock -> work order / operation row locks -> material
     row locks -> audit chain lock.
 
