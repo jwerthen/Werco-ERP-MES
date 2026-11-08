@@ -25,7 +25,8 @@ that B's write landed, and that a retry succeeds on the same pool with its audit
    a swallowing ``try/except`` (the shape of a legacy best-effort caller). Here only the guard in
    ``app.db.database`` stands between the victim and a silent 200.
 4. The guard at session level: a swallowed 40P01, then ``commit()`` raises
-   ``AbortedTransactionCommitError``, carrying SQLSTATE 40P01.
+   ``AbortedTransactionCommitError``, carrying SQLSTATE 40P01, and has already ended the server
+   transaction, so a session that is only closed returns a clean connection to the pool.
 
 Non-blocking, like every ``verify_*_postgres`` step in ``.github/workflows/e2e.yml``. It runs in
 a scratch database created beside ``DATABASE_URL`` and dropped afterwards, and refuses anything
@@ -43,6 +44,7 @@ import time
 from unittest.mock import patch
 from uuid import uuid4
 
+import psycopg2.extensions
 import sqlalchemy as sa
 from sqlalchemy import text
 
@@ -334,6 +336,7 @@ def _verify(scratch_name: str) -> None:
         a = SessionLocal()
         try:
             a.execute(text("UPDATE work_centers SET description = 'A' WHERE id = :i"), {"i": wc_id})
+            driver_connection = a.connection().connection.dbapi_connection
             swallowed = None
             try:
                 a.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _AUDIT_CHAIN_LOCK_KEY})
@@ -347,14 +350,19 @@ def _verify(scratch_name: str) -> None:
                 refused = exc
             else:
                 raise AssertionError(f"{label}: commit() returned normally for an aborted transaction")
-            a.rollback()
+            # Close-only cleanup (no rollback), as ``with SessionLocal() as db:`` does: the guard
+            # must already have ended the server transaction, or the pool would hand this
+            # connection to the next checkout still aborted.
+            status = driver_connection.info.transaction_status
+            if status != psycopg2.extensions.TRANSACTION_STATUS_IDLE:
+                raise AssertionError(f"{label}: the refused transaction was left open (libpq status {status})")
         finally:
             a.close()
         finish_b(b, label)
         assert refused.orig.pgcode == "40P01", f"{label}: the refusal lost the cause: {refused.orig!r}"
         assert is_lost_lock_race(refused), f"{label}: the refusal is not recognized as a lost lock race"
         assert scalar("SELECT description FROM work_centers WHERE id = :i", i=wc_id) == "B", f"{label}: A saved"
-        print(f"{label}: commit() raised AbortedTransactionCommitError (SQLSTATE 40P01)")
+        print(f"{label}: commit() raised AbortedTransactionCommitError (SQLSTATE 40P01); connection left idle")
     finally:
         for watched_logger in watched:
             watched_logger.removeHandler(captured)
