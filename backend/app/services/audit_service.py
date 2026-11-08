@@ -21,7 +21,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from fastapi import Request
 from sqlalchemy import desc, inspect, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -509,7 +509,14 @@ class AuditService:
              best-effort contract (log + return ``None``) with the session left
              un-poisoned.
 
-        This method never propagates an audit failure to the caller.
+        Best-effort, with one exception. A failure the savepoint contains, or one
+        that never reaches the database, is logged and returns ``None``, and the
+        caller's write proceeds. A database error (``DBAPIError``) that no
+        savepoint contained is RE-RAISED. On PostgreSQL that error has already
+        aborted the caller's transaction, so the caller's write cannot be saved
+        whatever happens next, and swallowing it would only hide that. The chain
+        lock's deadlock victim (40P01) is the case that matters. See the
+        ``except DBAPIError`` below and ``app.db.database``'s COMMIT guard.
         """
         try:
             # Credential marker (API-token requests only) -- folded in here so
@@ -631,6 +638,21 @@ class AuditService:
                 f"after {_MAX_SEQUENCE_RETRIES} attempts"
             )
             return None
+        except DBAPIError as e:
+            # A database error that no savepoint here contained. Postgres has ABORTED the
+            # caller's whole transaction: its business write is already lost, and the COMMIT it
+            # is about to send would silently roll back. The usual source is the chain-lock wait
+            # above, chosen as a deadlock victim (40P01) by a writer that took the chain lock
+            # first and now wants a row this caller holds. Also the tail read, or the caller's own
+            # pending flush that ``begin_nested`` sends. Swallowing it here is what let routes
+            # answer 200 for a write that was never saved and has no audit row. So it propagates:
+            # a lost lock race becomes the app-wide 409 (``app.db.locks.is_lost_lock_race``) and
+            # anything else becomes a 500. Either way the caller rolls back and nothing is reported
+            # saved. Errors a savepoint does contain stay best-effort: the sequence collisions
+            # retried above, and the paused-mode ``nextval`` / resync. So do Python-side failures
+            # that never reach the database.
+            logger.error(f"Failed to create audit log; the database error aborts the transaction: {e}")
+            raise
         except Exception as e:
             logger.error(f"Failed to create audit log: {e}")
             # Don't raise - audit logging should not break the main operation
@@ -642,8 +664,15 @@ class AuditService:
         Legacy log/helper callers retain their existing best-effort behavior. This
         uses the same credential attribution, chain locking and savepoint retries;
         it neither commits nor rolls back the caller's outer transaction itself.
+
+        A database error that ``log()`` re-raises (it aborted the transaction) is
+        reported as ``AuditWriteError`` too, chained to that error. Every
+        ``log_required`` caller already turns this error into a rollback and a 503.
         """
-        entry = self.log(action=action, resource_type=resource_type, **kwargs)
+        try:
+            entry = self.log(action=action, resource_type=resource_type, **kwargs)
+        except DBAPIError as exc:
+            raise AuditWriteError("The required audit record could not be saved") from exc
         if entry is None:
             raise AuditWriteError("The required audit record could not be saved")
         return entry

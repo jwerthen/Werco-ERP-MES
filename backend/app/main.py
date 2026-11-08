@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm.exc import StaleDataError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -24,6 +25,8 @@ from app.core.observability import capture_exception_to_sentry
 from app.core.observability import init_sentry as _init_sentry
 from app.core.queue import log_redis_target as _log_redis_target
 from app.db.database import Base, engine
+from app.db.locks import is_lost_lock_race
+from app.db.mixins import STALE_WRITE_CONFLICT_DETAIL
 from app.middleware.fabrication_quote_body_limit import FabricationQuoteBodyLimitMiddleware
 from app.middleware.logging_middleware import (
     CorrelationIdMiddleware,
@@ -867,10 +870,31 @@ async def stale_data_exception_handler(request: Request, exc: StaleDataError):
     logger.warning(f"Optimistic-lock conflict (StaleDataError) on {request.method} {request.url.path}: {exc}")
     response = JSONResponse(
         status_code=409,
-        content={"detail": "This record was modified by someone else. Refresh and try again."},
+        content={"detail": STALE_WRITE_CONFLICT_DETAIL},
     )
     origin = request.headers.get("origin")
     return add_cors_headers(response, origin)
+
+
+# Lost-lock-race handler. Postgres settles a lock conflict by rolling one transaction back
+# (deadlock_detected 40P01, serialization_failure 40001). Nothing in that transaction was saved,
+# and the writer that won has moved on from what this request read. That is the same situation
+# as a stale version check, so it gets the same 409 and the same text. The error arrives either
+# as the driver error itself (re-raised by ``AuditService.log``, or from any statement nobody
+# caught) or as the COMMIT guard's ``AbortedTransactionCommitError``, whose ``orig`` carries the
+# SQLSTATE that aborted the transaction (``app/db/database.py``). Every other database error is
+# re-raised untouched and takes the path it took before this handler existed: the global handler
+# above answers 500 with a correlation id.
+@app.exception_handler(DBAPIError)
+async def lost_lock_race_exception_handler(request: Request, exc: DBAPIError):
+    if not is_lost_lock_race(exc):
+        raise exc
+    logger.warning(
+        f"Lost lock race (SQLSTATE {getattr(exc.orig, 'pgcode', None)}) on {request.method} {request.url.path}; "
+        "the transaction was rolled back and nothing was saved"
+    )
+    response = JSONResponse(status_code=409, content={"detail": STALE_WRITE_CONFLICT_DETAIL})
+    return add_cors_headers(response, request.headers.get("origin"))
 
 
 # HTTP exception handler - ensures CORS headers on HTTP errors (401, 403, 404, etc.)
