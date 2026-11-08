@@ -2258,6 +2258,10 @@ export default function CrewStationKiosk() {
             initialGood={operationUnaccounted(shortBaselineFor(viewItem))}
             shortBaseline={shortBaselineFor(viewItem)}
             shortInRuns={viewItem.laser_nest != null}
+            // Pooled job whose earlier operation already declared a loss: those units
+            // are not credited here, so the one-tap scrap fill is withheld (it would
+            // scrap pieces this operation never received) — same rule as the kiosk.
+            uncreditedUpstream={viewItem.upstream_short_uncredited}
             requireTotalPositive={false}
             tallyBanner={`CREW TOTAL SO FAR: ${formatCrewTally(viewItem)} — enter only NEW pieces`}
             scrapCodes={scrapCodes}

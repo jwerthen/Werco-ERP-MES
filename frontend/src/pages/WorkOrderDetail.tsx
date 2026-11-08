@@ -58,6 +58,8 @@ import { formatCentralDate, formatCentralDateTime, getCentralDateStamp } from '.
 import { formatOperationLabel, operationNumberText, sortOperationsForDisplay } from '../utils/operationLabel';
 import { formatShortQuantity, shortUnitLabel, SHORT_EPSILON } from '../utils/shortCount';
 import {
+  isOpenEntriesRefusal,
+  isOverrideReasonRefusal,
   isReopenRequiredRefusal,
   joinOperatorNames,
   operationMayHaveLabor,
@@ -140,6 +142,21 @@ const RESUME_WORK_ORDER_MESSAGE =
  * the page shows it, and the user may retry or cancel.
  */
 const isStateMovedRefusal = (err: any): boolean => [400, 404, 409].includes(err?.response?.status);
+
+/**
+ * A Complete refusal that means the job moved under the open modal (the generic state
+ * refusal above) — EXCEPT the two the modal answers itself: "still clocked in" (it offers
+ * the acknowledge-and-close resubmit) and "say why you are booking more" (it raises the
+ * override-reason field). Those leave the page as it is; every other one re-reads it, so
+ * the header, the row's buttons and the modal's own recorded / upstream-short / ceiling
+ * figures stop describing a job that no longer exists (realtime is dark — nothing else
+ * would refresh them).
+ */
+const isCompleteStateMovedRefusal = (err: any): boolean => {
+  if (!isStateMovedRefusal(err)) return false;
+  const detail = err?.response?.data?.detail;
+  return !isOpenEntriesRefusal(detail) && !isOverrideReasonRefusal(detail);
+};
 
 /** Hold Work Order confirm copy. */
 const HOLD_WORK_ORDER_MESSAGE =
@@ -636,8 +653,12 @@ export default function WorkOrderDetail() {
   // TOTALS (prefilled with what is recorded), a scrap reason when the scrap total
   // rises, and — owner ruling 1 — an override reason when the desk books more good
   // than the floor counted, before we call the API.
+  //
+  // An operation target stores only the ID: the operation the modal renders is looked
+  // up in the CURRENT work order (`completeOperation` below), so a re-read after a
+  // refusal refreshes the figures the modal reasons with, not just the page around it.
   const [completeTarget, setCompleteTarget] = useState<
-    { kind: 'work_order' } | { kind: 'operation'; operation: WorkOrderOperation } | null
+    { kind: 'work_order' } | { kind: 'operation'; operationId: number } | null
   >(null);
   // The server's refusal of the current completion attempt, rendered INLINE in the
   // modal (verbatim) so the entered totals stay put for a retry. Cleared on open and
@@ -1125,8 +1146,17 @@ export default function WorkOrderDetail() {
   const handleCompleteOperation = (operation: WorkOrderOperation) => {
     if (completingOpId === operation.id) return;
     setCompleteError(null);
-    setCompleteTarget({ kind: 'operation', operation });
+    setCompleteTarget({ kind: 'operation', operationId: operation.id });
   };
+
+  // The operation the Complete modal is for, read from the CURRENT work order — so a
+  // re-read (after a refusal that means the job moved) refreshes every figure the modal
+  // reasons with. Null when the target is the work order, or when the operation is no
+  // longer on the job (the modal then has nothing to complete and closes).
+  const completeOperation =
+    completeTarget?.kind === 'operation'
+      ? (workOrder?.operations || []).find((op) => op.id === completeTarget.operationId) ?? null
+      : null;
 
   const handleCompleteSubmit = async (values: CompleteWorkSubmit) => {
     if (!completeTarget) return;
@@ -1162,11 +1192,14 @@ export default function WorkOrderDetail() {
         // never reach the renderer.)
         const detail = err.response?.data?.detail;
         setCompleteError(typeof detail === 'string' && detail ? detail : 'Failed to complete work order');
+        // The job moved under the modal: re-read it (the refusal stays on screen).
+        if (isCompleteStateMovedRefusal(err)) await loadWorkOrder();
       } finally {
         setCompleting(false);
       }
     } else {
-      const operation = completeTarget.operation;
+      const operation = completeOperation;
+      if (!operation) return;
       const operationId = operation.id;
       setCompletingOpId(operationId);
       try {
@@ -1220,6 +1253,10 @@ export default function WorkOrderDetail() {
           // follow-up the refusal names.
           const detail = err.response?.data?.detail;
           setCompleteError(typeof detail === 'string' && detail ? detail : 'Failed to complete operation');
+          // A refusal that means the job moved (held meanwhile, a stale short or
+          // scrap figure, completed elsewhere) re-reads the page; the modal's figures
+          // follow, because it renders the operation from the reloaded work order.
+          if (isCompleteStateMovedRefusal(err)) await loadWorkOrder();
         }
       } finally {
         setCompletingOpId(null);
@@ -3871,39 +3908,39 @@ export default function WorkOrderDetail() {
       </Modal>
 
       <CompleteWorkModal
-        open={completeTarget !== null}
+        open={completeTarget !== null && (completeTarget.kind === 'work_order' || completeOperation !== null)}
         onClose={() => {
           // Don't let the user dismiss mid-request; reflect only server state.
           if (completing || completingOpId !== null) return;
           setCompleteTarget(null);
         }}
         submitting={
-          completeTarget?.kind === 'operation' ? completingOpId === completeTarget.operation.id : completing
+          completeTarget?.kind === 'operation' ? completingOpId === completeTarget.operationId : completing
         }
         onSubmit={handleCompleteSubmit}
         error={completeError}
         title={
-          completeTarget?.kind === 'operation'
-            ? `Complete operation "${completeTarget.operation.name}"`
+          completeOperation
+            ? `Complete operation "${completeOperation.name}"`
             : `Complete work order ${workOrder.work_order_number}`
         }
         // Owner ruling 1: both fields are TOTALS prefilled with what is RECORDED,
         // and every figure the modal reasons with is the server's (the S12 read
         // model) — the operation's good ceiling / upstream short, the work order's
         // deliverable / accounted loss.
-        {...(completeTarget?.kind === 'operation'
+        {...(completeOperation
           ? {
               mode: 'operation' as const,
-              subtitle: `Target: ${formatShortQuantity(operationRunTarget(completeTarget.operation, workOrder.quantity_ordered))}${completeTarget.operation.laser_nest ? ' runs' : ''}. Enter the totals, including work already recorded.`,
-              target: operationRunTarget(completeTarget.operation, workOrder.quantity_ordered),
-              recordedComplete: Number(completeTarget.operation.quantity_complete || 0),
-              recordedScrapped: Number(completeTarget.operation.quantity_scrapped || 0),
-              upstreamShort: completeTarget.operation.upstream_quantity_short,
-              goodCeiling: completeTarget.operation.quantity_good_ceiling,
-              laborRecorded: operationMayHaveLabor(completeTarget.operation),
-              floorRecorded: completeTarget.operation.quantity_recorded_good,
-              isNest: !!completeTarget.operation.laser_nest,
-              subjectLabel: operationLabel(completeTarget.operation),
+              subtitle: `Target: ${formatShortQuantity(operationRunTarget(completeOperation, workOrder.quantity_ordered))}${completeOperation.laser_nest ? ' runs' : ''}. Enter the totals, including work already recorded.`,
+              target: operationRunTarget(completeOperation, workOrder.quantity_ordered),
+              recordedComplete: Number(completeOperation.quantity_complete || 0),
+              recordedScrapped: Number(completeOperation.quantity_scrapped || 0),
+              upstreamShort: completeOperation.upstream_quantity_short,
+              goodCeiling: completeOperation.quantity_good_ceiling,
+              laborRecorded: operationMayHaveLabor(completeOperation),
+              floorRecorded: completeOperation.quantity_recorded_good,
+              isNest: !!completeOperation.laser_nest,
+              subjectLabel: operationLabel(completeOperation),
             }
           : {
               mode: 'work_order' as const,

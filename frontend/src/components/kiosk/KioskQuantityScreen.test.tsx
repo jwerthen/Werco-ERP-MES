@@ -126,4 +126,54 @@ describe('SHORT readout (owner ruling 1) is COMPLETE-only', () => {
     fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
     expect(onConfirm).toHaveBeenCalledWith(3, 1, 'Material defect', null);
   });
+  it('on a POOLED job whose earlier operation already declared the loss, withholds the scrap fill and says why', () => {
+    const onConfirm = jest.fn();
+    render(
+      <KioskQuantityScreen
+        title="Complete job"
+        jobLabel="WO-1 · Op 20"
+        confirmLabel="Continue"
+        requireTotalPositive={false}
+        // Pooled: no chain credit, so 2 still read as unaccounted — but Op 10 already
+        // closed them short, and they never reached this operation.
+        shortBaseline={{ target: 10, upstreamShort: 0, complete: 8, scrapped: 0 }}
+        uncreditedUpstream={2}
+        scrapCodes={null}
+        busy={false}
+        onConfirm={onConfirm}
+        onCancel={jest.fn()}
+      />
+    );
+
+    // Still SHORT (the server would refuse the close) …
+    expect(screen.getByTestId('kiosk-qty-short')).toHaveTextContent('Short 2 pcs');
+    expect(screen.getByTestId('kiosk-qty-confirm')).toBeDisabled();
+    // … but no one-tap fill: it would scrap the same loss a second time.
+    expect(screen.queryByTestId('kiosk-qty-report-scrap')).not.toBeInTheDocument();
+    expect(screen.getByTestId('kiosk-qty-uncredited')).toHaveTextContent(
+      "2 pcs were already closed short at an earlier operation, but this job's operations are not sequenced, so that loss is not credited here. Do not report pieces you never received as scrap — ask a supervisor to turn on Sequential operations."
+    );
+    expect(screen.getByTestId('kiosk-qty-short-hint')).not.toHaveTextContent(/report as scrap/);
+  });
+
+  it('the uncredited figure changes nothing when the entry is not short', () => {
+    render(
+      <KioskQuantityScreen
+        title="Complete job"
+        jobLabel="WO-1 · Op 20"
+        confirmLabel="Continue"
+        requireTotalPositive={false}
+        initialGood={2}
+        shortBaseline={{ target: 10, upstreamShort: 0, complete: 8, scrapped: 0 }}
+        uncreditedUpstream={2}
+        scrapCodes={null}
+        busy={false}
+        onConfirm={jest.fn()}
+        onCancel={jest.fn()}
+      />
+    );
+    expect(screen.queryByTestId('kiosk-qty-short')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('kiosk-qty-uncredited')).not.toBeInTheDocument();
+    expect(screen.getByTestId('kiosk-qty-confirm')).toBeEnabled();
+  });
 });

@@ -393,10 +393,11 @@ describe('OperatorKiosk process steps', () => {
       })
     );
 
-    // Honest two-step message, verbatim missing labels…
+    // Honest two-step message, verbatim missing labels — and the 1 scrap that rode the
+    // refused close was not saved, so it says so…
     expect(
       await screen.findByText(
-        'Clocked out, but completing failed: Required process steps are missing records: Bore diameter'
+        'Clocked out, but completing failed (the 1 scrap was not saved): Required process steps are missing records: Bore diameter'
       )
     ).toBeInTheDocument();
     // …and the steps view opens with the inline missing banner (not just a toast).

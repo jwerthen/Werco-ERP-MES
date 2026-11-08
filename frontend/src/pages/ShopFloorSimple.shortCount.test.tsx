@@ -12,7 +12,12 @@
  *    (`operation_status: "complete"`), in which case there is nothing left to close;
  *  - a close refused after the clock-out landed is reported honestly;
  *  - the work-center queue fallback carries the REAL scrap total and the server's
- *    short-count figures (it used to hard-code `quantity_scrapped: 0`).
+ *    short-count figures (it used to hard-code `quantity_scrapped: 0`);
+ *  - a check-in whose operation is NOT in the loaded list (another station, a filter)
+ *    still carries those figures off `my-active-job`, so its Check Out judges against
+ *    what can reach the operation, not the full target;
+ *  - on a POOLED job whose earlier operation already declared a loss
+ *    (`upstream_short_uncredited`), the hint never says to enter it as scrap.
  */
 
 import React from 'react';
@@ -258,8 +263,10 @@ describe('ShopFloorSimple — short count (owner ruling 1)', () => {
     fireEvent.click(within(dialog).getByLabelText('Complete Op 20 after checking out'));
     fireEvent.click(within(dialog).getByRole('button', { name: 'Check out & complete' }));
 
+    // The 1 scrap covering the short rode the refused close (the check-out carried 0), so
+    // it was NOT saved — said plainly, as the crew station does.
     const failed = await screen.findByText(
-      'Checked out, but completing failed: Bob T is still clocked in to Op 20 — have them clock out with their count first, or leave the operation open.'
+      'Checked out, but completing failed (the 1 scrap was not saved): Bob T is still clocked in to Op 20 — have them clock out with their count first, or leave the operation open.'
     );
     // An ERROR, not a warning: the check-out landed, the close was refused.
     expect(failed.closest('[role="alert"]')).toHaveClass('bg-red-600');
@@ -335,5 +342,105 @@ describe('ShopFloorSimple — short count (owner ruling 1)', () => {
     // 7 good + 3 scrap = 10: accounted for, so the card offers the close. With the old
     // hard-coded `quantity_scrapped: 0` this read "3 remaining" and offered nothing.
     expect(await screen.findByText('All pieces accounted for')).toBeInTheDocument();
+  });
+  describe('a check-in whose operation is not in the loaded list', () => {
+    // Sequenced job, 10 target: Op 10 closed 2 short, so Op 20 can receive 8; 6 good here.
+    const SHORTED_JOB = {
+      ...ACTIVE_JOB,
+      upstream_quantity_short: 2,
+      quantity_good_ceiling: 8,
+      quantity_unaccounted: 2,
+    };
+
+    async function openBannerCheckOut() {
+      const banner = await screen.findByRole('button', { name: /^Go to WO-2026-0042/ });
+      fireEvent.click(within(banner.closest('li') as HTMLElement).getByRole('button', { name: 'Check Out' }));
+      return screen.findByRole('dialog');
+    }
+
+    it('judges against what can reach the operation, off my-active-job', async () => {
+      // The desk list is filtered elsewhere: the checked-in operation is not loaded.
+      mockedApi.getShopFloorOperations.mockResolvedValue({ operations: [] });
+      mockedApi.getMyActiveJob.mockResolvedValue({ active_jobs: [SHORTED_JOB], active_job: SHORTED_JOB });
+      renderShopFloor();
+      const dialog = await openBannerCheckOut();
+
+      // 8 received − 6 good = 2 (the full target would have said 4).
+      expect(within(dialog).getByText(/Not yet accounted for:\s*2/)).toBeInTheDocument();
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Remaining' }));
+      expect(within(dialog).getByLabelText('Additional good parts at checkout')).toHaveValue(2);
+      // 6 + 2 is the full count the server auto-completes — said up front, and no hint to
+      // scrap the 2 an upstream close already declared short.
+      expect(within(dialog).getByText(/That is the full count — checking out completes/)).toBeInTheDocument();
+      expect(within(dialog).queryByText(/enter lost pieces as scrap/)).not.toBeInTheDocument();
+    });
+
+    it("prefers the check-in's figures over a stale list row", async () => {
+      // The list row predates the upstream short close; my-active-job is the fresher read.
+      mockedApi.getShopFloorOperations.mockResolvedValue({
+        operations: [{ ...OP, upstream_quantity_short: 0, quantity_good_ceiling: 10, quantity_unaccounted: 4 }],
+      });
+      mockedApi.getMyActiveJob.mockResolvedValue({ active_jobs: [SHORTED_JOB], active_job: SHORTED_JOB });
+      renderShopFloor();
+      const dialog = await openBannerCheckOut();
+
+      expect(within(dialog).getByText(/Not yet accounted for:\s*2/)).toBeInTheDocument();
+    });
+  });
+
+  describe('a POOLED job whose earlier operation already declared the loss', () => {
+    it('the check-out hint says not to scrap pieces never received — never "enter lost pieces as scrap"', async () => {
+      // Pooled: no chain credit, so 4 still read as unaccounted, 2 of them already closed
+      // short at Op 10 (`upstream_short_uncredited`).
+      mockedApi.getShopFloorOperations.mockResolvedValue({
+        operations: [{ ...OP, upstream_quantity_short: 0, quantity_good_ceiling: 10, upstream_short_uncredited: 2 }],
+      });
+      renderShopFloor();
+      const dialog = await openCheckOut();
+
+      const hint = within(dialog).getByText(/^4 not yet accounted for — /);
+      expect(hint).toHaveTextContent(
+        "2 pcs were already closed short at an earlier operation, but this job's operations are not sequenced"
+      );
+      expect(hint).toHaveTextContent('Do not report pieces you never received as scrap');
+      expect(hint).toHaveTextContent('Check out and leave it open.');
+      expect(hint).not.toHaveTextContent(/enter lost pieces as scrap/);
+    });
+
+    it('the work-center queue fallback carries the uncredited figure too', async () => {
+      mockedApi.getShopFloorOperations.mockResolvedValue({ operations: [] });
+      mockedApi.getWorkCenters.mockResolvedValue([DEBURR_1]);
+      mockedApi.getWorkCenterQueue.mockResolvedValue({
+        queue: [
+          {
+            operation_id: 101,
+            work_order_id: 42,
+            work_order_number: 'WO-2026-0042',
+            part_number: 'PN-0099',
+            part_name: 'Mount Plate',
+            operation_number: '20',
+            operation_name: 'Deburr',
+            work_center_id: 1,
+            status: 'in_progress',
+            quantity_ordered: 10,
+            quantity_complete: 6,
+            quantity_scrapped: 0,
+            upstream_quantity_short: 0,
+            quantity_good_ceiling: 10,
+            quantity_unaccounted: 4,
+            upstream_short_uncredited: 2,
+            priority: 3,
+            due_date: null,
+          },
+        ],
+      });
+      localStorage.setItem('shopfloor:workCenterId', '1');
+      renderShopFloor('/shop-floor/operations?work_center_id=1');
+      const dialog = await openCheckOut();
+
+      expect(within(dialog).getByText(/^4 not yet accounted for — /)).toHaveTextContent(
+        'Do not report pieces you never received as scrap'
+      );
+    });
   });
 });

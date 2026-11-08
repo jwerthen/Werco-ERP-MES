@@ -60,6 +60,7 @@ import {
   implicitFullCountAfterEntry,
   operationUnaccounted,
   shortAfterEntry,
+  uncreditedUpstreamWarning,
 } from '../utils/shortCount';
 import { ScanResolveResult } from '../types/scan';
 import { useAuth } from '../context/AuthContext';
@@ -195,6 +196,20 @@ const INITIAL_PRODUCTION_DATA = {
 };
 
 const formatScanActions = (actions: string[]) => actions.map((action) => action.replace(/_/g, ' ')).join(', ');
+
+/**
+ * Owner ruling 1's server figures for the operation behind a check-in, off
+ * `GET /shop-floor/my-active-job` — which carries them for every check-in, including
+ * one whose operation is not in the loaded list (another station, a search, a filter).
+ * The job's value wins when present (it is the fresher read, as for the counts); the
+ * list row's otherwise. Absent everywhere reads as "nothing lost upstream".
+ */
+const shortCountFieldsFromJob = (job: ActiveJob, row?: OperationShortCountFields): OperationShortCountFields => ({
+  upstream_quantity_short: job.upstream_quantity_short ?? row?.upstream_quantity_short ?? null,
+  quantity_good_ceiling: job.quantity_good_ceiling ?? row?.quantity_good_ceiling ?? null,
+  quantity_unaccounted: job.quantity_unaccounted ?? row?.quantity_unaccounted ?? null,
+  upstream_short_uncredited: job.upstream_short_uncredited ?? row?.upstream_short_uncredited ?? null,
+});
 
 const isActiveJobOperation = (job: ActiveJob, operation: Operation) =>
   job.operation_id != null
@@ -425,10 +440,11 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
           // received-aware remaining subtracts scrap, so a hard-coded 0 here would
           // over-state what is left on every job with recorded scrap.
           quantity_scrapped: Number(item.quantity_scrapped || 0),
-          // Owner ruling 1: the same three server figures the list rows carry.
+          // Owner ruling 1: the same server figures the list rows carry.
           upstream_quantity_short: item.upstream_quantity_short ?? null,
           quantity_good_ceiling: item.quantity_good_ceiling ?? null,
           quantity_unaccounted: item.quantity_unaccounted ?? null,
+          upstream_short_uncredited: item.upstream_short_uncredited ?? null,
           priority: item.priority,
           due_date: item.due_date,
           customer_name: null,
@@ -976,6 +992,8 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
       quantity_ordered: job.quantity_ordered ?? matchingOperation.quantity_ordered,
       quantity_complete: job.quantity_complete ?? matchingOperation.quantity_complete,
       quantity_scrapped: job.operation_quantity_scrapped ?? matchingOperation.quantity_scrapped,
+      // Owner ruling 1's server figures, fresher on the check-in for the same reason.
+      ...shortCountFieldsFromJob(job, matchingOperation),
       laser_nest: job.laser_nest ?? matchingOperation.laser_nest,
     };
 
@@ -996,6 +1014,10 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
       component_quantity: job.component_quantity,
       quantity_complete: job.quantity_complete || 0,
       quantity_scrapped: job.operation_quantity_scrapped || 0,
+      // Without these the check-out judged against the full target: it over-stated
+      // "not yet accounted for", missed the full count the server auto-completes, and
+      // told the operator to scrap units an upstream close had already declared short.
+      ...shortCountFieldsFromJob(job),
       priority: 5,
       due_date: null,
       customer_name: null,
@@ -1172,6 +1194,11 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
         scrap: checkOutData.quantity_scrapped,
       })
     : 0;
+  // Pooled work order only: units an earlier operation already closed short, NOT
+  // credited here — the hint must not tell the operator to scrap them.
+  const checkOutUncredited = checkOutModal
+    ? Math.max(0, Number(checkOutModal.operation.upstream_short_uncredited || 0))
+    : 0;
   const checkOutCanComplete = Boolean(
     checkOutModal &&
       checkOutModal.operation.status !== 'complete' &&
@@ -1246,8 +1273,15 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
     } catch (err: any) {
       const detail = err.response?.data?.detail;
       if (clockedOut) {
-        // The labor landed; only the close was refused. Say both, verbatim.
-        showToast('error', `Checked out, but completing failed: ${detail || 'Failed to complete operation'}`);
+        // The labor landed; only the close was refused. Say both, verbatim — and when the
+        // scrap covering the short rode that refused close (the clock-out carried 0), say
+        // it was not saved, as the crew station does.
+        showToast(
+          'error',
+          scrapAtClose
+            ? `Checked out, but completing failed (the ${formatShortQuantity(scrapEntered)} scrap was not saved): ${detail || 'Failed to complete operation'}`
+            : `Checked out, but completing failed: ${detail || 'Failed to complete operation'}`
+        );
         closeCheckOutModal();
         await Promise.all([loadOperations(), loadActiveJobs(), loadDashboardCounts()]);
       } else {
@@ -3000,8 +3034,14 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
                 )}
                 {!checkOutCanComplete && checkOutUnaccountedAfter > 0 && (
                   <p id="shopfloor-checkout-complete-after-hint" className="mt-1 text-xs text-amber-300">
-                    {formatShortQuantity(checkOutUnaccountedAfter)} not yet accounted for — enter lost pieces as scrap
-                    with a reason, or check out and leave it open
+                    {checkOutUncredited > 0
+                      ? // Pooled job, loss already declared upstream: "enter lost pieces as
+                        // scrap" would scrap units this operation never received.
+                        `${formatShortQuantity(checkOutUnaccountedAfter)} not yet accounted for — ${uncreditedUpstreamWarning(
+                          checkOutUncredited,
+                          !!checkOutModal.operation.laser_nest
+                        )} Check out and leave it open.`
+                      : `${formatShortQuantity(checkOutUnaccountedAfter)} not yet accounted for — enter lost pieces as scrap with a reason, or check out and leave it open`}
                   </p>
                 )}
               </div>

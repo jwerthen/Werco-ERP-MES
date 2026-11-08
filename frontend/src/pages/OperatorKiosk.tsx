@@ -76,8 +76,6 @@ import {
   clockOutOperationStatus,
   formatShortQuantity,
   goodCeiling as resolveGoodCeiling,
-  implicitFullCountAfterEntry,
-  shortAfterEntry,
 } from '../utils/shortCount';
 
 const POLL_INTERVAL_MS = 15_000;
@@ -868,18 +866,30 @@ export default function OperatorKiosk() {
    * unaccounted under the row lock and refuses an over-statement (a crewmate reported
    * pieces since the overlay opened), where the clock-out cannot tell replacement scrap
    * from a stale screen. Only an entry that is a full good count on its own carries its
-   * scrap on the clock-out (that scrap was replaced, and no `/complete` follows).
+   * scrap on the clock-out (that scrap was replaced, and no `/complete` follows). Which of
+   * the two an entry is — `context.fullCount` — is the OVERLAY's own reading of the job it
+   * renders, never recomputed here from an older snapshot.
    *
    * A refusal of the clock-out itself (nothing landed) renders INLINE in the overlay,
    * which stays open with the entry intact. Once the clock-out has landed a later
-   * refusal can only be reported honestly: "Clocked out, but completing failed".
+   * refusal can only be reported honestly: "Clocked out, but completing failed" — and,
+   * when the covering scrap rode that refused close, that the scrap was not saved.
    */
   const handleComplete = useCallback(
     async (
       job: ActiveJob,
       mode: KioskCompleteMode,
       entry: { good: number; scrap: number; scrapReason: string | null; scrapReasonCodeId: number | null },
-      context: { chainItem: KioskQueueItem | null; unaccountedAfter: number; fullCount: boolean }
+      context: {
+        chainItem: KioskQueueItem | null;
+        unaccountedAfter: number;
+        fullCount: boolean;
+        /**
+         * The live queue row's `start_blocked_reason`: the work order is draft or on hold,
+         * so the floor cannot clock back in to it — the recovery advice must not say to.
+         */
+        startBlockedReason?: string | null;
+      }
     ) => {
       if (!job.operation_id) return;
       const { good, scrap, scrapReason, scrapReasonCodeId } = entry;
@@ -982,12 +992,22 @@ export default function OperatorKiosk() {
         // Two-step verb: if the clock-out landed but completion was refused, say so
         // honestly AND keep the backend's gating detail verbatim.
         if (clockedOut) {
-          // Name the next step (the steps view below is its own next step).
+          // Scrap that covered the short rode the refused `/complete` (the clock-out
+          // carried 0), so it — and its reason — were NOT saved. Said plainly, as the crew
+          // station does, so nobody walks away believing the loss is on record.
+          const failedPrefix = scrapAtClose
+            ? `Clocked out, but completing failed (the ${formatShortQuantity(scrap)} scrap was not saved)`
+            : 'Clocked out, but completing failed';
+          // Name the next step (the steps view below is its own next step). On a draft or
+          // held work order the floor cannot clock back in, so "clock in and Complete
+          // again" is impossible there — the running operation stays closable from the
+          // work order page. Never advise resuming the job just to close it.
+          const nextStep = context.startBlockedReason
+            ? `${opLabel} is still open; ask a supervisor to complete it from the work order page.`
+            : `${opLabel} is still open; clock in and Complete again, or ask a supervisor.`;
           showToast(
             'error',
-            missing
-              ? `Clocked out, but completing failed: ${message}`
-              : `Clocked out, but completing failed: ${message} — ${opLabel} is still open; clock in and Complete again, or ask a supervisor.`
+            missing ? `${failedPrefix}: ${message}` : `${failedPrefix}: ${message} — ${nextStep}`
           );
           if (missing && job.operation_id != null) {
             setView({ name: 'steps', operationId: job.operation_id, jobLabel: jobLabel(job), missing });
@@ -2150,39 +2170,34 @@ export default function OperatorKiosk() {
                   })
               : undefined
           }
-          onConfirm={(good, scrap, reason, codeId) =>
+          // The decision figures come FROM the overlay (`figures`), computed off the very
+          // job it renders — the live poll. Recomputing them here off `view.job` (the
+          // snapshot the overlay opened on) let the two disagree once a crewmate reported:
+          // the overlay showed a full count, the handler treated it as a covered short, and
+          // a real replacement scrap was parked on a `/complete` that never ran.
+          onConfirm={(good, scrap, reason, codeId, figures) =>
             void handleComplete(
               view.job,
               'finish',
               { good, scrap, scrapReason: reason, scrapReasonCodeId: codeId },
               {
                 chainItem: nextQueueItem,
-                unaccountedAfter: 0,
-                fullCount: implicitFullCountAfterEntry({
-                  target: view.job.quantity_ordered,
-                  ceiling: activeQueueItem?.quantity_good_ceiling ?? view.job.quantity_good_ceiling,
-                  complete: view.job.quantity_complete,
-                  good,
-                }),
+                unaccountedAfter: figures.unaccountedAfter,
+                fullCount: figures.fullCount,
+                startBlockedReason: activeQueueItem?.start_blocked_reason ?? null,
               }
             )
           }
-          onLeaveOpen={(good, scrap, reason, codeId) =>
+          onLeaveOpen={(good, scrap, reason, codeId, figures) =>
             void handleComplete(
               view.job,
               'leave_open',
               { good, scrap, scrapReason: reason, scrapReasonCodeId: codeId },
               {
                 chainItem: null,
-                fullCount: false,
-                unaccountedAfter: shortAfterEntry({
-                  target: view.job.quantity_ordered,
-                  upstreamShort: activeQueueItem?.upstream_quantity_short ?? view.job.upstream_quantity_short,
-                  complete: view.job.quantity_complete,
-                  scrapped: activeQueueItem?.quantity_scrapped ?? view.job.operation_quantity_scrapped,
-                  good,
-                  scrap,
-                }),
+                fullCount: figures.fullCount,
+                unaccountedAfter: figures.unaccountedAfter,
+                startBlockedReason: activeQueueItem?.start_blocked_reason ?? null,
               }
             )
           }

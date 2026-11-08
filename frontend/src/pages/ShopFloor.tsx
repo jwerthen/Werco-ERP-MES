@@ -633,8 +633,13 @@ export default function ShopFloor() {
                   size="sm"
                   onClick={() => {
                     setClockOutJob(job);
-                    const remaining = Math.max(0, (job.quantity_ordered || 0) - (job.quantity_complete || 0));
-                    setClockOutData({ quantity_produced: remaining, quantity_scrapped: 0, notes: '' });
+                    // Starts at 0 — the operator enters what they made this session, as
+                    // KEEP OPEN on the kiosk and Check Out on the desk do. Pre-filling
+                    // "ordered − complete" keyed a guaranteed 400 whenever an upstream
+                    // close had lowered the good ceiling (owner ruling 1), and on every
+                    // other job made the default submit a full count that completes the
+                    // operation — phantom good from a walk-away.
+                    setClockOutData({ quantity_produced: 0, quantity_scrapped: 0, notes: '' });
                     setClockOutModal(true);
                   }}
                 >

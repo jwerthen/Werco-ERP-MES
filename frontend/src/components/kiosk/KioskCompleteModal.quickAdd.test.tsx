@@ -196,7 +196,8 @@ describe('KioskCompleteModal — quantity quick adds', () => {
 
     // Good rides the clock-out, scrap is 0 and carries no reason. The host then
     // closes the operation without asserting any quantity (owner ruling 1).
-    expect(onConfirm).toHaveBeenCalledWith(5, 0, null, null);
+    // 20 + 5 of 25 is a full good count, and the overlay hands that reading over too.
+    expect(onConfirm).toHaveBeenCalledWith(5, 0, null, null, { fullCount: true, unaccountedAfter: 0 });
   });
 
   it('is disabled while a mutation is in flight', async () => {

@@ -116,7 +116,8 @@ describe('KioskCompleteModal — short count (owner ruling 1)', () => {
       await user.click(screen.getByTestId('kiosk-complete-leave-open'));
       expect(within(goodWell()).getByText('3')).toBeInTheDocument();
       await user.click(screen.getByTestId('kiosk-complete-leave-open-confirm'));
-      expect(onLeaveOpen).toHaveBeenCalledWith(3, 0, null, null);
+      // 10 − 2 recorded − 3 keyed: 5 left open, and not a full count.
+      expect(onLeaveOpen).toHaveBeenCalledWith(3, 0, null, null, { fullCount: false, unaccountedAfter: 5 });
     });
   });
 
@@ -158,7 +159,12 @@ describe('KioskCompleteModal — short count (owner ruling 1)', () => {
       );
       expect(complete()).toBeEnabled();
       await user.click(complete());
-      expect(onConfirm).toHaveBeenCalledWith(6, 2, 'Material defect', null);
+      // Covered by scrap, so nothing is left — but it is NOT a full good count: the host
+      // must close it explicitly, with the scrap on that close.
+      expect(onConfirm).toHaveBeenCalledWith(6, 2, 'Material defect', null, {
+        fullCount: false,
+        unaccountedAfter: 0,
+      });
     });
 
     it('keeps the leave-open verb visible at SHORT 0 as well as when short', async () => {
@@ -200,6 +206,65 @@ describe('KioskCompleteModal — short count (owner ruling 1)', () => {
       await keyGood(user, '5');
       expect(screen.getByTestId('kiosk-complete-short-tile')).toHaveTextContent(/2\s*Short · runs/);
       expect(screen.getByTestId('kiosk-complete-short')).toHaveTextContent('1 run never reached it');
+    });
+  });
+
+  describe('the decision figures it hands the host', () => {
+    // The host decides where covering scrap rides from `fullCount` (a full good count
+    // completes the operation at clock-out, so no `/complete` follows). It must be the
+    // overlay's OWN reading of the job it renders — the live poll — never the host's
+    // recomputation from the snapshot the overlay opened on.
+    const props = (onConfirm: jest.Mock, onLeaveOpen: jest.Mock) => ({
+      nowMs: Date.parse('2026-11-07T13:00:00Z'),
+      busy: false,
+      online: true,
+      operationScrapped: 0,
+      currentUserId: 3,
+      roster: [ME],
+      onCancel: jest.fn(),
+      onConfirm,
+      onLeaveOpen,
+    });
+
+    it('a crewmate report that lands while the overlay is open turns the entry into a full count', async () => {
+      const user = userEvent.setup();
+      const onConfirm = jest.fn();
+      const onLeaveOpen = jest.fn();
+      // Opened at 2 of 10; the poll then brings 6 (a crewmate reported 4).
+      const { rerender } = render(<KioskCompleteModal job={JOB} {...props(onConfirm, onLeaveOpen)} />);
+      rerender(<KioskCompleteModal job={{ ...JOB, quantity_complete: 6 }} {...props(onConfirm, onLeaveOpen)} />);
+
+      // 4 good (6 + 4 = the full 10) and 1 REPLACEMENT scrap with its reason.
+      await keyGood(user, '4');
+      await user.click(scrapWell());
+      await user.click(screen.getByRole('button', { name: '1' }));
+      await user.click(
+        within(screen.getByRole('group', { name: 'Scrap reason' })).getByRole('button', { name: 'Material defect' })
+      );
+      await user.click(complete());
+
+      expect(onConfirm).toHaveBeenCalledWith(4, 1, 'Material defect', null, { fullCount: true, unaccountedAfter: 0 });
+    });
+
+    it('KEEP OPEN reports what is left from the live job, not the snapshot', async () => {
+      const user = userEvent.setup();
+      const onConfirm = jest.fn();
+      const onLeaveOpen = jest.fn();
+      const { rerender } = render(
+        <KioskCompleteModal job={JOB} mode="leave_open" {...props(onConfirm, onLeaveOpen)} />
+      );
+      rerender(
+        <KioskCompleteModal
+          job={{ ...JOB, quantity_complete: 6 }}
+          mode="leave_open"
+          {...props(onConfirm, onLeaveOpen)}
+        />
+      );
+      await keyGood(user, '3');
+      await user.click(screen.getByTestId('kiosk-complete-leave-open-confirm'));
+
+      // 10 − 6 − 3 = 1 (the snapshot would have said 5).
+      expect(onLeaveOpen).toHaveBeenCalledWith(3, 0, null, null, { fullCount: false, unaccountedAfter: 1 });
     });
   });
 

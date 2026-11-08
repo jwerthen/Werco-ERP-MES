@@ -10,7 +10,9 @@
  *    the acknowledgement; a badge with NO entry cannot record good (nothing is sent, and
  *    the screen says which badge to scan — without "JOIN" when the work order refuses a
  *    start, because JOIN is refused there too), and its scrap rides `/complete` itself;
- *  - a refusal of a `/complete` that carried the scrap says "Nothing was saved".
+ *  - a refusal of a `/complete` that carried the scrap says "Nothing was saved";
+ *  - on a POOLED job whose earlier operation already declared the loss
+ *    (`upstream_short_uncredited`), the one-tap scrap fill is withheld, as on the kiosk.
  */
 
 import React from 'react';
@@ -379,5 +381,22 @@ describe('CrewStationKiosk — short count (owner ruling 1)', () => {
       `Saved production, but completing failed (the 2 scrap was not saved): ${detail}`
     );
     expect(savedButFailed.closest('[role="alert"]')).toHaveClass('text-fd-red');
+  });
+  it('a POOLED job whose earlier operation already declared the loss: no one-tap scrap fill, and why', async () => {
+    // 8 good recorded; the 2 still "unaccounted" were closed short at Op 10, but the job is
+    // pooled, so they are not credited here — they never reached this operation.
+    mocked.getQueue.mockResolvedValue(
+      queueWith({ ...ITEM, quantity_complete: 8, quantity_unaccounted: 2, upstream_short_uncredited: 2 })
+    );
+    renderKiosk();
+    await openComplete();
+    fireEvent.click(screen.getByTestId('kiosk-key-clear'));
+
+    expect(screen.getByTestId('kiosk-qty-short')).toHaveTextContent('Short 2 pcs');
+    expect(screen.queryByTestId('kiosk-qty-report-scrap')).not.toBeInTheDocument();
+    expect(screen.getByTestId('kiosk-qty-uncredited')).toHaveTextContent(
+      'Do not report pieces you never received as scrap — ask a supervisor to turn on Sequential operations.'
+    );
+    expect(screen.getByTestId('kiosk-qty-confirm')).toBeDisabled();
   });
 });

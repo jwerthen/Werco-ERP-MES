@@ -13,11 +13,15 @@
  *    while this operator was still clocked in) — and the operator can then keep it open
  *    with 0;
  *  - a crewmate on the queue row's roster blocks a SHORT finish in the overlay itself;
- *  - once the clock-out landed, a refused close is reported honestly.
+ *  - once the clock-out landed, a refused close is reported honestly — including that
+ *    scrap which rode that close was NOT saved, and (on a draft / held job, where the
+ *    floor cannot clock back in) without advising a clock-in;
+ *  - the handler decides from the overlay's own figures, so a crewmate's report that
+ *    lands while the overlay is open cannot strand a real replacement scrap.
  */
 
 import React from 'react';
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import OperatorKiosk from './OperatorKiosk';
 import api from '../services/api';
@@ -322,5 +326,107 @@ describe('OperatorKiosk — short count (owner ruling 1)', () => {
     expect(failed.closest('[role="alert"]')).toHaveClass('text-fd-red');
     expect(mockedApi.completeOperation).toHaveBeenCalledWith(31, { source: 'kiosk' });
     expect(mockedApi.clockIn).not.toHaveBeenCalled();
+  });
+  it('scrap that rode a refused close says it was NOT saved', async () => {
+    const detail =
+      'Bob T is still clocked in to Op 20 — have them clock out with their count first, or leave the operation open.';
+    mockedApi.clockOut.mockResolvedValue({ operation_status: 'in_progress' });
+    mockedApi.completeOperation.mockRejectedValue({ response: { status: 409, data: { detail } } });
+    renderKiosk();
+
+    fireEvent.click(await screen.findByRole('button', { name: /^complete op$/i }));
+    fireEvent.click(screen.getByTestId('kiosk-qty-good'));
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    key('6');
+    fireEvent.click(screen.getByTestId('kiosk-complete-report-scrap'));
+    fireEvent.click(screen.getByRole('button', { name: 'Material defect' }));
+    fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
+
+    expect(
+      await screen.findByText(
+        `Clocked out, but completing failed (the 2 scrap was not saved): ${detail} — Op 20 is still open; clock in and Complete again, or ask a supervisor.`
+      )
+    ).toBeInTheDocument();
+    // The clock-out carried the good only; the 2 scrap rode the refused close.
+    expect(mockedApi.clockOut).toHaveBeenCalledWith(
+      501,
+      expect.objectContaining({ quantity_produced: 6, quantity_scrapped: 0 })
+    );
+    expect(mockedApi.completeOperation).toHaveBeenCalledWith(
+      31,
+      expect.objectContaining({ quantity_scrapped: 2, scrap_reason: 'Material defect' })
+    );
+  });
+
+  it('on a held work order the advice is the work order page — never a clock-in the floor cannot make', async () => {
+    const held =
+      "This work order is on hold — work cannot start until a supervisor resumes it (Resume Work Order on the work order). Resuming or clearing an operation's hold does not lift it.";
+    const detail =
+      'Bob T is still clocked in to Op 20 — have them clock out with their count first, or leave the operation open.';
+    mockedApi.getWorkCenterQueue.mockResolvedValue({
+      queue: [{ ...ACTIVE_ITEM, work_order_status: 'on_hold', start_blocked_reason: held }],
+    });
+    mockedApi.clockOut.mockResolvedValue({ operation_status: 'in_progress' });
+    mockedApi.completeOperation.mockRejectedValue({ response: { status: 409, data: { detail } } });
+    renderKiosk();
+
+    fireEvent.click(await screen.findByRole('button', { name: /^complete op$/i }));
+    fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
+
+    const failed = await screen.findByText(/^Clocked out, but completing failed: Bob T is still clocked in/);
+    expect(failed).toHaveTextContent('Op 20 is still open; ask a supervisor to complete it from the work order page.');
+    expect(failed).not.toHaveTextContent(/clock in and Complete again/i);
+    // Nor does it send anyone to resume a held job just to close the running work.
+    expect(failed).not.toHaveTextContent(/resume/i);
+  });
+
+  describe('a crewmate reports while the overlay is open', () => {
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => {
+      act(() => jest.runOnlyPendingTimers());
+      jest.useRealTimers();
+    });
+
+    it('the overlay shows a full count, so the replacement scrap rides the clock-out — not a /complete that never runs', async () => {
+      mockedApi.clockOut.mockResolvedValue({ operation_status: 'complete' });
+      renderKiosk();
+
+      // Opened at 2 of 10 good.
+      fireEvent.click(await screen.findByRole('button', { name: /^complete op$/i }));
+      // A crewmate reports 4 meanwhile; the 15 s poll brings the live job (6 of 10).
+      mockedApi.getMyActiveJob.mockResolvedValue({
+        active_jobs: [{ ...ACTIVE_JOB, quantity_complete: 6 }],
+        active_job: { ...ACTIVE_JOB, quantity_complete: 6 },
+      });
+      mockedApi.getWorkCenterQueue.mockResolvedValue({
+        queue: [{ ...ACTIVE_ITEM, quantity_complete: 6, quantity_unaccounted: 4 }, NEXT_ITEM],
+      });
+      const pollsBefore = mockedApi.getMyActiveJob.mock.calls.length;
+      await act(async () => {
+        jest.advanceTimersByTime(15_000);
+      });
+      await waitFor(() => expect(mockedApi.getMyActiveJob.mock.calls.length).toBeGreaterThan(pollsBefore));
+
+      // 4 good (the full 10 now) + 1 replacement scrap, with its reason.
+      fireEvent.click(screen.getByTestId('kiosk-qty-good'));
+      fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+      key('4');
+      fireEvent.click(screen.getByTestId('kiosk-qty-scrap'));
+      key('1');
+      fireEvent.click(screen.getByRole('button', { name: 'Material defect' }));
+      // The overlay's readout: a full count, nothing short.
+      expect(screen.queryByTestId('kiosk-complete-short')).not.toBeInTheDocument();
+      fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
+
+      expect(await screen.findByText('Completed WO-2026-0142')).toBeInTheDocument();
+      // The scrap and its reason rode the clock-out that completed the operation …
+      expect(mockedApi.clockOut).toHaveBeenCalledWith(
+        501,
+        expect.objectContaining({ quantity_produced: 4, quantity_scrapped: 1, scrap_reason: 'Material defect' })
+      );
+      // … so nothing was parked on a close that never ran, and nothing was dropped.
+      expect(mockedApi.completeOperation).not.toHaveBeenCalled();
+      expect(screen.queryByText(/scrap you entered was not recorded/)).not.toBeInTheDocument();
+    });
   });
 });

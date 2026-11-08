@@ -9,6 +9,12 @@
  * 409, "Reopen Op N and correct" for the correction that would leave a completed
  * operation short.
  *
+ * A Complete refusal that means the job moved under the modal (held meanwhile, an upstream
+ * close lowered the ceiling, a stale count) RE-READS the page — realtime is dark, so
+ * nothing else would — and the modal renders its operation from the reloaded work order,
+ * so its own figures refresh too. The two refusals the modal answers itself (still
+ * clocked in, override reason) do not.
+ *
  * Harness mirrors WorkOrderDetail.stepsIncomplete.test.tsx (all side-channels mocked,
  * a real ToastProvider so toast text is assertable).
  */
@@ -270,6 +276,101 @@ describe('office operation complete', () => {
     });
     expect(await screen.findByText('Op 10 completed — clocked out Dana R.')).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+});
+
+describe('a Complete refusal that means the job moved', () => {
+  const ON_HOLD =
+    "This work order is on hold — work cannot start until a supervisor resumes it (Resume Work Order on the work order). Resuming or clearing an operation's hold does not lift it.";
+
+  it('re-reads the page when the job was held after it loaded, keeping the refusal inline', async () => {
+    mockedApi.getWorkOrder
+      .mockResolvedValueOnce(workOrder() as never)
+      .mockResolvedValue(workOrder({ status: 'on_hold' }) as never);
+    mockedApi.completeWOOperation.mockRejectedValue({ response: { status: 409, data: { detail: ON_HOLD } } });
+    renderDetail();
+    const dialog = await openOperationModal('Inspect');
+    fireEvent.change(dialog.getByLabelText(/Quantity completed/), { target: { value: '10' } });
+    await act(async () => {
+      fireEvent.click(dialog.getByRole('button', { name: /^Complete$/ }));
+    });
+
+    expect(await dialog.findByRole('alert')).toHaveTextContent('This work order is on hold');
+    await waitFor(() => expect(mockedApi.getWorkOrder).toHaveBeenCalledTimes(2));
+    // The header now shows the job as it is (Resume, not Hold), and the READY row's
+    // Complete is gated — so a retry is not one click away from the same refusal.
+    expect(await screen.findByRole('button', { name: 'Resume Work Order', hidden: true })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Hold Work Order', hidden: true })).not.toBeInTheDocument();
+    expect(within(operationRow('Inspect')).getByRole('button', { name: /Complete/, hidden: true })).toBeDisabled();
+  });
+
+  it("refreshes the MODAL's own figures from the reloaded work order, not only the page", async () => {
+    const LOWERED = 'Quantity (10) exceeds the 8 units that can reach Op 20 — 2 were closed short upstream.';
+    // Loaded with nothing lost upstream; an upstream close then declared 2 short.
+    mockedApi.getWorkOrder
+      .mockResolvedValueOnce(workOrder() as never)
+      .mockResolvedValue(
+        workOrder({
+          operations: [
+            { ...RUNNING_OP },
+            { ...FRESH_OP, upstream_quantity_short: 2, quantity_good_ceiling: 8, quantity_unaccounted: 8 },
+          ],
+        }) as never
+      );
+    mockedApi.completeWOOperation.mockRejectedValue({ response: { status: 400, data: { detail: LOWERED } } });
+    renderDetail();
+    const dialog = await openOperationModal('Inspect');
+    fireEvent.change(dialog.getByLabelText(/Quantity completed/), { target: { value: '10' } });
+    // On the snapshot the page loaded, 10 is allowed.
+    expect(dialog.queryByText(/Cannot exceed/)).not.toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(dialog.getByRole('button', { name: /^Complete$/ }));
+    });
+
+    // The server's refusal stays inline, verbatim …
+    expect(await dialog.findByText(LOWERED)).toBeInTheDocument();
+    // … and the modal now reasons with the server's new ceiling — the entry is still the user's.
+    expect(
+      await dialog.findByText('Cannot exceed 8 — 2 never reached Op 20 (closed short upstream)')
+    ).toBeInTheDocument();
+    expect(dialog.getByLabelText(/Quantity completed/)).toHaveValue(10);
+  });
+
+  it('does NOT re-read for the refusals the modal answers itself (still clocked in)', async () => {
+    mockedApi.completeWOOperation.mockRejectedValue({
+      response: {
+        status: 409,
+        data: {
+          detail:
+            'Dana R. is still clocked in to Op 10 — have them clock out with their count first, or leave the operation open. Resubmit with acknowledge_open_entries to clock them out; pieces they have not reported will not be counted.',
+        },
+      },
+    });
+    renderDetail();
+    const dialog = await openOperationModal('Deburr');
+    fireEvent.click(dialog.getByRole('button', { name: 'Report 2 as scrap' }));
+    fireEvent.click(dialog.getByRole('combobox', { name: /scrap reason/i }));
+    fireEvent.mouseDown(screen.getByRole('option', { name: 'Out of tolerance' }));
+    await act(async () => {
+      fireEvent.click(dialog.getByRole('button', { name: /^Complete$/ }));
+    });
+    expect(await dialog.findByRole('button', { name: 'Clock them out and close' })).toBeInTheDocument();
+    expect(mockedApi.getWorkOrder).toHaveBeenCalledTimes(1);
+  });
+
+  it('a work-order force-complete refused because the job moved re-reads too', async () => {
+    mockedApi.getWorkOrder.mockResolvedValue(workOrder({ quantity_accounted_loss: 2, operations: [] }) as never);
+    mockedApi.completeWorkOrder.mockRejectedValue({
+      response: { status: 409, data: { detail: 'Work order is already complete' } },
+    });
+    renderDetail();
+    fireEvent.click(await screen.findByRole('button', { name: /^Complete$/ }));
+    const dialog = within(await screen.findByRole('dialog', { name: 'Complete work order WO-0042' }));
+    await act(async () => {
+      fireEvent.click(dialog.getByRole('button', { name: /^Complete$/ }));
+    });
+    expect(await dialog.findByRole('alert')).toHaveTextContent('Work order is already complete');
+    await waitFor(() => expect(mockedApi.getWorkOrder).toHaveBeenCalledTimes(2));
   });
 });
 

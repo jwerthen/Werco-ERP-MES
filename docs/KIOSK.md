@@ -201,7 +201,16 @@ URL is all the station setup there is.
      it open. A scrim tap or Escape while the request is in flight does not close the overlay under
      it. If the clock-out lands but the close is refused, the kiosk says so and names the next step
      — *"Clocked out, but completing failed: … — Op N is still open; clock in and Complete again, or
-     ask a supervisor."* — labor is closed either way. A completion refused with **409
+     ask a supervisor."* — labor is closed either way. When scrap covering the short rode that
+     refused close (the clock-out carried 0), the message says so — *"Clocked out, but completing
+     failed (the n scrap was not saved): …"* — as the crew station does. On a **draft or held** work
+     order (the queue row carries `start_blocked_reason`) the floor cannot clock back in, so the next
+     step reads *"Op N is still open; ask a supervisor to complete it from the work order page."*
+     instead — never "resume it": the running operation is closable as it stands. Whether an entry
+     is a full good count (so its scrap rides the clock-out) is the overlay's **own** reading of the
+     live job it renders, handed to the kiosk with the confirm — never recomputed from the snapshot
+     the overlay opened on, so a crewmate's report that lands while it is open cannot strand a real
+     replacement scrap on a close that never runs. A completion refused with **409
      `STEPS_INCOMPLETE`** (required process-sheet steps missing conforming records) opens the steps
      view with the outstanding steps rendered inline (see
      [Process steps](#process-steps-process-sheets-capture)).
@@ -1475,7 +1484,11 @@ Five things about it are load-bearing rather than cosmetic:
   Cancel and have each operator LEAVE with their count"*, plus a **Report n as scrap** button and
   *"Pieces never started? They are not scrap — Cancel, leave the job open, and ask a supervisor to
   lower the quantity."* — whenever the entry leaves any of it unaccounted (owner ruling 1); the production-report screen
-  carries no such readout. Recording more than the good ceiling is an office over-count, not a tap
+  carries no such readout. As on the single-operator kiosk, the one-tap **Report n as scrap** fill
+  is **withheld** on a **pooled** job whose earlier operation already declared the loss
+  (`upstream_short_uncredited` on the queue row), and the screen shows the same *"n were already
+  closed short at an earlier operation … ask a supervisor to turn on Sequential operations."*
+  warning instead — scrap the crew really made can still be keyed, with its reason. Recording more than the good ceiling is an office over-count, not a tap
   here. The over-count **CORRECTION** screen has no quick adds at all — it
   removes pieces.
 - It sits **below the keypad** here, where the narrow single-operator overlays stack it above

@@ -30,6 +30,7 @@ import {
   operationUnaccounted,
   shortAfterEntry,
   shortUnitLabel,
+  uncreditedUpstreamWarning,
 } from '../../utils/shortCount';
 
 /**
@@ -39,12 +40,27 @@ import {
  */
 export type KioskCompleteMode = 'finish' | 'leave_open';
 
-/** The four figures both confirm callbacks carry (the clock-out quantities). */
+/**
+ * What the overlay itself concluded about the entry, from the SAME job it renders (the
+ * live poll, not the snapshot it opened on). Handed to the host with every confirm so the
+ * host's decision — does the clock-out complete the operation on its own, so covering
+ * scrap rides the clock-out rather than a `/complete` that never runs? — can never
+ * disagree with the readout the operator was looking at when they tapped.
+ */
+export interface KioskCompleteFigures {
+  /** The entry is a full GOOD count: the clock-out completes the operation on its own. */
+  fullCount: boolean;
+  /** Received units still neither good nor scrapped after this entry lands. */
+  unaccountedAfter: number;
+}
+
+/** The four figures both confirm callbacks carry (the clock-out quantities), plus the readout. */
 export type KioskCompleteEntryHandler = (
   good: number,
   scrap: number,
   reason: string | null,
-  codeId: number | null
+  codeId: number | null,
+  figures: KioskCompleteFigures
 ) => void;
 
 interface KioskCompleteModalProps {
@@ -323,12 +339,15 @@ export default function KioskCompleteModal({
   };
 
   const submit = (handler: KioskCompleteEntryHandler) => {
+    // The figures on screen right now — the host decides from these, never from its own
+    // recomputation off an older snapshot of the job.
+    const figures: KioskCompleteFigures = { fullCount, unaccountedAfter: short };
     if (scrapQty <= 0) {
-      handler(goodQty, scrapQty, null, null);
+      handler(goodQty, scrapQty, null, null, figures);
       return;
     }
     const { reason, codeId } = resolveScrapSelection(codes, scrapReason, scrapDetail);
-    handler(goodQty, scrapQty, reason, codeId);
+    handler(goodQty, scrapQty, reason, codeId, figures);
   };
 
   const handleFinish = () => {
@@ -476,9 +495,7 @@ export default function KioskCompleteModal({
             </p>
             {uncredited > 0 && (
               <p data-testid="kiosk-complete-uncredited" className="mt-1 text-[12px] font-semibold text-fd-amber">
-                {formatShortQuantity(uncredited)} {unit(uncredited)} were already closed short at an earlier
-                operation, but this job&apos;s operations are not sequenced, so that loss is not credited here. Do not
-                report pieces you never received as scrap — ask a supervisor to turn on Sequential operations.
+                {uncreditedUpstreamWarning(uncredited, isNest)}
               </p>
             )}
             {others.length > 0 ? (

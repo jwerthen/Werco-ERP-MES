@@ -136,6 +136,23 @@ export function formatShortQuantity(value: number): string {
 }
 
 /**
+ * The floor's warning for `upstream_short_uncredited` > 0: on a POOLED work order an
+ * earlier operation already closed these units short, but pooled operations get no chain
+ * credit, so they still count as "not yet accounted for" here. Reporting them as scrap
+ * a second time records a defect that never happened and draws tied material that never
+ * auto-reverses — so every floor screen that offers a scrap fill withholds it and shows
+ * this text instead. One copy, so the kiosk, the crew station and the desk say the same.
+ * Text only — no arithmetic, so it sits outside the parity contract.
+ */
+export function uncreditedUpstreamWarning(count: number, isNest: boolean): string {
+  return (
+    `${formatShortQuantity(count)} ${shortUnitLabel(isNest, count)} were already closed short at an earlier ` +
+    "operation, but this job's operations are not sequenced, so that loss is not credited here. Do not report " +
+    'pieces you never received as scrap — ask a supervisor to turn on Sequential operations.'
+  );
+}
+
+/**
  * The operation's status after a clock-out, from the clock-out response's
  * `operation_status` ("complete" when that clock-out completed the operation on its own,
  * a full good count). Null when the response does not carry it (an older backend).

@@ -10,6 +10,7 @@ import {
   operationReceived,
   shortAfterEntry,
   shortUnitLabel,
+  uncreditedUpstreamWarning,
 } from '../../utils/shortCount';
 
 interface KioskQuantityScreenProps {
@@ -91,6 +92,16 @@ interface KioskQuantityScreenProps {
   shortBaseline?: ShortCountInput | null;
   /** The baseline counts sheet RUNS (a laser nest), not pieces. */
   shortInRuns?: boolean;
+  /**
+   * COMPLETE only. `upstream_short_uncredited` off the queue row: on a POOLED work order,
+   * units an earlier operation already closed short. Pooled operations get no chain
+   * credit, so those units still read as SHORT here — but they never reached this
+   * operation, and reporting them as scrap again would record a defect that never
+   * happened. When > 0 the screen withholds the one-tap "Report n as scrap" fill and
+   * says why (the same rule, and the same words, as the single-operator kiosk's overlay).
+   * The operator can still key scrap that really happened, with its reason.
+   */
+  uncreditedUpstream?: number | null;
   busy: boolean;
   /**
    * scrapReason: free text stored in TimeEntry.scrap_reason (legacy tile value,
@@ -123,6 +134,7 @@ export default function KioskQuantityScreen({
   confirmLockedLabel,
   shortBaseline,
   shortInRuns = false,
+  uncreditedUpstream,
   busy,
   onConfirm,
   onCancel,
@@ -153,6 +165,7 @@ export default function KioskQuantityScreen({
   const short = shortBaseline ? shortAfterEntry({ ...shortBaseline, good: goodQty, scrap: scrapQty }) : 0;
   const received = shortBaseline ? operationReceived(shortBaseline) : 0;
   const shortUnit = shortUnitLabel(shortInRuns, short);
+  const uncredited = shortBaseline ? Math.max(0, Number(uncreditedUpstream || 0)) : 0;
   const confirmDisabled = busy || needsReason || totalInvalid || confirmLocked || short > 0;
 
   const reportShortAsScrap = () => {
@@ -366,15 +379,23 @@ export default function KioskQuantityScreen({
             Pieces never started? They are not scrap — Cancel, leave the job open, and ask a supervisor to lower the
             quantity.
           </p>
-          <button
-            type="button"
-            data-testid="kiosk-qty-report-scrap"
-            disabled={busy}
-            onClick={reportShortAsScrap}
-            className="mt-3 min-h-14 rounded border border-fd-red bg-fd-red/10 px-4 text-lg font-bold uppercase tracking-wide text-fd-red transition-colors hover:bg-fd-red/20 disabled:opacity-40"
-          >
-            Report {formatShortQuantity(short)} as scrap
-          </button>
+          {uncredited > 0 ? (
+            // Pooled job, loss already declared upstream: no one-tap fill — it would turn
+            // pieces this operation never received into scrap a second time.
+            <p data-testid="kiosk-qty-uncredited" className="mt-1 text-base font-semibold text-fd-amber">
+              {uncreditedUpstreamWarning(uncredited, shortInRuns)}
+            </p>
+          ) : (
+            <button
+              type="button"
+              data-testid="kiosk-qty-report-scrap"
+              disabled={busy}
+              onClick={reportShortAsScrap}
+              className="mt-3 min-h-14 rounded border border-fd-red bg-fd-red/10 px-4 text-lg font-bold uppercase tracking-wide text-fd-red transition-colors hover:bg-fd-red/20 disabled:opacity-40"
+            >
+              Report {formatShortQuantity(short)} as scrap
+            </button>
+          )}
         </div>
       )}
 
@@ -425,7 +446,9 @@ export default function KioskQuantityScreen({
       {needsReason && <p className="mt-3 text-center text-base text-fd-red">Choose a scrap reason to continue.</p>}
       {short > 0 && (
         <p data-testid="kiosk-qty-short-hint" className="mt-3 text-center text-base text-fd-amber">
-          {formatShortQuantity(short)} short — report as scrap, or Cancel and have each operator LEAVE with their count
+          {uncredited > 0
+            ? `${formatShortQuantity(short)} short — Cancel, have each operator LEAVE with their count, and ask a supervisor`
+            : `${formatShortQuantity(short)} short — report as scrap, or Cancel and have each operator LEAVE with their count`}
         </p>
       )}
     </section>
