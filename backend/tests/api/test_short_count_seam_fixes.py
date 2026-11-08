@@ -22,9 +22,11 @@
   floor's SFI-1 order -- the operations it replaces, then the work order, then the audit chain --
   so the token re-check judges the locked rows. It takes the work order only when free: a writer
   holding it (one that locks the work order before its operations) makes the import release the
-  operations and wait, never queue on it with them held. It takes the audit-chain lock as its own
-  statement before the first audit row. So a lock race it loses on Postgres (40P01 / 40001) -- at
-  the chain lock included -- answers the same 409 rather than the 400 for a conflicting nest row.
+  operations and wait, never queue on it with them held. When it is replacing existing operations it
+  takes the audit-chain lock as its own statement before the first audit row, so a lock race it
+  loses on Postgres (40P01 / 40001) -- at the chain lock included -- answers the same 409 rather
+  than the 400 for a conflicting nest row; an import that replaces nothing (standalone, a parent's
+  first import) leaves the chain lock to its first audit row, after the rebuild.
 
 Every refusal is pinned as writing NOTHING.
 """
@@ -57,6 +59,7 @@ from app.models.time_entry import TimeEntry, TimeEntryType
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
+from app.services import laser_nest_service
 from app.services.audit_service import AuditService
 from app.services.laser_nest_service import import_would_wipe_recorded_work, laser_import_wipe_operation_ids
 from app.services.operation_action_gates import (
@@ -363,11 +366,6 @@ def _nest_world(db: Session) -> dict:
     }
 
 
-def _without_operation_versions(world: dict) -> dict:
-    """``_nest_world`` with each operation's ``version`` dropped (the last element of its tuple)."""
-    return {**world, "operations": [op[:-1] for op in world["operations"]]}
-
-
 NEST_PACKAGE_CONFLICT = (
     "Could not import the nest package; a nest conflicts with an existing record "
     "or a value is invalid. Review the rows and try again."
@@ -434,8 +432,8 @@ class TestApiTokenNestReimportOverRecordedWork:
         assert resp.status_code == 200, resp.text
         return fresh(db, WorkOrder, resp.json()["child_work_order"]["id"])
 
-    def _classic(self, client, db: Session, admin: User) -> tuple[WorkOrder, WorkOrder]:
-        """A production parent and the laser child a person's import created under it."""
+    def _parent(self, db: Session) -> WorkOrder:
+        """A released production parent with no laser child yet, and a laser work center to import onto."""
         _laser_center(db)
         part = make_part(db)
         parent = WorkOrder(
@@ -448,6 +446,11 @@ class TestApiTokenNestReimportOverRecordedWork:
         )
         db.add(parent)
         db.commit()
+        return parent
+
+    def _classic(self, client, db: Session, admin: User) -> tuple[WorkOrder, WorkOrder]:
+        """A production parent and the laser child a person's import created under it."""
+        parent = self._parent(db)
         resp = _import(client, user_headers(admin), WO_IMPORT_URL.format(wo=parent.id), _cnc_zip("N1_QTY2.nc"))
         assert resp.status_code == 200, resp.text
         return fresh(db, WorkOrder, parent.id), fresh(db, WorkOrder, resp.json()["child_work_order"]["id"])
@@ -704,11 +707,22 @@ class TestApiTokenNestReimportOverRecordedWork:
         resp = _import(client, user_headers(admin_user), WO_IMPORT_URL.format(wo=laser.id), _cnc_zip("N9.nc"))
         assert resp.status_code == 409, resp.text
         assert resp.json()["detail"] == STALE_WRITE_CONFLICT_DETAIL
-        # Nothing of the IMPORT persists. The other writer's version bump is theirs: whether it
-        # survives depends on the test backend (on SQLite the release of the import's lock
-        # savepoint commits it), so the operations are compared without their version.
+        # Nothing of the IMPORT persists. The other writer's version bump on the TARGET is theirs,
+        # and whether it survives depends on the test backend: on pysqlite no BEGIN precedes the
+        # import's lock savepoint, so that SAVEPOINT opens the connection's transaction and its
+        # RELEASE commits the bump, which the import's rollback cannot then undo; on Postgres it is
+        # rolled back with the import. So everything is compared exactly except that one version,
+        # which may be unchanged or +1 -- and every other operation's version must be unchanged.
         after = _nest_world(db_session)
-        assert _without_operation_versions(after) == _without_operation_versions(before)
+
+        def _target_version(world: dict) -> int:
+            return next(op[-1] for op in world["operations"] if op[0] == target_id)
+
+        def _without_target_version(world: dict) -> dict:
+            return {**world, "operations": [op[:-1] if op[0] == target_id else op for op in world["operations"]]}
+
+        assert _target_version(after) in (_target_version(before), _target_version(before) + 1)
+        assert _without_target_version(after) == _without_target_version(before)
 
     def test_a_row_changed_before_the_lock_is_judged_fresh_and_replaced(
         self, client, db_session, admin_user, no_ai, monkeypatch
@@ -1185,15 +1199,73 @@ class TestApiTokenNestReimportOverRecordedWork:
         [op] = _nest_ops(db_session, laser.id)
         assert "N9" in op.name
 
+    @pytest.mark.parametrize("package", ["N9.nc", "N8_QTY5.nc"])
+    def test_a_work_order_saved_by_the_writer_the_import_waited_for_answers_409_refresh(
+        self, client, db_session, admin_user, package, no_ai, monkeypatch
+    ):
+        """The import found the work order held, let go of its operations and WAITED for that writer
+        -- who saved the work order (a count of 2) and committed. The import must judge the job as
+        that writer left it: its next try re-locks the operations, and the header check compares the
+        work order this request LOADED with the stored version, so the save is the app's 409
+        "refresh and try again" -- no audit row, nothing of the import written, the other writer's
+        count intact -- never a 200 that zeroes the count just saved. That holds only while nothing
+        on the busy path reloads the work order: a refresh after the wait would adopt the new
+        version and the import would overwrite the count. ``N8_QTY5`` re-imports the same 5 planned
+        runs, the shape whose header the import never writes, so only the version read catches it."""
+        laser = self._standalone(client, db_session, admin_user)  # 2 nests, 5 planned runs
+        laser_id = laser.id
+        trace = self._busy_work_order(monkeypatch, busy_tries=1)
+        recording_wait = work_orders_endpoint._wait_for_laser_work_order
+
+        def _the_holder_saves_the_work_order_and_commits(db, **kwargs):
+            # The writer the import is about to wait for finishes: it saves the work order and
+            # COMMITS. One pysqlite connection serves the request and this writer, and the import's
+            # first SAVEPOINT opened that connection's transaction (no BEGIN precedes it, and the
+            # busy try's ROLLBACK TO keeps it open), so the save must commit at the driver to
+            # survive the import's own rollback -- as another session's commit does on Postgres.
+            # That COMMIT carries nothing of the import: it has written nothing before its locks.
+            assert not (db.new or db.dirty or db.deleted), "the import has written nothing yet"
+            driver = db.connection().connection.driver_connection
+            driver.commit()
+            driver.execute(
+                "UPDATE work_orders SET quantity_complete = 2, version = version + 1 WHERE id = ?", (laser_id,)
+            )
+            driver.commit()
+            return recording_wait(db, **kwargs)
+
+        monkeypatch.setattr(
+            work_orders_endpoint, "_wait_for_laser_work_order", _the_holder_saves_the_work_order_and_commits
+        )
+        audit_calls: list = []
+        original_log = AuditService.log
+
+        def _recording_log(service, *args, **kwargs):
+            audit_calls.append(kwargs.get("resource_type"))
+            return original_log(service, *args, **kwargs)
+
+        monkeypatch.setattr(AuditService, "log", _recording_log)
+        before = _nest_world(db_session)
+
+        resp = _import(client, user_headers(admin_user), WO_IMPORT_URL.format(wo=laser_id), _cnc_zip(package))
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"] == STALE_WRITE_CONFLICT_DETAIL
+        assert trace == ["ops", "try", "wait", "ops", "try"], "the import waited, then tried again"
+        assert audit_calls == [], "the conflict is found before the first audit row"
+        # The other writer's save stands -- its count and its version bump -- and nothing else moved.
+        saved = [(*row[:3], 2.0, *row[4:7], row[7] + 1) if row[0] == laser_id else row for row in before["work_orders"]]
+        assert _nest_world(db_session) == {**before, "work_orders": saved}
+
     def test_a_work_order_busy_through_every_try_answers_409_writing_nothing(
         self, client, db_session, admin_user, no_ai, monkeypatch
     ):
         """The work order is held on every try: after the last one the import gives up with the app's
         409 "refresh and try again" -- having written nothing and asked for no audit row -- rather
-        than queueing on the work order with the operations held."""
+        than queueing on the work order with the operations held. Three tries, pinned: docs/API.md
+        states the number (the import row and "Package import replaces everything"), so changing
+        the constant must fail here until the docs change with it."""
         laser = self._standalone(client, db_session, admin_user)
-        attempts = work_orders_endpoint._LASER_IMPORT_LOCK_ATTEMPTS
-        trace = self._busy_work_order(monkeypatch, busy_tries=attempts)
+        assert work_orders_endpoint._LASER_IMPORT_LOCK_ATTEMPTS == 3, "docs/API.md documents three tries"
+        trace = self._busy_work_order(monkeypatch, busy_tries=3)
         audit_calls: list = []
         original_log = AuditService.log
 
@@ -1207,7 +1279,7 @@ class TestApiTokenNestReimportOverRecordedWork:
         resp = _import(client, user_headers(admin_user), WO_IMPORT_URL.format(wo=laser.id), _cnc_zip("N9.nc"))
         assert resp.status_code == 409, resp.text
         assert resp.json()["detail"] == STALE_WRITE_CONFLICT_DETAIL
-        assert trace == ["ops", "try", "wait"] * (attempts - 1) + ["ops", "try"], trace
+        assert trace == ["ops", "try", "wait", "ops", "try", "wait", "ops", "try"], trace
         assert audit_calls == []
         assert _nest_world(db_session) == before
 
@@ -1252,6 +1324,142 @@ class TestApiTokenNestReimportOverRecordedWork:
 
         resp = _import(client, user_headers(admin_user), WO_IMPORT_URL.format(wo=laser.id), _cnc_zip("N9.nc"))
         assert resp.status_code == 200, resp.text
+
+    def _chain_lock_trace(self, monkeypatch) -> list:
+        """Record, in order: what ``_lock_laser_import_rows`` returned (``rows_locked:<value>``), the
+        import's explicit early chain lock (``early_chain_lock``), every chain-lock statement whoever
+        asks for it (``chain_lock`` -- the early one sends one too), every audit row (``audit``,
+        entered before ``AuditService.log`` runs, so its own chain lock lands after it), the rebuild
+        starting (``build``) and every nest-PDF blob write inside it (``blob``, entered once written)."""
+        trace: list = []
+        original_rows = work_orders_endpoint._lock_laser_import_rows
+        original_early = AuditService.acquire_chain_lock
+        original_chain = AuditService._acquire_chain_lock
+        original_log = AuditService.log
+        original_build = work_orders_endpoint.build_laser_nest_child_work_order
+        original_document = laser_nest_service._create_nest_document
+
+        def _rows(db, **kwargs):
+            locked = original_rows(db, **kwargs)
+            trace.append(f"rows_locked:{locked}")
+            return locked
+
+        def _early(service):
+            trace.append("early_chain_lock")
+            return original_early(service)
+
+        def _chain(service):
+            trace.append("chain_lock")
+            return original_chain(service)
+
+        def _log(service, *args, **kwargs):
+            trace.append("audit")
+            return original_log(service, *args, **kwargs)
+
+        def _build(db, **kwargs):
+            trace.append("build")
+            return original_build(db, **kwargs)
+
+        def _document(*args, **kwargs):
+            document = original_document(*args, **kwargs)
+            if document is not None:  # a nest with a PDF: its blob has just been written
+                trace.append("blob")
+            return document
+
+        monkeypatch.setattr(work_orders_endpoint, "_lock_laser_import_rows", _rows)
+        monkeypatch.setattr(AuditService, "acquire_chain_lock", _early)
+        monkeypatch.setattr(AuditService, "_acquire_chain_lock", _chain)
+        monkeypatch.setattr(AuditService, "log", _log)
+        monkeypatch.setattr(work_orders_endpoint, "build_laser_nest_child_work_order", _build)
+        monkeypatch.setattr(laser_nest_service, "_create_nest_document", _document)
+        return trace
+
+    @pytest.mark.parametrize("shape", ["standalone", "standalone_pdf_rows", "first_child", "nothing_to_replace"])
+    def test_an_import_replacing_nothing_takes_no_chain_lock_before_the_rebuild(
+        self, client, db_session, admin_user, shape, no_ai, monkeypatch
+    ):
+        """The early chain lock is for one race: the import holding the operations it replaces while a
+        writer that holds the chain waits for one of them. An import that replaces nothing holds no
+        operation lock -- a standalone import, a classic parent's first import onto the child it
+        creates, a laser job with no nest operation yet -- so it takes no chain lock of its own and
+        leaves it to its first audit row, after the rebuild. Taking it early there held the global,
+        all-tenant lock across every operation insert and every nest PDF's blob write, and put it
+        ahead of the work-center ``KEY SHARE`` those inserts take: a cycle with any writer that locks
+        the work center and then audits, which ``AuditService.log`` would have swallowed on that
+        writer's side as a silent no-op commit."""
+        rows = None
+        package = _cnc_zip("N1_QTY2.nc", "N2_QTY3.nc")
+        if shape in ("standalone", "standalone_pdf_rows"):
+            _laser_center(db_session)
+            url = STANDALONE_IMPORT_URL
+            if shape == "standalone_pdf_rows":
+                package = _pdf_zip("n1.pdf", "n2.pdf")
+                rows = [
+                    {"source_file": "n1.pdf", "cnc_number": "N1", "planned_runs": 2},
+                    {"source_file": "n2.pdf", "cnc_number": "N2", "planned_runs": 3},
+                ]
+        elif shape == "first_child":
+            url = WO_IMPORT_URL.format(wo=self._parent(db_session).id)
+        else:
+            _laser_center(db_session)
+            empty = WorkOrder(
+                work_order_number="SEAM-LASER-EMPTY",
+                part_id=None,
+                work_order_type="laser_cutting",
+                sequential_operations=False,
+                quantity_ordered=1,
+                status=WorkOrderStatus.RELEASED,
+                priority=5,
+                company_id=COMPANY_A,
+            )
+            db_session.add(empty)
+            db_session.commit()
+            assert laser_import_wipe_operation_ids(db_session, child_work_order=empty, company_id=COMPANY_A) == []
+            url = WO_IMPORT_URL.format(wo=empty.id)
+        trace = self._chain_lock_trace(monkeypatch)
+
+        resp = _import(client, user_headers(admin_user), url, package, rows=rows)
+        assert resp.status_code == 200, resp.text
+        # The standalone route never calls the row lock; the other two find nothing to lock.
+        expected_rows = [] if shape.startswith("standalone") else ["rows_locked:False"]
+        assert [entry for entry in trace if entry.startswith("rows_locked:")] == expected_rows, trace
+        assert "early_chain_lock" not in trace, trace
+        assert "chain_lock" in trace, "the audit rows still take the chain lock, as they always did"
+        first_chain_lock = trace.index("chain_lock")
+        assert trace.index("build") < first_chain_lock, f"no chain lock before the rebuild: {trace}"
+        assert trace[first_chain_lock - 1] == "audit", f"the first chain lock is an audit row's: {trace}"
+        if shape == "standalone_pdf_rows":
+            blobs = [i for i, entry in enumerate(trace) if entry == "blob"]
+            assert len(blobs) == 2 and max(blobs) < first_chain_lock, f"no blob write under the chain lock: {trace}"
+
+    @pytest.mark.parametrize("shape", ["laser", "parent", "pdf_rows"])
+    def test_an_import_replacing_operations_takes_one_early_chain_lock_before_any_audit_row(
+        self, client, db_session, admin_user, shape, no_ai, monkeypatch
+    ):
+        """The other side of the same rule: an import that replaces operations holds their row locks
+        (and the work order's), so it takes the chain lock exactly once as its own statement, before
+        its first audit row and before the rebuild -- where a lost lock race reaches the 409 instead
+        of being swallowed inside ``AuditService.log``."""
+        if shape == "parent":
+            parent, _laser = self._classic(client, db_session, admin_user)
+            url = WO_IMPORT_URL.format(wo=parent.id)
+        else:
+            laser = self._standalone(client, db_session, admin_user)
+            url = WO_IMPORT_URL.format(wo=laser.id)
+        rows = None
+        package = _cnc_zip("N9.nc")
+        if shape == "pdf_rows":
+            package = _pdf_zip("n1.pdf")
+            rows = [{"source_file": "n1.pdf", "cnc_number": "N1", "planned_runs": 2}]
+        trace = self._chain_lock_trace(monkeypatch)
+
+        resp = _import(client, user_headers(admin_user), url, package, rows=rows)
+        assert resp.status_code == 200, resp.text
+        assert trace.count("early_chain_lock") == 1, trace
+        early = trace.index("early_chain_lock")
+        assert trace[:early] == ["rows_locked:True"], f"the row locks first, then the chain lock: {trace}"
+        assert trace[early + 1] == "chain_lock", "the early lock is the chain-lock statement itself"
+        assert early < trace.index("audit") and early < trace.index("build"), trace
 
     def test_a_persons_parent_addressed_import_never_resolves_the_laser_child_early(
         self, client, db_session, admin_user, admin_headers, supervisor, no_ai, monkeypatch

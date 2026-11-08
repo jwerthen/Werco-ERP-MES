@@ -1610,7 +1610,7 @@ def _wait_for_laser_work_order(db: Session, *, work_order: WorkOrder, company_id
         waiter.rollback()
 
 
-def _lock_laser_import_rows(db: Session, *, laser_work_order: WorkOrder, company_id: int) -> None:
+def _lock_laser_import_rows(db: Session, *, laser_work_order: WorkOrder, company_id: int) -> bool:
     """Lock what the package import rewrites on an existing laser job: its operations, then the work order.
 
     Two lock orders exist on a work order and its operations, and the import must never wait for
@@ -1639,6 +1639,15 @@ def _lock_laser_import_rows(db: Session, *, laser_work_order: WorkOrder, company
     (409). Called first in the import's transaction on an existing laser job, before any write and
     any audit row; a job with no operation to replace locks nothing here (the header check then
     takes the work order, holding no operation lock).
+
+    Returns True when it locked at least one operation (and then the work order), False when the
+    job has none to replace. The caller takes the global audit-chain lock early -- as its own
+    statement, before its first audit row (``AuditService.acquire_chain_lock``) -- only on True:
+    that lock is there for the race in which the import holds these operations while a writer
+    holding the chain waits for one of them, and with no operation locked the import cannot be on
+    either side of it. On False the chain lock is left to the first audit row, so the import never
+    holds that all-tenant lock across the rebuild's operation inserts and nest-PDF blob writes for
+    nothing.
     """
     for attempt in range(1, _LASER_IMPORT_LOCK_ATTEMPTS + 1):
         try:
@@ -1647,11 +1656,11 @@ def _lock_laser_import_rows(db: Session, *, laser_work_order: WorkOrder, company
                     db, laser_work_order=laser_work_order, company_id=company_id
                 )
                 if not operations:
-                    return
+                    return False
                 if not _try_lock_laser_work_order(db, work_order=laser_work_order, company_id=company_id):
                     # Leaving the block this way rolls the savepoint back: the operation locks go too.
                     raise _LaserWorkOrderBusy()
-            return
+            return True
         except _LaserWorkOrderBusy:
             logger.info(
                 "Laser-nest import found work order %s held by another writer (try %s of %s); "
@@ -3327,10 +3336,14 @@ async def _run_laser_nest_import(
     deletes, then the work order -- taken only when free; while another writer holds it the
     import lets go of the operations and waits (``_lock_laser_import_rows``) -- then the audit
     chain, as the import's own statement before its first audit row
-    (``AuditService.acquire_chain_lock``). A concurrent edit to the job, a work order that stays
-    busy through every try, or a lock race Postgres settles by rolling this import back
-    (40P01 / 40001) answers 409 with the app-wide "refresh and try again" text; nothing of the
-    import commits.
+    (``AuditService.acquire_chain_lock``). That early chain lock is taken only when the import is
+    replacing existing operations, i.e. holds their row locks; a standalone import, a classic
+    parent's first import (a freshly created child) and a job with nothing to replace leave the
+    chain lock to their first audit row (after the rebuild, or inside it for a material-tied nest),
+    so the global all-tenant lock is not held across the build's nest-PDF blob writes for nothing on
+    those paths. A concurrent edit to the job, a work order that stays busy through every try, or a
+    lock race Postgres settles by rolling this import back (40P01 / 40001) answers 409 with the
+    app-wide "refresh and try again" text; nothing of the import commits.
     """
     # This PR's extension (see the helper): a standing API token may not re-import over nest
     # operations that carry recorded work. Checked FIRST -- before the rows parse, the upload
@@ -3493,6 +3506,7 @@ async def _run_laser_nest_import(
                     db.add(child_work_order)
                     db.flush()
                     pre_import_wo_values = None  # fresh WO: creation is audited via log_create below
+                    replaces_operations = False  # a fresh job: nothing to replace, no row locked
                 else:
                     parent_work_order, child_work_order = _resolve_laser_target(
                         db, work_order=target_work_order, company_id=company_id
@@ -3505,8 +3519,11 @@ async def _run_laser_nest_import(
                     # import step back instead of deadlocking it. Nothing between here and the
                     # header check writes an operation: the token re-check and the
                     # work-center pick only read, and the release and the zeroing below write
-                    # the header alone.
-                    _lock_laser_import_rows(db, laser_work_order=child_work_order, company_id=company_id)
+                    # the header alone. False when there is nothing to replace (a classic parent's
+                    # freshly created child included): nothing was locked here.
+                    replaces_operations = _lock_laser_import_rows(
+                        db, laser_work_order=child_work_order, company_id=company_id
+                    )
                     # The token refusal again, now under the import's advisory lock and its row
                     # locks, judged on the rows just locked, and before the first write to this
                     # work order and the first audit row.
@@ -3544,13 +3561,22 @@ async def _run_laser_nest_import(
                 # mid-import answers the 409 below rather than the 400 -- see the helper.
                 _check_laser_header_before_audit(db, work_order=child_work_order, company_id=company_id)
                 # The global audit-chain lock as this import's OWN statement, once its row locks
-                # are held and before the first audit row. AuditService.log takes the same lock
+                # are held and before the first audit row -- but only when it is replacing existing
+                # operations, i.e. holds their row locks. AuditService.log takes the same lock
                 # inside an except that swallows everything, so a lock race the import lost THERE
                 # (Postgres rolling it back as the deadlock victim against a writer that holds the
                 # chain and waits for one of these rows) surfaced on the next statement as the 400
                 # for a conflicting nest row. Here it reaches the lost-race 409 below; the later
-                # audit rows stack on the lock (it is re-entrant).
-                audit.acquire_chain_lock()
+                # audit rows stack on the lock (it is re-entrant). With nothing replaced there is no
+                # operation lock for such a writer to wait on: a standalone job or a freshly created
+                # classic child is not yet visible to any other writer, and an existing job with no
+                # nest operation holds only the work order's row lock from the header check. Taking
+                # the all-tenant lock here would then only hold it across the whole rebuild -- every
+                # nest PDF's blob write included -- and put it ahead of the work-center KEY SHARE the
+                # rebuild's operation inserts take. There the first audit row takes it (a material
+                # tie's, inside the rebuild, else after it).
+                if replaces_operations:
+                    audit.acquire_chain_lock()
                 parent_work_order_id = parent_work_order.id if parent_work_order is not None else None
 
                 # IMPORT-REPLACES-EVERYTHING wipes ALL prior non-deleted nests on
