@@ -885,16 +885,50 @@ async def stale_data_exception_handler(request: Request, exc: StaleDataError):
 # SQLSTATE that aborted the transaction (``app/db/database.py``). Every other database error is
 # re-raised untouched and takes the path it took before this handler existed: the global handler
 # above answers 500 with a correlation id.
+#
+# Every lost race is also reported to Sentry. Before this handler existed an uncaught 40P01 reached
+# the global handler, which reports it; a deadlock usually means two paths take the same locks in
+# different orders, which is a defect to fix, so a 409 must not make it invisible. The event is
+# grouped by route TEMPLATE and SQLSTATE (``_report_lost_lock_race``), so one lock-order bug is one
+# issue however many requests hit it. Reporting is best-effort: it can never change the 409.
 @app.exception_handler(DBAPIError)
 async def lost_lock_race_exception_handler(request: Request, exc: DBAPIError):
     if not db_locks.is_lost_lock_race(exc):
         raise exc
+    pgcode = getattr(exc.orig, "pgcode", None)
+    _report_lost_lock_race(request, exc, pgcode)
     logger.warning(
-        f"Lost lock race (SQLSTATE {getattr(exc.orig, 'pgcode', None)}) on {request.method} {request.url.path}; "
-        "the transaction was rolled back and nothing was saved"
+        f"Lost lock race (SQLSTATE {pgcode}) on {request.method} {request.url.path}; "
+        "the transaction that lost was rolled back"
     )
     response = JSONResponse(status_code=409, content={"detail": STALE_WRITE_CONFLICT_DETAIL})
     return add_cors_headers(response, request.headers.get("origin"))
+
+
+def _report_lost_lock_race(request: Request, exc: DBAPIError, pgcode: Any) -> None:
+    """Send a lost lock race to Sentry, grouped by route template + SQLSTATE. Never raises.
+
+    The route TEMPLATE (``/api/v1/work-orders/{work_order_id}/priority``), not the concrete path,
+    goes into the fingerprint, so every request on one route that loses the same race is one
+    issue. The concrete path, method and the request's correlation id (when the middleware set
+    one) ride along as context to find the request in the logs.
+    """
+    try:
+        route = getattr(request.scope.get("route"), "path", None) or request.url.path
+        capture_exception_to_sentry(
+            exc,
+            context={
+                "lost_lock_race": True,
+                "pgcode": str(pgcode),
+                "method": request.method,
+                "route": route,
+                "path": request.url.path,
+                "correlation_id": getattr(request.state, "correlation_id", None),
+            },
+            fingerprint=["lost-lock-race", request.method, route, str(pgcode)],
+        )
+    except Exception:  # reporting must never change the answer
+        logger.debug("Could not report a lost lock race to Sentry", exc_info=True)
 
 
 # HTTP exception handler - ensures CORS headers on HTTP errors (401, 403, 404, etc.)

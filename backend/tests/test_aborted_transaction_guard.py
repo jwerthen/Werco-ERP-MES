@@ -624,6 +624,76 @@ def test_route_retry_after_the_lost_race_succeeds_with_its_audit_row(routed, mon
     assert _work_order_audit_rows(routed) == 1
 
 
+class _SentrySpy:
+    def __init__(self) -> None:
+        self.captured: list = []
+
+    def capture_exception(self, exc, **scope_kwargs) -> None:
+        self.captured.append((exc, scope_kwargs))
+
+
+@pytest.fixture
+def sentry_spy(monkeypatch):
+    """Pretend Sentry is configured and record what the SDK would be handed (no network, no init)."""
+    import sentry_sdk
+
+    spy = _SentrySpy()
+    monkeypatch.setattr(settings, "SENTRY_DSN", "https://public@sentry.invalid/1")
+    monkeypatch.setattr(sentry_sdk, "set_tag", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sentry_sdk, "capture_exception", spy.capture_exception)
+    return spy
+
+
+def test_a_lost_lock_race_is_reported_to_sentry_grouped_by_route_and_sqlstate(routed, sentry_spy):
+    """A 409 must not hide a lock-order bug: before the 409 handler, the 500 handler reported it."""
+    response = TestClient(app).put(
+        f"/api/v1/work-orders/{routed.work_order_id}/priority",
+        json={"priority": 1, "reason": "rush"},
+        headers={**routed.headers, "X-Correlation-ID": "race-ref-1"},
+    )
+    assert response.status_code == 409, response.text
+    assert response.json() == {"detail": STALE_WRITE_CONFLICT_DETAIL}
+
+    [(exc, scope_kwargs)] = sentry_spy.captured
+    assert is_lost_lock_race(exc)
+    route = "/api/v1/work-orders/{work_order_id}/priority"
+    assert scope_kwargs["fingerprint"] == ["lost-lock-race", "PUT", route, "40P01"]
+    assert scope_kwargs["tags"] == {
+        "lost_lock_race": "True",
+        "pgcode": "40P01",
+        "method": "PUT",
+        "route": route,
+        "path": f"/api/v1/work-orders/{routed.work_order_id}/priority",
+        "correlation_id": "race-ref-1",
+    }
+
+
+def test_a_failing_sentry_report_never_changes_the_409(routed, monkeypatch):
+    import app.main as app_main
+
+    attempts = []
+
+    def capture_breaks(exc, **_kwargs):
+        attempts.append(exc)
+        raise RuntimeError("sentry is down")
+
+    monkeypatch.setattr(app_main, "capture_exception_to_sentry", capture_breaks)
+    response = _put_priority(routed, TestClient(app))
+    assert len(attempts) == 1 and is_lost_lock_race(attempts[0])  # the report was attempted, and failed
+    assert response.status_code == 409, response.text
+    assert response.json() == {"detail": STALE_WRITE_CONFLICT_DETAIL}
+    assert _priority(routed) == 5
+
+
+def test_a_non_race_database_error_is_not_reported_as_a_lost_race(routed, monkeypatch, sentry_spy):
+    """Only the 500 handler reports it (once), with its own grouping -- never the race fingerprint."""
+    routed.dbapi.next_failure = FakeQueryCanceled
+    _swallowing_log(monkeypatch)
+    response = _put_priority(routed, TestClient(app, raise_server_exceptions=False))
+    assert response.status_code == 500
+    assert all("fingerprint" not in scope_kwargs for _exc, scope_kwargs in sentry_spy.captured)
+
+
 # --------------------------------------------------------------------------------------------
 # POST /work-orders/: the creation audit commits WITH the work order, so a 409 saved nothing
 # --------------------------------------------------------------------------------------------
