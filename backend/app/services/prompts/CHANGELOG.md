@@ -1,5 +1,15 @@
 # Prompt Registry Changelog
 
+## 2026-11-05 — auto_execute_decision retired (owner ruling 3)
+
+- `auto_execute_decision` **RETIRED**. 1.0.0 was the last version. Owner ruling 3
+  (2026-11-05): nothing AI-driven executes without a named person clicking Accept,
+  so the always-on agent that picked recommendations to auto-execute is removed
+  with its service, its `auto_execute` model-router task and the
+  `ANTHROPIC_AUTO_EXECUTE_MODEL` override. The id stays **reserved** and must never
+  be reused: historical `ai_usage_events` (feature `ai_auto_execute`) and
+  `ai_interaction_events` (`ai_feature = auto_execute`) rows reference it.
+
 ## 2026-09-22 — Hank operational workflows
 
 - `copilot_chat` **1.5.0**: six reviewed action schemas, live operational/evidence reports, own active-job and receiving context, saved-work status/extraction tools, and truthful handoff/routine/voice guidance. Cached tool schemas remain deterministic.

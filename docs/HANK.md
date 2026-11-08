@@ -343,10 +343,10 @@ confirms it.
   connected to Hank's chat tool registry. MCP read/write annotations are hints;
   they do not supply an employee-intent or approval workflow.
 - The ERP already has separate Action Inbox sensors, a morning brief, contextual
-  recommendations, and allowlisted apply/automation machinery. Company snapshot
-  context can already include tenant-level learned preferences. These are useful
-  foundations. Hank's own stores record reviewed actions, explicit personal
-  follow-ups and typed employee preferences. See
+  recommendations, and an allowlisted Accept & apply (a person's click; no
+  automation). Company snapshot context can already include tenant-level learned
+  preferences. These are useful foundations. Hank's own stores record reviewed
+  actions, explicit personal follow-ups and typed employee preferences. See
   [Always-On AI](AI_ALWAYS_ON.md).
 - Hank has sixteen read tools and one proposal-preparation tool. Tenant scope is
   injected by the server and cannot be chosen by model arguments. Chat can save

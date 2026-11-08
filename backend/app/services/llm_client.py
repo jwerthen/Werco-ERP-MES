@@ -262,6 +262,24 @@ def _ai_egress_allowed(company_id: Optional[int]) -> bool:
             db.close()
 
 
+def ai_egress_allowed(company_id: Optional[int]) -> bool:
+    """Public read of the per-company AI egress switch, for request POLICY (not LLM calls).
+
+    Used by the AI recommendation Accept & apply door and the governance snapshot
+    (owner ruling 3: when AI egress is off, nothing AI-driven executes -- including a
+    person's Accept & apply). Unlike :func:`_ai_egress_allowed`, a missing company is
+    a denial here: there is no "no tenant" case for a policy read.
+
+    ``_ai_egress_allowed`` is resolved through this module's globals AT CALL TIME, so
+    the suite-wide test patch of that seam applies. Callers must import this module and
+    call ``llm_client.ai_egress_allowed(...)``; never ``from llm_client import
+    _ai_egress_allowed``, which would bind the unpatched function.
+    """
+    if company_id is None:
+        return False
+    return bool(_ai_egress_allowed(company_id))
+
+
 def _record_usage_event(
     *,
     company_id: Optional[int],

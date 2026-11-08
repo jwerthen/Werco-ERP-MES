@@ -129,3 +129,23 @@ export function toDisplayString(value: unknown): string {
   }
   return String(value);
 }
+
+/**
+ * The text to show for a failed API call: the server's verbatim string `detail`, else
+ * the error's own message, else `fallback`. This is the extraction useOptimisticMutation
+ * has always used for its error toast; server-gated callers that are deliberately NOT
+ * optimistic (AI Accept & apply) share it so every surface reads a refusal the same way.
+ */
+export function apiErrorDetail(err: unknown, fallback: string): string {
+  const detail = (err as { response?: { data?: { detail?: unknown } } } | null | undefined)?.response?.data?.detail;
+  if (typeof detail === 'string' && detail.trim()) return detail;
+  const message = (err as { message?: unknown } | null | undefined)?.message;
+  if (typeof message === 'string' && message.trim()) return message;
+  return fallback;
+}
+
+/** HTTP status of a failed Axios call, or undefined for a network/non-HTTP failure. */
+export function apiErrorStatus(err: unknown): number | undefined {
+  const status = (err as { response?: { status?: unknown } } | null | undefined)?.response?.status;
+  return typeof status === 'number' ? status : undefined;
+}

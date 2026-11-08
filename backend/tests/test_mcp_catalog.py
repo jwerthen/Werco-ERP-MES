@@ -20,6 +20,7 @@ rule rather than "something in 663 tools changed".
 from __future__ import annotations
 
 import copy
+import json
 import re
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Set
 
@@ -138,11 +139,26 @@ class TestMembership:
         secured = {(m, p) for m, p, _o, _pp in iter_secured_operations(app.openapi())}
         assert set(SHADOWED_OPERATIONS) <= secured
         assert set(EXCLUDED_OPERATIONS) <= secured
-        # The excluded loaders are the two Excel-cutover routes and nothing else.
+        # The exclusions are the two Excel-cutover loaders plus AI Accept & apply (owner
+        # ruling 3: only a named person's click runs a recommendation) -- nothing else.
         assert set(EXCLUDED_OPERATIONS) == {
             ("POST", "/api/v1/work-orders/import"),
             ("POST", "/api/v1/purchasing/purchase-orders/import"),
+            ("POST", "/api/v1/ai/recommendations/{recommendation_id}/apply"),
         }
+
+    def test_ai_apply_is_not_a_tool_but_record_only_accept_is(self, catalog):
+        by_path = {tool.key: tool.name for tool in catalog}
+        assert ("POST", "/api/v1/ai/recommendations/{recommendation_id}/apply") not in by_path
+        assert all("apply_ai_recommendation" != tool.name for tool in catalog)
+        assert by_path[("POST", "/api/v1/ai/recommendations/{recommendation_id}/accept")] == (
+            "accept_ai_recommendation"
+        )
+        # The accept tool still carries the refused-only ``apply`` flag, so its schema must say
+        # so -- an agent reading the tool should never try apply=true.
+        (accept,) = [tool for tool in catalog if tool.name == "accept_ai_recommendation"]
+        apply_flag = json.dumps(accept.input_schema)
+        assert "Must be false" in apply_flag and "Accept & apply" in apply_flag
 
     def test_public_operations_name_exactly_the_unsecured_routes(self, spec):
         unsecured = {
