@@ -1,5 +1,18 @@
 # Prompt Registry Changelog
 
+## 2026-11-09 — qms_clause_extraction text moved out of the router (#9-0)
+
+- `qms_clause_extraction` 1.0.0 — **no version change**, because neither the text
+  nor the request layout changed. The user message moved verbatim from the inline
+  f-string in `app/api/endpoints/qms_standards.py` to `QMS_CLAUSE_EXTRACTION_TEMPLATE`
+  + `QMS_CLAUSE_SCHEMA` in `prompts/qms.py`; the model call moved to
+  `app/services/qms_extraction_service.py`. The rendered prompt and the request
+  (one user message, no `system`, `max_tokens` 16000, routing on the full input
+  length) are byte-identical, pinned by `tests/services/test_qms_extraction_service.py`
+  and `tests/api/test_qms_upload_request_parity.py`. Supersedes the 2026-06-09
+  "remains inline" note. Edit the template from now on; `text=None` stays because
+  it is a per-request user message, not a cacheable system prompt.
+
 ## 2026-11-05 — auto_execute_decision retired (owner ruling 3)
 
 - `auto_execute_decision` **RETIRED**. 1.0.0 was the last version. Owner ruling 3

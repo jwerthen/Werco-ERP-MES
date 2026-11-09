@@ -31,9 +31,8 @@ from app.services.auto_evidence_service import (
     compute_overall_compliance,
     discover_evidence_for_clause,
 )
-from app.services.llm_client import LLMEgressDisabledError, LLMNotConfiguredError, run_llm_task
-from app.services.llm_model_router import LLMTaskContext
-from app.services.prompts import QMS_CLAUSE_EXTRACTION_PROMPT
+from app.services.llm_client import LLMEgressDisabledError, LLMNotConfiguredError
+from app.services.qms_extraction_service import extract_clauses_with_llm
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -164,66 +163,17 @@ async def upload_pdf_and_extract_clauses(
             status_code=400, detail="Could not extract text from PDF. The file may be scanned/image-based or empty."
         )
 
-    # Use Claude AI to extract clauses (prompt version: see app/services/prompts/qms.py —
-    # bump QMS_CLAUSE_EXTRACTION_PROMPT when this inline text changes).
-    clause_schema = """[
-  {
-    "clause_number": "string - e.g. '4.1', '8.5.2'",
-    "title": "string - clause title",
-    "description": "string - full clause text or summary of requirements"
-  }
-]"""
-
-    prompt = f"""You are a QMS standards expert. Extract ALL clauses and sub-clauses from this quality management document.
-
-The document is: {standard.name} {standard.version or ''}
-
-Rules:
-1. Extract EVERY numbered clause and sub-clause (e.g., 4.1, 4.2, 5.1.1, 8.5.2)
-2. Include the clause number, title, and the full requirement text as description
-3. Maintain the hierarchical numbering exactly as shown in the document
-4. Include ALL levels of sub-clauses
-5. For the description, include the actual requirement text — not just a summary
-6. Return a JSON array of objects, nothing else
-
-Schema:
-{clause_schema}
-
-Document text:
----
-{pdf_text[:100000]}
----
-
-Return ONLY a valid JSON array. No markdown, no explanations."""
-
+    # The prompt, the model call and the JSON parse live in qms_extraction_service
+    # (prompt text: QMS_CLAUSE_EXTRACTION_TEMPLATE in app/services/prompts/qms.py).
+    # Its exceptions propagate unchanged, so the mapping below is the HTTP contract.
     try:
-        llm_result = run_llm_task(
-            LLMTaskContext(
-                task="qms_clause_extraction",
-                input_chars=len(pdf_text),
-                max_output_tokens=16000,
-            ),
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=16000,
+        extraction = extract_clauses_with_llm(
+            pdf_text,
+            name=standard.name,
+            version=standard.version,
             company_id=company_id,
-            feature="qms_standards",
-            prompt_version=QMS_CLAUSE_EXTRACTION_PROMPT.version,
         )
-
-        response_text = llm_result.text.strip()
-
-        # Clean markdown fences
-        if response_text.startswith("```json"):
-            response_text = response_text[7:]
-        if response_text.startswith("```"):
-            response_text = response_text[3:]
-        if response_text.endswith("```"):
-            response_text = response_text[:-3]
-
-        extracted = json.loads(response_text.strip())
-
-        if not isinstance(extracted, list):
-            raise ValueError("Expected a JSON array of clauses")
+        extracted = extraction.clauses
 
     except LLMNotConfiguredError as e:
         detail = (
@@ -286,8 +236,8 @@ Return ONLY a valid JSON array. No markdown, no explanations."""
         "Extracted %s clauses from PDF for standard %s using %s (%s)",
         len(clauses),
         standard.name,
-        llm_result.model,
-        llm_result.model_selection_reason,
+        extraction.model,
+        extraction.model_selection_reason,
     )
     return clauses
 

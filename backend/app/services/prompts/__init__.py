@@ -32,7 +32,7 @@ from app.services.prompts.laser_nest import (
     LASER_NEST_SEGMENTATION_PROMPT,
     LASER_NEST_VERIFICATION_PROMPT,
 )
-from app.services.prompts.qms import QMS_CLAUSE_EXTRACTION_PROMPT
+from app.services.prompts.qms import QMS_CLAUSE_EXTRACTION_PROMPT, QMS_CLAUSE_EXTRACTION_TEMPLATE, QMS_CLAUSE_SCHEMA
 from app.services.prompts.routing import ROUTING_GENERATION_PROMPT
 from app.services.prompts.sheet_stock import SHEET_STOCK_DISAMBIGUATION_PROMPT
 
@@ -67,6 +67,8 @@ __all__ = [
     "SHEET_STOCK_DISAMBIGUATION_PROMPT",
     "ROUTING_GENERATION_PROMPT",
     "QMS_CLAUSE_EXTRACTION_PROMPT",
+    "QMS_CLAUSE_EXTRACTION_TEMPLATE",
+    "QMS_CLAUSE_SCHEMA",
     "COPILOT_CHAT_PROMPT",
     "NL_SEARCH_INTENT_PROMPT",
     "HANK_INTAKE_PROMPT",
