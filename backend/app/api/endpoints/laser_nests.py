@@ -69,6 +69,10 @@ async def extract_laser_nest_from_pdf(
     planner still verifies and saves. ``company_id`` is passed through for
     tenant-scoped AI-usage telemetry on the underlying ``run_llm_task`` call.
 
+    ``planned_runs`` is null, and ``confidence`` "low", whenever the run count was
+    not cleanly read as a whole number from 1 to 9,999; a count above 9,999 also
+    adds a ``warning``.
+
     Declared as a static literal ``/extract`` POST so it is matched ahead of the
     dynamic ``/{laser_nest_id}`` routes.
     """

@@ -3991,8 +3991,8 @@ mixed**:
 | POST | `/work-orders/laser-nest-packages/standalone/preview` | Same preview with **no work order in the path** — used before a standalone import (same `sheet_suggestion` on every row) | Admin / Manager / Supervisor |
 | POST | `/work-orders/laser-nest-packages/standalone/import` | Import a package into a **fresh standalone laser WO** — creates a released, part-less `laser_cutting` work order with the release recorded as the importer's (`released_by` / `released_at`) (no parent; quantity = total planned sheet runs; optional `due_date`, optional `sheet_match_provenance`) | Admin / Manager / Supervisor |
 | POST | `/laser-nests/extract` | Auto-extract nest fields (CNC #, material, size) from a single uploaded nest PDF. Stateless — no DB write, no audit | Admin / Manager / Supervisor |
-| POST | `/work-orders/{id}/laser-nests/manual` | Manually add **one** nest to a work order (child laser WO of an assembly, or the addressed `laser_cutting` WO directly). Creates a clock-in-able `LASER` operation; sets the laser WO RELEASED the same way the import does (release recorded when it was a draft or unstamped; an **on-hold** laser WO stays on hold, so the new nest cannot be started until the hold is lifted) | Admin / Manager / Supervisor |
-| PATCH | `/laser-nests/{id}` | Edit a manual nest (all fields optional). Raising `planned_runs` on a COMPLETE nest or a finished laser work order is **409**; a standing API token lowering it once work is recorded on the nest is **403** | Admin / Manager / Supervisor |
+| POST | `/work-orders/{id}/laser-nests/manual` | Manually add **one** nest to a work order (child laser WO of an assembly, or the addressed `laser_cutting` WO directly). Creates a clock-in-able `LASER` operation; sets the laser WO RELEASED the same way the import does (release recorded when it was a draft or unstamped; an **on-hold** laser WO stays on hold, so the new nest cannot be started until the hold is lifted). `planned_runs` must be 1–9,999 (**422** otherwise) | Admin / Manager / Supervisor |
+| PATCH | `/laser-nests/{id}` | Edit a manual nest (all fields optional). `planned_runs` outside 1–9,999 is **422**. Raising `planned_runs` on a COMPLETE nest or a finished laser work order is **409**; a standing API token lowering it once work is recorded on the nest is **403** | Admin / Manager / Supervisor |
 | POST | `/laser-nests/{id}/attach-document` | Attach an already-uploaded PDF Document to the nest (PDF-only) | Admin / Manager / Supervisor |
 | DELETE | `/laser-nests/{id}/document` | Detach the PDF (clears the FK; the Document row is left intact) | Admin / Manager / Supervisor |
 | GET | `/laser-nests/{id}/document` | Serve the attached PDF **inline** for operator preview | Yes (any authenticated user) |
@@ -4303,7 +4303,12 @@ environment variable or deployment configuration change is needed.
 >   Used by the manual-create modal to auto-fill fields from a dropped PDF. Returns
 >   `{ cnc_number, material, thickness, sheet_size, planned_runs, confidence, source, warning, passes }`
 >   where `source` ∈ `{ai, filename}`, `confidence` ∈ `{high, medium, low}` (overall — the
->   per-field minimum when both passes ran), and `passes` ∈ `{1, 2}`.
+>   per-field minimum when both passes ran), and `passes` ∈ `{1, 2}`. `planned_runs` is a real
+>   **`null`** whenever the run count was not cleanly read — missing, not a whole number, below 1,
+>   or above 9,999 — and `confidence` is then **`low`**; a count above 9,999 also adds a `warning`
+>   (joined with `; ` to any existing one). The response never carries the model's raw value, so the
+>   manual form is never pre-filled with a count the create route would refuse (and a non-numeric
+>   value such as `"N/A"` or `2.5` is no longer a **500**).
 >   Declared as a static `/extract` route so it matches ahead of the dynamic `/{laser_nest_id}` routes.
 >
 > - **Batch ZIP (`…/laser-nest-packages/preview` → `…/import`).** A package is treated as a **PDF
@@ -4326,7 +4331,9 @@ environment variable or deployment configuration change is needed.
 >   supplies PDF bytes). When `rows` is absent, the legacy CNC-file import is unchanged.
 >
 >   `rows` is **strictly validated** before anything is persisted (`LaserNestImportRow`):
->   `source_file` required (1–1000 chars), `planned_runs` required and **≥ 1**,
+>   `source_file` required (1–1000 chars), `planned_runs` required and **1–9,999** (a larger
+>   count used to reach the `Integer` column and fail as a **500** on Postgres; it is now a
+>   failing row like any other),
 >   `source_pages` optional (required on the bare-PDF path — see below): non-empty, entries
 >   **≥ 1**, ascending and consecutive,
 >   `work_center_id` optional and **> 0** (per-nest override; must resolve to an **active**,
@@ -4389,20 +4396,31 @@ environment variable or deployment configuration change is needed.
 >   segmentation defaults to one nest per page — the page split itself is local `pypdf` and keeps
 >   working.
 > - **`planned_runs` reads differently on the two entry points, and the difference is load-bearing.**
->   The stateless single-PDF `POST /laser-nests/extract` passes the model's value straight through, so
->   it returns **`null`** when no run count was found. **Preview rows do not**: `LaserNestPreviewRow`
->   types `planned_runs` as a non-optional `int` and `_coerce_planned_runs` **floors it at 1**, so a
->   nest that genuinely runs once and a nest whose count neither pass could find are the **same `1`**
->   in the response. `field_confidence["planned_runs"] == "low"` is the **only** signal that separates
->   them — read the confidence, never the number, and the import wizard accordingly counts and labels
->   those rows rather than presenting them as read values. Accepted coercion shapes (widened
->   2026-08-05, since a model asked for one integer emits all of these): `3`, `3.0`, `"3"`, `"x3"`,
->   `"3 sheets"`, `"3 of 5"` — a **leading** integer is required for the free-text case, so `"sheet 4"`
->   reads as 1 rather than mistaking a label for a count. Anything else (a fractional float, junk,
->   missing) falls back to 1 rather than raising and 400-ing the whole preview batch.
+>   Both read the model's value through the same `read_planned_runs` (`laser_nest_service.py`), which
+>   accepts a whole count from 1 to 9,999 (`MAX_PLANNED_RUNS`) and treats everything else as **not
+>   read**. The stateless single-PDF `POST /laser-nests/extract` returns a not-read count as **`null`**
+>   at `low` confidence (above). **Preview rows do not**: `LaserNestPreviewRow` types `planned_runs` as
+>   a non-optional `int`, so a not-read count is **floored at 1**, and a nest that genuinely runs once
+>   and a nest whose count neither pass could read are the **same `1`** in the response.
+>   `field_confidence["planned_runs"] == "low"` is the **only** signal that separates them — read the
+>   confidence, never the number, and the import wizard accordingly counts and labels those rows
+>   rather than presenting them as read values. **Every floor now carries that `low`, and so does the
+>   row's overall `confidence`** (it is the minimum across fields), whatever the two-pass merge
+>   scored: the merge scores *agreement*, so before this rule two passes that both answered `"N/A"`
+>   came out a **high** `1`, and two that misread the same 11-digit number passed it through **high**
+>   into the import. A count above 9,999 is not clamped to the limit: it reads as `1`, `low`, and adds
+>   the row `warning` `Run count '…' looked wrong — enter it by hand (the limit is 9,999 runs per
+>   nest).` Accepted shapes (widened 2026-08-05, since a model asked for one integer emits all of
+>   these): `3`, `3.0`, `"3"`, `"x3"`, `"3 sheets"`, `"3 of 5"` — a **leading** integer is required for
+>   the free-text case, so `"sheet 4"` is not read rather than mistaking a label for a count. Anything
+>   else (a fractional value such as `2.5` or `"2.5"`, 0 or a negative, junk, missing) is not read; it
+>   never raises and 400s the whole preview batch. The 9,999 limit is a design default (2026-11-09)
+>   the owner can still change: one constant, `MAX_PLANNED_RUNS` in `app/models/laser_nest.py`, behind
+>   every bound in this section; the MCP `add_laser_nest` schema repeats it as a literal `maximum`
+>   that a catalog test holds equal to the route's.
 >
 > **Manual nest create (`POST /work-orders/{id}/laser-nests/manual`).** Body: `cnc_number`
-> (required, 1–100 chars), `planned_runs` (required, **≥ 1**), and optional `nest_name`,
+> (required, 1–100 chars), `planned_runs` (required, **1–9,999**, **422** otherwise), and optional `nest_name`,
 > `material`, `thickness`, `sheet_size`, plus the same optional **material tie** the import rows take
 > (`material_part_id` **> 0**, `qty_per_run` **> 0** — see "Nest material ties" below), and an
 > optional **`work_center_id`** (**> 0**) naming the laser this nest runs on. Resolves the target
@@ -4617,7 +4635,7 @@ environment variable or deployment configuration change is needed.
 > `planned_runs`, `material`, `thickness`, `sheet_size`). A `planned_runs` change **reverse-syncs**
 > the operation's `component_quantity` and re-derives the laser WO's `quantity_ordered` over
 > its non-deleted nests. Lowering `planned_runs` below `completed_runs` is allowed (over-run is
-> acceptable); only the schema's `ge=1` floor applies. **Raising** it is refused **409** before any
+> acceptable); only the schema's bounds apply (1–9,999, **422** outside them). **Raising** it is refused **409** before any
 > write when the nest's operation is COMPLETE (`Nest N is already complete at {runs} runs; raising its
 > planned runs would leave a completed operation short. Add a nest for the extra runs.`) or the laser
 > work order is COMPLETE / CLOSED / CANCELLED (`This laser work order is {status}; Nest N's planned
