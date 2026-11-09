@@ -6,6 +6,16 @@ from sqlalchemy.orm import relationship
 from app.db.database import Base
 from app.db.mixins import SoftDeleteMixin, TenantMixin
 
+# The largest run count one nest may carry. A DESIGN DEFAULT the owner accepted on
+# 2026-11-09 and can still change: no real nest runs anywhere near this many sheets, so
+# anything above it is a misread, not a plan. It is enforced at every door that writes
+# ``LaserNest.planned_runs`` -- manual create and PATCH (422), the package import rows
+# (400), the MCP ``add_laser_nest`` schema (``maximum``) -- and an AI-extracted count above
+# it is treated as NOT READ (floored to 1, low confidence, with a warning) rather than
+# passed through. Before the bound, such a count reached this ``Integer`` column and
+# overflowed Postgres int4 as a 500. No migration: the column is unchanged.
+MAX_PLANNED_RUNS = 9_999
+
 
 class LaserNestPackage(Base, TenantMixin):
     """Imported laser nest package.

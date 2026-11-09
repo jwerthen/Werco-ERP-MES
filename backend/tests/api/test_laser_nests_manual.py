@@ -225,6 +225,60 @@ class TestManualCreate:
 
 
 # --------------------------------------------------------------------------- #
+# The run-count bound (MAX_PLANNED_RUNS = 9,999) on manual create and PATCH
+# --------------------------------------------------------------------------- #
+class TestPlannedRunsBound:
+    """A nest runs at most 9,999 sheets (owner design default, 2026-11-09).
+
+    Above that is a typo or a misread, and before the bound it reached the int4
+    ``planned_runs`` column and overflowed on Postgres as a 500. Both write doors
+    now refuse it with a 422 before anything is written. The literals are the
+    owner-facing contract; ``MAX_PLANNED_RUNS`` itself is pinned in
+    ``tests/services/test_laser_nest_planned_runs.py``.
+    """
+
+    def test_create_refuses_10000_and_writes_nothing(self, client, db_session, laser_setup):
+        headers = headers_for(laser_setup["admin"])
+        resp = _create_manual_nest(
+            client, headers, laser_setup["parent"].id, {"cnc_number": "PRG-BIG", "planned_runs": 10_000}
+        )
+        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
+        assert db_session.query(LaserNest).filter(LaserNest.cnc_number == "PRG-BIG").count() == 0
+
+    def test_create_accepts_9999(self, client, db_session, laser_setup):
+        headers = headers_for(laser_setup["admin"])
+        resp = _create_manual_nest(
+            client, headers, laser_setup["parent"].id, {"cnc_number": "PRG-MAX", "planned_runs": 9_999}
+        )
+        assert resp.status_code == status.HTTP_201_CREATED, resp.text
+        assert resp.json()["planned_runs"] == 9_999
+
+    def test_patch_refuses_10000_and_leaves_the_nest_alone(self, client, db_session, laser_setup):
+        headers = headers_for(laser_setup["admin"])
+        created = _create_manual_nest(
+            client, headers, laser_setup["parent"].id, {"cnc_number": "PRG-EDIT", "planned_runs": 4}
+        ).json()
+
+        resp = client.patch(f"/api/v1/laser-nests/{created['id']}", headers=headers, json={"planned_runs": 10_000})
+
+        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
+        nest = db_session.query(LaserNest).filter(LaserNest.id == created["id"]).one()
+        db_session.refresh(nest)
+        assert nest.planned_runs == 4
+
+    def test_patch_accepts_9999(self, client, db_session, laser_setup):
+        headers = headers_for(laser_setup["admin"])
+        created = _create_manual_nest(
+            client, headers, laser_setup["parent"].id, {"cnc_number": "PRG-EDIT-MAX", "planned_runs": 4}
+        ).json()
+
+        resp = client.patch(f"/api/v1/laser-nests/{created['id']}", headers=headers, json={"planned_runs": 9_999})
+
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        assert resp.json()["planned_runs"] == 9_999
+
+
+# --------------------------------------------------------------------------- #
 # Concurrency: the laser-child-WO advisory lock is taken on the manual path
 # --------------------------------------------------------------------------- #
 class TestLaserChildWorkOrderLock:

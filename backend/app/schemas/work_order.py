@@ -13,6 +13,7 @@ from app.core.validation import (
     OperationNumber,
     UnitNumber,
 )
+from app.models.laser_nest import MAX_PLANNED_RUNS
 from app.models.work_order import OperationStatus, WorkOrderStatus, WorkOrderType
 from app.schemas.base import UTCModel
 
@@ -100,7 +101,7 @@ class LaserNestManualCreate(BaseModel):
     """Request body for manually keying one laser nest onto an assembly WO."""
 
     cnc_number: str = Field(..., min_length=1, max_length=100, description="CNC program number")
-    planned_runs: int = Field(..., ge=1, description="Planned sheet runs")
+    planned_runs: int = Field(..., ge=1, le=MAX_PLANNED_RUNS, description="Planned sheet runs")
     nest_name: Optional[str] = Field(None, max_length=255)
     material: Optional[str] = Field(None, max_length=100)
     thickness: Optional[str] = Field(None, max_length=50)
@@ -143,7 +144,7 @@ class LaserNestUpdate(BaseModel):
 
     cnc_number: Optional[str] = Field(None, min_length=1, max_length=100)
     nest_name: Optional[str] = Field(None, max_length=255)
-    planned_runs: Optional[int] = Field(None, ge=1)
+    planned_runs: Optional[int] = Field(None, ge=1, le=MAX_PLANNED_RUNS)
     material: Optional[str] = Field(None, max_length=100)
     thickness: Optional[str] = Field(None, max_length=50)
     sheet_size: Optional[str] = Field(None, max_length=100)
@@ -186,6 +187,13 @@ class LaserNestPdfExtractionResponse(BaseModel):
     service's ``extraction_confidence`` key. ``source`` is "ai" or "filename"
     (the latter when the model could not pin the CNC number and the filename stem
     was used as the fallback). ``warning`` is None on success.
+
+    ``planned_runs`` is a REAL null whenever the run count was not cleanly read
+    (``read_planned_runs``): missing, not a whole number, below 1, or above
+    ``MAX_PLANNED_RUNS``. Whenever it is not cleanly read, ``confidence`` is
+    "low" too, and a count above the bound adds a ``warning``. It is never the raw
+    model value, so the manual form can never be pre-filled with a count the
+    manual-create route would refuse.
     """
 
     cnc_number: Optional[str] = None
@@ -342,12 +350,16 @@ class LaserNestPreviewRow(BaseModel):
         1,
         description=(
             "Planned sheet runs. NON-OPTIONAL and floored at 1 by "
-            "``_coerce_planned_runs``, so a nest whose run count could not be read "
+            "``read_planned_runs``, so a nest whose run count could not be read "
             "and a nest that genuinely runs once are the SAME 1 here. "
             "``field_confidence['planned_runs'] == 'low'`` is the only thing that "
             "separates them -- consumers must read it before treating this as an "
-            "extracted value. (The single-PDF ``POST /laser-nests/extract`` "
-            "response is the one place that keeps a real null.)"
+            "extracted value. Every floored or capped value carries that ``low``, "
+            "including a count both AI passes agreed on but that was not a number, "
+            "and a count above ``MAX_PLANNED_RUNS`` (9,999) is not passed through: "
+            "it reads as 1, ``low``, with a row ``warning`` asking for the count by "
+            "hand. (The single-PDF ``POST /laser-nests/extract`` response is the one "
+            "place that keeps a real null.)"
         ),
     )
     material: Optional[str] = None
@@ -393,7 +405,7 @@ class LaserNestImportRow(BaseModel):
     source_file: str = Field(..., min_length=1, max_length=1000)
     cnc_number: Optional[str] = Field(None, max_length=100)
     nest_name: Optional[str] = Field(None, max_length=255)
-    planned_runs: int = Field(..., ge=1, description="Planned sheet runs")
+    planned_runs: int = Field(..., ge=1, le=MAX_PLANNED_RUNS, description="Planned sheet runs")
     material: Optional[str] = Field(None, max_length=100)
     thickness: Optional[str] = Field(None, max_length=50)
     sheet_size: Optional[str] = Field(None, max_length=100)

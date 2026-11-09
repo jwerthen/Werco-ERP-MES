@@ -16,7 +16,7 @@ from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.models.document import Document, DocumentType
-from app.models.laser_nest import LaserNest, LaserNestPackage
+from app.models.laser_nest import MAX_PLANNED_RUNS, LaserNest, LaserNestPackage
 from app.models.part import Part
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderType
@@ -191,20 +191,14 @@ def parse_laser_nest_pdf_package(folder: str, company_id: int) -> list[ParsedLas
     return nests
 
 
-def _coerce_planned_runs(value: object) -> int:
-    """Coerce a model-supplied ``planned_runs`` to a sane int, flooring at 1.
+def _parse_planned_runs(value: object) -> Optional[int]:
+    """The run count a model-supplied ``planned_runs`` STATES, or None if it states none.
 
-    Defensive: the extraction result is AI output, so ``planned_runs`` may be a
-    non-numeric string, a float-ish string, or junk. Anything unreadable falls
-    back to 1 so a bad model value can never ``ValueError`` -> 400 the whole
-    preview batch.
-
-    THE FLOOR IS NOT A READ. ``planned_runs`` is a non-optional ``int`` on the
-    wire, so a nest whose run count could not be found and a nest that genuinely
-    runs once are the SAME 1 in the preview response. Only
-    ``field_confidence["planned_runs"]`` tells them apart, which is why the
-    wizard counts the low-confidence ones out loud rather than presenting 40
-    identical-looking 1s as read values. Do not "simplify" that signal away.
+    No floor and no ceiling -- that is ``read_planned_runs``' job. This only
+    decides what number, if any, the value says. It never raises: the extraction
+    result is AI output, so the value may be a non-numeric string, a float-ish
+    string, or junk, and a raise here would sink a whole 50-nest preview batch
+    over one odd row.
 
     Accepted shapes, widened deliberately: the previous rule was int-or-digit-
     string ONLY, so every near-miss a model actually emits for this field --
@@ -212,21 +206,21 @@ def _coerce_planned_runs(value: object) -> int:
     sheets"``, ``"x3"`` -- landed on the same silent 1 as genuine junk. Each of
     those is an unambiguous 3, and reading it is strictly better than defaulting
     it. A LEADING integer is required for the free-text case: ``"3 of 5"`` is 3,
-    while ``"sheet 4"`` stays 1 rather than reading a label as a count.
+    while ``"sheet 4"`` states no count rather than reading a label as one.
 
     A FRACTIONAL count is refused on BOTH the number and the string path, and
     the two must not drift apart: half a run is not a sheet count, and rounding
     one would invent a quantity nobody wrote. ``2.5`` and ``"2.5"`` therefore
-    both fall back to 1 -- reading the string form as 2 would make the answer
+    both state no count -- reading the string form as 2 would make the answer
     depend on whether the model happened to quote its JSON number, which is the
     one thing a caller can neither see nor control.
     """
     if isinstance(value, bool):
-        return 1
+        return None
     if isinstance(value, int):
-        return max(1, value)
+        return value
     if isinstance(value, float):
-        return max(1, int(value)) if value.is_integer() else 1
+        return int(value) if value.is_integer() else None
     if isinstance(value, str):
         text = value.strip()
         # NOTE: there is deliberately no `text.isdigit()` fast path here, and
@@ -247,9 +241,80 @@ def _coerce_planned_runs(value: object) -> int:
         if match:
             fraction = match.group(2)
             if fraction and float(fraction) != 0:
-                return 1
-            return max(1, int(match.group(1)))
-    return 1
+                return None
+            digits = match.group(1).lstrip("0") or "0"
+            if len(digits) > len(str(MAX_PLANNED_RUNS)):
+                # Longer than any count the bound admits, so the exact value no
+                # longer matters -- only that it is over. Skipping int() here also
+                # keeps the never-raise promise: int() refuses a digit string past
+                # Python's 4,300-digit conversion limit.
+                return MAX_PLANNED_RUNS + 1
+            return int(digits)
+    return None
+
+
+def read_planned_runs(value: object) -> tuple[int, bool]:
+    """Read a model-supplied ``planned_runs``: ``(count, was_read)``.
+
+    ``was_read`` is True only when the value states a whole count from 1 to
+    ``MAX_PLANNED_RUNS``. Everything else -- missing, junk, a fraction, 0 or a
+    negative, or a count above the bound -- is ``(1, False)``: the preview's
+    non-optional field gets its floor of 1, and the caller MUST mark it low
+    confidence (``build_parsed_nest_from_extraction`` and ``POST
+    /laser-nests/extract`` both do).
+
+    THE FLOOR IS NOT A READ. ``planned_runs`` is a non-optional ``int`` on the
+    preview wire, so a nest whose run count could not be found and a nest that
+    genuinely runs once are the SAME 1 in the response. Only
+    ``field_confidence["planned_runs"]`` tells them apart, which is why the
+    wizard counts the low-confidence ones out loud rather than presenting 40
+    identical-looking 1s as read values. ``was_read`` exists because the two-pass
+    merge cannot supply that signal on its own: it scores AGREEMENT, so two
+    passes that both answered "N/A", or both misread the same 11-digit number,
+    come out "high". Do not "simplify" ``was_read`` away.
+
+    A count above ``MAX_PLANNED_RUNS`` is not clamped to the bound: 9,999 is no
+    more a reading of "99999999999" than 1 is, and the floor is the one value
+    every consumer already treats as "not read" once it carries ``low``.
+    """
+    count = _parse_planned_runs(value)
+    if count is None or count < 1 or count > MAX_PLANNED_RUNS:
+        return 1, False
+    return count, True
+
+
+def planned_runs_bound_warning(value: object) -> Optional[str]:
+    """The planner-facing warning for a run count over ``MAX_PLANNED_RUNS``, else None.
+
+    Only an over-the-bound count gets words: a missing or unreadable one is
+    already flagged by its low confidence, while a huge one is a number the AI
+    did read and the planner should know it was thrown away, not just doubted.
+    """
+    count = _parse_planned_runs(value)
+    if count is None or count <= MAX_PLANNED_RUNS:
+        return None
+    try:
+        shown = str(value).strip()
+    except ValueError:  # an int past Python's 4,300-digit str() limit
+        shown = "a very long number"
+    if len(shown) > 40:
+        shown = shown[:40] + "…"
+    return f"Run count '{shown}' looked wrong — enter it by hand (the limit is {MAX_PLANNED_RUNS:,} runs per nest)."
+
+
+def _coerce_planned_runs(value: object) -> int:
+    """The floored count alone: ``read_planned_runs(value)[0]``, always an int >= 1.
+
+    Kept for callers and tests that want only the number. Anything that SHOWS
+    the number to a person must use ``read_planned_runs`` and carry its
+    ``was_read`` into the confidence, or the floor masquerades as a read.
+    """
+    return read_planned_runs(value)[0]
+
+
+def _join_warnings(*warnings: Optional[str]) -> Optional[str]:
+    joined = "; ".join(warning for warning in warnings if warning)
+    return joined or None
 
 
 def _coerce_field_confidence(value: object) -> Optional[dict]:
@@ -270,11 +335,13 @@ def build_parsed_nest_from_extraction(result: dict, *, abs_path: str, rel_path: 
     """Map an ``extract_nest_fields_from_pdf`` result dict to a ``ParsedLaserNest``.
 
     Shared by the sync package parser and the async (parallelized) preview path
-    so both assemble rows identically. ``planned_runs`` floors at 1.
+    so both assemble rows identically. ``planned_runs`` floors at 1, and a floor
+    is never presented as a read: see the ``read_planned_runs`` branch below.
     """
     cnc_number = result.get("cnc_number")
     file_name = Path(abs_path).name
     warning = result.get("warning")
+    row_warning = warning if isinstance(warning, str) else None
     passes = result.get("passes")
     # Canonicalize the sheet descriptors HERE, at the earliest point they exist,
     # rather than only at the DB write: the wizard shows this row to the planner
@@ -283,19 +350,33 @@ def build_parsed_nest_from_extraction(result: dict, *, abs_path: str, rel_path: 
     material, thickness, sheet_size = normalize_nest_descriptors(
         result.get("material"), result.get("thickness"), result.get("sheet_size")
     )
+    raw_runs = result.get("planned_runs")
+    planned_runs, runs_read = read_planned_runs(raw_runs)
+    field_confidence = _coerce_field_confidence(result.get("confidence"))
+    confidence = result.get("extraction_confidence")
+    if not runs_read:
+        # The merge scores agreement, not readability, so whatever it said about
+        # this field, a count that was not cleanly read is LOW -- and so is the row,
+        # because the row's confidence is the minimum across its fields. Without
+        # this, two passes that both answered "N/A" floor to a "high" 1, and two
+        # that both misread one 11-digit number pass it through "high" into the
+        # import, where it overflowed the int4 column.
+        field_confidence = {**(field_confidence or {}), "planned_runs": "low"}
+        confidence = "low"
+        row_warning = _join_warnings(row_warning, planned_runs_bound_warning(raw_runs))
     return ParsedLaserNest(
         nest_name=cnc_number or Path(file_name).stem,
         cnc_file_name=file_name,
         cnc_file_path=rel_path,
-        planned_runs=_coerce_planned_runs(result.get("planned_runs")),
+        planned_runs=planned_runs,
         material=material,
         thickness=thickness,
         sheet_size=sheet_size,
         cnc_number=cnc_number,
         pdf_source_path=abs_path,
-        confidence=result.get("extraction_confidence"),
-        field_confidence=_coerce_field_confidence(result.get("confidence")),
-        warning=warning if isinstance(warning, str) else None,
+        confidence=confidence,
+        field_confidence=field_confidence,
+        warning=row_warning,
         passes=passes if isinstance(passes, int) and not isinstance(passes, bool) else None,
     )
 

@@ -153,6 +153,71 @@ class TestExtractHappyPath:
         assert body["warning"] == "API key not configured"
 
 
+def _stub_runs(monkeypatch, planned_runs, *, confidence="high", warning=None):
+    """Stub the service with an otherwise clean, two-pass result carrying ``planned_runs``."""
+    monkeypatch.setattr(
+        laser_nests_endpoint,
+        "extract_nest_fields_from_pdf",
+        lambda pdf_path, file_name, company_id=None: {
+            "cnc_number": "05749",
+            "material": "A36",
+            "thickness": "0.25in",
+            "sheet_size": "72.5x120",
+            "planned_runs": planned_runs,
+            "extraction_confidence": confidence,
+            "source": "ai",
+            "warning": warning,
+            "passes": 2,
+        },
+    )
+
+
+class TestExtractPlannedRuns:
+    """The run count is AI output and never reaches the response raw.
+
+    It used to be handed straight to the response model: "N/A", "3 sheets" or
+    2.5 failed its int check as a 500 (which the manual modal swallowed, losing
+    every other pre-filled field with it), and an 11-digit misread pre-filled the
+    form with a count the manual-create route now refuses. A count that is not a
+    clean 1..9,999 is now a real null at low confidence, by the same reader the
+    package preview uses.
+    """
+
+    @pytest.mark.parametrize("raw", ["N/A", 2.5, "2.5", "sheet 4", 0])
+    def test_an_unreadable_count_is_null_and_low(self, client, db_session, monkeypatch, raw):
+        _stub_runs(monkeypatch, raw)
+        resp = _post_extract(client, headers_for(make_user(db_session, role=UserRole.ADMIN)))
+
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        body = resp.json()
+        assert body["planned_runs"] is None
+        assert body["confidence"] == "low"
+        assert body["warning"] is None
+        # Everything else still arrives for the modal to pre-fill.
+        assert (body["cnc_number"], body["material"], body["sheet_size"]) == ("05749", "A36", "72.5x120")
+
+    @pytest.mark.parametrize("raw,expected", [("3 sheets", 3), ("x3", 3), (3.0, 3), (9_999, 9_999)])
+    def test_a_clean_count_in_any_shape_is_read(self, client, db_session, monkeypatch, raw, expected):
+        _stub_runs(monkeypatch, raw)
+        resp = _post_extract(client, headers_for(make_user(db_session, role=UserRole.ADMIN)))
+
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        assert resp.json()["planned_runs"] == expected
+        assert resp.json()["confidence"] == "high"
+
+    @pytest.mark.parametrize("raw", [10_000, 99_999_999_999])
+    def test_a_count_over_the_bound_is_null_low_and_explained(self, client, db_session, monkeypatch, raw):
+        _stub_runs(monkeypatch, raw, warning="Verification pass skipped: API error")
+        resp = _post_extract(client, headers_for(make_user(db_session, role=UserRole.ADMIN)))
+
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        body = resp.json()
+        assert body["planned_runs"] is None
+        assert body["confidence"] == "low"
+        # The service's own warning is kept, and the bound's is added to it.
+        assert body["warning"].startswith(f"Verification pass skipped: API error; Run count '{raw}' looked wrong")
+
+
 class TestExtractValidation:
     def test_non_pdf_rejected_400(self, client, db_session, mock_extraction):
         headers = headers_for(make_user(db_session, role=UserRole.ADMIN))
