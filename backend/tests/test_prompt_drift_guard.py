@@ -31,10 +31,12 @@ its own digest, only so a failure can name what changed). The assertions:
 (f) ``set(RENDER_CASES) == set(PROMPT_REGISTRY)``;
 (g) every fingerprint is deterministic: twice in-process and once in a subprocess
     with a different ``PYTHONHASHSEED``;
-(h) when ``PROMPT_LOCK_BASE_REF`` is set (CI fetches the base branch and sets it),
-    every entry in the base branch's lock is still present, unchanged and in order,
-    so the only way to go green after a change is to APPEND a higher version. In CI
-    a missing or unresolvable ref fails; locally it skips with a message;
+(h) when ``PROMPT_LOCK_BASE_REF`` is set, every entry in the lock at that ref is
+    still present, unchanged and in order, so the only way to go green after a
+    change is to APPEND a higher version. CI sets it to ``HEAD^1``, the first parent
+    of the commit under test: on a pull request that is the base-branch commit
+    GitHub's test merge commit was built on, so the ref cannot move under the run.
+    In CI a missing or unresolvable ref fails; locally it skips with a message;
 (i) for every render case, adding one character to the prompt text (or, for the
     text-less QMS prompt, its template) changes every one of its variants' captured
     requests, so no render case can silently capture nothing.
@@ -744,6 +746,37 @@ def test_changelog_matcher_rejects_a_neighbouring_id() -> None:
     assert _changelog_mentions(line, "laser_nest_verification", "1.0.1")
     assert not _changelog_mentions(line, "laser_nest_verification", "1.1.0")
     assert not _changelog_mentions("copilot_chat 1.7.10", "copilot_chat", "1.7.1")
+    placeholder = "- models <old> → <new> — <which model and why>"
+    assert not any(_changelog_mentions(placeholder, MODELS_KEY, version) for version in ("1.0.0", "1.1.0", "2.0.0"))
+
+
+def _next_versions(version: str) -> List[str]:
+    major, minor, patch_level = _semver(version)
+    return [f"{major}.{minor}.{patch_level + 1}", f"{major}.{minor + 1}.0", f"{major + 1}.0.0"]
+
+
+def test_changelog_does_not_already_record_any_next_version(lock: Dict[str, Any]) -> None:
+    """(d) must demand a NEW line for the next bump, not find one already written.
+
+    A concrete future version anywhere in the CHANGELOG -- an instruction's worked
+    example such as "`models` 1.0.0 → 1.1.0", say -- satisfies (d) for that bump in
+    advance, so the bump could land with no line of its own. Examples in the
+    CHANGELOG therefore use placeholders (``<old> → <new>``).
+    """
+    changelog = _normalized_changelog()
+    current_versions = [(prompt_id, prompt.version) for prompt_id, prompt in sorted(PROMPT_REGISTRY.items())]
+    current_versions.append((MODELS_KEY, lock[MODELS_KEY][-1]["version"]))
+    premature = [
+        f"{history_id} {next_version}"
+        for history_id, version in current_versions
+        for next_version in _next_versions(version)
+        if _changelog_mentions(changelog, history_id, next_version)
+    ]
+    assert not premature, (
+        f"app/services/prompts/CHANGELOG.md already mentions a version nobody has shipped yet: {premature}. "
+        "The next bump would then pass the CHANGELOG check without a line of its own. Write examples with "
+        "placeholders, e.g. ``- `<id>` <old> → <new> — <what changed and why>``."
+    )
 
 
 # ---------------------------------------------------------------------------

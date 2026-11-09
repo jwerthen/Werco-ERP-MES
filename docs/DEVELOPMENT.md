@@ -451,24 +451,34 @@ prints the exact entry to paste. Do all three in the same change:
    `prompt_lock.json`.
 
 A default-model change follows the same steps with no constant to bump. Add a
-``- `models` 1.0.0 → 1.1.0 — …`` line, then append under `models`. If you did not mean to
-change what the model sees, revert the edit instead.
+``- `models` <old> → <new> — <which model and why>`` line, then append under `models`. If
+you did not mean to change what the model sees, revert the edit instead.
 
 **Append, never edit: the base-ref check.** Without it, the cheapest way to turn the guard
 green would be to overwrite the last `sha256` in place. That records a different request
 under a version that already labels historical usage rows. So, in CI:
-- the Backend Tests job first fetches the base branch;
-- the pytest step exports `PROMPT_LOCK_BASE_REF=origin/<base branch>`;
+- the Backend Tests job checks out with `fetch-depth: 2`, so the tested commit's parent is
+  present;
+- the pytest step exports `PROMPT_LOCK_BASE_REF=HEAD^1`, the first parent of the commit under
+  test. On a pull request that is GitHub's test merge commit, whose first parent is the
+  base-branch commit the PR was merged onto. On a push it is the pushed commit's parent (the
+  previous tip, for a merge or squash commit);
 - the guard reads the lock at that ref and requires every entry there to be present in the
   working tree, **unchanged and in the same position**, along with every `retired` entry.
 
 Editing, reordering or deleting an entry fails. The only green path is to append a
-**higher** version. A push has no base branch, so it compares against `main`. If two branches
-bump the same prompt, whichever merges second must take the next version up after updating
-from the base branch.
+**higher** version. If two branches bump the same prompt, whichever merges second must take
+the next version up after updating from the base branch.
+
+The ref is pinned to the run rather than fetched by branch name on purpose. A branch is read
+when the step runs, not when the run was created. A second merge that appended a lock entry
+in between would make the older run fail with "entry N was removed". On a push, which has no
+base branch, the fetched `main` would be the pushed commit itself, so nothing would be
+checked.
 
 In CI a missing or unresolvable ref **fails** rather than skips (`tests/test_ci_workflow_gates.py`
-also pins the fetch step). Locally the check skips unless you set the variable:
+also pins the checkout depth and the exported ref). Locally the check skips unless you set the
+variable. Compare a feature branch with `main`:
 
 ```bash
 cd backend
@@ -492,6 +502,10 @@ PROMPT_LOCK_BASE_REF=origin/main pytest tests/test_prompt_drift_guard.py --no-co
 - **Every render must be deterministic.** The guard renders twice in-process and once in a
   subprocess with a different `PYTHONHASHSEED`, so a builder that depends on set or hash
   ordering fails.
+- **The CHANGELOG never names a version nobody has shipped.** A worked example such as
+  "`models` 1.0.0 → 1.1.0" would already satisfy the CHANGELOG check for that bump, so the
+  bump could land with no line of its own. Examples in that file use `<old> → <new>`; the
+  guard fails if any id's next patch, minor or major version already appears there.
 
 ### Frontend Testing
 

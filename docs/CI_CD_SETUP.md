@@ -299,9 +299,10 @@ npm run audit:ci
        bump, a prompt `CHANGELOG.md` line and an **appended** `prompt_lock.json` entry;
      - an existing lock entry was edited.
 
-     The job fetches the base branch before pytest and exports `PROMPT_LOCK_BASE_REF`. If
-     that ref is missing, the append-only check fails in CI rather than skipping. See
-     [DEVELOPMENT.md](DEVELOPMENT.md) → Testing → Prompt-drift guard.
+     The job checks out with `fetch-depth: 2` and exports `PROMPT_LOCK_BASE_REF=HEAD^1`, the
+     first parent of the tested commit (on a pull request, the base-branch commit the PR was
+     merged onto). If that ref does not resolve, the append-only check fails in CI rather
+     than skipping. See [DEVELOPMENT.md](DEVELOPMENT.md) → Testing → Prompt-drift guard.
 
 ### Pipeline Failed: Frontend Build
 

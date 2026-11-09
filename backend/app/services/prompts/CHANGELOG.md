@@ -15,7 +15,10 @@
   `llm_model_router.DEFAULT_ANTHROPIC_MODELS` (fast `claude-haiku-4-5-20251001`,
   default `claude-sonnet-4-6`, reasoning `claude-opus-4-8`) and
   `DEFAULT_COPILOT_MODEL` (`claude-opus-5-5`). Changing a default now needs a
-  `models` line here (`- models 1.0.0 → 1.1.0 — ...`) and an appended lock entry.
+  `models` line here (`- models <old> → <new> — <which model and why>`) and an
+  appended lock entry. Examples in this file use placeholders, never a concrete
+  future version: the guard would read one as the next bump's line, written in
+  advance.
 - Backfilled below, because they shipped without entries: `copilot_chat`
   1.5.0 → 1.6.0 → 1.7.0 and `hank_document_intake` 1.0.0 → 1.1.0 → 1.2.0 (#288,
   #289, 2026-09-23), and the `estimate_drawing_extraction` retirement (2026-09-16).

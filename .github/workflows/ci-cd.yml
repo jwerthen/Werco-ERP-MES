@@ -84,7 +84,20 @@ jobs:
       run:
         working-directory: ./backend
     steps:
+      # The prompt-drift guard (tests/test_prompt_drift_guard.py) reads
+      # app/services/prompts/prompt_lock.json at PROMPT_LOCK_BASE_REF (set on the
+      # pytest step below) and fails if any existing entry was edited or removed:
+      # entries may only be appended. That ref is HEAD^1, the first parent of the
+      # commit under test. On a pull_request that is GitHub's test merge commit, whose
+      # first parent is the base-branch commit the PR was merged onto; on a push, the
+      # pushed commit's parent (the previous tip, for a merge or squash commit).
+      # Depth 2 fetches that parent; depth 1 holds only HEAD. The ref is pinned to the
+      # run on purpose: fetching the base branch by name when the step runs would race
+      # a second merge, and on a push would compare the lock with itself. In CI the guard
+      # FAILS, rather than skips, when the ref does not resolve.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -97,25 +110,13 @@ jobs:
         run: |
           python -m pip install --require-hashes -r requirements-dev.lock
 
-      # The prompt-drift guard (tests/test_prompt_drift_guard.py) reads the base
-      # branch's app/services/prompts/prompt_lock.json and fails if any existing
-      # entry was edited or removed: entries may only be appended. The checkout is
-      # shallow and holds only this commit, so fetch the base branch explicitly into
-      # the remote-tracking ref the pytest step names below. In CI the guard FAILS,
-      # rather than skips, when that ref is missing. A push has no base_ref and
-      # compares against main.
-      - name: Fetch base branch for the prompt-lock check
-        env:
-          BASE_REF: ${{ github.base_ref || 'main' }}
-        run: git fetch --no-tags --depth=1 origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
-
       # No DATABASE_URL / TEST_DATABASE_URL here: tests/conftest.py sets both, per
       # xdist worker, before app.main is imported. Exporting a Postgres URL that
       # conftest immediately overwrites is how the misreading above survived so long.
       - name: Run pytest with coverage
         env:
           RUN_DOCKER_HYGIENE_TESTS: "1"
-          PROMPT_LOCK_BASE_REF: origin/${{ github.base_ref || 'main' }}
+          PROMPT_LOCK_BASE_REF: HEAD^1
         run: |
           pytest tests/ -v --cov=app --cov-report=xml --cov-report=term
 
