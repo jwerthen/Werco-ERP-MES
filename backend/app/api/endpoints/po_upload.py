@@ -4,7 +4,7 @@ Purchase Order PDF Upload and Extraction API
 
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
@@ -39,6 +39,7 @@ from app.services.part_number_service import generate_werco_part_number, normali
 from app.services.pdf_service import (
     SUPPORTED_EXTENSIONS,
     extract_text_from_document,
+    extraction_warnings,
     move_pdf_to_po,
     save_uploaded_document,
 )
@@ -100,6 +101,19 @@ def _find_existing_part_number_by_description(
     return None
 
 
+def _partial_read_issues(extraction_result: Any) -> List[Dict[str, str]]:
+    """The extractor's partial-read warnings as ``validation_issues`` entries (``severity: warning``).
+
+    Each carries the extractor's ``code`` (``OCR_PARTIAL`` for scanned pages skipped or cut short,
+    ``TEXT_PARTIAL`` for a text layer cut short), so the review screen shows the user that only
+    part of the document reached the AI, and an MCP agent can branch on the code.
+    """
+    return [
+        {"field": "document_content", "severity": "warning", "code": warning.code, "message": warning.message}
+        for warning in extraction_warnings(extraction_result)
+    ]
+
+
 async def _upload_and_extract_document(
     document_type: str, file: UploadFile, db: Session, current_user: User, company_id: int
 ) -> POExtractionResult:
@@ -147,7 +161,8 @@ async def _upload_and_extract_document(
                 pdf_was_ocr=extraction_result.is_ocr,
                 pdf_page_count=extraction_result.page_count,
                 pdf_path=doc_path,
-                validation_issues=[{"field": "document_content", "severity": "error", "message": error_msg}],
+                validation_issues=[{"field": "document_content", "severity": "error", "message": error_msg}]
+                + _partial_read_issues(extraction_result),
             )
 
         # Extract structured data using LLM
@@ -165,7 +180,8 @@ async def _upload_and_extract_document(
                 pdf_was_ocr=extraction_result.is_ocr,
                 pdf_page_count=extraction_result.page_count,
                 pdf_path=doc_path,
-                validation_issues=[{"field": "extraction", "severity": "error", "message": llm_result["_error"]}],
+                validation_issues=[{"field": "extraction", "severity": "error", "message": llm_result["_error"]}]
+                + _partial_read_issues(extraction_result),
             )
 
         # Normalize document type
@@ -192,8 +208,8 @@ async def _upload_and_extract_document(
         po_number = llm_result.get("po_number", "")
         po_exists = check_po_number_exists(po_number, db, company_id) if po_number else False
 
-        # Validate extracted data
-        validation_issues = validate_extracted_data(llm_result)
+        # Validate extracted data. Partial-read warnings lead: they qualify everything below them.
+        validation_issues = _partial_read_issues(extraction_result) + validate_extracted_data(llm_result)
 
         # Add PO exists warning
         if po_exists:
