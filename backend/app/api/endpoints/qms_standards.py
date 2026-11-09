@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session, joinedload, with_loader_criteria
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
+from app.core.upload_limits import ensure_upload_within_limit, read_upload_within_limit
 from app.db.database import get_db
 from app.models.qms_standard import QMSClause, QMSClauseEvidence, QMSStandard
 from app.models.user import User, UserRole
@@ -37,6 +38,10 @@ from app.services.prompts import QMS_CLAUSE_EXTRACTION_PROMPT
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Standard-PDF upload cap for ``upload-pdf`` (413 over it, checked before the body is read; see
+# ``app.core.upload_limits``). Resolved at call time, so this constant is the one tunable.
+QMS_PDF_MAX_BYTES = 20 * 1024 * 1024  # 20MB
 
 
 # ============== QMS Standards ==============
@@ -120,7 +125,8 @@ async def upload_pdf_and_extract_clauses(
 ):
     """
     Upload a QMS standard PDF (quality manual, AS9100D, ISO 9001, etc.)
-    and automatically extract all clauses using AI.
+    and automatically extract all clauses using AI. PDFs over 20 MB are refused with 413
+    before any work runs.
     """
     standard = (
         db.query(QMSStandard)
@@ -138,9 +144,10 @@ async def upload_pdf_and_extract_clauses(
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
 
-    content = await file.read()
-    if len(content) > 20 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="File too large. Maximum 20MB.")
+    # Size first (413 without reading a byte when Starlette already counted too many), then a
+    # read bounded at QMS_PDF_MAX_BYTES + 1 -- the whole body is never buffered just to measure it.
+    ensure_upload_within_limit(file, QMS_PDF_MAX_BYTES)
+    content = await read_upload_within_limit(file, QMS_PDF_MAX_BYTES)
 
     # Extract text from PDF
     try:

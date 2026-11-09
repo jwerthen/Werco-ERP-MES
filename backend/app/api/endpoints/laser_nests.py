@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.core.credentials import is_api_token_credential
+from app.core.upload_limits import ensure_upload_within_limit, read_upload_within_limit
 from app.db.database import get_db
 from app.models.document import Document
 from app.models.laser_nest import LaserNest
@@ -53,6 +54,12 @@ router = APIRouter()
 # any authenticated user -- operators need to view the shop drawing.
 _NEST_WRITE_ROLES = require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])
 
+# Single-nest PDF cap for ``POST /laser-nests/extract`` (413 over it, checked before the body is read;
+# see ``app.core.upload_limits``). It equals the extractor's native-PDF cap
+# (``laser_nest_extraction_service._MAX_NATIVE_PDF_BYTES``), so every PDF this route accepts is one
+# the model can read as a document. Resolved at call time, so this constant is the one tunable.
+LASER_NEST_EXTRACT_MAX_BYTES = 20 * 1024 * 1024  # 20MB
+
 
 @router.post("/extract", response_model=LaserNestPdfExtractionResponse)
 async def extract_laser_nest_from_pdf(
@@ -65,6 +72,7 @@ async def extract_laser_nest_from_pdf(
     Stateless: no DB write, no audit. Feeds the manual-modal auto-fill -- the
     planner still verifies and saves. ``company_id`` is passed through for
     tenant-scoped AI-usage telemetry on the underlying ``run_llm_task`` call.
+    PDFs over 20 MB are refused with 413 before any work runs.
 
     Declared as a static literal ``/extract`` POST so it is matched ahead of the
     dynamic ``/{laser_nest_id}`` routes.
@@ -74,16 +82,23 @@ async def extract_laser_nest_from_pdf(
     if not is_pdf:
         raise HTTPException(status_code=400, detail="Only PDF files are supported for nest extraction")
 
+    # Size first (413 without reading a byte when Starlette already counted too many), then a
+    # read bounded at LASER_NEST_EXTRACT_MAX_BYTES + 1. Both run BEFORE the temp file exists, so a
+    # refused upload writes nothing to disk. A 413 is a refusal of the request, not an extraction
+    # failure, so it does not break the "never raises" contract below.
+    ensure_upload_within_limit(file, LASER_NEST_EXTRACT_MAX_BYTES)
+    content = await read_upload_within_limit(file, LASER_NEST_EXTRACT_MAX_BYTES)
+
     # extract_nest_fields_from_pdf is sync + blocking (native-PDF document block,
     # or flattened-text fallback, + LLM call); run it off the event loop. It NEVER
     # raises -- a bad PDF degrades to a filename-only result with a warning.
     temp_path = None
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp:
-            # Capture the path BEFORE the body read, so a failed read still hits
+            # Capture the path BEFORE the write, so a failed write still hits
             # the finally cleanup and never leaks the temp file.
             temp_path = temp.name
-            temp.write(await file.read())
+            temp.write(content)
         result = await run_in_threadpool(extract_nest_fields_from_pdf, temp_path, file_name, company_id)
     finally:
         if temp_path and os.path.exists(temp_path):

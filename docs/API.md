@@ -4298,7 +4298,8 @@ environment variable or deployment configuration change is needed.
 > shared `run_llm_task` pipeline (one tenant-scoped `ai_usage_events` row per pass — telemetry,
 > not audit):
 >
-> - **Single-PDF (`POST /laser-nests/extract`).** Multipart `file` (PDF; non-PDF → **400**).
+> - **Single-PDF (`POST /laser-nests/extract`).** Multipart `file` (PDF; non-PDF → **400**; over
+>   **20 MB** → **413** before any work, see [AI document uploads](#ai-document-uploads)).
 >   **Stateless — no DB write, no audit**; `company_id` flows through only for usage telemetry.
 >   Used by the manual-create modal to auto-fill fields from a dropped PDF. Returns
 >   `{ cnc_number, material, thickness, sheet_size, planned_runs, confidence, source, warning, passes }`
@@ -4372,7 +4373,14 @@ environment variable or deployment configuration change is needed.
 > - **50-PDF cap (`LASER_PDF_PACKAGE_MAX`).** A package (or `rows` array) with more than **50**
 >   PDFs — or a bare PDF with more than **50 pages** — is rejected with **400**.
 > - **Upload size + abuse guards.** The upload body (ZIP or bare PDF) is capped at **50 MB**
->   (`LASER_UPLOAD_MAX_BYTES`), enforced while the body streams to disk → **413**. The local page
+>   (`LASER_UPLOAD_MAX_BYTES`), enforced while the body streams to disk → **413**. On **preview**
+>   the counted upload size is checked first (413 before a byte is copied), and a ZIP is refused
+>   with **413** before anything is unpacked when its central directory lists more than **200**
+>   files and folders (`LASER_ZIP_MAX_MEMBERS`) or more than **200 MB** unpacked
+>   (`LASER_ZIP_MAX_UNCOMPRESSED_BYTES`) — the zip-bomb guard, since the 50 MB cap counts
+>   compressed bytes only. Preview copies and unpacks on a worker thread, not the event loop.
+>   **Import** keeps the streaming 50 MB cap only for now; the zip caps reach it in a later change
+>   (roadmap #9-6). The local page
 >   split refuses pathological amplification (pages sharing huge embedded resources that would
 >   multiply on split) → **400**. The per-request AI fan-out shares one **process-global**
 >   concurrency cap (5), and the two standalone routes carry a **10/minute** per-path rate limit.
@@ -5516,6 +5524,10 @@ uploads go through text extraction + LLM. See
 | POST | `/bom/import/commit` | Commit a reviewed preview payload — creates parts, the BOM, and BOM items | Admin / Manager / Supervisor |
 | POST | `/bom/import` | One-shot upload → LLM extraction → create parts/BOM items (`create_missing_parts` form flag, default `true`) | Admin / Manager / Supervisor |
 
+> **Upload cap.** `POST /bom/import/preview` and `POST /bom/import` refuse a file over **20 MB**
+> with **413** before any work runs (see [AI document uploads](#ai-document-uploads)); an empty file
+> is **400**.
+
 > **Excel scanning is bounded** with the same caps as the shared Bulk Imports parser: at most
 > **256 columns** are read per row, more than **10,000 collected data rows** refuses the file
 > (**400**), and scanning more than **100,000 raw rows** workbook-wide refuses the file (**400**).
@@ -5845,7 +5857,7 @@ uploads go through text extraction + LLM. See
 | POST | `/routing/{id}/operations/reorder` | Reorder operations (**400** on a released routing, **422** on a malformed body). **Also rewrites each listed operation's `operation_number` from its new `sequence`** — see the `operation_number` note below | Admin / Manager / Supervisor |
 | POST | `/routing/import/preview` | Upload a routing CSV/XLSX (multipart `file`), preview it WITHOUT writing (dry-run, fully rolled back) | Admin / Manager / Supervisor |
 | POST | `/routing/import/commit` | Commit a routing CSV/XLSX import — one draft routing per part, with one `audit_log` CREATE per routing | Admin / Manager / Supervisor |
-| POST | `/routing/generate-from-drawing` | AI step 1: upload a drawing (multipart `file` + `part_id`) and get a **proposed** routing for review — creates no routing. **404** on a soft-deleted part | Admin / Manager / Supervisor |
+| POST | `/routing/generate-from-drawing` | AI step 1: upload a drawing (multipart `file` + `part_id`) and get a **proposed** routing for review — creates no routing. **404** on a soft-deleted part; **413** for a drawing over 10 MB | Admin / Manager / Supervisor |
 | POST | `/routing/create-from-generation` | AI step 2: create the reviewed/edited proposal as a **draft** routing, writing one tamper-evident `audit_log` CREATE (see note). **404** on a soft-deleted part or an unknown generation session | Admin / Manager / Supervisor |
 
 > **AI routing generation — the accept step is the audited record (2026-11-05).**
@@ -8166,7 +8178,7 @@ in `RBAC_PERMISSIONS.md`.
 | DELETE | `/qms-standards/evidence/{evidence_id}` | Remove an evidence link | Admin / Manager / Quality |
 
 > **PDF clause extraction:** `POST /qms-standards/{standard_id}/upload-pdf` requires a text-based
-> PDF (≤ 20 MB; scanned/image-only PDFs are rejected) and a configured `ANTHROPIC_API_KEY` — it
+> PDF (≤ 20 MB, else **413** before any work; scanned/image-only PDFs are rejected) and a configured `ANTHROPIC_API_KEY` — it
 > returns **500** if the key is missing. Claude extracts the numbered clauses and persists them
 > against the standard.
 
@@ -9019,8 +9031,8 @@ call per file (at most 2 concurrent) and one `create-from-upload` call per revie
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| POST | `/po-upload/upload-po` | Upload a PO document (`.pdf`/`.doc`/`.docx`, 10 MB cap; else **400**) — AI-extracts data for review before commit | Yes |
-| POST | `/po-upload/upload-quote` | Upload a vendor quote document — AI-extracts data to build a PO | Yes |
+| POST | `/po-upload/upload-po` | Upload a PO document (`.pdf`/`.doc`/`.docx`, 10 MB cap; over it **413** before any work — this was a **400** before 2026-11-09) — AI-extracts data for review before commit | Yes |
+| POST | `/po-upload/upload-quote` | Upload a vendor quote document (same types and 10 MB / **413** cap) — AI-extracts data to build a PO | Yes |
 | POST | `/po-upload/upload-invoice` | Legacy alias of `upload-quote` (same extraction behavior) | Yes |
 | POST | `/po-upload/create-from-upload` | Create the PO from the reviewed extraction — can create the vendor and missing parts. Part-number matching is **case-insensitive** and ignores surrounding whitespace: the same number repeated across lines / `create_parts` creates the part **once** (stored as the first occurrence's stripped form) and attaches every matching line to it; an active part already holding the number is reused, and a line with no `part_id` resolves by part number to an existing active part even when it isn't in `create_parts`. **400** if `line_items` is empty, the PO number already exists, a supplied `vendor_id` / line `part_id` doesn't exist in the active company **or is soft-deleted**, a line's part number matches no active part and isn't in `create_parts`, or a new part's number belongs to a **soft-deleted** part (restore it via `POST /parts/{id}/restore` or use a different number) | Admin / Manager / Supervisor |
 | GET | `/po-upload/pdf/{path}` | Serve the uploaded source document for preview (`s3://` refs and local paths) | Yes |
@@ -12485,8 +12497,8 @@ parses `text/plain` as JSON (it is the label the SPA's `navigator.sendBeacon` bo
 unauthenticated JSON parse. Both gates apply to it. On every other path `text/plain` is neither
 parsed as JSON nor capped by this middleware.
 
-**Not affected:** `multipart/form-data` uploads, which keep their own per-endpoint caps (20 MB
-for QMS standard uploads, 50 MB `LASER_UPLOAD_MAX_BYTES` for laser-nest ZIP/PDF — those also
+**Not affected:** `multipart/form-data` uploads, which keep their own per-endpoint caps (the AI
+document routes are listed under [AI document uploads](#ai-document-uploads) below; all of them
 return **413**), and inbound carrier tracking webhooks, which bypass this middleware entirely so
 their HMAC verifies against raw bytes.
 
@@ -12499,6 +12511,30 @@ create ~201 KB. A BOM create above roughly **1300 line items** exceeds the cap; 
 data — as of 2026-07-30 the middleware only measures size. Angle brackets in a note field (ASME
 Y14.5 notation such as `2.500 <REF>`, or `<` meaning "less than") round-trip byte-for-byte
 through create/read/update. Server-rendered PDFs escape at render.
+
+### AI document uploads
+
+Every route that hands an uploaded document to the AI refuses an oversized file with **413**
+before it does any work — no storage write, no text extraction, no model call:
+
+| Route | Cap | Constant |
+|---|---|---|
+| `POST /po-upload/upload-po`, `/upload-quote`, `/upload-invoice` | 10 MB | `po_upload.MAX_FILE_SIZE` |
+| `POST /routing/generate-from-drawing` | 10 MB | `routing.MAX_FILE_SIZE` |
+| `POST /qms-standards/{standard_id}/upload-pdf` | 20 MB | `qms_standards.QMS_PDF_MAX_BYTES` |
+| `POST /bom/import/preview`, `POST /bom/import` | 20 MB | `bom.BOM_IMPORT_MAX_BYTES` |
+| `POST /laser-nests/extract` | 20 MB (the extractor's native-PDF cap) | `laser_nests.LASER_NEST_EXTRACT_MAX_BYTES` |
+| `POST /work-orders/{work_order_id}/laser-nest-packages/preview`, `POST /work-orders/laser-nest-packages/standalone/preview` | 50 MB upload; a ZIP also ≤ 200 files and folders and ≤ 200 MB unpacked | `work_orders.LASER_UPLOAD_MAX_BYTES`, `laser_nest_service.LASER_ZIP_MAX_MEMBERS` / `LASER_ZIP_MAX_UNCOMPRESSED_BYTES` |
+
+The check runs in two steps (`app/core/upload_limits.py`). First the size the server counted while
+receiving the multipart body: over the cap, the request is refused without the file being read into
+memory. Then the file is read up to the cap plus one byte, and refused if more arrived, so the bound
+holds even when the counted size is missing or wrong. The `detail` is a plain string such as
+`"File too large (max 10 MB)."`; the laser package routes say
+`"Upload exceeds the 50 MB limit. Split the package into smaller batches."`, and a ZIP over the
+member or unpacked-size cap names that cap. The PO routes answered **400** for an oversized file
+before 2026-11-09; the frontend shows `detail` for any status, so the message reaches the user the
+same way.
 
 ## Spreadsheet Exports (CSV / XLSX)
 
