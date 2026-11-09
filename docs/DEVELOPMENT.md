@@ -407,6 +407,92 @@ custom-field value writes). The 2026-11 security/integrity PRs fixed every one o
 only entries left are the `seed-database` pair, a dead write branch filed as an unowned
 follow-up. The file is the current list, not this paragraph.
 
+#### Prompt-drift guard (`tests/test_prompt_drift_guard.py`)
+
+Every Anthropic call records its prompt's `version` on its `ai_usage_events` row, and the
+AI-learning rows attribute their signal to it. That is only honest if the version moves
+whenever the request moves. This guard enforces it. It is unmarked, so it runs in CI's
+Backend Tests job and in a plain `pytest`. It needs no database, no network and no API key.
+
+**What it fingerprints.**
+- **Every registered prompt (`PROMPT_REGISTRY`).** The guard calls the prompt's **real**
+  request builder with fixed inputs, once per branch that adds text the model sees: OCR
+  notes, routing branches, laser hint lines, and copilot's message wrappers and forced-final
+  call. `tests/llm_capture.py`'s `CaptureClient` stands in at
+  `llm_client.get_anthropic_client` and stops at the `create` call, so nothing is sent and no
+  telemetry row is written.
+  - **Kept:** `system`, `messages`, `tools` (in order, because it is the cached prefix),
+    `tool_choice` and `extra_body`.
+  - **Dropped:** the model id, `max_tokens`, the timeout and retries. These are budgets, not
+    layout.
+  - **What counts as a change:** prompt text, a tool or structured-output schema, the tool
+    order, a wrapper tag or the request layout. Each needs a version bump.
+- **The router's default model ids**, hashed under `models`:
+  `llm_model_router.DEFAULT_ANTHROPIC_MODELS` and `DEFAULT_COPILOT_MODEL`. Only the
+  code defaults are locked. The per-task `ANTHROPIC_*_MODEL` overrides
+  ([ENVIRONMENT_VARIABLES.md](ENVIRONMENT_VARIABLES.md) → External Services) are
+  deployment config, and the guard does not see them.
+
+**The lock.** `backend/app/services/prompts/prompt_lock.json` sits next to the registry's
+`CHANGELOG.md`. It holds:
+- an append-only history per prompt id, `[{version, sha256, variants}]`. `variants` exists
+  only so that a failure can name the variant that changed;
+- a `models` history. There is no models version constant in code: the current version is
+  the last entry;
+- a `retired` map of ids that must never be reused.
+
+**When it fails on a deliberate change**, the message names the variant(s) that changed and
+prints the exact entry to paste. Do all three in the same change:
+1. Bump the prompt's `version`: patch for wording or layout only, minor for behavior, major
+   for the output contract.
+2. Add a line to `app/services/prompts/CHANGELOG.md`, such as
+   ``- `copilot_chat` 1.7.1 → 1.7.2 — <what changed and why>``.
+3. **Append** the printed `{version, sha256, variants}` entry to that id's history in
+   `prompt_lock.json`.
+
+A default-model change follows the same steps with no constant to bump. Add a
+``- `models` 1.0.0 → 1.1.0 — …`` line, then append under `models`. If you did not mean to
+change what the model sees, revert the edit instead.
+
+**Append, never edit: the base-ref check.** Without it, the cheapest way to turn the guard
+green would be to overwrite the last `sha256` in place. That records a different request
+under a version that already labels historical usage rows. So, in CI:
+- the Backend Tests job first fetches the base branch;
+- the pytest step exports `PROMPT_LOCK_BASE_REF=origin/<base branch>`;
+- the guard reads the lock at that ref and requires every entry there to be present in the
+  working tree, **unchanged and in the same position**, along with every `retired` entry.
+
+Editing, reordering or deleting an entry fails. The only green path is to append a
+**higher** version. A push has no base branch, so it compares against `main`. If two branches
+bump the same prompt, whichever merges second must take the next version up after updating
+from the base branch.
+
+In CI a missing or unresolvable ref **fails** rather than skips (`tests/test_ci_workflow_gates.py`
+also pins the fetch step). Locally the check skips unless you set the variable:
+
+```bash
+cd backend
+git fetch origin main
+PROMPT_LOCK_BASE_REF=origin/main pytest tests/test_prompt_drift_guard.py --no-cov
+```
+
+**Other rules it enforces.**
+- **Adding a prompt.** A new registry id needs:
+  - a `RENDER_CASES` entry with one variant per text branch, plus a one-character
+    `mutation` the guard uses to prove the case captures the text;
+  - a lock history;
+  - a CHANGELOG line.
+- **Retiring a prompt.** Remove the id from the registry and from `RENDER_CASES`. Keep its
+  lock history, and add the id to the lock's `retired` map, the `RETIRED` CHANGELOG entry and
+  the reserved list in the `app/services/prompts/__init__.py` docstring.
+- **The fixed render inputs are part of every fingerprint.** Never edit an existing variant's
+  inputs, because that forces a version bump with no prompt change. Adding a variant changes
+  the fingerprint too. Add it in the same change that adds the branch, which needs a bump
+  anyway.
+- **Every render must be deterministic.** The guard renders twice in-process and once in a
+  subprocess with a different `PYTHONHASHSEED`, so a builder that depends on set or hash
+  ordering fails.
+
 ### Frontend Testing
 
 **Run all tests**
