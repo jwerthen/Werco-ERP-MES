@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased, joinedload, selectinload
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
+from app.core.parse_limits import holds_parse_slot
 from app.core.time_utils import to_utc_iso
 from app.db.database import get_db
 from app.models.bom import BOM, BOMItem, BOMItemType, BOMLineType
@@ -55,7 +56,12 @@ from app.services.llm_service import extract_bom_data_with_llm
 from app.services.material_tie_part_gate import part_type_change_refusal
 from app.services.part_number_resolver import resolve_part_by_number
 from app.services.part_number_service import generate_werco_part_number
-from app.services.pdf_service import SUPPORTED_EXTENSIONS, extract_text_from_document, save_uploaded_document
+from app.services.pdf_service import (
+    SUPPORTED_EXTENSIONS,
+    extract_text_from_document,
+    extraction_warnings,
+    save_uploaded_document,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -831,8 +837,11 @@ def _normalize_header(value: str) -> str:
     return "".join(ch for ch in value.strip().lower() if ch.isalnum() or ch.isspace()).replace(" ", "")
 
 
+@holds_parse_slot
 def _extract_excel_table(file_path: str, ext: str) -> Tuple[List[str], List[List[str]]]:
     """Extract ``(columns, data rows)`` from an uploaded Excel BOM with a bounded scan.
+
+    Holds a process-wide parse slot (``app.core.parse_limits``) for the whole scan.
 
     Semantics are unchanged from the original implementation: the first
     non-empty row found anywhere in the workbook becomes ``columns``; every
@@ -1189,6 +1198,18 @@ def _create_from_import_payload(
     )
 
 
+def _partial_read_messages(extraction_result: Any) -> List[str]:
+    """Pages skipped or cut short by the extractor (OCR page cap, time budgets), as warning lines."""
+    return [warning.message for warning in extraction_warnings(extraction_result)]
+
+
+def _no_text_detail(read_warnings: List[str]) -> str:
+    """The 400 detail for an upload with no usable text, naming any partial read that explains it."""
+    if not read_warnings:
+        return "Could not extract text from document"
+    return " ".join(["Could not extract text from document.", *read_warnings])
+
+
 @router.post("/import/preview", response_model=BOMImportPreviewResponse)
 async def import_bom_preview(
     file: UploadFile = File(...),
@@ -1254,8 +1275,9 @@ async def import_bom_preview(
             )
 
         extraction_result = extract_text_from_document(doc_path)
+        read_warnings = _partial_read_messages(extraction_result)
         if not extraction_result.text or len(extraction_result.text.strip()) < 50:
-            raise HTTPException(status_code=400, detail="Could not extract text from document")
+            raise HTTPException(status_code=400, detail=_no_text_detail(read_warnings))
 
         extracted = extract_bom_data_with_llm(
             extraction_result.text, is_ocr=extraction_result.is_ocr, company_id=company_id
@@ -1264,6 +1286,7 @@ async def import_bom_preview(
             raise HTTPException(status_code=400, detail=extracted.get("_error"))
 
         llm_assembly, llm_items, llm_warnings, confidence = _build_preview(extracted)
+        llm_warnings = read_warnings + llm_warnings
         doc_type = (extracted.get("document_type") or ("bom" if llm_items else "part")).lower()
         if llm_items and doc_type != "bom":
             doc_type = "bom"
@@ -1344,8 +1367,9 @@ async def import_bom_or_part(
     def _run_import() -> BOMImportResponse:
         doc_path = save_uploaded_document(content, filename)
         extraction_result = extract_text_from_document(doc_path)
+        read_warnings = _partial_read_messages(extraction_result)
         if not extraction_result.text or len(extraction_result.text.strip()) < 50:
-            raise HTTPException(status_code=400, detail="Could not extract text from document")
+            raise HTTPException(status_code=400, detail=_no_text_detail(read_warnings))
 
         extracted = extract_bom_data_with_llm(
             extraction_result.text, is_ocr=extraction_result.is_ocr, company_id=company_id
@@ -1359,7 +1383,7 @@ async def import_bom_or_part(
         if items and doc_type != "bom":
             doc_type = "bom"
 
-        warnings: List[str] = []
+        warnings: List[str] = list(read_warnings)
         missing_parts: List[str] = []
 
         assembly_number = _safe_part_number(assembly.get("part_number")) or _safe_part_number(

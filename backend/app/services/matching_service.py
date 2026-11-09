@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
+from app.core.parse_limits import holds_parse_slot
 from app.db.tenant_filter import tenant_query
 
 logger = logging.getLogger(__name__)
@@ -411,10 +412,14 @@ def search_parts_for_typeahead(query: str, db: Session, company_id: int, limit: 
     return out
 
 
+@holds_parse_slot
 def match_po_line_items(line_items: List[Dict[str, Any]], db: Session, company_id: int) -> List[Dict[str, Any]]:
     """
     Match all line items to existing parts.
     Returns line items with match info added.
+
+    Holds a process-wide parse slot (``app.core.parse_limits``): fuzzy-matching every line against
+    up to 1,000 hydrated parts is CPU work that competes for the GIL like any parser.
     """
     enhanced_items = []
 

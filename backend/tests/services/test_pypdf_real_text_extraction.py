@@ -16,10 +16,10 @@ laser-nest report with **reportlab** and push it through the three real
 consumers:
 
   * ``pdf_service._extract_native_text`` — the shared native extractor behind
-    every document-upload path;
-  * ``qms_standards.upload_pdf_and_extract_clauses``' inline
-    ``PdfReader(io.BytesIO(...))`` + per-page ``extract_text()`` + 50-character
-    floor;
+    every document-upload path (since #9-3a it reads through the resource-limited
+    ``pdf_text_reader`` child process, so these assertions also cover that hop);
+  * ``qms_standards.upload_pdf_and_extract_clauses``' read of the in-memory upload
+    (the same subprocess reader) + drop-empty-pages join + 50-character floor;
   * ``laser_nest_pdf_split_service.split_pdf_segments`` — where the load-bearing
     new assertion is that **each written segment's text still survives**, since
     the segment PDFs are what get handed to AI extraction downstream.
@@ -36,7 +36,6 @@ behavior.
 """
 
 import inspect
-import io
 from pathlib import Path
 
 import pytest
@@ -48,6 +47,7 @@ from reportlab.pdfgen import canvas
 from app.api.endpoints import qms_standards
 from app.services.laser_nest_pdf_split_service import get_pdf_page_count, split_pdf_segments
 from app.services.pdf_service import _extract_native_text, extract_text_from_pdf
+from app.services.pdf_text_reader import read_pdf_pages
 
 pytestmark = pytest.mark.unit
 
@@ -186,26 +186,27 @@ class TestExtractNativeText:
 
 
 # --------------------------------------------------------------------------- #
-# qms_standards — inline PdfReader(BytesIO) + the 50-character floor
+# qms_standards — subprocess read of the in-memory upload + the 50-character floor
 # --------------------------------------------------------------------------- #
 def _qms_extract(content: bytes) -> tuple[list[str], str]:
-    """Mirror of the inline extraction in ``upload_pdf_and_extract_clauses``.
+    """Mirror of the extraction in ``upload_pdf_and_extract_clauses``.
 
     Mirrored rather than driven through the endpoint because the endpoint's own
     path needs a DB row, auth and an AI call *after* the floor check, while the
     property under test is the pypdf half. ``TestQmsStandardTextFloor
     .test_endpoint_pipeline_still_matches_this_mirror`` fails loudly if the
-    endpoint's inline code drifts away from this copy.
+    endpoint's code drifts away from this copy. (End-to-end coverage through the
+    endpoint lives in ``tests/api/test_partial_read_warnings.py``.)
     """
-    reader = PdfReader(io.BytesIO(content))
-    pages_text = [text for text in (page.extract_text() for page in reader.pages) if text]
+    read = read_pdf_pages(content, qms_standards._qms_pdf_read_limits())
+    pages_text = [text for text in read.pages if text]
     return pages_text, "\n\n".join(pages_text)
 
 
 class TestQmsStandardTextFloor:
     def test_reads_every_page_from_an_in_memory_upload(self, nest_report):
-        """The endpoint never touches the filesystem — it wraps the uploaded
-        bytes in ``io.BytesIO``. Extraction must behave the same as from a path."""
+        """The endpoint never touches the filesystem — it pipes the uploaded bytes
+        to the reader process. Extraction must behave the same as from a path."""
         pages_text, joined = _qms_extract(nest_report.read_bytes())
 
         assert len(pages_text) == _REPORT_PAGES
@@ -235,7 +236,10 @@ class TestQmsStandardTextFloor:
         floor changes, update ``_qms_extract`` and these tests to match."""
         source = inspect.getsource(qms_standards.upload_pdf_and_extract_clauses)
 
-        assert "PdfReader(io.BytesIO(content))" in source, "endpoint no longer reads the upload from memory"
+        assert (
+            "read_pdf_pages(content, _qms_pdf_read_limits())" in source
+        ), "endpoint no longer reads the in-memory upload through the bounded reader"
+        assert "[text for text in read.pages if text]" in source, "endpoint's empty-page handling moved"
         assert f"len(pdf_text.strip()) < {_QMS_MIN_TEXT_CHARS}" in source, "endpoint's text floor moved"
 
 

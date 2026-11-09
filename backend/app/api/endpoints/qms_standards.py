@@ -33,10 +33,35 @@ from app.services.auto_evidence_service import (
 )
 from app.services.llm_client import LLMEgressDisabledError, LLMNotConfiguredError, run_llm_task
 from app.services.llm_model_router import LLMTaskContext
+from app.services.pdf_text_reader import MIB, PdfReadError, PdfReadLimits, read_pdf_pages
 from app.services.prompts import QMS_CLAUSE_EXTRACTION_PROMPT
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Text-layer read limits for an uploaded standard. Standards and quality manuals run to hundreds of
+# pages, so these are wider than pdf_service's. The prompt sends only the first
+# QMS_PROMPT_TEXT_CHARS characters (``pdf_text[:100000]`` below; keep the two equal) and the model
+# router only distinguishes input sizes up to 85,000, so the total-character cap can never change
+# what the AI sees or which model reads it.
+QMS_PDF_MAX_BYTES = 20 * MIB  # the upload cap checked before the read
+QMS_PDF_MAX_PAGES = 2000
+QMS_PDF_MAX_PAGE_CHARS = 100_000
+QMS_PDF_MAX_TOTAL_CHARS = 2_000_000
+QMS_PDF_CPU_SECONDS = 60
+QMS_PDF_WALL_SECONDS = 90.0
+QMS_PROMPT_TEXT_CHARS = 100_000
+
+
+def _qms_pdf_read_limits() -> PdfReadLimits:
+    return PdfReadLimits(
+        max_bytes=QMS_PDF_MAX_BYTES,
+        max_pages=QMS_PDF_MAX_PAGES,
+        max_page_chars=QMS_PDF_MAX_PAGE_CHARS,
+        max_total_chars=QMS_PDF_MAX_TOTAL_CHARS,
+        cpu_seconds=QMS_PDF_CPU_SECONDS,
+        wall_seconds=QMS_PDF_WALL_SECONDS,
+    )
 
 
 # ============== QMS Standards ==============
@@ -142,22 +167,26 @@ async def upload_pdf_and_extract_clauses(
     if len(content) > 20 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File too large. Maximum 20MB.")
 
-    # Extract text from PDF
+    # Extract text from PDF, in the resource-limited reader process (same text as in-process pypdf).
     try:
-        import io
-
-        from pypdf import PdfReader
-
-        reader = PdfReader(io.BytesIO(content))
-        pages_text = []
-        for page in reader.pages:
-            text = page.extract_text()
-            if text:
-                pages_text.append(text)
-        pdf_text = "\n\n".join(pages_text)
-    except Exception as e:
+        read = read_pdf_pages(content, _qms_pdf_read_limits())
+    except PdfReadError as e:
         logger.error(f"PDF parsing failed: {e}")
-        raise HTTPException(status_code=400, detail=f"Failed to read PDF: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Failed to read PDF: {e}")
+    pages_text = [text for text in read.pages if text]
+    pdf_text = "\n\n".join(pages_text)
+    if read.warnings and len(pdf_text) < QMS_PROMPT_TEXT_CHARS:
+        # A partial read that already covers the prompt's whole text window changes nothing the
+        # AI sees. A shorter one would silently drop clauses, and this response has no place
+        # to say so, so refuse instead.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Only part of this PDF could be read: "
+                + " ".join(read.warnings)
+                + " Split it into smaller PDFs and upload each one."
+            ),
+        )
 
     if not pdf_text or len(pdf_text.strip()) < 50:
         raise HTTPException(

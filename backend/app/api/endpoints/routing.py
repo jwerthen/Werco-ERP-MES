@@ -311,11 +311,13 @@ async def generate_routing_from_drawing(
     is_ocr = False
 
     if ext == ".pdf":
-        from app.services.pdf_service import extract_text_from_pdf
+        from app.services.pdf_service import extract_text_from_pdf, extraction_warnings
 
         result = extract_text_from_pdf(str(file_path))
         drawing_text = result.text
         is_ocr = result.is_ocr
+        # Pages skipped or cut short (OCR page cap, time budget) — the reviewer must see them.
+        warnings.extend(warning.message for warning in extraction_warnings(result))
         if not drawing_text or len(drawing_text.strip()) < 20:
             warnings.append("Very little text extracted from the PDF. The routing may be incomplete.")
 
