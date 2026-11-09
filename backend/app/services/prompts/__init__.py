@@ -5,14 +5,20 @@ Every prompt that reaches the API has an entry here so that:
 - AIInteractionEvent / AIRecommendation rows can attribute learning signals
   to the prompt revision that generated the suggestion.
 
-Bump the ``version`` (semver) whenever prompt text changes and record the
-change in ``CHANGELOG.md`` in this package. Prompt text should be stable,
-deterministic content (no timestamps, no per-request values) — it forms the
-cacheable prefix for prompt caching.
+Bump the ``version`` (semver) whenever prompt text or request layout changes,
+record the change in ``CHANGELOG.md`` in this package, and APPEND the new
+``{version, sha256, variants}`` entry to ``prompt_lock.json`` (never edit an
+existing entry). ``tests/test_prompt_drift_guard.py`` renders every builder and
+fails until all three agree. Prompt text should be stable, deterministic content
+(no timestamps, no per-request values) — it forms the cacheable prefix for prompt
+caching.
 
 Retired ids stay reserved and are never reused, because historical
 ``ai_usage_events`` / ``ai_interaction_events`` rows reference them:
-``auto_execute_decision`` (retired 2026-11-05, owner ruling 3 -- see CHANGELOG.md).
+
+- ``auto_execute_decision`` (retired 2026-11-05, owner ruling 3 -- see CHANGELOG.md);
+- ``estimate_drawing_extraction`` (retired 2026-09-16 with the legacy Estimate
+  Workbench -- see CHANGELOG.md).
 """
 
 from typing import Dict

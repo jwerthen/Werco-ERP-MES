@@ -191,6 +191,62 @@ class TestDeploymentHygieneAndLandingGates:
         assert "--audit-level=high" in scripts["audit:ci"]
 
 
+_GIT_FETCH_REFSPEC_RE = re.compile(r"\bgit fetch\b.*?\"?\+?refs/heads/([^:\s\"]+):([^\s\"]+)\"?")
+
+
+class TestPromptLockBaseRefIsFetched:
+    """The prompt-drift guard's append-only check needs the base branch's lock file.
+
+    ``tests/test_prompt_drift_guard.py`` (h) reads ``prompt_lock.json`` at
+    ``$PROMPT_LOCK_BASE_REF`` and fails if any existing entry was edited, so a prompt
+    change can only go green by APPENDING a higher version. In CI the check FAILS
+    when the ref is missing, so it cannot silently become a skip; this test pins the
+    other half: that ci-cd.yml's required backend-test job fetches the base branch
+    (the checkout is shallow and holds only the PR commit) BEFORE pytest runs, into
+    exactly the ref the pytest step exports.
+
+    Validated both ways: run against the pre-change ci-cd.yml (no fetch step, no
+    env), it fails on the missing variable.
+    """
+
+    def _steps(self) -> list:
+        return _load_workflow("ci-cd.yml")["jobs"]["backend-test"]["steps"]
+
+    def test_the_guard_reads_the_variable_this_file_pins(self) -> None:
+        guard = (REPO_ROOT / "backend" / "tests" / "test_prompt_drift_guard.py").read_text(encoding="utf-8")
+        assert 'BASE_REF_ENV = "PROMPT_LOCK_BASE_REF"' in guard
+
+    def test_base_branch_is_fetched_before_pytest_into_the_exported_ref(self) -> None:
+        steps = self._steps()
+        pytest_index = next(
+            (index for index, step in enumerate(steps) if re.search(r"\bpytest\s+tests/", step.get("run") or "")),
+            None,
+        )
+        assert pytest_index is not None, "ci-cd.yml's backend-test job no longer runs `pytest tests/`."
+        exported = (steps[pytest_index].get("env") or {}).get("PROMPT_LOCK_BASE_REF", "")
+        assert exported.startswith("origin/") and "github.base_ref" in exported, (
+            "The backend pytest step must export PROMPT_LOCK_BASE_REF=origin/<base branch>, or the prompt-drift "
+            f"guard's append-only check fails in CI. Found: {exported!r}"
+        )
+
+        fetches = [
+            (index, step) for index, step in enumerate(steps) if _GIT_FETCH_REFSPEC_RE.search(step.get("run") or "")
+        ]
+        assert fetches, "backend-test no longer fetches the base branch for the prompt-lock check."
+        index, step = fetches[0]
+        assert index < pytest_index, "The base-branch fetch must run before the pytest step."
+
+        source, destination = _GIT_FETCH_REFSPEC_RE.search(step["run"]).groups()
+        expression = (step.get("env") or {}).get("BASE_REF", "")
+        assert (
+            source == "${BASE_REF}" and "github.base_ref" in expression
+        ), f"The fetch must take the branch from the event's base_ref; found source {source!r}, BASE_REF={expression!r}"
+        fetched_ref = destination.replace("${BASE_REF}", expression)
+        assert (
+            fetched_ref == f"refs/remotes/{exported}"
+        ), f"The fetch writes {fetched_ref!r} but pytest reads {exported!r}: they must name the same ref."
+
+
 # The real-PostgreSQL verifiers e2e.yml must keep running. A floor, not the full set:
 # a new verifier step is welcome without touching this list.
 E2E_POSTGRES_VERIFIERS = (
