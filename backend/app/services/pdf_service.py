@@ -458,8 +458,11 @@ def _extract_native_text(pdf_path: str, warnings: Optional[List[ExtractionWarnin
     """Extract text using pypdf (native PDF text), in the resource-limited reader process.
 
     Returns ``(text, page_count)`` exactly as the former in-process read did for any document
-    within the limits; unreadable input still yields ``("", 0)``. Partial-read warnings are
-    appended to ``warnings`` when given.
+    within the limits. Unreadable input still yields ``("", 0)``, and so does a parser error
+    part-way through: in-process pypdf raised there, the old ``except Exception`` returned
+    ``("", 0)``, and the caller then OCR'd the whole document, which it still does. Reads cut
+    short by a page, character, CPU, memory or time limit keep their pages, and the partial-read
+    warnings are appended to ``warnings`` when given.
     """
     limits = _native_read_limits()
     try:
@@ -474,6 +477,10 @@ def _extract_native_text(pdf_path: str, warnings: Optional[List[ExtractionWarnin
         return "", 0
     except OSError as e:
         logger.error(f"Native PDF extraction failed: {e}")
+        return "", 0
+    if result.stopped_on_error:
+        # Silent, like a damaged file: the OCR fallback reads every page, as it did before.
+        logger.error(f"Native PDF extraction failed part-way: {'; '.join(result.warnings)}")
         return "", 0
     if warnings is not None:
         warnings.extend(ExtractionWarning(TEXT_PARTIAL, message) for message in result.warnings)
@@ -519,10 +526,13 @@ def _ocr_page_sizes(info: Dict[str, Any]) -> Dict[int, Tuple[float, float]]:
 def _ocr_render_params(size_pts: Optional[Tuple[float, float]]) -> Tuple[int, Optional[int]]:
     """(dpi, scale_to) that keeps one rendered page within ``OCR_MAX_PIXELS``.
 
-    A page that fits at ``OCR_DPI`` renders exactly as before. A larger one (large-format
-    drawings) is rendered at the highest whole dpi that fits. The page is rendered with
-    ``-cropbox``: the box pdfinfo reports is never smaller than the crop box, so the bound holds
-    whichever box pdfinfo measured. A page with no reported size falls back to ``-scale-to``.
+    A page that fits at ``OCR_DPI`` renders at the same dpi as before (crop box, see below). A
+    larger one (large-format drawings) is rendered at the highest whole dpi that fits. Every page
+    is rendered with ``-cropbox`` (since 2026-11-09; pdftoppm's default, used before, is the
+    media box): the box pdfinfo reports is never smaller than the crop box, so the bound holds
+    whichever box pdfinfo measured. The trade-off is that text printed outside a page's crop box,
+    which a PDF viewer does not show either, is no longer recognized. A page with no reported
+    size falls back to ``-scale-to``.
     """
     if not size_pts or size_pts[0] <= 0 or size_pts[1] <= 0:
         return OCR_DPI, OCR_FALLBACK_SCALE_TO
@@ -561,6 +571,12 @@ def _extract_ocr_text(pdf_path: str, warnings: Optional[List[ExtractionWarning]]
     tesseract_missing = getattr(pytesseract, "TesseractNotFoundError", None)
     if isinstance(tesseract_missing, type):
         tool_errors += (tesseract_missing,)
+    try:
+        from pdf2image.exceptions import PDFPopplerTimeoutError
+
+        poppler_timeouts: Tuple[type, ...] = (PDFPopplerTimeoutError,)
+    except ImportError:
+        poppler_timeouts = ()
 
     deadline = time.monotonic() + OCR_TOTAL_BUDGET_S
     with ocr_slot(timeout=OCR_TOTAL_BUDGET_S) as acquired:
@@ -574,16 +590,33 @@ def _extract_ocr_text(pdf_path: str, warnings: Optional[List[ExtractionWarning]]
             )
             return "", 0
         return _ocr_document(
-            pdf_path, deadline, sink, convert_from_path, pdfinfo_from_path, pytesseract.image_to_string, tool_errors
+            pdf_path,
+            deadline,
+            sink,
+            convert_from_path,
+            pdfinfo_from_path,
+            pytesseract.image_to_string,
+            tool_errors,
+            poppler_timeouts,
         )
 
 
-def _ocr_budget_warning(first_unread: int, last_planned: int, page_count: int) -> ExtractionWarning:
-    unread = f"page {first_unread}" if first_unread == last_planned else f"pages {first_unread}–{last_planned}"
-    verb = "was" if first_unread == last_planned else "were"
+def _ocr_budget_warning(first_unread: int, page_count: int) -> ExtractionWarning:
+    """Every page from ``first_unread`` to the END of the document is unread, including any past
+    the ``OCR_MAX_PAGES`` cap: one sentence, instead of a cap warning that contradicts it."""
+    unread = f"page {first_unread}" if first_unread == page_count else f"pages {first_unread}–{page_count}"
+    verb = "was" if first_unread == page_count else "were"
     return ExtractionWarning(
         OCR_PARTIAL,
         f"Text recognition stopped after {OCR_TOTAL_BUDGET_S:g} seconds, so {unread} of {page_count} {verb} not read.",
+    )
+
+
+def _ocr_budget_spent_before_start() -> ExtractionWarning:
+    # Built per call, like the read limits, so the module constant stays the single knob.
+    return ExtractionWarning(
+        OCR_PARTIAL,
+        f"Text recognition was skipped: the {OCR_TOTAL_BUDGET_S:g}-second limit ran out before it started.",
     )
 
 
@@ -595,36 +628,43 @@ def _ocr_document(
     pdfinfo_from_path: Any,
     image_to_string: Any,
     tool_errors: Tuple[type, ...],
+    poppler_timeouts: Tuple[type, ...] = (),
 ) -> Tuple[str, int]:
     """The page loop of :func:`_extract_ocr_text`; runs while holding an OCR slot."""
+    pdfinfo_timeout = 0.0
     try:
         remaining = deadline - time.monotonic()
         if remaining < OCR_MIN_STEP_S:
             raise _OcrBudgetSpent()
-        info = pdfinfo_from_path(
-            pdf_path, timeout=min(OCR_PDFINFO_TIMEOUT_S, remaining), first_page=1, last_page=OCR_MAX_PAGES
-        )
+        pdfinfo_timeout = min(OCR_PDFINFO_TIMEOUT_S, remaining)
+        info = pdfinfo_from_path(pdf_path, timeout=pdfinfo_timeout, first_page=1, last_page=OCR_MAX_PAGES)
         page_count = int(info["Pages"])
     except _OcrBudgetSpent:
-        sink.append(
-            ExtractionWarning(
-                OCR_PARTIAL,
-                f"Text recognition was skipped: the {OCR_TOTAL_BUDGET_S:g}-second limit ran out before it started.",
+        sink.append(_ocr_budget_spent_before_start())
+        return "", 0
+    except poppler_timeouts:
+        # Reported like the text-layer reader's timeout, not dropped silently with real failures.
+        logger.error(f"OCR page count timed out after {pdfinfo_timeout:g} s")
+        if pdfinfo_timeout < OCR_PDFINFO_TIMEOUT_S:
+            sink.append(_ocr_budget_spent_before_start())
+        else:
+            sink.append(
+                ExtractionWarning(
+                    OCR_PARTIAL,
+                    "Text recognition was skipped: the scanned document could not be opened within "
+                    f"{OCR_PDFINFO_TIMEOUT_S:g} seconds.",
+                )
             )
-        )
         return "", 0
     except Exception as e:
         logger.error(f"OCR extraction failed: {e}")
         return "", 0
 
-    if page_count > OCR_MAX_PAGES:
-        sink.append(
-            ExtractionWarning(OCR_PARTIAL, f"Only the first {OCR_MAX_PAGES} of {page_count} scanned pages were read.")
-        )
     sizes = _ocr_page_sizes(info)
 
     all_text: List[str] = []
     skipped: List[int] = []
+    stopped = False
     pages_to_read = min(page_count, OCR_MAX_PAGES)
     for page in range(1, pages_to_read + 1):
         try:
@@ -632,7 +672,8 @@ def _ocr_document(
                 raise _OcrBudgetSpent()
             text = _ocr_one_page(pdf_path, page, sizes.get(page), deadline, convert_from_path, image_to_string)
         except _OcrBudgetSpent:
-            sink.append(_ocr_budget_warning(page, pages_to_read, page_count))
+            sink.append(_ocr_budget_warning(page, page_count))
+            stopped = True
             break
         except tool_errors as e:
             logger.error(f"OCR extraction failed: {e}")
@@ -643,6 +684,7 @@ def _ocr_document(
                         f"Text recognition stopped at page {page} of {page_count} ({pages_read_phrase(page - 1)}).",
                     )
                 )
+            stopped = True
             break
         except Exception as e:  # a per-page timeout, or a page poppler/tesseract cannot handle
             logger.warning(f"OCR skipped page {page}: {type(e).__name__}: {e}")
@@ -651,6 +693,12 @@ def _ocr_document(
         if text:
             all_text.append(f"--- Page {page} (OCR) ---\n{text}")
 
+    # The page-cap sentence only when every page up to the cap was attempted; a stop above
+    # already names the pages it left unread, those past the cap included.
+    if page_count > OCR_MAX_PAGES and not stopped:
+        sink.append(
+            ExtractionWarning(OCR_PARTIAL, f"Only the first {OCR_MAX_PAGES} of {page_count} scanned pages were read.")
+        )
     if skipped:
         verb = "were" if len(skipped) > 1 else "was"
         sink.append(ExtractionWarning(OCR_PARTIAL, f"{_page_list(skipped)} could not be read and {verb} skipped."))

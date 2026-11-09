@@ -8191,6 +8191,10 @@ in `RBAC_PERMISSIONS.md`.
 >   is sent. This response has no place for a warning, so the upload is refused rather than saving a
 >   clause list that silently misses the unread pages. If a partial read already covers the first
 >   100,000 characters, the upload goes ahead unchanged, because the AI never reads past that point.
+>   When the read stopped because a page could not be parsed (rather than at a limit), the advice
+>   ends `"The PDF may be damaged. Save or export it again as a new PDF and upload that copy."`
+>   instead, since splitting the file would not get past a damaged page. Before 2026-11-09 such a
+>   PDF was refused whatever was read before the damaged page, with the parser's exception text.
 
 > **Auto-evidence supplier counts now exclude removed suppliers — expect the number to drop.** The
 > *Supplier Management & Evaluation* evidence row (`GET /qms-standards/clauses/{clause_id}/auto-evidence`,
@@ -12556,25 +12560,35 @@ the text is exactly what the old in-process read returned, and a test holds the 
 | Wall clock | 45 s | 90 s |
 | Memory (Linux only) | 512 MiB address space | 512 MiB address space |
 
-When a page, character, CPU, memory or time limit is reached part-way through, the read stops there,
-the pages already read are kept, and a plain-language warning says so, for example "Only the first
-500 of 812 pages were read." or "Reading the PDF's text stopped after 45 seconds (pages 1–14 of 120
-read).". A parser error part-way through also keeps the earlier pages, with a warning; before
-2026-11-09 it returned no text at all. A file over the size limit is not read at all. A PDF that
-cannot be opened still yields no text, and the document uploads then try OCR.
+When the page-count, total-character, CPU, memory or time limit is reached part-way through, the
+read stops there, the pages already read are kept, and a plain-language warning says so, for example
+"Only the first 500 of 812 pages were read." or "Reading the PDF's text stopped after 45 seconds
+(pages 1–14 of 120 read).". A page longer than the per-page limit is cut at 100,000 characters and
+reading carries on with the next page, with a warning naming the cut page. A file over the size limit
+is not read at all. A PDF that cannot be opened still yields no text, and the document uploads then
+try OCR. A parser error part-way through (a damaged page) is handled as before: the document uploads
+treat the text layer as unreadable and OCR the whole document, and only the QMS upload keeps the
+pages read before the error (see [QMS Standards](#qms-standards--audit-readiness)).
 
 **OCR (scanned PDFs).** When the text layer yields 100 characters or fewer, the document uploads fall
 back to OCR (pdf2image + tesseract). It is bounded per document:
 
 - only the first **30 pages** are read ("Only the first 30 of 120 scanned pages were read.");
-- the whole pass gets **90 seconds**, including the wait for an OCR slot. When the time runs out, the
-  pages not yet read are named in a warning;
+- the whole pass gets **90 seconds**, including the wait for an OCR slot. When the time runs out, one
+  warning names every page not read, those past the 30-page cap included ("Text recognition stopped
+  after 90 seconds, so pages 5–120 of 120 were not read."), in place of the 30-page sentence;
+- counting the pages (poppler's `pdfinfo`) gets **10 seconds**. A scan that cannot be opened in that
+  time is skipped with a warning ("Text recognition was skipped: the scanned document could not be
+  opened within 10 seconds.");
 - rendering a page and recognizing it each get **30 seconds**. A page that times out or cannot be
   processed is **skipped with a warning**, and the remaining pages are still read. Before, one failure
   threw away all OCR text;
-- pages are rendered one at a time at 300 dpi, using the page's crop box (the area a PDF viewer
-  shows). A page that would be larger than **25 megapixels** at 300 dpi, such as a large-format
-  drawing, is rendered at a lower dpi.
+- pages are rendered one at a time at 300 dpi. A page that would be larger than **25 megapixels** at
+  300 dpi, such as a large-format drawing, is rendered at a lower dpi;
+- (changed 2026-11-09) each page is rendered from its **crop box**, the area a PDF viewer shows.
+  Before, it was rendered from the media box (poppler's default), so text printed outside a page's
+  crop box, which a viewer does not show either, is no longer recognized. On the usual page, where
+  the two boxes are the same, nothing changes.
 
 If tesseract or poppler is not installed, OCR yields no text and no warning, as before.
 
@@ -12583,6 +12597,15 @@ Excel parsing in BOM import and in document text extraction, and PO line-item ma
 OCR passes run at once. Other requests wait for a slot. A parse waits as long as it takes; an OCR pass
 waits only within its 90-second budget, and if no slot frees up it is skipped with a warning to try
 again in a minute.
+
+> **Interim, until the AI routes move off the event loop (roadmap #9-2a).** PO upload, routing
+> generation and the QMS upload still parse on the server's event loop, while BOM import and
+> `/laser-nests/extract` parse in worker threads. A parse on the event loop takes no slot and never
+> waits, because waiting there would stall every request the process is serving, kiosk polls
+> included, for as long as the worker-thread parse ran (up to 45 s for a text-layer read, 90 s for
+> OCR). So each process can run one parse and one OCR pass beyond the caps above. Each PDF read on
+> those three routes also starts a reader process first, which adds roughly 0.1–0.25 s during which
+> the process serves nothing else. Both go away when #9-2a moves those parses into worker threads.
 
 **Where the warnings appear.** They describe the read that produced the returned text: text-layer
 warnings when the text layer was used, OCR warnings when OCR was, and both when neither produced

@@ -178,14 +178,16 @@ async def upload_pdf_and_extract_clauses(
     if read.warnings and len(pdf_text) < QMS_PROMPT_TEXT_CHARS:
         # A partial read that already covers the prompt's whole text window changes nothing the
         # AI sees. A shorter one would silently drop clauses, and this response has no place
-        # to say so, so refuse instead.
+        # to say so, so refuse instead. A parser error means a damaged page, which splitting
+        # the file would not get past; a new copy of the PDF often does.
+        advice = (
+            " The PDF may be damaged. Save or export it again as a new PDF and upload that copy."
+            if read.stopped_on_error
+            else " Split it into smaller PDFs and upload each one."
+        )
         raise HTTPException(
             status_code=400,
-            detail=(
-                "Only part of this PDF could be read: "
-                + " ".join(read.warnings)
-                + " Split it into smaller PDFs and upload each one."
-            ),
+            detail="Only part of this PDF could be read: " + " ".join(read.warnings) + advice,
         )
 
     if not pdf_text or len(pdf_text.strip()) < 50:

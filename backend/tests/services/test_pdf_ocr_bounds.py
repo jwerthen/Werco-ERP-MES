@@ -9,7 +9,9 @@ tests pin the bounds that replaced that:
 * at most 30 pages are read (owner decision 2026-11-09), with a visible warning naming the skip;
 * every poppler and tesseract call carries a per-page timeout, and a page that times out is
   skipped with a warning instead of sinking the whole document;
-* the whole document gets a 90-second budget (owner decision), checked on a patched clock;
+* the whole document gets a 90-second budget (owner decision), INCLUDING the wait for an OCR
+  slot, checked on a patched clock; when it runs out, one warning names every unread page;
+* the page count (pdfinfo) gets 10 seconds, and a timeout there is reported, not dropped;
 * at most two documents OCR at once per process;
 * a page too large to rasterize at 300 dpi within 25 MP is rendered at a lower dpi.
 
@@ -26,6 +28,7 @@ import sys
 import threading
 import time
 import types
+from contextlib import contextmanager
 from typing import Dict, List, Optional, Tuple
 
 import pytest
@@ -62,6 +65,10 @@ class TesseractNotFoundError(OSError):
     pass
 
 
+class PDFPopplerTimeoutError(Exception):
+    """Stand-in for ``pdf2image.exceptions.PDFPopplerTimeoutError``."""
+
+
 class FakeOcrTools:
     """Stand-ins for ``pdf2image`` and ``pytesseract`` that record every call."""
 
@@ -75,6 +82,8 @@ class FakeOcrTools:
         work_s: float = 0.0,
         fail_pages: Tuple[int, ...] = (),
         missing_tesseract: bool = False,
+        tesseract_vanishes_at: Optional[int] = None,
+        pdfinfo_times_out: bool = False,
     ) -> None:
         self.page_count = page_count
         self.sizes = sizes or {}
@@ -83,6 +92,8 @@ class FakeOcrTools:
         self.work_s = work_s
         self.fail_pages = fail_pages
         self.missing_tesseract = missing_tesseract
+        self.tesseract_vanishes_at = tesseract_vanishes_at
+        self.pdfinfo_times_out = pdfinfo_times_out
         self.pdfinfo_calls: List[dict] = []
         self.convert_calls: List[dict] = []
         self.ocr_calls: List[dict] = []
@@ -95,6 +106,10 @@ class FakeOcrTools:
 
     def pdfinfo_from_path(self, pdf_path, userpw=None, ownerpw=None, poppler_path=None, rawdates=False, **kwargs):
         self.pdfinfo_calls.append(dict(kwargs))
+        if self.pdfinfo_times_out:
+            if self.clock is not None:
+                self.clock.advance(kwargs.get("timeout") or 0)
+            raise PDFPopplerTimeoutError("Run poppler poppler timeout.")
         info: Dict[str, object] = {"Pages": self.page_count}
         first = kwargs.get("first_page") or 1
         last = min(kwargs.get("last_page") or 1, self.page_count)
@@ -117,7 +132,9 @@ class FakeOcrTools:
     def image_to_string(self, image, lang=None, config="", nice=0, output_type="string", timeout=0):
         now = self.clock.now if self.clock else None
         self.ocr_calls.append(dict(page=image.page, timeout=timeout, at=now))
-        if self.missing_tesseract:
+        if self.missing_tesseract or (
+            self.tesseract_vanishes_at is not None and image.page >= self.tesseract_vanishes_at
+        ):
             raise TesseractNotFoundError("tesseract is not installed or it's not in your PATH")
         if self.on_ocr_enter is not None:
             self.on_ocr_enter()
@@ -137,7 +154,11 @@ class FakeOcrTools:
         pytesseract = types.ModuleType("pytesseract")
         pytesseract.image_to_string = self.image_to_string
         pytesseract.TesseractNotFoundError = TesseractNotFoundError
+        exceptions = types.ModuleType("pdf2image.exceptions")
+        exceptions.PDFPopplerTimeoutError = PDFPopplerTimeoutError
+        pdf2image.exceptions = exceptions
         monkeypatch.setitem(sys.modules, "pdf2image", pdf2image)
+        monkeypatch.setitem(sys.modules, "pdf2image.exceptions", exceptions)
         monkeypatch.setitem(sys.modules, "pytesseract", pytesseract)
 
 
@@ -251,6 +272,111 @@ def test_the_document_stops_at_the_90_second_budget(monkeypatch, scan_path):
     assert clock.now - started <= 90 + 1e-6
 
 
+def _patch_clock(monkeypatch) -> FakeClock:
+    clock = FakeClock()
+    monkeypatch.setattr(pdf_service, "time", types.SimpleNamespace(monotonic=clock.monotonic), raising=False)
+    return clock
+
+
+def _slot_after_waiting(monkeypatch, clock: FakeClock, waited_s: float) -> None:
+    """Replace the OCR slot with one that is granted after ``waited_s`` of (fake) queueing."""
+
+    @contextmanager
+    def slow_slot(timeout):
+        assert timeout == pytest.approx(90)
+        clock.advance(waited_s)
+        yield True
+
+    monkeypatch.setattr(pdf_service, "ocr_slot", slow_slot)
+
+
+def test_the_90_second_budget_counts_the_wait_for_an_ocr_slot(monkeypatch, scan_path):
+    """Review F3(a); owner decision 2026-11-09: the budget INCLUDES the slot wait. After 80 s in
+    the queue only 10 s are left, so no step may be handed more than that."""
+    clock = _patch_clock(monkeypatch)
+    started = clock.now
+    _slot_after_waiting(monkeypatch, clock, 80.0)
+    tools = FakeOcrTools(page_count=3, clock=clock, work_s=25.0)
+    tools.install(monkeypatch)
+
+    result = pdf_service.extract_text_from_pdf(scan_path)
+
+    assert tools.convert_calls[0]["timeout"] <= 10 + 1e-6
+    assert tools.ocr_calls[0]["timeout"] <= 10 + 1e-6
+    assert clock.now - started <= 90 + 1e-6
+    assert _messages(result) == [
+        "Text recognition stopped after 90 seconds, so pages 2–3 of 3 were not read.",
+        "Page 1 could not be read and was skipped.",
+    ]
+
+
+def test_a_capped_scan_that_also_runs_out_of_time_gets_one_consistent_warning(monkeypatch, scan_path):
+    """Review F4: "Only the first 30 of 120 were read" next to "pages 5-30 of 120 were not read"
+    contradicted itself. When the time runs out, one sentence names everything unread."""
+    clock = _patch_clock(monkeypatch)
+    tools = FakeOcrTools(page_count=120, clock=clock, work_s=25.0)
+    tools.install(monkeypatch)
+
+    result = pdf_service.extract_text_from_pdf(scan_path)
+
+    assert _messages(result) == [
+        "Text recognition stopped after 90 seconds, so pages 5–120 of 120 were not read.",
+        "Page 4 could not be read and was skipped.",
+    ]
+
+
+def test_a_capped_scan_whose_ocr_tool_fails_part_way_gets_one_consistent_warning(monkeypatch, scan_path):
+    tools = FakeOcrTools(page_count=120, tesseract_vanishes_at=3)
+    tools.install(monkeypatch)
+
+    result = pdf_service.extract_text_from_pdf(scan_path)
+
+    assert "--- Page 2 (OCR) ---" in result.text
+    assert _messages(result) == ["Text recognition stopped at page 3 of 120 (pages 1–2 read)."]
+
+
+def test_a_capped_scan_with_a_skipped_page_names_both(monkeypatch, scan_path):
+    tools = FakeOcrTools(page_count=120, fail_pages=(7,))
+    tools.install(monkeypatch)
+
+    result = pdf_service.extract_text_from_pdf(scan_path)
+
+    assert _messages(result) == [
+        "Only the first 30 of 120 scanned pages were read.",
+        "Page 7 could not be read and was skipped.",
+    ]
+
+
+def test_a_pdfinfo_timeout_skips_ocr_with_a_warning(monkeypatch, scan_path):
+    """Review F6: pdfinfo hanging past its 10 s used to land in the generic ``except`` and vanish
+    without a word, unlike the text-layer reader's timeout."""
+    tools = FakeOcrTools(page_count=3, pdfinfo_times_out=True)
+    tools.install(monkeypatch)
+
+    result = pdf_service.extract_text_from_pdf(scan_path)
+
+    assert tools.convert_calls == [] and tools.ocr_calls == []
+    assert result.text == ""
+    assert [(w.code, w.message) for w in result.warnings] == [
+        (
+            "OCR_PARTIAL",
+            "Text recognition was skipped: the scanned document could not be opened within 10 seconds.",
+        )
+    ]
+
+
+def test_a_pdfinfo_timeout_cut_short_by_the_budget_names_the_budget(monkeypatch, scan_path):
+    clock = _patch_clock(monkeypatch)
+    _slot_after_waiting(monkeypatch, clock, 85.0)
+    tools = FakeOcrTools(page_count=3, clock=clock, pdfinfo_times_out=True)
+    tools.install(monkeypatch)
+
+    result = pdf_service.extract_text_from_pdf(scan_path)
+
+    assert tools.pdfinfo_calls[0]["timeout"] <= 5 + 1e-6
+    assert _messages(result) == ["Text recognition was skipped: the 90-second limit ran out before it started."]
+
+
 def test_at_most_two_documents_ocr_at_once(monkeypatch, tmp_path):
     tools = FakeOcrTools(page_count=1)
     tools.install(monkeypatch)
@@ -300,7 +426,7 @@ def test_a_large_page_is_rendered_at_a_lower_dpi(monkeypatch, scan_path):
     pdf_service.extract_text_from_pdf(scan_path)
 
     letter_call, arch_call = tools.convert_calls
-    assert letter_call["dpi"] == 300, "a normal page renders exactly as before"
+    assert letter_call["dpi"] == 300, "a normal page renders at the same dpi as before (crop box: see below)"
     assert arch_call["dpi"] < 300
     width_px = math.ceil(ARCH_D[0] / 72 * arch_call["dpi"])
     height_px = math.ceil(ARCH_D[1] / 72 * arch_call["dpi"])

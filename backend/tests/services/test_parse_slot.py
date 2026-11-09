@@ -239,3 +239,136 @@ def test_ocr_slot_reports_a_timeout_without_holding_anything():
             parse_limits._ocr_semaphore.release()
     with parse_limits.ocr_slot(timeout=1) as acquired:
         assert acquired is True
+
+
+# --------------------------------------------------------------------------- #
+# Interim: the event-loop thread never waits on a slot (review F1, until #9-2a)
+# --------------------------------------------------------------------------- #
+# The PO upload, routing generation and QMS upload routes are ``async def`` and still parse on
+# the event loop. If the loop waited for a slot held by threadpool work (a BOM preview, a laser
+# text fallback), the WHOLE process would stop serving for up to that work's limit. So a caller
+# running an event loop takes no slot: at most one parser beyond the cap, never a frozen loop.
+# #9-2a moves those parses into worker threads and #9-2c's trip-wire makes this path dead.
+def _hold_all(semaphore, count: int) -> threading.Event:
+    """Hold ``count`` permits of ``semaphore`` in another thread until the returned event is set."""
+    holding = threading.Event()
+    release = threading.Event()
+
+    def holder():
+        for _ in range(count):
+            assert semaphore.acquire(timeout=5)
+        holding.set()
+        release.wait(3)  # self-releasing, so a regression fails on the timing assert instead of hanging
+        for _ in range(count):
+            semaphore.release()
+
+    threading.Thread(target=holder, daemon=True).start()
+    assert holding.wait(5)
+    return release
+
+
+def test_parse_slot_on_the_event_loop_does_not_wait_for_a_busy_cap():
+    import asyncio
+
+    from app.core import parse_limits
+    from app.core.parse_limits import PARSE_CONCURRENCY, parse_slot
+
+    release = _hold_all(parse_limits._parse_semaphore, PARSE_CONCURRENCY)
+    try:
+
+        async def on_loop() -> float:
+            started = time.monotonic()
+            with parse_slot():
+                with parse_slot():
+                    pass
+            return time.monotonic() - started
+
+        waited = asyncio.run(on_loop())
+        assert waited < 0.5, f"the event loop waited {waited:.2f}s for a parse slot"
+    finally:
+        release.set()
+    # Nothing was acquired on the loop, so nothing extra was released: both slots come back.
+    time.sleep(0.05)
+    for _ in range(PARSE_CONCURRENCY):
+        assert parse_limits._parse_semaphore.acquire(timeout=2)
+    for _ in range(PARSE_CONCURRENCY):
+        parse_limits._parse_semaphore.release()
+
+
+def test_ocr_slot_on_the_event_loop_does_not_wait_for_a_busy_cap():
+    import asyncio
+
+    from app.core import parse_limits
+
+    release = _hold_all(parse_limits._ocr_semaphore, parse_limits.OCR_CONCURRENCY)
+    try:
+
+        async def on_loop():
+            started = time.monotonic()
+            with parse_limits.ocr_slot(timeout=3) as acquired:
+                return acquired, time.monotonic() - started
+
+        acquired, waited = asyncio.run(on_loop())
+        assert acquired is True
+        assert waited < 0.5, f"the event loop waited {waited:.2f}s for an OCR slot"
+    finally:
+        release.set()
+    time.sleep(0.05)
+    for _ in range(parse_limits.OCR_CONCURRENCY):
+        assert parse_limits._ocr_semaphore.acquire(timeout=2)
+    for _ in range(parse_limits.OCR_CONCURRENCY):
+        parse_limits._ocr_semaphore.release()
+
+
+def test_an_on_loop_pdf_read_is_not_held_behind_threadpool_parses(monkeypatch):
+    """The reviewer's probe, made deterministic: two worker threads hold both parse slots (two
+    offloaded BOM previews) while an async route reads a PDF inline on the loop."""
+    import asyncio
+
+    from app.core import parse_limits
+    from app.services import pdf_text_reader
+    from app.services.pdf_text_reader import PdfReadLimits, read_pdf_pages
+
+    def fake_run(command, *, input, stdout, **kwargs):
+        stdout.write(b'{"page_count": 1}\n{"text": "page", "cut": false}\n{"end": "complete"}\n')
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(pdf_text_reader.subprocess, "run", fake_run)
+    limits = PdfReadLimits(
+        max_bytes=1024, max_pages=5, max_page_chars=100, max_total_chars=100, cpu_seconds=5, wall_seconds=5
+    )
+    release = _hold_all(parse_limits._parse_semaphore, parse_limits.PARSE_CONCURRENCY)
+    try:
+
+        async def route():
+            started = time.monotonic()
+            result = read_pdf_pages(b"%PDF-1.4", limits)
+            return result, time.monotonic() - started
+
+        result, waited = asyncio.run(route())
+        assert result.pages == ["page"]
+        assert waited < 0.5, f"the on-loop read waited {waited:.2f}s behind threadpool parses"
+    finally:
+        release.set()
+
+
+def test_a_worker_thread_still_waits_for_the_cap():
+    """The bypass is for the loop thread only: a thread with no running loop still queues."""
+    from app.core import parse_limits
+    from app.core.parse_limits import parse_slot
+
+    release = _hold_all(parse_limits._parse_semaphore, parse_limits.PARSE_CONCURRENCY)
+    entered = threading.Event()
+
+    def worker():
+        with parse_slot():
+            entered.set()
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    try:
+        assert not entered.wait(0.3), "a worker thread got past a full parse cap"
+    finally:
+        release.set()
+    assert entered.wait(5)
+    thread.join(5)

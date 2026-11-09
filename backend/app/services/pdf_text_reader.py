@@ -4,7 +4,12 @@ pypdf is pure Python: on an uploaded PDF it holds the GIL for as long as the doc
 and its memory use follows whatever the file declares. Reading the text layer in a child
 process bounds both: the child runs under ``RLIMIT_CPU``, ``RLIMIT_AS`` (Linux), ``RLIMIT_FSIZE``
 on its output and a parent wall-clock timeout, and the parent holds a :func:`parse_slot` for the
-duration, so at most ``PARSE_CONCURRENCY`` readers run per process.
+duration, so at most ``PARSE_CONCURRENCY`` readers run per process (plus, until #9-2a, one on the
+event-loop thread, which takes no slot; see ``app.core.parse_limits``).
+
+The cost is a child start per read: 0.08-0.25 s measured (interpreter start plus importing pypdf)
+before the first page. Until #9-2a moves the PO upload, routing generation and QMS upload parses
+off the event loop, that start is added to the time those routes hold the loop for each PDF.
 
 Generalized from ``hank_pdf_reader`` (which is unchanged: its 25-page / 10 MB / refuse-encrypted
 limits are a Hank contract). Unlike Hank, this reader must return EXACTLY what in-process pypdf
@@ -22,7 +27,9 @@ plain-language warning instead of a silent change:
   is cut there;
 * out of CPU, memory or wall-clock time, or a parser error part-way through: the pages read
   before that point are kept. The child writes one JSON line per page and flushes it, so a
-  killed child still leaves every finished page behind.
+  killed child still leaves every finished page behind. A parser error (as opposed to a limit)
+  also sets ``PdfReadResult.stopped_on_error``: in-process pypdf raised there and its callers
+  treated the whole read as failed, so a caller that must keep that behavior can.
 
 A document that cannot be opened at all raises :class:`PdfReadError` with a plain message.
 
@@ -82,11 +89,17 @@ class PdfReadLimits:
 
 @dataclass(frozen=True)
 class PdfReadResult:
-    """What was read: page texts in document order (index 0 is page 1, empty pages included)."""
+    """What was read: page texts in document order (index 0 is page 1, empty pages included).
+
+    ``stopped_on_error`` is True when the read ended on a parser exception part-way through (not
+    on a page, character, CPU, memory or time limit). In-process pypdf raised in that case, so
+    ``pdf_service`` still treats such a read as no text layer and OCRs the whole document.
+    """
 
     pages: List[str]
     page_count: int
     warnings: List[str]
+    stopped_on_error: bool = False
 
 
 class PdfReadError(ValueError):
@@ -292,7 +305,7 @@ def parse_reader_output(
         warnings.append(
             f"Page {page} has more text than can be read; only its first {limits.max_page_chars:,} characters were read."
         )
-    return PdfReadResult(pages=pages, page_count=page_count, warnings=warnings)
+    return PdfReadResult(pages=pages, page_count=page_count, warnings=warnings, stopped_on_error=error is not None)
 
 
 # --------------------------------------------------------------------------- #

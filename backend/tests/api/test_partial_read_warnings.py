@@ -381,3 +381,72 @@ def test_qms_upload_of_an_unreadable_pdf_is_a_plain_400(client: TestClient, admi
     assert response.status_code == status.HTTP_400_BAD_REQUEST
     assert response.json()["detail"] == "Failed to read PDF: The PDF could not be read. It may be damaged or not a PDF."
     assert qms_llm == []
+
+
+def _stub_qms_read(monkeypatch, pages, warnings, *, page_count=5, stopped_on_error=False):
+    from app.services.pdf_text_reader import PdfReadResult
+
+    monkeypatch.setattr(
+        "app.api.endpoints.qms_standards.read_pdf_pages",
+        lambda content, limits: PdfReadResult(
+            pages=list(pages), page_count=page_count, warnings=list(warnings), stopped_on_error=stopped_on_error
+        ),
+    )
+
+
+def test_qms_upload_goes_ahead_when_a_partial_read_covers_the_prompt_window(
+    client: TestClient, admin_headers, qms_standard, qms_llm, monkeypatch
+):
+    """Review F3(b). The AI is sent only the first 100,000 characters, so a partial read that
+    already reached them changes nothing it sees: the upload proceeds, with exactly one AI call.
+    The joined text here is exactly 100,000 characters (the boundary)."""
+    pages = ["A" * 49_999, "", "B" * 49_999]
+    _stub_qms_read(monkeypatch, pages, ["Only the first 3 of 5 pages were read."])
+
+    response = _upload_qms(client, admin_headers, qms_standard.id, b"%PDF-1.4 stand-in")
+
+    assert response.status_code == status.HTTP_200_OK, response.text
+    (call,) = qms_llm
+    expected = "A" * 49_999 + "\n\n" + "B" * 49_999
+    assert len(expected) == 100_000
+    assert f"---\n{expected}\n---" in call["messages"][0]["content"]
+
+
+def test_qms_upload_one_character_short_of_the_window_is_still_refused(
+    client: TestClient, admin_headers, qms_standard, qms_llm, monkeypatch
+):
+    _stub_qms_read(monkeypatch, ["A" * 49_999, "B" * 49_998], ["Only the first 2 of 5 pages were read."])
+
+    response = _upload_qms(client, admin_headers, qms_standard.id, b"%PDF-1.4 stand-in")
+
+    assert response.status_code == status.HTTP_400_BAD_REQUEST, response.text
+    assert qms_llm == []
+
+
+def test_qms_upload_that_broke_part_way_asks_for_a_new_copy_not_a_split(
+    client: TestClient, admin_headers, qms_standard, qms_llm, monkeypatch
+):
+    """Review F7: splitting does not help a damaged page; re-saving the PDF can."""
+    warning = "Reading the PDF's text stopped at page 2 of 3 (page 1 read)."
+    _stub_qms_read(monkeypatch, ["4.1 Context " * 10], [warning], page_count=3, stopped_on_error=True)
+
+    response = _upload_qms(client, admin_headers, qms_standard.id, b"%PDF-1.4 stand-in")
+
+    assert response.status_code == status.HTTP_400_BAD_REQUEST, response.text
+    assert response.json()["detail"] == (
+        f"Only part of this PDF could be read: {warning} "
+        "The PDF may be damaged. Save or export it again as a new PDF and upload that copy."
+    )
+    assert qms_llm == []
+
+
+def test_qms_prompt_sends_exactly_the_window_the_refusal_rule_measures():
+    """Review F7. ``QMS_PROMPT_TEXT_CHARS`` decides when a partial read is refused; the prompt
+    f-string slices the text with a literal. They must stay equal, or a partial read could pass
+    the refusal check and still hand the AI a shorter text than a whole read would. (The prompt
+    text itself is deliberately not edited in this PR.)"""
+    import inspect
+
+    from app.api.endpoints.qms_standards import QMS_PROMPT_TEXT_CHARS, upload_pdf_and_extract_clauses
+
+    assert f"pdf_text[:{QMS_PROMPT_TEXT_CHARS}]" in inspect.getsource(upload_pdf_and_extract_clauses)

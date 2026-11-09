@@ -15,6 +15,8 @@ process. Two things are pinned here:
    timeout and a CPU kill each keep the pages read so far and add a plain-language warning; a
    document that cannot be opened raises one plain error; and the child's output is validated
    as untrusted.
+3. **A parser error part-way through still means OCR.** In-process pypdf raised there and the
+   document uploads OCR'd every page; the reader flags it (``stopped_on_error``) so they still do.
 """
 
 from __future__ import annotations
@@ -422,6 +424,72 @@ def test_a_torn_final_line_is_ignored():
     result = parse_reader_output(raw, GENEROUS)
     assert result.pages == ["one"]
     assert result.warnings == ["Reading the PDF's text stopped at page 2 of 2 (page 1 read)."]
+
+
+def test_a_parser_error_part_way_keeps_the_pages_and_says_it_stopped_on_an_error():
+    raw = b'{"page_count": 3}\n{"text": "one", "cut": false}\n{"error": "KeyError"}\n'
+    result = parse_reader_output(raw, GENEROUS)
+    assert result.pages == ["one"]
+    assert result.stopped_on_error is True
+    assert result.warnings == ["Reading the PDF's text stopped at page 2 of 3 (page 1 read)."]
+
+
+@pytest.mark.parametrize(
+    "raw, kwargs",
+    [
+        (b'{"page_count": 2}\n{"text": "one", "cut": false}\n{"text": "tw', {}),
+        (b'{"page_count": 2}\n{"text": "one", "cut": false}\n', {"timed_out": True}),
+        (b'{"page_count": 2}\n{"text": "one", "cut": false}\n', {"killed": True}),
+        (b'{"page_count": 2}\n{"text": "one", "cut": false}\n{"text": "two", "cut": false}\n{"end": "complete"}\n', {}),
+    ],
+    ids=["torn", "timeout", "killed", "complete"],
+)
+def test_only_a_parser_error_counts_as_stopping_on_an_error(raw, kwargs):
+    assert parse_reader_output(raw, GENEROUS, **kwargs).stopped_on_error is False
+
+
+_PAGE_ONE_THEN_PARSER_ERROR = (
+    "import json, sys\n"
+    "sys.stdin.buffer.read()\n"
+    "print(json.dumps({'page_count': 3}), flush=True)\n"
+    "print(json.dumps({'text': 'PAGE ONE PO LINE ITEMS ' * 10, 'cut': False}), flush=True)\n"
+    "print(json.dumps({'error': 'KeyError'}), flush=True)\n"
+)
+
+
+def test_a_parser_error_part_way_still_falls_back_to_ocr_of_the_whole_document(monkeypatch, tmp_path):
+    """Review F2. In-process pypdf raising on page 2 used to land in ``except Exception: return
+    "", 0``, so the upload OCR'd every page. The reader keeps page 1 (QMS uses that), but the
+    document uploads must still take the OCR path, or pages 2-3 are silently lost whenever page
+    1 alone clears the 100-character bar."""
+    _stand_in_child(monkeypatch, _PAGE_ONE_THEN_PARSER_ERROR)
+    ocr_calls = []
+
+    def fake_ocr(pdf_path, warnings=None):
+        ocr_calls.append(pdf_path)
+        return "--- Page 1 (OCR) ---\n" + "OCR OF ALL 3 PAGES " * 10, 3
+
+    monkeypatch.setattr(pdf_service, "_extract_ocr_text", fake_ocr)
+    path = tmp_path / "broken-page-2.pdf"
+    path.write_bytes(b"%PDF-1.4 stand-in")
+
+    result = pdf_service.extract_text_from_pdf(str(path))
+
+    assert ocr_calls == [str(path)], "OCR must run, as it did before the reader moved out of process"
+    assert result.is_ocr is True and result.page_count == 3
+    assert "OCR OF ALL 3 PAGES" in result.text and "PAGE ONE PO LINE ITEMS" not in result.text
+    assert result.warnings == []
+
+
+def test_a_parser_error_part_way_reads_as_no_text_layer_like_a_damaged_file(monkeypatch, tmp_path):
+    """Same contract as an unreadable PDF: ``("", 0)`` and no warning, so OCR decides."""
+    _stand_in_child(monkeypatch, _PAGE_ONE_THEN_PARSER_ERROR)
+    path = tmp_path / "broken-page-2.pdf"
+    path.write_bytes(b"%PDF-1.4 stand-in")
+    warnings: list = []
+
+    assert pdf_service._extract_native_text(str(path), warnings) == ("", 0)
+    assert warnings == []
 
 
 def test_stream_pages_writes_the_protocol(tmp_path):
