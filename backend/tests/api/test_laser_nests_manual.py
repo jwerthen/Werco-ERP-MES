@@ -230,9 +230,10 @@ class TestManualCreate:
 class TestPlannedRunsBound:
     """A nest runs at most 9,999 sheets (owner design default, 2026-11-09).
 
-    Above that is a typo or a misread, and before the bound it reached the int4
-    ``planned_runs`` column and overflowed on Postgres as a 500. Both write doors
-    now refuse it with a 422 before anything is written. The literals are the
+    Above that is a typo or a misread. Before the bound, a count up to int4's
+    2,147,483,647 was stored without complaint and only a larger one overflowed the
+    ``planned_runs`` column as a 500 on Postgres. Both write doors now refuse
+    anything over 9,999 with a 422 before anything is written. The literals are the
     owner-facing contract; ``MAX_PLANNED_RUNS`` itself is pinned in
     ``tests/services/test_laser_nest_planned_runs.py``.
     """

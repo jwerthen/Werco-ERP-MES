@@ -9,7 +9,6 @@ mount (see ``app/api/router.py``).
 
 import os
 import tempfile
-from typing import Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
@@ -34,8 +33,7 @@ from app.services.laser_nest_extraction_service import extract_nest_fields_from_
 from app.services.laser_nest_restore_service import restore_laser_nest
 from app.services.laser_nest_service import (
     manual_nest_response_dict,
-    planned_runs_bound_warning,
-    read_planned_runs,
+    read_extracted_planned_runs,
     soft_delete_laser_nest,
     sync_laser_nest_to_operation,
 )
@@ -100,24 +98,19 @@ async def extract_laser_nest_from_pdf(
     # as-is, "N/A", "3 sheets" or 2.5 failed the response model's int check (a
     # 500 the manual modal swallowed, losing every other pre-filled field), and an
     # 11-digit misread pre-filled the form with a count the manual-create route
-    # refuses. Not cleanly read means a real null, at low confidence -- the same
-    # rule the package preview applies (``read_planned_runs``).
-    raw_runs = result.get("planned_runs")
-    read_count, runs_read = read_planned_runs(raw_runs)
-    planned_runs: Optional[int] = read_count if runs_read else None
-    confidence = result.get("extraction_confidence") if runs_read else "low"
-    warnings = (result.get("warning"), None if runs_read else planned_runs_bound_warning(raw_runs))
-    warning = "; ".join(entry for entry in warnings if isinstance(entry, str) and entry) or None
+    # refuses. The package preview's own rule decides (``read_extracted_planned_runs``);
+    # this door only turns its floored, not-read 1 into a real null.
+    runs = read_extracted_planned_runs(result)
 
     return LaserNestPdfExtractionResponse(
         cnc_number=result.get("cnc_number"),
         material=result.get("material"),
         thickness=result.get("thickness"),
         sheet_size=result.get("sheet_size"),
-        planned_runs=planned_runs,
-        confidence=confidence,
+        planned_runs=runs.count if runs.was_read else None,
+        confidence=runs.confidence,
         source=result.get("source", "none"),
-        warning=warning,
+        warning=runs.warning,
         passes=result.get("passes"),
     )
 

@@ -39,9 +39,14 @@ pass merging and coercion meet, is where both bugs lived; a test of the coercion
 alone is the gap that hid them.
 
 The functions added with the bound (``read_planned_runs``,
-``planned_runs_bound_warning``, ``MAX_PLANNED_RUNS``) are reached through their
-modules rather than imported by name, so each case fails on its own against code
-that predates them instead of the whole module failing to collect.
+``planned_runs_bound_warning``, ``read_extracted_planned_runs``,
+``MAX_PLANNED_RUNS``) are reached through their modules rather than imported by
+name, so each case fails on its own against code that predates them instead of
+the whole module failing to collect. ``_count`` is the floored count alone, the
+number a preview row shows.
+
+The ``llm_replay`` fixture comes from ``tests/llm_replay.py``, which
+``tests/conftest.py`` registers as a plugin; only ``text_message`` is imported.
 """
 
 import base64
@@ -54,11 +59,16 @@ import app.models.laser_nest as laser_nest_model
 import app.services.laser_nest_service as nest_service
 from app.schemas.work_order import LaserNestPreviewRow
 from app.services.laser_nest_extraction_service import extract_nest_fields_from_pdf
-from app.services.laser_nest_service import _coerce_planned_runs, build_parsed_nest_from_extraction
+from app.services.laser_nest_service import build_parsed_nest_from_extraction
 from app.services.prompts import LASER_NEST_EXTRACTION_PROMPT, LASER_NEST_VERIFICATION_PROMPT
-from tests.llm_replay import llm_replay, text_message  # noqa: F401  (llm_replay is a fixture)
+from tests.llm_replay import text_message
 
 pytestmark = pytest.mark.unit
+
+
+def _count(value: object) -> int:
+    """The floored count a preview row shows: ``read_planned_runs(value)[0]``, an int >= 1."""
+    return nest_service.read_planned_runs(value)[0]
 
 
 class TestIntegers:
@@ -66,20 +76,20 @@ class TestIntegers:
 
     @pytest.mark.parametrize("value,expected", [(1, 1), (3, 3), (42, 42)])
     def test_positive_int_passes_through(self, value, expected):
-        assert _coerce_planned_runs(value) == expected
+        assert _count(value) == expected
 
     @pytest.mark.parametrize("value", [0, -1, -400])
     def test_non_positive_int_floors_at_one(self, value):
         # A nest is cut at least once; a 0 or a negative is a model artifact,
         # not a statement that nothing runs.
-        assert _coerce_planned_runs(value) == 1
+        assert _count(value) == 1
 
     @pytest.mark.parametrize("value", [True, False])
     def test_bool_is_not_a_count(self, value):
         # bool is an int subclass in Python, so this has to be rejected FIRST or
         # `True` silently becomes one run and `False` becomes a floored one --
         # both dressed up as a read value.
-        assert _coerce_planned_runs(value) == 1
+        assert _count(value) == 1
 
 
 class TestFloats:
@@ -87,19 +97,19 @@ class TestFloats:
 
     @pytest.mark.parametrize("value,expected", [(3.0, 3), (1.0, 1), (12.000, 12)])
     def test_whole_number_float_is_read(self, value, expected):
-        assert _coerce_planned_runs(value) == expected
+        assert _count(value) == expected
 
     @pytest.mark.parametrize("value", [2.5, 0.5, 3.9, -2.0])
     def test_fractional_or_non_positive_float_falls_back(self, value):
         # Half a run is not a sheet count, and rounding one would invent a
         # quantity nobody wrote. -2.0 is whole but still floors to 1.
-        assert _coerce_planned_runs(value) == 1
+        assert _count(value) == 1
 
     @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
     def test_non_finite_float_falls_back_without_raising(self, value):
         # ``json.loads`` accepts NaN/Infinity by default, so these can genuinely
         # reach here; ``int(inf)`` would raise and 400 the whole preview batch.
-        assert _coerce_planned_runs(value) == 1
+        assert _count(value) == 1
 
 
 class TestNumericStrings:
@@ -117,11 +127,11 @@ class TestNumericStrings:
         ],
     )
     def test_digit_strings_are_read(self, value, expected):
-        assert _coerce_planned_runs(value) == expected
+        assert _count(value) == expected
 
     @pytest.mark.parametrize("value", ["0", "  0  ", "0.0"])
     def test_zero_string_floors_at_one(self, value):
-        assert _coerce_planned_runs(value) == 1
+        assert _count(value) == 1
 
 
 class TestFreeText:
@@ -142,7 +152,7 @@ class TestFreeText:
         ],
     )
     def test_leading_integer_is_read(self, value, expected):
-        assert _coerce_planned_runs(value) == expected
+        assert _count(value) == expected
 
     @pytest.mark.parametrize(
         "value",
@@ -157,13 +167,13 @@ class TestFreeText:
     def test_a_number_that_is_not_leading_is_not_a_count(self, value):
         # This is the whole safeguard on the widened rule. "sheet 4" is nest
         # sheet number four; reading it as four runs would quadruple a job.
-        assert _coerce_planned_runs(value) == 1
+        assert _count(value) == 1
 
     @pytest.mark.parametrize("value", ["3abc", "3x", "5x", "3ea"])
     def test_a_digit_glued_to_a_word_is_not_a_count(self, value):
         # The trailing word boundary. "3 sheets" is three runs; "3abc" is an
         # identifier fragment the model failed to parse.
-        assert _coerce_planned_runs(value) == 1
+        assert _count(value) == 1
 
     @pytest.mark.parametrize("value", ["2.5", "x2.5", "0.5", "3.9"])
     def test_a_fractional_string_is_refused_like_a_fractional_float(self, value):
@@ -171,11 +181,11 @@ class TestFreeText:
         # property, not the individual values: reading "2.5" as 2 while 2.5
         # falls back to 1 would make the answer depend on whether the model
         # happened to quote its JSON number, which no caller can see or control.
-        assert _coerce_planned_runs(value) == 1
+        assert _count(value) == 1
 
     @pytest.mark.parametrize("number,text", [(3.0, "3.0"), (2.5, "2.5"), (12.0, "12.000"), (0.5, "0.5")])
     def test_the_number_and_string_encodings_of_one_value_agree(self, number, text):
-        assert _coerce_planned_runs(number) == _coerce_planned_runs(text)
+        assert _count(number) == _count(text)
 
 
 class TestUnreadable:
@@ -201,11 +211,11 @@ class TestUnreadable:
         # A bad model value must not ValueError its way into a 400 that sinks
         # the whole preview batch -- one unreadable field costs one defaulted
         # row, flagged by its confidence, and nothing else.
-        assert _coerce_planned_runs(value) == 1
+        assert _count(value) == 1
 
     def test_result_is_always_a_plain_int(self):
         for value in (3, 3.0, "3", "3 sheets", None, True, 2.5, "2.5", object()):
-            result = _coerce_planned_runs(value)
+            result = _count(value)
             assert type(result) is int
             assert result >= 1
 
@@ -234,7 +244,7 @@ class TestTheBound:
         assert warning is not None
         assert "looked wrong" in warning and "enter it by hand" in warning
         # Never clamped: 9,999 is no more a reading of "99999999999" than 1 is.
-        assert _coerce_planned_runs(value) == 1
+        assert _count(value) == 1
 
     def test_the_warning_quotes_the_value_but_clips_a_long_one(self):
         assert "'99999999999'" in nest_service.planned_runs_bound_warning(99_999_999_999)
@@ -316,6 +326,51 @@ class TestRowBuilderFlagsTheFloor:
             "medium",
             None,
         )
+
+
+class TestTheSharedReading:
+    """``read_extracted_planned_runs``: the one copy of the not-read rule.
+
+    The preview row and ``POST /laser-nests/extract`` both take their run count,
+    confidences and warning from it (the endpoint tests prove the handler delegates
+    and that the two doors agree); these pin what it returns.
+    """
+
+    def test_a_clean_read_keeps_the_results_own_values(self):
+        reading = nest_service.read_extracted_planned_runs(
+            {
+                "planned_runs": "3 sheets",
+                "confidence": {"planned_runs": "medium", "material": "high"},
+                "extraction_confidence": "medium",
+                "warning": "Verification pass skipped: API error",
+            }
+        )
+        assert reading == nest_service.PlannedRunsReading(
+            count=3,
+            was_read=True,
+            confidence="medium",
+            field_confidence={"planned_runs": "medium", "material": "high"},
+            warning="Verification pass skipped: API error",
+        )
+
+    def test_not_read_is_low_everywhere_and_an_over_the_bound_count_says_why(self):
+        reading = nest_service.read_extracted_planned_runs(
+            {
+                "planned_runs": 10_000,
+                "confidence": {"planned_runs": "high", "material": "high"},
+                "extraction_confidence": "high",
+                "warning": "Verification pass skipped: API error",
+            }
+        )
+        assert (reading.count, reading.was_read, reading.confidence) == (1, False, "low")
+        assert reading.field_confidence == {"planned_runs": "low", "material": "high"}
+        assert reading.warning.startswith("Verification pass skipped: API error; Run count '10000' looked wrong")
+
+    def test_a_non_string_warning_is_dropped_not_joined(self):
+        # AI-adjacent output: a junk warning shape must not reach a str field.
+        reading = nest_service.read_extracted_planned_runs({"planned_runs": "N/A", "warning": {"oops": 1}})
+        assert (reading.count, reading.was_read, reading.warning) == (1, False, None)
+        assert reading.field_confidence == {"planned_runs": "low"}
 
 
 # --------------------------------------------------------------------------- #

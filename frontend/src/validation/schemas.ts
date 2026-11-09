@@ -327,10 +327,18 @@ export const vendorSchema = z.object({
 // LASER NEST (manual entry)
 // ============================================================================
 
+/**
+ * The most runs one laser nest may carry. Mirrors the backend's
+ * `MAX_PLANNED_RUNS` (app/models/laser_nest.py), a design default the owner can
+ * still change: manual create / PATCH refuse more with a 422 and the package
+ * import with a 400, so the forms say it first, in words.
+ */
+export const MAX_PLANNED_RUNS = 9999;
+
 // Mirrors backend LaserNestManualCreate / LaserNestUpdate constraints
-// (cnc_number 1..100, planned_runs >= 1 int, optional descriptors). Optional
-// descriptors are coerced to undefined when blank so a cleared field PATCHes
-// as "unset" rather than an empty string.
+// (cnc_number 1..100, planned_runs a whole number 1..MAX_PLANNED_RUNS, optional
+// descriptors). Optional descriptors are coerced to undefined when blank so a
+// cleared field PATCHes as "unset" rather than an empty string.
 const optionalTrimmed = (max: number) =>
   z
     .string()
@@ -362,7 +370,8 @@ export const laserNestManualSchema = z
     planned_runs: z.coerce
       .number({ error: 'Enter a number' })
       .int('Whole sheets only')
-      .min(1, 'At least 1 run'),
+      .min(1, 'At least 1 run')
+      .max(MAX_PLANNED_RUNS, 'At most 9,999 runs per nest'),
     nest_name: optionalTrimmed(255),
     material: optionalTrimmed(100),
     thickness: optionalTrimmed(50),

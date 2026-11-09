@@ -4331,9 +4331,10 @@ environment variable or deployment configuration change is needed.
 >   supplies PDF bytes). When `rows` is absent, the legacy CNC-file import is unchanged.
 >
 >   `rows` is **strictly validated** before anything is persisted (`LaserNestImportRow`):
->   `source_file` required (1–1000 chars), `planned_runs` required and **1–9,999** (a larger
->   count used to reach the `Integer` column and fail as a **500** on Postgres; it is now a
->   failing row like any other),
+>   `source_file` required (1–1000 chars), `planned_runs` required and **1–9,999** (before the
+>   bound, a count from 10,000 up to int4's 2,147,483,647 was stored without complaint and only a
+>   larger one failed as a **500** on Postgres; both are now a failing row like any other — the
+>   import wizard refuses an over-the-limit count itself before it sends the rows),
 >   `source_pages` optional (required on the bare-PDF path — see below): non-empty, entries
 >   **≥ 1**, ascending and consecutive,
 >   `work_center_id` optional and **> 0** (per-nest override; must resolve to an **active**,
@@ -4635,7 +4636,11 @@ environment variable or deployment configuration change is needed.
 > `planned_runs`, `material`, `thickness`, `sheet_size`). A `planned_runs` change **reverse-syncs**
 > the operation's `component_quantity` and re-derives the laser WO's `quantity_ordered` over
 > its non-deleted nests. Lowering `planned_runs` below `completed_runs` is allowed (over-run is
-> acceptable); only the schema's bounds apply (1–9,999, **422** outside them). **Raising** it is refused **409** before any
+> acceptable); only the schema's bounds apply (1–9,999, **422** outside them). A nest stored with more
+> than 9,999 runs before the bound existed (2026-11-09) keeps that value — no migration touches it — but
+> any PATCH that **sends** `planned_runs` must bring it within 1–9,999. The manual modal's edit always
+> sends it, so editing such a nest through the modal (to fix its material, say) means correcting its
+> run count too; the modal flags the count field before sending anything. **Raising** it is refused **409** before any
 > write when the nest's operation is COMPLETE (`Nest N is already complete at {runs} runs; raising its
 > planned runs would leave a completed operation short. Add a nest for the extra runs.`) or the laser
 > work order is COMPLETE / CLOSED / CANCELLED (`This laser work order is {status}; Nest N's planned

@@ -260,8 +260,9 @@ def read_planned_runs(value: object) -> tuple[int, bool]:
     ``MAX_PLANNED_RUNS``. Everything else -- missing, junk, a fraction, 0 or a
     negative, or a count above the bound -- is ``(1, False)``: the preview's
     non-optional field gets its floor of 1, and the caller MUST mark it low
-    confidence (``build_parsed_nest_from_extraction`` and ``POST
-    /laser-nests/extract`` both do).
+    confidence. ``read_extracted_planned_runs`` does that for both doors that show
+    an extracted count (the preview row and ``POST /laser-nests/extract``); reach
+    for it rather than calling this directly from a new one.
 
     THE FLOOR IS NOT A READ. ``planned_runs`` is a non-optional ``int`` on the
     preview wire, so a nest whose run count could not be found and a nest that
@@ -302,16 +303,6 @@ def planned_runs_bound_warning(value: object) -> Optional[str]:
     return f"Run count '{shown}' looked wrong — enter it by hand (the limit is {MAX_PLANNED_RUNS:,} runs per nest)."
 
 
-def _coerce_planned_runs(value: object) -> int:
-    """The floored count alone: ``read_planned_runs(value)[0]``, always an int >= 1.
-
-    Kept for callers and tests that want only the number. Anything that SHOWS
-    the number to a person must use ``read_planned_runs`` and carry its
-    ``was_read`` into the confidence, or the floor masquerades as a read.
-    """
-    return read_planned_runs(value)[0]
-
-
 def _join_warnings(*warnings: Optional[str]) -> Optional[str]:
     joined = "; ".join(warning for warning in warnings if warning)
     return joined or None
@@ -331,17 +322,68 @@ def _coerce_field_confidence(value: object) -> Optional[dict]:
     return coerced or None
 
 
+@dataclass(frozen=True)
+class PlannedRunsReading:
+    """One extraction result's run count, with the not-read rule already applied.
+
+    ``count`` is floored at 1 (the preview row's non-optional field); ``was_read`` is
+    the only thing that says whether that 1 is real. When the count was NOT read,
+    ``field_confidence["planned_runs"]`` and the overall ``confidence`` are both
+    ``"low"`` and ``warning`` carries the over-the-bound sentence, if any, after the
+    result's own warning. When it WAS read, all three are the result's own values.
+    """
+
+    count: int
+    was_read: bool
+    confidence: Optional[str]
+    field_confidence: Optional[dict]
+    warning: Optional[str]
+
+
+def read_extracted_planned_runs(result: dict) -> PlannedRunsReading:
+    """Apply the not-read rule to an ``extract_nest_fields_from_pdf`` result.
+
+    THE ONE COPY of the rule. Both doors that show an AI-extracted run count to a
+    planner call it -- ``build_parsed_nest_from_extraction`` (the package preview
+    row, which keeps the floored ``count``) and ``POST /laser-nests/extract`` (the
+    manual modal's auto-fill, which turns a not-read count into a real null) -- so
+    the two can never disagree about what was read, how sure it is, or what the
+    planner is told. Keep it here; a second copy in a router is how they drift.
+
+    The merge scores agreement, not readability, so whatever it said about this
+    field, a count that was not cleanly read is LOW -- and so is the whole result,
+    because the overall confidence is the minimum across its fields. Without this,
+    two passes that both answered "N/A" floor to a "high" 1, and two that both
+    misread one 11-digit number pass it through "high" into the import, where it
+    overflowed the int4 column.
+    """
+    raw_runs = result.get("planned_runs")
+    count, was_read = read_planned_runs(raw_runs)
+    warning = result.get("warning")
+    own_warning = warning if isinstance(warning, str) else None
+    field_confidence = _coerce_field_confidence(result.get("confidence"))
+    confidence = result.get("extraction_confidence")
+    if was_read:
+        return PlannedRunsReading(count, True, confidence, field_confidence, own_warning)
+    return PlannedRunsReading(
+        count=count,
+        was_read=False,
+        confidence="low",
+        field_confidence={**(field_confidence or {}), "planned_runs": "low"},
+        warning=_join_warnings(own_warning, planned_runs_bound_warning(raw_runs)),
+    )
+
+
 def build_parsed_nest_from_extraction(result: dict, *, abs_path: str, rel_path: str) -> ParsedLaserNest:
     """Map an ``extract_nest_fields_from_pdf`` result dict to a ``ParsedLaserNest``.
 
     Shared by the sync package parser and the async (parallelized) preview path
     so both assemble rows identically. ``planned_runs`` floors at 1, and a floor
-    is never presented as a read: see the ``read_planned_runs`` branch below.
+    is never presented as a read: the count, both confidences and the warning come
+    from ``read_extracted_planned_runs``.
     """
     cnc_number = result.get("cnc_number")
     file_name = Path(abs_path).name
-    warning = result.get("warning")
-    row_warning = warning if isinstance(warning, str) else None
     passes = result.get("passes")
     # Canonicalize the sheet descriptors HERE, at the earliest point they exist,
     # rather than only at the DB write: the wizard shows this row to the planner
@@ -350,33 +392,20 @@ def build_parsed_nest_from_extraction(result: dict, *, abs_path: str, rel_path: 
     material, thickness, sheet_size = normalize_nest_descriptors(
         result.get("material"), result.get("thickness"), result.get("sheet_size")
     )
-    raw_runs = result.get("planned_runs")
-    planned_runs, runs_read = read_planned_runs(raw_runs)
-    field_confidence = _coerce_field_confidence(result.get("confidence"))
-    confidence = result.get("extraction_confidence")
-    if not runs_read:
-        # The merge scores agreement, not readability, so whatever it said about
-        # this field, a count that was not cleanly read is LOW -- and so is the row,
-        # because the row's confidence is the minimum across its fields. Without
-        # this, two passes that both answered "N/A" floor to a "high" 1, and two
-        # that both misread one 11-digit number pass it through "high" into the
-        # import, where it overflowed the int4 column.
-        field_confidence = {**(field_confidence or {}), "planned_runs": "low"}
-        confidence = "low"
-        row_warning = _join_warnings(row_warning, planned_runs_bound_warning(raw_runs))
+    runs = read_extracted_planned_runs(result)
     return ParsedLaserNest(
         nest_name=cnc_number or Path(file_name).stem,
         cnc_file_name=file_name,
         cnc_file_path=rel_path,
-        planned_runs=planned_runs,
+        planned_runs=runs.count,
         material=material,
         thickness=thickness,
         sheet_size=sheet_size,
         cnc_number=cnc_number,
         pdf_source_path=abs_path,
-        confidence=confidence,
-        field_confidence=field_confidence,
-        warning=row_warning,
+        confidence=runs.confidence,
+        field_confidence=runs.field_confidence,
+        warning=runs.warning,
         passes=passes if isinstance(passes, int) and not isinstance(passes, bool) else None,
     )
 

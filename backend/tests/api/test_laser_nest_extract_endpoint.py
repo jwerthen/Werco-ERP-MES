@@ -153,22 +153,29 @@ class TestExtractHappyPath:
         assert body["warning"] == "API key not configured"
 
 
+def _runs_result(planned_runs, *, confidence="high", warning=None) -> dict:
+    """An otherwise clean, two-pass extraction result carrying ``planned_runs``."""
+    return {
+        "cnc_number": "05749",
+        "material": "A36",
+        "thickness": "0.25in",
+        "sheet_size": "72.5x120",
+        "planned_runs": planned_runs,
+        "confidence": {"cnc_number": "high", "material": "high", "planned_runs": confidence},
+        "extraction_confidence": confidence,
+        "source": "ai",
+        "warning": warning,
+        "passes": 2,
+    }
+
+
 def _stub_runs(monkeypatch, planned_runs, *, confidence="high", warning=None):
-    """Stub the service with an otherwise clean, two-pass result carrying ``planned_runs``."""
+    """Stub the service with ``_runs_result(planned_runs, ...)``."""
+    result = _runs_result(planned_runs, confidence=confidence, warning=warning)
     monkeypatch.setattr(
         laser_nests_endpoint,
         "extract_nest_fields_from_pdf",
-        lambda pdf_path, file_name, company_id=None: {
-            "cnc_number": "05749",
-            "material": "A36",
-            "thickness": "0.25in",
-            "sheet_size": "72.5x120",
-            "planned_runs": planned_runs,
-            "extraction_confidence": confidence,
-            "source": "ai",
-            "warning": warning,
-            "passes": 2,
-        },
+        lambda pdf_path, file_name, company_id=None: dict(result),
     )
 
 
@@ -216,6 +223,69 @@ class TestExtractPlannedRuns:
         assert body["confidence"] == "low"
         # The service's own warning is kept, and the bound's is added to it.
         assert body["warning"].startswith(f"Verification pass skipped: API error; Run count '{raw}' looked wrong")
+
+
+class TestExtractSharesThePreviewRule:
+    """ONE not-read rule behind both doors.
+
+    The preview row (``build_parsed_nest_from_extraction``) and this response both take
+    their run count, confidence and warning from ``read_extracted_planned_runs`` in
+    ``laser_nest_service``. A second copy of that rule in the router could drift from
+    the row's, which is the gap these two tests close: the first proves the handler
+    delegates, the second that the two doors give the same answer for every shape.
+    """
+
+    def test_the_handler_delegates_to_the_service_rule(self, client, db_session, monkeypatch):
+        from app.services import laser_nest_service
+
+        real = laser_nest_service.read_extracted_planned_runs
+        seen = []
+
+        def spy(result):
+            seen.append(result.get("planned_runs"))
+            return real(result)
+
+        monkeypatch.setattr(laser_nests_endpoint, "read_extracted_planned_runs", spy)
+        _stub_runs(monkeypatch, "N/A")
+        resp = _post_extract(client, headers_for(make_user(db_session, role=UserRole.ADMIN)))
+
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        assert seen == ["N/A"]
+        assert resp.json()["planned_runs"] is None
+
+    @pytest.mark.parametrize(
+        "raw,warning",
+        [
+            (3, None),
+            ("3 sheets", None),
+            (9_999, "Verification pass skipped: API error"),
+            ("N/A", None),
+            (None, "Verification pass skipped: API error"),
+            (0, None),
+            (2.5, None),
+            (10_000, None),
+            (99_999_999_999, "Verification pass skipped: API error"),
+        ],
+    )
+    def test_the_response_and_the_preview_row_agree(self, client, db_session, monkeypatch, raw, warning):
+        from app.services.laser_nest_service import build_parsed_nest_from_extraction
+
+        _stub_runs(monkeypatch, raw, warning=warning)
+        resp = _post_extract(client, headers_for(make_user(db_session, role=UserRole.ADMIN)))
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        body = resp.json()
+        row = build_parsed_nest_from_extraction(
+            _runs_result(raw, warning=warning), abs_path="/tmp/05749.pdf", rel_path="05749.pdf"
+        )
+
+        assert body["confidence"] == row.confidence
+        assert body["warning"] == row.warning
+        if body["planned_runs"] is None:
+            # Not read: the row shows the same fact as a floored 1 flagged low.
+            assert (row.planned_runs, row.field_confidence["planned_runs"]) == (1, "low")
+        else:
+            assert body["planned_runs"] == row.planned_runs
+            assert row.field_confidence["planned_runs"] == "high"
 
 
 class TestExtractValidation:

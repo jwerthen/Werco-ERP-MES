@@ -12,8 +12,12 @@ from app.db.mixins import SoftDeleteMixin, TenantMixin
 # ``LaserNest.planned_runs`` -- manual create and PATCH (422), the package import rows
 # (400), the MCP ``add_laser_nest`` schema (``maximum``) -- and an AI-extracted count above
 # it is treated as NOT READ (floored to 1, low confidence, with a warning) rather than
-# passed through. Before the bound, such a count reached this ``Integer`` column and
-# overflowed Postgres int4 as a 500. No migration: the column is unchanged.
+# passed through. Before the bound, a count from 10,000 up to int4's 2,147,483,647 was
+# stored without complaint, and only a count past 2,147,483,647 (an 11-digit misread, say)
+# overflowed this ``Integer`` column as a 500 on Postgres. No migration: the column is
+# unchanged, and a row stored above the bound before it existed keeps its value. The
+# bound bites that row only when a write sends ``planned_runs`` -- the manual modal's
+# edit always does -- and then the count must come down to 9,999 or less (422 otherwise).
 MAX_PLANNED_RUNS = 9_999
 
 

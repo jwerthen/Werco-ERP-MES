@@ -147,6 +147,31 @@ describe('LaserNestImportWizard', () => {
     expect(await screen.findByText(/enter a cnc number for sheet-1\.pdf/i)).toBeInTheDocument();
     expect(mockApi.importLaserNestPackage).not.toHaveBeenCalled();
   });
+
+  it('blocks import and names the row when a run count is over the 9,999-per-nest limit', async () => {
+    // The server refuses it too (400), but with a raw validation dump; the wizard
+    // says it in words first, and sends nothing.
+    render(<LaserNestImportWizard open workOrderId={42} onClose={jest.fn()} onImported={jest.fn()} />);
+    await previewPackage();
+
+    fireEvent.change(screen.getByLabelText('Runs for sheet-1.pdf'), { target: { value: '10000' } });
+    fireEvent.click(screen.getByRole('button', { name: /^import 2 nests$/i }));
+
+    expect(await screen.findByText(/runs for sheet-1\.pdf must be at most 9,999/i)).toBeInTheDocument();
+    expect(mockApi.importLaserNestPackage).not.toHaveBeenCalled();
+  });
+
+  it('imports a run count of exactly 9,999', async () => {
+    render(<LaserNestImportWizard open workOrderId={42} onClose={jest.fn()} onImported={jest.fn()} />);
+    await previewPackage();
+
+    fireEvent.change(screen.getByLabelText('Runs for sheet-1.pdf'), { target: { value: '9999' } });
+    fireEvent.click(screen.getByRole('button', { name: /^import 2 nests$/i }));
+
+    await waitFor(() => expect(mockApi.importLaserNestPackage).toHaveBeenCalledTimes(1));
+    const [, payload] = mockApi.importLaserNestPackage.mock.calls[0];
+    expect(payload.rows?.[0]).toEqual(expect.objectContaining({ source_file: 'sheet-1.pdf', planned_runs: 9999 }));
+  });
 });
 
 /**

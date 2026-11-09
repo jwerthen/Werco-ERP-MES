@@ -354,7 +354,7 @@ class LaserNestPreviewRow(BaseModel):
             "and a nest that genuinely runs once are the SAME 1 here. "
             "``field_confidence['planned_runs'] == 'low'`` is the only thing that "
             "separates them -- consumers must read it before treating this as an "
-            "extracted value. Every floored or capped value carries that ``low``, "
+            "extracted value. Every floored value carries that ``low``, "
             "including a count both AI passes agreed on but that was not a number, "
             "and a count above ``MAX_PLANNED_RUNS`` (9,999) is not passed through: "
             "it reads as 1, ``low``, with a row ``warning`` asking for the count by "

@@ -23,9 +23,10 @@ A script is a contract, in both directions:
 
 Offline by construction: nothing here can reach the network, and no API key is read.
 
-Usage::
+Usage (``tests/conftest.py`` registers this module as a plugin, so the ``llm_replay``
+fixture is available everywhere under ``tests/``; import only the helpers)::
 
-    from tests.llm_replay import llm_replay, text_message  # noqa: F401  (fixture import)
+    from tests.llm_replay import text_message
 
     def test_something(llm_replay):
         replay = llm_replay([text_message('{"a": 1}'), text_message('{"a": 1}')])
