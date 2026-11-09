@@ -5530,6 +5530,14 @@ uploads go through text extraction + LLM. See
 > degrades gracefully** at the scan cap — partial text at `"medium"` confidence — rather than
 > refusing the file.
 
+> **A partly read PDF is reported (2026-11-09).** On a PDF upload to `POST /bom/import/preview` or
+> `POST /bom/import`, each page the extractor skipped or cut short (see
+> [Document Text Extraction Limits](#document-text-extraction-limits)) adds a sentence to the start of
+> the response's `warnings`. When too little text came back to send to the AI, the **400** detail
+> `"Could not extract text from document"` becomes `"Could not extract text from document."` followed
+> by those sentences, so the user sees the reason (for example, that the 90-second OCR limit ran out).
+> Word and Excel uploads never produce these warnings.
+
 > **The assembly promotion is refused when live material ties stand** (2026-08-18). Both importers
 > resolve an existing part by part number and set `part_type = assembly` whenever the document is a
 > BOM. When that part is currently a material/supply type **and at least one OPEN work-order material
@@ -5845,7 +5853,7 @@ uploads go through text extraction + LLM. See
 | POST | `/routing/{id}/operations/reorder` | Reorder operations (**400** on a released routing, **422** on a malformed body). **Also rewrites each listed operation's `operation_number` from its new `sequence`** — see the `operation_number` note below | Admin / Manager / Supervisor |
 | POST | `/routing/import/preview` | Upload a routing CSV/XLSX (multipart `file`), preview it WITHOUT writing (dry-run, fully rolled back) | Admin / Manager / Supervisor |
 | POST | `/routing/import/commit` | Commit a routing CSV/XLSX import — one draft routing per part, with one `audit_log` CREATE per routing | Admin / Manager / Supervisor |
-| POST | `/routing/generate-from-drawing` | AI step 1: upload a drawing (multipart `file` + `part_id`) and get a **proposed** routing for review — creates no routing. **404** on a soft-deleted part | Admin / Manager / Supervisor |
+| POST | `/routing/generate-from-drawing` | AI step 1: upload a drawing (multipart `file` + `part_id`) and get a **proposed** routing for review — creates no routing. **404** on a soft-deleted part. If a PDF was only partly read, each gap adds a line to `warnings` (see [Document Text Extraction Limits](#document-text-extraction-limits)) | Admin / Manager / Supervisor |
 | POST | `/routing/create-from-generation` | AI step 2: create the reviewed/edited proposal as a **draft** routing, writing one tamper-evident `audit_log` CREATE (see note). **404** on a soft-deleted part or an unknown generation session | Admin / Manager / Supervisor |
 
 > **AI routing generation — the accept step is the audited record (2026-11-05).**
@@ -8169,6 +8177,20 @@ in `RBAC_PERMISSIONS.md`.
 > PDF (≤ 20 MB; scanned/image-only PDFs are rejected) and a configured `ANTHROPIC_API_KEY` — it
 > returns **500** if the key is missing. Claude extracts the numbered clauses and persists them
 > against the standard.
+>
+> The text layer is read in the resource-limited reader process, with the QMS limits listed in
+> [Document Text Extraction Limits](#document-text-extraction-limits): 2,000 pages, 2,000,000
+> characters, 90 seconds. That read can refuse the upload with a **400** in two ways, both before
+> the AI call, so nothing is saved:
+> - `"Failed to read PDF: …"` when nothing could be read at all. Since 2026-11-09 the rest of the
+>   detail is a plain sentence, for example "The PDF could not be read. It may be damaged or not a
+>   PDF." or "Reading the PDF took longer than 90 seconds, so its text was not read.". It used to be
+>   the parser's exception text.
+> - (new 2026-11-09) `"Only part of this PDF could be read: … Split it into smaller PDFs and upload each one."` when
+>   the read stopped part-way **and** the text it got is shorter than the 100,000 characters the AI
+>   is sent. This response has no place for a warning, so the upload is refused rather than saving a
+>   clause list that silently misses the unread pages. If a partial read already covers the first
+>   100,000 characters, the upload goes ahead unchanged, because the AI never reads past that point.
 
 > **Auto-evidence supplier counts now exclude removed suppliers — expect the number to drop.** The
 > *Supplier Management & Evaluation* evidence row (`GET /qms-standards/clauses/{clause_id}/auto-evidence`,
@@ -9026,6 +9048,17 @@ call per file (at most 2 concurrent) and one `create-from-upload` call per revie
 | GET | `/po-upload/pdf/{path}` | Serve the uploaded source document for preview (`s3://` refs and local paths) | Yes |
 | GET | `/po-upload/search-parts` | Part typeahead for extraction-review matching. `q` matches **part number, name, description, and customer part number** — every whitespace-separated term must appear, then results are ranked by similar-word score so a query like `raw material` surfaces `A36 Raw Material Sheet`. `limit` **1–50**, default 10 | Yes |
 | GET | `/po-upload/search-vendors` | Vendor typeahead for extraction-review matching (`q`, `limit` **1–50**, default 10) — active, **non-soft-deleted** vendors only | Yes |
+
+> **A partly read PDF is flagged in `validation_issues` (2026-11-09).** When the extractor read only
+> part of an uploaded PDF (see [Document Text Extraction Limits](#document-text-extraction-limits)), each
+> gap becomes an entry such as
+> `{"field": "document_content", "severity": "warning", "code": "OCR_PARTIAL", "message": "Only the first 30 of 120 scanned pages were read."}`.
+> `code` is `OCR_PARTIAL` when scanned pages were skipped or cut short, and `TEXT_PARTIAL` when the
+> text layer was cut short. On a normal extraction these entries come before the field checks; only
+> the "PO number already exists" warning is listed ahead of them. The two low-confidence responses
+> (no usable text, and an AI extraction error) list them after their `error` entry. Today these are
+> the only `validation_issues` entries that carry a `code`; every other entry has just `field`,
+> `severity` and `message`.
 
 ### Receiving & Inspection
 
@@ -12499,6 +12532,69 @@ create ~201 KB. A BOM create above roughly **1300 line items** exceeds the cap; 
 data — as of 2026-07-30 the middleware only measures size. Angle brackets in a note field (ASME
 Y14.5 notation such as `2.500 <REF>`, or `<` meaning "less than") round-trip byte-for-byte
 through create/read/update. Server-rendered PDFs escape at render.
+
+## Document Text Extraction Limits
+
+Several AI document uploads read an uploaded PDF's text before calling the model: PO upload
+(`/po-upload/upload-po`, `/upload-quote`, `/upload-invoice`), BOM import (`/bom/import/preview`,
+`/bom/import`), `/routing/generate-from-drawing`, the laser-nest flattened-text fallback, and the QMS
+standard upload (`/qms-standards/{standard_id}/upload-pdf`). Since 2026-11-09 that read runs under the
+fixed limits below. They are code constants, not environment variables (`app/services/pdf_service.py`,
+`app/api/endpoints/qms_standards.py`, `app/core/parse_limits.py`).
+
+**Text layer.** pypdf runs in a separate, resource-limited child process
+(`app/services/pdf_text_reader.py`), not inside the API process. For a document within the limits
+the text is exactly what the old in-process read returned, and a test holds the two equal.
+
+| Limit | Document uploads (`pdf_service`) | QMS standard upload |
+|---|---|---|
+| File size | 64 MiB | 20 MB (the route's own upload cap) |
+| Pages read | the first 500 | the first 2,000 |
+| Characters per page | 100,000 | 100,000 |
+| Characters in total | 1,000,000 | 2,000,000 |
+| CPU time | 30 s | 60 s |
+| Wall clock | 45 s | 90 s |
+| Memory (Linux only) | 512 MiB address space | 512 MiB address space |
+
+When a page, character, CPU, memory or time limit is reached part-way through, the read stops there,
+the pages already read are kept, and a plain-language warning says so, for example "Only the first
+500 of 812 pages were read." or "Reading the PDF's text stopped after 45 seconds (pages 1–14 of 120
+read).". A parser error part-way through also keeps the earlier pages, with a warning; before
+2026-11-09 it returned no text at all. A file over the size limit is not read at all. A PDF that
+cannot be opened still yields no text, and the document uploads then try OCR.
+
+**OCR (scanned PDFs).** When the text layer yields 100 characters or fewer, the document uploads fall
+back to OCR (pdf2image + tesseract). It is bounded per document:
+
+- only the first **30 pages** are read ("Only the first 30 of 120 scanned pages were read.");
+- the whole pass gets **90 seconds**, including the wait for an OCR slot. When the time runs out, the
+  pages not yet read are named in a warning;
+- rendering a page and recognizing it each get **30 seconds**. A page that times out or cannot be
+  processed is **skipped with a warning**, and the remaining pages are still read. Before, one failure
+  threw away all OCR text;
+- pages are rendered one at a time at 300 dpi, using the page's crop box (the area a PDF viewer
+  shows). A page that would be larger than **25 megapixels** at 300 dpi, such as a large-format
+  drawing, is rendered at a lower dpi.
+
+If tesseract or poppler is not installed, OCR yields no text and no warning, as before.
+
+**Concurrency, per process.** At most **2** CPU-heavy parses run at once: PDF text-layer reads, the
+Excel parsing in BOM import and in document text extraction, and PO line-item matching. At most **2**
+OCR passes run at once. Other requests wait for a slot. A parse waits as long as it takes; an OCR pass
+waits only within its 90-second budget, and if no slot frees up it is skipped with a warning to try
+again in a minute.
+
+**Where the warnings appear.** They describe the read that produced the returned text: text-layer
+warnings when the text layer was used, OCR warnings when OCR was, and both when neither produced
+usable text.
+
+| Endpoint | Where |
+|---|---|
+| `POST /po-upload/upload-po`, `/upload-quote`, `/upload-invoice` | `validation_issues` entries with `severity: "warning"` and `code` `OCR_PARTIAL` or `TEXT_PARTIAL` (see [PO Upload](#po-upload-ai-document-extraction)) |
+| `POST /routing/generate-from-drawing` | lines in `warnings` |
+| `POST /bom/import/preview`, `POST /bom/import` | lines at the start of `warnings`, and appended to the no-text **400** detail |
+| `POST /qms-standards/{standard_id}/upload-pdf` | a **400** when the text read is shorter than the 100,000 characters the AI is sent (see [QMS Standards](#qms-standards--audit-readiness)) |
+| Laser-nest flattened-text fallback | not surfaced yet: the limits apply, but no warning reaches the preview row or the `/laser-nests/extract` result |
 
 ## Spreadsheet Exports (CSV / XLSX)
 
