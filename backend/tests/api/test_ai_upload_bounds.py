@@ -12,17 +12,21 @@ Each AI route refuses an oversized upload with **413** before it buffers the bod
 
 Every route's caps are patched down to 1 KB, so no test builds a megabyte. Everything downstream of
 the read (storage, text extraction, the LLM) is replaced by a function that fails the test if it
-runs, so a refusal is proven to happen before any work.
+runs, so a refusal is proven to happen before any work. The one exception is the test that a
+single-nest PDF just past the extractor's ~20 MB native cap is ACCEPTED at the real caps (it posts
+about 20 MB), because that is the text fallback this route must keep reachable.
 
 The laser package preview streams to disk under its own 50 MB cap (already 413) and gains three
 things, each pinned below: the same honest-size pre-check, zip-bomb caps checked against the
-central directory BEFORE any member is extracted, and both the temp-file copy and the extraction
-running on the default threadpool rather than the event loop. The package IMPORT path is
-deliberately untouched here (#9-6 takes it).
+central directory BEFORE any member is extracted, and the temp-file copy (ZIP and bare PDF) and the
+extraction running on the default threadpool rather than the event loop. The package IMPORT path is
+deliberately untouched here (#9-6 takes it); it shares only the unzip helper, which now writes each
+ZIP entry exactly once (``tests/services/test_laser_zip_limits.py``).
 """
 
 import asyncio
 import io
+import os
 import tempfile
 import zipfile
 from typing import Optional
@@ -178,8 +182,11 @@ class TestAiDocumentRoutes:
 
 def test_default_caps():
     """The production caps. PO and routing keep their 10 MB and QMS its 20 MB, now as 413 instead
-    of 400. BOM had none (20 MB, like QMS). The single-nest PDF gets the extractor's 20 MB
-    native-document cap (``laser_nest_extraction_service._MAX_NATIVE_PDF_BYTES``)."""
+    of 400. BOM had none (20 MB, like QMS). The single-nest PDF gets the laser package's 50 MB,
+    deliberately ABOVE the extractor's 20 MB native-document cap
+    (``laser_nest_extraction_service._MAX_NATIVE_PDF_BYTES``): a PDF between the two is still read
+    through the flattened-text fallback, as it was before the cap and as the bare-PDF package
+    preview still does. Capping at the native size would have turned that fallback into a 413."""
     from app.services.laser_nest_extraction_service import _MAX_NATIVE_PDF_BYTES
 
     mb = 1024 * 1024
@@ -187,8 +194,40 @@ def test_default_caps():
     assert routing_endpoint.MAX_FILE_SIZE == 10 * mb
     assert qms_endpoint.QMS_PDF_MAX_BYTES == 20 * mb
     assert bom_endpoint.BOM_IMPORT_MAX_BYTES == 20 * mb
-    assert laser_nests_endpoint.LASER_NEST_EXTRACT_MAX_BYTES == 20 * mb == _MAX_NATIVE_PDF_BYTES
     assert work_orders_endpoint.LASER_UPLOAD_MAX_BYTES == 50 * mb
+    assert laser_nests_endpoint.LASER_NEST_EXTRACT_MAX_BYTES == work_orders_endpoint.LASER_UPLOAD_MAX_BYTES
+    assert laser_nests_endpoint.LASER_NEST_EXTRACT_MAX_BYTES > _MAX_NATIVE_PDF_BYTES
+
+
+def test_laser_extract_accepts_a_pdf_past_the_native_cap_so_the_text_fallback_stays_reachable(
+    client, admin_headers, monkeypatch
+):
+    """Review finding F2: a single-nest PDF just over the extractor's native-document cap reaches
+    the extractor (which reads it through the flattened-text fallback) instead of being refused.
+
+    Real caps, no patching: the body is one native cap plus a PDF header, about 20 MB.
+    """
+    from app.services.laser_nest_extraction_service import _MAX_NATIVE_PDF_BYTES
+
+    seen: dict = {}
+
+    def _fake_extract(pdf_path, file_name, company_id=None):
+        seen["bytes"] = os.path.getsize(pdf_path)
+        return {"cnc_number": "05749", "source": "ai", "extraction_confidence": "low", "warning": None, "passes": 1}
+
+    monkeypatch.setattr(laser_nests_endpoint, "extract_nest_fields_from_pdf", _fake_extract)
+    body = b"%PDF-1.4\n" + b"\0" * _MAX_NATIVE_PDF_BYTES
+    assert len(body) > _MAX_NATIVE_PDF_BYTES
+
+    resp = client.post(
+        "/api/v1/laser-nests/extract",
+        headers=admin_headers,
+        files={"file": ("nest.pdf", io.BytesIO(body), "application/pdf")},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["cnc_number"] == "05749"
+    assert seen["bytes"] == len(body)
 
 
 # --------------------------------------------------------------------------------------------------
@@ -302,3 +341,59 @@ class TestLaserPackagePreview:
         assert resp.status_code == 200, resp.text
         assert len(resp.json()["nests"]) == 2
         assert seen == {"copy_on_loop": False, "extract_on_loop": False}
+
+    def test_bare_pdf_temp_copy_runs_off_the_event_loop(self, client, admin_headers, monkeypatch):
+        """Review finding F3: the bare-PDF branch copies its upload on a worker thread too.
+
+        A one-page PDF previews with segmentation and extraction stubbed; the ``.pdf`` temp file
+        must be created off the event loop (``_save_upload_to_temp(..., offload=True)``).
+        """
+        from pypdf import PdfWriter
+
+        writer = PdfWriter()
+        writer.add_blank_page(width=200, height=200)
+        pdf = io.BytesIO()
+        writer.write(pdf)
+
+        monkeypatch.setattr(
+            work_orders_endpoint,
+            "segment_nest_pdf",
+            lambda pdf_path, file_name, page_count, company_id=None: {
+                "nests": [{"pages": [1], "cnc_number_hint": None}],
+                "skipped_pages": [],
+                "confidence": "high",
+                "warning": None,
+            },
+        )
+        monkeypatch.setattr(
+            work_orders_endpoint,
+            "extract_nest_fields_from_pdf",
+            lambda pdf_path, file_name, company_id=None, *, cnc_hint=None, filename_is_cnc_hint=True: {
+                "cnc_number": "05749",
+                "extraction_confidence": "high",
+                "source": "ai",
+                "warning": None,
+                "passes": 1,
+            },
+        )
+        seen: list = []
+        original_mkstemp = tempfile.mkstemp
+
+        def _recording_mkstemp(*args, **kwargs):
+            suffix: Optional[str] = kwargs.get("suffix", args[0] if args else None)
+            if suffix == ".pdf":
+                seen.append(_on_event_loop())
+            return original_mkstemp(*args, **kwargs)
+
+        monkeypatch.setattr(tempfile, "mkstemp", _recording_mkstemp)
+
+        resp = client.post(
+            LASER_PREVIEW_URL,
+            headers=admin_headers,
+            files={"file": ("nests.pdf", io.BytesIO(pdf.getvalue()), "application/pdf")},
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["source_page_count"] == 1  # the bare-PDF branch ran, not the ZIP one
+        assert [row["cnc_number"] for row in resp.json()["nests"]] == ["05749"]
+        assert seen == [False], "the bare-PDF temp copy must run on a worker thread, not the event loop"

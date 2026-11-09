@@ -4299,7 +4299,8 @@ environment variable or deployment configuration change is needed.
 > not audit):
 >
 > - **Single-PDF (`POST /laser-nests/extract`).** Multipart `file` (PDF; non-PDF → **400**; over
->   **20 MB** → **413** before any work, see [AI document uploads](#ai-document-uploads)).
+>   **50 MB** → **413** before any work, see [AI document uploads](#ai-document-uploads); a PDF
+>   over the ~20 MB native cap is still read, through the flattened-text fallback).
 >   **Stateless — no DB write, no audit**; `company_id` flows through only for usage telemetry.
 >   Used by the manual-create modal to auto-fill fields from a dropped PDF. Returns
 >   `{ cnc_number, material, thickness, sheet_size, planned_runs, confidence, source, warning, passes }`
@@ -12525,7 +12526,7 @@ intake keeps its own per-file and per-batch caps, also **413**; see
 | `POST /routing/generate-from-drawing` | 10 MB | `routing.MAX_FILE_SIZE` |
 | `POST /qms-standards/{standard_id}/upload-pdf` | 20 MB | `qms_standards.QMS_PDF_MAX_BYTES` |
 | `POST /bom/import/preview`, `POST /bom/import` | 20 MB | `bom.BOM_IMPORT_MAX_BYTES` |
-| `POST /laser-nests/extract` | 20 MB (the extractor's native-PDF cap) | `laser_nests.LASER_NEST_EXTRACT_MAX_BYTES` |
+| `POST /laser-nests/extract` | 50 MB, the same as the laser package upload (a PDF over the extractor's ~20 MB native cap is read through the text fallback, not refused) | `laser_nests.LASER_NEST_EXTRACT_MAX_BYTES` |
 | `POST /work-orders/{work_order_id}/laser-nest-packages/preview`, `POST /work-orders/laser-nest-packages/standalone/preview` | 50 MB upload; a ZIP also ≤ 200 files and folders and ≤ 200 MB unpacked | `work_orders.LASER_UPLOAD_MAX_BYTES`, `laser_nest_service.LASER_ZIP_MAX_MEMBERS` / `LASER_ZIP_MAX_UNCOMPRESSED_BYTES` |
 
 The check runs in two steps (`app/core/upload_limits.py`). First the size the server counted while
@@ -12534,13 +12535,19 @@ memory. Then the file is read up to the cap plus one byte, and refused if more a
 holds even when the counted size is missing or wrong. The laser package previews take the same
 first step, then stream the upload to a temporary file and refuse once more than 50 MB has arrived;
 a ZIP's member count and unpacked size are then read from its central directory and refused before
-anything is unpacked. Any temporary file is removed on refusal.
+anything is unpacked. Unpacking writes each central-directory entry exactly once, so a file name
+repeated many times inside the ZIP cannot unpack its largest copy once per repeat; what ends up on
+disk is the last copy, as before. Any temporary file is removed on refusal.
 
 The `detail` is a plain string such as `"File too large (max 10 MB)."`; the laser package routes
 say `"Upload exceeds the 50 MB limit. Split the package into smaller batches."`, and a ZIP over the
 member or unpacked-size cap names that cap. Before 2026-11-09 the PO, routing-drawing and QMS routes
 answered an oversized file with **400**, and the BOM routes and `/laser-nests/extract` had no cap.
-The frontend shows `detail` for any status, so the message reaches the user the same way.
+The PO upload, routing drawing, QMS, BOM import and laser package screens show `detail` for any
+status, so the message reaches the user the same way. The one exception is the manual-nest modal,
+the only caller of `/laser-nests/extract`: auto-fill there is best-effort and it drops every error
+silently, a 413 included, so a PDF over 50 MB just gets no auto-fill (the PDF itself still
+attaches through the document upload).
 
 ## Spreadsheet Exports (CSV / XLSX)
 

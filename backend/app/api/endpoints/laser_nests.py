@@ -55,10 +55,13 @@ router = APIRouter()
 _NEST_WRITE_ROLES = require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])
 
 # Single-nest PDF cap for ``POST /laser-nests/extract`` (413 over it, checked before the body is read;
-# see ``app.core.upload_limits``). It equals the extractor's native-PDF cap
-# (``laser_nest_extraction_service._MAX_NATIVE_PDF_BYTES``), so every PDF this route accepts is one
-# the model can read as a document. Resolved at call time, so this constant is the one tunable.
-LASER_NEST_EXTRACT_MAX_BYTES = 20 * 1024 * 1024  # 20MB
+# see ``app.core.upload_limits``). It matches the laser package upload cap
+# (``work_orders.LASER_UPLOAD_MAX_BYTES``, 50 MB), and is deliberately ABOVE the extractor's ~20 MB
+# native-PDF cap (``laser_nest_extraction_service._MAX_NATIVE_PDF_BYTES``): a PDF between the two is
+# still read through the flattened-text fallback, exactly as the bare-PDF package preview reads it.
+# Capping at the native size would turn that fallback into a 413 that the manual-nest modal drops
+# silently. Resolved at call time, so this constant is the one tunable; a test pins the relationship.
+LASER_NEST_EXTRACT_MAX_BYTES = 50 * 1024 * 1024  # 50MB
 
 
 @router.post("/extract", response_model=LaserNestPdfExtractionResponse)
@@ -72,7 +75,8 @@ async def extract_laser_nest_from_pdf(
     Stateless: no DB write, no audit. Feeds the manual-modal auto-fill -- the
     planner still verifies and saves. ``company_id`` is passed through for
     tenant-scoped AI-usage telemetry on the underlying ``run_llm_task`` call.
-    PDFs over 20 MB are refused with 413 before any work runs.
+    PDFs over 50 MB are refused with 413 before any work runs; a PDF over the
+    extractor's ~20 MB native-document cap is still read, via the text fallback.
 
     Declared as a static literal ``/extract`` POST so it is matched ahead of the
     dynamic ``/{laser_nest_id}`` routes.

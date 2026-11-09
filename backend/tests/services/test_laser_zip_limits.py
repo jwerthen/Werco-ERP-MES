@@ -1,15 +1,19 @@
 """Laser-package zip-bomb caps (``laser_nest_service.check_laser_zip_limits``) -- roadmap #9-3b.
 
 The caps read the archive's central directory and refuse BEFORE anything is extracted, so these
-tests assert both the refusal and that the destination holds no file afterwards. The last test pins
-the assumption the size cap rests on: CPython never writes more of a member than its declared
-``file_size``, so a header that under-declares a member cannot smuggle bytes past the sum.
+tests assert both the refusal and that the destination holds no file afterwards. The last two tests
+pin the two assumptions the size cap rests on: CPython never writes more of a member than its
+declared ``file_size``, so a header that under-declares a member cannot smuggle bytes past the sum;
+and extraction writes each central-directory entry exactly once, so a name repeated many times
+cannot re-inflate its largest entry once per repeat.
 
 The endpoint mapping (413 on the preview) is in ``tests/api/test_ai_upload_bounds.py``.
 """
 
 import io
+import shutil
 import struct
+import warnings
 import zipfile
 from pathlib import Path
 
@@ -19,6 +23,7 @@ from app.services import laser_nest_service
 from app.services.laser_nest_service import (
     LaserZipLimitError,
     check_laser_zip_limits,
+    extract_laser_nest_zip,
     extract_laser_nest_zip_within_limits,
 )
 
@@ -144,3 +149,58 @@ def test_an_under_declared_member_cannot_write_past_its_declared_size(tmp_path):
         extract_laser_nest_zip_within_limits(str(zip_path), str(dest))
 
     assert sum(p.stat().st_size for p in _files_under(dest)) <= 10
+
+
+def _duplicate_name_zip(copies: int, last_size: int) -> bytes:
+    """``copies`` entries all named ``a.pdf``: every one empty except the LAST, which holds ``last_size`` zeros."""
+    buf = io.BytesIO()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)  # zipfile warns "Duplicate name" on write
+        with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for _ in range(copies - 1):
+                zf.writestr("a.pdf", b"")
+            zf.writestr("a.pdf", b"\0" * last_size)
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize(
+    "extract",
+    [extract_laser_nest_zip_within_limits, extract_laser_nest_zip],
+    ids=["preview-with-caps", "import-uncapped-until-9-6"],
+)
+def test_duplicate_member_names_cannot_multiply_the_bytes_written(tmp_path, monkeypatch, extract):
+    """The declared-size sum stays a real bound when one name repeats (review finding F1).
+
+    ``ZipFile.extractall()`` with no ``members`` walks ``namelist()`` and looks each NAME up again,
+    which always returns the LAST entry with that name -- so 199 empty ``a.pdf`` entries plus one
+    full-size ``a.pdf`` passed the sum check yet inflated and wrote the full-size entry 200 times
+    (200 x the cap from a tiny upload). Extraction must walk the central-directory entries
+    themselves: each is written once, truncated to its own declared size, so the bytes written can
+    never exceed the sum ``check_laser_zip_limits`` counted. The on-disk result is unchanged -- the
+    last duplicate still wins.
+    """
+    cap = 64 * 1024
+    monkeypatch.setattr(laser_nest_service, "LASER_ZIP_MAX_UNCOMPRESSED_BYTES", cap)
+    zip_path = tmp_path / "duplicates.zip"
+    zip_path.write_bytes(_duplicate_name_zip(copies=laser_nest_service.LASER_ZIP_MAX_MEMBERS, last_size=cap))
+    with zipfile.ZipFile(zip_path) as archive:
+        declared = sum(member.file_size for member in archive.infolist())
+        assert len(archive.infolist()) == laser_nest_service.LASER_ZIP_MAX_MEMBERS
+        assert declared == cap
+        check_laser_zip_limits(archive)  # at the member cap and at the size cap: allowed
+
+    written = {"bytes": 0}
+
+    def _counting_copy(source, target, length=0):
+        while chunk := source.read(64 * 1024):
+            target.write(chunk)
+            written["bytes"] += len(chunk)
+
+    # zipfile's extractor writes each member through shutil.copyfileobj.
+    monkeypatch.setattr(shutil, "copyfileobj", _counting_copy)
+    dest = tmp_path / "out"
+
+    extract(str(zip_path), str(dest))
+
+    assert written["bytes"] <= declared, f"wrote {written['bytes']} bytes for {declared} declared"
+    assert (dest / "a.pdf").read_bytes() == b"\0" * cap

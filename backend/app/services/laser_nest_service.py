@@ -359,10 +359,16 @@ def check_laser_zip_limits(archive: zipfile.ZipFile) -> None:
 
     Raises ``LaserZipLimitError``; reads only the central directory and writes nothing.
 
-    Summing the DECLARED ``ZipInfo.file_size`` is a sound bound, not a hopeful one: CPython's
-    extractor never yields more than a member's declared ``file_size`` (``ZipExtFile`` truncates its
-    output to that count, then fails the CRC check), so a header that under-declares a member cannot
-    write past what was counted here. Duplicate names are each counted, which only over-counts.
+    Summing the DECLARED ``ZipInfo.file_size`` is a sound bound, not a hopeful one, because of two
+    facts the extraction side must keep true:
+
+    * CPython's extractor never yields more than a member's declared ``file_size`` (``ZipExtFile``
+      truncates its output to that count, then fails the CRC check), so a header that under-declares
+      a member cannot write past what was counted here.
+    * ``_safe_extract_zip`` extracts each central-directory ENTRY exactly once (``members=`` the
+      ``infolist()``). A name that repeats is counted once per entry here and written once per entry
+      there. Extracting by NAME instead (``extractall()``'s default) would re-resolve every repeat to
+      the last, largest entry and write it once per repeat, so the sum would bound nothing.
     """
     members = archive.infolist()
     max_members = LASER_ZIP_MAX_MEMBERS
@@ -1274,10 +1280,17 @@ def _laser_operation_description(nest: ParsedLaserNest) -> str:
 
 def _safe_extract_zip(archive: zipfile.ZipFile, destination: Path) -> None:
     destination = destination.resolve()
-    for member in archive.infolist():
+    members = archive.infolist()
+    for member in members:
         target = (destination / member.filename).resolve()
         try:
             target.relative_to(destination)
         except ValueError as exc:
             raise ValueError("Zip package contains an unsafe path") from exc
-    archive.extractall(destination)
+    # ``members=`` the central-directory ENTRIES, never the default ``namelist()``. Given names,
+    # ``extractall`` looks each one up again and always gets the LAST entry with that name, so a
+    # name repeated N times inflates and writes its largest entry N times -- 200 x the zip cap
+    # from a ~200 KB upload, past ``check_laser_zip_limits``'s declared-size sum. By entry, each
+    # is written once and truncated to its own declared size. Later duplicates still overwrite
+    # earlier ones, so what ends up on disk is unchanged.
+    archive.extractall(destination, members=members)
