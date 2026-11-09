@@ -35,7 +35,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
-import app.api.endpoints.qms_standards as qms_endpoint
+import app.services.qms_extraction_service as qms_extraction_service
 from app.core.security import create_access_token
 from app.models.audit_log import AuditLog
 from app.models.company import Company
@@ -264,7 +264,9 @@ class TestQMSUploadEgressOff:
         def _raise(*args, **kwargs):
             raise LLMEgressDisabledError(company_id=COMPANY_A)
 
-        monkeypatch.setattr(qms_endpoint, "run_llm_task", _raise)
+        # The model call moved into qms_extraction_service (#9-0); patch it where it is
+        # looked up.
+        monkeypatch.setattr(qms_extraction_service, "run_llm_task", _raise)
 
         pdf = _text_pdf_bytes(
             "Quality Manual clause 4.1 Understanding the organization and its context. "
