@@ -3303,7 +3303,10 @@ async def preview_standalone_laser_nest_package(
 
     Identical parsing/extraction behavior to the ``{work_order_id}`` preview,
     just not anchored to any existing work order -- the wizard uses this before
-    a standalone import that will create a fresh part-less laser WO.
+    a standalone import that will create a fresh part-less laser WO. Same size
+    limits too: uploads over 50 MB, and ZIPs listing more than 200 files and
+    folders or unpacking to more than 200 MB, are refused with 413 before
+    anything is unpacked.
 
     The ``db`` session is here for the sheet-stock suggestion pass only; it is
     used for tenant-scoped READS (``company_id`` from the token, never the body)
@@ -3325,7 +3328,9 @@ async def preview_laser_nest_package_import(
 
     See ``_run_laser_nest_preview`` for the package-shape detection. The addressed
     WO may be an assembly parent or (since the standalone generalization) a
-    laser-cutting WO itself.
+    laser-cutting WO itself. Uploads over 50 MB, and ZIPs listing more than 200
+    files and folders or unpacking to more than 200 MB, are refused with 413
+    before anything is unpacked.
     """
     _load_parent_work_order(db, work_order_id, company_id)
     return await _run_laser_nest_preview(file=file, source_path=source_path, company_id=company_id, db=db)

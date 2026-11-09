@@ -4379,9 +4379,9 @@ environment variable or deployment configuration change is needed.
 >   files and folders (`LASER_ZIP_MAX_MEMBERS`) or more than **200 MB** unpacked
 >   (`LASER_ZIP_MAX_UNCOMPRESSED_BYTES`) — the zip-bomb guard, since the 50 MB cap counts
 >   compressed bytes only. Preview copies and unpacks on a worker thread, not the event loop.
->   **Import** keeps the streaming 50 MB cap only for now; the zip caps reach it in a later change
->   (roadmap #9-6). The local page
->   split refuses pathological amplification (pages sharing huge embedded resources that would
+>   **Import** does not yet check the counted size or the two ZIP caps — only the streaming 50 MB
+>   cap applies there, and it still copies and unpacks on the event loop. The local page split
+>   refuses pathological amplification (pages sharing huge embedded resources that would
 >   multiply on split) → **400**. The per-request AI fan-out shares one **process-global**
 >   concurrency cap (5), and the two standalone routes carry a **10/minute** per-path rate limit.
 > - **Graceful degrade.** A PDF the model can't read falls back to the **filename stem** as the
@@ -8178,9 +8178,9 @@ in `RBAC_PERMISSIONS.md`.
 | DELETE | `/qms-standards/evidence/{evidence_id}` | Remove an evidence link | Admin / Manager / Quality |
 
 > **PDF clause extraction:** `POST /qms-standards/{standard_id}/upload-pdf` requires a text-based
-> PDF (≤ 20 MB, else **413** before any work; scanned/image-only PDFs are rejected) and a configured `ANTHROPIC_API_KEY` — it
-> returns **500** if the key is missing. Claude extracts the numbered clauses and persists them
-> against the standard.
+> PDF (≤ 20 MB, else **413** before any work; scanned/image-only PDFs are rejected) and a
+> configured `ANTHROPIC_API_KEY` — it returns **500** if the key is missing. Claude extracts the
+> numbered clauses and persists them against the standard.
 
 > **Auto-evidence supplier counts now exclude removed suppliers — expect the number to drop.** The
 > *Supplier Management & Evaluation* evidence row (`GET /qms-standards/clauses/{clause_id}/auto-evidence`,
@@ -12514,8 +12514,10 @@ through create/read/update. Server-rendered PDFs escape at render.
 
 ### AI document uploads
 
-Every route that hands an uploaded document to the AI refuses an oversized file with **413**
-before it does any work — no storage write, no text extraction, no model call:
+These routes hand an uploaded document to the AI. Each refuses an oversized file with **413**
+before it does any work — no document saved, no text extraction, no model call. (Hank's document
+intake keeps its own per-file and per-batch caps, also **413**; see
+[Hank (AI shop teammate)](#hank-ai-shop-teammate).)
 
 | Route | Cap | Constant |
 |---|---|---|
@@ -12529,12 +12531,16 @@ before it does any work — no storage write, no text extraction, no model call:
 The check runs in two steps (`app/core/upload_limits.py`). First the size the server counted while
 receiving the multipart body: over the cap, the request is refused without the file being read into
 memory. Then the file is read up to the cap plus one byte, and refused if more arrived, so the bound
-holds even when the counted size is missing or wrong. The `detail` is a plain string such as
-`"File too large (max 10 MB)."`; the laser package routes say
-`"Upload exceeds the 50 MB limit. Split the package into smaller batches."`, and a ZIP over the
-member or unpacked-size cap names that cap. The PO routes answered **400** for an oversized file
-before 2026-11-09; the frontend shows `detail` for any status, so the message reaches the user the
-same way.
+holds even when the counted size is missing or wrong. The laser package previews take the same
+first step, then stream the upload to a temporary file and refuse once more than 50 MB has arrived;
+a ZIP's member count and unpacked size are then read from its central directory and refused before
+anything is unpacked. Any temporary file is removed on refusal.
+
+The `detail` is a plain string such as `"File too large (max 10 MB)."`; the laser package routes
+say `"Upload exceeds the 50 MB limit. Split the package into smaller batches."`, and a ZIP over the
+member or unpacked-size cap names that cap. Before 2026-11-09 the PO, routing-drawing and QMS routes
+answered an oversized file with **400**, and the BOM routes and `/laser-nests/extract` had no cap.
+The frontend shows `detail` for any status, so the message reaches the user the same way.
 
 ## Spreadsheet Exports (CSV / XLSX)
 
