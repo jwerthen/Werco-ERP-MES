@@ -253,6 +253,55 @@ class TestE2EPostgresVerifiersRunFirst:
         )
 
 
+_FLOATING_RUNNER_RE = re.compile(r"-latest\b")
+_PLAYWRIGHT_INSTALL_RE = re.compile(r"\bplaywright\s+install\b")
+
+
+def _floating_runner_playwright_jobs(workflow: dict) -> list:
+    """Jobs that install Playwright browsers on a floating (``*-latest``) runner image."""
+    offenders = []
+    for job_key, job in (workflow.get("jobs") or {}).items():
+        installs = any(_PLAYWRIGHT_INSTALL_RE.search(step.get("run") or "") for step in job.get("steps") or [])
+        runner = job.get("runs-on")
+        labels = runner if isinstance(runner, list) else [runner]
+        if installs and any(isinstance(label, str) and _FLOATING_RUNNER_RE.search(label) for label in labels):
+            offenders.append(f"job={job_key} runs-on={runner!r}")
+    return offenders
+
+
+class TestPlaywrightJobsPinTheirRunnerImage:
+    """A job that runs ``playwright install`` must name an explicit runner image.
+
+    ``npx playwright install --with-deps`` supports only the OS images on Playwright's own
+    support matrix. When GitHub rolled ``ubuntu-latest`` to 26.04 (~2026-11-08), Playwright
+    1.58 refused to install Chromium there and every E2E run, the nightly on main included,
+    died at the install step for days without running a test. E2E is non-blocking, so the
+    red X looked like ordinary flakiness. Pinning the image means GitHub cannot move it out
+    from under the browser install; moving the pin forward is then a deliberate change made
+    together with a Playwright bump that supports the new image.
+
+    Validated both ways: against the pre-change e2e.yml (``runs-on: ubuntu-latest``) this
+    fails naming ``job=e2e``; against the pinned ``ubuntu-24.04`` it passes.
+    """
+
+    @pytest.mark.parametrize("workflow_name", sorted(path.name for path in WORKFLOWS_DIR.glob("*.yml")))
+    def test_no_playwright_install_runs_on_a_floating_image(self, workflow_name: str) -> None:
+        offenders = _floating_runner_playwright_jobs(_load_workflow(workflow_name))
+        assert not offenders, (
+            f"{workflow_name}: these jobs install Playwright browsers on a floating runner image, "
+            "which GitHub can move to an OS Playwright does not support yet. Pin an explicit "
+            "image (e.g. ubuntu-24.04):\n  " + "\n  ".join(offenders)
+        )
+
+    def test_the_e2e_workflow_still_installs_playwright(self) -> None:
+        # Without this, renaming the install step's command would make the guard above
+        # vacuously green: no job would "install Playwright", so none could be flagged.
+        jobs = (_load_workflow("e2e.yml").get("jobs") or {}).values()
+        assert any(
+            _PLAYWRIGHT_INSTALL_RE.search(step.get("run") or "") for job in jobs for step in job.get("steps") or []
+        ), "e2e.yml no longer runs `playwright install`; update TestPlaywrightJobsPinTheirRunnerImage"
+
+
 class TestPrCheckDoesNotDuplicateTheBackendSuite:
     """The backend gate must live in exactly ONE place, and it must still exist.
 
