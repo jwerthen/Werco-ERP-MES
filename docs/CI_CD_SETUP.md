@@ -126,6 +126,14 @@ overrides are required — `frontend/e2e/fixtures.ts` defaults to `manager@werco
 `operator@werco.com`, which the seed does **not** create. See
 [ENVIRONMENT_VARIABLES.md](./ENVIRONMENT_VARIABLES.md) → E2E Testing.
 
+**Pinned runner image (`ubuntu-24.04`, not `ubuntu-latest`).** `npx playwright install
+--with-deps` supports only the OS images on Playwright's own support matrix. When GitHub
+rolled `ubuntu-latest` to 26.04 (~2026-11-08), Playwright 1.58 refused to install Chromium
+and every run, the nightly included, died at the install step without running a test. To
+move to a newer image, bump `@playwright/test` to a release that supports it **in the same
+change**. `backend/tests/test_ci_workflow_gates.py` fails any workflow job that runs
+`playwright install` on a `*-latest` label.
+
 **Intentionally non-blocking.** The job is a separate workflow, not a required status
 check, so failures stay visible on PRs without blocking merges until the suite's flake
 behavior in CI is known. Promotion path: add the "Playwright E2E" job to the `main`
