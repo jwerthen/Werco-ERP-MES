@@ -1257,7 +1257,10 @@ runner (Postgres 15 service → `python -m scripts.seed_data` → uvicorn with
 no repo secrets. It is not a required status check until its flake behavior in CI is
 known; the promotion path is adding the "Playwright E2E" job to branch protection. The
 HTML report is always uploaded as the `playwright-report` artifact (14-day retention);
-backend/vite logs upload on failure. Details in `docs/CI_CD_SETUP.md`.
+backend/vite logs upload on failure. The job pins its runner to `ubuntu-24.04` rather than
+`ubuntu-latest`, because Playwright's browser install supports only the images on its own
+support matrix; move the pin only together with a Playwright bump. Details in
+`docs/CI_CD_SETUP.md`.
 
 ## Security Considerations
 
