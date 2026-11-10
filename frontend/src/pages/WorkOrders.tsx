@@ -1,6 +1,6 @@
 import { useQueuedSearchParams } from '../hooks/useQueuedSearchParams';
 import { useWorkOrderBrowse } from '../hooks/useWorkOrderBrowse';
-import { WorkOrderBrowseParams } from '../types/workOrderBrowse';
+import { WorkOrderBrowseParams, WorkOrderTypeFilter } from '../types/workOrderBrowse';
 import { useTableWorkspace } from '../hooks/useTableWorkspace';
 import { TableWorkspaceControls } from '../components/ui/TableWorkspaceControls';
 import { getPriorityClasses, getPriorityLabel } from '../utils/priority';
@@ -35,6 +35,7 @@ import {
   CheckIcon,
   XMarkIcon,
   BookmarkSquareIcon,
+  FireIcon,
 } from '@heroicons/react/24/outline';
 import { SkeletonTable } from '../components/ui/Skeleton';
 import {
@@ -102,6 +103,22 @@ const groupOptions: { value: GroupBy; label: string }[] = [
   { value: 'part', label: 'By Part' },
   { value: 'status', label: 'By Status' },
 ];
+
+/**
+ * One-click quick filter over `work_order_type`, server-side (`work_order_type` on
+ * `GET /work-orders/browse`). Nest packages are the `laser_cutting` work orders —
+ * standalone nest jobs AND the laser children the import hangs off a production
+ * job — so the planner reaches them without paging past every production order.
+ * Rides in the URL as `?type=` like every other filter (absent = all types).
+ */
+const typeOptions: { value: WorkOrderTypeFilter | ''; label: string }[] = [
+  { value: '', label: 'All types' },
+  { value: 'laser_cutting', label: 'Nest packages' },
+  { value: 'production', label: 'Production' },
+];
+
+const parseTypeFilter = (value: string | null): WorkOrderTypeFilter | '' =>
+  value === 'laser_cutting' || value === 'production' ? value : '';
 
 const formatStatusLabel = (status: string) => status.replace('_', ' ');
 
@@ -580,6 +597,9 @@ export default function WorkOrders() {
   // changes are handled by the loadRequestRef race guard below.
   const statusFilter = searchParams.get('status') ?? '';
   const customerFilter = searchParams.get('customer') ?? '';
+  // An unknown `?type=` (hand-edited URL, stale bookmark) reads as "all types"
+  // rather than reaching the server, whose enum would 422 the whole list.
+  const typeFilter = parseTypeFilter(searchParams.get('type'));
   const dashboardScope = ['overdue', 'due_today'].includes(searchParams.get('scope') || '') ? searchParams.get('scope') : null;
   const hideCOTS = searchParams.get('cots') !== '1';
   const groupParam = searchParams.get('group');
@@ -601,12 +621,14 @@ export default function WorkOrders() {
   // COTS / grouping params instead of wiping them.
   const setActiveTab = (value: WorkOrdersTab) => setFilterParam('tab', value === 'orders' ? '' : value);
   const setCustomerFilter = (value: string) => setFilterParam('customer', value);
+  const setTypeFilter = (value: WorkOrderTypeFilter | '') => setFilterParam('type', value);
   const setHideCOTS = (hide: boolean) => setFilterParam('cots', hide ? '' : '1');
   const setGroupBy = (value: GroupBy) => setFilterParam('group', value === 'none' ? '' : value);
 
   const browse = useWorkOrderBrowse({
     status: statusFilter || undefined, search: debouncedSearch || undefined,
     customer: customerFilter || undefined, hide_cots: hideCOTS,
+    work_order_type: typeFilter || undefined,
     scope: dashboardScope as 'overdue' | 'due_today' | undefined || undefined,
     sort: (browseSort?.key || 'priority') as WorkOrderBrowseParams['sort'],
     direction: browseSort?.dir || 'asc', group: groupBy,
@@ -1345,11 +1367,11 @@ export default function WorkOrders() {
   );
 
   const workspace = useTableWorkspace('work-orders', 'orders', workOrderColumns,
-    { search, status: statusFilter, customer: customerFilter, scope: dashboardScope || '', cots: hideCOTS ? '' : '1', group: groupBy === 'none' ? '' : groupBy },
+    { search, status: statusFilter, customer: customerFilter, type: typeFilter, scope: dashboardScope || '', cots: hideCOTS ? '' : '1', group: groupBy === 'none' ? '' : groupBy },
     filters => {
       const next = new URLSearchParams(searchParams);
       if (filters.search) next.set('search', filters.search); else next.delete('search');
-      for (const key of ['status', 'customer', 'scope', 'cots', 'group']) {
+      for (const key of ['status', 'customer', 'type', 'scope', 'cots', 'group']) {
         const value = filters[key];
         if (typeof value === 'string' && value) next.set(key, value); else next.delete(key);
       }
@@ -1684,6 +1706,38 @@ export default function WorkOrders() {
       {dashboardScope && <div className="flex flex-wrap items-center gap-3 text-sm text-slate-300" role="status"><span>Dashboard: {dashboardScope === 'overdue' ? 'Overdue' : 'Due today'} work orders · Central time</span><button className="text-blue-300 underline" onClick={() => setFilterParam('scope', '')}>Clear dashboard filter</button></div>}
       {/* Filters */}
       <div className="card rounded-sm border-fd-line p-2.5 sm:p-3" data-tour="wo-filters">
+        {/* Type quick filter. Counts come from the server and ignore the type filter
+            itself, so each chip says what clicking it would show under the other
+            filters. They are hidden until the first response carries them. */}
+        <div className="mb-2 flex flex-wrap items-center gap-1.5 border-b border-fd-line pb-2" role="group" aria-label="Work order type">
+          {typeOptions.map(option => {
+            const active = typeFilter === option.value;
+            const counts = browse.type_counts ?? {};
+            const hasCounts = Object.keys(counts).length > 0;
+            const count = option.value
+              ? counts[option.value] ?? 0
+              : Object.values(counts).reduce((sum, value) => sum + value, 0);
+            return (
+              <button
+                key={option.value || 'all'}
+                type="button"
+                onClick={() => setTypeFilter(option.value)}
+                aria-pressed={active}
+                className={`inline-flex items-center gap-1.5 rounded-sm border px-3 py-1.5 text-sm font-medium transition-colors ${
+                  active
+                    ? 'border-fd-blue/50 bg-fd-blue/20 text-fd-blue'
+                    : 'border-fd-line bg-slate-900/70 text-slate-300 hover:border-fd-line-bright'
+                }`}
+              >
+                {option.value === 'laser_cutting' && <FireIcon className="h-4 w-4 flex-shrink-0" aria-hidden="true" />}
+                {option.label}
+                {hasCounts && (
+                  <span className={`tabular-nums text-xs ${active ? 'text-fd-blue' : 'text-slate-500'}`}>{count}</span>
+                )}
+              </button>
+            );
+          })}
+        </div>
         <div className="grid grid-cols-1 xs:grid-cols-2 lg:grid-cols-[minmax(18rem,1fr)_11rem_13rem_11rem] gap-2 sm:gap-3">
           {/* Search */}
           <div className="relative min-w-0 xs:col-span-2 lg:col-span-1">

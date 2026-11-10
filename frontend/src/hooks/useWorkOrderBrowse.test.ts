@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import api from '../services/api';
 import { useWorkOrderBrowse } from './useWorkOrderBrowse';
-import { WorkOrderBrowseResponse } from '../types/workOrderBrowse';
+import { WorkOrderBrowseResponse, WorkOrderTypeFilter } from '../types/workOrderBrowse';
 import { WorkOrderSummary } from '../types';
 jest.mock('../services/api', () => ({ __esModule: true, default: { browseWorkOrders: jest.fn() } }));
 const request = api.browseWorkOrders as jest.Mock;
@@ -15,6 +15,7 @@ const response = (ids: number[], total = 123, skip = 0): WorkOrderBrowseResponse
   customers: ['Acme'],
   customers_truncated: false,
   group_totals: {},
+  type_counts: { production: total, laser_cutting: 0 },
 });
 const ids = (start: number, end: number) => Array.from({ length: end - start }, (_, i) => start + i);
 function deferred<T>() {
@@ -108,4 +109,45 @@ test('late reads after account change cannot reveal previous company rows', asyn
   rerender();
   await act(async () => pending.resolve(response([99])));
   expect(result.current.workOrders).toEqual([]);
+});
+
+test('type counts survive a filter change until the new response lands, then take its values', async () => {
+  const pending = deferred<WorkOrderBrowseResponse>();
+  request
+    .mockResolvedValueOnce({ ...response([1], 5), type_counts: { production: 3, laser_cutting: 2 } })
+    .mockReturnValueOnce(pending.promise);
+  const { result, rerender } = renderHook(
+    ({ work_order_type }: { work_order_type?: WorkOrderTypeFilter }) => useWorkOrderBrowse({ work_order_type }),
+    { initialProps: {} }
+  );
+  await act(async () => {
+    await result.current.loadWorkOrders();
+  });
+  expect(result.current.type_counts).toEqual({ production: 3, laser_cutting: 2 });
+  rerender({ work_order_type: 'laser_cutting' });
+  // Rows from the old filter are hidden at once, but the chip counts are not blanked.
+  expect(result.current.workOrders).toEqual([]);
+  expect(result.current.type_counts).toEqual({ production: 3, laser_cutting: 2 });
+  act(() => {
+    void result.current.loadWorkOrders();
+  });
+  expect(result.current.refreshing).toBe(true);
+  expect(result.current.type_counts).toEqual({ production: 3, laser_cutting: 2 });
+  expect(request).toHaveBeenLastCalledWith({ work_order_type: 'laser_cutting', skip: 0, limit: 50 });
+  await act(async () => pending.resolve({ ...response([2], 2), type_counts: { production: 4, laser_cutting: 2 } }));
+  expect(result.current.refreshing).toBe(false);
+  expect(result.current.type_counts).toEqual({ production: 4, laser_cutting: 2 });
+  expect(result.current.workOrders.map(row => row.id)).toEqual([2]);
+});
+
+test('type counts from the previous account are not carried across an account change', async () => {
+  request.mockResolvedValueOnce({ ...response([1]), type_counts: { production: 7, laser_cutting: 3 } });
+  const { result, rerender } = renderHook(() => useWorkOrderBrowse({}));
+  await act(async () => {
+    await result.current.loadWorkOrders();
+  });
+  expect(result.current.type_counts).toEqual({ production: 7, laser_cutting: 3 });
+  sessionStorage.setItem('user', JSON.stringify({ id: 2, company_id: 2 }));
+  rerender();
+  expect(result.current.type_counts).toEqual({});
 });

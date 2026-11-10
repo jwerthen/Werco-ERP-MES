@@ -10,7 +10,7 @@ Migration `097_team_workspaces` follows `096_working_calendars`. It enables RLS 
 
 | Screen | Saved configuration |
 | --- | --- |
-| Work Orders | Search, status/customer/COTS/date scope, grouping, server sort, columns, density |
+| Work Orders | Search, status/customer/type/COTS/date scope, grouping, server sort, columns, density |
 | Purchasing, Quality | Existing private table workspaces now support explicit team views through the shared control |
 | Inventory | Independent summary/detail layouts, sort/columns/density, text/group/low-stock filters |
 | Shipping ready queue | Text filter, columns, sort and density; original due-date default retained |

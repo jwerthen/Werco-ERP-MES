@@ -1241,3 +1241,7 @@ class WorkOrderBrowseResponse(BaseModel):
     customers: List[str]
     customers_truncated: bool = False
     group_totals: Dict[str, int]
+    # Active rows per ``work_order_type`` under every OTHER filter (the type filter
+    # itself is excluded so each quick-filter chip can show its own count). Both
+    # WorkOrderType values are always present, zero-filled.
+    type_counts: Dict[str, int] = Field(default_factory=dict)

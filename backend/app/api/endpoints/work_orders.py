@@ -2144,6 +2144,10 @@ def browse_orders(
     customer: Optional[str] = Query(None, max_length=255),
     hide_cots: bool = True,
     scope: Optional[Literal["overdue", "due_today"]] = None,
+    work_order_type: Optional[WorkOrderType] = Query(
+        None,
+        description="Only this work-order type: 'laser_cutting' = nest packages, 'production' = everything else.",
+    ),
     sort: Literal["work_order_number", "part", "customer", "due_date", "priority", "status"] = "priority",
     direction: Literal["asc", "desc"] = "asc",
     group: Literal["none", "customer", "part", "status"] = "none",
@@ -2151,7 +2155,13 @@ def browse_orders(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Server-filtered page plus exact persisted-record counts; never reconciles on read."""
+    """Server-filtered page plus exact persisted-record counts; never reconciles on read.
+
+    ``work_order_type=laser_cutting`` narrows the list to nest packages (standalone laser
+    work orders and the laser children of production jobs). ``type_counts`` reports how
+    many rows each type would show under the other filters, so a client can label the
+    choice without a second request.
+    """
     require_workspace_access(db, current_user, company_id, "work-orders")
     response.headers["Cache-Control"] = "no-store"
     return browse_work_orders(
@@ -2164,6 +2174,7 @@ def browse_orders(
         customer=customer,
         hide_cots=hide_cots,
         scope=scope,
+        work_order_type=work_order_type,
         sort=sort,
         direction=direction,
         group=group,

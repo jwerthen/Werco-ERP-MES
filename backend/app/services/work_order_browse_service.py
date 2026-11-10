@@ -7,7 +7,7 @@ from sqlalchemy import and_, case, func, or_
 from sqlalchemy.orm import joinedload, selectinload
 
 from app.models.part import Part, PartType
-from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus
+from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus, WorkOrderType
 from app.schemas.work_order import WorkOrderSummary
 from app.services.work_order_state_service import work_order_operation_progress
 
@@ -52,6 +52,7 @@ def browse_work_orders(
     customer=None,
     hide_cots=True,
     scope=None,
+    work_order_type=None,
     sort='priority',
     direction='asc',
     group='none',
@@ -92,8 +93,15 @@ def browse_work_orders(
         query = query.filter(overdue)
     elif scope == 'due_today':
         query = query.filter(due_today)
+    # The type filter (production vs. laser-cutting nest package) is a FACET: the
+    # customer list below honors it, and `type_counts` deliberately ignores it so the
+    # quick-filter chips can say how many of each type the OTHER filters leave --
+    # "Nest packages (12)" must not read 0 just because "Production" is selected.
+    work_order_type = getattr(work_order_type, 'value', work_order_type)
+    type_predicate = WorkOrder.work_order_type == work_order_type if work_order_type else None
+    customer_query = query.filter(type_predicate) if type_predicate is not None else query
     customer_rows = (
-        query.with_entities(WorkOrder.customer_name)
+        customer_query.with_entities(WorkOrder.customer_name)
         .filter(WorkOrder.customer_name.is_not(None), WorkOrder.customer_name != '')
         .distinct()
         .order_by(WorkOrder.customer_name)
@@ -102,6 +110,14 @@ def browse_work_orders(
     )
     if customer:
         query = query.filter(WorkOrder.customer_name == customer)
+    type_counts = {member.value: 0 for member in WorkOrderType}
+    type_counts.update(
+        query.with_entities(WorkOrder.work_order_type, func.count(WorkOrder.id))
+        .group_by(WorkOrder.work_order_type)
+        .all()
+    )
+    if type_predicate is not None:
+        query = query.filter(type_predicate)
     total, overdue_count, in_progress_count, today_count = query.with_entities(
         func.count(WorkOrder.id),
         func.sum(case((overdue, 1), else_=0)),
@@ -163,4 +179,5 @@ def browse_work_orders(
         'customers': [row[0] for row in customer_rows[:1000]],
         'customers_truncated': len(customer_rows) > 1000,
         'group_totals': groups,
+        'type_counts': type_counts,
     }
