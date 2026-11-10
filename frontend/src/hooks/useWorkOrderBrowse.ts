@@ -15,6 +15,7 @@ const empty: WorkOrderBrowseResponse = {
   customers: [],
   customers_truncated: false,
   group_totals: {},
+  type_counts: {},
 };
 
 /** Fetch only requested windows. A scope/generation guard prevents stale filters or sessions replacing rows. */
@@ -24,7 +25,13 @@ export function useWorkOrderBrowse(params: WorkOrderBrowseParams) {
   const current = useRef(scope);
   current.current = scope;
   const sequence = useRef(0);
-  const facets = useRef<{ identity: string; customers: string[] }>({ identity, customers: [] });
+  // Facets survive a refetch so the customer list and the type-chip counts don't
+  // blank (or read 0) for the length of every filter change.
+  const facets = useRef<{ identity: string; customers: string[]; type_counts: Record<string, number> }>({
+    identity,
+    customers: [],
+    type_counts: {},
+  });
   const busy = useRef(false);
   const [state, setState] = useState({ scope, response: empty, loading: true, error: false, nextSkip: 0 });
   const latest = useRef(state);
@@ -64,7 +71,7 @@ export function useWorkOrderBrowse(params: WorkOrderBrowseParams) {
           group_totals: Object.assign({}, ...responses.map(row => row.group_totals)),
         };
         if (sequence.current !== seq || current.current !== scope || identity !== workspaceIdentity()) return;
-        facets.current = { identity, customers: response.customers };
+        facets.current = { identity, customers: response.customers, type_counts: response.type_counts ?? {} };
         setState(previous => {
           const keep = append && previous.scope === scope && response.skip === skip;
           const items = keep ? [...previous.response.items, ...response.items] : response.items;
@@ -128,6 +135,10 @@ export function useWorkOrderBrowse(params: WorkOrderBrowseParams) {
     ...visible.response,
     customers:
       visible.loading && facets.current.identity === identity ? facets.current.customers : visible.response.customers,
+    type_counts:
+      visible.loading && facets.current.identity === identity
+        ? facets.current.type_counts
+        : visible.response.type_counts,
     workOrders: visible.response.items,
     setWorkOrders: setItems,
     loading: visible.loading && visible.response.items.length === 0,

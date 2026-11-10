@@ -119,7 +119,7 @@ export const tours: Record<string, Tour> = {
         target: '[data-tour="wo-filters"]',
         title: 'Filter & Search',
         description:
-          'Filter work orders by status, priority, customer, or date range. Use the search to find specific work order numbers.',
+          'Use the type chips to show only nest packages or production orders, then narrow by status or customer, or group the list. Search finds work order, unit, part, or customer numbers.',
         position: 'bottom',
         path: '/work-orders',
       },
