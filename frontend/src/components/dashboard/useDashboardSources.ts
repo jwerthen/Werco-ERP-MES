@@ -15,9 +15,9 @@
  *   any fetch in flight, but not `hardMinIntervalMs`;
  * - after an error the next tick retries once `min(minIntervalMs, 60 s)` has elapsed;
  * - a key that becomes needed is fetched immediately (unless the module cache can seed it,
- *   below); a key that stops being needed has its state dropped (so the page's "widget
- *   errors" banner never names a source nothing shows) and its in-flight result is not
- *   applied to this mount's state;
+ *   below); a key that stops being needed has its state and its per-key meta dropped, and
+ *   its in-flight result is not applied — so a widget removed and re-added starts clean
+ *   (loading, never the old "not available" or error) while it is asked again;
  * - HTTP 403 is terminal (`forbidden`) for the key while this mount keeps it — a remount, or
  *   removing and re-adding the widget, asks the server again — and the session scope change
  *   resets it;
@@ -28,9 +28,10 @@
  *   keeps the error-retry cadence instead of passing the last result off as fresh. Every
  *   outcome is written when the request SETTLES, even if its result is no longer current
  *   (the user left `/`, or removed the widget, while it was in flight), ordered by attempt so
- *   a late answer never overwrites a newer one; and a mount that needs a key while a newer
- *   attempt of it is still in flight adopts that attempt — its floors and its outcome —
- *   instead of sending a duplicate.
+ *   a late answer never overwrites a newer one. A mount that needs a key while a newer
+ *   attempt of it is still in flight follows that attempt's outcome, and while it is younger
+ *   than the in-flight grace also adopts it for the floors instead of sending a duplicate
+ *   (see `seedFromCache`).
  *
  * Api methods take no AbortSignal; the per-key sequence is what discards stale results.
  * Every fetch tells its spec whether it is `forced` (a user's refresh / retry), so a source
@@ -56,7 +57,8 @@ export const SOURCE_ERROR_MESSAGE = 'Could not refresh';
  * outlives the mount. Results can settle out of order, so every write — success, failure and
  * refusal alike — is ordered by ATTEMPT: one module-wide counter stamped when a fetch starts.
  * Never by clock time — two fetches can start in the same millisecond, and the wall clock can
- * step backwards. Times are kept only for the floors and the error-retry cadence.
+ * step backwards. Times are kept for what is genuinely about time: the TTL and `updatedAt`
+ * (`verifiedAt`), the floors, the error-retry cadence and the in-flight grace (`startedAt`).
  *
  * Per cache key there are three records, each holding the newest attempt of its kind that no
  * newer attempt has superseded: the verified data (`sourceCache`), a failure NEWER than that
@@ -80,8 +82,10 @@ type FetchOutcome = 'success' | 'failure' | 'refused';
 
 /**
  * Cached-source fetches still in flight, by cache key, across hook instances: a remount of `/`
- * can start while the previous mount's request has not answered yet, and adopts it rather than
- * duplicating it. `settled` resolves with the outcome once that fetch's result is in the cache.
+ * can start while the previous mount's request has not answered yet, and follows (and, while it
+ * is young enough, adopts) it rather than duplicating it. `settled` resolves with the outcome
+ * once that fetch's result has been offered to the cache (an outcome older than what the cache
+ * already holds is not written).
  */
 interface PendingFetch extends AttemptMark {
   settled: Promise<FetchOutcome>;

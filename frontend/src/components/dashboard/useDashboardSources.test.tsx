@@ -178,6 +178,77 @@ describe('useDashboardSources', () => {
     await act(async () => equipmentPending.resolve('late'));
     expect(result.current.sources.equipment).toBeUndefined();
     expect(Object.keys(result.current.sources)).toEqual(['stock']);
+
+    // Re-added: asked again, and the late answer for the removed key was never applied.
+    equipment.mockImplementation(() => new Promise<string>(() => undefined));
+    rerender({ neededKey: 'equipment,stock', scope: 'scope-a' });
+    expect(equipment).toHaveBeenCalledTimes(2);
+    expect(result.current.sources.equipment).toMatchObject({ data: null, loading: true });
+  });
+
+  it('a widget removed after a 403 and re-added starts clean while it is asked again', async () => {
+    const equipment = jest
+      .fn<Promise<unknown>, []>()
+      .mockRejectedValueOnce(forbidden())
+      .mockImplementation(() => new Promise(() => undefined));
+    const { result, rerender } = setup('equipment', { equipment: spec(equipment) });
+    await flush();
+    expect(result.current.sources.equipment).toMatchObject({ forbidden: true, loading: false });
+
+    rerender({ neededKey: '', scope: 'scope-a' });
+    rerender({ neededKey: 'equipment', scope: 'scope-a' });
+    expect(equipment).toHaveBeenCalledTimes(2);
+    expect(result.current.sources.equipment).toMatchObject({ forbidden: false, loading: true, data: null });
+  });
+
+  it('a success after failures puts the source back on its normal floor', async () => {
+    const fetch = jest
+      .fn<Promise<unknown>, []>()
+      .mockResolvedValueOnce('first')
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValue('recovered');
+    const { result } = setup('deliveryKpis', { deliveryKpis: spec(fetch, { minIntervalMs: 600_000 }) });
+    await flush();
+
+    now += 600_000;
+    await act(() => result.current.refresh(false));
+    expect(result.current.sources.deliveryKpis).toMatchObject({ error: 'Could not refresh' });
+    now += ERROR_RETRY_CAP_MS;
+    await act(() => result.current.refresh(false));
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(result.current.sources.deliveryKpis).toMatchObject({ data: 'recovered', error: null });
+
+    // Recovered: not every 60 s any more, but the 10-minute floor from the recovering fetch.
+    now += ERROR_RETRY_CAP_MS;
+    await act(() => result.current.refresh(false));
+    expect(fetch).toHaveBeenCalledTimes(3);
+    now += 600_000 - ERROR_RETRY_CAP_MS;
+    await act(() => result.current.refresh(false));
+    expect(fetch).toHaveBeenCalledTimes(4);
+  });
+
+  it('a hung retry is protected by the full floor when the floor is longer than the 30 s grace', async () => {
+    const hung = deferred<unknown>();
+    const fetch = jest
+      .fn<Promise<unknown>, []>()
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockReturnValueOnce(hung.promise)
+      .mockResolvedValue('replacement');
+    const { result } = setup('maintenance', { maintenance: spec(fetch, { minIntervalMs: 120_000 }) });
+    await flush();
+    now += ERROR_RETRY_CAP_MS;
+    act(() => {
+      void result.current.refresh(false); // starts the retry, which hangs
+    });
+    expect(fetch).toHaveBeenCalledTimes(2);
+
+    // 60 s into the hung retry: past 30 s, but younger than the 120 s floor — not replaced.
+    now += 60_000;
+    await act(() => result.current.refresh(false));
+    expect(fetch).toHaveBeenCalledTimes(2);
+    now += 60_000;
+    await act(() => result.current.refresh(false));
+    expect(fetch).toHaveBeenCalledTimes(3);
   });
 
   it('never drops an in-flight result when another key refreshes (per-key sequence)', async () => {
@@ -911,9 +982,9 @@ describe('useDashboardSources', () => {
 
     describe('a request too old to adopt is still followed', () => {
       // t=0 first load is slow; t=5 s a manual refresh supersedes it; the first load answers at
-      // t=10 s (cached, not shown: it is not current); the refresh hangs; the user leaves at
-      // t=60 s and returns at t=125 s — the data is still fresh, but the refresh is 120 s old,
-      // past the 120 s in-flight grace, so it is not adopted.
+      // t=20 s (cached, not shown: it is not current); the refresh hangs; the user leaves at
+      // t=60 s and returns at t=135 s — the data is fresh (115 s old) and the refresh 130 s old,
+      // clearly past the 120 s in-flight grace, so it is followed but not adopted.
       async function returnWhileOldRefreshHangs() {
         const firstLoad = deferred<unknown>();
         const refresh = deferred<unknown>();
@@ -928,12 +999,12 @@ describe('useDashboardSources', () => {
         act(() => {
           void first.result.current.refresh(true);
         });
-        now += 5_000;
+        now += 15_000;
         firstLoad.resolve('first');
         await flush();
-        now += 50_000;
+        now += 40_000;
         first.unmount();
-        now += 65_000;
+        now += 75_000;
         const second = setup('actionInbox', specs);
         expect(fetch).toHaveBeenCalledTimes(2);
         expect(second.result.current.sources.actionInbox).toMatchObject({ data: 'first', error: null });
@@ -1067,6 +1138,94 @@ describe('useDashboardSources', () => {
       now += 40_000;
       await act(() => second.result.current.refresh(false));
       expect(fetch).toHaveBeenCalledTimes(4);
+      second.unmount();
+    });
+
+    it('adopts an in-flight request older than 30 s while it is younger than the floor', async () => {
+      const refresh = deferred<unknown>();
+      const fetch = jest
+        .fn<Promise<unknown>, []>()
+        .mockResolvedValueOnce('first')
+        .mockReturnValueOnce(refresh.promise)
+        .mockResolvedValue('later');
+      const specs = {
+        deliveryKpis: spec(fetch, { minIntervalMs: 600_000, hardMinIntervalMs: 60_000, cacheTtlMs: 600_000 }),
+      };
+      const first = setup('deliveryKpis', specs);
+      await flush();
+      now += 60_000;
+      act(() => {
+        void first.result.current.refresh(true);
+      });
+      first.unmount();
+
+      // Back 40 s into the request: past 30 s, but the grace is max(10 min floor, 30 s).
+      now += 40_000;
+      const second = setup('deliveryKpis', specs);
+      await act(() => second.result.current.refresh(true));
+      expect(fetch).toHaveBeenCalledTimes(2);
+      second.unmount();
+    });
+
+    it('an adopted request counts as in flight: a poll does not duplicate it on the error cadence', async () => {
+      const retry = deferred<unknown>();
+      const fetch = jest
+        .fn<Promise<unknown>, []>()
+        .mockResolvedValueOnce('first')
+        .mockRejectedValueOnce(new Error('offline'))
+        .mockReturnValueOnce(retry.promise)
+        .mockResolvedValue('later');
+      const specs = inboxSpecs(fetch);
+      const first = setup('actionInbox', specs);
+      await flush();
+      now += 10_000;
+      await act(() => first.result.current.refresh(true));
+      now += 10_000;
+      act(() => {
+        void first.result.current.refresh(true);
+      });
+      now += 1_000;
+      first.unmount();
+
+      // Back at t=25 s: the data carries the t=10 s failure, and the t=20 s retry is adopted.
+      now += 4_000;
+      const second = setup('actionInbox', specs);
+      expect(second.result.current.sources.actionInbox).toMatchObject({ data: 'first', error: 'Could not refresh' });
+      // A poll 60 s into the adopted retry (the error cadence) must not send a duplicate.
+      now += 55_000;
+      await act(() => second.result.current.refresh(false));
+      expect(fetch).toHaveBeenCalledTimes(3);
+      second.unmount();
+    });
+
+    it("a follow registered before the widget was removed never touches the re-added widget's own result", async () => {
+      const refresh = deferred<unknown>();
+      const fetch = jest
+        .fn<Promise<unknown>, []>()
+        .mockResolvedValueOnce('first')
+        .mockReturnValueOnce(refresh.promise)
+        .mockResolvedValueOnce('own');
+      const specs = inboxSpecs(fetch);
+      const first = setup('actionInbox', specs);
+      await flush();
+      now += 30_000;
+      act(() => {
+        void first.result.current.refresh(true);
+      });
+      first.unmount();
+
+      now += 1_000;
+      const second = setup('actionInbox', specs);
+      // Remove and re-add (the re-add follows the same request again), then fetch its own.
+      second.rerender({ neededKey: '', scope: 'scope-a' });
+      second.rerender({ neededKey: 'actionInbox', scope: 'scope-a' });
+      now += 1_000;
+      await act(() => second.result.current.refresh(true));
+      expect(second.result.current.sources.actionInbox).toMatchObject({ data: 'own', error: null });
+
+      refresh.reject(forbidden());
+      await flush();
+      expect(second.result.current.sources.actionInbox).toMatchObject({ data: 'own', forbidden: false });
       second.unmount();
     });
   });

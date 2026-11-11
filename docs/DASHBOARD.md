@@ -376,10 +376,12 @@ non-interactive text:
   their last result in a module-level cache keyed by the session, so navigating away from `/` and
   back inside that window does not refetch them. Every answer is recorded when it arrives, even
   after you have left `/`, and the newest attempt wins whatever order they arrive in. A request
-  still in flight when you come back (or re-add the widget) is followed: when it answers, its
-  result, failure or refusal is shown. While it is younger than the in-flight grace
-  (`max(floor, 30 s)`) it is also adopted rather than sent again, and its start counts for the
-  floors; older than that it is treated as hung, as a poll would treat it. So a cached result is
+  still in flight when you come back (or re-add the widget) is adopted while it is younger than
+  the in-flight grace (`max(floor, 30 s)`): it is not sent again, its start counts for the
+  floors, and when it answers its result, failure or refusal is shown. Older than that it is
+  treated as hung, as a poll would treat it: with cached data on screen its answer is still
+  shown if it arrives before the page's own next request replaces it; with none, the source is
+  fetched again at once. So a cached result is
   never passed off as fresh after a newer refresh of it failed: coming back while the result is
   still inside its window shows "could not refresh" and retries on the error cadence. With no
   result inside its window and no request young enough to adopt, the source is fetched again. A
