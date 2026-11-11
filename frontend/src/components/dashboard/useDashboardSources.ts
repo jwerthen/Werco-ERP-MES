@@ -9,8 +9,10 @@
  * - a fetch's result is accepted only against ITS key's sequence — a WebSocket tick that
  *   refreshes other sources can never discard an in-flight wallboard response;
  * - non-forced ticks (30 s poll, WebSocket pushes) skip a key younger than its
- *   `minIntervalMs`, never supersede a fetch still in flight, and skip ENTIRELY while the
- *   tab is hidden; a forced (manual) refresh bypasses the floor but not `hardMinIntervalMs`;
+ *   `minIntervalMs`, never supersede a fetch still in flight until it is older than
+ *   `max(minIntervalMs, IN_FLIGHT_GRACE_MS)` (then it is treated as hung and replaced), and
+ *   skip ENTIRELY while the tab is hidden; a forced (manual) refresh bypasses the floor and
+ *   any fetch in flight, but not `hardMinIntervalMs`;
  * - after an error the next tick retries once `min(minIntervalMs, 60 s)` has elapsed;
  * - a key that becomes needed is fetched immediately (unless the module cache can seed it,
  *   below); a key that stops being needed has its state dropped (so the page's "widget
@@ -41,7 +43,10 @@ import { EMPTY_SOURCE_STATE, type DashboardSourceKey, type SourceSpec, type Sour
 
 /** After a failure, a key is retried no later than this, whatever its floor. */
 export const ERROR_RETRY_CAP_MS = 60_000;
-/** A non-forced tick never supersedes a fetch younger than this (a hung request is replaced after it). */
+/**
+ * A non-forced tick never supersedes a fetch in flight younger than `max(minIntervalMs, this)`;
+ * past that age the fetch is treated as hung and replaced.
+ */
 export const IN_FLIGHT_GRACE_MS = 30_000;
 export const SOURCE_ERROR_MESSAGE = 'Could not refresh';
 
@@ -201,7 +206,10 @@ export function useDashboardSources(
     return meta;
   }, []);
 
-  /** HTTP 403: terminal for this key until the session scope changes; the payload is dropped. */
+  /**
+   * HTTP 403: the payload is dropped and no poll or manual refresh asks again while this mount
+   * keeps the key. A remount, removing and re-adding the widget, or a session change asks again.
+   */
   const showRefused = useCallback((key: string, meta: SourceMeta) => {
     meta.forbidden = true;
     setStates(previous => ({
@@ -302,11 +310,16 @@ export function useDashboardSources(
    *   it was left: the data with the "could not refresh" marker, retried on the error cadence
    *   from the failed attempt.
    * - A NEWER attempt still in flight (the previous mount's, or this mount's from before the
-   *   widget was removed) is ADOPTED rather than duplicated: its start drives the floors (so a
-   *   forced refresh still waits out a hard minimum, and a poll does not supersede it inside
-   *   the in-flight grace), and its outcome is applied once it settles — unless this mount has
-   *   fetched the key itself since. A refusal (403) shows as refused at once; otherwise the
-   *   cache is re-read, and if it holds no fresh data a failure still shows its marker.
+   *   widget was removed) is FOLLOWED: its outcome is applied once it settles — unless this
+   *   mount has fetched the key itself since. A refusal (403) shows as refused at once;
+   *   otherwise the cache is re-read, and if it holds no fresh data a failure still shows
+   *   its marker. So seeded data is never left on screen as clean after a newer attempt of
+   *   it failed or was refused.
+   * - While that attempt is younger than the in-flight grace (`max(minIntervalMs, 30 s)`, the
+   *   age at which a poll would replace it as hung) it is also ADOPTED rather than duplicated:
+   *   its start drives the floors, so a forced refresh still waits out a hard minimum and a
+   *   poll does not supersede it early. Older, it is treated as hung: with fresh data it is
+   *   only followed and the floors run from the data; with none the key is fetched.
    */
   const seedRef = useRef<(key: string) => boolean>(() => false);
   const seedFromCache = useCallback(
@@ -314,28 +327,25 @@ export function useDashboardSources(
       const spec = getSourceSpec(key, specsRef.current);
       if (!spec?.cacheTtlMs) return false;
       const cacheKey = cacheKeyFor(scopeRef.current, key);
+      const now = Date.now();
       const stored = sourceCache.get(cacheKey);
-      const entry = stored && Date.now() - stored.verifiedAt < spec.cacheTtlMs ? stored : undefined;
+      const entry = stored && now - stored.verifiedAt < spec.cacheTtlMs ? stored : undefined;
       const failure = failedAttempts.get(cacheKey);
       const failedSinceData = entry && failure && failure.attempt > entry.attempt ? failure : undefined;
+      // Compared against every SETTLED attempt, not just the fresh data: in the microtask gap
+      // between a fetch's cache write and its pendingFetches cleanup, the pending entry is that
+      // already-settled attempt and must be neither followed nor adopted.
       const newestSettled = Math.max(
         stored?.attempt ?? -1,
         failure?.attempt ?? -1,
         refusedAttempts.get(cacheKey) ?? -1
       );
       const pending = pendingFetches.get(cacheKey);
-      // Adopted only while the in-flight grace still protects it — the same age at which a poll
-      // would supersede it as hung; an older one is left to settle into the cache on its own.
-      const adopted =
-        pending &&
-        pending.attempt > newestSettled &&
-        Date.now() - pending.startedAt < Math.max(spec.minIntervalMs, IN_FLIGHT_GRACE_MS)
-          ? pending
-          : undefined;
-      if (!entry && !adopted) return false;
+      const newer = pending && pending.attempt > newestSettled ? pending : undefined;
+      const adopt = Boolean(newer && now - newer.startedAt < Math.max(spec.minIntervalMs, IN_FLIGHT_GRACE_MS));
+      if (!entry && !adopt) return false;
 
       const meta = metaFor(key);
-      meta.inFlight = false;
       if (entry) {
         meta.lastStartedAt = failedSinceData?.startedAt ?? entry.startedAt;
         meta.lastFailed = Boolean(failedSinceData);
@@ -350,26 +360,27 @@ export function useDashboardSources(
           },
         }));
       }
-      if (!adopted) return true;
+      if (!newer) return true;
 
-      meta.inFlight = true;
-      meta.lastStartedAt = adopted.startedAt;
-      const adoptedSeq = meta.seq;
+      if (adopt) {
+        meta.inFlight = true;
+        meta.lastStartedAt = newer.startedAt;
+      }
+      const followedSeq = meta.seq;
       const apply = (outcome: unknown) => {
-        if (!mountedRef.current || metaRef.current.get(key) !== meta || meta.seq !== adoptedSeq) return;
+        if (!mountedRef.current || metaRef.current.get(key) !== meta || meta.seq !== followedSeq) return;
         meta.inFlight = false;
-        if (outcome === 'refused' || (refusedAttempts.get(cacheKey) ?? -1) >= adopted.attempt) {
+        if (outcome === 'refused') {
           showRefused(key, meta);
           return;
         }
-        if (seedRef.current(key)) return;
-        if (outcome === 'failure') showFailed(key, meta, adopted.startedAt);
-        else void fetchKey(key);
+        // A success of the newest attempt is always cached fresh, so the re-seed shows it.
+        if (!seedRef.current(key) && outcome === 'failure') showFailed(key, meta, newer.startedAt);
       };
-      void adopted.settled.then(apply, apply);
+      void newer.settled.then(apply, apply);
       return true;
     },
-    [metaFor, fetchKey, showRefused, showFailed]
+    [metaFor, showRefused, showFailed]
   );
   seedRef.current = seedFromCache;
 

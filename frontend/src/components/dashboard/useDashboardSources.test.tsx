@@ -225,7 +225,7 @@ describe('useDashboardSources', () => {
     expect(result.current.sources.stock).toMatchObject({ data: 'again', error: null });
   });
 
-  it('treats a 403 as terminal until the session scope changes', async () => {
+  it('treats a 403 as terminal for the mount (no poll or manual refresh re-asks) until the session scope changes', async () => {
     const fetch = jest.fn<Promise<string>, []>().mockRejectedValueOnce(forbidden()).mockResolvedValue('allowed');
     const { result, rerender } = setup('stock', { stock: spec(fetch, { minIntervalMs: 0 }) });
     await flush();
@@ -890,8 +890,9 @@ describe('useDashboardSources', () => {
       });
       first.unmount();
 
-      // Back after the TTL: a new fetch (t=150 s) succeeds and is cached.
-      now += 120_000;
+      // Back after the TTL, with the t=30 s refresh past the in-flight grace (hung): a new fetch
+      // (t=160 s) succeeds and is cached.
+      now += 130_000;
       const second = setup('actionInbox', specs);
       await flush();
       expect(second.result.current.sources.actionInbox).toMatchObject({ data: 'fresh', error: null });
@@ -906,6 +907,167 @@ describe('useDashboardSources', () => {
       expect(fetch).toHaveBeenCalledTimes(3);
       expect(third.result.current.sources.actionInbox).toMatchObject({ data: 'fresh', error: null });
       third.unmount();
+    });
+
+    describe('a request too old to adopt is still followed', () => {
+      // t=0 first load is slow; t=5 s a manual refresh supersedes it; the first load answers at
+      // t=10 s (cached, not shown: it is not current); the refresh hangs; the user leaves at
+      // t=60 s and returns at t=125 s — the data is still fresh, but the refresh is 120 s old,
+      // past the 120 s in-flight grace, so it is not adopted.
+      async function returnWhileOldRefreshHangs() {
+        const firstLoad = deferred<unknown>();
+        const refresh = deferred<unknown>();
+        const fetch = jest
+          .fn<Promise<unknown>, []>()
+          .mockReturnValueOnce(firstLoad.promise)
+          .mockReturnValueOnce(refresh.promise)
+          .mockResolvedValue('later');
+        const specs = inboxSpecs(fetch);
+        const first = setup('actionInbox', specs);
+        now += 5_000;
+        act(() => {
+          void first.result.current.refresh(true);
+        });
+        now += 5_000;
+        firstLoad.resolve('first');
+        await flush();
+        now += 50_000;
+        first.unmount();
+        now += 65_000;
+        const second = setup('actionInbox', specs);
+        expect(fetch).toHaveBeenCalledTimes(2);
+        expect(second.result.current.sources.actionInbox).toMatchObject({ data: 'first', error: null });
+        return { refresh, second };
+      }
+
+      it('shows its refusal when it answers 403', async () => {
+        const { refresh, second } = await returnWhileOldRefreshHangs();
+        refresh.reject(forbidden());
+        await flush();
+        expect(second.result.current.sources.actionInbox).toMatchObject({ data: null, forbidden: true });
+        second.unmount();
+      });
+
+      it('shows its failure when it fails', async () => {
+        const { refresh, second } = await returnWhileOldRefreshHangs();
+        refresh.reject(new Error('gateway timeout'));
+        await flush();
+        expect(second.result.current.sources.actionInbox).toMatchObject({ data: 'first', error: 'Could not refresh' });
+        second.unmount();
+      });
+    });
+
+    it('keeps the newer of two successes that answer out of order', async () => {
+      const older = deferred<unknown>();
+      const newer = deferred<unknown>();
+      const fetch = jest
+        .fn<Promise<unknown>, []>()
+        .mockResolvedValueOnce('first')
+        .mockReturnValueOnce(older.promise)
+        .mockReturnValueOnce(newer.promise);
+      const specs = inboxSpecs(fetch);
+      const first = setup('actionInbox', specs);
+      await flush();
+      now += 30_000;
+      act(() => {
+        void first.result.current.refresh(true);
+      });
+      now += 1_000;
+      act(() => {
+        void first.result.current.refresh(true);
+      });
+      first.unmount();
+
+      newer.resolve('newer');
+      await flush();
+      older.resolve('older');
+      await flush();
+
+      now += 5_000;
+      const second = setup('actionInbox', specs);
+      expect(fetch).toHaveBeenCalledTimes(3);
+      expect(second.result.current.sources.actionInbox).toMatchObject({ data: 'newer', error: null });
+      second.unmount();
+    });
+
+    it('remembers the newest refusal when an older one answers after it', async () => {
+      const a2 = deferred<unknown>();
+      const a3 = deferred<unknown>();
+      const a4 = deferred<unknown>();
+      const fetch = jest
+        .fn<Promise<unknown>, []>()
+        .mockResolvedValueOnce('first')
+        .mockReturnValueOnce(a2.promise)
+        .mockReturnValueOnce(a3.promise)
+        .mockReturnValueOnce(a4.promise)
+        .mockRejectedValue(forbidden());
+      const specs = inboxSpecs(fetch);
+      const first = setup('actionInbox', specs);
+      await flush();
+      for (let i = 0; i < 3; i += 1) {
+        now += 1_000;
+        act(() => {
+          void first.result.current.refresh(true);
+        });
+      }
+      first.unmount();
+
+      // The newest (a4) is refused, then the older a2 is refused late, then a3 answers late.
+      a4.reject(forbidden());
+      await flush();
+      a2.reject(forbidden());
+      await flush();
+      a3.resolve('payload from before the newest refusal');
+      await flush();
+
+      now += 5_000;
+      const second = setup('actionInbox', specs);
+      expect(second.result.current.sources.actionInbox?.data).toBeNull();
+      expect(fetch).toHaveBeenCalledTimes(5);
+      await flush();
+      expect(second.result.current.sources.actionInbox).toMatchObject({ data: null, forbidden: true });
+      second.unmount();
+    });
+
+    it('an older failure answering late does not pull the error retry earlier', async () => {
+      const f2 = deferred<unknown>();
+      const f3 = deferred<unknown>();
+      const fetch = jest
+        .fn<Promise<unknown>, []>()
+        .mockResolvedValueOnce('first')
+        .mockReturnValueOnce(f2.promise)
+        .mockReturnValueOnce(f3.promise)
+        .mockResolvedValue('again');
+      const specs = inboxSpecs(fetch);
+      const first = setup('actionInbox', specs);
+      await flush();
+      now += 10_000;
+      act(() => {
+        void first.result.current.refresh(true);
+      });
+      now += 40_000;
+      act(() => {
+        void first.result.current.refresh(true);
+      });
+      now += 1_000;
+      first.unmount();
+
+      f3.reject(new Error('offline')); // the newest failure, started at t=50 s
+      await flush();
+      f2.reject(new Error('offline')); // an older one, started at t=10 s, answering late
+      await flush();
+
+      now += 9_000; // t=60 s
+      const second = setup('actionInbox', specs);
+      expect(second.result.current.sources.actionInbox).toMatchObject({ data: 'first', error: 'Could not refresh' });
+      // Retry is due 60 s after the NEWEST failed attempt (t=110 s), not after the older one (t=70 s).
+      now += 10_000;
+      await act(() => second.result.current.refresh(false));
+      expect(fetch).toHaveBeenCalledTimes(3);
+      now += 40_000;
+      await act(() => second.result.current.refresh(false));
+      expect(fetch).toHaveBeenCalledTimes(4);
+      second.unmount();
     });
   });
 });

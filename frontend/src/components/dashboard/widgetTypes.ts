@@ -90,7 +90,10 @@ export interface SourceState<T = unknown> {
   error: string | null;
   /** True until the first result (or failure) for a needed key. */
   loading: boolean;
-  /** HTTP 403: terminal until the session scope changes; render "Not available for your role". */
+  /**
+   * HTTP 403: render "Not available for your role". No poll or manual refresh asks again while
+   * the page keeps the source; a remount, re-adding the widget or a session change does.
+   */
   forbidden: boolean;
   /** When `data` was last verified. */
   updatedAt: Date | null;

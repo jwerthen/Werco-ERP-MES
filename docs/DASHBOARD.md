@@ -328,7 +328,7 @@ sidebar use (`components/dashboard/useWidgetEligibility.ts`):
   dialog and rendered. It is a UX proxy that mirrors the endpoint's server gate as closely as the
   client can; the endpoint still enforces its own authorization, and a widget whose source answers
   **403** renders "Not available for your role" inside the widget (never in the page's error banner,
-  and the source is not retried until the session changes).
+  and no poll or manual refresh asks again while the page stays open — see Errors below).
 - **Link gating** (`canOpen(href)`) decides whether something inside a visible widget is a link.
   `canOpen` is `canAccessPath(href, can)` (`utils/routeAccess.ts`), the exact predicate
   `PrivateRoute` enforces, so the dashboard never shows a link the router would send to
@@ -374,13 +374,16 @@ non-interactive text:
   hidden.
 - **Cached sources.** Action Inbox (2 min), Maintenance (5 min) and Delivery KPIs (10 min) keep
   their last result in a module-level cache keyed by the session, so navigating away from `/` and
-  back inside that window does not refetch them. A request still in flight when you come back (or
-  re-add the widget) is adopted rather than sent again, and its start still counts for the floors.
-  Every answer is recorded when it arrives, even after you have left `/`, and the newest attempt
-  wins whatever order they arrive in. So a cached result is never passed off as fresh after a newer
-  refresh of it failed: coming back inside the window shows "could not refresh" and retries on the
-  error cadence. Past the window, the source is simply fetched again. A refusal (403) newer than the
-  cached result evicts it. The Notifications list has its own short cache, which the widget clears
+  back inside that window does not refetch them. Every answer is recorded when it arrives, even
+  after you have left `/`, and the newest attempt wins whatever order they arrive in. A request
+  still in flight when you come back (or re-add the widget) is followed: when it answers, its
+  result, failure or refusal is shown. While it is younger than the in-flight grace
+  (`max(floor, 30 s)`) it is also adopted rather than sent again, and its start counts for the
+  floors; older than that it is treated as hung, as a poll would treat it. So a cached result is
+  never passed off as fresh after a newer refresh of it failed: coming back while the result is
+  still inside its window shows "could not refresh" and retries on the error cadence. With no
+  result inside its window and no request young enough to adopt, the source is fetched again. A
+  refusal (403) newer than the cached result evicts it. The Notifications list has its own short cache, which the widget clears
   when it unmounts, so returning to `/` always shows a list that agrees with the unread count; a
   manual refresh or the widget's Retry always reaches the network, and a failed refresh of the list
   is never answered from that cache as a success.
