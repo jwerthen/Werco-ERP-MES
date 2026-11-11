@@ -21,11 +21,11 @@
  *   the entry (a remount refetches and is refused again — refused data is never re-served
  *   as verified), and a failed refresh is recorded on it, so a remount shows the same
  *   "could not refresh" marker and keeps the error-retry cadence instead of passing the
- *   last result off as fresh. Both are written when the request SETTLES, even if its result
- *   is no longer current (the user left `/`, or removed the widget, while it was in flight)
- *   — only a failure newer than the cached success is recorded — and a mount that hydrated
- *   from an entry while a refresh of it was still in flight re-reads the entry once that
- *   refresh settles.
+ *   last result off as fresh. Every outcome is written when the request SETTLES, even if its
+ *   result is no longer current (the user left `/`, or removed the widget, while it was in
+ *   flight), ordered by attempt so a late answer never overwrites a newer one; and a mount
+ *   that hydrated from an entry while a newer attempt of it was still in flight applies that
+ *   attempt's outcome once it settles.
  *
  * Api methods take no AbortSignal; the per-key sequence is what discards stale results.
  * Every fetch tells its spec whether it is `forced` (a user's refresh / retry), so a source
@@ -42,43 +42,87 @@ export const ERROR_RETRY_CAP_MS = 60_000;
 export const IN_FLIGHT_GRACE_MS = 30_000;
 export const SOURCE_ERROR_MESSAGE = 'Could not refresh';
 
+/**
+ * The cache is written when a request SETTLES, whether or not its result is still current
+ * (the user may have left `/`, or removed the widget, while it was in flight) — the cache
+ * outlives the mount. Results can settle out of order, so every write is ordered by ATTEMPT:
+ * one module-wide counter stamped when a fetch starts. Never by clock time — two fetches can
+ * start in the same millisecond, and the wall clock can step backwards. Times are kept only
+ * for the floors and the error-retry cadence.
+ */
 interface CacheEntry {
   data: unknown;
+  /** The attempt that produced `data`, and when it started / answered. */
+  attempt: number;
   startedAt: number;
   verifiedAt: number;
-  /** When the latest refresh after `verifiedAt` started, if it FAILED (non-403); null otherwise. */
+  /** A non-403 failure of a NEWER attempt than `attempt`, and when it started; null otherwise. */
+  failedAttempt: number | null;
   failedStartedAt: number | null;
 }
 
-const sourceCache = new Map<string, CacheEntry>();
+type FetchOutcome = 'success' | 'failure' | 'refused';
 
 /**
  * Cached-source fetches still in flight, by cache key, across hook instances: a remount of `/`
  * can hydrate from an entry while the previous mount's refresh of it has not answered yet.
- * `settled` resolves after that fetch's result has been written to the cache.
+ * `settled` resolves with the outcome once that fetch's result is in the cache.
  */
 interface PendingFetch {
+  attempt: number;
   startedAt: number;
-  settled: Promise<void>;
+  settled: Promise<FetchOutcome>;
 }
 
+const sourceCache = new Map<string, CacheEntry>();
+/** The newest attempt the server REFUSED (403) per cache key, until a newer attempt succeeds. */
+const refusedAttempts = new Map<string, number>();
 const pendingFetches = new Map<string, PendingFetch>();
+let attemptCounter = 0;
+/** Bumped by every clear: a request started before a clear never writes into the cache after it. */
+let cacheGeneration = 0;
 
 /** Drop every cached source result (session scope changes, tests). */
 export function clearDashboardSourceCache(): void {
   sourceCache.clear();
+  refusedAttempts.clear();
   pendingFetches.clear();
+  cacheGeneration += 1;
+}
+
+const newestAttemptIn = (entry: CacheEntry) => Math.max(entry.attempt, entry.failedAttempt ?? -1);
+
+/** A success is cached unless a newer attempt already succeeded, failed or was refused. */
+function recordCachedSuccess(
+  cacheKey: string,
+  generation: number,
+  next: Omit<CacheEntry, 'failedAttempt' | 'failedStartedAt'>
+): void {
+  if (generation !== cacheGeneration) return;
+  const entry = sourceCache.get(cacheKey);
+  if (entry && newestAttemptIn(entry) > next.attempt) return;
+  if ((refusedAttempts.get(cacheKey) ?? -1) > next.attempt) return;
+  refusedAttempts.delete(cacheKey);
+  sourceCache.set(cacheKey, { ...next, failedAttempt: null, failedStartedAt: null });
+}
+
+/** A non-403 failure is recorded on the entry unless the entry already reflects a newer attempt. */
+function recordCachedFailure(cacheKey: string, generation: number, attempt: number, startedAt: number): void {
+  if (generation !== cacheGeneration) return;
+  const entry = sourceCache.get(cacheKey);
+  if (!entry || newestAttemptIn(entry) > attempt) return;
+  sourceCache.set(cacheKey, { ...entry, failedAttempt: attempt, failedStartedAt: startedAt });
 }
 
 /**
- * Record a non-403 failure on a cached entry — but only one NEWER than the entry's own
- * successful fetch: a late failure of an older refresh must not mark a newer success failed.
+ * A 403 evicts unconditionally — the server refused this session, so no remount may re-serve
+ * the payload as verified — and is remembered, so an OLDER attempt answering late can never
+ * re-cache what a newer one was refused.
  */
-function recordCachedFailure(cacheKey: string, startedAt: number): void {
-  const entry = sourceCache.get(cacheKey);
-  if (!entry || startedAt < entry.startedAt) return;
-  if (entry.failedStartedAt !== null && entry.failedStartedAt >= startedAt) return;
-  sourceCache.set(cacheKey, { ...entry, failedStartedAt: startedAt });
+function recordCachedRefusal(cacheKey: string, generation: number, attempt: number): void {
+  if (generation !== cacheGeneration) return;
+  sourceCache.delete(cacheKey);
+  refusedAttempts.set(cacheKey, Math.max(attempt, refusedAttempts.get(cacheKey) ?? -1));
 }
 
 const cacheKeyFor = (scope: string | null, key: string) => `${scope ?? ''}\u0000${key}`;
@@ -145,6 +189,34 @@ export function useDashboardSources(
     return meta;
   }, []);
 
+  /** HTTP 403: terminal for this key until the session scope changes; the payload is dropped. */
+  const showRefused = useCallback((key: string, meta: SourceMeta) => {
+    meta.forbidden = true;
+    setStates(previous => ({
+      ...previous,
+      [key]: { data: null, error: null, loading: false, forbidden: true, updatedAt: null },
+    }));
+  }, []);
+
+  /** Any other failure: keep the last verified data, mark it, retry on the error cadence from `startedAt`. */
+  const showFailed = useCallback((key: string, meta: SourceMeta, startedAt: number) => {
+    meta.lastStartedAt = startedAt;
+    meta.lastFailed = true;
+    setStates(previous => {
+      const before = previous[key];
+      return {
+        ...previous,
+        [key]: {
+          data: before?.data ?? null,
+          error: SOURCE_ERROR_MESSAGE,
+          loading: false,
+          forbidden: false,
+          updatedAt: before?.updatedAt ?? null,
+        },
+      };
+    });
+  }, []);
+
   const fetchKey = useCallback(
     (key: string, forced = false): Promise<void> => {
       const spec = getSourceSpec(key, specsRef.current);
@@ -165,68 +237,49 @@ export function useDashboardSources(
         request = Promise.reject(error);
       }
 
-      const settled = request.then(
+      const cached = Boolean(spec?.cacheTtlMs);
+      const attempt = ++attemptCounter;
+      const generation = cacheGeneration;
+      const settled: Promise<FetchOutcome> = request.then(
         data => {
-          if (!isCurrent()) return;
+          const verifiedAt = Date.now();
+          if (cached) recordCachedSuccess(cacheKey, generation, { data, attempt, startedAt, verifiedAt });
+          if (!isCurrent()) return 'success';
           meta.inFlight = false;
           meta.lastFailed = false;
-          const verifiedAt = Date.now();
-          if (spec?.cacheTtlMs) {
-            sourceCache.set(cacheKey, { data, startedAt, verifiedAt, failedStartedAt: null });
-          }
           setStates(previous => ({
             ...previous,
             [key]: { data, error: null, loading: false, forbidden: false, updatedAt: new Date(verifiedAt) },
           }));
+          return 'success';
         },
         error => {
           const forbidden = apiErrorStatus(error) === 403;
-          // Both written even when this result is no longer current (the page unmounted, the
-          // key went away while the request was in flight), because the cache outlives this
-          // mount. A 403 evicts: the server refused this session, so no remount may re-serve
-          // the cached payload as verified (a later success re-caches it). Any other failure is
-          // recorded, so a remount shows "could not refresh" instead of the cache as fresh.
-          if (spec?.cacheTtlMs) {
-            if (forbidden) sourceCache.delete(cacheKey);
-            else recordCachedFailure(cacheKey, startedAt);
+          if (cached) {
+            if (forbidden) recordCachedRefusal(cacheKey, generation, attempt);
+            else recordCachedFailure(cacheKey, generation, attempt, startedAt);
           }
-          if (!isCurrent()) return;
+          if (!isCurrent()) return forbidden ? 'refused' : 'failure';
           meta.inFlight = false;
           if (forbidden) {
-            meta.forbidden = true;
-            setStates(previous => ({
-              ...previous,
-              [key]: { data: null, error: null, loading: false, forbidden: true, updatedAt: null },
-            }));
-            return;
+            showRefused(key, meta);
+            return 'refused';
           }
-          meta.lastFailed = true;
-          setStates(previous => {
-            const before = previous[key];
-            return {
-              ...previous,
-              [key]: {
-                data: before?.data ?? null,
-                error: SOURCE_ERROR_MESSAGE,
-                loading: false,
-                forbidden: false,
-                updatedAt: before?.updatedAt ?? null,
-              },
-            };
-          });
+          showFailed(key, meta, startedAt);
+          return 'failure';
         }
       );
-      if (spec?.cacheTtlMs) {
-        const pending: PendingFetch = { startedAt, settled };
+      if (cached) {
+        const pending: PendingFetch = { attempt, startedAt, settled };
         pendingFetches.set(cacheKey, pending);
         const done = () => {
           if (pendingFetches.get(cacheKey) === pending) pendingFetches.delete(cacheKey);
         };
         void settled.then(done, done);
       }
-      return settled;
+      return settled.then(() => undefined);
     },
-    [metaFor]
+    [metaFor, showRefused, showFailed]
   );
 
   /**
@@ -234,11 +287,12 @@ export function useDashboardSources(
    * refresh recorded on the entry comes back as it was left: the last verified data with
    * the "could not refresh" marker, retried on the error cadence from the failed attempt.
    *
-   * When a refresh of the entry is still in flight (the previous mount's, or this mount's
-   * from before the widget was removed), the entry is re-read once that refresh settles —
-   * unless this mount has fetched the key itself since. A recorded failure then shows its
-   * marker; an evicted entry (403) is fetched again, so refused data is not kept on screen
-   * as verified.
+   * When a NEWER attempt of the entry is still in flight (the previous mount's, or this
+   * mount's from before the widget was removed), the outcome is applied once it settles —
+   * unless this mount has fetched the key itself since. A refusal (403) shows as refused at
+   * once, never left on screen as verified while anything is re-asked; otherwise the entry
+   * is re-read, and if it has meanwhile aged past its TTL a failure still shows its marker
+   * (the floors then decide the next fetch, so a hard minimum is never bypassed).
    */
   const hydrateRef = useRef<(key: string) => boolean>(() => false);
   const hydrateFromCache = useCallback(
@@ -265,18 +319,22 @@ export function useDashboardSources(
       }));
 
       const pending = pendingFetches.get(cacheKey);
-      if (pending && pending.startedAt >= (entry.failedStartedAt ?? entry.startedAt)) {
+      if (pending && pending.attempt > newestAttemptIn(entry)) {
         const hydratedSeq = meta.seq;
-        const reread = () => {
+        const apply = (outcome: unknown) => {
           if (!mountedRef.current || metaRef.current.get(key) !== meta || meta.seq !== hydratedSeq) return;
-          if (sourceCache.has(cacheKey)) hydrateRef.current(key);
-          else void fetchKey(key);
+          if (outcome === 'refused') {
+            showRefused(key, meta);
+            return;
+          }
+          if (hydrateRef.current(key)) return;
+          if (outcome === 'failure') showFailed(key, meta, pending.startedAt);
         };
-        void pending.settled.then(reread, reread);
+        void pending.settled.then(apply, apply);
       }
       return true;
     },
-    [metaFor, fetchKey]
+    [metaFor, showRefused, showFailed]
   );
   hydrateRef.current = hydrateFromCache;
 
