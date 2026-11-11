@@ -97,6 +97,98 @@ describe('notificationListCache', () => {
     expect(load).toHaveBeenCalledTimes(3);
   });
 
+  it('never serves the cached list as a success once a newer refresh of it failed', async () => {
+    // Load OK, a manual refresh fails 5 s later, then a background tick 30 s after that —
+    // all well inside the two-minute data floor. Serving the cached list to the tick would
+    // read as a fresh success: the page would clear "could not refresh" and advance the
+    // list's "updated" time without anything having reached the server.
+    const error = new Error('offline');
+    const load = jest
+      .fn()
+      .mockResolvedValueOnce('first')
+      .mockRejectedValueOnce(error)
+      .mockResolvedValueOnce('recovered');
+    await expect(fetchNotificationListThroughCache(load)).resolves.toBe('first');
+
+    now += 5_000;
+    await expect(fetchNotificationListThroughCache(load, { force: true })).rejects.toBe(error);
+
+    now += 30_000;
+    await expect(fetchNotificationListThroughCache(load)).rejects.toBe(error);
+    expect(load).toHaveBeenCalledTimes(2);
+
+    // Past the error replay but still inside the data floor: retry the network rather than
+    // fall back to the list the failure came after.
+    now += NOTIFICATION_LIST_ERROR_RETRY_MS;
+    expect(now - 1_000_000).toBeLessThan(NOTIFICATION_LIST_FLOOR_MS);
+    await expect(fetchNotificationListThroughCache(load)).resolves.toBe('recovered');
+    expect(load).toHaveBeenCalledTimes(3);
+
+    // Recovered: the floor applies to the new list again.
+    now += 1;
+    await expect(fetchNotificationListThroughCache(load)).resolves.toBe('recovered');
+    expect(load).toHaveBeenCalledTimes(3);
+  });
+
+  it('ignores a failure from an older count once the current count has a good list', async () => {
+    let rejectOld: (reason: unknown) => void = () => undefined;
+    const load = jest
+      .fn()
+      .mockImplementationOnce(() => new Promise<string>((_, reject) => (rejectOld = reject)))
+      .mockResolvedValueOnce('current');
+    const old = fetchNotificationListThroughCache(load);
+    await Promise.resolve();
+
+    invalidateNotificationList();
+    await expect(fetchNotificationListThroughCache(load)).resolves.toBe('current');
+
+    rejectOld(new Error('late failure for the old count'));
+    await expect(old).rejects.toThrow('late failure');
+
+    now += 1;
+    await expect(fetchNotificationListThroughCache(load)).resolves.toBe('current');
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it('a late result for an older count cannot unmask the current count failing', async () => {
+    // Request A (old count) is slow; the count changes; the current count loads, then a manual
+    // refresh of it fails. A then settles late — first as a failure, in the second run as a
+    // success. Neither may clear the current failure marker and let the cached list through.
+    for (const lateOutcome of ['fails', 'succeeds'] as const) {
+      resetNotificationListCache();
+      now = 1_000_000;
+      let settleOld: { resolve: (v: string) => void; reject: (e: unknown) => void } = {
+        resolve: () => undefined,
+        reject: () => undefined,
+      };
+      const currentFailure = new Error('current refresh failed');
+      const load = jest
+        .fn()
+        .mockImplementationOnce(() => new Promise<string>((resolve, reject) => (settleOld = { resolve, reject })))
+        .mockResolvedValueOnce('current')
+        .mockRejectedValueOnce(currentFailure);
+      const old = fetchNotificationListThroughCache(load);
+      await Promise.resolve();
+
+      invalidateNotificationList();
+      await expect(fetchNotificationListThroughCache(load)).resolves.toBe('current');
+      now += 5_000;
+      await expect(fetchNotificationListThroughCache(load, { force: true })).rejects.toBe(currentFailure);
+
+      if (lateOutcome === 'fails') {
+        settleOld.reject(new Error('late old failure'));
+        await expect(old).rejects.toThrow('late old failure');
+      } else {
+        settleOld.resolve('old list');
+        await expect(old).resolves.toBe('old list');
+      }
+
+      now += 30_000;
+      await expect(fetchNotificationListThroughCache(load)).rejects.toBe(currentFailure);
+      expect(load).toHaveBeenCalledTimes(3);
+    }
+  });
+
   it('a forced call shares a request already in flight rather than duplicating it', async () => {
     let resolve: (value: string) => void = () => undefined;
     const load = jest.fn(() => new Promise<string>(done => (resolve = done)));

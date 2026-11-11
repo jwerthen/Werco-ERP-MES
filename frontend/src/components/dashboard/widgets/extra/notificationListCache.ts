@@ -12,6 +12,9 @@
  *  - the last good result is older than `NOTIFICATION_LIST_FLOOR_MS`.
  * A failed fetch is replayed (not retried) for `NOTIFICATION_LIST_ERROR_RETRY_MS`, so an
  * outage cannot turn every WebSocket push into a request — but never to a forced call.
+ * A failure also suspends the data floor for its count: once a refresh of the cached list
+ * has failed, that list is never served again as a success (it would read as a fresh,
+ * verified result); after the replay window the next call goes back to the network.
  *
  * Keyed by session scope (`getHankSessionScope`): a sign-out, user switch or company switch
  * never serves the previous principal's list. Module state, so it survives remounts of `/`.
@@ -82,35 +85,49 @@ export function fetchNotificationListThroughCache<T>(
   const now = Date.now();
 
   if (state.inflight && state.inflightEpoch === epoch) return state.inflight as Promise<T>;
-  if (!force && state.hasData && state.dataEpoch === epoch && now - state.fetchedAt < NOTIFICATION_LIST_FLOOR_MS) {
-    return Promise.resolve(state.data as T);
+  // A success for this count clears its error, so a current-count error here is newer than any
+  // list held for this count. It is checked BEFORE the data floor and it suspends that floor:
+  // serving the cached list after a refresh of it failed would read to the loader as a fresh
+  // success, clearing "could not refresh" and advancing `updatedAt` with no request made. Past
+  // the replay window the next call retries the network instead of falling back to that list.
+  const failedForThisCount = state.hasError && state.errorEpoch === epoch;
+  if (!force && failedForThisCount && now - state.errorAt < NOTIFICATION_LIST_ERROR_RETRY_MS) {
+    return Promise.reject(state.error);
   }
   if (
     !force &&
-    state.hasError &&
-    state.errorEpoch === epoch &&
-    now - state.errorAt < NOTIFICATION_LIST_ERROR_RETRY_MS
+    !failedForThisCount &&
+    state.hasData &&
+    state.dataEpoch === epoch &&
+    now - state.fetchedAt < NOTIFICATION_LIST_FLOOR_MS
   ) {
-    return Promise.reject(state.error);
+    return Promise.resolve(state.data as T);
   }
 
   const requestEpoch = epoch;
   const request: Promise<T> = Promise.resolve()
     .then(load)
     .then(
+      // A request made before the count changed can settle after one made since. Its result
+      // never overwrites a newer count's: a late old list would replace the current one, and a
+      // late old failure would replace (and so unmask) the current count's failure marker.
       data => {
         if (cache === state) {
-          state.data = data;
-          state.hasData = true;
-          state.dataEpoch = requestEpoch;
-          state.fetchedAt = Date.now();
-          state.hasError = false;
-          state.error = undefined;
+          if (requestEpoch >= state.dataEpoch) {
+            state.data = data;
+            state.hasData = true;
+            state.dataEpoch = requestEpoch;
+            state.fetchedAt = Date.now();
+          }
+          if (requestEpoch >= state.errorEpoch) {
+            state.hasError = false;
+            state.error = undefined;
+          }
         }
         return data;
       },
       (error: unknown) => {
-        if (cache === state) {
+        if (cache === state && requestEpoch >= state.errorEpoch) {
           state.error = error;
           state.hasError = true;
           state.errorEpoch = requestEpoch;
