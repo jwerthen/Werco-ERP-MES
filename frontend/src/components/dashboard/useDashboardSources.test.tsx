@@ -719,8 +719,157 @@ describe('useDashboardSources', () => {
 
       refresh.reject(forbidden());
       await flush();
-      // The older attempt's refusal evicts the cache entry, but this mount's own newer answer stands.
+      // The older attempt's refusal is stale against this mount's own newer answer, which stands
+      // on screen and in the cache.
       expect(second.result.current.sources.actionInbox).toMatchObject({ data: 'own', error: null, forbidden: false });
+      second.unmount();
+      const third = setup('actionInbox', specs);
+      expect(fetch).toHaveBeenCalledTimes(3);
+      expect(third.result.current.sources.actionInbox).toMatchObject({ data: 'own', error: null });
+      third.unmount();
+    });
+
+    it('a remount during the first load adopts the request in flight instead of sending a duplicate', async () => {
+      const firstLoad = deferred<unknown>();
+      const fetch = jest.fn<Promise<unknown>, []>().mockReturnValueOnce(firstLoad.promise);
+      const specs = inboxSpecs(fetch);
+      const first = setup('actionInbox', specs);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      first.unmount();
+
+      now += 2_000;
+      const second = setup('actionInbox', specs);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(second.result.current.sources.actionInbox).toMatchObject({ loading: true, data: null });
+      // A background tick inside the in-flight grace does not supersede the adopted request either.
+      now += 10_000;
+      await act(() => second.result.current.refresh(false));
+      expect(fetch).toHaveBeenCalledTimes(1);
+
+      firstLoad.resolve('loaded');
+      await flush();
+      expect(second.result.current.sources.actionInbox).toMatchObject({ data: 'loaded', error: null, loading: false });
+      second.unmount();
+    });
+
+    it('a remount adopts the request in flight for the floors: a forced refresh still waits out the hard minimum', async () => {
+      const refresh = deferred<unknown>();
+      const fetch = jest
+        .fn<Promise<unknown>, []>()
+        .mockResolvedValueOnce('first')
+        .mockReturnValueOnce(refresh.promise)
+        .mockResolvedValue('later');
+      const specs = {
+        deliveryKpis: spec(fetch, { minIntervalMs: 600_000, hardMinIntervalMs: 60_000, cacheTtlMs: 600_000 }),
+      };
+      const first = setup('deliveryKpis', specs);
+      await flush();
+      now += 60_000;
+      act(() => {
+        void first.result.current.refresh(true);
+      });
+      expect(fetch).toHaveBeenCalledTimes(2);
+      first.unmount();
+
+      // Back 10 s later: 'first' is shown, and the t=60 s request is what the hard minimum counts from.
+      now += 10_000;
+      const second = setup('deliveryKpis', specs);
+      expect(second.result.current.sources.deliveryKpis).toMatchObject({ data: 'first', error: null });
+      await act(() => second.result.current.refresh(true));
+      expect(fetch).toHaveBeenCalledTimes(2);
+
+      refresh.resolve('second');
+      await flush();
+      expect(second.result.current.sources.deliveryKpis).toMatchObject({ data: 'second', error: null });
+      now += 50_000; // 60 s after the adopted request started
+      await act(() => second.result.current.refresh(true));
+      expect(fetch).toHaveBeenCalledTimes(3);
+      second.unmount();
+    });
+
+    it('re-adding a widget while its refresh is in flight adopts that refresh rather than sending another', async () => {
+      const refresh = deferred<unknown>();
+      const fetch = jest.fn<Promise<unknown>, []>().mockResolvedValueOnce('first').mockReturnValueOnce(refresh.promise);
+      const hook = setup('actionInbox', inboxSpecs(fetch));
+      await flush();
+      now += 30_000;
+      act(() => {
+        void hook.result.current.refresh(true);
+      });
+      hook.rerender({ neededKey: '', scope: 'scope-a' });
+      now += 1_000;
+      hook.rerender({ neededKey: 'actionInbox', scope: 'scope-a' });
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(hook.result.current.sources.actionInbox).toMatchObject({ data: 'first', error: null });
+
+      refresh.resolve('refreshed');
+      await flush();
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(hook.result.current.sources.actionInbox).toMatchObject({ data: 'refreshed', error: null });
+      hook.unmount();
+    });
+
+    it('remembers a failure with no data to mark yet, so an older success answering late is cached as failed', async () => {
+      const firstLoad = deferred<unknown>();
+      const fetch = jest
+        .fn<Promise<unknown>, []>()
+        .mockReturnValueOnce(firstLoad.promise)
+        .mockRejectedValueOnce(new Error('offline'))
+        .mockResolvedValue('again');
+      const specs = inboxSpecs(fetch);
+      const first = setup('actionInbox', specs);
+
+      // The first load is slow; a manual refresh supersedes it and fails at once.
+      now += 5_000;
+      await act(() => first.result.current.refresh(true));
+      expect(first.result.current.sources.actionInbox).toMatchObject({ data: null, error: 'Could not refresh' });
+      // The first load then answers. It is older than the failure.
+      firstLoad.resolve('older');
+      await flush();
+      first.unmount();
+
+      now += 10_000;
+      const second = setup('actionInbox', specs);
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(second.result.current.sources.actionInbox).toMatchObject({ data: 'older', error: 'Could not refresh' });
+      // Retried on the error cadence from the failed attempt (t=5 s + 60 s).
+      now += ERROR_RETRY_CAP_MS - 10_000 - 1;
+      await act(() => second.result.current.refresh(false));
+      expect(fetch).toHaveBeenCalledTimes(2);
+      now += 1;
+      await act(() => second.result.current.refresh(false));
+      expect(fetch).toHaveBeenCalledTimes(3);
+      expect(second.result.current.sources.actionInbox).toMatchObject({ data: 'again', error: null });
+      second.unmount();
+    });
+
+    it('a refusal older than the cached data is stale and evicts nothing', async () => {
+      const older = deferred<unknown>();
+      const fetch = jest
+        .fn<Promise<unknown>, []>()
+        .mockResolvedValueOnce('first')
+        .mockReturnValueOnce(older.promise)
+        .mockResolvedValueOnce('newer');
+      const specs = inboxSpecs(fetch);
+      const first = setup('actionInbox', specs);
+      await flush();
+
+      now += 30_000;
+      act(() => {
+        void first.result.current.refresh(true);
+      });
+      now += 1_000;
+      await act(() => first.result.current.refresh(true));
+      expect(first.result.current.sources.actionInbox).toMatchObject({ data: 'newer', error: null });
+      older.reject(forbidden());
+      await flush();
+      expect(first.result.current.sources.actionInbox).toMatchObject({ data: 'newer', forbidden: false });
+      first.unmount();
+
+      now += 5_000;
+      const second = setup('actionInbox', specs);
+      expect(fetch).toHaveBeenCalledTimes(3);
+      expect(second.result.current.sources.actionInbox).toMatchObject({ data: 'newer', error: null });
       second.unmount();
     });
 

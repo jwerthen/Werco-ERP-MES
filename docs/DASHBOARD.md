@@ -374,16 +374,20 @@ non-interactive text:
   hidden.
 - **Cached sources.** Action Inbox (2 min), Maintenance (5 min) and Delivery KPIs (10 min) keep
   their last result in a module-level cache keyed by the session, so navigating away from `/` and
-  back does not refetch them. A cached result is never passed off as fresh after a newer refresh
-  of it failed — including one that fails after you left `/` or removed the widget, or one still
-  in flight when you come back — so returning shows "could not refresh" and retries on the error
-  cadence; a refusal (403) evicts the entry. The Notifications list has its own short cache, which
-  the widget clears when it unmounts, so returning to `/` always shows a list that agrees with the
-  unread count; a manual refresh or the widget's Retry always reaches the network, and a failed
-  refresh of the list is never answered from that cache as a success.
+  back inside that window does not refetch them. A request still in flight when you come back (or
+  re-add the widget) is adopted rather than sent again, and its start still counts for the floors.
+  Every answer is recorded when it arrives, even after you have left `/`, and the newest attempt
+  wins whatever order they arrive in. So a cached result is never passed off as fresh after a newer
+  refresh of it failed: coming back inside the window shows "could not refresh" and retries on the
+  error cadence. Past the window, the source is simply fetched again. A refusal (403) newer than the
+  cached result evicts it. The Notifications list has its own short cache, which the widget clears
+  when it unmounts, so returning to `/` always shows a list that agrees with the unread count; a
+  manual refresh or the widget's Retry always reaches the network, and a failed refresh of the list
+  is never answered from that cache as a success.
 - **Errors.** A failed source keeps its last verified data and is named in the page's widget-sources
-  banner. A **403** is terminal for that source until the session scope changes and shows in the
-  widget only.
+  banner. A **403** shows in the widget only and is terminal for that source while the page stays
+  open: no poll or manual refresh asks again. Leaving `/` and coming back, removing and re-adding
+  the widget, or a session change asks the server again.
 - **Session changes.** Signing out, switching user or company, or entering a read-only company view
   re-reads the saved layout, closes the dialog and clears every source's state and cache.
 
