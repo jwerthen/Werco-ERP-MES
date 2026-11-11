@@ -1588,8 +1588,8 @@ def test_model_ddl_naming_a_supabase_role_carries_its_own_role_check():
         violations += found
         count += found_count
         files += bool(found_count)
-    # 24 literals in 10 modules as of 113: consumable, continuous_improvement, hank, hank_intake,
-    # hank_preferences, hank_teamwork, quote_nesting_draft/run/spacing_policy, stock_piece.
+    # 25 literals in 11 modules as of 118: consumable, continuous_improvement, dashboard_layout, hank,
+    # hank_intake, hank_preferences, hank_teamwork, quote_nesting_draft/run/spacing_policy, stock_piece.
     assert count > 0 and files > 0, "no model literal names a Supabase-only role: the scan or the pattern is broken"
     assert not violations, (
         "model DDL names a Supabase-only role with no pg_roles check in its own SQL, so create_all aborts on any "

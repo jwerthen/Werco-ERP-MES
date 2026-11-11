@@ -43,8 +43,18 @@ jest.mock('../services/api', () => ({
     getEquipmentDueSoon: jest.fn(),
     getLowStockAlerts: jest.fn(),
     getCapacityHeatmap: jest.fn(),
+    // Customizable dashboard: the saved layout is the stock default.
+    getDashboardLayout: jest.fn(() =>
+      Promise.resolve({ company_id: 1, version: 0, layout: null, can_edit: true, updated_at: null })
+    ),
   },
 }));
+
+// The page gates links and widgets with usePermissions (PrivateRoute's predicate).
+jest.mock('../context/AuthContext', () => {
+  const user = { id: 1, role: 'manager', is_superuser: false };
+  return { useAuth: () => ({ user, isAuthenticated: true, isLoading: false }) };
+});
 
 jest.mock('../hooks/useWebSocket', () => ({ useWebSocket: jest.fn() }));
 

@@ -1,0 +1,108 @@
+import {
+  fetchNotificationListThroughCache,
+  invalidateNotificationList,
+  NOTIFICATION_LIST_ERROR_RETRY_MS,
+  NOTIFICATION_LIST_FLOOR_MS,
+  resetNotificationListCache,
+} from './notificationListCache';
+
+function fakeToken(sub: string, cid: number): string {
+  const encode = (value: object) => btoa(JSON.stringify(value)).replace(/=+$/, '');
+  return `${encode({ alg: 'HS256' })}.${encode({ sub, cid, type: 'access' })}.signature`;
+}
+
+let now = 1_000_000;
+
+beforeEach(() => {
+  resetNotificationListCache();
+  sessionStorage.clear();
+  now = 1_000_000;
+  jest.spyOn(Date, 'now').mockImplementation(() => now);
+});
+
+afterEach(() => {
+  jest.restoreAllMocks();
+});
+
+describe('notificationListCache', () => {
+  it('serves the cached list inside the floor and refetches after it', async () => {
+    const load = jest.fn().mockResolvedValueOnce('first').mockResolvedValueOnce('second');
+    await expect(fetchNotificationListThroughCache(load)).resolves.toBe('first');
+
+    now += NOTIFICATION_LIST_FLOOR_MS - 1;
+    await expect(fetchNotificationListThroughCache(load)).resolves.toBe('first');
+    expect(load).toHaveBeenCalledTimes(1);
+
+    now += 1;
+    await expect(fetchNotificationListThroughCache(load)).resolves.toBe('second');
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it('goes to the network as soon as the unread count changed', async () => {
+    const load = jest.fn().mockResolvedValueOnce('before').mockResolvedValueOnce('after');
+    await fetchNotificationListThroughCache(load);
+    invalidateNotificationList();
+    await expect(fetchNotificationListThroughCache(load)).resolves.toBe('after');
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it('shares one in-flight request between callers', async () => {
+    let resolve: (value: string) => void = () => undefined;
+    const load = jest.fn(() => new Promise<string>(done => (resolve = done)));
+    const first = fetchNotificationListThroughCache(load);
+    const second = fetchNotificationListThroughCache(load);
+    await Promise.resolve();
+    resolve('list');
+    await expect(first).resolves.toBe('list');
+    await expect(second).resolves.toBe('list');
+    expect(load).toHaveBeenCalledTimes(1);
+  });
+
+  it('replays a failure instead of retrying it until the retry window passes', async () => {
+    const error = new Error('offline');
+    const load = jest.fn().mockRejectedValueOnce(error).mockResolvedValueOnce('recovered');
+    await expect(fetchNotificationListThroughCache(load)).rejects.toBe(error);
+
+    now += NOTIFICATION_LIST_ERROR_RETRY_MS - 1;
+    await expect(fetchNotificationListThroughCache(load)).rejects.toBe(error);
+    expect(load).toHaveBeenCalledTimes(1);
+
+    now += 1;
+    await expect(fetchNotificationListThroughCache(load)).resolves.toBe('recovered');
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries a failure at once when the count changed', async () => {
+    const load = jest.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce('fresh');
+    await expect(fetchNotificationListThroughCache(load)).rejects.toThrow('offline');
+    invalidateNotificationList();
+    await expect(fetchNotificationListThroughCache(load)).resolves.toBe('fresh');
+  });
+
+  it("never serves another session's list", async () => {
+    sessionStorage.setItem('token', fakeToken('7', 1));
+    const load = jest.fn().mockResolvedValueOnce('user 7').mockResolvedValueOnce('user 8');
+    await expect(fetchNotificationListThroughCache(load)).resolves.toBe('user 7');
+
+    sessionStorage.setItem('token', fakeToken('8', 1));
+    await expect(fetchNotificationListThroughCache(load)).resolves.toBe('user 8');
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it('drops a late result that arrives after the session changed', async () => {
+    sessionStorage.setItem('token', fakeToken('7', 1));
+    let resolve: (value: string) => void = () => undefined;
+    const slow = jest.fn(() => new Promise<string>(done => (resolve = done)));
+    const pending = fetchNotificationListThroughCache(slow);
+    await Promise.resolve();
+
+    sessionStorage.setItem('token', fakeToken('7', 2));
+    const fresh = jest.fn().mockResolvedValue('company 2');
+    await expect(fetchNotificationListThroughCache(fresh)).resolves.toBe('company 2');
+
+    resolve('company 1');
+    await expect(pending).resolves.toBe('company 1');
+    // The company-2 cache is untouched by the late company-1 result.
+    await expect(fetchNotificationListThroughCache(jest.fn())).resolves.toBe('company 2');
+  });
+});
