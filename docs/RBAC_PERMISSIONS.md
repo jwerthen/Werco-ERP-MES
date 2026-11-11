@@ -1668,112 +1668,16 @@ Follow-up owners must be active users in the same company with purchasing access
 > Admin / Manager / Supervisor set plus superuser and Platform Admin, which the page's old inline role
 > list left out.
 
-### Material Nesting
+### Material Nesting (retired)
 
-**Sales & Quoting → Material Nesting** (`/nest`) requires a signed-in ERP user and
-`purchasing:view` on both the sidebar link and the direct route, matching Quote
-Calculator. By default, Admin, Manager, Supervisor, and Viewer have access;
-Operator, Quality, and Shipping do not. Active-company role-permission overrides
-can grant or revoke this permission. Platform Admin and the existing superuser
-override also pass; an override from another company is not used.
-
-All permitted users can edit the current browser estimate, compare sheets, and
-download or reopen local estimate files. These are client-side calculations and
-downloads; they create no ERP quote, purchase order, inventory transaction, work
-order, or audit record. The downloadable review record is draft evidence, not
-a server approval or immutable audit event.
-
-**Export buyer PDF** formats one complete, current alternative per populated group.
-`POST /api/v1/quote-nesting/buyer-pdf` independently requires effective
-`purchasing:view`; any conditional group or recorded-piece sheet additionally
-requires `inventory:view`. Both multipart/report company IDs must match the active
-company. Company/preparer identity comes from the authenticated server context.
-The endpoint writes no order, inventory, quote, revision or audit record and adds
-no permission key. Existing kiosk, disabled-user and read-only switched-company
-POST restrictions remain in force. The PDF does not establish material availability,
-reservation, certification or manufacturing approval.
-
-`GET /api/v1/quote-nesting/materials` and
-`POST /api/v1/quote-nesting/material-resolution` independently enforce the same
-effective `purchasing:view` permission. They read only active catalog rows from
-the active company; missing, inactive, and foreign-company IDs all return 404.
-Neither endpoint seeds defaults or writes data. Existing disabled-user,
-kiosk/API-token, and read-only switched-company restrictions remain in force;
-the calculation POST is not exempt from the read-only-context fence. No new
-permission key, inventory reservation, or approval authority
-is introduced by catalog resolution. See [MATERIAL_NESTING.md](MATERIAL_NESTING.md) and the
-[API contract](API.md#quote-nesting-material-provenance).
-
-**Team draft persistence** adds a separate explicit write boundary:
-
-| Action | Required effective permissions |
-|--------|--------------------------------|
-| List drafts/history or open a revision | `purchasing:view` |
-| Save new draft or append a revision | `purchasing:view` **and** `purchasing:create` |
-
-Defaults allow Admin, Manager and Supervisor to save; Viewer can open drafts.
-Tenant overrides are honored and malformed overrides fail closed. Existing
-Platform Admin/superuser exemptions remain, but read-only switched-company
-contexts cannot write. The frontend hides Save when create permission is absent;
-the server checks independently. These permissions grant neither geometry/quote
-approval nor physical-material reservation. New saves add immutable input
-revisions and required audit events, never operational quote or inventory writes.
-Company scope is enforced on every draft query/reference. Customer/job-specific
-segregation and approvals are future capabilities, not implied by draft access.
-
-**Saved server calculations** use the same effective permissions:
-
-| Action | Required effective permissions |
-|--------|--------------------------------|
-| Read runtime readiness, run history, status, exact checkpoint or draft report | `purchasing:view` |
-| Start a calculation from an exact saved revision or cancel a run | `purchasing:view` **and** `purchasing:create` |
-
-The worker rechecks the submitting actor's active user/company membership,
-effective permissions and API-token validity before claiming work and while it
-runs. Queue payloads contain only company/run IDs; no user credential or drawing
-is put in Redis. Worker build readiness is shared infrastructure metadata, not
-another tenant's data. All result/report queries remain company-scoped. Start
-and cancel explicitly bind the intended company. Reads create no business/audit
-events; normal API-token usage telemetry still applies. New run, cancellation,
-lease and checkpoint writes require transactional audit evidence. A run remains
-unapproved even when its geometry is checked and its search finishes. No new
-permission key, quote approval, cost writeback, original-CAD authentication or
-inventory reservation authority is introduced.
-
-**Configured stock exclusions** use the existing estimate, draft and calculation
-permissions above. Editing an exclusion in the browser requires nesting access;
-persisting it or starting a saved calculation still requires effective
-`purchasing:view` and `purchasing:create`. No role, permission key or approval
-boundary changes. Its label, reason, outline and entered clearance describe every
-hypothetical sheet of one stock-size scenario. They do not certify physical stock,
-claim a machine zone, reserve material or grant inventory write authority. The API
-bounds saved input structure; worker geometry validation does not promote the draft
-to an approved nest or quote.
-
-**Quote-spacing policy governance** adds Admin decisions, separate from quote approval:
-
-| Action | Required authority |
-|--------|--------------------|
-| Read policy history/revisions or resolve a matching band | Effective `purchasing:view` |
-| Create policy draft, publish approval or withdraw approval | Admin (or existing Platform Admin/superuser exemption) **and** effective `purchasing:view` + `purchasing:create` |
-| Apply a resolved band or enter a custom-spacing reason in the browser | Existing nesting access; persistence still uses the draft/run write gates |
-
-A Manager or Supervisor with purchasing create permission cannot administer
-spacing policies. Admin permission overrides still apply. The server independently
-checks every command; API-token, kiosk, disabled-user and read-only switched-company
-fences remain. Each write names the intended company, expected policy version,
-request UUID and reason. Same-request replay is bound to the actor and credential;
-tenant references are scoped and foreign IDs return 404. Reads create no policy
-or approval rows. Publication binds an immutable content hash; withdrawal appends
-history instead of deleting it. Required audit failure rolls back the command.
-
-The initial workflow allows an Admin to approve their own draft. This is a
-quoting-allowance approval only, not two-person quote approval, material/certification
-acceptance or manufacturing authority. Saving or starting new policy-bound work
-revalidates current approval on the server. Already accepted queued calculations
-keep their frozen inputs. Custom-spacing overrides expressly remove the approval
-claim and retain an estimator reason. Company switches abort pending UI operations
-and clear the prior decision target. See [MATERIAL_NESTING.md](MATERIAL_NESTING.md#admin-policy-history-and-decisions).
+The Material Nesting estimator (`/nest`) and every `/api/v1/quote-nesting/*` route it used —
+buyer PDF, catalog material resolution, team drafts, saved calculations, spacing-policy
+governance and original-DXF attachments — were removed in commit `3e17456e` (2026-09-16).
+Their permission rules went with them: `/nest` now only redirects to `/fabrication-quotes`,
+and the API answers **404** for every one of those paths. No permission key was added or
+removed by the retirement; `purchasing:view` / `purchasing:create` keep their other uses.
+For the estimator that replaced it, see [FABRICATION_QUOTING.md](FABRICATION_QUOTING.md).
+The tables those routes wrote are kept as historical records with no API reader or writer.
 
 ### Receiving
 
@@ -3178,20 +3082,6 @@ import { ProtectedRoute, AdminRoute } from './components/ProtectedRoute';
 } />
 ```
 
-## Original DXF evidence on saved nesting revisions
-
-`/quote-nesting/drafts/{draft_id}/revisions/{number}/sources` retains unapproved original-byte evidence for material planning and part traceability. The historical namespace does not confer quote approval or inventory authority. These routes reuse effective role permissions, including company overrides:
-
-| Action | Server requirement |
-|---|---|
-| List exact-revision attachment history or download a completed source | Active-company authority and `purchasing:view` |
-| Create an intent, submit original bytes, or finalize tracked bytes | `purchasing:view` **and** `purchasing:create`, writable company context, normal authenticated user/API-token eligibility |
-| Resume an existing intent | All write requirements, plus the exact recorded actor and API-token identity (or the same interactive actor) |
-
-Normal platform/superuser permission bypass remains, but never bypasses read-only context, intended-company checks or another actor/credential's command identity. A read-only colleague can inspect or download completed evidence without becoming its uploader. Revocation/expiry and kiosk path fences remain authoritative; the service rechecks authority before completion after external storage I/O. `can_attach` and per-item `can_resume` describe these capabilities for the UI, not source approval or storage availability.
-
-Intent, storage-attempt and completion mutations each require `AuditService.log_required` in their DB transaction with original credential attribution. Exact completed recovery adds no extra completion audit or object. Staged objects cannot be adopted by another credential, and there is no edit/delete/purge, manufacturing release, quote approval, stock reservation or remnant-credit permission in this feature. See [the source-evidence API contract](API.md#original-dxf-evidence-for-saved-nesting-revisions).
-
 ## Superuser Override
 
 Stored `is_superuser=true` and Platform Admin principals bypass role gates. They still obey
@@ -3223,17 +3113,7 @@ resolver requires effective `inventory:view` and normal tenant/token/kiosk acces
 It does not require Admin/Manager/Supervisor inventory mutation authority and makes
 no observation, audit or inventory change. Existing read-only-company contexts still
 refuse the POST under the central method fence; no read-only exemption is added.
-No purchasing permission grants inventory access. Project18 records carrying an actual
-`remnantPlan` field additionally require effective `inventory:view` wherever their evidence
-leaves the API: draft list/history/detail/save and exact retries; saved-run list/detail,
-checkpoint/report/start/cancel and retries; and all attached CAD intent/content/finalize/
-download operations. The gate uses field presence, not version alone. Worker claim and
-live checkpoint acceptance recheck the submitting actor/token's inventory permission.
-Ordinary inputs without that field retain their existing nesting permissions.
-
-Authorization precedes idempotent recovery. Current observation/source checks apply only to
-new saves and starts, under a short observation-header shared lock after the existing policy
-locks. Historical reads and queued calculations preserve their frozen unapproved evidence;
-a source correction or withdrawal does not rewrite a saved record. No stock-mutator role,
-reservation/consumption grant or new approval authority is introduced. A source selection
-remains planner-declared and physically unverified, even after a successful calculation.
+No purchasing permission grants inventory access. The saved-draft, saved-run and
+original-DXF routes that once carried the selected piece onward (with their own
+`inventory:view` gates) were retired with every `/quote-nesting/*` route in `3e17456e`
+(2026-09-16); this resolver is the only remaining recorded-piece planning route.

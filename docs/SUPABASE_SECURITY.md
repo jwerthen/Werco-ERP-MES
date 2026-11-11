@@ -159,6 +159,17 @@ Re-granting to undo a `REVOKE` could open Data API access that never existed, so
 prior value resolves to the restrictive setting (CLAUDE.md invariant 3's rule). Downgrading past
 `113` leaves the objects revoked, which every older revision already tolerates.
 
+## Retained quote-nesting tables (101–103)
+
+> **The application that wrote these tables is retired.** Commit `3e17456e` (2026-09-16)
+> removed the Material Nesting estimator, its Node worker and every `/quote-nesting/*`
+> route. The tables below — and migration `105_nesting_cad_sources`' attachment tables — are
+> kept as historical records: no route, service or job reads or writes them. Their
+> database guards (deny-by-default RLS, revokes, immutability triggers, mirrored in the
+> models) are unchanged and still apply. The application-layer behavior described in the
+> next three sections (audit evidence, tenant filtering, permission checks, policy
+> resolution) is a record of how the retired API behaved, not a current control.
+
 ## Nesting draft revision storage
 
 Migration `101_quote_nesting_drafts` adds company-scoped headers and immutable
@@ -229,12 +240,12 @@ and queued-run snapshots remain immutable. Fresh conformance claims on save/new
 run must match current server records. Policy approval does not approve a nest,
 material grade, machine parameters or projected remnants.
 
-Independent validation is in
-`backend/tests/test_migration_103_quote_nesting_spacing_policies.py` and
-`backend/tests/api/test_quote_nesting_spacing_contract.py`. The existing disposable
-PostgreSQL verifier now includes migration 103 plus
-`verify_nesting_spacing_postgres.py` and the bounded subprocess
-`verify_nesting_spacing_api_postgres.py`. Local PostgreSQL 15 execution verified
+Independent validation of the retained schema is in
+`backend/tests/test_migration_103_quote_nesting_spacing_policies.py`, and the disposable
+PostgreSQL operations verifier still runs migration 103 plus
+`verify_nesting_spacing_postgres.py`. The API contract test and the
+`verify_nesting_spacing_api_postgres.py` subprocess that exercised the routes were removed
+with them in `3e17456e`. At release, local PostgreSQL 15 execution verified
 upgrade/downgrade twice, inherited Data API grant revocation, immutable SQL guards,
 concurrent publication/withdrawal CAS, real JWT/API 200/409 conflicts, identical
 same-key event recovery, audit-failure rollback and save-versus-withdraw serialization.

@@ -195,7 +195,8 @@ See **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**, **[docs/DEPLOYMENT_RUNBOOK.md]
 | [docs/EXCEL_MIGRATION_RUNBOOK.md](docs/EXCEL_MIGRATION_RUNBOOK.md) | Go-live migration off Excel: load order, dry-run discipline, rehearsals, cutover checklist |
 | [docs/AI_ALWAYS_ON.md](docs/AI_ALWAYS_ON.md) | Always-on sensors, outcome capture, Action Inbox learning loop |
 | [docs/AI_QUOTING_AGENT_RUNBOOK.md](docs/AI_QUOTING_AGENT_RUNBOOK.md) | Operating the Anthropic-powered RFQ/quoting feature |
-| [docs/MATERIAL_NESTING.md](docs/MATERIAL_NESTING.md) | Sheet material estimator: DXF import, size comparisons, limits, and local estimate files |
+| [docs/FABRICATION_QUOTING.md](docs/FABRICATION_QUOTING.md) | The estimator at `/fabrication-quotes`: DXF/STEP/PDF evidence, review, approval and customer-quote handoff |
+| [docs/MATERIAL_NESTING.md](docs/MATERIAL_NESTING.md) | Retired Material Nesting / legacy quoting subsystem (removed 2026-09-16) — historical pointer only |
 | [docs/IMPLEMENTATION_NOTES_AI_QUOTING_AGENT.md](docs/IMPLEMENTATION_NOTES_AI_QUOTING_AGENT.md) | AI quoting design/implementation notes |
 | [docs/CMMC_LEVEL_2_COMPLIANCE.md](docs/CMMC_LEVEL_2_COMPLIANCE.md) | CMMC L2 roadmap — **frozen 2026-07-28**, historical record only |
 | [docs/AUDIT_LOG_RETENTION_RUNBOOK.md](docs/AUDIT_LOG_RETENTION_RUNBOOK.md) | Audit-log retention operations |
