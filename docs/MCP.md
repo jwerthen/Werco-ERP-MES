@@ -2,8 +2,8 @@
 
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
-(Cursor, Claude Code, a chat bot) gets **762 tools** — 15 hand-written *convenience* tools plus
-**747 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+(Cursor, Claude Code, a chat bot) gets **765 tools** — 15 hand-written *convenience* tools plus
+**750 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
 as the same request from the web app.
 
 This is the runbook: how to run it, how to authenticate, what the tools are called, which rules
@@ -12,7 +12,9 @@ the convenience tools enforce, what a result looks like, and what to do when a c
 **Counts and names were re-checked with `python -m app.mcp --print-catalog` on 2026-11-07, after AI
 Accept & apply left the catalog, the draft / on-hold floor gates added `work_orders_resume_work_order`,
 and the short-count close rules added no tool** (15 convenience + 747 generated tools, 16 shadowed raw
-operations).
+operations), **and again on 2026-11-11 after the saved dashboard layout routes added three tools**
+(`get_my_dashboard_layout`, `save_my_dashboard_layout`, `reset_my_dashboard_layout` under the new
+`Dashboard` tag: 15 convenience + 750 generated, 16 shadowed).
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
 `backend/tests/test_mcp_docs_names.py` checks every tool name this file, `CLAUDE.md` and `API.md`
@@ -35,7 +37,7 @@ quote against the live catalog, so a name that shifts fails CI instead of going 
   dict Swagger renders in non-production. A router that ships tomorrow is a tool tomorrow, with no
   list to update. (`app.openapi()` builds the document in process even in production, where the
   served `/api/openapi.json` route is deliberately disabled; the catalog does not re-enable it.)
-- **Reads broad, writes real.** 62 of the API's 66 tags are in. Data Export, Users, Audit,
+- **Reads broad, writes real.** 67 of the API's 72 tags are in (re-counted 2026-11-11). Data Export, Users, Audit,
   Admin Settings, Platform Administration and Company Management are included: their own
   `require_role` gates and audit rows are the control, not the catalog.
 
@@ -195,7 +197,7 @@ routes authenticate every call; in IN-PROCESS mode it uses the real `ErpTokenVer
  "generated_tools":   [{"name": "...", "method": "GET", "path": "/api/v1/...", "tag": "...",
                         "function": "...", "annotations": {...}, "deprecated": false}],
  "shadowed_operations": [["GET", "/api/v1/inventory/"], ...],
- "counts": {"convenience": 15, "generated": 746, "shadowed": 16}
+ "counts": {"convenience": 15, "generated": 750, "shadowed": 16}
 }
 ```
 
@@ -394,7 +396,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 
 | SPA page (route) | OpenAPI tag(s) | Representative tools |
 |---|---|---|
-| `Dashboard` (`/`) | Shop Floor, Scheduling, Calibration, Inventory, Quality Management | `get_shop_floor_dashboard`★, `get_scheduled_jobs`, `get_equipment_due_soon`, `get_low_stock_alerts`, `get_quality_summary` |
+| `Dashboard` (`/`) | Dashboard, Shop Floor, Scheduling, Calibration, Inventory, Quality Management | `get_shop_floor_dashboard`★, `get_capacity_heatmap`, `get_equipment_due_soon`, `get_low_stock_alerts`, `get_quality_summary`, `get_my_dashboard_layout`, `save_my_dashboard_layout`, `reset_my_dashboard_layout` (the caller's own saved layout; an API token reads it but is refused **403** on save / reset — [API.md → Personal dashboard layout](API.md#personal-dashboard-layout)) |
 | `ActionInbox` (`/action-inbox`) | AI Learning, Setup & Readiness | `list_ai_recommendations`, `accept_ai_recommendation` (record-only; on an action card it needs a role that could apply the action and is refused for an API token), `dismiss_ai_recommendation`, `snooze_ai_recommendation`, `get_setup_health` — **Accept & apply is not a tool**: `POST /ai/recommendations/{recommendation_id}/apply` is in `EXCLUDED_OPERATIONS` (§6.1) |
 | `Notifications` (`/notifications`) | Notifications | `list_notifications`, `get_unread_count`, `mark_notification_read`, `mark_all_read` |
 | `MySettings` (`/settings`) | Users (self-service) | `get_current_user_info`, `get_my_notification_preferences`, `update_my_notification_preferences`, `update_my_phone`, `send_test_sms`, `change_own_password` |

@@ -70,8 +70,12 @@ export type DashboardSourceKey = CoreSourceKey | ExtraSourceKey;
 export interface SourceSpec<T = unknown> {
   /** Human label for the page's "widget errors" banner, e.g. 'Quality'. */
   label: string;
-  /** Fetch the data. Api methods take no AbortSignal; the loader's per-key sequence guard discards stale results. */
-  fetch: () => Promise<T>;
+  /**
+   * Fetch the data. Api methods take no AbortSignal; the loader's per-key sequence guard discards stale results.
+   * `forced` is true for a user's manual refresh / retry, so a source with its own cache (notifications) can
+   * go past it. Wrap the api call (`() => api.x()`); never pass an api method by reference.
+   */
+  fetch: (options?: { forced?: boolean }) => Promise<T>;
   /** Non-forced refreshes (30 s poll, WebSocket pushes) skip this key until it is this old. */
   minIntervalMs: number;
   /** A manual (forced) refresh still waits this long between fetches (expensive sources). */

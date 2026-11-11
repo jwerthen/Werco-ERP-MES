@@ -329,6 +329,18 @@ statement, writes no row, and adds no environment variable, secret, cron or work
   under, and the migration will not pick which company's record to change.
   See [API.md → Customer Complaints & RMA](API.md#customer-complaints--rma).
 
+**Saved dashboard layouts.** Apply additive **118_dashboard_layouts** after
+**117_operation_short_declared** through the normal API boot migration path. It creates the empty
+per-company, per-user `dashboard_layouts` table and seeds no rows, so every role keeps the default
+dashboard until someone saves a layout. PostgreSQL RLS and table/sequence revokes from `PUBLIC`,
+`anon` and `authenticated` match model bootstrap. No environment variable, secret, cron or worker
+job is added. Deploy order is free: the frontend treats a 404 (or 405) from `GET /dashboard/layout`
+as "not deployed yet", renders the default dashboard and hides **Customize**. Verify a save, a
+reload in another browser, a stale-tab 409, a reset, and `dashboard_layout` rows in the Audit Log.
+Keep the table on ordinary application rollback; a deliberate 118 downgrade drops every saved
+layout (users fall back to the default; the audit rows remain). See
+[Saved dashboard layouts](DEPLOYMENT.md#saved-dashboard-layouts).
+
 ## Table of Contents
 
 1. [Quick Reference](#quick-reference)

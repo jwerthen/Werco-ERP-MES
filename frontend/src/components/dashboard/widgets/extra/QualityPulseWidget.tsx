@@ -97,7 +97,7 @@ export function QualityPulseWidget() {
                   <h3
                     id={headingId}
                     title={NCR_MONTH_TOOLTIP}
-                    className="text-[10px] font-semibold uppercase tracking-wide text-slate-500"
+                    className="text-[10px] font-semibold uppercase tracking-wide text-slate-400"
                   >
                     {NCR_MONTH_HEADING}
                   </h3>

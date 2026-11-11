@@ -1,9 +1,9 @@
 import { PageHeader } from '../components/ui/PageHeader';
-import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
+import React, { useEffect, useLayoutEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../services/api';
 import { SkeletonDashboard } from '../components/ui/Skeleton';
-import { EmptyState, ErrorState, useToast } from '../components/ui';
+import { Button, EmptyState, ErrorState, useToast } from '../components/ui';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import DashboardOperationDetails from '../components/dashboard/DashboardOperationDetails';
 import { CustomizeDashboardDialog } from '../components/dashboard/CustomizeDashboardDialog';
@@ -50,6 +50,12 @@ export default function Dashboard() {
   const [selectedAssignment, setSelectedAssignment] = useState<ActiveAssignment | null>(null);
   const [customizeOpen, setCustomizeOpen] = useState(false);
   const [layoutReloading, setLayoutReloading] = useState(false);
+  /** Written into a persistent polite region, so layout changes are announced. */
+  const [layoutAnnouncement, setLayoutAnnouncement] = useState('');
+  /** A control to focus after the render that settles an action (a fresh object per request). */
+  const [focusRequest, setFocusRequest] = useState<{ target: 'customize' | 'layoutReload' } | null>(null);
+  const customizeButtonRef = useRef<HTMLButtonElement>(null);
+  const layoutReloadButtonRef = useRef<HTMLButtonElement>(null);
 
   const requestRef = useRef(0);
   const dataRef = useRef(data);
@@ -181,6 +187,26 @@ export default function Dashboard() {
     setCustomizeOpen(false);
   }, [scope]);
 
+  useLayoutEffect(() => {
+    if (!focusRequest) return;
+    const target = focusRequest.target === 'layoutReload' ? layoutReloadButtonRef.current : null;
+    (target ?? customizeButtonRef.current)?.focus();
+  }, [focusRequest]);
+
+  // The dialog's Modal returns focus to whatever opened it — unless that control is gone:
+  // the empty-state (or banners-only) Customize action unmounts as soon as a save or reset
+  // puts widgets back. Then focus would drop to <body>; send it to the header's Customize
+  // button instead. This runs after the Modal's own restore (its cleanup runs first).
+  const dialogOpen = customizeOpen && layout.response !== null;
+  const dialogWasOpenRef = useRef(false);
+  useEffect(() => {
+    const closed = dialogWasOpenRef.current && !dialogOpen;
+    dialogWasOpenRef.current = dialogOpen;
+    if (!closed) return;
+    const active = document.activeElement;
+    if (!active || active === document.body) customizeButtonRef.current?.focus();
+  }, [dialogOpen]);
+
   // Manual refresh handler
   const handleManualRefresh = useCallback(() => {
     if (!isRefreshingRef.current) {
@@ -197,6 +223,23 @@ export default function Dashboard() {
       setLayoutReloading(false);
     }
   }, [reloadLayout]);
+
+  /**
+   * The layout notice's "Reload layout": the notice (and the focused button) disappears on
+   * success, so focus moves to the header's Customize button and the change is announced;
+   * a repeat failure says so and keeps focus on the button.
+   */
+  const handleNoticeReload = useCallback(async () => {
+    setLayoutAnnouncement('');
+    const response = await handleReloadLayout();
+    if (response) {
+      setLayoutAnnouncement('Your saved dashboard layout is now showing.');
+      setFocusRequest({ target: 'customize' });
+      return;
+    }
+    showToast('error', "Your saved dashboard layout still couldn't be loaded. Try again in a moment.");
+    setFocusRequest({ target: 'layoutReload' });
+  }, [handleReloadLayout, showToast]);
 
   const handleCustomize = useCallback(async () => {
     if (layout.status === 'loading' || layout.status === 'unsupported') return;
@@ -262,6 +305,7 @@ export default function Dashboard() {
           </button>
           {layout.status !== 'unsupported' && (
             <button
+              ref={customizeButtonRef}
               type="button"
               onClick={() => void handleCustomize()}
               disabled={layout.status === 'loading' || layoutReloading}
@@ -333,10 +377,11 @@ export default function Dashboard() {
           <div role="status" className="rounded border border-fd-line p-3 text-sm text-slate-300">
             Your saved dashboard layout couldn&apos;t be loaded; showing the default.{' '}
             <button
+              ref={layoutReloadButtonRef}
               type="button"
               className="underline disabled:opacity-60"
               disabled={layoutReloading}
-              onClick={() => void handleReloadLayout()}
+              onClick={() => void handleNoticeReload()}
             >
               Reload layout
             </button>
@@ -352,10 +397,20 @@ export default function Dashboard() {
           />
         ) : (
           <>
-            {/* With no KPI strip and no panel grid, the tour anchor moves to the banner zone. */}
+            {/* With no KPI strip and no panel grid, the tour anchor moves to the banner zone,
+                with a standing note: every banner may be quiet, which would otherwise leave
+                a blank page that reads as broken. */}
             {!hasKpis && !hasPanels ? (
               <div className="space-y-4" data-tour="dashboard-stats">
                 {banners}
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-sm border border-dashed border-fd-line p-3">
+                  <p className="text-sm text-slate-300">
+                    Only alerts and banners are on your dashboard. They appear here when something needs attention.
+                  </p>
+                  <Button variant="secondary" size="sm" onClick={() => void handleCustomize()}>
+                    Customize dashboard
+                  </Button>
+                </div>
               </div>
             ) : (
               banners
@@ -398,6 +453,9 @@ export default function Dashboard() {
       <CoreDashboardProvider value={coreEnv}>
         <div className="space-y-4">
           {pageHeader}
+          <p role="status" aria-live="polite" className="sr-only">
+            {layoutAnnouncement}
+          </p>
           {body}
 
           {selectedAssignment?.operation.id != null && (

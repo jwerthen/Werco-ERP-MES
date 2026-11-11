@@ -56,8 +56,10 @@ export function BlockedJobsWidget() {
       footer={total != null ? plural(total, 'open blocker') : undefined}
       headerExtra={
         total != null ? (
+          // `blocked_total` counts BLOCKERS (one work order can carry several), and the 24-row
+          // cap means distinct work orders cannot be counted here — so the chip says blockers.
           <CountChip variant={total > 0 ? 'red' : 'slate'} title={plural(total, 'open blocker')}>
-            {total} blocked
+            {plural(total, 'blocker')}
           </CountChip>
         ) : undefined
       }
@@ -151,7 +153,7 @@ export function ShippingOutlookWidget() {
               </div>
               {ship.due_today_rows.length > 0 && (
                 <div>
-                  <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                  <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
                     Most still to ship today
                   </p>
                   <ul className="divide-y divide-fd-line">

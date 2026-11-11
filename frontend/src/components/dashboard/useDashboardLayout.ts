@@ -15,7 +15,10 @@
  * `detail` (409 = changed in another tab).
  *
  * The hook re-runs its GET whenever the session scope (user, active company, read-only
- * flag, token scope/type) changes — `useDashboardSessionScope`.
+ * flag, token scope/type) changes — `useDashboardSessionScope`. Every state is tagged with
+ * the scope it was produced under, and a state from any other scope reads as `'loading'`
+ * IN THE SAME RENDER the scope changes: the page never paints, fetches the sources of, or
+ * writes against the previous session's layout while the new one loads.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import api from '../../services/api';
@@ -80,20 +83,38 @@ function normalizeResponse(raw: unknown): DashboardLayoutResponse | null {
 export class DashboardLayoutCompanyChangedError extends Error {
   constructor() {
     super('Your active company changed. Reload the dashboard before saving its layout.');
+    // Restore the prototype chain so `instanceof` holds when the class is transpiled to ES5
+    // (tsconfig/ts-jest) — the extends-Error caveat (KioskApiError precedent). The dialog's
+    // stale-write recovery depends on it.
+    Object.setPrototypeOf(this, DashboardLayoutCompanyChangedError.prototype);
     this.name = 'DashboardLayoutCompanyChangedError';
   }
 }
 
+interface ScopedLayoutState extends DashboardLayoutState {
+  /** The session scope this state was produced under. */
+  scope: string | null;
+}
+
+const LOADING_STATE: DashboardLayoutState = { status: 'loading', response: null };
+
 export function useDashboardLayout(scope: string | null): UseDashboardLayoutResult {
-  const [state, setState] = useState<DashboardLayoutState>({ status: 'loading', response: null });
+  const [state, setState] = useState<ScopedLayoutState>(() => ({ ...LOADING_STATE, scope }));
   const stateRef = useRef(state);
   stateRef.current = state;
+  const scopeRef = useRef(scope);
+  scopeRef.current = scope;
+  // What this render may show: only a state produced under the CURRENT scope.
+  const current: DashboardLayoutState = state.scope === scope ? state : LOADING_STATE;
+  const currentRef = useRef(current);
+  currentRef.current = current;
   const seqRef = useRef(0);
   const controllerRef = useRef<AbortController | null>(null);
   const mountedRef = useRef(true);
 
   const load = useCallback(async (): Promise<DashboardLayoutResponse | null> => {
     const seq = ++seqRef.current;
+    const loadScope = scopeRef.current;
     controllerRef.current?.abort();
     const controller = new AbortController();
     controllerRef.current = controller;
@@ -112,16 +133,17 @@ export function useDashboardLayout(scope: string | null): UseDashboardLayoutResu
       if (!isCurrent()) return null;
       const response = normalizeResponse(raw);
       if (!response) throw new Error('Unexpected dashboard layout response');
-      setState({ status: 'ready', response });
+      setState({ status: 'ready', response, scope: loadScope });
       return response;
     } catch (error) {
       if (!isCurrent()) return null;
       const status = apiErrorStatus(error);
+      const onScreen = stateRef.current;
       if (status === 404 || status === 405) {
-        setState({ status: 'unsupported', response: null });
-      } else if (stateRef.current.status !== 'ready') {
-        // A failed RE-load never downgrades a layout already on screen.
-        setState({ status: 'error', response: null });
+        setState({ status: 'unsupported', response: null, scope: loadScope });
+      } else if (onScreen.scope !== loadScope || onScreen.status !== 'ready') {
+        // A failed RE-load never downgrades a layout already on screen for this session.
+        setState({ status: 'error', response: null, scope: loadScope });
       }
       return null;
     } finally {
@@ -139,24 +161,28 @@ export function useDashboardLayout(scope: string | null): UseDashboardLayoutResu
     };
   }, []);
 
-  // Initial load, and a fresh load on every session-scope change.
+  // Initial load, and a fresh load on every session-scope change. The render that sees a
+  // new scope already reads as loading (`current` above); recording it here also covers a
+  // return to an earlier scope, whose old state would otherwise be shown while it reloads.
   useEffect(() => {
-    // Never keep showing the previous session's layout while the new one loads.
     setState(previous =>
-      previous.status === 'loading' && previous.response === null ? previous : { status: 'loading', response: null }
+      previous.status === 'loading' && previous.response === null && previous.scope === scope
+        ? previous
+        : { ...LOADING_STATE, scope }
     );
     void load();
   }, [scope, load]);
 
   const write = useCallback(async (send: (current: DashboardLayoutResponse) => Promise<DashboardLayoutResponse>) => {
-    const current = stateRef.current.response;
-    if (!current) throw new Error('Your saved dashboard layout has not loaded yet. Reload it and try again.');
+    const loaded = currentRef.current.response;
+    if (!loaded) throw new Error('Your saved dashboard layout has not loaded yet. Reload it and try again.');
     const seq = seqRef.current;
-    const raw = await send(current);
+    const writeScope = scopeRef.current;
+    const raw = await send(loaded);
     const response = normalizeResponse(raw);
     if (!response) throw new Error('Unexpected dashboard layout response');
-    if (response.company_id !== current.company_id) throw new DashboardLayoutCompanyChangedError();
-    if (mountedRef.current && seq === seqRef.current) setState({ status: 'ready', response });
+    if (response.company_id !== loaded.company_id) throw new DashboardLayoutCompanyChangedError();
+    if (mountedRef.current && seq === seqRef.current) setState({ status: 'ready', response, scope: writeScope });
     return response;
   }, []);
 
@@ -181,10 +207,10 @@ export function useDashboardLayout(scope: string | null): UseDashboardLayoutResu
   );
 
   return {
-    status: state.status,
-    response: state.response,
-    saved: state.response?.layout ?? null,
-    canEdit: state.response?.can_edit === true,
+    status: current.status,
+    response: current.response,
+    saved: current.response?.layout ?? null,
+    canEdit: current.response?.can_edit === true,
     reload: load,
     save,
     reset,

@@ -51,7 +51,9 @@ const FORBIDDEN = readySource(null, { forbidden: true });
 describe('BlockedJobsWidget', () => {
   it('lists blockers oldest first with the uncapped blocker total and search links', () => {
     renderWithDashboardContext(<BlockedJobsWidget />, { sources: { wallboard: readySource(wallboard()) } });
-    expect(screen.getByText('5 blocked')).toBeInTheDocument();
+    // The total counts blockers, not distinct work orders (WO-3001 carries two of them).
+    expect(screen.getByText('5 blockers')).toBeInTheDocument();
+    expect(screen.queryByText(/\d+ blocked$/)).not.toBeInTheDocument();
     expect(screen.getByText('5 open blockers total')).toBeInTheDocument();
     const links = screen.getAllByRole('link', { name: 'WO-3001' });
     expect(links).toHaveLength(2);
@@ -66,7 +68,7 @@ describe('BlockedJobsWidget', () => {
     renderWithDashboardContext(<BlockedJobsWidget />, {
       sources: { wallboard: readySource(wallboard({ blocked_total: undefined })) },
     });
-    expect(screen.getByText('2 blocked')).toBeInTheDocument();
+    expect(screen.getByText('2 blockers')).toBeInTheDocument();
   });
 
   it('renders the empty state', () => {
@@ -91,7 +93,7 @@ describe('BlockedJobsWidget', () => {
 
     renderWithDashboardContext(<BlockedJobsWidget />, { sources: { wallboard: FORBIDDEN } });
     expect(screen.getByText('Not available for your role')).toBeInTheDocument();
-    expect(screen.queryByText(/blocked$/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\d+ blockers?$/)).not.toBeInTheDocument();
   });
 
   it('renders work-order numbers as text when the list cannot be opened', () => {

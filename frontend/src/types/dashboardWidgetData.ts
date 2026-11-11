@@ -44,6 +44,11 @@ export interface ActiveDowntimeEvent {
   work_center: { id: number; code: string; name: string } | null;
   reporter: { id: number; username: string | null; full_name: string | null } | null;
   resolver: { id: number; username: string | null; full_name: string | null } | null;
+  /**
+   * `wo_number` is the work order's `work_order_number`. Older APIs sent null here (their
+   * `WorkOrderInfo` read `wo_number` off an ORM `WorkOrder` that has no such attribute), so
+   * link by `work_order_id` and never require the number to be present.
+   */
   work_order: { id: number; wo_number: string | null } | null;
 }
 

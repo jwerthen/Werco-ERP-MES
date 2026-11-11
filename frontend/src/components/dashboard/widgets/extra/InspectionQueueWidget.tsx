@@ -68,7 +68,7 @@ export function InspectionQueueWidget() {
               </div>
               {queue.length > 0 && (
                 <div>
-                  <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                  <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
                     Oldest waiting
                   </p>
                   <ul className="divide-y divide-fd-line">

@@ -3,6 +3,7 @@ import { resetNotificationListCache } from '../widgets/extra/notificationListCac
 import type { ExtraSourceKey } from '../widgetTypes';
 import {
   EXTRA_SOURCE_SPECS,
+  fetchNotificationsSource,
   NOTIFICATION_WIDGET_ROW_LIMIT,
   VISITOR_WIDGET_ROW_LIMIT,
   WORK_ORDER_WIDGET_ROW_LIMIT,
@@ -131,5 +132,25 @@ describe('EXTRA_SOURCE_SPECS', () => {
     await expect(EXTRA_SOURCE_SPECS.notifications.fetch()).resolves.toBe('notifications');
     expect(api.getNotifications).toHaveBeenCalledTimes(1);
     expect(api.getNotifications).toHaveBeenCalledWith({ unread: true, pageSize: NOTIFICATION_WIDGET_ROW_LIMIT });
+  });
+
+  it('serves notifications through the forced-aware fetcher', () => {
+    expect(EXTRA_SOURCE_SPECS.notifications.fetch).toBe(fetchNotificationsSource);
+  });
+
+  it('lets a forced notifications fetch past the replayed failure and the list floor', async () => {
+    (api.getNotifications as jest.Mock).mockRejectedValueOnce(new Error('502'));
+    await expect(fetchNotificationsSource()).rejects.toThrow('502');
+    // An unforced call inside the replay window gets the replayed failure, no request.
+    await expect(fetchNotificationsSource()).rejects.toThrow('502');
+    expect(api.getNotifications).toHaveBeenCalledTimes(1);
+
+    await expect(fetchNotificationsSource({ forced: true })).resolves.toBe('notifications');
+    expect(api.getNotifications).toHaveBeenCalledTimes(2);
+    // Inside the floor an unforced call is cached; a forced one refetches.
+    await expect(fetchNotificationsSource()).resolves.toBe('notifications');
+    expect(api.getNotifications).toHaveBeenCalledTimes(2);
+    await expect(fetchNotificationsSource({ forced: true })).resolves.toBe('notifications');
+    expect(api.getNotifications).toHaveBeenCalledTimes(3);
   });
 });

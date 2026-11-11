@@ -17,9 +17,15 @@
  *   shows) and any in-flight result for it is ignored;
  * - HTTP 403 is terminal (`forbidden`) until the session scope changes;
  * - specs with `cacheTtlMs` keep their last result in a module-level cache keyed by the
- *   session scope, so the floor survives remounts of `/` (the landing page).
+ *   session scope, so the floor survives remounts of `/` (the landing page). A 403 EVICTS
+ *   the entry (a remount refetches and is refused again — refused data is never re-served
+ *   as verified), and a failed refresh is recorded on it, so a remount shows the same
+ *   "could not refresh" marker and keeps the error-retry cadence instead of passing the
+ *   last result off as fresh.
  *
  * Api methods take no AbortSignal; the per-key sequence is what discards stale results.
+ * Every fetch tells its spec whether it is `forced` (a user's refresh / retry), so a source
+ * with a cache of its own (notifications) answers a manual refresh from the network.
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { apiErrorStatus } from '../../utils/apiError';
@@ -36,6 +42,8 @@ interface CacheEntry {
   data: unknown;
   startedAt: number;
   verifiedAt: number;
+  /** When the latest refresh after `verifiedAt` started, if it FAILED (non-403); null otherwise. */
+  failedStartedAt: number | null;
 }
 
 const sourceCache = new Map<string, CacheEntry>();
@@ -110,7 +118,7 @@ export function useDashboardSources(
   }, []);
 
   const fetchKey = useCallback(
-    (key: string): Promise<void> => {
+    (key: string, forced = false): Promise<void> => {
       const spec = getSourceSpec(key, specsRef.current);
       const meta = metaFor(key);
       const seq = ++meta.seq;
@@ -123,7 +131,7 @@ export function useDashboardSources(
       let request: Promise<unknown>;
       try {
         if (!spec) throw new Error(`No source spec for ${key}`);
-        request = Promise.resolve(spec.fetch());
+        request = Promise.resolve(spec.fetch({ forced }));
       } catch (error) {
         request = Promise.reject(error);
       }
@@ -134,16 +142,24 @@ export function useDashboardSources(
           meta.inFlight = false;
           meta.lastFailed = false;
           const verifiedAt = Date.now();
-          if (spec?.cacheTtlMs) sourceCache.set(cacheKeyFor(fetchScope, key), { data, startedAt, verifiedAt });
+          if (spec?.cacheTtlMs) {
+            sourceCache.set(cacheKeyFor(fetchScope, key), { data, startedAt, verifiedAt, failedStartedAt: null });
+          }
           setStates(previous => ({
             ...previous,
             [key]: { data, error: null, loading: false, forbidden: false, updatedAt: new Date(verifiedAt) },
           }));
         },
         error => {
+          const forbidden = apiErrorStatus(error) === 403;
+          const cacheKey = cacheKeyFor(fetchScope, key);
+          // Evict even when this result is no longer current (the page unmounted, the key
+          // went away): the server refused this session, so no remount may re-serve the
+          // cached payload as verified. A later success simply re-caches it.
+          if (forbidden && spec?.cacheTtlMs) sourceCache.delete(cacheKey);
           if (!isCurrent()) return;
           meta.inFlight = false;
-          if (apiErrorStatus(error) === 403) {
+          if (forbidden) {
             meta.forbidden = true;
             setStates(previous => ({
               ...previous,
@@ -152,6 +168,8 @@ export function useDashboardSources(
             return;
           }
           meta.lastFailed = true;
+          const cached = spec?.cacheTtlMs ? sourceCache.get(cacheKey) : undefined;
+          if (cached) sourceCache.set(cacheKey, { ...cached, failedStartedAt: startedAt });
           setStates(previous => {
             const before = previous[key];
             return {
@@ -171,22 +189,27 @@ export function useDashboardSources(
     [metaFor]
   );
 
-  /** Seed a newly needed key from the module cache when its result is still fresh. */
+  /**
+   * Seed a newly needed key from the module cache when its result is still fresh. A failed
+   * refresh recorded on the entry comes back as it was left: the last verified data with
+   * the "could not refresh" marker, retried on the error cadence from the failed attempt.
+   */
   const hydrateFromCache = useCallback(
     (key: string): boolean => {
       const spec = getSourceSpec(key, specsRef.current);
       if (!spec?.cacheTtlMs) return false;
       const entry = sourceCache.get(cacheKeyFor(scopeRef.current, key));
       if (!entry || Date.now() - entry.verifiedAt >= spec.cacheTtlMs) return false;
+      const failed = entry.failedStartedAt !== null;
       const meta = metaFor(key);
-      meta.lastStartedAt = entry.startedAt;
-      meta.lastFailed = false;
+      meta.lastStartedAt = entry.failedStartedAt ?? entry.startedAt;
+      meta.lastFailed = failed;
       meta.inFlight = false;
       setStates(previous => ({
         ...previous,
         [key]: {
           data: entry.data,
-          error: null,
+          error: failed ? SOURCE_ERROR_MESSAGE : null,
           loading: false,
           forbidden: false,
           updatedAt: new Date(entry.verifiedAt),
@@ -247,7 +270,7 @@ export function useDashboardSources(
       if (!forced && isTabHidden()) return;
       const now = Date.now();
       const due = neededRef.current.filter(key => shouldFetch(key, forced, now));
-      await Promise.allSettled(due.map(key => fetchKey(key)));
+      await Promise.allSettled(due.map(key => fetchKey(key, forced)));
     },
     [fetchKey, shouldFetch]
   );

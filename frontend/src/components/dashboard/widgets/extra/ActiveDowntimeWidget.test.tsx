@@ -25,7 +25,9 @@ function event(overrides: Partial<ActiveDowntimeEvent> = {}): ActiveDowntimeEven
     work_center: { id: 3, code: 'CNC-2', name: 'Haas VF-2' },
     reporter: { id: 2, username: null, full_name: 'Lena Chen' },
     resolver: null,
-    work_order: { id: 88, wo_number: 'WO-5088' },
+    // The payload from an API that predates the WorkOrderInfo alias fix: the number arrives
+    // null, and the widget must still link by work_order_id.
+    work_order: { id: 88, wo_number: null },
     ...overrides,
   };
 }
@@ -42,6 +44,7 @@ describe('ActiveDowntimeWidget', () => {
             planned_type: 'planned',
             category: 'planned_maintenance',
             reason_code: null,
+            work_order_id: null,
             work_order: null,
           }),
         ]),
@@ -58,8 +61,20 @@ describe('ActiveDowntimeWidget', () => {
     expect(screen.getByText('Planned maintenance')).toBeInTheDocument();
     expect(screen.getByText('unplanned')).toBeInTheDocument();
     expect(screen.getByText('planned')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'WO-5088' })).toHaveAttribute('href', '/work-orders/88');
+    // Linked by work_order_id even though the server sends no number; the planned event has
+    // no work order, so exactly one row links.
+    const woLink = screen.getByRole('link', { name: 'Open the work order for Haas VF-2' });
+    expect(woLink).toHaveAttribute('href', '/work-orders/88');
+    expect(woLink).toHaveTextContent('Work order');
+    expect(screen.getAllByText('Work order')).toHaveLength(1);
     expect(screen.getByRole('link', { name: 'Open downtime' })).toHaveAttribute('href', '/downtime');
+  });
+
+  it('names the work order by its number when the server sends one', () => {
+    renderWithDashboardContext(<ActiveDowntimeWidget />, {
+      sources: { downtime: readySource([event({ work_order: { id: 88, wo_number: 'WO-5088' } })]) },
+    });
+    expect(screen.getByRole('link', { name: 'WO-5088' })).toHaveAttribute('href', '/work-orders/88');
   });
 
   it('renders the empty state when no machine is down', () => {
@@ -98,7 +113,7 @@ describe('ActiveDowntimeWidget', () => {
       sources: { downtime: readySource([event()]) },
       env: { canOpen: () => false },
     });
-    expect(screen.getByText('WO-5088')).toBeInTheDocument();
+    expect(screen.getByText('Work order')).toBeInTheDocument();
     expect(screen.queryByRole('link')).not.toBeInTheDocument();
   });
 

@@ -220,6 +220,32 @@ rollback step; it does not undo documents, receipts, production or shipments
 already created by completed actions. Intake-linked Documents cannot be deleted
 through the application because the saved source and receipt must remain valid.
 
+### Saved dashboard layouts
+
+Apply additive **118_dashboard_layouts** after **117_operation_short_declared** through
+the normal API boot migration path. It creates an empty tenant/user `dashboard_layouts`
+table with a unique company/user key, a `version >= 1` check and indexes on `company_id`
+and `user_id`. No layout is seeded: until a person saves one, reads return
+`layout: null` without creating rows and every role keeps the default dashboard.
+PostgreSQL RLS and table/sequence revokes from `PUBLIC`, `anon`, and `authenticated`
+match model bootstrap. No environment variable, secret, cron or worker job is added.
+
+Deploy order is free. The frontend tolerates an API that does not have the routes yet:
+a 404 (or 405) from `GET /dashboard/layout` renders the default dashboard with
+**Customize** hidden. An older frontend never calls the new routes.
+
+Verify in a test company: open `/`, use **Customize** to add a panel and save, then
+reload in another browser and see the same layout; save from a second, stale tab and get
+the "changed in another tab" refusal; **Reset to default**. The Audit Log should show
+`dashboard_layout` CREATE and UPDATE rows. Confirm RLS with
+`SELECT relrowsecurity FROM pg_class WHERE relname = 'dashboard_layouts';` (true).
+
+Keep the table on ordinary application rollback: older code ignores it and renders
+the fixed dashboard. A deliberate 118 downgrade drops every saved layout, returning
+everyone to the default; the audit rows recording each change remain. See
+[API.md → Personal dashboard layout](API.md#personal-dashboard-layout) and
+[DASHBOARD.md → Customizing the dashboard](DASHBOARD.md#customizing-the-dashboard).
+
 ### Existing ERP frontend: Fabrication Quoting
 
 The fabrication estimator lives at [wercomfg.app/fabrication-quotes](https://wercomfg.app/fabrication-quotes), under **Sales & Quoting → Fabrication Quoting**. It uses the existing ERP authentication, API, Railway services and Vercel project. Old estimator URLs redirect here. See [the implementation and operating guide](FABRICATION_QUOTING.md).

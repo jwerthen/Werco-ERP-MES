@@ -77,7 +77,7 @@ export function PresencePanel() {
         <div className="space-y-3">
           {onJobSignedInUsers.length > 0 && (
             <div>
-              <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+              <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
                 On a job ({onJobSignedInUsers.length})
               </p>
               <div className="flex flex-wrap gap-1">
@@ -158,7 +158,7 @@ function IdleUserRow({ user }: { user: SignedInUserStatus }) {
     <div className="flex items-center gap-2 py-1.5">
       <div className="flex min-w-0 flex-1 items-center gap-1.5">
         <span className="truncate font-medium text-slate-200">{user.name}</span>
-        <span className="flex-shrink-0 text-[10px] text-slate-500 tabular-nums">{user.employee_id}</span>
+        <span className="flex-shrink-0 text-[10px] text-slate-400 tabular-nums">{user.employee_id}</span>
         <span
           className={`flex-shrink-0 rounded-sm px-1 py-0.5 text-[10px] font-medium ${getRoleBadgeClass(user.role)}`}
         >

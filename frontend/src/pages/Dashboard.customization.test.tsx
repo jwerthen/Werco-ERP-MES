@@ -11,6 +11,8 @@ import type { DashboardLayoutResponse, DashboardLayoutValues } from '../types/da
 import type { WallboardResponse } from '../types/wallboard';
 import { setCustomPermissions } from '../utils/permissions';
 import { clearDashboardSourceCache } from '../components/dashboard/useDashboardSources';
+import { ToastProvider } from '../components/ui';
+import { useWebSocket } from '../hooks/useWebSocket';
 import Dashboard from './Dashboard';
 
 jest.mock('../services/api', () => ({
@@ -25,6 +27,10 @@ jest.mock('../services/api', () => ({
     saveDashboardLayout: jest.fn(),
     resetDashboardLayout: jest.fn(),
     getWallboard: jest.fn(),
+    getKPIDashboard: jest.fn(),
+    getVisitorLogs: jest.fn(),
+    getReceivingStats: jest.fn(),
+    getInspectionQueue: jest.fn(),
   },
 }));
 
@@ -213,6 +219,20 @@ it('renders the classic layout for the default (byte-identical panel widths)', a
   await waitFor(() => expect(mockedApi.getQualitySummary).toHaveBeenCalledTimes(1));
 });
 
+it('renders the core panels’ small labels at AA contrast (slate-400, never slate-500)', async () => {
+  renderDashboard();
+  await loaded();
+  const labels = [
+    screen.getByText('Sched'),
+    screen.getByText('Cap'),
+    screen.getByText('Util'),
+    screen.getByText('On a job (1)'),
+    screen.getByText('E021'),
+    screen.getByText(/^\d+\/\d+ \(\d+%\)$/),
+  ];
+  labels.forEach(label => expect(label).not.toHaveClass('text-slate-500'));
+});
+
 it('fetches a source shared by two widgets once', async () => {
   mockedApi.getDashboardLayout.mockResolvedValue(
     layoutResponse(layoutOf({ id: 'kpi.open_ncrs' }, { id: 'quality_pulse' }))
@@ -260,7 +280,7 @@ describe('opt-in panels render through the extra catalog', () => {
     expect(late.closest('.min-w-0.xl\\:col-span-12')).not.toBeNull();
     // No stored size: the widget's own default ('third').
     expect(screen.getByRole('heading', { name: 'Blocked Jobs' }).closest('.min-w-0.xl\\:col-span-4')).not.toBeNull();
-    await waitFor(() => expect(screen.getByText('5 blocked')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('5 blockers')).toBeInTheDocument());
     expect(mockedApi.getWallboard).toHaveBeenCalledTimes(1);
     // Nothing on this layout reads the core sources.
     expect(mockedApi.getQualitySummary).not.toHaveBeenCalled();
@@ -375,6 +395,38 @@ describe('links the router would refuse are not rendered as links', () => {
   });
 });
 
+it('returns focus to the header Customize button when a save removes the empty state that opened the dialog', async () => {
+  mockedApi.getDashboardLayout.mockResolvedValue(layoutResponse(layoutOf()));
+  mockedApi.saveDashboardLayout.mockImplementation(async body => layoutResponse(body.layout, { version: 3 }));
+  renderDashboard();
+  await loaded();
+  const [headerButton, emptyStateButton] = screen.getAllByRole('button', { name: 'Customize dashboard' });
+  emptyStateButton.focus();
+  fireEvent.click(emptyStateButton);
+  const dialog = await screen.findByRole('dialog', { name: 'Customize dashboard' });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add Overdue' }));
+  await act(async () => {
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save layout' }));
+  });
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Customize dashboard' })).not.toBeInTheDocument());
+  expect(screen.queryByText('Your dashboard is empty')).not.toBeInTheDocument();
+  expect(headerButton).toHaveFocus();
+});
+
+it('keeps an anchor and a Customize action on a layout that holds only banners', async () => {
+  mockedApi.getDashboardLayout.mockResolvedValue(
+    layoutResponse(layoutOf({ id: 'morning_brief' }, { id: 'alert_chips' }))
+  );
+  renderDashboard();
+  await loaded();
+  expect(screen.queryByText('Your dashboard is empty')).not.toBeInTheDocument();
+  const anchor = document.querySelector('[data-tour="dashboard-stats"]') as HTMLElement;
+  expect(anchor).not.toBeNull();
+  expect(within(anchor).getByText(/Only alerts and banners are on your dashboard/)).toBeInTheDocument();
+  fireEvent.click(within(anchor).getByRole('button', { name: 'Customize dashboard' }));
+  expect(await screen.findByRole('dialog', { name: 'Customize dashboard' })).toBeInTheDocument();
+});
+
 it('offers Customize from an empty dashboard', async () => {
   mockedApi.getDashboardLayout.mockResolvedValue(layoutResponse(layoutOf()));
   renderDashboard();
@@ -409,12 +461,115 @@ it('shows the default with a status notice when the saved layout cannot load, an
   expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
 
+  const reload = screen.getByRole('button', { name: 'Reload layout' });
+  reload.focus();
   await act(async () => {
-    fireEvent.click(screen.getByRole('button', { name: 'Reload layout' }));
+    fireEvent.click(reload);
   });
   await waitFor(() => expect(screen.queryByRole('heading', { name: 'Capacity Overview' })).not.toBeInTheDocument());
   expect(screen.queryByText(/couldn.t be loaded/)).not.toBeInTheDocument();
   expect(stripLabels()).toEqual(['Overdue']);
+  // The focused notice is gone: focus lands on a control that survives, and the change is announced.
+  expect(screen.getByRole('button', { name: 'Customize dashboard' })).toHaveFocus();
+  expect(
+    screen.getByText('Your saved dashboard layout is now showing.').closest('[aria-live="polite"]')
+  ).not.toBeNull();
+});
+
+it('says so, and keeps focus on the button, when "Reload layout" fails again', async () => {
+  mockedApi.getDashboardLayout.mockRejectedValue(httpError(500));
+  render(
+    <ToastProvider>
+      <MemoryRouter>
+        <Dashboard />
+      </MemoryRouter>
+    </ToastProvider>
+  );
+  await loaded();
+  const reload = screen.getByRole('button', { name: 'Reload layout' });
+  reload.focus();
+  await act(async () => {
+    fireEvent.click(reload);
+  });
+  expect(await screen.findByText(/Your saved dashboard layout still couldn.t be loaded/)).toBeInTheDocument();
+  expect(mockedApi.getDashboardLayout).toHaveBeenCalledTimes(2);
+  expect(screen.getByRole('button', { name: 'Reload layout' })).toHaveFocus();
+});
+
+describe('a session-scope change in place', () => {
+  const tokenFor = (claims: Record<string, unknown>) => `x.${btoa(JSON.stringify(claims))}.y`;
+  afterEach(() => sessionStorage.clear());
+
+  it('fetches nothing for the previous session’s layout before the new one resolves', async () => {
+    sessionStorage.setItem('token', tokenFor({ sub: '1', cid: 1 }));
+    let resolveNext!: (value: DashboardLayoutResponse) => void;
+    mockedApi.getDashboardLayout.mockResolvedValueOnce(layoutResponse(null)).mockImplementationOnce(
+      () =>
+        new Promise<DashboardLayoutResponse>(resolve => {
+          resolveNext = resolve;
+        })
+    );
+    renderDashboard();
+    await loaded();
+    await waitFor(() => expect(mockedApi.getQualitySummary).toHaveBeenCalledTimes(1));
+    const before = {
+      quality: mockedApi.getQualitySummary.mock.calls.length,
+      equipment: mockedApi.getEquipmentDueSoon.mock.calls.length,
+      stock: mockedApi.getLowStockAlerts.mock.calls.length,
+      capacity: mockedApi.getCapacityHeatmap.mock.calls.length,
+    };
+
+    await act(async () => {
+      sessionStorage.setItem('token', tokenFor({ sub: '1', cid: 2 }));
+      window.dispatchEvent(new Event('werco:auth-token-changed'));
+    });
+    expect(mockedApi.getDashboardLayout).toHaveBeenCalledTimes(2);
+    const during = {
+      quality: mockedApi.getQualitySummary.mock.calls.length,
+      equipment: mockedApi.getEquipmentDueSoon.mock.calls.length,
+      stock: mockedApi.getLowStockAlerts.mock.calls.length,
+      capacity: mockedApi.getCapacityHeatmap.mock.calls.length,
+    };
+    expect(during).toEqual(before);
+
+    // The new session's layout needs none of the classic sources: none are fetched.
+    await act(async () => resolveNext(layoutResponse(layoutOf({ id: 'kpi.overdue' }), { company_id: 2 })));
+    await waitFor(() => expect(stripLabels()).toEqual(['Overdue']));
+    expect(mockedApi.getQualitySummary.mock.calls.length).toBe(before.quality);
+    expect(mockedApi.getCapacityHeatmap.mock.calls.length).toBe(before.capacity);
+  });
+
+  it('closes an open Customize dialog, so the previous session’s draft can never be saved into the new one', async () => {
+    sessionStorage.setItem('token', tokenFor({ sub: '1', cid: 1 }));
+    let resolveNext!: (value: DashboardLayoutResponse) => void;
+    mockedApi.getDashboardLayout
+      .mockResolvedValueOnce(layoutResponse(layoutOf({ id: 'kpi.overdue' })))
+      .mockImplementationOnce(
+        () =>
+          new Promise<DashboardLayoutResponse>(resolve => {
+            resolveNext = resolve;
+          })
+      );
+    renderDashboard();
+    await loaded();
+    fireEvent.click(screen.getByRole('button', { name: 'Customize dashboard' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Customize dashboard' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add Due Today' }));
+
+    await act(async () => {
+      sessionStorage.setItem('token', tokenFor({ sub: '1', cid: 2 }));
+      window.dispatchEvent(new Event('werco:auth-token-changed'));
+    });
+    expect(screen.queryByRole('dialog', { name: 'Customize dashboard' })).not.toBeInTheDocument();
+    // Customize waits for the new session's layout.
+    expect(screen.getByRole('button', { name: 'Customize dashboard' })).toBeDisabled();
+
+    await act(async () => resolveNext(layoutResponse(null, { company_id: 2 })));
+    await waitForLoaded();
+    expect(screen.queryByRole('dialog', { name: 'Customize dashboard' })).not.toBeInTheDocument();
+    expect(mockedApi.saveDashboardLayout).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Customize dashboard' })).toBeEnabled();
+  });
 });
 
 it('re-reads a failed layout before opening Customize', async () => {
@@ -486,6 +641,111 @@ it('skips the background poll while the tab is hidden and catches up once visibl
       await jest.advanceTimersByTimeAsync(0);
     });
     expect(mockedApi.getDashboardWithCache).toHaveBeenCalledTimes(2);
+  } finally {
+    visibilitySpy.mockRestore();
+    jest.useRealTimers();
+  }
+});
+
+describe('a role never sees, or fetches for, the saved widgets it is not eligible for', () => {
+  it('viewer: the planner-only panels are hidden and their endpoints never called', async () => {
+    mockUser = { id: 5, role: 'viewer', is_superuser: false };
+    mockedApi.getDashboardLayout.mockResolvedValue(
+      layoutResponse(
+        layoutOf({ id: 'kpi.open_cars' }, { id: 'delivery_kpis' }, { id: 'visitors_on_site' }, { id: 'quality_pulse' })
+      )
+    );
+    renderDashboard();
+    await loaded();
+    expect(stripLabels()).toEqual(['Open CARs']);
+    expect(await screen.findByRole('heading', { name: 'Quality Pulse' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Delivery & Yield KPIs' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Visitors On Site' })).not.toBeInTheDocument();
+    await waitFor(() => expect(mockedApi.getQualitySummary).toHaveBeenCalledTimes(1));
+    expect(mockedApi.getKPIDashboard).not.toHaveBeenCalled();
+    expect(mockedApi.getVisitorLogs).not.toHaveBeenCalled();
+  });
+
+  it('shipping: the quality and inspection widgets are hidden and their endpoints never called', async () => {
+    mockUser = { id: 6, role: 'shipping', is_superuser: false };
+    mockedApi.getDashboardLayout.mockResolvedValue(
+      layoutResponse(
+        layoutOf(
+          { id: 'kpi.open_cars' },
+          { id: 'kpi.pending_fai' },
+          { id: 'kpi.overdue' },
+          { id: 'quality_pulse' },
+          { id: 'inspection_queue' },
+          { id: 'work_center_status' }
+        )
+      )
+    );
+    renderDashboard();
+    await loaded();
+    expect(stripLabels()).toEqual(['Overdue']);
+    expect(screen.getByRole('heading', { name: 'Work Center Status' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Quality Pulse' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Inspection Queue' })).not.toBeInTheDocument();
+    await act(async () => undefined);
+    expect(mockedApi.getQualitySummary).not.toHaveBeenCalled();
+    expect(mockedApi.getReceivingStats).not.toHaveBeenCalled();
+    expect(mockedApi.getInspectionQueue).not.toHaveBeenCalled();
+  });
+});
+
+it('defers a WebSocket push while the tab is hidden, catches up once, and debounces pushes while visible', async () => {
+  jest.useFakeTimers();
+  let visibility: DocumentVisibilityState = 'visible';
+  const visibilitySpy = jest.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visibility);
+  const push = (type: string) => {
+    const { onMessage } = (useWebSocket as jest.Mock).mock.calls.at(-1)[0];
+    onMessage({ type });
+  };
+  try {
+    renderDashboard();
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(0);
+    });
+    expect(mockedApi.getDashboardWithCache).toHaveBeenCalledTimes(1);
+
+    visibility = 'hidden';
+    await act(async () => {
+      push('work_order_update');
+      await jest.advanceTimersByTimeAsync(1_000);
+    });
+    expect(mockedApi.getDashboardWithCache).toHaveBeenCalledTimes(1);
+
+    visibility = 'visible';
+    await act(async () => {
+      document.dispatchEvent(new Event('visibilitychange'));
+      await jest.advanceTimersByTimeAsync(0);
+    });
+    expect(mockedApi.getDashboardWithCache).toHaveBeenCalledTimes(2);
+    // Nothing was missed since: another visibility change fetches nothing.
+    await act(async () => {
+      document.dispatchEvent(new Event('visibilitychange'));
+      await jest.advanceTimersByTimeAsync(0);
+    });
+    expect(mockedApi.getDashboardWithCache).toHaveBeenCalledTimes(2);
+
+    // While visible, a burst of pushes is one refresh after the 750 ms debounce; pings are ignored.
+    await act(async () => {
+      push('shop_floor_update');
+      push('dashboard_update');
+      push('ping');
+      await jest.advanceTimersByTimeAsync(749);
+    });
+    expect(mockedApi.getDashboardWithCache).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(1);
+    });
+    expect(mockedApi.getDashboardWithCache).toHaveBeenCalledTimes(3);
+    await act(async () => {
+      push('ping');
+      push('connected');
+      await jest.advanceTimersByTimeAsync(1_000);
+    });
+    expect(mockedApi.getDashboardWithCache).toHaveBeenCalledTimes(3);
   } finally {
     visibilitySpy.mockRestore();
     jest.useRealTimers();

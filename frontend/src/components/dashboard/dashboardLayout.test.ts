@@ -3,6 +3,7 @@
  * dialog saves back.
  */
 import type { DashboardLayoutValues } from '../../types/dashboardLayout';
+import { MAX_DASHBOARD_WIDGETS } from '../../types/dashboardLayout';
 import type { Permission } from '../../utils/permissions';
 import {
   buildSavePayload,
@@ -210,6 +211,66 @@ describe('buildSavePayload / isSameLayout', () => {
     expect(countCarriedWidgets(saved, MANAGER)).toBe(0);
   });
 
+  it('round-trips: widgets a session cannot see survive its edits and return, in place and at their size, when access does', () => {
+    const saved = layoutOf(
+      { id: 'kpi.overdue' },
+      { id: 'kpi.open_cars' },
+      { id: 'kpi.due_today' },
+      { id: 'capacity_overview', size: 'third' },
+      { id: 'quality_pulse', size: 'full' },
+      { id: 'presence', size: 'wide' }
+    );
+    // A session without quality:view (the shipping role) sees and edits only the rest.
+    const draft = draftFromLayout(saved, SHIPPING);
+    expect(draft.kpis).toEqual(['kpi.overdue', 'kpi.due_today']);
+    expect(draft.panels).toEqual([
+      { id: 'capacity_overview', size: 'third' },
+      { id: 'presence', size: 'wide' },
+    ]);
+    const edited = buildSavePayload(
+      {
+        ...draft,
+        kpis: ['kpi.due_today', 'kpi.overdue'],
+        panels: [
+          { id: 'presence', size: 'half' },
+          { id: 'capacity_overview', size: 'third' },
+          { id: 'shipping_outlook', size: 'third' },
+        ],
+      },
+      saved,
+      SHIPPING
+    );
+    // Each hidden widget follows the saved neighbour it followed before, with its own size.
+    expect(edited.widgets).toEqual([
+      { id: 'kpi.due_today' },
+      { id: 'kpi.overdue' },
+      { id: 'kpi.open_cars' },
+      { id: 'presence', size: 'half' },
+      { id: 'capacity_overview', size: 'third' },
+      { id: 'quality_pulse', size: 'full' },
+      { id: 'shipping_outlook', size: 'third' },
+    ]);
+
+    // Access returns: the hidden widgets render again where the viewer had them.
+    const restored = resolveLayout(edited, ADMIN);
+    expect(ids(restored.kpis)).toEqual(['kpi.due_today', 'kpi.overdue', 'kpi.open_cars']);
+    expect(restored.panels.map(panel => [panel.definition.id, panel.size])).toEqual([
+      ['presence', 'half'],
+      ['capacity_overview', 'third'],
+      ['quality_pulse', 'full'],
+      ['shipping_outlook', 'third'],
+    ]);
+    expect(restored.neededSources).toEqual(['capacity', 'quality', 'wallboard']);
+    // ...and an untouched dialog for that viewer saves nothing new.
+    expect(buildSavePayload(draftFromLayout(edited, ADMIN), edited, ADMIN)).toEqual(edited);
+
+    // Removing everything the restricted session can see still keeps what it cannot.
+    const cleared = buildSavePayload({ banners: [], kpis: [], panels: [] }, edited, SHIPPING);
+    expect(cleared.widgets).toEqual([{ id: 'kpi.open_cars' }, { id: 'quality_pulse', size: 'full' }]);
+    expect(isEmptyLayout(resolveLayout(cleared, SHIPPING))).toBe(true);
+    expect(ids(resolveLayout(cleared, ADMIN).kpis)).toEqual(['kpi.open_cars']);
+  });
+
   it('drops unknown ids, emits sizes only for panels and caps the list', () => {
     const saved = layoutOf({ id: 'kpi.from_a_newer_bundle' }, { id: 'kpi.overdue', size: 'wide' });
     const payload = buildSavePayload(
@@ -225,7 +286,36 @@ describe('buildSavePayload / isSameLayout', () => {
       format_version: 1,
       widgets: [{ id: 'attention' }, { id: 'kpi.overdue' }, { id: 'presence', size: 'third' }],
     });
-    expect(payload.widgets.length).toBeLessThanOrEqual(64);
+  });
+
+  it('caps the payload at MAX_DASHBOARD_WIDGETS, keeping the first ones', () => {
+    // The real registry is smaller than the cap, so only a larger one can exercise it.
+    const many: DashboardWidgetDefinition[] = Array.from({ length: MAX_DASHBOARD_WIDGETS + 6 }, (_, index) => ({
+      id: `kpi.w${index}`,
+      zone: 'kpi',
+      title: `Widget ${index}`,
+      description: '',
+      category: 'Insights',
+      sources: [],
+    }));
+    const registry = createWidgetRegistry(many, []);
+    const allIds = many.map(definition => definition.id);
+    const payload = buildSavePayload({ banners: [], kpis: allIds, panels: [] }, layoutOf(), MANAGER, registry);
+    expect(payload.widgets).toHaveLength(MAX_DASHBOARD_WIDGETS);
+    expect(payload.widgets.map(widget => widget.id)).toEqual(allIds.slice(0, MAX_DASHBOARD_WIDGETS));
+  });
+
+  it('counts as carried only widgets the viewer saved — never the stock default the layout started from', () => {
+    // No saved layout: nothing of the viewer's is hidden, whatever the default contains.
+    expect(countCarriedWidgets(null, MANAGER)).toBe(0);
+    expect(countCarriedWidgets(null, SHIPPING)).toBe(0);
+    // A non-admin's first save carries the admin-only setup nudge from the default; it was
+    // never their choice, so it is never announced as "hidden from you right now".
+    const firstSave = buildSavePayload({ ...draftFromLayout(null, MANAGER), kpis: ['kpi.overdue'] }, null, MANAGER);
+    expect(firstSave.widgets.map(widget => widget.id)).toContain('setup_nudge');
+    expect(countCarriedWidgets(firstSave, MANAGER)).toBe(0);
+    // A widget the viewer did pick and can no longer see is still counted.
+    expect(countCarriedWidgets(layoutOf({ id: 'setup_nudge' }, { id: 'kpi.open_cars' }), SHIPPING)).toBe(1);
   });
 
   it('treats a null or unknown size as the widget default', () => {

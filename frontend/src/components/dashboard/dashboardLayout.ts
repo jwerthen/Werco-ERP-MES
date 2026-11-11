@@ -202,16 +202,28 @@ export function isSameLayout(a: LayoutInput, b: LayoutInput, registry: WidgetReg
   return JSON.stringify(canonicalize(a, registry)) === JSON.stringify(canonicalize(b, registry));
 }
 
-/** How many saved widgets this viewer cannot currently see (they are kept on save). */
+/**
+ * How many widgets the viewer put in their SAVED layout but cannot currently see (they are
+ * kept on save, and the dialog says so).
+ *
+ * Only a saved layout is counted: `null` (no saved layout — the stock default) is 0. And a
+ * stock-default widget the viewer is not eligible for is never counted, saved or not: it
+ * is in the layout because the default put it there (`buildSavePayload` carries it through
+ * a non-admin's first save so an untouched dialog stays clean), not because the viewer
+ * chose it — today that is the admin-only setup nudge, gated by role rather than by a
+ * permission that may come back.
+ */
 export function countCarriedWidgets(
   saved: LayoutInput,
   ctx: WidgetEligibilityContext,
   registry: WidgetRegistry = DASHBOARD_REGISTRY
 ): number {
+  if (saved == null) return 0;
+  const stockDefault = new Set(registry.classic.map(entry => entry.id));
   const canonical = canonicalize(saved, registry);
   return [...canonical.banners, ...canonical.kpis, ...canonical.panels.map(panel => panel.id)].filter(id => {
     const definition = registry.byId.get(id);
-    return Boolean(definition && !isWidgetEligible(definition, ctx));
+    return Boolean(definition && !isWidgetEligible(definition, ctx) && !stockDefault.has(id));
   }).length;
 }
 

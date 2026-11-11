@@ -71,7 +71,7 @@ export function ActionInboxWidget() {
                   const total = active.filter(item => item.severity === severity.key).length;
                   return (
                     <div key={severity.key} className="rounded-sm border border-fd-line px-2 py-1.5">
-                      <dt className="text-[10px] font-medium uppercase tracking-wide text-slate-500">
+                      <dt className="text-[10px] font-medium uppercase tracking-wide text-slate-400">
                         {severity.label}
                       </dt>
                       <dd
@@ -88,7 +88,7 @@ export function ActionInboxWidget() {
                 <p className="text-xs text-slate-400">No high-severity issues.</p>
               ) : (
                 <div>
-                  <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-500">High severity</p>
+                  <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">High severity</p>
                   <ul className="divide-y divide-fd-line">
                     {high.slice(0, TOP_HIGH_LIMIT).map(item => (
                       <li key={item.key} className="py-1.5 first:pt-0">

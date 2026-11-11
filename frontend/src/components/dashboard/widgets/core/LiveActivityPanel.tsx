@@ -54,7 +54,7 @@ export function LiveActivityPanel() {
               <div key={workCenterName} id={`wc-live-${workCenterId}`} className="scroll-mt-2">
                 <div className="sticky top-0 z-10 bg-fd-panel border-b border-fd-line py-1.5">
                   <p className="truncate text-xs font-semibold uppercase tracking-wide text-slate-300">
-                    {workCenterName} <span className="text-slate-500">· {assignments.length}</span>
+                    {workCenterName} <span className="text-slate-400">· {assignments.length}</span>
                   </p>
                 </div>
                 <div className="divide-y divide-fd-line">
@@ -214,7 +214,7 @@ function ActiveAssignmentRow({
         <div className="h-1 w-16 flex-shrink-0 rounded-sm bg-slate-800">
           <div className="h-1 rounded-sm bg-werco-500" style={{ width: `${Math.min(100, progress)}%` }} />
         </div>
-        <span className="flex-shrink-0 whitespace-nowrap text-[10px] text-slate-500 tabular-nums">
+        <span className="flex-shrink-0 whitespace-nowrap text-[10px] text-slate-400 tabular-nums">
           {completeQty}/{orderedQty || 0} ({progress}%)
         </span>
       </div>

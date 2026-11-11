@@ -4,6 +4,10 @@
  * `DowntimeEventResponse` is a plain BaseModel, not UTCModel, so `start_time` can arrive
  * without a `Z`; every timestamp goes through `utils/centralTime` (`toDate` treats a
  * zone-less string as UTC) and renders in Central time.
+ *
+ * The work-order link is keyed by `work_order_id`, which the server always fills. Its text is
+ * `work_order.wo_number` when sent; an API deployed before the `WorkOrderInfo` alias fix sends
+ * null there (see `ActiveDowntimeEvent`), so the link then reads "Work order".
  */
 import React from 'react';
 import { CheckCircleIcon } from '@heroicons/react/24/outline';
@@ -60,27 +64,30 @@ export function ActiveDowntimeWidget() {
               {rows.map(event => {
                 const minutes = elapsedMinutes(event.start_time, nowMs);
                 const workCenter = event.work_center;
+                const machineName = workCenter ? workCenter.name : `Work center ${event.work_center_id}`;
+                const woNumber = event.work_order?.wo_number || null;
                 return (
                   <li key={event.id} className="flex items-center gap-2 py-1.5 first:pt-0">
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-xs font-semibold text-white">
-                        {workCenter ? workCenter.name : `Work center ${event.work_center_id}`}
+                        {machineName}
                         {workCenter?.code ? (
-                          <span className="ml-1 font-normal text-slate-500">{workCenter.code}</span>
+                          <span className="ml-1 font-normal text-slate-400">{workCenter.code}</span>
                         ) : null}
                       </p>
                       <p className="truncate text-[11px] text-slate-400">
                         {humanize(event.category)}
                         {event.reason_code ? ` · ${event.reason_code}` : ''}
-                        {event.work_order?.wo_number ? (
+                        {event.work_order_id != null ? (
                           <>
                             {' · '}
                             <WidgetLink
-                              href={`/work-orders/${event.work_order.id}`}
+                              href={`/work-orders/${event.work_order_id}`}
                               className="text-fd-link hover:text-sky-200"
                               textClassName="text-slate-300"
+                              aria-label={woNumber ? undefined : `Open the work order for ${machineName}`}
                             >
-                              {event.work_order.wo_number}
+                              {woNumber ?? 'Work order'}
                             </WidgetLink>
                           </>
                         ) : null}
@@ -95,7 +102,7 @@ export function ActiveDowntimeWidget() {
                       <span className="block font-semibold text-red-400">
                         {minutes == null ? '—' : formatDuration(minutes)}
                       </span>
-                      <span className="block text-slate-500">since {formatCentralTime(event.start_time)}</span>
+                      <span className="block text-slate-400">since {formatCentralTime(event.start_time)}</span>
                     </span>
                   </li>
                 );

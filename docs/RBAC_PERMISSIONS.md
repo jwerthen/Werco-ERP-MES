@@ -182,6 +182,14 @@ The role gate still applies after the credential check: the person must hold a r
 apply the action. `hank_task_service.py` and its siblings carry older inline copies of the stricter
 predicate.
 
+Personal presentation writes are not judgment writes and are deliberately absent from the tables
+above: saving or resetting your own Hank preferences (`PUT /hank/preferences`,
+`POST /hank/preferences/reset`) or dashboard layout (`PUT /dashboard/layout`,
+`POST /dashboard/layout/reset`) requires an interactive person — `is_interactive_person` for the
+dashboard layout, the equivalent clauses inline in `HankPreferenceService.can_edit` — plus the
+read-only company fence, while any credential that reaches the route may read them (see
+[Dashboard](#dashboard) and [Hank](#hank-ai-chat-and-pdf-filing)).
+
 Judgment-shaped writes deliberately left open, so no predicate applies (the role gate and the
 route's own fences still do):
 
@@ -2342,6 +2350,48 @@ UI controls do not grant API authority. See [API: Documents](API.md#documents).
 > read the list but cannot print badges — consistent with the Admin-only user-write posture in the
 > note directly above.
 
+### Dashboard
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| Own dashboard layout — read / save / reset (`GET`/`PUT /dashboard/layout`, `POST /dashboard/layout/reset`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+> **Self-scoped by construction, like `/users/me/*`.** The three routes
+> (`app/api/endpoints/dashboard_layouts.py`) carry **no `require_role`**: they read and write only the
+> caller's own row for the active company (`get_current_user` + `get_current_company_id`) and never
+> accept a user id. A layout is presentation only and grants nothing — every endpoint a widget reads
+> enforces its own authorization. **Reads** are open to any credential that reaches the route, an API
+> token included (it gets `can_edit: false`); a kiosk badge token is refused **403** by its path fence,
+> as everywhere outside `/api/v1/shop-floor`. **Saves and resets** additionally need an interactive
+> person (`is_interactive_person`) in an active company they belong to (or a platform principal in a
+> switched context), outside a read-only company view — otherwise **403** — and write a required
+> audit row (resource type `dashboard_layout`; **503** and nothing saved when it cannot be written).
+> Operators hold the row too, but `/` redirects them to the kiosk, so they never see the page.
+
+**Which widgets a viewer is offered.** The dashboard's widget catalog (see
+[`docs/DASHBOARD.md` → Widget catalog](DASHBOARD.md#widget-catalog)) shows each widget only to
+viewers whose effective permissions (role defaults plus company overrides, evaluated by the SPA's
+`usePermissions().can`) satisfy its eligibility rule. Eligibility is a UX proxy: a widget whose
+endpoint refuses the viewer still renders "Not available for your role" in place. With the default
+role permissions:
+
+| Widgets | Rule | Default roles offered them |
+|---|---|---|
+| Every default-layout widget except Setup progress, plus the Action Inbox and Notifications panels | none | All (Operators are redirected away from `/`) |
+| Setup progress banner | Admin (`isAdmin`: the `admin` role or a superuser) | Admin |
+| Open CARs and Pending FAIs tiles, Quality Pulse panel | `quality:view` | Admin, Manager, Supervisor, Quality, Viewer |
+| Overdue / Due Today work-order lists, Late Jobs, Blocked Jobs, Today's Output, Active Downtime, Maintenance Due | `work_orders:view` | All |
+| Inspection Queue | `receiving:view` | Admin, Manager, Supervisor, Quality, Viewer |
+| Shipping Outlook | `shipping:view` | Admin, Manager, Supervisor, Shipping, Viewer |
+| Delivery & Yield KPIs, Visitors On Site | Admin, Manager or Supervisor **role** (mirrors the endpoints' `require_role`, so a permission override cannot widen it) | Admin, Manager, Supervisor |
+
+Superusers pass every rule; Platform Admins pass every rule except Setup progress, which checks for
+the `admin` role itself. **Links inside a visible widget are gated separately**, by the same route
+check `PrivateRoute` enforces (`canAccessPath`): a link the viewer cannot open renders as plain text. With the default permissions that removes, for example, the
+Calibration Due links for Supervisor, Shipping and Viewer (`/calibration` needs `quality:calibration`)
+and Work Center Status **View All** for everyone but Admin (`/work-centers` needs `admin:settings`).
+See [API → Personal dashboard layout](API.md#personal-dashboard-layout).
+
 ### Customers
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
@@ -3199,6 +3249,14 @@ tenant context, credential scope, read-only-context restrictions, active-company
 (except the narrow HTTP recovery paths above), record-retention/finalization guards and required
 audits. Tenant provisioning never grants `platform_admin` or superuser authority, even when the
 caller is a platform principal.
+
+The SPA mirrors this for `platform_admin`: `hasPermission` (`frontend/src/utils/permissions.ts`)
+answers true for every permission and never applies a company's custom role-permission override to
+it. Before this, `GET /admin/settings/role-permissions` (loaded at login) answered
+`platform_admin: []`, because the backend's default role-permission table has no entry for it, and
+read as an override that made every `can()` false for a password-login Platform Admin until the
+next page reload. Superusers are handled in `usePermissions`, which returns true before consulting
+any role.
 
 ## Adding New Permissions
 

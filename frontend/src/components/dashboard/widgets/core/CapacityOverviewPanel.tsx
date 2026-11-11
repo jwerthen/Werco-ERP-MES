@@ -68,15 +68,15 @@ export function CapacityOverviewPanel() {
       headerExtra={
         <div className="flex items-center gap-4 text-xs tabular-nums">
           <span className="flex flex-col leading-tight">
-            <span className="text-[10px] uppercase tracking-wide text-slate-500">Sched</span>
+            <span className="text-[10px] uppercase tracking-wide text-slate-400">Sched</span>
             <span className="font-bold text-white">{capacityHeatmap ? `${totalScheduledHours.toFixed(1)}h` : '—'}</span>
           </span>
           <span className="flex flex-col leading-tight">
-            <span className="text-[10px] uppercase tracking-wide text-slate-500">Cap</span>
+            <span className="text-[10px] uppercase tracking-wide text-slate-400">Cap</span>
             <span className="font-bold text-white">{capacityHeatmap ? `${totalCapacityHours.toFixed(1)}h` : '—'}</span>
           </span>
           <span className="flex flex-col leading-tight">
-            <span className="text-[10px] uppercase tracking-wide text-slate-500">Util</span>
+            <span className="text-[10px] uppercase tracking-wide text-slate-400">Util</span>
             <span
               className={`font-bold ${totalCapacityUtilization > 100 ? 'text-red-500' : totalCapacityUtilization >= 90 ? 'text-amber-400' : 'text-emerald-400'}`}
             >

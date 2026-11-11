@@ -11,7 +11,10 @@
  * permission change never destroys a layout.
  *
  * Reordering is ↑/↓ buttons (no drag-and-drop): focus stays on the moved row's control
- * and a polite live region announces the new position.
+ * and a polite live region announces the new position. Focus never drops to <body>: a
+ * 409 on save or reset moves it to "Reload saved layout", which stays mounted (with its
+ * spinner) while the reload runs; a successful reload focuses the dialog heading and
+ * announces that the unsaved edits were discarded.
  */
 import React, { useCallback, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDownIcon, ChevronUpIcon, XMarkIcon } from '@heroicons/react/24/outline';
@@ -110,6 +113,8 @@ export function CustomizeDashboardDialog({
   }, [registry, eligibility]);
 
   const controlsDisabled = !canEdit || pending !== null || needsRefresh;
+  const dialogHeadingId = `${baseId}-heading`;
+  const reloadButtonId = `${baseId}-reload`;
 
   // Restore focus after a move/add/remove re-rendered the lists.
   useLayoutEffect(() => {
@@ -205,9 +210,12 @@ export function CustomizeDashboardDialog({
   };
 
   // ── Server actions (non-optimistic) ────────────────────────────────────────
+  /** Show the failure; a stale write (409 / company changed) also sends focus to "Reload saved layout". */
   const describeFailure = (failure: unknown, fallback: string) => {
     if (apiErrorStatus(failure) === 409 || failure instanceof DashboardLayoutCompanyChangedError) {
       setNeedsRefresh(true);
+      // Save and Reset are disabled from here on; the recovery action is the next step.
+      pendingFocusRef.current = reloadButtonId;
     }
     setError(apiErrorDetail(failure, fallback));
   };
@@ -249,18 +257,23 @@ export function CustomizeDashboardDialog({
     }
   };
 
+  // The error (and the button inside it) stays up until the reload settles, so the focused
+  // control never unmounts under the user and its spinner is visible.
   const handleReload = async () => {
     setPending('reload');
-    setError('');
+    setNotice('');
     try {
       const reloaded = await onReload();
       if (!mountedRef.current) return;
       setDraft(draftFromLayout(reloaded, eligibility, registry));
+      setError('');
       setNeedsRefresh(false);
       setNotice('Reloaded your saved layout. Your unsaved changes were discarded.');
+      pendingFocusRef.current = dialogHeadingId;
     } catch (failure) {
       if (!mountedRef.current) return;
       setError(apiErrorDetail(failure, 'Your saved layout could not be reloaded. Try again.'));
+      pendingFocusRef.current = reloadButtonId;
     } finally {
       if (mountedRef.current) setPending(null);
     }
@@ -286,75 +299,84 @@ export function CustomizeDashboardDialog({
         </h3>
         <div className="grid gap-3 md:grid-cols-2">
           <div className="min-w-0 rounded-sm border border-fd-line p-2">
-            <p id={onListId} className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+            <p id={onListId} className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
               On your dashboard
             </p>
             {onDashboard.length === 0 ? (
-              <p className="py-1.5 text-xs text-slate-500">Nothing here yet — add from the list.</p>
+              <p className="py-1.5 text-xs text-slate-400">Nothing here yet — add from the list.</p>
             ) : (
               <ol aria-labelledby={onListId} className="divide-y divide-fd-line">
                 {onDashboard.map(({ id, index, definition }) => {
                   const panel = zone === 'panel' ? draft.panels[index] : null;
+                  // The name grows from a real basis (not flex-1's 0), so on a narrow row the
+                  // control group wraps below it instead of squeezing the name to "…" (and, at
+                  // phone width, wraps within itself); a long name wraps rather than truncating.
                   return (
                     <li key={id} className="flex flex-wrap items-center gap-1.5 py-1.5">
-                      <span className="w-5 flex-shrink-0 text-right text-[10px] tabular-nums text-slate-500">
+                      <span className="w-5 flex-shrink-0 text-right text-[10px] tabular-nums text-slate-400">
                         {index + 1}
                       </span>
-                      <span className="min-w-0 flex-1 truncate text-sm text-slate-200" title={definition.description}>
+                      <span
+                        data-testid="widget-row-title"
+                        className="min-w-0 grow basis-40 break-words text-sm text-slate-200"
+                        title={definition.description}
+                      >
                         {definition.title}
                       </span>
-                      {panel && (
-                        <>
-                          <label htmlFor={elementId('size', id)} className="sr-only">
-                            Width of {definition.title}
-                          </label>
-                          <select
-                            id={elementId('size', id)}
-                            className="input !w-auto !py-0.5 !text-xs"
-                            value={panel.size}
-                            disabled={controlsDisabled}
-                            onChange={event => setSize(index, event.target.value as PanelSize)}
-                          >
-                            {PANEL_SIZES.map(size => (
-                              <option key={size} value={size}>
-                                {PANEL_SIZE_LABELS[size]}
-                              </option>
-                            ))}
-                          </select>
-                        </>
-                      )}
-                      <button
-                        type="button"
-                        id={elementId('up', id)}
-                        className="btn-ghost btn-sm !px-1"
-                        aria-label={`Move ${definition.title} up`}
-                        title="Move up"
-                        disabled={controlsDisabled || index === 0}
-                        onClick={() => move(zone, index, -1)}
-                      >
-                        <ChevronUpIcon aria-hidden="true" className="h-4 w-4" />
-                      </button>
-                      <button
-                        type="button"
-                        id={elementId('down', id)}
-                        className="btn-ghost btn-sm !px-1"
-                        aria-label={`Move ${definition.title} down`}
-                        title="Move down"
-                        disabled={controlsDisabled || index === ids.length - 1}
-                        onClick={() => move(zone, index, 1)}
-                      >
-                        <ChevronDownIcon aria-hidden="true" className="h-4 w-4" />
-                      </button>
-                      <button
-                        type="button"
-                        id={elementId('remove', id)}
-                        className="btn-ghost btn-sm !px-1.5 text-xs"
-                        aria-label={`Remove ${definition.title}`}
-                        disabled={controlsDisabled}
-                        onClick={() => remove(zone, index)}
-                      >
-                        Remove
-                      </button>
+                      <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1.5">
+                        {panel && (
+                          <>
+                            <label htmlFor={elementId('size', id)} className="sr-only">
+                              Width of {definition.title}
+                            </label>
+                            <select
+                              id={elementId('size', id)}
+                              className="input !w-auto !py-0.5 !text-xs"
+                              value={panel.size}
+                              disabled={controlsDisabled}
+                              onChange={event => setSize(index, event.target.value as PanelSize)}
+                            >
+                              {PANEL_SIZES.map(size => (
+                                <option key={size} value={size}>
+                                  {PANEL_SIZE_LABELS[size]}
+                                </option>
+                              ))}
+                            </select>
+                          </>
+                        )}
+                        <button
+                          type="button"
+                          id={elementId('up', id)}
+                          className="btn-ghost btn-sm !px-1"
+                          aria-label={`Move ${definition.title} up`}
+                          title="Move up"
+                          disabled={controlsDisabled || index === 0}
+                          onClick={() => move(zone, index, -1)}
+                        >
+                          <ChevronUpIcon aria-hidden="true" className="h-4 w-4" />
+                        </button>
+                        <button
+                          type="button"
+                          id={elementId('down', id)}
+                          className="btn-ghost btn-sm !px-1"
+                          aria-label={`Move ${definition.title} down`}
+                          title="Move down"
+                          disabled={controlsDisabled || index === ids.length - 1}
+                          onClick={() => move(zone, index, 1)}
+                        >
+                          <ChevronDownIcon aria-hidden="true" className="h-4 w-4" />
+                        </button>
+                        <button
+                          type="button"
+                          id={elementId('remove', id)}
+                          className="btn-ghost btn-sm !px-1.5 text-xs"
+                          aria-label={`Remove ${definition.title}`}
+                          disabled={controlsDisabled}
+                          onClick={() => remove(zone, index)}
+                        >
+                          Remove
+                        </button>
+                      </div>
                     </li>
                   );
                 })}
@@ -362,20 +384,27 @@ export function CustomizeDashboardDialog({
             )}
           </div>
           <div className="min-w-0 rounded-sm border border-fd-line p-2">
-            <p id={availableId} className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+            <p id={availableId} className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
               Available
             </p>
             {available.length === 0 ? (
-              <p className="py-1.5 text-xs text-slate-500">Everything available is on your dashboard.</p>
+              <p className="py-1.5 text-xs text-slate-400">Everything available is on your dashboard.</p>
             ) : (
               <div aria-labelledby={availableId} role="group" className="space-y-2">
-                {WIDGET_CATEGORY_ORDER.map(category => {
+                {WIDGET_CATEGORY_ORDER.map((category, categoryIndex) => {
                   const inCategory = available.filter(definition => definition.category === category);
                   if (inCategory.length === 0) return null;
+                  // Index, not the label: category labels contain spaces.
+                  const categoryLabelId = `${availableId}-category-${categoryIndex}`;
                   return (
                     <div key={category}>
-                      <p className="text-[10px] font-medium uppercase tracking-wide text-slate-400">{category}</p>
-                      <ul className="divide-y divide-fd-line">
+                      <p
+                        id={categoryLabelId}
+                        className="text-[10px] font-medium uppercase tracking-wide text-slate-400"
+                      >
+                        {category}
+                      </p>
+                      <ul aria-labelledby={categoryLabelId} className="divide-y divide-fd-line">
                         {inCategory.map(definition => (
                           <li key={definition.id} className="flex items-start gap-2 py-1.5">
                             <div className="min-w-0 flex-1">
@@ -420,7 +449,9 @@ export function CustomizeDashboardDialog({
       <div className="space-y-4">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <h2 className="text-lg font-semibold text-fd-ink">Customize dashboard</h2>
+            <h2 id={dialogHeadingId} tabIndex={-1} className="text-lg font-semibold text-fd-ink">
+              Customize dashboard
+            </h2>
             <p className="text-sm text-slate-400">
               Choose what appears on your dashboard, in what order, and how wide each panel is. Your layout is saved to
               your account for this company.
@@ -454,6 +485,7 @@ export function CustomizeDashboardDialog({
             <p>{error}</p>
             {needsRefresh && (
               <LoadingButton
+                id={reloadButtonId}
                 variant="secondary"
                 size="sm"
                 className="mt-2"
@@ -466,7 +498,11 @@ export function CustomizeDashboardDialog({
             )}
           </div>
         )}
-        {notice && <p className="text-sm text-slate-300">{notice}</p>}
+        {/* Always mounted, so a notice written into it is announced (the reload's "edits
+            discarded" message must not change the draft silently). */}
+        <div role="status" aria-live="polite">
+          {notice && <p className="text-sm text-slate-300">{notice}</p>}
+        </div>
 
         <section aria-labelledby={bannerHeadingId} className="space-y-2">
           <h3 id={bannerHeadingId} className="text-sm font-semibold text-fd-ink">
@@ -475,20 +511,28 @@ export function CustomizeDashboardDialog({
           <ul className="divide-y divide-fd-line rounded-sm border border-fd-line px-2">
             {eligible.banner.map(definition => {
               const checkboxId = `${baseId}-banner-${safeId(definition.id)}`;
+              const descriptionId = `${checkboxId}-description`;
+              // The label is the title alone (the checkbox's name); the description is
+              // attached as its accessible description, not run into the name.
               return (
                 <li key={definition.id} className="flex items-start gap-2 py-1.5">
                   <input
                     id={checkboxId}
                     type="checkbox"
                     className="checkbox checkbox-sm mt-0.5"
+                    aria-describedby={descriptionId}
                     checked={draft.banners.includes(definition.id)}
                     disabled={controlsDisabled}
                     onChange={event => toggleBanner(definition.id, event.target.checked)}
                   />
-                  <label htmlFor={checkboxId} className="min-w-0 flex-1">
-                    <span className="block text-sm text-slate-200">{definition.title}</span>
-                    <span className="block text-xs text-slate-400">{definition.description}</span>
-                  </label>
+                  <div className="min-w-0 flex-1">
+                    <label htmlFor={checkboxId} className="block text-sm text-slate-200">
+                      {definition.title}
+                    </label>
+                    <p id={descriptionId} className="text-xs text-slate-400">
+                      {definition.description}
+                    </p>
+                  </div>
                 </li>
               );
             })}

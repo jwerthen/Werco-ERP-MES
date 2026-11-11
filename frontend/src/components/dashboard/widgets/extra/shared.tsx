@@ -63,15 +63,20 @@ interface SourceBodyProps<T> {
   loadingText: string;
   /** ErrorState headline when there is no data to fall back to. */
   errorTitle: string;
+  /**
+   * The ErrorState's Retry. Defaults to the page's forced refresh; a panel whose source has
+   * its own cache passes a handler that clears that cache first and then forces a refresh.
+   */
+  onRetry?: () => void;
   children: (data: T) => React.ReactNode;
 }
 
-export function SourceBody<T>({ state, loadingText, errorTitle, children }: SourceBodyProps<T>) {
+export function SourceBody<T>({ state, loadingText, errorTitle, onRetry, children }: SourceBodyProps<T>) {
   const { refresh } = useDashboardWidgetEnv();
   if (state.forbidden) return <ForbiddenNotice />;
   if (state.data != null) return <>{children(state.data)}</>;
   if (state.error) {
-    return <ErrorState title={errorTitle} message={state.error} onRetry={() => refresh(true)} />;
+    return <ErrorState title={errorTitle} message={state.error} onRetry={onRetry ?? (() => refresh(true))} />;
   }
   return (
     <p role="status" className="py-3 text-xs text-slate-400">
@@ -183,9 +188,9 @@ export function PanelStat({
 }) {
   const body = (
     <>
-      <span className="block text-[10px] font-medium uppercase tracking-wide text-slate-500">{label}</span>
+      <span className="block text-[10px] font-medium uppercase tracking-wide text-slate-400">{label}</span>
       <span className={`block text-lg font-bold tabular-nums leading-tight ${valueClassName}`}>{value}</span>
-      {hint && <span className="block truncate text-[10px] text-slate-500">{hint}</span>}
+      {hint && <span className="block truncate text-[10px] text-slate-400">{hint}</span>}
     </>
   );
   const cellClass = 'block min-w-0 rounded-sm border border-fd-line px-2 py-1.5';

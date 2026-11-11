@@ -4,11 +4,15 @@
  * rows come from the `notifications` source (`GET /notifications?unread=true&page_size=5`),
  * which is refetched when that store's unread count changes (this widget invalidates the
  * list cache and asks the page for a non-forced refresh) or once the list is two minutes old.
+ * The widget only sees count changes while it is mounted, so it also invalidates the list
+ * when it unmounts: the next mount (back to `/`, or the panel re-added) fetches a list that
+ * agrees with the count instead of one cached before a change nobody watched. Its Retry
+ * clears the cache too, so a retry after a failure is never answered by the replayed error.
  *
  * Read-only: opening a row follows its deep link; marking read stays in the bell and the
  * Notifications page.
  */
-import React, { useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useRef } from 'react';
 import { BellIcon } from '@heroicons/react/24/outline';
 import { CockpitPanel } from '../../../cockpit';
 import { EmptyState } from '../../../ui';
@@ -43,6 +47,16 @@ export function NotificationsWidget() {
     refresh(false);
   }, [revision, unreadCount, refresh]);
 
+  // Count changes are only observed while mounted. Unmounting forgets the cached list, so a
+  // remount never shows rows that contradict a count that moved in the meantime.
+  useEffect(() => () => invalidateNotificationList(), []);
+
+  // The list cache replays a failure for a minute; a user's Retry must reach the network.
+  const retry = useCallback(() => {
+    invalidateNotificationList();
+    refresh(true);
+  }, [refresh]);
+
   const listTotal = !state.forbidden && state.data ? state.data.pagination.total_count : null;
   const count = state.forbidden ? null : (unreadCount ?? listTotal);
 
@@ -59,7 +73,12 @@ export function NotificationsWidget() {
         )
       }
     >
-      <SourceBody state={state} loadingText="Loading notifications…" errorTitle="Notifications are unavailable">
+      <SourceBody
+        state={state}
+        loadingText="Loading notifications…"
+        errorTitle="Notifications are unavailable"
+        onRetry={retry}
+      >
         {data =>
           data.items.length === 0 || unreadCount === 0 ? (
             <EmptyState
@@ -90,7 +109,7 @@ export function NotificationsWidget() {
                       ) : (
                         <p className="truncate text-xs font-semibold text-slate-200">{item.title}</p>
                       )}
-                      <p className="text-[11px] tabular-nums text-slate-500">
+                      <p className="text-[11px] tabular-nums text-slate-400">
                         {formatCentralDateTime(item.created_at, { year: undefined })}
                       </p>
                     </div>

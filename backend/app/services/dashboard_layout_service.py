@@ -9,9 +9,11 @@ and a REQUIRED audit row in the same transaction.
 
 Stored rows are read only through ``normalize_stored_layout`` (lenient), and ``save`` never
 validates the stored row at all: the no-op test and the audit ``old_values`` use the RAW
-stored JSON, so a row written by another schema can always be saved over or reset.
+stored JSON, so a row written by another schema can always be saved over or reset. The no-op
+test compares canonical JSON, not Python values (see ``_same_json``).
 """
 
+import json
 from datetime import datetime, timezone
 from typing import Any
 
@@ -36,6 +38,22 @@ NOT_EDITABLE_DETAIL = 'Save your dashboard layout from an interactive account in
 STALE_VERSION_DETAIL = 'Your dashboard layout changed in another tab. Reload it before saving.'
 # The stored encoding of "use the stock default"; only reset writes it.
 DEFAULT_LAYOUT_JSON: dict[str, Any] = {}
+
+
+def _same_json(stored: Any, payload: Any) -> bool:
+    """Type-strict equality of two JSON values: True only when they serialize identically.
+
+    Python ``==`` treats ``True == 1`` and ``1.0 == 1``, but ``normalize_stored_layout`` rejects
+    a bool or float ``format_version``, so a value-equal row can read as the default. Treating it
+    as "unchanged" would answer 200 for a save that wrote nothing. Anything that cannot be
+    canonicalized counts as different, so the save overwrites it rather than trusting it.
+    """
+    try:
+        return json.dumps(stored, sort_keys=True, separators=(',', ':')) == json.dumps(
+            payload, sort_keys=True, separators=(',', ':')
+        )
+    except (TypeError, ValueError, RecursionError):
+        return False
 
 
 def _layout_row(db, company_id, user_id, *, locked=False):
@@ -95,7 +113,7 @@ class DashboardLayoutService:
         previous = row.layout_json if row is not None else None
         if row is None and reset:
             return self.response(None)
-        if row is not None and previous == payload:
+        if row is not None and _same_json(previous, payload):
             # Identical payload, or a reset of a row already at the default: no fake change.
             return self.response(row)
         now = datetime.now(timezone.utc)

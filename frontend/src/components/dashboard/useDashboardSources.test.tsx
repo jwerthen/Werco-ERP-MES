@@ -3,14 +3,17 @@
  * changes, per-key sequences, terminal 403s and the module cache.
  */
 import { act, renderHook } from '@testing-library/react';
+import api from '../../services/api';
 import { SOURCE_SPECS } from './sources';
 import {
   ERROR_RETRY_CAP_MS,
+  IN_FLIGHT_GRACE_MS,
   clearDashboardSourceCache,
   toNeededKey,
   useDashboardSources,
   type UseDashboardSourcesOptions,
 } from './useDashboardSources';
+import { resetNotificationListCache } from './widgets/extra/notificationListCache';
 import type { DashboardSourceKey, SourceSpec } from './widgetTypes';
 
 jest.mock('../../services/api', () => ({ __esModule: true, default: {} }));
@@ -267,5 +270,179 @@ describe('useDashboardSources', () => {
     await flush();
     expect(fetch).toHaveBeenCalledTimes(3);
     stale.unmount();
+  });
+
+  it('passes `forced` to the spec: true for a user refresh, false for first loads and background ticks', async () => {
+    const fetch = jest.fn((_options?: { forced?: boolean }) => Promise.resolve(1));
+    const { result } = setup('stock', { stock: spec(fetch, { minIntervalMs: 0 }) });
+    await flush();
+    expect(fetch).toHaveBeenLastCalledWith({ forced: false });
+    await act(() => result.current.refresh(true));
+    expect(fetch).toHaveBeenLastCalledWith({ forced: true });
+    now += 1;
+    await act(() => result.current.refresh(false));
+    expect(fetch).toHaveBeenLastCalledWith({ forced: false });
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it('lets a user refresh reach the network for the notifications list, past its replayed failure', async () => {
+    // The page's "Retry unavailable sections" and header Refresh are forced refreshes. The
+    // list cache replays a failure for 60 s to anything not forced, so unless the loader
+    // passes `forced` through, those buttons re-serve the same error without a request.
+    const getNotifications = jest.fn().mockRejectedValueOnce(new Error('502')).mockResolvedValue({ items: [] });
+    const mockedApi = api as unknown as Record<string, unknown>;
+    mockedApi.getNotifications = getNotifications;
+    resetNotificationListCache();
+    try {
+      const { result } = setup('notifications', { notifications: SOURCE_SPECS.notifications });
+      await flush();
+      expect(getNotifications).toHaveBeenCalledTimes(1);
+      expect(result.current.sources.notifications).toMatchObject({ error: 'Could not refresh', data: null });
+
+      now += 5_000; // past the loader's own floor, well inside the list cache's error replay
+      await act(() => result.current.refresh(true));
+      expect(getNotifications).toHaveBeenCalledTimes(2);
+      expect(result.current.sources.notifications).toMatchObject({ error: null, data: { items: [] } });
+    } finally {
+      delete mockedApi.getNotifications;
+      resetNotificationListCache();
+    }
+  });
+
+  it('a forced refresh supersedes a fetch in flight, and the superseded answer is never adopted', async () => {
+    const first = deferred<string>();
+    const second = deferred<string>();
+    const fetch = jest
+      .fn<Promise<string>, []>()
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => second.promise);
+    const { result } = setup('stock', { stock: spec(fetch) });
+    act(() => {
+      void result.current.refresh(true);
+    });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    await act(async () => second.resolve('fresh'));
+    expect(result.current.sources.stock).toMatchObject({ data: 'fresh', loading: false });
+    await act(async () => first.resolve('superseded'));
+    expect(result.current.sources.stock).toMatchObject({ data: 'fresh' });
+  });
+
+  it('replaces a hung request on a background tick only once the in-flight grace has passed', async () => {
+    const fetch = jest
+      .fn<Promise<string>, []>()
+      .mockImplementationOnce(() => new Promise<string>(() => undefined))
+      .mockResolvedValue('recovered');
+    const { result } = setup('stock', { stock: spec(fetch, { minIntervalMs: 0 }) });
+    now += IN_FLIGHT_GRACE_MS - 1;
+    await act(() => result.current.refresh(false));
+    expect(fetch).toHaveBeenCalledTimes(1);
+    now += 1;
+    await act(() => result.current.refresh(false));
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(result.current.sources.stock).toMatchObject({ data: 'recovered', loading: false, error: null });
+  });
+
+  it('on a session change, never shows the previous session’s data, its late answer or its cache', async () => {
+    const lateFromA = deferred<string>();
+    const firstForB = deferred<string>();
+    const fetch = jest
+      .fn<Promise<string>, []>()
+      .mockResolvedValueOnce('company-a')
+      .mockImplementationOnce(() => lateFromA.promise)
+      .mockImplementationOnce(() => firstForB.promise)
+      .mockResolvedValue('company-a-again');
+    const specs = { maintenance: spec(fetch, { minIntervalMs: 300_000, cacheTtlMs: 600_000 }) };
+    const { result, rerender, unmount } = setup('maintenance', specs, 'scope-a');
+    await flush();
+    expect(result.current.sources.maintenance).toMatchObject({ data: 'company-a' });
+
+    // A refresh for company A is still in flight when the session switches to company B.
+    now += 1_000;
+    act(() => {
+      void result.current.refresh(true);
+    });
+    rerender({ neededKey: 'maintenance', scope: 'scope-b' });
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(result.current.sources.maintenance).toMatchObject({ data: null, loading: true, error: null });
+
+    await act(async () => lateFromA.resolve('company-a-late'));
+    expect(result.current.sources.maintenance).toMatchObject({ data: null, loading: true });
+
+    await act(async () => firstForB.resolve('company-b'));
+    expect(result.current.sources.maintenance).toMatchObject({ data: 'company-b', loading: false });
+    unmount();
+
+    // Back in company A inside the TTL: the switch dropped A's cache, so it is fetched again.
+    now += 1_000;
+    const back = setup('maintenance', specs, 'scope-a');
+    expect(fetch).toHaveBeenCalledTimes(4);
+    expect(back.result.current.sources.maintenance).toMatchObject({ data: null, loading: true });
+    await flush();
+    expect(back.result.current.sources.maintenance).toMatchObject({ data: 'company-a-again' });
+    back.unmount();
+  });
+
+  it('never re-serves a cached result the server has since refused (403) after a remount', async () => {
+    const fetch = jest.fn<Promise<unknown>, []>().mockResolvedValueOnce({ value: 42 }).mockRejectedValue(forbidden());
+    const specs = { maintenance: spec(fetch, { minIntervalMs: 300_000, cacheTtlMs: 600_000 }) };
+    const first = setup('maintenance', specs);
+    await flush();
+    expect(first.result.current.sources.maintenance).toMatchObject({ data: { value: 42 }, forbidden: false });
+
+    // Mid-session the role loses access (the session scope does not change).
+    now += 10_000;
+    await act(() => first.result.current.refresh(true));
+    expect(first.result.current.sources.maintenance).toMatchObject({ data: null, forbidden: true });
+    first.unmount();
+
+    // Back on `/` well inside the TTL: the refused payload is never hydrated as verified data.
+    now += 10_000;
+    const second = setup('maintenance', specs);
+    expect(second.result.current.sources.maintenance?.data).toBeNull();
+    expect(fetch).toHaveBeenCalledTimes(3);
+    await flush();
+    expect(second.result.current.sources.maintenance).toMatchObject({ data: null, forbidden: true, loading: false });
+    second.unmount();
+  });
+
+  it('keeps a failed refresh marked after a remount, and its retry cadence, instead of re-serving the cache as fresh', async () => {
+    const fetch = jest
+      .fn<Promise<unknown>, []>()
+      .mockResolvedValueOnce('first')
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValue('again');
+    const specs = {
+      deliveryKpis: spec(fetch, { minIntervalMs: 600_000, hardMinIntervalMs: 60_000, cacheTtlMs: 600_000 }),
+    };
+    const first = setup('deliveryKpis', specs);
+    await flush();
+    now += 60_000;
+    await act(() => first.result.current.refresh(true));
+    expect(first.result.current.sources.deliveryKpis).toMatchObject({ data: 'first', error: 'Could not refresh' });
+    first.unmount();
+
+    now += 10_000;
+    const second = setup('deliveryKpis', specs);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(second.result.current.sources.deliveryKpis).toMatchObject({
+      data: 'first',
+      error: 'Could not refresh',
+      loading: false,
+    });
+    // The error retry counts from the FAILED attempt: min(floor, 60 s) after it, not the floor after the success.
+    now += ERROR_RETRY_CAP_MS - 10_000 - 1;
+    await act(() => second.result.current.refresh(false));
+    expect(fetch).toHaveBeenCalledTimes(2);
+    now += 1;
+    await act(() => second.result.current.refresh(false));
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(second.result.current.sources.deliveryKpis).toMatchObject({ data: 'again', error: null });
+    second.unmount();
+
+    // A success clears the marker for the next remount.
+    const third = setup('deliveryKpis', specs);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(third.result.current.sources.deliveryKpis).toMatchObject({ data: 'again', error: null });
+    third.unmount();
   });
 });

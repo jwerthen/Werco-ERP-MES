@@ -6,12 +6,14 @@
 import React from 'react';
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import type { DashboardLayoutValues } from '../../types/dashboardLayout';
+import { CLASSIC_LAYOUT_VALUES } from './widgetRegistry';
 import type { Permission } from '../../utils/permissions';
 import {
   CustomizeDashboardDialog,
   READ_ONLY_LAYOUT_NOTICE,
   type CustomizeDashboardDialogProps,
 } from './CustomizeDashboardDialog';
+import { DashboardLayoutCompanyChangedError } from './useDashboardLayout';
 import type { WidgetEligibilityContext } from './widgetTypes';
 
 jest.mock('../../services/api', () => ({ __esModule: true, default: {} }));
@@ -53,9 +55,20 @@ const panelSection = () => screen.getByRole('region', { name: 'Panels' });
 const onDashboardTitles = (section: HTMLElement) =>
   within(within(section).getByRole('list', { name: 'On your dashboard' }))
     .getAllByRole('listitem')
-    .map(item => item.querySelector('span.truncate')?.textContent);
-const liveRegion = () => document.querySelector('[aria-live="polite"]') as HTMLElement;
+    .map(item => item.querySelector('[data-testid="widget-row-title"]')?.textContent);
+/** The sr-only region that announces list edits. */
+const liveRegion = () => document.querySelector('p.sr-only[aria-live="polite"]') as HTMLElement;
 const saveButton = () => screen.getByRole('button', { name: 'Save layout' });
+const reloadButton = () => screen.getByRole('button', { name: /Reload saved layout/ });
+const dialogHeading = () => screen.getByRole('heading', { name: 'Customize dashboard', level: 2 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(done => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
 
 afterEach(() => jest.restoreAllMocks());
 
@@ -87,6 +100,25 @@ it('lists the viewer’s widgets in render order and the rest as available', asy
   expect(screen.queryByRole('checkbox', { name: /Setup progress/ })).not.toBeInTheDocument();
   expect(screen.getByRole('checkbox', { name: /Needs attention/ })).toBeChecked();
   expect(saveButton()).toBeDisabled();
+});
+
+it('names each banner checkbox by its title and describes it by its description', async () => {
+  renderDialog();
+  await settle();
+  const attention = screen.getByRole('checkbox', { name: 'Needs attention' });
+  expect(attention).toHaveAccessibleName('Needs attention');
+  expect(attention).toHaveAccessibleDescription(
+    'The most urgent exception (overdue work, open NCRs, calibration, low stock) with a link to review it.'
+  );
+});
+
+it.each([
+  ['no saved layout', null],
+  ['a saved layout that only carries the stock default', CLASSIC_LAYOUT_VALUES],
+])('never tells a non-admin a saved widget is hidden when they have %s', async (_label, saved) => {
+  renderDialog({ saved, eligibility: MANAGER });
+  await settle();
+  expect(screen.queryByText(/not available to you right now/)).not.toBeInTheDocument();
 });
 
 it('keeps focus on the moved row and announces its new position', async () => {
@@ -165,6 +197,12 @@ it('offers the opt-in panels the viewer may see, grouped by category, and adds o
   expect(categoryOf('Active Downtime')).toBe('Shop floor');
   expect(categoryOf('Quality Pulse')).toBe('Quality');
   expect(categoryOf('Inspection Queue')).toBe('Supply chain');
+  // Each category's list is named by its sub-heading, so the grouping is not visual only.
+  const shopFloor = within(available).getByRole('list', { name: 'Shop floor' });
+  expect(within(shopFloor).getByRole('button', { name: 'Add Active Downtime' })).toBeInTheDocument();
+  expect(within(available).getByRole('list', { name: 'Quality' })).toContainElement(
+    within(available).getByRole('button', { name: 'Add Quality Pulse' })
+  );
   // require_role([ADMIN, MANAGER, SUPERVISOR]) panels are not offered when hasRole says no.
   expect(within(available).queryByRole('button', { name: 'Add Delivery & Yield KPIs' })).not.toBeInTheDocument();
   expect(within(available).queryByRole('button', { name: 'Add Visitors On Site' })).not.toBeInTheDocument();
@@ -237,15 +275,17 @@ it('cannot be dismissed while a save is in flight', async () => {
   expect(props.onClose).toHaveBeenCalledTimes(1);
 });
 
-it('shows a 409 inline and replaces the draft with the reloaded layout', async () => {
+it('shows a 409 inline, focuses the recovery action and replaces the draft with the reloaded layout', async () => {
   const reloaded: DashboardLayoutValues = { format_version: 1, widgets: [{ id: 'kpi.due_today' }] };
   const onSave = jest
     .fn()
     .mockRejectedValue(httpError(409, 'Your dashboard layout changed in another tab. Reload it before saving.'));
-  const onReload = jest.fn().mockResolvedValue(reloaded);
+  const pendingReload = deferred<DashboardLayoutValues | null>();
+  const onReload = jest.fn(() => pendingReload.promise);
   const { props } = renderDialog({ onSave, onReload });
   await settle();
   fireEvent.click(within(kpiSection()).getByRole('button', { name: 'Remove Overdue' }));
+  saveButton().focus();
   await act(async () => {
     fireEvent.click(saveButton());
   });
@@ -253,14 +293,39 @@ it('shows a 409 inline and replaces the draft with the reloaded layout', async (
   expect(alert).toHaveTextContent('Your dashboard layout changed in another tab. Reload it before saving.');
   expect(saveButton()).toBeDisabled();
   expect(props.onClose).not.toHaveBeenCalled();
+  // Focus leaves the now-disabled Save button for the recovery action.
+  expect(reloadButton()).toHaveFocus();
 
-  await act(async () => {
-    fireEvent.click(within(alert).getByRole('button', { name: 'Reload saved layout' }));
-  });
+  fireEvent.click(reloadButton());
+  // While the reload runs the alert and its button stay mounted, showing the spinner.
   expect(onReload).toHaveBeenCalledTimes(1);
+  expect(within(screen.getByRole('alert')).getByRole('button', { name: /Reload saved layout/ })).toBeDisabled();
+  expect(reloadButton().querySelector('.animate-spin')).not.toBeNull();
+
+  await act(async () => pendingReload.resolve(reloaded));
   expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-  expect(screen.getByText('Reloaded your saved layout. Your unsaved changes were discarded.')).toBeInTheDocument();
+  // The discard is announced: the notice is written into a live region that was already mounted.
+  const notice = screen.getByText('Reloaded your saved layout. Your unsaved changes were discarded.');
+  expect(notice.closest('[aria-live="polite"]')).not.toBeNull();
+  expect(dialogHeading()).toHaveFocus();
   expect(onDashboardTitles(kpiSection())).toEqual(['Due Today']);
+});
+
+it('keeps the recovery action, focused, when the reload itself fails', async () => {
+  const onSave = jest.fn().mockRejectedValue(httpError(409, 'Changed in another tab.'));
+  const onReload = jest.fn().mockRejectedValue(httpError(503, 'Service unavailable. Try again.'));
+  renderDialog({ onSave, onReload });
+  await settle();
+  fireEvent.click(within(kpiSection()).getByRole('button', { name: 'Remove Overdue' }));
+  await act(async () => {
+    fireEvent.click(saveButton());
+  });
+  await act(async () => {
+    fireEvent.click(reloadButton());
+  });
+  expect(screen.getByRole('alert')).toHaveTextContent('Service unavailable. Try again.');
+  expect(reloadButton()).toBeEnabled();
+  expect(reloadButton()).toHaveFocus();
 });
 
 it('resets to the default through a confirmation', async () => {
@@ -275,6 +340,143 @@ it('resets to the default through a confirmation', async () => {
   expect(props.onReset).toHaveBeenCalledTimes(1);
   expect(props.onSave).not.toHaveBeenCalled();
   expect(props.onClose).toHaveBeenCalledTimes(1);
+});
+
+it('moves focus to the recovery action when a reset fails with 409 (Reset itself is now disabled)', async () => {
+  const saved: DashboardLayoutValues = { format_version: 1, widgets: [{ id: 'kpi.overdue' }] };
+  const onReset = jest.fn().mockRejectedValue(httpError(409, 'Your dashboard layout changed in another tab.'));
+  renderDialog({ saved, onReset });
+  await settle();
+  const reset = screen.getByRole('button', { name: 'Reset to default' });
+  reset.focus();
+  fireEvent.click(reset);
+  const confirm = screen.getByRole('dialog', { name: 'Reset dashboard to default?' });
+  await settle();
+  await act(async () => {
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Reset to default' }));
+  });
+  expect(screen.queryByRole('dialog', { name: 'Reset dashboard to default?' })).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Reset to default' })).toBeDisabled();
+  expect(reloadButton()).toHaveFocus();
+  expect(document.activeElement).not.toBe(document.body);
+});
+
+it('uses AA-contrast text for its small labels (no slate-500 text on the panel)', async () => {
+  renderDialog();
+  await settle();
+  const dialog = screen.getByRole('dialog', { name: 'Customize dashboard' });
+  expect(dialog.querySelectorAll('[class*="text-slate-500"]')).toHaveLength(0);
+});
+
+it('lets a panel name wrap with its controls below it instead of squeezing it to an ellipsis', async () => {
+  renderDialog();
+  await settle();
+  const list = within(panelSection()).getByRole('list', { name: 'On your dashboard' });
+  const row = within(list).getAllByRole('listitem')[0];
+  const name = within(row).getByTestId('widget-row-title');
+  expect(name).toHaveTextContent('Capacity Overview');
+  // A real flex basis (not basis-0) is what makes the controls wrap below the name, and
+  // without `truncate` a long name wraps rather than collapsing to "…".
+  expect(name).not.toHaveClass('truncate');
+  expect(name).toHaveClass('basis-40');
+  const controls = within(row).getByRole('combobox', { name: 'Width of Capacity Overview' }).parentElement;
+  expect(controls).not.toBe(row);
+  expect(controls).toContainElement(within(row).getByRole('button', { name: 'Remove Capacity Overview' }));
+});
+
+it('treats a save answered for another company like a 409: says so, stops saving and focuses the recovery action', async () => {
+  const onSave = jest.fn().mockRejectedValue(new DashboardLayoutCompanyChangedError());
+  const { props } = renderDialog({ onSave });
+  await settle();
+  fireEvent.click(within(kpiSection()).getByRole('button', { name: 'Remove Overdue' }));
+  saveButton().focus();
+  await act(async () => {
+    fireEvent.click(saveButton());
+  });
+  expect(screen.getByRole('alert')).toHaveTextContent(
+    'Your active company changed. Reload the dashboard before saving its layout.'
+  );
+  expect(saveButton()).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Reset to default' })).toBeDisabled();
+  expect(within(kpiSection()).getByRole('button', { name: 'Add Overdue' })).toBeDisabled();
+  expect(reloadButton()).toHaveFocus();
+  expect(props.onClose).not.toHaveBeenCalled();
+});
+
+it('keeps the draft editable and lets the user retry after a failure that is not a conflict', async () => {
+  const onSave = jest
+    .fn()
+    .mockRejectedValueOnce(
+      httpError(
+        503,
+        'Your dashboard layout could not be saved because its audit record failed; nothing was changed. Retry.'
+      )
+    )
+    .mockResolvedValue(undefined);
+  const { props } = renderDialog({ onSave });
+  await settle();
+  fireEvent.click(within(kpiSection()).getByRole('button', { name: 'Remove Overdue' }));
+  await act(async () => {
+    fireEvent.click(saveButton());
+  });
+  expect(screen.getByRole('alert')).toHaveTextContent(/audit record failed; nothing was changed/);
+  // No reload is forced: the server refused nothing about the version, so the edits stand.
+  expect(screen.queryByRole('button', { name: /Reload saved layout/ })).not.toBeInTheDocument();
+  expect(onDashboardTitles(kpiSection())).not.toContain('Overdue');
+  expect(saveButton()).toBeEnabled();
+  expect(props.onClose).not.toHaveBeenCalled();
+
+  await act(async () => {
+    fireEvent.click(saveButton());
+  });
+  expect(onSave).toHaveBeenCalledTimes(2);
+  expect(onSave.mock.calls[1][0]).toEqual(onSave.mock.calls[0][0]);
+  expect(props.onClose).toHaveBeenCalledTimes(1);
+});
+
+it('offers no reset while the dashboard already shows the default', async () => {
+  renderDialog({ saved: null });
+  await settle();
+  const reset = screen.getByRole('button', { name: 'Reset to default' });
+  expect(reset).toBeDisabled();
+  expect(reset).toHaveAttribute('title', 'You are already using the default layout');
+});
+
+it('asks before the close button discards edits, like Escape and Cancel', async () => {
+  const confirm = jest.spyOn(window, 'confirm').mockReturnValue(false);
+  const { props } = renderDialog();
+  await settle();
+  fireEvent.click(within(kpiSection()).getByRole('button', { name: 'Remove Overdue' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Close customize dashboard' }));
+  expect(confirm).toHaveBeenCalledTimes(1);
+  expect(props.onClose).not.toHaveBeenCalled();
+  confirm.mockReturnValue(true);
+  fireEvent.click(screen.getByRole('button', { name: 'Close customize dashboard' }));
+  expect(props.onClose).toHaveBeenCalledTimes(1);
+});
+
+it('is clean again once a banner is toggled off and back on (banners keep registry order)', async () => {
+  const { props } = renderDialog();
+  await settle();
+  const attention = screen.getByRole('checkbox', { name: 'Needs attention' });
+  fireEvent.click(attention);
+  expect(attention).not.toBeChecked();
+  expect(saveButton()).toBeEnabled();
+  fireEvent.click(attention);
+  expect(attention).toBeChecked();
+  expect(saveButton()).toBeDisabled();
+
+  // Toggled back on, it still saves in registry order, not at the end of the banner list.
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Alert chips' }));
+  fireEvent.click(attention);
+  fireEvent.click(attention);
+  await act(async () => {
+    fireEvent.click(saveButton());
+  });
+  const payload = (props.onSave as jest.Mock).mock.calls[0][0] as DashboardLayoutValues;
+  const ids = payload.widgets.map(widget => widget.id);
+  expect(ids.slice(0, 3)).toEqual(['attention', 'setup_nudge', 'morning_brief']);
+  expect(ids).not.toContain('alert_chips');
 });
 
 it('is read-only for a session that cannot save', async () => {

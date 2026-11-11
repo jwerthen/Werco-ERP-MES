@@ -79,6 +79,36 @@ describe('notificationListCache', () => {
     await expect(fetchNotificationListThroughCache(load)).resolves.toBe('fresh');
   });
 
+  it('lets a forced call past the error replay and the data floor', async () => {
+    const error = new Error('offline');
+    const load = jest
+      .fn()
+      .mockRejectedValueOnce(error)
+      .mockResolvedValueOnce('recovered')
+      .mockResolvedValueOnce('fresher');
+    await expect(fetchNotificationListThroughCache(load)).rejects.toBe(error);
+
+    // A user's retry inside the replay window still reaches the network.
+    now += 1;
+    await expect(fetchNotificationListThroughCache(load, { force: true })).resolves.toBe('recovered');
+    // An unforced tick keeps the floor; a forced refresh inside it does not.
+    await expect(fetchNotificationListThroughCache(load)).resolves.toBe('recovered');
+    await expect(fetchNotificationListThroughCache(load, { force: true })).resolves.toBe('fresher');
+    expect(load).toHaveBeenCalledTimes(3);
+  });
+
+  it('a forced call shares a request already in flight rather than duplicating it', async () => {
+    let resolve: (value: string) => void = () => undefined;
+    const load = jest.fn(() => new Promise<string>(done => (resolve = done)));
+    const tick = fetchNotificationListThroughCache(load);
+    const forced = fetchNotificationListThroughCache(load, { force: true });
+    await Promise.resolve();
+    resolve('list');
+    await expect(tick).resolves.toBe('list');
+    await expect(forced).resolves.toBe('list');
+    expect(load).toHaveBeenCalledTimes(1);
+  });
+
   it("never serves another session's list", async () => {
     sessionStorage.setItem('token', fakeToken('7', 1));
     const load = jest.fn().mockResolvedValueOnce('user 7').mockResolvedValueOnce('user 8');

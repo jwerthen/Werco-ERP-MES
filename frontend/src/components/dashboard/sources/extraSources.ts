@@ -13,7 +13,8 @@
  *    `deliveryKpis` (10 KPIs × current/prior/sparkline, uncached on the server) also holds
  *    a 60 s hard minimum against manual refreshes.
  *  - `notifications` fetches through `notificationListCache`, which hits the network only
- *    when the unread count changed or the list is two minutes old — see that module.
+ *    when the unread count changed, the widget remounted, the call is forced, or the list
+ *    is two minutes old — see that module.
  */
 import api from '../../../services/api';
 import type { ExtraSourceDataMap } from '../../../types/dashboardWidgetData';
@@ -31,6 +32,20 @@ export const NOTIFICATION_WIDGET_ROW_LIMIT = 5;
 export const VISITOR_WIDGET_ROW_LIMIT = 10;
 
 type ExtraSourceSpecs = { [K in ExtraSourceKey]: SourceSpec<ExtraSourceDataMap[K]> };
+
+/**
+ * The `notifications` fetch. `forced` (a user's manual refresh — the header Refresh, the
+ * page's "Retry unavailable sections", the widget's own Retry) goes past the list cache's
+ * floor and error replay; the keyed loader passes it on every fetch.
+ */
+export function fetchNotificationsSource(
+  opts: { forced?: boolean } = {}
+): Promise<ExtraSourceDataMap['notifications']> {
+  return fetchNotificationListThroughCache(
+    () => api.getNotifications({ unread: true, pageSize: NOTIFICATION_WIDGET_ROW_LIMIT }),
+    { force: opts.forced === true }
+  );
+}
 
 const SPECS: ExtraSourceSpecs = {
   wallboard: {
@@ -103,10 +118,7 @@ const SPECS: ExtraSourceSpecs = {
   },
   notifications: {
     label: 'Notifications',
-    fetch: () =>
-      fetchNotificationListThroughCache(() =>
-        api.getNotifications({ unread: true, pageSize: NOTIFICATION_WIDGET_ROW_LIMIT })
-      ),
+    fetch: fetchNotificationsSource,
     // Short on purpose: the real two-minute network floor lives in notificationListCache,
     // which also refetches as soon as the unread count changes. A long loader floor here
     // would swallow the widget's change-triggered refresh.

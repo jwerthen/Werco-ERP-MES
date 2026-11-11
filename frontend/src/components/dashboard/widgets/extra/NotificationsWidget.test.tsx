@@ -3,11 +3,20 @@ import { act, fireEvent, screen } from '@testing-library/react';
 import { readySource, renderWithDashboardContext } from '../../../../test-utils/dashboardWidgets';
 import type { NotificationItem, NotificationListResponse } from '../../../../types/notification';
 import { useNotificationState } from '../../../../hooks/useNotificationState';
-import { invalidateNotificationList } from './notificationListCache';
+import {
+  fetchNotificationListThroughCache,
+  invalidateNotificationList,
+  resetNotificationListCache,
+} from './notificationListCache';
 import { NotificationsWidget } from './NotificationsWidget';
 
 jest.mock('../../../../hooks/useNotificationState', () => ({ useNotificationState: jest.fn() }));
-jest.mock('./notificationListCache', () => ({ invalidateNotificationList: jest.fn() }));
+// The REAL cache, with invalidation spied on: the remount and retry cases below run the
+// actual cache the `notifications` source spec fetches through.
+jest.mock('./notificationListCache', () => {
+  const actual = jest.requireActual('./notificationListCache');
+  return { ...actual, invalidateNotificationList: jest.fn(actual.invalidateNotificationList) };
+});
 
 const mockUseNotificationState = useNotificationState as jest.MockedFunction<typeof useNotificationState>;
 const mockInvalidate = invalidateNotificationList as jest.MockedFunction<typeof invalidateNotificationList>;
@@ -64,6 +73,7 @@ function Harness() {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  resetNotificationListCache();
   mockUseNotificationState.mockReturnValue(storeState(3, 1));
 });
 
@@ -146,13 +156,57 @@ describe('NotificationsWidget', () => {
     expect(screen.getByText('NCR-0042 opened')).toBeInTheDocument();
   });
 
-  it('forces a refresh from the error state', () => {
+  it('forces a refresh from the error state, clearing the list cache first', () => {
     const { refresh } = renderWithDashboardContext(<NotificationsWidget />, {
       sources: { notifications: readySource(null, { error: 'Could not refresh' }) },
     });
     expect(screen.getByRole('alert')).toHaveTextContent('Notifications are unavailable');
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     expect(refresh).toHaveBeenCalledWith(true);
+    expect(mockInvalidate).toHaveBeenCalledTimes(1);
+    expect(mockInvalidate.mock.invocationCallOrder[0]).toBeLessThan(refresh.mock.invocationCallOrder[0]);
+  });
+
+  it('a Retry after a failure reaches the network instead of the replayed error', async () => {
+    const load = jest
+      .fn()
+      .mockRejectedValueOnce(new Error('502'))
+      .mockResolvedValueOnce(page([note()]));
+    // The failed fetch the widget is showing: the cache would replay it for a minute.
+    await expect(fetchNotificationListThroughCache(load)).rejects.toThrow('502');
+    await expect(fetchNotificationListThroughCache(load)).rejects.toThrow('502');
+    expect(load).toHaveBeenCalledTimes(1);
+
+    renderWithDashboardContext(<NotificationsWidget />, {
+      sources: { notifications: readySource(null, { error: 'Could not refresh' }) },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+    // The forced refresh's fetch (the source spec → this cache) now goes to the network.
+    await expect(fetchNotificationListThroughCache(load)).resolves.toEqual(page([note()]));
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it('forgets the cached list on unmount, so a remount never shows rows the count contradicts', async () => {
+    const threeUnread = page([note({ id: 1 }), note({ id: 2 }), note({ id: 3 })]);
+    const oneUnread = page([note({ id: 3 })]);
+    const load = jest.fn().mockResolvedValueOnce(threeUnread).mockResolvedValueOnce(oneUnread);
+
+    // Dashboard open: the list is fetched at 3 unread and the widget shows it.
+    await expect(fetchNotificationListThroughCache(load)).resolves.toBe(threeUnread);
+    const view = renderWithDashboardContext(<NotificationsWidget />, {
+      sources: { notifications: readySource(threeUnread) },
+    });
+    expect(mockInvalidate).not.toHaveBeenCalled();
+
+    // The user leaves `/` and reads two notifications elsewhere: nothing watches the count.
+    view.unmount();
+    expect(mockInvalidate).toHaveBeenCalledTimes(1);
+    mockUseNotificationState.mockReturnValue(storeState(1, 2));
+
+    // Back on `/` well inside the two-minute floor: the loader's first fetch is a fresh list.
+    await expect(fetchNotificationListThroughCache(load)).resolves.toBe(oneUnread);
+    expect(load).toHaveBeenCalledTimes(2);
   });
 
   it('is not available on a 403', () => {

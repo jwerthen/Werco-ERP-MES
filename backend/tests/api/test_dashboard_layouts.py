@@ -1,8 +1,11 @@
 """A saved dashboard layout is personal presentation: audited, CAS-guarded, tenant/owner isolated,
 writable only by an interactive person, and never a 500 whatever a stored row holds."""
 
+import json
+
 import pytest
 from fastapi import HTTPException
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.api.endpoints.dashboard_layouts import AUDIT_FAILED_DETAIL
 from app.core.security import create_access_token
@@ -17,6 +20,7 @@ from app.schemas.dashboard_layout import (
     DashboardLayoutValues,
     normalize_stored_layout,
 )
+from app.services import dashboard_layout_service as layout_service
 from app.services.audit_service import AuditService, AuditWriteError
 from app.services.dashboard_layout_service import (
     COMPANY_CHANGED_DETAIL,
@@ -502,6 +506,31 @@ def test_the_no_op_check_compares_the_raw_row_not_its_normalized_view(client, au
     assert db_session.query(DashboardLayout).one().layout_json == shown
 
 
+@pytest.mark.parametrize('stored_format', [True, 1.0], ids=['boolean_format', 'float_format'])
+def test_the_no_op_check_is_type_strict(client, auth_headers, db_session, test_user, stored_format):
+    """``True == 1`` and ``1.0 == 1`` in Python, but the normalizer rejects both, so the GET
+    serves the default. Saving the same widgets must REWRITE the row, never a silent no-op."""
+    widgets = [{'id': 'presence', 'size': None}]
+    raw = {'format_version': stored_format, 'widgets': widgets}
+    wanted = {'format_version': 1, 'widgets': widgets}
+    assert raw == wanted  # the trap: equal in value, not in what was stored
+    store(db_session, test_user, raw, version=3)
+    assert client.get(URL, headers=auth_headers).json()['layout'] is None
+
+    response = save(client, auth_headers, wanted, version=3)
+    assert response.status_code == 200, response.text
+    assert response.json()['version'] == 4 and response.json()['layout'] == wanted
+    trail = audits(db_session)
+    assert [entry.action for entry in trail] == ['UPDATE']
+    assert trail[0].old_values == {'version': 3, 'layout': raw}
+    assert type(trail[0].old_values['layout']['format_version']) is type(stored_format)
+    assert trail[0].new_values == {'version': 4, 'layout': wanted}
+    db_session.expire_all()
+    row = db_session.query(DashboardLayout).one()
+    assert row.version == 4 and json.dumps(row.layout_json, sort_keys=True) == json.dumps(wanted, sort_keys=True)
+    assert client.get(URL, headers=auth_headers).json()['layout'] == wanted
+
+
 def test_reset_of_a_row_already_at_the_default_writes_nothing(client, auth_headers, db_session, test_user):
     store(db_session, test_user, {}, version=2)
     response = reset(client, auth_headers, version=2)
@@ -529,7 +558,8 @@ def test_required_audit_failure_rolls_back_and_answers_503(client, auth_headers,
         response = save(client, auth_headers, OTHER_LAYOUT, version=int(operation == 'update'))
     assert response.status_code == 503, response.text
     assert response.json()['detail'] == AUDIT_FAILED_DETAIL
-    db_session.rollback()
+    # The app shares this session (the ``client`` fixture), so it is read exactly as the route
+    # left it: no rollback of our own, which would hide a route that forgot to roll back.
     db_session.expire_all()
     rows = db_session.query(DashboardLayout).all()
     if operation == 'create':
@@ -552,3 +582,63 @@ def test_a_lost_first_create_race_is_a_409_not_a_500(client, auth_headers, db_se
     row = db_session.query(DashboardLayout).one()
     assert row.version == 1 and row.layout_json == LAYOUT
     assert audits(db_session) == []
+
+
+def test_a_version_moved_after_the_locked_read_is_a_409_never_a_blind_overwrite(
+    client, auth_headers, db_session, test_user, monkeypatch
+):
+    """The UPDATE is conditional on the version this request read. If another tab's save landed
+    between the read and the write, nothing is overwritten and nothing is audited."""
+    store(db_session, test_user, LAYOUT, version=2)
+    real_layout_row = layout_service._layout_row
+
+    def read_one_version_behind(db, company_id, user_id, *, locked=False):
+        found = real_layout_row(db, company_id, user_id, locked=locked)
+        if locked and found is not None:
+            # What this request read is one version behind what the database now holds.
+            set_committed_value(found, 'version', found.version - 1)
+        return found
+
+    monkeypatch.setattr(layout_service, '_layout_row', read_one_version_behind)
+    response = save(client, auth_headers, OTHER_LAYOUT, version=1)
+    assert response.status_code == 409, response.text
+    assert response.json()['detail'] == STALE_VERSION_DETAIL
+    monkeypatch.undo()
+    db_session.expire_all()
+    row = db_session.query(DashboardLayout).one()
+    assert row.version == 2 and row.layout_json == LAYOUT
+    assert audits(db_session) == []
+
+
+def test_a_switched_platform_admin_writes_and_audits_in_the_active_company_only(client, db_session, test_user):
+    """The row AND its audit record land on the company the session is switched into, never on the
+    principal's home company, whose own layout stays untouched; a command still naming the home
+    company is refused before anything is written."""
+    db_session.add(Company(id=2, name='Switched layouts', slug='switched-layouts', is_active=True))
+    test_user.role = UserRole.PLATFORM_ADMIN
+    db_session.commit()
+    home_id = store(db_session, test_user, OTHER_LAYOUT, company_id=1, version=4).id
+    switched = {
+        'Authorization': f'Bearer {create_access_token(subject=test_user.id, company_id=2)}',
+        'X-Requested-With': 'XMLHttpRequest',
+    }
+
+    read = client.get(URL, headers=switched)
+    assert read.status_code == 200, read.text
+    assert read.json() == {**DEFAULT_BODY, 'company_id': 2}
+
+    home_command = save(client, switched, company=1, version=4)
+    assert home_command.status_code == 409 and home_command.json()['detail'] == COMPANY_CHANGED_DETAIL
+
+    saved = save(client, switched, company=2)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()['company_id'] == 2 and saved.json()['version'] == 1 and saved.json()['layout'] == LAYOUT
+
+    db_session.expire_all()
+    rows = {row.company_id: row for row in db_session.query(DashboardLayout).all()}
+    assert set(rows) == {1, 2}
+    assert rows[2].user_id == test_user.id and rows[2].layout_json == LAYOUT and rows[2].version == 1
+    assert rows[1].id == home_id and rows[1].layout_json == OTHER_LAYOUT and rows[1].version == 4
+    trail = audits(db_session)
+    assert len(trail) == 1
+    assert trail[0].company_id == 2 and trail[0].resource_id == rows[2].id and trail[0].user_id == test_user.id
