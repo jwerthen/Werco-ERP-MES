@@ -495,6 +495,13 @@ class TestDowntimeWorkOrderReferences:
         )
         assert response.status_code == 200, response.text
         assert response.json()["work_order"]["id"] == work_order.id
+        # The response names the work order by its number (the wire field is wo_number,
+        # the column is work_order_number); it used to serialize null.
+        assert response.json()["work_order"]["wo_number"] == work_order.work_order_number
+        active = client.get(f"{DOWNTIME_URL}/active", headers=headers_for(db_session))
+        assert active.status_code == 200, active.text
+        rendered = [row["work_order"] for row in active.json() if row["work_order"]]
+        assert {"id": work_order.id, "wo_number": work_order.work_order_number} in rendered
 
 
 class TestReasonCodeIntegrity:

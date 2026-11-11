@@ -231,20 +231,28 @@ export function setCustomPermissions(permissions: Record<string, string[]> | nul
 }
 
 /**
- * Get current permissions for a role (custom if loaded, else default)
+ * Get current permissions for a role (custom if loaded, else default).
+ *
+ * `platform_admin` never takes a per-company override. The backend's `require_role`
+ * waves PLATFORM_ADMIN through every gate and `DEFAULT_ROLE_PERMISSIONS` has no row for
+ * it, so `GET /admin/settings/role-permissions` (loaded at login) answers
+ * `platform_admin: []` — which, read as an override, made every `can()` false for a
+ * password-login platform admin until the next page reload.
  */
 function getCurrentRolePermissions(role: UserRole): Permission[] {
-  if (customPermissions && customPermissions[role]) {
+  if (role !== 'platform_admin' && customPermissions && customPermissions[role]) {
     return customPermissions[role];
   }
   return ROLE_PERMISSIONS[role] || [];
 }
 
 /**
- * Check if a user has a specific permission
+ * Check if a user has a specific permission. `platform_admin` passes every check,
+ * mirroring the backend (see getCurrentRolePermissions).
  */
 export function hasPermission(userRole: UserRole | undefined, permission: Permission): boolean {
   if (!userRole) return false;
+  if (userRole === 'platform_admin') return true;
   return getCurrentRolePermissions(userRole).includes(permission);
 }
 

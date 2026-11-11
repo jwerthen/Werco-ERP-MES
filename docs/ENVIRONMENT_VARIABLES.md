@@ -407,6 +407,12 @@ reconciled when opened in its detail / operations-list views; nothing is permane
 > cost; the **durable fix is the deferred ARQ reconcile job** (move reconcile off the read path
 > entirely), not an ever-higher cap. See `docs/WORK_ORDER_COMPLETION_REMEDIATION.md` → Rank 12.
 
+> **Saved dashboard layouts — no new variables.** Per-user dashboard customization
+> ([docs/DASHBOARD.md → Customizing the dashboard](DASHBOARD.md#customizing-the-dashboard)) adds
+> migration 118 and **no environment variable, secret or cron**. Layouts are saved per employee and
+> company in the database, not in configuration; the 3-second wait for a saved layout and every widget
+> refresh floor are constants in the frontend source, not settings.
+
 ### Realtime WebSocket pushes
 
 Writes push `work_order_update` / `shop_floor_update` / `dashboard_update` events to the writing

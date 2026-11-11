@@ -18,6 +18,7 @@ from .customer_complaint import (
     ReturnMaterialAuthorization,
     RMAStatus,
 )
+from .dashboard_layout import DashboardLayout
 from .display_token import DisplayToken
 from .document import Document, DocumentType
 from .document_delivery import DocumentDelivery
@@ -210,6 +211,7 @@ __all__ = [
     "HankRoutine",
     "HankRoutineRun",
     "HankPreference",
+    "DashboardLayout",
     "FabricationQuote",
     "FabricationQuoteActual",
     "FabricationQuoteFile",

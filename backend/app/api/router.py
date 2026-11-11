@@ -19,6 +19,7 @@ from app.api.endpoints import (
     customer_complaints,
     customer_pos,
     customers,
+    dashboard_layouts,
     document_deliveries,
     documents,
     downtime,
@@ -96,6 +97,8 @@ api_router.include_router(hank_tasks.router, prefix="/hank", tags=["Hank"])
 api_router.include_router(hank_teamwork.router, prefix="/hank", tags=["Hank"])
 api_router.include_router(hank_watches.router, prefix="/hank", tags=["Hank"])
 api_router.include_router(user_workspaces.router, prefix="/user-workspaces", tags=["User Workspaces"])
+# A person's own saved dashboard layout (presentation only; see dashboard_layout_service).
+api_router.include_router(dashboard_layouts.router, prefix="/dashboard", tags=["Dashboard"])
 
 api_router.include_router(auth.router, prefix="/auth", tags=["Authentication"])
 api_router.include_router(ai_learning.router, prefix="/ai", tags=["AI Learning"])

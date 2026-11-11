@@ -10451,6 +10451,11 @@ There is no delete endpoint.
 > and `resolver.username` are now optional and **always `null`** (the page's TypeScript type now says
 > `username?: string | null`; nothing renders it). Read `full_name`.
 
+> **`work_order.wo_number` now carries the number.** The nested `work_order` object read `wo_number`
+> off a `WorkOrder` whose column is `work_order_number`, so it serialized `null` on every event
+> (fixed 2026-11-11 with a validation alias; the wire name is unchanged). Clients should still link by
+> `work_order_id` and treat the number as optional, since an API deployed before the fix sends `null`.
+
 > **Tenancy: the work center and work order are validated, and a legacy cross-tenant link no longer
 > renders.** `work_center_id` and `work_order_id` on create and on `PUT` must belong to the active
 > company — a flat **404** (`"Work center not found"` / `"Work order not found"`), never 403 — and a
@@ -10658,6 +10663,120 @@ roles). See [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#sms-channel-twilio).
 > | **429** | Per-user hourly test budget exhausted (`3/hour`) |
 > | **503** | The quota backend (Redis) is unavailable — refuses rather than sending unmetered, and deliberately does *not* report this as a limit the user hit |
 > | **502** | Provider rejected the message, or the provider was unreachable |
+
+### Personal dashboard layout
+
+Which widgets the signed-in user's dashboard (`/`) shows, in what order and, for panels, at what
+width — saved **per user, per active company**. Presentation only: a layout grants nothing, and
+every endpoint a widget reads enforces its own authorization. **No role gate**: like
+`/users/me/*`, the routes read and write only the caller's own row and never accept a user id.
+Backing UI: Dashboard → **Customize** ([docs/DASHBOARD.md → Customizing the dashboard](DASHBOARD.md#customizing-the-dashboard)).
+Source: `app/api/endpoints/dashboard_layouts.py`, `app/services/dashboard_layout_service.py`,
+`app/schemas/dashboard_layout.py`; table `dashboard_layouts` (migration 118).
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/dashboard/layout` | Your saved layout for the active company, or `layout: null` for the default. Never creates a row | Any authenticated user (self); kiosk badge tokens are refused by their path fence |
+| PUT | `/dashboard/layout` | Replace your layout (version compare-and-swap, required audit) | Interactive person in a writable company (self) |
+| POST | `/dashboard/layout/reset` | Return to the default, keeping the row and its audit history | Interactive person in a writable company (self) |
+
+All three return the same body:
+
+```json
+{
+  "company_id": 1,
+  "version": 3,
+  "layout": {
+    "format_version": 1,
+    "widgets": [
+      { "id": "attention", "size": null },
+      { "id": "kpi.overdue", "size": null },
+      { "id": "capacity_overview", "size": "wide" },
+      { "id": "quality_pulse", "size": "half" }
+    ]
+  },
+  "updated_at": "2026-11-11T15:04:05Z",
+  "can_edit": true
+}
+```
+
+- `layout: null` is the stock default. With no saved row the answer is `version: 0`,
+  `layout: null`, `updated_at: null`.
+- `widgets` is in render order; `size` `null` means the widget's own default width.
+- `can_edit` says whether **this session** may save (see Credentials below).
+
+**`PUT /dashboard/layout`** — body `{ "expected_company_id": 1, "expected_version": 3, "layout":
+{ "format_version": 1, "widgets": [ { "id": "kpi.overdue" }, { "id": "presence", "size": "full" } ] } }`.
+**`POST /dashboard/layout/reset`** — body `{ "expected_company_id": 1, "expected_version": 3 }`.
+Input is strict (**422**): every object is `extra="forbid"` (a `layout` sent to reset is refused);
+`expected_company_id` must be > 0 and `expected_version` ≥ 0 (0 = first save); `layout.widgets` is
+**required**, so `layout: {}` is a 422 while `widgets: []` saves a deliberately **empty** dashboard;
+at most 64 entries, ids unique; `id` matches `^[a-z][a-z0-9_.]{0,63}$`; `size` is `null` or matches
+`^[a-z][a-z_]{0,23}$`; `format_version` may be omitted and must otherwise be `1`.
+
+**Shape, not membership.** The server accepts any well-formed id and size. The widget catalog and
+the width vocabulary belong to the SPA, which deploys separately from the API: the SPA ignores an id
+it does not know (and drops it on its next save) and renders an unknown width at the widget's
+default.
+
+**Write semantics.**
+
+- **Check order:** `expected_company_id` ≠ the active company → **409** → credential and company
+  check → **403** → a per-user advisory lock and row lock → `expected_version` ≠ the current version
+  (0 with no row) → **409** → no-op check → write.
+- **Compare-and-swap.** The first save creates version 1; every real change increments it. Send the
+  version from the last response, and after an uncertain response reload rather than overwrite. On
+  PostgreSQL the per-user advisory lock serializes two first saves, so the second sees version 1 and
+  gets the stale-version **409**; the unique (company, user) key is the backstop, and a save it
+  refuses answers the same **409**.
+- **No-op.** A current-version `PUT` whose layout is identical to the stored JSON (the raw row, not
+  its normalized view), a reset with no saved row, and a reset of a row already at the default write
+  nothing — no version bump, no audit row — and return the current state. The version check still
+  applies to them.
+- **Reset is the only way back to the default.** It stores the empty object (served as
+  `layout: null`) and increments the version; it does not delete the row. No `PUT` can produce the
+  default.
+- **Required audit.** Each real change writes one audit row in the same transaction: resource type
+  `dashboard_layout`, action `CREATE` for the first save and `UPDATE` afterwards (reset included),
+  identifier `Employee <user id> dashboard layout`, `old_values` `{version, layout}` (the stored JSON
+  verbatim) on `UPDATE`, `new_values` `{version, layout}` (`{}` for a reset), and `extra_data`
+  `{source: "dashboard_layout", reset_to_default: true|false}`. If the audit row cannot be written
+  the change rolls back and the caller gets **503**.
+- **Stored rows are read leniently and never cause a 500.** Every response reads the stored row
+  through one normalizer: a non-object root, a `format_version` other than the integer 1, or a
+  missing or non-list `widgets` serves the default (and logs a warning); an entry with an invalid id
+  is dropped and an invalid size becomes `null`; duplicates keep the first; at most 64 are kept; a
+  non-empty stored list from which nothing survives serves the default, while a stored empty list
+  stays an empty dashboard. Writes compare and audit the **raw** stored JSON, so a row written by
+  another schema can always be saved over or reset.
+
+**Credentials.**
+
+| Caller | GET | PUT / reset |
+|---|---|---|
+| A person's own session (access JWT), any role, in an active company they belong to | 200, `can_edit: true` | Allowed |
+| Platform Admin or superuser in a writable switched company | 200, `can_edit: true` | Allowed (their own row in that company) |
+| Long-lived API token (including through the MCP door) | 200, `can_edit: false` | **403** `Save your dashboard layout from an interactive account in a writable company.` |
+| Read-only company context | 200, `can_edit: false` | **403** from the read-only fence, `Read-only company context cannot modify data` |
+| Kiosk badge token (`scope="kiosk"`) | **403** (path fence) | **403** (path fence) |
+
+The three routes are also MCP tools — `get_my_dashboard_layout`, `save_my_dashboard_layout` and
+`reset_my_dashboard_layout` — and run as the caller, so an agent on an API token can read the layout
+but not change it.
+
+| Status | When |
+|---|---|
+| **200** | Read; saved; reset; or a no-op |
+| **401** | Not authenticated |
+| **403** | The session may not save (table above), or a kiosk badge token on any verb |
+| **409** | `Active company changed. Reopen the dashboard in the intended company.` — `expected_company_id` is not the active company. `Your dashboard layout changed in another tab. Reload it before saving.` — stale `expected_version`, or a lost first-save race |
+| **422** | Invalid body (rules above) |
+| **503** | `Your dashboard layout could not be saved because its audit record failed; nothing was changed. Retry.` |
+
+**Deploy skew.** The SPA (Vercel) and the API (Railway) deploy independently. An SPA that reaches an
+API without these routes gets **404** (or 405), renders the default dashboard and hides Customize; an
+older SPA never calls them. Adding a widget to the SPA needs no API change. Migration 118 adds the
+table and no environment variable.
 
 ### Admin Settings (Admin)
 
@@ -12745,7 +12864,7 @@ What matters from this file's point of view:
   routers with the caller's own bearer token. The router is the boundary: the same `require_role`
   gates, tenant scoping, audit rows, optimistic-locking 409s and per-endpoint size caps apply, and a
   401/403/409/422 comes back verbatim as an `is_error` tool result carrying the server's `detail`.
-- **The catalog is this API.** 746 tools are generated from `app.openapi()` at startup — every
+- **The catalog is this API.** 750 tools are generated from `app.openapi()` at startup — every
   secured operation except the `Authentication`, `Carrier Webhooks`, `Error Logging` (and its router-level `errors` twin) and `WebSocket` tags, the
   unauthenticated health/station-login routes (named one by one in `catalog.PUBLIC_OPERATIONS`) and
   the three operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders

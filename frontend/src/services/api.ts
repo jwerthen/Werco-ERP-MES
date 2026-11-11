@@ -120,6 +120,7 @@ import type { HankBriefing } from '../types/hank';
 import type { HankCapabilities, HankTask, HankTaskCreate, HankTaskCommand, HankTaskList } from '../types/hankTasks';
 import type { HankWatchCreate } from '../types/hankWatches';
 import type { HankPreferencesCommand, HankPreferencesResponse, HankPreferencesUpdate } from '../types/hankPreferences';
+import type { DashboardLayoutCommand, DashboardLayoutResponse, DashboardLayoutSave } from '../types/dashboardLayout';
 import type { HankEvidence, HankHandoff, HankHandoffCreate, HankHandoffList, HankRoutine, HankRoutineValues, HankRoutineRun, HankRoutineAdvance, HankWorkQueue, HankWorkState } from '../types/hankWork';
 import type { HankIntakeBatch, HankIntakeBatchList, HankIntakeFile, HankIntakePlan, HankIntakeReceivingDraft, HankIntakePurchaseOrderDraft, HankSourcePreview } from '../types/hankIntake';
 import {
@@ -2260,6 +2261,21 @@ class ApiService {
     return (await this.api.post<HankPreferencesResponse>('/hank/preferences/reset', body, { signal })).data;
   }
 
+  /** The caller's saved dashboard layout in the active company (`layout: null` = the stock default). */
+  async getDashboardLayout(signal?: AbortSignal): Promise<DashboardLayoutResponse> {
+    return (await this.api.get<DashboardLayoutResponse>('/dashboard/layout', { signal })).data;
+  }
+
+  /** Save a customized layout. CAS fields come from the last server response; 409 on a stale version. */
+  async saveDashboardLayout(body: DashboardLayoutSave, signal?: AbortSignal): Promise<DashboardLayoutResponse> {
+    return (await this.api.put<DashboardLayoutResponse>('/dashboard/layout', body, { signal })).data;
+  }
+
+  /** Return to the stock default — the only way back to it (an empty `widgets` list is an empty dashboard). */
+  async resetDashboardLayout(body: DashboardLayoutCommand, signal?: AbortSignal): Promise<DashboardLayoutResponse> {
+    return (await this.api.post<DashboardLayoutResponse>('/dashboard/layout/reset', body, { signal })).data;
+  }
+
   async getHankReadiness(id: number, signal?: AbortSignal): Promise<HankEvidence> {
     return (await this.api.get<HankEvidence>(`/hank/work-orders/${id}/readiness`, { signal })).data;
   }
@@ -2571,6 +2587,17 @@ class ApiService {
   async getActiveUsers() {
     const response = await this.api.get('/shop-floor/active-users');
     return response.data;
+  }
+
+  /**
+   * Shop-floor wallboard snapshot for a signed-in user (`GET /shop-floor/wallboard`).
+   * Read-only and side-effect free on the server; customer names are redacted unless
+   * the caller's role may see them. The TV board itself uses `services/wallboardClient`
+   * (display tokens must never enter this client's auth state) — this method is for
+   * office surfaces such as the dashboard's opt-in widgets.
+   */
+  async getWallboard(): Promise<import('../types/wallboard').WallboardResponse> {
+    return (await this.api.get('/shop-floor/wallboard')).data;
   }
 
   // Simplified Shop Floor Operations

@@ -2,7 +2,7 @@ from datetime import date, datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Query as OrmQuery
@@ -142,7 +142,10 @@ class UserInfo(BaseModel):
 
 class WorkOrderInfo(BaseModel):
     id: int
-    wo_number: Optional[str] = None
+    # The wire name stays ``wo_number``; the ORM column is ``work_order_number``. Reading the
+    # attribute by the wire name alone always produced null, so the event's work order was
+    # never named on the Downtime page or the dashboard's Active Downtime panel.
+    wo_number: Optional[str] = Field(default=None, validation_alias=AliasChoices("wo_number", "work_order_number"))
 
     class Config:
         from_attributes = True
