@@ -374,9 +374,13 @@ non-interactive text:
   hidden.
 - **Cached sources.** Action Inbox (2 min), Maintenance (5 min) and Delivery KPIs (10 min) keep
   their last result in a module-level cache keyed by the session, so navigating away from `/` and
-  back does not refetch them. The Notifications list has its own short cache, which the widget
-  clears when it unmounts, so returning to `/` always shows a list that agrees with the unread
-  count; a manual refresh or the widget's Retry always reaches the network.
+  back does not refetch them. A cached result is never passed off as fresh after a newer refresh
+  of it failed — including one that fails after you left `/` or removed the widget, or one still
+  in flight when you come back — so returning shows "could not refresh" and retries on the error
+  cadence; a refusal (403) evicts the entry. The Notifications list has its own short cache, which
+  the widget clears when it unmounts, so returning to `/` always shows a list that agrees with the
+  unread count; a manual refresh or the widget's Retry always reaches the network, and a failed
+  refresh of the list is never answered from that cache as a success.
 - **Errors.** A failed source keeps its last verified data and is named in the page's widget-sources
   banner. A **403** is terminal for that source until the session scope changes and shows in the
   widget only.

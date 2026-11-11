@@ -21,7 +21,11 @@
  *   the entry (a remount refetches and is refused again — refused data is never re-served
  *   as verified), and a failed refresh is recorded on it, so a remount shows the same
  *   "could not refresh" marker and keeps the error-retry cadence instead of passing the
- *   last result off as fresh.
+ *   last result off as fresh. Both are written when the request SETTLES, even if its result
+ *   is no longer current (the user left `/`, or removed the widget, while it was in flight)
+ *   — only a failure newer than the cached success is recorded — and a mount that hydrated
+ *   from an entry while a refresh of it was still in flight re-reads the entry once that
+ *   refresh settles.
  *
  * Api methods take no AbortSignal; the per-key sequence is what discards stale results.
  * Every fetch tells its spec whether it is `forced` (a user's refresh / retry), so a source
@@ -48,9 +52,33 @@ interface CacheEntry {
 
 const sourceCache = new Map<string, CacheEntry>();
 
+/**
+ * Cached-source fetches still in flight, by cache key, across hook instances: a remount of `/`
+ * can hydrate from an entry while the previous mount's refresh of it has not answered yet.
+ * `settled` resolves after that fetch's result has been written to the cache.
+ */
+interface PendingFetch {
+  startedAt: number;
+  settled: Promise<void>;
+}
+
+const pendingFetches = new Map<string, PendingFetch>();
+
 /** Drop every cached source result (session scope changes, tests). */
 export function clearDashboardSourceCache(): void {
   sourceCache.clear();
+  pendingFetches.clear();
+}
+
+/**
+ * Record a non-403 failure on a cached entry — but only one NEWER than the entry's own
+ * successful fetch: a late failure of an older refresh must not mark a newer success failed.
+ */
+function recordCachedFailure(cacheKey: string, startedAt: number): void {
+  const entry = sourceCache.get(cacheKey);
+  if (!entry || startedAt < entry.startedAt) return;
+  if (entry.failedStartedAt !== null && entry.failedStartedAt >= startedAt) return;
+  sourceCache.set(cacheKey, { ...entry, failedStartedAt: startedAt });
 }
 
 const cacheKeyFor = (scope: string | null, key: string) => `${scope ?? ''}\u0000${key}`;
@@ -126,6 +154,7 @@ export function useDashboardSources(
       meta.inFlight = true;
       meta.lastStartedAt = startedAt;
       const fetchScope = scopeRef.current;
+      const cacheKey = cacheKeyFor(fetchScope, key);
       const isCurrent = () => mountedRef.current && metaRef.current.get(key) === meta && meta.seq === seq;
 
       let request: Promise<unknown>;
@@ -136,14 +165,14 @@ export function useDashboardSources(
         request = Promise.reject(error);
       }
 
-      return request.then(
+      const settled = request.then(
         data => {
           if (!isCurrent()) return;
           meta.inFlight = false;
           meta.lastFailed = false;
           const verifiedAt = Date.now();
           if (spec?.cacheTtlMs) {
-            sourceCache.set(cacheKeyFor(fetchScope, key), { data, startedAt, verifiedAt, failedStartedAt: null });
+            sourceCache.set(cacheKey, { data, startedAt, verifiedAt, failedStartedAt: null });
           }
           setStates(previous => ({
             ...previous,
@@ -152,11 +181,15 @@ export function useDashboardSources(
         },
         error => {
           const forbidden = apiErrorStatus(error) === 403;
-          const cacheKey = cacheKeyFor(fetchScope, key);
-          // Evict even when this result is no longer current (the page unmounted, the key
-          // went away): the server refused this session, so no remount may re-serve the
-          // cached payload as verified. A later success simply re-caches it.
-          if (forbidden && spec?.cacheTtlMs) sourceCache.delete(cacheKey);
+          // Both written even when this result is no longer current (the page unmounted, the
+          // key went away while the request was in flight), because the cache outlives this
+          // mount. A 403 evicts: the server refused this session, so no remount may re-serve
+          // the cached payload as verified (a later success re-caches it). Any other failure is
+          // recorded, so a remount shows "could not refresh" instead of the cache as fresh.
+          if (spec?.cacheTtlMs) {
+            if (forbidden) sourceCache.delete(cacheKey);
+            else recordCachedFailure(cacheKey, startedAt);
+          }
           if (!isCurrent()) return;
           meta.inFlight = false;
           if (forbidden) {
@@ -168,8 +201,6 @@ export function useDashboardSources(
             return;
           }
           meta.lastFailed = true;
-          const cached = spec?.cacheTtlMs ? sourceCache.get(cacheKey) : undefined;
-          if (cached) sourceCache.set(cacheKey, { ...cached, failedStartedAt: startedAt });
           setStates(previous => {
             const before = previous[key];
             return {
@@ -185,6 +216,15 @@ export function useDashboardSources(
           });
         }
       );
+      if (spec?.cacheTtlMs) {
+        const pending: PendingFetch = { startedAt, settled };
+        pendingFetches.set(cacheKey, pending);
+        const done = () => {
+          if (pendingFetches.get(cacheKey) === pending) pendingFetches.delete(cacheKey);
+        };
+        void settled.then(done, done);
+      }
+      return settled;
     },
     [metaFor]
   );
@@ -193,12 +233,20 @@ export function useDashboardSources(
    * Seed a newly needed key from the module cache when its result is still fresh. A failed
    * refresh recorded on the entry comes back as it was left: the last verified data with
    * the "could not refresh" marker, retried on the error cadence from the failed attempt.
+   *
+   * When a refresh of the entry is still in flight (the previous mount's, or this mount's
+   * from before the widget was removed), the entry is re-read once that refresh settles —
+   * unless this mount has fetched the key itself since. A recorded failure then shows its
+   * marker; an evicted entry (403) is fetched again, so refused data is not kept on screen
+   * as verified.
    */
+  const hydrateRef = useRef<(key: string) => boolean>(() => false);
   const hydrateFromCache = useCallback(
     (key: string): boolean => {
       const spec = getSourceSpec(key, specsRef.current);
       if (!spec?.cacheTtlMs) return false;
-      const entry = sourceCache.get(cacheKeyFor(scopeRef.current, key));
+      const cacheKey = cacheKeyFor(scopeRef.current, key);
+      const entry = sourceCache.get(cacheKey);
       if (!entry || Date.now() - entry.verifiedAt >= spec.cacheTtlMs) return false;
       const failed = entry.failedStartedAt !== null;
       const meta = metaFor(key);
@@ -215,10 +263,22 @@ export function useDashboardSources(
           updatedAt: new Date(entry.verifiedAt),
         },
       }));
+
+      const pending = pendingFetches.get(cacheKey);
+      if (pending && pending.startedAt >= (entry.failedStartedAt ?? entry.startedAt)) {
+        const hydratedSeq = meta.seq;
+        const reread = () => {
+          if (!mountedRef.current || metaRef.current.get(key) !== meta || meta.seq !== hydratedSeq) return;
+          if (sourceCache.has(cacheKey)) hydrateRef.current(key);
+          else void fetchKey(key);
+        };
+        void pending.settled.then(reread, reread);
+      }
       return true;
     },
-    [metaFor]
+    [metaFor, fetchKey]
   );
+  hydrateRef.current = hydrateFromCache;
 
   // One effect for both inputs, so a session-scope change and a needed-key change are
   // applied in a single, ordered pass. A LAYOUT effect on purpose: the fetches for newly

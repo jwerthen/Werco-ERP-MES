@@ -445,4 +445,160 @@ describe('useDashboardSources', () => {
     expect(third.result.current.sources.deliveryKpis).toMatchObject({ data: 'again', error: null });
     third.unmount();
   });
+
+  describe('a cached source whose refresh settles after its result stopped being current', () => {
+    const inboxSpecs = (fetch: jest.Mock) => ({
+      actionInbox: spec(fetch, { minIntervalMs: 120_000, cacheTtlMs: 120_000 }),
+    });
+
+    it('records a refresh that fails after the page was left, so coming back still shows it failed', async () => {
+      const refresh = deferred<unknown>();
+      const fetch = jest
+        .fn<Promise<unknown>, []>()
+        .mockResolvedValueOnce('first')
+        .mockReturnValueOnce(refresh.promise)
+        .mockResolvedValue('again');
+      const specs = inboxSpecs(fetch);
+      const first = setup('actionInbox', specs);
+      await flush();
+
+      // A manual refresh at t=30 s, then the user navigates away before it answers.
+      now += 30_000;
+      act(() => {
+        void first.result.current.refresh(true);
+      });
+      expect(fetch).toHaveBeenCalledTimes(2);
+      first.unmount();
+      refresh.reject(new Error('offline'));
+      await flush();
+
+      // Back on `/` inside the TTL: the newest attempt failed, so the cache is not passed off as fresh.
+      now += 30_000;
+      const second = setup('actionInbox', specs);
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(second.result.current.sources.actionInbox).toMatchObject({
+        data: 'first',
+        error: 'Could not refresh',
+        loading: false,
+      });
+      // And the retry counts from the failed attempt (t=30 s), not the floor after the success.
+      now += ERROR_RETRY_CAP_MS - 30_000 - 1;
+      await act(() => second.result.current.refresh(false));
+      expect(fetch).toHaveBeenCalledTimes(2);
+      now += 1;
+      await act(() => second.result.current.refresh(false));
+      expect(fetch).toHaveBeenCalledTimes(3);
+      expect(second.result.current.sources.actionInbox).toMatchObject({ data: 'again', error: null });
+      second.unmount();
+    });
+
+    it('records a refresh that fails after its widget was removed, so re-adding it shows the failure', async () => {
+      const refresh = deferred<unknown>();
+      const fetch = jest.fn<Promise<unknown>, []>().mockResolvedValueOnce('first').mockReturnValueOnce(refresh.promise);
+      const hook = setup('actionInbox', inboxSpecs(fetch));
+      await flush();
+
+      now += 30_000;
+      act(() => {
+        void hook.result.current.refresh(true);
+      });
+      hook.rerender({ neededKey: '', scope: 'scope-a' });
+      refresh.reject(new Error('offline'));
+      await flush();
+
+      now += 10_000;
+      hook.rerender({ neededKey: 'actionInbox', scope: 'scope-a' });
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(hook.result.current.sources.actionInbox).toMatchObject({ data: 'first', error: 'Could not refresh' });
+      hook.unmount();
+    });
+
+    it('a remount that hydrated while the refresh was still in flight learns that it failed', async () => {
+      const refresh = deferred<unknown>();
+      const fetch = jest.fn<Promise<unknown>, []>().mockResolvedValueOnce('first').mockReturnValueOnce(refresh.promise);
+      const specs = inboxSpecs(fetch);
+      const first = setup('actionInbox', specs);
+      await flush();
+
+      now += 30_000;
+      act(() => {
+        void first.result.current.refresh(true);
+      });
+      first.unmount();
+
+      // A quick Back: the new mount hydrates the (still clean) entry before the refresh answers.
+      now += 1_000;
+      const second = setup('actionInbox', specs);
+      expect(second.result.current.sources.actionInbox).toMatchObject({ data: 'first', error: null });
+
+      refresh.reject(new Error('offline'));
+      await flush();
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(second.result.current.sources.actionInbox).toMatchObject({ data: 'first', error: 'Could not refresh' });
+      second.unmount();
+    });
+
+    it('a remount that hydrated while the refresh was in flight stops showing data the server then refused', async () => {
+      const refresh = deferred<unknown>();
+      const fetch = jest
+        .fn<Promise<unknown>, []>()
+        .mockResolvedValueOnce('first')
+        .mockReturnValueOnce(refresh.promise)
+        .mockRejectedValue(forbidden());
+      const specs = inboxSpecs(fetch);
+      const first = setup('actionInbox', specs);
+      await flush();
+
+      now += 30_000;
+      act(() => {
+        void first.result.current.refresh(true);
+      });
+      first.unmount();
+      now += 1_000;
+      const second = setup('actionInbox', specs);
+      expect(second.result.current.sources.actionInbox?.data).toBe('first');
+
+      refresh.reject(forbidden());
+      await flush();
+      // The entry was evicted; the mount asks again rather than keep the refused payload as verified.
+      expect(fetch).toHaveBeenCalledTimes(3);
+      expect(second.result.current.sources.actionInbox).toMatchObject({ data: null, forbidden: true });
+      second.unmount();
+    });
+
+    it('never marks a newer cached success failed because an older refresh failed late', async () => {
+      const stale = deferred<unknown>();
+      const fetch = jest
+        .fn<Promise<unknown>, []>()
+        .mockResolvedValueOnce('first')
+        .mockReturnValueOnce(stale.promise)
+        .mockResolvedValueOnce('fresh');
+      const specs = inboxSpecs(fetch);
+      const first = setup('actionInbox', specs);
+      await flush();
+
+      now += 30_000;
+      act(() => {
+        void first.result.current.refresh(true);
+      });
+      first.unmount();
+
+      // Back after the TTL: a new fetch (t=150 s) succeeds and is cached.
+      now += 120_000;
+      const second = setup('actionInbox', specs);
+      await flush();
+      expect(second.result.current.sources.actionInbox).toMatchObject({ data: 'fresh', error: null });
+      second.unmount();
+
+      // The t=30 s refresh only now fails: older evidence than the cached success.
+      stale.reject(new Error('offline'));
+      await flush();
+
+      now += 1_000;
+      const third = setup('actionInbox', specs);
+      expect(fetch).toHaveBeenCalledTimes(3);
+      expect(third.result.current.sources.actionInbox).toMatchObject({ data: 'fresh', error: null });
+      third.unmount();
+    });
+  });
 });
