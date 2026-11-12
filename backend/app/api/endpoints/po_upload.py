@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_company_id, get_current_user, require_role
 from app.core.config import settings
+from app.core.upload_limits import ensure_upload_within_limit, read_upload_within_limit
 from app.db.database import get_db
 from app.db.tenant_filter import tenant_query
 from app.models.part import Part, PartType
@@ -46,6 +47,8 @@ from app.services.pdf_service import (
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+# Document upload cap for upload-po / upload-quote / upload-invoice (413 over it, checked before the
+# body is read; see ``app.core.upload_limits``). Resolved at call time, so this constant is the one tunable.
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 ALLOWED_MIME_TYPES = [
     'application/pdf',
@@ -113,12 +116,11 @@ async def _upload_and_extract_document(
     if file_ext not in SUPPORTED_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Unsupported file type. Allowed: PDF, DOC, DOCX")
 
-    # Read file content
-    content = await file.read()
-
-    # Validate file size
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB")
+    # Size first (413 without reading a byte when Starlette already counted too many), then a read
+    # bounded at MAX_FILE_SIZE + 1 -- the whole body is never buffered just to measure it. Both raise
+    # BEFORE the broad ``except Exception`` below, so the 413 reaches the client as a 413.
+    ensure_upload_within_limit(file, MAX_FILE_SIZE)
+    content = await read_upload_within_limit(file, MAX_FILE_SIZE)
 
     # Save document (durable storage; tenant-prefixed key on remote backends)
     doc_path = save_uploaded_document(content, file.filename, company_id=company_id)
@@ -305,7 +307,7 @@ async def upload_and_extract_po(
 ):
     """
     Upload a purchase order PDF or Word document and extract data using AI.
-    Supports: .pdf, .doc, .docx
+    Supports: .pdf, .doc, .docx (10 MB maximum; larger files are refused with 413 before any work runs)
     Returns extracted data for user review before committing.
     """
     return await _upload_and_extract_document("po", file, db, current_user, company_id)
@@ -320,7 +322,7 @@ async def upload_and_extract_quote(
 ):
     """
     Upload a vendor quote PDF or Word document and extract data to create a PO.
-    Supports: .pdf, .doc, .docx
+    Supports: .pdf, .doc, .docx (10 MB maximum; larger files are refused with 413 before any work runs)
     """
     return await _upload_and_extract_document("quote", file, db, current_user, company_id)
 
@@ -333,7 +335,7 @@ async def upload_and_extract_invoice(
     company_id: int = Depends(get_current_company_id),
 ):
     """
-    Legacy endpoint. Uploads vendor quotes for PO creation.
+    Legacy endpoint. Uploads vendor quotes for PO creation (10 MB maximum; 413 over it).
     """
     return await _upload_and_extract_document("quote", file, db, current_user, company_id)
 

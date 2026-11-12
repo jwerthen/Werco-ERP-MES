@@ -1093,7 +1093,8 @@ A JSON body exceeded `MAX_JSON_BODY_BYTES` (default 256 KB; the old
 (above roughly 1300 line items). Raise the value on the backend service — but read the sizing note
 under [Request Body Size](#request-body-size-json) first, and prefer splitting the import. File
 uploads are **not** affected by this setting; a 413 on an upload is that endpoint's own cap (20 MB
-QMS standards, 50 MB `LASER_UPLOAD_MAX_BYTES`). A 413 from the **MCP door** (`/mcp`) is a different
+QMS standards, 50 MB `LASER_UPLOAD_MAX_BYTES`; every AI document route's cap is listed in
+[API.md → AI document uploads](API.md#ai-document-uploads)). A 413 from the **MCP door** (`/mcp`) is a different
 cap — `WERCO_MCP_MAX_UPLOAD_BYTES` (default 25 MB) on the whole JSON-RPC envelope; see
 [MCP](#mcp-model-context-protocol-door-and-bridge).
 
