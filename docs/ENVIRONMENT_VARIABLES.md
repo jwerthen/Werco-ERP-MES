@@ -497,48 +497,29 @@ The API and the worker each log a warning at startup, and `/health/ready` report
 Read by the worker process only (`arq app.worker.WorkerSettings`). See
 `docs/WORKER_SERVICE.md` (reference) and `docs/WORKER_DEPLOYMENT_RUNBOOK.md` (procedure).
 
-Saved nesting calculations add no operator-set variables or secrets. The worker
-uses the API's existing database/Redis configuration and the artifact's `APP_RELEASE`.
-Its Node path `/usr/local/bin/node`, bundle path `/app/nesting-runtime/solver.cjs`,
-Node 22 runtime and 512 MiB heap limit are fixed in reviewed code/image configuration;
-request input cannot override them. Railway supplies `RAILWAY_DEPLOYMENT_ID` for
-the availability heartbeat; do not set it manually. Existing `WORKER_CRON_JOBS`
-and deployment enablement variables are unchanged. Missing fresh runtime identity
-causes new server nesting requests to fail unavailable while saved history stays readable.
-Runtime readiness also requires `relay_quote_nesting_runs_job` among the worker's
-selected schedules. Existing cron allowlists must include that relay to support server
-nesting; `none` intentionally leaves new calculations unavailable. No deployment
-script changes these selections or enables unrelated schedules.
+The worker's release check adds no operator-set variable or secret. At startup, and
+every 30 seconds after, `app/core/worker_runtime.py` writes a credential-free identity —
+`release` (the image's `APP_RELEASE`), `instance_id`, `deployment_id` (Railway's
+`RAILWAY_DEPLOYMENT_ID`, supplied by Railway; do not set it) and `observed_at` — to Redis
+key `werco:worker:runtime:<instance_id>` with a 90-second TTL, and logs it as
+`worker_runtime_ready` only after that write succeeds. The release gate
+`.github/scripts/verify_worker_release.py` passes only on a fresh identity from the active
+SUCCESS deployment matching the release SHA. It does not depend on `WORKER_CRON_JOBS`, so
+`none` is a valid selection for a verified release.
 
-Tenant spacing policies are versioned database records, not environment variables.
-Migration103 follows 102 and seeds no policy or approval. This feature adds no secret,
-runtime-path override or schedule. API/frontend/shared-worker releases must support
-project 10/quote 9 together; the existing release/runtime gates remain mandatory. Do not
-encode material allowances or policy approval in service variables to bypass the
-explicit, audited policy workflow.
-
-Stock exclusions are versioned quote inputs, not service variables or physical
-inventory configuration. They add no environment variable, secret, cron selection
-or migration. API/frontend/shared-worker support for quote 11/project 12 and solver
-`werco-contour-v5` must advance together through the existing runtime identity gate.
-Do not encode exclusion geometry or clearances in deployment variables. Legacy job
-13 is a local file format; stored server revisions retain their original project format.
+The retired quote-nesting runtime (removed in `3e17456e`, 2026-09-16) took its fixed Node
+and solver-bundle paths and its `relay_quote_nesting_runs_job` cron with it; no variable,
+cron or runtime path supports it any more. Naming that job in `WORKER_CRON_JOBS` is now an
+unknown name, which stops the worker at startup. Its tables (migrations `101`, `102`, `103`
+and `105`) are retained history with no reader or writer, and need no configuration.
 
 Physical-piece observations are database evidence, not deployment variables. Additive
 migration `104_stock_piece_observations` follows `103_nesting_spacing_policies` and
 creates no seed records. The register adds no secret, environment variable, cron,
 dependency or runtime/profile override; existing database configuration and inventory
 permissions apply. Recording or withdrawing an observation does not mark a piece
-available, reserve it, feed a nest or award quote credit. Do not introduce service
+available, reserve it or award quote credit. Do not introduce service
 variables to claim physical verification or bypass the explicit observation workflow.
-
-Original DXF attachments add migration `105_nesting_cad_sources` and reuse existing
-`STORAGE_BACKEND` / S3 or local upload settings. They add no environment flag, secret,
-cron, dependency or solver override. Each attempt pins its nonsecret provider identity;
-changing provider/root does not silently redirect historical objects. Local files on
-an ephemeral host remain ephemeral. Verify durability, access and restore separately;
-do not encode retention periods or source approval in deployment variables. See
-[CAD source storage](CAD_SOURCE_STORAGE.md) for recovery and rollback behavior.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|

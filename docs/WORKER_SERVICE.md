@@ -9,8 +9,8 @@
 
 **Deployment status:** the production `werco-worker` service exists and the gated
 CI/CD worker upload path is active (verified 2026-09-08). The original cutover analysis
-below is historical; it does not establish current cron settings or certify any new
-nesting runtime as deployed. Each nesting release requires the identity gate below.
+below is historical; it does not establish current cron settings. Each worker release
+requires the identity gate in [§6](#shared-worker-release-verification).
 
 **Hank follow-up rollout:** the current worker declares **14** crons. Production
 previously selected `none` after quote-nesting retirement. Enable Hank with the exact
