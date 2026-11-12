@@ -1,0 +1,133 @@
+{
+  "schema": 1,
+  "note": "Append-only. Read by tests/test_prompt_drift_guard.py. When a prompt's request changes, bump its version, add a CHANGELOG.md line and APPEND {version, sha256, variants} to its history; never edit or remove an entry (CI compares this file with the base branch).",
+  "retired": {
+    "auto_execute_decision": "2026-11-05",
+    "estimate_drawing_extraction": "2026-09-16"
+  },
+  "models": [
+    {
+      "version": "1.0.0",
+      "sha256": "ae4d9e932f124c3e2479c8667725b46b492f1f06e24ad8d881393469f089f96b"
+    }
+  ],
+  "prompts": {
+    "bom_extraction": [
+      {
+        "version": "1.0.0",
+        "sha256": "92969b10e112864881bfd98804933f66f2e833f04d97167a0f2acdf9563ab77b",
+        "variants": {
+          "text": "5780cfd94ee631ac0eb1a3515976d41d2765b8457a1b638803bc73eeb2790244",
+          "ocr": "386aec93a5a4bbe61f489782a43dc1d544073ef066d4fd00400ac687c0eef13d"
+        }
+      }
+    ],
+    "copilot_chat": [
+      {
+        "version": "1.7.1",
+        "sha256": "796340145fe746bc5a106ed142ef1410cf1e23b541a49d859e3013af759d5ee5",
+        "variants": {
+          "first_call": "fcb0f2b35f6ec5d099d52e92879950c7bfcf2ada0823d35e3c9a88e03c90f29f",
+          "forced_final": "ba5aedc9e0ba0ca8dc534203ec7f99a24a653645c3073381d27f32f70f2bd7d2"
+        }
+      }
+    ],
+    "hank_document_intake": [
+      {
+        "version": "1.2.1",
+        "sha256": "2fcf3f8f29013bb72c027b696be677d24321d13cad6cbcc1d3137f1f5a316596",
+        "variants": {
+          "pdf": "e7c19172f2d1ac6f88084bbe5f48276a360a6fae663c1a2c5968bf2e2edbbb9d",
+          "office": "1d1933d707497c3d105eb4393218ceb4aa499204f9bc42faf930b39e4cc21c04"
+        }
+      }
+    ],
+    "laser_nest_extraction": [
+      {
+        "version": "1.2.0",
+        "sha256": "1ca3d0bc66d6376649e5c6e138a5427ea14ee8934353eba35541e5bb4abb37a9",
+        "variants": {
+          "native_pdf": "585115a7a1e58607bef66cc401a7d8efeb6a4292b529de804360b41f5c44f970",
+          "native_pdf_segment_hint": "56e56e58de18f432791d0d28d6def483935aded8e233653500fa818ec852d57d",
+          "native_pdf_no_hint": "3e2178f50702ae7b3888472a802a01e50c09add7172aec9ad927735b3de7af84",
+          "text_fallback": "af84369ff7875eb77a4c0efe3c85a2ea7310e2168e220234495474e9648bd111",
+          "text_fallback_ocr": "b6c255e86c9e489d1528446983f75c5c8c816a4df020927f7fd03fd6e725c377"
+        }
+      }
+    ],
+    "laser_nest_segmentation": [
+      {
+        "version": "1.0.0",
+        "sha256": "b9f6fbbf7346f41c4adeb6fe1460709ba37f2c157719421d10c4823fd618d9cf",
+        "variants": {
+          "native_pdf": "51fabedcb925fe790e18a18cc982ee30ab70d6b9ccb52f690395f935ac29220e"
+        }
+      }
+    ],
+    "laser_nest_verification": [
+      {
+        "version": "1.1.0",
+        "sha256": "ecdd0c69365e6cacaa02d8e472d3ed091a08bfe7f5e541d6bb9c553c60a1229c",
+        "variants": {
+          "native_pdf": "967b01d8bc44c0882b3a8bb70fc232f5e139d00b83942ca73cb93d7bb97426b5",
+          "native_pdf_no_filename_hint": "82fd8c95615b88b4d2cfc532a7c567502f7b86f22cf3e98c90262f6a24de9eb9",
+          "text_fallback": "1ab3c7bec736837f998a9494ba4bea2c3c14c2932ba6e2b72cc7aa02f91d9d12",
+          "text_fallback_ocr": "1ab3c7bec736837f998a9494ba4bea2c3c14c2932ba6e2b72cc7aa02f91d9d12"
+        }
+      }
+    ],
+    "nl_search_intent": [
+      {
+        "version": "1.0.0",
+        "sha256": "d121ad66e9e310cc8975fb9b41f1d634cfa8700cb436a6b436ade86abd1b8d22",
+        "variants": {
+          "query": "ff73262e6c98b91415f2f7427e6fc2a54ecce99a58d6000d2ce21424d9fb5c5e"
+        }
+      }
+    ],
+    "po_extraction": [
+      {
+        "version": "1.0.0",
+        "sha256": "39b4c6165d22e282556fdcfada7b3708bd180ea7f4c2ccaa04163bf74773c555",
+        "variants": {
+          "text": "04a31cc2876c1b734b18e2a309dc536080e476d804eed7d90358ac47de52cdaf",
+          "ocr": "87ee1fe95274deec4b9636267857aa38e4215dd23766598d1b13cf049450f96c"
+        }
+      }
+    ],
+    "qms_clause_extraction": [
+      {
+        "version": "1.0.0",
+        "sha256": "af837bd5e7276d687ad70b7d706357fcfbc54a0f52985a11e5bcdca3625cdae4",
+        "variants": {
+          "with_version": "e79839829c5314f1482ca9b08cdd94410fe80fa754a9ee7efb9734645e51e765",
+          "no_version": "421096846f38f13c69e906bc65305221225e3653f2cc06fc0260f894a2698031"
+        }
+      }
+    ],
+    "routing_generation": [
+      {
+        "version": "1.1.0",
+        "sha256": "b94ecba0e810a8a20c4e1a494b21d28cac52875bfbbfb933e625b32fa5cfcf4b",
+        "variants": {
+          "text": "cb38bd853e7239929f521a73f9551c926a448c1e0c48af22e9718225935b8384",
+          "geometry": "cf9c17784f94f30df7d8c12305a8367f97bd84bab494761b9db6410dd6ff7d4c",
+          "learned_context": "caefcf922f75eebfe22e2767d26d44ae1efa9ff91b7e8e8362d5828e3f123e81",
+          "assembly": "beabd39ea032f6252d0acc115cce68d2cc45a9a7047ba7684cbb8ff09bd8d5c1",
+          "ocr": "025374d01aa8e174a6277213dc01a70a548da4356b0a4676920183d91862f6d9",
+          "part_context": "780c1d07cbbc68b73e219bf08a465299b66688ec777b339469f14340d1123af1",
+          "default_work_center_types": "d1609c07eef48cd43c80f6aa5fee282914f1a4b7cb252275a1709c808415f10d"
+        }
+      }
+    ],
+    "sheet_stock_disambiguation": [
+      {
+        "version": "1.0.0",
+        "sha256": "ccde3a77f4962224f25cdc998b4f83e08d33ff8572a5f8d1dd454ddf8e6239b3",
+        "variants": {
+          "fixed_groups": "d61801552a9343730227980f54342cbad270fc7c479cc31b8bc7d1f71446c0ea"
+        }
+      }
+    ]
+  }
+}

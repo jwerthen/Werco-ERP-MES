@@ -1,5 +1,28 @@
 # Prompt Registry Changelog
 
+## 2026-11-09 — prompt-drift guard and lock (#9-5a)
+
+- `prompt_lock.json` (new, next to this file) holds an append-only history of
+  `{version, sha256, variants}` per prompt id, plus a history for the router's
+  default models. `tests/test_prompt_drift_guard.py` renders every prompt's real
+  request builder once per branch that adds text the model sees (OCR notes, routing
+  branches, laser hint lines, the copilot forced-final call and message wrappers)
+  and fails when the request changes without a version bump, a line here and an
+  APPENDED lock entry. CI compares the lock with the base branch, so an existing
+  entry can never be edited. No prompt changed version: the first snapshot is the
+  baseline for every current version.
+- `models` 1.0.0 — baseline of the router's default model ids:
+  `llm_model_router.DEFAULT_ANTHROPIC_MODELS` (fast `claude-haiku-4-5-20251001`,
+  default `claude-sonnet-4-6`, reasoning `claude-opus-4-8`) and
+  `DEFAULT_COPILOT_MODEL` (`claude-opus-5-5`). Changing a default now needs a
+  `models` line here (`- models <old> → <new> — <which model and why>`) and an
+  appended lock entry. Examples in this file use placeholders, never a concrete
+  future version: the guard would read one as the next bump's line, written in
+  advance.
+- Backfilled below, because they shipped without entries: `copilot_chat`
+  1.5.0 → 1.6.0 → 1.7.0 and `hank_document_intake` 1.0.0 → 1.1.0 → 1.2.0 (#288,
+  #289, 2026-09-23), and the `estimate_drawing_extraction` retirement (2026-09-16).
+
 ## 2026-11-09 — qms_clause_extraction text moved out of the router (#9-0)
 
 - `qms_clause_extraction` 1.0.0 — **no version change**, because neither the text
@@ -23,14 +46,51 @@
   be reused: historical `ai_usage_events` (feature `ai_auto_execute`) and
   `ai_interaction_events` (`ai_feature = auto_execute`) rows reference it.
 
+## 2026-09-23 — Hank document evidence and Office intake (backfilled 2026-11-09, #9-5a)
+
+These four versions shipped without entries; they are recorded here after the fact.
+
+- `copilot_chat` 1.5.0 → 1.6.0 (#288) — the panel's Upload PDFs action (Admin,
+  Manager, Quality) now saves and analyzes PDFs, and analyzed evidence can be
+  attached to chat. New guidance plus two tool schemas in the cached prefix:
+  `hank_document_evidence` (read saved fields and lines with page citations, a
+  small page at a time) and `hank_receiving_document` (match delivery evidence to
+  open PO lines without posting anything). A `receive_delivery` proposal must carry
+  `source_intake_file_id` and `source_intake_version`, and ordered or backordered
+  quantities are never delivered quantities. Attached PDF summaries, extracted
+  fields and page excerpts join the untrusted-context list. Attached files reach the
+  model as an `<attached_pdf_evidence>` manifest block in the uncached user turn.
+- `hank_document_intake` 1.0.0 → 1.1.0 (#288) — for delivery lists and packing
+  slips, quantity means the quantity shipped or delivered on this document, not
+  ordered, previously received or backordered (null plus an explanation when the
+  columns can't be told apart). Keep the printed unit of measure, keep each lot or
+  heat line separate with its own evidence, and never add line quantities.
+- `copilot_chat` 1.6.0 → 1.7.0 (#289) — Upload documents accepts PDF, DOCX, XLSX and
+  XLS, and evidence cites paragraphs or sheet/cell locations. New guidance plus the
+  `hank_purchase_order_document` tool schema (match an uploaded supplier PO's vendor
+  and every line to current records); `draft_purchase_order` may create an
+  explicitly reviewed, source-backed PO ready for Receiving only when the employee
+  asks. Still no supplier email, receipt or inventory change. The manifest block
+  was renamed `<attached_document_evidence>`.
+- `hank_document_intake` 1.1.0 → 1.2.0 (#289) — classifies Word and Excel documents
+  as well as PDFs: cite Office section numbers and exact paragraph/table-row/
+  sheet-row locators, treat formula results marked UNTRUSTED as unconfirmed, extract
+  every relevant line up to 50 with `has_more_lines`, and read purchase-order fields
+  as printed (ordered quantity, per-unit price, requested delivery date, supplier
+  versus customer). Request layout: Office documents travel as numbered text
+  sections in the user message instead of a PDF `document` block.
+
 ## 2026-09-22 — Hank operational workflows
 
 - `copilot_chat` **1.5.0**: six reviewed action schemas, live operational/evidence reports, own active-job and receiving context, saved-work status/extraction tools, and truthful handoff/routine/voice guidance. Cached tool schemas remain deterministic.
 - `hank_document_intake` **1.0.0**: bounded PDF classification and structured fields with source pages, uncertainty and record-matching hints; source content never supplies instructions or manufacturing approval.
 
 Bump a prompt's semver `version` and add an entry here whenever its text or
-request layout changes. The version string is recorded on `AIUsageEvent`
-(every API call) and on `AIInteractionEvent`/`AIRecommendation` learning rows.
+request layout changes, then APPEND the new `{version, sha256, variants}` entry to
+`prompt_lock.json` (the drift guard's failure message prints it). Never edit an
+existing lock entry; CI checks the lock against the base branch. The version
+string is recorded on `AIUsageEvent` (every API call) and on
+`AIInteractionEvent`/`AIRecommendation` learning rows.
 
 ## 2026-09-22
 
@@ -61,6 +121,15 @@ request layout changes. The version string is recorded on `AIUsageEvent`
   background monitoring promises, and instructions embedded in retrieved data.
   Prompt id, model routing, telemetry keys, and cached-prefix layout stay stable;
   append the deterministic `search_documents` tool schema to the cached prefix.
+
+## 2026-09-16 — estimate_drawing_extraction retired (backfilled 2026-11-09, #9-5a)
+
+- `estimate_drawing_extraction` **RETIRED**. 1.0.0 was the last version. The legacy
+  Estimate Workbench's drawing-PDF extraction (fab and buyout lines over three
+  varied passes) was removed with the workbench when legacy quoting was replaced by
+  reviewed fabrication estimates (3e17456e). The id stays **reserved** and must
+  never be reused: historical `ai_usage_events` rows carry task and feature
+  `estimate_drawing_extraction`.
 
 ## 2026-08-10
 

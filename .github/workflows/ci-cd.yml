@@ -84,7 +84,20 @@ jobs:
       run:
         working-directory: ./backend
     steps:
+      # The prompt-drift guard (tests/test_prompt_drift_guard.py) reads
+      # app/services/prompts/prompt_lock.json at PROMPT_LOCK_BASE_REF (set on the
+      # pytest step below) and fails if any existing entry was edited or removed:
+      # entries may only be appended. That ref is HEAD^1, the first parent of the
+      # commit under test. On a pull_request that is GitHub's test merge commit, whose
+      # first parent is the base-branch commit the PR was merged onto; on a push, the
+      # pushed commit's parent (the previous tip, for a merge or squash commit).
+      # Depth 2 fetches that parent; depth 1 holds only HEAD. The ref is pinned to the
+      # run on purpose: fetching the base branch by name when the step runs would race
+      # a second merge, and on a push would compare the lock with itself. In CI the guard
+      # FAILS, rather than skips, when the ref does not resolve.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -103,6 +116,7 @@ jobs:
       - name: Run pytest with coverage
         env:
           RUN_DOCKER_HYGIENE_TESTS: "1"
+          PROMPT_LOCK_BASE_REF: HEAD^1
         run: |
           pytest tests/ -v --cov=app --cov-report=xml --cov-report=term
 

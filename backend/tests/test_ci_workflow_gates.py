@@ -191,6 +191,67 @@ class TestDeploymentHygieneAndLandingGates:
         assert "--audit-level=high" in scripts["audit:ci"]
 
 
+class TestPromptLockBaseRefIsTheTestedCommitsParent:
+    """The prompt-drift guard's append-only check reads the lock from the tested commit's first parent.
+
+    ``tests/test_prompt_drift_guard.py`` (h) reads ``prompt_lock.json`` at
+    ``$PROMPT_LOCK_BASE_REF`` and fails if any existing entry was edited, so a prompt
+    change can only go green by APPENDING a higher version. In CI the check FAILS
+    when the ref is missing, so it cannot silently become a skip; this test pins the
+    other half, in ci-cd.yml's required backend-test job:
+
+    * the pytest step exports ``PROMPT_LOCK_BASE_REF=HEAD^1``. On ``pull_request`` the
+      checkout is GitHub's test merge commit, whose first parent is exactly the
+      base-branch commit the PR was merged onto; on ``push`` it is the branch tip
+      before the pushed commit; on ``workflow_dispatch`` the dispatched commit's
+      parent. All three are pinned to the commit under test.
+    * the checkout fetches that parent (``fetch-depth`` 2, or 0 for full history):
+      the default depth of 1 holds only the tested commit, and ``HEAD^1`` would not
+      resolve.
+
+    Why not fetch the base BRANCH by name (the design's first draft): the branch is
+    read when the step runs, not when the run was created. If main moved in between
+    (a second merge that appended a lock entry), the older run would compare its tree
+    with a newer lock and fail with "entry N was removed", for no reason, blocking
+    its own ``build`` job. On a push there is no ``base_ref``, so fetching ``main``
+    would compare the pushed lock with itself and check nothing.
+
+    Validated both ways: run against the branch-fetch version of ci-cd.yml (an
+    ``origin/<base_ref>`` export and a depth-1 checkout), both tests below fail.
+    """
+
+    def _steps(self) -> list:
+        return _load_workflow("ci-cd.yml")["jobs"]["backend-test"]["steps"]
+
+    def test_the_guard_reads_the_variable_this_file_pins(self) -> None:
+        guard = (REPO_ROOT / "backend" / "tests" / "test_prompt_drift_guard.py").read_text(encoding="utf-8")
+        assert 'BASE_REF_ENV = "PROMPT_LOCK_BASE_REF"' in guard
+
+    def test_pytest_compares_the_lock_with_the_tested_commits_first_parent(self) -> None:
+        steps = self._steps()
+        pytest_step = next((step for step in steps if re.search(r"\bpytest\s+tests/", step.get("run") or "")), None)
+        assert pytest_step is not None, "ci-cd.yml's backend-test job no longer runs `pytest tests/`."
+        exported = (pytest_step.get("env") or {}).get("PROMPT_LOCK_BASE_REF", "")
+        assert exported == "HEAD^1", (
+            "The backend pytest step must export PROMPT_LOCK_BASE_REF=HEAD^1 (the first parent of the commit "
+            "under test), or the prompt-drift guard's append-only check fails in CI -- or, with a branch name, "
+            f"races the branch moving. Found: {exported!r}"
+        )
+
+    def test_checkout_fetches_the_first_parent(self) -> None:
+        steps = self._steps()
+        checkout_index = next(
+            (index for index, step in enumerate(steps) if (step.get("uses") or "").startswith("actions/checkout@")),
+            None,
+        )
+        assert checkout_index == 0, "backend-test must check out the repository first."
+        depth = (steps[checkout_index].get("with") or {}).get("fetch-depth")
+        assert isinstance(depth, int) and (depth == 0 or depth >= 2), (
+            "backend-test's checkout must fetch the tested commit's parent (fetch-depth: 2) so that HEAD^1, the "
+            f"prompt-lock base, resolves. Found fetch-depth={depth!r}"
+        )
+
+
 # The real-PostgreSQL verifiers e2e.yml must keep running. A floor, not the full set:
 # a new verifier step is welcome without touching this list.
 E2E_POSTGRES_VERIFIERS = (
