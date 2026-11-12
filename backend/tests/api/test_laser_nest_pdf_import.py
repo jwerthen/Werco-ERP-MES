@@ -749,8 +749,10 @@ class TestImportRowValidation:
 
     @pytest.mark.parametrize(
         "bad_runs",
-        [-5, 0, "two"],
-        ids=["negative", "zero", "non_numeric"],
+        # 10,000 is one over MAX_PLANNED_RUNS (owner design default, 2026-11-09). Before
+        # the bound it was accepted, and an 11-digit count overflowed int4 as a 500.
+        [-5, 0, "two", 10_000, 99_999_999_999],
+        ids=["negative", "zero", "non_numeric", "over_the_bound", "int4_overflow"],
     )
     def test_invalid_planned_runs_rejected_400(self, client, db_session, bad_runs):
         admin, wc, parent = self._setup(db_session)
@@ -759,6 +761,13 @@ class TestImportRowValidation:
         assert resp.status_code == status.HTTP_400_BAD_REQUEST, resp.text
         assert "Invalid nest rows" in resp.json()["detail"]
         self._assert_no_nests(db_session)
+
+    def test_planned_runs_at_the_bound_is_accepted(self, client, db_session):
+        admin, wc, parent = self._setup(db_session)
+        rows = [{"source_file": "05749.pdf", "cnc_number": "05749", "planned_runs": 9_999}]
+        resp = _import(client, headers_for(admin), parent.id, _pdf_zip("05749.pdf"), rows=rows, work_center_id=wc.id)
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        assert [nest.planned_runs for nest in db_session.query(LaserNest).all()] == [9_999]
 
     def test_over_long_cnc_number_rejected_400(self, client, db_session):
         admin, wc, parent = self._setup(db_session)

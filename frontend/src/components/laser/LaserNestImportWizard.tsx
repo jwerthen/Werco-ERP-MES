@@ -27,6 +27,7 @@ import { defaultLaserWorkCenter, sortWorkCentersForLaserDispatch } from '../../u
 import { formatTieQty } from '../../utils/materialTie';
 import { isProductionPartType } from '../../utils/catalogGroups';
 import { deriveSheetSpec, isSheetLikePart, thicknessInches } from '../../utils/sheetPart';
+import { MAX_PLANNED_RUNS } from '../../validation/schemas';
 
 interface LaserNestImportWizardProps {
   open: boolean;
@@ -1196,12 +1197,16 @@ export default function LaserNestImportWizard({
   const validateRows = (candidateRows: EditableRow[]): string | null => {
     if (candidateRows.length === 0) return 'Add at least one nest to import.';
     // Each row needs a CNC number (the operator-facing program number) and a
-    // whole-sheet run count >= 1.
+    // whole-sheet run count from 1 to MAX_PLANNED_RUNS (the import route's own
+    // bound, whose 400 would otherwise arrive as a raw validation dump).
     for (const row of candidateRows) {
       if (!row.cnc_number.trim()) return `Enter a CNC number for ${row.source_file}.`;
       const runs = Number(row.planned_runs);
       if (!Number.isInteger(runs) || runs < 1) {
         return `Runs for ${row.source_file} must be a whole number of at least 1.`;
+      }
+      if (runs > MAX_PLANNED_RUNS) {
+        return `Runs for ${row.source_file} must be at most 9,999 per nest.`;
       }
       // A tied row needs a real per-run quantity (the API enforces > 0). A qty
       // is never sent without a part, and a 0 is never sent at all. Checked for

@@ -68,6 +68,13 @@ from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import WorkOrder, WorkOrderOperation
 
+# Suite-wide fixture modules. ``tests/llm_replay.py`` supplies the ``llm_replay``
+# fixture (scripted Anthropic responses through the REAL ``run_llm_task``). Registered
+# here once rather than imported by name into each test module, where the fixture
+# import reads as unused (F401) and the test parameter then shadows it (F811). Test
+# modules import only its helpers (``text_message``, ``install_replay``, ...).
+pytest_plugins = ["tests.llm_replay"]
+
 # Create test engine
 if "sqlite" in TEST_DATABASE_URL:
     engine = create_engine(

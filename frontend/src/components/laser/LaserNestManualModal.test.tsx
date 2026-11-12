@@ -235,6 +235,50 @@ describe('LaserNestManualModal', () => {
     expect(mockApi.createManualLaserNest).not.toHaveBeenCalled();
   });
 
+  // --- The 9,999-runs-per-nest limit (the routes refuse more with a 422) ---
+
+  it('blocks submit when the run count is over 9,999', async () => {
+    render(<LaserNestManualModal open workOrderId={42} onClose={jest.fn()} onSaved={jest.fn()} />);
+    fillField(/cnc number/i, '8001');
+    fillField(/qty to cut/i, '10000');
+    fireEvent.click(screen.getByRole('button', { name: /add nest/i }));
+
+    expect(await screen.findByText(/at most 9,999 runs per nest/i)).toBeInTheDocument();
+    expect(mockApi.createManualLaserNest).not.toHaveBeenCalled();
+  });
+
+  it('accepts a run count of exactly 9,999', async () => {
+    mockApi.createManualLaserNest.mockResolvedValue({
+      id: 7, nest_name: '8001', planned_runs: 9999, completed_runs: 0, remaining_runs: 9999,
+    });
+    render(<LaserNestManualModal open workOrderId={42} onClose={jest.fn()} onSaved={jest.fn()} />);
+    fillField(/cnc number/i, '8001');
+    fillField(/qty to cut/i, '9999');
+    fireEvent.click(screen.getByRole('button', { name: /add nest/i }));
+
+    await waitFor(() => expect(mockApi.createManualLaserNest).toHaveBeenCalledTimes(1));
+    expect(mockApi.createManualLaserNest).toHaveBeenCalledWith(42, expect.objectContaining({ planned_runs: 9999 }));
+  });
+
+  it('flags a nest stored over the limit before an edit is sent, since the edit always resends its runs', async () => {
+    // A count above 9,999 saved before the limit existed keeps its value, but the
+    // PATCH this modal sends always carries planned_runs, which the route bounds.
+    render(
+      <LaserNestManualModal
+        open
+        workOrderId={42}
+        nest={{ id: 3, nest_name: 'Nest A', cnc_number: '1234', planned_runs: 12000, completed_runs: 0, remaining_runs: 12000 }}
+        onClose={jest.fn()}
+        onSaved={jest.fn()}
+      />
+    );
+    fillField(/material/i, 'A36');
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+
+    expect(await screen.findByText(/at most 9,999 runs per nest/i)).toBeInTheDocument();
+    expect(mockApi.updateLaserNest).not.toHaveBeenCalled();
+  });
+
   // --- Auto-extraction (create path) -------------------------------------
 
   it('the reference-PDF file input does not collide with the CNC/material/size field labels', () => {

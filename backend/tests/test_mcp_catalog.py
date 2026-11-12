@@ -746,6 +746,22 @@ class TestConvenienceSchemasMirrorTheirRoutes:
         assert set(convenience.input_schema["properties"]) - {"release"} == set(generated.input_schema["properties"])
         assert set(convenience.input_schema["required"]) == set(generated.input_schema["required"])
 
+    def test_add_laser_nest_planned_runs_bounds_mirror_the_route(self, unshadowed):
+        """The hand-written ``planned_runs`` bounds must equal the route's, so an agent is
+        told up front what the route would refuse with a 422 (MAX_PLANNED_RUNS = 9,999)."""
+        generated = unshadowed[("POST", "/api/v1/work-orders/{work_order_id}/laser-nests/manual")]
+        route_runs = generated.input_schema["properties"]["planned_runs"]
+        tool_runs = _convenience("add_laser_nest").input_schema["properties"]["planned_runs"]
+        for keyword in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"):
+            assert tool_runs.get(keyword) == route_runs.get(keyword), keyword
+        assert route_runs.get("maximum") == 9_999
+
+        # The generated PATCH tool takes the same bound straight from LaserNestUpdate.
+        patch = unshadowed[("PATCH", "/api/v1/laser-nests/{laser_nest_id}")]
+        patch_runs = patch.input_schema["properties"]["planned_runs"]
+        integer_branch = next(branch for branch in patch_runs["anyOf"] if branch.get("type") == "integer")
+        assert integer_branch.get("maximum") == 9_999
+
     def test_every_convenience_schema_is_strict_and_claims_a_tag(self):
         for tool in CONVENIENCE_TOOLS:
             assert tool.input_schema["additionalProperties"] is False, tool.name
