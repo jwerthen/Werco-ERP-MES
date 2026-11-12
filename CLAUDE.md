@@ -220,14 +220,7 @@ API style: REST, JSON, OpenAPI at `/docs`. JWT auth — 15-min access token, 7-d
 React 19 SPA under `frontend/src/`:
 
 - `pages/` — route-level screens (~59). `components/` — reusable UI grouped by domain.
-- `features/nesting/` — the browser Material Nesting estimator at `/nest`, mounted by `pages/MaterialNesting.tsx` inside the normal authenticated ERP layout. Its imported stylesheet is isolated in a ShadowRoot; its feature-local Base UI dialog/select portals target that root through `NestingPortalContext`. This is a scoped presentation exception to the shared UI conventions below; keep nesting styles and controls within this feature. Notifications use the ERP `ToastProvider`. The route and Sales & Quoting navigation entry both require `purchasing:view`. Every section entry initializes `createBlankProject()` with no demo parts or retained draft; edits persist only while the page remains mounted, and a different user/company also remounts it. No automatic restoration or browser-storage persistence is used; explicit Team drafts saves are available in the ERP. `useUnsavedChanges` covers the entire project's unsaved edits on refresh/tab-close; ERP route changes do not prompt.
-  - DXF files are assigned material/thickness before parsing and grouped into separate stock comparisons/orders. Each group retains its own stock prices and auto/manual gap/margin settings. Automatic spacing comes from `lib/spacing.ts`: editable, estimator-chosen quoting allowances, **not an industry-approved standard or an Ermaksan cutting recipe**. Packing uses actual outer contours, including concave profiles, with final contour separation checks; holes subtract from area but are not used for part placement. Supported curves are approximated with a retained tolerance allowance, and contained open reference paths remain visible. Legacy `drawing-bounds` parts can be opened but require removal/re-import before nesting; new imports never substitute rectangular footprints.
-  - `lib/orientation.ts` is the common orientation policy for candidate generation (including the rectangle fast path), oversize checks, final `validateNest`, UI, and review exports. `Part.rotationMode` is fixed/half-turn/quarter-turn and overrides legacy `rotate`; absent mode maps false to fixed and true to quarter turns. Optional part grain X/Y is the source drawing axis, while group `Quote.grainAxis` passes to stock as sheet length X / width Y. Required grain with unknown sheet grain or no permitted alignment leaves that part unplaced, never inferred or relaxed. Mirroring and part-in-part remain prohibited.
-  - `lib/leftovers.ts` computes advisory vector leftover regions inside the comparison worker after validating Part/Stock/Nest. It subtracts protected outer envelopes (internal holes remain reserved) from an inward-protected rectangular usable sheet via Clipper PolyTree, preserving real connected regions/holes. `LEFTOVER_PROFILE` version `werco-leftovers-v1` declares grid/tessellation/square-join/area/budget guards; its ledger separates nominal parts, cutouts, edge margins, clearance/numerical loss and remaining area. All regions are review-only with USD 0 credit and no inventory/eligibility claim. `OptionResult.leftoverError` must not erase a valid nest/order; stale regions cannot be exported. Cached report export checks area/schema/input consistency without doing offsets on the UI thread. Editable estimate versions are unchanged and do not persist analysis output.
-  - `MaterialSourcePanel` and `useNestingCatalog` read active-company `QuoteMaterial` records through `/quote-nesting/materials` and `/quote-nesting/material-resolution`; both endpoints independently require effective `purchasing:view`, retain normal authentication fences, and never seed or write. Select an exact record and price basis; never infer density, currency, grade, inventory mapping, or a nearby thickness price. Decimal conversions remain unconfirmed; applying costs requires an estimator USD acknowledgment tied to the current source hash. ERP-bound group identity includes company/catalog ID. Source/input changes and Open clear applied catalog prices and acknowledgment.
-  - **Compare sheets** calculates populated groups through `compareSheetsInWorker`, with progress and cancellation. Do not run packing during render or group selection: results are cached by group and quote signature, and stale results cannot be exported. **Save** writes constraint-bearing projects as version 6 with constrained quotes version 7 (other groups may remain version 3); without constraints, ERP bindings use version 5 and family-only projects version 4. Constrained legacy jobs use version 8. These distinct discriminants make older readers reject unsupported orientation settings instead of silently dropping them; **Open** also accepts older single-quote/job files. `lib/provenance.ts` records DXF source/geometry hashes and unit decisions; `lib/run-manifest.ts` exports validated draft review evidence with solver/build/settings and compared alternatives. That client-generated record is not signed approval, immutable server audit, inventory reservation, or an NC program. Save before leaving the section. See `docs/MATERIAL_NESTING.md` for the workflow, limits, and primary-source spacing references.
-  - `BuyerPdfExport` freezes one complete current alternative per populated group, revalidates selected layouts and sends a bounded inch-based DTO to `/quote-nesting/buyer-pdf`. The read-only PDF formatter requires effective `purchasing:view`, plus `inventory:view` for conditional recorded-piece evidence; both company IDs bind to the active context and server identity supplies company/preparer. The PDF contains selected purchase quantities and fitted vector layouts with replacement full-sheet fallback, without prices, quote approval, orders, reservation or NC output. Input/context changes and cancellation discard pending downloads. No migration, dependency, environment variable or worker profile is added. See `docs/API.md` → Buyer material plan PDF.
-  - `TeamDrafts` provides explicit company-scoped Save/Open with immutable input revisions via `/quote-nesting/drafts` (migration101). Entry remains fresh; no auto-restore. Reads require effective `purchasing:view`, writes additionally `purchasing:create`. `expected_company_id`, expected-version CAS and same-actor UUID idempotency protect saves. `AuditService.log_required` makes revision plus audit atomic without changing legacy best-effort callers. Stored JSON is an unapproved client input snapshot, not authoritative geometry, quote approval, physical remnant inventory, or comparison output. PostgreSQL UPDATE/DELETE/TRUNCATE guards and model DDL protect revision history; models mirror migration bootstrap behavior. The 5MiB file cap has a route-specific pre-parser ASGI cap; the global JSON cap is unchanged. Open revalidates browser geometry and clears applied catalog prices and comparisons. See `docs/API.md` → Quote nesting draft revisions.
+- `features/fabrication-quote/` — the estimator workspace behind `/fabrication-quotes` (`pages/FabricationQuoting.tsx`; see `docs/FABRICATION_QUOTING.md`). It replaced the retired `features/nesting/` Material Nesting estimator, whose old `/nest` URL now only redirects there — read "Retired quote-nesting subsystem" below before touching anything named `quote_nesting`.
 - `services/` — Axios API client with **ETag-based conditional caching and a refresh-token interceptor**. Route API calls through this client, not raw axios.
 - `context/` — React Context for cross-cutting state: auth, active-company switching, keyboard shortcuts, tours. No Redux; server data is fetched per-page and cached at the client.
 - `components/dashboard/` — the customizable landing page `/` (`pages/Dashboard.tsx`). Every section is a widget in ONE registry (`widgetRegistry.ts`: `CORE_WIDGETS` plus the opt-in `EXTRA_WIDGETS` from `widgets/extra/index.ts`, looked up through a `Map` because saved ids are user data); `CLASSIC_LAYOUT` is what a `null` layout renders for every role, so adding an id there changes everyone's dashboard — new widgets are opt-in. A user's layout is saved server-side per user per active company (`GET`/`PUT /dashboard/layout`, `POST /dashboard/layout/reset`; `services/dashboard_layout_service.py` copies the Hank-preferences contract — version CAS, required audit, `is_interactive_person` + read-only fence on writes — and validates shape, never catalog membership, because SPA and API deploy separately). Widget data flows through ONE keyed loader, `useDashboardSources.ts` over `sources/` specs: only visible widgets' sources are fetched, each with its own floor and request sequence, and the `/shop-floor/dashboard` heartbeat is always fetched outside it. Keep the two gates separate: a widget's `isEligible` decides whether it is offered and rendered (a UX proxy — a 403 still renders in-widget as "Not available for your role"), while `canOpen(href)` (= `canAccessPath`, the `PrivateRoute` predicate) decides whether a link inside it is a link; a dead link renders as plain text. The layout GET is abandoned after 3 s, and a 404 means "API not deployed yet" (default layout, Customize hidden). To add a widget, follow `docs/DASHBOARD.md` → "Adding a widget".
@@ -277,112 +270,14 @@ There are 37+ Alembic versions over live, multi-tenant data. When adding a migra
 
 `docs/` holds the runbooks that aren't obvious from code: `RBAC_PERMISSIONS.md` (the role model — kept current, it is the ground truth for role gating), `CMMC_LEVEL_2_COMPLIANCE.md` (**frozen 2026-07-28**, historical record of a certification effort no longer being pursued — read it for history, don't add rows to it, and verify any claim in it against the code before relying on it), `AI_QUOTING_AGENT_RUNBOOK.md` + `IMPLEMENTATION_NOTES_AI_QUOTING_AGENT.md` (the Anthropic-powered RFQ/quoting feature, and the per-company `allow_ai_egress` CUI kill switch on `Company` — enforced fail-closed at `run_llm_task`, gating every Anthropic call), `SHIPPING_CARRIER_INTEGRATION.md` (the swappable multi-carrier aggregator — EasyPost adapter + registry, the `allow_carrier_egress` CUI kill switch, inbound HMAC-verified webhooks, the tracking poll cron, and label/BOL Document storage), `THERMAL_LABEL_PRINTING.md` (the 4×6 thermal receiving label — reportlab PDF + Code128(lot), the ProxyBox Zero/pbxz.io cloud-tunnel bridge to a Westinghouse WHTP203e printer, the per-company `CompanyPrintProfile` with the `allow_print_egress` CUI kill switch, manual reprint + auto-print-on-receipt gating, and RECEIVING_LABEL Document storage), `EXCEL_MIGRATION_RUNBOOK.md` (the A0.2 Excel migration kit — CSV/XLSX import load order, server templates, dry-run-then-commit discipline, open-WO/PO loaders, cutover checklist), `PROCESS_SHEETS_SCOPE.md` (the Process Sheets feature — typed, revision-controlled operation steps with kiosk capture: settled product decisions incl. the completion-path posture table, data model, snapshot semantics, and the phased 4-PR plan, all four phases implemented incl. the PR 4 quality-loop integrations — SPC feed, gauge enforcement at capture, OOT→NCR one-tap hold, qualification snapshots, AS9102 FAI pre-fill; the shop-floor capture flow itself is documented in `KIOSK.md`, and §"The other writer: manual entry on the `/spc` page" is the one to read before touching `spc_measurements` from either side — the office page and the kiosk feed both write it, both derive `MAX(subgroup_number)+1` under no lock, and recalculating control limits rewrites out-of-control flags on historical rows in place), `LEAN_ROADMAP.md` (the standing lean-principles improvement roadmap — the 2026-07-09 arda.cards lean-glossary digest mapped to current strengths/gaps, five phased build packs starting with the Flow & Quality Metrics pack, the deliberately-not-building list, and the standardized metric definitions: OTD/OTIF promise precedence `must_ship_by || due_date`, FPY/RTY, lead/queue time, PCE, MTBF/MTTR, and the backfill/import provenance-exclusion rule), `KIOSK.md` (the `/kiosk` operator station screen — URL params, badge login, idle logout, lockdown, telemetry/offline behavior — plus the **crew-station mode** at `/kiosk?kiosk=1&station=<id>`: PIN-unlocked work-center-bound `kiosk_stations`, the two-tier auth model — a scoped `type="kiosk"` station token honored only by the roster queue read + badge mint, and 5-minute badge-minted `scope="kiosk"` operator tokens path-fenced to shop-floor — per-badge JOIN/LEAVE with the crew-tally double-count guard, idle = flow reset not logout, and the revocation runbook), `WALLBOARD.md` (the A0.5 read-only shop-floor TV board — scoped single-endpoint display tokens, TV setup, revocation), `VISITOR_SIGNIN.md` (the `/visitor-signin` lobby tablet — another standalone full-screen station route alongside `/kiosk` and `/wallboard`; the shared-PIN `signin_stations` auth model and its scoped `type="signin"` station token minted via `POST /visitor-logs/station-login`, the `get_signin_principal` two-write fence, admin station setup + the `visitor_logs:view`-gated Visitor Log page, host check-in email, idle/lock behavior, and the enforced 5/min-per-IP station-login rate limit), `DASHBOARD.md` (the manager command-cockpit landing page `/` — the default layout and its live panels, the operator de-duplication rule and id-keyed cross-links, responsive caps, and per-user customization: the widget catalog, eligibility vs link gating, data-fetching rules and how to add a widget), `SUPABASE_SECURITY.md` (the prod Supabase Postgres security posture — managed-Postgres-only usage, the 2026-07-07 Data API exposure and the `059`/`060` hardening, deny-by-default RLS with zero policies, the ENABLE-RLS new-table convention, the manual dashboard checklist, and verification SQL), `NOTIFICATIONS.md` (the notification pipeline — the transactional **outbox** tee off `OperationalEventService.emit` (session listeners that act on the **outermost** transaction only — a savepoint release enqueues nothing, a savepoint rollback drops only its own ids — → `dispatch_notification_job`, `notified_at` idempotency, the 5-min `relay_pending_notifications_job` sweeper), the `notification_catalog.py` event registry (event_key → category/severity/default+mandatory channels/`recurring` re-notify/`source_event_types`), the in-app inbox, email, and SMS channels (SMS over Twilio is gated by the **fourth** CUI egress kill switch — the default-off per-company `Company.allow_sms_egress`, enforced fail-closed in `sms_service.py` — *plus* per-user opt-in and a stored phone, and only for `sms_eligible` catalog events; bodies stay terse and machine-composed — catalog label + sanitized identifier + at most **one** closed-vocabulary classifier that must clear two fences (`_SMS_DETAIL_KEYS` picks the enum-valued payload *field*, `safe_detail()` vets the *value*: one whitespace-free token, no digits, ≤24 chars) — and **never** caller-composed title/body text), the §11.1 content rules — **rewritten 2026-07-29 as the boundary decision of record** after CMMC L2 was descoped (PR #163): email bodies now carry payload detail from the `_DETAIL_KEYS` allowlist (statuses, quantities, day counts, short reasons) and the visitor check-in email names the visitor, while part numbers and customer names stay absent because the dispatcher reads the payload and never re-queries; read §11.1 before changing what any notification says — and the compliance invariants — PRs 1 and 4 of the phased plan in `NOTIFICATIONS_PLAN.md`), `MATERIAL_CONSUMPTION_PLAN.md` (the optional work-order↔material tie and the sum-delta consumption engine — see invariant 6: the operation- vs work-order-scoped split that prevents double-issue, the known limitations, and the phased PR plan; PR 1 shipped dark with no UI, and **PR 4.5 → "Exposing the flag" is the one to read before touching the BOM/routing leg** — what the one-time opt-in gate does and does not assert, the completion-time `BACKFLUSH_DEMAND_REFUSED` refusal, and the outstanding sign-off), `WORK_ORDER_TEMPLATES.md` (the named catalog of jobs the shop re-runs — what a template is and is not, the DRAFT guarantee and what it actually rests on, the deleted-source read-through and the FK that makes it safe, and the quantity/due-date rules), `DEPLOYMENT.md` / `DEPLOYMENT_RUNBOOK.md`, `ENVIRONMENT_VARIABLES.md`, `API.md`, `DEVELOPMENT.md`, and `BROWSER_HARNESS.md` (the safe headless-Chromium CLI for screenshots/snapshots/logs/PDFs of a running app).
 
-### Saved quote-nesting calculations
+### Retired quote-nesting subsystem (historical tables only)
 
-`/quote-nesting/runs` coordinates unapproved calculations from immutable team
-draft revisions (migration102), separately from operational laser nests/quotes/
-inventory. Read permission is effective `purchasing:view`; start/cancel also
-require `purchasing:create`. Runtime readiness, intended company, exact saved
-revision/hash and same-actor UUID retry are enforced. A committed QUEUED row is
-the durable outbox; `quote_nesting_run_outbox` enqueues company/run IDs after
-commit, and the narrow ARQ relay requeues pending work or expires lost leases.
-No geometry runs in an HTTP handler. Tenant-scoped lifecycle/CAS/checkpoint
-commands use `AuditService.log_required` transactionally. Immutable input/runtime
-references, one active run per company, terminal/append-only guards and composite
-tenant/lease/input FKs exist in both migration and model bootstrap DDL.
+Commit `3e17456e` (2026-09-16) removed the browser Material Nesting estimator (`frontend/src/features/nesting/`, `pages/MaterialNesting.tsx`), its Node solver runtime (`frontend/tools/nesting-server-worker.ts`, `tsconfig.nesting-worker.json`, the ARQ job `jobs/quote_nesting_runs.py` and its run-outbox relay), the generated frontend copy of the geometry profile and its CI generator, and every `/quote-nesting/*` router and service — team drafts, saved runs, spacing policies, catalog materials, the buyer PDF and the original-DXF `/sources` attachments. The rules this file used to give for saved runs, stock exclusions, compensated envelopes, spacing policies and original-DXF evidence described that code and went with it. New estimates, including their nesting, go through Fabrication Quoting (`backend/app/fabrication_quote/`, `docs/FABRICATION_QUOTING.md`), and the old `/nest` URL redirects to `/fabrication-quotes`. Production laser-nest import and dispatch (`/laser-nests` and the work-order nest-package verbs) are a separate feature and are unaffected.
 
-The existing ARQ image compiles `frontend/tools/nesting-server-worker.ts` from
-the same TypeScript kernel used by the browser. Its fixed Node/bundle/manifest
-paths, minimal child environment and byte/time/heap limits are enforced in
-`jobs/quote_nesting_runs.py`; the API image does not acquire Node. Fresh matching
-runtime heartbeats contain build metadata only. Each validated stock option is
-retained as an immutable checkpoint; cancellation/timeouts keep earlier results
-without claiming infeasibility. COMPLETED means planned options evaluated, not
-that every part fits. Solver `werco-contour-v6` uses locale-independent code-unit
-tie-breaking. Seed is null; exact saved inputs, runtime/build and completed work
-are the replay boundary, not elapsed wall time.
+Two things outlived it on purpose:
 
-`SavedRuns` / `SavedRunPreview` are explicit actions inside Team drafts; they do
-not restore inputs automatically or overwrite current workspace comparisons.
-The report binds the original imperial input and internal-mm result envelopes;
-the UI shows imperial measurements and actual checked contours. All runs remain
-unapproved, leftover credits stay zero, and no CAD-source authenticity, physical
-remnant registration, approval, reservation or quote total write is implied.
-See `docs/API.md`, `docs/MATERIAL_NESTING.md` and the worker deployment runbook.
-
-### Configured quote stock exclusions
-
-Stock-size options can retain labeled, reasoned unavailable regions and explicit
-clearance in sheet-local coordinates. They repeat on every hypothetical sheet of
-that option; they are not physical piece IDs, reservations or machine zones. Preserve
-exact outlines and reject out-of-sheet edits instead of silently cropping/removing
-regions. Bounds are 16 regions/2,000 source vertices per option and 20,000 combined
-part/reference/exclusion source vertices per project. A zero entered clearance does
-not remove the separate numerical/curve guard.
-
-The API applies bounded structural validation; authoritative topology and guarded
-geometry validation runs in the shared TypeScript Node kernel before a checkpoint.
-Disable the rectangle fast path when nonempty exclusions exist. Final constraints
-and leftover subtraction use the same guarded envelopes, and overlapping exclusions
-are unioned once within usable stock. Only nonempty exclusions select
-`werco-leftovers-v2` and the `excludedArea` ledger; absent/empty lists preserve v1.
-Quote 11/project 12 discriminators protect exclusion-bearing inputs; legacy job 13
-is local-only. Solver v5 and the exact worker/image readiness gate prevent an older
-runtime from silently dropping constraints. No migration, RBAC, environment, cron,
-physical inventory, reservation or manufacturing approval change is included.
-
-### Current compensated-envelope identity and history
-
-Use normative `backend/app/data/nesting_profiles/werco-compensated-v1.json` and its
-checked-in generated frontend adapter, never two manually maintained profiles.
-`python3 .github/scripts/generate_nesting_profile.py --check` verifies their exact
-canonical payload in CI; frontend/Node standalone builds self-check the adapter and
-Python checks the source. Hash recursively sorted compact ASCII `{id, profile}`
-without a terminal newline. The current identity is `werco-compensated-v1` with SHA
-`21e8689fb2ce80c72befbc5866f658cd74fe8ed336d1b5c070e182f3081aa55a`.
-Do not reuse or change historical estimate/report canonicalizers for this hash.
-
-New comparisons/runs use solver v6 and explicit quote 14/project 15 identity; local
-job 16 remains local-only. Fresh groups carry the profile, but opening old inputs
-adds nothing. Every populated group must explicitly upgrade before any new option
-runs; the upgrade preserves source numbers/policy/exclusions and invalidates live
-comparisons, then requires a new saved revision for server execution. The current
-profile reserves full guarded part envelopes against each other, exclusions and
-inward usable stock; independent nominal checks still apply. V3 leftover evidence
-always carries excluded area, including zero. Older v4/v5 runs select only their
-frozen validator from bound run/settings/source/report identities; a report label
-cannot choose weaker rules or cause historical geometry to be recalculated.
-
-Manifest and Node hello carry `geometry_profile`; the Redis heartbeat DTO remains
-unchanged. The API/worker/frontend must share the exact profile and bundle release
-before promotion. No migration, environment, cron, physical inventory, reservation,
-shop-policy approval or quote approval is created by this geometry identity.
-
-### Quote-spacing policy invariants
-
-`/quote-nesting/spacing-policies` uses a tenant-owned singleton header, immutable
-content revisions and an append-only decision ledger (migration103). No migration,
-GET or startup seeds/approves policy rows. Read/resolve requires effective
-`purchasing:view`; draft/publish/withdraw also requires Admin authority and
-`purchasing:create`, preserving existing token/context fences. Every command
-uses company-version CAS, actor/credential-bound UUID replay, tenant composite
-references and required transactional audit. RLS/revokes and immutable guards
-must remain identical in model bootstrap and migration DDL.
-
-Select the latest effective publication before testing withdrawal; never fall
-back silently to an older approval. New draft saves and run starts take the same
-company policy lock as publication and verify exact snapshot authority/currentness.
-Queued run claims deliberately do not re-resolve policy: accepted immutable
-inputs retain their original settings. Legacy inputs/hashes are not rewritten.
-Policy/override quotes use version9 in project10. An override is manual with an
-explicit reason and cannot coexist with a policy snapshot.
-
-Python fixed-context Decimal and TypeScript BigInt share canonical nine-place
-inch values: half-up thickness normalization, upward formula rounding. Keep the
-exact numeric serialization bridge and real complete UTC timestamp checks. This
-is quoting-policy precision, not configurable geometry tolerance or machine data.
-Policy approval does not approve a nest, grade/certification, remnant or quote.
-See `docs/API.md`, `docs/RBAC_PERMISSIONS.md` and `docs/MATERIAL_NESTING.md`.
+- **The tables.** Migrations `101_quote_nesting_drafts`, `102_quote_nesting_runs`, `103_nesting_spacing_policies` and `105_nesting_cad_sources` still run in the normal chain, and their models (`app/models/quote_nesting_*.py`, still registered in `app/models/__init__.py`) still build the tables on a fresh bootstrap. They hold historical drafts, runs, policies and source receipts kept for retention (`docs/MATERIAL_NESTING.md`); no route, service or job reads or writes them any more. Their RLS, `REVOKE` and immutability-trigger DDL is still mirrored between model and migration, `tests/test_migration_10{1,2,3,5}_*.py` still cover them, and `e2e.yml`'s `verify_operations_postgres` step still exercises their guards on real Postgres. Treat them as ordinary tables under the migration rules above: don't drop them or strip their guards as dead code, and don't run those downgrades as an ordinary rollback — each one drops that history. (`104_stock_piece_observations`, between them in the chain, is not retired; it backs the live routes in the next section.)
+- **The geometry profiles.** `backend/app/data/nesting_profiles/werco-compensated-v1.json` and `werco-remnant-domain-v1.json` are still loaded at import by `core/nesting_geometry_profile.py` and `core/remnant_domain_profile.py`, which recompute each file's embedded SHA-256 (over recursively key-sorted, compact ASCII `{id, profile}`) and raise on a mismatch. `schemas/remnant_planning.py` imports both and the stock-piece router imports that schema, so a hand-edited profile stops the API from starting. The one function that compared saved input against the compensated identity, `schemas/remnant_planning.validate_saved_selection`, no longer has a caller.
 
 ### Advisory physical-piece observations
 
@@ -399,19 +294,6 @@ into availability, reservations, nesting stock, physical lineage or quote credit
 Canonical reported inch strings are distinct from nesting-kernel geometry approval.
 Source drift reads are pure and never reconcile inventory. See
 `docs/STOCK_OBSERVATION_ARCHITECTURE.md` and `docs/STOCK_OBSERVATIONS.md`.
-
-### Original DXF evidence
-
-Saved-revision `/sources` routes add explicit original-byte attachments (migration105).
-Bind the exact tenant/revision/input hash and saved part provenance; never rewrite an
-input revision or accept a text-fallback hash as original-byte evidence. Commit each
-fresh generated attempt and required audit before blob I/O, release database sessions
-during I/O, then commit verified receipt, all bindings and required audit atomically.
-An uncertain write is recovered by read-back, never overwritten; downloads verify
-size/hash again. Preserve actor/credential-bound replay, immutable history and scoped
-provider identity. No generic document deletion, inventory mutation or automatic
-retention policy applies. See `docs/CAD_SOURCE_STORAGE.md` and
-`docs/NESTING_ORIGINAL_DXFS.md` for bounds, recovery and storage acceptance limits.
 
 ## Conventions worth matching
 

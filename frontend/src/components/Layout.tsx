@@ -534,9 +534,9 @@ export default function Layout({ children }: LayoutProps) {
     enabled: Boolean(presenceUrl),
   });
 
-  // Manual window-scroll restoration: this app uses a plain <BrowserRouter>, so
-  // react-router's <ScrollRestoration> (data-router only) is unavailable. Called
-  // once here in the shell; saves/restores window scroll per route via sessionStorage.
+  // Manual window-scroll restoration (useScrollRestoration explains why it is not
+  // react-router's <ScrollRestoration>). Called once here in the shell; saves/restores
+  // window scroll per route via sessionStorage.
   useScrollRestoration();
 
   // Global keyboard shortcuts for layout

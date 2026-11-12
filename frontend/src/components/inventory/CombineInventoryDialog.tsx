@@ -771,9 +771,9 @@ export default function CombineInventoryDialog({
    * off the server's pre-fill, an acknowledgement ticked — never the mere fact
    * that a preview loaded. Treating a loaded preview as dirty would put a
    * confirm in front of every Cancel, which is how a guard gets trained out of
-   * people. In-app route blocking is unavailable in this app (the router is a
-   * component `<BrowserRouter>`), so this covers refresh/tab-close plus the
-   * explicit Cancel/Close gate below.
+   * people. `useUnsavedChanges` covers refresh/tab-close, the explicit
+   * Cancel/Close gate below, and in-app route changes (it registers with
+   * `UnsavedChangesProvider`, whose `useBlocker` runs under the app's data router).
    */
   const isDirty =
     open &&
