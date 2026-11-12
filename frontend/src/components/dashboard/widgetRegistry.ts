@@ -225,7 +225,7 @@ export const CLASSIC_LAYOUT: readonly LayoutEntry[] = [
   { id: 'recent_completions', size: 'full' },
 ];
 
-/** Category order in the Customize dialog's "Available" lists. */
+/** Category order in the Add widgets gallery's lists. */
 export const WIDGET_CATEGORY_ORDER: readonly WidgetCategory[] = [
   'Alerts',
   'Key metrics',

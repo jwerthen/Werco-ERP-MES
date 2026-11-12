@@ -1,22 +1,31 @@
 /**
- * Pure layout logic: what a saved layout renders for a viewer, and what the Customize
- * dialog saves back.
+ * Pure layout logic: what a saved layout renders for a viewer, what dashboard edit mode
+ * saves back, and the draft operations edit mode applies.
  */
 import type { DashboardLayoutValues } from '../../types/dashboardLayout';
 import { MAX_DASHBOARD_WIDGETS } from '../../types/dashboardLayout';
 import type { Permission } from '../../utils/permissions';
 import {
+  addWidget,
   buildSavePayload,
   countCarriedWidgets,
+  countUnknownWidgets,
   draftFromLayout,
   isEmptyLayout,
   isSameLayout,
+  moveWidgetTo,
+  removeWidget,
   resolveLayout,
+  setBannerVisible,
+  setPanelSize,
+  withZoneOrder,
+  zoneIds,
+  type LayoutDraft,
 } from './dashboardLayout';
 import { CLASSIC_LAYOUT, CORE_WIDGETS, DASHBOARD_REGISTRY, createWidgetRegistry } from './widgetRegistry';
 import { CORE_WIDGET_RENDERERS } from './widgets/core';
 import { EXTRA_WIDGET_RENDERERS } from './widgets/extra';
-import type { DashboardWidgetDefinition, WidgetEligibilityContext } from './widgetTypes';
+import type { DashboardWidgetDefinition, PanelSize, WidgetEligibilityContext } from './widgetTypes';
 
 const ctxFor = (permissions: Permission[] | 'all', isAdmin = false): WidgetEligibilityContext => ({
   can: permission => permissions === 'all' || permissions.includes(permission),
@@ -318,6 +327,21 @@ describe('buildSavePayload / isSameLayout', () => {
     expect(countCarriedWidgets(layoutOf({ id: 'setup_nudge' }, { id: 'kpi.open_cars' }), SHIPPING)).toBe(1);
   });
 
+  it('counts the distinct saved widgets this bundle does not know (a save from here drops them)', () => {
+    expect(countUnknownWidgets(null)).toBe(0);
+    expect(countUnknownWidgets(layoutOf({ id: 'kpi.overdue' }, { id: 'presence' }))).toBe(0);
+    const fromNewerBundle = layoutOf(
+      { id: 'kpi.from_a_newer_bundle' },
+      { id: 'kpi.overdue' },
+      { id: 'kpi.from_a_newer_bundle' },
+      { id: 'panel_from_a_newer_bundle', size: 'half' }
+    );
+    expect(countUnknownWidgets(fromNewerBundle)).toBe(2);
+    // The documented policy stands: the payload built from this bundle leaves them out.
+    const payload = buildSavePayload(draftFromLayout(fromNewerBundle, MANAGER), fromNewerBundle, MANAGER);
+    expect(payload.widgets.map(widget => widget.id)).not.toContain('kpi.from_a_newer_bundle');
+  });
+
   it('treats a null or unknown size as the widget default', () => {
     expect(isSameLayout(layoutOf({ id: 'presence', size: null }), layoutOf({ id: 'presence', size: 'narrow' }))).toBe(
       true
@@ -337,5 +361,354 @@ describe('buildSavePayload / isSameLayout', () => {
         layoutOf({ id: 'attention' }, { id: 'alert_chips' })
       )
     ).toBe(true);
+  });
+});
+
+describe('draft operations (edit mode)', () => {
+  const draft = (): LayoutDraft => ({
+    banners: ['attention', 'alert_chips'],
+    kpis: ['kpi.overdue', 'kpi.due_today', 'kpi.open_ncrs'],
+    panels: [
+      { id: 'capacity_overview', size: 'wide' },
+      { id: 'presence', size: 'narrow' },
+      { id: 'recent_completions', size: 'full' },
+    ],
+  });
+  /** A deep copy taken before an op, to prove the op never mutates its input. */
+  const snapshot = (value: LayoutDraft) => JSON.parse(JSON.stringify(value)) as LayoutDraft;
+  const definition = (id: string) => DASHBOARD_REGISTRY.byId.get(id)!;
+
+  describe('zoneIds', () => {
+    it('lists a zone in render order as a fresh array', () => {
+      const base = draft();
+      expect(zoneIds(base, 'kpi')).toEqual(['kpi.overdue', 'kpi.due_today', 'kpi.open_ncrs']);
+      expect(zoneIds(base, 'kpi')).not.toBe(base.kpis);
+      expect(zoneIds(base, 'panel')).toEqual(['capacity_overview', 'presence', 'recent_completions']);
+    });
+  });
+
+  describe('withZoneOrder', () => {
+    it('reorders one zone, keeps panel sizes and leaves the other zones untouched', () => {
+      const base = draft();
+      const before = snapshot(base);
+      const next = withZoneOrder(base, 'panel', ['recent_completions', 'capacity_overview', 'presence']);
+      expect(next.panels).toEqual([
+        { id: 'recent_completions', size: 'full' },
+        { id: 'capacity_overview', size: 'wide' },
+        { id: 'presence', size: 'narrow' },
+      ]);
+      expect(next.kpis).toBe(base.kpis);
+      expect(next.banners).toBe(base.banners);
+      expect(base).toEqual(before);
+      expect(withZoneOrder(base, 'kpi', ['kpi.open_ncrs', 'kpi.overdue', 'kpi.due_today']).kpis).toEqual([
+        'kpi.open_ncrs',
+        'kpi.overdue',
+        'kpi.due_today',
+      ]);
+    });
+
+    it('returns the same draft for the current order', () => {
+      const base = draft();
+      expect(withZoneOrder(base, 'kpi', ['kpi.overdue', 'kpi.due_today', 'kpi.open_ncrs'])).toBe(base);
+      expect(withZoneOrder(base, 'panel', ['capacity_overview', 'presence', 'recent_completions'])).toBe(base);
+    });
+
+    it('rejects a membership change (added, missing, repeated or foreign ids) by returning the same draft', () => {
+      const base = draft();
+      expect(withZoneOrder(base, 'kpi', ['kpi.overdue', 'kpi.due_today'])).toBe(base);
+      expect(withZoneOrder(base, 'kpi', ['kpi.overdue', 'kpi.due_today', 'kpi.open_ncrs', 'kpi.signed_in'])).toBe(base);
+      expect(withZoneOrder(base, 'kpi', ['kpi.overdue', 'kpi.overdue', 'kpi.due_today'])).toBe(base);
+      expect(withZoneOrder(base, 'kpi', ['kpi.overdue', 'kpi.due_today', 'kpi.signed_in'])).toBe(base);
+      // A panel id is not a member of the KPI zone.
+      expect(withZoneOrder(base, 'kpi', ['kpi.overdue', 'kpi.due_today', 'presence'])).toBe(base);
+    });
+  });
+
+  describe('moveWidgetTo', () => {
+    it('moves to a position, clamping to the first and last place', () => {
+      const base = draft();
+      const before = snapshot(base);
+      expect(zoneIds(moveWidgetTo(base, 'kpi', 'kpi.open_ncrs', 0), 'kpi')).toEqual([
+        'kpi.open_ncrs',
+        'kpi.overdue',
+        'kpi.due_today',
+      ]);
+      expect(zoneIds(moveWidgetTo(base, 'kpi', 'kpi.overdue', 1), 'kpi')).toEqual([
+        'kpi.due_today',
+        'kpi.overdue',
+        'kpi.open_ncrs',
+      ]);
+      expect(zoneIds(moveWidgetTo(base, 'panel', 'capacity_overview', 99), 'panel')).toEqual([
+        'presence',
+        'recent_completions',
+        'capacity_overview',
+      ]);
+      expect(zoneIds(moveWidgetTo(base, 'panel', 'recent_completions', -5), 'panel')).toEqual([
+        'recent_completions',
+        'capacity_overview',
+        'presence',
+      ]);
+      expect(moveWidgetTo(base, 'panel', 'presence', 0).panels[0]).toEqual({ id: 'presence', size: 'narrow' });
+      expect(base).toEqual(before);
+    });
+
+    it('returns the same draft when nothing moves', () => {
+      const base = draft();
+      expect(moveWidgetTo(base, 'kpi', 'kpi.overdue', 0)).toBe(base);
+      expect(moveWidgetTo(base, 'kpi', 'kpi.overdue', -1)).toBe(base);
+      expect(moveWidgetTo(base, 'kpi', 'kpi.open_ncrs', 2)).toBe(base);
+      expect(moveWidgetTo(base, 'kpi', 'kpi.open_ncrs', 40)).toBe(base);
+      expect(moveWidgetTo(base, 'kpi', 'kpi.overdue', Number.NaN)).toBe(base);
+      // Not in that zone: a panel id against the KPI zone, and an unknown id.
+      expect(moveWidgetTo(base, 'kpi', 'presence', 0)).toBe(base);
+      expect(moveWidgetTo(base, 'panel', 'kpi.from_a_newer_bundle', 0)).toBe(base);
+    });
+  });
+
+  describe('removeWidget', () => {
+    it('removes from the named zone only, immutably', () => {
+      const base = draft();
+      const before = snapshot(base);
+      const withoutTile = removeWidget(base, 'kpi', 'kpi.due_today');
+      expect(withoutTile.kpis).toEqual(['kpi.overdue', 'kpi.open_ncrs']);
+      expect(withoutTile.panels).toBe(base.panels);
+      const withoutPanel = removeWidget(base, 'panel', 'presence');
+      expect(zoneIds(withoutPanel, 'panel')).toEqual(['capacity_overview', 'recent_completions']);
+      expect(withoutPanel.kpis).toBe(base.kpis);
+      expect(base).toEqual(before);
+    });
+
+    it('returns the same draft when the widget is not in that zone', () => {
+      const base = draft();
+      expect(removeWidget(base, 'kpi', 'kpi.signed_in')).toBe(base);
+      expect(removeWidget(base, 'kpi', 'presence')).toBe(base);
+      expect(removeWidget(base, 'panel', 'kpi.overdue')).toBe(base);
+    });
+  });
+
+  describe('addWidget', () => {
+    it('appends a KPI to the end of the strip', () => {
+      const base = draft();
+      const before = snapshot(base);
+      expect(addWidget(base, definition('kpi.signed_in')).kpis).toEqual([
+        'kpi.overdue',
+        'kpi.due_today',
+        'kpi.open_ncrs',
+        'kpi.signed_in',
+      ]);
+      expect(base).toEqual(before);
+    });
+
+    it("appends a panel at its default width, else 'half'", () => {
+      const base = draft();
+      const live = definition('live_activity');
+      expect(live.defaultSize).toBe('narrow');
+      expect(addWidget(base, live).panels.slice(-1)).toEqual([{ id: 'live_activity', size: 'narrow' }]);
+      const sizeless: DashboardWidgetDefinition = { ...definition('presence'), id: 'sizeless', defaultSize: undefined };
+      expect(addWidget(base, sizeless).panels.slice(-1)).toEqual([{ id: 'sizeless', size: 'half' }]);
+    });
+
+    it('returns the same draft for a widget already on the dashboard, or a banner', () => {
+      const base = draft();
+      expect(addWidget(base, definition('kpi.overdue'))).toBe(base);
+      expect(addWidget(base, definition('presence'))).toBe(base);
+      expect(addWidget(base, definition('morning_brief'))).toBe(base);
+    });
+  });
+
+  describe('setPanelSize', () => {
+    it('changes one panel width, immutably', () => {
+      const base = draft();
+      const before = snapshot(base);
+      const next = setPanelSize(base, 'presence', 'third');
+      expect(next.panels).toEqual([
+        { id: 'capacity_overview', size: 'wide' },
+        { id: 'presence', size: 'third' },
+        { id: 'recent_completions', size: 'full' },
+      ]);
+      expect(next.panels[0]).toBe(base.panels[0]);
+      expect(base).toEqual(before);
+    });
+
+    it('returns the same draft for an unchanged size, a missing panel or an unknown size', () => {
+      const base = draft();
+      expect(setPanelSize(base, 'presence', 'narrow')).toBe(base);
+      expect(setPanelSize(base, 'live_activity', 'full')).toBe(base);
+      expect(setPanelSize(base, 'kpi.overdue', 'full')).toBe(base);
+      expect(setPanelSize(base, 'presence', 'enormous' as PanelSize)).toBe(base);
+    });
+  });
+
+  describe('setBannerVisible', () => {
+    it('switches banners on and off, and they still render and save in registry order', () => {
+      const base = draft();
+      const before = snapshot(base);
+      const withBrief = setBannerVisible(base, 'morning_brief', true);
+      expect(withBrief.banners).toEqual(['attention', 'alert_chips', 'morning_brief']);
+      expect(base).toEqual(before);
+      // Registry order wins over draft order, rendered and saved.
+      expect(ids(resolveLayout(buildSavePayload(withBrief, null, MANAGER), MANAGER).banners)).toEqual([
+        'attention',
+        'morning_brief',
+        'alert_chips',
+      ]);
+      expect(
+        buildSavePayload(withBrief, null, MANAGER)
+          .widgets.slice(0, 4)
+          .map(widget => widget.id)
+      ).toEqual(['attention', 'setup_nudge', 'morning_brief', 'alert_chips']);
+      expect(setBannerVisible(base, 'attention', false).banners).toEqual(['alert_chips']);
+    });
+
+    it('returns the same draft when the banner is already in that state', () => {
+      const base = draft();
+      expect(setBannerVisible(base, 'attention', true)).toBe(base);
+      expect(setBannerVisible(base, 'morning_brief', false)).toBe(base);
+    });
+
+    it('is clean after a banner is switched off and back on', () => {
+      const saved = buildSavePayload(draftFromLayout(null, MANAGER), null, MANAGER);
+      const untouched = draftFromLayout(saved, MANAGER);
+      const toggled = setBannerVisible(setBannerVisible(untouched, 'attention', false), 'attention', true);
+      expect(toggled.banners).not.toEqual(untouched.banners);
+      expect(isSameLayout(buildSavePayload(toggled, saved, MANAGER), saved)).toBe(true);
+    });
+  });
+
+  describe('with carried (ineligible) saved widgets', () => {
+    // The shipping role cannot see the quality widgets: kpi.open_cars, kpi.pending_fai, quality_pulse.
+    const saved = layoutOf(
+      { id: 'attention' },
+      { id: 'kpi.overdue' },
+      { id: 'kpi.open_cars' },
+      { id: 'kpi.due_today' },
+      { id: 'kpi.pending_fai' },
+      { id: 'capacity_overview', size: 'third' },
+      { id: 'quality_pulse', size: 'full' },
+      { id: 'presence', size: 'wide' }
+    );
+    const carriedIds = ['kpi.open_cars', 'kpi.pending_fai', 'quality_pulse'];
+    const savedIdsOf = (draftValue: LayoutDraft) =>
+      buildSavePayload(draftValue, saved, SHIPPING).widgets.map(widget => widget.id);
+
+    it('the untouched draft is clean and every op keeps the carried entries anchored', () => {
+      const untouched = draftFromLayout(saved, SHIPPING);
+      expect(untouched.kpis).toEqual(['kpi.overdue', 'kpi.due_today']);
+      expect(isSameLayout(buildSavePayload(untouched, saved, SHIPPING), saved)).toBe(true);
+
+      const cases: [string, LayoutDraft, string[]][] = [
+        [
+          'withZoneOrder',
+          withZoneOrder(untouched, 'kpi', ['kpi.due_today', 'kpi.overdue']),
+          // Each carried tile follows the saved neighbour it followed before.
+          [
+            'attention',
+            'kpi.due_today',
+            'kpi.pending_fai',
+            'kpi.overdue',
+            'kpi.open_cars',
+            'capacity_overview',
+            'quality_pulse',
+            'presence',
+          ],
+        ],
+        [
+          'moveWidgetTo',
+          moveWidgetTo(untouched, 'panel', 'presence', 0),
+          [
+            'attention',
+            'kpi.overdue',
+            'kpi.open_cars',
+            'kpi.due_today',
+            'kpi.pending_fai',
+            'presence',
+            'capacity_overview',
+            'quality_pulse',
+          ],
+        ],
+        [
+          'removeWidget',
+          removeWidget(untouched, 'kpi', 'kpi.overdue'),
+          [
+            'attention',
+            'kpi.open_cars',
+            'kpi.due_today',
+            'kpi.pending_fai',
+            'capacity_overview',
+            'quality_pulse',
+            'presence',
+          ],
+        ],
+        [
+          'addWidget',
+          addWidget(untouched, definition('kpi.signed_in')),
+          [
+            'attention',
+            'kpi.overdue',
+            'kpi.open_cars',
+            'kpi.due_today',
+            'kpi.pending_fai',
+            'kpi.signed_in',
+            'capacity_overview',
+            'quality_pulse',
+            'presence',
+          ],
+        ],
+        [
+          'setPanelSize',
+          setPanelSize(untouched, 'capacity_overview', 'half'),
+          [
+            'attention',
+            'kpi.overdue',
+            'kpi.open_cars',
+            'kpi.due_today',
+            'kpi.pending_fai',
+            'capacity_overview',
+            'quality_pulse',
+            'presence',
+          ],
+        ],
+        [
+          'setBannerVisible',
+          setBannerVisible(untouched, 'alert_chips', true),
+          [
+            'attention',
+            'alert_chips',
+            'kpi.overdue',
+            'kpi.open_cars',
+            'kpi.due_today',
+            'kpi.pending_fai',
+            'capacity_overview',
+            'quality_pulse',
+            'presence',
+          ],
+        ],
+      ];
+      for (const [name, edited, expected] of cases) {
+        expect([name, savedIdsOf(edited)]).toEqual([name, expected]);
+        const payload = buildSavePayload(edited, saved, SHIPPING);
+        carriedIds.forEach(id =>
+          expect([name, payload.widgets.some(widget => widget.id === id)]).toEqual([name, true])
+        );
+        expect(payload.widgets.find(widget => widget.id === 'quality_pulse')).toEqual({
+          id: 'quality_pulse',
+          size: 'full',
+        });
+      }
+      expect(
+        buildSavePayload(setPanelSize(untouched, 'capacity_overview', 'half'), saved, SHIPPING).widgets
+      ).toContainEqual({ id: 'capacity_overview', size: 'half' });
+    });
+
+    it('is clean again after a reorder is undone by the reverse reorder', () => {
+      const untouched = draftFromLayout(saved, SHIPPING);
+      const there = withZoneOrder(untouched, 'panel', ['presence', 'capacity_overview']);
+      expect(isSameLayout(buildSavePayload(there, saved, SHIPPING), saved)).toBe(false);
+      const back = withZoneOrder(there, 'panel', ['capacity_overview', 'presence']);
+      expect(back).not.toBe(untouched);
+      expect(isSameLayout(buildSavePayload(back, saved, SHIPPING), saved)).toBe(true);
+      const moved = moveWidgetTo(moveWidgetTo(untouched, 'kpi', 'kpi.overdue', 1), 'kpi', 'kpi.overdue', 0);
+      expect(isSameLayout(buildSavePayload(moved, saved, SHIPPING), saved)).toBe(true);
+    });
   });
 });

@@ -19,7 +19,8 @@ Top to bottom, all in one tight vertical stack. Items 1–3 are page chrome and 
 items 4–9 are widgets (their widget ids are in the [catalog](#widget-catalog)).
 
 1. **Header** — title, "Updated" pulse and "Checked HH:MM" / "Refreshing dashboard…" metadata,
-   manual refresh, **Customize** (hidden when the API predates the feature — see
+   manual refresh, **Customize**, which turns the page into [edit mode](#customizing-the-dashboard)
+   (hidden when the API predates the feature — see
    [Loading the saved layout](#loading-the-saved-layout)), and the **Shop Floor** link (shown only
    when the viewer can open `/shop-floor`).
 2. **System banners** — not widgets, always evaluated:
@@ -37,7 +38,10 @@ items 4–9 are widgets (their widget ids are in the [catalog](#widget-catalog))
 3. **Empty dashboard** — when the viewer's layout resolves to no widget at all (they removed
    everything, or none of their saved widgets is available to them), an empty state "Your dashboard
    is empty" with a **Customize dashboard** action replaces items 4–9. A layout that still holds a
-   banner which happens to render nothing (no exception, no brief) is not "empty".
+   banner which happens to render nothing (no exception, no brief) is not "empty": with banners but
+   no KPI tile or panel, the page shows a standing note "Only alerts and banners are on your
+   dashboard. They appear here when something needs attention." with its own **Customize dashboard**
+   button. Both actions enter edit mode, exactly like the header button.
 4. **Needs attention** (`attention`) — the first exception, in priority order overdue work orders →
    open NCRs → calibration due → low stock, with a **Review affected records** button (hidden when
    the viewer cannot open its target). Its subtitle reads "Based on last verified shop data" while the
@@ -166,12 +170,15 @@ page-by-page overhaul backlog (tiers + sequencing) lives in the project audit no
 - **1024–1279px (lg)** — two columns, same internal caps. `two_thirds` and `full` panels span both
   columns; every other width takes one.
 - **<1024px / mobile** — single column; height caps are **dropped** so panels grow naturally and no
-  data is trapped behind a nested scroll.
+  data is trapped behind a nested scroll. In [edit mode](#what-edit-mode-shows) only, each panel body
+  previews at 12rem (192 px) with a fade, so the page stays short enough to rearrange; placement
+  depends only on order and width, so the preview still shows where each panel will sit.
 
 Panel widths are a fixed vocabulary, mapped to static Tailwind classes in one place
-(`PANEL_SIZE_CLASSES`, `components/dashboard/widgetTypes.ts`):
+(`PANEL_SIZE_CLASSES`, `components/dashboard/widgetTypes.ts`). The label is what the Move menu's
+**Width** radios show:
 
-| Width (`size`) | Dialog label | Classes |
+| Width (`size`) | Width label | Classes |
 |---|---|---|
 | `third` | Third | `xl:col-span-4` |
 | `narrow` | Narrow | `xl:col-span-5` |
@@ -205,29 +212,342 @@ see "Progress is operation-scoped" above.
 
 ## Customizing the dashboard
 
-**Customize** in the page header opens a dialog where a user chooses what their own dashboard shows.
-Source: [`frontend/src/components/dashboard/`](../frontend/src/components/dashboard/) (registry,
-layout logic, loaders, dialog, widgets) and [`frontend/src/pages/Dashboard.tsx`](../frontend/src/pages/Dashboard.tsx);
-API contract in [`docs/API.md` → Personal dashboard layout](API.md#personal-dashboard-layout).
+**Customize** in the page header turns the live page into an in-place **edit mode**, in the style of
+iOS / macOS widgets: the user drags KPI tiles and panels into a new order (or moves them from the
+keyboard), removes them, adds widgets from a gallery and picks panel widths, then saves the whole
+session with **Done**. Source: [`frontend/src/components/dashboard/editor/`](../frontend/src/components/dashboard/editor/)
+(the editor), [`WidgetCell.tsx`](../frontend/src/components/dashboard/WidgetCell.tsx) (one tile or
+panel, in both modes) and [`frontend/src/pages/Dashboard.tsx`](../frontend/src/pages/Dashboard.tsx);
+the registry, layout logic, loaders and widgets are in
+[`frontend/src/components/dashboard/`](../frontend/src/components/dashboard/); API contract in
+[`docs/API.md` → Personal dashboard layout](API.md#personal-dashboard-layout).
 
-### What a user can do
+### Entering edit mode
 
-- **Alerts & banners** — turn each banner on or off. Banners always render in the fixed order shown in
-  [Layout](#layout); they cannot be reordered.
-- **Key metrics** and **Panels** — each has an **On your dashboard** list (render order; **↑ / ↓**
-  move, **Remove**) and an **Available** list grouped by category (Alerts, Shop floor, Work orders,
-  Quality, Supply chain, Planning, Insights, People) with **Add**, which appends to the end. Panels
-  also take a width: Third, Narrow, Half, Wide, Two-thirds or Full width (see
-  [Responsive](#responsive)). There is no drag-and-drop; after each move, add or remove, focus stays
-  on the same control (or the nearest one that still exists) and a polite live region announces the
-  new position.
-- **Save layout** — enabled only when the draft differs from what is saved and the session can save.
-- **Reset to default** — returns to the default layout after a confirmation ("Reset dashboard to
-  default?"); disabled when the user is already on the default.
+- **Entry points.** The header **Customize** button, the empty state's **Customize dashboard** action
+  and the banners-only note's **Customize dashboard** button run the same handler. Pointing at or
+  focusing the header button starts loading the editor's code ahead of the press.
+- **When it is refused.** Customize is hidden when the API predates the feature, and disabled (its
+  handler does nothing) while the saved layout loads, while the page body is the loading skeleton or
+  the full **Error loading dashboard** state — edit mode arranges the cells, so it opens only over
+  them — while a layout reload runs, while an entry is already under way, and while editing.
+- **Read-only sessions** (`can_edit: false` — see [Persistence](#persistence)). Customize stays
+  visible, described to screen readers as "Read-only session. The layout can't be changed." Pressing
+  it shows the info toast "This session can't save a dashboard layout — read-only company view or an
+  API/kiosk credential." and does not enter edit mode. A session that becomes read-only while
+  editing (a re-read answers `can_edit: false`) leaves edit mode with the same toast.
+- **A fresh read on every entry.** Customize re-reads `GET /dashboard/layout` before every entry (its
+  icon spins and it is `aria-busy` meanwhile): a copy cached since the page loaded can be behind a
+  save from another tab or device, and an edit session seeded from it would end in a **409** that
+  discards its edits. The re-read has the same 3 s cap as the first load
+  ([`LAYOUT_LOAD_TIMEOUT_MS`](#loading-the-saved-layout)), so the re-read can take up to 3 s (plus
+  loading the editor's code the first time, which has no deadline of its own and which pointing at
+  or focusing Customize starts early). If the re-read fails while a saved layout is on screen, edit
+  mode opens on that layout; if the first load had failed too, Customize refuses with "Your saved dashboard layout couldn't be loaded. Try again in a
+  moment." A re-read that answers `can_edit: false` gets the read-only toast.
+- **The editor's code loads on demand.** If that chunk cannot be fetched (typically a 404 just after
+  a deploy), the toast "The dashboard editor couldn't load. Reload the page and try again." appears,
+  the page stays in view mode with no automatic reload, focus returns to Customize, and the next
+  press tries the import again. If the session changed while it loaded, nothing happens.
+- **On entry** the draft is seeded once from the saved layout (polls and pushes never reset it), focus
+  moves to the edit bar's heading "Customizing dashboard", and the page announces "Customizing your
+  dashboard. Drag widgets to rearrange them, or use each widget's Move button. Press Done to save."
+  The header Customize button is disabled while editing; manual refresh and **Shop Floor** stay
+  available.
 
-Only widgets the viewer is [eligible](#eligibility-versus-link-gating) for are listed. Escape, the
-backdrop, the close button and Cancel all go through the standard unsaved-changes guard
-(`useUnsavedChanges`); while a save or reset is in flight the dialog cannot be dismissed.
+### What edit mode shows
+
+- **The edit bar**, fixed to the bottom of the viewport (above the bottom navigation below lg, right
+  of the sidebar at lg+) but next after the page header in the tab order: the heading, an **Unsaved
+  changes** tag while the draft differs from the saved layout, and **Add widgets · Undo · Reset to
+  default · Cancel · Done**. Below sm, Undo shows its icon only and Reset reads "Reset" (the
+  accessible names are unchanged). The bar also holds the failure alert, an always-mounted status
+  line and the [notes about widgets it cannot show](#widgets-edit-mode-cannot-show).
+- **Every KPI tile and panel** gets a dashed hairline outline, a square **−** (Remove) badge on its
+  top-left corner and a **Move** button (a six-dot grip) inside its top-right corner — 24 px, 32 px
+  on a coarse pointer. The chrome sits over the cell, so the grids keep their view-mode gaps and
+  spans; in a KPI tile the label leaves room for the Move button. The KPI strip and the panel grid
+  become lists ("Key metrics on your dashboard", "Panels on your dashboard").
+- **Widget content stays mounted and live** — its polls and pushes continue — but is `inert`: no
+  link, button, in-page cross-link or operation-details modal inside it can be focused or fired, and
+  an invisible drag surface covers it. The banner zone is inert too; banners get no chrome.
+- **Below lg** each panel body previews at 12rem (192 px) with a fade at the bottom (see
+  [Responsive](#responsive)).
+- **An empty zone** shows a dashed placeholder — "No key metrics on your dashboard." / "No panels on
+  your dashboard." — whose **Add key metrics** / **Add panels** button opens the gallery at that
+  section. The empty state and the banners-only note are not shown while editing.
+- **Nothing remounts.** Each tile and panel renders through `WidgetCell` in both modes; edit mode
+  adds its chrome beside the widget and toggles attributes and classes, so entering or leaving never
+  remounts a widget: a panel keeps its scroll position, the Notifications list keeps its cache, and
+  Setup progress and Morning brief do not refetch.
+- **Focus scrolling stays clear of the chrome.** While editing, `scroll-padding` keeps a focused
+  control out from under the sticky header (4rem) and the edit bar (measured from the bar's top
+  edge, plus 8 px; 7rem until it is first measured, and re-measured when the bar or window resizes),
+  the page gets matching bottom padding so its last row can scroll clear of the bar (less whatever
+  its containers already pad below it: Layout's `<main>` reserves BottomNav's height below lg, and
+  counting it twice left about 80 px of dead space under the last row on a phone), and scroll
+  anchoring is off so a live reorder cannot make the browser jump the page. The previous values come
+  back on exit.
+
+### Dragging with a mouse or a finger
+
+- **Lift.** With a mouse, pen or trackpad, press on a tile or panel (its body, or its Move button)
+  and move 6 px. On touch, press and hold for 250 ms without moving more than 8 px; a quicker swipe
+  scrolls the page as usual. Where the device supports it, a touch pickup gives a short vibration.
+- **Live reflow.** The widget's own cell stays in the grid as the landing slot (a blue dashed
+  outline, its content hidden but still holding its height), and a compact ghost card — the title
+  and the width ("Key metric" for a tile), at most 480 × 280 px, keeping the point you grabbed —
+  follows the pointer. When the pointer passes the midline of another widget the page renders the
+  new order, so the **real CSS grid** reflows and the slot shows exactly where the widget will land;
+  the widgets it displaces glide to their new places. Over a gutter or the empty end of a row, the
+  widget goes after the last widget on that row to the left of the pointer. After each reorder the
+  pointer must move 8 px before the next one, and a pointer held still never keeps reordering. KPI
+  tiles move only within the KPI strip, panels only within the panel grid.
+- **Auto-scroll.** The page scrolls while the pointer is within 20% of the viewport's top or bottom
+  edge.
+- **Drop.** Releasing commits the order the slot showed as **one Undo step** (releasing outside the
+  grid keeps the last order shown); the ghost glides into the slot and fades out (180 ms), and focus
+  moves to the widget's Move button.
+- **Cancel.** Escape, switching away from the browser tab, or a window resize that crosses a Tailwind
+  breakpoint (640 / 768 / 1024 / 1280 px) cancels the drag, and the widgets glide back to the order
+  at pickup. A resize that stays inside one breakpoint — the iOS toolbar collapsing mid-drag — does
+  not cancel. A release that the drag library drops before it has registered the pickup is reported
+  as a cancel, so the page is never left stuck mid-drag.
+- A press while widgets are still gliding finishes the glides first, and lifts only when it lands on
+  the pressed widget's settled position.
+
+### Keyboard and the Move menu
+
+- **Tab order:** header, edit bar, the page's system banners (their Retry / Reload buttons), then
+  each KPI tile's and each panel's **Remove** and **Move** buttons, in order.
+- **On a Move button** (named "Move {title}", or "Move or resize {title}" for a panel): ArrowLeft /
+  ArrowUp moves the widget one place earlier in reading order, ArrowRight / ArrowDown one place
+  later, Home / End to the first / last place. An arrow with a modifier key is ignored. Each press is
+  one Undo step; focus stays on the same Move button, and its widget is scrolled into view. At an end
+  nothing moves and "{title} is already first." / "{title} is already last." is announced.
+- **Enter or Space** (or a click or tap without dragging) opens the **Move menu**: **Move to start ·
+  Move earlier · Move later · Move to end** (at the first place the first two are disabled, at the
+  last place the last two), and for a panel a **Width** group of six radios, each with a small 12-column glyph of its span. Opening
+  focuses the first enabled item. A move item moves the widget, closes the menu and returns focus to
+  the Move button. A width applies at once — the menu stays open with focus on the radio — and is
+  announced ("{title} width: Half.") 500 ms after the last change. **All widths chosen in one visit
+  to the menu are one Undo step**, and arriving back at the width the visit started with leaves no
+  step. Escape closes the menu and returns focus to the Move button; a press outside it, or focus
+  moving outside it, closes it. One menu is open at a time, and starting a drag closes it. It opens
+  below the button, opens above instead when it would run under the edit bar or off the bottom of
+  the viewport and fits under the sticky header, and otherwise scrolls itself into view; it grows
+  leftward from the cell's right edge, or rightward when that would cross the content area's left
+  edge.
+- **Escape never leaves edit mode.** It cancels a drag, closes the Move menu or closes a dialog.
+  There are no global shortcuts — no Ctrl/Cmd+Z, no Escape-to-exit.
+
+### Zones and widths
+
+Every widget belongs to one of three zones, and nothing moves between them:
+
+- **Banners** (Needs attention, Setup progress, Morning brief, Alert chips) are switched on or off,
+  only from the gallery's **Alerts & banners** section. They always render in the fixed order shown
+  in [Layout](#layout) and cannot be moved.
+- **KPI tiles** are ordered and have one size.
+- **Panels** are ordered and take one of six widths from the Move menu: Third, Narrow, Half, Wide,
+  Two-thirds or Full width — 4, 5, 6, 7, 8 or 12 of the 12 columns at xl (see
+  [Responsive](#responsive)).
+
+### Remove, Add widgets and Undo
+
+- **Remove (−)** takes the widget off the draft, and the widgets after it glide into the space.
+  Focus moves to the next widget's Remove button in that zone, else the previous one's, else **Add
+  widgets**, and "{title} removed from your dashboard. Undo is available." is announced.
+- **Add widgets** opens the gallery (a dialog at every screen size): **Alerts & banners** (a checkbox
+  per banner), then **Key metrics** and **Panels** — the widgets the viewer is
+  [eligible](#eligibility-versus-link-gating) for that are not on the dashboard, grouped by category,
+  each with its description, a panel's default width and an **Add** button. **Add appends the widget
+  to the end of its zone** (a panel at its default width, else Half). The gallery stays open, the
+  row leaves the list, focus moves to the next **Add** (else the previous one, else the gallery's
+  **Done**), and the gallery's own live region announces "{title} added at position n of n." Escape,
+  the backdrop, ✕ and **Done** close it without asking — every addition is already on the grid
+  behind it. If something was added, focus then moves to the last added widget's Move button, which
+  is scrolled into view and ringed for 1.2 s. Opened from an empty zone's placeholder, the gallery
+  lands on that section's heading; from **Add widgets**, at the top. The gallery shows static
+  descriptions only: it renders no widget and fetches nothing.
+- **Undo** (a bar button) reverts one step at a time: a drop, a keyboard or menu move, a remove, an
+  add, one Move-menu visit's widths, a banner switch. History holds 50 steps, and reloading the
+  saved layout after a **409** clears it. It announces "Undone: {step}." — for example "Undone:
+  moved Capacity Overview." With nothing to undo the button is `aria-disabled` but stays focusable.
+  There is no Ctrl/Cmd+Z.
+
+### Done, Cancel and Reset to default
+
+- **Done** closes any open Move menu, then:
+  - **nothing changed** (including a draft changed and changed back): leaves edit mode without a
+    request and announces "Finished customizing. Nothing changed.";
+  - **otherwise** it sends **one** `PUT /dashboard/layout` — the whole session in a single save —
+    through `useDashboardLayout`'s compare-and-swap, with the `expected_company_id` /
+    `expected_version` of the last server response (normally the entry re-read). It is
+    non-optimistic: Done shows a spinner but keeps keyboard focus, the bar's status line says "Saving
+    your dashboard layout…", and Add widgets, Undo, Reset, Cancel, dragging and every Remove and
+    Move button are locked until the server answers. Success shows the toast "Dashboard layout
+    saved" and leaves edit mode;
+  - **409** (the layout changed in another tab, or the active company changed): the bar's alert shows
+    the server's message with a focused **Reload saved layout**. Done, Reset, Undo, Add widgets,
+    dragging and the widget chrome stay locked until the reload succeeds; Cancel stays available. The
+    reload replaces the draft with the saved layout, clears Undo, says "Reloaded your saved layout.
+    Your unsaved changes were discarded." and focuses the heading; a reload that fails says "Your
+    saved layout could not be reloaded. Try again." and keeps focus on the button;
+  - **any other failure** (for example the **503** when the audit row cannot be written): the alert
+    shows the server's message (or "Your dashboard layout was not saved. Try again."), the draft is
+    kept and focus returns to Done.
+- **Cancel** is disabled only while a request is in flight. With unsaved changes it asks first,
+  through the browser's confirm ("You have unsaved changes. Discard them?" — `useUnsavedChanges`'s
+  `confirmDiscard`); declining keeps editing. It sends nothing, the widgets glide back to the saved
+  layout, and "Customizing cancelled. Your saved layout is showing." is announced. After a **409**,
+  Cancel also re-reads the saved layout, so the page and the next edit session start from the
+  server's current version.
+- **Reset to default** is disabled when no layout is saved (the server answers `layout: null` —
+  tooltip "You are already using the default layout") and while the editor is locked. It asks first
+  ("Reset dashboard to default?" — "Your saved layout will be replaced by the standard dashboard."),
+  and the confirmation cannot be dismissed while it runs. Confirming sends
+  `POST /dashboard/layout/reset` (the same compare-and-swap), shows "Dashboard reset to default" and
+  leaves edit mode, discarding the draft. A **409** closes the confirmation and focuses **Reload
+  saved layout**; any other failure closes it, shows the alert and focuses Reset.
+- **Leaving the page with unsaved changes** asks "Leave with unsaved changes?" for in-app
+  navigation, and a refresh or tab close gets the browser's own prompt. **While Done's save is in
+  flight that guard is off**, because leaving then discards nothing: the PUT still lands, and its
+  outcome is shown as a toast after you have left — "Dashboard layout saved", or "Your dashboard
+  layout changes were not saved. Your previous layout is unchanged." A reset that settles after you
+  left reports the same way ("Dashboard reset to default" / "Your dashboard was not reset. Your
+  saved layout is unchanged.").
+- **A session change** (sign-out, another user, another company, a read-only view) ends edit mode
+  in the very render it happens, so the old draft is never shown, fetched for or saved. A draft
+  with unsaved changes gets the warning toast "Your session changed, so unsaved dashboard edits were
+  discarded."; focus that was lost goes to Customize (or the main content area while Customize is
+  disabled); a save, reset or reload still in flight is ignored when it answers.
+
+### Widgets edit mode cannot show
+
+- **Widgets the viewer cannot see right now.** Saved widgets the viewer is not
+  [eligible](#eligibility-versus-link-gating) for are not in the draft and not offered in the gallery,
+  and a save **keeps them in place**. The bar counts the ones the viewer chose: "N widgets in your
+  saved layout are not available to you right now; they are kept and will reappear if access
+  returns." A widget the stock default includes is never counted (`countCarriedWidgets`), so it is
+  kept without a note — today that is only Setup progress, which non-admins never see.
+- **Widgets this version of the app does not know.** Ids saved by a newer version of the SPA (a
+  fresh tab after a deploy) are not shown and are **dropped** by a save from this version. The bar
+  warns before Done: "N widgets from a newer version of the app aren't shown here and will be
+  removed if you save. Refresh the page to keep them."
+
+### Refreshes, motion and screen readers while editing
+
+- **Data keeps refreshing.** The 30 s poll and WebSocket pushes continue in edit mode, and keyboard
+  moves never pause them. **Only while a pointer or touch drag is in progress** are poll and push
+  refreshes held, together with any background request a widget makes itself — a refresh that
+  changed heights would move the grid under the pointer. When the drag ends or is cancelled (or edit
+  mode ends mid-drag), **one** catch-up refresh runs if anything was held: a full one, heartbeat
+  included, which still waits for a hidden tab to become visible. A manual refresh is never held.
+  What edit mode fetches is in [Data fetching](#data-fetching).
+- **Animation.** Every edit — a live reorder, a move, a remove, an add, a width, a banner switch,
+  Undo, a cancelled drag, Cancel, a reload or a reset — animates the tiles and panels it moves as one
+  FLIP: a widget that moved glides to its new place (200 ms) and a new one fades in (180 ms). Data
+  refreshes never animate. With `prefers-reduced-motion` there is no FLIP and no drop animation, and
+  scrolling a moved widget into view jumps instead of gliding.
+- **Names and descriptions.** Each Move button is described by one shared hint ("Use the arrow keys
+  to move this widget one place. Home and End move it to the first or last place. Press Enter for
+  more options.") followed by its position ("Position n of m."); each Remove button is named "Remove
+  {title}". The drag surface and the ghost are hidden from assistive technology; the Move button is
+  their equivalent.
+- **Announcements** go to the page's polite live region:
+
+  | Event | Announcement |
+  |---|---|
+  | Entering | "Customizing your dashboard. Drag widgets to rearrange them, or use each widget's Move button. Press Done to save." |
+  | Keyboard or menu move | "{title}, position n of m." (spoken once — see below) |
+  | Move at an end | "{title} is already first." / "{title} is already last." |
+  | Width | "{title} width: {width}." (500 ms after the last change) |
+  | Remove | "{title} removed from your dashboard. Undo is available." |
+  | Undo | "Undone: {step}." |
+  | Drag pickup | "Picked up {title}, position n of m." |
+  | Live reorder during a drag | "{title}, position n of m." (500 ms after the last reorder) |
+  | Drop | "{title} dropped at position n of m." / "{title} stays at position n of m." |
+  | Drag cancelled | "Move cancelled. {title} is back at position n of m." |
+  | Done with nothing changed | "Finished customizing. Nothing changed." |
+  | Cancel | "Customizing cancelled. Your saved layout is showing." |
+
+  The gallery's "{title} added at position n of n." goes to the gallery's own live region, because
+  an open dialog hides the page's region from VoiceOver. The bar's status line speaks "Saving your
+  dashboard layout…", "Reloading your saved layout…" and the reload notice. The drag library's own
+  announcements are switched off. A keyboard or menu move's position is spoken **once**: when the
+  move puts focus back on the Move button (a move later, or any move from the menu), the screen
+  reader re-reads the button's description, which ends with the new position, so the live region
+  stays quiet; only a move that leaves focus undisturbed (a keyboard move earlier) uses the live
+  region. A screen reader set not to read descriptions therefore does not hear the new position after
+  a move later or a menu move.
+- **Focus.** Every outcome names a target, so focus never drops to the page body:
+
+  | After | Focus goes to |
+  |---|---|
+  | Entering | The edit bar's heading |
+  | An arrow, Home or End; a Move-menu move | The same widget's Move button (its widget scrolled into view) |
+  | A width radio | Stays on the radio |
+  | Escape in the Move menu | The Move button |
+  | A drop or a cancelled drag | The dragged widget's Move button |
+  | Remove | The next widget's Remove button in the zone, else the previous one's, else **Add widgets** |
+  | Undo | Stays on Undo |
+  | Add in the gallery | The next **Add**, else the previous one, else the gallery's **Done** |
+  | Closing the gallery | The last added widget's Move button; with nothing added, the button that opened it |
+  | Done, Cancel, a successful reset | The header Customize button |
+  | A **409** on save or reset | **Reload saved layout** |
+  | Reload succeeded / failed | The edit bar's heading / stays on **Reload saved layout** |
+  | Any other save / reset failure | Done / Reset |
+  | A refused entry (read-only re-read, failed re-read, the editor's code failing to load) | The header Customize button |
+
+### How edit mode is built
+
+- **One widget tree for both modes.** `WidgetCell` renders each KPI tile and panel in view and edit
+  mode alike — the widget's body is the same element in both, with edit mode adding the chrome and
+  the drag surface beside it and toggling `role`, `inert` and classes — and the widget renders inside
+  a memoized body with its own widget-level error boundary, so a cell re-render never re-renders the
+  widget and a crashed widget can still be moved or removed.
+- **Editor state** lives in `useLayoutEditor` (main bundle): a pure reducer (`editorState.ts`: the
+  draft, the Undo history and the drag session), the server verbs through the unchanged
+  `useDashboardLayout`, focus, announcements and the unsaved-changes guard. Edit mode renders the
+  draft run through `buildSavePayload` and `resolveLayout` — exactly what Done would store, resolved
+  as view mode will resolve it; a drag's live order is render-only until the drop commits it.
+  `editorCopy.ts` holds the copy more than one module must agree on — every message
+  `useLayoutEditor` announces or toasts, the Move / Remove names and zone-list labels, and every
+  element id the hook moves focus to — so the hook, the components and their tests import one copy.
+  Text only one component renders stays in that component (the bar's heading and buttons, the Move
+  menu's items, the gallery's text, a cell's "Position N of M."), as does the gallery's
+  section-heading id, which the gallery focuses itself; the page's "Your saved dashboard layout
+  couldn't be loaded…" refusal is in `Dashboard.tsx`.
+- **The drag layer is a lazy chunk.** `@dnd-kit/core` (pinned exactly, 6.3.1) is imported by one
+  module, `DashboardDragLayer.tsx`, which is reached only through `loadDragLayer.ts`'s dynamic
+  `import()` — so nothing of dnd-kit is in the entry bundle, and the layer mounts only while editing.
+  It is a **sibling** of the widget tree (mounting it never remounts a widget) and binds to the
+  page's own cells through `dragBridge.ts`; the cells forward their mouse-down / touch-start to it.
+  Where a dragged widget lands is decided by pure functions in `dragPlanning.ts` from the boxes the
+  browser laid out; the animation is `useFlipLayout.ts` (Web Animations API).
+- **No server change.** Storage, API, schema, permissions and audit are what PR #326 shipped: Done is
+  the existing `PUT /dashboard/layout` and Reset the existing `POST /dashboard/layout/reset`, each
+  writing one required audit row per real change.
+
+### Decisions open to change
+
+These were decided for the first version of edit mode and can be revisited:
+
+1. **In-place edit mode with a bottom bar, saved by Done.** The whole session is one save; there is
+   no autosave per drag, because each save writes an audit row and bumps the version. The button
+   could read "Save layout" instead of "Done".
+2. **A read-only session gets a toast** explaining why it cannot customize, instead of a disabled
+   editor (the first release opened a read-only dialog).
+3. **New widgets come from the Add widgets gallery and land at the end of their section**; the user
+   then drags them into place. Dragging straight out of the gallery is not built.
+4. **Widths are the six named sizes, chosen in each panel's Move menu.** There are no drag-to-resize
+   handles, KPI tiles have one size, banners are on/off in a fixed order, and widgets cannot cross
+   between the KPI strip and the panel grid.
+5. **The instrument-panel look rather than Apple mimicry:** no jiggle, square "−" badges, dashed
+   hairline outlines.
+6. **Undo is a bar button, with no Ctrl/Cmd+Z**, and Cancel discards the whole session, asking first
+   when there are changes.
 
 ### Persistence
 
@@ -238,9 +558,10 @@ separate layout in each. Nothing is kept in browser storage. Every save and rese
 audit row (resource type `dashboard_layout`), so layout changes appear in the Audit Log.
 
 - **Who can save:** any role that can open `/`, but only from an **interactive person's session in a
-  writable company**. In a read-only company view the page still renders the saved layout, and the
-  dialog opens read-only with the notice "This session can't save a dashboard layout — read-only
-  company view or an API/kiosk credential." An API token can read the layout (`can_edit: false`)
+  writable company**. In a read-only company view the page still renders the saved layout, but
+  **Customize** does not enter edit mode: it shows the info toast "This session can't save a
+  dashboard layout — read-only company view or an API/kiosk credential." (see
+  [Entering edit mode](#entering-edit-mode)). An API token can read the layout (`can_edit: false`)
   but not save it; a kiosk badge token is refused on every verb by its path fence. See
   [`docs/RBAC_PERMISSIONS.md`](RBAC_PERMISSIONS.md#dashboard).
 - **The server checks shape, not membership.** It accepts any well-formed widget id and width; the
@@ -290,7 +611,7 @@ company's role overrides; which default roles hold each is in
 | `presence` | Signed In Right Now | panel, `narrow` | Heartbeat | Everyone |
 | `recent_completions` | Recent Completions | panel, `full` | Heartbeat | Everyone |
 
-**Opt-in** (added from Customize; two core KPI tiles plus the panels in `EXTRA_WIDGETS`,
+**Opt-in** (added from Customize → **Add widgets**; two core KPI tiles plus the panels in `EXTRA_WIDGETS`,
 `widgets/extra/index.ts`). Every one reads an endpoint that already existed:
 
 | Id | Title | Zone (default width) | Source → endpoint | Shown to | Refresh floor |
@@ -325,7 +646,7 @@ Two separate checks, both built on the same `usePermissions().can` that `Private
 sidebar use (`components/dashboard/useWidgetEligibility.ts`):
 
 - **Eligibility** (`isEligible` on a widget definition) decides whether a widget is offered in the
-  dialog and rendered. It is a UX proxy that mirrors the endpoint's server gate as closely as the
+  Add widgets gallery and rendered. It is a UX proxy that mirrors the endpoint's server gate as closely as the
   client can; the endpoint still enforces its own authorization, and a widget whose source answers
   **403** renders "Not available for your role" inside the widget (never in the page's error banner,
   and no poll or manual refresh asks again while the page stays open — see Errors below).
@@ -337,10 +658,12 @@ sidebar use (`components/dashboard/useWidgetEligibility.ts`):
   **Review affected records** button are hidden.
 
 Saved widgets the viewer is not eligible for right now are not rendered and not fetched, but a save
-**keeps them**, in place, and the dialog says how many ("…they are kept and will reappear if access
-returns"), so a temporary permission change never destroys a layout. A widget id this bundle does not
-know (a layout saved by a newer or older SPA) is ignored when rendering and **dropped** on the next
-save from this bundle.
+**keeps them**, in place, and the edit bar says how many ("…they are kept and will reappear if access
+returns" — a widget the stock default includes, today only Setup progress, is kept without a note), so
+a temporary permission change never destroys a layout. A widget id this bundle does not know (a layout
+saved by a newer or older SPA) is ignored when rendering and **dropped** on the next save from this
+bundle; the edit bar warns before Done (see
+[Widgets edit mode cannot show](#widgets-edit-mode-cannot-show)).
 
 ### Cross-links degrade when their target is hidden
 
@@ -366,6 +689,15 @@ non-interactive text:
   request sequence per source, so one widget's slow request can never discard another's. Nothing is
   fetched for widgets until the saved layout has settled (at most 3 s). A source that becomes needed
   is fetched at once; one that stops being needed has its state dropped and any late answer ignored.
+- **In edit mode** the page fetches the saved layout's sources **plus** the draft's, the draft's
+  only once its membership has been unchanged for 400 ms (`EDIT_SOURCE_SETTLE_MS` in `Dashboard.tsx`):
+  an added widget's source is fetched 400 ms after the add, and an add undone inside that window
+  sends nothing. A saved widget removed in the draft keeps its source — and that source's state, a
+  403 included — while you edit, so Cancel puts it back with its data at once. Leaving edit mode
+  drops draft-only sources immediately. Only the current edit session's draft counts (a settled value
+  left over from a cancelled session is never fetched), a drag never changes membership, and the
+  gallery never fetches. Background refreshes pause only during a drag — see
+  [Refreshes, motion and screen readers while editing](#refreshes-motion-and-screen-readers-while-editing).
 - **Floors.** Background ticks (the 30 s poll and pushes) skip a source younger than its floor
   (table above) and never replace a request still in flight unless it is older than
   `max(floor, 30 s)`. A manual refresh (the header button, "Retry unavailable sections", a widget's
@@ -391,10 +723,12 @@ non-interactive text:
   is never answered from that cache as a success.
 - **Errors.** A failed source keeps its last verified data and is named in the page's widget-sources
   banner. A **403** shows in the widget only and is terminal for that source while the page stays
-  open: no poll or manual refresh asks again. Leaving `/` and coming back, removing and re-adding
-  the widget, or a session change asks the server again.
+  open: no poll or manual refresh asks again. Leaving `/` and coming back, saving the layout without
+  the widget and adding it back later, or a session change asks the server again.
 - **Session changes.** Signing out, switching user or company, or entering a read-only company view
-  re-reads the saved layout, closes the dialog and clears every source's state and cache.
+  re-reads the saved layout, ends edit mode (see
+  [Done, Cancel and Reset to default](#done-cancel-and-reset-to-default)) and clears every source's
+  state and cache.
 
 ### Loading the saved layout
 
@@ -407,15 +741,14 @@ skeleton until it settles:
 - **404 or 405**: the API predates this feature (the SPA can deploy before the API). The default
   renders, **Customize is hidden**, and no notice shows.
 - **Any other failure** (or a response of the wrong shape): the default renders with the same
-  notice. **Customize** then re-reads the layout first and opens the dialog only if that succeeds.
-  A failed reload never replaces a layout already on screen.
+  notice. **Customize** re-reads the layout before every entry and, after a failed load, enters
+  edit mode only if that re-read succeeds (see [Entering edit mode](#entering-edit-mode)). A failed
+  reload never replaces a layout already on screen.
 
-Saving is **non-optimistic**: the dialog stays open with a spinner until the server answers, and
-sends the `expected_company_id` / `expected_version` of the last server response. A **409** (the
-layout changed in another tab, or the active company changed) shows the server's message in the
-dialog with **Reload saved layout**, which replaces the draft with what is saved and says so
-("Reloaded your saved layout. Your unsaved changes were discarded."). Success closes the dialog with
-"Dashboard layout saved" (reset: "Dashboard reset to default").
+Saves and resets happen only from edit mode, non-optimistically, with the `expected_company_id` /
+`expected_version` of the last server response — see
+[Done, Cancel and Reset to default](#done-cancel-and-reset-to-default) for the **409** and
+**Reload saved layout** path.
 
 ### Which "overdue" each surface uses
 
@@ -446,6 +779,11 @@ visible differences:
 - **Recent Completions sits inside the panel grid** as a full-width cell instead of a separate card
   below it; its markup and height cap are unchanged.
 - **Background refreshes pause in a hidden tab** (poll and pushes), with one catch-up load on return.
+- **Each KPI tile has its own widget error boundary**, as each panel already had: a tile that throws
+  while rendering shows the error in its own slot.
+- **Customize edits the page in place.** The first release of customization (PR #326) opened a
+  Customize dialog with ↑ / ↓ buttons; it was replaced by [edit mode](#customizing-the-dashboard),
+  and a read-only session now gets a toast instead of a read-only dialog.
 - **Platform admins** no longer lose every permission check after a password login until the next
   reload (`utils/permissions.ts`: `platform_admin` ignores per-company role overrides, matching the
   backend, where it passes every gate).
@@ -454,8 +792,8 @@ visible differences:
 
 1. **Define it.** Add an entry to `EXTRA_WIDGETS` (`components/dashboard/widgets/extra/index.ts`)
    for an opt-in panel, or to `CORE_WIDGETS` (`widgetRegistry.ts`) for a banner or KPI tile: a
-   unique `id` matching the server's pattern `^[a-z][a-z0-9_.]{0,63}$`, `zone`, dialog `title` /
-   `description`, `category`, `sources`, a `defaultSize` for a panel, and an `isEligible` that
+   unique `id` matching the server's pattern `^[a-z][a-z0-9_.]{0,63}$`, `zone`, the `title` (edit
+   mode's names and the gallery) and gallery `description`, `category`, `sources`, a `defaultSize` for a panel, and an `isEligible` that
    mirrors the endpoint's server gate (`can('<route permission>')`, or `hasRole([...])` where the
    endpoint uses `require_role`). Omitting `isEligible` offers it to everyone who can open `/`.
 2. **Give it data.** Reuse an existing source key when another widget already reads the endpoint

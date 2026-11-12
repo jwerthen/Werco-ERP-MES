@@ -1,7 +1,9 @@
 /**
  * Customizable dashboard, page level: a saved layout decides what renders and what is
  * fetched; cross-links and links degrade instead of dead-ending; an empty layout and a
- * layout that cannot load both leave the user somewhere useful; Customize round-trips.
+ * layout that cannot load both leave the user somewhere useful; Customize round-trips
+ * through edit mode (the drag layer is the typed fake; edit mode itself is covered in
+ * depth by Dashboard.editMode.test.tsx).
  */
 import React from 'react';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -13,7 +15,12 @@ import { setCustomPermissions } from '../utils/permissions';
 import { clearDashboardSourceCache } from '../components/dashboard/useDashboardSources';
 import { ToastProvider } from '../components/ui';
 import { useWebSocket } from '../hooks/useWebSocket';
+import { dragHarness } from '../test-utils/fakeDragLayer';
 import Dashboard from './Dashboard';
+
+jest.mock('../components/dashboard/editor/loadDragLayer', () =>
+  jest.requireActual('../test-utils/fakeDragLayer').createFakeLoadDragLayerModule()
+);
 
 jest.mock('../services/api', () => ({
   __esModule: true,
@@ -156,12 +163,29 @@ const kpiStrip = () => document.querySelector('.grid.grid-cols-2[data-tour="dash
 const stripLabels = () =>
   Array.from(kpiStrip()?.children ?? []).map(child => child.querySelector('.stat-label')?.textContent);
 
+/** The fixed edit bar (a region named by its heading); present only in edit mode. */
+const editBar = () => screen.queryByRole('region', { name: 'Customizing dashboard' });
+/** Click a Customize control and wait for edit mode (focus lands on the bar heading). */
+async function enterEditMode(button: HTMLElement) {
+  fireEvent.click(button);
+  await waitFor(() => expect(screen.getByRole('heading', { name: 'Customizing dashboard' })).toHaveFocus());
+}
+/** Add widgets through the gallery, then close it. */
+async function addFromGallery(...names: string[]) {
+  fireEvent.click(within(editBar()!).getByRole('button', { name: 'Add widgets' }));
+  const gallery = await screen.findByRole('dialog', { name: 'Add widgets' });
+  names.forEach(name => fireEvent.click(within(gallery).getByRole('button', { name })));
+  fireEvent.click(within(gallery).getByRole('button', { name: 'Done' }));
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Add widgets' })).not.toBeInTheDocument());
+}
+
 beforeAll(() => {
   window.HTMLElement.prototype.scrollIntoView = jest.fn();
 });
 
 beforeEach(() => {
   jest.clearAllMocks();
+  dragHarness.reset();
   clearDashboardSourceCache();
   setCustomPermissions(null);
   mockUser = { id: 1, role: 'manager', is_superuser: false };
@@ -395,21 +419,21 @@ describe('links the router would refuse are not rendered as links', () => {
   });
 });
 
-it('returns focus to the header Customize button when a save removes the empty state that opened the dialog', async () => {
+it('returns focus to the header Customize button when a save replaces the empty state edit mode was entered from', async () => {
   mockedApi.getDashboardLayout.mockResolvedValue(layoutResponse(layoutOf()));
   mockedApi.saveDashboardLayout.mockImplementation(async body => layoutResponse(body.layout, { version: 3 }));
   renderDashboard();
   await loaded();
   const [headerButton, emptyStateButton] = screen.getAllByRole('button', { name: 'Customize dashboard' });
   emptyStateButton.focus();
-  fireEvent.click(emptyStateButton);
-  const dialog = await screen.findByRole('dialog', { name: 'Customize dashboard' });
-  fireEvent.click(within(dialog).getByRole('button', { name: 'Add Overdue' }));
+  await enterEditMode(emptyStateButton);
+  await addFromGallery('Add Overdue');
   await act(async () => {
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Save layout' }));
+    fireEvent.click(within(editBar()!).getByRole('button', { name: 'Done' }));
   });
-  await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Customize dashboard' })).not.toBeInTheDocument());
+  await waitFor(() => expect(editBar()).not.toBeInTheDocument());
   expect(screen.queryByText('Your dashboard is empty')).not.toBeInTheDocument();
+  expect(stripLabels()).toEqual(['Overdue']);
   expect(headerButton).toHaveFocus();
 });
 
@@ -423,8 +447,8 @@ it('keeps an anchor and a Customize action on a layout that holds only banners',
   const anchor = document.querySelector('[data-tour="dashboard-stats"]') as HTMLElement;
   expect(anchor).not.toBeNull();
   expect(within(anchor).getByText(/Only alerts and banners are on your dashboard/)).toBeInTheDocument();
-  fireEvent.click(within(anchor).getByRole('button', { name: 'Customize dashboard' }));
-  expect(await screen.findByRole('dialog', { name: 'Customize dashboard' })).toBeInTheDocument();
+  await enterEditMode(within(anchor).getByRole('button', { name: 'Customize dashboard' }));
+  expect(editBar()).toBeInTheDocument();
 });
 
 it('offers Customize from an empty dashboard', async () => {
@@ -434,8 +458,8 @@ it('offers Customize from an empty dashboard', async () => {
   expect(screen.getByText('Your dashboard is empty')).toBeInTheDocument();
   const buttons = screen.getAllByRole('button', { name: 'Customize dashboard' });
   expect(buttons).toHaveLength(2);
-  fireEvent.click(buttons[1]);
-  expect(await screen.findByRole('dialog', { name: 'Customize dashboard' })).toBeInTheDocument();
+  await enterEditMode(buttons[1]);
+  expect(editBar()).toBeInTheDocument();
   expect(mockedApi.getQualitySummary).not.toHaveBeenCalled();
   expect(mockedApi.getCapacityHeatmap).not.toHaveBeenCalled();
 });
@@ -539,10 +563,12 @@ describe('a session-scope change in place', () => {
     expect(mockedApi.getCapacityHeatmap.mock.calls.length).toBe(before.capacity);
   });
 
-  it('closes an open Customize dialog, so the previous session’s draft can never be saved into the new one', async () => {
+  it('ends edit mode, so the previous session’s draft can never be saved into the new one', async () => {
     sessionStorage.setItem('token', tokenFor({ sub: '1', cid: 1 }));
     let resolveNext!: (value: DashboardLayoutResponse) => void;
     mockedApi.getDashboardLayout
+      .mockResolvedValueOnce(layoutResponse(layoutOf({ id: 'kpi.overdue' })))
+      // Customize re-reads the saved layout before entering.
       .mockResolvedValueOnce(layoutResponse(layoutOf({ id: 'kpi.overdue' })))
       .mockImplementationOnce(
         () =>
@@ -552,33 +578,36 @@ describe('a session-scope change in place', () => {
       );
     renderDashboard();
     await loaded();
-    fireEvent.click(screen.getByRole('button', { name: 'Customize dashboard' }));
-    const dialog = await screen.findByRole('dialog', { name: 'Customize dashboard' });
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Add Due Today' }));
+    await enterEditMode(screen.getByRole('button', { name: 'Customize dashboard' }));
+    await addFromGallery('Add Due Today');
+    expect(within(editBar()!).getByText('Unsaved changes')).toBeInTheDocument();
 
     await act(async () => {
       sessionStorage.setItem('token', tokenFor({ sub: '1', cid: 2 }));
       window.dispatchEvent(new Event('werco:auth-token-changed'));
     });
-    expect(screen.queryByRole('dialog', { name: 'Customize dashboard' })).not.toBeInTheDocument();
+    expect(editBar()).not.toBeInTheDocument();
+    expect(dragHarness.mounted).toBe(false);
     // Customize waits for the new session's layout.
     expect(screen.getByRole('button', { name: 'Customize dashboard' })).toBeDisabled();
 
     await act(async () => resolveNext(layoutResponse(null, { company_id: 2 })));
     await waitForLoaded();
-    expect(screen.queryByRole('dialog', { name: 'Customize dashboard' })).not.toBeInTheDocument();
+    expect(editBar()).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Remove Due Today' })).not.toBeInTheDocument();
     expect(mockedApi.saveDashboardLayout).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: 'Customize dashboard' })).toBeEnabled();
   });
 });
 
-it('re-reads a failed layout before opening Customize', async () => {
+it('re-reads a failed layout before entering edit mode', async () => {
   mockedApi.getDashboardLayout.mockRejectedValueOnce(httpError(500)).mockResolvedValue(layoutResponse(null));
   renderDashboard();
   await loaded();
-  fireEvent.click(screen.getByRole('button', { name: 'Customize dashboard' }));
-  expect(await screen.findByRole('dialog', { name: 'Customize dashboard' })).toBeInTheDocument();
+  await enterEditMode(screen.getByRole('button', { name: 'Customize dashboard' }));
+  expect(editBar()).toBeInTheDocument();
   expect(mockedApi.getDashboardLayout).toHaveBeenCalledTimes(2);
+  expect(screen.queryByText(/couldn.t be loaded; showing the default/)).not.toBeInTheDocument();
 });
 
 it('hides Customize, without a notice, when the API predates the feature (404)', async () => {
@@ -590,7 +619,7 @@ it('hides Customize, without a notice, when the API predates the feature (404)',
   expect(screen.queryByText(/couldn.t be loaded/)).not.toBeInTheDocument();
 });
 
-it('saves a customized layout and renders it (newly needed sources fetched at once)', async () => {
+it('saves a customized layout and renders it (a newly needed source fetched once)', async () => {
   mockedApi.getDashboardLayout.mockResolvedValue(
     layoutResponse(layoutOf({ id: 'kpi.overdue' }, { id: 'kpi.due_today' }))
   );
@@ -599,12 +628,11 @@ it('saves a customized layout and renders it (newly needed sources fetched at on
   await loaded();
   expect(mockedApi.getQualitySummary).not.toHaveBeenCalled();
 
-  fireEvent.click(screen.getByRole('button', { name: 'Customize dashboard' }));
-  const dialog = await screen.findByRole('dialog', { name: 'Customize dashboard' });
-  fireEvent.click(within(dialog).getByRole('button', { name: 'Remove Overdue' }));
-  fireEvent.click(within(dialog).getByRole('button', { name: 'Add Open NCRs' }));
+  await enterEditMode(screen.getByRole('button', { name: 'Customize dashboard' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Remove Overdue' }));
+  await addFromGallery('Add Open NCRs');
   await act(async () => {
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Save layout' }));
+    fireEvent.click(within(editBar()!).getByRole('button', { name: 'Done' }));
   });
 
   expect(mockedApi.saveDashboardLayout).toHaveBeenCalledWith({
@@ -612,7 +640,7 @@ it('saves a customized layout and renders it (newly needed sources fetched at on
     expected_version: 2,
     layout: { format_version: 1, widgets: [{ id: 'kpi.due_today' }, { id: 'kpi.open_ncrs' }] },
   });
-  await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Customize dashboard' })).not.toBeInTheDocument());
+  await waitFor(() => expect(editBar()).not.toBeInTheDocument());
   expect(stripLabels()).toEqual(['Due Today', 'Open NCRs']);
   await waitFor(() => expect(mockedApi.getQualitySummary).toHaveBeenCalledTimes(1));
   await waitFor(() => expect(within(kpiStrip()!).getByText('2')).toBeInTheDocument());

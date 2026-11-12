@@ -6,11 +6,15 @@
  *   widgets the viewer is not eligible for are dropped; banners keep registry order;
  *   KPIs and panels keep saved order; a panel size that is not a known PanelSize falls
  *   back to the widget's `defaultSize` (the widget is never dropped for its size).
- * - `buildSavePayload` turns the Customize dialog's draft (eligible widgets only) back
- *   into a full layout, CARRYING known-but-ineligible saved entries through unchanged so
- *   a temporary permission change never destroys a layout.
+ * - `buildSavePayload` turns the edit-mode draft (eligible widgets only) back into a full
+ *   layout, CARRYING known-but-ineligible saved entries through unchanged so a temporary
+ *   permission change never destroys a layout.
  * - `isSameLayout` compares two layouts the way the page would render them, so an
- *   untouched dialog is never "dirty".
+ *   untouched editor is never "dirty".
+ * - The draft operations (`withZoneOrder`, `moveWidgetTo`, `removeWidget`, `addWidget`,
+ *   `setPanelSize`, `setBannerVisible`) are what dashboard edit mode applies. Each is
+ *   immutable and returns the SAME draft object when it changes nothing, so the editor's
+ *   history records a step only for a real change (`next !== draft`).
  *
  * Every id lookup is a Map lookup (`registry.byId`): a stored `constructor` is unknown.
  */
@@ -28,7 +32,7 @@ import {
   type WidgetEligibilityContext,
 } from './widgetTypes';
 
-/** What the Customize dialog edits: the viewer's ELIGIBLE widgets only. */
+/** What dashboard edit mode edits: the viewer's ELIGIBLE widgets only. */
 export interface LayoutDraft {
   /** Visible banner ids (render order is always registry order). */
   banners: string[];
@@ -113,7 +117,7 @@ export function resolveLayout(
   };
 }
 
-/** The dialog's starting draft: exactly what the page renders for this viewer. */
+/** The editor's starting draft: exactly what the page renders for this viewer. */
 export function draftFromLayout(
   saved: LayoutInput,
   ctx: WidgetEligibilityContext,
@@ -204,12 +208,12 @@ export function isSameLayout(a: LayoutInput, b: LayoutInput, registry: WidgetReg
 
 /**
  * How many widgets the viewer put in their SAVED layout but cannot currently see (they are
- * kept on save, and the dialog says so).
+ * kept on save, and the edit bar says so).
  *
  * Only a saved layout is counted: `null` (no saved layout — the stock default) is 0. And a
  * stock-default widget the viewer is not eligible for is never counted, saved or not: it
  * is in the layout because the default put it there (`buildSavePayload` carries it through
- * a non-admin's first save so an untouched dialog stays clean), not because the viewer
+ * a non-admin's first save so an untouched editor stays clean), not because the viewer
  * chose it — today that is the admin-only setup nudge, gated by role rather than by a
  * permission that may come back.
  */
@@ -227,7 +231,118 @@ export function countCarriedWidgets(
   }).length;
 }
 
+/**
+ * How many distinct widgets the SAVED layout names that this bundle does not know (a layout
+ * saved by a newer SPA, e.g. from a fresh tab after a deploy). They are never drafted or
+ * carried, so a save from this bundle drops them (docs/DASHBOARD.md); the edit bar says so
+ * before Done. `null` (no saved layout) is 0.
+ */
+export function countUnknownWidgets(saved: LayoutInput, registry: WidgetRegistry = DASHBOARD_REGISTRY): number {
+  if (saved == null) return 0;
+  const unknown = new Set<string>();
+  for (const entry of entriesOf(saved, registry)) {
+    if (entry && typeof entry.id === 'string' && !registry.byId.has(entry.id)) unknown.add(entry.id);
+  }
+  return unknown.size;
+}
+
 /** True when no widget at all would render. */
 export function isEmptyLayout(resolved: ResolvedLayout): boolean {
   return resolved.banners.length === 0 && resolved.kpis.length === 0 && resolved.panels.length === 0;
+}
+
+// ── Draft operations (dashboard edit mode) ─────────────────────────────────────
+// Pure and immutable. Each returns the SAME draft object when nothing changes (an unknown
+// id, an out-of-zone id, an unchanged position, size or visibility), which is what lets the
+// editor's history skip no-op steps by reference.
+
+/** The two zones a user reorders. Banners are only switched on and off, in registry order. */
+export type EditableZone = 'kpi' | 'panel';
+
+/** The widget ids of one editable zone, in render order (a fresh array). */
+export function zoneIds(draft: LayoutDraft, zone: EditableZone): string[] {
+  return zone === 'kpi' ? [...draft.kpis] : draft.panels.map(panel => panel.id);
+}
+
+function sameIds(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((id, index) => id === b[index]);
+}
+
+/**
+ * Put one zone in `order`. Only a REORDER is accepted: when `order` does not name exactly
+ * the zone's current widgets (an added, missing or repeated id), the draft is returned
+ * unchanged. Panels keep their sizes.
+ */
+export function withZoneOrder(draft: LayoutDraft, zone: EditableZone, order: readonly string[]): LayoutDraft {
+  const current = zoneIds(draft, zone);
+  if (sameIds(current, order)) return draft;
+  if (order.length !== current.length || new Set(order).size !== order.length) return draft;
+  const members = new Set(current);
+  if (!order.every(id => members.has(id))) return draft;
+  if (zone === 'kpi') return { ...draft, kpis: [...order] };
+  const byId = new Map(draft.panels.map(panel => [panel.id, panel] as const));
+  return { ...draft, panels: order.map(id => byId.get(id)!) };
+}
+
+/**
+ * Move `id` to position `index` of its zone (0-based; clamped to the first and last place).
+ * Unchanged when `id` is not in the zone or is already there.
+ */
+export function moveWidgetTo(draft: LayoutDraft, zone: EditableZone, id: string, index: number): LayoutDraft {
+  const order = zoneIds(draft, zone);
+  const from = order.indexOf(id);
+  if (from < 0 || Number.isNaN(index)) return draft;
+  const to = Math.max(0, Math.min(order.length - 1, Math.trunc(index)));
+  if (to === from) return draft;
+  order.splice(from, 1);
+  order.splice(to, 0, id);
+  return withZoneOrder(draft, zone, order);
+}
+
+/** Take `id` off its zone. Unchanged when it is not there. */
+export function removeWidget(draft: LayoutDraft, zone: EditableZone, id: string): LayoutDraft {
+  if (zone === 'kpi') {
+    return draft.kpis.includes(id) ? { ...draft, kpis: draft.kpis.filter(kpi => kpi !== id) } : draft;
+  }
+  return draft.panels.some(panel => panel.id === id)
+    ? { ...draft, panels: draft.panels.filter(panel => panel.id !== id) }
+    : draft;
+}
+
+/**
+ * Append a KPI or panel to the END of its zone; a panel takes its `defaultSize`, else
+ * `'half'` (the rule the Customize dialog had). Unchanged when the widget is already on the
+ * dashboard, or is a banner (banners are switched on with `setBannerVisible`).
+ */
+export function addWidget(draft: LayoutDraft, definition: DashboardWidgetDefinition): LayoutDraft {
+  if (definition.zone === 'kpi') {
+    return draft.kpis.includes(definition.id) ? draft : { ...draft, kpis: [...draft.kpis, definition.id] };
+  }
+  if (definition.zone !== 'panel' || draft.panels.some(panel => panel.id === definition.id)) return draft;
+  const size = isPanelSize(definition.defaultSize) ? definition.defaultSize : FALLBACK_PANEL_SIZE;
+  return { ...draft, panels: [...draft.panels, { id: definition.id, size }] };
+}
+
+/** Change a panel's width. Unchanged when the panel is not on the dashboard or already has that size. */
+export function setPanelSize(draft: LayoutDraft, id: string, size: PanelSize): LayoutDraft {
+  const index = draft.panels.findIndex(panel => panel.id === id);
+  if (index < 0 || draft.panels[index].size === size || !isPanelSize(size)) return draft;
+  return {
+    ...draft,
+    panels: draft.panels.map((panel, position) => (position === index ? { ...panel, size } : panel)),
+  };
+}
+
+/**
+ * Switch a banner on or off (the former Customize dialog's semantics: on appends, off filters).
+ * Banners always RENDER and SAVE in registry order whatever the draft order is
+ * (`resolveLayout` / `buildSavePayload`). Unchanged when the banner is already in that state.
+ */
+export function setBannerVisible(draft: LayoutDraft, id: string, visible: boolean): LayoutDraft {
+  const shown = draft.banners.includes(id);
+  if (shown === visible) return draft;
+  return {
+    ...draft,
+    banners: visible ? [...draft.banners, id] : draft.banners.filter(banner => banner !== id),
+  };
 }

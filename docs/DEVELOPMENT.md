@@ -456,6 +456,57 @@ ts-jest type-check per file at runtime, measured at 30 unrelated suites failing 
 compile and the test run going 30s → 430s. The separate whole-program pass costs ~16s
 and does not touch the test runtime.
 
+#### Dashboard edit mode (drag and drop) in jsdom
+
+jsdom has no layout engine, no Web Animations API, no `inert` enforcement and no real blur when
+React moves a focused node, so the dashboard editor (`components/dashboard/editor/`,
+`WidgetCell.tsx`; behavior in `docs/DASHBOARD.md` → Customizing the dashboard) is tested in
+layers, each with its own helper in `frontend/src/test-utils/`:
+
+- **Placement rules are pure.** `editor/dragPlanning.test.ts` feeds the planner rects from
+  **`gridFlow.ts`**, a test-only simulator of the two dashboard grids (each width's span per
+  breakpoint, sparse row-major placement, no dense packing) that produces real-shaped rects for any
+  order, spans and heights; `gridFlow.test.ts` holds its span table to `PANEL_SIZE_CLASSES`. A rule
+  about where a dragged widget lands is tested here, not through the DOM.
+- **Editor behavior without the page** — the edit bar, the Move menu, the gallery, and
+  `useLayoutEditor`'s focus, announcements and server verbs — runs on **`layoutEditorHarness.tsx`**:
+  `createFakeLayout()` stands in for `useDashboardLayout` (its `save` / `reset` / `reload` are
+  `jest.fn`s that behave like the server by default; `set()`, inside `act`, changes what it shows)
+  and `<EditorHarness>` renders a miniature dashboard of real `WidgetCell`s with stub widgets, wired
+  to the real hook.
+- **Page and component suites never load dnd-kit.** A suite that enters edit mode on the page mocks
+  the lazy loader with **`fakeDragLayer.tsx`**:
+
+  ```ts
+  jest.mock('../components/dashboard/editor/loadDragLayer', () =>
+    jest.requireActual('../test-utils/fakeDragLayer').createFakeLoadDragLayerModule()
+  );
+  ```
+
+  The fake is typed against the real layer's props (`editor/dragLayerTypes.ts`), renders nothing and
+  records its props in `dragHarness`, whose `start` / `reorder` / `end` / `cancel` call the page's
+  drag callbacks inside `act` (`start` is a no-op while the layer is disabled, as a disabled dnd-kit
+  draggable starts nothing). Call `dragHarness.reset()` in `beforeEach`. The mocked
+  `loadDashboardDragLayer` is a `jest.fn`, so `mockRejectedValueOnce` simulates the editor chunk
+  failing to load.
+- **One suite uses the real layer:** `editor/DashboardDragLayer.test.tsx` drives real dnd-kit
+  sensors. A test about the sensors and the layer itself — activation thresholds, the touch
+  long-press, the reorder gates, the resize guard, the ghost, the drop animation, click suppression
+  — belongs there. Its tools are in **`dndDom.ts`**: `stubRects` (a scoped `getBoundingClientRect`
+  stub keyed by `data-widget-cell`, then `data-testid`, changeable mid-test; `restore()` it after
+  each test), `mouseDown` / `mouseMove` / `mouseUp` / `mouseDrag` (the press on the activator, then
+  moves and the release on `document`, where the MouseSensor listens), `touchStart` / `touchMove` /
+  `touchEnd` (real `TouchEvent`s carrying plain-object `touches`, dispatched on the target; pair with
+  `jest.useFakeTimers()` for the long-press delay), and `installFakeAnimate` (records every
+  `Element.prototype.animate` call, for the FLIP tests).
+
+Use the fake layer whenever the subject is what the page or a component does with a drag; use the
+real one only to prove the dnd-kit wiring. What none of these can prove — real grid geometry,
+`inert`, touch in a browser — is the e2e spec's job (below). Focus after a keyboard move LATER, the
+case where React re-inserts the focused cell, is asserted only in jsdom (`Dashboard.editMode.test.tsx`
+→ "keyboard moves on the Move button"); the e2e spec checks focus after a move earlier and after a
+pointer drop, not that case.
+
 ### E2E Testing (Playwright)
 
 The Playwright suite (`frontend/e2e/*.spec.ts`) drives a real browser against a running
@@ -494,6 +545,67 @@ yet (known follow-up); the admin-modal test still runs.
 
 In CI the same suite runs via `.github/workflows/e2e.yml` — see the CI/CD Pipeline
 section below.
+
+#### Dashboard edit mode spec — run it by hand before merging
+
+`e2e/dashboard-edit-mode.spec.ts` proves what the jsdom suites cannot: the real CSS grid
+reflowing under the pointer, with the landing slot exactly where the panel lands (at 1440,
+1100 and 390 px wide); the order persisting across a reload; a pointer held still never
+reordering; Escape mid-drag; focus on the Move button after a keyboard move earlier and after a
+pointer drop; `inert` widget content; no remount across edit mode; axe with the Move menu and the
+gallery open; and touch long-press versus swipe. It runs in `e2e.yml`, but that workflow is
+**non-blocking**, so a green PR proves none of this. **Run the spec locally before merging any
+change to the dashboard editor** (`components/dashboard/editor/`, `WidgetCell.tsx`, the edit-mode parts of
+`pages/Dashboard.tsx`). With the backend seeded and started with `RATE_LIMIT_ENABLED=false`
+(steps 1–2 above) and the Vite dev server running, from `frontend/`:
+
+```bash
+CI=1 E2E_BASE_URL=http://localhost:<frontend port> \
+  E2E_ADMIN_EMAIL=admin@werco.com E2E_ADMIN_SECRET=<the seed admin's password> \
+  npx playwright test e2e/dashboard-edit-mode.spec.ts
+```
+
+`CI=1` turns off the config's own `webServer` (which starts or reuses a dev server on port
+5173), so Playwright tests the server at `E2E_BASE_URL`; it also means one worker and up to
+two retries per failing test, so treat a test the report marks **flaky** as a failure to
+investigate, not a pass. The spec signs in as the admin only, runs its tests serially, and
+resets that admin's own saved dashboard layout to the default through the UI before and after
+every test — don't point it at a database where that layout matters.
+
+Its helpers encode real-browser pitfalls; keep them when you add a test:
+
+- **Compare boxes in document coordinates** (`documentBox`). A viewport box is valid only at the
+  scroll position it was read at, so the slot read before the release and the panel read after it
+  are compared in the frame that does not scroll. The drop's own focus does not scroll the page (it
+  is requested with `preventScroll`); the helper keeps the comparison valid if anything else
+  scrolls between the two reads.
+- **Wait for the glides** (`glidesSettled`). Every cell a reorder displaces — the landing slot
+  included — runs a 200 ms FLIP on the cell element, and a box read mid-glide is neither where it
+  was nor where it is going. Count only animations whose target carries `data-widget-cell`:
+  widget content runs infinite CSS animations (status pulses) that never settle.
+- **Wait out dnd-kit's click guard** (`dragClickGuardLapsed`). After any drag ends, dnd-kit keeps
+  a capture-phase `click` blocker on `document` for 50 ms, so a click sent straight after a drop
+  is swallowed.
+- **Scan a settled dialog with axe.** The Modal fades and scales in, and axe samples rendered
+  colours, so a scan taken mid-animation reports low contrast; the gallery scan first waits until
+  the dialog has no running finite animation.
+- **Keep the pointer out of the bottom auto-scroll band.** dnd-kit scrolls the page while the
+  pointer is within 20% of the viewport's top or bottom, and a page scrolling under a held pointer
+  reorders on its own after the slot was measured; the landing-slot and touch tests use a tall
+  viewport (1600 px and 1400 px) and keep the pointer path above 80% of its height — they bound the
+  bottom band only. A grab inside the top band is safe when the drag then moves only downward:
+  dnd-kit 6.3.1 scrolls toward an edge only after the pointer has moved toward that edge during the
+  drag (its scroll intent), which is why the touch test's long press, about 210 px from the top,
+  does not scroll — provided the page is still. Scroll that is still running when the press lands
+  counts as movement toward the top (the quick swipe before it leaves a fling, measured at 7 px)
+  and latches upward intent, and the page then auto-scrolls up under the finger. So
+  `scrollSettled` waits for scrollY to stay unchanged for 200 ms of animation frames (two
+  back-to-back reads can land inside one frame mid-fling), and `panelToTop` settles before it
+  measures. The swipe moves the finger down (the page scrolls up), because the page may already
+  sit at its maximum scroll.
+- **One CDP session per touch gesture** (`touchGesture`). Chrome tracks the active touch per
+  session, so a `touchMove` sent from a fresh session is refused ("Must send a TouchStart
+  first").
 
 ### Test coverage gates
 
