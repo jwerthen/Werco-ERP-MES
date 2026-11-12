@@ -26,7 +26,7 @@ import { WorkOrdersDueTodayWidget, WorkOrdersOverdueWidget } from './WorkOrderLi
 /** The server's `require_role([ADMIN, MANAGER, SUPERVISOR])` list (superuser / platform_admin pass via hasRole). */
 const PLANNER_ROLES: UserRole[] = ['admin', 'manager', 'supervisor'];
 
-/** Definitions for the opt-in panels, in the order the Customize dialog lists them. */
+/** Definitions for the opt-in panels, in the order the Add widgets gallery lists them. */
 export const EXTRA_WIDGETS: readonly DashboardWidgetDefinition[] = [
   {
     id: 'action_inbox',

@@ -234,9 +234,11 @@ Deploy order is free. The frontend tolerates an API that does not have the route
 a 404 (or 405) from `GET /dashboard/layout` renders the default dashboard with
 **Customize** hidden. An older frontend never calls the new routes.
 
-Verify in a test company: open `/`, use **Customize** to add a panel and save, then
-reload in another browser and see the same layout; save from a second, stale tab and get
-the "changed in another tab" refusal; **Reset to default**. The Audit Log should show
+Verify in a test company: open `/`, press **Customize**, add a panel from **Add widgets**
+and press **Done**, then reload in another browser and see the same layout; open edit mode
+in two tabs, press **Done** with a change in one and then in the other, and get the
+"changed in another tab" refusal (a tab that was merely left open is not stale enough:
+Customize re-reads the layout on entry); **Reset to default**. The Audit Log should show
 `dashboard_layout` CREATE and UPDATE rows. Confirm RLS with
 `SELECT relrowsecurity FROM pg_class WHERE relname = 'dashboard_layouts';` (true).
 

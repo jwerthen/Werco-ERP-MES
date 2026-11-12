@@ -4,23 +4,43 @@ import { Link } from 'react-router-dom';
 import api from '../services/api';
 import { SkeletonDashboard } from '../components/ui/Skeleton';
 import { Button, EmptyState, ErrorState, useToast } from '../components/ui';
-import { ErrorBoundary } from '../components/ErrorBoundary';
 import DashboardOperationDetails from '../components/dashboard/DashboardOperationDetails';
-import { CustomizeDashboardDialog } from '../components/dashboard/CustomizeDashboardDialog';
 import { DashboardWidgetProvider, type DashboardWidgetEnv } from '../components/dashboard/DashboardWidgetContext';
-import { isEmptyLayout, resolveLayout } from '../components/dashboard/dashboardLayout';
+import { isEmptyLayout, resolveLayout, type EditableZone } from '../components/dashboard/dashboardLayout';
 import { getSourceSpec } from '../components/dashboard/sources';
 import { useDashboardLayout, useDashboardSessionScope } from '../components/dashboard/useDashboardLayout';
-import { toNeededKey, useDashboardSources } from '../components/dashboard/useDashboardSources';
+import { parseNeededKey, toNeededKey, useDashboardSources } from '../components/dashboard/useDashboardSources';
 import { useWidgetEligibility } from '../components/dashboard/useWidgetEligibility';
+import { WidgetCell } from '../components/dashboard/WidgetCell';
+import { createDragBridge } from '../components/dashboard/editor/dragBridge';
+import { EditBar } from '../components/dashboard/editor/EditBar';
+import {
+  EDITOR_LOAD_FAILED,
+  EDIT_IDS,
+  READ_ONLY_CUSTOMIZE_DESCRIPTION,
+  READ_ONLY_LAYOUT_NOTICE,
+  ZONE_LIST_LABELS,
+  ZONE_PLACEHOLDERS,
+} from '../components/dashboard/editor/editorCopy';
+import {
+  loadDashboardDragLayer,
+  prefetchDashboardDragLayer,
+  type DashboardDragLayerComponent,
+} from '../components/dashboard/editor/loadDragLayer';
+import { useFlipLayout } from '../components/dashboard/editor/useFlipLayout';
+import { useLayoutEditor } from '../components/dashboard/editor/useLayoutEditor';
+import { WidgetGallery } from '../components/dashboard/editor/WidgetGallery';
 import {
   CORE_WIDGET_RENDERERS,
   CoreDashboardProvider,
   type CoreDashboardEnv,
 } from '../components/dashboard/widgets/core';
 import { EXTRA_WIDGET_RENDERERS } from '../components/dashboard/widgets/extra';
-import { PANEL_SIZE_CLASSES, type DashboardWidgetDefinition } from '../components/dashboard/widgetTypes';
+import type { DashboardWidgetDefinition } from '../components/dashboard/widgetTypes';
 import { ActiveAssignment, DashboardData } from '../types';
+import type { DashboardLayoutResponse } from '../types/dashboardLayout';
+import { useDebouncedValue } from '../hooks/useDebouncedValue';
+import { usePrefersReducedMotion } from '../hooks/usePrefersReducedMotion';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
 import { formatCentralTime } from '../utils/centralTime';
@@ -28,9 +48,54 @@ import { ArrowPathIcon, Squares2X2Icon, WrenchScrewdriverIcon } from '@heroicons
 
 const isTabHidden = () => document.visibilityState !== 'visible';
 
+/**
+ * Edit mode fetches the sources of widgets the draft adds once its membership has been still
+ * this long, so an add followed by Undo (or a remove and re-add) sends nothing.
+ */
+const EDIT_SOURCE_SETTLE_MS = 400;
+const READ_ONLY_DESCRIPTION_ID = 'dashboard-customize-read-only';
+const LAYOUT_LOAD_FAILED = "Your saved dashboard layout couldn't be loaded. Try again in a moment.";
+/** Space kept between a focus-scrolled control and the fixed edit bar's top edge. */
+const EDIT_BAR_CLEARANCE_PX = 8;
+
 /** Core renderers first (a Map — widget ids are user data), then the opt-in catalog's. */
 function rendererFor(definition: DashboardWidgetDefinition) {
   return CORE_WIDGET_RENDERERS.get(definition.id) ?? EXTRA_WIDGET_RENDERERS.get(definition.id);
+}
+
+/**
+ * The draft's sources from a SETTLED edit-source tag, only when the tag was made under this
+ * edit session: a debounced value left over from another session (Cancel, then Customize again
+ * inside the settle window) is never fetched. The session id alone decides it — it grows on
+ * every entry and never resets within a mount; the scope check is defense in depth.
+ */
+function settledDraftSources(settled: string, scope: string | null, sessionId: number | null): string {
+  if (!settled || sessionId === null) return '';
+  try {
+    const parsed: unknown = JSON.parse(settled);
+    if (Array.isArray(parsed) && parsed[0] === scope && parsed[1] === sessionId && typeof parsed[2] === 'string') {
+      return parsed[2];
+    }
+  } catch {
+    // Not a tag: nothing to add.
+  }
+  return '';
+}
+
+/** An edit-mode zone with nothing in it: says so and opens the gallery. Sits outside the zone list. */
+function ZonePlaceholder({ zone, disabled, onAdd }: { zone: EditableZone; disabled: boolean; onAdd: () => void }) {
+  const copy = ZONE_PLACEHOLDERS[zone];
+  return (
+    <div
+      data-zone-placeholder={zone}
+      className="flex flex-wrap items-center justify-between gap-3 border border-dashed border-fd-line-bright p-3"
+    >
+      <p className="text-sm text-slate-300">{copy.message}</p>
+      <Button variant="secondary" size="sm" disabled={disabled} onClick={onAdd}>
+        {copy.action}
+      </Button>
+    </div>
+  );
 }
 
 export default function Dashboard() {
@@ -39,19 +104,65 @@ export default function Dashboard() {
   const layout = useDashboardLayout(scope);
   const { eligibility, canOpen } = useWidgetEligibility();
   const resolved = useMemo(() => resolveLayout(layout.saved, eligibility), [layout.saved, eligibility]);
-  // Nothing is fetched for widgets until the layout settles (at most LAYOUT_LOAD_TIMEOUT_MS),
-  // so a widget the saved layout hides is never fetched.
-  const neededKey = layout.status === 'loading' ? '' : toNeededKey(resolved.neededSources);
+
+  /** Written into a persistent polite region; the child is re-keyed so a repeated message is spoken again. */
+  const [announcement, setAnnouncement] = useState<{ text: string; key: number }>({ text: '', key: 0 });
+  const announce = useCallback((text: string) => setAnnouncement(current => ({ text, key: current.key + 1 })), []);
+
+  // ── Edit mode ──────────────────────────────────────────────────────────────
+  const reducedMotion = usePrefersReducedMotion();
+  const rootRef = useRef<HTMLDivElement>(null);
+  /** FLIP's `capture`, filled in once `useFlipLayout` has run (see the hook order below). */
+  const flipCaptureRef = useRef<(() => void) | null>(null);
+  const captureLayout = useCallback(() => flipCaptureRef.current?.(), []);
+  const [bridge] = useState(createDragBridge);
+  // useLayoutEditor BEFORE useFlipLayout: within one commit the editor's focus (and the
+  // scroll that reveals a moved widget) then measures the committed layout, before FLIP's
+  // play effect translates every moved cell back to where it was.
+  const editor = useLayoutEditor({
+    scope,
+    layout,
+    eligibility,
+    onBeforeChange: captureLayout,
+    showToast,
+    announce,
+    reducedMotion,
+  });
+  const flip = useFlipLayout(rootRef, { disabled: reducedMotion });
+  flipCaptureRef.current = flip.capture;
+  const editing = editor.active;
+  const { enter: enterEditor, openGallery, dragStart, dragEnd, dragCancel } = editor;
+  /** The lazily loaded drag layer (dnd-kit lives only in its chunk). */
+  const [DragLayer, setDragLayer] = useState<DashboardDragLayerComponent | null>(null);
+  const [editorLoading, setEditorLoading] = useState(false);
+  const enteringRef = useRef(false);
+
+  // What renders: the edit session's resolved draft while editing, else the saved layout.
+  const view = editor.shown ?? resolved;
+
+  // Fetched: the saved layout's sources, plus — while editing — the sources of the committed
+  // draft once its membership has settled. Nothing is fetched until the layout settles (at
+  // most LAYOUT_LOAD_TIMEOUT_MS), so a widget the saved layout hides is never fetched.
+  const editSourceTag = editing
+    ? JSON.stringify([scope, editor.sessionId, toNeededKey(editor.draftNeededSources)])
+    : '';
+  const settledEditSourceTag = useDebouncedValue(editSourceTag, EDIT_SOURCE_SETTLE_MS);
+  const draftSourceKey = editing ? settledDraftSources(settledEditSourceTag, scope, editor.sessionId) : '';
+  const neededKey =
+    layout.status === 'loading' ? '' : toNeededKey([...resolved.neededSources, ...parseNeededKey(draftSourceKey)]);
   const { sources, refresh: refreshSources } = useDashboardSources(neededKey, { scope });
 
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [selectedAssignment, setSelectedAssignment] = useState<ActiveAssignment | null>(null);
-  const [customizeOpen, setCustomizeOpen] = useState(false);
+  /**
+   * The body is the grid (not the skeleton or the shop-data ErrorState). Edit mode arranges
+   * the cells, so it opens only over them: `loading` only goes true → false and `data` is
+   * never cleared, so the grid never goes away under an open editor.
+   */
+  const bodyReady = !loading && !(Boolean(error) && !data);
   const [layoutReloading, setLayoutReloading] = useState(false);
-  /** Written into a persistent polite region, so layout changes are announced. */
-  const [layoutAnnouncement, setLayoutAnnouncement] = useState('');
   /** A control to focus after the render that settles an action (a fresh object per request). */
   const [focusRequest, setFocusRequest] = useState<{ target: 'customize' | 'layoutReload' } | null>(null);
   const customizeButtonRef = useRef<HTMLButtonElement>(null);
@@ -62,7 +173,14 @@ export default function Dashboard() {
   dataRef.current = data;
   const refreshSourcesRef = useRef(refreshSources);
   refreshSourcesRef.current = refreshSources;
-  const missedWhileHiddenRef = useRef(false);
+  /** A poll or push skipped (hidden tab, or a drag in progress) that is owed one catch-up refresh. */
+  const missedRefreshRef = useRef(false);
+  /** A pointer / touch drag is in progress: background refreshes wait until it ends. */
+  const gestureActiveRef = useRef(false);
+  const mountedRef = useRef(true);
+  /** The latest render's scope and layout status, for checks after an await. */
+  const latestRef = useRef({ scope, status: layout.status });
+  latestRef.current = { scope, status: layout.status };
 
   // Conditional request state
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -75,6 +193,13 @@ export default function Dashboard() {
   const realtimeUrl = useMemo(() => {
     const token = getAccessToken();
     return buildWsUrl('/ws/updates', token ? { token } : undefined);
+  }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
   }, []);
 
   // Clear "data changed" indicator after 2 seconds
@@ -121,14 +246,24 @@ export default function Dashboard() {
     if (current()) setIsRefreshing(false);
   }, []);
 
-  /** Poll / WebSocket refreshes skip a hidden tab and run once when it becomes visible again. */
+  /**
+   * Poll / WebSocket refreshes skip a hidden tab — and a widget drag in progress (a refresh
+   * that changes heights would move the grid under the pointer) — and run once afterwards.
+   */
   const backgroundRefresh = useCallback(() => {
-    if (isTabHidden()) {
-      missedWhileHiddenRef.current = true;
+    if (isTabHidden() || gestureActiveRef.current) {
+      missedRefreshRef.current = true;
       return;
     }
     void loadDashboard(false);
   }, [loadDashboard]);
+
+  /** The one catch-up owed after a drag: through backgroundRefresh, so a hidden tab still defers it. */
+  const catchUpAfterGesture = useCallback(() => {
+    if (!missedRefreshRef.current) return;
+    missedRefreshRef.current = false;
+    backgroundRefresh();
+  }, [backgroundRefresh]);
 
   const scheduleRealtimeRefresh = useCallback(() => {
     if (realtimeRefreshRef.current) return;
@@ -164,8 +299,8 @@ export default function Dashboard() {
 
   useEffect(() => {
     const onVisibilityChange = () => {
-      if (!isTabHidden() && missedWhileHiddenRef.current) {
-        missedWhileHiddenRef.current = false;
+      if (!isTabHidden() && !gestureActiveRef.current && missedRefreshRef.current) {
+        missedRefreshRef.current = false;
         void loadDashboard(false);
       }
     };
@@ -182,30 +317,71 @@ export default function Dashboard() {
     };
   }, []);
 
-  // A different session (user, active company, read-only flag) never keeps the dialog open.
+  // Leaving edit mode (Done, Cancel, a session change) mid-drag unmounts the drag layer
+  // without an end or cancel callback: the gesture is over, and the catch-up is owed.
   useEffect(() => {
-    setCustomizeOpen(false);
-  }, [scope]);
+    if (editing || !gestureActiveRef.current) return;
+    gestureActiveRef.current = false;
+    catchUpAfterGesture();
+  }, [editing, catchUpAfterGesture]);
+
+  // While editing, focus-scrolling keeps controls clear of the sticky header (3.5rem) and
+  // the fixed edit bar (WCAG 2.4.11); the previous values come back on exit. The bottom
+  // padding is MEASURED from the bar's top edge, which covers BottomNav below lg, the safe
+  // area, wrapped button rows and the bar's alert / notes (7rem is only the fallback before
+  // the first measurement). The page root's bottom padding follows it, so the last row can
+  // always scroll clear of the bar — less whatever its containers already pad below it
+  // (Layout's <main> reserves BottomNav's height below lg; counting that twice left ~80 px
+  // of dead space under the last row on a phone). Scroll anchoring is off: the live
+  // reorders move cells the browser could pick as its anchor, and its compensating scroll
+  // would jump the page.
+  useEffect(() => {
+    if (!editing) return;
+    const style = document.documentElement.style;
+    const pageRoot = rootRef.current;
+    const previous = {
+      top: style.scrollPaddingTop,
+      bottom: style.scrollPaddingBottom,
+      anchor: style.overflowAnchor,
+    };
+    style.scrollPaddingTop = '4rem';
+    style.scrollPaddingBottom = '7rem';
+    style.overflowAnchor = 'none';
+    const reservedBelowRoot = () => {
+      let reserved = 0;
+      for (let node = pageRoot?.parentElement; node && node !== document.body; node = node.parentElement) {
+        reserved += parseFloat(getComputedStyle(node).paddingBottom) || 0;
+      }
+      return reserved;
+    };
+    const sync = () => {
+      const bar = document.getElementById(EDIT_IDS.bar);
+      const box = bar?.getBoundingClientRect();
+      if (!box || box.height <= 0) return; // Not laid out (yet): keep the fallback.
+      const covered = Math.ceil(Math.max(0, window.innerHeight - box.top)) + EDIT_BAR_CLEARANCE_PX;
+      style.scrollPaddingBottom = `${covered}px`;
+      if (pageRoot) pageRoot.style.paddingBottom = `${Math.max(0, Math.ceil(covered - reservedBelowRoot()))}px`;
+    };
+    sync();
+    const bar = document.getElementById(EDIT_IDS.bar);
+    const observer = typeof ResizeObserver === 'function' && bar ? new ResizeObserver(sync) : null;
+    if (observer && bar) observer.observe(bar);
+    window.addEventListener('resize', sync);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener('resize', sync);
+      style.scrollPaddingTop = previous.top;
+      style.scrollPaddingBottom = previous.bottom;
+      style.overflowAnchor = previous.anchor;
+      if (pageRoot) pageRoot.style.paddingBottom = '';
+    };
+  }, [editing]);
 
   useLayoutEffect(() => {
     if (!focusRequest) return;
     const target = focusRequest.target === 'layoutReload' ? layoutReloadButtonRef.current : null;
     (target ?? customizeButtonRef.current)?.focus();
   }, [focusRequest]);
-
-  // The dialog's Modal returns focus to whatever opened it — unless that control is gone:
-  // the empty-state (or banners-only) Customize action unmounts as soon as a save or reset
-  // puts widgets back. Then focus would drop to <body>; send it to the header's Customize
-  // button instead. This runs after the Modal's own restore (its cleanup runs first).
-  const dialogOpen = customizeOpen && layout.response !== null;
-  const dialogWasOpenRef = useRef(false);
-  useEffect(() => {
-    const closed = dialogWasOpenRef.current && !dialogOpen;
-    dialogWasOpenRef.current = dialogOpen;
-    if (!closed) return;
-    const active = document.activeElement;
-    if (!active || active === document.body) customizeButtonRef.current?.focus();
-  }, [dialogOpen]);
 
   // Manual refresh handler
   const handleManualRefresh = useCallback(() => {
@@ -230,36 +406,117 @@ export default function Dashboard() {
    * a repeat failure says so and keeps focus on the button.
    */
   const handleNoticeReload = useCallback(async () => {
-    setLayoutAnnouncement('');
     const response = await handleReloadLayout();
     if (response) {
-      setLayoutAnnouncement('Your saved dashboard layout is now showing.');
+      announce('Your saved dashboard layout is now showing.');
       setFocusRequest({ target: 'customize' });
       return;
     }
     showToast('error', "Your saved dashboard layout still couldn't be loaded. Try again in a moment.");
     setFocusRequest({ target: 'layoutReload' });
-  }, [handleReloadLayout, showToast]);
+  }, [handleReloadLayout, showToast, announce]);
 
+  /**
+   * Customize (the header button, the empty-state action and the banners-only action): only
+   * over a rendered grid (not the skeleton or the shop-data ErrorState — edit mode arranges the
+   * cells). It re-reads the saved layout first, every time — a copy cached since page load may
+   * be behind a save from another tab or device, and a session seeded from it would end in a
+   * 409 that discards its edits; a failed re-read of a layout already on screen keeps it, a
+   * failed one after a load error refuses. Then it refuses a read-only session with a toast,
+   * loads the drag layer's chunk, and enters edit mode — unless the session changed meanwhile.
+   */
   const handleCustomize = useCallback(async () => {
-    if (layout.status === 'loading' || layout.status === 'unsupported') return;
-    if (layout.status === 'error') {
+    const status = layout.status;
+    if (status === 'loading' || status === 'unsupported' || editing || enteringRef.current || !bodyReady) return;
+    // Read-only is a property of the session scope (a change re-reads the layout anyway).
+    if (status === 'ready' && !layout.canEdit) {
+      showToast('info', READ_ONLY_LAYOUT_NOTICE);
+      return;
+    }
+    const clickScope = scope;
+    enteringRef.current = true;
+    setEditorLoading(true);
+    try {
       const response = await handleReloadLayout();
-      if (!response) {
-        showToast('error', "Your saved dashboard layout couldn't be loaded. Try again in a moment.");
+      if (!mountedRef.current) return;
+      if (!response && status === 'error') {
+        showToast('error', LAYOUT_LOAD_FAILED);
+        // The button was disabled while it worked: give it focus back.
+        setFocusRequest({ target: 'customize' });
         return;
       }
+      const seed: DashboardLayoutResponse | undefined = response ?? undefined;
+      if (!(seed ? seed.can_edit === true : layout.canEdit)) {
+        showToast('info', READ_ONLY_LAYOUT_NOTICE);
+        setFocusRequest({ target: 'customize' });
+        return;
+      }
+      let Layer: DashboardDragLayerComponent;
+      try {
+        Layer = await loadDashboardDragLayer();
+      } catch {
+        // A chunk 404 after a deploy: stay in view mode, no automatic reload. The loader's
+        // memo is already cleared, so the next click imports again.
+        if (!mountedRef.current) return;
+        showToast('error', EDITOR_LOAD_FAILED);
+        setFocusRequest({ target: 'customize' });
+        return;
+      }
+      if (!mountedRef.current) return;
+      const latest = latestRef.current;
+      if (latest.scope !== clickScope || (!seed && latest.status !== 'ready')) return;
+      setDragLayer(() => Layer);
+      enterEditor(seed);
+    } finally {
+      enteringRef.current = false;
+      if (mountedRef.current) setEditorLoading(false);
     }
-    setCustomizeOpen(true);
-  }, [layout.status, handleReloadLayout, showToast]);
+  }, [layout.status, layout.canEdit, editing, bodyReady, scope, handleReloadLayout, showToast, enterEditor]);
 
-  const isVisible = useCallback((widgetId: string) => resolved.visibleIds.has(widgetId), [resolved.visibleIds]);
+  // The drag layer's callbacks. Only an active pointer / touch gesture pauses background
+  // refreshes; its end (or cancel) runs the one catch-up.
+  const handleDragStart = useCallback(
+    (zone: EditableZone, id: string) => {
+      gestureActiveRef.current = true;
+      dragStart(zone, id);
+    },
+    [dragStart]
+  );
+  const handleDragEnd = useCallback(
+    (zone: EditableZone, id: string) => {
+      gestureActiveRef.current = false;
+      dragEnd(zone, id);
+      catchUpAfterGesture();
+    },
+    [dragEnd, catchUpAfterGesture]
+  );
+  const handleDragCancel = useCallback(
+    (zone: EditableZone, id: string) => {
+      gestureActiveRef.current = false;
+      dragCancel(zone, id);
+      catchUpAfterGesture();
+    },
+    [dragCancel, catchUpAfterGesture]
+  );
+
+  // Keyed on visible MEMBERSHIP, not the Set's identity: a live drag reorder (or Undo of one)
+  // rebuilds `visibleIds` with the same members, and a new `isVisible` would re-render every
+  // widget that reads the widget context, on the drag's hot path.
+  const visibleKey = JSON.stringify(Array.from(view.visibleIds).sort());
+  const isVisible = useMemo(() => {
+    const ids = new Set<string>(JSON.parse(visibleKey) as string[]);
+    return (widgetId: string) => ids.has(widgetId);
+  }, [visibleKey]);
   // A widget's Retry is the page's manual refresh. A widget's own non-forced request (e.g.
   // Notifications after the unread count moved) refreshes the sources only, under their
-  // floors and the hidden-tab rule — never an extra shop-floor heartbeat (it reconciles on read).
+  // floors and the hidden-tab rule — never an extra shop-floor heartbeat (it reconciles on
+  // read). The one exception is the drag pause: a refresh that changes heights mid-drag
+  // would move the grid under the pointer, so the request is folded into the single
+  // catch-up the drag's end already owes, which is a full refresh (heartbeat included).
   const refreshFromWidget = useCallback(
     (forced: boolean) => {
       if (forced) handleManualRefresh();
+      else if (gestureActiveRef.current) missedRefreshRef.current = true;
       else void refreshSourcesRef.current(false);
     },
     [handleManualRefresh]
@@ -273,11 +530,12 @@ export default function Dashboard() {
     [data, error]
   );
 
-  const sourceErrorKeys = resolved.neededSources.filter(key => {
+  const sourceErrorKeys = view.neededSources.filter(key => {
     const state = sources[key];
     return Boolean(state?.error) && !state?.forbidden;
   });
 
+  const readOnly = layout.status === 'ready' && !layout.canEdit;
   const pageHeader = (
     <PageHeader
       title="Dashboard"
@@ -304,18 +562,34 @@ export default function Dashboard() {
             <ArrowPathIcon aria-hidden="true" className={`h-5 w-5 ${isRefreshing ? 'animate-spin' : ''}`} />
           </button>
           {layout.status !== 'unsupported' && (
-            <button
-              ref={customizeButtonRef}
-              type="button"
-              onClick={() => void handleCustomize()}
-              disabled={layout.status === 'loading' || layoutReloading}
-              className="btn-ghost btn-sm"
-              title="Customize dashboard"
-              aria-label="Customize dashboard"
-            >
-              <Squares2X2Icon aria-hidden="true" className="h-5 w-5" />
-              <span className="ml-1.5 hidden sm:inline">Customize</span>
-            </button>
+            <>
+              <button
+                ref={customizeButtonRef}
+                id={EDIT_IDS.customize}
+                type="button"
+                onClick={() => void handleCustomize()}
+                onPointerEnter={() => prefetchDashboardDragLayer()}
+                onFocus={() => prefetchDashboardDragLayer()}
+                disabled={layout.status === 'loading' || !bodyReady || layoutReloading || editorLoading || editing}
+                aria-busy={editorLoading || undefined}
+                aria-describedby={readOnly ? READ_ONLY_DESCRIPTION_ID : undefined}
+                className="btn-ghost btn-sm"
+                title="Customize dashboard"
+                aria-label="Customize dashboard"
+              >
+                {editorLoading ? (
+                  <ArrowPathIcon aria-hidden="true" className="h-5 w-5 animate-spin" />
+                ) : (
+                  <Squares2X2Icon aria-hidden="true" className="h-5 w-5" />
+                )}
+                <span className="ml-1.5 hidden sm:inline">Customize</span>
+              </button>
+              {readOnly && (
+                <span id={READ_ONLY_DESCRIPTION_ID} className="sr-only">
+                  {READ_ONLY_CUSTOMIZE_DESCRIPTION}
+                </span>
+              )}
+            </>
           )}
           {canOpen('/shop-floor') && (
             <Link to="/shop-floor" className="btn-primary">
@@ -331,9 +605,11 @@ export default function Dashboard() {
     const Widget = rendererFor(definition);
     return Widget ? <Widget key={definition.id} /> : null;
   };
-  const hasKpis = resolved.kpis.length > 0;
-  const hasPanels = resolved.panels.length > 0;
-  const banners = resolved.banners.map(renderWidget);
+  const hasKpis = view.kpis.length > 0;
+  const hasPanels = view.panels.length > 0;
+  // View mode only: edit mode always shows both zones (a grid or a placeholder) instead.
+  const emptyView = !editing && isEmptyLayout(view);
+  const bannersOnlyView = !editing && !emptyView && !hasKpis && !hasPanels;
 
   // ONE root for every state, with the header as its first child, so the header (and
   // focus inside it) survives the loading → loaded transition.
@@ -350,6 +626,73 @@ export default function Dashboard() {
   } else if (error && !data) {
     body = <ErrorState title="Error loading dashboard" message={error} onRetry={() => loadDashboard(true)} />;
   } else {
+    // KPI tiles and panels render through WidgetCell in BOTH modes, in the same slots, so
+    // entering or leaving edit mode toggles attributes and never remounts a widget.
+    const kpiZone = hasKpis ? (
+      <div
+        key="kpi-grid"
+        ref={editing ? bridge.zoneRef('kpi') : undefined}
+        role={editing ? 'list' : undefined}
+        aria-label={editing ? ZONE_LIST_LABELS.kpi : undefined}
+        className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2"
+        data-tour="dashboard-stats"
+      >
+        {view.kpis.map((definition, index) => {
+          const Widget = rendererFor(definition);
+          if (!Widget) return null;
+          return (
+            <WidgetCell
+              key={definition.id}
+              definition={definition}
+              component={Widget}
+              zone="kpi"
+              edit={editing ? { editor, bridge, index, count: view.kpis.length } : null}
+            />
+          );
+        })}
+      </div>
+    ) : editing ? (
+      <ZonePlaceholder
+        key="kpi-placeholder"
+        zone="kpi"
+        disabled={editor.controlsDisabled}
+        onAdd={() => openGallery('kpi')}
+      />
+    ) : null;
+
+    const panelZone = hasPanels ? (
+      <div
+        key="panel-grid"
+        ref={editing ? bridge.zoneRef('panel') : undefined}
+        role={editing ? 'list' : undefined}
+        aria-label={editing ? ZONE_LIST_LABELS.panel : undefined}
+        className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-12 gap-4 items-start"
+        data-tour={hasKpis ? undefined : 'dashboard-stats'}
+      >
+        {view.panels.map(({ definition, size }, index) => {
+          const Widget = rendererFor(definition);
+          if (!Widget) return null;
+          return (
+            <WidgetCell
+              key={definition.id}
+              definition={definition}
+              component={Widget}
+              zone="panel"
+              size={size}
+              edit={editing ? { editor, bridge, index, count: view.panels.length } : null}
+            />
+          );
+        })}
+      </div>
+    ) : editing ? (
+      <ZonePlaceholder
+        key="panel-placeholder"
+        zone="panel"
+        disabled={editor.controlsDisabled}
+        onAdd={() => openGallery('panel')}
+      />
+    ) : null;
+
     body = (
       <>
         {error && (
@@ -388,62 +731,42 @@ export default function Dashboard() {
           </div>
         )}
 
-        {isEmptyLayout(resolved) ? (
+        {emptyView && (
           <EmptyState
             icon={Squares2X2Icon}
             title="Your dashboard is empty"
             description="Add key metrics and panels back from Customize dashboard."
             action={{ label: 'Customize dashboard', onClick: () => void handleCustomize() }}
           />
-        ) : (
-          <>
-            {/* With no KPI strip and no panel grid, the tour anchor moves to the banner zone,
-                with a standing note: every banner may be quiet, which would otherwise leave
-                a blank page that reads as broken. */}
-            {!hasKpis && !hasPanels ? (
-              <div className="space-y-4" data-tour="dashboard-stats">
-                {banners}
-                <div className="flex flex-wrap items-center justify-between gap-3 rounded-sm border border-dashed border-fd-line p-3">
-                  <p className="text-sm text-slate-300">
-                    Only alerts and banners are on your dashboard. They appear here when something needs attention.
-                  </p>
-                  <Button variant="secondary" size="sm" onClick={() => void handleCustomize()}>
-                    Customize dashboard
-                  </Button>
-                </div>
-              </div>
-            ) : (
-              banners
-            )}
-
-            {/* KPI strip — one dense row of compact tiles (the tiles are its direct children) */}
-            {hasKpis && (
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2" data-tour="dashboard-stats">
-                {resolved.kpis.map(renderWidget)}
-              </div>
-            )}
-
-            {/* COCKPIT GRID — each panel in a sized cell */}
-            {hasPanels && (
-              <div
-                className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-12 gap-4 items-start"
-                data-tour={hasKpis ? undefined : 'dashboard-stats'}
-              >
-                {resolved.panels.map(({ definition, size }) => {
-                  const Widget = rendererFor(definition);
-                  if (!Widget) return null;
-                  return (
-                    <div key={definition.id} className={`min-w-0 ${PANEL_SIZE_CLASSES[size]}`}>
-                      <ErrorBoundary level="widget" name={definition.title}>
-                        <Widget />
-                      </ErrorBoundary>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </>
         )}
+
+        {/* The banner zone: one stable wrapper (hidden while empty), inert while editing.
+            With no KPI strip and no panel grid it carries the tour anchor and a standing
+            note: every banner may be quiet, which would otherwise leave a blank page that
+            reads as broken. */}
+        <div
+          className="space-y-4 empty:hidden"
+          data-tour={bannersOnlyView ? 'dashboard-stats' : undefined}
+          inert={editing}
+        >
+          {view.banners.map(renderWidget)}
+          {bannersOnlyView && (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-sm border border-dashed border-fd-line p-3">
+              <p className="text-sm text-slate-300">
+                Only alerts and banners are on your dashboard. They appear here when something needs attention.
+              </p>
+              <Button variant="secondary" size="sm" onClick={() => void handleCustomize()}>
+                Customize dashboard
+              </Button>
+            </div>
+          )}
+        </div>
+
+        {/* KPI strip — one dense row of compact tiles (the cells are its direct children) */}
+        {kpiZone}
+
+        {/* COCKPIT GRID — each panel in a sized cell */}
+        {panelZone}
       </>
     );
   }
@@ -451,11 +774,13 @@ export default function Dashboard() {
   return (
     <DashboardWidgetProvider value={widgetEnv}>
       <CoreDashboardProvider value={coreEnv}>
-        <div className="space-y-4">
+        <div ref={rootRef} className={editing ? 'space-y-4 pb-28' : 'space-y-4'}>
           {pageHeader}
-          <p role="status" aria-live="polite" className="sr-only">
-            {layoutAnnouncement}
+          <p role="status" aria-live="polite" className="sr-only" data-testid="dashboard-announcer">
+            <span key={announcement.key}>{announcement.text}</span>
           </p>
+          {/* Fixed to the bottom of the viewport, but next after the header in the tab order. */}
+          <EditBar editor={editor} />
           {body}
 
           {selectedAssignment?.operation.id != null && (
@@ -466,19 +791,22 @@ export default function Dashboard() {
             />
           )}
 
-          {customizeOpen && layout.response && (
-            <CustomizeDashboardDialog
-              saved={layout.saved}
-              canEdit={layout.canEdit}
-              eligibility={eligibility}
-              onSave={layout.save}
-              onReset={layout.reset}
-              onReload={async () => {
-                const response = await handleReloadLayout();
-                if (!response) throw new Error("Your saved dashboard layout couldn't be reloaded. Try again.");
-                return response.layout;
-              }}
-              onClose={() => setCustomizeOpen(false)}
+          <WidgetGallery editor={editor} eligibility={eligibility} />
+
+          {/* The drag layer: a SIBLING of the widget tree (mounting it never remounts a widget),
+              loaded on demand so dnd-kit stays out of the landing bundle. */}
+          {editing && DragLayer && (
+            <DragLayer
+              bridge={bridge}
+              enabled={!editor.controlsDisabled}
+              orders={editor.orders}
+              layoutKey={editor.layoutKey}
+              reducedMotion={reducedMotion}
+              describe={editor.describe}
+              onDragStart={handleDragStart}
+              onReorder={editor.dragReorder}
+              onDragEnd={handleDragEnd}
+              onDragCancel={handleDragCancel}
             />
           )}
         </div>

@@ -84,7 +84,7 @@ export class DashboardLayoutCompanyChangedError extends Error {
   constructor() {
     super('Your active company changed. Reload the dashboard before saving its layout.');
     // Restore the prototype chain so `instanceof` holds when the class is transpiled to ES5
-    // (tsconfig/ts-jest) — the extends-Error caveat (KioskApiError precedent). The dialog's
+    // (tsconfig/ts-jest) — the extends-Error caveat (KioskApiError precedent). Edit mode's
     // stale-write recovery depends on it.
     Object.setPrototypeOf(this, DashboardLayoutCompanyChangedError.prototype);
     this.name = 'DashboardLayoutCompanyChangedError';

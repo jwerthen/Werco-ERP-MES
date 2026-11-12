@@ -336,7 +336,9 @@ dashboard until someone saves a layout. PostgreSQL RLS and table/sequence revoke
 `anon` and `authenticated` match model bootstrap. No environment variable, secret, cron or worker
 job is added. Deploy order is free: the frontend treats a 404 (or 405) from `GET /dashboard/layout`
 as "not deployed yet", renders the default dashboard and hides **Customize**. Verify a save, a
-reload in another browser, a stale-tab 409, a reset, and `dashboard_layout` rows in the Audit Log.
+reload in another browser, a stale-tab 409 (edit mode open in two tabs, **Done** with a change in
+each — Customize re-reads the layout on entry, so a tab merely left open does not conflict), a
+reset, and `dashboard_layout` rows in the Audit Log.
 Keep the table on ordinary application rollback; a deliberate 118 downgrade drops every saved
 layout (users fall back to the default; the audit rows remain). See
 [Saved dashboard layouts](DEPLOYMENT.md#saved-dashboard-layouts).

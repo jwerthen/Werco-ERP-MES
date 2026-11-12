@@ -106,4 +106,124 @@ describe('LoadingButton', () => {
     render(<LoadingButton loading>Loading</LoadingButton>);
     expect(screen.getByRole('button')).toHaveClass('cursor-not-allowed');
   });
+
+  describe('focusableWhileLoading', () => {
+    describe('off (the default every existing caller gets)', () => {
+      it('disables natively while loading and adds no aria-disabled of its own', () => {
+        const handleClick = jest.fn();
+        render(
+          <LoadingButton loading onClick={handleClick}>
+            Save
+          </LoadingButton>
+        );
+        const button = screen.getByRole('button');
+        expect(button).toBeDisabled();
+        expect(button).not.toHaveAttribute('aria-disabled');
+        fireEvent.click(button);
+        expect(handleClick).not.toHaveBeenCalled();
+      });
+
+      it("passes a caller's own aria-disabled and onClick straight through", () => {
+        const handleClick = jest.fn();
+        render(
+          <LoadingButton aria-disabled="true" onClick={handleClick}>
+            Save
+          </LoadingButton>
+        );
+        const button = screen.getByRole('button');
+        expect(button).toHaveAttribute('aria-disabled', 'true');
+        expect(button).toBeEnabled();
+        fireEvent.click(button);
+        expect(handleClick).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    describe('on', () => {
+      it('changes nothing while not loading', () => {
+        const handleClick = jest.fn();
+        render(
+          <LoadingButton focusableWhileLoading onClick={handleClick}>
+            Done
+          </LoadingButton>
+        );
+        const button = screen.getByRole('button', { name: 'Done' });
+        expect(button).toBeEnabled();
+        expect(button).not.toHaveAttribute('aria-disabled');
+        fireEvent.click(button);
+        expect(handleClick).toHaveBeenCalledTimes(1);
+      });
+
+      it('keeps the focused button focusable while loading: aria-disabled, never natively disabled', () => {
+        const handleClick = jest.fn();
+        const { rerender } = render(
+          <LoadingButton focusableWhileLoading onClick={handleClick}>
+            Done
+          </LoadingButton>
+        );
+        const button = screen.getByRole('button', { name: 'Done' });
+        button.focus();
+        rerender(
+          <LoadingButton focusableWhileLoading loading loadingText="Saving…" onClick={handleClick}>
+            Done
+          </LoadingButton>
+        );
+        expect(button).not.toBeDisabled();
+        expect(button).toHaveAttribute('aria-disabled', 'true');
+        expect(button).toHaveFocus();
+        // Still the loading button: spinner, loading text and the loading classes.
+        expect(screen.getByRole('status', { name: /loading/i })).toBeInTheDocument();
+        expect(button).toHaveTextContent('Saving…');
+        expect(button).toHaveClass('opacity-75', 'cursor-not-allowed');
+        // Settled: an ordinary button again.
+        rerender(
+          <LoadingButton focusableWhileLoading onClick={handleClick}>
+            Done
+          </LoadingButton>
+        );
+        expect(button).toHaveFocus();
+        expect(button).not.toHaveAttribute('aria-disabled');
+      });
+
+      it('ignores a click while loading, and a submit button does not submit its form', () => {
+        const handleClick = jest.fn();
+        const handleSubmit = jest.fn((event: React.FormEvent) => event.preventDefault());
+        render(
+          <form onSubmit={handleSubmit}>
+            <LoadingButton type="submit" focusableWhileLoading loading onClick={handleClick}>
+              Save
+            </LoadingButton>
+          </form>
+        );
+        const button = screen.getByRole('button');
+        // fireEvent returns false when a handler prevented the click's default action.
+        expect(fireEvent.click(button)).toBe(false);
+        expect(handleClick).not.toHaveBeenCalled();
+        expect(handleSubmit).not.toHaveBeenCalled();
+      });
+
+      it("overrides a caller's aria-disabled=false while loading", () => {
+        render(
+          <LoadingButton focusableWhileLoading loading aria-disabled={false}>
+            Done
+          </LoadingButton>
+        );
+        expect(screen.getByRole('button')).toHaveAttribute('aria-disabled', 'true');
+      });
+
+      it('still disables natively when `disabled` is set, loading or not', () => {
+        const { rerender } = render(
+          <LoadingButton focusableWhileLoading loading disabled>
+            Done
+          </LoadingButton>
+        );
+        expect(screen.getByRole('button')).toBeDisabled();
+        rerender(
+          <LoadingButton focusableWhileLoading disabled>
+            Done
+          </LoadingButton>
+        );
+        expect(screen.getByRole('button')).toBeDisabled();
+      });
+    });
+  });
 });

@@ -133,9 +133,9 @@ export interface DashboardWidgetDefinition {
   /** Matches the server's WIDGET_ID_PATTERN: ^[a-z][a-z0-9_.]{0,63}$ */
   id: string;
   zone: DashboardZone;
-  /** Shown in the Customize dialog. */
+  /** Shown in edit mode (the cell chrome's names and the Add widgets gallery). */
   title: string;
-  /** One line, shown in the Customize dialog. */
+  /** One line, shown in the Add widgets gallery. */
   description: string;
   category: WidgetCategory;
   /** Sources this widget reads; the union over visible widgets is what the page fetches. */

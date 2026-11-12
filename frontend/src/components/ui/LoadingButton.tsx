@@ -1,8 +1,12 @@
 /**
  * Loading Button Component
- * 
+ *
  * A button that shows a loading spinner when in loading state.
  * Prevents double-clicks and provides visual feedback.
+ *
+ * `focusableWhileLoading`: while loading, the button stays focusable (`aria-disabled`, clicks
+ * ignored) instead of natively `disabled`, so keyboard focus on it never drops to <body> for
+ * the length of the request. `disabled` still disables it natively.
  */
 
 import React from 'react';
@@ -11,6 +15,8 @@ import { Spinner } from './Skeleton';
 interface LoadingButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   loading?: boolean;
   loadingText?: string;
+  /** Keep the button focusable while loading (aria-disabled; clicks ignored) instead of `disabled`. */
+  focusableWhileLoading?: boolean;
   children: React.ReactNode;
   variant?: 'primary' | 'secondary' | 'danger' | 'ghost';
   size?: 'sm' | 'md' | 'lg';
@@ -37,24 +43,26 @@ export const LoadingButton: React.FC<LoadingButtonProps> = ({
   size = 'md',
   disabled,
   className = '',
+  focusableWhileLoading = false,
+  onClick,
   ...props
 }) => {
   const baseClasses = variantClasses[variant];
   const sizeClass = sizeClasses[size];
+  const softLock = loading && focusableWhileLoading;
 
   return (
     <button
       {...props}
-      disabled={loading || disabled}
+      aria-disabled={softLock ? true : props['aria-disabled']}
+      onClick={softLock ? event => event.preventDefault() : onClick}
+      disabled={softLock ? disabled : loading || disabled}
       className={`${baseClasses} ${sizeClass} ${className} ${
         loading ? 'opacity-75 cursor-not-allowed' : ''
       } inline-flex items-center justify-center`}
     >
       {loading && (
-        <Spinner 
-          size="sm" 
-          className={`mr-2 ${variant === 'primary' ? 'border-white/30 border-t-white' : ''}`} 
-        />
+        <Spinner size="sm" className={`mr-2 ${variant === 'primary' ? 'border-white/30 border-t-white' : ''}`} />
       )}
       {loading && loadingText ? loadingText : children}
     </button>
