@@ -38,6 +38,15 @@ class DowntimeEvent(Base, TenantMixin):
     id = Column(Integer, primary_key=True, index=True)
     work_center_id = Column(Integer, ForeignKey("work_centers.id"), nullable=False, index=True)
     work_order_id = Column(Integer, ForeignKey("work_orders.id"), nullable=True)
+    # The maintenance work order this stoppage belongs to (migration 124): set when a
+    # work-center maintenance WO that requires shutdown starts and opens -- or adopts -- the
+    # event, so completing / cancelling that WO resolves it. NULL for every other event.
+    maintenance_work_order_id = Column(
+        Integer,
+        ForeignKey("maintenance_work_orders.id", name="fk_downtime_events_maintenance_work_order_id"),
+        nullable=True,
+        index=True,
+    )
 
     start_time = Column(DateTime, nullable=False, default=datetime.utcnow)
     end_time = Column(DateTime, nullable=True)

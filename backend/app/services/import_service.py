@@ -700,6 +700,53 @@ IMPORT_TEMPLATES: Dict[str, ImportTemplateSpec] = {
                 _col("is_outside_operation", "Optional. true/false (default false).", "false", "false", "false"),
             ),
         ),
+        ImportTemplateSpec(
+            entity="maintenance-schedules",
+            title="Preventive maintenance schedules",
+            description=(
+                "ONE ROW PER PM TASK. Rows sharing a target, frequency and schedule name become one PM schedule "
+                "whose checklist is their task list. POST /api/v1/maintenance/schedules/import/preview, then /commit."
+            ),
+            columns=(
+                _col(
+                    "work_center_code",
+                    "Fill this OR asset_tag. A production work center's code (case-insensitive).",
+                    "CNC-01",
+                    "CNC-01",
+                    "",
+                ),
+                _col(
+                    "asset_tag",
+                    "Fill this OR work_center_code. A non-production equipment asset (forklift, compressor...).",
+                    "",
+                    "",
+                    "FL-01",
+                ),
+                _col("asset_name", "Creates the asset when asset_tag is new; never renames one.", "", "", "Forklift 1"),
+                _col("asset_type", "Optional, used only when the asset is created.", "", "", "forklift"),
+                _col(
+                    "schedule_name",
+                    "Optional. Default '<target> <Frequency> PM'. Same name = same schedule.",
+                    "",
+                    "",
+                    "",
+                ),
+                _col("task", "REQUIRED. One checklist item.", "Lubricate ways", "Check coolant level", "Check tires"),
+                _col(
+                    "frequency",
+                    "REQUIRED. daily, weekly, biweekly, monthly, quarterly, semi_annual, annual (yearly) or custom. "
+                    "'As necessary' rows are skipped.",
+                    "monthly",
+                    "monthly",
+                    "annual",
+                ),
+                _col("frequency_days", "Whole days; REQUIRED for custom, ignored otherwise.", "", "", ""),
+                _col("next_due_date", "Optional date (YYYY-MM-DD). New schedules default to today.", "", "", ""),
+                _col("estimated_duration_hours", "Optional number (new schedules default 1).", "0.5", "", ""),
+                _col("requires_shutdown", "Optional true/false (new schedules default false).", "true", "", ""),
+                _col("priority", "Optional: critical, high, medium or low (default medium).", "", "", ""),
+            ),
+        ),
     )
 }
 

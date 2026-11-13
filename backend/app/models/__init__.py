@@ -75,6 +75,7 @@ from .job_costing import CostEntry, CostEntrySource, CostEntryType, JobCost, Job
 from .kiosk_station import KioskStation
 from .laser_nest import LaserNest, LaserNestPackage
 from .maintenance import (
+    MaintenanceAsset,
     MaintenanceFrequency,
     MaintenanceLog,
     MaintenancePriority,
@@ -346,6 +347,7 @@ __all__ = [
     "ToolUsageLog",
     "ToolStatus",
     "ToolType",
+    "MaintenanceAsset",
     "MaintenanceSchedule",
     "MaintenanceWorkOrder",
     "MaintenanceLog",

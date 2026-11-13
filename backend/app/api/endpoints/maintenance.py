@@ -1,16 +1,19 @@
 from datetime import date, datetime, timedelta
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.api.audit_guard import required_audit
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.core.time_utils import to_utc_iso
 from app.db.database import get_db
 from app.models.maintenance import (
     FREQUENCY_DAYS_MAP,
+    MaintenanceAsset,
     MaintenanceFrequency,
     MaintenanceLog,
     MaintenancePriority,
@@ -21,7 +24,16 @@ from app.models.maintenance import (
 )
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
+from app.schemas.maintenance import (
+    MaintenanceAssetCreate,
+    MaintenanceAssetResponse,
+    MaintenanceAssetUpdate,
+    PmImportResponse,
+)
+from app.services import downtime_service
 from app.services.audit_service import AuditService
+from app.services.import_service import MAX_IMPORT_FILE_BYTES, ImportFileError
+from app.services.maintenance_schedule_import_service import commit_pm_import, parse_checklist, preview_pm_import
 
 router = APIRouter()
 
@@ -38,6 +50,9 @@ router = APIRouter()
 _PLANNING_ROLES = [UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]
 _PERFORMING_ROLES = [UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR, UserRole.OPERATOR]
 
+# A maintenance work order in one of these is over: any downtime it holds open is resolved.
+_TERMINAL_STATUSES = (MaintenanceStatus.COMPLETED, MaintenanceStatus.CANCELLED)
+
 # Widest calendar window a single request may ask for. Unbounded, the endpoint
 # was one query-string edit away from serializing every maintenance work order
 # a tenant has ever had.
@@ -47,42 +62,97 @@ _MAX_CALENDAR_DAYS = 366
 # ── Pydantic Schemas ──────────────────────────────────────────────────────
 
 
+# A maintenance record targets EXACTLY ONE of a production work center or a non-production
+# equipment asset (migration 124's CHECK holds the same rule in the database). Enum fields are
+# typed, so an unknown value -- the old form's ``usage_based`` frequency -- is a 422 rather
+# than the ValueError 500 a hand-rolled ``MaintenanceFrequency(...)`` used to raise.
+_TARGET_REQUIRED = "Exactly one of work_center_id or asset_id is required"
+_TARGET_BOTH = "Give work_center_id or asset_id, not both"
+_CUSTOM_NEEDS_DAYS = "frequency_days is required when frequency is custom"
+
+
+def _refuse_nulls(model: BaseModel, fields: Tuple[str, ...]) -> None:
+    nulled = [name for name in fields if name in model.model_fields_set and getattr(model, name) is None]
+    if nulled:
+        raise ValueError(f"{', '.join(nulled)} cannot be null")
+
+
+def _strip_required(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    text = value.strip()
+    if not text:
+        raise ValueError("must not be blank")
+    return text
+
+
 class ScheduleCreate(BaseModel):
-    work_center_id: int
-    name: str
+    work_center_id: Optional[int] = None
+    asset_id: Optional[int] = None
+    name: str = Field(..., min_length=1, max_length=255)
     description: Optional[str] = None
-    maintenance_type: str = "preventive"
-    frequency: str = "monthly"
-    frequency_days: Optional[int] = None
-    estimated_duration_hours: float = 1.0
-    priority: str = "medium"
-    checklist: Optional[str] = None  # JSON string
+    maintenance_type: MaintenanceType = MaintenanceType.PREVENTIVE
+    frequency: MaintenanceFrequency = MaintenanceFrequency.MONTHLY
+    frequency_days: Optional[int] = Field(None, ge=1, le=3650, description="Days between PMs; custom only")
+    estimated_duration_hours: float = Field(1.0, ge=0)
+    priority: MaintenancePriority = MaintenancePriority.MEDIUM
+    checklist: Optional[str] = None  # JSON array of strings (one item per line is still read)
     requires_shutdown: bool = False
     assigned_to: Optional[int] = None
     next_due_date: Optional[date] = None
 
+    @field_validator("name")
+    @classmethod
+    def _name(cls, value: Optional[str]) -> Optional[str]:
+        return _strip_required(value)
+
+    @model_validator(mode="after")
+    def _validate(self) -> "ScheduleCreate":
+        if (self.work_center_id is None) == (self.asset_id is None):
+            raise ValueError(_TARGET_BOTH if self.work_center_id is not None else _TARGET_REQUIRED)
+        if self.frequency == MaintenanceFrequency.CUSTOM and not self.frequency_days:
+            raise ValueError(_CUSTOM_NEEDS_DAYS)
+        return self
+
 
 class ScheduleUpdate(BaseModel):
-    name: Optional[str] = None
+    name: Optional[str] = Field(None, min_length=1, max_length=255)
     description: Optional[str] = None
-    maintenance_type: Optional[str] = None
-    frequency: Optional[str] = None
-    frequency_days: Optional[int] = None
-    estimated_duration_hours: Optional[float] = None
-    priority: Optional[str] = None
+    maintenance_type: Optional[MaintenanceType] = None
+    frequency: Optional[MaintenanceFrequency] = None
+    frequency_days: Optional[int] = Field(None, ge=1, le=3650)
+    estimated_duration_hours: Optional[float] = Field(None, ge=0)
+    priority: Optional[MaintenancePriority] = None
     checklist: Optional[str] = None
     requires_shutdown: Optional[bool] = None
     assigned_to: Optional[int] = None
     next_due_date: Optional[date] = None
     is_active: Optional[bool] = None
 
+    @field_validator("name")
+    @classmethod
+    def _name(cls, value: Optional[str]) -> Optional[str]:
+        return _strip_required(value)
+
+    @model_validator(mode="after")
+    def _refuse_explicit_nulls(self) -> "ScheduleUpdate":
+        # NOT NULL / always-set columns: an explicit null would otherwise be written verbatim.
+        _refuse_nulls(
+            self,
+            ("name", "maintenance_type", "frequency", "estimated_duration_hours", "priority", "requires_shutdown"),
+        )
+        _refuse_nulls(self, ("is_active",))
+        return self
+
 
 class WorkOrderCreate(BaseModel):
     schedule_id: Optional[int] = None
-    work_center_id: int
-    maintenance_type: str = "preventive"
-    priority: str = "medium"
-    title: str
+    # Exactly one target; both omitted with a schedule_id inherits the schedule's target.
+    work_center_id: Optional[int] = None
+    asset_id: Optional[int] = None
+    maintenance_type: MaintenanceType = MaintenanceType.PREVENTIVE
+    priority: MaintenancePriority = MaintenancePriority.MEDIUM
+    title: str = Field(..., min_length=1, max_length=255)
     description: Optional[str] = None
     checklist_results: Optional[str] = None
     scheduled_date: Optional[date] = None
@@ -90,11 +160,22 @@ class WorkOrderCreate(BaseModel):
     requires_shutdown: bool = False
     assigned_to: Optional[int] = None
 
+    @field_validator("title")
+    @classmethod
+    def _title(cls, value: Optional[str]) -> Optional[str]:
+        return _strip_required(value)
+
+    @model_validator(mode="after")
+    def _one_target(self) -> "WorkOrderCreate":
+        if self.work_center_id is not None and self.asset_id is not None:
+            raise ValueError(_TARGET_BOTH)
+        return self
+
 
 class WorkOrderUpdate(BaseModel):
-    priority: Optional[str] = None
-    status: Optional[str] = None
-    title: Optional[str] = None
+    priority: Optional[MaintenancePriority] = None
+    status: Optional[MaintenanceStatus] = None
+    title: Optional[str] = Field(None, min_length=1, max_length=255)
     description: Optional[str] = None
     checklist_results: Optional[str] = None
     scheduled_date: Optional[date] = None
@@ -102,6 +183,16 @@ class WorkOrderUpdate(BaseModel):
     requires_shutdown: Optional[bool] = None
     assigned_to: Optional[int] = None
     notes: Optional[str] = None
+
+    @field_validator("title")
+    @classmethod
+    def _title(cls, value: Optional[str]) -> Optional[str]:
+        return _strip_required(value)
+
+    @model_validator(mode="after")
+    def _refuse_explicit_nulls(self) -> "WorkOrderUpdate":
+        _refuse_nulls(self, ("priority", "status", "title", "requires_shutdown"))
+        return self
 
 
 class WorkOrderComplete(BaseModel):
@@ -111,17 +202,26 @@ class WorkOrderComplete(BaseModel):
     parts_used: Optional[str] = None
     labor_cost: float = 0
     parts_cost: float = 0
-    downtime_minutes: float = 0
+    # 0 (the default) on a work order that recorded downtime is filled from its linked
+    # DowntimeEvent(s); a positive value is the technician's own figure and is kept.
+    downtime_minutes: float = Field(0, ge=0)
     actual_duration_hours: Optional[float] = None
 
 
 class LogCreate(BaseModel):
-    work_center_id: int
+    work_center_id: Optional[int] = None
+    asset_id: Optional[int] = None
     maintenance_wo_id: Optional[int] = None
-    event_type: str
-    description: str
+    event_type: str = Field(..., min_length=1, max_length=50)
+    description: str = Field(..., min_length=1)
     cost: float = 0
     event_date: Optional[datetime] = None
+
+    @model_validator(mode="after")
+    def _one_target(self) -> "LogCreate":
+        if (self.work_center_id is None) == (self.asset_id is None):
+            raise ValueError(_TARGET_BOTH if self.work_center_id is not None else _TARGET_REQUIRED)
+        return self
 
 
 # ── Helper ────────────────────────────────────────────────────────────────
@@ -146,6 +246,58 @@ def _work_center_in_company(db: Session, work_center_id: int, company_id: int) -
     if not wc:
         raise HTTPException(status_code=404, detail="Work center not found")
     return wc
+
+
+def _asset_in_company(db: Session, asset_id: int, company_id: int) -> MaintenanceAsset:
+    """Resolve an equipment asset inside the caller's tenant, or a flat 404 (same posture as
+    ``_work_center_in_company``: a foreign asset reads exactly like a missing one). A retired
+    (inactive) asset still resolves -- its history stays readable and correctable."""
+    asset = (
+        db.query(MaintenanceAsset)
+        .filter(MaintenanceAsset.id == asset_id, MaintenanceAsset.company_id == company_id)
+        .first()
+    )
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    return asset
+
+
+def _resolve_target(
+    db: Session, company_id: int, *, work_center_id: Optional[int], asset_id: Optional[int]
+) -> Tuple[Optional[WorkCenter], Optional[MaintenanceAsset]]:
+    """The ONE target of a maintenance record (the schemas already refused both / neither)."""
+    if work_center_id is not None:
+        return _work_center_in_company(db, work_center_id, company_id), None
+    if asset_id is not None:
+        return None, _asset_in_company(db, asset_id, company_id)
+    raise HTTPException(status_code=422, detail=_TARGET_REQUIRED)
+
+
+def _schedule_or_404(db: Session, schedule_id: int, company_id: int, *, for_update: bool = False):
+    query = db.query(MaintenanceSchedule).filter(
+        MaintenanceSchedule.id == schedule_id, MaintenanceSchedule.company_id == company_id
+    )
+    if for_update:
+        query = query.with_for_update()
+    schedule = query.first()
+    if not schedule:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    return schedule
+
+
+def _wo_or_404(db: Session, wo_id: int, company_id: int, *, for_update: bool = False) -> MaintenanceWorkOrder:
+    """Tenant-scoped maintenance WO, or a flat 404. ``for_update`` row-locks it (a no-op on
+    SQLite): the state verbs read-check-write ``status`` and now open / resolve downtime, so
+    two simultaneous starts must not both pass the status check and open two events."""
+    query = db.query(MaintenanceWorkOrder).filter(
+        MaintenanceWorkOrder.id == wo_id, MaintenanceWorkOrder.company_id == company_id
+    )
+    if for_update:
+        query = query.with_for_update().populate_existing()
+    wo = query.first()
+    if not wo:
+        raise HTTPException(status_code=404, detail="Work order not found")
+    return wo
 
 
 def _generate_wo_number(db: Session) -> str:
@@ -199,12 +351,34 @@ def _same_tenant(row: Any, related: Any) -> Any:
     return related if related.company_id == row.company_id else None
 
 
-def _serialize_schedule(s: MaintenanceSchedule, wc: Optional[WorkCenter] = None) -> dict:
-    wc = wc or _same_tenant(s, s.work_center)
+def _target_fields(row: Any) -> Dict[str, Any]:
+    """The record's target, both kinds, tenant-guarded on egress (see ``_same_tenant``)."""
+    wc = _same_tenant(row, row.work_center)
+    asset = _same_tenant(row, row.asset)
+    if row.asset_id is not None:
+        target_type, target_name, target_code = (
+            "asset",
+            asset.name if asset else None,
+            asset.asset_tag if asset else None,
+        )
+    else:
+        target_type, target_name, target_code = "work_center", wc.name if wc else None, wc.code if wc else None
+    return {
+        "work_center_id": row.work_center_id,
+        "work_center_name": wc.name if wc else None,
+        "asset_id": row.asset_id,
+        "asset_tag": asset.asset_tag if asset else None,
+        "asset_name": asset.name if asset else None,
+        "target_type": target_type,
+        "target_code": target_code,
+        "target_name": target_name,
+    }
+
+
+def _serialize_schedule(s: MaintenanceSchedule) -> dict:
     return {
         "id": s.id,
-        "work_center_id": s.work_center_id,
-        "work_center_name": wc.name if wc else None,
+        **_target_fields(s),
         "name": s.name,
         "description": s.description,
         "maintenance_type": s.maintenance_type.value if hasattr(s.maintenance_type, "value") else s.maintenance_type,
@@ -213,6 +387,8 @@ def _serialize_schedule(s: MaintenanceSchedule, wc: Optional[WorkCenter] = None)
         "estimated_duration_hours": s.estimated_duration_hours,
         "priority": s.priority.value if hasattr(s.priority, "value") else s.priority,
         "checklist": s.checklist,
+        # The checklist parsed tolerantly (a JSON array, else one item per line).
+        "checklist_items": parse_checklist(s.checklist),
         "requires_shutdown": s.requires_shutdown,
         "assigned_to": s.assigned_to,
         "last_completed_date": s.last_completed_date.isoformat() if s.last_completed_date else None,
@@ -224,12 +400,10 @@ def _serialize_schedule(s: MaintenanceSchedule, wc: Optional[WorkCenter] = None)
 
 
 def _serialize_wo(wo: MaintenanceWorkOrder) -> dict:
-    wc = _same_tenant(wo, wo.work_center)
     return {
         "id": wo.id,
         "schedule_id": wo.schedule_id,
-        "work_center_id": wo.work_center_id,
-        "work_center_name": wc.name if wc else None,
+        **_target_fields(wo),
         "wo_number": wo.wo_number,
         "maintenance_type": wo.maintenance_type.value if hasattr(wo.maintenance_type, "value") else wo.maintenance_type,
         "priority": wo.priority.value if hasattr(wo.priority, "value") else wo.priority,
@@ -271,11 +445,9 @@ def _serialize_wo_with_derived_overdue(wo: MaintenanceWorkOrder, today: date) ->
 
 
 def _serialize_log(log: MaintenanceLog) -> dict:
-    wc = _same_tenant(log, log.work_center)
     return {
         "id": log.id,
-        "work_center_id": log.work_center_id,
-        "work_center_name": wc.name if wc else None,
+        **_target_fields(log),
         "maintenance_wo_id": log.maintenance_wo_id,
         "event_type": log.event_type,
         "description": log.description,
@@ -292,19 +464,104 @@ def _serialize_log(log: MaintenanceLog) -> dict:
 @router.get("/schedules")
 def list_schedules(
     work_center_id: Optional[int] = None,
+    asset_id: Optional[int] = None,
     is_active: Optional[bool] = True,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """List PM schedules with optional filters"""
+    """List PM schedules with optional filters (``work_center_id`` or ``asset_id`` narrows to
+    one target). Each row names its target: ``target_type`` is ``work_center`` or ``asset``."""
     query = db.query(MaintenanceSchedule).filter(MaintenanceSchedule.company_id == company_id)
     if is_active is not None:
         query = query.filter(MaintenanceSchedule.is_active == is_active)
     if work_center_id:
         query = query.filter(MaintenanceSchedule.work_center_id == work_center_id)
+    if asset_id:
+        query = query.filter(MaintenanceSchedule.asset_id == asset_id)
     schedules = query.order_by(MaintenanceSchedule.next_due_date).all()
     return [_serialize_schedule(s) for s in schedules]
+
+
+def _read_upload(file: UploadFile) -> bytes:
+    # Bounded read: one byte past the parser's cap is enough for it to refuse the file.
+    return file.file.read(MAX_IMPORT_FILE_BYTES + 1)
+
+
+# Declared before ``/schedules/{schedule_id}`` so the literal paths are never parsed as an id.
+@router.post(
+    "/schedules/import/preview",
+    response_model=PmImportResponse,
+    summary="Preview a PM schedule import (dry run)",
+)
+def preview_pm_schedule_import(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(_PLANNING_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Upload a PM schedule sheet (the ``maintenance-schedules`` template, one row per task, as
+    .xlsx or .csv) and see what a commit would do. WRITES NOTHING.
+
+    Each row targets a work center (``work_center_code``) OR an equipment asset
+    (``asset_tag``; a new tag with ``asset_name`` is created on commit). Rows sharing a
+    target, frequency and schedule name become one schedule whose checklist is their task
+    list; an existing active schedule with that target and name is updated. "Yearly" reads as
+    annual; "as necessary" rows are skipped with a warning. Returns per-row outcomes, the
+    schedules to create / update (with field changes), the assets to create, and
+    ``source_hash``, which the commit must echo back."""
+    content = _read_upload(file)
+    try:
+        return preview_pm_import(db, company_id=company_id, filename=file.filename, content=content)
+    except ImportFileError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/schedules/import/commit",
+    response_model=PmImportResponse,
+    summary="Commit a PM schedule import",
+)
+def commit_pm_schedule_import(
+    file: UploadFile = File(...),
+    expected_source_hash: str = Form(..., min_length=64, max_length=64),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(_PLANNING_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Apply a previewed PM schedule sheet.
+
+    ``expected_source_hash`` is the preview's ``source_hash`` (409 if the file differs).
+    ALL-OR-NOTHING: any row error refuses 409 with the row errors and writes nothing. Each
+    created asset and each created / updated schedule writes a required audit row, plus one
+    summary row; a re-run of the same sheet changes nothing and writes no audit row."""
+    content = _read_upload(file)
+    try:
+        with required_audit(db, "The audit record for the PM schedule import could not be saved; nothing was changed."):
+            result = commit_pm_import(
+                db,
+                company_id=company_id,
+                filename=file.filename,
+                content=content,
+                expected_source_hash=expected_source_hash,
+                audit=audit,
+            )
+            db.commit()
+    except ImportFileError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="The maintenance data changed while importing (e.g. an asset tag was just created); "
+            "nothing was imported. Preview again, then commit.",
+        ) from exc
+    except HTTPException:
+        db.rollback()
+        raise
+    return result
 
 
 @router.get("/schedules/{schedule_id}")
@@ -315,14 +572,7 @@ def get_schedule(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get schedule detail"""
-    schedule = (
-        db.query(MaintenanceSchedule)
-        .filter(MaintenanceSchedule.id == schedule_id, MaintenanceSchedule.company_id == company_id)
-        .first()
-    )
-    if not schedule:
-        raise HTTPException(status_code=404, detail="Schedule not found")
-    return _serialize_schedule(schedule)
+    return _serialize_schedule(_schedule_or_404(db, schedule_id, company_id))
 
 
 @router.post("/schedules")
@@ -333,18 +583,22 @@ def create_schedule(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Create a new PM schedule"""
-    wc = _work_center_in_company(db, data.work_center_id, company_id)
+    """Create a new PM schedule on a work center OR an equipment asset (exactly one).
+
+    ``frequency`` is one of daily, weekly, biweekly, monthly, quarterly, semi_annual, annual,
+    custom (422 otherwise); ``custom`` requires ``frequency_days``."""
+    _resolve_target(db, company_id, work_center_id=data.work_center_id, asset_id=data.asset_id)
 
     schedule = MaintenanceSchedule(
         work_center_id=data.work_center_id,
+        asset_id=data.asset_id,
         name=data.name,
         description=data.description,
-        maintenance_type=MaintenanceType(data.maintenance_type),
-        frequency=MaintenanceFrequency(data.frequency),
+        maintenance_type=data.maintenance_type,
+        frequency=data.frequency,
         frequency_days=data.frequency_days,
         estimated_duration_hours=data.estimated_duration_hours,
-        priority=MaintenancePriority(data.priority),
+        priority=data.priority,
         checklist=data.checklist,
         requires_shutdown=data.requires_shutdown,
         assigned_to=data.assigned_to,
@@ -359,7 +613,7 @@ def create_schedule(
     audit.log_create("maintenance_schedule", schedule.id, schedule.name, new_values=schedule)
     db.commit()
     db.refresh(schedule)
-    return _serialize_schedule(schedule, wc)
+    return _serialize_schedule(schedule)
 
 
 @router.put("/schedules/{schedule_id}")
@@ -371,22 +625,15 @@ def update_schedule(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Update a PM schedule"""
-    schedule = (
-        db.query(MaintenanceSchedule)
-        .filter(MaintenanceSchedule.id == schedule_id, MaintenanceSchedule.company_id == company_id)
-        .first()
-    )
-    if not schedule:
-        raise HTTPException(status_code=404, detail="Schedule not found")
+    """Update a PM schedule (enum fields 422 on an unknown value; a schedule left on
+    ``custom`` must carry ``frequency_days``). The target is not changed here."""
+    schedule = _schedule_or_404(db, schedule_id, company_id)
 
     update_data = data.model_dump(exclude_unset=True)
-    if "maintenance_type" in update_data:
-        update_data["maintenance_type"] = MaintenanceType(update_data["maintenance_type"])
-    if "frequency" in update_data:
-        update_data["frequency"] = MaintenanceFrequency(update_data["frequency"])
-    if "priority" in update_data:
-        update_data["priority"] = MaintenancePriority(update_data["priority"])
+    frequency = update_data.get("frequency", schedule.frequency)
+    frequency_days = update_data["frequency_days"] if "frequency_days" in update_data else schedule.frequency_days
+    if frequency == MaintenanceFrequency.CUSTOM and not frequency_days:
+        raise HTTPException(status_code=422, detail=_CUSTOM_NEEDS_DAYS)
 
     old_values = {c.key: getattr(schedule, c.key) for c in schedule.__table__.columns}
 
@@ -420,13 +667,7 @@ def deactivate_schedule(
     so this is logged as an update carrying the flip (the shape
     ``delete_work_center`` uses for the same situation), not as a delete.
     """
-    schedule = (
-        db.query(MaintenanceSchedule)
-        .filter(MaintenanceSchedule.id == schedule_id, MaintenanceSchedule.company_id == company_id)
-        .first()
-    )
-    if not schedule:
-        raise HTTPException(status_code=404, detail="Schedule not found")
+    schedule = _schedule_or_404(db, schedule_id, company_id)
     old_values = {"is_active": schedule.is_active}
     schedule.is_active = False
     db.flush()
@@ -449,6 +690,7 @@ def deactivate_schedule(
 def list_work_orders(
     status: Optional[str] = None,
     work_center_id: Optional[int] = None,
+    asset_id: Optional[int] = None,
     maintenance_type: Optional[str] = None,
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
@@ -475,6 +717,8 @@ def list_work_orders(
         query = query.filter(MaintenanceWorkOrder.status == status)
     if work_center_id:
         query = query.filter(MaintenanceWorkOrder.work_center_id == work_center_id)
+    if asset_id:
+        query = query.filter(MaintenanceWorkOrder.asset_id == asset_id)
     if maintenance_type:
         query = query.filter(MaintenanceWorkOrder.maintenance_type == maintenance_type)
     if start_date:
@@ -530,14 +774,7 @@ def get_work_order(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get maintenance work order detail"""
-    wo = (
-        db.query(MaintenanceWorkOrder)
-        .filter(MaintenanceWorkOrder.id == wo_id, MaintenanceWorkOrder.company_id == company_id)
-        .first()
-    )
-    if not wo:
-        raise HTTPException(status_code=404, detail="Work order not found")
-    return _serialize_wo(wo)
+    return _serialize_wo(_wo_or_404(db, wo_id, company_id))
 
 
 @router.post("/work-orders")
@@ -548,30 +785,33 @@ def create_work_order(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Create a new maintenance work order"""
-    _work_center_in_company(db, data.work_center_id, company_id)
+    """Create a new maintenance work order on a work center OR an equipment asset.
 
+    Give exactly one of ``work_center_id`` / ``asset_id``, or neither together with a
+    ``schedule_id`` to inherit that schedule's target. ``requires_shutdown`` on a WORK-CENTER
+    work order means starting it records machine downtime (an asset never does)."""
     # A foreign schedule_id would otherwise be accepted verbatim, and
     # complete_work_order writes last_completed_date / next_due_date straight
     # onto whatever schedule it points at -- a cross-tenant write laundered
     # through a legitimately-owned work order.
+    schedule: Optional[MaintenanceSchedule] = None
     if data.schedule_id is not None:
-        owns_schedule = (
-            db.query(MaintenanceSchedule.id)
-            .filter(MaintenanceSchedule.id == data.schedule_id, MaintenanceSchedule.company_id == company_id)
-            .first()
-        )
-        if not owns_schedule:
-            raise HTTPException(status_code=404, detail="Schedule not found")
+        schedule = _schedule_or_404(db, data.schedule_id, company_id)
+
+    work_center_id, asset_id = data.work_center_id, data.asset_id
+    if work_center_id is None and asset_id is None and schedule is not None:
+        work_center_id, asset_id = schedule.work_center_id, schedule.asset_id
+    _resolve_target(db, company_id, work_center_id=work_center_id, asset_id=asset_id)
 
     wo_number = _generate_wo_number(db)
 
     wo = MaintenanceWorkOrder(
         schedule_id=data.schedule_id,
-        work_center_id=data.work_center_id,
+        work_center_id=work_center_id,
+        asset_id=asset_id,
         wo_number=wo_number,
-        maintenance_type=MaintenanceType(data.maintenance_type),
-        priority=MaintenancePriority(data.priority),
+        maintenance_type=data.maintenance_type,
+        priority=data.priority,
         status=MaintenanceStatus.SCHEDULED,
         title=data.title,
         description=data.description,
@@ -599,25 +839,29 @@ def update_work_order(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Update a maintenance work order"""
-    wo = (
-        db.query(MaintenanceWorkOrder)
-        .filter(MaintenanceWorkOrder.id == wo_id, MaintenanceWorkOrder.company_id == company_id)
-        .first()
-    )
-    if not wo:
-        raise HTTPException(status_code=404, detail="Work order not found")
+    """Update a maintenance work order.
+
+    Moving it to ``cancelled`` (or ``completed``) resolves any downtime event it holds open,
+    so a work order that ends without ``/complete`` never leaves its machine marked down."""
+    wo = _wo_or_404(db, wo_id, company_id, for_update=True)
 
     update_data = data.model_dump(exclude_unset=True)
-    if "priority" in update_data:
-        update_data["priority"] = MaintenancePriority(update_data["priority"])
-    if "status" in update_data:
-        update_data["status"] = MaintenanceStatus(update_data["status"])
-
     old_values = {c.key: getattr(wo, c.key) for c in wo.__table__.columns}
+    was_terminal = wo.status in _TERMINAL_STATUSES
 
     for field, value in update_data.items():
         setattr(wo, field, value)
+
+    if not was_terminal and wo.status in _TERMINAL_STATUSES:
+        downtime_service.resolve_maintenance_downtime(
+            db,
+            wo,
+            company_id=company_id,
+            actor_id=current_user.id,
+            audit=audit,
+            ended_at=datetime.utcnow(),
+            resolution=f"Maintenance work order {wo.wo_number} set to {wo.status.value}",
+        )
 
     db.flush()
     audit.log_update(
@@ -640,14 +884,14 @@ def start_work_order(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Start a maintenance work order"""
-    wo = (
-        db.query(MaintenanceWorkOrder)
-        .filter(MaintenanceWorkOrder.id == wo_id, MaintenanceWorkOrder.company_id == company_id)
-        .first()
-    )
-    if not wo:
-        raise HTTPException(status_code=404, detail="Work order not found")
+    """Start a maintenance work order.
+
+    A WORK-CENTER work order with ``requires_shutdown`` also records the stoppage: it opens a
+    downtime event on that machine (preventive / predictive -> planned maintenance, outside
+    OEE loss; corrective / emergency -> mechanical, unplanned), or adopts an open event an
+    operator already logged on it rather than doubling the minutes. ``/complete`` and a
+    cancel resolve it. An equipment-asset work order never records downtime."""
+    wo = _wo_or_404(db, wo_id, company_id, for_update=True)
     if wo.status not in (MaintenanceStatus.SCHEDULED, MaintenanceStatus.OVERDUE, MaintenanceStatus.ON_HOLD):
         raise HTTPException(status_code=400, detail=f"Cannot start work order in status '{wo.status.value}'")
 
@@ -664,6 +908,7 @@ def start_work_order(
     log = MaintenanceLog(
         company_id=company_id,
         work_center_id=wo.work_center_id,
+        asset_id=wo.asset_id,
         maintenance_wo_id=wo.id,
         event_type="started",
         description=f"Maintenance work order {wo.wo_number} started",
@@ -672,8 +917,16 @@ def start_work_order(
     )
     db.add(log)
     db.flush()
+    downtime = downtime_service.open_or_link_maintenance_downtime(
+        db, wo, company_id=company_id, actor_id=current_user.id, audit=audit, started_at=wo.started_at
+    )
     audit.log_status_change(
-        "maintenance_work_order", wo.id, wo.wo_number, old_status, MaintenanceStatus.IN_PROGRESS.value
+        "maintenance_work_order",
+        wo.id,
+        wo.wo_number,
+        old_status,
+        MaintenanceStatus.IN_PROGRESS.value,
+        extra_data={"downtime_event_id": downtime.id} if downtime is not None else None,
     )
     db.commit()
     db.refresh(wo)
@@ -690,14 +943,11 @@ def complete_work_order(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Complete a maintenance work order"""
-    wo = (
-        db.query(MaintenanceWorkOrder)
-        .filter(MaintenanceWorkOrder.id == wo_id, MaintenanceWorkOrder.company_id == company_id)
-        .first()
-    )
-    if not wo:
-        raise HTTPException(status_code=404, detail="Work order not found")
+    """Complete a maintenance work order.
+
+    Resolves the downtime event the work order holds open (see ``/start``) at completion,
+    and -- when ``downtime_minutes`` is left at 0 -- records the linked events' minutes."""
+    wo = _wo_or_404(db, wo_id, company_id, for_update=True)
     if wo.status not in (MaintenanceStatus.IN_PROGRESS, MaintenanceStatus.SCHEDULED, MaintenanceStatus.OVERDUE):
         raise HTTPException(status_code=400, detail=f"Cannot complete work order in status '{wo.status.value}'")
 
@@ -714,6 +964,20 @@ def complete_work_order(
     wo.parts_cost = data.parts_cost
     wo.total_cost = data.labor_cost + data.parts_cost
     wo.downtime_minutes = data.downtime_minutes
+
+    resolved = downtime_service.resolve_maintenance_downtime(
+        db,
+        wo,
+        company_id=company_id,
+        actor_id=current_user.id,
+        audit=audit,
+        ended_at=now,
+        resolution=f"Maintenance work order {wo.wo_number} completed",
+    )
+    if not data.downtime_minutes:
+        linked_minutes = downtime_service.linked_downtime_minutes(db, company_id, wo)
+        if linked_minutes is not None:
+            wo.downtime_minutes = linked_minutes
 
     # Calculate duration
     if data.actual_duration_hours is not None:
@@ -741,6 +1005,7 @@ def complete_work_order(
     log = MaintenanceLog(
         company_id=company_id,
         work_center_id=wo.work_center_id,
+        asset_id=wo.asset_id,
         maintenance_wo_id=wo.id,
         event_type="completed",
         description=f"Maintenance work order {wo.wo_number} completed. Cost: ${wo.total_cost:.2f}",
@@ -761,6 +1026,7 @@ def complete_work_order(
             "downtime_minutes": wo.downtime_minutes,
             "actual_duration_hours": wo.actual_duration_hours,
             "schedule_id": wo.schedule_id,
+            "resolved_downtime_event_ids": [event.id for event in resolved],
         },
     )
     db.commit()
@@ -993,6 +1259,247 @@ def get_history(
     }
 
 
+@router.get("/assets/{asset_id}/history")
+def get_maintenance_asset_history(
+    asset_id: int,
+    limit: int = Query(100, ge=1, le=5000),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Full maintenance history (log entries) for an equipment asset, newest first."""
+    asset = _asset_in_company(db, asset_id, company_id)
+    logs = (
+        db.query(MaintenanceLog)
+        .filter(MaintenanceLog.company_id == company_id, MaintenanceLog.asset_id == asset_id)
+        .order_by(MaintenanceLog.event_date.desc())
+        .limit(limit)
+        .all()
+    )
+    return {
+        "asset_id": asset.id,
+        "asset_tag": asset.asset_tag,
+        "asset_name": asset.name,
+        "logs": [_serialize_log(log) for log in logs],
+    }
+
+
+# ── Equipment assets ──────────────────────────────────────────────────────
+#
+# Non-production equipment that is maintained but never scheduled, dispatched, run on the
+# kiosk or counted in OEE (owner decision 2026-11-13). Reads are open to every signed-in
+# role; writes are the planning roles, like schedules. No physical delete: retiring is
+# ``is_active = false`` (DELETE), and its schedules / work orders / history stay.
+
+_ASSET_EDITABLE_FIELDS = (
+    "asset_tag",
+    "name",
+    "asset_type",
+    "manufacturer",
+    "model",
+    "serial_number",
+    "location",
+    "notes",
+    "is_active",
+)
+
+
+def _asset_values(asset: MaintenanceAsset) -> Dict[str, Any]:
+    return {field: getattr(asset, field) for field in _ASSET_EDITABLE_FIELDS}
+
+
+def _asset_counts(db: Session, company_id: int, asset_ids: List[int]) -> Dict[int, Tuple[int, int]]:
+    """``{asset_id: (active schedules, open work orders)}`` in two grouped reads."""
+    if not asset_ids:
+        return {}
+    schedules = dict(
+        db.query(MaintenanceSchedule.asset_id, func.count(MaintenanceSchedule.id))
+        .filter(
+            MaintenanceSchedule.company_id == company_id,
+            MaintenanceSchedule.asset_id.in_(asset_ids),
+            MaintenanceSchedule.is_active == True,  # noqa: E712
+        )
+        .group_by(MaintenanceSchedule.asset_id)
+        .all()
+    )
+    open_wos = dict(
+        db.query(MaintenanceWorkOrder.asset_id, func.count(MaintenanceWorkOrder.id))
+        .filter(
+            MaintenanceWorkOrder.company_id == company_id,
+            MaintenanceWorkOrder.asset_id.in_(asset_ids),
+            MaintenanceWorkOrder.status.notin_(_TERMINAL_STATUSES),
+        )
+        .group_by(MaintenanceWorkOrder.asset_id)
+        .all()
+    )
+    return {asset_id: (int(schedules.get(asset_id, 0)), int(open_wos.get(asset_id, 0))) for asset_id in asset_ids}
+
+
+def _asset_response(asset: MaintenanceAsset, counts: Optional[Tuple[int, int]] = None) -> MaintenanceAssetResponse:
+    response = MaintenanceAssetResponse.model_validate(asset)
+    if counts is not None:
+        response.active_schedule_count, response.open_work_order_count = counts
+    return response
+
+
+def _refuse_duplicate_tag(db: Session, company_id: int, asset_tag: str, *, exclude_id: Optional[int] = None) -> None:
+    """``asset_tag`` is unique per company, case-insensitively (the DB key is exact-case)."""
+    query = db.query(MaintenanceAsset.id).filter(
+        MaintenanceAsset.company_id == company_id,
+        func.lower(MaintenanceAsset.asset_tag) == asset_tag.lower(),
+    )
+    if exclude_id is not None:
+        query = query.filter(MaintenanceAsset.id != exclude_id)
+    if query.first():
+        raise HTTPException(status_code=409, detail=f"An asset tagged '{asset_tag}' already exists")
+
+
+@router.get("/assets", response_model=List[MaintenanceAssetResponse])
+def list_maintenance_assets(
+    include_inactive: bool = Query(False, description="Include retired (inactive) assets"),
+    search: Optional[str] = Query(None, max_length=100, description="Matches tag, name or type"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """List the company's equipment assets (non-production machines), by tag, each with its
+    active schedule and open work order counts."""
+    query = db.query(MaintenanceAsset).filter(MaintenanceAsset.company_id == company_id)
+    if not include_inactive:
+        query = query.filter(MaintenanceAsset.is_active == True)  # noqa: E712
+    if search and search.strip():
+        pattern = f"%{search.strip().lower()}%"
+        query = query.filter(
+            func.lower(MaintenanceAsset.asset_tag).like(pattern)
+            | func.lower(MaintenanceAsset.name).like(pattern)
+            | func.lower(func.coalesce(MaintenanceAsset.asset_type, "")).like(pattern)
+        )
+    assets = query.order_by(MaintenanceAsset.asset_tag).all()
+    counts = _asset_counts(db, company_id, [asset.id for asset in assets])
+    return [_asset_response(asset, counts.get(asset.id)) for asset in assets]
+
+
+@router.get("/assets/{asset_id}", response_model=MaintenanceAssetResponse)
+def get_maintenance_asset(
+    asset_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Get one equipment asset."""
+    asset = _asset_in_company(db, asset_id, company_id)
+    return _asset_response(asset, _asset_counts(db, company_id, [asset.id]).get(asset.id))
+
+
+@router.post("/assets", response_model=MaintenanceAssetResponse)
+def create_maintenance_asset(
+    data: MaintenanceAssetCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(_PLANNING_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Register a non-production equipment asset (forklift, compressor, manual mill...).
+    ``asset_tag`` must be unique in the company, ignoring case (409)."""
+    _refuse_duplicate_tag(db, company_id, data.asset_tag)
+    asset = MaintenanceAsset(**data.model_dump(), company_id=company_id, is_active=True, version=1)
+    db.add(asset)
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=f"An asset tagged '{data.asset_tag}' already exists") from exc
+    audit.log_create("maintenance_asset", asset.id, asset.asset_tag, new_values=_asset_values(asset))
+    db.commit()
+    db.refresh(asset)
+    return _asset_response(asset, (0, 0))
+
+
+@router.put("/assets/{asset_id}", response_model=MaintenanceAssetResponse)
+def update_maintenance_asset(
+    asset_id: int,
+    data: MaintenanceAssetUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(_PLANNING_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Edit an equipment asset. ``version`` must be the asset's current version (409 if
+    someone else saved first); only the fields sent are changed."""
+    asset = (
+        db.query(MaintenanceAsset)
+        .filter(MaintenanceAsset.id == asset_id, MaintenanceAsset.company_id == company_id)
+        .with_for_update()
+        .populate_existing()
+        .first()
+    )
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    if data.version != asset.version:
+        raise HTTPException(
+            status_code=409,
+            detail=f"This asset was changed by someone else (now version {asset.version}); reload it and retry.",
+        )
+    update_data = data.model_dump(exclude_unset=True, exclude={"version"})
+    if "asset_tag" in update_data and update_data["asset_tag"] != asset.asset_tag:
+        _refuse_duplicate_tag(db, company_id, update_data["asset_tag"], exclude_id=asset.id)
+
+    old_values = _asset_values(asset)
+    for field in _ASSET_EDITABLE_FIELDS:
+        if field in update_data:
+            setattr(asset, field, update_data[field])
+    new_values = _asset_values(asset)
+    if new_values != old_values:
+        asset.version = asset.version + 1
+        try:
+            db.flush()
+        except IntegrityError as exc:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="An asset with that tag already exists") from exc
+        audit.log_update("maintenance_asset", asset.id, asset.asset_tag, old_values=old_values, new_values=new_values)
+        db.commit()
+        db.refresh(asset)
+    return _asset_response(asset, _asset_counts(db, company_id, [asset.id]).get(asset.id))
+
+
+@router.delete("/assets/{asset_id}", response_model=MaintenanceAssetResponse)
+def retire_maintenance_asset(
+    asset_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(_PLANNING_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Retire an equipment asset (``is_active = false``; never a physical delete).
+
+    Its schedules, work orders and history are kept; deactivate its schedules separately if
+    they should stop coming due. ``PUT`` with ``is_active: true`` brings it back."""
+    asset = (
+        db.query(MaintenanceAsset)
+        .filter(MaintenanceAsset.id == asset_id, MaintenanceAsset.company_id == company_id)
+        .with_for_update()
+        .populate_existing()
+        .first()
+    )
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    if asset.is_active:
+        asset.is_active = False
+        asset.version = asset.version + 1
+        db.flush()
+        audit.log_update(
+            "maintenance_asset",
+            asset.id,
+            asset.asset_tag,
+            old_values={"is_active": True},
+            new_values={"is_active": False},
+            description=f"Retired equipment asset {asset.asset_tag}",
+        )
+        db.commit()
+        db.refresh(asset)
+    return _asset_response(asset, _asset_counts(db, company_id, [asset.id]).get(asset.id))
+
+
 # ── Log ───────────────────────────────────────────────────────────────────
 
 
@@ -1004,8 +1511,8 @@ def create_log(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Add a maintenance log entry"""
-    _work_center_in_company(db, data.work_center_id, company_id)
+    """Add a maintenance log entry against a work center OR an equipment asset."""
+    _resolve_target(db, company_id, work_center_id=data.work_center_id, asset_id=data.asset_id)
 
     if data.maintenance_wo_id is not None:
         owns_wo = (
@@ -1024,6 +1531,7 @@ def create_log(
     log = MaintenanceLog(
         company_id=company_id,
         work_center_id=data.work_center_id,
+        asset_id=data.asset_id,
         maintenance_wo_id=data.maintenance_wo_id,
         event_type=data.event_type,
         description=data.description,
