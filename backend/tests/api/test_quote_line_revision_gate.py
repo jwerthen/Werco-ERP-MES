@@ -7,6 +7,9 @@ Werco's 2026-10-01 quote went out with the Rev column blank on every line. Pinne
   and ``POST /quotes/{id}/generate-pdf`` -- with the exact 409 naming the lines, and each
   refusal writes nothing (no status move, no audit row, no delivery row, no SMTP call).
   Part-less lines are included, or the gate would never fire on the hand-off quote.
+* No detour: a ``PUT`` into sent/accepted from REJECTED or EXPIRED (both reachable from a
+  never-sent draft) is gated too, and a status move bundled with a content edit lands at
+  DRAFT rather than slipping past the gate.
 * An idempotent re-send of an already-SENT quote is unaffected.
 * ``line_revisions`` on ``PUT`` is a content edit: normalized, audited per line, refused on
   an issued quote and for a line that is not on this quote, tenant-isolated.
@@ -258,6 +261,69 @@ class TestEverySendDoorRefuses:
         assert resp.json()["detail"] == f"{MISSING_REVISION_DETAIL} Missing on line(s): 1."
 
 
+class TestNoDetourAroundTheGate:
+    """The gate is on the MOVE into a customer status, not on the starting status.
+
+    ``PUT`` sets ``status`` blindly, and a quote can reach REJECTED or EXPIRED without ever
+    having been sent (draft -> rejected is a plain status update). Gating only draft/pending
+    starts would let draft -> rejected -> sent carry a revision-less quote to the customer.
+    """
+
+    @pytest.mark.parametrize("start", [QuoteStatus.REJECTED, QuoteStatus.EXPIRED])
+    @pytest.mark.parametrize("target", ["sent", "accepted"])
+    def test_put_from_rejected_or_expired_is_a_door_too(self, client, db_session, start, target):
+        quote = _quote(db_session, [None, "B", None], status=start)
+        before = _state(db_session, quote.id)
+        resp = client.put(f"/api/v1/quotes/{quote.id}", headers=_headers(_user(db_session)), json={"status": target})
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"] == EXPECTED_1_3
+        assert _state(db_session, quote.id) == before
+
+    def test_draft_to_rejected_then_sent_cannot_launder_a_blank_revision(self, client, db_session):
+        quote = _quote(db_session, [None])
+        headers = _headers(_user(db_session))
+        rejected = client.put(f"/api/v1/quotes/{quote.id}", headers=headers, json={"status": "rejected"})
+        assert rejected.status_code == 200, rejected.text  # moving AWAY from the customer is not gated
+        resp = client.put(f"/api/v1/quotes/{quote.id}", headers=headers, json={"status": "sent"})
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"] == f"{MISSING_REVISION_DETAIL} Missing on line(s): 1."
+        db_session.expire_all()
+        assert db_session.get(Quote, quote.id).status == QuoteStatus.REJECTED
+
+    @pytest.mark.parametrize("start", [QuoteStatus.REJECTED, QuoteStatus.EXPIRED])
+    def test_a_complete_quote_may_still_be_reopened_to_sent(self, client, db_session, start):
+        quote = _quote(db_session, ["A", "N/A"], status=start)
+        resp = client.put(f"/api/v1/quotes/{quote.id}", headers=_headers(_user(db_session)), json={"status": "sent"})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status"] == "sent"
+
+    @pytest.mark.parametrize(
+        "edit",
+        [
+            pytest.param("line_revisions", id="with-a-revision-edit"),
+            pytest.param("internal_notes", id="with-a-commercial-edit"),
+        ],
+    )
+    def test_a_status_move_bundled_with_a_content_edit_lands_at_draft_never_sent(self, client, db_session, edit):
+        # The gate is skipped when the same request edits content ONLY because the content
+        # edit resets the quote to DRAFT. Pin that, or the skip becomes a bypass.
+        quote = _quote(db_session, [None, None], status=QuoteStatus.PENDING)
+        first = min(quote.lines, key=lambda line: line.line_number)
+        body = {"status": "sent"}
+        if edit == "line_revisions":
+            body["line_revisions"] = [{"line_id": first.id, "part_revision": "A"}]
+        else:
+            body["internal_notes"] = "Buyer asked for a re-quote"
+        headers = _headers(_user(db_session))
+        resp = client.put(f"/api/v1/quotes/{quote.id}", headers=headers, json=body)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status"] == "draft"
+        db_session.expire_all()
+        assert db_session.get(Quote, quote.id).status == QuoteStatus.DRAFT
+        still_blocked = client.post(f"/api/v1/quotes/{quote.id}/send", headers=headers)
+        assert still_blocked.status_code == 409, still_blocked.text
+
+
 class TestDoorsOpenOnceEveryLineHasARevision:
     def test_send_and_generate_pdf_succeed_with_na_on_a_line_with_no_drawing(self, client, db_session):
         quote = _quote(db_session, ["A", "N/A"])
@@ -499,6 +565,52 @@ def test_terms_block_is_the_module_constant_with_the_fob_point():
     assert quote_terms("Broken Arrow, OK 74012")[1] == "FOB Broken Arrow, OK."
     assert quote_terms(None)[1] == "FOB Origin."
     assert len(quote_terms(None)) == 6
+
+
+def test_a_line_naming_another_companys_part_prefills_no_revision(client, db_session):
+    # A legacy line whose part_id points at another tenant's part: the editor must not be
+    # handed that tenant's drawing revision to pre-fill, in the response or the print data.
+    foreign = _part(db_session, company_id=2, revision="Q")
+    quote = _quote(db_session, [None], part=foreign)
+    headers = _headers(_user(db_session))
+    line = client.get(f"/api/v1/quotes/{quote.id}", headers=headers).json()["lines"][0]
+    assert line["part_current_revision"] is None
+    printed = client.get(f"/api/v1/print/quotes/{quote.id}/print-data", headers=headers).json()["lines"][0]
+    assert printed["part_current_revision"] is None
+
+
+def test_a_changed_fob_point_after_preview_is_a_changed_document(client, db_session, fake_smtp):
+    """The Terms block reads the company's address, so it is part of the prepared snapshot.
+
+    A delivery reviewed while the company sat in Tulsa must not be emailed after the address
+    moved to Broken Arrow: the customer would receive a PDF whose FOB point nobody reviewed.
+    """
+    _company(db_session, address="1 Main St\nTulsa, OK 74103")
+    quote = _quote(db_session, ["A"], valid_until=date.today() + timedelta(days=30))
+    headers = _headers(_user(db_session))
+    prepared = client.post(
+        "/api/v1/document-deliveries/preview", headers=headers, json={"entity_type": "quote", "entity_id": quote.id}
+    )
+    assert prepared.status_code == 200, prepared.text
+    review = prepared.json()
+
+    _company(db_session, address="415 East Houston Street\nBroken Arrow, OK 74012")
+    resp = client.post(
+        f"/api/v1/document-deliveries/{review['id']}/send",
+        headers=headers,
+        json={
+            "expected_version": review["version"],
+            "request_key": "rev-gate-fob-0001",
+            "recipient": review["recipient"],
+            "subject": review["subject"],
+            "body": review["body"],
+        },
+    )
+    assert resp.status_code == 409, resp.text
+    assert "changed after this PDF was prepared" in resp.json()["detail"]
+    fake_smtp.assert_not_called()
+    db_session.expire_all()
+    assert db_session.get(DocumentDelivery, review["id"]).status == "prepared"
 
 
 def test_delivery_preview_after_entering_revisions_succeeds(client, db_session):

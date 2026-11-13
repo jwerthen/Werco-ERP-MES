@@ -244,6 +244,11 @@ class TestLogLines:
         assert rows[via_wo.id]["job_number"] == blank_customer_wo.work_order_number
         assert rows[no_wo.id]["customer"] == "L3-LINK"
         assert rows[no_wo.id]["job_number"] is None and rows[no_wo.id]["customer_po"] is None
+        # The customer FILTER (SQL) reads the same fallback the line displays (Python): a
+        # whitespace-only job customer falls through to the part's, so filtering on the
+        # customer the log shows finds both lines.
+        filtered = _log(client, _user(db_session), customer="l3-li")
+        assert {row["fai_id"] for row in filtered} == {via_wo.id, no_wo.id}
 
     def test_a_since_deleted_part_and_work_order_are_still_named(self, client, db_session):
         part = _part(db_session, name="Retired bracket")

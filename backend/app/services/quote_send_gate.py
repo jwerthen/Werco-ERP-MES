@@ -17,7 +17,8 @@ customer revises the drawing. Three rules, one module:
   puts a quote in front of the customer refuses (409, :data:`MISSING_REVISION_DETAIL`)
   while any line -- part-less lines included, or the gate would never fire on the hand-off
   quote -- lacks a revision: ``POST /quotes/{id}/send`` (when the status actually moves),
-  ``PUT /quotes/{id}`` moving a draft/pending quote to sent or accepted, the document
+  ``PUT /quotes/{id}`` moving a quote into sent or accepted from any other status (rejected
+  and expired included -- both are reachable from draft without a send), the document
   delivery preview and send, and ``POST /quotes/{id}/generate-pdf`` (it produces the
   customer document). Each refusal is raised before anything is written.
 """

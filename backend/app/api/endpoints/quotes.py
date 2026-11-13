@@ -433,9 +433,10 @@ def update_quote(
     ``line_revisions`` enters each line's drawing revision (letters/digits, or ``N/A`` for a
     line with no drawing). It is a content edit: draft/pending quotes only, and it resets the
     quote to DRAFT and clears its approval stamp like any other; a ``line_id`` that is not a
-    line of this quote (or is repeated) is a 422. Moving a draft/pending quote to ``sent`` or
-    ``accepted`` here is refused (409) while any line lacks its drawing revision, exactly as
-    ``POST /quotes/{id}/send`` is.
+    line of this quote (or is repeated) is a 422. Moving a quote to ``sent`` or ``accepted``
+    here from any status other than those two (draft, pending, and also rejected or expired,
+    which a quote can reach without ever being sent) is refused (409) while any line lacks
+    its drawing revision, exactly as ``POST /quotes/{id}/send`` is.
     """
     quote = db.query(Quote).filter(Quote.id == quote_id, Quote.company_id == company_id).with_for_update().first()
     if not quote:
@@ -493,10 +494,14 @@ def update_quote(
     if len(set(edited_line_ids)) != len(edited_line_ids):
         raise HTTPException(status_code=422, detail="line_revisions names the same line more than once")
     # Every door that puts the quote in front of the customer holds the revision gate. Only a
-    # real move counts: with a content edit in the same request the quote lands at DRAFT.
+    # real move INTO a customer status counts (SENT -> ACCEPTED is not one: the customer
+    # already holds that document), and it is judged on the move, not the starting status:
+    # REJECTED / EXPIRED are reachable from DRAFT by a plain status update, so gating only
+    # draft/pending would let draft -> rejected -> sent carry a blank revision out. With a
+    # content edit in the same request the quote lands at DRAFT, so there is no move.
     if (
         update_data.get("status") in (QuoteStatus.SENT, QuoteStatus.ACCEPTED)
-        and quote.status in (QuoteStatus.DRAFT, QuoteStatus.PENDING)
+        and quote.status not in (QuoteStatus.SENT, QuoteStatus.ACCEPTED)
         and not (content_keys or line_data is not None)
     ):
         assert_quote_sendable(quote)

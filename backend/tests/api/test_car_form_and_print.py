@@ -456,6 +456,49 @@ class TestUpdateFormFields:
         assert resp.status_code == 422, resp.text
         assert _snapshot(db_session) == before
 
+    @pytest.mark.parametrize("cleared", [None, "   "])
+    def test_erasing_the_other_text_while_the_reason_stays_other_is_422(self, client, db_session, cleared):
+        # The other half of the rule: the box stays "Other" and only its blank is emptied.
+        car = _car(db_session, initiation_reason="other", initiation_reason_other="Supplier survey")
+        before = _snapshot(db_session)
+        resp = client.put(
+            f"{BASE}/car/{car.id}",
+            headers=_headers(_user(db_session)),
+            json={"version": 0, "initiation_reason_other": cleared},
+        )
+        assert resp.status_code == 422, resp.text
+        assert "initiation_reason_other" in resp.text
+        assert _snapshot(db_session) == before
+
+    def test_moving_off_other_lets_its_text_be_cleared(self, client, db_session):
+        car = _car(db_session, initiation_reason="other", initiation_reason_other="Supplier survey")
+        resp = client.put(
+            f"{BASE}/car/{car.id}",
+            headers=_headers(_user(db_session)),
+            json={"version": 0, "initiation_reason": "internal_audit", "initiation_reason_other": None},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["initiation_reason"] == "internal_audit"
+        assert resp.json()["initiation_reason_other"] is None
+
+    @pytest.mark.parametrize(
+        "field,value",
+        [
+            ("cost_labor", "-0.01"),  # a cost is never negative
+            ("cost_material", "12.345"),  # the column holds cents, not mills
+            ("cost_shipping", "12345678901.00"),  # 11 integer digits overflow Numeric(12, 2)
+        ],
+    )
+    def test_a_cost_the_column_cannot_hold_is_422_before_anything_is_written(self, client, db_session, field, value):
+        user = _user(db_session)
+        car = _car(db_session)
+        before = _snapshot(db_session)
+        created = client.post(f"{BASE}/car", headers=_headers(user), json=_create_body(**{field: value}))
+        updated = client.put(f"{BASE}/car/{car.id}", headers=_headers(user), json={"version": 0, field: value})
+        assert created.status_code == 422, created.text
+        assert updated.status_code == 422, updated.text
+        assert _snapshot(db_session) == before
+
     def test_closed_car_refuses_a_form_field_edit(self, client, db_session):
         car = _car(db_session, status=CARStatus.CLOSED)
         resp = client.put(
@@ -558,6 +601,51 @@ class TestQualityApproval:
         db_session.expire_all()
         row = db_session.get(CorrectiveActionRequest, car.id)
         assert row.quality_approved_by is None and row.quality_approved_at is None
+
+    def test_approval_neither_moves_the_status_nor_touches_another_field(self, client, db_session):
+        # "Approval does not freeze other fields and is not required to close": the verb
+        # writes the two stamp columns and nothing else, and it emits an update (never a
+        # second "created") so the CAR notifications do not re-fire as a new CAR.
+        car = _car(db_session, status=CARStatus.CORRECTIVE_ACTION, rma_number="RMA-1", cost_labor=10)
+        before = _snapshot(db_session)["cars"][0]
+        resp = client.post(f"{BASE}/car/{car.id}/quality-approval", headers=_headers(_user(db_session)))
+        assert resp.status_code == 200, resp.text
+        after = _snapshot(db_session)["cars"][0]
+        changed = {key for key in after if after[key] != before[key]}
+        assert changed - {"updated_at"} == {"quality_approved_by", "quality_approved_at"}
+        assert after["status"] == CARStatus.CORRECTIVE_ACTION
+        events = (
+            db_session.query(OperationalEvent)
+            .filter(OperationalEvent.entity_type == "car", OperationalEvent.entity_id == car.id)
+            .all()
+        )
+        assert [event.event_type for event in events] == ["car_updated"]
+        assert events[0].event_payload["changed_fields"] == ["quality_approved_at", "quality_approved_by"]
+        assert events[0].event_payload["previous_status"] == events[0].event_payload["status"]
+
+        # ... and an approved CAR stays editable through the ordinary update verb.
+        edited = client.put(
+            f"{BASE}/car/{car.id}", headers=_headers(_user(db_session)), json={"version": 0, "rma_number": "RMA-2"}
+        )
+        assert edited.status_code == 200, edited.text
+        assert edited.json()["rma_number"] == "RMA-2" and edited.json()["quality_approved_by"] is not None
+
+    def test_a_platform_admin_approving_in_this_companys_context_is_still_named(self, client, db_session):
+        # The approver is a server-stamped attribution fact: a platform principal acting in
+        # company 1's context is not one of its users, yet the record (and the print) must
+        # name who approved it rather than show a blank approver.
+        platform = _user(db_session, role=UserRole.PLATFORM_ADMIN, company_id=2, first_name="Pat")
+        car = _car(db_session)
+        token = create_access_token(subject=platform.id, company_id=1)
+        headers = {"Authorization": f"Bearer {token}", "X-Requested-With": "XMLHttpRequest"}
+        resp = client.post(f"{BASE}/car/{car.id}/quality-approval", headers=headers)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["quality_approved_by"] == platform.id
+
+        body = client.get(f"{BASE}/car/{car.id}", headers=_headers(_user(db_session, role=UserRole.VIEWER))).json()
+        assert body["quality_approved_by_name"] == platform.full_name
+        text = _pdf_text(client.get(f"{BASE}/car/{car.id}/pdf", headers=_headers(_user(db_session))).content)
+        assert platform.full_name in text
 
 
 # =========================================================================== fail-closed
@@ -665,6 +753,90 @@ class TestEscalationPrefill:
         assert car.rma_number == "RMA-2026-0002"
         assert car.initiation_reason == "customer_feedback"
         assert car.submitted_date == central_today()
+
+    @pytest.mark.parametrize("case", ["retired_own_part", "foreign_part"])
+    def test_ncr_escalation_carries_a_retired_part_but_never_another_companys(self, client, db_session, case):
+        # The NCR's part is a RECORD the CAR inherits (a since-retired part is still carried);
+        # a legacy NCR whose part_id points at another tenant must not plant that id -- or
+        # that tenant's part number -- on a new CAR.
+        part = _part(db_session, is_deleted=True) if case == "retired_own_part" else _part(db_session, company_id=2)
+        ncr = NonConformanceReport(
+            ncr_number=f"NCR-F-{next(_seq):04d}",
+            source=NCRSource.INCOMING_INSPECTION,
+            title="Plating thickness under spec",
+            description="Plating measured 0.0002 under the minimum on 4 pieces.",
+            quantity_affected=4,
+            quantity_rejected=0,
+            status=NCRStatus.OPEN,
+            disposition=NCRDisposition.PENDING,
+            part_id=part.id,
+            po_number="",  # a blank PO is no PO
+            company_id=1,
+        )
+        db_session.add(ncr)
+        db_session.commit()
+
+        resp = client.post(f"{BASE}/ncr/{ncr.id}/create-car", headers=_headers(_user(db_session)))
+
+        assert resp.status_code == 200, resp.text
+        car = resp.json()
+        assert car["vendor_po_number"] is None
+        if case == "retired_own_part":
+            assert (car["part_id"], car["part_number"]) == (part.id, part.part_number)
+        else:
+            assert car["part_id"] is None and car["part_number"] is None
+            assert part.part_number not in resp.text
+            assert _committed(car["id"], "CREATE")[0]["new_values"].get("part_id") is None
+
+    def test_complaint_naming_another_companys_part_is_refused_and_writes_nothing(self, client, db_session):
+        foreign = _part(db_session, company_id=2)
+        complaint = CustomerComplaint(
+            complaint_number=f"CC-F-{next(_seq):05d}",
+            customer_name="Acme Aerospace",
+            part_id=foreign.id,
+            title="Dented flange",
+            description="Brackets arrived dented on one flange.",
+            quantity_affected=3,
+            date_received=date.today(),
+            company_id=1,
+        )
+        db_session.add(complaint)
+        db_session.commit()
+        before = _snapshot(db_session)
+
+        resp = client.post(
+            f"/api/v1/complaints/complaints/{complaint.id}/create-car", headers=_headers(_user(db_session))
+        )
+
+        assert resp.status_code == 409, resp.text
+        assert "outside your company" in resp.json()["detail"]
+        assert _snapshot(db_session) == before
+        db_session.expire_all()
+        assert db_session.get(CustomerComplaint, complaint.id).car_id is None
+
+    def test_complaint_without_part_customer_or_rma_leaves_those_boxes_blank(self, client, db_session):
+        complaint = CustomerComplaint(
+            complaint_number=f"CC-F-{next(_seq):05d}",
+            customer_name="Walk-in buyer",
+            title="Late delivery",
+            description="Shipment arrived two days late.",
+            quantity_affected=1,
+            date_received=date.today(),
+            company_id=1,
+        )
+        db_session.add(complaint)
+        db_session.commit()
+
+        resp = client.post(
+            f"/api/v1/complaints/complaints/{complaint.id}/create-car", headers=_headers(_user(db_session))
+        )
+
+        assert resp.status_code == 200, resp.text
+        db_session.expire_all()
+        car = db_session.get(CorrectiveActionRequest, db_session.get(CustomerComplaint, complaint.id).car_id)
+        assert (car.part_id, car.customer_id, car.rma_number) == (None, None, None)
+        assert car.customer_name == "Walk-in buyer"  # the complaint's own customer text
+        assert car.initiation_reason == "customer_feedback"
 
 
 # ============================================================================ printable
