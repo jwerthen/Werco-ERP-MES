@@ -2681,6 +2681,12 @@ and writes an `EXPORT` audit row through `AuditService`:
 > 404 / 422. Superuser / Platform Admin bypass role checks, as elsewhere. See `docs/API.md` →
 > Production calendar & shifts.
 >
+> **In the app** the editor and the sync both live on Admin Settings → **Production Calendar**
+> (`/admin/settings?tab=calendar`), and `/admin/settings` is `AdminRoute`-gated. So a Manager or
+> Supervisor, who may run the sync, reaches it through the API or the MCP tool
+> `sync_working_calendars_from_shifts`, not the UI. The page's own gates mirror the server's
+> (`canEditProductionCalendar` / `canSyncWorkingCalendars` in `frontend/src/utils/recordWriteAccess.ts`).
+>
 > **OEE shift references.** OEE writes (`OEE_WRITE_ROLES`) name a defined shift by `shift_id`; the
 > role gate is unchanged.
 

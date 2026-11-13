@@ -341,11 +341,22 @@ backfill, no environment variable, no worker job. Before rolling back to a pre-1
 migration path: four empty tenant tables plus the nullable `oee_records.shift_id` FK + index, no
 backfill, no seeded calendar, RLS/revokes as for every new table. Deploy-time behavior change: every
 tenant's day boundaries for OEE, the OEE cron, reports, downtime filters, job-cost labor dates and
-analytics move from UTC dates to company-local (production) days. Post-deploy steps (owner): save
+analytics move from UTC dates to company-local (production) days. Once the calendar is saved, the
+wallboard TODAY bar and the dashboard's "Operations Completed Today" reset at the production-day start
+(05:00 for Werco) instead of Central midnight. Post-deploy steps (owner): save
 Werco's calendar (`docs/API.md` → Production calendar & shifts, worked example), run the
 working-calendar sync dry run, review the per-work-center diff, commit. Verify with
 `GET /production-calendar/resolve?at=2026-11-18T07:30:00Z&work_center_id=<WLD-01>` → production day
 2026-11-17, shift `W2`. No environment variable, secret or new worker job.
+
+**Company-local dates and export datetime cells (P1.1).** No migration, environment variable or
+worker job, but consumer-visible on deploy: every `/exports/*` datetime cell changes from naive UTC
+(`2026-01-15 23:30:00`) to company-local ISO-8601 with its offset (`2026-01-15T17:30:00-06:00`);
+calendar-date filters (the work-order and inventory-transaction exports, `GET /job-costs/`, analytics
+periods, `/reports/ship-otd`) select company-local days instead of UTC dates, and a reversed range is
+**422**; about 30 JSON response models that emitted zone-less datetimes now carry the `Z` (same
+instant). Tell anyone with a script or spreadsheet that parses an export — see `docs/API.md` →
+Spreadsheet Exports → Date filters and datetime cells.
 
 **Saved dashboard layouts.** Apply additive **118_dashboard_layouts** after
 **117_operation_short_declared** through the normal API boot migration path. It creates the empty

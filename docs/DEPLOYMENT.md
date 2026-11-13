@@ -245,9 +245,13 @@ from `PUBLIC`, `anon` and `authenticated` match model bootstrap. No environment 
 worker job is added; the 02:30 OEE cron keeps its schedule and now targets each company's previous
 production day. **Behavior change on deploy, for every tenant:** OEE, reports, downtime filters,
 job-cost labor dates and analytics move from UTC-date day boundaries to company-local (production)
-days. After deploy, an Admin applies Werco's calendar (`docs/API.md` → Production calendar & shifts →
-worked example), then runs `POST /production-calendar/working-calendars/sync` as a dry run, reviews it,
-and commits — the commit changes scheduling capacity for every covered work center.
+days (the export, job-cost and analytics **calendar-date** filters move to company-local days in the
+same release — see `DEPLOYMENT_RUNBOOK.md` → Company-local dates and export datetime cells). Once a
+calendar is saved, the wallboard TODAY bar and the dashboard's "Operations Completed Today" reset at
+the production-day start instead of Central midnight. After deploy, an Admin applies Werco's calendar
+(Admin Settings → Production Calendar, or `docs/API.md` → Production calendar & shifts → worked
+example), then runs `POST /production-calendar/working-calendars/sync` as a dry run, reviews it, and
+commits — the commit changes scheduling capacity for every covered work center.
 
 ### Saved dashboard layouts
 

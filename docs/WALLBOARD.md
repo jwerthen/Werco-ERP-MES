@@ -560,9 +560,12 @@ six equal hairline-divided cells: `OPS DONE`, `PIECES`, `ON CLOCK` (green), `LAB
 (1 decimal), `RECEIPTS`, `SCRAP EVENTS` (amber when > 0) — live, resetting at the **start of the
 production day** (the company's production calendar: e.g. 05:00 Central for Werco; Central midnight
 when no calendar is configured — see `docs/API.md` → Production calendar & shifts), from the `today`
-block. Time entries count on the production day they are attributed to (greatest shift overlap), so
-an early 04:55 weld clock-in counts on today's 1st shift and a 04:00 entry on a 05:00-start shop on
-yesterday. Semantics in the
+block (`ON CLOCK` is a live count with no window). Time entries count on the production day they are
+attributed to (greatest shift overlap), so an early 04:55 weld clock-in that runs into the 05:00 1st
+shift counts on today's 1st shift, while a 04:00–04:30 entry on a 05:00-start shop, overlapping no
+shift, counts on yesterday. The eyebrow still shows the Central **calendar** date, so between midnight
+and the production-day start it names the new date over the previous production day's counts.
+Semantics in the
 payload section below. Missing block (old backend) → `—` values; the bar never disappears. (The
 `PLANT 30d` KPI cluster that used to occupy the right ~40% of this band was removed on owner
 feedback 2026-07-15 — see the KPI-strip deprecation note below.)
@@ -637,12 +640,17 @@ principal and redacted on every public board.
   promised today..+6 days, not fully shipped; `due_today_rows` = top 2 open due-today WOs by
   quantity remaining (`wo_number`, `part_number`, `promise_date`, `qty_remaining` — deliberately
   nothing else); `next_due_date` / `next_due_count` when nothing is promised today.
-- **`today`** (plant-wide, Central-midnight → now) — `ops_completed`; `pieces_completed`
-  (RUN+REWORK quantity produced, **provenance-excluded**: backfill/import rows never masquerade
-  as live capture); `wos_completed`; `operators_on_clock` (distinct users with an open time
-  entry, **any** entry type); `hours_logged` (closed labor durations + open elapsed, attributed
-  to the entry's start day); `receipts` (PO receipts); `scrap_events` (entries with scrap > 0,
-  provenance-excluded). Aggregates only — nothing per-person.
+- **`today`** (plant-wide, start of the current **production day** → now; Central midnight when
+  no production calendar is configured; it was Central midnight for every company until
+  2026-11-13) — `ops_completed` and `wos_completed` (by `actual_end` inside that window);
+  `pieces_completed` (RUN+REWORK quantity produced, **provenance-excluded**: backfill/import rows
+  never masquerade as live capture); `operators_on_clock` (distinct users with an open time
+  entry, **any** entry type, no window); `hours_logged` (closed labor durations + open elapsed);
+  `receipts` (PO receipts by `received_at`); `scrap_events` (entries with scrap > 0,
+  provenance-excluded). Pieces, hours and scrap events count the time entries **attributed** to
+  today's production day (greatest shift overlap, ties to the outgoing shift; an entry that
+  overlaps no shift counts on the production day it started), not entries that merely started
+  inside the window. Aggregates only — nothing per-person.
 - **`quality`** (plant-wide) — `open_ncr_count` (not closed/void), `newest_ncr_age_days`,
   `wos_on_hold`. Counts and ages only.
 - **`kpi_strip`** — **deprecated, always `null`** (see the deprecation note below).

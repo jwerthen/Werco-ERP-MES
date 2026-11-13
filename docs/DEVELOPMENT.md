@@ -1230,6 +1230,34 @@ The platform rule is **store UTC, serve UTC (`Z`), display Central**:
   `Z` (e.g. `2026-07-01T19:17:00Z`). New **response** schemas inherit `UTCModel`
   (`app/schemas/base.py`) rather than bare `BaseModel`; hand-built response dicts run datetime values
   through `app.core.time_utils.to_utc_iso(...)`. `date`-only fields stay `YYYY-MM-DD` (unaffected).
+  A **nested** response model needs `UTCModel` too — its encoder does not reach a nested bare
+  `BaseModel`. `tests/test_response_datetime_offset_guard.py` walks every route's response model
+  recursively and fails CI on a datetime field without the UTC encoder (its allowlist is empty).
+  Spreadsheet cells are not JSON: the `/exports/*` datasets
+  (`services/export_service.py`) write datetimes as company-local ISO-8601 **with the offset**
+  (`to_local_iso`, `2026-01-15T17:30:00-06:00`) so a row reads on the local day its filter chose.
+- **Read calendar dates on the company clock.** A `date` query parameter that filters a UTC
+  timestamp column names a day in the company time zone (`Company.timezone`, default
+  America/Chicago; blank or unknown falls back to Chicago, never UTC). Use
+  `app/api/date_window.py` — `company_date_window` (inclusive local dates → `[start, end)` in UTC,
+  **422** on a reversed or out-of-range pair) or `company_period` for an analytics `period` — and
+  filter the end bound with a strict `<`. Services use `services/company_time.py`
+  (`company_zone`, `company_today`, `company_window`). Never
+  `datetime.combine(d, datetime.min/max.time())`: that is UTC midnight, which put every
+  second-shift row in the next day. `tests/test_date_filter_combine_guard.py` refuses the pattern in
+  `app/` outside a reasoned allowlist of non-filter uses.
+- **Shop-floor "days" are production days.** Anything that buckets floor work by day or shift —
+  OEE, the OEE cron, the wallboard `today` pulse, the dashboard's `completed_today`, the daily-output
+  and employee-time reports, downtime date filters, job-cost labor dates, analytics "today" — reads
+  the company's production calendar: load it once with
+  `production_calendar_service.load_production_calendar`, then use the pure helpers in
+  `services/production_calendar.py` (`production_day`, `production_day_window_utc`,
+  `current_production_day`, `shift_for`, `entry_attribution`) or `date_window.production_date_window`
+  for a 422-raising HTTP range. An instant in a shift overlap belongs to the outgoing shift; an
+  interval to the shift it overlaps most. With no calendar configured a production day is the
+  company-local calendar day, so these read exactly like the calendar-date helpers. **Due dates,
+  due-today and lateness stay calendar dates** — don't move them onto production days. See
+  `docs/API.md` → Production calendar & shifts.
 - **Display Central.** The frontend renders every timestamp in shop-local Central time
   (America/Chicago) via `frontend/src/utils/centralTime.ts` (`formatCentralDateTime` /
   `formatCentralDate` / `formatCentralTime`; `toDate` to parse — it treats zone-less strings as UTC;

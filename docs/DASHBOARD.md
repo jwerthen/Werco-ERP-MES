@@ -61,6 +61,11 @@ items 4–9 are widgets (their widget ids are in the [catalog](#widget-catalog))
    Items"; "Operations Completed Today"; "Open NCRs". Overdue, Active Work Orders, Checked In Now,
    Due Today, Calibration Due, Low Stock Items and Open NCRs link to their list pages when the viewer
    can open them; Signed In, Idle and Operations Completed Today scroll to a panel on the page.
+   "Operations Completed Today" counts from the start of the current **production day** (05:00
+   Central once Werco's production calendar is saved; local midnight in the company time zone,
+   Central by default, while none is configured —
+   see `docs/API.md` → Production calendar & shifts). "Due Today" and "Overdue" stay on the Central
+   calendar date.
 9. **Cockpit grid** — the five panels in one 12-column grid. On wide screens: Capacity Overview
    (7) + Live Shop Activity (5), then Work Center Status (7) + Signed In Right Now (5), then Recent
    Completions across the full width. Each panel caps its height and scrolls internally so the page
@@ -633,7 +638,9 @@ company's role overrides; which default roles hold each is in
 | `delivery_kpis` | Delivery & Yield KPIs | panel (`half`) | `deliveryKpis` → `GET /analytics/kpis?period=30d` | Admin, Manager or Supervisor role (superuser and platform admin pass) | 10 min, cached; a manual refresh at most every 60 s |
 | `visitors_on_site` | Visitors On Site | panel (`third`) | `visitors` → `GET /visitor-logs/?on_site_only=true&limit=10` | Admin, Manager or Supervisor role (superuser and platform admin pass) | 2 min |
 
-The four `wallboard` panels share **one** request. The work-order lists send `hide_cots=false` so
+The four `wallboard` panels share **one** request. Today's Output is the wallboard `today` block, so it
+counts from the production-day start like the tile above (`docs/WALLBOARD.md` → payload). The
+work-order lists send `hide_cots=false` so
 their totals agree with the Overdue and Due Today tiles, which count COTS work orders too. Quality
 Pulse's "New NCRs this month by current disposition" counts by the server's calendar month in UTC,
 not the Central day used elsewhere, and says so in its tooltip. The two role-gated panels mirror
