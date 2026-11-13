@@ -41,7 +41,7 @@ import json
 import os
 from dataclasses import dataclass
 from datetime import timezone
-from typing import Any, Mapping, Optional, Protocol
+from typing import Any, Dict, Mapping, Optional, Protocol
 
 from mcp.server.auth.provider import AccessToken
 from starlette.concurrency import run_in_threadpool
@@ -65,6 +65,14 @@ ENV_PASSWORD = "WERCO_ERP_PASSWORD"  # nosec B105 - the NAME of an env var, not 
 # the JWT) for an API token; the server reads them to narrow a read-only caller.
 CLAIM_API_TOKEN_SCOPE = "api_token_scope"
 CLAIM_API_TOKEN_AI_EXTERNAL = "api_token_ai_external"
+# For an AI-external token only (P0.3): the row's company and identity -- what the door's
+# AI-egress guard needs to refuse and to name the token in the controlled-access ledger --
+# and whether that company's AI egress was ON when the token was verified for THIS request.
+CLAIM_API_TOKEN_COMPANY_ID = "api_token_company_id"
+CLAIM_API_TOKEN_ID = "api_token_id"
+CLAIM_API_TOKEN_JTI_PREFIX = "api_token_jti_prefix"
+CLAIM_API_TOKEN_LABEL = "api_token_label"
+CLAIM_API_TOKEN_AI_EGRESS = "api_token_ai_egress"
 _SCOPE_FULL = "full"
 
 
@@ -120,12 +128,21 @@ FULL_SCOPE = CallerScope()
 
 @dataclass(frozen=True)
 class ApiTokenGrant:
-    """A LIVE API token's row, as the door needs it: who, until when, and how narrowed."""
+    """A LIVE API token's row, as the door needs it: who, until when, and how narrowed.
+
+    ``ai_egress_allowed`` is read only for an AI-external token (``llm_client.ai_egress_allowed``,
+    the one reader of ``Company.allow_ai_egress``) and is None otherwise.
+    """
 
     user_id: int
     expires_at: Optional[int]
     scope: str
     ai_external: bool
+    company_id: Optional[int] = None
+    api_token_id: Optional[int] = None
+    jti_prefix: Optional[str] = None
+    label: Optional[str] = None
+    ai_egress_allowed: Optional[bool] = None
 
 
 def bearer_token_from_header(value: Optional[str]) -> Optional[str]:
@@ -184,9 +201,12 @@ def live_api_token_grant(token: str) -> Optional[ApiTokenGrant]:
     the door: there is no user to name a 403 to). Blocking; the verifier runs it in a
     worker thread. Imports are local so ``python -m app.mcp`` can still set its
     environment placeholders before ``app.core.config`` is imported (see
-    ``app.mcp.__init__``). ``scope`` / ``ai_external`` come from the ROW.
+    ``app.mcp.__init__``). ``scope`` / ``ai_external`` come from the ROW; for an
+    AI-external token the company's AI-egress switch is read too (fail closed: any error
+    there is "off").
     """
     from app.db.database import SessionLocal
+    from app.services import llm_client
     from app.services.api_token_service import check_api_token
 
     db = SessionLocal()
@@ -199,11 +219,17 @@ def live_api_token_grant(token: str) -> Optional[ApiTokenGrant]:
             return None
         expires_at = record.expires_at
         epoch = int(expires_at.replace(tzinfo=timezone.utc).timestamp()) if expires_at is not None else None
+        ai_external = record.ai_external is not False
         return ApiTokenGrant(
             user_id=int(user.id),
             expires_at=epoch,
             scope=str(record.scope),
             ai_external=bool(record.ai_external),
+            company_id=int(record.company_id),
+            api_token_id=int(record.id),
+            jti_prefix=record.jti_prefix,
+            label=record.label,
+            ai_egress_allowed=bool(llm_client.ai_egress_allowed(record.company_id)) if ai_external else None,
         )
     finally:
         db.close()
@@ -300,13 +326,25 @@ class ErpTokenVerifier:
         if grant is None:
             return None
         # ``scopes`` stays [] (RequireAuthMiddleware checks none); the row's narrowing rides
-        # in ``claims`` so the server can narrow tools/list and refuse before dispatch.
+        # in ``claims`` so the server can narrow tools/list and refuse before dispatch, and
+        # (AI-external only) the door's egress guard can refuse before the transport.
+        claims: Dict[str, Any] = {CLAIM_API_TOKEN_SCOPE: grant.scope, CLAIM_API_TOKEN_AI_EXTERNAL: grant.ai_external}
+        if grant.ai_external:
+            claims.update(
+                {
+                    CLAIM_API_TOKEN_COMPANY_ID: grant.company_id,
+                    CLAIM_API_TOKEN_ID: grant.api_token_id,
+                    CLAIM_API_TOKEN_JTI_PREFIX: grant.jti_prefix,
+                    CLAIM_API_TOKEN_LABEL: grant.label,
+                    CLAIM_API_TOKEN_AI_EGRESS: grant.ai_egress_allowed is True,
+                }
+            )
         return AccessToken(
             token=token,
             client_id=str(grant.user_id),
             scopes=[],
             expires_at=grant.expires_at,
-            claims={CLAIM_API_TOKEN_SCOPE: grant.scope, CLAIM_API_TOKEN_AI_EXTERNAL: grant.ai_external},
+            claims=claims,
         )
 
 

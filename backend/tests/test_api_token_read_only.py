@@ -97,8 +97,12 @@ def _issue(client: TestClient, admin_headers: dict, user: User, **extra) -> Tupl
 
 @pytest.fixture
 def read_only_token(client: TestClient, admin_headers: dict, test_user: User) -> Tuple[int, str]:
-    """(row id, token): a READ-ONLY token bound to the MANAGER ``test_user`` (a role that may write)."""
-    token_id, token, _body = _issue(client, admin_headers, test_user, scope="read_only")
+    """(row id, token): a READ-ONLY token bound to the MANAGER ``test_user`` (a role that may write).
+
+    Minted ``ai_external=False`` so these tests see the read-only gates alone; the AI-external
+    narrowing (egress, route allowlist, redaction) is ``tests/api/test_ai_external_token.py``'s.
+    """
+    token_id, token, _body = _issue(client, admin_headers, test_user, scope="read_only", ai_external=False)
     return token_id, token
 
 
@@ -461,8 +465,8 @@ class TestMarkers:
             request=_request_for("GET", SimpleNamespace(tags=["Parts"])), db=db_session, token=token
         )
         assert user._api_token_id == token_id
-        assert (user._api_token_scope, user._api_token_ai_external) == ("read_only", True)
-        assert is_read_only_api_token(user) and is_ai_external_credential(user)
+        assert (user._api_token_scope, user._api_token_ai_external) == ("read_only", False)
+        assert is_read_only_api_token(user) and not is_ai_external_credential(user)
 
     def test_an_interactive_credential_clears_a_stale_narrowing(
         self, db_session: Session, test_user: User, auth_headers: dict
@@ -547,7 +551,8 @@ class TestSearchDropsPeople:
         self, client: TestClient, admin_headers: dict, admin_user: User, test_user: User
     ):
         _id, full_token, _body = _issue(client, admin_headers, admin_user)
-        _id, ro_token, _body = _issue(client, admin_headers, admin_user, scope="read_only")
+        # Not AI-external: global search is not on the AI-external allowlist at all.
+        _id, ro_token, _body = _issue(client, admin_headers, admin_user, scope="read_only", ai_external=False)
         query = {"q": test_user.email.split("@")[0], "types": "user"}
 
         full = client.get("/api/v1/search/", params=query, headers=_bearer(full_token))

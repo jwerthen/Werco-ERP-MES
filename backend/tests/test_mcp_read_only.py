@@ -45,6 +45,7 @@ from app.main import app
 from app.mcp import __main__ as cli
 from app.mcp.auth import (
     CLAIM_API_TOKEN_AI_EXTERNAL,
+    CLAIM_API_TOKEN_ID,
     CLAIM_API_TOKEN_SCOPE,
     FULL_SCOPE,
     AuthContext,
@@ -172,7 +173,8 @@ class TestDoorListing:
     def test_a_read_only_token_is_shown_only_reads_outside_the_denied_tags(
         self, door_client: TestClient, admin_headers: dict, test_user: User, catalog, deny_tags
     ):
-        _id, token = _issue(door_client, admin_headers, test_user, scope="read_only")
+        # Not AI-external: an AI-external token's narrower listing is tests/test_mcp_ai_external.py's.
+        _id, token = _issue(door_client, admin_headers, test_user, scope="read_only", ai_external=False)
         names = _listed_names(door_client.post(DOOR, json=_rpc("tools/list"), headers=_door_auth(token)))
 
         generated, convenience = read_only_view(catalog, CONVENIENCE_TOOLS, deny_tags=deny_tags)
@@ -305,11 +307,15 @@ class TestVerifierCarriesTheRow:
     async def test_a_read_only_tokens_access_token_carries_the_row_scope(
         self, client: TestClient, admin_headers: dict, test_user: User
     ):
-        _id, token = _issue(client, admin_headers, test_user, scope="read_only")
+        token_id, token = _issue(client, admin_headers, test_user, scope="read_only")
         principal = await ErpTokenVerifier().verify_token(token)
         assert isinstance(principal, AccessToken)
         assert principal.scopes == []
-        assert principal.claims == {CLAIM_API_TOKEN_SCOPE: "read_only", CLAIM_API_TOKEN_AI_EXTERNAL: True}
+        assert principal.claims[CLAIM_API_TOKEN_SCOPE] == "read_only"
+        assert principal.claims[CLAIM_API_TOKEN_AI_EXTERNAL] is True
+        # AI-external: the row's company and identity ride along for the door's egress guard
+        # (tests/test_mcp_ai_external.py pins the full set).
+        assert principal.claims[CLAIM_API_TOKEN_ID] == token_id
         grant = live_api_token_grant(token)
         assert (grant.user_id, grant.scope, grant.ai_external) == (test_user.id, "read_only", True)
         assert live_api_token_principal(token) == (test_user.id, None), "the tuple shape is unchanged"
@@ -394,7 +400,7 @@ class TestStdio:
     async def test_a_static_read_only_token_narrows_the_listing_and_refuses_before_dispatch(
         self, client: TestClient, admin_headers: dict, test_user: User, catalog, deny_tags
     ):
-        _id, token = _issue(client, admin_headers, test_user, scope="read_only")
+        _id, token = _issue(client, admin_headers, test_user, scope="read_only", ai_external=False)
         executor = _NeverExecutor()
         server = build_server(executor, catalog=catalog, token_source=TokenSource(executor, access_token=token))
         async with connected(server) as session:

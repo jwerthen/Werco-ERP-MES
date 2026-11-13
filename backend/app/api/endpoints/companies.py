@@ -120,7 +120,12 @@ def update_my_company_ai_egress(
     """Flip the active company's ``allow_ai_egress`` kill switch.
 
     SAFETY: ``allow_ai_egress`` gates all outbound AI document-extraction egress to
-    the Anthropic API. ADMIN-only, matching the sibling CUI egress kill switches
+    the Anthropic API -- AND (Claude-plugin brief P0.3) every use of an AI-external API
+    token, the credential an outside AI connector such as Claude holds: while it is off,
+    such a token is refused 403 on every API route and at the MCP door (``initialize`` and
+    ``tools/list`` included). Turning it on therefore also opens the connector -- do it
+    only once the empowered official has cleared that (docs/EXPORT_CONTROL_AI_EGRESS.md).
+    ADMIN-only, matching the sibling CUI egress kill switches
     ``allow_carrier_egress`` / ``allow_print_egress`` (a CUI-boundary decision is
     reserved to Admins). It is created OFF and only flips when an admin sets it here.
     The flip is audited both as a field-level update AND as a security-relevant

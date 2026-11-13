@@ -28,6 +28,7 @@ from app.core.queue import log_redis_target as _log_redis_target
 from app.db import locks as db_locks
 from app.db.database import Base, engine
 from app.db.mixins import STALE_WRITE_CONFLICT_DETAIL
+from app.middleware.export_control import ExportControlMiddleware
 from app.middleware.fabrication_quote_body_limit import FabricationQuoteBodyLimitMiddleware
 from app.middleware.logging_middleware import (
     CorrelationIdMiddleware,
@@ -317,7 +318,14 @@ For API support, contact the system administrator.
     },
 )
 
-# Logging middleware with correlation IDs (added first, executed last)
+# Export control for narrowed API tokens (Claude-plugin brief P0.1 / P0.3). Added FIRST so it is
+# the INNERMOST user middleware: inside GZip (it must read and rewrite uncompressed JSON) and
+# inside CorrelationId (the ledger rows it writes quote the correlation id). It acts only on a
+# response whose request carried the marker get_current_user writes for a read-only / AI-external
+# API token; everything else passes through untouched. See app/middleware/export_control.py.
+app.add_middleware(ExportControlMiddleware)
+
+# Logging middleware with correlation IDs (added right after export control: inside every other layer)
 app.add_middleware(RequestLoggingMiddleware)
 app.add_middleware(CorrelationIdMiddleware)
 app.add_middleware(FabricationQuoteBodyLimitMiddleware)

@@ -21,6 +21,12 @@ only so the agent is never shown or handed what the API layer would refuse anywa
 ``WERCO_MCP_READ_ONLY_DENY_TAGS``, and calling one by name is a 403 BEFORE argument
 validation or dispatch (every tool stays in the registry, so it is never a 404).
 ``get_current_user`` enforces the same rule on every dispatched request regardless.
+
+An AI-EXTERNAL API token (always read-only; Claude-plugin brief P0.3) is narrowed further,
+to the tools whose every route is on ``app.core.export_control.AI_EXTERNAL_ALLOWED_ROUTES``:
+its ``tools/list`` shows only those, and any other tool called by name is a 403 with the
+API layer's own text before dispatch. What those tools return is redacted by the API's
+export-control middleware on the in-process dispatch, not here.
 """
 
 from __future__ import annotations
@@ -36,6 +42,7 @@ from mcp.server.lowlevel import Server
 
 from app.core.config import settings
 from app.core.credentials import READ_ONLY_TOOL_DENIED_DETAIL, READ_ONLY_TOOL_WRITES_DETAIL
+from app.core.export_control import AI_EXTERNAL_ROUTE_DENIED_DETAIL, ai_external_operations
 from app.mcp.auth import (
     FULL_SCOPE,
     AuthContext,
@@ -101,6 +108,10 @@ DEFAULT_INSTRUCTIONS = (
     "- A READ-ONLY API token is shown only tools that read, outside the areas denied to read-only tokens "
     "(documents, exports, users, the audit log, admin and platform settings, API tokens, intake uploads). A tool "
     "that writes, or one in a denied area, answers 403 when called by name; so does the API itself.\n"
+    "- An AI-EXTERNAL token sees a narrower read set still. Records of export-controlled customers, and records "
+    "the ERP cannot tie to a customer, come back with their ids, statuses, dates and quantities but every other "
+    "text replaced by '[export-controlled]' (and \"export_controlled\": true): report them as withheld, never "
+    "guess what they contain.\n"
     "- Reads are broad: the generated tools mirror the whole API. Start with the convenience tools (search, "
     "list_*, get_work_order, get_shop_floor_dashboard). Large results are truncated with a note; narrow them with "
     "limit / skip / filters.\n"
@@ -134,6 +145,8 @@ class _Entry:
     # tool declares). ``tags`` are the OpenAPI tags it reaches, for the read-only deny list.
     reads: bool = False
     tags: FrozenSet[str] = field(default_factory=frozenset)
+    # Every route it may dispatch is on the AI-external allowlist (P0.3).
+    ai_external_allowed: bool = False
 
     @property
     def method(self) -> Optional[str]:
@@ -157,24 +170,36 @@ def _mcp_tool(
     )
 
 
+def default_ai_external_operations() -> FrozenSet[Tuple[str, str]]:
+    """The AI-external allowlist as full ``(METHOD, /api/v1/...)`` pairs -- the catalog's own path form."""
+    return ai_external_operations(settings.API_V1_PREFIX)
+
+
 def build_registry(
     catalog: Sequence[GeneratedTool],
     convenience: Sequence[ConvenienceTool] = CONVENIENCE_TOOLS,
+    *,
+    ai_external_ops: Optional[Iterable[Tuple[str, str]]] = None,
 ) -> Dict[str, _Entry]:
     """Convenience tools first, then the catalog by name; a duplicate name is a build error.
 
     A convenience tool whose route is not in ``SHADOWED_OPERATIONS`` would collide
     with its generated twin here rather than silently win -- that is the point.
+    ``ai_external_ops`` defaults to the AI-external allowlist under the mounted prefix.
     """
+    allowed_ops = frozenset(default_ai_external_operations() if ai_external_ops is None else ai_external_ops)
     registry: Dict[str, _Entry] = {}
     route_tags = {tool.key: frozenset(tool.tags or (tool.tag,)) for tool in catalog}
     for tool in convenience:
+        declared = CONVENIENCE_TOOL_ROUTES.get(tool.name, frozenset())
         registry[tool.name] = _Entry(
             tool=_mcp_tool(tool.name, tool.description, tool.input_schema, tool.hints),
             validator=jsonschema.Draft202012Validator(tool.input_schema),
             convenience=tool,
             reads=convenience_tool_reads(tool),
             tags=_convenience_tags(tool, route_tags),
+            # A tool with no declared routes cannot be placed: never AI-external (fails closed).
+            ai_external_allowed=bool(declared) and all(route in allowed_ops for route in declared),
         )
     for generated in sorted(catalog, key=lambda item: item.name):
         if generated.name in registry:
@@ -187,6 +212,7 @@ def build_registry(
             generated=generated,
             reads=generated.method == "GET",
             tags=frozenset(generated.tags or (generated.tag,)),
+            ai_external_allowed=generated.key in allowed_ops,
         )
     return registry
 
@@ -219,6 +245,17 @@ def read_only_refusal(*, reads: bool, tags: Iterable[str], deny_tags: Iterable[s
     return None
 
 
+def ai_external_refusal(*, reads: bool, tags: Iterable[str], deny_tags: Iterable[str], allowed: bool) -> Optional[str]:
+    """The refusal an AI-EXTERNAL caller gets for a tool, or None.
+
+    The read-only rule first (an AI-external token is always read-only), then the allowlist.
+    """
+    refusal = read_only_refusal(reads=reads, tags=tags, deny_tags=deny_tags)
+    if refusal is not None:
+        return refusal
+    return None if allowed else AI_EXTERNAL_ROUTE_DENIED_DETAIL
+
+
 def read_only_view(
     catalog: Sequence[GeneratedTool],
     convenience: Sequence[ConvenienceTool] = CONVENIENCE_TOOLS,
@@ -234,6 +271,25 @@ def read_only_view(
         name
         for name, entry in registry.items()
         if read_only_refusal(reads=entry.reads, tags=entry.tags, deny_tags=denied) is None
+    }
+    return [tool for tool in catalog if tool.name in keep], [tool for tool in convenience if tool.name in keep]
+
+
+def ai_external_view(
+    catalog: Sequence[GeneratedTool],
+    convenience: Sequence[ConvenienceTool] = CONVENIENCE_TOOLS,
+    *,
+    deny_tags: Iterable[str],
+) -> Tuple[List[GeneratedTool], List[ConvenienceTool]]:
+    """``(generated, convenience)`` an AI-EXTERNAL API token is shown -- ``build_server``'s
+    AI-external listing rule, in the input order."""
+    denied = frozenset(deny_tags)
+    registry = build_registry(catalog, convenience)
+    keep = {
+        name
+        for name, entry in registry.items()
+        if ai_external_refusal(reads=entry.reads, tags=entry.tags, deny_tags=denied, allowed=entry.ai_external_allowed)
+        is None
     }
     return [tool for tool in catalog if tool.name in keep], [tool for tool in convenience if tool.name in keep]
 
@@ -434,9 +490,22 @@ def build_server(
             if read_only_refusal(reads=entry.reads, tags=entry.tags, deny_tags=deny_tags) is None
         ]
     )
+    ai_external_listing = types.ListToolsResult(
+        tools=[
+            entry.tool
+            for entry in registry.values()
+            if ai_external_refusal(
+                reads=entry.reads, tags=entry.tags, deny_tags=deny_tags, allowed=entry.ai_external_allowed
+            )
+            is None
+        ]
+    )
 
     async def on_list_tools(ctx: Any, params: Any) -> types.ListToolsResult:
-        if caller_scope(ctx, token_source, verify_bearer=verify_bearer).read_only:
+        narrowed = caller_scope(ctx, token_source, verify_bearer=verify_bearer)
+        if narrowed.ai_external:
+            return ai_external_listing
+        if narrowed.read_only:
             return read_only_listing
         return listing
 
@@ -449,9 +518,14 @@ def build_server(
         if isinstance(auth, types.CallToolResult):
             return auth
 
-        if auth.read_only:
-            # Before validation and dispatch: nothing a read-only token may not do is sent.
-            refusal = read_only_refusal(reads=entry.reads, tags=entry.tags, deny_tags=deny_tags)
+        if auth.read_only or auth.ai_external:
+            # Before validation and dispatch: nothing a narrowed token may not do is sent.
+            if auth.ai_external:
+                refusal = ai_external_refusal(
+                    reads=entry.reads, tags=entry.tags, deny_tags=deny_tags, allowed=entry.ai_external_allowed
+                )
+            else:
+                refusal = read_only_refusal(reads=entry.reads, tags=entry.tags, deny_tags=deny_tags)
             if refusal is not None:
                 return error_result(status=403, detail=refusal, method=entry.method, path=entry.path)
 

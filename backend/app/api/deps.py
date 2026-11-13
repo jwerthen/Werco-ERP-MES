@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, FrozenSet, Iterable, Optional
+from typing import Any, FrozenSet, Iterable, Optional, Tuple
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
@@ -11,6 +11,15 @@ from app.core.credentials import (
     API_TOKEN_SCOPE_FULL,
     READ_ONLY_ROUTE_DENIED_DETAIL,
     READ_ONLY_ROUTE_WRITES_DETAIL,
+)
+from app.core.export_control import (
+    AI_EGRESS_DISABLED_DETAIL,
+    AI_EXTERNAL_ROUTE_DENIED_DETAIL,
+    EXPORT_CONTROL_STATE_KEY,
+    REASON_AI_EGRESS_DISABLED,
+    REASON_ROUTE_NOT_ALLOWLISTED,
+    ExportControlMarker,
+    ai_external_operations,
 )
 from app.core.observability import set_sentry_tags
 from app.core.security import (
@@ -25,6 +34,7 @@ from app.models.display_token import DisplayToken
 from app.models.kiosk_station import KioskStation
 from app.models.signin_station import SigninStation
 from app.models.user import User, UserRole
+from app.services import llm_client
 from app.services.access_identity import require_active_company, resolve_access_identity
 from app.services.api_token_service import resolve_api_token_user
 from app.services.audit_service import AuditService
@@ -115,6 +125,46 @@ def _is_api_token_denied_path(path: str) -> bool:
     return False
 
 
+# (METHOD, full route template) an AI-external API token may call (gate 4). Derived from
+# ``app.core.export_control.AI_EXTERNAL_ALLOWED_ROUTES`` -- the one list the MCP door also
+# lists from -- with the mounted prefix applied.
+AI_EXTERNAL_ALLOWED_OPERATIONS: FrozenSet[Tuple[str, str]] = ai_external_operations(settings.API_V1_PREFIX)
+
+
+def _matched_route_template(request: Request) -> Optional[str]:
+    """The matched route's template (``/api/v1/parts/{part_id}``), or None when no route matched."""
+    route = request.scope.get("route")
+    if route is None:
+        return None
+    return getattr(route, "path_format", None) or getattr(route, "path", None)
+
+
+def ai_external_route_allowed(request: Request) -> bool:
+    """Gate 4: is ``(method, matched route template)`` on the AI-external allowlist? No route -> False."""
+    template = _matched_route_template(request)
+    return template is not None and (request.method.upper(), template) in AI_EXTERNAL_ALLOWED_OPERATIONS
+
+
+def _export_control_marker(request: Request, user: User, record: Any, *, refusal_reason: Optional[str] = None) -> None:
+    """Write the marker ``app.middleware.export_control`` reads into ``request.scope["state"]`` (gate 5).
+
+    Every value comes from the api_tokens ROW. ``refusal_reason`` set means a gate is about
+    to refuse this request and the middleware records the refusal in the ledger.
+    """
+    marker = ExportControlMarker(
+        company_id=int(record.company_id),
+        user_id=getattr(user, "id", None),
+        api_token_id=record.id,
+        jti_prefix=getattr(record, "jti_prefix", None),
+        label=getattr(record, "label", None),
+        read_only=True,
+        ai_external=record.ai_external is not False,
+        route=_matched_route_template(request) or request.url.path,
+        refusal_reason=refusal_reason,
+    )
+    request.scope.setdefault("state", {})[EXPORT_CONTROL_STATE_KEY] = marker
+
+
 def read_only_api_token_refusal(
     request: Request, deny_tags: Optional[FrozenSet[str]] = None
 ) -> Optional[HTTPException]:
@@ -131,8 +181,8 @@ def read_only_api_token_refusal(
        through.
 
     (Gate 1 -- AI egress -- and gate 4 -- the AI-external route allowlist -- are separate
-    checks for an AI-external token; see ``get_current_user``.) Full tokens and people
-    never reach this function.
+    checks for an AI-external token, and gate 5 writes the response middleware's marker;
+    see ``get_current_user``.) Full tokens and people never reach this function.
     """
     if request.method.upper() not in SAFE_READ_ONLY_METHODS:
         return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=READ_ONLY_ROUTE_WRITES_DETAIL)
@@ -277,16 +327,26 @@ def get_current_user(
         _tag_sentry_principal(user)
 
         # Narrowed tokens only; a FULL token is byte-identical to before. Gate order:
-        #   1. AI-external + company AI egress off -> 403 (Claude-plugin brief P0.3; the
-        #      export-control stage adds it HERE, ahead of the read-only gates).
+        #   1. AI-external + company AI egress off -> 403 (Claude-plugin brief P0.3), ledgered.
         #   2. read-only + not GET/HEAD/OPTIONS -> 403   } read_only_api_token_refusal
         #   3. read-only + a denied tag on the route -> 403 }
-        #   4. AI-external + (method, route) outside the AI-external allowlist -> 403 (P0.3).
-        #   5. AI-external -> the export-control marker for the response middleware (P0.3).
-        if api_token_record.scope != API_TOKEN_SCOPE_FULL:
+        #   4. AI-external + (method, route) outside the AI-external allowlist -> 403, ledgered.
+        #   5. the export-control marker for the response middleware (app.middleware.export_control):
+        #      file bytes refused to every read-only token; AI-external JSON redacted.
+        # An AI-external row is treated as read-only whatever its scope says (the mint refuses
+        # the combination; a tampered row must not widen anything).
+        ai_external = api_token_record.ai_external is not False
+        if api_token_record.scope != API_TOKEN_SCOPE_FULL or ai_external:
+            if ai_external and not llm_client.ai_egress_allowed(api_token_record.company_id):
+                _export_control_marker(request, user, api_token_record, refusal_reason=REASON_AI_EGRESS_DISABLED)
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=AI_EGRESS_DISABLED_DETAIL)
             refusal = read_only_api_token_refusal(request)
             if refusal is not None:
                 raise refusal
+            if ai_external and not ai_external_route_allowed(request):
+                _export_control_marker(request, user, api_token_record, refusal_reason=REASON_ROUTE_NOT_ALLOWLISTED)
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=AI_EXTERNAL_ROUTE_DENIED_DETAIL)
+            _export_control_marker(request, user, api_token_record)
         return user
 
     # An interactive credential: clear the markers explicitly. The same ORM
