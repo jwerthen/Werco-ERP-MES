@@ -248,6 +248,53 @@ everyone to the default; the audit rows recording each change remain. See
 [API.md → Personal dashboard layout](API.md#personal-dashboard-layout) and
 [DASHBOARD.md → Customizing the dashboard](DASHBOARD.md#customizing-the-dashboard).
 
+### CAR form fields, quote line revisions and the FAI log
+
+Apply additive **122_car_form_quote_rev** after **118_dashboard_layouts** through the normal API
+boot migration path. It adds 21 nullable columns to `cars` (the controlled CAR form's fields, with
+the foreign keys `fk_cars_part_id`, `fk_cars_customer_id`, `fk_cars_vendor_id` and
+`fk_cars_quality_approved_by`, the index `ix_cars_part_id` and the CHECK
+`ck_cars_initiation_reason`) and one, `part_revision`, to `quote_lines`. It creates no table and runs
+no RLS, revoke or role statement (both tables have had RLS since `059`). It reads and writes no row,
+so there is no backfill. Each `ADD COLUMN` is metadata-only on PostgreSQL, but each statement still
+takes a brief ACCESS EXCLUSIVE lock, bounded by `SET LOCAL lock_timeout = '5s'`. No environment
+variable, secret, cron or worker job is added. The FAI log of record and its export need no
+migration.
+
+Deploy order: the migration must run before or with the API, which the boot path does. Old code is
+safe on the new schema. New code on an un-migrated database fails every CAR and quote-line load, so
+deploy the API before or with the worker.
+
+Tell users before the deploy:
+
+- **Every existing quote line has no drawing revision.** Until each line's Rev is entered (or `N/A`
+  on a line with no drawing), **Send**, the quote PDF and quote email answer **409** naming the
+  lines. Revisions can be entered only on a draft or pending quote. An issued quote with no line
+  converted to a work order can be moved back to draft, given its revisions and sent again. A quote
+  with any line converted to a work order cannot, so its PDF can no longer be generated.
+- **Quote email previews prepared before the deploy cannot be sent.** The send answers **409**
+  "The document changed after this PDF was prepared". Create a fresh preview.
+- **The quote PDF's FOB term comes from the company address.** It prints "FOB *City*, *ST*." when
+  the last address line ends in "City, ST [ZIP]", else "FOB Origin.". Check the company record.
+
+Verify in a test company:
+
+- Open a CAR with a reason, a part and a vendor. **Print CAR**, then **Record quality approval**. A
+  second approval should be refused (409). The Audit Log should show the `car` CREATE and APPROVE
+  rows.
+- On a draft quote, enter a Rev on each line and send it. Before the Rev is entered, **Send** should
+  be refused with the line numbers.
+- Disposition an FAI as Passed, record its customer approval, and find it in the FAI tab's **Log**
+  view. As an Admin or Manager, export the log and confirm an `fai` EXPORT row in the Audit Log.
+
+Rollback: keep the columns. Older code never reads them. Once `122` has run, an older image cannot
+boot until the database is stamped back, so from a checkout of this release run
+`alembic stamp 118_dashboard_layouts` before redeploying it. The values stay, and the next forward
+deploy re-runs `122` as a guarded no-op. The downgrade is **not** a rollback step: it drops every
+recorded CAR form field, Quality Manager approval and quote-line revision. The audit rows that
+recorded them remain, but nothing rebuilds the columns from them. See
+[API.md → Quality](API.md#quality) and [API.md → Quotes](API.md#quotes).
+
 ### Existing ERP frontend: Fabrication Quoting
 
 The fabrication estimator lives at [wercomfg.app/fabrication-quotes](https://wercomfg.app/fabrication-quotes), under **Sales & Quoting → Fabrication Quoting**. It uses the existing ERP authentication, API, Railway services and Vercel project. Old estimator URLs redirect here. See [the implementation and operating guide](FABRICATION_QUOTING.md).

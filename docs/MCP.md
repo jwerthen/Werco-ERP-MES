@@ -347,6 +347,12 @@ list):
 - **Nor close an AI action card** (owner ruling 3): `accept_ai_recommendation` on an action card
   (record-only, "Mark handled") answers **403** to an API token, and AI Accept & apply is not a tool
   at all.
+- **Nor record a quality approval** (the lead's design decision of 2026-11-13, applying the same
+  principle; not an owner ruling): `approve_car_quality` answers **403** `"A standing API token
+  cannot record a CAR's quality approval. A person signed in to the app must record it."` and
+  `record_fai_customer_approval` answers **403** `"A standing API token cannot record an FAI's
+  customer approval. A person signed in to the app must record it."`, both before any write. The
+  reads beside them (`get_car_pdf`, `list_fai_log`) stay open.
 - **Deliberately left open.** `work_orders_resume_work_order` lifts a work-order hold for a token
   whose user holds Admin / Manager / Supervisor, audited as that user (owner decision 2026-11-07).
   `dismiss_ai_recommendation`, snooze and feedback stay open to every credential — a design decision
@@ -442,7 +448,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `FabricationQuoting` sources, nesting and actuals | Fabrication Quoting | `upload_file`, `original_file`, `nest`, `save_nest`, `revisions`, `revision`, `list_actuals`, `record_actuals` |
 | `FabricationQuoting` process profiles | Fabrication Quoting | `list_profiles`, `list_revisions`, `save_profile`, `capabilities` |
 | `Customers` (`/customers`) | Customers | `list_customers`, `create_customer`, `update_customer`, `get_customer_stats`, `import_customers_csv` |
-| `Quality` (`/quality`) | Quality Management, Parts | `list_quality_ncrs`★, `get_ncr`, `create_ncr`, `update_ncr`, `void_ncr`, `list_cars`, `create_fai`, `get_quality_summary`, `list_scrap_reason_codes` |
+| `Quality` (`/quality`) | Quality Management, Parts, Data Export | `list_quality_ncrs`★, `get_ncr`, `create_ncr`, `update_ncr`, `void_ncr`, `list_cars`, `get_car_pdf`, `approve_car_quality`, `create_fai`, `record_fai_customer_approval`, `list_fai_log`, `export_fai_log`, `get_quality_summary`, `list_scrap_reason_codes` |
 | `SPC` (`/spc`) | Statistical Process Control, Parts | `list_characteristics`, `add_measurements`, `get_chart_data`, `calculate_control_limits`, `get_capability`, `statistical_process_control_get_dashboard` |
 | `CustomerComplaints` (`/customer-complaints`) | Customer Complaints & RMA | `list_complaints`, `create_complaint`, `create_rma`, `get_8d_report`, `customer_complaints_rma_get_dashboard` |
 | `Calibration` (`/calibration`) | Calibration | `list_equipment`, `get_equipment_due_soon`, `record_calibration`, `get_calibration_history` |

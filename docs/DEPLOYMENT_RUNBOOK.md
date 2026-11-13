@@ -343,6 +343,29 @@ Keep the table on ordinary application rollback; a deliberate 118 downgrade drop
 layout (users fall back to the default; the audit rows remain). See
 [Saved dashboard layouts](DEPLOYMENT.md#saved-dashboard-layouts).
 
+**CAR form fields and quote line revisions.** Apply additive **122_car_form_quote_rev** after
+**118_dashboard_layouts** through the normal API boot migration path. It adds 21 nullable columns
+(four named foreign keys, one index, one CHECK) to `cars` and `quote_lines.part_revision`, with no
+backfill, no table and no RLS, revoke or role statement. Each `ALTER` takes a brief ACCESS EXCLUSIVE
+lock under `SET LOCAL lock_timeout = '5s'`. No environment variable, secret, cron or worker job is
+added. Migrate before or with the API, and deploy the API before or with the worker: new code on an
+un-migrated database fails every CAR and quote-line load.
+- **User-visible at deploy.** Every existing quote line lacks a drawing revision, so Send, the quote
+  PDF and quote email answer **409** until each line's Rev (or `N/A`) is entered on a draft or
+  pending quote. A quote with a line converted to a work order cannot go back to draft, so its PDF
+  can no longer be generated. Quote email previews prepared before the deploy fail at send with
+  **409** and must be previewed again. The PDF's FOB term is read from the company address.
+- **Verify after deploy:** a CAR's **Print CAR** and **Record quality approval** (a second approval
+  is **409**; `car` APPROVE row in the Audit Log), a draft quote refused at Send until its Revs are
+  entered, and an FAI customer approval followed by the FAI **Log** view and an Admin/Manager export
+  (`fai` EXPORT row).
+- **Rollback: stamp to `118`, do not downgrade.** Keep the columns; older code never reads them.
+  Before redeploying an older image, from a checkout of this release run
+  `railway run --service werco-api alembic stamp 118_dashboard_layouts`, or its boot cannot find
+  `122` and fails `/health`. The downgrade drops every recorded CAR form field, Quality Manager
+  approval and quote-line revision. See
+  [CAR form fields, quote line revisions and the FAI log](DEPLOYMENT.md#car-form-fields-quote-line-revisions-and-the-fai-log).
+
 ## Table of Contents
 
 1. [Quick Reference](#quick-reference)
