@@ -15,23 +15,29 @@ dependency writes an :class:`~app.core.export_control.ExportControlMarker` into
   the response passes through untouched, unbuffered: zero cost for the SPA.
 * **a refusal marker** (gate 1 / gate 4 refused an AI-external token, or the MCP door
   refused it for AI egress) -- one ``ai_external_refused`` ledger row is written before
-  the 403 is sent.
+  the 403 is sent. A refusal-marked response that is NOT an error (something caught the
+  gate's 403 and answered 2xx) is never forwarded: 503.
 * **read-only, any** -- a response that is not JSON (a PDF, a CSV, a drawing, a redirect
   to file storage) is replaced by 403 ``"Read-only API token cannot download files."``
   (for an AI-external token, recorded in the ledger). JSON passes.
-* **AI-external + JSON** -- the body is buffered, the company's export-control index is
-  built and the body redacted (2xx) or text-scrubbed (an error) in a worker thread, the
-  ledger rows are COMMITTED, the body is re-serialized with a corrected
-  ``Content-Length`` and no ``ETag``, and only then is anything sent.
+* **AI-external + JSON** -- the body is buffered; a 2xx has the company's export-control
+  index built and the body redacted in a worker thread, the ledger rows COMMITTED, and is
+  re-serialized with a corrected ``Content-Length`` and no ``ETag`` -- only then is
+  anything sent. A by-number lookup that found a withheld record answers the same 404 a
+  number nobody carries gets. A route's own error answers a fixed text per status code
+  (no echo of the request: scrubbing an echo would confirm a probe), with fresh headers.
 
 Any failure on a marked response -- the index, the redaction, the ledger write, an
 undecodable or encoded body -- answers 503 ``"Export-control check failed; nothing was
 sent."`` and not one byte of the original body: fail closed.
 
-Independently, a request carrying an API-token bearer has its conditional headers
-(``If-None-Match`` and friends) stripped before routing (a cheap unverified look at the
-JWT's ``type``; no database): a 304 must never let a cached unredacted body outlive a
-customer becoming controlled, and no API token needs one.
+Independently, a request carrying a NARROWED API-token bearer (read-only or AI-external)
+has its conditional headers (``If-None-Match`` and friends) stripped before routing (a
+cheap unverified look at the JWT's ``type`` / ``api_scope`` / ``ai_ext`` claims; no
+database): a 304 must never let a cached unredacted body outlive a customer becoming
+controlled. A full token keeps them (code review P0, finding 7). Looking only at claims is
+safe: a narrowed token whose claims were removed fails ``check_api_token`` (the claim must
+equal the row), and a full token that claims to be narrowed only loses its 304s.
 """
 
 from __future__ import annotations
@@ -67,28 +73,46 @@ CONDITIONAL_REQUEST_HEADERS = frozenset(
 _BODYLESS_STATUSES = frozenset({204, 304})
 
 
-def bearer_is_api_token(headers: List[Any]) -> bool:
-    """Does the ``Authorization`` header carry a JWT whose UNVERIFIED payload says ``type == "api"``?
-
-    Metadata only: it only ever causes conditional headers to be dropped, which is harmless
-    for any caller. Authentication is ``get_current_user``'s.
-    """
+def _unverified_bearer_payload(headers: List[Any]) -> Optional[Dict[str, Any]]:
+    """The UNVERIFIED JWT payload of the ``Authorization: Bearer`` header, or None."""
     for name, value in headers:
         if name.lower() != b"authorization":
             continue
         try:
             scheme, _, token = value.decode("latin-1").partition(" ")
         except Exception:  # noqa: BLE001 - a malformed header is simply not an API token
-            return False
+            return None
         if scheme.lower() != "bearer" or token.count(".") != 2:
-            return False
+            return None
         segment = token.split(".")[1]
         try:
             payload = json.loads(base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4)))
         except Exception:  # noqa: BLE001
-            return False
-        return isinstance(payload, dict) and payload.get("type") == "api"
-    return False
+            return None
+        return payload if isinstance(payload, dict) else None
+    return None
+
+
+def bearer_is_api_token(headers: List[Any]) -> bool:
+    """Does the ``Authorization`` header carry a JWT whose UNVERIFIED payload says ``type == "api"``?
+
+    Metadata only. Authentication is ``get_current_user``'s.
+    """
+    payload = _unverified_bearer_payload(headers)
+    return payload is not None and payload.get("type") == "api"
+
+
+def bearer_is_narrowed_api_token(headers: List[Any]) -> bool:
+    """An API-token bearer whose UNVERIFIED claims say read-only (``api_scope``) or AI-external (``ai_ext``).
+
+    Metadata only: it only ever causes conditional headers to be dropped. A full token's JWT
+    carries neither claim (migration 119), so it keeps its 304s.
+    """
+    payload = _unverified_bearer_payload(headers)
+    if payload is None or payload.get("type") != "api":
+        return False
+    scope = payload.get("api_scope")
+    return payload.get("ai_ext") is True or (scope is not None and scope != "full")
 
 
 def _json_response(status: int, detail: str) -> List[Message]:
@@ -128,7 +152,7 @@ class ExportControlMiddleware:
 
         state: Dict[str, Any] = scope.setdefault("state", {})
         headers = scope.get("headers") or []
-        if bearer_is_api_token(headers):
+        if bearer_is_narrowed_api_token(headers):
             scope["headers"] = [(k, v) for k, v in headers if k.lower() not in CONDITIONAL_REQUEST_HEADERS]
 
         responder = _Responder(scope, state, send)
@@ -219,6 +243,12 @@ class _Responder:
                 self.mode = self.DROP
                 await self._fail_closed("refusal ledger write")
                 return
+            if status < 400:
+                # Something caught the gate's 403 and answered anyway: that body was never
+                # checked, so none of it goes out (code review P0, finding 5).
+                self.mode = self.DROP
+                await self._fail_closed(f"refused request answered {status}")
+                return
             self.mode = self.PASS
             await self._send(message)
             return
@@ -267,7 +297,7 @@ class _Responder:
             try:
                 payload = json.loads(body)
                 route_path = relative_route_path(self.route_template, settings.API_V1_PREFIX)
-                redacted = await run_in_threadpool(
+                outcome = await run_in_threadpool(
                     export_control_service.apply_export_control,
                     self.marker,
                     payload,
@@ -276,10 +306,24 @@ class _Responder:
                     path_params=dict(self.scope.get("path_params") or {}),
                     **self._context(),
                 )
-                body = json.dumps(redacted, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                body = json.dumps(outcome.payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             except Exception:  # noqa: BLE001 - fail closed on ANY failure
                 logger.exception("AI-external export-control pass failed")
                 await self._fail_closed("redaction")
+                return
+            if outcome.rebuilt:
+                # A new response: none of the route's headers (an echoing one included).
+                await self._send(
+                    {
+                        "type": "http.response.start",
+                        "status": outcome.status_code,
+                        "headers": [
+                            (b"content-type", b"application/json"),
+                            (b"content-length", str(len(body)).encode()),
+                        ],
+                    }
+                )
+                await self._send({"type": "http.response.body", "body": body, "more_body": False})
                 return
 
         headers = MutableHeaders(raw=list(start.get("headers", [])))

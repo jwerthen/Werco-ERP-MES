@@ -28,6 +28,7 @@ from app.core.config import settings
 from app.core.credentials import READ_ONLY_TOOL_DENIED_DETAIL, READ_ONLY_TOOL_WRITES_DETAIL
 from app.core.export_control import (
     AI_EGRESS_DISABLED_DETAIL,
+    AI_EXTERNAL_QUERY_DENIED_DETAIL,
     AI_EXTERNAL_ROUTE_DENIED_DETAIL,
     EXPORT_CONTROL_FAILED_DETAIL,
     EXPORT_CONTROL_STATE_KEY,
@@ -323,6 +324,31 @@ class TestAiExternalCalls:
         assert result["structuredContent"]["detail"] == detail
         db_session.expire_all()
         assert db_session.query(ControlledAccessEvent).count() == 0, "refused before dispatch: nothing reached the API"
+
+    def test_a_text_filter_through_an_allowlisted_tool_is_refused_by_the_api_layer(
+        self, door_client: TestClient, db_session: Session, token, auth_headers: dict
+    ):
+        """Code review P0, finding 1: ``list_parts`` is allowlisted, but its ``search`` filter is an
+        oracle on the withheld part text -- the API layer refuses it (403, ledgered) and the door
+        returns that answer; the same tool without the filter still lists."""
+        seed_world(db_session)
+        _id, bearer = token
+        refused = _result(
+            door_client.post(DOOR, json=_call("list_parts", {"search": "controlled"}), headers=_auth(bearer))
+        )
+        assert refused["isError"] is True
+        assert refused["structuredContent"]["status"] == 403
+        assert refused["structuredContent"]["detail"] == AI_EXTERNAL_QUERY_DENIED_DETAIL
+        db_session.expire_all()
+        assert (
+            db_session.query(ControlledAccessEvent)
+            .filter(ControlledAccessEvent.denial_reason == "query_parameter_not_allowlisted")
+            .count()
+            == 1
+        )
+        listed = _result(door_client.post(DOOR, json=_call("list_parts", {"limit": 5}), headers=_auth(bearer)))
+        assert listed.get("isError") is not True, listed
+        assert not contains_canary(json.dumps(listed).encode())
 
     def test_what_a_read_tool_returns_is_redacted(
         self, door_client: TestClient, db_session: Session, token, auth_headers: dict

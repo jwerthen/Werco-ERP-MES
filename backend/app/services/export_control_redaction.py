@@ -17,8 +17,11 @@ Two passes:
    * it descends from a controlled object.
 
    Inside a controlled object a KEEP-allowlist applies -- ids, statuses, priority /
-   sequence / version, dates and times, numbers, booleans, nulls and the business
-   identifiers in :data:`KEPT_IDENTIFIER_KEYS` -- and every other string becomes
+   sequence / version, dates and times, booleans, nulls, the business identifiers in
+   :data:`KEPT_IDENTIFIER_KEYS`, numeric strings ONLY under a count / quantity / duration /
+   money / sequence key (:data:`NUMERIC_KEEP_KEY_FRAGMENTS`), and JSON numbers except under
+   a measurement key (:data:`MEASUREMENT_KEY_FRAGMENTS`: a nominal, tolerance, measured
+   value or dimension is technical data) -- and every other value becomes
    ``"[export-controlled]"``. A denylist of "sensitive" keys would leak the next text
    column somebody adds; the allowlist cannot. ``"export_controlled": true`` is added to
    every redacted object. Counts, ids, statuses, dates and quantities therefore stay true.
@@ -28,9 +31,11 @@ Two passes:
    aliases, customer part numbers and drawing numbers of controlled and unlinkable parts,
    controlled customers' names and codes, and every free-text customer name that resolves
    to no customer at all -- it may be a controlled one misspelled) replaced,
-   case-insensitively. Only values
-   that cannot carry text are exempt: ISO dates, numeric strings under non-identifier keys
-   and numeric / UUID ids.
+   case-insensitively. A whole value EQUAL to one of those tokens is replaced whatever its
+   length (a three-letter customer code is withheld too); the substring match needs
+   :data:`MIN_SENSITIVE_TOKEN_LENGTH` so a short token cannot rewrite ordinary words. Only
+   values that cannot carry text are exempt: ISO dates, numeric strings under
+   non-identifier keys and numeric / UUID ids.
 """
 
 from __future__ import annotations
@@ -40,6 +45,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Pattern, Tuple
 
 from app.core.export_control import (
+    AI_EXTERNAL_MASKED_LOOKUPS,
     CLASSIFICATION_CUI,
     CLASSIFICATION_ITAR,
     CLASSIFICATION_UNKNOWN,
@@ -47,10 +53,13 @@ from app.core.export_control import (
     REASON_UNLINKABLE_RECORD,
     REDACTED_MARKER_KEY,
     REDACTED_VALUE,
+    ai_external_error_detail,
 )
 
-# Sensitive tokens shorter than this are not matched by the text pass: a 1-3 character
-# part number would rewrite every word that happens to contain it.
+# Sensitive tokens shorter than this are not matched INSIDE a longer string by the text
+# pass: a 1-3 character part number would rewrite every word that happens to contain it.
+# A string that IS such a token (whole value, normalized) is still replaced -- code review
+# P0, finding 2: a customer coded "BAE" otherwise went out as "BAE".
 MIN_SENSITIVE_TOKEN_LENGTH = 4
 
 
@@ -158,6 +167,13 @@ class ControlledIndex:
     def sensitive_pattern(self) -> Optional[Pattern[str]]:
         return compile_sensitive_pattern(self.sensitive_tokens)
 
+    def sensitive_values(self) -> FrozenSet[str]:
+        """Every sensitive token and controlled customer name / code, normalized: matched as a WHOLE value."""
+        values = {normalize_key(token) for token in self.sensitive_tokens}
+        values.update(self.customer_names)
+        values.discard("")
+        return frozenset(values)
+
 
 def compile_sensitive_pattern(tokens: Iterable[str]) -> Optional[Pattern[str]]:
     """One case-insensitive alternation, longest token first, or None when there is nothing to remove."""
@@ -256,6 +272,31 @@ PATH_PARAM_KEYS: Mapping[str, Tuple[str, str]] = {
     "receipt_id": ("receipt", "id"),
 }
 
+# (route, list key) -> record type, for NESTED record lists whose items identify themselves
+# by nothing but ``id`` (or a link) -- the top-level ROUTE_SHAPES cannot see them. Compliance
+# review P0, finding 3: ``all_operations`` on an operation's detail lists its SIBLINGS by
+# ``id`` alone, so a withheld sibling (its component part unlinkable) went out in full.
+# ``timeline_operation``: a work-order timeline item names its operation only in its
+# ``source_url`` fragment (``#operation-12``); every other item is the work order's own.
+NESTED_SHAPES: Mapping[Tuple[str, str], str] = {
+    ("/shop-floor/operations/{operation_id}", "all_operations"): "operation",
+    ("/work-orders/{work_order_id}/timeline", "items"): "timeline_operation",
+}
+_TIMELINE_OPERATION = re.compile(r"#operation-(\d+)$")
+
+
+def _shape_reference(shape: str, obj: Mapping[str, Any]) -> Optional[Tuple[str, Any]]:
+    """``(record type, id)`` the ``shape`` says ``obj`` is, or None when it names no record."""
+    if shape == "timeline_operation":
+        url = obj.get("source_url")
+        match = _TIMELINE_OPERATION.search(url) if isinstance(url, str) else None
+        return ("operation", match.group(1)) if match else None
+    record_id = obj.get("id")
+    if record_id is None or isinstance(record_id, (dict, list)):
+        return None
+    return (shape, record_id)
+
+
 # --------------------------------------------------------------------------- the keep-allowlist
 
 KEPT_IDENTIFIER_KEYS: FrozenSet[str] = frozenset(
@@ -306,6 +347,63 @@ _TEXTUAL_KEY_FRAGMENTS = (
     "material",
 )
 
+# Inside a withheld object a numeric STRING (a Decimal serializes as one) stays only under a
+# key naming a count, quantity, duration, money amount or sequence -- an ALLOWLIST, so a
+# nominal, tolerance or measured value (``"nominal": "0.2500"``) is withheld whatever its
+# key is called. Compliance review P0, finding 1 (blocker): before this, any numeric string
+# under a non-text key passed, and an ITAR FAI's dimensions went out.
+NUMERIC_KEEP_KEY_FRAGMENTS = (
+    "quantity",
+    "qty",
+    "count",
+    "hours",
+    "minutes",
+    "seconds",
+    "days",
+    "duration",
+    "cost",
+    "price",
+    "total",
+    "amount",
+    "tax",
+    "shipping",
+    "stock",
+    "reorder",
+    "percent",
+    "sequence",
+    "version",
+    "priority",
+    "runs",
+    "pieces",
+)
+# A JSON NUMBER inside a withheld object stays true (counts, quantities, money, hours) unless
+# its key names a measurement or dimension of the article -- technical data, withheld even
+# as a number. A key that also names a count / quantity / duration / money amount
+# (``actual_hours``, ``target_quantity``) keeps its value.
+MEASUREMENT_KEY_FRAGMENTS = (
+    "nominal",
+    "toleran",
+    "value",
+    "measur",
+    "dimension",
+    "diameter",
+    "thickness",
+    "length",
+    "width",
+    "height",
+    "depth",
+    "angle",
+    "radius",
+    "weight",
+    "torque",
+    "pressure",
+    "temperature",
+    "hardness",
+    "tensile",
+    "limit",
+    "target",
+)
+
 _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?$")
 _NUMERIC = re.compile(r"^[+-]?\d+(\.\d+)?([eE][+-]?\d+)?$")
 _ID_VALUE = re.compile(r"^(\d+|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$")
@@ -328,6 +426,19 @@ def _is_textual_key(key: str) -> bool:
     return any(fragment in lowered for fragment in _TEXTUAL_KEY_FRAGMENTS)
 
 
+def _names_a_count_or_amount(key: str) -> bool:
+    lowered = key.lower()
+    return any(fragment in lowered for fragment in NUMERIC_KEEP_KEY_FRAGMENTS)
+
+
+def _is_measurement_key(key: Optional[str]) -> bool:
+    """A key whose NUMBER, inside a withheld object, is technical data (see MEASUREMENT_KEY_FRAGMENTS)."""
+    if key is None or _is_id_key(key) or _names_a_count_or_amount(key):
+        return False
+    lowered = key.lower()
+    return any(fragment in lowered for fragment in MEASUREMENT_KEY_FRAGMENTS)
+
+
 def _structurally_inert(key: Optional[str], value: str) -> bool:
     """A string that cannot carry technical data: an ISO date, a numeric id, or a number under a non-text key."""
     if _ISO_DATE.match(value):
@@ -341,8 +452,10 @@ def _structurally_inert(key: Optional[str], value: str) -> bool:
 
 def _kept_string(key: Optional[str], value: str) -> bool:
     """Inside a controlled object: may this string stay?"""
+    if _ISO_DATE.match(value):
+        return True
     if key is None:
-        return _structurally_inert(None, value)
+        return False
     if key in KEPT_IDENTIFIER_KEYS:
         return True
     if _is_id_key(key):
@@ -351,7 +464,8 @@ def _kept_string(key: Optional[str], value: str) -> bool:
         return True
     if _is_date_key(key):
         return True
-    return _structurally_inert(key, value)
+    # A number as text: only a count / quantity / duration / money / sequence (the allowlist).
+    return bool(_NUMERIC.match(value)) and _names_a_count_or_amount(key) and not _is_textual_key(key)
 
 
 # --------------------------------------------------------------------------- the walk
@@ -373,9 +487,13 @@ class RedactionResult:
 
 
 class _Walker:
-    def __init__(self, index: ControlledIndex, pattern: Optional[Pattern[str]]) -> None:
+    def __init__(
+        self, index: ControlledIndex, pattern: Optional[Pattern[str]], route_path: Optional[str] = None
+    ) -> None:
         self.index = index
         self.pattern = pattern
+        self.whole_values = index.sensitive_values()
+        self.route_path = route_path or ""
         self.hits: Dict[Tuple[str, Optional[int]], RedactionHit] = {}
 
     def record(self, record_type: str, record_id: Optional[int], control: Control) -> None:
@@ -410,10 +528,12 @@ class _Walker:
                 if named is not None:
                     self.record("customer", named[0], named[1])
                     found.append(named[1])
-        if shape is not None and "id" in obj and not isinstance(obj["id"], (dict, list)):
-            control = self.index.by_id(shape, obj["id"])
+        reference = _shape_reference(shape, obj) if shape is not None else None
+        if reference is not None:
+            record_type, record_id = reference
+            control = self.index.by_id(record_type, record_id)
             if control is not None:
-                self.record(shape, _as_int(obj["id"]), control)
+                self.record(record_type, _as_int(record_id), control)
                 found.append(control)
         return worst(*found)
 
@@ -428,6 +548,8 @@ class _Walker:
             if controlled and not _kept_string(key, value):
                 return REDACTED_VALUE
             return self.scrub(key, value)
+        if controlled and isinstance(value, (int, float)) and not isinstance(value, bool) and _is_measurement_key(key):
+            return REDACTED_VALUE
         return value
 
     def walk_object(self, obj: Mapping[str, Any], *, controlled: bool, shape: Optional[str]) -> Dict[str, Any]:
@@ -436,7 +558,8 @@ class _Walker:
         out: Dict[str, Any] = {}
         for key, value in obj.items():
             new_key = self.scrub_key(key, out)
-            out[new_key] = self.walk(value, controlled=withheld, key=key)
+            nested = NESTED_SHAPES.get((self.route_path, key)) if isinstance(key, str) else None
+            out[new_key] = self.walk(value, controlled=withheld, key=key, shape=nested)
         if withheld:
             out[REDACTED_MARKER_KEY] = True
         return out
@@ -444,14 +567,23 @@ class _Walker:
     # -- the residual text pass
 
     def scrub(self, key: Optional[str], value: str) -> str:
-        if self.pattern is None or _structurally_inert(key, value):
+        if _structurally_inert(key, value):
+            return value
+        if self.whole_values and normalize_key(value) in self.whole_values:
+            return REDACTED_VALUE
+        if self.pattern is None:
             return value
         return self.pattern.sub(REDACTED_VALUE, value)
 
     def scrub_key(self, key: Any, taken: Mapping[str, Any]) -> Any:
-        if not isinstance(key, str) or self.pattern is None:
+        if not isinstance(key, str):
             return key
-        scrubbed = self.pattern.sub(REDACTED_VALUE, key)
+        if self.whole_values and normalize_key(key) in self.whole_values:
+            scrubbed = REDACTED_VALUE
+        elif self.pattern is not None:
+            scrubbed = self.pattern.sub(REDACTED_VALUE, key)
+        else:
+            return key
         candidate, n = scrubbed, 2
         while candidate in taken:  # two keys collapsing to one must not drop a value
             candidate, n = f"{scrubbed}#{n}", n + 1
@@ -511,7 +643,7 @@ def redact_payload(
     ``route_path`` is the matched route template relative to the API prefix (it selects a
     :data:`ROUTE_SHAPES` entry); ``path_params`` are the request's path parameters.
     """
-    walker = _Walker(index, index.sensitive_pattern())
+    walker = _Walker(index, index.sensitive_pattern(), route_path)
     shape, wrapper_key = ROUTE_SHAPES.get(route_path or "", (None, None))
     whole = _path_param_control(walker, path_params) is not None
 
@@ -536,7 +668,8 @@ def _walk_wrapper(
         if key == wrapper_key and isinstance(value, list):
             out[new_key] = [walker.walk(item, controlled=controlled, key=key, shape=shape) for item in value]
         else:
-            out[new_key] = walker.walk(value, controlled=controlled, key=key)
+            nested = NESTED_SHAPES.get((walker.route_path, key)) if isinstance(key, str) else None
+            out[new_key] = walker.walk(value, controlled=controlled, key=key, shape=nested)
     if controlled:
         out[REDACTED_MARKER_KEY] = True
     return out
@@ -546,3 +679,61 @@ def scrub_text(payload: Any, index: ControlledIndex) -> Any:
     """The residual text pass alone (an error response): a new payload, the input untouched."""
     walker = _Walker(index, index.sensitive_pattern())
     return walker.scrub_tree(payload)
+
+
+def is_masked_lookup(route_path: Optional[str], result: RedactionResult) -> bool:
+    """Must this 2xx answer a by-number lookup with the not-found 404 instead (code review P0, finding 1)?
+
+    True when ``route_path`` is in :data:`~app.core.export_control.AI_EXTERNAL_MASKED_LOOKUPS`
+    (its number is withheld text) and the record it returned was withheld: a 200 -- redacted
+    or not -- would confirm that a probed part number exists.
+    """
+    if (route_path or "") not in AI_EXTERNAL_MASKED_LOOKUPS:
+        return False
+    payload = result.payload
+    return isinstance(payload, dict) and payload.get(REDACTED_MARKER_KEY) is True
+
+
+# 422 ``detail`` item keys kept for an AI-external token: where and what kind of error, never
+# the request's own value (``input``), the validator's context or message. A parameter NAME is
+# kept only where it is the route's own declared name (an undeclared query parameter never
+# gets this far: gate 4 refuses it); a body location keeps no key -- that could be the caller's.
+_NAMED_VALIDATION_LOCATIONS = frozenset({"path", "query", "header", "cookie"})
+_VALIDATION_LOCATIONS = _NAMED_VALIDATION_LOCATIONS | {"body"}
+VALIDATION_ERROR_MESSAGE = "Invalid value."
+
+
+def ai_external_error_body(status_code: int, payload: Any) -> Dict[str, Any]:
+    """The body an AI-external token gets for a route's own error -- fixed text, no echo of the request.
+
+    The residual text pass over an error that ECHOES the request (a 422's ``input``, a 404
+    naming the number asked for) would turn a probed controlled part number into
+    ``[export-controlled]`` and so confirm the probe (code review P0, finding 1). So no
+    route error text reaches the token at all: one fixed detail per status code, and for a
+    422 the location and type of each error -- schema names -- and nothing the caller sent.
+    """
+    body: Dict[str, Any] = {"detail": ai_external_error_detail(status_code)}
+    detail = payload.get("detail") if isinstance(payload, dict) else None
+    if status_code == 422 and isinstance(detail, list):
+        errors: List[Dict[str, Any]] = []
+        for error in detail:
+            if not isinstance(error, dict):
+                continue
+            loc = error.get("loc")
+            parts = list(loc) if isinstance(loc, (list, tuple)) else []
+            if parts and parts[0] in _NAMED_VALIDATION_LOCATIONS and len(parts) >= 2:
+                location = [str(parts[0]), str(parts[1])]
+            elif parts and parts[0] in _VALIDATION_LOCATIONS:
+                location = [str(parts[0])]
+            else:
+                location = []
+            error_type = error.get("type")
+            errors.append(
+                {
+                    "type": str(error_type) if isinstance(error_type, str) else "invalid",
+                    "loc": location,
+                    "msg": VALIDATION_ERROR_MESSAGE,
+                }
+            )
+        body["errors"] = errors
+    return body

@@ -2,8 +2,8 @@
 
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
-(Cursor, Claude Code, a chat bot) gets **768 tools** — 15 hand-written *convenience* tools plus
-**753 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+(Cursor, Claude Code, a chat bot) gets **766 tools** — 15 hand-written *convenience* tools plus
+**751 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
 as the same request from the web app. A **read-only** API token is shown fewer tools, and an
 **AI-external** one fewer still (§4.1, §4.2).
 
@@ -16,11 +16,10 @@ and the short-count close rules added no tool** (15 convenience + 747 generated 
 operations), **and again on 2026-11-11 after the saved dashboard layout routes added three tools**
 (`get_my_dashboard_layout`, `save_my_dashboard_layout`, `reset_my_dashboard_layout` under the new
 `Dashboard` tag: 15 convenience + 750 generated, 16 shadowed), **and again on 2026-11-13 after the
-read-only / AI-external token work (P0) added three Customers tools**
-(`get_customer_export_control`, `create_customer_export_contract`,
-`update_customer_export_contract`) and moved the Hank intake routes to their own `Hank Intake` tag
-with no name change: 15 convenience + 753 generated, 16 shadowed. The read-only catalog is
-8 convenience + 290 generated tools.
+read-only / AI-external token work (P0) added one Customers tool**
+(`get_customer_export_control`; the two contract WRITES are in `EXCLUDED_OPERATIONS`, §6.1) and
+moved the Hank intake routes to their own `Hank Intake` tag with no name change: 15 convenience +
+751 generated, 16 shadowed. The read-only catalog is 8 convenience + 290 generated tools.
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
 `backend/tests/test_mcp_docs_names.py` checks every tool name this file, `CLAUDE.md` and `API.md`
@@ -213,7 +212,7 @@ routes authenticate every call; in IN-PROCESS mode it uses the real `ErpTokenVer
  "generated_tools":   [{"name": "...", "method": "GET", "path": "/api/v1/...", "tag": "...",
                         "function": "...", "annotations": {...}, "deprecated": false}],
  "shadowed_operations": [["GET", "/api/v1/inventory/"], ...],
- "counts": {"convenience": 15, "generated": 753, "shadowed": 16}
+ "counts": {"convenience": 15, "generated": 751, "shadowed": 16}
 }
 ```
 
@@ -520,7 +519,12 @@ three more rules:
    | Maintenance work orders | `preventive_maintenance_list_work_orders`, `get_overdue_work_orders`, `preventive_maintenance_get_work_order` |
 
    (★ = convenience tool; 5 convenience + 39 generated.) Adding a route needs a canary conformance
-   test, and CI fails without one.
+   test, and CI fails without one. **Filters are narrowed too:** each route accepts only the query
+   parameters in `AI_EXTERNAL_QUERY_PARAMS` — free-text `search`, the `customer` filter and
+   `sort` / `group` by part or customer are refused **403** `"This query parameter is not
+   available to an AI-external API token: free-text search, customer filters and text sort keys
+   are refused."` (ledgered), because a filter over withheld text is an oracle on it. So
+   `list_parts` works, `list_parts` with `search` does not.
 3. **Export-controlled and unlinkable records come back redacted.** These records are returned
    with ids, statuses, dates, quantities and the business numbers (work order, NCR, PO, …) intact:
    - records of a customer an Admin marked ITAR / export controlled / CUI;
@@ -535,7 +539,10 @@ three more rules:
    **503** `"Export-control check failed; nothing was sent."`. The redaction runs in the API's
    response middleware, so it is the same through the door, the stdio bridge or a direct call.
    An agent must report a redacted record as withheld and never guess its content; the server
-   instructions say so.
+   instructions say so. A route's own error comes back as one fixed text per status code
+   (`"Request failed (404 Not Found); details are withheld from AI-external API tokens."`), never
+   echoing the request, and a part-number lookup that finds a withheld part is the same 404 as a
+   number nobody carries.
 
 The rules for which customers and records are controlled, how an Admin marks a customer, the
 ledger, and the steps to connect Claude are in
@@ -596,7 +603,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `FabricationQuoting` (`/fabrication-quotes`) | Fabrication Quoting | `fabrication_quoting_list_quotes`, `fabrication_quoting_create_quote`, `fabrication_quoting_get_quote`, `fabrication_quoting_update_quote`, `calculate`, `fabrication_quoting_approve_quote`, `fabrication_quoting_revise_quote`, `fabrication_quoting_handoff_quote`, `export_package` |
 | `FabricationQuoting` sources, nesting and actuals | Fabrication Quoting | `upload_file`, `original_file`, `nest`, `save_nest`, `revisions`, `revision`, `list_actuals`, `record_actuals` |
 | `FabricationQuoting` process profiles | Fabrication Quoting | `list_profiles`, `list_revisions`, `save_profile`, `capabilities` |
-| `Customers` (`/customers`) | Customers | `list_customers`, `create_customer`, `update_customer`, `get_customer_stats`, `import_customers_csv`, `get_customer_export_control`, `create_customer_export_contract`, `update_customer_export_contract` (the Export control panel: Admin only, refused **403** to every API token — [EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md#6-marking-a-customer-export-controlled-admin)) |
+| `Customers` (`/customers`) | Customers | `list_customers`, `create_customer`, `update_customer`, `get_customer_stats`, `import_customers_csv`, `get_customer_export_control` (read-only; **marking a customer controlled is not a tool**: `POST /customers/{customer_id}/contracts` and `PUT /customers/{customer_id}/contracts/{contract_id}` are in `EXCLUDED_OPERATIONS` (§6.1) — Admin only, in the app's Export control panel, and refused **403** to every API token — [EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md#6-marking-a-customer-export-controlled-admin)) |
 | `Quality` (`/quality`) | Quality Management, Parts | `list_quality_ncrs`★, `get_ncr`, `create_ncr`, `update_ncr`, `void_ncr`, `list_cars`, `create_fai`, `get_quality_summary`, `list_scrap_reason_codes` |
 | `SPC` (`/spc`) | Statistical Process Control, Parts | `list_characteristics`, `add_measurements`, `get_chart_data`, `calculate_control_limits`, `get_capability`, `statistical_process_control_get_dashboard` |
 | `CustomerComplaints` (`/customer-complaints`) | Customer Complaints & RMA | `list_complaints`, `create_complaint`, `create_rma`, `get_8d_report`, `customer_complaints_rma_get_dashboard` |
@@ -643,7 +650,7 @@ minus two further, named sets:
   They are listed **by name** rather than skipped silently, so a new route that forgets its
   `security` dependency — even under a tag that already has tools — fails the coverage guard
   (`catalog.unaccounted_operations`, §14) until it is either secured or named there.
-- **`EXCLUDED_OPERATIONS`** — three operations, none with a convenience twin:
+- **`EXCLUDED_OPERATIONS`** — five operations, none with a convenience twin:
   - The two Excel-cutover loaders, `POST /work-orders/import` and
     `POST /purchasing/purchase-orders/import` (`migration_import_service`). They record a *past*
     system's state rather than perform a user action: the work-order loader mints work orders
@@ -658,6 +665,15 @@ minus two further, named sets:
     the record-only accept, dismiss, snooze and feedback tools, and may create recommendations;
     on an action card the record-only accept is refused for an API token and for a role that could
     not apply the action. See [API.md → AI Recommendations](API.md#ai-recommendations-action-inbox).
+  - The two customer **export-control writes**, `POST /customers/{customer_id}/contracts` and
+    `PUT /customers/{customer_id}/contracts/{contract_id}`. Marking or un-marking a customer
+    controlled decides what an outside AI connector is shown, and the owner's rule is "an Admin
+    does it, signed in to the app". The routes refuse every API token (403), but a person's own
+    access JWT (the stdio bridge's email / password, or the HTTP door) would still reach them
+    through a tool, so an agent — possibly following text injected through ERP data — could
+    switch a customer's control off and the connector would get that customer's records
+    unredacted from the next request on. Reading a customer's standing
+    (`get_customer_export_control`) stays a tool.
 
 The `Import Batches` tag also excludes the recoverable Import Center review, receipt,
 correction and commit routes. These wrap the same cutover loaders, including their
@@ -825,8 +841,8 @@ the only door to them (`convenience.SHADOWED_OPERATIONS`):
 Every other operation stays generated — including the neighbours of the shadowed ones
 (`work_orders_start_work_order`, `work_orders_update_operation`, `preview_laser_nest_package_import`,
 `get_work_order_by_number`, `update_laser_nest`, `get_inventory_summary`, `get_purchase_order`, …) —
-except the operations in `EXCLUDED_OPERATIONS` (§6.1) — the two cutover loaders and AI Accept &
-apply — which have no tool and no replacement. Adding a convenience tool whose route is *not* in the shadow set is a build error
+except the operations in `EXCLUDED_OPERATIONS` (§6.1) — the two cutover loaders, AI Accept &
+apply and the two customer export-control writes — which have no tool and no replacement. Adding a convenience tool whose route is *not* in the shadow set is a build error
 (`build_registry` refuses a duplicate name) rather than a silent win.
 
 ---
@@ -1170,8 +1186,8 @@ count, in which case there is nothing left to close.
 - Tests (all in the default `pytest tests/` run, so in CI's required "Backend Tests" job):
   - `backend/tests/test_mcp_catalog.py` (no DB) — membership against the live `app.openapi()` (every
     secured, unshadowed, unexcluded operation is exactly one tool; `PUBLIC_OPERATIONS` names exactly
-    the unsecured routes; `EXCLUDED_OPERATIONS` are exactly the two loaders and the AI apply route,
-    and the record-only accept stays a tool), names (unique, wire-valid,
+    the unsecured routes; `EXCLUDED_OPERATIONS` are exactly the two loaders, the AI apply route
+    and the two customer export-control writes, and the record-only accept stays a tool), names (unique, wire-valid,
     ≤ 64, collisions prefixed, the numeric-suffix fallback proven on synthetic input and unused on
     the live catalog), schemas (`$ref`-free, `additionalProperties: false`, every JSON body's
     property set equal to the document's — the `title` field included), and the two convenience

@@ -292,7 +292,11 @@ Verify in a test company:
 **Rollback.** Older code ignores both columns and the narrowing claims, so it accepts a read-only or
 AI-external token **as a full token** and redacts nothing. **Revoke every narrowed token before
 rolling the API back** (Admin → API Tokens). A deliberate 119 downgrade drops both columns and the
-CHECK, and with them the record of which tokens were narrowed. Revoke those tokens first. See
+CHECK, and with them the record of which tokens were narrowed, so it **refuses** (raises before any
+DDL, naming the count) while any un-revoked read-only or AI-external token exists: revoke them
+first (`SELECT id, label FROM api_tokens WHERE (scope <> 'full' OR ai_external) AND revoked =
+false`). An offline `--sql` downgrade cannot check: run that query by hand. A code-only rollback
+(database left at 119) is not checked at all, so the revoke step is still yours. See
 [EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md).
 
 ### Existing ERP frontend: Fabrication Quoting

@@ -14,12 +14,16 @@ from app.core.credentials import (
 )
 from app.core.export_control import (
     AI_EGRESS_DISABLED_DETAIL,
+    AI_EXTERNAL_QUERY_DENIED_DETAIL,
     AI_EXTERNAL_ROUTE_DENIED_DETAIL,
     EXPORT_CONTROL_STATE_KEY,
     REASON_AI_EGRESS_DISABLED,
+    REASON_QUERY_NOT_ALLOWLISTED,
     REASON_ROUTE_NOT_ALLOWLISTED,
     ExportControlMarker,
     ai_external_operations,
+    ai_external_query_allowed,
+    relative_route_path,
 )
 from app.core.observability import set_sentry_tags
 from app.core.security import (
@@ -145,6 +149,17 @@ def ai_external_route_allowed(request: Request) -> bool:
     return template is not None and (request.method.upper(), template) in AI_EXTERNAL_ALLOWED_OPERATIONS
 
 
+def ai_external_query_params_allowed(request: Request) -> bool:
+    """Gate 4, second half: is every query parameter (and value) on the route's AI-external list?
+
+    ``app.core.export_control.AI_EXTERNAL_QUERY_PARAMS`` says why: a free-text filter over a
+    field the redaction hides is an oracle on that field. Read from the raw query string,
+    every repeated value included; an undeclared parameter is refused, not ignored.
+    """
+    route_path = relative_route_path(_matched_route_template(request), settings.API_V1_PREFIX)
+    return ai_external_query_allowed(route_path, request.query_params.multi_items())
+
+
 def _export_control_marker(request: Request, user: User, record: Any, *, refusal_reason: Optional[str] = None) -> None:
     """Write the marker ``app.middleware.export_control`` reads into ``request.scope["state"]`` (gate 5).
 
@@ -173,8 +188,10 @@ def read_only_api_token_refusal(
     Two gates, in order, both pure (no database):
 
     2. **Method.** Anything but ``GET`` / ``HEAD`` / ``OPTIONS`` is refused -- whatever the
-       bound user's role, and before the route reads a byte. This is what makes the token
-       unable to write through ``/api/v1`` directly, not just through the MCP door.
+       bound user's role, and before anything is written (FastAPI decodes a JSON body before
+       it solves dependencies, so a malformed body still answers 422 first; nothing is
+       written either way). This is what makes the token unable to write through
+       ``/api/v1`` directly, not just through the MCP door.
     3. **Tag.** The matched route (``request.scope["route"]``, which FastAPI sets before any
        dependency runs) must carry no tag in ``WERCO_MCP_READ_ONLY_DENY_TAGS``. No matched
        route at all fails CLOSED -- a request this gate cannot place is refused, not waved
@@ -330,7 +347,8 @@ def get_current_user(
         #   1. AI-external + company AI egress off -> 403 (Claude-plugin brief P0.3), ledgered.
         #   2. read-only + not GET/HEAD/OPTIONS -> 403   } read_only_api_token_refusal
         #   3. read-only + a denied tag on the route -> 403 }
-        #   4. AI-external + (method, route) outside the AI-external allowlist -> 403, ledgered.
+        #   4. AI-external + (method, route) outside the AI-external allowlist -> 403, ledgered;
+        #      then a query parameter / value outside that route's list (a text filter) -> 403, ledgered.
         #   5. the export-control marker for the response middleware (app.middleware.export_control):
         #      file bytes refused to every read-only token; AI-external JSON redacted.
         # An AI-external row is treated as read-only whatever its scope says (the mint refuses
@@ -346,6 +364,9 @@ def get_current_user(
             if ai_external and not ai_external_route_allowed(request):
                 _export_control_marker(request, user, api_token_record, refusal_reason=REASON_ROUTE_NOT_ALLOWLISTED)
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=AI_EXTERNAL_ROUTE_DENIED_DETAIL)
+            if ai_external and not ai_external_query_params_allowed(request):
+                _export_control_marker(request, user, api_token_record, refusal_reason=REASON_QUERY_NOT_ALLOWLISTED)
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=AI_EXTERNAL_QUERY_DENIED_DETAIL)
             _export_control_marker(request, user, api_token_record)
         return user
 

@@ -13,14 +13,17 @@ import copy
 
 import pytest
 
-from app.core.export_control import REDACTED_MARKER_KEY, REDACTED_VALUE
+from app.core.export_control import REDACTED_MARKER_KEY, REDACTED_VALUE, ai_external_error_detail
 from app.services.export_control_redaction import (
     MIN_SENSITIVE_TOKEN_LENGTH,
     UNLINKABLE,
+    VALIDATION_ERROR_MESSAGE,
     Control,
     ControlledIndex,
+    ai_external_error_body,
     compile_sensitive_pattern,
     customer_control,
+    is_masked_lookup,
     normalize_key,
     redact_payload,
     scrub_text,
@@ -145,6 +148,74 @@ class TestKeepAllowlist:
         assert payload == before
 
 
+class TestNumbersInsideAWithheldRecord:
+    """Compliance review P0, finding 1 (blocker): dimensions and measured values are technical data."""
+
+    def test_numeric_strings_stay_only_under_count_quantity_money_and_duration_keys(self):
+        record = {
+            "work_order_id": 1,
+            "nominal": "0.2500",
+            "tolerance_plus": "0.0005",
+            "tolerance_minus": "-0.0005",
+            "actual_value": "0.2502",
+            "required_value": "7.3291",
+            "thickness": "0.125",
+            "unknown_new_column": "42",
+            "quantity_scrapped": "1.500",
+            "quantity_affected": "2",
+            "unit_price": "12.50",
+            "line_total": "87.50",
+            "standard_cost": "3.10",
+            "setup_hours": "1.5",
+            "lead_time_days": "10",
+            "reorder_point": "5",
+            "safety_stock": "2",
+        }
+        out = redact_payload(record, _index()).payload
+        for key in ("nominal", "tolerance_plus", "tolerance_minus", "actual_value", "required_value", "thickness"):
+            assert out[key] == R, key
+        assert out["unknown_new_column"] == R, "an allowlist: an unknown key's number is withheld"
+        for key in (
+            "quantity_scrapped",
+            "quantity_affected",
+            "unit_price",
+            "line_total",
+            "standard_cost",
+            "setup_hours",
+            "lead_time_days",
+            "reorder_point",
+            "safety_stock",
+        ):
+            assert out[key] == record[key], key
+
+    def test_json_numbers_stay_true_except_under_a_measurement_key(self):
+        record = {
+            "work_order_id": 1,
+            "quantity_ordered": 7,
+            "priority": 2,
+            "actual_hours": 3.5,
+            "target_quantity": 10,
+            "char_number": 1,
+            "total": 1234.5,
+            "nominal": 0.25,
+            "upper_limit": 0.2505,
+            "measured_value": 0.2502,
+            "diameter": 0.5,
+            "weight": 1.2,
+            "is_conforming": True,
+        }
+        out = redact_payload(record, _index()).payload
+        for key in ("quantity_ordered", "priority", "actual_hours", "target_quantity", "char_number", "total"):
+            assert out[key] == record[key], key
+        for key in ("nominal", "upper_limit", "measured_value", "diameter", "weight"):
+            assert out[key] == R, key
+        assert out["is_conforming"] is True
+
+    def test_a_cleared_record_keeps_its_dimensions(self):
+        record = {"work_order_id": 2, "nominal": "0.2500", "diameter": 0.5}
+        assert redact_payload(record, _index()).payload == record
+
+
 class TestIdentification:
     @pytest.mark.parametrize(
         "record,expected",
@@ -199,6 +270,37 @@ class TestIdentification:
         assert out["operations"][1]["name"] == R, "an operation the index never saw"
         assert REDACTED_MARKER_KEY not in out["notices"][0], "not a record list: no shape"
 
+    def test_a_nested_list_of_operations_is_classified_by_id(self):
+        """Compliance review P0, finding 3: ``all_operations`` lists siblings by ``id`` alone."""
+        index = _index(controlled={**_index().controlled, "operation": {101: UNLINKABLE}})
+        payload = {
+            "operation": {"id": 100, "name": "Form"},
+            "all_operations": [{"id": 100, "name": "Form"}, {"id": 101, "name": "Laser ITAR widget", "sequence": 20}],
+        }
+        out = redact_payload(payload, index, route_path="/shop-floor/operations/{operation_id}").payload
+        assert out["all_operations"][0] == {"id": 100, "name": "Form"}
+        assert out["all_operations"][1] == {"id": 101, "name": R, "sequence": 20, REDACTED_MARKER_KEY: True}
+        # Another route's ``all_operations`` gets no opinion (its ids may be another table's).
+        assert redact_payload(payload, index, route_path="/routing/{routing_id}").payload == payload
+
+    def test_a_timeline_item_is_classified_by_the_operation_it_links(self):
+        index = _index(controlled={**_index().controlled, "operation": {101: UNLINKABLE}})
+        payload = {
+            "items": [
+                {
+                    "id": "operation-start:101",
+                    "detail": "20 · Laser ITAR widget",
+                    "source_url": "/work-orders/2#operation-101",
+                },
+                {"id": "operation-start:100", "detail": "10 · Form", "source_url": "/work-orders/2#operation-100"},
+                {"id": "job-created:2", "detail": "WO-2", "source_url": "/work-orders/2"},
+            ],
+            "next_cursor": None,
+        }
+        out = redact_payload(payload, index, route_path="/work-orders/{work_order_id}/timeline").payload
+        assert out["items"][0]["detail"] == R and out["items"][0][REDACTED_MARKER_KEY] is True
+        assert out["items"][1] == payload["items"][1] and out["items"][2] == payload["items"][2]
+
     def test_a_path_parameter_controls_the_whole_response(self):
         payload = {"events": [{"label": "started", "actor": "Pat"}], "next_cursor": None}
         out = redact_payload(payload, _index(), path_params={"work_order_id": "1"}).payload
@@ -229,11 +331,26 @@ class TestResidualTextPass:
         payload = {"id": 2, "due_date": "2026-11-13", "created_at": "2026-11-13T08:00:00Z", "quantity": "1500.0"}
         assert redact_payload(payload, index).payload == payload
 
-    def test_short_tokens_are_ignored(self):
+    def test_short_tokens_are_not_matched_inside_longer_strings(self):
         assert MIN_SENSITIVE_TOKEN_LENGTH == 4
         assert compile_sensitive_pattern(["ABC", "  ", ""]) is None
         pattern = compile_sensitive_pattern(["ABCD", "ABCDEF"])
         assert pattern.sub("#", "xABCDEFx ABCD") == "x#x #", "longest token first"
+
+    def test_a_short_token_is_still_withheld_as_a_whole_value(self):
+        """Code review P0, finding 2: a controlled customer coded "BAE" went out as "BAE"."""
+        index = _index(sensitive_tokens=("BAE", "PN-SECRET-10"), customer_names={"bae": (7, ITAR)})
+        payload = {
+            "customers": ["BAE", " bae ", "Open Commerce Co"],
+            "items": [{"id": 2, "customer_po": "Bae", "notes": "via BAE dock"}],
+            "group_totals": {"BAE": 3, "Open Commerce Co": 1},
+        }
+        out = redact_payload(payload, index, route_path="/work-orders/browse").payload
+        assert out["customers"] == [R, R, "Open Commerce Co"]
+        assert out["items"][0]["customer_po"] == R
+        assert out["items"][0]["notes"] == "via BAE dock", "inside a longer string: the 4-character floor"
+        assert out["group_totals"] == {R: 3, "Open Commerce Co": 1}
+        assert scrub_text({"detail": "bae"}, index) == {"detail": R}
 
     def test_no_tokens_no_pattern(self):
         index = _index(sensitive_tokens=())
@@ -249,3 +366,53 @@ def test_normalize_key():
 def test_control_rank_orders_itar_over_cui_over_unlinkable():
     assert ITAR.rank > CUI.rank > UNLINKABLE.rank
     assert isinstance(UNLINKABLE, Control) and UNLINKABLE.reason == "unlinkable_record"
+
+
+class TestErrorBodiesAndMaskedLookups:
+    """Code review P0, finding 1: an error that echoes the request is an oracle once scrubbed."""
+
+    def test_a_route_error_becomes_one_fixed_text(self):
+        echo = {"detail": "Part PN-SECRET-10 not found"}
+        assert ai_external_error_body(404, echo) == {"detail": ai_external_error_detail(404)}
+        assert ai_external_error_body(404, {"detail": "anything else"}) == ai_external_error_body(404, echo)
+        assert "404 Not Found" in ai_external_error_detail(404)
+        assert ai_external_error_detail(799).startswith("Request failed (799 Error)")
+
+    def test_a_422_keeps_location_and_type_never_the_input(self):
+        payload = {
+            "detail": [
+                {
+                    "type": "int_parsing",
+                    "loc": ["path", "part_id"],
+                    "msg": "Input should be ...",
+                    "input": "PN-SECRET-10",
+                },
+                {
+                    "type": "value_error",
+                    "loc": ["body", "PN-SECRET-10", "x"],
+                    "msg": "Value error, PN-SECRET-10",
+                    "ctx": {},
+                },
+                "not a dict",
+            ]
+        }
+        body = ai_external_error_body(422, payload)
+        assert body["detail"] == ai_external_error_detail(422)
+        assert body["errors"] == [
+            {"type": "int_parsing", "loc": ["path", "part_id"], "msg": VALIDATION_ERROR_MESSAGE},
+            {"type": "value_error", "loc": ["body"], "msg": VALIDATION_ERROR_MESSAGE},
+        ]
+        assert "PN-SECRET-10" not in str(body), "a body key may be the caller's: never echoed"
+        assert "input" not in str(body) and "Value error" not in str(body)
+
+    def test_only_a_withheld_record_on_a_masked_route_is_masked(self):
+        withheld = redact_payload(
+            {"id": 10, "part_number": "PN-SECRET-10"}, _index(), route_path="/parts/by-number/{part_number}"
+        )
+        cleared = redact_payload(
+            {"id": 11, "part_number": "OPEN-1"}, _index(), route_path="/parts/by-number/{part_number}"
+        )
+        assert is_masked_lookup("/parts/by-number/{part_number}", withheld) is True
+        assert is_masked_lookup("/parts/by-number/{part_number}", cleared) is False
+        # A work-order number is a KEPT identifier: that lookup is never masked.
+        assert is_masked_lookup("/work-orders/by-number/{wo_number}", withheld) is False

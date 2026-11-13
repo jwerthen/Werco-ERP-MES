@@ -108,8 +108,10 @@ unchanged.
   - only `GET` / `HEAD` / `OPTIONS`, whatever the user's role; anything else is **403**;
   - nothing under a tag in `WERCO_MCP_READ_ONLY_DENY_TAGS` (Documents, Document Deliveries, Data
     Export, Users, Audit, Admin Settings, Carrier Integrations, Platform Administration, Company
-    Management, API Tokens, Hank Intake) — **403**;
-  - no file bytes (a non-JSON response becomes **403**);
+    Management, API Tokens, Hank Intake) — **403**; API Tokens, Users, Audit, Documents and Data
+    Export are a floor the setting can never drop;
+  - no file bytes (a non-JSON response becomes **403**), and a GET exporter that writes an
+    `EXPORT` audit row refuses it **403** before writing that row;
   - global search drops the `user` result type.
 - **AI-external** (`ai_external = true`; always read-only): additionally refused unless the
   company's `allow_ai_egress` is on, limited to a fixed read allowlist, and served export-controlled

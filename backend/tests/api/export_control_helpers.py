@@ -45,6 +45,13 @@ ITAR_CUSTOMER_CODE = f"{CANARY}-CODE"
 CLEAR_CUSTOMER = "Open Commerce Co"
 CLEAR_CUSTOMER_CODE = "OPENCO"
 CLEAR_TEXT = "OPENTEXT"  # appears in the cleared customer's records; must survive in full
+# Dimensional / measured values on the ITAR FAI and NCR: NUMERIC strings, which a text
+# canary cannot catch. Exponent form so no timestamp or id can contain the marker by chance.
+# (Compliance review P0, finding 1: a numeric string under a non-text key used to pass.)
+NUMERIC_CANARIES = (b"329150e", b"329151e")
+NOMINAL_CANARY = "7.329150e0"
+MEASURED_CANARY = "7.329151e0"
+TOLERANCE_CANARY = "0.329150e-2"
 
 
 def bearer(token: str) -> Dict[str, str]:
@@ -364,8 +371,8 @@ def seed_world(db: Session, *, company_id: int = 1, controlled: bool = True, pre
         title=_canary("ncr title"),
         description=_canary("ncr description"),
         specification=_canary("spec"),
-        actual_value=_canary("actual"),
-        required_value=_canary("required"),
+        actual_value=MEASURED_CANARY,
+        required_value=NOMINAL_CANARY,
         detected_date=today,
         car_id=itar_car.id,
         company_id=company_id,
@@ -415,9 +422,11 @@ def seed_world(db: Session, *, company_id: int = 1, controlled: bool = True, pre
             fai_id=itar_fai.id,
             char_number=1,
             characteristic=_canary("hole diameter"),
-            nominal="0.250",
+            nominal=NOMINAL_CANARY,
+            tolerance_plus=TOLERANCE_CANARY,
+            tolerance_minus=TOLERANCE_CANARY,
             specification=_canary("char spec"),
-            actual_value="0.251",
+            actual_value=MEASURED_CANARY,
             company_id=company_id,
         )
     )
@@ -632,6 +641,10 @@ def seed_world(db: Session, *, company_id: int = 1, controlled: bool = True, pre
 
 def contains_canary(raw: bytes, canary: str = CANARY) -> bool:
     return canary.lower().encode() in raw.lower()
+
+
+def contains_numeric_canary(raw: bytes) -> bool:
+    return any(marker in raw.lower() for marker in NUMERIC_CANARIES)
 
 
 def find_record(payload: Any, *, key: str, value: Any) -> Optional[Dict[str, Any]]:

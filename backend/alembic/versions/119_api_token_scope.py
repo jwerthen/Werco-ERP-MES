@@ -23,13 +23,21 @@ adds the two columns that carry it, over the EXISTING ``api_tokens`` table
 Both can only NARROW what the bound user can do, never widen it; both are fixed at mint
 (changing either is revoke + re-mint, there is no update verb).
 
-No backfill (deliberate)
-------------------------
+No backfill on PostgreSQL (deliberate)
+--------------------------------------
 Every existing row reads ``full`` / ``false`` from the server defaults, which is exactly
 how every pre-119 token behaves today, so nothing in flight changes underneath a running
-bot. There is no ``UPDATE``: on PostgreSQL 11+ ``ADD COLUMN ... NOT NULL DEFAULT <constant>``
-is metadata-only, and the defaults ARE the backfill. A String + CHECK rather than a native
-ENUM: the recent house style, and it never needs an ``ALTER TYPE`` on live Postgres.
+bot. There is no ``UPDATE`` on PostgreSQL: on PostgreSQL 11+ ``ADD COLUMN ... NOT NULL
+DEFAULT <constant>`` is metadata-only, and the defaults ARE the backfill. A String + CHECK
+rather than a native ENUM: the recent house style, and it never needs an ``ALTER TYPE`` on
+live Postgres.
+
+SQLite only (local dev databases): the batch rebuild fills existing rows with the quoted
+default as the TEXT ``'false'``, and SQLAlchemy's Boolean reads any non-empty text as
+``True`` -- every pre-119 token would have read as AI-external, disagreed with its JWT and
+answered 401 (code review P0, finding 3). So on SQLite, and only for rows the rebuild just
+filled, the upgrade normalizes ``'false'`` to ``0`` (``SQLITE_NORMALIZE_AI_EXTERNAL_SQL``).
+The DDL default itself stays byte-identical with the model's.
 
 Shape / compliance
 ------------------
@@ -54,10 +62,14 @@ runs in ``batch_alter_table`` (table recreate; named CHECK constraints are refle
 carried by alembic's batch mode). The downgrade drops the CHECK BEFORE the column it names,
 as batch mode requires.
 
-Downgrade is LOSSY: it discards every token's scope, so a read-only token minted after 119
-would come back as a FULL token if it stayed live across a downgrade. Revoke every
-``scope = 'read_only'`` token (``SELECT id, label FROM api_tokens WHERE scope <> 'full' AND
-revoked = false``) before running it.
+Downgrade is LOSSY: it discards every token's scope, so a read-only or AI-external token
+minted after 119 would come back as a FULL token -- writes allowed, no export-control
+redaction -- if it stayed live across a downgrade. So the downgrade REFUSES (raises, before
+any DDL) while any such token is live, naming how many (code review P0, finding 4): revoke
+every one first (``SELECT id, label FROM api_tokens WHERE (scope <> 'full' OR ai_external)
+AND revoked = false``). ``--sql`` (offline) has no database to check: run that query by
+hand first. A CODE-only rollback (database left at 119) is not covered by this check -- the
+pre-119 code ignores the narrowing claims, so revoke the narrowed tokens before that too.
 
 Lock-step with the model: ``ApiToken.scope`` / ``ApiToken.ai_external`` and the model-level
 ``CheckConstraint`` carry the identical type, nullability, server default and condition text;
@@ -89,6 +101,11 @@ CHECK_CONDITION = "scope IN ('full', 'read_only')"
 # api_tokens and is handed back as soon as the DDL is done (precedent 114/117).
 LOCK_TIMEOUT_SQL = "SET LOCAL lock_timeout = '5s'"
 RESET_LOCK_TIMEOUT_SQL = "SET LOCAL lock_timeout = DEFAULT"
+
+
+# SQLite only: the rows the batch rebuild filled with the TEXT default 'false' (see the
+# module docstring). Never run on PostgreSQL, where the column is a real boolean.
+SQLITE_NORMALIZE_AI_EXTERNAL_SQL = "UPDATE api_tokens SET ai_external = 0 WHERE ai_external = 'false'"
 
 
 def _scope_column() -> sa.Column:
@@ -134,6 +151,25 @@ def _has_check_constraint(table_name: str, constraint_name: str) -> bool:
     return any(ck.get("name") == constraint_name for ck in _inspector().get_check_constraints(table_name))
 
 
+def _live_narrowed_tokens(has_scope: bool, has_ai_external: bool) -> int:
+    """How many un-revoked tokens are read-only or AI-external (what a downgrade would WIDEN)."""
+    tokens = sa.table(
+        TABLE_NAME,
+        sa.column("revoked", sa.Boolean()),
+        sa.column(SCOPE_COLUMN, sa.String()),
+        sa.column(AI_EXTERNAL_COLUMN, sa.Boolean()),
+    )
+    narrowed = []
+    if has_scope:
+        narrowed.append(tokens.c[SCOPE_COLUMN] != "full")
+    if has_ai_external:
+        narrowed.append(tokens.c[AI_EXTERNAL_COLUMN] == sa.true())
+    if not narrowed or not _has_table(TABLE_NAME):
+        return 0
+    query = sa.select(sa.func.count()).select_from(tokens).where(tokens.c.revoked == sa.false(), sa.or_(*narrowed))
+    return int(op.get_bind().execute(query).scalar() or 0)
+
+
 def upgrade() -> None:
     if _offline():
         need_scope = need_ai_external = need_check = True
@@ -154,6 +190,8 @@ def upgrade() -> None:
                 batch_op.add_column(_ai_external_column())
             if need_check:
                 batch_op.create_check_constraint(CHECK_NAME, CHECK_CONDITION)
+        if need_ai_external:
+            op.execute(SQLITE_NORMALIZE_AI_EXTERNAL_SQL)
         return
 
     postgres = _is_postgres()
@@ -170,13 +208,21 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # LOSSY: see the module docstring (revoke read-only tokens first).
+    # LOSSY: see the module docstring -- refused while a narrowed token is live.
     if _offline():
         has_scope = has_ai_external = has_check = True
     else:
         has_scope = _has_column(TABLE_NAME, SCOPE_COLUMN)
         has_ai_external = _has_column(TABLE_NAME, AI_EXTERNAL_COLUMN)
         has_check = _has_check_constraint(TABLE_NAME, CHECK_NAME)
+        live = _live_narrowed_tokens(has_scope, has_ai_external)
+        if live:
+            raise RuntimeError(
+                f"Refusing to downgrade 119_api_token_scope: {live} live read-only / AI-external API "
+                "token(s) would become FULL tokens (writes allowed, no export-control redaction). Revoke "
+                "them first: SELECT id, label FROM api_tokens WHERE (scope <> 'full' OR ai_external) "
+                "AND revoked = false"
+            )
     if not (has_scope or has_ai_external or has_check):
         return
 

@@ -4650,8 +4650,8 @@ def complete_operation(
     Unknown keys are **422**.
 
     Refused before any write, in order: role not Admin / Manager / Supervisor / Operator /
-    Quality **403** (before the operation is read or the body is validated); terminal work
-    order **409**; already complete **400**; operation ON_HOLD **409** (other non-startable status **400**); a READY
+    Quality **403** (before the operation is read; a malformed JSON body is still **422**
+    first, and nothing is written either way); terminal work order **409**; already complete **400**; operation ON_HOLD **409** (other non-startable status **400**); a READY
     operation under a DRAFT / ON_HOLD work order **409** (completing it starts it); bad
     ``quantity_complete`` / missing target **400**; predecessors incomplete **400**; no
     labor ever recorded **400** (floor only -- the office twin deliberately has no such

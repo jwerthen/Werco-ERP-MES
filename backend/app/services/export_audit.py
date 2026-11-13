@@ -24,8 +24,11 @@ from datetime import date, datetime
 from enum import Enum
 from typing import Any, Mapping, Optional, Sequence
 
+from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.core.credentials import is_ai_external_credential, is_read_only_api_token
+from app.core.export_control import READ_ONLY_FILE_REFUSED_DETAIL
 from app.services.audit_service import AuditService
 
 # Hard cap on any one recorded filter value, and on each filter key.
@@ -72,6 +75,20 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_json_safe(v) for v in value]
     return _cap(str(value))
+
+
+def refuse_file_export_to_narrowed_token(user: Any) -> None:
+    """403 ``"Read-only API token cannot download files."`` for a read-only / AI-external API token.
+
+    The response middleware already replaces any file a narrowed token is answered with --
+    but only AFTER the route has run, and an exporter writes its ``EXPORT`` audit row
+    first. Without this check the audit trail records an export the caller never received
+    (compliance review P0, finding 7). Every GET exporter that writes such a row calls this
+    BEFORE writing anything: :func:`log_export` itself, and the hand-rolled ones
+    (visitor log CSV, Import Center failed rows, consumable checkouts).
+    """
+    if is_read_only_api_token(user) or is_ai_external_credential(user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=READ_ONLY_FILE_REFUSED_DETAIL)
 
 
 def log_export(
@@ -122,6 +139,7 @@ def log_export(
     a row without a download is a false positive an auditor can dismiss, whereas
     a download without a row is the failure this seam exists to prevent.
     """
+    refuse_file_export_to_narrowed_token(getattr(audit, "user", None))
     if known_columns is None:
         disclosed = list(columns)
     else:

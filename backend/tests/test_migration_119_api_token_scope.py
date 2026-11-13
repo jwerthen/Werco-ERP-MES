@@ -67,6 +67,7 @@ CHECK_CONDITION = "scope IN ('full', 'read_only')"
 
 LOCK_TIMEOUT = "SET LOCAL lock_timeout = '5s'"
 RESET_LOCK_TIMEOUT = "SET LOCAL lock_timeout = DEFAULT"
+SQLITE_NORMALIZE = "UPDATE api_tokens SET ai_external = 0 WHERE ai_external = 'false'"
 
 
 def _script_directory() -> ScriptDirectory:
@@ -165,8 +166,10 @@ class _RecordedDDL:
         return out
 
 
-def _record(function_name: str, *, dialect: str, scope: bool, ai_external: bool, check: bool) -> _RecordedDDL:
-    """Run ``function_name`` with each object's existence stubbed independently."""
+def _record(
+    function_name: str, *, dialect: str, scope: bool, ai_external: bool, check: bool, live_narrowed: int = 0
+) -> _RecordedDDL:
+    """Run ``function_name`` with each object's existence (and the live narrowed-token count) stubbed."""
     module = _load_module()
     recorder = _RecordedDDL(dialect)
     module.op = recorder
@@ -174,6 +177,7 @@ def _record(function_name: str, *, dialect: str, scope: bool, ai_external: bool,
     module._has_table = lambda _table: True
     module._has_column = lambda _table, column: present[column]
     module._has_check_constraint = lambda _table, _name: check
+    module._live_narrowed_tokens = lambda _has_scope, _has_ai_external: live_narrowed
     getattr(module, function_name)()
     return recorder
 
@@ -261,14 +265,75 @@ def test_postgres_virgin_upgrade_adds_both_columns_then_the_check_under_a_local_
 
 @pytest.mark.unit
 def test_sqlite_virgin_upgrade_runs_in_batch_mode_and_sets_no_lock_timeout():
-    """SQLite has no ALTER TABLE ... ADD CONSTRAINT, and lock_timeout is a PostgreSQL setting."""
+    """SQLite has no ALTER TABLE ... ADD CONSTRAINT, and lock_timeout is a PostgreSQL setting.
+    After the rebuild, the rows it filled with the TEXT 'false' are normalized to 0."""
     recorder = _record("upgrade", dialect="sqlite", scope=False, ai_external=False, check=False)
     assert recorder.sequence == [
         ("batch_add_column", TABLE),
         ("batch_add_column", TABLE),
         ("batch_create_check_constraint", TABLE),
+        ("execute", SQLITE_NORMALIZE),
     ]
     assert recorder.subjects("batch_add_column") == [SCOPE, AI_EXTERNAL]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("scope,check", [(False, False), (True, True), (False, True)])
+def test_the_sqlite_normalization_runs_only_when_the_column_was_just_added(scope: bool, check: bool):
+    """Code review P0, finding 3: it rewrites only rows the rebuild filled -- never on a
+    database that already had the column, and never on PostgreSQL."""
+    added = _record("upgrade", dialect="sqlite", scope=scope, ai_external=False, check=check)
+    assert ("execute", SQLITE_NORMALIZE) in added.calls
+    present = _record("upgrade", dialect="sqlite", scope=scope, ai_external=True, check=check)
+    assert ("execute", SQLITE_NORMALIZE) not in present.calls
+    postgres = _record("upgrade", dialect="postgresql", scope=False, ai_external=False, check=False)
+    assert all("UPDATE" not in str(call) for call in postgres.calls)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("dialect", ["postgresql", "sqlite"])
+def test_the_downgrade_refuses_while_a_narrowed_token_is_live(dialect: str):
+    """Code review / compliance review P0, finding 4: pre-119 code ignores the narrowing
+    claims, so a live read-only / AI-external token would come back a FULL token -- writes
+    allowed, no redaction. Refused before any DDL, naming how to find them."""
+    with pytest.raises(RuntimeError) as refused:
+        _record("downgrade", dialect=dialect, scope=True, ai_external=True, check=True, live_narrowed=2)
+    message = str(refused.value)
+    assert "2 live read-only / AI-external" in message and "Revoke" in message
+    assert "scope <> 'full' OR ai_external" in message
+    # Revoked (or no) narrowed tokens: the downgrade runs.
+    assert _record("downgrade", dialect=dialect, scope=True, ai_external=True, check=True, live_narrowed=0).calls
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("dialect_name", ["postgresql", "sqlite"])
+def test_the_live_narrowed_token_count_query_compiles_for_both_engines(dialect_name: str, monkeypatch):
+    """Dialect-compiled, never executed here: un-revoked AND (scope <> 'full' OR ai_external)."""
+    module = _load_module()
+    captured = {}
+
+    class _Bind:
+        def execute(self, query):
+            captured["sql"] = str(query.compile(dialect=_dialect(dialect_name), compile_kwargs={"literal_binds": True}))
+            return SimpleNamespace(scalar=lambda: 3)
+
+    module.op = SimpleNamespace(get_bind=lambda: _Bind())
+    module._has_table = lambda _table: True
+    assert module._live_narrowed_tokens(True, True) == 3
+    sql = " ".join(captured["sql"].split())
+    assert "count(*)" in sql.lower() and "FROM api_tokens" in sql
+    assert "scope != 'full'" in sql
+    if dialect_name == "postgresql":
+        assert "revoked = false" in sql and "ai_external = true" in sql
+    else:
+        assert "revoked = 0" in sql and "ai_external = 1" in sql
+    assert module._live_narrowed_tokens(False, False) == 0, "neither column: nothing to widen"
+
+
+def _dialect(name: str):
+    from sqlalchemy.dialects import postgresql, sqlite
+
+    return postgresql.dialect() if name == "postgresql" else sqlite.dialect()
 
 
 @pytest.mark.unit
@@ -376,12 +441,18 @@ def test_postgres_downgrade_sql():
 
 
 @pytest.mark.unit
-def test_pure_ddl_no_backfill_and_no_data_statement():
+def test_no_backfill_and_no_data_statement_beyond_the_two_named_ones():
+    """No backfill on PostgreSQL. The only data statements: the SQLite-only normalization of the
+    rows the batch rebuild filled (finding 3), and the downgrade's read-only count of live
+    narrowed tokens (finding 4) -- built with sa.select, never raw SQL text."""
     body = _body()
-    for forbidden in ("op.bulk_insert", "conn.execute", "sa.text(", "UPDATE ", "INSERT ", "DELETE ", "SELECT "):
+    for forbidden in ("op.bulk_insert", "conn.execute", "sa.text(", "INSERT ", "DELETE "):
         assert forbidden not in body, f"119 must be pure DDL; found {forbidden!r}"
+    assert body.count("UPDATE ") == 1 and 'SQLITE_NORMALIZE_AI_EXTERNAL_SQL = "UPDATE api_tokens' in body
+    assert body.count("op.execute(SQLITE_NORMALIZE_AI_EXTERNAL_SQL)") == 1
     assert body.count("op.execute(LOCK_TIMEOUT_SQL)") == body.count("op.execute(RESET_LOCK_TIMEOUT_SQL)") == 2
-    assert body.count("op.execute(") == 4
+    assert body.count("op.execute(") == 5
+    assert body.count("op.get_bind().execute(") == 1 and "sa.select(sa.func.count())" in body
     assert "audit_log" not in body
 
 
@@ -558,14 +629,22 @@ def test_migration_119_round_trip_and_a_pre_119_token_reads_full(tmp_path):
         _alembic(db_url, "upgrade", REVISION)
         assert _shape(engine) == bootstrapped
 
-        # ...and the pre-119 token reads exactly as it always behaved: full, not AI-external.
+        # ...and the pre-119 token reads exactly as it always behaved: full, not AI-external --
+        # through the ORM, which is what check_api_token reads (code review P0, finding 3: the
+        # rebuild filled the row with the TEXT 'false', which SQLAlchemy's Boolean reads as
+        # True, so every pre-119 token would have disagreed with its JWT and been a 401).
         with engine.connect() as conn:
             row = conn.execute(sa.text("SELECT label, jti, scope, ai_external FROM api_tokens WHERE id = 7")).one()
         assert tuple(row)[:3] == ("pre-119 bot", "jti-pre-119", "full")
-        # SQLite keeps the quoted DEFAULT 'false' literally (exactly as it does for 088's
-        # ``revoked``, whose plain-string default 088's test pins); PostgreSQL casts the same
-        # literal to boolean false. Either way: not AI-external.
-        assert row.ai_external in (0, "false")
+        assert row.ai_external == 0, "normalized from the TEXT 'false' the batch rebuild wrote"
+        from sqlalchemy.orm import Session as OrmSession
+
+        from app.models.api_token import ApiToken
+
+        with OrmSession(engine) as orm:
+            token = orm.get(ApiToken, 7)
+            assert token is not None
+            assert token.ai_external is False and token.scope == "full"
 
         # 4. The CHECK the migration built refuses a scope no gate knows.
         with pytest.raises(sa.exc.IntegrityError):
@@ -573,5 +652,23 @@ def test_migration_119_round_trip_and_a_pre_119_token_reads_full(tmp_path):
                 conn.execute(sa.text("UPDATE api_tokens SET scope = 'admin' WHERE id = 7"))
         with engine.begin() as conn:
             conn.execute(sa.text("UPDATE api_tokens SET scope = 'read_only' WHERE id = 7"))
+
+        # 5. A live read-only token: the downgrade refuses (it would come back FULL)...
+        refused = subprocess.run(
+            [sys.executable, "-m", "alembic", "downgrade", "-1"],
+            cwd=BACKEND_DIR,
+            env={**os.environ, "DATABASE_URL": db_url},
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        assert refused.returncode != 0
+        assert "Refusing to downgrade 119_api_token_scope" in refused.stderr + refused.stdout
+        assert {SCOPE, AI_EXTERNAL} <= _column_names(engine), "nothing was dropped"
+        # ...and runs once that token is revoked.
+        with engine.begin() as conn:
+            conn.execute(sa.text("UPDATE api_tokens SET revoked = 1 WHERE id = 7"))
+        _alembic(db_url, "downgrade", "-1")
+        assert not ({SCOPE, AI_EXTERNAL} & _column_names(engine))
     finally:
         engine.dispose()

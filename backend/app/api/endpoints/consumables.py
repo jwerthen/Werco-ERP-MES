@@ -18,6 +18,7 @@ from app.schemas.consumables import (
 )
 from app.services import consumable_service
 from app.services.audit_service import AuditService
+from app.services.export_audit import refuse_file_export_to_narrowed_token
 
 router = APIRouter()
 
@@ -98,6 +99,7 @@ def export(
     audit: AuditService = Depends(get_audit_service),
 ):
     """Export filtered CSV (Admin/Manager), audited before download; over 10,000 rows is refused."""
+    refuse_file_export_to_narrowed_token(user)  # before the EXPORT row: no file reaches one
     return Response(
         content=consumable_service.export_history(db, company_id, audit, **filters),
         media_type="text/csv; charset=utf-8",

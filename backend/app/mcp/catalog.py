@@ -46,11 +46,22 @@ EXCLUDED_TAGS: FrozenSet[str] = frozenset(
 # a NAMED PERSON clicking Accept, so running a recommendation's action is a person's click
 # in the app, never an agent's tool call (the route also refuses API tokens). Agents keep
 # the record-only accept, dismiss and snooze tools.
+#
+# And the two customer export-control WRITES (Claude-plugin brief P0.3; compliance review
+# P0, finding 2). Marking or un-marking a customer controlled decides what an outside AI
+# connector is shown, and the owner's rule is "an Admin does it, signed in to the app". The
+# routes refuse API tokens, but a person's own access JWT (the stdio bridge's email /
+# password, or the HTTP door) would still reach them through a tool call -- so an agent,
+# possibly following text injected through ERP data, could switch control OFF and the
+# connector would get that customer's records unredacted from the next request on. Not
+# tools, ever. Reading a customer's standing stays a tool.
 EXCLUDED_OPERATIONS: FrozenSet[Tuple[str, str]] = frozenset(
     {
         ("POST", "/api/v1/work-orders/import"),
         ("POST", "/api/v1/purchasing/purchase-orders/import"),
         ("POST", "/api/v1/ai/recommendations/{recommendation_id}/apply"),
+        ("POST", "/api/v1/customers/{customer_id}/contracts"),
+        ("PUT", "/api/v1/customers/{customer_id}/contracts/{contract_id}"),
     }
 )
 

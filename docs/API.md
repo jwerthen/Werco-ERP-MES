@@ -701,8 +701,11 @@ tokens" below), never wider.
 >
 > **Read-only and AI-external tokens (migration `119_api_token_scope`; Claude-plugin brief P0).**
 > Two columns on the row narrow a token below its user's role. Both are fixed at mint (revoke and
-> re-mint to change them) and audited: the `log_create` row and the `API_TOKEN_ISSUED` event carry
-> `scope` and `ai_external`. A narrowed token's JWT carries matching `api_scope` / `ai_ext` claims,
+> re-mint to change them) and audited: the `CREATE` row and the `API_TOKEN_ISSUED` event carry
+> `scope` and `ai_external`. Issuing and revoking are **required** audit evidence: if either row
+> cannot be written the answer is **503** (`"The audit record for this API token could not be
+> saved; no token was issued. Retry."` / `"The audit record for this revocation could not be saved;
+> the token was not revoked. Retry."`) and nothing is saved. A narrowed token's JWT carries matching `api_scope` / `ai_ext` claims,
 > and the row check refuses a token whose claims disagree with its row (**401**). A **full** token's
 > JWT and behavior are exactly what they were before. `get_current_user` applies these gates to a
 > narrowed token, in order, after the path fence:
@@ -711,17 +714,25 @@ tokens" below), never wider.
 >    `llm_client.ai_egress_allowed`) → **403** `"AI egress is disabled for this company: an
 >    AI-external API token cannot be used until an Admin enables it."`.
 > 2. **Read-only, method not `GET` / `HEAD` / `OPTIONS`** → **403** `"Read-only API token cannot
->    modify data."`, whatever the user's role. This applies before the route reads anything, so the
->    two shop-floor operation verbs are included.
+>    modify data."`, whatever the user's role. Nothing is written before it (a malformed JSON body
+>    is still **422** first: FastAPI decodes the body before it resolves dependencies), so the two
+>    shop-floor operation verbs are included.
 > 3. **Read-only, the matched route carries a tag in `WERCO_MCP_READ_ONLY_DENY_TAGS`** (default:
 >    Documents, Document Deliveries, Data Export, Users, Audit, Admin Settings, Carrier
 >    Integrations, Platform Administration, Company Management, API Tokens, Hank Intake) → **403**
 >    `"Read-only API token cannot access this resource."`. A request that matches no route fails
->    closed with the same 403. Denying Users removes `GET /users/me` too.
+>    closed with the same 403. Denying Users removes `GET /users/me` too. API Tokens, Users, Audit,
+>    Documents and Data Export are a floor the setting can extend but never drop
+>    (`READ_ONLY_DENY_TAG_FLOOR`), so an empty or truncated value still denies them.
 > 4. **AI-external, `(method, route)` not on the allowlist** (a fixed set of `GET` routes in
 >    `app/core/export_control.py`: work orders, shop-floor operations, downtime, work centers, OEE,
 >    parts, routings, NCR / CAR / FAI, quotes, vendors, purchase orders, receiving, maintenance work
->    orders) → **403** `"This resource is not available to an AI-external API token."`.
+>    orders) → **403** `"This resource is not available to an AI-external API token."`. Then every
+>    query parameter (and value) must be on that route's list in `AI_EXTERNAL_QUERY_PARAMS`:
+>    free-text `search`, the `customer` filter and `sort` / `group` by part or customer are refused
+>    **403** `"This query parameter is not available to an AI-external API token: free-text search,
+>    customer filters and text sort keys are refused."`, as is any parameter the route does not
+>    declare. A filter over withheld text is an oracle on it.
 >
 > An AI-external row is treated as read-only whatever its `scope` says. On the way out, the
 > export-control middleware (`app/middleware/export_control.py`) does two things. It replaces any
@@ -729,19 +740,26 @@ tokens" below), never wider.
 > files."`; that covers any status but 204 / 304 / 1xx, so file downloads, drawings, CSV / XLSX
 > exports and redirects to file storage are all refused. For an AI-external token it also redacts
 > the JSON records of export-controlled customers, and records that cannot be tied to any
-> customer, to `"[export-controlled]"`, keeping ids, statuses, dates and quantities. It logs each
-> withheld record and each refusal to `controlled_access_events`. If that check fails, the answer
-> is **503** `"Export-control check failed; nothing was sent."`.
+> customer, to `"[export-controlled]"`, keeping ids, statuses, dates, quantities and money (never
+> dimensions, tolerances or measured values). It logs each withheld record and each refusal to
+> `controlled_access_events`. A route's own error comes back as one fixed text per status code
+> (`"Request failed (404 Not Found); details are withheld from AI-external API tokens."`; a 422
+> adds each error's `type` and location, never the value sent), and `GET /parts/by-number/...` that
+> finds a withheld part is that same 404. If the check fails, the answer is **503**
+> `"Export-control check failed; nothing was sent."`.
 >
 > Global search (`GET /search/`) never returns `user` results to a read-only token. "Read-only"
 > means no non-GET request. A reconcile-on-read GET can still commit status reconciliation and its
-> audit rows as the token's user. The rules for which records are withheld, and the steps to hand
+> audit rows as the token's user. GET exporters that write an `EXPORT` audit row (visitor log CSV,
+> Import Center failed rows, consumable checkouts, `/analytics` report export) refuse a read-only
+> token **403** `"Read-only API token cannot download files."` before that row is written. The rules for which records are withheld, and the steps to hand
 > a token to Claude, are in [docs/EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md).
 >
-> **Conditional requests.** Every request that carries an API-token bearer has `If-None-Match` /
-> `If-Match` / `If-Modified-Since` / `If-Unmodified-Since` / `If-Range` stripped before routing,
-> full tokens included. An API token therefore never receives a **304**: it always gets the body,
-> which for an AI-external token is the redacted one.
+> **Conditional requests.** A request carrying a **read-only or AI-external** API token (its JWT's
+> `api_scope` / `ai_ext` claims) has `If-None-Match` / `If-Match` / `If-Modified-Since` /
+> `If-Unmodified-Since` / `If-Range` stripped before routing, so it never receives a **304**: it
+> always gets the body, which for an AI-external token is the redacted one. A full token, which
+> carries neither claim, keeps its 304s.
 >
 > **Never a platform principal.** A superuser or `platform_admin` is waved through every `require_role`
 > gate and reaches `/platform/*`, which addresses other companies by explicit id — a row pin constrains
@@ -1388,7 +1406,7 @@ active company; another company's customer id answers **404** with the same deta
 | POST | `/customers/import-csv` | See [Bulk Imports & Templates](#bulk-imports--templates-excel-migration-kit) | Admin / Manager |
 | GET | `/customers/{id}/export-control` | The customer's export-control standing: `controlled` (derived from **every** contract and classified handling instruction it has ever had), `data_classification` (`itar_export_controlled` outranks `cui`), `controlling_contract_id`, `customer_is_deleted`, and every contract with its own `controlling` flag. A soft-deleted customer is readable | Admin (never an API token) |
 | POST | `/customers/{id}/contracts` | Add a contract. Body: `contract_name` (required), `contract_number`, `itar_controlled`, `export_controlled`, `contains_cui`, `default_data_classification` (default `internal`), `effective_date`, `expiration_date`, `active` (default `true`), `handling_instructions`, and a required `reason` (1–1000 chars); unknown keys **422**. → **201** with the export-control view. Duplicate `contract_number` in the company → **409** | Admin (never an API token) |
-| PUT | `/customers/{id}/contracts/{contract_id}` | Change the supplied fields of one of the customer's contracts; `reason` always required; an explicit `null` on a flag, `active` or the classification is **422**. Not this customer's contract in this company → **404**; duplicate `contract_number` → **409**. A request that changes nothing writes nothing. There is no delete: un-marking is this `PUT` with the flags off | Admin (never an API token) |
+| PUT | `/customers/{id}/contracts/{contract_id}` | Change the supplied fields of one of the customer's contracts; `reason` always required; an explicit `null` on a flag, `active`, the classification or `contract_name` is **422**. Not this customer's contract in this company → **404**; duplicate `contract_number` → **409**. A request that changes nothing writes nothing. There is no delete: un-marking is this `PUT` with the flags off | Admin (never an API token) |
 
 > **Export control (Claude-plugin brief P0.3; owner decision 2026-11-13).** These three routes are
 > the only writer of `customer_contracts`. A customer is **export-controlled** when any of its
@@ -1408,7 +1426,9 @@ active company; another company's customer id answers **404** with the same deta
 > saved; nothing was changed. Retry."` and nothing is saved. Dates are stored as naive UTC.
 > Another company's customer is **404**. A soft-deleted customer stays readable and markable,
 > because its historical records stay controlled. The UI is the **Export control** panel on the
-> customer detail in **Customers**, shown to Admins only.
+> customer detail in **Customers**, shown to Admins only. The two writes are **not MCP tools**
+> (`catalog.EXCLUDED_OPERATIONS`), so not even a person's own JWT reaches them through an agent;
+> `get_customer_export_control` stays a tool.
 
 > **Create and update are now role-gated.** Both previously required only an authenticated user.
 > Update is Admin / Manager, matching the rest of the customer master's writes (import, delete,
@@ -7512,8 +7532,8 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > send the previous response's `ETag` back as `If-None-Match` to get a **304 Not Modified** (and no
 > body) when nothing changed. The `ETag` is a cheap state fingerprint computed **before** the reconcile,
 > so an unchanged dashboard 304s without running the reconcile or building the payload. A request
-> authenticated by an API token never gets that 304: the export-control middleware strips its
-> conditional headers (see Authentication → API tokens). The dashboard's
+> authenticated by a read-only or AI-external API token never gets that 304: the export-control
+> middleware strips its conditional headers (see Authentication → API tokens). The dashboard's
 > reconcile scan is bounded to the most-recently-touched `SHOP_FLOOR_DASHBOARD_RECONCILE_LIMIT` open
 > work orders (default 250; see `docs/ENVIRONMENT_VARIABLES.md`) — any WO beyond the cap is still
 > reconciled when opened in its own detail / operations-list view.
@@ -12975,15 +12995,17 @@ What matters from this file's point of view:
   routers with the caller's own bearer token. The router is the boundary: the same `require_role`
   gates, tenant scoping, audit rows, optimistic-locking 409s and per-endpoint size caps apply, and a
   401/403/409/422 comes back verbatim as an `is_error` tool result carrying the server's `detail`.
-- **The catalog is this API.** 753 tools are generated from `app.openapi()` at startup — every
+- **The catalog is this API.** 751 tools are generated from `app.openapi()` at startup — every
   secured operation except the `Authentication`, `Carrier Webhooks`, `Error Logging` (and its router-level `errors` twin) and `WebSocket` tags, the
   unauthenticated health/station-login routes (named one by one in `catalog.PUBLIC_OPERATIONS`) and
-  the three operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders
+  the five operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders
   (`POST /work-orders/import`, `POST /purchasing/purchase-orders/import` — they mint work orders
   RELEASED / IN_PROGRESS and POs SENT, a record of a past system rather than a user action) and
   AI Accept & apply (`POST /ai/recommendations/{recommendation_id}/apply` — owner ruling 3: only a
   person signed in to the app runs an AI recommendation's action; the route also refuses API
-  tokens) — plus 15 fixed-name convenience tools that shadow 16
+  tokens) and the two customer export-control writes (`POST /customers/{id}/contracts`,
+  `PUT /customers/{id}/contracts/{contract_id}` — only an Admin signed in to the app marks a
+  customer controlled) — plus 15 fixed-name convenience tools that shadow 16
   raw routes (`POST /work-orders/`, `PUT /work-orders/{id}`, `POST /work-orders/{id}/release`, the two
   nest-package imports, the manual nest add, `GET /search/`, …) to enforce agent rules the routes do
   not: create/duplicate always land DRAFT, release is a separate explicit tool and the generic update

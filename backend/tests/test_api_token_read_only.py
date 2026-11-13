@@ -40,7 +40,8 @@ from sqlalchemy.orm import Session
 from starlette.requests import Request
 
 from app.api import deps
-from app.core.config import settings
+from app.api.endpoints.api_tokens import ISSUE_AUDIT_UNAVAILABLE_DETAIL, REVOKE_AUDIT_UNAVAILABLE_DETAIL
+from app.core.config import READ_ONLY_DENY_TAG_FLOOR, settings
 from app.core.credentials import (
     READ_ONLY_ROUTE_DENIED_DETAIL,
     READ_ONLY_ROUTE_WRITES_DETAIL,
@@ -57,6 +58,7 @@ from app.models.time_entry import TimeEntry
 from app.models.user import User, UserRole
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.services.api_token_service import AI_EXTERNAL_REQUIRES_READ_ONLY_DETAIL, AUTH_EVENT_ISSUED
+from app.services.audit_service import AuditService
 from tests.api.kiosk_test_helpers import make_user, make_wo_with_operation, make_work_center
 from tests.test_mcp_cli import BACKEND_ROOT, clean_env
 
@@ -531,10 +533,29 @@ class TestDenyTagSetting:
         assert intake and all(route.tags == ["Hank Intake"] for route in intake)
 
     def test_the_property_strips_and_drops_empties(self, monkeypatch):
-        monkeypatch.setattr(settings, "WERCO_MCP_READ_ONLY_DENY_TAGS", " Audit , ,Users,")
-        assert settings.read_only_deny_tags == frozenset({"Audit", "Users"})
+        monkeypatch.setattr(settings, "WERCO_MCP_READ_ONLY_DENY_TAGS", " Audit , ,Users,Parts")
+        assert settings.read_only_deny_tags == READ_ONLY_DENY_TAG_FLOOR | {"Parts"}
+
+    @pytest.mark.parametrize("value", ["", " , ", "Parts", "Audit"])
+    def test_configuration_extends_the_floor_but_can_never_drop_it(self, monkeypatch, value: str):
+        """Compliance review P0, finding 6: an empty or truncated setting used to deny NOTHING
+        (the boot check only refuses unknown tags), opening the token admin, user records, the
+        audit log, documents and bulk export to a read-only token."""
+        monkeypatch.setattr(settings, "WERCO_MCP_READ_ONLY_DENY_TAGS", value)
+        assert READ_ONLY_DENY_TAG_FLOOR <= settings.read_only_deny_tags
+        assert READ_ONLY_DENY_TAG_FLOOR == frozenset({"API Tokens", "Users", "Audit", "Documents", "Data Export"})
+        assert READ_ONLY_DENY_TAG_FLOOR <= DEFAULT_DENY_TAGS, "the floor is a subset of the documented default"
+        deps.refuse_unknown_read_only_deny_tags(app.routes)  # every floor tag is a live tag
+
+    def test_an_emptied_setting_still_refuses_the_floor_at_the_api(
+        self, client: TestClient, admin_headers: dict, test_user: User, monkeypatch
+    ):
+        _id, token, _body = _issue(client, admin_headers, test_user, scope="read_only", ai_external=False)
         monkeypatch.setattr(settings, "WERCO_MCP_READ_ONLY_DENY_TAGS", "")
-        assert settings.read_only_deny_tags == frozenset()
+        for path in ("/users/", "/audit/", "/documents/"):
+            response = client.get(f"{API_PREFIX}{path}", headers=_bearer(token))
+            assert response.status_code == 403, path
+            assert response.json()["detail"] == READ_ONLY_ROUTE_DENIED_DETAIL
 
     def test_the_boot_check_passes_on_the_default(self):
         deps.refuse_unknown_read_only_deny_tags(app.routes)
@@ -593,3 +614,69 @@ class TestSearchDropsPeople:
         assert narrowed.status_code == 200, narrowed.text
         assert narrowed.json()["results"] == []
         assert "user" not in narrowed.json()["categories"]
+
+
+# --------------------------------------------------------------------------- required audit on mint / revoke
+
+
+class TestMintAndRevokeAreRequiredEvidence:
+    """Compliance review P0, finding 5: a standing credential -- one whose answers may leave the
+    company -- never exists without the record of who minted it and with what scope, and is never
+    revoked without the record of who revoked it. A failed audit write is 503 with nothing saved."""
+
+    def test_a_failed_issue_audit_mints_nothing(
+        self, client: TestClient, db_session: Session, admin_headers: dict, test_user: User, monkeypatch
+    ):
+        before = db_session.query(ApiToken).count()
+        monkeypatch.setattr(AuditService, "log", lambda self, *args, **kwargs: None)
+        response = client.post(
+            API_TOKENS_URL,
+            json={"user_id": test_user.id, "label": "ai connector", "scope": "read_only"},
+            headers=admin_headers,
+        )
+        assert response.status_code == 503, response.text
+        assert response.json() == {"detail": ISSUE_AUDIT_UNAVAILABLE_DETAIL}
+        assert "token" not in response.json()
+        db_session.expire_all()
+        assert db_session.query(ApiToken).count() == before
+
+    def test_a_failed_revoke_audit_leaves_the_token_live(
+        self, client: TestClient, db_session: Session, admin_headers: dict, test_user: User, monkeypatch
+    ):
+        token_id, token, _body = _issue(client, admin_headers, test_user, scope="read_only", ai_external=False)
+        monkeypatch.setattr(AuditService, "log", lambda self, *args, **kwargs: None)
+        response = client.post(f"{API_TOKENS_URL}{token_id}/revoke", json={"reason": "rotating"}, headers=admin_headers)
+        assert response.status_code == 503, response.text
+        assert response.json() == {"detail": REVOKE_AUDIT_UNAVAILABLE_DETAIL}
+        db_session.expire_all()
+        row = db_session.get(ApiToken, token_id)
+        assert row.revoked is False and row.revoke_reason is None
+        monkeypatch.undo()
+        assert client.get(f"{API_PREFIX}/parts/", headers=_bearer(token)).status_code == 200, "still live"
+
+    def test_both_rows_are_written_on_success(
+        self, client: TestClient, db_session: Session, admin_headers: dict, test_user: User
+    ):
+        token_id, _token, _body = _issue(client, admin_headers, test_user, scope="read_only")
+        assert (
+            client.post(
+                f"{API_TOKENS_URL}{token_id}/revoke", json={"reason": "done"}, headers=admin_headers
+            ).status_code
+            == 200
+        )
+        db_session.expire_all()
+        actions = [
+            row.action
+            for row in db_session.query(AuditLog)
+            .filter(AuditLog.resource_type == "api_token", AuditLog.resource_id == token_id)
+            .order_by(AuditLog.id)
+        ]
+        assert actions == ["CREATE", "STATUS_CHANGE"]
+        created = (
+            db_session.query(AuditLog)
+            .filter(
+                AuditLog.resource_type == "api_token", AuditLog.resource_id == token_id, AuditLog.action == "CREATE"
+            )
+            .one()
+        )
+        assert created.new_values["scope"] == "read_only" and created.new_values["ai_external"] is True

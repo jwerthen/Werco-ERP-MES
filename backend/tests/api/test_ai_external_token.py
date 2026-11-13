@@ -44,20 +44,32 @@ from app.core.credentials import READ_ONLY_ROUTE_DENIED_DETAIL, READ_ONLY_ROUTE_
 from app.core.export_control import (
     AI_EGRESS_DISABLED_DETAIL,
     AI_EXTERNAL_ALLOWED_ROUTES,
+    AI_EXTERNAL_QUERY_DENIED_DETAIL,
+    AI_EXTERNAL_QUERY_PARAMS,
     AI_EXTERNAL_ROUTE_DENIED_DETAIL,
     EXPORT_CONTROL_FAILED_DETAIL,
     EXPORT_CONTROL_STATE_KEY,
     READ_ONLY_FILE_REFUSED_DETAIL,
     REDACTED_VALUE,
     ExportControlMarker,
+    ai_external_error_detail,
 )
 from app.core.security import create_api_token
 from app.main import app
-from app.middleware.export_control import CONDITIONAL_REQUEST_HEADERS, ExportControlMiddleware, bearer_is_api_token
+from app.middleware.export_control import (
+    CONDITIONAL_REQUEST_HEADERS,
+    ExportControlMiddleware,
+    bearer_is_api_token,
+    bearer_is_narrowed_api_token,
+)
 from app.models.api_token import ApiToken
+from app.models.audit_log import AuditLog
+from app.models.customer import Customer
 from app.models.downtime import DowntimeEvent
 from app.models.governance import ControlledAccessEvent, CustomerContract
+from app.models.part import Part
 from app.models.user import User, UserRole
+from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.services import export_control_service, llm_client
 from tests.api.export_control_helpers import (
     CANARY,
@@ -66,6 +78,7 @@ from tests.api.export_control_helpers import (
     World,
     bearer,
     contains_canary,
+    contains_numeric_canary,
     find_record,
     issue_token,
     make_viewer,
@@ -201,6 +214,21 @@ def _open_itar_downtime(db: Session, w: World) -> DowntimeEvent:
     return event
 
 
+# The status an AI-external token gets where it is not 200. A by-number part lookup that
+# finds a WITHHELD part answers the same 404 a number nobody carries gets: a 200, even
+# fully redacted, would confirm the probed part number exists (code review P0, finding 1).
+CANARY_EXPECTED_STATUS: Dict[Tuple[str, str], int] = {
+    ("GET", "/parts/by-number/{part_number}"): 404,
+}
+
+# Routes whose person-view carries the NUMERIC canaries (the ITAR FAI's nominal, tolerances and
+# measured value; the ITAR NCR's actual / required value): proves the numeric check is not vacuous.
+NUMERIC_CANARY_ROUTES = (
+    "/quality/fai/{fai_id}",
+    "/quality/ncr",
+    "/quality/ncr/{ncr_id}",
+)
+
 # Extra rows a case needs before its controlled text can be in the response at all (the seed's
 # downtime events are resolved, so without this /downtime/active would be empty -- a vacuous case).
 CANARY_PRIMERS: Dict[Tuple[str, str], Callable[[Session, World], Any]] = {
@@ -242,15 +270,38 @@ class TestCanaryConformance:
         assert client.get(f"{API}/work-orders/{world.itar_wo.id}", headers=auth_headers).status_code == 200
 
         redacted = client.get(url, headers=bearer(token))
-        assert redacted.status_code == 200, (url, redacted.text[:500])
+        assert redacted.status_code == CANARY_EXPECTED_STATUS.get(operation, 200), (url, redacted.text[:500])
         assert redacted.headers["content-type"].startswith("application/json")
         assert not contains_canary(redacted.content), f"{url} leaked the canary: {redacted.text[:800]}"
+        assert not contains_numeric_canary(redacted.content), f"{url} leaked a dimension: {redacted.text[:800]}"
         assert "etag" not in redacted.headers
 
         person = client.get(url, headers=auth_headers)
         assert person.status_code == 200, (url, person.text[:500])
         if person_sees_canary:
             assert contains_canary(person.content), f"{url}: the case is vacuous -- a person sees no canary either"
+
+    @pytest.mark.parametrize("template", NUMERIC_CANARY_ROUTES)
+    def test_dimensions_and_measured_values_are_withheld_not_just_text(
+        self, client: TestClient, world: World, ai_token, auth_headers: dict, template: str
+    ):
+        """Compliance review P0, finding 1 (blocker): inside a withheld record a numeric STRING
+        under a non-text key passed -- an ITAR FAI's nominal, tolerances and measured value, an
+        NCR's actual / required value. Numeric strings now stay only under a count / quantity /
+        money / duration key."""
+        url = _url(template)(world)
+        person = client.get(url, headers=auth_headers)
+        assert person.status_code == 200 and contains_numeric_canary(person.content), "vacuous: no dimension"
+        _id, token = ai_token
+        redacted = client.get(url, headers=bearer(token))
+        assert redacted.status_code == 200
+        assert not contains_numeric_canary(redacted.content), redacted.text[:800]
+        if template == "/quality/fai/{fai_id}":
+            body = redacted.json()
+            (char,) = [c for c in body["characteristics"] if c["char_number"] == 1]
+            for key in ("nominal", "tolerance_plus", "tolerance_minus", "actual_value"):
+                assert char[key] == REDACTED_VALUE, key
+            assert char["char_number"] == 1 and char["export_controlled"] is True
 
     def test_gzip_responses_are_redacted_before_compression(self, client: TestClient, world: World, ai_token):
         _id, token = ai_token
@@ -676,7 +727,9 @@ class TestLedger:
 
 
 class TestConditionalRequests:
-    def test_the_bearer_sniff_reads_only_the_type_claim(self, client: TestClient, ai_token, auth_headers: dict):
+    def test_the_bearer_sniff_reads_only_the_type_claim(
+        self, client: TestClient, ai_token, auth_headers: dict, admin_headers: dict, test_user: User
+    ):
         _id, token = ai_token
         assert bearer_is_api_token([(b"authorization", f"Bearer {token}".encode())]) is True
         person = auth_headers["Authorization"].encode()
@@ -684,6 +737,20 @@ class TestConditionalRequests:
         assert bearer_is_api_token([(b"authorization", b"Bearer not.a.jwt")]) is False
         assert bearer_is_api_token([]) is False
         assert b"if-none-match" in CONDITIONAL_REQUEST_HEADERS and b"if-match" in CONDITIONAL_REQUEST_HEADERS
+        # Only a NARROWED token loses its conditional headers (code review P0, finding 7).
+        assert bearer_is_narrowed_api_token([(b"authorization", f"Bearer {token}".encode())]) is True
+        _full_id, full = issue_token(client, admin_headers, test_user)
+        assert bearer_is_narrowed_api_token([(b"authorization", f"Bearer {full}".encode())]) is False
+        assert bearer_is_narrowed_api_token([(b"authorization", person)]) is False
+
+    def test_a_full_token_keeps_its_304(self, client: TestClient, admin_headers: dict, test_user: User):
+        """Code review P0, finding 7: full tokens are byte-identical to before -- the dashboard's
+        ETag still earns them a 304. Only read-only / AI-external tokens are stripped."""
+        _id, full = issue_token(client, admin_headers, test_user)
+        url = f"{API}/shop-floor/dashboard"
+        etag = client.get(url, headers=bearer(full)).headers.get("etag")
+        assert etag
+        assert client.get(url, headers={**bearer(full), "If-None-Match": etag}).status_code == 304
 
     def test_if_none_match_never_earns_an_api_token_a_304(
         self, client: TestClient, admin_headers: dict, viewer: User, world: World, auth_headers: dict
@@ -704,6 +771,299 @@ class TestConditionalRequests:
         response = client.get(f"{API}/work-orders/", headers={**bearer(token), "If-None-Match": "*"})
         assert response.status_code == 200
         assert "etag" not in response.headers
+
+
+# --------------------------------------------------------------------------- filter oracles
+
+# Query parameters an allowlisted route DECLARES that an AI-external token is refused: each
+# filters (free text, or an exact customer name) over a field the redaction hides. Every
+# declared parameter must be here or in AI_EXTERNAL_QUERY_PARAMS -- the guard below.
+REFUSED_QUERY_PARAMS: Dict[str, frozenset] = {
+    "/parts/": frozenset({"search"}),
+    "/work-orders/": frozenset({"search"}),
+    "/work-orders/browse": frozenset({"search", "customer"}),
+    "/shop-floor/operations": frozenset({"search"}),
+    "/quotes/": frozenset({"customer", "search"}),
+}
+
+
+def _declared_query_params(route: APIRoute) -> set:
+    names, stack = set(), [route.dependant]
+    while stack:
+        current = stack.pop()
+        names.update(param.alias or param.name for param in current.query_params)
+        stack.extend(current.dependencies)
+    return names
+
+
+class TestFilterOracles:
+    """Code review P0, finding 1: a filter is an oracle on the field it filters."""
+
+    def test_every_declared_query_parameter_is_classified(self):
+        relative = {path for _method, path in AI_EXTERNAL_ALLOWED_ROUTES}
+        assert set(AI_EXTERNAL_QUERY_PARAMS) == relative, "one entry per allowlisted route, no stale ones"
+        routes = {
+            route.path_format[len(API) :]: route
+            for route in app.routes
+            if isinstance(route, APIRoute) and "GET" in route.methods and route.path_format.startswith(API)
+        }
+        for path in sorted(relative):
+            declared = _declared_query_params(routes[path])
+            allowed = set(AI_EXTERNAL_QUERY_PARAMS[path])
+            refused = set(REFUSED_QUERY_PARAMS.get(path, frozenset()))
+            assert allowed <= declared, f"{path}: allows parameters the route does not take: {allowed - declared}"
+            assert not allowed & refused, path
+            unclassified = declared - allowed - refused
+            assert not unclassified, (
+                f"{path} takes {sorted(unclassified)}: classify each in AI_EXTERNAL_QUERY_PARAMS "
+                "(a filter over a KEPT field) or REFUSED_QUERY_PARAMS (one over withheld text)"
+            )
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "/parts/?search=description of the controlled",
+            "/parts/?search=zzz-no-such-text",
+            "/work-orders/?search=ITARCANARY-CP",
+            "/work-orders/browse?search=ITAR",
+            "/work-orders/browse?customer=ITARCANARY Defense Systems",
+            "/work-orders/browse?sort=part",
+            "/work-orders/browse?sort=customer",
+            "/work-orders/browse?group=customer",
+            "/work-orders/browse?group=part",
+            "/shop-floor/operations?search=brake",
+            "/quotes/?customer=ITARCANARY Defense Systems",
+            "/quotes/?search=ITAR",
+            "/parts/?not_a_parameter=1",
+            "/work-orders/?status=released&search=x",
+        ],
+    )
+    def test_text_filters_are_refused_and_ledgered(
+        self, client: TestClient, db_session: Session, world: World, ai_token, query: str
+    ):
+        token_id, token = ai_token
+        response = client.get(API + query, headers=bearer(token))
+        assert response.status_code == 403, response.text[:300]
+        assert response.json() == {"detail": AI_EXTERNAL_QUERY_DENIED_DETAIL}
+        refused = _events(db_session, action="ai_external_refused")
+        assert [event.denial_reason for event in refused] == ["query_parameter_not_allowlisted"]
+        assert refused[0].extra_data["credential"]["api_token_id"] == token_id
+
+    def test_the_substring_oracle_is_closed(self, client: TestClient, world: World, ai_token, auth_headers: dict):
+        """Before: a matching substring returned 1 redacted row and a non-matching one 0 -- so
+        repeating the query recovered the withheld description. Now both answers are the same."""
+        _id, token = ai_token
+        hit = client.get(f"{API}/parts/?search=description of the controlled", headers=bearer(token))
+        miss = client.get(f"{API}/parts/?search=zzz-no-such-text", headers=bearer(token))
+        assert (hit.status_code, hit.content) == (miss.status_code, miss.content)
+        person = client.get(f"{API}/parts/?search=description of the controlled", headers=auth_headers)
+        assert person.status_code == 200 and len(person.json()) == 1, "a person still searches"
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "/work-orders/?status=released&limit=5&skip=0",
+            "/work-orders/browse?sort=due_date&direction=desc&group=status",
+            "/work-orders/browse?sort=work_order_number&group=none&hide_cots=true",
+            "/parts/?part_type=manufactured&limit=10&active_only=true",
+            "/quotes/?status=draft&limit=5",
+            "/shop-floor/operations?status=ready&page=1&page_size=10",
+        ],
+    )
+    def test_filters_over_kept_fields_still_work(self, client: TestClient, world: World, ai_token, query: str):
+        _id, token = ai_token
+        response = client.get(API + query, headers=bearer(token))
+        assert response.status_code == 200, response.text[:300]
+        assert not contains_canary(response.content)
+
+
+# --------------------------------------------------------------------------- probes that echo
+
+
+class TestProbeEchoes:
+    """Code review P0, finding 1: an answer that changes with whether a probe matched withheld text."""
+
+    def test_a_by_number_lookup_of_a_withheld_part_is_the_not_found_404(
+        self, client: TestClient, db_session: Session, world: World, ai_token, auth_headers: dict
+    ):
+        _id, token = ai_token
+        nobody = client.get(f"{API}/parts/by-number/NO-SUCH-PART-123", headers=bearer(token))
+        assert nobody.status_code == 404
+        for number in (world.itar_part.part_number, world.itar_part.part_number.lower(), f"{CANARY}-ALIAS-1"):
+            withheld = client.get(f"{API}/parts/by-number/{number}", headers=bearer(token))
+            assert withheld.status_code == 404, number
+            assert withheld.content == nobody.content, "indistinguishable from a number nobody carries"
+            assert "x-resolved-from-alias" not in withheld.headers
+            assert not contains_canary(withheld.content)
+        assert nobody.json() == {"detail": ai_external_error_detail(404)}
+        # The withheld lookup is still ledgered; a cleared part is still found, in full.
+        assert ("part", world.itar_part.id) in {
+            (event.record_type, event.record_id) for event in _events(db_session, action="ai_external_redacted")
+        }
+        cleared = client.get(f"{API}/parts/by-number/{world.clear_part.part_number}", headers=bearer(token))
+        assert cleared.status_code == 200 and cleared.json()["name"].startswith(CLEAR_TEXT)
+        assert (
+            client.get(f"{API}/parts/by-number/{world.itar_part.part_number}", headers=auth_headers).status_code == 200
+        )
+
+    @pytest.mark.parametrize(
+        "probe_template,control_template",
+        [
+            ("/parts/{probe}", "/parts/{control}"),  # a path id that does not parse: 422 echoes ``input``
+            ("/parts/?part_type={probe}", "/parts/?part_type={control}"),  # an enum that does not parse
+            ("/work-orders/by-number/{probe}", "/work-orders/by-number/{control}"),  # a 404
+        ],
+    )
+    def test_route_errors_never_echo_the_request(
+        self, client: TestClient, world: World, ai_token, probe_template: str, control_template: str
+    ):
+        """The residual text pass over an error that echoed the request rewrote a probed
+        controlled part number to ``[export-controlled]`` -- confirming the probe. A route's own
+        error is now one fixed text per status code, so a probe and a control answer identically."""
+        _id, token = ai_token
+        probe = client.get(API + probe_template.format(probe=world.itar_part.part_number), headers=bearer(token))
+        control = client.get(API + control_template.format(control="ZZZZ-NOT-A-PART"), headers=bearer(token))
+        assert probe.status_code == control.status_code and probe.status_code in (404, 422)
+        assert probe.content == control.content, (probe.text, control.text)
+        assert REDACTED_VALUE.encode() not in probe.content and not contains_canary(probe.content)
+        assert probe.json()["detail"] == ai_external_error_detail(probe.status_code)
+
+    def test_a_422_names_where_and_what_but_never_the_value(self, client: TestClient, world: World, ai_token):
+        _id, token = ai_token
+        response = client.get(f"{API}/parts/?limit=not-a-number", headers=bearer(token))
+        assert response.status_code == 422
+        assert response.json() == {
+            "detail": ai_external_error_detail(422),
+            "errors": [{"type": "int_parsing", "loc": ["query", "limit"], "msg": "Invalid value."}],
+        }
+
+
+# --------------------------------------------------------------------------- short customer codes
+
+
+class TestShortCustomerCodes:
+    def test_a_three_letter_controlled_code_is_withheld_as_a_whole_value(
+        self, client: TestClient, db_session: Session, world: World, ai_token
+    ):
+        """Code review P0, finding 2: the substring pass needs 4+ characters (so a short token
+        cannot rewrite ordinary words), and a controlled customer coded "BAE" went out whole in
+        the browse page's customer facet. A whole value EQUAL to a sensitive token is replaced
+        whatever its length."""
+        short = Customer(name="Bravo Aero Electronics", code="BAE", company_id=world.company_id)
+        # Its own part: a part a controlled job builds is controlled with it (and its other jobs too).
+        bae_part = Part(
+            part_number="BAE-BRKT-1", name="Bravo bracket", part_type="manufactured", company_id=world.company_id
+        )
+        db_session.add_all([short, bae_part])
+        db_session.flush()
+        db_session.add(
+            CustomerContract(
+                company_id=world.company_id, customer_id=short.id, contract_name="ITAR", itar_controlled=True
+            )
+        )
+        db_session.add(
+            WorkOrder(
+                work_order_number="WO-BAE-0001",
+                part_id=bae_part.id,
+                quantity_ordered=1,
+                status=WorkOrderStatus.RELEASED,
+                customer_name="BAE",
+                company_id=world.company_id,
+            )
+        )
+        world.clear_wo.customer_po = "bae"  # a cleared record carrying the code as a whole value
+        db_session.commit()
+        _id, token = ai_token
+        browse = client.get(f"{API}/work-orders/browse", headers=bearer(token))
+        assert browse.status_code == 200
+        assert "BAE" not in browse.json()["customers"] and "bae" not in browse.json()["customers"]
+        assert world.clear_customer.name in browse.json()["customers"], "a cleared name passes in full"
+        listed = client.get(f"{API}/work-orders/", headers=bearer(token)).json()
+        bae = find_record(listed, key="work_order_number", value="WO-BAE-0001")
+        assert bae["export_controlled"] is True and bae["customer_name"] == REDACTED_VALUE
+        clear = find_record(listed, key="id", value=world.clear_wo.id)
+        assert "export_controlled" not in clear and clear["customer_po"] == REDACTED_VALUE
+        assert clear["customer_name"] == world.clear_customer.name
+
+
+# --------------------------------------------------------------------------- nested records
+
+
+def _sibling_with_unlinkable_component(db: Session, w: World) -> WorkOrderOperation:
+    """A second operation on the CLEARED work order whose component part has no customer (an
+    engineering part): the operation is withheld as unlinkable while the work order is not."""
+    engineering = Part(
+        part_number="ENG-ONLY-0001",
+        name="SIBLINGCANARY engineering part",
+        part_type="manufactured",
+        company_id=w.company_id,
+    )
+    db.add(engineering)
+    db.flush()
+    sibling = WorkOrderOperation(
+        work_order_id=w.clear_wo.id,
+        work_center_id=w.work_center.id,
+        sequence=20,
+        operation_number="20",
+        name="SIBLINGCANARY sibling op",
+        component_part_id=engineering.id,
+        component_quantity=1,
+        status=OperationStatus.PENDING,
+        actual_start=datetime.utcnow() - timedelta(hours=1),
+        company_id=w.company_id,
+    )
+    db.add(sibling)
+    db.commit()
+    db.refresh(sibling)
+    return sibling
+
+
+class TestNestedRecords:
+    """Compliance review P0, finding 3: nested record lists that carry only ``id`` for themselves."""
+
+    @pytest.mark.parametrize("template", ["/shop-floor/operations/{op}", "/work-orders/{wo}/timeline"])
+    def test_a_withheld_sibling_operation_is_withheld_inside_a_cleared_response(
+        self, client: TestClient, db_session: Session, world: World, ai_token, auth_headers: dict, template: str
+    ):
+        sibling = _sibling_with_unlinkable_component(db_session, world)
+        url = API + template.format(op=world.clear_op.id, wo=world.clear_wo.id)
+        person = client.get(url, headers=auth_headers)
+        assert person.status_code == 200 and b"SIBLINGCANARY" in person.content, "vacuous: the sibling is not there"
+        _id, token = ai_token
+        response = client.get(url, headers=bearer(token))
+        assert response.status_code == 200
+        assert b"SIBLINGCANARY" not in response.content, response.text[:800]
+        body = response.json()
+        if "all_operations" in body:
+            entry = find_record(body["all_operations"], key="id", value=sibling.id)
+            assert entry["export_controlled"] is True and entry["name"] == REDACTED_VALUE
+            assert entry["sequence"] == 20 and entry["operation_number"] == "20"
+            own = find_record(body["all_operations"], key="id", value=world.clear_op.id)
+            assert "export_controlled" not in own and own["name"] == "Brake"
+
+
+# --------------------------------------------------------------------------- export audit rows
+
+
+class TestNoExportRecordWithoutAnExport:
+    @pytest.mark.parametrize(
+        "path", ["/visitor-logs/export.csv", "/consumables/checkouts/export.csv", "/import/batches/1/failed-rows.csv"]
+    )
+    def test_a_read_only_token_is_refused_before_the_export_row_is_written(
+        self, client: TestClient, db_session: Session, admin_headers: dict, admin_user: User, path: str
+    ):
+        """Compliance review P0, finding 7: the file-bytes rule replaces the body AFTER the route
+        ran, and these exporters commit an EXPORT audit row first -- recording an export the
+        caller never received. They now refuse a narrowed token before writing anything."""
+        _id, token = issue_token(client, admin_headers, admin_user, scope="read_only", ai_external=False)
+        before = db_session.query(AuditLog).filter(AuditLog.action == "EXPORT").count()
+        response = client.get(API + path, headers=bearer(token))
+        assert response.status_code == 403, response.text[:300]
+        assert response.json() == {"detail": READ_ONLY_FILE_REFUSED_DETAIL}
+        db_session.expire_all()
+        assert db_session.query(AuditLog).filter(AuditLog.action == "EXPORT").count() == before
+        # A person still exports.
+        assert client.get(API + path, headers=admin_headers).status_code != 403
 
 
 # --------------------------------------------------------------------------- tenancy
@@ -823,6 +1183,22 @@ class TestMiddlewareMessages:
             [_start(), {"type": "http.response.body", "body": b"", "more_body": False}], marker=_marker()
         )
         assert sent[0]["status"] == 200 and sent[1]["body"] == b""
+
+    async def test_a_refused_request_answered_2xx_is_never_forwarded(self, monkeypatch):
+        """Code review P0, finding 5: if anything caught a gate's 403 and the route answered
+        2xx, that body was never checked -- it must not go out under the refusal marker."""
+        recorded = []
+        monkeypatch.setattr(export_control_service, "record_refusal", lambda *a, **k: recorded.append(a))
+        secret = {"type": "http.response.body", "body": b'{"notes": "ITARCANARY"}', "more_body": False}
+        sent = await _drive([_start(status=200), secret], marker=_marker(refusal_reason="route_not_allowlisted"))
+        assert sent[0]["status"] == 503
+        assert json.loads(sent[1]["body"]) == {"detail": EXPORT_CONTROL_FAILED_DETAIL}
+        assert all(b"ITARCANARY" not in message.get("body", b"") for message in sent)
+        assert recorded, "the refusal itself is still ledgered"
+        # The ordinary case -- the gate's own 403 -- still passes.
+        refusal = {"type": "http.response.body", "body": b'{"detail": "no"}', "more_body": False}
+        sent = await _drive([_start(status=403), refusal], marker=_marker(refusal_reason="route_not_allowlisted"))
+        assert sent[0]["status"] == 403 and sent[1]["body"] == b'{"detail": "no"}'
 
     async def test_bodyless_statuses_pass(self):
         sent = await _drive([{"type": "http.response.start", "status": 204, "headers": []}], marker=_marker())

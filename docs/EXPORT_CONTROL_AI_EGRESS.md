@@ -26,6 +26,7 @@ too.
 | 2 | The method is `GET`, `HEAD` or `OPTIONS` | **403** `"Read-only API token cannot modify data."` | No |
 | 3 | The matched route carries no tag in `WERCO_MCP_READ_ONLY_DENY_TAGS` (no matched route at all fails closed) | **403** `"Read-only API token cannot access this resource."` | No |
 | 4 | `(method, route template)` is on the AI-external allowlist (§5) | **403** `"This resource is not available to an AI-external API token."` | Yes: `ai_external_refused` / `route_not_allowlisted` |
+| 4b | Every query parameter (and value) is on that route's list in `AI_EXTERNAL_QUERY_PARAMS` (§5.1); an undeclared parameter is refused, not ignored | **403** `"This query parameter is not available to an AI-external API token: free-text search, customer filters and text sort keys are refused."` | Yes: `ai_external_refused` / `query_parameter_not_allowlisted` |
 | 5 | Passed: a marker goes into `request.scope["state"]` for the response middleware | none | none |
 
 The response middleware (`ExportControlMiddleware`, the innermost user middleware, so it sees
@@ -37,8 +38,17 @@ uncompressed JSON) then reads the marker:
   row (`non_json_response`).
 - **JSON, 2xx:** the response is buffered and redacted (§4). One `ai_external_redacted` ledger row
   per withheld record is written and committed, then the body is sent with a corrected
-  `Content-Length` and no `ETag`.
-- **JSON, error status:** only the residual text pass (§4) runs. It writes no ledger rows.
+  `Content-Length` and no `ETag`. One exception: `GET /parts/by-number/{part_number}` that finds a
+  **withheld** part answers the same **404** a number nobody carries gets (the lookup is still
+  ledgered). A 200, even fully redacted, would confirm that the probed part number exists.
+- **JSON, error status (a route's own error, not a gate refusal):** the body is replaced by one
+  fixed text per status code, `"Request failed (<code> <phrase>); details are withheld from
+  AI-external API tokens."`, with fresh headers. A **422** also carries `errors`: each one's `type`
+  and location (`["query", "limit"]`) and `"msg": "Invalid value."`, never the value sent. A route
+  error can echo the request (a 422's `input`, a 404 naming the number asked for), and scrubbing
+  an echoed part number to `[export-controlled]` would itself confirm the probe. No ledger rows.
+- **A refusal marker on a non-error response** (something caught a gate's 403 and the route
+  answered 2xx anyway): **503**, nothing of that body is sent. The refusal is still ledgered.
 - **Any failure** building the index, redacting or writing the ledger: **503**
   `"Export-control check failed; nothing was sent."`, and no byte of the original body is sent.
 
@@ -50,10 +60,12 @@ A tool the token may not call is refused by name with the same API-layer text, b
 (see [MCP.md → 4.2](MCP.md#42-ai-external-tokens-and-export-control)). That refusal writes no
 ledger row, because nothing reached the API.
 
-A request authenticated by any API token (full ones included) has its conditional headers
-stripped (`If-None-Match`, `If-Match`, `If-Modified-Since`, `If-Unmodified-Since`, `If-Range`).
-An API token therefore never gets a 304, so a cached unredacted body cannot outlive a customer
-becoming controlled.
+A request authenticated by a **read-only or AI-external** API token has its conditional headers
+stripped (`If-None-Match`, `If-Match`, `If-Modified-Since`, `If-Unmodified-Since`, `If-Range`),
+read from the JWT's own `api_scope` / `ai_ext` claims without a database call. Such a token
+therefore never gets a 304, so a cached unredacted body cannot outlive a customer becoming
+controlled. A full token, which carries neither claim, keeps its 304s. Removing the claims does
+not help a narrowed token: the claim must match the token's row, or the token is refused 401.
 
 ---
 
@@ -169,23 +181,38 @@ these hold:
   example, a CAR carries no foreign key at all;
 - the route's own path parameter names a withheld record. Then the **whole** response is that
   record's (for example `/work-orders/{work_order_id}/timeline`);
-- it sits inside a withheld object.
+- it sits inside a withheld object;
+- it is an item of a NESTED list that names its record only by `id` or link (`NESTED_SHAPES`): an
+  operation detail's `all_operations` (its siblings, by `id`) and a work-order timeline's `items`
+  (an operation's start / finish, by its `#operation-<id>` link). A cleared work order can hold a
+  withheld operation, one whose component part is unlinkable, and that operation's name must not
+  reach the token through a sibling's detail or the timeline.
 
 Inside a withheld object a **keep-allowlist** applies. These stay true:
 
 - ids;
 - status, state, priority, sequence and version;
 - date and time fields;
-- JSON numbers, booleans and nulls;
+- booleans and nulls;
+- JSON numbers, **except** under a key that names a measurement or dimension of the article
+  (`nominal`, `toleran…`, `…value`, `measur…`, `dimension`, `diameter`, `thickness`, `length`,
+  `width`, `height`, `depth`, `angle`, `radius`, `weight`, `torque`, `pressure`, `temperature`,
+  `hardness`, `tensile`, `limit`, `target`) and no count / quantity / duration / money word;
+- numeric **strings** (a Decimal serializes as one) only under a key naming a count, quantity,
+  duration, money amount or sequence (`quantity`, `qty`, `count`, `hours`, `minutes`, `seconds`,
+  `days`, `duration`, `cost`, `price`, `total`, `amount`, `tax`, `shipping`, `stock`, `reorder`,
+  `percent`, `sequence`, `version`, `priority`, `runs`, `pieces`). This is an allowlist: an FAI's
+  `nominal`, `tolerance_plus`, `tolerance_minus` and `actual_value`, and an NCR's `actual_value` /
+  `required_value`, are withheld, as is a number under any key the list does not name;
 - the business identifiers `work_order_number`, `wo_number`, `operation_number`, `ncr_number`,
   `car_number`, `fai_number`, `quote_number`, `po_number`, `receipt_number`, `lot_number`,
   `work_center_code` and `work_center_name`.
 
-**Every other string becomes `"[export-controlled]"`.** That includes part numbers, descriptions,
-customer names, notes, instructions and specifications, and a numeric-looking string under a
-text key such as a numeric part number. Each withheld object gains `"export_controlled": true`, so
-a consumer can tell "withheld" from "empty". Counts, ids, statuses, dates and quantities stay
-true, so OEE and throughput figures are unaffected.
+**Every other value becomes `"[export-controlled]"`.** That includes part numbers, descriptions,
+customer names, notes, instructions and specifications, nominal dimensions, tolerances and measured
+values, and a numeric-looking string under a text key such as a numeric part number. Each withheld
+object gains `"export_controlled": true`, so a consumer can tell "withheld" from "empty". Counts,
+ids, statuses, dates, quantities and money stay true, so OEE and throughput figures are unaffected.
 
 The **residual text pass** then runs over every remaining string in the response, including
 cleared records, object keys and error `detail` text. It replaces each sensitive token,
@@ -195,7 +222,11 @@ case-insensitively, with `[export-controlled]`. The sensitive tokens are:
 - controlled customers' names and codes;
 - every free-text customer name that resolves to no customer.
 
-Tokens shorter than 4 characters are not matched.
+A string that **is** one of those tokens, compared whole (case, surrounding and repeated
+whitespace ignored), is replaced whatever its length, so a controlled customer coded `BAE` never
+goes out as `BAE`, in a list such as the browse page's customer facet included. Inside a longer
+string a token is matched only when it is at least 4 characters, so a short code cannot rewrite
+ordinary words.
 
 The input is never mutated. Records are redacted, not dropped, so list lengths and totals stay
 true.
@@ -229,6 +260,26 @@ Pareto `top_reasons` falls back to an event's free-text `description` in an obje
 record key. A controlled job's downtime text could not be linked and withheld there, so the route
 is refused rather than risk a leak. The per-event downtime reads carry `work_order_id` and are
 redacted.
+
+### 5.1 Query parameters
+
+A filter is an oracle on the field it filters: `/parts/?search=` matches the part number, name and
+description the redaction then hides, so "1 row" against "0 rows" works the withheld text out one
+substring at a time. So every allowlisted route has its own list of query parameters an
+AI-external token may send (`AI_EXTERNAL_QUERY_PARAMS` in `app/core/export_control.py`), and
+anything else, an undeclared parameter included, is refused **403** at gate 4b and ledgered.
+Refused, not stripped: silently ignoring a filter would hand an agent the wrong answer as if it
+were the right one.
+
+- **Refused:** `search` on `/parts/`, `/work-orders/`, `/work-orders/browse`,
+  `/shop-floor/operations` and `/quotes/`; `customer` on `/work-orders/browse` and `/quotes/`;
+  `sort=part` / `sort=customer` and `group=customer` / `group=part` on `/work-orders/browse`.
+- **Allowed:** filters over fields the redaction keeps, such as ids, statuses, dates, counts,
+  booleans, pagination and closed-vocabulary categories (`part_type`, `work_order_type`, downtime
+  `category`).
+
+A new query parameter on an allowlisted route is refused until it is classified; a guard test in
+`backend/tests/api/test_ai_external_token.py` fails CI until it is.
 
 **Adding a route is a code change with a test obligation.** Every entry needs a canary
 conformance case in `backend/tests/api/test_ai_external_token.py`. That case seeds a controlled
@@ -300,7 +351,7 @@ The middleware writes the ledger in its own short-lived session, as one bulk ins
 | `action` | `ai_external_redacted` (one row per withheld record per request, deduplicated) or `ai_external_refused` (one row per refused request) |
 | `record_type` / `record_id` | the withheld record, for example `work_order` / `412`; `request` / NULL for a refusal |
 | `allowed` | always false |
-| `denial_reason` | `export_controlled_customer`, `unlinkable_record`, `ai_egress_disabled`, `route_not_allowlisted` or `non_json_response` |
+| `denial_reason` | `export_controlled_customer`, `unlinkable_record`, `ai_egress_disabled`, `route_not_allowlisted`, `query_parameter_not_allowlisted` or `non_json_response` |
 | `data_classification` | `itar_export_controlled`, `cui`, or `unknown` (unlinkable records and refusals) |
 | `user_id` | the token's user |
 | `request_id` / `source_ip` | the request's correlation id and client address |
@@ -370,20 +421,37 @@ Deactivating Werco Assistant revokes its tokens too.
 
 ## 9. Known limits
 
-- **Existence oracles remain.** A list filter or `search=` parameter carrying a controlled part
-  number returns a redacted row, which confirms that the string exists. Sort order and counts are
-  preserved by design.
+- **Probes are closed where they were exact; order is not.** Free-text filters are refused
+  (§5.1), a part-number lookup that finds a withheld part answers the not-found 404, and a route's
+  error text never echoes the request (§1). What remains is ORDER: a list sorted by a withheld
+  field (`/parts/` by part number, for example) still places a withheld row among the cleared
+  ones, which bounds where its hidden value sorts, though not what it is. Counts are preserved by
+  design. A work-order number lookup confirms that a work-order number exists; work-order numbers
+  are kept identifiers anyway.
 - **Read-only means no non-GET request, not "causes no writes".** Allowlisted reads that reconcile
   on read can still write:
   - `GET /work-orders/`, `/work-orders/{id}` and `/shop-floor/operations…` can commit status
     reconciliation and audit rows, attributed to Werco Assistant with the token's
     `extra_data.credential`;
   - every request touches the token's `last_used_at`, at most once per 5 minutes.
+
+  GET **exporters** that write an `EXPORT` audit row before streaming the file (visitor log CSV,
+  Import Center failed rows, consumable checkouts, and everything through `export_audit.log_export`)
+  refuse a read-only or AI-external token **403** `"Read-only API token cannot download files."`
+  *before* that row is written, so the audit trail never records an export the caller did not
+  receive. A new exporter must call `refuse_file_export_to_narrowed_token` the same way.
 - **The stdio bridge.** A bridge started with an AI-external token narrows its own listing from the
   token's unverified `ai_ext` claim and has no egress check of its own. The API layer refuses every
   call regardless, and that is the control.
-- **The cost is per request.** The index is rebuilt on every AI-external response, and each
-  withheld record writes a ledger row. Prefer narrow, filtered reads.
+- **The cost is per request.** The index is rebuilt on every AI-external response (it loads all of
+  the company's parts, work orders, operations, PO lines, receipts, NCRs, quotes and quote lines),
+  and each withheld record writes a ledger row, so `/parts/` writes one per blank-customer
+  engineering part. "No cache in v1" was the agreed design; a load check (or a per-request-window
+  cache) is an open follow-up. Prefer narrow, filtered reads.
+- **Marking a customer is never an agent action.** The two contract writes are excluded from the
+  MCP catalog (`EXCLUDED_OPERATIONS`), so an agent holding a person's own JWT cannot switch a
+  customer's control off either; the routes also refuse every API token (403). Reading a
+  customer's standing stays a tool.
 - **Handling instructions have no writer** in the app. Contracts are the supported way to mark a
   customer.
 - **CMMC.** This is an AS9100D / customer-contract control, not a CMMC artifact. The frozen
@@ -396,8 +464,8 @@ Deactivating Werco Assistant revokes its tokens too.
 | Concern | Where |
 |---|---|
 | Token columns `scope`, `ai_external` | `app/models/api_token.py`, migration `119_api_token_scope` |
-| Gates 1–5 | `app/api/deps.py` (`get_current_user`, `read_only_api_token_refusal`, `ai_external_route_allowed`) |
-| Allowlist, refusal texts, ledger vocabulary, marker | `app/core/export_control.py` |
+| Gates 1–5 | `app/api/deps.py` (`get_current_user`, `read_only_api_token_refusal`, `ai_external_route_allowed`, `ai_external_query_params_allowed`) |
+| Allowlist, query-parameter lists, masked lookups, refusal and error texts, ledger vocabulary, marker | `app/core/export_control.py` |
 | Index and ledger writes; contract write path | `app/services/export_control_service.py` |
 | Redaction engine (pure) | `app/services/export_control_redaction.py` |
 | Response middleware | `app/middleware/export_control.py` (registered first in `app/main.py`, so it is innermost) |

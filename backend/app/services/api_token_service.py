@@ -212,7 +212,9 @@ def resolve_api_token_user(
 # --------------------------------------------------------------------------- admin verbs
 
 
-def _log_auth_event(audit: AuditService, action: str, *, user: User, record: ApiToken, extra: Dict) -> None:
+def _log_auth_event(
+    audit: AuditService, action: str, *, user: User, record: ApiToken, extra: Dict, required: bool = False
+) -> None:
     """The ``authentication`` row ``auth.log_auth_event`` would write, via the request-scoped audit.
 
     Written through the caller's ``AuditService`` (actor = the Admin, IP and
@@ -220,8 +222,10 @@ def _log_auth_event(audit: AuditService, action: str, *, user: User, record: Api
     helper: a service must not import a router, and ``auth.py`` already
     imports ``deps`` which imports this module. Same ``resource_type``, same
     ``resource_id`` (the token's USER), same identifier (their email).
+    ``required`` -- through ``log_required`` (``AuditWriteError`` on failure).
     """
-    audit.log(
+    write = audit.log_required if required else audit.log
+    write(
         action=action,
         resource_type="authentication",
         resource_id=user.id,
@@ -310,7 +314,12 @@ def issue_api_token(
     db.flush()  # assign the PK so the audit rows carry a real resource_id
 
     lifetime = "never expires" if expires_at is None else f"expires {expires_at.date().isoformat()}"
-    audit.log_create(
+    # REQUIRED evidence (compliance review P0, finding 5): a standing credential -- one whose
+    # answers may leave the company -- never exists without the record of who minted it and
+    # with what scope. ``AuditWriteError`` propagates before the commit; the route's
+    # ``required_audit`` rolls the row back and answers 503, and no JWT is ever created.
+    audit.log_required(
+        action=AuditService.ACTIONS["CREATE"],
         resource_type=API_TOKEN_RESOURCE_TYPE,
         resource_id=record.id,
         resource_identifier=label,
@@ -333,6 +342,7 @@ def issue_api_token(
         user=target,
         record=record,
         extra={"expires_at": lifetime, "scope": scope, "ai_external": effective_ai_external},
+        required=True,
     )
     db.commit()
     db.refresh(record)
@@ -389,20 +399,42 @@ def _flip_revoked(db: Session, record: ApiToken, *, revoked_by: int, reason: str
     return updated == 1
 
 
-def _audit_revocation(audit: AuditService, record: ApiToken, holder: Optional[User], reason: str) -> None:
-    """The status-change row + ``API_TOKEN_REVOKED`` event one revocation writes (metadata only)."""
+def _audit_revocation(
+    audit: AuditService, record: ApiToken, holder: Optional[User], reason: str, *, required: bool = False
+) -> None:
+    """The status-change row + ``API_TOKEN_REVOKED`` event one revocation writes (metadata only).
+
+    ``required`` -- the explicit revoke verb: both rows through ``log_required``. The
+    deactivation companion (``revoke_api_tokens_for_user``) keeps its caller's posture.
+    """
     holder_email = holder.email if holder is not None else f"user {record.user_id}"
-    audit.log_status_change(
-        resource_type=API_TOKEN_RESOURCE_TYPE,
-        resource_id=record.id,
-        resource_identifier=record.label,
-        old_status="active",
-        new_status="revoked",
-        description=f"Revoked API token '{record.label}' for {holder_email}: {reason}",
-        extra_data={"reason": reason, "user_id": record.user_id, "jti_prefix": record.jti_prefix},
-    )
+    description = f"Revoked API token '{record.label}' for {holder_email}: {reason}"
+    extra_data = {"reason": reason, "user_id": record.user_id, "jti_prefix": record.jti_prefix}
+    if required:
+        audit.log_required(
+            action=AuditService.ACTIONS["STATUS_CHANGE"],
+            resource_type=API_TOKEN_RESOURCE_TYPE,
+            resource_id=record.id,
+            resource_identifier=record.label,
+            description=description,
+            old_values={"status": "active"},
+            new_values={"status": "revoked"},
+            extra_data=extra_data,
+        )
+    else:
+        audit.log_status_change(
+            resource_type=API_TOKEN_RESOURCE_TYPE,
+            resource_id=record.id,
+            resource_identifier=record.label,
+            old_status="active",
+            new_status="revoked",
+            description=description,
+            extra_data=extra_data,
+        )
     if holder is not None:
-        _log_auth_event(audit, AUTH_EVENT_REVOKED, user=holder, record=record, extra={"reason": reason})
+        _log_auth_event(
+            audit, AUTH_EVENT_REVOKED, user=holder, record=record, extra={"reason": reason}, required=required
+        )
 
 
 def revoke_api_token(
@@ -443,7 +475,8 @@ def revoke_api_token(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="API token is already revoked")
 
     holder = db.query(User).filter(User.id == record.user_id).first()
-    _audit_revocation(audit, record, holder, reason)
+    # REQUIRED evidence: the route's ``required_audit`` rolls the flip back on failure (503).
+    _audit_revocation(audit, record, holder, reason, required=True)
     db.commit()
     db.refresh(record)
     return record

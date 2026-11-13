@@ -85,8 +85,11 @@ class CustomerContractUpdate(BaseModel):
     @field_validator("contract_name")
     @classmethod
     def _name(cls, value: Optional[str]) -> Optional[str]:
+        # Runs only when the field is SENT (an omitted field keeps its value). An explicit
+        # null on this NOT NULL column is a 422 -- it used to reach the flush and come back
+        # as a misleading 409 "contract number already exists" (code review P0, finding 6).
         if value is None:
-            return None
+            raise ValueError("must not be null")
         stripped = value.strip()
         if not stripped:
             raise ValueError("contract_name must not be blank")

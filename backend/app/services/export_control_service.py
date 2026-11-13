@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
@@ -88,10 +89,11 @@ from app.services.export_control_redaction import (
     Control,
     ControlledIndex,
     RedactionHit,
+    ai_external_error_body,
     customer_control,
+    is_masked_lookup,
     normalize_key,
     redact_payload,
-    scrub_text,
     worst,
 )
 
@@ -708,6 +710,20 @@ def record_refusal(
         db.close()
 
 
+@dataclass(frozen=True)
+class ExportControlOutcome:
+    """What the middleware sends instead of the route's body.
+
+    ``rebuilt`` -- the response is a NEW one (a route error's fixed text, or a masked
+    lookup's 404): send ``status_code`` with fresh headers, none of the route's. Otherwise
+    send the route's status and headers with this ``payload`` as the body.
+    """
+
+    status_code: int
+    payload: Any
+    rebuilt: bool = False
+
+
 def apply_export_control(
     marker: ExportControlMarker,
     payload: Any,
@@ -719,27 +735,31 @@ def apply_export_control(
     source_ip: Optional[str],
     route: Optional[str] = None,
     session_factory: Optional[SessionFactory] = None,
-) -> Any:
+) -> ExportControlOutcome:
     """The AI-external view of one decoded JSON response, with its ledger rows COMMITTED before it returns.
 
-    A 2xx body gets both passes and one ``ai_external_redacted`` row per withheld record; an
-    error body gets the residual text pass only. Blocking (the middleware runs it in a worker
-    thread). Raises on any failure -- the caller then sends 503 and nothing else.
+    A 2xx body gets both passes and one ``ai_external_redacted`` row per withheld record --
+    and a by-number lookup that found a withheld record answers the not-found 404 instead
+    (``is_masked_lookup``). A route's own error answers a fixed text per status code
+    (``ai_external_error_body``): its text could echo the request, and scrubbing an echo
+    would confirm a probe. Blocking (the middleware runs it in a worker thread). Raises on
+    any failure -- the caller then sends 503 and nothing else.
     """
+    if not 200 <= status_code < 300:
+        return ExportControlOutcome(status_code, ai_external_error_body(status_code, payload), rebuilt=True)
     db = _session(session_factory)
     try:
         index = build_controlled_index(db, marker.company_id)
-        if 200 <= status_code < 300:
-            result = redact_payload(payload, index, route_path=route_path, path_params=path_params)
-            rows = redaction_event_rows(
-                marker, result.hits, request_id=request_id, source_ip=source_ip, route=route or marker.route
-            )
-            if rows:
-                insert_controlled_access_events(db, rows)
-            db.commit()
-            return result.payload
-        db.rollback()
-        return scrub_text(payload, index)
+        result = redact_payload(payload, index, route_path=route_path, path_params=path_params)
+        rows = redaction_event_rows(
+            marker, result.hits, request_id=request_id, source_ip=source_ip, route=route or marker.route
+        )
+        if rows:
+            insert_controlled_access_events(db, rows)
+        db.commit()
+        if is_masked_lookup(route_path, result):
+            return ExportControlOutcome(404, ai_external_error_body(404, None), rebuilt=True)
+        return ExportControlOutcome(status_code, result.payload)
     except Exception:
         db.rollback()
         raise

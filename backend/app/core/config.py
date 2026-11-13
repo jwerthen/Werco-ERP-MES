@@ -59,6 +59,12 @@ INSECURE_SECRET_KEYS = {
 }
 
 
+# Tags a READ-ONLY API token is refused whatever ``WERCO_MCP_READ_ONLY_DENY_TAGS`` says
+# (``Settings.read_only_deny_tags`` adds them to the configured list). Every one must stay a
+# live route tag -- the boot check in main.py fails on one that is not.
+READ_ONLY_DENY_TAG_FLOOR: FrozenSet[str] = frozenset({"API Tokens", "Users", "Audit", "Documents", "Data Export"})
+
+
 class Settings(BaseSettings):
     # Application
     APP_NAME: str = "Werco ERP"
@@ -432,8 +438,17 @@ class Settings(BaseSettings):
 
     @property
     def read_only_deny_tags(self) -> FrozenSet[str]:
-        """``WERCO_MCP_READ_ONLY_DENY_TAGS`` as a set: entries stripped, empties dropped, case kept."""
-        return frozenset(tag.strip() for tag in (self.WERCO_MCP_READ_ONLY_DENY_TAGS or "").split(",") if tag.strip())
+        """``WERCO_MCP_READ_ONLY_DENY_TAGS`` as a set (stripped, empties dropped, case kept) PLUS the floor.
+
+        ``READ_ONLY_DENY_TAG_FLOOR`` is always denied: configuration can EXTEND the list but
+        never drop those, so an empty or truncated value cannot open the token admin, user
+        records, the audit log, documents or bulk export to a read-only token (compliance
+        review P0, finding 6).
+        """
+        configured = frozenset(
+            tag.strip() for tag in (self.WERCO_MCP_READ_ONLY_DENY_TAGS or "").split(",") if tag.strip()
+        )
+        return configured | READ_ONLY_DENY_TAG_FLOOR
 
     @field_validator("WERCO_MCP_HTTP_PATH")
     @classmethod

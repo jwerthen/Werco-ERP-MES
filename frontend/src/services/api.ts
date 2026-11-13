@@ -13,7 +13,7 @@ import type {
   CustomerContractUpdateInput,
   CustomerExportControl,
 } from '../types/exportControl';
-import axios,{ AxiosInstance, AxiosError, AxiosRequestConfig } from 'axios';
+import axios, { AxiosInstance, AxiosError, AxiosRequestConfig } from 'axios';
 import { normalizeAxiosErrorDetail } from '../utils/apiError';
 import {
   LoginResponse,

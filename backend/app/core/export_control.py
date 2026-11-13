@@ -21,7 +21,8 @@ docs/EXPORT_CONTROL_AI_EGRESS.md -- change them together.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import FrozenSet, Optional, Tuple
+from http import HTTPStatus
+from typing import FrozenSet, Iterable, Mapping, Optional, Tuple
 
 # ``scope["state"]`` key the marker is written under (``request.state`` is backed by it).
 EXPORT_CONTROL_STATE_KEY = "export_control"
@@ -37,6 +38,12 @@ AI_EGRESS_DISABLED_DETAIL = (
     "AI egress is disabled for this company: an AI-external API token cannot be used until an Admin enables it."
 )
 AI_EXTERNAL_ROUTE_DENIED_DETAIL = "This resource is not available to an AI-external API token."
+# Gate 4, second half: a query parameter (or value) off :data:`AI_EXTERNAL_QUERY_PARAMS`.
+# Fixed text, never naming the parameter or echoing its value (see the map's comment).
+AI_EXTERNAL_QUERY_DENIED_DETAIL = (
+    "This query parameter is not available to an AI-external API token: free-text search, "
+    "customer filters and text sort keys are refused."
+)
 READ_ONLY_FILE_REFUSED_DETAIL = "Read-only API token cannot download files."
 EXPORT_CONTROL_FAILED_DETAIL = "Export-control check failed; nothing was sent."
 
@@ -52,6 +59,7 @@ REASON_UNLINKABLE_RECORD = "unlinkable_record"
 REASON_AI_EGRESS_DISABLED = "ai_egress_disabled"
 REASON_ROUTE_NOT_ALLOWLISTED = "route_not_allowlisted"
 REASON_NON_JSON_RESPONSE = "non_json_response"
+REASON_QUERY_NOT_ALLOWLISTED = "query_parameter_not_allowlisted"
 
 # ``controlled_access_events.data_classification`` values this feature writes (a subset of
 # ``app.models.governance.DataClassification``; repeated, not imported, to stay pure).
@@ -138,6 +146,187 @@ def ai_external_operations(api_prefix: str) -> FrozenSet[Tuple[str, str]]:
     """:data:`AI_EXTERNAL_ALLOWED_ROUTES` with ``api_prefix`` (``settings.API_V1_PREFIX``) applied."""
     prefix = api_prefix.rstrip("/")
     return frozenset((method, f"{prefix}{path}") for method, path in AI_EXTERNAL_ALLOWED_ROUTES)
+
+
+# Per allowlisted route, the query parameters an AI-external token may send (None = any
+# value; a set = only those values). Anything else -- an undeclared parameter included --
+# is refused 403 at gate 4 (``AI_EXTERNAL_QUERY_DENIED_DETAIL``), ledgered
+# ``query_parameter_not_allowlisted``. Code review P0, finding 1.
+#
+# WHY: a filter is an oracle on the field it filters. ``/parts/?search=`` matches the part
+# number, name and description the redaction then hides, so "1 row" vs "0 rows" works the
+# withheld text out one substring at a time; an exact ``customer=`` filter confirms a
+# controlled customer's name; sorting or grouping by part or customer orders withheld text
+# against cleared text. A filter over a field the redaction KEEPS (ids, statuses, dates,
+# counts, booleans, pagination, closed-vocabulary categories) reveals nothing the response
+# does not already show, so those stay. Free text is refused, not stripped: silently
+# ignoring a filter would hand an agent the wrong answer as if it were the right one.
+#
+# A new parameter on an allowlisted route is refused until it is classified here;
+# ``tests/api/test_ai_external_token.py`` fails CI until it is (allowed here, or named in
+# that test's refused list).
+_ANY = None
+AI_EXTERNAL_QUERY_PARAMS: Mapping[str, Mapping[str, Optional[FrozenSet[str]]]] = {
+    "/work-orders/": {
+        "skip": _ANY,
+        "limit": _ANY,
+        "status": _ANY,
+        "include_deleted": _ANY,
+        "deleted_only": _ANY,
+    },
+    "/work-orders/browse": {
+        "skip": _ANY,
+        "limit": _ANY,
+        "status": _ANY,
+        "hide_cots": _ANY,
+        "scope": _ANY,
+        "work_order_type": _ANY,
+        # Not "part" / "customer": ordering by withheld text places it among cleared text.
+        "sort": frozenset({"work_order_number", "due_date", "priority", "status"}),
+        "direction": _ANY,
+        # Not "customer" / "part": group keys ARE the withheld text.
+        "group": frozenset({"none", "status"}),
+    },
+    "/work-orders/{work_order_id}": {},
+    "/work-orders/by-number/{wo_number}": {},
+    "/work-orders/{work_order_id}/timeline": {
+        "category": _ANY,
+        "actor_id": _ANY,
+        "start_at": _ANY,
+        "end_at": _ANY,
+        "cursor": _ANY,
+        "limit": _ANY,
+    },
+    "/shop-floor/operations": {
+        "work_center_id": _ANY,
+        "status": _ANY,
+        "due_today": _ANY,
+        "page": _ANY,
+        "page_size": _ANY,
+    },
+    "/shop-floor/operations/{operation_id}": {},
+    "/downtime/": {
+        "skip": _ANY,
+        "limit": _ANY,
+        "work_center_id": _ANY,
+        "category": _ANY,
+        "planned_type": _ANY,
+        "date_from": _ANY,
+        "date_to": _ANY,
+        "active_only": _ANY,
+    },
+    "/downtime/active": {},
+    "/downtime/by-work-center": {"date_from": _ANY, "date_to": _ANY},
+    "/downtime/reason-codes": {"category": _ANY, "active_only": _ANY},
+    "/downtime/{event_id}": {},
+    "/work-centers/": {"skip": _ANY, "limit": _ANY, "active_only": _ANY},
+    "/work-centers/types": {},
+    "/work-centers/{work_center_id}": {},
+    "/oee/records": {
+        "work_center_id": _ANY,
+        "date_from": _ANY,
+        "date_to": _ANY,
+        "shift": _ANY,
+        "skip": _ANY,
+        "limit": _ANY,
+    },
+    "/oee/records/{record_id}": {},
+    "/oee/dashboard": {"period": _ANY, "date_from": _ANY, "date_to": _ANY},
+    "/oee/trends": {"work_center_id": _ANY, "period": _ANY, "date_from": _ANY, "date_to": _ANY},
+    "/oee/six-big-losses/{work_center_id}": {"period": _ANY},
+    "/oee/targets": {},
+    "/parts/": {
+        "skip": _ANY,
+        "limit": _ANY,
+        "part_type": _ANY,
+        "item_group": _ANY,
+        "active_only": _ANY,
+        "include_bom_components": _ANY,
+        "include_deleted": _ANY,
+    },
+    "/parts/{part_id}": {},
+    "/parts/by-number/{part_number}": {},
+    "/routing/": {
+        "skip": _ANY,
+        "limit": _ANY,
+        "part_id": _ANY,
+        "status": _ANY,
+        "active_only": _ANY,
+        "include_bom_components": _ANY,
+    },
+    "/routing/{routing_id}": {},
+    "/routing/by-part/{part_id}": {},
+    "/quality/ncr": {"skip": _ANY, "limit": _ANY, "status": _ANY, "part_id": _ANY},
+    "/quality/ncr/{ncr_id}": {},
+    "/quality/car": {"skip": _ANY, "limit": _ANY, "status": _ANY},
+    "/quality/car/{car_id}": {},
+    "/quality/fai": {"skip": _ANY, "limit": _ANY, "status": _ANY, "part_id": _ANY},
+    "/quality/fai/{fai_id}": {},
+    "/quotes/": {"status": _ANY, "limit": _ANY, "offset": _ANY},
+    "/quotes/{quote_id}": {},
+    "/purchasing/vendors": {"active_only": _ANY, "approved_only": _ANY, "deleted_only": _ANY},
+    "/purchasing/vendors/{vendor_id}": {},
+    "/purchasing/purchase-orders": {
+        "status": _ANY,
+        "vendor_id": _ANY,
+        "deleted_only": _ANY,
+        "limit": _ANY,
+        "offset": _ANY,
+    },
+    "/purchasing/purchase-orders/{po_id}": {},
+    "/receiving/history": {"days": _ANY, "status": _ANY},
+    "/receiving/receipt/{receipt_id}": {},
+    "/maintenance/work-orders": {
+        "status": _ANY,
+        "work_center_id": _ANY,
+        "maintenance_type": _ANY,
+        "start_date": _ANY,
+        "end_date": _ANY,
+    },
+    "/maintenance/work-orders/overdue": {},
+    "/maintenance/work-orders/{wo_id}": {},
+}
+
+
+def ai_external_query_allowed(route_path: Optional[str], query: Iterable[Tuple[str, str]]) -> bool:
+    """Gate 4, second half: may an AI-external token send ``query`` (name, value pairs) to ``route_path``?
+
+    ``route_path`` is the matched template RELATIVE to the API prefix. A route with no entry
+    in :data:`AI_EXTERNAL_QUERY_PARAMS` accepts no query parameter at all (fail closed).
+    """
+    allowed = AI_EXTERNAL_QUERY_PARAMS.get(route_path or "", {})
+    for name, value in query:
+        if name not in allowed:
+            return False
+        values = allowed[name]
+        if values is not None and value not in values:
+            return False
+    return True
+
+
+# Business-number lookups whose number is WITHHELD text (a part number is; a work-order
+# number is a kept identifier, so ``/work-orders/by-number/...`` is not here). When the
+# number names a withheld record, the AI-external answer is the same 404 a number nobody
+# carries gets -- a 200 (even fully redacted) would confirm the number exists.
+# route (relative) -> (path parameter, record type)
+AI_EXTERNAL_MASKED_LOOKUPS: Mapping[str, Tuple[str, str]] = {
+    "/parts/by-number/{part_number}": ("part_number", "part"),
+}
+
+
+def ai_external_error_detail(status_code: int) -> str:
+    """The ONE error text an AI-external token gets for a route's own error (not a gate refusal).
+
+    A route error can echo the request (a 422's ``input``, a 404 naming the number asked
+    for), and the residual text pass would then rewrite an echoed controlled part number to
+    ``[export-controlled]`` -- which tells the caller the probe matched. A fixed text per
+    status code cannot. Gate refusals keep their own fixed texts.
+    """
+    try:
+        phrase = HTTPStatus(status_code).phrase
+    except ValueError:
+        phrase = "Error"
+    return f"Request failed ({status_code} {phrase}); details are withheld from AI-external API tokens."
 
 
 def relative_route_path(path: Optional[str], api_prefix: str) -> Optional[str]:

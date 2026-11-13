@@ -276,6 +276,30 @@ class TestWrites:
         )
         assert null_flag.status_code == 422
 
+    def test_a_null_contract_name_is_422_not_a_misleading_409(
+        self, client: TestClient, db_session: Session, admin_headers: dict, plain_customer
+    ):
+        """Code review / compliance review P0, finding 6/8: an explicit null on the NOT NULL
+        column used to reach the flush and come back as 409 "A contract with that number
+        already exists"."""
+        contract_id = _mark(client, admin_headers, plain_customer.id).json()["contracts"][0]["id"]
+        response = client.put(
+            f"{API}/{plain_customer.id}/contracts/{contract_id}",
+            json={"contract_name": None, "reason": "r"},
+            headers=admin_headers,
+        )
+        assert response.status_code == 422, response.text
+        assert "already exists" not in response.text
+        db_session.expire_all()
+        assert db_session.get(CustomerContract, contract_id).contract_name == "Program X"
+        # Omitting the field still leaves it alone.
+        kept = client.put(
+            f"{API}/{plain_customer.id}/contracts/{contract_id}",
+            json={"active": False, "reason": "r"},
+            headers=admin_headers,
+        )
+        assert kept.status_code == 200 and kept.json()["contracts"][0]["contract_name"] == "Program X"
+
     def test_a_duplicate_contract_number_is_409(
         self, client: TestClient, db_session: Session, admin_headers: dict, plain_customer
     ):
