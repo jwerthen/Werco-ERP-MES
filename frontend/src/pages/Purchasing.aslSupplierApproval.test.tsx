@@ -15,6 +15,8 @@ import { MemoryRouter } from 'react-router-dom';
 import api from '../services/api';
 import { ToastProvider } from '../components/ui/Toast';
 import Purchasing from './Purchasing';
+import type { Part } from '../types';
+import type { SupplierApprovalCheck } from '../types/supplierApproval';
 
 jest.mock('../services/api', () => ({
   __esModule: true,
@@ -59,7 +61,7 @@ const vendors = [
     approval_status: null,
   },
 ];
-const parts = [{ id: 9, part_number: 'HW-9', name: 'Rivet' }];
+const parts = [{ id: 9, part_number: 'HW-9', name: 'Rivet' }] as Part[];
 const purchaseOrders = [
   {
     id: 10,
@@ -74,7 +76,9 @@ const purchaseOrders = [
   },
 ];
 
-const check = (overrides: Record<string, unknown> = {}) => ({
+// Typed against the real response contract, so a mock that drifts from what the server
+// returns is a compile error (tsconfig.test.json), not a passing test.
+const check = (overrides: Partial<SupplierApprovalCheck> = {}): SupplierApprovalCheck => ({
   vendor_id: 1,
   vendor_name: 'Bramble Metals',
   approval_status: 'approved',
@@ -112,14 +116,14 @@ async function openCreatePO() {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockedApi.getVendors.mockResolvedValue(vendors as any);
-  mockedApi.getPurchaseOrders.mockResolvedValue(purchaseOrders as any);
-  mockedApi.getParts.mockResolvedValue(parts as any);
-  mockedApi.getDocuments.mockResolvedValue([] as any);
-  mockedApi.getDocumentTypes.mockResolvedValue([] as any);
-  mockedApi.updateVendor.mockResolvedValue({} as any);
-  mockedApi.checkSupplierApproval.mockResolvedValue(check() as any);
-  mockedApi.createPurchaseOrder.mockResolvedValue({ id: 99, supplier_approval_warnings: [] } as any);
+  mockedApi.getVendors.mockResolvedValue(vendors);
+  mockedApi.getPurchaseOrders.mockResolvedValue(purchaseOrders);
+  mockedApi.getParts.mockResolvedValue(parts);
+  mockedApi.getDocuments.mockResolvedValue([]);
+  mockedApi.getDocumentTypes.mockResolvedValue([]);
+  mockedApi.updateVendor.mockResolvedValue({});
+  mockedApi.checkSupplierApproval.mockResolvedValue(check());
+  mockedApi.createPurchaseOrder.mockResolvedValue({ id: 99, supplier_approval_warnings: [] });
 });
 
 describe('Create PO — Approved Supplier List', () => {
@@ -149,7 +153,7 @@ describe('Create PO — Approved Supplier List', () => {
         refused: true,
         refusal,
         warnings: [{ code: 'vendor_disqualified', message: refusal }],
-      }) as any
+      })
     );
     const form = await openCreatePO();
     fireEvent.change(screen.getByLabelText(/vendor/i), { target: { value: '1' } });
@@ -166,7 +170,7 @@ describe('Create PO — Approved Supplier List', () => {
       supplier_approval_warnings: [
         { code: 'scope_not_approved', message: 'Bramble Metals is not approved for Hardware (part HW-9).', part_id: 9 },
       ],
-    } as any);
+    });
     const form = await openCreatePO();
     fireEvent.change(screen.getByLabelText(/vendor/i), { target: { value: '1' } });
     fireEvent.click(within(form).getByRole('button', { name: '+ Add Line' }));
@@ -182,7 +186,7 @@ describe('Create PO — Approved Supplier List', () => {
   });
 
   test('surfaces the server’s 409 when the vendor was disqualified after the page loaded', async () => {
-    mockedApi.checkSupplierApproval.mockResolvedValue(check({ warnings: [] }) as any);
+    mockedApi.checkSupplierApproval.mockResolvedValue(check({ warnings: [] }));
     const refusal =
       'Bramble Metals is Disqualified on the Approved Supplier List; a purchase order cannot be raised to it.';
     mockedApi.createPurchaseOrder.mockRejectedValue({ response: { status: 409, data: { detail: refusal } } });

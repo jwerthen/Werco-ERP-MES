@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from app.core.time_utils import CENTRAL_TIME_ZONE
 from app.models.audit_log import AuditLog
 from app.models.part import Part
-from app.models.purchasing import PurchaseOrder, Vendor
+from app.models.purchasing import POStatus, PurchaseOrder, Vendor
 from app.models.user import UserRole
 from app.schemas.purchasing import POCreate, POLineCreate
 from app.services.audit_service import AuditService, AuditWriteError
@@ -597,3 +597,97 @@ def test_scorecard_reviews_due_counts_the_vendor_reevaluation_dates(client, db_s
     make_vendor(db_session, company_id=2, approval_status="approved", reevaluation_due=today)
     body = client.get("/api/v1/supplier-scorecards/supplier-scorecards/dashboard", headers=headers_for(user)).json()
     assert body["reviews_due_30_days"] == 2
+
+
+# =========================================================================== approval-verb field semantics
+
+
+def test_an_explicit_approval_date_is_kept_and_a_reapproval_never_restamps_it(client, db_session):
+    """Only BECOMING approved with no date sent records today. A date the auditor sends is
+    the record; and re-saving an already-approved vendor (say, to set its next re-evaluation)
+    must not rewrite when it was approved -- that would falsify the approval history."""
+    quality = make_user(db_session, role=UserRole.QUALITY, company_id=1)
+    conditional = make_vendor(db_session, approval_status="conditional", is_approved=False)
+    sent = client.put(
+        f"{VENDORS}/{conditional.id}/approval",
+        headers=headers_for(quality),
+        json=approval_body(conditional, approval_date="2025-06-01"),
+    )
+    assert sent.status_code == status.HTTP_200_OK, sent.text
+    assert sent.json()["approval_date"] == "2025-06-01" and sent.json()["is_approved"] is True
+
+    approved = make_vendor(db_session, approval_status="approved", is_approved=True, approval_date=date(2020, 1, 15))
+    resaved = client.put(
+        f"{VENDORS}/{approved.id}/approval",
+        headers=headers_for(quality),
+        json=approval_body(approved, reevaluation_due="2028-01-15"),
+    )
+    assert resaved.status_code == status.HTTP_200_OK, resaved.text
+    assert resaved.json()["approval_date"] == "2020-01-15" and resaved.json()["reevaluation_due"] == "2028-01-15"
+    (audit,) = vendor_audit_rows(db_session, approved.id)
+    assert set(audit.new_values) == {"reevaluation_due"}
+
+
+def test_an_explicit_null_clears_a_field_and_an_omitted_one_is_kept(client, db_session):
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    vendor = make_vendor(
+        db_session,
+        approval_status="approved",
+        is_approved=True,
+        reevaluation_due=date(2027, 1, 1),
+        approval_notes="Keep me",
+        approved_scopes=["hardware"],
+    )
+    response = client.put(
+        f"{VENDORS}/{vendor.id}/approval",
+        headers=headers_for(admin),
+        json=approval_body(vendor, reevaluation_due=None, approved_scopes=[]),
+    )
+    assert response.status_code == status.HTTP_200_OK, response.text
+    body = response.json()
+    assert body["reevaluation_due"] is None and body["approved_scopes"] is None
+    assert body["approval_notes"] == "Keep me"
+    (audit,) = vendor_audit_rows(db_session, vendor.id)
+    assert audit.new_values == {"approved_scopes": None, "reevaluation_due": None}
+
+
+# =========================================================================== PO responses
+
+
+def test_po_update_and_supplier_confirmation_responses_carry_current_warnings(client, db_session):
+    """The warnings are computed from the vendor's CURRENT ASL entry on every PO response, not
+    stored: a PO raised while the vendor was fine shows the warning once it goes Conditional."""
+    manager = make_user(db_session, role=UserRole.MANAGER, company_id=1)
+    vendor = make_vendor(db_session, approval_status="approved", is_approved=True, approved_scopes=["hardware"])
+    part = make_part(db_session, part_type="hardware")
+    created = client.post(POS, headers=headers_for(manager), json=_po_body(vendor, part))
+    assert created.status_code == status.HTTP_200_OK, created.text
+    assert created.json()["supplier_approval_warnings"] == []
+    po_id = created.json()["id"]
+
+    db_session.expire_all()
+    stored_vendor = db_session.get(Vendor, vendor.id)
+    stored_vendor.approval_status = "conditional"
+    stored_vendor.is_approved = False
+    db_session.commit()
+
+    updated = client.put(f"{POS}/{po_id}", headers=headers_for(manager), json={"version": 0, "notes": "Expedite"})
+    assert updated.status_code == status.HTTP_200_OK, updated.text
+    assert [w["code"] for w in updated.json()["supplier_approval_warnings"]] == ["vendor_conditional"]
+
+    db_session.expire_all()
+    po = db_session.get(PurchaseOrder, po_id)
+    po.status = POStatus.SENT
+    db_session.commit()
+    db_session.refresh(po)
+    confirmed = client.put(
+        f"{POS}/{po_id}/supplier-confirmation",
+        headers=headers_for(manager),
+        json={
+            "expected_updated_at": po.updated_at.replace(tzinfo=timezone.utc).isoformat(),
+            "acknowledged": True,
+            "supplier_confirmation_note": "Supplier acknowledged by phone",
+        },
+    )
+    assert confirmed.status_code == status.HTTP_200_OK, confirmed.text
+    assert [w["code"] for w in confirmed.json()["supplier_approval_warnings"]] == ["vendor_conditional"]

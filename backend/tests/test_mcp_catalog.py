@@ -152,6 +152,20 @@ class TestMembership:
             ("POST", "/api/v1/purchasing/vendors/asl-import/commit"),
         }
 
+    def test_asl_writes_are_not_tools_but_the_asl_reads_are(self, catalog):
+        """A supplier-approval decision and the QL 7.4 load are a person's judgment (the routes
+        also refuse API tokens), so agents get no tool for them -- but they keep the two reads
+        the exclusion's comment promises: the overdue re-evaluation list and the PO check."""
+        by_path = {tool.key: tool.name for tool in catalog}
+        for write in (
+            ("PUT", "/api/v1/purchasing/vendors/{vendor_id}/approval"),
+            ("POST", "/api/v1/purchasing/vendors/asl-import/preview"),
+            ("POST", "/api/v1/purchasing/vendors/asl-import/commit"),
+        ):
+            assert write not in by_path, write
+        assert by_path[("GET", "/api/v1/purchasing/vendors/reevaluation-due")] == "list_vendors_reevaluation_due"
+        assert by_path[("POST", "/api/v1/purchasing/supplier-approval-check")] == "check_supplier_approval"
+
     def test_ai_apply_is_not_a_tool_but_record_only_accept_is(self, catalog):
         by_path = {tool.key: tool.name for tool in catalog}
         assert ("POST", "/api/v1/ai/recommendations/{recommendation_id}/apply") not in by_path

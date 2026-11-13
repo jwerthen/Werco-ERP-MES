@@ -17,6 +17,7 @@ from openpyxl import Workbook
 from sqlalchemy.orm import Session
 
 from app.models.audit_log import AuditLog
+from app.models.part import Part
 from app.models.purchasing import Vendor
 from app.models.user import UserRole
 from app.services.import_service import ImportFileError, build_import_template_workbook, parse_import_file
@@ -434,3 +435,105 @@ def test_tenant_isolation(client, db_session, suppliers):
     assert db_session.get(Vendor, foreign.id).approval_status == "approved"
     assert db_session.get(Vendor, suppliers["northwind"].id).approval_status is None
     assert "Harbor" not in str(preview.json())
+
+
+# =========================================================================== edges the sheet will hit
+
+
+def test_a_blank_status_takes_a_listed_vendor_off_the_asl_with_a_warning(client, db_session, quality, suppliers):
+    """A blank STATUS is "not on the ASL". For a vendor that IS on the list today, that is a
+    removal -- the preview must say so (not the "not on the list yet" wording), the commit
+    must record it as an audited change, and ``is_approved`` is left exactly as it was (a
+    NULL status derives nothing)."""
+    harbor = suppliers["harbor"]
+    harbor.approval_status = "approved"
+    harbor.approved_scopes = ["hardware"]
+    harbor.reevaluation_due = date(2027, 3, 1)
+    db_session.commit()
+    rows = [["Harbor Labs", None, None, None, None, None, None, None, None]]
+    preview, commit = preview_and_commit(client, headers_for(quality), asl_workbook(rows))
+    (row,) = preview.json()["rows"]
+    assert row["outcome"] == "update" and row["changes"] == {"approval_status": {"old": "approved", "new": None}}
+    assert row["warnings"] == [
+        f"STATUS is blank: this removes {harbor.code} from the Approved Supplier List (was Approved)."
+    ]
+    assert preview.json()["summary"]["not_on_asl_count"] == 1
+    assert commit.status_code == status.HTTP_200_OK, commit.text
+
+    db_session.expire_all()
+    stored = db_session.get(Vendor, harbor.id)
+    assert stored.approval_status is None and stored.is_approved is True
+    assert stored.approved_scopes == ["hardware"] and stored.reevaluation_due == date(2027, 3, 1)  # blanks keep
+    (audit,) = [r for r in asl_audit_rows(db_session) if r.resource_type == "vendor"]
+    assert audit.old_values == {"approval_status": "approved"} and audit.new_values == {"approval_status": None}
+
+
+def test_a_disqualified_row_warns_and_the_loaded_status_refuses_a_po(client, db_session, quality, suppliers):
+    """End to end: a Disqualified status loaded from the sheet is the one the PO gate reads."""
+    rows = [["Harbor Labs", None, "Disqualified", None, None, None, None, None, "Failed audit"]]
+    preview, commit = preview_and_commit(client, headers_for(quality), asl_workbook(rows))
+    (row,) = preview.json()["rows"]
+    assert "Disqualified: purchase orders to this vendor will be refused." in row["warnings"]
+    assert row["changes"]["is_approved"] == {"old": True, "new": False}
+    assert commit.status_code == status.HTTP_200_OK, commit.text
+
+    manager = make_user(db_session, role=UserRole.MANAGER, company_id=1)
+    part = Part(
+        company_id=1, part_number=f"ASLI-{_next():05d}", name="Probe", part_type="purchased", unit_of_measure="each"
+    )
+    db_session.add(part)
+    db_session.commit()
+    po = client.post(
+        "/api/v1/purchasing/purchase-orders",
+        headers=headers_for(manager),
+        json={
+            "vendor_id": suppliers["harbor"].id,
+            "lines": [{"part_id": part.id, "quantity_ordered": 1, "unit_price": 1}],
+        },
+    )
+    assert po.status_code == status.HTTP_409_CONFLICT, po.text
+    assert "Harbor Labs is Disqualified on the Approved Supplier List" in po.json()["detail"]
+
+
+def test_an_inactive_vendor_is_updated_but_stays_inactive(client, db_session, quality, suppliers):
+    harbor = suppliers["harbor"]
+    harbor.is_active = False
+    db_session.commit()
+    rows = [["Harbor Labs", None, "Approved", "Hardware", None, "AS9100 Cert", None, None, None]]
+    preview, commit = preview_and_commit(client, headers_for(quality), asl_workbook(rows))
+    (row,) = preview.json()["rows"]
+    assert any("is inactive" in warning and "stays inactive" in warning for warning in row["warnings"])
+    assert commit.status_code == status.HTTP_200_OK, commit.text
+    db_session.expire_all()
+    stored = db_session.get(Vendor, harbor.id)
+    assert stored.approval_status == "approved" and stored.is_active is False
+
+
+def test_code_matching_errors_name_the_problem(client, db_session, quality, suppliers):
+    header = HEADER + ["VENDOR CODE"]
+    gone = make_vendor(db_session, "Gone By Code")
+    gone.soft_delete(quality.id)
+    db_session.commit()
+    rows = [
+        ["Whoever", None, "Approved", "Hardware", None, "AS9100 Cert", None, None, None, "NO-SUCH-CODE"],
+        ["Gone By Code", None, "Approved", "Hardware", None, "AS9100 Cert", None, None, None, gone.code.lower()],
+    ]
+    body = upload(client, PREVIEW, headers_for(quality), asl_workbook(rows, header=header)).json()
+    errors = {row["row"]: row["error"] for row in body["rows"]}
+    assert errors[6] == "no vendor with code 'NO-SUCH-CODE'"
+    assert "is deleted" in errors[7] and f"/vendors/{gone.id}/restore" in errors[7]
+
+
+def test_the_commit_re_matches_against_the_database_not_the_preview(client, db_session, quality, suppliers):
+    """The preview is a snapshot, never authorization: a vendor deleted after the preview
+    turns the commit into a 409 naming the restore, and nothing is written."""
+    content = asl_workbook(good_rows())
+    source_hash = upload(client, PREVIEW, headers_for(quality), content).json()["source_hash"]
+    suppliers["harbor"].soft_delete(quality.id)
+    db_session.commit()
+    commit = upload(client, COMMIT, headers_for(quality), content, expected_source_hash=source_hash)
+    assert commit.status_code == status.HTTP_409_CONFLICT, commit.text
+    (error,) = commit.json()["detail"]["errors"]
+    assert error["supplier_name"] == "Harbor Labs" and "restore" in error["error"]
+    assert asl_audit_rows(db_session) == []
+    assert db_session.get(Vendor, suppliers["northwind"].id).approval_status is None

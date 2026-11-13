@@ -9,7 +9,7 @@ the asset CRUD's roles, case-insensitive tag uniqueness, version CAS and audit r
 isolation of asset ids, and that the MTBF/MTTR dashboard stays work-center-only.
 """
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 import pytest
 from fastapi import status
@@ -297,6 +297,47 @@ class TestTargets:
         assert resp.status_code == 200, resp.text
         metrics = resp.json()["work_center_metrics"]
         assert [(row["work_center_code"], row["wo_count"]) for row in metrics] == [("MTBF-1", 1)]
+
+    def test_asset_work_orders_read_on_the_calendar_and_overdue_list(self, client, db_session, planner_headers):
+        """The calendar and overdue reads serialize every work order through the shared target
+        fields; an asset work order (no work center) reads as an asset there, not a 500."""
+        asset = make_asset(db_session, tag="CAL-1", name="Cold saw")
+        late = date.today() - timedelta(days=3)
+        db_session.add(
+            MaintenanceWorkOrder(
+                company_id=1,
+                asset_id=asset.id,
+                wo_number=f"MWO-T-{_next()}",
+                title="Blade change",
+                scheduled_date=late,
+                due_date=late,
+                status=MaintenanceStatus.SCHEDULED,
+            )
+        )
+        db_session.commit()
+        window = {"start_date": (late - timedelta(days=1)).isoformat(), "end_date": date.today().isoformat()}
+        calendar = client.get("/api/v1/maintenance/calendar", headers=planner_headers, params=window)
+        assert calendar.status_code == 200, calendar.text
+        assert [(row["target_type"], row["target_code"], row["target_name"]) for row in calendar.json()] == [
+            ("asset", "CAL-1", "Cold saw")
+        ]
+        overdue = client.get(f"{WORK_ORDERS}/overdue", headers=planner_headers)
+        assert overdue.status_code == 200, overdue.text
+        assert [row["asset_tag"] for row in overdue.json()] == ["CAL-1"]
+
+    def test_a_mis_tenanted_asset_reference_never_leaks_on_egress(self, client, db_session, planner_headers):
+        """Ingress refuses a foreign asset_id (the flat-404 test above), but the FK carries no
+        tenant, so a row written around the API could still point at another company's asset.
+        The serializer must then read the target as absent rather than name the foreign asset."""
+        foreign = make_asset(db_session, company_id=2, tag="ACME-SECRET-AS", name="ACME-SECRET press")
+        db_session.add(MaintenanceSchedule(company_id=1, asset_id=foreign.id, name="Legacy row"))
+        db_session.commit()
+        resp = client.get(SCHEDULES, headers=planner_headers)
+        assert resp.status_code == 200, resp.text
+        [row] = resp.json()
+        assert row["asset_id"] == foreign.id and row["target_type"] == "asset"
+        assert row["asset_tag"] is None and row["asset_name"] is None and row["target_name"] is None
+        assert "ACME-SECRET" not in resp.text
 
 
 # ---------------------------------------------------------------------------
