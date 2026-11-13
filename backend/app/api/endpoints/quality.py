@@ -28,6 +28,8 @@ from app.schemas.quality import (
     FAICharacteristicResponse,
     FAICharacteristicUpdate,
     FAICreate,
+    FAICustomerApprovalRequest,
+    FAILogRow,
     FAIPrefillResponse,
     FAIResponse,
     FAIUpdate,
@@ -357,7 +359,53 @@ def list_fais(
         query = query.filter(FirstArticleInspection.status == status)
     if part_id:
         query = query.filter(FirstArticleInspection.part_id == part_id)
-    return query.order_by(FirstArticleInspection.created_at.desc()).offset(skip).limit(limit).all()
+    fais = query.order_by(FirstArticleInspection.created_at.desc()).offset(skip).limit(limit).all()
+    return fai_service.fai_responses(db, company_id, fais)
+
+
+# Declared before ``/fai/{fai_id}`` so "log" is never parsed as an FAI id.
+@router.get("/fai/log", response_model=List[FAILogRow])
+def list_fai_log(
+    start_date: Optional[date] = Query(None, description="Log date from (inclusive, Central)"),
+    end_date: Optional[date] = Query(None, description="Log date to (inclusive, Central)"),
+    status: Optional[FAIStatus] = Query(None, description="Filter by FAI status (result)"),
+    customer: Optional[str] = Query(None, max_length=255, description="Customer name contains"),
+    part_id: Optional[int] = Query(None, gt=0),
+    work_order_id: Optional[int] = Query(None, gt=0),
+    search: Optional[str] = Query(
+        None, max_length=255, description="FAI #, part # or description, job #, customer PO or serial contains"
+    ),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """The FAI log of record: one line per first article inspection, newest first.
+
+    The ERP is the company's FAI log of record; the old spreadsheet log (form QF 7.5-3.4) is a
+    frozen archive. Each line carries what that log did -- FAI Report #, date, part #,
+    product description, customer, job # and whether it is complete -- plus the revision
+    inspected, customer PO, result, type, reason and the customer approval. Customer, PO and
+    job come from the linked work order (customer falls back to the part's). A line keeps
+    naming a since-deleted part or work order: this is a historical record.
+
+    Offset-paged (``limit`` / ``offset``): request one row more than a page to learn whether
+    another page exists. The date filters are inclusive Central dates on the log's date (the
+    completion date, else the inspection date, else the day the FAI was created).
+    """
+    query = fai_service.fai_log_query(
+        db,
+        company_id,
+        start_date=start_date,
+        end_date=end_date,
+        status=status,
+        customer=customer,
+        part_id=part_id,
+        work_order_id=work_order_id,
+        search=search,
+    )
+    return fai_service.fai_log_rows(query.offset(offset).limit(limit).all())
 
 
 @router.post("/fai", response_model=FAIResponse)
@@ -368,8 +416,14 @@ def create_fai(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Create an inspection with validated tenant-owned references."""
-    return fai_service.create_fai(db, company_id, fai_in, current_user, audit)
+    """Create an inspection with validated tenant-owned references.
+
+    ``part_id`` and ``work_order_id`` must be live records of your company (404 otherwise).
+    When ``part_revision`` is omitted the part's current revision is recorded as the revision
+    inspected.
+    """
+    fai = fai_service.create_fai(db, company_id, fai_in, current_user, audit)
+    return fai_service.fai_response(db, company_id, fai)
 
 
 @router.get("/fai/{fai_id}", response_model=FAIResponse)
@@ -380,7 +434,7 @@ def get_fai(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get FAI details."""
-    return fai_service.get_fai(db, company_id, fai_id)
+    return fai_service.fai_response(db, company_id, fai_service.get_fai(db, company_id, fai_id))
 
 
 @router.put("/fai/{fai_id}", response_model=FAIResponse)
@@ -392,8 +446,37 @@ def update_fai(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Edit an unfinished FAI; final disposition requires approval authority."""
-    return fai_service.update_fai(db, company_id, fai_id, fai_in, current_user, audit)
+    """Edit an unfinished FAI; final disposition requires approval authority.
+
+    Setting ``status`` to passed, failed or conditional is the final disposition (Admin,
+    Manager or Quality; 403 otherwise): it stamps the completion date (Central) and the
+    approver and freezes the inspection evidence (later edits are 409). The customer's
+    approval is recorded afterwards with ``POST /quality/fai/{id}/customer-approval``.
+    """
+    fai = fai_service.update_fai(db, company_id, fai_id, fai_in, current_user, audit)
+    return fai_service.fai_response(db, company_id, fai)
+
+
+@router.post("/fai/{fai_id}/customer-approval", response_model=FAIResponse)
+def record_fai_customer_approval(
+    fai_id: int,
+    approval_in: FAICustomerApprovalRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(fai_service.APPROVE_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Record the customer's approval of a completed FAI (Admin, Manager or Quality).
+
+    Writes only ``customer_approved`` and ``customer_approval_date`` (default today, Central;
+    a past date back-enters an earlier approval; a future date is 422). Only a PASSED or
+    CONDITIONAL FAI can carry it: an FAI without its final disposition, or a FAILED one, is
+    refused (409). Recorded once (409 if already recorded). A standing API token is refused
+    (403) -- a person must record it. The APPROVE audit row commits with the approval, or
+    neither is saved (503).
+    """
+    fai = fai_service.record_customer_approval(db, company_id, fai_id, approval_in, current_user, audit)
+    return fai_service.fai_response(db, company_id, fai)
 
 
 @router.post("/fai/{fai_id}/prefill-from-steps", response_model=FAIPrefillResponse)

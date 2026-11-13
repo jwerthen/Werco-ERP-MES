@@ -2,7 +2,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import List, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.validation import DescriptionLong, Money, MoneySmall
 from app.models.quality import (
@@ -324,7 +324,9 @@ class FAICharacteristicCreate(BaseModel):
     nominal: Optional[str] = Field(None, max_length=100, description="Nominal value")
     tolerance_plus: Optional[str] = Field(None, max_length=50, description="Positive tolerance")
     tolerance_minus: Optional[str] = Field(None, max_length=50, description="Negative tolerance")
-    specification: Optional[str] = Field(None, max_length=500, description="Reference specification")
+    # Bounded at the column width (``fai_characteristics.specification`` String(255)): a
+    # longer value is a 422 here rather than a Postgres DataError 500 at flush.
+    specification: Optional[str] = Field(None, max_length=255, description="Reference specification")
     is_critical: bool = False
     is_major: bool = False
 
@@ -358,13 +360,31 @@ class FAICharacteristicResponse(BaseModel):
 
 class FAICreate(BaseModel):
     part_id: int = Field(..., gt=0)
-    part_revision: Optional[str] = Field(None, max_length=20, pattern=r'^[A-Z0-9]+$')
+    part_revision: Optional[str] = Field(
+        None,
+        max_length=20,
+        pattern=r'^[A-Z0-9]+$',
+        description=(
+            "The drawing revision being inspected. Trimmed and upper-cased; omitted or blank records "
+            "the part's current revision at creation."
+        ),
+    )
     work_order_id: Optional[int] = Field(None, gt=0)
     serial_number: Optional[str] = Field(None, max_length=100)
     fai_type: str = Field(default='full', max_length=50, description="Full or partial FAI")
-    reason: Optional[str] = Field(None, max_length=500, description="Reason for FAI")
+    # ``fais.reason`` is String(50); the old 500 bound let a long reason reach Postgres as a
+    # DataError 500 instead of a 422.
+    reason: Optional[str] = Field(None, max_length=50, description="Reason for FAI")
     due_date: Optional[date] = None
     customer_approval_required: bool = False
+
+    @field_validator('part_revision', mode='before')
+    @classmethod
+    def normalize_part_revision(cls, value):
+        if isinstance(value, str):
+            value = value.strip().upper()
+            return value or None
+        return value
 
 
 class FAIUpdate(BaseModel):
@@ -397,11 +417,89 @@ class FAIResponse(UTCModel):
     completed_date: Optional[date]
     customer_approval_required: bool
     customer_approved: bool
+    customer_approval_date: Optional[date] = None
     characteristics: List[FAICharacteristicResponse] = Field(default_factory=list)
     created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    # Responsibility: ids plus display names resolved tenant-scoped by
+    # ``fai_service.fai_responses`` (``inspector_id`` is a selection; ``approved_by`` is
+    # stamped by the server at final disposition).
+    inspector_id: Optional[int] = None
+    inspector_name: Optional[str] = None
+    approved_by: Optional[int] = None
+    approved_by_name: Optional[str] = None
+
+    # What the FAI log shows for this inspection, read from the linked work order (the
+    # job), falling back to the part's customer. Historical: a since-deleted work order or
+    # part still names what the inspection was for.
+    work_order_number: Optional[str] = None
+    customer_name: Optional[str] = None
+    customer_po: Optional[str] = None
+    part_current_revision: Optional[str] = Field(
+        None, description="The part's revision today, which can differ from the revision inspected"
+    )
 
     class Config:
         from_attributes = True
+
+
+class FAICustomerApprovalRequest(BaseModel):
+    """POST /quality/fai/{fai_id}/customer-approval -- the customer's acceptance of the FAI."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    customer_approval_date: Optional[date] = Field(
+        None,
+        description=(
+            "The date the customer approved the FAI. Defaults to today (Central); a past date "
+            "records an approval received earlier. A future date is refused."
+        ),
+    )
+
+
+class FAILogRow(UTCModel):
+    """One line of the FAI log of record (``GET /quality/fai/log``, ``GET /exports/fai/export``).
+
+    The first seven fields mirror the paper log the ERP replaces (form QF 7.5-3.4: FAI Report
+    #, Date Submitted, Part #, Product Description, Customer, Job #, Complete); the rest are
+    what that log never captured.
+    """
+
+    fai_id: int
+    fai_number: str = Field(..., description="FAI Report #")
+    log_date: date = Field(
+        ...,
+        description=(
+            "The log's date: the completion date, else the inspection date, else the day the FAI was "
+            "created (Central)"
+        ),
+    )
+    part_id: int
+    part_number: Optional[str] = None
+    part_name: Optional[str] = Field(None, description="Product description (the part's name)")
+    part_revision: Optional[str] = Field(None, description="The drawing revision recorded on the FAI")
+    part_current_revision: Optional[str] = Field(None, description="The part's revision today")
+    customer: Optional[str] = Field(
+        None, description="The work order's customer, else the part's customer (free text on those records)"
+    )
+    customer_po: Optional[str] = None
+    work_order_id: Optional[int] = None
+    job_number: Optional[str] = Field(None, description="The linked work order's number")
+    serial_number: Optional[str] = None
+    status: FAIStatus
+    is_complete: bool = Field(..., description="True once the FAI has its final disposition")
+    fai_type: Optional[str] = None
+    reason: Optional[str] = None
+    total_characteristics: int = 0
+    characteristics_passed: int = 0
+    characteristics_failed: int = 0
+    inspection_date: Optional[date] = None
+    completed_date: Optional[date] = None
+    customer_approval_required: bool = False
+    customer_approved: bool = False
+    customer_approval_date: Optional[date] = None
+    created_at: datetime
 
 
 # FAI pre-fill from process-sheet step records (process sheets PR 4)
