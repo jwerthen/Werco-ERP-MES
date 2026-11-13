@@ -24,7 +24,7 @@ import pytest
 from sqlalchemy.orm import Session
 
 from app.models.company import Company
-from app.models.inventory import InventoryTransaction, TransactionType
+from app.models.inventory import InventoryItem, InventoryTransaction, TransactionType
 from app.models.part import Part
 from app.models.purchasing import PurchaseOrder, Vendor
 from app.models.quote import Quote
@@ -326,18 +326,59 @@ def test_every_export_renders_its_datetime_columns_with_an_offset(
             created_at=created,
         )
     )
+    # ``InventoryItem.received_date`` is a DateTime column despite its name.
+    db_session.add(
+        InventoryItem(
+            company_id=1,
+            part_id=export_part.id,
+            location="TZ-BIN",
+            quantity_on_hand=1,
+            is_active=True,
+            received_date=created,
+        )
+    )
+    db_session.add(
+        WorkOrder(
+            work_order_number="WO-TZ-EVERY",
+            part_id=export_part.id,
+            quantity_ordered=1,
+            status="draft",
+            company_id=1,
+            created_at=created,
+        )
+    )
     db_session.commit()
 
-    cases = [
-        ("/api/v1/exports/parts/export", {}, "created_at"),
-        ("/api/v1/exports/purchase-orders/export", {}, "created_at"),
-        ("/api/v1/exports/quotes/export", {}, "created_at"),
-        (TXN_URL, {}, "created_at"),
-    ]
-    for url, params, column in cases:
-        rows = _csv_rows(client.get(url, headers=admin_headers, params=params))
+    for url, column in DATETIME_COLUMN_BY_EXPORT.items():
+        rows = _csv_rows(client.get(url, headers=admin_headers))
         assert rows, url
         assert {row[column] for row in rows} == {expected}, url
+
+
+# Every /exports/* route, and the default datetime column each one renders (None: the
+# dataset has no datetime column -- PO lines carry only the ``required_date`` DATE).
+DATETIME_COLUMN_BY_EXPORT = {
+    WO_URL: "created_at",
+    "/api/v1/exports/parts/export": "created_at",
+    "/api/v1/exports/inventory/export": "received_date",
+    "/api/v1/exports/purchase-orders/export": "created_at",
+    "/api/v1/exports/quotes/export": "created_at",
+    TXN_URL: "created_at",
+}
+EXPORTS_WITHOUT_A_DATETIME_COLUMN = {"/api/v1/exports/purchase-orders/lines/export"}
+
+
+def test_every_export_route_is_checked_for_datetime_offsets():
+    """A new /exports/* route must be added to the offset check above (or declared datetime-free)."""
+    from app.main import app
+
+    export_routes = {
+        route.path
+        for route in app.routes
+        if getattr(route, "path", "").startswith("/api/v1/exports/") and "GET" in getattr(route, "methods", set())
+    }
+    assert export_routes, "the walk found no export routes"
+    assert export_routes == set(DATETIME_COLUMN_BY_EXPORT) | EXPORTS_WITHOUT_A_DATETIME_COLUMN
 
 
 def test_export_audit_still_records_the_requested_dates_not_utc_instants(client, admin_headers):

@@ -440,3 +440,37 @@ def test_write_routes_still_validate_with_the_cost_fields_null(client, db_sessio
     )
     assert duplicated.status_code == status.HTTP_201_CREATED, duplicated.text
     assert duplicated.json()["work_order"]["job_cost_actuals"] is None
+
+
+def test_issued_material_cost_reads_every_ledger_shape_of_this_work_order_only(client, db_session):
+    """The read uses the shared ``work_order_ledger_filter``: an operation-scoped tie ISSUE
+    (``reference_id`` = the OPERATION) and a legacy ``work_order`` ISSUE count; another work
+    order's row does not. A narrower ``reference_type`` filter would drop the operation row --
+    for a laser nest that is the job's whole material leg."""
+    admin = make_user(db_session)
+    wo, part = make_wo(db_session)
+    other_wo, _ = make_wo(db_session)
+    op = db_session.query(WorkOrderOperation).filter(WorkOrderOperation.work_order_id == wo.id).one()
+
+    def issue(reference_type, reference_id, cost):
+        db_session.add(
+            InventoryTransaction(
+                created_by=admin.id,
+                part_id=part.id,
+                transaction_type=TransactionType.ISSUE,
+                quantity=-1.0,
+                reference_type=reference_type,
+                reference_id=reference_id,
+                unit_cost=cost,
+                total_cost=-cost,
+                company_id=COMPANY_A,
+            )
+        )
+        db_session.commit()
+
+    issue("work_order_operation", op.id, 40.0)
+    issue("work_order", wo.id, 2.5)
+    issue("work_order_backflush", other_wo.id, 1000.0)
+
+    assert get_by_id(client, admin, wo.id)["issued_material_cost"] == 42.5
+    assert get_by_id(client, admin, other_wo.id)["issued_material_cost"] == 1000.0
