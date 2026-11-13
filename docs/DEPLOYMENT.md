@@ -248,6 +248,50 @@ everyone to the default; the audit rows recording each change remain. See
 [API.md → Personal dashboard layout](API.md#personal-dashboard-layout) and
 [DASHBOARD.md → Customizing the dashboard](DASHBOARD.md#customizing-the-dashboard).
 
+### Approved Supplier List, equipment assets and maintenance downtime
+
+Apply **123_vendor_asl**, then **124_maintenance_assets**, through the normal API boot migration
+path. No environment variable, secret, cron or worker job is added.
+
+- **123** adds six nullable Approved Supplier List columns to `vendors` (`approval_status`,
+  `approved_scopes`, `approval_bases`, `reevaluation_due`, `last_performance_evaluation`,
+  `approval_notes`), the CHECK `ck_vendors_approval_status`, the index
+  `ix_vendors_company_reevaluation_due`, and `parts.supply_scope`. No table, so no RLS statement. **No
+  backfill:** every vendor reads "not on the ASL" until the ASL import or **Update approval** records a
+  status, and `is_approved` is untouched until then.
+- **124** creates the tenant table `maintenance_assets` (RLS enabled with no policies; table and
+  sequence revoked from `PUBLIC`, and from `anon` / `authenticated` where those roles exist, matching
+  model bootstrap). On `maintenance_schedules`, `maintenance_work_orders` and `maintenance_logs` it
+  adds `asset_id` (FK and index), makes `work_center_id` nullable and adds the CHECK
+  `ck_<table>_one_target` (exactly one target; every existing row has a work center, so it validates).
+  It adds `downtime_events.maintenance_work_order_id` (FK and index). No data changes.
+- **Locks.** Both revisions run `SET LOCAL lock_timeout = '5s'`. They take ACCESS EXCLUSIVE locks on
+  `vendors`, `parts`, the three maintenance tables and `downtime_events`, held until the boot
+  transaction commits; the CHECKs validate and the indexes build inside it. A long transaction holding
+  any of those tables fails the boot after 5 seconds; the old deployment keeps serving and redeploying
+  is safe.
+- **Order.** The migration ships with the API or ahead of it: the old API ignores the new columns and
+  always writes a work center on maintenance rows. Deploy the API before the frontend (the normal CI
+  order): the new Supplier Scorecards ASL tab, the Create PO check, the Maintenance Assets tab and both
+  import wizards call routes the old API does not have.
+- **Verify** in a test company: Supplier Scorecards → Approved Supplier List → **Update approval** on a
+  vendor (a `vendor` UPDATE audit row carries the reason); preview an ASL file and confirm it lists
+  only matched vendors; mark a test vendor Disqualified and confirm a purchase order to it is refused
+  (409); add an equipment asset and a schedule on it; start a work-center maintenance work order with
+  *requires shutdown* and confirm `/downtime` shows an open event, then complete it and confirm the
+  event resolves. `SELECT relrowsecurity FROM pg_class WHERE relname = 'maintenance_assets';` is true.
+- **Rollback.** Keep both migrations on an ordinary application rollback, with these cautions. Old
+  code cannot start or complete a maintenance work order that targets an **asset**: its event-log
+  insert carries no target, so the 124 CHECK refuses it (500, nothing saved). Old code does not
+  resolve the downtime event a maintenance work order opened; resolve those on `/downtime`. Old code
+  also neither refuses a purchase order to a Disqualified vendor nor stops the vendor edit from
+  contradicting an ASL status. A deliberate **124** downgrade refuses, naming the counts, while any
+  schedule, work order or log targets an asset (re-point or remove those first), and otherwise drops
+  the asset register; a **123** downgrade drops every recorded ASL value and part scope. Export them
+  first. See
+  [API.md → Approved Supplier List on the vendor record](API.md#approved-supplier-list-on-the-vendor-record)
+  and [API.md → Maintenance](API.md#maintenance-pm-schedules-maintenance-work-orders-event-log).
+
 ### Existing ERP frontend: Fabrication Quoting
 
 The fabrication estimator lives at [wercomfg.app/fabrication-quotes](https://wercomfg.app/fabrication-quotes), under **Sales & Quoting → Fabrication Quoting**. It uses the existing ERP authentication, API, Railway services and Vercel project. Old estimator URLs redirect here. See [the implementation and operating guide](FABRICATION_QUOTING.md).

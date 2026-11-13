@@ -209,6 +209,15 @@ but **only entries whose source is wired today actually fire**; the rest are **d
 `material.backflush_shortage`, `material.allocation_consumption_failed`, `material.backflush_failed`,
 `material.backflush_demand_refused`, `dispatch.changed`.
 
+> **`downtime.started` / `downtime.resolved` have a second source since migration `124`.** Besides
+> an operator report on `/downtime`, starting a work-center maintenance work order with
+> `requires_shutdown` emits `downtime_started` (unless it adopts an event already open on that
+> machine, which emits nothing new), and ending it — `/complete`, or a `PUT` to `cancelled` /
+> `completed` — emits `downtime_resolved`. See
+> [API.md → Maintenance](API.md#maintenance-pm-schedules-maintenance-work-orders-event-log). The
+> catalog entry is unchanged, so a **planned** preventive-maintenance shutdown raises the same
+> `critical` `downtime.started` notification (and SMS, for users who opted in) as a breakdown.
+
 > **`dispatch.changed` — added with Dispatch Board v2 (2026-11-04).** The planner changed the run
 > order at a machine; the people clocked in there are told.
 >

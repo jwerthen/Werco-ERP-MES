@@ -57,7 +57,9 @@ review gates, revision conflicts, partial-save recovery and verification.
 - **Draft a purchase order:** choose a vendor and part, enter quantity, unit
   price and optional required date, then review and create a draft PO. The form
   starts with one line; the API and chat can prepare up to 50. It never approves,
-  sends, or receives the PO.
+  sends, or receives the PO. A vendor Disqualified on the Approved Supplier List
+  is refused at review and again at creation (409); other Approved Supplier List
+  findings are recorded on the PO's create audit entry as warnings.
 - **Attach a PDF to a job:** choose an existing PDF and destination work order,
   review revision/status and both records, then attach it. An existing job or
   revision-history binding cannot be reassigned. This does not approve or read
