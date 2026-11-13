@@ -205,6 +205,7 @@ machine that runs it and are never part of the server's configuration.
 | `WERCO_MCP_MAX_RESULT_CHARS` | No | `200000` | Characters of one tool result's text before it is truncated with a `[truncated: N of M chars …]` note (the structured payload is replaced by a marker when that happens) |
 | `WERCO_MCP_MAX_BLOB_BYTES` | No | `5000000` | Bytes of a binary response (PDF / XLSX / CSV attachment) returned inline as a base64 blob; over it the tool answers with an error telling the caller to download the file from the UI |
 | `WERCO_MCP_MAX_UPLOAD_BYTES` | No | `25000000` | Bytes of one MCP request envelope at the door — a nest PDF rides base64-encoded **inside** the JSON-RPC body, so `MAX_JSON_BODY_BYTES` is waived on the door path and this cap bounds it instead (**413** over it, before parsing). On the stdio bridge it bounds one decoded file argument |
+| `WERCO_MCP_READ_ONLY_DENY_TAGS` | No | `Documents,Document Deliveries,Data Export,Users,Audit,Admin Settings,Carrier Integrations,Platform Administration,Company Management,API Tokens,Hank Intake` | Comma-separated OpenAPI tags a **read-only API token** (`api_tokens.scope = 'read_only'`, migration `119`) may never reach. Entries are whitespace-stripped and **case-sensitive** (`API Tokens`, not `API tokens`). Despite the `WERCO_MCP_` prefix it is enforced **twice**, and whether or not the door is enabled: by `get_current_user` on every `/api/v1` request (**403** `"Read-only API token cannot access this resource."`), and by the MCP door, which hides those tools from the token's `tools/list` and answers **403** when one is called by name. Full tokens and people are unaffected. **The API refuses to start** when an entry is not a live route tag, because a misspelled tag would silently deny nothing. Removing a tag widens what every read-only and AI-external token can read: treat a change as an access-control change. See [MCP.md → 4.1](MCP.md#41-read-only-api-tokens) |
 
 Rate limiting is two-tier. The door waives the app's **default** limit on its own path (registered
 with the limiter's `exempt` mechanism) and keeps the **inner** route hit, keyed on the MCP caller's
@@ -221,7 +222,7 @@ here — never paste a token or password into a committed file.
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `WERCO_ERP_URL` | No | — | Base URL of the deployed API (`https://<api-host>`, trailing slash stripped). **Set → REMOTE mode**: tools go over HTTPS to that deployment, and any *missing* `DATABASE_URL` / `SECRET_KEY` / `REFRESH_TOKEN_SECRET_KEY` / `ENVIRONMENT` / `RATE_LIMIT_ENABLED` is defaulted to a placeholder that is never used (the catalog still needs `app.main` importable). **Unset → IN-PROCESS mode**: tools dispatch into the local app object and the real environment (a `DATABASE_URL`, the real `SECRET_KEY`) is required — dev only |
-| `WERCO_ERP_TOKEN` | No* | — | A static ERP bearer, used first when set: an **API token** (long-lived, revocable, Admin-minted via `POST /api-tokens/` — the recommended standing credential; it never 401s until revoked, so the refresh / login variables below are unnecessary with it) or a 15-minute **access** token |
+| `WERCO_ERP_TOKEN` | No* | — | A static ERP bearer, used first when set: an **API token** (long-lived, revocable, Admin-minted via `POST /api-tokens/` or Admin → API Tokens — the recommended standing credential; it never 401s until revoked, so the refresh / login variables below are unnecessary with it) or a 15-minute **access** token. A read-only or AI-external API token narrows the bridge's tool listing from its own claims; the API refuses everything else regardless ([MCP.md → 4.1](MCP.md#41-read-only-api-tokens)) |
 | `WERCO_ERP_REFRESH_TOKEN` | No* | — | A refresh token; on a 401 the bridge calls `POST /auth/refresh`, rotates the pair in memory, and retries the call once. A refresh token the server rejects is forgotten so the next attempt falls through to login |
 | `WERCO_ERP_EMAIL` / `WERCO_ERP_PASSWORD` | No* | — | Login credentials; the bridge logs in through `POST /auth/login` at first use and re-logs-in after a 401 when no refresh token works. A dedicated user at the role the agent needs (e.g. *Werco Assistant* — the owner's assistant is an Admin) is recommended so agent writes are attributable |
 | `WERCO_MCP_TRANSPORT` | No | `stdio` | `stdio` (what agents spawn) or `http` (a **dev-only** local Streamable HTTP server; same as `--transport http`) |
@@ -1104,3 +1105,10 @@ fresh one; for an API token that means an Admin mints a new one (`POST /api-toke
 renews it. On the stdio bridge no `WERCO_ERP_TOKEN` / `WERCO_ERP_REFRESH_TOKEN` /
 `WERCO_ERP_EMAIL`+`WERCO_ERP_PASSWORD` is set, or the login/refresh failed; the bridge logs
 `Credentials configured: …` on stderr at startup. See [docs/MCP.md → Troubleshooting](MCP.md#13-troubleshooting).
+
+### The API will not start: "WERCO_MCP_READ_ONLY_DENY_TAGS names tag(s) no API route carries"
+An entry in `WERCO_MCP_READ_ONLY_DENY_TAGS` matches no route's OpenAPI tag. The usual causes are a
+case slip (`API tokens` for `API Tokens`) or a tag a router no longer uses. The boot check refuses
+it on purpose, because a misspelled entry would deny nothing to every read-only token. Fix the
+value to the exact tag, or unset the variable to get the default. `python -m app.mcp
+--print-catalog` lists each tool's `tag`; run it without the bad value, since it boots the same app.
