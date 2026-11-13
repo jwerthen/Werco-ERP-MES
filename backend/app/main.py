@@ -1205,6 +1205,14 @@ from app.api.websocket import router as websocket_router
 
 app.include_router(websocket_router, prefix=settings.API_V1_PREFIX, tags=["WebSocket"])
 
+# Read-only API tokens are refused every route under a tag in WERCO_MCP_READ_ONLY_DENY_TAGS
+# (get_current_user, and the MCP door's listing). A misspelled tag would silently deny
+# nothing, so the configured list is checked against the live route tags HERE -- after
+# every router is included, whether or not the MCP door is enabled -- and a typo fails boot.
+from app.api.deps import refuse_unknown_read_only_deny_tags
+
+refuse_unknown_read_only_deny_tags(app.routes)
+
 # MCP door (app/mcp). Mounted AFTER every router so the tool catalog it derives from
 # app.openapi() sees the whole API. A no-op unless WERCO_MCP_HTTP_ENABLED is true (the
 # default is false); when mounted, the lifespan above enters its session manager.

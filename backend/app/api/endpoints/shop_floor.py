@@ -4131,22 +4131,42 @@ def get_all_operations(
     return response
 
 
+# The floor's PERFORMING roles for the two operation verbs below (owner decision P0.4,
+# 2026-11-13): Viewer and Shipping are 403 before anything is read. Matches the
+# ``work_orders:complete`` permission set and Hank's report_production roles; ``require_role``
+# still admits superusers and PLATFORM_ADMIN. The kiosk keeps working: both of its
+# credentials -- the single-operator employee-login token and the crew station's
+# badge-minted ``scope="kiosk"`` token -- are the operator's OWN access JWT, resolved to
+# the live user and role. NOT applied to clock-in / clock-out / production / hold / resume
+# (a documented residual: a Viewer can still start through clock-in and complete through a
+# full-count clock-out -- see docs/RBAC_PERMISSIONS.md).
+_FLOOR_OPERATION_ROLES = [
+    UserRole.ADMIN,
+    UserRole.MANAGER,
+    UserRole.SUPERVISOR,
+    UserRole.OPERATOR,
+    UserRole.QUALITY,
+]
+
+
 @router.put("/operations/{operation_id}/start")
 def start_operation(
     operation_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(_FLOOR_OPERATION_ROLES)),
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
     """
-    Mark operation as in progress and create a time entry.
+    Mark operation as in progress and create a time entry (Admin / Manager / Supervisor /
+    Operator / Quality; Viewer and Shipping are 403).
     - Sets status to IN_PROGRESS
     - Records actual_start_time
     - Creates a TimeEntry so the dashboard shows the operator on this job
     - Lifts a RELEASED work order to IN_PROGRESS (never a draft one)
 
-    Open to any authenticated user (the operator's verb). Refused before any write:
+    Admin / Manager / Supervisor / Operator / Quality (the operator's verb); Viewer and
+    Shipping are 403 before anything is read. Refused before any write:
     unknown operation (404); already complete / already in progress (400); work order
     missing or soft-deleted (404); **409** when the work order is a draft ("release
     first": release_work_order), on hold (work_orders_resume_work_order lifts it), or
@@ -4603,7 +4623,7 @@ def complete_operation(
     operation_id: int,
     completion_data: OperationCompleteRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(_FLOOR_OPERATION_ROLES)),
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
@@ -4613,6 +4633,7 @@ def complete_operation(
     itself and never closes short on its own: if recorded good does not cover every unit
     that reached the operation, it is refused 409 and nothing is written -- record the
     pieces first, or leave it open. An API token may not report scrap or close short (403).
+    Admin / Manager / Supervisor / Operator / Quality; Viewer and Shipping are 403.
 
     A CLOSE verb (owner ruling 1, 2026-11-05) -- there is no partial branch. On 200 the
     operation is COMPLETE, ``is_fully_complete`` is always true, and every open TimeEntry
@@ -4628,8 +4649,9 @@ def complete_operation(
     **409** names them otherwise, because their unreported pieces will not be counted.
     Unknown keys are **422**.
 
-    Refused before any write, in order: terminal work order **409**; already complete
-    **400**; operation ON_HOLD **409** (other non-startable status **400**); a READY
+    Refused before any write, in order: role not Admin / Manager / Supervisor / Operator /
+    Quality **403** (before the operation is read or the body is validated); terminal work
+    order **409**; already complete **400**; operation ON_HOLD **409** (other non-startable status **400**); a READY
     operation under a DRAFT / ON_HOLD work order **409** (completing it starts it); bad
     ``quantity_complete`` / missing target **400**; predecessors incomplete **400**; no
     labor ever recorded **400** (floor only -- the office twin deliberately has no such

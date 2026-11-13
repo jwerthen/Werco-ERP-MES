@@ -60,7 +60,11 @@ def create_api_token(
     not be a platform admin / superuser (409 -- no token ever acts as one).
     Issuance is audited, every write the token makes carries an audit marker
     naming it, and deactivating its user revokes it; a dedicated bot user
-    account is recommended.
+    account is recommended. ``scope`` narrows the token: ``read_only`` refuses
+    (403) every non-GET route and every route under a tag in
+    ``WERCO_MCP_READ_ONLY_DENY_TAGS``, whatever the user's role; ``ai_external``
+    (default true for a read-only token, 422 on a full one) marks a token whose
+    answers go to an outside AI service. Both are fixed at mint and audited.
     """
     record, token = api_token_service.issue_api_token(
         db,
@@ -70,6 +74,8 @@ def create_api_token(
         expires_days=payload.expires_days,
         created_by=current_user.id,
         audit=audit,
+        scope=payload.scope.value,
+        ai_external=payload.ai_external,
     )
     return ApiTokenIssueResponse(**ApiTokenResponse.model_validate(record).model_dump(), token=token)
 
@@ -85,7 +91,8 @@ def list_api_tokens(
     """List this company's API tokens, newest first (ADMIN only; metadata only, never a secret).
 
     Each row carries the holder (``user_id``), its ``label``, ``jti_prefix``
-    (the correlation handle, not a credential), ``expires_at`` (null = never),
+    (the correlation handle, not a credential), its ``scope`` and ``ai_external``
+    flag, ``expires_at`` (null = never),
     the revocation trail and ``last_used_at`` (touched at most once per five
     minutes, so it is a liveness marker, not a hit counter).
     """

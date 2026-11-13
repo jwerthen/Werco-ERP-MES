@@ -1,6 +1,6 @@
 import re
 from pathlib import Path
-from typing import List, Optional
+from typing import FrozenSet, List, Optional
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 from pydantic import AliasChoices, Field, ValidationInfo, field_validator, model_validator
@@ -415,6 +415,25 @@ class Settings(BaseSettings):
     # initialize, schema-rejected calls, unauthenticated 401 probes) would have no
     # ceiling at all. Kept ABOVE the 100/60 s default so it never binds a tool call.
     WERCO_MCP_HTTP_RATE_LIMIT: str = "300/minute"
+    # OpenAPI tags a READ-ONLY API token (api_tokens.scope = 'read_only', migration 119)
+    # may never reach -- comma-separated, case-sensitive, exactly as the routers tag them.
+    # Enforced TWICE: by get_current_user on every /api/v1 request (403) and by the MCP
+    # door (hidden from tools/list, 403 when called by name). Full tokens and people are
+    # unaffected. Every entry must be a live route tag: main.py refuses to boot on a typo,
+    # because a misspelled tag would silently deny nothing. The default covers document /
+    # drawing files, bulk exports, user records, the audit log, admin and platform
+    # settings, carrier credentials, company management, the token admin itself and Hank's
+    # intake uploads ("CAD source storage" has no live router since 2026-09-16; file bytes
+    # under any other tag are refused to read-only tokens by the non-JSON response rule).
+    WERCO_MCP_READ_ONLY_DENY_TAGS: str = (
+        "Documents,Document Deliveries,Data Export,Users,Audit,Admin Settings,Carrier Integrations,"
+        "Platform Administration,Company Management,API Tokens,Hank Intake"
+    )
+
+    @property
+    def read_only_deny_tags(self) -> FrozenSet[str]:
+        """``WERCO_MCP_READ_ONLY_DENY_TAGS`` as a set: entries stripped, empties dropped, case kept."""
+        return frozenset(tag.strip() for tag in (self.WERCO_MCP_READ_ONLY_DENY_TAGS or "").split(",") if tag.strip())
 
     @field_validator("WERCO_MCP_HTTP_PATH")
     @classmethod

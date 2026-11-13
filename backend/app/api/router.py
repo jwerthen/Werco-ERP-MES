@@ -90,7 +90,10 @@ api_router.include_router(consumables.router, prefix="/consumables", tags=["Cons
 api_router.include_router(document_deliveries.router, prefix="/document-deliveries", tags=["Document Deliveries"])
 api_router.include_router(operations_inbox.router, prefix="/operations-inbox", tags=["Operations Inbox"])
 api_router.include_router(hank.router, prefix="/hank", tags=["Hank"])
-api_router.include_router(hank_intake.router, prefix="/hank", tags=["Hank"])
+# Its own tag (not "Hank") so WERCO_MCP_READ_ONLY_DENY_TAGS can deny the intake UPLOADS -- and
+# their source bytes -- to read-only API tokens without denying the rest of Hank. Changes no
+# generated MCP tool name.
+api_router.include_router(hank_intake.router, prefix="/hank", tags=["Hank Intake"])
 api_router.include_router(hank_operations.router, prefix="/hank", tags=["Hank"])
 api_router.include_router(hank_preferences.router, prefix="/hank", tags=["Hank"])
 api_router.include_router(hank_tasks.router, prefix="/hank", tags=["Hank"])

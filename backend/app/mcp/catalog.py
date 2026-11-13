@@ -159,6 +159,9 @@ class GeneratedTool:
     file_list_fields: Tuple[str, ...] = ()
     deprecated: bool = False
     operation_id: str = ""
+    # EVERY OpenAPI tag on the operation (``tag`` above is only the first, for naming and
+    # the description suffix). The read-only deny list is tested against all of them.
+    tags: Tuple[str, ...] = ()
 
     @property
     def key(self) -> Tuple[str, str]:
@@ -503,6 +506,7 @@ def build_tool(
         file_list_fields=tuple(file_list_fields),
         deprecated=bool(operation.get("deprecated")),
         operation_id=operation_id,
+        tags=tuple(str(item) for item in tags),
     )
 
 

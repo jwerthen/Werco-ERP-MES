@@ -1,12 +1,17 @@
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from typing import Any, FrozenSet, Iterable, Optional
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.credentials import (
+    API_TOKEN_SCOPE_FULL,
+    READ_ONLY_ROUTE_DENIED_DETAIL,
+    READ_ONLY_ROUTE_WRITES_DETAIL,
+)
 from app.core.observability import set_sentry_tags
 from app.core.security import (
     verify_api_token,
@@ -110,6 +115,63 @@ def _is_api_token_denied_path(path: str) -> bool:
     return False
 
 
+def read_only_api_token_refusal(
+    request: Request, deny_tags: Optional[FrozenSet[str]] = None
+) -> Optional[HTTPException]:
+    """The 403 a READ-ONLY API token gets on this request, or None (brief P0.1 / P0.2).
+
+    Two gates, in order, both pure (no database):
+
+    2. **Method.** Anything but ``GET`` / ``HEAD`` / ``OPTIONS`` is refused -- whatever the
+       bound user's role, and before the route reads a byte. This is what makes the token
+       unable to write through ``/api/v1`` directly, not just through the MCP door.
+    3. **Tag.** The matched route (``request.scope["route"]``, which FastAPI sets before any
+       dependency runs) must carry no tag in ``WERCO_MCP_READ_ONLY_DENY_TAGS``. No matched
+       route at all fails CLOSED -- a request this gate cannot place is refused, not waved
+       through.
+
+    (Gate 1 -- AI egress -- and gate 4 -- the AI-external route allowlist -- are separate
+    checks for an AI-external token; see ``get_current_user``.) Full tokens and people
+    never reach this function.
+    """
+    if request.method.upper() not in SAFE_READ_ONLY_METHODS:
+        return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=READ_ONLY_ROUTE_WRITES_DETAIL)
+    route = request.scope.get("route")
+    tags = getattr(route, "tags", None)
+    if route is None or tags is None:
+        return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=READ_ONLY_ROUTE_DENIED_DETAIL)
+    denied = settings.read_only_deny_tags if deny_tags is None else deny_tags
+    if any(str(tag) in denied for tag in tags):
+        return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=READ_ONLY_ROUTE_DENIED_DETAIL)
+    return None
+
+
+def live_route_tags(routes: Iterable[Any]) -> FrozenSet[str]:
+    """Every tag any FastAPI route in ``routes`` carries (``app.routes``; non-API routes skipped)."""
+    tags = set()
+    for route in routes:
+        for tag in getattr(route, "tags", None) or ():
+            tags.add(str(tag))
+    return frozenset(tags)
+
+
+def refuse_unknown_read_only_deny_tags(routes: Iterable[Any], deny_tags: Optional[FrozenSet[str]] = None) -> None:
+    """Boot check: raise ``RuntimeError`` when ``WERCO_MCP_READ_ONLY_DENY_TAGS`` names a tag no route carries.
+
+    Tags are case-sensitive (``API Tokens``, not ``API tokens``), and a misspelled entry would
+    otherwise silently deny NOTHING to every read-only token -- so ``main.py`` calls this after
+    every router is included and the deploy fails loudly instead.
+    """
+    configured = settings.read_only_deny_tags if deny_tags is None else deny_tags
+    unknown = sorted(configured - live_route_tags(routes))
+    if unknown:
+        raise RuntimeError(
+            "WERCO_MCP_READ_ONLY_DENY_TAGS names tag(s) no API route carries: "
+            + ", ".join(repr(tag) for tag in unknown)
+            + ". Tags are case-sensitive and must match the routers' OpenAPI tags exactly."
+        )
+
+
 def is_user_bearer(token: str) -> bool:
     """Is this bearer a USER credential -- an access JWT or an API JWT -- by signature?
 
@@ -207,13 +269,33 @@ def get_current_user(
         user._api_token_id = api_token_record.id
         user._api_token_jti_prefix = api_token_record.jti_prefix
         user._api_token_label = api_token_record.label
+        # The narrowing (migration 119), copied from the ROW -- never from a claim.
+        # ``app.core.credentials.is_read_only_api_token`` / ``is_ai_external_credential``
+        # read these, and fail closed on anything but exactly "full" / False.
+        user._api_token_scope = api_token_record.scope
+        user._api_token_ai_external = bool(api_token_record.ai_external)
         _tag_sentry_principal(user)
+
+        # Narrowed tokens only; a FULL token is byte-identical to before. Gate order:
+        #   1. AI-external + company AI egress off -> 403 (Claude-plugin brief P0.3; the
+        #      export-control stage adds it HERE, ahead of the read-only gates).
+        #   2. read-only + not GET/HEAD/OPTIONS -> 403   } read_only_api_token_refusal
+        #   3. read-only + a denied tag on the route -> 403 }
+        #   4. AI-external + (method, route) outside the AI-external allowlist -> 403 (P0.3).
+        #   5. AI-external -> the export-control marker for the response middleware (P0.3).
+        if api_token_record.scope != API_TOKEN_SCOPE_FULL:
+            refusal = read_only_api_token_refusal(request)
+            if refusal is not None:
+                raise refusal
         return user
 
-    # An interactive credential: clear the marker explicitly. The same ORM
+    # An interactive credential: clear the markers explicitly. The same ORM
     # instance can serve more than one request (a shared identity map), and an
-    # unset marker is what tells ``AuditService`` this write was the person's own.
+    # unset marker is what tells ``AuditService`` this write was the person's own
+    # -- and what keeps a person from inheriting a token's read-only narrowing.
     user._api_token_id = None
+    user._api_token_scope = None
+    user._api_token_ai_external = False
 
     # Attach active company context from JWT (may differ from user.company_id
     # when a platform admin switches to view another company)
