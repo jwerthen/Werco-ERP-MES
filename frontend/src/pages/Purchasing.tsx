@@ -25,6 +25,10 @@ import {
   TrashIcon,
 } from '@heroicons/react/24/outline';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
+import { AslStatusPill } from '../components/suppliers/AslStatusPill';
+import { SupplierApprovalWarnings } from '../components/suppliers/SupplierApprovalWarnings';
+import type { AslStatus, SupplierApprovalCheck, SupplierApprovalWarning } from '../types/supplierApproval';
+import { aslStatusLabel } from '../utils/supplierApproval';
 import {
   Button,
   ConfirmDialog,
@@ -59,6 +63,12 @@ interface Vendor {
   is_active?: boolean;
   notes?: string;
   version?: number;
+  updated_at?: string | null;
+  // Approved Supplier List status (AS9100D 8.4). Read-only here: it is written only by
+  // Supplier Scorecards → Approved Supplier List (Update approval / Import ASL). While it is
+  // set, `is_approved` FOLLOWS it and the vendor PUT refuses a contradicting value (409).
+  approval_status?: AslStatus | null;
+  reevaluation_due?: string | null;
   // Soft-delete provenance. Populated ONLY by the deleted view
   // (GET /purchasing/vendors?deleted_only=true); undefined on every live row, which is
   // exactly how the two books stay tellable apart in one shared row shape. Same three
@@ -341,6 +351,44 @@ export default function Purchasing() {
   // Snapshot captured when the edit-vendor modal opens; the dirty check
   // compares against it (Materials.tsx idiom).
   const [initialEditVendorForm, setInitialEditVendorForm] = useState(BLANK_EDIT_VENDOR);
+
+  // Approved Supplier List check for the PO being drafted (POST /purchasing/supplier-approval-check,
+  // a pure read). Advisory warnings show amber; a Disqualified vendor is the one hard stop —
+  // the server refuses the create (409) and the form says so before the click. Keyed on the
+  // vendor + the distinct line parts and debounced, so typing quantities never re-checks.
+  const [aslCheck, setAslCheck] = useState<SupplierApprovalCheck | null>(null);
+  const poPartIds = Array.from(new Set(newPO.lines.map(line => line.part_id).filter(id => id > 0))).sort(
+    (a, b) => a - b
+  );
+  const aslCheckKey = showPOModal && newPO.vendor_id > 0 ? `${newPO.vendor_id}:${poPartIds.join(',')}` : '';
+  const debouncedAslCheckKey = useDebouncedValue(aslCheckKey, 300);
+  useEffect(() => {
+    if (!debouncedAslCheckKey) {
+      setAslCheck(null);
+      return;
+    }
+    const [vendorPart, partsPart] = debouncedAslCheckKey.split(':');
+    let active = true;
+    // Advisory only: a failed check (older API, network) must never block the form, so any
+    // failure — even a synchronous one — just clears the panel.
+    Promise.resolve()
+      .then(() =>
+        api.checkSupplierApproval({
+          vendor_id: Number(vendorPart),
+          part_ids: partsPart ? partsPart.split(',').map(Number) : [],
+        })
+      )
+      .then(result => {
+        if (active) setAslCheck(result ?? null);
+      })
+      .catch(() => {
+        if (active) setAslCheck(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [debouncedAslCheckKey]);
+  const currentAslCheck = aslCheck && aslCheck.vendor_id === newPO.vendor_id ? aslCheck : null;
 
   // Unsaved-changes guards: every Cancel/Close/backdrop path of the three form
   // modals is gated with confirmDiscard() so in-progress edits aren't silently
@@ -865,9 +913,14 @@ export default function Purchasing() {
         payment_terms: editVendorForm.payment_terms.trim() || undefined,
         notes: editVendorForm.notes.trim() || undefined,
       };
+      // On the Approved Supplier List, `is_approved` follows the ASL status and the server
+      // refuses (409) a PUT that contradicts it — so don't send it at all while a status is
+      // set (the checkbox is locked below); the approval verb is the only way to move it.
+      const { is_approved: isApproved, ...rest } = cleanedForm;
       await api.updateVendor(selectedVendor.id, {
         version: selectedVendor.version ?? 0,
-        ...cleanedForm,
+        ...rest,
+        ...(selectedVendor.approval_status ? {} : { is_approved: isApproved }),
       });
       setShowEditVendorModal(false);
       setSelectedVendor(null);
@@ -987,14 +1040,28 @@ export default function Purchasing() {
     setActionError('');
     try {
       // An empty-string date 422s server-side — omit it when blank.
-      await api.createPurchaseOrder({
+      const created = await api.createPurchaseOrder({
         ...newPO,
         required_date: newPO.required_date || undefined,
       });
       if (!await poDraft.clear()) showToast('warning', 'Purchase order created, but the recovery draft could not be removed. Check the order list before resuming it.');
       setShowPOModal(false);
       setNewPO(BLANK_PO);
-      showToast('success', 'Purchase order created');
+      // The server recomputes the ASL warnings on the PO it stored (and records them on the
+      // create audit row) — a created PO that carries any is a partial success, not a clean one.
+      const aslWarnings: SupplierApprovalWarning[] = Array.isArray(created?.supplier_approval_warnings)
+        ? created.supplier_approval_warnings
+        : [];
+      if (aslWarnings.length > 0) {
+        showToast(
+          'warning',
+          `Purchase order created with ${aslWarnings.length} Approved Supplier List warning${
+            aslWarnings.length === 1 ? '' : 's'
+          }: ${aslWarnings[0].message}`
+        );
+      } else {
+        showToast('success', 'Purchase order created');
+      }
       loadData();
     } catch (err: any) {
       const detail = err.response?.data?.detail;
@@ -1556,6 +1623,13 @@ export default function Purchasing() {
       csv: vendor => (vendor.is_approved ? 'Yes' : 'No'),
     },
     {
+      key: 'approval_status',
+      header: 'ASL',
+      sortable: true,
+      accessor: vendor => aslStatusLabel(vendor.approval_status),
+      render: vendor => <AslStatusPill status={vendor.approval_status} />,
+    },
+    {
       key: 'actions',
       header: 'Actions',
       align: 'center',
@@ -2025,6 +2099,7 @@ export default function Purchasing() {
                     <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Name</th>
                     <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Contact</th>
                     <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Approved</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">ASL</th>
                     <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">AS9100</th>
                     <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">ISO9001</th>
                     <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Payment Terms</th>
@@ -2046,6 +2121,9 @@ export default function Purchasing() {
                         ) : (
                           <span className="text-slate-400">-</span>
                         )}
+                      </td>
+                      <td className="px-4 py-3">
+                        <AslStatusPill status={vendor.approval_status} />
                       </td>
                       <td className="px-4 py-3 text-center">
                         {vendor.is_as9100_certified ? (
@@ -2139,6 +2217,11 @@ export default function Purchasing() {
             </FormField>
           </div>
 
+          <SupplierApprovalWarnings
+            warnings={currentAslCheck?.warnings}
+            refusal={currentAslCheck?.refused ? currentAslCheck.refusal : null}
+          />
+
           <div>
             <div className="flex justify-between items-center mb-2">
               <span className="label">Line Items</span>
@@ -2229,7 +2312,11 @@ export default function Purchasing() {
             <Button variant="secondary" onClick={requestClosePOModal}>
               Cancel
             </Button>
-            <Button type="submit" disabled={actionBusy}>
+            <Button
+              type="submit"
+              disabled={actionBusy || !!currentAslCheck?.refused}
+              title={currentAslCheck?.refused ? currentAslCheck.refusal ?? undefined : undefined}
+            >
               Create PO
             </Button>
           </div>
@@ -2532,16 +2619,34 @@ export default function Purchasing() {
               </div>
 
               <div className="grid grid-cols-2 gap-4">
-                <label className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={editVendorForm.is_approved}
-                    onChange={e => setEditVendorForm({ ...editVendorForm, is_approved: e.target.checked })}
-                    className="rounded border-slate-600"
-                    aria-label="Approved Vendor"
-                  />
-                  <span>Approved Vendor</span>
-                </label>
+                <div>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={editVendorForm.is_approved}
+                      onChange={e => setEditVendorForm({ ...editVendorForm, is_approved: e.target.checked })}
+                      disabled={!!selectedVendor.approval_status}
+                      aria-describedby={selectedVendor.approval_status ? 'vendor-asl-approval-lock' : undefined}
+                      className="rounded border-slate-600 disabled:opacity-60"
+                      aria-label="Approved Vendor"
+                    />
+                    <span>Approved Vendor</span>
+                  </label>
+                  {selectedVendor.approval_status && (
+                    <p id="vendor-asl-approval-lock" className="mt-1 text-xs text-slate-400">
+                      Follows the Approved Supplier List status (
+                      <AslStatusPill status={selectedVendor.approval_status} />
+                      ). Change it with Update approval on{' '}
+                      <Link
+                        to="/supplier-scorecards?tab=asl"
+                        className="text-werco-navy-300 underline hover:text-blue-200"
+                      >
+                        Supplier Scorecards → Approved Supplier List
+                      </Link>
+                      .
+                    </p>
+                  )}
+                </div>
                 <label className="flex items-center gap-2">
                   <input
                     type="checkbox"

@@ -7,6 +7,7 @@ import usePermissions from '../../hooks/usePermissions';
 import useUnsavedChanges from '../../hooks/useUnsavedChanges';
 import EntityPicker from './EntityPicker';
 import SupplierFollowup from './SupplierFollowup';
+import { SupplierApprovalWarnings } from '../suppliers/SupplierApprovalWarnings';
 
 export default function PurchaseOrderDetail({
   id,
@@ -147,6 +148,9 @@ export default function PurchaseOrderDetail({
               Print purchase order
             </Button>
           </div>
+          {/* Advisory Approved Supplier List findings the server computed for this vendor and
+              these lines (never stored on the PO; re-read with it). */}
+          <SupplierApprovalWarnings warnings={record.supplier_approval_warnings} />
           {['sent', 'partial'].includes(record.status) && (
             <SupplierFollowup
               key={record.id}

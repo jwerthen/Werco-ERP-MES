@@ -70,6 +70,19 @@ import {
   OfficeOperationCompleteResult,
 } from '../types';
 import { ScanResolveRequest, ScanResolveResult } from '../types/scan';
+import type {
+  AslImportResponse,
+  AslVendor,
+  SupplierApprovalCheck,
+  VendorApprovalUpdate,
+  VendorReevaluationDue,
+} from '../types/supplierApproval';
+import type {
+  MaintenanceAsset,
+  MaintenanceAssetInput,
+  MaintenanceAssetUpdate,
+  PmImportResponse,
+} from '../types/maintenance';
 import {
   SPCCapability,
   SPCChartData,
@@ -3317,6 +3330,60 @@ class ApiService {
     return response.data;
   }
 
+  // ---- Approved Supplier List (AS9100D 8.4, QL 7.4) on the vendor record ----
+  // The ASL fields ride on every VendorResponse; these are the verbs that WRITE them (only
+  // the approval verb and the import ever do) plus the two pure reads the screens need.
+
+  // Overdue supplier re-evaluations: Approved / Conditional / Customer-Directed vendors whose
+  // reevaluation_due is before Central today (+ within_days). Live, active vendors unless
+  // include_inactive. A pure read.
+  async getVendorsReevaluationDue(params?: {
+    within_days?: number;
+    include_inactive?: boolean;
+  }): Promise<VendorReevaluationDue[]> {
+    const response = await this.api.get<VendorReevaluationDue[]>('/purchasing/vendors/reevaluation-due', { params });
+    return response.data;
+  }
+
+  // A person's supplier-approval decision (ADMIN/MANAGER/QUALITY; an API token is refused).
+  // Server-GATED — 409 when the vendor changed since `expected_updated_at`, 503 when the
+  // required audit row cannot be written — so callers stay non-optimistic.
+  async updateVendorApproval(id: number, data: VendorApprovalUpdate): Promise<AslVendor> {
+    const response = await this.api.put<AslVendor>(`/purchasing/vendors/${id}/approval`, data);
+    return response.data;
+  }
+
+  // ASL check for a prospective PO (pure read): advisory warnings, plus `refused` + the exact
+  // 409 text when the vendor is Disqualified.
+  async checkSupplierApproval(data: { vendor_id: number; part_ids: number[] }): Promise<SupplierApprovalCheck> {
+    const response = await this.api.post<SupplierApprovalCheck>('/purchasing/supplier-approval-check', data);
+    return response.data;
+  }
+
+  // Update-only ASL import. Preview writes nothing and returns `source_hash`; commit must
+  // echo it back (409 when the file differs, or with `detail.errors` when any row errors —
+  // all-or-nothing).
+  async previewVendorAslImport(file: File): Promise<AslImportResponse> {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await this.api.post<AslImportResponse>('/purchasing/vendors/asl-import/preview', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: importTimeout(true),
+    });
+    return response.data;
+  }
+
+  async commitVendorAslImport(file: File, expectedSourceHash: string): Promise<AslImportResponse> {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('expected_source_hash', expectedSourceHash);
+    const response = await this.api.post<AslImportResponse>('/purchasing/vendors/asl-import/commit', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: importTimeout(false),
+    });
+    return response.data;
+  }
+
   // Soft-delete a vendor. Server-gated: 400 (with actionable detail) when the
   // vendor still has active purchase orders — surface the detail verbatim.
   async deleteVendor(id: number): Promise<{ message: string; can_restore: boolean }> {
@@ -4803,7 +4870,7 @@ class ApiService {
   }
 
   // Preventive Maintenance
-  async getMaintenanceSchedules(params?: { work_center_id?: number; is_active?: boolean }) {
+  async getMaintenanceSchedules(params?: { work_center_id?: number; asset_id?: number; is_active?: boolean }) {
     const response = await this.api.get('/maintenance/schedules', { params });
     return response.data;
   }
@@ -4828,7 +4895,7 @@ class ApiService {
     return response.data;
   }
 
-  async getMaintenanceWorkOrders(params?: { status?: string; work_center_id?: number; maintenance_type?: string; start_date?: string; end_date?: string }) {
+  async getMaintenanceWorkOrders(params?: { status?: string; work_center_id?: number; asset_id?: number; maintenance_type?: string; start_date?: string; end_date?: string }) {
     const response = await this.api.get('/maintenance/work-orders', { params });
     return response.data;
   }
@@ -4880,6 +4947,59 @@ class ApiService {
 
   async createMaintenanceLog(data: any) {
     const response = await this.api.post('/maintenance/log', data);
+    return response.data;
+  }
+
+  // Equipment assets: non-production machines (forklifts, compressors, a manual mill) that
+  // are maintained but never scheduled, dispatched or counted in OEE. Reads open; writes are
+  // the planning roles. Retiring is is_active=false (DELETE), never a physical delete.
+  async getMaintenanceAssets(params?: { include_inactive?: boolean; search?: string }): Promise<MaintenanceAsset[]> {
+    const response = await this.api.get<MaintenanceAsset[]>('/maintenance/assets', { params });
+    return response.data;
+  }
+
+  async createMaintenanceAsset(data: MaintenanceAssetInput): Promise<MaintenanceAsset> {
+    const response = await this.api.post<MaintenanceAsset>('/maintenance/assets', data);
+    return response.data;
+  }
+
+  // `version` is the CAS: 409 when someone else saved first.
+  async updateMaintenanceAsset(id: number, data: MaintenanceAssetUpdate): Promise<MaintenanceAsset> {
+    const response = await this.api.put<MaintenanceAsset>(`/maintenance/assets/${id}`, data);
+    return response.data;
+  }
+
+  async retireMaintenanceAsset(id: number): Promise<MaintenanceAsset> {
+    const response = await this.api.delete<MaintenanceAsset>(`/maintenance/assets/${id}`);
+    return response.data;
+  }
+
+  async getMaintenanceAssetHistory(id: number, limit?: number) {
+    const response = await this.api.get(`/maintenance/assets/${id}/history`, { params: { limit } });
+    return response.data;
+  }
+
+  // PM schedule import (template `maintenance-schedules`, one row per task). Preview writes
+  // nothing; commit echoes the preview's source_hash and is all-or-nothing (409 with
+  // `detail.errors` on any row error).
+  async previewPmScheduleImport(file: File): Promise<PmImportResponse> {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await this.api.post<PmImportResponse>('/maintenance/schedules/import/preview', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: importTimeout(true),
+    });
+    return response.data;
+  }
+
+  async commitPmScheduleImport(file: File, expectedSourceHash: string): Promise<PmImportResponse> {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('expected_source_hash', expectedSourceHash);
+    const response = await this.api.post<PmImportResponse>('/maintenance/schedules/import/commit', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: importTimeout(false),
+    });
     return response.data;
   }
 
