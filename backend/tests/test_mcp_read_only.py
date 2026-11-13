@@ -413,6 +413,34 @@ class TestStdio:
         assert denied.is_error and denied.structured_content["detail"] == READ_ONLY_TOOL_DENIED_DETAIL
         assert executor.calls == [], "nothing was dispatched"
 
+    async def test_every_write_and_every_denied_tool_is_refused_by_name_before_dispatch(
+        self, client: TestClient, admin_headers: dict, test_user: User, catalog, deny_tags
+    ):
+        """Brief P0.1 / P0.2 acceptance, exhaustively: EVERY non-GET generated tool and every
+        writing convenience tool answers 403 "this tool writes", and EVERY GET tool under a denied
+        tag answers 403 "not available" -- each called by name with empty arguments (refusal
+        precedes validation) and none dispatched. The expected sets come from the catalog's HTTP
+        methods and tags and the hand-kept convenience split, NOT from the server's own
+        classification, so a write the registry mislabels as a read fails here."""
+        _id, token = _issue(client, admin_headers, test_user, scope="read_only", ai_external=False)
+        writes = sorted({tool.name for tool in catalog if tool.method != "GET"} | WRITE_CONVENIENCE)
+        denied = sorted(tool.name for tool in catalog if tool.method == "GET" and set(tool.tags) & deny_tags)
+        assert len(writes) > 300 and len(denied) >= len(deny_tags)
+        assert "shop_floor_start_operation" in writes and "shop_floor_complete_operation" in writes
+
+        executor = _NeverExecutor()
+        server = build_server(executor, catalog=catalog, token_source=TokenSource(executor, access_token=token))
+        wrong: List[Tuple[str, Any]] = []
+        async with connected(server) as session:
+            for names, detail in ((writes, READ_ONLY_TOOL_WRITES_DETAIL), (denied, READ_ONLY_TOOL_DENIED_DETAIL)):
+                for name in names:
+                    result = await session.call_tool(name, {})
+                    content = result.structured_content or {}
+                    if not (result.is_error and content.get("status") == 403 and content.get("detail") == detail):
+                        wrong.append((name, content))
+        assert wrong == [], f"{len(wrong)} tool(s) not refused as expected: {wrong[:10]}"
+        assert executor.calls == [], "a refused tool reached the API"
+
     async def test_a_full_static_token_lists_everything(
         self, client: TestClient, admin_headers: dict, test_user: User, catalog
     ):

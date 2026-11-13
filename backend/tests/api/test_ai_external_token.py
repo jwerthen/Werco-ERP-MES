@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import gzip
 import json
+from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, Iterator, List, Tuple
 
 import pytest
@@ -50,9 +51,11 @@ from app.core.export_control import (
     REDACTED_VALUE,
     ExportControlMarker,
 )
+from app.core.security import create_api_token
 from app.main import app
 from app.middleware.export_control import CONDITIONAL_REQUEST_HEADERS, ExportControlMiddleware, bearer_is_api_token
 from app.models.api_token import ApiToken
+from app.models.downtime import DowntimeEvent
 from app.models.governance import ControlledAccessEvent, CustomerContract
 from app.models.user import User, UserRole
 from app.services import export_control_service, llm_client
@@ -142,8 +145,7 @@ CANARY_CASES: Dict[Tuple[str, str], Tuple[UrlFor, bool]] = {
     ("GET", "/shop-floor/operations"): (_url("/shop-floor/operations"), True),
     ("GET", "/shop-floor/operations/{operation_id}"): (_url("/shop-floor/operations/{operation_id}"), True),
     ("GET", "/downtime/"): (_url("/downtime/"), True),
-    ("GET", "/downtime/active"): (_url("/downtime/active"), False),
-    ("GET", "/downtime/summary"): (_url("/downtime/summary"), False),
+    ("GET", "/downtime/active"): (_url("/downtime/active"), True),  # primed: an ITAR event still open
     ("GET", "/downtime/by-work-center"): (_url("/downtime/by-work-center"), False),
     ("GET", "/downtime/reason-codes"): (_url("/downtime/reason-codes"), False),
     ("GET", "/downtime/{event_id}"): (_url("/downtime/{event_id}"), True),
@@ -182,6 +184,30 @@ CANARY_CASES: Dict[Tuple[str, str], Tuple[UrlFor, bool]] = {
 }
 
 
+def _open_itar_downtime(db: Session, w: World) -> DowntimeEvent:
+    """A downtime event on the ITAR work order that is still OPEN (no end_time): what /downtime/active lists."""
+    event = DowntimeEvent(
+        work_center_id=w.work_center.id,
+        work_order_id=w.itar_wo.id,
+        start_time=datetime.utcnow() - timedelta(minutes=5),
+        category="mechanical",
+        description=f"{CANARY} open downtime description",
+        reported_by=w.reporter.id,
+        company_id=w.company_id,
+    )
+    db.add(event)
+    db.commit()
+    db.refresh(event)
+    return event
+
+
+# Extra rows a case needs before its controlled text can be in the response at all (the seed's
+# downtime events are resolved, so without this /downtime/active would be empty -- a vacuous case).
+CANARY_PRIMERS: Dict[Tuple[str, str], Callable[[Session, World], Any]] = {
+    ("GET", "/downtime/active"): _open_itar_downtime,
+}
+
+
 class TestCanaryConformance:
     def test_every_allowlisted_route_has_a_canary_case(self):
         """The guard: an allowlist entry without a conformance case fails CI."""
@@ -202,10 +228,13 @@ class TestCanaryConformance:
 
     @pytest.mark.parametrize("operation", sorted(CANARY_CASES), ids=lambda op: op[1])
     def test_the_canary_never_reaches_an_ai_external_token(
-        self, client: TestClient, world: World, ai_token, auth_headers: dict, operation
+        self, client: TestClient, db_session: Session, world: World, ai_token, auth_headers: dict, operation
     ):
         url_for, person_sees_canary = CANARY_CASES[operation]
         url = url_for(world)
+        primer = CANARY_PRIMERS.get(operation)
+        if primer is not None:
+            primer(db_session, world)
         _id, token = ai_token
         # Prime the job's history the way a day on the floor does: a person opening the work
         # order reconciles it (its labor evidence starts the operation), which is what the
@@ -416,6 +445,58 @@ class TestRefusals:
         refused = _events(db_session, action="ai_external_refused", denial_reason="route_not_allowlisted")
         assert len(refused) == 3
         assert refused[0].extra_data["route"] == f"{API}/search/"
+
+    def test_the_downtime_pareto_is_refused_because_it_cannot_be_redacted(
+        self, client: TestClient, db_session: Session, world: World, ai_token, auth_headers: dict
+    ):
+        """Regression (found by the P0 test gate): ``/downtime/summary``'s ``top_reasons`` falls
+        back to an event's free-text ``description`` when it has no ``reason_code``, in an object
+        that carries no record key -- so a controlled job's downtime text could not be linked and
+        went out verbatim. Unlinkable means refuse (the brief), so the route is off the allowlist;
+        the per-event downtime reads stay on it and are redacted."""
+        world.itar_downtime.reason_code = None
+        db_session.commit()
+        url = f"{API}/downtime/summary"
+        person = client.get(url, headers=auth_headers)
+        assert person.status_code == 200
+        reasons = [entry["reason"] for entry in person.json()["top_reasons"]]
+        assert any(CANARY in reason for reason in reasons), "the case is vacuous: no controlled text in the Pareto"
+
+        _id, token = ai_token
+        response = client.get(url, headers=bearer(token))
+        assert response.status_code == 403
+        assert response.json()["detail"] == AI_EXTERNAL_ROUTE_DENIED_DETAIL
+        assert not contains_canary(response.content)
+        assert ("GET", "/downtime/summary") not in AI_EXTERNAL_ALLOWED_ROUTES
+
+        # The same event through the per-event read: withheld, not refused.
+        listed = client.get(f"{API}/downtime/", headers=bearer(token))
+        assert listed.status_code == 200 and not contains_canary(listed.content)
+        event = next(row for row in listed.json() if row["id"] == world.itar_downtime.id)
+        assert event["export_controlled"] is True and event["description"] == REDACTED_VALUE
+
+    def test_an_ai_external_row_is_read_only_whatever_its_scope_says(
+        self, client: TestClient, db_session: Session, admin_headers: dict, viewer: User, world: World
+    ):
+        """The mint refuses AI-external + full (422), so this row exists only by tampering -- with a
+        JWT re-signed to match it. It must not widen anything: writes 403, the allowlist applies,
+        and what it reads is redacted."""
+        token_id, _token = issue_token(client, admin_headers, viewer)
+        row = db_session.get(ApiToken, token_id)
+        row.ai_external = True  # scope stays "full"
+        db_session.commit()
+        forged = create_api_token(
+            jti=row.jti, user_id=row.user_id, company_id=row.company_id, scope="full", ai_external=True
+        )
+        headers = bearer(forged)
+
+        write = client.post(f"{API}/parts/", json={"part_number": "X-1", "name": "x"}, headers=headers)
+        assert write.status_code == 403 and write.json()["detail"] == READ_ONLY_ROUTE_WRITES_DETAIL
+        off_list = client.get(f"{API}/customers/", headers=headers)
+        assert off_list.status_code == 403 and off_list.json()["detail"] == AI_EXTERNAL_ROUTE_DENIED_DETAIL
+        read = client.get(f"{API}/work-orders/{world.itar_wo.id}", headers=headers)
+        assert read.status_code == 200 and not contains_canary(read.content)
+        assert read.json()["export_controlled"] is True
 
     def test_head_on_an_allowlisted_route_is_never_served(self, client: TestClient, world: World, ai_token):
         """HEAD is not on the allowlist (GET only); FastAPI does not route it to a GET either."""

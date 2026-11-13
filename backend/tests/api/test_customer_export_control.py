@@ -125,6 +125,74 @@ class TestWho:
         assert db_session.query(AuditLog).count() == audit_before
 
 
+class TestWhoMayEdit:
+    """The PUT twin of ``TestWho``: un-marking a customer is the same judgment as marking it."""
+
+    @pytest.fixture
+    def contract_id(self, client: TestClient, admin_headers: dict, plain_customer) -> int:
+        created = _mark(client, admin_headers, plain_customer.id)
+        assert created.status_code == 201, created.text
+        return created.json()["contracts"][0]["id"]
+
+    def _unmark(self, client: TestClient, headers: dict, customer_id: int, contract_id: int):
+        return client.put(
+            f"{API}/{customer_id}/contracts/{contract_id}",
+            json={"itar_controlled": False, "reason": "declassified"},
+            headers=headers,
+        )
+
+    def _still_marked(self, db: Session, contract_id: int, audit_before: int) -> None:
+        db.expire_all()
+        assert db.get(CustomerContract, contract_id).itar_controlled is True
+        assert db.query(AuditLog).count() == audit_before
+
+    @pytest.mark.parametrize(
+        "role", [UserRole.MANAGER, UserRole.SUPERVISOR, UserRole.QUALITY, UserRole.OPERATOR, UserRole.VIEWER]
+    )
+    def test_only_an_admin_may_unmark(self, client: TestClient, db_session: Session, plain_customer, contract_id, role):
+        audit_before = db_session.query(AuditLog).count()
+        headers = user_headers(make_user(db_session, company_id=1, role=role))
+        assert self._unmark(client, headers, plain_customer.id, contract_id).status_code == 403
+        self._still_marked(db_session, contract_id, audit_before)
+
+    def test_never_through_an_admins_full_api_token(
+        self,
+        client: TestClient,
+        db_session: Session,
+        admin_headers: dict,
+        admin_user: User,
+        plain_customer,
+        contract_id,
+    ):
+        _id, token = issue_token(client, admin_headers, admin_user)
+        audit_before = db_session.query(AuditLog).count()
+        response = self._unmark(client, bearer(token), plain_customer.id, contract_id)
+        assert response.status_code == 403
+        assert response.json()["detail"] == EXPORT_CONTROL_API_TOKEN_DETAIL
+        self._still_marked(db_session, contract_id, audit_before)
+
+    def test_another_companys_admin_gets_404(
+        self, client: TestClient, db_session: Session, plain_customer, contract_id
+    ):
+        ensure_company(db_session, 2)
+        foreign_admin = make_user(db_session, company_id=2, role=UserRole.ADMIN)
+        audit_before = db_session.query(AuditLog).count()
+        headers = user_headers(foreign_admin)
+        assert self._unmark(client, headers, plain_customer.id, contract_id).status_code == 404
+        assert client.get(f"{API}/{plain_customer.id}/export-control", headers=headers).status_code == 404
+        self._still_marked(db_session, contract_id, audit_before)
+
+    def test_an_audit_failure_on_unmark_saves_nothing(
+        self, client: TestClient, db_session: Session, admin_headers: dict, plain_customer, contract_id, monkeypatch
+    ):
+        audit_before = db_session.query(AuditLog).count()
+        monkeypatch.setattr(AuditService, "log", lambda self, *args, **kwargs: None)
+        response = self._unmark(client, admin_headers, plain_customer.id, contract_id)
+        assert response.status_code == 503
+        assert response.json()["detail"] == EXPORT_CONTROL_AUDIT_UNAVAILABLE_DETAIL
+        self._still_marked(db_session, contract_id, audit_before)
+
+
 class TestWrites:
     def test_marking_is_audited_with_the_reason(
         self, client: TestClient, db_session: Session, admin_headers: dict, admin_user: User, plain_customer

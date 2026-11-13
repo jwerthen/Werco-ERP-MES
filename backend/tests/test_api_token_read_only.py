@@ -26,6 +26,8 @@ STRAIGHT to ``/api/v1`` (the MCP door's refusals are covered in
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from types import SimpleNamespace
 from typing import Any, Dict, List, Tuple
 
@@ -56,6 +58,7 @@ from app.models.user import User, UserRole
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.services.api_token_service import AI_EXTERNAL_REQUIRES_READ_ONLY_DETAIL, AUTH_EVENT_ISSUED
 from tests.api.kiosk_test_helpers import make_user, make_wo_with_operation, make_work_center
+from tests.test_mcp_cli import BACKEND_ROOT, clean_env
 
 pytestmark = pytest.mark.api
 
@@ -541,6 +544,33 @@ class TestDenyTagSetting:
         with pytest.raises(RuntimeError) as raised:
             deps.refuse_unknown_read_only_deny_tags(app.routes, frozenset({"Audit", typo}))
         assert repr(typo) in str(raised.value)
+
+    @pytest.mark.integration
+    def test_a_misspelled_deny_tag_fails_the_real_boot(self):
+        """The check is WIRED: importing ``app.main`` with a typo in the setting raises, so a deploy
+        fails loudly instead of silently denying nothing. (The function alone is pinned above;
+        this pins that ``main.py`` calls it.)"""
+        # Built from scratch (clean_env's OS plumbing) plus just enough to import the app: an
+        # in-memory database nothing ever touches, throwaway keys, and the misspelled list.
+        env = {
+            **clean_env(),
+            "DATABASE_URL": "sqlite:///file:p0-boot-check?mode=memory&cache=shared&uri=true",
+            "SECRET_KEY": "boot-check-secret-key-abcdefghijklmnopqrstuvwxyz12",
+            "REFRESH_TOKEN_SECRET_KEY": "boot-check-refresh-key-abcdefghijklmnopqrstuvwxyz",
+            "ENVIRONMENT": "test",
+            "SENTRY_DSN": "",
+            "WERCO_MCP_READ_ONLY_DENY_TAGS": "Audit,API tokens",
+        }
+        result = subprocess.run(
+            [sys.executable, "-c", "import app.main"],
+            cwd=BACKEND_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        assert result.returncode != 0, "a misspelled deny tag must fail the boot"
+        assert "WERCO_MCP_READ_ONLY_DENY_TAGS names tag(s) no API route carries: 'API tokens'" in result.stderr
 
 
 # --------------------------------------------------------------------------- global search

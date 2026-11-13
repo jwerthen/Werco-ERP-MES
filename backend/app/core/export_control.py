@@ -82,10 +82,12 @@ AI_EXTERNAL_ALLOWED_ROUTES: FrozenSet[Tuple[str, str]] = frozenset(
         # Shop-floor operations (and their actuals)
         ("GET", "/shop-floor/operations"),
         ("GET", "/shop-floor/operations/{operation_id}"),
-        # Downtime
+        # Downtime. NOT /downtime/summary: its Pareto ``top_reasons`` falls back to an event's
+        # free-text ``description`` in an object carrying no record key, so a controlled job's
+        # downtime text cannot be linked and withheld there -- refuse rather than leak (the
+        # brief). The per-event reads below carry ``work_order_id`` and are redacted.
         ("GET", "/downtime/"),
         ("GET", "/downtime/active"),
-        ("GET", "/downtime/summary"),
         ("GET", "/downtime/by-work-center"),
         ("GET", "/downtime/reason-codes"),
         ("GET", "/downtime/{event_id}"),

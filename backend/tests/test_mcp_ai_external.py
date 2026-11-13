@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import pytest
@@ -28,6 +29,8 @@ from app.core.credentials import READ_ONLY_TOOL_DENIED_DETAIL, READ_ONLY_TOOL_WR
 from app.core.export_control import (
     AI_EGRESS_DISABLED_DETAIL,
     AI_EXTERNAL_ROUTE_DENIED_DETAIL,
+    EXPORT_CONTROL_FAILED_DETAIL,
+    EXPORT_CONTROL_STATE_KEY,
     REDACTED_VALUE,
     ai_external_operations,
 )
@@ -45,13 +48,13 @@ from app.mcp.auth import (
 )
 from app.mcp.catalog import build_catalog
 from app.mcp.convenience import CONVENIENCE_TOOL_NAMES, CONVENIENCE_TOOL_ROUTES, CONVENIENCE_TOOLS, SHADOWED_OPERATIONS
-from app.mcp.http import McpDoor, mount_mcp, unmount_mcp
+from app.mcp.http import AiEgressDoorGuard, McpDoor, mount_mcp, unmount_mcp
 from app.mcp.results import ExecResult
 from app.mcp.server import ai_external_refusal, ai_external_view, build_registry, build_server
 from app.models.api_token import ApiToken
 from app.models.governance import ControlledAccessEvent
 from app.models.user import User
-from app.services import llm_client
+from app.services import export_control_service, llm_client
 from tests.api.export_control_helpers import contains_canary, issue_token, make_viewer, seed_world
 from tests.test_mcp_server import connected
 
@@ -184,6 +187,73 @@ class TestDoorEgressGuard:
         assert response.status_code == 200
         assert response.json()["result"]["serverInfo"]["name"] == "werco-erp"
 
+    def test_a_refusal_the_ledger_cannot_record_is_503(
+        self, door_client: TestClient, db_session: Session, admin_headers: dict, viewer: User, monkeypatch
+    ):
+        """Fail closed at the door too: no ledger row, no answer but the 503."""
+
+        def broken(db, rows):
+            raise RuntimeError("ledger down")
+
+        _id, token = issue_token(door_client, admin_headers, viewer, scope="read_only")
+        _egress(monkeypatch, False)
+        monkeypatch.setattr(export_control_service, "insert_controlled_access_events", broken)
+        response = door_client.post(DOOR, json=_rpc("tools/list"), headers=_auth(token))
+        assert response.status_code == 503
+        assert response.json() == {"detail": EXPORT_CONTROL_FAILED_DETAIL}
+        db_session.expire_all()
+        assert db_session.query(ControlledAccessEvent).count() == 0
+
+    @pytest.mark.parametrize(
+        "egress",
+        [None, "true", 1, False],
+        ids=["missing", "string", "int", "off"],
+    )
+    async def test_the_guard_refuses_unless_the_switch_was_read_as_exactly_on(self, egress):
+        """A record without the switch, or with anything but ``True``, is OFF (fail closed)."""
+        claims = {CLAIM_API_TOKEN_SCOPE: "read_only", CLAIM_API_TOKEN_AI_EXTERNAL: True, CLAIM_API_TOKEN_COMPANY_ID: 1}
+        if egress is not None:
+            claims[CLAIM_API_TOKEN_AI_EGRESS] = egress
+        reached: List[bool] = []
+
+        async def inner(scope, receive, send):
+            reached.append(True)
+
+        sent: List[dict] = []
+
+        async def send(message):
+            sent.append(message)
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        principal = SimpleNamespace(access_token=SimpleNamespace(claims=claims, client_id="7"))
+        scope = {"type": "http", "method": "POST", "path": DOOR, "headers": [], "user": principal}
+        await AiEgressDoorGuard(inner)(scope, receive, send)
+        assert reached == [], "the MCP transport was reached"
+        assert sent[0]["status"] == 403
+        assert json.loads(sent[1]["body"]) == {"detail": AI_EGRESS_DISABLED_DETAIL}
+        marker = scope["state"][EXPORT_CONTROL_STATE_KEY]
+        assert (marker.refusal_reason, marker.company_id, marker.user_id) == ("ai_egress_disabled", 1, 7)
+
+    async def test_the_guard_passes_a_person_and_a_token_that_is_not_ai_external(self):
+        for claims in (None, {CLAIM_API_TOKEN_SCOPE: "read_only", CLAIM_API_TOKEN_AI_EXTERNAL: False}):
+            reached: List[bool] = []
+
+            async def inner(scope, receive, send, reached=reached):
+                reached.append(True)
+
+            async def noop_send(message):
+                raise AssertionError("the guard answered instead of passing through")
+
+            async def receive():
+                return {"type": "http.request", "body": b"", "more_body": False}
+
+            principal = SimpleNamespace(access_token=SimpleNamespace(claims=claims, client_id="7"))
+            scope = {"type": "http", "method": "POST", "path": DOOR, "headers": [], "user": principal}
+            await AiEgressDoorGuard(inner)(scope, receive, noop_send)
+            assert reached == [True]
+
 
 # --------------------------------------------------------------------------- listing and refusals
 
@@ -288,6 +358,56 @@ class TestAiExternalCalls:
         )
         assert contains_canary(json.dumps(full).encode())
 
+    @pytest.mark.parametrize(
+        "key,argument,record,record_type",
+        [
+            (("GET", "/api/v1/parts/{part_id}"), "part_id", "itar_part", "part"),
+            (("GET", "/api/v1/quality/ncr/{ncr_id}"), "ncr_id", "itar_ncr", "ncr"),
+            (("GET", "/api/v1/quotes/{quote_id}"), "quote_id", "itar_quote", "quote"),
+        ],
+        ids=["part", "ncr", "quote"],
+    )
+    def test_the_brief_records_come_back_redacted_through_the_door_and_in_full_to_a_person(
+        self,
+        door_client: TestClient,
+        db_session: Session,
+        token,
+        auth_headers: dict,
+        catalog,
+        key,
+        argument,
+        record,
+        record_type,
+    ):
+        """Brief P0.3 acceptance, at the connector's own door: the ITAR part, NCR and quote (the
+        work order is the test above) reach an AI-external token redacted -- id kept, text gone,
+        ledgered -- and a person calling the same tool gets the full record."""
+        world = seed_world(db_session)
+        row = getattr(world, record)
+        name = next(tool.name for tool in catalog if tool.key == key)
+        _id, bearer = token
+
+        redacted = _result(door_client.post(DOOR, json=_call(name, {argument: row.id}), headers=_auth(bearer)))
+        assert redacted.get("isError") is not True, redacted
+        assert not contains_canary(json.dumps(redacted).encode()), "nor in the text content block"
+        body = redacted["structuredContent"]
+        assert body["id"] == row.id, "the id stays"
+        assert body["export_controlled"] is True
+        assert REDACTED_VALUE in body.values()
+
+        db_session.expire_all()
+        ledgered = db_session.query(ControlledAccessEvent).filter(
+            ControlledAccessEvent.action == "ai_external_redacted",
+            ControlledAccessEvent.record_type == record_type,
+            ControlledAccessEvent.record_id == row.id,
+        )
+        assert ledgered.count() == 1
+
+        person = {**ACCEPT, "Authorization": auth_headers["Authorization"]}
+        full = _result(door_client.post(DOOR, json=_call(name, {argument: row.id}), headers=person))
+        assert full.get("isError") is not True, full
+        assert contains_canary(json.dumps(full).encode())
+
 
 # --------------------------------------------------------------------------- verifier and stdio
 
@@ -346,3 +466,47 @@ class TestStdio:
         assert [tool.name for tool in listing.tools] == [t.name for t in convenience] + [t.name for t in generated]
         assert refused.is_error and refused.structured_content["detail"] == AI_EXTERNAL_ROUTE_DENIED_DETAIL
         assert executor.calls == []
+
+    async def test_every_tool_off_the_ai_external_allowlist_is_refused_by_name_before_dispatch(
+        self, client: TestClient, admin_headers: dict, viewer: User, catalog, deny_tags
+    ):
+        """Exhaustive: every tool an AI-external token may not call answers 403 with the right
+        text -- a write "this tool writes", a denied tag "not available", anything else off the
+        allowlist the API layer's own text -- and nothing is dispatched. The expected answer is
+        derived from the catalog's methods / tags, the allowlist and the hand-kept convenience
+        split, never from the server's classification."""
+        _id, token = issue_token(client, admin_headers, viewer, scope="read_only")
+        allowed = ai_external_operations(settings.API_V1_PREFIX)
+        write_convenience = set(CONVENIENCE_TOOL_NAMES) - {
+            "search",
+            "get_shop_floor_dashboard",
+            "list_inventory",
+            *AI_CONVENIENCE,
+        }
+        expected: Dict[str, str] = {}
+        for tool in catalog:
+            if tool.method != "GET":
+                expected[tool.name] = READ_ONLY_TOOL_WRITES_DETAIL
+            elif set(tool.tags) & deny_tags:
+                expected[tool.name] = READ_ONLY_TOOL_DENIED_DETAIL
+            elif tool.key not in allowed:
+                expected[tool.name] = AI_EXTERNAL_ROUTE_DENIED_DETAIL
+        for name in CONVENIENCE_TOOL_NAMES:
+            if name in write_convenience:
+                expected[name] = READ_ONLY_TOOL_WRITES_DETAIL
+            elif name not in AI_CONVENIENCE:
+                expected[name] = AI_EXTERNAL_ROUTE_DENIED_DETAIL
+        reachable = {tool.name for tool in catalog} | set(CONVENIENCE_TOOL_NAMES)
+        assert len(reachable - set(expected)) == len(AI_CONVENIENCE) + sum(tool.key in allowed for tool in catalog)
+
+        executor = _NeverExecutor()
+        server = build_server(executor, catalog=catalog, token_source=TokenSource(executor, access_token=token))
+        wrong: List[Tuple[str, Any]] = []
+        async with connected(server) as session:
+            for name, detail in sorted(expected.items()):
+                result = await session.call_tool(name, {})
+                content = result.structured_content or {}
+                if not (result.is_error and content.get("status") == 403 and content.get("detail") == detail):
+                    wrong.append((name, content))
+        assert wrong == [], f"{len(wrong)} tool(s) not refused as expected: {wrong[:10]}"
+        assert executor.calls == [], "a refused tool reached the API"
