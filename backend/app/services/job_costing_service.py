@@ -46,10 +46,18 @@ def recalculate_totals(job_cost: JobCost) -> None:
 
     Identical math to the endpoint's ``recalculate_job_cost`` -- centralized so the
     completion sync and the endpoint stay in lock-step. Mutates ``job_cost`` in place.
+
+    SUBCONTRACT has its OWN branch and its own total (``actual_subcontract_cost``). It must
+    never reach the ``else`` below, which folds OTHER into ``actual_overhead_cost`` -- the
+    work-order read reports that column as burden, so a subcontract entry falling through
+    would be shown as burden. ``actual_overhead_cost`` keeps its stored meaning (OVERHEAD +
+    OTHER) so existing variances do not shift; there is no subcontract estimate, so
+    subcontract reaches only the total and ``total_variance``.
     """
     material_total = 0.0
     labor_total = 0.0
     overhead_total = 0.0
+    subcontract_total = 0.0
     other_total = 0.0
 
     for entry in job_cost.entries:
@@ -59,13 +67,16 @@ def recalculate_totals(job_cost: JobCost) -> None:
             labor_total += entry.total_cost
         elif entry.entry_type == CostEntryType.OVERHEAD or entry.entry_type == "overhead":
             overhead_total += entry.total_cost
+        elif entry.entry_type == CostEntryType.SUBCONTRACT or entry.entry_type == "subcontract":
+            subcontract_total += entry.total_cost
         else:
             other_total += entry.total_cost
 
     job_cost.actual_material_cost = material_total
     job_cost.actual_labor_cost = labor_total
     job_cost.actual_overhead_cost = overhead_total + other_total
-    job_cost.actual_total_cost = material_total + labor_total + overhead_total + other_total
+    job_cost.actual_subcontract_cost = subcontract_total
+    job_cost.actual_total_cost = material_total + labor_total + overhead_total + other_total + subcontract_total
 
     job_cost.estimated_total_cost = (
         job_cost.estimated_material_cost + job_cost.estimated_labor_cost + job_cost.estimated_overhead_cost

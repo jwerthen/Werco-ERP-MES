@@ -329,6 +329,13 @@ statement, writes no row, and adds no environment variable, secret, cron or work
   under, and the migration will not pick which company's record to change.
   See [API.md → Customer Complaints & RMA](API.md#customer-complaints--rma).
 
+**Job cost subcontract (P1.3).** Apply additive **121_job_cost_subcontract** after
+**120_production_calendar** through the normal API boot migration path: one NOT NULL DEFAULT 0
+column on `job_costs` and, where the native `costentrytype` enum exists, its `SUBCONTRACT` label. No
+backfill, no environment variable, no worker job. Before rolling back to a pre-121 image, re-key any
+`SUBCONTRACT` cost entries to `other` through the API — older code cannot load them (see
+`DEPLOYMENT.md` → Job cost subcontract element).
+
 **Production calendar (P1.2).** Apply additive **120_production_calendar** (after
 **118_dashboard_layouts** here; re-chained after 119 at release) through the normal API boot
 migration path: four empty tenant tables plus the nullable `oee_records.shift_id` FK + index, no

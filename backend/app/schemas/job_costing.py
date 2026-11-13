@@ -79,7 +79,10 @@ class JobCostResponse(UTCModel):
     estimated_total_cost: float
     actual_material_cost: float
     actual_labor_cost: float
+    # OVERHEAD + OTHER entries.
     actual_overhead_cost: float
+    # SUBCONTRACT entries (outside processing); part of actual_total_cost, never of overhead.
+    actual_subcontract_cost: float = 0.0
     actual_total_cost: float
     material_variance: float
     labor_variance: float

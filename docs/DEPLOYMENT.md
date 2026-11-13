@@ -220,6 +220,19 @@ rollback step; it does not undo documents, receipts, production or shipments
 already created by completed actions. Intake-linked Documents cannot be deleted
 through the application because the saved source and receipt must remain valid.
 
+### Job cost subcontract element (migration 121)
+
+Apply additive **121_job_cost_subcontract** after **120_production_calendar** through the normal API
+boot migration path. It adds `job_costs.actual_subcontract_cost` (FLOAT NOT NULL DEFAULT 0 —
+metadata-only on PostgreSQL 11+, every existing row reads 0, which is true: no subcontract entry could
+exist before it) and, where `cost_entries.entry_type` is the native `costentrytype` enum, the
+`SUBCONTRACT` label (in its own autocommit step; a database whose column is migration 024's VARCHAR
+has no type and needs no label). No table, environment variable, secret or worker job is added.
+Deploy the API before or with the ARQ worker. **Rollback:** pre-121 code cannot load a cost entry of
+type `SUBCONTRACT`; before redeploying an older image, list them (`SELECT id, company_id, job_cost_id
+FROM cost_entries WHERE entry_type = 'SUBCONTRACT'`) and re-key them to `other` through the API
+(delete + re-add, both audited). The enum label stays on downgrade.
+
 ### Production calendar (migration 120)
 
 Apply additive **120_production_calendar** through the normal API boot migration path (it follows

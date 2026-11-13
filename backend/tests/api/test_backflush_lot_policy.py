@@ -86,7 +86,7 @@ from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
 from app.models.work_order_material import AllocationSource, AllocationStatus, WorkOrderMaterialAllocation
 from app.services.analytics_service import AnalyticsService
 from app.services.audit_service import AuditService
-from app.services.completion_cost_service import _issued_material_cost
+from app.services.completion_cost_service import issued_material_cost
 from app.services.completion_inventory_service import (
     BACKFLUSH_COMPONENT_FAILED_AUDIT_ACTION,
     BACKFLUSH_COMPONENT_FAILED_EVENT_TYPE,
@@ -1579,7 +1579,7 @@ def test_job_cost_includes_backflush_rows(db_session: Session):
     wo, component, _ = _spilled_job(db_session, user)
 
     assert sum(r.quantity for r in issue_rows(db_session, wo, component)) == -10.0
-    assert _issued_material_cost(db_session, wo, COMPANY_A) == 100.0, "10 units at $10, across two lots"
+    assert issued_material_cost(db_session, wo, COMPANY_A) == 100.0, "10 units at $10, across two lots"
 
 
 def test_analytics_cogs_includes_backflush_rows(db_session: Session):
@@ -1588,7 +1588,7 @@ def test_analytics_cogs_includes_backflush_rows(db_session: Session):
     wo, _, _ = _spilled_job(db_session, user)
 
     assert AnalyticsService(db_session, COMPANY_A)._issued_material_cost(wo.id) == 100.0
-    assert AnalyticsService(db_session, COMPANY_A)._issued_material_cost(wo.id) == _issued_material_cost(
+    assert AnalyticsService(db_session, COMPANY_A)._issued_material_cost(wo.id) == issued_material_cost(
         db_session, wo, COMPANY_A
     )
 

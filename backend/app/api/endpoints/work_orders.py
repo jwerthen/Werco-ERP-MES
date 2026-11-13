@@ -211,6 +211,7 @@ from app.services.storage_service import delete_ref
 from app.services.wallboard_service import operator_display_name
 from app.services.work_center_type_service import get_work_center_group
 from app.services.work_order_browse_service import browse_work_orders
+from app.services.work_order_cost_view import inject_cost_figures
 from app.services.work_order_duplicate_service import duplicate_work_order
 from app.services.work_order_state_service import (
     QTY_EPSILON,
@@ -232,6 +233,7 @@ from app.services.work_order_state_service import (
     is_laser_dispatch_work_order,
     log_demotions_required,
     operation_accounting,
+    operation_hours_source,
     operation_labor_evidence,
     operation_target_quantity,
     operations_worked_out_of_sequence,
@@ -968,6 +970,13 @@ def _enrich_work_order_operations(work_order: WorkOrder, *, db: Session, company
         op.quantity_scrapped = op.quantity_scrapped or 0
         op.estimated_hours = float(op.setup_time_hours) + float(op.run_time_hours)
         op.actual_hours = float(op.actual_setup_hours) + float(op.actual_run_hours)
+        # P1.4: where the actual hours come from, from the same batched evidence read --
+        # measured closed-entry sums beside the stored actuals they may exceed.
+        evidence = labor_evidence.get(op.id)
+        op.hours_source = operation_hours_source(op, evidence)
+        op.recorded_setup_hours = evidence.closed_setup_hours if evidence else 0.0
+        op.recorded_run_hours = evidence.closed_run_hours if evidence else 0.0
+        op.hours_include_backfill = bool(evidence and evidence.closed_backfill_entries)
         op.work_center_name = op.work_center.name if op.work_center else None
         sync_laser_nest_from_operation(op)
 
@@ -4170,19 +4179,17 @@ def get_work_order(
     hold), and the blocker's free text rides this response because every caller
     here is an identified session -- see ``OperationHoldInfo`` in
     ``app/schemas/work_order.py``.
+
+    Cost and hours (P1.3 / P1.4): ``job_cost_actuals`` (the JobCost's material / labor /
+    burden / subcontract / total, null when the work order has no JobCost),
+    ``issued_material_cost`` (net issued material from the inventory ledger -- a different
+    basis), and per operation ``hours_source`` / ``recorded_setup_hours`` /
+    ``recorded_run_hours`` / ``hours_include_backfill`` -- see the schema field comments.
     """
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     response.headers["Pragma"] = "no-cache"
     work_order = (
-        db.query(WorkOrder)
-        .options(
-            joinedload(WorkOrder.part),
-            selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.component_part),
-            selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.work_center),
-            selectinload(WorkOrder.operations)
-            .selectinload(WorkOrderOperation.laser_nest)
-            .selectinload(LaserNest.document),
-        )
+        _work_order_read_query(db)
         .filter(
             WorkOrder.id == work_order_id,
             WorkOrder.company_id == company_id,
@@ -4194,13 +4201,7 @@ def get_work_order(
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
 
-    # Normalize nullable numeric fields for serialization safety
-    work_order.quantity_complete = work_order.quantity_complete or 0
-    work_order.quantity_scrapped = work_order.quantity_scrapped or 0
-    work_order.estimated_hours = work_order.estimated_hours or 0
-    work_order.actual_hours = work_order.actual_hours or 0
-    work_order.estimated_cost = work_order.estimated_cost or 0
-    work_order.actual_cost = work_order.actual_cost or 0
+    _normalize_work_order_header(work_order)
 
     # Both reconcile-on-read commits below mutate version-mapped operation rows;
     # a concurrent-write conflict is benign on a GET (idempotent), so swallow
@@ -4215,8 +4216,29 @@ def get_work_order(
     # AUD-3: terminal reconcile-driven transitions are audited to the requesting user.
     _reconcile_and_commit(db, [work_order], current_user, company_id)
     _enrich_work_order_operations(work_order, db=db, company_id=company_id)
+    inject_cost_figures(db, company_id=company_id, work_order=work_order)
 
     return work_order
+
+
+def _work_order_read_query(db: Session):
+    """The eager-load shape both single-work-order reads render from (by id, by number)."""
+    return db.query(WorkOrder).options(
+        joinedload(WorkOrder.part),
+        selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.component_part),
+        selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.work_center),
+        selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.laser_nest).selectinload(LaserNest.document),
+    )
+
+
+def _normalize_work_order_header(work_order: WorkOrder) -> None:
+    """Normalize nullable numeric header fields for serialization safety (in memory only)."""
+    work_order.quantity_complete = work_order.quantity_complete or 0
+    work_order.quantity_scrapped = work_order.quantity_scrapped or 0
+    work_order.estimated_hours = work_order.estimated_hours or 0
+    work_order.actual_hours = work_order.actual_hours or 0
+    work_order.estimated_cost = work_order.estimated_cost or 0
+    work_order.actual_cost = work_order.actual_cost or 0
 
 
 @router.get("/by-number/{wo_number}", response_model=WorkOrderResponse)
@@ -4227,23 +4249,30 @@ def get_work_order_by_number(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Get a work order by work order number"""
+    """Get a work order by its number: the same body as ``GET /work-orders/{id}``.
+
+    Computed operation figures (hold context, short-count figures, hours_source and the
+    recorded hours), ``job_cost_actuals`` and ``issued_material_cost`` included. A
+    soft-deleted work order is 404, as by id. Unlike the read by id it does NOT reconcile
+    on read: it writes nothing, so it does not heal a stranded work order.
+    """
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     response.headers["Pragma"] = "no-cache"
     work_order = (
-        db.query(WorkOrder)
-        .options(
-            selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.work_center),
-            selectinload(WorkOrder.operations)
-            .selectinload(WorkOrderOperation.laser_nest)
-            .selectinload(LaserNest.document),
+        _work_order_read_query(db)
+        .filter(
+            WorkOrder.work_order_number == wo_number,
+            WorkOrder.company_id == company_id,
+            WorkOrder.is_deleted == False,  # noqa: E712
         )
-        .filter(WorkOrder.work_order_number == wo_number, WorkOrder.company_id == company_id)
         .first()
     )
 
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
+    _normalize_work_order_header(work_order)
+    _enrich_work_order_operations(work_order, db=db, company_id=company_id)
+    inject_cost_figures(db, company_id=company_id, work_order=work_order)
     return work_order
 
 

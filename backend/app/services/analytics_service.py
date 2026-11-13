@@ -1599,7 +1599,7 @@ class AnalyticsService:
         exactly); summing it with a bare ``abs()`` would turn a credit into extra cost.
         """
         # ISSUE -> +|total_cost|, RETURN -> -|total_cost|. Same CASE as
-        # ``completion_cost_service._issued_material_cost``; keep the two in step.
+        # ``completion_cost_service.issued_material_cost``; keep the two in step.
         total = (
             self.db.query(func.coalesce(func.sum(_signed_cogs_cost()), 0.0))
             .filter(

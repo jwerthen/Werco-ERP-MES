@@ -2224,6 +2224,13 @@ Deletion and recalculation retain removed entry evidence in the audit log. Same-
 part labels remain readable. No new financial approval workflow is introduced, and automatic
 work-order completion retains its existing business path. See [API: Job costing](API.md#job-costing).
 
+**Job-cost figures on the work-order read (2026-11-13).** `GET /work-orders/{id}` and
+`GET /work-orders/by-number/{wo_number}` now carry `job_cost_actuals` (the JobCost's material /
+labor / burden / subcontract / total) and `issued_material_cost`. No gate changed: job-cost reads were
+already open to every role, and the work-order reads keep their own gate (any authenticated user in
+the active company). The JobCost is read with its own `company_id` scope, never through the work
+order's relationship, so a foreign-tenant row is never shown.
+
 ### Documents
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |

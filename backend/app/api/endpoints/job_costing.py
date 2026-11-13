@@ -36,6 +36,7 @@ def build_job_cost_response(job_cost: JobCost) -> dict:
         "actual_material_cost": job_cost.actual_material_cost,
         "actual_labor_cost": job_cost.actual_labor_cost,
         "actual_overhead_cost": job_cost.actual_overhead_cost,
+        "actual_subcontract_cost": job_cost.actual_subcontract_cost or 0.0,
         "actual_total_cost": job_cost.actual_total_cost,
         "material_variance": job_cost.material_variance,
         "labor_variance": job_cost.labor_variance,
@@ -318,6 +319,14 @@ def variance_report(
                     ),
                     2,
                 ),
+            },
+            # Actual-only: there is no subcontract estimate, so the whole actual is variance.
+            # Listed so material + labor + overhead + subcontract reconcile to the total.
+            "subcontract": {
+                "estimated": 0.0,
+                "actual": job_cost.actual_subcontract_cost or 0.0,
+                "variance": job_cost.actual_subcontract_cost or 0.0,
+                "variance_percent": 0,
             },
             "total": {
                 "estimated": job_cost.estimated_total_cost,

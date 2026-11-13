@@ -1425,7 +1425,8 @@ company-scoped.
 | GET | `/work-orders/` | List all work orders (`skip` ≥ 0, `limit` 1–5000 default 100 — the standard list tier, see [Pagination](#pagination)). `deleted_only=true` returns **only** this company's soft-deleted work orders — the restore view, **Admin / Manager**, and the only read in the API that can see one; see "Seeing a deleted work order" below | Yes (`deleted_only=true`: Admin / Manager) |
 | GET | `/work-orders/browse` | **The bounded, server-filtered page behind the Work Orders list screen.** Returns an **envelope**, not a bare array. Query: `skip` ≥ 0 (default 0; a `skip` past the last page is clamped to that page's start, and the response's `skip` reports the clamped value), `limit` **1–100** (default 50); `status` (one `WorkOrderStatus`; omitted = every status except complete / closed / cancelled); `search` (≤ 200 chars, a **literal** case-insensitive substring — `%` / `_` are not wildcards — over WO number, customer name, customer PO, lot, unit #, part number and part name); `customer` (≤ 255, exact customer name); `hide_cots` (default `true`: hides work orders whose part is purchased / hardware / raw material; part-less ones stay); `scope` (`overdue` \| `due_today`, open work orders against the **Central** date); `work_order_type` (`production` \| `laser_cutting`, unknown → **422**; `laser_cutting` = nest packages — standalone laser work orders and the laser children a nest import hangs off a production job); `sort` (`work_order_number` \| `part` \| `customer` \| `due_date` \| `priority` (default) \| `status`, nulls last, ID tiebreaker) with `direction` (`asc` default \| `desc`); `group` (`none` default \| `customer` \| `part` \| `status`, rows ordered by group first). Response: `items` (`WorkOrderSummary` rows with operation progress), `total` (the full filtered count), `skip`, `limit`, `has_next`, `stats` (`overdue` / `in_progress` / `due_today` over the filtered set), `customers` (distinct customer names under every filter **except** `customer` — it honors `work_order_type` — capped at 1000, with `customers_truncated`), `group_totals` (full counts for only the groups on this page; `{}` when `group=none`), and `type_counts` (`{production, laser_cutting}`, both always present, zero-filled: rows per type under every **other** filter, `customer` included, deliberately **ignoring** `work_order_type` so each type chip shows its own count). A pure read sent `Cache-Control: no-store`: it **never reconciles on read** — no completion evidence, READY promotion or inventory effect — so loading the list does not heal a stranded work order the way `GET /work-orders/{id}` does (see "A read heals a stranded work order" below) | Effective `work_orders:view` in the active company (every role by default; **403** when a company role override removes it) |
 | POST | `/work-orders/` | Create work order. `work_order_type` is validated against the `WorkOrderType` vocabulary (**422** on an unknown value), and `'laser_cutting'` is **refused on create** (422) — nest-dispatch WOs are minted only by the laser nest import paths (see note below). Body accepts `sequential_operations` (**default `true`** — a sequenced routing; see "READY promotion" below) and the optional `unit_number` (≤ 50 chars — see "Unit #" below) | Yes |
-| GET | `/work-orders/{id}` | Get work order by ID | Yes |
+| GET | `/work-orders/{id}` | Get work order by ID. Also carries the job's cost by element (`job_cost_actuals`), the inventory-ledger material figure (`issued_material_cost`) and, per operation, where its actual hours come from (`hours_source`, `recorded_setup_hours`, `recorded_run_hours`, `hours_include_backfill`) — see "Cost and actual hours on the work-order read" below | Yes |
+| GET | `/work-orders/by-number/{wo_number}` | Get work order by number: the **same body** as by ID (every computed field included). A soft-deleted work order is **404**, as by ID. Unlike the read by ID it does **not** reconcile on read — it writes nothing | Yes |
 | GET | `/work-orders/{id}/timeline` | Chronological job history with category, actor and time filters; opaque cursor, `limit` 1–100 (default 30). Returns business events and source links, not raw audit payloads | Yes |
 | PUT | `/work-orders/{id}` | Update work order (body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status, **or sets `status` to COMPLETE/CLOSED from any status other than COMPLETE/CLOSED** — see "Terminal-state lock" below). **`due_date` is the one non-`status` field that IS status-gated: changing it on a COMPLETE/CLOSED/CANCELLED work order returns 409** (see "Due date on a finished job" below). Other non-`status` fields such as `notes` / `special_instructions` / `unit_number` carry **no status gate**: they are editable at any status, including terminal ones (send `unit_number: null` — or `""`, which is trimmed to NULL — to clear it). **The flip verb for `sequential_operations`** — turning it *on* returns **409** on a laser nest WO, and **409 naming the operations** when work is already under way out of sequence; otherwise it demotes un-worked blocked operations READY → PENDING, one audit row each (see "READY promotion" below). **`status: on_hold` on a DRAFT work order returns 409** (a draft has nothing on the floor to hold — release it first); this `PUT` is the "Hold Work Order" write for a released / in-progress job, and the door that puts a held job back on the floor is `POST /work-orders/{id}/resume` (this `PUT` can still move a held job to `draft` or `cancelled`, which keeps it off the floor; its blind move to `released` / `in_progress` is a known gap — see "Draft and on-hold work orders refuse every start" below). **Any move to `draft`** (from released / in progress / on hold) returns every un-worked READY operation — laser nests included — to PENDING with one **required** audit row each; **503**, nothing changed, when those rows cannot be written (see "Returning a job to draft" below). **Lowering `quantity_ordered` below what a whole-order operation has already accounted for (its good + scrap) returns 409** naming the operation, before any field is written — lower the order only by units no operation has started; **raising** it once a whole-order or component operation has completed returns 409 too; whole-order targets restated as `component_quantity` move with the order (audited); an API token lowering it once work is recorded gets 403, as does an API token raising the header's `quantity_scrapped` (only a person declares scrap — owner decision 2026-11-07), changing `scrap_reason`, or changing the header's `quantity_complete` / `quantity_scrapped` in either direction (this PR's extension); and a `sequential_operations` flip that would re-interpret a declared short returns 409 (see "Short count at completion" below) | Admin / Manager / Supervisor |
 | DELETE | `/work-orders/{id}` | Delete work order (soft by default; `hard_delete=true` only for draft/cancelled, and refused **409** when ledger-backed ties or saved templates reference it) | Admin / Manager |
@@ -2277,6 +2278,51 @@ company-scoped.
 > writer three ways (ORM writes, request schemas, MCP tools), so a new one fails CI until it is
 > guarded or listed as exempt with a reason.
 >
+> **Cost and actual hours on the work-order read** (P1.3 / P1.4, 2026-11-13). The two
+> single-work-order reads — `GET /work-orders/{id}` and `GET /work-orders/by-number/{wo_number}` —
+> carry two cost figures, on two different bases. Every other route that returns a
+> `WorkOrderResponse` (create, `PUT`, release, duplicate, template use, nest imports) leaves both
+> `null`.
+>
+> - **`job_cost_actuals`** — the work order's `JobCost` by element, or `null` when it has none.
+>   **Nothing creates a `JobCost` automatically** (the completion sync only updates an existing
+>   one), so expect `null` on most jobs. Fields: `job_cost_id`, `status` (`in_progress` /
+>   `completed` / `reviewed`), `actual_material_cost`, `actual_labor_cost`, `actual_burden_cost`
+>   (the JobCost's `actual_overhead_cost`: OVERHEAD **plus OTHER** entries),
+>   `actual_subcontract_cost` (SUBCONTRACT entries), `actual_total_cost` (all five types) and
+>   `updated_at`. These are the JobCost's own totals of its cost entries: labor is rebuilt from
+>   closed time entries at the work-center rate (`POST /job-costs/{id}/calculate`, or the
+>   completion sync when `LABOR_COST_ROLLUP_ENABLED` is on); material, burden and subcontract come
+>   **only** from manually added entries. Read with its own `company_id` scope — a legacy row of
+>   another company holding this work order's id on the global `job_costs.work_order_id` key is
+>   never disclosed. Plain numbers, which may be negative (a manual entry can be).
+> - **`issued_material_cost`** — net `ISSUE` minus `RETURN` cost from the inventory ledger, over
+>   all three work-order reference shapes (`work_order_ledger_filter`): the material leg of
+>   `actual_cost`. Present whether or not a JobCost exists and whatever
+>   `LABOR_COST_ROLLUP_ENABLED` says. It is **not** `job_cost_actuals.actual_material_cost`, which
+>   counts manual MATERIAL entries only; a job can show real issued material here and `0` there.
+>
+> **Where actual hours come from.** An operation's `actual_setup_hours` / `actual_run_hours` are
+> never copied from routing standards (`setup_time_hours` / `run_time_hours` are the estimate
+> only), and no API writes them by hand. Every non-zero value is a sum of time-entry
+> `duration_hours`, which is the **server's wall clock** from clock-in to clock-out. `SETUP`
+> entries credit setup hours; every other type — `RUN`, `REWORK`, `INSPECTION`, `DOWNTIME`,
+> `BREAK` — credits run hours. Clock-out credits the operation at once. Some paths close entries
+> **without** crediting it: an operation hold (`PUT /shop-floor/operations/{id}/hold`, and the
+> process-sheet OOT quality hold) always, and the auto clock-out when an operation or work order
+> completes while `LABOR_COST_ROLLUP_ENABLED` is off. A paper back-entry (`source` `backfill`)
+> records the clerk's keying session, not the labor. So each operation on the two reads above
+> also carries, derived at read time from the same batched time-entry read (never stored):
+>
+> | Field | Meaning |
+> |---|---|
+> | `hours_source` | `time_entries` — closed time entries measured hours on this operation. `manual` — stored hours with no time-entry hours behind them (legacy or out-of-band data; no API writes them). `none` — nothing recorded; an open entry counts for nothing until clock-out. `standard` is **reserved and never returned**. |
+> | `recorded_setup_hours` / `recorded_run_hours` | The measured sums of **closed** entries, split as clock-out splits them. They can be **higher** than `actual_setup_hours` / `actual_run_hours` after a hold or a flag-off auto clock-out. |
+> | `hours_include_backfill` | `true` when any closed entry behind those sums is a paper back-entry or an import, whose duration is keying time. |
+>
+> All four are `null` on responses not built through `_enrich_work_order_operations`. A foreign
+> company's entry on a colliding operation id never counts.
+>
 > **Read models.** `WorkOrderOperationResponse` (every response built through
 > `_enrich_work_order_operations` — `GET /work-orders/{id}`, by-number, create, duplicate, both
 > nest-package imports, template use) carries `quantity_short_declared` (the column) and, computed in
@@ -2569,11 +2615,15 @@ company-scoped.
 >   > `ISSUE` on the same work order is still refused **409** — see the error table below — but that
 >   > refusal is now a legacy-only fence and is **unreachable** in practice.
 >
-> **Tied material counts as job-cost material.** `WorkOrder.actual_cost`, the synced `JobCost`, and
-> the analytics cost variance sum `abs(total_cost)` over the work order's `ISSUE` rows under **all
-> three** reference shapes (`work_order`, `work_order_backflush` and `work_order_operation`) — one
-> shared predicate (`work_order_ledger_filter`), so the stored
-> rollup and the analytics leg cannot drift. A nest that burned six $80 sheets contributes $480.
+> **Tied material counts as work-order material cost.** `WorkOrder.actual_cost`, the work-order
+> read's `issued_material_cost` and the analytics cost variance sum `abs(total_cost)` over the work
+> order's `ISSUE` rows (less `RETURN` credits) under **all three** reference shapes (`work_order`,
+> `work_order_backflush` and `work_order_operation`) — one shared predicate
+> (`work_order_ledger_filter`), so the stored rollup and the analytics leg cannot drift. A nest that
+> burned six $80 sheets contributes $480. **A `JobCost` does not**: its sync on completion only
+> rebuilds labor from time entries, and its `actual_material_cost` is the total of manually added
+> MATERIAL entries. (This paragraph said "the synced `JobCost`" did until 2026-11-13; it never
+> did.)
 >
 > **Scrap consumes**, and posts as `ISSUE` (not `SCRAP`): lot genealogy filters on `ISSUE`, so a
 > `SCRAP` row would erase audited scrap material from the as-built record. The good/scrap split is
@@ -8056,7 +8106,7 @@ those two fields is what the check is worth.
 | GET | `/job-costs/{id}/variance-report` | Read its variance report | Yes |
 | POST | `/job-costs/` | Create for an undeleted tenant work order | Admin / Manager |
 | PUT | `/job-costs/{id}` | Update estimates/status | Admin / Manager |
-| POST | `/job-costs/{id}/entries` | Add a manual cost entry | Admin / Manager |
+| POST | `/job-costs/{id}/entries` | Add a manual cost entry (`entry_type` `material` / `labor` / `overhead` / `other` / `subcontract`) | Admin / Manager |
 | DELETE | `/job-costs/{id}/entries/{entry_id}` | Remove a cost entry, retaining its prior contents in the audit trail | Admin / Manager |
 | POST | `/job-costs/{id}/calculate` | Regenerate TimeEntry labor entries and recompute totals, preserving other entries | Admin / Manager |
 
@@ -8069,6 +8119,17 @@ operation/user references are rendered `null`. Same-company historical part labe
 platform-actor attribution remain readable. A second job cost for an already-costed work order
 returns **400**; a conflicting legacy row outside the tenant returns **409** without exposing it.
 Explicit `null` estimates/status and invalid enum values return **422**.
+
+**Cost elements (2026-11-13, migration 121).** A job cost totals its entries by type:
+`actual_material_cost` (MATERIAL), `actual_labor_cost` (LABOR), `actual_overhead_cost`
+(OVERHEAD **and** OTHER — its stored meaning, unchanged), and `actual_subcontract_cost`
+(SUBCONTRACT: outside processing such as plating or heat treat). `actual_total_cost` is all five
+types; subcontract is never folded into overhead. There is no subcontract **estimate**, so
+subcontract reaches `total_variance` but no per-element variance; the variance report lists a
+`subcontract` line (estimated `0`) so its lines add up to the total. Subcontract entries are
+manual: no purchase-order line or receipt carries a work-order link, so nothing posts one
+automatically. The work-order read reports these totals as `job_cost_actuals` (burden =
+`actual_overhead_cost`) — see Work Orders → "Cost and actual hours on the work-order read".
 
 Every manual write requires **Admin / Manager**, including recalculation (**403** otherwise).
 Cost entries, parent totals, and required audit rows commit atomically; audit failure returns

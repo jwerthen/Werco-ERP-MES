@@ -1293,7 +1293,11 @@ CONVENIENCE_TOOLS: Tuple[ConvenienceTool, ...] = (
     ConvenienceTool(
         "get_work_order",
         "GET /api/v1/work-orders/{id} (or /by-number/{n}) — One work order with its operations, nests, status and "
-        "optimistic-lock version. [Work Orders]",
+        "optimistic-lock version. Cost: job_cost_actuals (JobCost material / labor / burden / subcontract / total; "
+        "null when the job has no JobCost) and issued_material_cost (net material issued from inventory, a "
+        "different basis). Per operation, hours_source says where actual_setup_hours / actual_run_hours come from "
+        "(time_entries = measured clock-in/out, manual, none; never standards) beside recorded_setup_hours / "
+        "recorded_run_hours and hours_include_backfill. [Work Orders]",
         _strict(_GET_WORK_ORDER_SCHEMA),
         _READ,
         _get_work_order,
