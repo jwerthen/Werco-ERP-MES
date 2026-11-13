@@ -352,7 +352,11 @@ list):
   cannot record a CAR's quality approval. A person signed in to the app must record it."` and
   `record_fai_customer_approval` answers **403** `"A standing API token cannot record an FAI's
   customer approval. A person signed in to the app must record it."`, both before any write. The
-  reads beside them (`get_car_pdf`, `list_fai_log`) stay open.
+  same applies to the judgments around them: `update_fai` setting a final status (`passed`,
+  `failed`, `conditional`) answers **403** `"A standing API token cannot record an FAI's final
+  disposition. …"`, and `create_car` / `update_car` filling or changing a vendor or customer
+  approval box answers **403** `"A standing API token cannot record or change a CAR's vendor or
+  customer approval. …"`. The reads beside them (`get_car_pdf`, `list_fai_log`) stay open.
 - **Deliberately left open.** `work_orders_resume_work_order` lifts a work-order hold for a token
   whose user holds Admin / Manager / Supervisor, audited as that user (owner decision 2026-11-07).
   `dismiss_ai_recommendation`, snooze and feedback stay open to every credential — a design decision

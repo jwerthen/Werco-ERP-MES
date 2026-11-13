@@ -246,7 +246,7 @@ class DocumentDeliveryService:
                 estimate=context,
                 # The PDF's Terms block is built from the company's address, so a changed FOB
                 # point is a changed document (a prepared delivery must be re-previewed).
-                terms=company_quote_terms(self.db, self.company_id),
+                terms=company_quote_terms(self.db, self.company_id, record.valid_until),
             )
             return record, digest(data), record.customer_email or '', record.quote_number, None
         query = (

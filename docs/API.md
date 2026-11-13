@@ -1321,7 +1321,7 @@ active company; another company's customer id answers **404** with the same deta
 | GET | `/customers/{id}/stats` | Parts and assemblies filed under the customer's name, work-order counts by status, and current / past / recent work orders, **from the active company only** (see note) | Yes |
 | POST | `/customers/` | Create. `code` is optional and generated from the name when omitted. **400** `Customer name already exists` / `Customer code already exists` on a duplicate **within the company**. Writes an audit `CREATE` row in the same transaction | Admin / Manager / Supervisor |
 | PUT | `/customers/{id}` | Partial update of a live customer (**404** on a soft-deleted one). A rename onto a name already used in the company is **400** `Customer name already exists`, including when a concurrent rename races past the check. `code` is not updatable | Admin / Manager |
-| DELETE | `/customers/{id}` | Soft delete by default (also clears `is_active`). A second soft delete of an already-deleted customer is **400** `Customer is already deleted` and changes nothing. `hard_delete=true` removes the row (a soft-deleted one too), and is refused **400** while parts of the active company carry the customer's name | Admin / Manager |
+| DELETE | `/customers/{id}` | Soft delete by default (also clears `is_active`). A second soft delete of an already-deleted customer is **400** `Customer is already deleted` and changes nothing. `hard_delete=true` removes the row (a soft-deleted one too), and is refused **400** while parts of the active company carry the customer's name, or while a CAR names the customer (`Cannot hard delete: Customer is named on N corrective action report(s); soft delete it instead`) | Admin / Manager |
 | POST | `/customers/{id}/restore` | Restore a soft-deleted customer (**400** if it is not deleted). Restore always sets `is_active = true` (see note) | Admin / Manager |
 | POST | `/customers/import-csv` | See [Bulk Imports & Templates](#bulk-imports--templates-excel-migration-kit) | Admin / Manager |
 
@@ -1352,7 +1352,8 @@ active company; another company's customer id answers **404** with the same deta
 > work-order numbers and customer POs, and the hard-delete count refused the delete over the other
 > company's parts while disclosing how many it had. Both now read the active company only.
 >
-> The hard-delete check counts parts only. Customer complaints, RMAs, RFQ quotes, fabrication
+> The hard-delete check counts parts and CARs (`cars.customer_id`, migration `122`) only. Customer
+> complaints, RMAs, RFQ quotes, fabrication
 > quotes and the governance tables reference `customers.id` with no `ON DELETE`, so on PostgreSQL a
 > hard delete of a customer they still reference fails with a database error (**500**) rather than
 > a 400. Work orders that name the customer are not counted. Soft delete is unaffected.
@@ -4713,7 +4714,7 @@ environment variable or deployment configuration change is needed.
 | POST | `/parts/` | Create part | Yes |
 | GET | `/parts/{id}` | Get part by ID | Yes |
 | PUT | `/parts/{id}` | Update part — resolves **any** part in the company, engineering or material/supply. (**409** when it turns `backflush_components` on and the part's readiness check reports blockers, and **409** when it reclassifies a material part into a produced one while an **unfinished** work order still ties it — see below) | Admin / Manager / Supervisor |
-| DELETE | `/parts/{id}` | Delete part (soft delete — restorable) | Admin |
+| DELETE | `/parts/{id}` | Delete part (soft delete — restorable). `hard_delete=true` is refused **400** while work orders, BOMs or BOM lines reference the part, or while a CAR names it (`Cannot hard delete: Part is named on N corrective action report(s); soft delete it instead`; `DELETE /materials/{id}?hard_delete=true` applies the same CAR check) | Admin |
 | POST | `/parts/{id}/restore` | Restore a soft-deleted part, **returning it to the `is_active` it had when it was deleted** — not an unconditional re-activate, and an unknowable prior value comes back **inactive**. **400** if it is not actually deleted. See note below | Admin / Manager |
 | POST | `/parts/{id}/deactivate` | Take a part out of use — `is_active=false` + `status='obsolete'`. **Not** a delete; `is_deleted` is never written. Reason required. **409** if it still has stock and `acknowledge_remaining_stock` was not set | **Admin / Manager** |
 | POST | `/parts/{id}/activate` | Put a retired part back into use. Reason optional | **Admin / Manager** |
@@ -7896,29 +7897,39 @@ the caller's most recent closed unapproved session.)
 > | Field | Type | Rule |
 > |---|---|---|
 > | `initiation_reason` | one of `management_review`, `nonconformance_trend`, `customer_feedback`, `internal_audit`, `production_problems`, `external_audit`, `continuous_improvement`, `other` | One value per CAR (the form's eight boxes). `other` requires a non-blank `initiation_reason_other` (**422**). Held by the DB CHECK `ck_cars_initiation_reason`. Distinct from `car_type` |
-> | `initiation_reason_other` | text ≤ 255 | The "Other ____" text |
+> | `initiation_reason_other` | text ≤ 255 | The "Other ____" text. A `PUT` that moves `initiation_reason` off `other` without sending this field clears it (recorded old → `null` on the audit row) |
 > | `rma_number` | text ≤ 50 | Free text: a Werco RMA, a customer's, or a paper back-entry |
-> | `submitted_date` | date | "Date Submitted". Defaults to today in Central at create; a past date back-enters a paper CAR. Due-date validation is unchanged |
+> | `submitted_date` | date | "Date Submitted". Defaults to today in Central at create; a past date back-enters a paper CAR; a date after today (Central) is **422**. Due-date validation is unchanged |
 > | `part_id` | id | A **live** part of the active company (**404** `"Part not found"`) |
 > | `customer_id` | id | A **live** customer of the active company (**404** `"Customer not found"`). Its name is snapshotted into `customer_name`, which is never accepted in a request: re-taken when `customer_id` changes, cleared when it is cleared |
 > | `vendor_id` | id | A vendor of the active company (**404** `"Vendor not found"`). **Inactive and soft-deleted vendors are accepted**: a supplier CAR can be the record of that supplier's removal (invariant 3's records exception, AS9100D 8.4) |
 > | `vendor_po_number` | text ≤ 100 | "P.O number (if C/A applies to a vendor)" |
 > | `cost_labor`, `cost_material`, `cost_outside_services`, `cost_shipping` | decimal, ≥ 0, at most 12 digits with 2 decimal places (**422** otherwise) | Blank is not zero: each stays `null` until entered |
 > | `management_action` | text ≤ 2000 | |
-> | `vendor_approval_name`, `vendor_approval_title`, `vendor_approval_date` | text ≤ 255, date | Vendor management approval |
-> | `customer_approval_name`, `customer_approval_date` | text ≤ 255, date | Customer approval |
+> | `vendor_approval_name`, `vendor_approval_title`, `vendor_approval_date` | text ≤ 255, date | Vendor management approval. The date cannot be after today (Central) (**422**). **A standing API token may not fill or change these** (see below) |
+> | `customer_approval_name`, `customer_approval_date` | text ≤ 255, date | Customer approval. The date cannot be after today (Central) (**422**). **A standing API token may not fill or change these** (see below) |
 >
+> - **The sign-off boxes are a person's entry.** A standing API token is refused with **403**
+>   (`"A standing API token cannot record or change a CAR's vendor or customer approval. A person
+>   signed in to the app must record it."`), before any write, when a create fills any vendor or
+>   customer approval field or an update changes (or clears) one. Leaving them blank, or re-sending
+>   the stored value beside another edit, is not refused. See
+>   [RBAC → Credential policy for judgment writes](RBAC_PERMISSIONS.md#credential-policy-for-judgment-writes).
 > - **Only a changed reference is checked.** On `PUT` a part, customer or vendor the CAR already
 >   names is never re-validated, so a CAR keeps naming a part or customer retired after it was raised.
 >   A new selection must pass the rules above.
 > - **`CARResponse` adds** every field above plus `cost_total` (the sum of the entered buckets,
 >   computed on read and never stored; `null` when none is entered), `part_number` / `part_name` /
->   `part_revision` (the part's revision **today**, read from the part), `customer_name`,
+>   `part_current_revision` (the part's revision **today**, read from the part; the CAR records no
+>   revision of its own, and the detail screen labels it "current Rev"), `customer_name`,
 >   `vendor_name`, `containment_due` / `corrective_due`, the `initiated_by` / `assigned_to` /
 >   `verified_by` / `closed_by` ids with a `*_name` beside each, and `quality_approved_by` /
 >   `quality_approved_by_name` / `quality_approved_at`. Part and vendor names are read without an
 >   `is_deleted` filter (historical record), but always tenant-scoped, so a legacy row pointing at
->   another company's record shows no name rather than theirs. Every CAR route, list included,
+>   another company's record shows no name rather than theirs. A server-stamped user
+>   (`initiated_by`, `verified_by`, `closed_by`, `quality_approved_by`) outside the company is
+>   named only when it is a superuser or Platform Admin who acted in this company's context; an
+>   ordinary user of another company is never named. Every CAR route, list included,
 >   returns this shape.
 > - **Escalations prefill the form.** `POST /quality/ncr/{id}/create-car`: see the bullet above.
 >   `POST /complaints/complaints/{id}/create-car`: see **Customer Complaints & RMA**.
@@ -7989,9 +8000,9 @@ Quality**. Platform Admin/superuser role overrides retain the same tenant and re
 | GET | `/quality/fai` | List tenant inspections | Yes |
 | GET | `/quality/fai/log` | The FAI log of record, newest first: one `FAILogRow` per inspection. Filters `start_date` / `end_date` (inclusive Central dates), `status`, `customer` (≤ 255), `part_id`, `work_order_id`, `search` (≤ 255); `limit` 1–500 (default 100), `offset`. See "FAI log of record" | Yes |
 | GET | `/quality/fai/{fai_id}` | Read an inspection and its tenant-owned characteristics | Yes |
-| POST | `/quality/fai` | Create an inspection for an undeleted tenant part and optional undeleted tenant work order. An omitted or blank `part_revision` records the part's current revision | Admin / Manager / Supervisor / Quality |
-| PUT | `/quality/fai/{fai_id}` | Edit an unfinished inspection; setting `passed`, `failed`, or `conditional` requires approval authority | Authoring roles; Admin / Manager / Quality for final disposition |
-| POST | `/quality/fai/{fai_id}/customer-approval` | Record the customer's approval of a PASSED or CONDITIONAL inspection; body `{ "customer_approval_date": "<date, optional>" }`. Once. **403** for a standing API token. See "Customer approval" | Admin / Manager / Quality |
+| POST | `/quality/fai` | Create an inspection for an undeleted tenant part and optional undeleted tenant work order that builds that part (its own part, or a component of one of its operations; **422** otherwise). An omitted or blank `part_revision` records the part's current revision | Admin / Manager / Supervisor / Quality |
+| PUT | `/quality/fai/{fai_id}` | Edit an unfinished inspection; setting `passed`, `failed`, or `conditional` requires approval authority and a person (**403** for a standing API token) | Authoring roles; Admin / Manager / Quality for final disposition |
+| POST | `/quality/fai/{fai_id}/customer-approval` | Record the customer's approval of a PASSED or CONDITIONAL inspection; optional body `{ "customer_approval_date": "<date, optional>" }`. Once. **403** for a standing API token. See "Customer approval" | Admin / Manager / Quality |
 | POST | `/quality/fai/{fai_id}/characteristics` | Add a characteristic with the parent's company context | Admin / Manager / Supervisor / Quality |
 | PUT | `/quality/fai/{fai_id}/characteristics/{char_id}` | Record/correct an unfinished characteristic | Admin / Manager / Supervisor / Quality |
 | DELETE | `/quality/fai/{fai_id}/characteristics/{char_id}` | Remove an unfinished characteristic and retain its prior contents in the audit trail | Admin / Manager / Supervisor / Quality |
@@ -8000,12 +8011,21 @@ Quality**. Platform Admin/superuser role overrides retain the same tenant and re
 Every writer locks and resolves the same tenant-owned FAI before changing it. A characteristic
 must belong to both that FAI and company; unknown/foreign parents, children, inspectors, or
 referenced records return **404**. A forbidden authoring/approval role returns **403**, without
-changing the inspection. Finalization records the actual actor in `approved_by` and the completion
+changing the inspection. A standing API token setting a final status is refused **403** (`"A
+standing API token cannot record an FAI's final disposition. A person signed in to the app must
+record it."`) before the row lock and any write; it may still make the non-final edits its role
+allows. Finalization records the actual actor in `approved_by` and the completion
 date (today on the Central calendar, not the server host's date). A final status (`passed`,
 `failed`, `conditional`) **or any existing `completed_date`** makes all header, characteristic, and
 prefill writes return **409**: corrections require a new inspection. The customer approval is the one
 write allowed after that (see below). The legacy `version` request field is not an optimistic-lock
 guarantee for the FAI model.
+
+Create refuses (**422**, nothing written) a `work_order_id` whose job does not build the part: the
+log of record names the linked job's number, customer and PO, so an FAI of one part linked to
+another part's job would put that job's customer on this first article. A job builds the part when
+it is the job's own part or a `component_part_id` of one of its operations (a component FAI inside
+an assembly job); a part-less job (a standalone laser-nest work order) is not judged.
 
 Create stamps the revision inspected: `part_revision` is trimmed and upper-cased before its
 `^[A-Z0-9]+$` check, and when it is omitted or blank the part's current revision is recorded, so the
@@ -8024,11 +8044,12 @@ A since-deleted work order or part is still named (historical record).
 **Customer approval (`POST /quality/fai/{fai_id}/customer-approval`).** Records that the customer
 accepted the first article. A customer approval normally arrives after the final disposition, which
 froze the evidence, so it has its own verb. It writes only `customer_approved = true` and
-`customer_approval_date`. Gate **Admin / Manager / Quality**. Body `FAICustomerApprovalRequest`
-(unknown keys are **422**):
+`customer_approval_date`. Gate **Admin / Manager / Quality**. Optional body
+`FAICustomerApprovalRequest` (unknown keys are **422**; no body records today):
 
 - `customer_approval_date` defaults to today (Central). A past date back-enters an approval received
-  earlier; a future date is **422**.
+  earlier, but not one before the FAI's `inspection_date` when it has one (**422**); a future date
+  is **422**.
 - Only a **PASSED** or **CONDITIONAL** inspection can carry it. One with no final disposition yet is
   **409** ("Record FAI …'s final disposition (Passed or Conditional) before its customer
   approval."). A **FAILED** one is **409** too: a failure is answered by a new inspection.
@@ -8592,7 +8613,7 @@ when an estimate is approved and handed off in Fabrication Quoting (`/fabricatio
 | POST | `/quotes/{quote_id}/send` | Mark the quote sent. Records the status only; no message is dispatched. **409** unless `draft` / `pending` / `sent` (re-sending a `sent` quote is an idempotent 200); **409** while any line lacks its drawing revision (see "Drawing revision on every quote line") | Admin / Manager / Supervisor |
 | GET | `/quotes/{quote_id}/conversion-plan` | Per line: whether it can become a work order, and why not | Yes |
 | POST | `/quotes/{quote_id}/convert` | Convert the reviewed lines (`line_ids`; default all eligible) into **DRAFT** work orders, one per line, in one transaction. **400** unless `sent` / `accepted`; **422** on an ineligible line, or on unlinked quote-only lines without `acknowledge_unlinked` | Admin / Manager / Supervisor |
-| POST | `/quotes/{quote_id}/generate-pdf` | Customer-ready quote PDF. **409** while any line lacks its drawing revision, whatever the quote's status | Yes |
+| POST | `/quotes/{quote_id}/generate-pdf` | Customer-ready quote PDF. On a quote not yet issued (`draft`, `pending`, `rejected`, `expired`), **409** while any line lacks its drawing revision; a `sent`, `accepted` or `converted` quote reprints as issued | Yes |
 
 > **Quote writes are role-gated and audited (2026-11-05).** `PUT`, `/send` and `/convert` share one
 > role set, `QUOTE_WRITE_ROLES` = Admin / Manager / Supervisor (superuser and Platform Admin pass, as
@@ -8628,7 +8649,8 @@ when an estimate is approved and handed off in Fabrication Quoting (`/fabricatio
 > quote that is not `draft` / `pending`; **409** when `lines` is sent (customer quote prices and lines
 > are frozen — revise the estimate in Fabrication Quoting); **409** on any status change to a
 > `converted` quote; **422** on `status: "converted"` (use `/convert`); **422** when `line_revisions`
-> names a line id that is not on this quote, names a line twice, or carries an invalid value; **409**
+> names a line id that is not on this quote, names a line twice, carries an invalid value, or puts
+> `N/A` on a line naming a manufactured or assembly part; **409**
 > on a move into `sent` or `accepted` from any other status (`draft`, `pending`, and also `rejected`
 > or `expired`, which a quote can reach without ever being sent) while any line lacks its drawing
 > revision. That check is skipped when the same request also edits content, because the edit lands the
@@ -8652,24 +8674,35 @@ when an estimate is approved and handed off in Fabrication Quoting (`/fabricatio
 >   no drawing (a setup charge, freight, a packaged line). Blank is refused (**422**): a revision, once
 >   entered, is corrected rather than erased. It is a **content edit**, so it inherits every content
 >   rule: `draft` / `pending` quotes only, no work-order-linked lines, the `expected_updated_at` check,
->   the reset to `draft` and the cleared approval stamp. An empty list edits nothing.
+>   the reset to `draft` and the cleared approval stamp. An empty list edits nothing, and so does a
+>   value equal to the one stored (no reset, no audit row). `N/A` is refused (**422**, naming the
+>   line and part) on a line naming a **manufactured or assembly** part of the company: that part has
+>   a drawing, so `N/A` would satisfy the gate without a revision. Purchased, hardware, raw-material
+>   and consumable parts, and part-less lines, may carry `N/A`.
 > - **The gate.** While any line has no revision (part-less lines included), each door that puts the
 >   quote in front of the customer refuses with **409** and writes nothing:
 >   `"Every quote line needs a drawing revision before the quote can be sent. Missing on line(s): 1, 3."`
 >   The doors are `POST /quotes/{id}/send` (when the status actually moves; re-sending a `sent` quote
 >   stays a 200), `PUT /quotes/{id}` moving a quote into `sent` or `accepted` from any other status,
->   `POST /quotes/{id}/generate-pdf`, and the quote email path, `POST /document-deliveries/preview` and
+>   `POST /quotes/{id}/generate-pdf` on a quote not yet issued, and the quote email path,
+>   `POST /document-deliveries/preview` and
 >   `POST /document-deliveries/{id}/send`. The send re-checks the gate, so a preview prepared before the
 >   gate existed cannot reach SMTP.
-> - **`generate-pdf` is gated in every status**, not only `draft` / `pending`, because it produces the
->   customer document. A quote issued before `122` has no line revisions, so its PDF cannot be
->   regenerated until they are entered, and entry is open only to a `draft` / `pending` quote. An
->   issued quote with no line converted to a work order can be moved back to `draft` with `PUT`, given
->   its revisions, and sent again (each step audited). A `converted` quote, or one with any line linked
->   to a work order, cannot be moved back to `draft`, so its PDF stays refused.
+> - **`generate-pdf` holds the gate until the quote is issued.** A `draft`, `pending`, `rejected` or
+>   `expired` quote is refused (the last two are reachable from `draft` without a send, so a PDF of one
+>   would be the first customer document). A `sent`, `accepted` or `converted` quote reprints the
+>   document the customer already holds and is never refused for a blank revision: every quote issued
+>   since `122` passed the gate on its way to `sent`, and an issued quote's lines are frozen, so the
+>   only issued quote with blank revisions is one issued before `122` (its Rev column prints `-`).
+>   Refusing it would leave that issued document unreproducible, since a `converted` quote cannot be
+>   reopened to enter revisions. **The email path stays gated in every status**: an email is a new
+>   send. To email such a quote, move it back to `draft` with `PUT` (when no line is linked to a work
+>   order), enter its revisions and send it again (each step audited).
 > - **Reads.** `QuoteLineResponse` and the print data (`GET /print/quotes/{id}/print-data`) carry
 >   `part_revision` and `part_current_revision` (the linked part's revision today, tenant-checked; the
->   editor pre-fills an empty Rev from it). The Quotes editor has a Rev input per line and sends only
+>   editor pre-fills an empty Rev from it and marks the box "From the part — check the drawing" until
+>   the planner changes it, because saving records it). `part_number` is tenant-checked the same way:
+>   a legacy line pointing at another company's part names no part. The Quotes editor has a Rev input per line and sends only
 >   the revisions that changed. The detail table shows a Rev column ("Missing" when blank) and names
 >   the lines the gate will refuse.
 >
@@ -8679,7 +8712,8 @@ when an estimate is approved and handed off in Fabrication Quoting (`/fabricatio
 > "Exclusions / Notes" block is replaced by a **Terms** block, one module constant in
 > `services/document_pdf_service.py`:
 >
-> 1. Quote valid for 30 days from the quote date.
+> 1. Quote valid for 30 days from the quote date. When the quote carries its own `valid_until`, this
+>    term reads "Quote valid until *MM/DD/YYYY*." instead, so the Terms never contradict Valid Until.
 > 2. FOB *City*, *ST*. The FOB point is read from the issuing company's own `address` (its last line
 >    ending in "City, ST [ZIP]"). It prints "FOB Origin." when no city and state can be read.
 > 3. All prices are in U.S. dollars (USD).

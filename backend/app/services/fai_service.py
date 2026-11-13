@@ -19,14 +19,14 @@ from sqlalchemy import and_, func, inspect, or_
 from sqlalchemy.orm import Query, Session, selectinload
 
 from app.core.credentials import is_api_token_credential
-from app.core.time_utils import CENTRAL_TIME_ZONE, ensure_utc
+from app.core.time_utils import CENTRAL_TIME_ZONE, central_today, ensure_utc
 from app.db.database import atomic_transaction
 from app.db.locks import acquire_generator_lock
 from app.db.tenant_filter import tenant_filter, tenant_query
 from app.models.part import Part
 from app.models.quality import FAICharacteristic, FAIStatus, FirstArticleInspection
 from app.models.user import User, UserRole
-from app.models.work_order import WorkOrder
+from app.models.work_order import WorkOrder, WorkOrderOperation
 from app.schemas.quality import (
     FAICharacteristicCreate,
     FAICharacteristicUpdate,
@@ -52,11 +52,11 @@ CUSTOMER_APPROVABLE_STATUSES = {FAIStatus.PASSED, FAIStatus.CONDITIONAL}
 API_TOKEN_CUSTOMER_APPROVAL = (
     "A standing API token cannot record an FAI's customer approval. A person signed in to the app must record it."
 )
-
-
-def central_today() -> date:
-    """Today's date on the shop's (Central) calendar, never the server host's local date."""
-    return datetime.now(CENTRAL_TIME_ZONE).date()
+# Nor the final disposition itself (passed / failed / conditional): it is the inspection's
+# quality judgment, it stamps the approver, and it freezes the evidence for good.
+API_TOKEN_FAI_DISPOSITION = (
+    "A standing API token cannot record an FAI's final disposition. A person signed in to the app must record it."
+)
 
 
 @contextmanager
@@ -170,6 +170,31 @@ def _number(db, company_id):
     return f"{prefix}{number:03d}"
 
 
+def _require_job_builds_part(db: Session, company_id: int, work_order: WorkOrder, part: Part) -> None:
+    """422 unless ``work_order`` builds ``part``: its own part, or a component of its operations.
+
+    The FAI log of record names the linked job's number, customer and customer PO, so an FAI
+    linked to another part's job would put that job's customer on this part's first article.
+    A part-less job (a standalone laser-nest work order) names no part and is not judged.
+    """
+    if work_order.part_id is None or work_order.part_id == part.id:
+        return
+    component = (
+        tenant_query(db, WorkOrderOperation, company_id)
+        .filter(WorkOrderOperation.work_order_id == work_order.id, WorkOrderOperation.component_part_id == part.id)
+        .with_entities(WorkOrderOperation.id)
+        .first()
+    )
+    if component is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Work order {work_order.work_order_number} does not build part {part.part_number}. "
+                "Link the FAI to a job for that part, or to an assembly job that builds it as a component."
+            ),
+        )
+
+
 def create_fai(db: Session, company_id: int, data: FAICreate, user: User, audit: AuditService):
     with fai_transaction(db):
         part = tenant_query(db, Part, company_id).filter(Part.id == data.part_id, Part.is_deleted.is_(False)).first()
@@ -183,6 +208,7 @@ def create_fai(db: Session, company_id: int, data: FAICreate, user: User, audit:
             )
             if work_order is None:
                 raise HTTPException(status_code=404, detail="Work order not found")
+            _require_job_builds_part(db, company_id, work_order, part)
         values = data.model_dump()
         if values.get("part_revision") is None:
             # The inspection is of the drawing revision in force NOW. Stamp it on the record
@@ -214,10 +240,13 @@ def create_fai(db: Session, company_id: int, data: FAICreate, user: User, audit:
 
 
 def update_fai(db: Session, company_id: int, fai_id: int, data: FAIUpdate, user: User, audit: AuditService):
+    changes = data.model_dump(exclude_unset=True, exclude={"version"})
+    finalizing = changes.get("status") in FINAL_STATUSES
+    if finalizing and is_api_token_credential(user):
+        # Before the row lock and before any write: the disposition is a person's judgment.
+        raise HTTPException(status_code=403, detail=API_TOKEN_FAI_DISPOSITION)
     with fai_transaction(db):
         fai = editable_fai(db, company_id, fai_id)
-        changes = data.model_dump(exclude_unset=True, exclude={"version"})
-        finalizing = changes.get("status") in FINAL_STATUSES
         if finalizing and not (user.is_superuser or user.role == UserRole.PLATFORM_ADMIN or user.role in APPROVE_ROLES):
             raise HTTPException(status_code=403, detail="FAI approval requires Admin, Manager or Quality")
         if "status" in changes and changes["status"] is None:
@@ -347,7 +376,7 @@ def record_customer_approval(
     db: Session,
     company_id: int,
     fai_id: int,
-    data: FAICustomerApprovalRequest,
+    data: Optional[FAICustomerApprovalRequest],
     user: User,
     audit: AuditService,
 ) -> FirstArticleInspection:
@@ -357,14 +386,15 @@ def record_customer_approval(
     on a PASSED or CONDITIONAL inspection: an undispositioned FAI is refused (409, record the
     disposition first) and so is a FAILED one (409, a failure is answered by a new inspection).
     Recorded once (409 when already recorded), so the record keeps the first approval. The
-    date defaults to today (Central); a past date back-enters an approval received earlier and
-    a future one is refused (422). A standing API token is refused (403). The row is locked
-    first; the APPROVE audit row commits with the approval or neither is saved (503).
+    date defaults to today (Central); a past date back-enters an approval received earlier, but
+    not one before the FAI's recorded inspection date, and a future one is refused (422). The
+    body is optional (no body = today). A standing API token is refused (403). The row is
+    locked first; the APPROVE audit row commits with the approval or neither is saved (503).
     """
     if is_api_token_credential(user):
         raise HTTPException(status_code=403, detail=API_TOKEN_CUSTOMER_APPROVAL)
     today = central_today()
-    approval_date = data.customer_approval_date or today
+    approval_date = (data.customer_approval_date if data is not None else None) or today
     if approval_date > today:
         raise HTTPException(status_code=422, detail="The customer approval date cannot be in the future.")
     with fai_transaction(db):
@@ -390,6 +420,15 @@ def record_customer_approval(
             raise HTTPException(
                 status_code=409,
                 detail=f"FAI {fai.fai_number} already has its customer approval; it is recorded once.",
+            )
+        if fai.inspection_date is not None and approval_date < fai.inspection_date:
+            # The customer approves an inspected first article; it cannot predate the inspection.
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "The customer approval date cannot be before the FAI's inspection date "
+                    f"({fai.inspection_date:%m/%d/%Y})."
+                ),
             )
         old: Dict[str, Any] = {
             "customer_approved": bool(fai.customer_approved),
@@ -587,11 +626,15 @@ def fai_log_query(
         query = query.filter(fai.part_id == part_id)
     if work_order_id is not None:
         query = query.filter(fai.work_order_id == work_order_id)
+    # A blank or whitespace-only filter is no filter: matching "%%" would drop every row whose
+    # Customer is empty.
+    customer = (customer or "").strip()
+    search = (search or "").strip()
     if customer:
         shown_customer = func.coalesce(func.nullif(func.trim(WorkOrder.customer_name), ""), Part.customer_name)
-        query = query.filter(shown_customer.ilike(_like(customer.strip()), escape="\\"))
+        query = query.filter(shown_customer.ilike(_like(customer), escape="\\"))
     if search:
-        pattern = _like(search.strip())
+        pattern = _like(search)
         query = query.filter(
             or_(
                 *(

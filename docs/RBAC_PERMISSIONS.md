@@ -133,7 +133,8 @@ and each row below names its own: owner ruling 3 of 2026-11-05 (the two AI rows)
 decision of 2026-11-07 (a standing API token may not declare scrap or close work short), this
 PR's extensions of that decision (scrap reasons, the re-stamp short close and the other count
 judgments), and the lead's design decision of 2026-11-13 for the two quality-approval verbs (CAR
-Quality Manager approval, FAI customer approval). This section is the **one list** of those credential rules — what refuses a credential,
+Quality Manager approval, FAI customer approval) and its review follow-ups (the FAI final
+disposition and the CAR form's vendor / customer sign-off boxes). This section is the **one list** of those credential rules — what refuses a credential,
 what is deliberately left open (and who decided each), and what is deliberately not refused —
 across the AI governance (ruling 3), floor-gates (ruling 2) and short-count (ruling 1) changes;
 other documents point here. The predicates live once, in
@@ -146,7 +147,7 @@ request:
 | `is_api_token_credential` (the write is refused when true) | A long-lived **API token** | An interactive session, and a crew-station badge token (a person standing at the kiosk) |
 
 Writes that apply them — each refused before any write and before any audit row (the 403 texts
-live in `ai_action_applier.py` and `operation_action_gates.py`, and for the two quality approvals in
+live in `ai_action_applier.py` and `operation_action_gates.py`, and for the quality judgments in
 `quality_record_service.py` and `fai_service.py`; where each sits in its route's
 check order is in `docs/API.md` → Work Orders → "Short count at completion" and → AI
 Recommendations):
@@ -162,6 +163,8 @@ Recommendations):
 | **Re-importing a nest package onto a laser job with recorded work** — `POST /work-orders/{id}/laser-nest-packages/import` (either import shape; the MCP tool `import_laser_nest_package` with a `work_order_id`) when any operation the import would delete has recorded work (the same `operation_has_recorded_work` rule), or the laser work order's header already carries good or scrap: the import replaces every nest operation and zeroes the header counts, erasing a person's good, scrap and any declared short. Refused before the upload is unpacked, and again under the import's lock reading the database rather than the rows the first check loaded; a token's import onto un-worked nests with a zero header, and the standalone import, which wipes nothing, are unchanged | `is_api_token_credential` (`laser_nest_service.import_would_wipe_recorded_work`) | **403** `API_TOKEN_NEST_REIMPORT` (`Re-importing a nest package replaces nests that already have recorded work …`) — its own text, so the caller is told which action was refused | **This PR's extension** of the same principle — the owner was asked about scrap and short closes, not this |
 | **Recording a CAR's Quality Manager approval** — `POST /quality/car/{id}/quality-approval` (the MCP tool `approve_car_quality`). The stamp names the approving person | `is_api_token_credential` | **403** `API_TOKEN_QUALITY_APPROVAL` (`A standing API token cannot record a CAR's quality approval. A person signed in to the app must record it.`) | Lead's design decision for the CAR form (2026-11-13), applying the 2026-11-07 principle; not an owner ruling |
 | **Recording an FAI's customer approval** — `POST /quality/fai/{id}/customer-approval` (the MCP tool `record_fai_customer_approval`). It asserts that a person saw the customer's acceptance | `is_api_token_credential` | **403** `API_TOKEN_CUSTOMER_APPROVAL` (`A standing API token cannot record an FAI's customer approval. A person signed in to the app must record it.`) | Lead's design decision for the FAI log of record (2026-11-13), applying the 2026-11-07 principle; not an owner ruling |
+| **Recording an FAI's final disposition** — `PUT /quality/fai/{id}` setting `status` to `passed`, `failed` or `conditional`. It is the inspection's quality judgment: it stamps the approver and freezes the evidence for good. Refused before the row lock; a token's non-final edits (notes, `in_progress`, inspector, inspection date) are unchanged | `is_api_token_credential` | **403** `API_TOKEN_FAI_DISPOSITION` (`A standing API token cannot record an FAI's final disposition. A person signed in to the app must record it.`) | Review follow-up to the lead's 2026-11-13 decision (the lesser customer approval already refused tokens, so the disposition before it could not stay open); not an owner ruling |
+| **Filling or changing a CAR's vendor or customer approval boxes** — `vendor_approval_name` / `_title` / `_date` and `customer_approval_name` / `_date` on `POST /quality/car` (any non-blank value) or `PUT /quality/car/{id}` (any change, clearing included; re-sending the stored value is no change). The printed controlled form shows them as the vendor's and customer's sign-offs | `is_api_token_credential` | **403** `API_TOKEN_CAR_SIGNOFF` (`A standing API token cannot record or change a CAR's vendor or customer approval. A person signed in to the app must record it.`) | Review follow-up to the lead's 2026-11-13 decision, for the same reason as the FAI customer approval; not an owner ruling |
 
 Deliberately **not** refused:
 
@@ -175,6 +178,10 @@ Deliberately **not** refused:
   owner decision. The 2026-11-07 decision
   covered standing API tokens only; whether an agent on a person's JWT may make these writes was
   not part of it.
+- **Not yet decided (owner question):** a CAR status move through `PUT /quality/car/{id}` to
+  `verification` or `closed` stamps `verified_by` / `closed_by` with the token's user, and is not
+  refused for a standing API token today. It is the same kind of write as the rows above; whether
+  it gets the same rule is open.
 - Scrap fields that are not production scrap records: `POST /fabrication-quotes/{quote_id}/actuals`
   (the MCP tool `record_actuals`) takes a `scrap_quantity` but stores it as a quoting-calibration
   observation (`FabricationQuoteActual.observation_json`), and a BOM line's `scrap_factor` is a
@@ -2043,7 +2050,8 @@ contract; they do not bypass tenant scoping or the read-only context fence.
 > `customer_approved` and `customer_approval_date`: on a PASSED or CONDITIONAL inspection, once
 > (**409** otherwise), with a required `APPROVE` audit row (**503** with rollback on audit loss). A
 > standing API token is refused **403** whatever its user's role (see
-> [Credential policy for judgment writes](#credential-policy-for-judgment-writes)). The UI shows the
+> [Credential policy for judgment writes](#credential-policy-for-judgment-writes)), and so is a token
+> setting the final disposition itself through `PUT /quality/fai/{id}`. The UI shows the
 > control to the same roles (`canApproveFAIs` in `frontend/src/utils/recordWriteAccess.ts`).
 >
 > **FAI log of record — read-broad, export gated.** `GET /quality/fai/log` depends on
@@ -2106,7 +2114,8 @@ contract; they do not bypass tenant scoping or the read-only context fence.
 > Shipping and Viewer get **403**. The server stamps the approver and time (neither is accepted in a
 > request body), once per CAR (**409** when already approved or VOID), with a required `APPROVE` audit
 > row. It does not gate closure. A standing API token is refused **403** whatever its user's role
-> (see [Credential policy for judgment writes](#credential-policy-for-judgment-writes)). The CAR
+> (see [Credential policy for judgment writes](#credential-policy-for-judgment-writes)), and so is a
+> token filling or changing the form's vendor or customer approval boxes on `POST` / `PUT`. The CAR
 > detail screen shows **Record quality approval** only to `quality:approve` holders, the same three
 > roles by default.
 

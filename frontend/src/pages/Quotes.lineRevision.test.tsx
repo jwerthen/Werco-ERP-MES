@@ -110,6 +110,11 @@ test('the editor pre-fills from the part and sends only the revisions that chang
   expect(within(dialog).getByRole('textbox', { name: 'Line 1 drawing revision' })).toHaveValue('C');
   expect(within(dialog).getByRole('textbox', { name: 'Line 2 drawing revision' })).toHaveValue('B');
   expect(within(dialog).getByRole('textbox', { name: 'Line 3 drawing revision' })).toHaveValue('');
+  // Only the pre-filled box is marked as a suggestion to check, and it is described by the mark.
+  expect(within(dialog).getByRole('textbox', { name: 'Line 1 drawing revision' })).toHaveAccessibleDescription(
+    'From the part — check the drawing'
+  );
+  expect(within(dialog).getAllByText('From the part — check the drawing')).toHaveLength(1);
   fireEvent.change(within(dialog).getByRole('textbox', { name: 'Line 3 drawing revision' }), {
     target: { value: 'n/a' },
   });
@@ -156,4 +161,17 @@ test('the send gate’s 409 is shown verbatim', async () => {
 
   expect(await screen.findByText(detail)).toBeInTheDocument();
   expect(mockedApi.sendQuote).toHaveBeenCalledWith(7);
+});
+
+test('the pre-fill mark clears once the planner enters a different revision', async () => {
+  renderQuotes();
+  fireEvent.click(await screen.findByRole('button', { name: 'Edit draft' }));
+  const dialog = await screen.findByRole('dialog');
+  const line1 = within(dialog).getByRole('textbox', { name: 'Line 1 drawing revision' });
+  expect(within(dialog).getByText('From the part — check the drawing')).toBeInTheDocument();
+
+  fireEvent.change(line1, { target: { value: 'd' } });
+  expect(line1).toHaveValue('D');
+  expect(within(dialog).queryByText('From the part — check the drawing')).not.toBeInTheDocument();
+  expect(line1).not.toHaveAccessibleDescription();
 });

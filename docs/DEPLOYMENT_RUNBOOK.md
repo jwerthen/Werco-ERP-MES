@@ -350,11 +350,13 @@ backfill, no table and no RLS, revoke or role statement. Each `ALTER` takes a br
 lock under `SET LOCAL lock_timeout = '5s'`. No environment variable, secret, cron or worker job is
 added. Migrate before or with the API, and deploy the API before or with the worker: new code on an
 un-migrated database fails every CAR and quote-line load.
-- **User-visible at deploy.** Every existing quote line lacks a drawing revision, so Send, the quote
-  PDF and quote email answer **409** until each line's Rev (or `N/A`) is entered on a draft or
-  pending quote. A quote with a line converted to a work order cannot go back to draft, so its PDF
-  can no longer be generated. Quote email previews prepared before the deploy fail at send with
-  **409** and must be previewed again. The PDF's FOB term is read from the company address.
+- **User-visible at deploy.** Every existing quote line lacks a drawing revision, so Send, quote
+  email and the PDF of a quote not yet issued answer **409** until each line's Rev (or `N/A`) is
+  entered on a draft or pending quote. A sent, accepted or converted quote still reprints as issued.
+  Quote email previews prepared before the deploy fail at send with **409** and must be previewed
+  again; a delivery still `sending` / `unknown` at the deploy that is later accepted or reconciled
+  leaves its quote's status unchanged ("its workflow status was retained"), so mark that quote sent
+  by hand. The PDF's FOB term is read from the company address.
 - **Verify after deploy:** a CAR's **Print CAR** and **Record quality approval** (a second approval
   is **409**; `car` APPROVE row in the Audit Log), a draft quote refused at Send until its Revs are
   entered, and an FAI customer approval followed by the FAI **Log** view and an Admin/Manager export

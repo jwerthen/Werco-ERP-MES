@@ -2,7 +2,7 @@ from datetime import date
 from io import BytesIO
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Body, Depends, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -219,6 +219,8 @@ def create_car(
     A part or customer must be a live record of your company and a vendor must be your
     company's (it may be inactive or removed -- a supplier CAR may document the removal);
     anything else is a 404 and nothing is written. The customer's name is snapshotted.
+    Date Submitted and the approval dates cannot be in the future (422). A standing API token
+    may not fill the vendor or customer approval boxes (403): a person records a sign-off.
     """
     car = quality_record_service.create_car(db, company_id, car_in, current_user, audit)
     return quality_record_service.car_response(db, company_id, car)
@@ -275,9 +277,11 @@ def update_car(
 
     The CAR form fields are editable here too: a CHANGED part or customer must be a live
     record of your company (an unchanged one is not re-checked), a changed vendor must be
-    your company's, and the reason ``other`` requires ``initiation_reason_other`` (422). The
-    Quality Manager approval is not editable here -- record it with
-    ``POST /quality/car/{id}/quality-approval``.
+    your company's, and the reason ``other`` requires ``initiation_reason_other`` (422);
+    moving the reason off ``other`` clears that text unless the request sends it. Date
+    Submitted and the approval dates cannot be in the future (422). A standing API token may
+    not change the vendor or customer approval boxes (403). The Quality Manager approval is
+    not editable here -- record it with ``POST /quality/car/{id}/quality-approval``.
     """
     car = quality_record_service.update_car(db, company_id, car_id, car_in, current_user, audit)
     return quality_record_service.car_response(db, company_id, car)
@@ -418,8 +422,10 @@ def create_fai(
 ):
     """Create an inspection with validated tenant-owned references.
 
-    ``part_id`` and ``work_order_id`` must be live records of your company (404 otherwise).
-    When ``part_revision`` is omitted the part's current revision is recorded as the revision
+    ``part_id`` and ``work_order_id`` must be live records of your company (404 otherwise),
+    and the work order must build that part -- as its own part, or as a component of one of its
+    operations -- or the FAI log would name another part's job, customer and PO (422). When
+    ``part_revision`` is omitted the part's current revision is recorded as the revision
     inspected.
     """
     fai = fai_service.create_fai(db, company_id, fai_in, current_user, audit)
@@ -449,9 +455,10 @@ def update_fai(
     """Edit an unfinished FAI; final disposition requires approval authority.
 
     Setting ``status`` to passed, failed or conditional is the final disposition (Admin,
-    Manager or Quality; 403 otherwise): it stamps the completion date (Central) and the
-    approver and freezes the inspection evidence (later edits are 409). The customer's
-    approval is recorded afterwards with ``POST /quality/fai/{id}/customer-approval``.
+    Manager or Quality; 403 otherwise, and 403 for a standing API token -- a person records
+    it): it stamps the completion date (Central) and the approver and freezes the inspection
+    evidence (later edits are 409). The customer's approval is recorded afterwards with
+    ``POST /quality/fai/{id}/customer-approval``.
     """
     fai = fai_service.update_fai(db, company_id, fai_id, fai_in, current_user, audit)
     return fai_service.fai_response(db, company_id, fai)
@@ -460,7 +467,7 @@ def update_fai(
 @router.post("/fai/{fai_id}/customer-approval", response_model=FAIResponse)
 def record_fai_customer_approval(
     fai_id: int,
-    approval_in: FAICustomerApprovalRequest,
+    approval_in: Optional[FAICustomerApprovalRequest] = Body(default=None),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(fai_service.APPROVE_ROLES)),
     company_id: int = Depends(get_current_company_id),
@@ -468,8 +475,9 @@ def record_fai_customer_approval(
 ):
     """Record the customer's approval of a completed FAI (Admin, Manager or Quality).
 
-    Writes only ``customer_approved`` and ``customer_approval_date`` (default today, Central;
-    a past date back-enters an earlier approval; a future date is 422). Only a PASSED or
+    Writes only ``customer_approved`` and ``customer_approval_date`` (default today, Central --
+    the body is optional; a past date back-enters an earlier approval, but not one before the
+    FAI's inspection date; a future date is 422). Only a PASSED or
     CONDITIONAL FAI can carry it: an FAI without its final disposition, or a FAILED one, is
     refused (409). Recorded once (409 if already recorded). A standing API token is refused
     (403) -- a person must record it. The APPROVE audit row commits with the approval, or

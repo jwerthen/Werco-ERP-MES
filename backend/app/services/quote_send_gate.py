@@ -20,17 +20,29 @@ customer revises the drawing. Three rules, one module:
   ``PUT /quotes/{id}`` moving a quote into sent or accepted from any other status (rejected
   and expired included -- both are reachable from draft without a send), the document
   delivery preview and send, and ``POST /quotes/{id}/generate-pdf`` (it produces the
-  customer document). Each refusal is raised before anything is written.
+  customer document) while the quote has not been issued. Each refusal is raised before
+  anything is written.
+
+  ``generate-pdf`` on an ISSUED quote (:data:`ISSUED_QUOTE_STATUSES`) reprints the document
+  the customer already holds and is not gated (:func:`assert_quote_printable`): every quote
+  issued since the gate shipped passed it on its way to SENT, and an issued quote's lines are
+  frozen, so the only blank revisions it can carry are a quote issued before the gate existed
+  -- which must stay reproducible as issued (its Rev column prints "-"). The email delivery
+  is a NEW send and stays gated in every status.
+* **N/A** (:func:`refuse_na_on_drawn_parts`). ``N/A`` is for a line with no drawing; a line
+  naming a manufactured or assembly part (``ENGINEERING_PART_TYPES``) has one, so ``N/A``
+  there is refused (422) rather than letting it satisfy the gate unread.
 """
 
 import re
-from typing import Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.db.tenant_filter import tenant_query
-from app.models.part import Part
+from app.models.part import ENGINEERING_PART_TYPES, Part
+from app.models.quote import QuoteStatus
 
 # The explicit value for a line with no drawing (a setup charge, freight, a packaged line).
 NO_DRAWING_REVISION = "N/A"
@@ -38,6 +50,10 @@ QUOTE_LINE_REVISION_MAX_LENGTH = 20  # quote_lines.part_revision is String(20), 
 _REVISION_PATTERN = re.compile(r"^[A-Z0-9]{1,20}$")
 
 MISSING_REVISION_DETAIL = "Every quote line needs a drawing revision before the quote can be sent."
+
+# The customer already holds a quote in these statuses: only the gated doors reach SENT, and
+# conversion (to ACCEPTED / CONVERTED) requires a SENT or ACCEPTED quote.
+ISSUED_QUOTE_STATUSES = frozenset({QuoteStatus.SENT, QuoteStatus.ACCEPTED, QuoteStatus.CONVERTED})
 
 
 def normalize_line_revision(value: str) -> str:
@@ -90,3 +106,50 @@ def assert_quote_sendable(quote) -> None:
     detail = quote_send_blockers(quote)
     if detail is not None:
         raise HTTPException(status_code=409, detail=detail)
+
+
+def assert_quote_printable(quote) -> None:
+    """The ``generate-pdf`` gate: the send gate until the quote is issued, none after.
+
+    An issued quote (:data:`ISSUED_QUOTE_STATUSES`) reprints the document the customer already
+    holds. Its lines are frozen, so the only way it lacks a revision is that it was issued
+    before the gate existed -- and refusing it would leave that issued document unreproducible
+    (a converted quote cannot be reopened to enter revisions). A draft, pending, rejected or
+    expired quote has not been issued -- rejected and expired are reachable from draft without
+    a send -- so it holds the send gate.
+    """
+    if quote.status in ISSUED_QUOTE_STATUSES:
+        return
+    assert_quote_sendable(quote)
+
+
+def refuse_na_on_drawn_parts(db: Session, company_id: int, lines_and_revisions: Iterable) -> None:
+    """422 (before any write) when ``N/A`` is entered on a line naming a drawn part.
+
+    ``lines_and_revisions`` is ``(line, requested_revision)`` pairs. A drawn part is a
+    manufactured or assembly part of this company (``ENGINEERING_PART_TYPES``) -- it has a
+    drawing revision, so ``N/A`` would satisfy the send gate without one ever being entered.
+    Purchased, hardware, raw-material and consumable parts may carry ``N/A``; so may a
+    part-less line, and a line whose part is another company's (it names no part here).
+    """
+    na_lines = [
+        line for line, revision in lines_and_revisions if revision == NO_DRAWING_REVISION and line.part_id is not None
+    ]
+    if not na_lines:
+        return
+    drawn: Dict[int, str] = {
+        row.id: row.part_number
+        for row in tenant_query(db, Part, company_id)
+        .filter(Part.id.in_(sorted({line.part_id for line in na_lines})), Part.part_type.in_(ENGINEERING_PART_TYPES))
+        .with_entities(Part.id, Part.part_number)
+    }
+    refused = sorted((line.line_number, drawn[line.part_id]) for line in na_lines if line.part_id in drawn)
+    if refused:
+        named = ", ".join(f"line {number} ({part_number})" for number, part_number in refused)
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"N/A is only for a line with no drawing; {named} names a manufactured or assembly part. "
+                "Enter its drawing revision."
+            ),
+        )

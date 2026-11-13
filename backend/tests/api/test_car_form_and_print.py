@@ -46,8 +46,9 @@ from app.models.quality import (
     NonConformanceReport,
 )
 from app.models.user import User, UserRole
+from app.services import quality_record_service
 from app.services.audit_service import AuditService
-from app.services.quality_record_service import API_TOKEN_QUALITY_APPROVAL, central_today
+from app.services.quality_record_service import API_TOKEN_CAR_SIGNOFF, API_TOKEN_QUALITY_APPROVAL, central_today
 from tests.api.export_audit_helpers import fresh_session
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
@@ -278,7 +279,7 @@ class TestCreateWithFormFields:
         assert car["initiation_reason"] == "customer_feedback"
         assert car["rma_number"] == "CUST-RMA-77"
         assert car["submitted_date"] == central_today().isoformat()
-        assert (car["part_id"], car["part_number"], car["part_revision"]) == (part.id, part.part_number, "D")
+        assert (car["part_id"], car["part_number"], car["part_current_revision"]) == (part.id, part.part_number, "D")
         assert (car["customer_id"], car["customer_name"]) == (customer.id, "Acme Aerospace")
         assert (car["vendor_id"], car["vendor_name"], car["vendor_po_number"]) == (
             vendor.id,
@@ -469,6 +470,30 @@ class TestUpdateFormFields:
         assert resp.status_code == 422, resp.text
         assert "initiation_reason_other" in resp.text
         assert _snapshot(db_session) == before
+
+    def test_moving_off_other_clears_its_text_when_the_request_leaves_it_out(self, client, db_session):
+        # Regression: a PUT that moved the reason off "other" without re-sending the text
+        # left an orphaned "Other: ____" on the record beside another box.
+        car = _car(db_session, initiation_reason="other", initiation_reason_other="Supplier survey")
+        resp = client.put(
+            f"{BASE}/car/{car.id}",
+            headers=_headers(_user(db_session)),
+            json={"version": 0, "initiation_reason": "internal_audit"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["initiation_reason"] == "internal_audit"
+        assert resp.json()["initiation_reason_other"] is None
+        row = _committed(car.id)[-1]
+        assert row["old_values"]["initiation_reason_other"] == "Supplier survey"
+        assert row["new_values"]["initiation_reason_other"] is None
+
+    def test_an_edit_that_leaves_the_reason_alone_keeps_the_other_text(self, client, db_session):
+        car = _car(db_session, initiation_reason="other", initiation_reason_other="Supplier survey")
+        resp = client.put(
+            f"{BASE}/car/{car.id}", headers=_headers(_user(db_session)), json={"version": 0, "rma_number": "R-1"}
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["initiation_reason_other"] == "Supplier survey"
 
     def test_moving_off_other_lets_its_text_be_cleared(self, client, db_session):
         car = _car(db_session, initiation_reason="other", initiation_reason_other="Supplier survey")
@@ -976,3 +1001,165 @@ def test_list_and_detail_resolve_names_tenant_scoped(client, db_session):
     assert rows[legacy.id]["part_number"] is None
     detail = client.get(f"{BASE}/car/{legacy.id}", headers=_headers(user)).json()
     assert detail["part_number"] is None and detail["part_id"] == foreign_part.id
+
+
+# ======================================================== review follow-ups (P2a fix stage)
+
+
+class TestSignoffsAreAPersonsEntry:
+    """The vendor-management and customer approval boxes assert a person saw that sign-off.
+
+    A standing API token may not fill or change them (403, nothing written), matching the
+    FAI customer-approval verb; leaving them blank, or re-sending what is stored, is fine.
+    """
+
+    @pytest.mark.parametrize(
+        "field,value",
+        [
+            ("vendor_approval_name", "Pat Smith"),
+            ("vendor_approval_title", "QA Manager"),
+            ("vendor_approval_date", "2026-11-01"),
+            ("customer_approval_name", "Dana Buyer"),
+            ("customer_approval_date", "2026-11-01"),
+        ],
+    )
+    def test_an_api_token_cannot_fill_a_signoff_box_at_create(self, client, db_session, field, value):
+        headers = _token_headers(client, db_session, _user(db_session, role=UserRole.QUALITY))
+        before = _snapshot(db_session)
+
+        resp = client.post(f"{BASE}/car", headers=headers, json=_create_body(**{field: value}))
+
+        assert resp.status_code == 403, resp.text
+        assert resp.json()["detail"] == API_TOKEN_CAR_SIGNOFF
+        assert _snapshot(db_session) == before
+
+    def test_an_api_token_may_create_a_car_that_leaves_the_boxes_blank(self, client, db_session):
+        headers = _token_headers(client, db_session, _user(db_session, role=UserRole.QUALITY))
+        resp = client.post(
+            f"{BASE}/car", headers=headers, json=_create_body(rma_number="RMA-1", customer_approval_name="   ")
+        )
+        assert resp.status_code == 200, resp.text
+
+    @pytest.mark.parametrize(
+        "change",
+        [
+            {"vendor_approval_title": "QA Manager"},
+            {"customer_approval_name": None},
+            {"vendor_approval_date": "2026-11-02"},
+        ],
+    )
+    def test_an_api_token_cannot_change_or_clear_a_signoff(self, client, db_session, change):
+        car = _car(
+            db_session,
+            vendor_approval_name="Pat Smith",
+            vendor_approval_date=date(2026, 11, 1),
+            customer_approval_name="Dana",
+        )
+        headers = _token_headers(client, db_session, _user(db_session, role=UserRole.QUALITY))
+        before = _snapshot(db_session)
+
+        resp = client.put(f"{BASE}/car/{car.id}", headers=headers, json={"version": 0, **change})
+
+        assert resp.status_code == 403, resp.text
+        assert resp.json()["detail"] == API_TOKEN_CAR_SIGNOFF
+        assert _snapshot(db_session) == before
+
+    def test_an_api_token_may_resend_the_stored_signoff_with_another_edit(self, client, db_session):
+        car = _car(db_session, vendor_approval_name="Pat Smith", customer_approval_name="Dana")
+        headers = _token_headers(client, db_session, _user(db_session, role=UserRole.QUALITY))
+
+        resp = client.put(
+            f"{BASE}/car/{car.id}",
+            headers=headers,
+            json={
+                "version": 0,
+                "vendor_approval_name": "Pat Smith",
+                "customer_approval_name": "Dana",
+                "rma_number": "R-9",
+            },
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["rma_number"] == "R-9" and resp.json()["vendor_approval_name"] == "Pat Smith"
+
+
+class TestRecordDatesAreNotInTheFuture:
+    @pytest.mark.parametrize("field", ["submitted_date", "vendor_approval_date", "customer_approval_date"])
+    def test_a_future_date_is_422_on_create_and_update_and_today_is_accepted(
+        self, client, db_session, monkeypatch, field
+    ):
+        monkeypatch.setattr(quality_record_service, "central_today", lambda: date(2026, 11, 13))
+        user = _user(db_session)
+        car = _car(db_session)
+        before = _snapshot(db_session)
+
+        created = client.post(f"{BASE}/car", headers=_headers(user), json=_create_body(**{field: "2026-11-14"}))
+        updated = client.put(f"{BASE}/car/{car.id}", headers=_headers(user), json={"version": 0, field: "2026-11-14"})
+
+        assert created.status_code == 422, created.text
+        assert updated.status_code == 422, updated.text
+        assert "cannot be in the future" in created.json()["detail"]
+        assert _snapshot(db_session) == before
+        today = client.put(f"{BASE}/car/{car.id}", headers=_headers(user), json={"version": 0, field: "2026-11-13"})
+        assert today.status_code == 200, today.text
+
+
+def test_a_stamped_user_of_another_company_is_never_named_on_the_car_or_its_print(client, db_session):
+    # Regression: the attribution fallback read ANY user by id, so a legacy/imported row
+    # stamping another company's ordinary user printed that person's name on this CAR.
+    # Only a platform principal acting in this company's context is named from outside it.
+    foreign = _user(db_session, role=UserRole.QUALITY, company_id=2, first_name="Foreignperson")
+    car = _car(db_session, initiated_by=foreign.id, verified_by=foreign.id, closed_by=foreign.id)
+    viewer = _headers(_user(db_session, role=UserRole.VIEWER))
+
+    body = client.get(f"{BASE}/car/{car.id}", headers=viewer)
+    pdf = client.get(f"{BASE}/car/{car.id}/pdf", headers=viewer)
+
+    assert body.status_code == 200 and pdf.status_code == 200
+    assert body.json()["initiated_by_name"] is None and body.json()["closed_by_name"] is None
+    assert "Foreignperson" not in body.text
+    assert "Foreignperson" not in _pdf_text(pdf.content)
+
+
+class TestHardDeleteOfARecordACarNames:
+    """A CAR holds a real foreign key to the part / customer it names: a hard delete is a 400."""
+
+    def test_part_material_and_customer_refuse_and_nothing_is_deleted(self, client, db_session):
+        admin = _headers(_user(db_session, role=UserRole.ADMIN))
+        part = _part(db_session)
+        material = Part(
+            part_number=f"CARF-M-{next(_seq):04d}",
+            name="Sheet 0.125 6061",
+            part_type="raw_material",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add(material)
+        customer = _customer(db_session)
+        db_session.commit()
+        _car(db_session, part_id=part.id, customer_id=customer.id)
+        _car(db_session, part_id=material.id)
+        before = _snapshot(db_session)
+
+        refusals = {
+            "Part": client.delete(f"/api/v1/parts/{part.id}?hard_delete=true", headers=admin),
+            "Material": client.delete(f"/api/v1/materials/{material.id}?hard_delete=true", headers=admin),
+            "Customer": client.delete(f"/api/v1/customers/{customer.id}?hard_delete=true", headers=admin),
+        }
+
+        for label, resp in refusals.items():
+            assert resp.status_code == 400, resp.text
+            assert resp.json()["detail"] == (
+                f"Cannot hard delete: {label} is named on 1 corrective action report; soft delete it instead"
+            )
+        assert _snapshot(db_session) == before
+        db_session.expire_all()
+        assert db_session.get(Part, part.id) is not None and db_session.get(Part, material.id) is not None
+        assert db_session.get(Customer, customer.id) is not None
+
+    def test_a_record_no_car_names_still_hard_deletes(self, client, db_session):
+        admin = _headers(_user(db_session, role=UserRole.ADMIN))
+        part = _part(db_session)
+        resp = client.delete(f"/api/v1/parts/{part.id}?hard_delete=true", headers=admin)
+        assert resp.status_code == 200, resp.text

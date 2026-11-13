@@ -78,8 +78,8 @@ export interface CARRecord {
   part_id?: number | null;
   part_number?: string | null;
   part_name?: string | null;
-  /** The part's CURRENT revision, read from the part (not stored on the CAR). */
-  part_revision?: string | null;
+  /** The part's revision TODAY, read from the part. The CAR records no revision of its own. */
+  part_current_revision?: string | null;
   customer_id?: number | null;
   /** Snapshotted from the customer record when the customer is set; never sent. */
   customer_name?: string | null;

@@ -15,9 +15,11 @@ QUOTE_VALIDITY_DAYS = 30
 
 # The customer quote's Terms block, in order. ``{fob}`` is the FOB point, built from the
 # issuing company's own address (``quote_fob_term``) -- never a hard-coded city, because the
-# ERP serves more than one company.
+# ERP serves more than one company. The first term is the default validity; a quote that
+# carries its own ``valid_until`` prints :data:`QUOTE_VALID_UNTIL_TERM` instead, so the Terms
+# block never contradicts the "Valid Until" line above it.
 QUOTE_TERMS = (
-    "Quote valid for 30 days from the quote date.",
+    f"Quote valid for {QUOTE_VALIDITY_DAYS} days from the quote date.",
     "{fob}",
     "All prices are in U.S. dollars (USD).",
     "Sales tax is not included.",
@@ -25,6 +27,7 @@ QUOTE_TERMS = (
     "Subject to drawing/specification review at order entry.",
 )
 FOB_FALLBACK = "FOB Origin."
+QUOTE_VALID_UNTIL_TERM = "Quote valid until {date}."
 
 # "City, ST" or "City, ST 74012" / "City, ST 74012-1234": the trailing locality of a US address.
 _CITY_STATE = re.compile(r"^(?P<city>[A-Za-z][A-Za-z .'-]*?)\s*,\s*(?P<state>[A-Za-z]{2})(?:\s+\d{5}(?:-\d{4})?)?$")
@@ -53,17 +56,25 @@ def quote_fob_term(address: Optional[str]) -> str:
     return f"FOB {located[0]}, {located[1]}." if located else FOB_FALLBACK
 
 
-def quote_terms(address: Optional[str]) -> List[str]:
-    """The Terms block for a quote issued by the company at ``address``."""
+def quote_terms(address: Optional[str], valid_until: Optional[date] = None) -> List[str]:
+    """The Terms block for a quote issued by the company at ``address``.
+
+    ``valid_until`` is the quote's OWN expiry (``Quote.valid_until``), when it carries one: the
+    validity term then names that date. Without one the quote's Valid Until is the quote date +
+    :data:`QUOTE_VALIDITY_DAYS`, which is exactly what the default term says.
+    """
     fob = quote_fob_term(address)
-    return [term.format(fob=fob) for term in QUOTE_TERMS]
+    terms = [term.format(fob=fob) for term in QUOTE_TERMS]
+    if valid_until is not None:
+        terms[0] = QUOTE_VALID_UNTIL_TERM.format(date=valid_until.strftime("%m/%d/%Y"))
+    return terms
 
 
-def company_quote_terms(db, company_id) -> List[str]:
+def company_quote_terms(db, company_id, valid_until: Optional[date] = None) -> List[str]:
     from app.models.company import Company
 
     company = db.query(Company).filter(Company.id == company_id).first()
-    return quote_terms(company.address if company is not None else None)
+    return quote_terms(company.address if company is not None else None, valid_until)
 
 
 def quote_valid_until(quote) -> Optional[date]:
@@ -155,7 +166,7 @@ def build_quote_document(db, quote, company_id):
         total_amount=float(quote.total or 0),
         line_summaries=lines,
         assumptions=context["assumptions"],
-        terms=company_quote_terms(db, company_id),
+        terms=company_quote_terms(db, company_id, quote.valid_until),
     )
 
 

@@ -338,6 +338,40 @@ class TestDoorsOpenOnceEveryLineHasARevision:
         assert resp.status_code == 200, resp.text
         assert _quote_rows(db_session, quote.id) == []
 
+    @pytest.mark.parametrize("status", [QuoteStatus.SENT, QuoteStatus.ACCEPTED, QuoteStatus.CONVERTED])
+    def test_an_issued_legacy_quote_still_reprints_as_issued(self, client, db_session, status):
+        # Regression: a quote issued before revisions were recorded has blank lines it can
+        # never fill (its lines are frozen, and a converted one cannot be reopened), so gating
+        # its reprint left the issued customer document permanently unreproducible.
+        quote = _quote(db_session, [None, None], status=status)
+        before = _state(db_session, quote.id)
+        resp = client.post(f"/api/v1/quotes/{quote.id}/generate-pdf", headers=_headers(_user(db_session)))
+        assert resp.status_code == 200, resp.text
+        text = _pdf_text(resp.content)
+        assert "Line 1 - 1" in text and "Line 2 - 1" in text  # the Rev column prints "-"
+        assert _state(db_session, quote.id) == before
+
+    @pytest.mark.parametrize("status", [QuoteStatus.REJECTED, QuoteStatus.EXPIRED])
+    def test_generate_pdf_stays_gated_on_a_never_issued_rejected_or_expired_quote(self, client, db_session, status):
+        # Both are reachable from a draft with a plain status update, never sent: a PDF of one
+        # would be the first customer document, so it holds the gate.
+        quote = _quote(db_session, [None, "B", None], status=status)
+        resp = client.post(f"/api/v1/quotes/{quote.id}/generate-pdf", headers=_headers(_user(db_session)))
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"] == EXPECTED_1_3
+
+    def test_emailing_an_issued_legacy_quote_is_still_a_gated_send(self, client, db_session, fake_smtp):
+        # Unlike a reprint, an email is a NEW send to the customer: it stays gated.
+        quote = _quote(db_session, [None, "B", None], status=QuoteStatus.SENT)
+        resp = client.post(
+            "/api/v1/document-deliveries/preview",
+            headers=_headers(_user(db_session)),
+            json={"entity_type": "quote", "entity_id": quote.id},
+        )
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"] == EXPECTED_1_3
+        fake_smtp.assert_not_called()
+
     def test_put_to_accepted_from_sent_is_not_a_send_door(self, client, db_session):
         quote = _quote(db_session, [None], status=QuoteStatus.SENT)
         resp = client.put(
@@ -389,6 +423,86 @@ class TestLineRevisionEntry:
 
         sent = client.post(f"/api/v1/quotes/{quote.id}/send", headers=_headers(_user(db_session)))
         assert sent.status_code == 200, sent.text
+
+    def test_resending_the_stored_revisions_edits_nothing(self, client, db_session):
+        # Regression: an unchanged value still counted as a content edit, resetting a PENDING
+        # quote to DRAFT, clearing its approval and writing an UPDATE row with no changes.
+        approver = _user(db_session)
+        quote = _quote(db_session, ["A", "N/A"], status=QuoteStatus.PENDING, approved_by=approver.id)
+        lines = sorted(quote.lines, key=lambda line: line.line_number)
+        before = _state(db_session, quote.id)
+        resp = client.put(
+            f"/api/v1/quotes/{quote.id}",
+            headers=_headers(_user(db_session)),
+            json={
+                "line_revisions": [
+                    {"line_id": lines[0].id, "part_revision": " a "},
+                    {"line_id": lines[1].id, "part_revision": "n/a"},
+                ]
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status"] == "pending"
+        assert _state(db_session, quote.id) == before
+        assert _quote_rows(db_session, quote.id) == []
+
+    def test_a_real_change_beside_an_unchanged_one_audits_only_the_change(self, client, db_session):
+        quote = _quote(db_session, ["A", None], status=QuoteStatus.DRAFT)
+        lines = sorted(quote.lines, key=lambda line: line.line_number)
+        resp = client.put(
+            f"/api/v1/quotes/{quote.id}",
+            headers=_headers(_user(db_session)),
+            json={
+                "line_revisions": [
+                    {"line_id": lines[0].id, "part_revision": "A"},
+                    {"line_id": lines[1].id, "part_revision": "B"},
+                ]
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        update = next(row for row in _quote_rows(db_session, quote.id) if row.action == "UPDATE")
+        assert update.extra_data["line_revision_changes"] == [
+            {"line_id": lines[1].id, "line_number": 2, "old": None, "new": "B"}
+        ]
+
+    @pytest.mark.parametrize("part_type", ["manufactured", "assembly"])
+    def test_na_on_a_line_naming_a_drawn_part_is_422(self, client, db_session, part_type):
+        # N/A is for a line with no drawing; a manufactured or assembly part has one, so N/A
+        # there would satisfy the send gate without a revision ever being entered.
+        part = _part(db_session, revision="C")
+        part.part_type = part_type
+        db_session.commit()
+        quote = _quote(db_session, [None, None], part=part)
+        lines = sorted(quote.lines, key=lambda line: line.line_number)
+        before = _state(db_session, quote.id)
+        resp = client.put(
+            f"/api/v1/quotes/{quote.id}",
+            headers=_headers(_user(db_session)),
+            json={"line_revisions": [{"line_id": lines[0].id, "part_revision": "n/a"}]},
+        )
+        assert resp.status_code == 422, resp.text
+        assert f"line 1 ({part.part_number})" in resp.json()["detail"]
+        assert _state(db_session, quote.id) == before
+
+    @pytest.mark.parametrize("part_type", ["purchased", "hardware"])
+    def test_na_is_allowed_on_a_part_less_line_and_a_bought_part(self, client, db_session, part_type):
+        part = _part(db_session)
+        part.part_type = part_type
+        db_session.commit()
+        quote = _quote(db_session, [None, None], part=part)
+        lines = sorted(quote.lines, key=lambda line: line.line_number)
+        resp = client.put(
+            f"/api/v1/quotes/{quote.id}",
+            headers=_headers(_user(db_session)),
+            json={
+                "line_revisions": [
+                    {"line_id": lines[0].id, "part_revision": "N/A"},
+                    {"line_id": lines[1].id, "part_revision": "N/A"},
+                ]
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert [line["part_revision"] for line in resp.json()["lines"]] == ["N/A", "N/A"]
 
     @pytest.mark.parametrize("start", [QuoteStatus.SENT, QuoteStatus.ACCEPTED])
     def test_refused_on_an_issued_quote(self, client, db_session, start):
@@ -541,6 +655,9 @@ def test_pdf_keeps_an_explicit_valid_until_and_falls_back_to_fob_origin(client, 
     )
     assert "Valid Until: 12/15/2026" in text
     assert "FOB Origin." in text
+    # Regression: the Terms block said "valid for 30 days" beside a 75-day Valid Until.
+    assert "Quote valid until 12/15/2026." in text
+    assert "valid for 30 days" not in text
 
 
 @pytest.mark.unit
@@ -565,6 +682,11 @@ def test_terms_block_is_the_module_constant_with_the_fob_point():
     assert quote_terms("Broken Arrow, OK 74012")[1] == "FOB Broken Arrow, OK."
     assert quote_terms(None)[1] == "FOB Origin."
     assert len(quote_terms(None)) == 6
+    assert quote_terms(None)[0] == "Quote valid for 30 days from the quote date."
+    # A quote carrying its own expiry names it, so the block never contradicts Valid Until.
+    explicit = quote_terms(None, date(2027, 1, 5))
+    assert explicit[0] == "Quote valid until 01/05/2027."
+    assert explicit[1:] == quote_terms(None)[1:]
 
 
 def test_a_line_naming_another_companys_part_prefills_no_revision(client, db_session):
@@ -577,6 +699,9 @@ def test_a_line_naming_another_companys_part_prefills_no_revision(client, db_ses
     assert line["part_current_revision"] is None
     printed = client.get(f"/api/v1/print/quotes/{quote.id}/print-data", headers=headers).json()["lines"][0]
     assert printed["part_current_revision"] is None
+    # Nor its part number: the same tenant check covers the label beside the revision.
+    assert line["part_number"] is None and printed["part_number"] is None
+    assert foreign.part_number not in client.get(f"/api/v1/quotes/{quote.id}", headers=headers).text
 
 
 def test_a_changed_fob_point_after_preview_is_a_changed_document(client, db_session, fake_smtp):

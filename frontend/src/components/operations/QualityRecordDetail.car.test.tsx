@@ -75,7 +75,7 @@ const car: CARRecord = {
   part_id: 12,
   part_number: 'PN-12',
   part_name: 'Bracket',
-  part_revision: 'C',
+  part_current_revision: 'C',
   customer_id: 3,
   customer_name: 'Acme Aerospace',
   vendor_id: 40,
@@ -126,6 +126,8 @@ test('the form fields load from the record and save with the rest of the CAR', a
   expect(screen.getByLabelText('Labor cost')).toHaveValue(120);
   // The summary shows the server's own total (computed at read time, never stored).
   expect(screen.getByText('Cost total').nextElementSibling).toHaveTextContent('$150.50');
+  // The part's revision is read from the part TODAY, and labelled so: the CAR records none.
+  expect(screen.getByText('PN-12 (current Rev C) — Bracket')).toBeInTheDocument();
   // A removed vendor the CAR names stays readable in its picker.
   await waitFor(() => expect(screen.getByLabelText('Vendor')).toHaveValue('Old Plating Co'));
 

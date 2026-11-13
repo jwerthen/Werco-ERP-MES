@@ -187,9 +187,9 @@ export default function QualityRecordDetail({
           [
             'Part',
             record.part_number
-              ? `${record.part_number}${record.part_revision ? ` Rev ${record.part_revision}` : ''}${
-                  record.part_name ? ` — ${record.part_name}` : ''
-                }`
+              ? `${record.part_number}${
+                  record.part_current_revision ? ` (current Rev ${record.part_current_revision})` : ''
+                }${record.part_name ? ` — ${record.part_name}` : ''}`
               : '—',
           ],
           ['Customer', record.customer_name || '—'],

@@ -87,6 +87,8 @@ interface QuoteDraft {
     part_revision: string;
     /** What the line holds on the server, to send only the revisions that change. */
     saved_part_revision: string;
+    /** The part's current revision the empty box was pre-filled with ('' when it was not). */
+    prefilled_part_revision: string;
     description: string;
     quantity: number;
     unit_price: number;
@@ -213,6 +215,7 @@ export default function Quotes() {
             labor_hours: line.labor_hours || 0,
             part_revision: (line.part_revision || line.part_current_revision || '').toUpperCase(),
             saved_part_revision: line.part_revision || '',
+            prefilled_part_revision: line.part_revision ? '' : (line.part_current_revision || '').toUpperCase(),
           })),
         }
       : emptyDraft();
@@ -987,8 +990,9 @@ export default function Quotes() {
                   Quoted line items
                   <span className="block text-xs font-normal text-slate-400">
                     Prices and quantities are read only. Enter each line&apos;s drawing revision (N/A for a line with no
-                    drawing); a blank box is pre-filled from the part&apos;s current revision and saved with the draft.
-                    Every line needs one before the quote can be sent.
+                    drawing). A blank box is pre-filled from the part&apos;s current revision and marked until you
+                    change it; saving the draft records it, so check it against the drawing first. Every line needs one
+                    before the quote can be sent.
                   </span>
                 </caption>
                 <thead>
@@ -1001,32 +1005,46 @@ export default function Quotes() {
                   </tr>
                 </thead>
                 <tbody>
-                  {newQuote.lines.map((line, index) => (
-                    <tr key={line.id || index} className="border-t border-fd-line">
-                      <td className="p-2">{line.description}</td>
-                      <td className="p-2">
-                        <input
-                          className="input w-24 font-mono uppercase"
-                          aria-label={`Line ${line.line_number ?? index + 1} drawing revision`}
-                          maxLength={20}
-                          placeholder="Rev"
-                          value={line.part_revision}
-                          onChange={event => {
-                            const value = event.target.value.toUpperCase();
-                            setNewQuote(previous => ({
-                              ...previous,
-                              lines: previous.lines.map((row, rowIndex) =>
-                                rowIndex === index ? { ...row, part_revision: value } : row
-                              ),
-                            }));
-                          }}
-                        />
-                      </td>
-                      <td className="p-2">{line.quantity.toLocaleString()}</td>
-                      <td className="p-2">${line.unit_price.toFixed(2)}</td>
-                      <td className="p-2">${(line.quantity * line.unit_price).toFixed(2)}</td>
-                    </tr>
-                  ))}
+                  {newQuote.lines.map((line, index) => {
+                    // A box still holding the part's current revision it was pre-filled with is
+                    // a suggestion, not an entry yet: say so, so the planner checks it against
+                    // the drawing before the save records it as theirs.
+                    const prefilled =
+                      !!line.prefilled_part_revision && line.part_revision === line.prefilled_part_revision;
+                    const hintId = `quote-line-${line.id ?? index}-rev-hint`;
+                    return (
+                      <tr key={line.id || index} className="border-t border-fd-line">
+                        <td className="p-2">{line.description}</td>
+                        <td className="p-2">
+                          <input
+                            className={`input w-24 font-mono uppercase${prefilled ? ' border-fd-amber' : ''}`}
+                            aria-label={`Line ${line.line_number ?? index + 1} drawing revision`}
+                            aria-describedby={prefilled ? hintId : undefined}
+                            maxLength={20}
+                            placeholder="Rev"
+                            value={line.part_revision}
+                            onChange={event => {
+                              const value = event.target.value.toUpperCase();
+                              setNewQuote(previous => ({
+                                ...previous,
+                                lines: previous.lines.map((row, rowIndex) =>
+                                  rowIndex === index ? { ...row, part_revision: value } : row
+                                ),
+                              }));
+                            }}
+                          />
+                          {prefilled && (
+                            <span id={hintId} className="mt-1 block text-xs text-fd-amber">
+                              From the part — check the drawing
+                            </span>
+                          )}
+                        </td>
+                        <td className="p-2">{line.quantity.toLocaleString()}</td>
+                        <td className="p-2">${line.unit_price.toFixed(2)}</td>
+                        <td className="p-2">${(line.quantity * line.unit_price).toFixed(2)}</td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
               <p className="text-right font-semibold mt-3">

@@ -268,12 +268,18 @@ deploy the API before or with the worker.
 Tell users before the deploy:
 
 - **Every existing quote line has no drawing revision.** Until each line's Rev is entered (or `N/A`
-  on a line with no drawing), **Send**, the quote PDF and quote email answer **409** naming the
-  lines. Revisions can be entered only on a draft or pending quote. An issued quote with no line
-  converted to a work order can be moved back to draft, given its revisions and sent again. A quote
-  with any line converted to a work order cannot, so its PDF can no longer be generated.
+  on a line with no drawing), **Send**, the quote email and the PDF of a quote not yet issued
+  (draft, pending, rejected, expired) answer **409** naming the lines. Revisions can be entered only
+  on a draft or pending quote. An already sent, accepted or converted quote still reprints its PDF
+  as issued (its Rev column shows `-`). To email one, move it back to draft (possible only when no
+  line is converted to a work order), enter its revisions and send it again.
 - **Quote email previews prepared before the deploy cannot be sent.** The send answers **409**
   "The document changed after this PDF was prepared". Create a fresh preview.
+- **Quote emails still in flight at the deploy keep their quote's status.** A delivery that was
+  `sending` or `unknown` when the deploy landed and is later accepted, or reconciled as accepted,
+  does not move its quote to SENT: the snapshot it was prepared from no longer matches (the delivery
+  says "The source changed; its workflow status was retained."). Mark that quote sent by hand once
+  its revisions are entered.
 - **The quote PDF's FOB term comes from the company address.** It prints "FOB *City*, *ST*." when
   the last address line ends in "City, ST [ZIP]", else "FOB Origin.". Check the company record.
 

@@ -30,6 +30,7 @@ import pytest
 from openpyxl import load_workbook
 from sqlalchemy import inspect
 
+from app.core import time_utils
 from app.core.security import create_access_token
 from app.models.audit_log import AuditLog
 from app.models.company import Company
@@ -37,10 +38,11 @@ from app.models.operational_event import OperationalEvent
 from app.models.part import Part
 from app.models.quality import FAICharacteristic, FAIStatus, FirstArticleInspection
 from app.models.user import User, UserRole
-from app.models.work_order import WorkOrder, WorkOrderStatus
+from app.models.work_center import WorkCenter
+from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.services import fai_service
 from app.services.audit_service import AuditService
-from app.services.fai_service import API_TOKEN_CUSTOMER_APPROVAL
+from app.services.fai_service import API_TOKEN_CUSTOMER_APPROVAL, API_TOKEN_FAI_DISPOSITION
 from tests.api.export_audit_helpers import committed_export_rows, fresh_session
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
@@ -323,6 +325,17 @@ class TestLogFiltersAndPaging:
         assert _numbers(_log(client, user, customer="newton")) == [pending.fai_number]
         assert _numbers(_log(client, user, customer="xomet")) == [passed.fai_number]  # the part's customer
 
+    def test_a_whitespace_only_customer_or_search_filter_is_no_filter(self, client, db_session):
+        # Regression: "   " passed the truthiness check and became the pattern "%%", which
+        # dropped every FAI whose Customer is empty (no job, no customer on the part).
+        with_customer = _fai(db_session, _part(db_session, customer_name="Acme"))
+        without_customer = _fai(db_session, _part(db_session))
+        viewer = _user(db_session, role=UserRole.VIEWER)
+
+        for params in ({"customer": "   "}, {"search": "  "}, {"customer": " ", "search": "\t"}):
+            numbers = _numbers(_log(client, viewer, **params))
+            assert with_customer.fai_number in numbers and without_customer.fai_number in numbers, params
+
     def test_search_matches_fai_part_job_po_and_serial_and_treats_wildcards_literally(self, client, db_session):
         part = _part(db_session, part_number="818-3931-618", name="ROD END MANUAL PULL")
         wo = _work_order(db_session, part, work_order_number="WA-7201", customer_po="PO 100_A")
@@ -560,6 +573,36 @@ class TestCustomerApproval:
         assert response.status_code == 422, response.text
         assert _snapshot(db_session) == before
 
+    def test_a_date_before_the_inspection_date_is_refused_and_nothing_changes(self, client, db_session):
+        fai = _fai(
+            db_session,
+            _part(db_session),
+            status=FAIStatus.PASSED,
+            inspection_date=date(2026, 9, 10),
+            completed_date=date(2026, 9, 11),
+        )
+        before = _snapshot(db_session)
+
+        response = _approve(client, _user(db_session), fai, {"customer_approval_date": "2026-09-09"})
+
+        assert response.status_code == 422, response.text
+        assert "09/10/2026" in response.json()["detail"]
+        assert _snapshot(db_session) == before
+        same_day = _approve(client, _user(db_session), fai, {"customer_approval_date": "2026-09-10"})
+        assert same_day.status_code == 200, same_day.text
+
+    def test_the_body_is_optional_and_defaults_to_today(self, client, db_session, monkeypatch):
+        # Every field of the body is optional, so a bodyless call (an MCP tool call with no
+        # arguments) records today's approval instead of answering 422.
+        monkeypatch.setattr(fai_service, "central_today", lambda: date(2026, 11, 13))
+        fai = _fai(db_session, _part(db_session), status=FAIStatus.PASSED, completed_date=date(2026, 11, 1))
+
+        response = client.post(f"{BASE}/{fai.id}/customer-approval", headers=_headers(_user(db_session)))
+
+        assert response.status_code == 200, response.text
+        assert response.json()["customer_approved"] is True
+        assert response.json()["customer_approval_date"] == "2026-11-13"
+
     @pytest.mark.parametrize("status", [FAIStatus.PENDING, FAIStatus.IN_PROGRESS, FAIStatus.FAILED])
     def test_refused_before_a_passing_final_disposition(self, client, db_session, status):
         completed = date(2026, 9, 1) if status == FAIStatus.FAILED else None
@@ -749,6 +792,92 @@ class TestCreateAndDisposition:
         assert response.json()["approved_by"] == user.id
         assert response.json()["approved_by_name"] == user.full_name
 
+    @pytest.mark.parametrize("final_status", ["passed", "failed", "conditional"])
+    def test_api_token_cannot_record_the_final_disposition(self, client, db_session, final_status):
+        # The disposition is the inspection's quality judgment: it stamps the approver and
+        # freezes the evidence. A standing token is refused before the lock and any write,
+        # even when it is bound to a Quality user who could disposition in the app.
+        fai = _fai(db_session, _part(db_session))
+        headers = _token_headers(client, db_session, _user(db_session, role=UserRole.QUALITY))
+        before = _snapshot(db_session)
+
+        response = client.put(f"{BASE}/{fai.id}", headers=headers, json={"version": 0, "status": final_status})
+
+        assert response.status_code == 403, response.text
+        assert response.json()["detail"] == API_TOKEN_FAI_DISPOSITION
+        assert _snapshot(db_session) == before
+
+    def test_api_token_may_still_edit_an_unfinished_fai(self, client, db_session):
+        fai = _fai(db_session, _part(db_session))
+        headers = _token_headers(client, db_session, _user(db_session, role=UserRole.QUALITY))
+
+        response = client.put(
+            f"{BASE}/{fai.id}", headers=headers, json={"version": 0, "status": "in_progress", "notes": "Started"}
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["status"] == "in_progress" and response.json()["completed_date"] is None
+
+    def test_a_work_order_for_another_part_is_refused_and_nothing_is_written(self, client, db_session):
+        # Regression: the log names the linked job's number, customer and PO, so an FAI of
+        # part X linked to part Y's job put Y's customer on X's first article.
+        inspected = _part(db_session)
+        other_job = _work_order(db_session, _part(db_session), customer_name="Someone Else")
+        before = _snapshot(db_session)
+
+        response = client.post(
+            BASE, headers=_headers(_user(db_session)), json={"part_id": inspected.id, "work_order_id": other_job.id}
+        )
+
+        assert response.status_code == 422, response.text
+        assert other_job.work_order_number in response.json()["detail"]
+        assert inspected.part_number in response.json()["detail"]
+        assert _snapshot(db_session) == before
+
+    def test_a_component_of_an_assembly_job_and_a_part_less_job_are_accepted(self, client, db_session):
+        component = _part(db_session)
+        assembly_job = _work_order(db_session, _part(db_session))
+        center = WorkCenter(
+            name=f"FAIL-WC-{next(_seq)}",
+            code=f"FAIL-WC-{next(_seq)}",
+            work_center_type="assembly",
+            hourly_rate=100,
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add(center)
+        db_session.commit()
+        db_session.add(
+            WorkOrderOperation(
+                work_order_id=assembly_job.id,
+                work_center_id=center.id,
+                sequence=10,
+                operation_number="10",
+                name="Weld component",
+                status=OperationStatus.PENDING,
+                component_part_id=component.id,
+                company_id=1,
+            )
+        )
+        part_less_job = WorkOrder(
+            work_order_number=f"WO-FAIL-NEST-{next(_seq):04d}",
+            part_id=None,
+            work_order_type="laser_cutting",  # a standalone laser-nest job names no part
+            quantity_ordered=1,
+            status=WorkOrderStatus.RELEASED,
+            company_id=1,
+        )
+        db_session.add(part_less_job)
+        db_session.commit()
+        user = _user(db_session)
+
+        for job in (assembly_job, part_less_job):
+            response = client.post(
+                BASE, headers=_headers(user), json={"part_id": component.id, "work_order_id": job.id}
+            )
+            assert response.status_code == 200, response.text
+            assert response.json()["work_order_id"] == job.id
+
     def test_inspector_and_approver_names_resolve_tenant_scoped(self, client, db_session):
         inspector = _user(db_session, first_name="Ivy", last_name="Inspector")
         foreign = _user(db_session, company_id=2, first_name="Foreign", last_name="Person")
@@ -774,13 +903,16 @@ class TestCreateAndDisposition:
 
 
 def test_central_today_reads_the_shop_calendar_not_the_host(monkeypatch):
-    """03:00 UTC on Nov 14 is 21:00 on Nov 13 in Central."""
+    """03:00 UTC on Feb 4 is 21:00 on Feb 3 in Central (a date far from any real "today")."""
 
     class _Frozen(datetime):
         @classmethod
         def now(cls, tz=None):
-            moment = datetime(2026, 11, 14, 3, 0, tzinfo=timezone.utc)
+            moment = datetime(2001, 2, 4, 3, 0, tzinfo=timezone.utc)
             return moment.astimezone(tz) if tz is not None else moment.replace(tzinfo=None)
 
-    monkeypatch.setattr(fai_service, "datetime", _Frozen)
-    assert fai_service.central_today() == date(2026, 11, 13)
+    # ``central_today`` lives in ``app.core.time_utils`` (shared with the CAR service); patch
+    # the clock it actually reads, or this would pass on any host whose Central date matches.
+    monkeypatch.setattr(time_utils, "datetime", _Frozen)
+    assert fai_service.central_today() == date(2001, 2, 3)
+    assert fai_service.central_today is time_utils.central_today

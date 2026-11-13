@@ -164,7 +164,9 @@ class CARFormFields(BaseModel):
     resolved tenant-scoped by ``quality_record_service`` before anything is written. The
     customer NAME is never accepted here -- it is snapshotted from the customer record --
     and the Quality Manager approval is server-stamped by its own verb
-    (``POST /quality/car/{id}/quality-approval``), never sent in a body.
+    (``POST /quality/car/{id}/quality-approval``), never sent in a body. A standing API token
+    may not write or change the vendor / customer approval boxes (403), and ``submitted_date``
+    and the two approval dates cannot be later than today (Central) (422).
     """
 
     initiation_reason: Optional[CARInitiationReason] = Field(
@@ -290,7 +292,13 @@ class CARResponse(UTCModel):
     part_id: Optional[int] = None
     part_number: Optional[str] = None
     part_name: Optional[str] = None
-    part_revision: Optional[str] = Field(None, description="The part's current revision (read from the part)")
+    part_current_revision: Optional[str] = Field(
+        None,
+        description=(
+            "The part's revision TODAY, read from the part. The CAR records no revision of its own, "
+            "so this can differ from the revision the CAR was raised against."
+        ),
+    )
     customer_id: Optional[int] = None
     customer_name: Optional[str] = None
     vendor_id: Optional[int] = None

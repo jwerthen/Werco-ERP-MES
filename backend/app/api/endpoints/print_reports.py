@@ -216,7 +216,11 @@ def get_quote_print_data(
         lines.append(
             QuoteLinePrintData(
                 line_number=line.line_number,
-                part_number=line.part.part_number if line.part else None,
+                # Tenant-checked like part_current_revision below: a legacy line whose
+                # part_id points at another company's part names no part here.
+                part_number=(
+                    line.part.part_number if line.part is not None and line.part.company_id == company_id else None
+                ),
                 part_revision=line.part_revision,
                 part_current_revision=(
                     line.part.revision if line.part is not None and line.part.company_id == company_id else None

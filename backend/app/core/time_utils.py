@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -25,3 +25,8 @@ def to_central_iso(value: Optional[datetime]) -> Optional[str]:
     if dt is None:
         return None
     return dt.astimezone(CENTRAL_TIME_ZONE).isoformat()
+
+
+def central_today() -> date:
+    """Today's date on the shop's (Central) calendar, never the server host's local date."""
+    return datetime.now(CENTRAL_TIME_ZONE).date()

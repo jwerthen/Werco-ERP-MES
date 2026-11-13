@@ -16,7 +16,12 @@ from app.models.rfq_quote import QuoteEstimate, RfqPackage
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder
 from app.services.audit_service import AuditService
-from app.services.quote_send_gate import assert_quote_sendable, normalize_line_revision
+from app.services.quote_send_gate import (
+    assert_quote_printable,
+    assert_quote_sendable,
+    normalize_line_revision,
+    refuse_na_on_drawn_parts,
+)
 
 router = APIRouter()
 
@@ -332,7 +337,9 @@ def _quote_response(quote: Quote, ai_estimate=None, fabrication_quote_id=None) -
                     )
                 },
                 part_current_revision=_part_current_revision(line, quote.company_id),
-                part_number=line.part.part_number if line.part else None,
+                # Tenant-checked like the revision beside it: a legacy line whose part_id
+                # points at another company's part names no part here.
+                part_number=(line.part.part_number if line.part and line.part.company_id == quote.company_id else None),
                 work_order_number=line.work_order.work_order_number if line.work_order else None,
             )
             for line in sorted(quote.lines, key=lambda line: (line.line_number, line.id))
@@ -433,7 +440,9 @@ def update_quote(
     ``line_revisions`` enters each line's drawing revision (letters/digits, or ``N/A`` for a
     line with no drawing). It is a content edit: draft/pending quotes only, and it resets the
     quote to DRAFT and clears its approval stamp like any other; a ``line_id`` that is not a
-    line of this quote (or is repeated) is a 422. Moving a quote to ``sent`` or ``accepted``
+    line of this quote (or is repeated) is a 422, and so is ``N/A`` on a line naming a
+    manufactured or assembly part (it has a drawing). A value equal to the stored one edits
+    nothing -- no reset, no audit row. Moving a quote to ``sent`` or ``accepted``
     here from any status other than those two (draft, pending, and also rejected or expired,
     which a quote can reach without ever being sent) is refused (409) while any line lacks
     its drawing revision, exactly as ``POST /quotes/{id}/send`` is.
@@ -462,7 +471,14 @@ def update_quote(
     line_data = update_data.pop("lines", None)
     revision_edits = update_data.pop("line_revisions", None) or []  # an empty list edits nothing
     content_keys = set(update_data) - {"status"}
-    if revision_edits:
+    lines_by_id = {line.id: line for line in quote.lines}
+    # Only a revision that CHANGES is a content edit. Re-sending the stored values (an editor
+    # saving unchanged rows) must not reset a pending quote to DRAFT or clear its approval. An
+    # unknown line id counts as a change, so it still reaches the 422 below.
+    if any(
+        edit["line_id"] not in lines_by_id or lines_by_id[edit["line_id"]].part_revision != edit["part_revision"]
+        for edit in revision_edits
+    ):
         content_keys.add("line_revisions")
     has_production_links = bool(quote.work_order_id or any(line.work_order_id for line in quote.lines))
     if has_production_links and (
@@ -483,7 +499,6 @@ def update_quote(
             status_code=409,
             detail="Customer quote prices and lines are frozen. Revise and approve the estimate in Fabrication Quoting.",
         )
-    lines_by_id = {line.id: line for line in quote.lines}
     edited_line_ids = [edit["line_id"] for edit in revision_edits]
     unknown = sorted({line_id for line_id in edited_line_ids if line_id not in lines_by_id})
     if unknown:
@@ -493,6 +508,15 @@ def update_quote(
         )
     if len(set(edited_line_ids)) != len(edited_line_ids):
         raise HTTPException(status_code=422, detail="line_revisions names the same line more than once")
+    refuse_na_on_drawn_parts(
+        db,
+        company_id,
+        [
+            (lines_by_id[edit["line_id"]], edit["part_revision"])
+            for edit in revision_edits
+            if lines_by_id[edit["line_id"]].part_revision != edit["part_revision"]
+        ],
+    )
     # Every door that puts the quote in front of the customer holds the revision gate. Only a
     # real move INTO a customer status counts (SENT -> ACCEPTED is not one: the customer
     # already holds that document), and it is judged on the move, not the starting status:
@@ -534,7 +558,7 @@ def update_quote(
     if content_keys:
         new_snapshot = _quote_audit_snapshot(quote)
         extra_data: Dict[str, Any] = {"edited_fields": sorted(content_keys)}
-        if revision_edits:
+        if "line_revisions" in content_keys:
             # Per line, old -> new: the drawing revision is customer-document content.
             old_snapshot["line_revisions"] = old_revisions
             new_snapshot["line_revisions"] = _line_revisions(quote)
@@ -825,10 +849,14 @@ def generate_quote_pdf(
 ):
     """Generate customer-ready quote PDF (no operation-time line items).
 
-    This is the customer document, so it holds the same gate as sending: refused (409) while
-    any line lacks its drawing revision. The PDF shows each line's Rev, the quote's own
+    Until the quote is issued this is a new customer document, so it holds the same gate as
+    sending: a draft, pending, rejected or expired quote is refused (409) while any line lacks
+    its drawing revision. A sent, accepted or converted quote reprints the document the
+    customer already holds and is never refused for it (a quote issued before revisions were
+    recorded prints "-" in the Rev column). The PDF shows each line's Rev, the quote's own
     revision as "Quote Rev", Valid Until (the quote's date, else quote date + 30 days) and
-    the standard Terms block (FOB from your company's address).
+    the standard Terms block (FOB from your company's address; the validity term names the
+    Valid Until date when the quote carries one).
     """
     quote = (
         db.query(Quote)
@@ -838,7 +866,7 @@ def generate_quote_pdf(
     )
     if not quote:
         raise HTTPException(status_code=404, detail="Quote not found")
-    assert_quote_sendable(quote)
+    assert_quote_printable(quote)
 
     from app.services.document_pdf_service import build_quote_document
 
