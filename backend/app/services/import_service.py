@@ -45,7 +45,7 @@ import io
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
-from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
+from typing import AbstractSet, Any, Dict, Iterator, List, Optional, Set, Tuple
 
 # Caps chosen for go-live master-data loads: big enough for a full part master
 # (thousands of rows), small enough that parsing stays interactive.
@@ -70,6 +70,10 @@ BLANK_RUN_LOOKAHEAD_ROWS = 50_000
 # pathological alternating blank/data pattern that survives the blank-run
 # cutoff; refuse such a file with an actionable error instead of spinning.
 MAX_SCANNED_ROWS = 100_000
+
+# ``header_detect``: how many non-blank rows may sit above the header row (a controlled
+# form's title block) before the file is refused as having no recognizable header.
+HEADER_DETECT_SCAN_ROWS = 10
 
 # Rows whose FIRST cell starts with this marker are guidance rows and are
 # skipped on import. This must match EXACTLY what build_import_template_workbook
@@ -165,6 +169,10 @@ class ParsedTable:
 
     headers: List[str]
     rows: List[Tuple[int, Dict[str, str]]] = field(default_factory=list)
+    # Non-blank rows ABOVE a detected header row (``header_detect``), as coerced cell text --
+    # e.g. a controlled form's title block (form number, revision, rev date). Empty unless
+    # header detection skipped something.
+    preamble: List[List[str]] = field(default_factory=list)
 
     def iter_rows(self) -> Iterator[Tuple[int, Dict[str, str]]]:
         return iter(self.rows)
@@ -187,7 +195,7 @@ def _rows_from_csv(content: bytes) -> Iterator[List[Any]]:
     yield from csv.reader(io.StringIO(decoded))
 
 
-def _rows_from_xlsx(content: bytes) -> Iterator[Tuple[Any, ...]]:
+def _rows_from_xlsx(content: bytes, sheet_name: Optional[str] = None) -> Iterator[Tuple[Any, ...]]:
     try:
         from openpyxl import load_workbook
 
@@ -200,7 +208,16 @@ def _rows_from_xlsx(content: bytes) -> Iterator[Tuple[Any, ...]]:
         # Import reads the FIRST sheet only; the template's "Examples" sheet is
         # therefore ignored by design. max_col bounds per-row cost when the
         # declared used range is bloated (e.g. one stray cell in column XFD).
+        # ``sheet_name`` (case-insensitive) PREFERS a named sheet when the workbook has
+        # one -- a controlled form kept as a multi-tab workbook -- and falls back to the
+        # first sheet otherwise, so a re-saved single-sheet copy still imports.
         worksheet = workbook.worksheets[0]
+        if sheet_name:
+            wanted = sheet_name.strip().casefold()
+            for candidate in workbook.worksheets:
+                if str(candidate.title).strip().casefold() == wanted:
+                    worksheet = candidate
+                    break
         yield from worksheet.iter_rows(values_only=True, max_col=MAX_IMPORT_COLUMNS)
     finally:
         workbook.close()
@@ -215,6 +232,8 @@ def parse_import_file(
     max_bytes: int = MAX_IMPORT_FILE_BYTES,
     max_scanned_rows: int = MAX_SCANNED_ROWS,
     blank_run_lookahead_rows: int = BLANK_RUN_LOOKAHEAD_ROWS,
+    header_detect: Optional[AbstractSet[str]] = None,
+    sheet_name: Optional[str] = None,
 ) -> ParsedTable:
     """Parse an uploaded CSV/XLSX into normalized row dicts.
 
@@ -227,6 +246,13 @@ def parse_import_file(
     gap and raises if any is found, so a user who kept rows below a huge cleared
     block gets an actionable error instead of a partial import.
 
+    ``header_detect`` (additive; default unchanged) is for a controlled form with a title
+    block above its table: the header is the first of the first
+    :data:`HEADER_DETECT_SCAN_ROWS` non-blank rows whose normalized cells contain EVERY
+    name in the set; the non-blank rows above it are returned as ``preamble`` and never
+    parsed as data. No such row -> :class:`ImportFileError` naming the expected columns.
+    ``sheet_name`` prefers that worksheet of an .xlsx (see ``_rows_from_xlsx``).
+
     Raises :class:`ImportFileError` for any file-level problem; row-level
     validation stays in the calling endpoint so its error contract is unchanged.
     """
@@ -238,10 +264,12 @@ def parse_import_file(
     if len(content) > max_bytes:
         raise ImportFileError(f"File is too large (max {max_bytes // (1024 * 1024)} MB)")
 
-    raw_rows = _rows_from_csv(content) if ext in CSV_EXTENSIONS else _rows_from_xlsx(content)
+    raw_rows = _rows_from_csv(content) if ext in CSV_EXTENSIONS else _rows_from_xlsx(content, sheet_name)
 
     headers: List[str] = []
     table_rows: List[Tuple[int, Dict[str, str]]] = []
+    preamble: List[List[str]] = []
+    wanted_headers = {normalize_import_header(name) for name in header_detect} if header_detect else set()
     consecutive_blank_rows = 0
     blank_run_cutoff_row = 0  # raw row number where the blank-run cutoff fired (0 = never fired)
 
@@ -259,6 +287,17 @@ def parse_import_file(
                 break  # presumed used-range bloat — but verify via the look-ahead below before trusting it
             continue  # tolerate blank rows anywhere
         consecutive_blank_rows = 0
+        if not headers and wanted_headers:
+            candidate = {normalize_import_header(cell) for cell in cells}
+            if not wanted_headers <= candidate:
+                preamble.append(cells)
+                if len(preamble) >= HEADER_DETECT_SCAN_ROWS:
+                    raise ImportFileError(
+                        "Could not find the header row: none of the first "
+                        f"{HEADER_DETECT_SCAN_ROWS} non-blank rows has the columns "
+                        f"{', '.join(sorted(wanted_headers))}."
+                    )
+                continue
         if not headers:
             headers = [normalize_import_header(cell) for cell in cells]
             # Two distinct columns that collide after normalization would
@@ -305,6 +344,10 @@ def parse_import_file(
                 )
 
     if not headers:
+        if wanted_headers and preamble:
+            raise ImportFileError(
+                f"Could not find the header row: no row has the columns {', '.join(sorted(wanted_headers))}."
+            )
         if blank_run_cutoff_row:
             raise ImportFileError(
                 "File must include a header row "
@@ -317,7 +360,7 @@ def parse_import_file(
         if missing:
             raise ImportFileError(f"Missing required columns: {', '.join(missing)}")
 
-    return ParsedTable(headers=[h for h in headers if h], rows=table_rows)
+    return ParsedTable(headers=[h for h in headers if h], rows=table_rows, preamble=preamble)
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +450,14 @@ IMPORT_TEMPLATES: Dict[str, ImportTemplateSpec] = {
                 _col("lead_time_days", "Optional whole number.", "14", "5", "3"),
                 _col("reorder_point", "Optional number.", "500", "1000", "12"),
                 _col("reorder_quantity", "Optional number.", "1000", "5000", "24"),
+                _col(
+                    "supply_scope",
+                    "Optional. Approved Supplier List scope of supply (label or slug), e.g. "
+                    "Raw Material - Metallics, Hardware, Adhesives / Bonding Materials.",
+                    "Raw Material - Metallics",
+                    "Hardware",
+                    "Adhesives / Bonding Materials",
+                ),
             ),
         ),
         ImportTemplateSpec(
@@ -443,6 +494,59 @@ IMPORT_TEMPLATES: Dict[str, ImportTemplateSpec] = {
                 _col("is_approved", "Optional. true/false.", "true", "true", "false"),
                 _col("is_as9100_certified", "Optional. true/false.", "true", "false", "false"),
                 _col("is_iso9001_certified", "Optional. true/false.", "true", "false", "true"),
+            ),
+        ),
+        ImportTemplateSpec(
+            entity="approved-supplier-list",
+            title="Approved Supplier List (QL 7.4)",
+            description=(
+                "UPDATE-ONLY load of the Approved Supplier List onto EXISTING vendors (never creates one). "
+                "The QL 7.4 workbook itself can be uploaded as-is: its title block is skipped and the "
+                "header row found. POST /api/v1/purchasing/vendors/asl-import/preview, then /commit."
+            ),
+            columns=(
+                _col(
+                    "supplier_name",
+                    "REQUIRED. Must match ONE existing vendor's name exactly (case, spaces and dashes "
+                    "ignored), unless vendor_code is filled.",
+                    "Apex Metals",
+                    "Bolt Bin Supply",
+                    "Crest Finishing",
+                ),
+                _col("supplier_address", "Optional. Compared only; the import never changes an address.", "", "", ""),
+                _col(
+                    "status",
+                    "Approved, Conditional, Disqualified or Approved - Customer Directed. Blank = not on the ASL.",
+                    "Approved",
+                    "Conditional",
+                    "Approved - Customer Directed",
+                ),
+                _col(
+                    "approved_scope_of_supply",
+                    "QL 7.4 scope label(s); separate several with ';'.",
+                    "Raw Material - Metallics",
+                    "Hardware",
+                    "Special Process - Plating / Coating",
+                ),
+                _col("approved_date", "Optional date. Blank never clears.", "2024-02-19", "2025-06-01", ""),
+                _col(
+                    "approval_basis",
+                    "AS9100 Cert, AS9120 Cert, ISO 9001 Cert, ISO 17025 Cert, NADCAP Cert, Questionnaire or "
+                    "Customer Requirement.",
+                    "AS9100 Cert",
+                    "Questionnaire",
+                    "Customer Requirement",
+                ),
+                _col("re_evaluation_due_date", "Optional date. Blank never clears.", "2027-02-19", "2026-12-01", ""),
+                _col("performance_evaluation_date", "Optional date. Blank never clears.", "2025-12-16", "", ""),
+                _col("notes", "Optional. Stored as the vendor's ASL notes; blank never clears.", "", "", ""),
+                _col(
+                    "vendor_code",
+                    "Optional. When filled, matches the vendor by code instead of by name.",
+                    "VND-001",
+                    "",
+                    "",
+                ),
             ),
         ),
         ImportTemplateSpec(

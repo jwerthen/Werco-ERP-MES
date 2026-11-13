@@ -13,6 +13,7 @@ from app.core.validation import (
 )
 from app.models.part import PartType, UnitOfMeasure
 from app.schemas.base import UTCModel
+from app.services.supplier_approval_service import AslValueError, parse_scope
 
 
 class PartBase(UTCModel):
@@ -128,6 +129,11 @@ class PartUpdate(BaseModel):
     customer_name: Optional[str] = Field(None, max_length=255)
     customer_part_number: Optional[str] = Field(None, max_length=100)
     drawing_number: Optional[str] = Field(None, max_length=100)
+    # The Approved Supplier List scope a purchase of this part falls under (slug or QL 7.4
+    # label; normalized to the slug, 422 on anything else). An explicit null clears it.
+    # Advisory: it drives the PO scope WARNING only. Deliberately on PartUpdate (and the
+    # materials import) and NOT on PartBase/PartCreate -- same posture as backflush_components.
+    supply_scope: Optional[str] = Field(None, max_length=60)
     # **``is_active`` and ``status`` are DELIBERATELY ABSENT.** ``POST /parts/{id}/deactivate``
     # and ``/activate`` are the only non-delete writers of those columns (reasoned, audited,
     # Admin/Manager, and refusing a soft-deleted part). ``PUT /parts/{id}`` and
@@ -143,6 +149,14 @@ class PartUpdate(BaseModel):
     def uppercase_revision(cls, v: Optional[str]) -> Optional[str]:
         """Ensure revision is uppercase"""
         return v.upper().strip() if v else v
+
+    @field_validator('supply_scope', mode='before')
+    @classmethod
+    def normalize_supply_scope(cls, v: object) -> Optional[str]:
+        try:
+            return parse_scope(v)
+        except AslValueError as exc:
+            raise ValueError(str(exc)) from exc
 
     @field_validator('backflush_components')
     @classmethod
@@ -194,6 +208,8 @@ class PartResponse(PartBase):
     # ``except Exception: return None`` can never make a part VANISH from a list because
     # of it -- a required field with no default would do exactly that.
     backflush_components: bool = False
+    # Read-only here (not on PartBase/PartCreate); see PartUpdate.supply_scope.
+    supply_scope: Optional[str] = None
     is_active: bool
     status: str
     created_at: datetime

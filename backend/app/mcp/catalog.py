@@ -46,11 +46,20 @@ EXCLUDED_TAGS: FrozenSet[str] = frozenset(
 # a NAMED PERSON clicking Accept, so running a recommendation's action is a person's click
 # in the app, never an agent's tool call (the route also refuses API tokens). Agents keep
 # the record-only accept, dismiss and snooze tools.
+#
+# And the Approved Supplier List writes (AS9100D 8.4): recording a supplier-approval
+# decision and loading the controlled QL 7.4 list are a named person's judgment, so they
+# are app actions only (the routes also refuse API tokens). The import preview goes with
+# its commit -- it exists only to feed one. Agents keep the reads: the re-evaluation-due
+# list and the supplier-approval check.
 EXCLUDED_OPERATIONS: FrozenSet[Tuple[str, str]] = frozenset(
     {
         ("POST", "/api/v1/work-orders/import"),
         ("POST", "/api/v1/purchasing/purchase-orders/import"),
         ("POST", "/api/v1/ai/recommendations/{recommendation_id}/apply"),
+        ("PUT", "/api/v1/purchasing/vendors/{vendor_id}/approval"),
+        ("POST", "/api/v1/purchasing/vendors/asl-import/preview"),
+        ("POST", "/api/v1/purchasing/vendors/asl-import/commit"),
     }
 )
 

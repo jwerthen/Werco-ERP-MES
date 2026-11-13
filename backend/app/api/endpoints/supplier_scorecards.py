@@ -12,6 +12,7 @@ from app.models.quality import NonConformanceReport
 from app.models.supplier_scorecard import ApprovedSupplierList, ScorecardPeriod, SupplierAudit, SupplierScorecard
 from app.models.user import User, UserRole
 from app.services.audit_service import AuditService
+from app.services.supplier_approval_service import REEVALUATION_STATUSES
 
 router = APIRouter()
 
@@ -511,13 +512,19 @@ def scorecard_dashboard(
         .count()
     )
 
-    # Reviews due (ASL)
+    # Reviews due (ASL): supplier re-evaluations due within 30 days (or already overdue), read
+    # off the vendor record -- the Approved Supplier List lives on ``Vendor`` since migration
+    # 123. The legacy ``approved_supplier_list`` table is read-only history and no longer
+    # counted here (it kept no link to the vendor's real status and drifted from it).
     reviews_due = (
-        db.query(ApprovedSupplierList)
+        db.query(Vendor)
         .filter(
-            ApprovedSupplierList.company_id == company_id,
-            ApprovedSupplierList.next_review_date != None,
-            ApprovedSupplierList.next_review_date <= thirty_days,
+            Vendor.company_id == company_id,
+            Vendor.is_deleted == False,  # noqa: E712
+            Vendor.is_active == True,  # noqa: E712
+            Vendor.approval_status.in_(sorted(REEVALUATION_STATUSES)),
+            Vendor.reevaluation_due != None,  # noqa: E711
+            Vendor.reevaluation_due <= thirty_days,
         )
         .count()
     )

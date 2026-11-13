@@ -1,14 +1,16 @@
-from datetime import date, datetime
-from typing import List, Optional
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Iterable, List, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
+from app.api.audit_guard import required_audit
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
+from app.core.credentials import is_api_token_credential
 from app.db.database import get_db
 from app.models.part import Part
 from app.models.purchasing import (
@@ -20,25 +22,42 @@ from app.models.purchasing import (
 from app.models.user import User, UserRole
 from app.schemas.import_kit import PurchaseOrderImportResponse
 from app.schemas.purchasing import (
+    AslImportResponse,
     POCreate,
     POLineCreate,
     POLineResponse,
     POListResponse,
     POResponse,
     POUpdate,
+    SupplierApprovalCheckRequest,
+    SupplierApprovalCheckResponse,
+    SupplierApprovalWarning,
     SupplierConfirmationUpdate,
+    VendorApprovalUpdate,
     VendorCreate,
+    VendorReevaluationDueResponse,
     VendorResponse,
     VendorUpdate,
 )
+from app.services import supplier_approval_service as asl
 from app.services.audit_service import AuditService
 from app.services.erp_draft_commands import PurchaseOrderNumberConflict, create_purchase_order_command
 from app.services.erp_draft_commands import generate_po_number as generate_po_number  # noqa: F401 - legacy service seam
-from app.services.import_service import ImportFileError, parse_import_file
+from app.services.import_service import MAX_IMPORT_FILE_BYTES, ImportFileError, parse_import_file
 from app.services.migration_import_service import import_open_purchase_orders
 from app.services.operational_event_service import OperationalEventService
+from app.services.vendor_asl_import_service import commit_asl_import, preview_asl_import
 
 router = APIRouter()
+
+# Who may record a supplier-approval decision or load the Approved Supplier List. The ASL's
+# owner on the controlled form (QL 7.4) is "Purchasing / Quality", so QUALITY sits beside
+# ADMIN/MANAGER here even though the general vendor edit stays ADMIN/MANAGER.
+ASL_WRITE_ROLES = [UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY]
+API_TOKEN_ASL_REFUSAL = (
+    "Supplier approval is a person's decision: an API token cannot change the Approved Supplier List. "
+    "Sign in to the app to do this."
+)
 
 # Ceiling on the rows ``GET /purchasing/purchase-orders`` will materialize. A
 # generous bound, not a page size: the default filter already excludes
@@ -439,6 +458,265 @@ async def import_vendors_csv(
     return await run_in_threadpool(_run_import)
 
 
+# ============ APPROVED SUPPLIER LIST (AS9100D 8.4, QL 7.4) ============
+#
+# DECLARED BEFORE ``/vendors/{vendor_id}`` ON PURPOSE: FastAPI matches routes in declaration
+# order, and ``GET /vendors/{vendor_id}`` would otherwise claim ``/vendors/reevaluation-due``
+# and answer 422 ("vendor_id is not an integer"). Keep every literal ``/vendors/<word>`` route
+# above the parameterized ones.
+
+
+def _refuse_api_token(current_user: User) -> None:
+    """Supplier approval is a judgment write: only a person signed in to the app makes it."""
+    if is_api_token_credential(current_user):
+        raise HTTPException(status_code=403, detail=API_TOKEN_ASL_REFUSAL)
+
+
+def _read_upload(file: UploadFile) -> bytes:
+    # Bounded read: one byte past the parser's cap is enough for it to refuse the file.
+    return file.file.read(MAX_IMPORT_FILE_BYTES + 1)
+
+
+@router.get("/vendors/reevaluation-due", response_model=List[VendorReevaluationDueResponse])
+def list_vendors_reevaluation_due(
+    within_days: int = Query(
+        0, ge=0, le=3650, description="0 = overdue only; N = also those falling due within N days"
+    ),
+    include_inactive: bool = Query(False, description="Include vendors switched off (is_active=false)"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """The overdue supplier re-evaluation list (AS9100D 8.4).
+
+    Vendors on the Approved Supplier List as Approved, Conditional or Approved - Customer
+    Directed whose ``reevaluation_due`` is before today (Central) plus ``within_days``,
+    oldest first, each with ``days_overdue`` (negative = not yet due). Live vendors only;
+    active ones only unless ``include_inactive``. Disqualified vendors carry no re-evaluation
+    obligation and are never listed. A pure read."""
+    today = asl.central_today()
+    query = db.query(Vendor).filter(
+        Vendor.company_id == company_id,
+        Vendor.is_deleted == False,  # noqa: E712
+        Vendor.approval_status.in_(sorted(asl.REEVALUATION_STATUSES)),
+        Vendor.reevaluation_due != None,  # noqa: E711
+        Vendor.reevaluation_due < today + timedelta(days=within_days),
+    )
+    if not include_inactive:
+        query = query.filter(Vendor.is_active == True)  # noqa: E712
+    vendors = query.order_by(Vendor.reevaluation_due, Vendor.name).all()
+    rows: List[VendorReevaluationDueResponse] = []
+    for vendor in vendors:
+        base = _vendor_response(vendor).model_dump()
+        rows.append(VendorReevaluationDueResponse(**base, days_overdue=(today - vendor.reevaluation_due).days))
+    return rows
+
+
+@router.post(
+    "/vendors/asl-import/preview",
+    response_model=AslImportResponse,
+    summary="Preview an Approved Supplier List import (dry run)",
+)
+def preview_vendor_asl_import(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(ASL_WRITE_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Upload the Approved Supplier List (the QL 7.4 workbook as-is, the
+    ``approved-supplier-list`` template, or a CSV) and see what a commit would change.
+    WRITES NOTHING.
+
+    UPDATE-ONLY: each row must match exactly one existing live vendor -- by ``vendor_code``
+    when that column is filled, else by exact normalized name -- and no vendor is ever
+    created. The title block above the header row is skipped. Returns, per row, the matched
+    vendor, the field changes (old/new), warnings and any error, plus ``source_hash``, which
+    the commit must echo back."""
+    _refuse_api_token(current_user)
+    content = _read_upload(file)
+    try:
+        return preview_asl_import(db, company_id=company_id, filename=file.filename, content=content)
+    except ImportFileError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/vendors/asl-import/commit",
+    response_model=AslImportResponse,
+    summary="Commit an Approved Supplier List import",
+)
+def commit_vendor_asl_import(
+    file: UploadFile = File(...),
+    expected_source_hash: str = Form(..., min_length=64, max_length=64),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(ASL_WRITE_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Apply a previewed Approved Supplier List file to the matched vendors.
+
+    ``expected_source_hash`` is the preview's ``source_hash`` (409 if the file differs).
+    ALL-OR-NOTHING: any row error refuses 409 with the row errors and writes nothing. Only
+    changed vendors are written, each with a required audit row (changed fields only) plus
+    one summary row; a re-run of the same sheet changes nothing and writes no audit row.
+    ``is_approved`` follows the status (Approved / Approved - Customer Directed -> true,
+    Conditional / Disqualified -> false; a blank status leaves it as it is)."""
+    _refuse_api_token(current_user)
+    content = _read_upload(file)
+    try:
+        with required_audit(
+            db, "The audit record for the Approved Supplier List import could not be saved; nothing was changed."
+        ):
+            result = commit_asl_import(
+                db,
+                company_id=company_id,
+                filename=file.filename,
+                content=content,
+                expected_source_hash=expected_source_hash,
+                audit=audit,
+            )
+            db.commit()
+    except ImportFileError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException:
+        db.rollback()
+        raise
+    return result
+
+
+@router.post("/supplier-approval-check", response_model=SupplierApprovalCheckResponse)
+def check_supplier_approval(
+    body: SupplierApprovalCheckRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Approved Supplier List check for a prospective purchase order. A pure read.
+
+    Returns the vendor's ASL status and the advisory warnings for buying these parts from it
+    (not on the ASL, Conditional, re-evaluation overdue, scope not approved, scope
+    unverified), and ``refused`` + the exact 409 text when the vendor is Disqualified -- the
+    one case every PO-create door refuses. Part ids not found in this company are ignored."""
+    vendor = _live_vendor_or_404(db, body.vendor_id, company_id)
+    parts = _parts_for_check(db, company_id, body.part_ids)
+    refused = asl.is_disqualified(vendor)
+    return SupplierApprovalCheckResponse(
+        vendor_id=vendor.id,
+        vendor_name=vendor.name,
+        approval_status=vendor.approval_status,
+        is_approved=bool(vendor.is_approved),
+        reevaluation_due=vendor.reevaluation_due,
+        refused=refused,
+        refusal=asl.disqualified_refusal(vendor) if refused else None,
+        warnings=asl.approval_warnings(vendor, parts),
+    )
+
+
+def _parts_for_check(db: Session, company_id: int, part_ids: Iterable[int]) -> List[Part]:
+    ids = sorted({part_id for part_id in part_ids if part_id})
+    if not ids:
+        return []
+    found = {
+        part.id: part
+        for part in db.query(Part).filter(
+            Part.company_id == company_id,
+            Part.id.in_(ids),
+            Part.is_deleted == False,  # noqa: E712
+        )
+    }
+    return [found[part_id] for part_id in ids if part_id in found]
+
+
+def _same_instant(expected: Optional[datetime], actual: Optional[datetime]) -> bool:
+    def _naive_utc(value: Optional[datetime]) -> Optional[datetime]:
+        if value is None:
+            return None
+        return value.astimezone(timezone.utc).replace(tzinfo=None) if value.tzinfo else value
+
+    return _naive_utc(expected) == _naive_utc(actual)
+
+
+@router.put("/vendors/{vendor_id}/approval", response_model=VendorResponse)
+def update_vendor_approval(
+    vendor_id: int,
+    body: VendorApprovalUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(ASL_WRITE_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Record a supplier-approval decision on the Approved Supplier List (AS9100D 8.4).
+
+    ADMIN / MANAGER / QUALITY, a person only (403 for an API token). ``approval_status`` is
+    required (null = take the vendor off the ASL); any other field is changed only when sent.
+    ``is_approved`` follows the status: Approved / Approved - Customer Directed -> true,
+    Conditional / Disqualified -> false (a Disqualified vendor cannot be sent a purchase
+    order); no status leaves it as it is. When the vendor becomes approved and no
+    ``approval_date`` is sent, today's date is recorded. ``reason`` is required;
+    ``expected_updated_at`` must equal the vendor's ``updated_at`` as read (409 otherwise).
+    Writes one required audit row with the changed fields; a no-change request writes nothing.
+    404 on a deleted vendor -- restore it first."""
+    _refuse_api_token(current_user)
+    vendor = (
+        db.query(Vendor)
+        .filter(
+            Vendor.id == vendor_id,
+            Vendor.company_id == company_id,
+            Vendor.is_deleted == False,  # noqa: E712
+        )
+        .with_for_update()
+        .populate_existing()
+        .first()
+    )
+    if vendor is None:
+        raise HTTPException(status_code=404, detail="Vendor not found")
+    if not _same_instant(body.expected_updated_at, vendor.updated_at):
+        raise HTTPException(
+            status_code=409, detail="This vendor changed since you opened it. Reload it before saving the approval."
+        )
+
+    fields = body.model_fields_set
+    changes: dict = {"status": body.approval_status}
+    for name, key in (
+        ("approved_scopes", "scopes"),
+        ("approval_bases", "bases"),
+        ("approval_date", "approval_date"),
+        ("reevaluation_due", "reevaluation_due"),
+        ("last_performance_evaluation", "last_performance_evaluation"),
+        ("approval_notes", "approval_notes"),
+    ):
+        if name in fields:
+            changes[key] = getattr(body, name)
+    becomes_approved = asl.derived_is_approved(body.approval_status) is True and not vendor.is_approved
+    if becomes_approved and "approval_date" not in fields:
+        changes["approval_date"] = asl.central_today()
+
+    before = asl.snapshot(vendor)
+    asl.apply_vendor_approval(vendor, **changes)
+    old, new = asl.changed_fields(before, asl.snapshot(vendor))
+    if not old:
+        db.rollback()
+        return _vendor_response(_live_vendor_or_404(db, vendor_id, company_id))
+
+    db.flush()
+    with required_audit(db, "The audit record for this supplier approval could not be saved; nothing was changed."):
+        audit.log_required(
+            AuditService.ACTIONS["UPDATE"],
+            "vendor",
+            resource_id=vendor.id,
+            resource_identifier=vendor.code,
+            description=f"Updated the supplier approval of {vendor.name}",
+            old_values=old,
+            new_values=new,
+            extra_data={"source": "approval", "reason": body.reason},
+            company_id=company_id,
+        )
+        db.commit()
+    db.refresh(vendor)
+    return _vendor_response(vendor)
+
+
 @router.get("/vendors/{vendor_id}", response_model=VendorResponse)
 def get_vendor(
     vendor_id: int,
@@ -468,6 +746,22 @@ def update_vendor(
     vendor = _live_vendor_or_404(db, vendor_id, company_id)
 
     update_data = vendor_in.model_dump(exclude_unset=True)
+
+    # On the Approved Supplier List, ``is_approved`` is DERIVED from ``approval_status`` (see
+    # supplier_approval_service.apply_vendor_approval). This blind-setattr PUT must not be able
+    # to contradict it -- e.g. mark a Disqualified vendor approved, which the Create PO vendor
+    # picker would then offer. Re-sending the derived value is a harmless no-op and passes.
+    if "is_approved" in update_data and vendor.approval_status is not None:
+        derived = asl.derived_is_approved(vendor.approval_status)
+        if bool(update_data["is_approved"]) != derived:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"{vendor.name} is {asl.status_label(vendor.approval_status)} on the Approved Supplier List, so "
+                    f"its approval follows that status. Change it with Update approval "
+                    f"(PUT /purchasing/vendors/{vendor.id}/approval)."
+                ),
+            )
 
     # Vendor code is editable but never blankable: normalize like the CSV import path,
     # reject an explicit null/blank, and enforce per-company uniqueness on change.
@@ -702,6 +996,18 @@ def restore_vendor(
 # ============ PURCHASE ORDERS ============
 
 
+def _po_response(po: PurchaseOrder) -> POResponse:
+    """Serialize a PO with its advisory Approved Supplier List warnings (computed now, from
+    the vendor's CURRENT ASL entry and the lines' parts -- never stored)."""
+    response = POResponse.model_validate(po)
+    if po.vendor is not None:
+        parts: List[Any] = [line.part for line in po.lines if line.part is not None]
+        response.supplier_approval_warnings = [
+            SupplierApprovalWarning(**warning) for warning in asl.approval_warnings(po.vendor, parts)
+        ]
+    return response
+
+
 def _live_po_or_404(db: Session, po_id: int, company_id: int) -> PurchaseOrder:
     """Resolve a purchase order that is workable: this company's, and NOT soft-deleted.
 
@@ -890,7 +1196,7 @@ def create_purchase_order(
         po = create_purchase_order_command(db, po_in, current_user, company_id, audit)
         db.commit()
         db.refresh(po)
-        return po
+        return _po_response(po)
     except PurchaseOrderNumberConflict as exc:
         db.rollback()
         raise HTTPException(400, f"PO number '{exc.po_number}' already exists") from exc
@@ -975,7 +1281,7 @@ def get_purchase_order(
 
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")
-    return po
+    return _po_response(po)
 
 
 # PO status classes for the ``PUT`` transition whitelist below.
@@ -1225,7 +1531,7 @@ def update_purchase_order(
     audit.log_update("purchase_order", po.id, po.po_number, old_values=old_values, new_values=po)
     db.commit()
     db.refresh(po)
-    return po
+    return _po_response(po)
 
 
 @router.post("/purchase-orders/{po_id}/send")
@@ -1504,4 +1810,4 @@ def update_supplier_confirmation(
     """
     from app.services.supplier_followup_service import update_supplier_confirmation as update_confirmation
 
-    return update_confirmation(db, current_user, company_id, po_id, body, audit)
+    return _po_response(update_confirmation(db, current_user, company_id, po_id, body, audit))

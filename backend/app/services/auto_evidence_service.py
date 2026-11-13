@@ -32,6 +32,7 @@ from app.models.quality import (
 from app.models.spc import SPCCharacteristic
 from app.models.supplier_scorecard import SupplierScorecard
 from app.models.work_order import WorkOrder
+from app.services.supplier_approval_service import APPROVED_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -978,12 +979,27 @@ def _query_suppliers(db: Session, company_id: int) -> dict:
     total_scorecards = (
         db.query(func.count(SupplierScorecard.id)).filter(SupplierScorecard.company_id == company_id).scalar() or 0
     )
+    active = (
+        db.query(func.count(Vendor.id))
+        .filter(
+            Vendor.company_id == company_id,
+            Vendor.is_active == True,  # noqa: E712
+            Vendor.is_deleted == False,  # noqa: E712
+        )
+        .scalar()
+        or 0
+    )
+    # "Approved" means approved ON THE APPROVED SUPPLIER LIST (vendors.approval_status, migration
+    # 123) -- not merely switched on. ``active`` above used to be reported as the approved count,
+    # which overstated it to a registrar by every active vendor that is Conditional, Disqualified
+    # or not on the ASL at all.
     approved = (
         db.query(func.count(Vendor.id))
         .filter(
             Vendor.company_id == company_id,
             Vendor.is_active == True,  # noqa: E712
             Vendor.is_deleted == False,  # noqa: E712
+            Vendor.approval_status.in_(sorted(APPROVED_STATUSES)),
         )
         .scalar()
         or 0
@@ -1003,17 +1019,20 @@ def _query_suppliers(db: Session, company_id: int) -> dict:
         suggested = "not_assessed"
     elif total_scorecards == 0:
         health = "warning"
-        health_detail = f"{approved} active suppliers but no performance scorecards"
+        health_detail = f"{active} active suppliers but no performance scorecards"
         suggested = "partial"
     else:
         health = "healthy"
-        health_detail = f"{approved} approved suppliers, {total_scorecards} performance evaluations"
+        health_detail = f"{approved} suppliers approved on the ASL, {total_scorecards} performance evaluations"
         suggested = "compliant"
 
     return dict(
         evidence_type="module",
         title="Supplier Management & Evaluation",
-        description=f"{total_vendors} suppliers ({approved} active), {total_scorecards} performance scorecards",
+        description=(
+            f"{total_vendors} suppliers ({active} active), {approved} approved on the ASL, "
+            f"{total_scorecards} performance scorecards"
+        ),
         module_reference="/purchasing/vendors",
         total_count=total_vendors,
         recent_count=total_scorecards,

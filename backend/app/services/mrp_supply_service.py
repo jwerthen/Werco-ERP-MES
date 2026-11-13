@@ -25,6 +25,7 @@ from app.schemas.work_order import WorkOrderCreate, WorkOrderOperationCreate
 from app.services.audit_service import AuditService
 from app.services.mrp_service import MRPService
 from app.services.operational_event_service import OperationalEventService
+from app.services.supplier_approval_service import assert_vendor_not_disqualified, not_disqualified_clause
 
 
 def _digest(value: Any) -> str:
@@ -144,7 +145,13 @@ class MRPSupplyService:
         ]
         vendors = (
             self.db.query(Vendor)
-            .filter(Vendor.company_id == self.company_id, Vendor.is_active == True, Vendor.is_deleted == False)
+            .filter(
+                Vendor.company_id == self.company_id,
+                Vendor.is_active == True,
+                Vendor.is_deleted == False,
+                # A Disqualified vendor is refused at draft time, so never offer it.
+                not_disqualified_clause(),
+            )
             .order_by(Vendor.name)
             .all()
         )
@@ -342,6 +349,8 @@ class MRPSupplyService:
         )
         if not vendor:
             raise HTTPException(422, 'Choose an active supplier in this workspace.')
+        # This door builds its PO directly, so it repeats the ASL's one hard gate.
+        assert_vendor_not_disqualified(vendor)
         data = POCreate(
             vendor_id=vendor.id,
             required_date=payload.due_date,

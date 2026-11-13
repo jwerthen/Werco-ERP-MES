@@ -18,6 +18,7 @@ from app.schemas.mrp import MRPPurchaseBatchResponse
 from app.schemas.purchasing import POCreate, POLineCreate
 from app.services.mrp_supply_service import MRPSupplyService, _digest
 from app.services.operational_event_service import OperationalEventService
+from app.services.supplier_approval_service import assert_vendor_not_disqualified
 
 
 class MRPPurchaseBatchService(MRPSupplyService):
@@ -114,6 +115,9 @@ class MRPPurchaseBatchService(MRPSupplyService):
         vendor_by_id = {vendor.id: vendor for vendor in vendors}
         if set(vendor_by_id) != {line.vendor_id for line in lines}:
             raise HTTPException(422, 'Every line needs an active supplier in this workspace.')
+        # The ASL's one hard gate, before any draft is created (this door builds POs directly).
+        for vendor in vendors:
+            assert_vendor_not_disqualified(vendor)
         # Validate ALL live shortages before adding any supply, otherwise an early
         # group changes the planner inputs used to validate a later group.
         reviews = {review['action_id']: review for review in self.review_batch(ids)['lines']}

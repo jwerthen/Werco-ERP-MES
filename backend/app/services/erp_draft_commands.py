@@ -17,6 +17,7 @@ from app.models.part import Part
 from app.models.purchasing import POStatus, PurchaseOrder, PurchaseOrderLine, Vendor
 from app.models.work_order import WorkOrder
 from app.services.operational_event_service import OperationalEventService
+from app.services.supplier_approval_service import approval_warnings, assert_vendor_not_disqualified
 
 
 class PurchaseOrderNumberConflict(IntegrityError):
@@ -105,6 +106,10 @@ def create_purchase_order_command(
     )
     if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
+    # The one hard Approved Supplier List gate (owner decision 2026-11-13): no purchase order
+    # to a Disqualified vendor, from any door that reaches this command -- the Purchasing
+    # screen, Hank and the AI draft applier. Raised before anything is written.
+    assert_vendor_not_disqualified(vendor)
 
     po_number = imported_po_number or generate_po_number(db, company_id)
 
@@ -131,10 +136,12 @@ def create_purchase_order_command(
 
     # Add lines
     subtotal = 0.0
+    line_parts = []
     for idx, line_data in enumerate(po_in.lines, 1):
         part = db.query(Part).filter(Part.id == line_data.part_id, Part.company_id == company_id).first()
         if not part:
             raise HTTPException(status_code=404, detail=f"Part {line_data.part_id} not found")
+        line_parts.append(part)
 
         # quantity_ordered/unit_price parse as Decimal (Money schema types) but the
         # PO money columns are Float — coerce so `subtotal += line_total` and the
@@ -158,12 +165,19 @@ def create_purchase_order_command(
     po.total = subtotal + po.tax + po.shipping
 
     db.flush()
+    create_extra: dict = {"vendor_code": vendor.code, "line_count": len(po_in.lines)}
+    # The advisory ASL warnings the buyer was shown (or would have been), recorded on the
+    # create row itself so the decision to buy anyway is part of the evidence. Present only
+    # when there is something to record.
+    warnings = approval_warnings(vendor, line_parts)
+    if warnings:
+        create_extra["supplier_approval_warnings"] = warnings
     audit.log_create(
         "purchase_order",
         po.id,
         po.po_number,
         new_values=po,
-        extra_data={"vendor_code": vendor.code, "line_count": len(po_in.lines)},
+        extra_data=create_extra,
     )
     if ready_for_receiving:
         # Employee attests that this uploaded existing PO belongs in Receiving.

@@ -206,6 +206,13 @@ class Part(Base, SoftDeleteMixin, TenantMixin):
     primary_supplier_id = Column(
         Integer, ForeignKey("vendors.id", ondelete="SET NULL", name="fk_parts_primary_supplier"), nullable=True
     )
+    # The Approved Supplier List scope a purchase of this part falls under (an ASL scope
+    # slug from app/services/supplier_approval_service.py, e.g. ``raw_material_metallics``).
+    # Lock-step with migration 123_vendor_asl. Advisory only: it drives the PO
+    # "vendor not approved for this scope" WARNING, never a refusal. Settable through
+    # ``PUT /parts/{id}``, ``PUT /materials/{id}`` and the materials import; NULL = not set,
+    # and the warning then falls back to a part_type hint.
+    supply_scope = Column(String(60), nullable=True)
 
     # Drawing/Document references
     drawing_number = Column(String(100))

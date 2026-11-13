@@ -19,6 +19,7 @@ from app.models.supplier_part import SupplierPartMapping
 from app.models.user import User
 from app.models.work_order import WorkOrder, WorkOrderStatus
 from app.services.audit_service import AuditService
+from app.services.supplier_approval_service import not_disqualified_clause
 
 logger = logging.getLogger(__name__)
 
@@ -330,6 +331,8 @@ class MRPAutoService:
                 Vendor.is_active == True,
                 Vendor.is_deleted == False,
                 Vendor.company_id == self.company_id,
+                # Never auto-pick a vendor Disqualified on the Approved Supplier List.
+                not_disqualified_clause(),
             )
             .first()
         )
@@ -351,6 +354,8 @@ class MRPAutoService:
                 Vendor.is_active == True,
                 Vendor.is_deleted == False,
                 Vendor.company_id == self.company_id,
+                # Never auto-pick a vendor Disqualified on the Approved Supplier List.
+                not_disqualified_clause(),
                 PurchaseOrder.company_id == self.company_id,
             )
             .group_by(Vendor.id)
@@ -371,6 +376,8 @@ class MRPAutoService:
                 Vendor.is_active == True,
                 Vendor.is_deleted == False,
                 Vendor.company_id == self.company_id,
+                # Never auto-pick a vendor Disqualified on the Approved Supplier List.
+                not_disqualified_clause(),
             )
             .first()
         )

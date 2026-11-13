@@ -63,6 +63,7 @@ from app.services.import_service import ParsedTable, parse_date_field
 from app.services.operational_event_service import OperationalEventService
 from app.services.part_number_resolver import resolve_part_by_number
 from app.services.process_sheet_service import ProcessSheetUnavailableError
+from app.services.supplier_approval_service import disqualified_refusal, is_disqualified
 from app.services.work_order_state_service import (
     operation_target_quantity,
     sync_work_order_quantity_complete,
@@ -624,6 +625,11 @@ def import_open_purchase_orders(
                     f"(POST /api/v1/purchasing/vendors/{vendor.id}/restore) and re-import; "
                     f"it cannot be re-created under the same code"
                 )
+            # The Approved Supplier List's one hard gate holds here too: this loader builds
+            # its POs directly (not through create_purchase_order_command), so it repeats
+            # the Disqualified refusal -- as this purchase order's row error, same text.
+            if is_disqualified(vendor):
+                raise ValueError(disqualified_refusal(vendor))
 
             if po_number:
                 if po_number.upper() in seen_po_numbers:

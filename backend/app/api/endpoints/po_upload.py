@@ -26,6 +26,7 @@ from app.schemas.po_upload import (
     POUploadResponse,
     VendorExtracted,
 )
+from app.schemas.purchasing import SupplierApprovalWarning
 from app.services.audit_service import AuditService
 from app.services.llm_service import extract_po_data_with_llm, validate_extracted_data
 from app.services.matching_service import (
@@ -42,6 +43,7 @@ from app.services.pdf_service import (
     move_pdf_to_po,
     save_uploaded_document,
 )
+from app.services.supplier_approval_service import approval_warnings, assert_vendor_not_disqualified
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -54,9 +56,19 @@ ALLOWED_MIME_TYPES = [
 ]
 
 
-def log_audit(db: Session, user: Optional[User], action: str, resource_type: str, resource_id: int, details: str):
+def log_audit(
+    db: Session,
+    user: Optional[User],
+    action: str,
+    resource_type: str,
+    resource_id: int,
+    details: str,
+    extra_data: Optional[dict] = None,
+):
     """Create audit log entry."""
-    AuditService(db, user).log(action=action, resource_type=resource_type, resource_id=resource_id, description=details)
+    AuditService(db, user).log(
+        action=action, resource_type=resource_type, resource_id=resource_id, description=details, extra_data=extra_data
+    )
 
 
 def _generate_quote_po_number(db: Session, company_id: int) -> str:
@@ -409,6 +421,10 @@ def create_po_from_upload(
     )
     if not vendor:
         raise HTTPException(status_code=400, detail="Vendor not found")
+    # The one hard Approved Supplier List gate: no PO to a Disqualified vendor (409), checked
+    # before any part is created -- this door builds its PO directly, not through
+    # create_purchase_order_command, so it carries its own call.
+    assert_vendor_not_disqualified(vendor)
 
     # Create any new parts
     from app.models.part import PartType
@@ -582,6 +598,12 @@ def create_po_from_upload(
             raise HTTPException(status_code=400, detail="Invalid source document reference") from exc
         po.source_document_path = new_path
 
+    # Advisory ASL warnings, recorded with the create and returned to the reviewer.
+    line_parts = (
+        tenant_query(db, Part, company_id).filter(Part.id.in_({item.part_id for item in data.line_items})).all()
+    )
+    warnings = approval_warnings(vendor, line_parts)
+
     # Audit log
     log_audit(
         db,
@@ -590,6 +612,7 @@ def create_po_from_upload(
         "purchase_order",
         po.id,
         f"Created PO {po.po_number} from uploaded PDF with {len(data.line_items)} lines",
+        extra_data={"supplier_approval_warnings": warnings} if warnings else None,
     )
 
     try:
@@ -608,6 +631,7 @@ def create_po_from_upload(
         lines_created=len(data.line_items),
         vendor_created=vendor_created,
         parts_created=parts_created,
+        supplier_approval_warnings=[SupplierApprovalWarning(**warning) for warning in warnings],
     )
 
 

@@ -139,12 +139,17 @@ class TestMembership:
         secured = {(m, p) for m, p, _o, _pp in iter_secured_operations(app.openapi())}
         assert set(SHADOWED_OPERATIONS) <= secured
         assert set(EXCLUDED_OPERATIONS) <= secured
-        # The exclusions are the two Excel-cutover loaders plus AI Accept & apply (owner
-        # ruling 3: only a named person's click runs a recommendation) -- nothing else.
+        # The exclusions are the two Excel-cutover loaders, AI Accept & apply (owner
+        # ruling 3: only a named person's click runs a recommendation) and the Approved
+        # Supplier List writes (a supplier-approval decision is a person's judgment) --
+        # nothing else.
         assert set(EXCLUDED_OPERATIONS) == {
             ("POST", "/api/v1/work-orders/import"),
             ("POST", "/api/v1/purchasing/purchase-orders/import"),
             ("POST", "/api/v1/ai/recommendations/{recommendation_id}/apply"),
+            ("PUT", "/api/v1/purchasing/vendors/{vendor_id}/approval"),
+            ("POST", "/api/v1/purchasing/vendors/asl-import/preview"),
+            ("POST", "/api/v1/purchasing/vendors/asl-import/commit"),
         }
 
     def test_ai_apply_is_not_a_tool_but_record_only_accept_is(self, catalog):
