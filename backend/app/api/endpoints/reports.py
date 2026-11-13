@@ -5,8 +5,9 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session, joinedload
 
+from app.api.date_window import LOCAL_DATE_FROM_DESCRIPTION, LOCAL_DATE_TO_DESCRIPTION, company_period, date_window
 from app.api.deps import get_current_company_id, get_current_user
-from app.core.time_utils import to_utc_iso
+from app.core.time_utils import local_date_range_to_utc, local_today, to_local_date, to_utc_iso
 from app.db.database import get_db
 from app.models.inventory import InventoryItem
 from app.models.purchasing import POReceipt, PurchaseOrder
@@ -15,7 +16,8 @@ from app.models.time_entry import TimeEntry
 from app.models.user import User
 from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.schemas.analytics import ShipOTDReportResponse
-from app.services.analytics_service import AnalyticsService, get_date_range
+from app.services.analytics_service import AnalyticsService
+from app.services.company_time import company_zone
 
 router = APIRouter()
 
@@ -46,8 +48,8 @@ def get_ship_otd_report(
     a per-customer rollup, and a promise-hygiene list of shipped/open WOs with
     NEITHER promise field set.
     """
-    start, end = get_date_range(period, start_date, end_date)
-    return AnalyticsService(db, company_id).get_ship_otd_report(start, end)
+    start, end, zone = company_period(db, company_id, period, start_date, end_date)
+    return AnalyticsService(db, company_id, zone=zone).get_ship_otd_report(start, end)
 
 
 @router.get("/production-summary")
@@ -395,13 +397,19 @@ def get_daily_output(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Get daily production output"""
+    """Daily production output for the last ``days`` calendar days, today included.
+
+    Each bucket is one calendar day in the company time zone (local midnight to the next
+    local midnight), keyed by that local date; an operation lands in the day its
+    ``actual_end`` falls on locally.
+    """
     result = []
+    zone = company_zone(db, company_id)
+    today = local_today(zone)
 
     for i in range(days - 1, -1, -1):
-        day = date.today() - timedelta(days=i)
-        day_start = datetime.combine(day, datetime.min.time())
-        day_end = datetime.combine(day, datetime.max.time())
+        day = today - timedelta(days=i)
+        day_start, day_end = local_date_range_to_utc(day, day, zone)
 
         # Completed operations for the day. Soft-deleted parents are excluded for
         # the same reason as in production-summary -- and so the trend and the
@@ -413,7 +421,7 @@ def get_daily_output(
                 WorkOrderOperation.company_id == company_id,
                 WorkOrder.is_deleted == False,  # noqa: E712
                 WorkOrderOperation.actual_end >= day_start,
-                WorkOrderOperation.actual_end <= day_end,
+                WorkOrderOperation.actual_end < day_end,
             )
             .scalar()
             or 0
@@ -426,7 +434,7 @@ def get_daily_output(
                 WorkOrderOperation.company_id == company_id,
                 WorkOrder.is_deleted == False,  # noqa: E712
                 WorkOrderOperation.actual_end >= day_start,
-                WorkOrderOperation.actual_end <= day_end,
+                WorkOrderOperation.actual_end < day_end,
             )
             .scalar()
             or 0
@@ -538,21 +546,30 @@ def get_work_order_costing(
 
 @router.get("/employee-time")
 def get_employee_time_report(
-    start_date: Optional[date] = None,
-    end_date: Optional[date] = None,
+    start_date: Optional[date] = Query(
+        None, description=f"Default: 7 days before today. {LOCAL_DATE_FROM_DESCRIPTION}"
+    ),
+    end_date: Optional[date] = Query(None, description=f"Default: today. {LOCAL_DATE_TO_DESCRIPTION}"),
     user_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Get employee time report"""
-    if not start_date:
-        start_date = date.today() - timedelta(days=7)
-    if not end_date:
-        end_date = date.today()
+    """Employee time report over an inclusive range of company-local calendar days.
 
-    start_dt = datetime.combine(start_date, datetime.min.time())
-    end_dt = datetime.combine(end_date, datetime.max.time())
+    A time entry is included when it clocked in or out inside the window (local midnight
+    on ``start_date`` to the next local midnight after ``end_date``); each entry's
+    ``date`` is its clock-in day in the company time zone. A reversed range is 422.
+    """
+    zone = company_zone(db, company_id)
+    today = local_today(zone)
+    if not start_date:
+        start_date = today - timedelta(days=7)
+    if not end_date:
+        end_date = today
+
+    # Half-open [start_dt, end_dt); both bounds are set because both dates are.
+    start_dt, end_dt = date_window(start_date, end_date, zone)
 
     query = (
         db.query(TimeEntry)
@@ -565,11 +582,11 @@ def get_employee_time_report(
         .filter(
             TimeEntry.company_id == company_id,
             or_(
-                and_(TimeEntry.clock_in >= start_dt, TimeEntry.clock_in <= end_dt),
+                and_(TimeEntry.clock_in >= start_dt, TimeEntry.clock_in < end_dt),
                 and_(
                     TimeEntry.clock_out.isnot(None),
                     TimeEntry.clock_out >= start_dt,
-                    TimeEntry.clock_out <= end_dt,
+                    TimeEntry.clock_out < end_dt,
                 ),
             ),
         )
@@ -604,7 +621,7 @@ def get_employee_time_report(
             entry.operation
             and entry.operation.completed_by == uid
             and entry.operation.actual_end
-            and start_dt <= entry.operation.actual_end <= end_dt
+            and start_dt <= entry.operation.actual_end < end_dt
         )
         by_employee[uid]["total_hours"] += hours
         by_employee[uid]["quantity_produced"] += quantity_produced
@@ -614,7 +631,7 @@ def get_employee_time_report(
             seen_operation_completions.add((uid, entry.operation_id))
         by_employee[uid]["entries"].append(
             {
-                "date": entry.clock_in.date().isoformat() if entry.clock_in else None,
+                "date": to_local_date(entry.clock_in, zone).isoformat() if entry.clock_in else None,
                 "clock_in": to_utc_iso(entry.clock_in),
                 "clock_out": to_utc_iso(entry.clock_out),
                 "hours": hours,
@@ -639,7 +656,7 @@ def get_employee_time_report(
             WorkOrderOperation.completed_by.isnot(None),
             WorkOrderOperation.actual_end.isnot(None),
             WorkOrderOperation.actual_end >= start_dt,
-            WorkOrderOperation.actual_end <= end_dt,
+            WorkOrderOperation.actual_end < end_dt,
         )
     )
     if user_id:
@@ -680,7 +697,7 @@ def get_employee_time_report(
         by_employee[uid]["quantity_scrapped"] += float(op.quantity_scrapped or 0)
         by_employee[uid]["entries"].append(
             {
-                "date": op.actual_end.date().isoformat() if op.actual_end else None,
+                "date": to_local_date(op.actual_end, zone).isoformat() if op.actual_end else None,
                 "clock_in": None,
                 "clock_out": to_utc_iso(op.actual_end),
                 "hours": 0,

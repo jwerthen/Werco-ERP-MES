@@ -4,13 +4,16 @@ import io
 from datetime import date, datetime
 from enum import Enum
 from typing import Any, List, Optional
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Query as SAQuery
 from sqlalchemy.orm import Session, joinedload
 
+from app.api.date_window import LOCAL_DATE_FROM_DESCRIPTION, LOCAL_DATE_TO_DESCRIPTION, date_window
 from app.api.deps import get_audit_service, get_current_company_id, require_role
+from app.core.time_utils import START_AFTER_END_DETAIL
 from app.db.database import get_db
 from app.models.inventory import InventoryItem, InventoryTransaction
 from app.models.part import Part, PartType
@@ -19,6 +22,7 @@ from app.models.quote import Quote, QuoteStatus
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder, WorkOrderStatus
 from app.services.audit_service import AuditService
+from app.services.company_time import company_zone
 from app.services.export_audit import log_export
 from app.services.export_service import generate_csv, generate_excel
 
@@ -90,12 +94,28 @@ def get_file_extension(format: ExportFormat) -> str:
     return format.value
 
 
+def require_ordered_dates(start_date: Optional[date], end_date: Optional[date]) -> None:
+    """422 when a calendar-``Date``-column range is reversed (it used to return an empty file).
+
+    The ``created_at`` filters get the same refusal from ``date_window``; this is the
+    check for the exports that filter a ``Date`` column directly (PO ``order_date``,
+    ``Quote.quote_date``), which have no time-of-day boundary to convert.
+    """
+    if start_date is not None and end_date is not None and start_date > end_date:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=START_AFTER_END_DETAIL)
+
+
+def export_filename(stem: str, zone: ZoneInfo, format: ExportFormat) -> str:
+    """``<stem>_<YYYYmmdd_HHMMSS>.<ext>`` stamped on the company's wall clock, not the server's."""
+    return f"{stem}_{datetime.now(zone).strftime('%Y%m%d_%H%M%S')}.{get_file_extension(format)}"
+
+
 # Work Orders Export
 @router.get("/work-orders/export")
 def export_work_orders(
     format: ExportFormat = Query(ExportFormat.CSV, description="Export format (csv or xlsx)"),
-    start_date: Optional[date] = Query(None, description="Filter by created date from"),
-    end_date: Optional[date] = Query(None, description="Filter by created date to"),
+    start_date: Optional[date] = Query(None, description=f"Created on or after. {LOCAL_DATE_FROM_DESCRIPTION}"),
+    end_date: Optional[date] = Query(None, description=f"Created on or before. {LOCAL_DATE_TO_DESCRIPTION}"),
     status: Optional[WorkOrderStatus] = Query(None, description="Filter by status"),
     columns: Optional[List[str]] = Query(None, description="Columns to include"),
     db: Session = Depends(get_db),
@@ -103,14 +123,22 @@ def export_work_orders(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Export work orders to CSV or Excel (ADMIN/MANAGER). The export is audited."""
+    """Export work orders to CSV or Excel (ADMIN/MANAGER). The export is audited.
+
+    ``start_date``/``end_date`` are inclusive calendar dates in the company time zone
+    (local midnight to the next local midnight, converted to UTC). Datetime cells are
+    ISO-8601 in the company time zone with their UTC offset (``2026-01-15T17:30:00-06:00``);
+    date cells are ``YYYY-MM-DD``.
+    """
+    zone = company_zone(db, company_id)
+    created_from, created_before = date_window(start_date, end_date, zone)
     query = db.query(WorkOrder).filter(WorkOrder.company_id == company_id).options(joinedload(WorkOrder.part))
     query = query.filter(WorkOrder.is_deleted == False)
 
-    if start_date:
-        query = query.filter(WorkOrder.created_at >= datetime.combine(start_date, datetime.min.time()))
-    if end_date:
-        query = query.filter(WorkOrder.created_at <= datetime.combine(end_date, datetime.max.time()))
+    if created_from is not None:
+        query = query.filter(WorkOrder.created_at >= created_from)
+    if created_before is not None:
+        query = query.filter(WorkOrder.created_at < created_before)
     if status:
         query = query.filter(WorkOrder.status == status)
 
@@ -169,17 +197,17 @@ def export_work_orders(
         filters={"start_date": start_date, "end_date": end_date, "status": status},
     )
 
-    filename = f"work_orders_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{get_file_extension(format)}"
+    filename = export_filename("work_orders", zone, format)
 
     if format == ExportFormat.CSV:
-        content = generate_csv(data, export_columns)
+        content = generate_csv(data, export_columns, zone=zone)
         return StreamingResponse(
             io.StringIO(content),
             media_type=get_content_type(format),
             headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
     else:
-        content = generate_excel(data, export_columns, "Work Orders")
+        content = generate_excel(data, export_columns, "Work Orders", zone=zone)
         return StreamingResponse(
             io.BytesIO(content),
             media_type=get_content_type(format),
@@ -199,7 +227,11 @@ def export_parts(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Export parts to CSV or Excel (ADMIN/MANAGER). The export is audited."""
+    """Export parts to CSV or Excel (ADMIN/MANAGER). The export is audited.
+
+    Datetime cells are ISO-8601 in the company time zone with their UTC offset.
+    """
+    zone = company_zone(db, company_id)
     query = db.query(Part).filter(Part.company_id == company_id, Part.is_deleted == False)
 
     if part_type:
@@ -262,17 +294,17 @@ def export_parts(
         filters={"part_type": part_type, "active_only": active_only},
     )
 
-    filename = f"parts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{get_file_extension(format)}"
+    filename = export_filename("parts", zone, format)
 
     if format == ExportFormat.CSV:
-        content = generate_csv(data, export_columns)
+        content = generate_csv(data, export_columns, zone=zone)
         return StreamingResponse(
             io.StringIO(content),
             media_type=get_content_type(format),
             headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
     else:
-        content = generate_excel(data, export_columns, "Parts")
+        content = generate_excel(data, export_columns, "Parts", zone=zone)
         return StreamingResponse(
             io.BytesIO(content),
             media_type=get_content_type(format),
@@ -292,7 +324,12 @@ def export_inventory(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Export inventory to CSV or Excel (ADMIN/MANAGER). The export is audited."""
+    """Export inventory to CSV or Excel (ADMIN/MANAGER). The export is audited.
+
+    Datetime cells (``received_date`` is a timestamp) are ISO-8601 in the company time
+    zone with their UTC offset.
+    """
+    zone = company_zone(db, company_id)
     query = (
         db.query(InventoryItem).filter(InventoryItem.company_id == company_id).options(joinedload(InventoryItem.part))
     )
@@ -358,17 +395,17 @@ def export_inventory(
         filters={"warehouse": warehouse, "has_quantity": has_quantity},
     )
 
-    filename = f"inventory_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{get_file_extension(format)}"
+    filename = export_filename("inventory", zone, format)
 
     if format == ExportFormat.CSV:
-        content = generate_csv(data, export_columns)
+        content = generate_csv(data, export_columns, zone=zone)
         return StreamingResponse(
             io.StringIO(content),
             media_type=get_content_type(format),
             headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
     else:
-        content = generate_excel(data, export_columns, "Inventory")
+        content = generate_excel(data, export_columns, "Inventory", zone=zone)
         return StreamingResponse(
             io.BytesIO(content),
             media_type=get_content_type(format),
@@ -390,7 +427,14 @@ def export_purchase_orders(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Export purchase orders to CSV or Excel (ADMIN/MANAGER). The export is audited."""
+    """Export purchase orders to CSV or Excel (ADMIN/MANAGER). The export is audited.
+
+    ``start_date``/``end_date`` filter the ``order_date`` calendar column (no time of
+    day, so no zone conversion); a reversed range is a 422. Datetime cells are ISO-8601
+    in the company time zone with their UTC offset.
+    """
+    require_ordered_dates(start_date, end_date)
+    zone = company_zone(db, company_id)
     query = (
         db.query(PurchaseOrder)
         .filter(
@@ -471,17 +515,17 @@ def export_purchase_orders(
         },
     )
 
-    filename = f"purchase_orders_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{get_file_extension(format)}"
+    filename = export_filename("purchase_orders", zone, format)
 
     if format == ExportFormat.CSV:
-        content = generate_csv(data, export_columns)
+        content = generate_csv(data, export_columns, zone=zone)
         return StreamingResponse(
             io.StringIO(content),
             media_type=get_content_type(format),
             headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
     else:
-        content = generate_excel(data, export_columns, "Purchase Orders")
+        content = generate_excel(data, export_columns, "Purchase Orders", zone=zone)
         return StreamingResponse(
             io.BytesIO(content),
             media_type=get_content_type(format),
@@ -502,7 +546,13 @@ def export_purchase_order_lines(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Export purchase order lines, detailed, to CSV or Excel (ADMIN/MANAGER). The export is audited."""
+    """Export purchase order lines, detailed, to CSV or Excel (ADMIN/MANAGER). The export is audited.
+
+    ``start_date``/``end_date`` filter the parent PO's ``order_date`` calendar column; a
+    reversed range is a 422.
+    """
+    require_ordered_dates(start_date, end_date)
+    zone = company_zone(db, company_id)
     # Tenant scope, on BOTH sides of the join. ``PurchaseOrderLine.company_id``
     # (TenantMixin) is the authoritative scope; the parent predicate additionally
     # stops a line from being read through a foreign PO. The join is
@@ -589,17 +639,17 @@ def export_purchase_order_lines(
         filters={"start_date": start_date, "end_date": end_date, "status": status},
     )
 
-    filename = f"po_lines_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{get_file_extension(format)}"
+    filename = export_filename("po_lines", zone, format)
 
     if format == ExportFormat.CSV:
-        content = generate_csv(data, export_columns)
+        content = generate_csv(data, export_columns, zone=zone)
         return StreamingResponse(
             io.StringIO(content),
             media_type=get_content_type(format),
             headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
     else:
-        content = generate_excel(data, export_columns, "PO Lines")
+        content = generate_excel(data, export_columns, "PO Lines", zone=zone)
         return StreamingResponse(
             io.BytesIO(content),
             media_type=get_content_type(format),
@@ -621,7 +671,14 @@ def export_quotes(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Export quotes to CSV or Excel (ADMIN/MANAGER). The export is audited."""
+    """Export quotes to CSV or Excel (ADMIN/MANAGER). The export is audited.
+
+    ``start_date``/``end_date`` filter the ``quote_date`` calendar column (no time of
+    day, so no zone conversion); a reversed range is a 422. Datetime cells are ISO-8601
+    in the company time zone with their UTC offset.
+    """
+    require_ordered_dates(start_date, end_date)
+    zone = company_zone(db, company_id)
     query = db.query(Quote).filter(Quote.company_id == company_id).options(joinedload(Quote.lines))
 
     if start_date:
@@ -689,17 +746,17 @@ def export_quotes(
         },
     )
 
-    filename = f"quotes_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{get_file_extension(format)}"
+    filename = export_filename("quotes", zone, format)
 
     if format == ExportFormat.CSV:
-        content = generate_csv(data, export_columns)
+        content = generate_csv(data, export_columns, zone=zone)
         return StreamingResponse(
             io.StringIO(content),
             media_type=get_content_type(format),
             headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
     else:
-        content = generate_excel(data, export_columns, "Quotes")
+        content = generate_excel(data, export_columns, "Quotes", zone=zone)
         return StreamingResponse(
             io.BytesIO(content),
             media_type=get_content_type(format),
@@ -711,8 +768,8 @@ def export_quotes(
 @router.get("/inventory/transactions/export")
 def export_inventory_transactions(
     format: ExportFormat = Query(ExportFormat.CSV, description="Export format (csv or xlsx)"),
-    start_date: Optional[date] = Query(None, description="Filter by transaction date from"),
-    end_date: Optional[date] = Query(None, description="Filter by transaction date to"),
+    start_date: Optional[date] = Query(None, description=f"Transactions on or after. {LOCAL_DATE_FROM_DESCRIPTION}"),
+    end_date: Optional[date] = Query(None, description=f"Transactions on or before. {LOCAL_DATE_TO_DESCRIPTION}"),
     part_id: Optional[int] = Query(None, description="Filter by part"),
     transaction_type: Optional[str] = Query(None, max_length=40, description="Filter by transaction type"),
     columns: Optional[List[str]] = Query(None, description="Columns to include"),
@@ -721,17 +778,24 @@ def export_inventory_transactions(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Export inventory transactions to CSV or Excel (ADMIN/MANAGER). The export is audited."""
+    """Export inventory transactions to CSV or Excel (ADMIN/MANAGER). The export is audited.
+
+    ``start_date``/``end_date`` are inclusive calendar dates in the company time zone
+    (local midnight to the next local midnight, converted to UTC). Datetime cells are
+    ISO-8601 in the company time zone with their UTC offset.
+    """
+    zone = company_zone(db, company_id)
+    created_from, created_before = date_window(start_date, end_date, zone)
     query = (
         db.query(InventoryTransaction)
         .filter(InventoryTransaction.company_id == company_id)
         .options(joinedload(InventoryTransaction.part))
     )
 
-    if start_date:
-        query = query.filter(InventoryTransaction.created_at >= datetime.combine(start_date, datetime.min.time()))
-    if end_date:
-        query = query.filter(InventoryTransaction.created_at <= datetime.combine(end_date, datetime.max.time()))
+    if created_from is not None:
+        query = query.filter(InventoryTransaction.created_at >= created_from)
+    if created_before is not None:
+        query = query.filter(InventoryTransaction.created_at < created_before)
     if part_id:
         query = query.filter(InventoryTransaction.part_id == part_id)
     if transaction_type:
@@ -799,17 +863,17 @@ def export_inventory_transactions(
         },
     )
 
-    filename = f"inventory_transactions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{get_file_extension(format)}"
+    filename = export_filename("inventory_transactions", zone, format)
 
     if format == ExportFormat.CSV:
-        content = generate_csv(data, export_columns)
+        content = generate_csv(data, export_columns, zone=zone)
         return StreamingResponse(
             io.StringIO(content),
             media_type=get_content_type(format),
             headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
     else:
-        content = generate_excel(data, export_columns, "Transactions")
+        content = generate_excel(data, export_columns, "Transactions", zone=zone)
         return StreamingResponse(
             io.BytesIO(content),
             media_type=get_content_type(format),

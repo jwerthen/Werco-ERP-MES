@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session, joinedload
 # carry ``work_order`` and keep it. On the ``work_order_operation`` rows ``reference_id``
 # is the OPERATION id, resolved back to its work order below; on ``work_order`` and
 # ``work_order_backflush`` rows it is the work order itself.
+from app.core.time_utils import to_utc_iso
 from app.db.ledger_filter import (
     LEDGER_QUANTITY_EPSILON,
     OPERATION_REFERENCE_TYPE,
@@ -27,6 +28,7 @@ from app.models.part import Part
 from app.models.purchasing import POReceipt, PurchaseOrder, PurchaseOrderLine
 from app.models.quality import NonConformanceReport
 from app.models.work_order import WorkOrder, WorkOrderOperation
+from app.schemas.base import UTCModel
 
 # The shared ledger-quantity threshold, imported from ``app.db.ledger_filter`` alongside
 # the predicate above rather than re-declared, so "this component lot is fully returned"
@@ -37,7 +39,7 @@ from app.models.work_order import WorkOrder, WorkOrderOperation
 # ``operational_event_service``) to learn one float.
 
 
-class LotHistoryItem(BaseModel):
+class LotHistoryItem(UTCModel):
     timestamp: datetime
     event_type: str
     description: str
@@ -65,7 +67,7 @@ class ConsumedComponent(BaseModel):
     quantity: float = 0
 
 
-class LotTraceResponse(BaseModel):
+class LotTraceResponse(UTCModel):
     lot_number: str
     part_id: Optional[int] = None
     part_number: Optional[str] = None
@@ -510,6 +512,10 @@ def trace_serial(
         )
 
     history.sort(key=lambda x: x["timestamp"])
+    # Hand-built dict, no response_model: serialize the naive-UTC instants with their
+    # 'Z' here (after sorting on the datetimes), as UTCModel would.
+    for event in history:
+        event["timestamp"] = to_utc_iso(event["timestamp"])
 
     return {
         "serial_number": serial_number,
@@ -518,7 +524,7 @@ def trace_serial(
         "lot_number": inv_item.lot_number,
         "current_location": inv_item.location,
         "status": inv_item.status,
-        "received_date": inv_item.received_date,
+        "received_date": to_utc_iso(inv_item.received_date),
         "cert_number": inv_item.cert_number,
         "work_orders_used": list(work_orders_used),
         "ncrs": list(ncrs_list),

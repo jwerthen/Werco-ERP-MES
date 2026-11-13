@@ -6,10 +6,13 @@ import logging
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import Date, and_, case, cast, func, or_
 from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.sql.elements import ColumnElement
 
+from app.core.time_utils import CENTRAL_TIME_ZONE, local_today, local_window
 from app.db.ledger_filter import work_order_ledger_filter
 from app.models.downtime import DowntimeEvent, DowntimePlannedType
 from app.models.inventory import InventoryItem, InventoryTransaction, TransactionType
@@ -44,6 +47,7 @@ from app.schemas.analytics import (
     TrendDirection,
     VendorQuality,
 )
+from app.services.company_time import company_zone
 from app.services.labor_cost_service import (
     is_approved_labor_required,
     is_labor_cost_rollup_enabled,
@@ -129,10 +133,19 @@ def calculate_trend(current: float, prior: float) -> Tuple[TrendDirection, float
 
 
 def get_date_range(
-    period: str, custom_start: Optional[date] = None, custom_end: Optional[date] = None
+    period: str,
+    custom_start: Optional[date] = None,
+    custom_end: Optional[date] = None,
+    *,
+    zone: Optional[ZoneInfo] = None,
 ) -> Tuple[date, date]:
-    """Convert period string to date range."""
-    today = date.today()
+    """Convert a period string to an inclusive calendar-date range.
+
+    "Today" is the date on the company's wall clock (``zone``; America/Chicago when not
+    given), never the server's ``date.today()`` -- a UTC server flips to tomorrow at
+    6/7 PM Central. Routers pass ``company_zone(db, company_id)``.
+    """
+    today = local_today(zone or CENTRAL_TIME_ZONE)
 
     if period == "custom" and custom_start and custom_end:
         return custom_start, custom_end
@@ -157,9 +170,31 @@ def get_prior_period(start: date, end: date) -> Tuple[date, date]:
 
 
 class AnalyticsService:
-    def __init__(self, db: Session, company_id: int):
+    def __init__(self, db: Session, company_id: int, zone: Optional[ZoneInfo] = None):
         self.db = db
         self.company_id = company_id
+        self._zone = zone
+
+    @property
+    def zone(self) -> ZoneInfo:
+        """The company's time zone: every ``start``/``end`` date here is a calendar day in it."""
+        if self._zone is None:
+            self._zone = company_zone(self.db, self.company_id)
+        return self._zone
+
+    def _window(self, start: date, end: date) -> Tuple[datetime, datetime]:
+        """Naive-UTC ``[start_utc, end_utc)`` for an inclusive company-local date range.
+
+        The end bound is EXCLUSIVE (the next local midnight): filter with a strict ``<``.
+        A reversed range reads as empty here, as it always has; the routers refuse it
+        with a 422 before it gets this far (``app.api.date_window``).
+        """
+        return local_window(start, end, self.zone)
+
+    def _between(self, column: Any, start: date, end: date) -> Tuple[ColumnElement, ColumnElement]:
+        """``column`` within the inclusive company-local date range, as two filter clauses."""
+        start_utc, end_utc = self._window(start, end)
+        return column >= start_utc, column < end_utc
 
     # ============ KPI CALCULATIONS ============
 
@@ -218,8 +253,7 @@ class AnalyticsService:
         """
         query = self.db.query(func.coalesce(func.sum(DowntimeEvent.duration_minutes), 0.0)).filter(
             DowntimeEvent.company_id == self.company_id,
-            DowntimeEvent.start_time >= datetime.combine(start, datetime.min.time()),
-            DowntimeEvent.start_time <= datetime.combine(end, datetime.max.time()),
+            *self._between(DowntimeEvent.start_time, start, end),
             DowntimeEvent.planned_type == DowntimePlannedType.UNPLANNED,
         )
         if work_center_id:
@@ -245,8 +279,8 @@ class AnalyticsService:
 
         OPTIMIZATION: a single conditional-aggregation query (no per-row Python loop).
         """
-        start_dt = datetime.combine(start, datetime.min.time())
-        end_dt = datetime.combine(end, datetime.max.time())
+        # Half-open company-local window: [local midnight on start, next local midnight after end).
+        start_dt, end_dt = self._window(start, end)
 
         # Single aggregation query: staffed hours (ALL clocked entries), productive
         # run hours (RUN+SETUP), and production-bearing pieces/scrap in one pass.
@@ -286,7 +320,7 @@ class AnalyticsService:
         ).filter(
             TimeEntry.company_id == self.company_id,
             TimeEntry.clock_in >= start_dt,
-            TimeEntry.clock_in <= end_dt,
+            TimeEntry.clock_in < end_dt,
             TimeEntry.clock_out.isnot(None),
         )
 
@@ -345,8 +379,7 @@ class AnalyticsService:
             - func.coalesce(func.sum(TimeEntry.quantity_scrapped), 0)
         ).filter(
             TimeEntry.company_id == self.company_id,
-            TimeEntry.clock_in >= datetime.combine(start, datetime.min.time()),
-            TimeEntry.clock_in <= datetime.combine(end, datetime.max.time()),
+            *self._between(TimeEntry.clock_in, start, end),
             TimeEntry.entry_type.in_(PRODUCTION_BEARING_ENTRY_TYPES),
         )
 
@@ -386,8 +419,7 @@ class AnalyticsService:
             .join(WorkOrderOperation, TimeEntry.operation_id == WorkOrderOperation.id)
             .filter(
                 TimeEntry.company_id == self.company_id,
-                TimeEntry.clock_in >= datetime.combine(start, datetime.min.time()),
-                TimeEntry.clock_in <= datetime.combine(end, datetime.max.time()),
+                *self._between(TimeEntry.clock_in, start, end),
                 TimeEntry.entry_type.in_(PRODUCTION_BEARING_ENTRY_TYPES),
             )
         )
@@ -410,8 +442,8 @@ class AnalyticsService:
         OPTIMIZATION: two GROUP-BY-date aggregations (entry stats + routing ideal
         hours) instead of N per-day queries.
         """
-        start_dt = datetime.combine(start, datetime.min.time())
-        end_dt = datetime.combine(end, datetime.max.time())
+        # Half-open company-local window: [local midnight on start, next local midnight after end).
+        start_dt, end_dt = self._window(start, end)
 
         # Daily entry stats: staffed (all entries), productive run (RUN+SETUP),
         # production-bearing pieces/scrap.
@@ -453,7 +485,7 @@ class AnalyticsService:
             .filter(
                 TimeEntry.company_id == self.company_id,
                 TimeEntry.clock_in >= start_dt,
-                TimeEntry.clock_in <= end_dt,
+                TimeEntry.clock_in < end_dt,
                 TimeEntry.clock_out.isnot(None),
             )
             .group_by(cast(TimeEntry.clock_in, Date))
@@ -478,7 +510,7 @@ class AnalyticsService:
             .filter(
                 TimeEntry.company_id == self.company_id,
                 TimeEntry.clock_in >= start_dt,
-                TimeEntry.clock_in <= end_dt,
+                TimeEntry.clock_in < end_dt,
                 TimeEntry.clock_out.isnot(None),
                 TimeEntry.entry_type.in_(PRODUCTION_BEARING_ENTRY_TYPES),
             )
@@ -495,7 +527,7 @@ class AnalyticsService:
         ).filter(
             DowntimeEvent.company_id == self.company_id,
             DowntimeEvent.start_time >= start_dt,
-            DowntimeEvent.start_time <= end_dt,
+            DowntimeEvent.start_time < end_dt,
             DowntimeEvent.planned_type == DowntimePlannedType.UNPLANNED,
         )
         if work_center_id:
@@ -573,8 +605,8 @@ class AnalyticsService:
         due date in the window) rather than conflating "no data" with a perfect 100%.
         Tenant-scoped and soft-delete-filtered.
         """
-        start_dt = datetime.combine(start, datetime.min.time())
-        end_dt = datetime.combine(end, datetime.max.time())
+        # Half-open company-local window: [local midnight on start, next local midnight after end).
+        start_dt, end_dt = self._window(start, end)
 
         # Completion-time anchor: actual_end when present, else updated_at.
         completion_time = func.coalesce(WorkOrder.actual_end, WorkOrder.updated_at)
@@ -586,7 +618,7 @@ class AnalyticsService:
                 WorkOrder.is_deleted == False,
                 WorkOrder.status == WorkOrderStatus.COMPLETE,
                 completion_time >= start_dt,
-                completion_time <= end_dt,
+                completion_time < end_dt,
                 WorkOrder.due_date.isnot(None),
             )
             .all()
@@ -1013,8 +1045,7 @@ class AnalyticsService:
             self.db.query(func.sum(TimeEntry.quantity_produced))
             .filter(
                 TimeEntry.company_id == self.company_id,
-                TimeEntry.clock_in >= datetime.combine(start, datetime.min.time()),
-                TimeEntry.clock_in <= datetime.combine(end, datetime.max.time()),
+                *self._between(TimeEntry.clock_in, start, end),
                 TimeEntry.entry_type == TimeEntryType.RUN,
             )
             .scalar()
@@ -1026,8 +1057,7 @@ class AnalyticsService:
             self.db.query(func.sum(TimeEntry.quantity_scrapped))
             .filter(
                 TimeEntry.company_id == self.company_id,
-                TimeEntry.clock_in >= datetime.combine(start, datetime.min.time()),
-                TimeEntry.clock_in <= datetime.combine(end, datetime.max.time()),
+                *self._between(TimeEntry.clock_in, start, end),
                 TimeEntry.entry_type.in_(PRODUCTION_BEARING_ENTRY_TYPES),
             )
             .scalar()
@@ -1039,8 +1069,7 @@ class AnalyticsService:
             self.db.query(func.sum(TimeEntry.quantity_produced))
             .filter(
                 TimeEntry.company_id == self.company_id,
-                TimeEntry.clock_in >= datetime.combine(start, datetime.min.time()),
-                TimeEntry.clock_in <= datetime.combine(end, datetime.max.time()),
+                *self._between(TimeEntry.clock_in, start, end),
                 TimeEntry.entry_type == TimeEntryType.REWORK,
             )
             .scalar()
@@ -1088,8 +1117,7 @@ class AnalyticsService:
             )
             .filter(
                 TimeEntry.company_id == self.company_id,
-                TimeEntry.clock_in >= datetime.combine(start, datetime.min.time()),
-                TimeEntry.clock_in <= datetime.combine(end, datetime.max.time()),
+                *self._between(TimeEntry.clock_in, start, end),
                 TimeEntry.entry_type.in_(PRODUCTION_BEARING_ENTRY_TYPES),
             )
             .first()
@@ -1124,7 +1152,7 @@ class AnalyticsService:
             .filter(
                 NonConformanceReport.company_id == self.company_id,
                 NonConformanceReport.is_deleted == False,  # noqa: E712
-                NonConformanceReport.created_at <= datetime.combine(prior_end, datetime.max.time()),
+                NonConformanceReport.created_at < self._window(prior_end, prior_end)[1],
                 or_(NonConformanceReport.closed_date.is_(None), NonConformanceReport.closed_date > prior_end),
             )
             .scalar()
@@ -1170,8 +1198,7 @@ class AnalyticsService:
             self.db.query(func.count(Quote.id))
             .filter(
                 Quote.company_id == self.company_id,
-                Quote.updated_at >= datetime.combine(start, datetime.min.time()),
-                Quote.updated_at <= datetime.combine(end, datetime.max.time()),
+                *self._between(Quote.updated_at, start, end),
                 Quote.status.in_([QuoteStatus.ACCEPTED, QuoteStatus.REJECTED, QuoteStatus.CONVERTED]),
             )
             .scalar()
@@ -1182,8 +1209,7 @@ class AnalyticsService:
             self.db.query(func.count(Quote.id))
             .filter(
                 Quote.company_id == self.company_id,
-                Quote.updated_at >= datetime.combine(start, datetime.min.time()),
-                Quote.updated_at <= datetime.combine(end, datetime.max.time()),
+                *self._between(Quote.updated_at, start, end),
                 Quote.status.in_([QuoteStatus.ACCEPTED, QuoteStatus.CONVERTED]),
             )
             .scalar()
@@ -1243,8 +1269,7 @@ class AnalyticsService:
             .filter(
                 InventoryTransaction.company_id == self.company_id,
                 InventoryTransaction.transaction_type.in_(CONSUMPTION_TRANSACTION_TYPES),
-                InventoryTransaction.created_at >= datetime.combine(start, datetime.min.time()),
-                InventoryTransaction.created_at <= datetime.combine(end, datetime.max.time()),
+                *self._between(InventoryTransaction.created_at, start, end),
             )
             .scalar()
             or 0
@@ -1381,8 +1406,7 @@ class AnalyticsService:
             func.sum(TimeEntry.duration_hours).label('total_hours'),
         ).filter(
             TimeEntry.company_id == self.company_id,
-            TimeEntry.clock_in >= datetime.combine(start_date, datetime.min.time()),
-            TimeEntry.clock_in <= datetime.combine(end_date, datetime.max.time()),
+            *self._between(TimeEntry.clock_in, start_date, end_date),
             TimeEntry.entry_type == TimeEntryType.RUN,
         )
 
@@ -1412,8 +1436,7 @@ class AnalyticsService:
             .filter(
                 WorkOrderOperation.company_id == self.company_id,
                 WorkOrderOperation.actual_end.isnot(None),
-                WorkOrderOperation.actual_end >= datetime.combine(start_date, datetime.min.time()),
-                WorkOrderOperation.actual_end <= datetime.combine(end_date, datetime.max.time()),
+                *self._between(WorkOrderOperation.actual_end, start_date, end_date),
                 WorkOrderOperation.status == OperationStatus.COMPLETE,
                 TimeEntry.id.is_(None),
             )
@@ -1515,8 +1538,7 @@ class AnalyticsService:
             query = query.filter(WorkOrder.id == work_order_id)
         else:
             query = query.filter(
-                WorkOrder.actual_end >= datetime.combine(start_date, datetime.min.time()),
-                WorkOrder.actual_end <= datetime.combine(end_date, datetime.max.time()),
+                *self._between(WorkOrder.actual_end, start_date, end_date),
             )
 
         work_orders = query.options(joinedload(WorkOrder.operations), joinedload(WorkOrder.part)).all()
@@ -1640,8 +1662,7 @@ class AnalyticsService:
             .filter(
                 NonConformanceReport.company_id == self.company_id,
                 NonConformanceReport.is_deleted == False,  # noqa: E712
-                NonConformanceReport.created_at >= datetime.combine(start_date, datetime.min.time()),
-                NonConformanceReport.created_at <= datetime.combine(end_date, datetime.max.time()),
+                *self._between(NonConformanceReport.created_at, start_date, end_date),
             )
             .group_by(NonConformanceReport.disposition)
             .order_by(func.count(NonConformanceReport.id).desc())
@@ -1696,8 +1717,7 @@ class AnalyticsService:
                 Vendor.is_deleted == False,  # noqa: E712
                 PurchaseOrder.is_deleted == False,  # noqa: E712
                 POReceipt.is_deleted == False,  # noqa: E712
-                POReceipt.received_at >= datetime.combine(start_date, datetime.min.time()),
-                POReceipt.received_at <= datetime.combine(end_date, datetime.max.time()),
+                *self._between(POReceipt.received_at, start_date, end_date),
             )
             .group_by(Vendor.id, Vendor.name)
             .all()
@@ -1762,8 +1782,7 @@ class AnalyticsService:
             .filter(
                 InventoryTransaction.company_id == self.company_id,
                 InventoryTransaction.transaction_type.in_(CONSUMPTION_TRANSACTION_TYPES),
-                InventoryTransaction.created_at >= datetime.combine(start_date, datetime.min.time()),
-                InventoryTransaction.created_at <= datetime.combine(end_date, datetime.max.time()),
+                *self._between(InventoryTransaction.created_at, start_date, end_date),
             )
             .group_by(InventoryTransaction.part_id)
             .all()

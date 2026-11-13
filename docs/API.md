@@ -8376,10 +8376,6 @@ Admin / Manager / Quality (see [RBAC](RBAC_PERMISSIONS.md#customer-complaints--r
 > so gaps left by the shared sequence remain. A complaint's `received_by` is the caller, and
 > `date_received` defaults to the server's current date. Before this fix,
 > `POST /complaints/complaints/` returned **500** on every call.
->
-> **Timestamp exception.** These response schemas still extend `BaseModel` rather than
-> `UTCModel`, so `created_at` / `updated_at` are not normalized to a trailing `Z` (see
-> [Timestamps](#timestamps)).
 
 ### Engineering Change Orders (ECO)
 
@@ -12165,12 +12161,44 @@ A platform admin can hold sockets in several companies at once. Nothing in `app/
 
 ### Timestamps
 
-All `datetime` fields in responses are serialized as **UTC ISO-8601 with a trailing `Z`**
-(e.g. `"2026-07-01T19:17:00Z"`) — the store-UTC / serve-UTC contract, applied uniformly across
-every endpoint (response schemas inherit `UTCModel`; hand-built dicts use
-`app.core.time_utils.to_utc_iso(...)`). `date`-only fields (e.g. `due_date`) are unaffected and
-stay `YYYY-MM-DD` with no time or zone. Clients should treat `Z` timestamps as UTC and convert for
-display; the web UI renders them in shop-local Central time.
+All `datetime` fields in JSON responses are serialized as **UTC ISO-8601 with a trailing `Z`**
+(e.g. `"2026-07-01T19:17:00Z"`) — the store-UTC / serve-UTC contract. Response schemas inherit
+`UTCModel` (nested models too: its encoder does not reach a nested bare `BaseModel`); hand-built
+dicts use `app.core.time_utils.to_utc_iso(...)`. `date`-only fields (e.g. `due_date`) are
+unaffected and stay `YYYY-MM-DD` with no time or zone. Clients should treat `Z` timestamps as UTC
+and convert for display; the web UI renders them in shop-local Central time.
+
+> **Changed 2026-11 (P1.1).** Until then the contract was not uniform: 30 response models (downtime
+> events and reason codes, OEE records and targets, quotes, job costs and cost entries, lot trace,
+> supplier scorecards / audits / ASL, customer complaints and RMAs, ECOs, SPC, calibration,
+> documents, notification log, CoCs, the audit log, workspaces) and five hand-built receiving /
+> serial-trace payloads emitted naive strings with **no offset** (`"2026-07-01T19:17:00"`). They now
+> carry the `Z`. The instant is unchanged — the value was always UTC — so a client that already read
+> zone-less strings as UTC (the web UI's `toDate` does) renders exactly as before.
+> `backend/tests/test_response_datetime_offset_guard.py` walks every route's response model and
+> fails CI on a datetime field without the UTC encoder.
+
+**Calendar-date query parameters are company-local days.** A `date` filter on a timestamp column
+(`start_date` / `end_date`, `date_from` / `date_to`, and an analytics `period` resolved to dates)
+names an inclusive calendar day in the **company time zone** (`Company.timezone`, default
+`America/Chicago`; a blank or unknown value falls back to Chicago, never UTC). The filter runs from
+local midnight on the start date to the **exclusive** next local midnight after the end date,
+converted to UTC — so a Central "January 15" is `2026-01-15T06:00:00Z` up to (not including)
+`2026-01-16T06:00:00Z` in winter and `05:00Z`–`05:00Z` in summer, and the DST days are 23 and 25
+hours long. Analytics "today" / `7d` / `30d` / `90d` / `ytd` count back from the company's
+wall-clock date, not the server's. A reversed range (`start > end`) is **422** `"Start date must be
+on or before end date"`; `9999-12-31` as an end date is **422** `"End date is outside the supported
+range"`. Applies to `/exports/work-orders/export`, `/exports/inventory/transactions/export`,
+`/downtime/` + `/downtime/summary` + `/downtime/by-work-center`, `GET /job-costs/`,
+`/reports/employee-time`, `/reports/daily-output` (Central-day buckets ending today; each
+employee-time entry's `date` is its local clock-in day), `/reports/ship-otd` and every
+`/analytics/*` period. Filters on a `Date` column (PO `order_date`, `Quote.quote_date`, OEE
+`record_date`) compare dates directly and are unchanged.
+
+> **Changed 2026-11 (P1.1).** These filters used to compare the date against **UTC** midnight, so a
+> Central day ran from 6 PM (CST) / 7 PM (CDT) the evening before to 5:59 / 6:59 PM, and every
+> second-shift row landed in the next day. `backend/tests/test_date_filter_combine_guard.py` keeps the
+> old `datetime.combine(d, datetime.min/max.time())` shape out of `app/`.
 
 ### Success Response
 ```json
@@ -12674,6 +12702,36 @@ the legacy best-effort exporters above. Its separate 10,000-row cap returns
 `GET /estimate-workbench/{estimate_id}/export/*` (`[ADMIN, MANAGER, SUPERVISOR]`, one estimate
 rather than a dataset) keep their existing, stricter gates. Single-record document downloads — CoC
 PDFs, quote PDFs, nest drawings, kiosk document views — are **not** bulk exports and are unchanged.
+
+### Date filters and datetime cells
+
+`start_date` / `end_date` on `/exports/work-orders/export` (`created_at`) and
+`/exports/inventory/transactions/export` (`created_at`) are **inclusive calendar dates in the
+company time zone** — local midnight to the exclusive next local midnight, converted to UTC (see
+[Timestamps](#timestamps)). The purchase-order, PO-line and quote exports filter a `Date` column
+(`order_date`, `quote_date`) and compare dates directly. On every export a reversed range is
+**422** `"Start date must be on or before end date"`, and `end_date=9999-12-31` on the two
+timestamp filters is **422** `"End date is outside the supported range"` (it was a 500). The audit
+row's `filters` still records the dates as requested (`"2026-01-15"`), never the converted instants.
+
+Every **datetime** cell, in CSV and XLSX, is ISO-8601 **in the company time zone with its UTC
+offset**, to the second — `2026-01-15T17:30:00-06:00` for 23:30Z on a January day,
+`2026-07-15T18:30:00-05:00` in July — so a row reads on the same local day the filter selected it
+by. That covers `created_at` on every dataset that has one, the work-order `scheduled_start` /
+`actual_start` / `actual_end`, and inventory `received_date` (a timestamp despite its name). XLSX
+datetime cells stay **text**: a spreadsheet date cannot carry an offset. **Date** cells (`due_date`,
+`order_date`, `quote_date`, `valid_until`, …) stay `YYYY-MM-DD`. Header keys are unchanged — they
+are the `columns` contract. File names are stamped on the company's wall clock.
+
+> **API consumers: the datetime cell bytes changed (2026-11, P1.1).** Datetime cells used to be
+> `2026-01-15 23:30:00` — naive **UTC** wall time, no `T`, no offset. They are now
+> `2026-01-15T17:30:00-06:00`: the same instant, shown 5–6 hours earlier on the local clock and
+> carrying the offset that says so. A parser that expected the old shape must read ISO-8601 with an
+> offset (Python `datetime.fromisoformat` does). A script that converted the old UTC wall time to
+> local by hand must stop. The two date filters also
+> moved their day boundary from UTC midnight to local midnight, so the same `start_date` /
+> `end_date` now returns that local day's rows — including the evening rows that used to fall into
+> the next day's file.
 
 ### Formula-injection neutralization (CWE-1236)
 

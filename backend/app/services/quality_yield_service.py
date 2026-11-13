@@ -38,6 +38,7 @@ from app.models.scrap_reason import ScrapReasonCode
 from app.models.time_entry import BASELINE_EXCLUDED_SOURCES, TimeEntry
 from app.models.work_order import WorkOrder, WorkOrderOperation
 from app.schemas.analytics import FPYGroup, FPYResponse, ScrapParetoBucket, ScrapParetoResponse
+from app.services.company_time import company_window
 
 logger = logging.getLogger(__name__)
 
@@ -67,8 +68,8 @@ def get_fpy_rty(
     route order and is only meaningful for the full route, so it is omitted
     (None) when a ``work_center_id`` filter narrows the route.
     """
-    start_dt = datetime.combine(start, datetime.min.time())
-    end_dt = datetime.combine(end, datetime.max.time())
+    # Half-open company-local window: [local midnight on start, next local midnight after end).
+    start_dt, end_dt = company_window(db, company_id, start, end)
 
     query = (
         db.query(
@@ -94,7 +95,7 @@ def get_fpy_rty(
             WorkOrder.is_deleted == False,  # noqa: E712
             WorkOrderOperation.actual_end.isnot(None),
             WorkOrderOperation.actual_end >= start_dt,
-            WorkOrderOperation.actual_end <= end_dt,
+            WorkOrderOperation.actual_end < end_dt,
         )
     )
     if work_center_id:
@@ -228,8 +229,8 @@ def get_scrap_rate(db: Session, company_id: int, start: date, end: date) -> Opti
     over ops anchored by ``actual_end`` (same population as FPY). Returns None
     ("n/a") on an empty denominator, never a fake 0. Tenant-scoped.
     """
-    start_dt = datetime.combine(start, datetime.min.time())
-    end_dt = datetime.combine(end, datetime.max.time())
+    # Half-open company-local window: [local midnight on start, next local midnight after end).
+    start_dt, end_dt = company_window(db, company_id, start, end)
     row = (
         db.query(
             func.coalesce(func.sum(WorkOrderOperation.quantity_scrapped), 0.0),
@@ -242,7 +243,7 @@ def get_scrap_rate(db: Session, company_id: int, start: date, end: date) -> Opti
             WorkOrder.is_deleted == False,  # noqa: E712
             WorkOrderOperation.actual_end.isnot(None),
             WorkOrderOperation.actual_end >= start_dt,
-            WorkOrderOperation.actual_end <= end_dt,
+            WorkOrderOperation.actual_end < end_dt,
         )
         .first()
     )
@@ -263,8 +264,8 @@ def get_scrap_pareto(
     part_id: Optional[int] = None,
 ) -> ScrapParetoResponse:
     """Scrapped quantity (and standard cost) grouped by scrap reason code."""
-    start_dt = datetime.combine(start, datetime.min.time())
-    end_dt = datetime.combine(end, datetime.max.time())
+    # Half-open company-local window: [local midnight on start, next local midnight after end).
+    start_dt, end_dt = company_window(db, company_id, start, end)
 
     # bucket key: scrap_reason_code_id (None = 'unspecified') -> {qty, cost}
     buckets: Dict[Optional[int], Dict[str, float]] = {}
@@ -291,7 +292,7 @@ def get_scrap_pareto(
             TimeEntry.company_id == company_id,
             TimeEntry.quantity_scrapped > 0,
             TimeEntry.clock_in >= start_dt,
-            TimeEntry.clock_in <= end_dt,
+            TimeEntry.clock_in < end_dt,
             or_(TimeEntry.source.is_(None), TimeEntry.source.notin_(BASELINE_EXCLUDED_SOURCES)),
             # Soft-deleted WOs' scrap is off the Pareto (tiers 2/3 already filter
             # is_deleted); the outer join means WO-less entries must stay counted.
@@ -317,7 +318,7 @@ def get_scrap_pareto(
             TimeEntry.company_id == company_id,
             TimeEntry.quantity_scrapped > 0,
             TimeEntry.clock_in >= start_dt,
-            TimeEntry.clock_in <= end_dt,
+            TimeEntry.clock_in < end_dt,
             TimeEntry.source.in_(BASELINE_EXCLUDED_SOURCES),
             # Same WO-liveness rule as tier 1: soft-deleted WOs' scrap is out.
             or_(WorkOrder.id.is_(None), WorkOrder.is_deleted == False),  # noqa: E712
@@ -346,7 +347,7 @@ def get_scrap_pareto(
             WorkOrder.is_deleted == False,  # noqa: E712
             WorkOrderOperation.quantity_scrapped > 0,
             op_anchor >= start_dt,
-            op_anchor <= end_dt,
+            op_anchor < end_dt,
         )
     )
     if work_center_id:
@@ -387,7 +388,7 @@ def get_scrap_pareto(
                 WorkOrder.is_deleted == False,  # noqa: E712
                 WorkOrder.quantity_scrapped > 0,
                 wo_anchor >= start_dt,
-                wo_anchor <= end_dt,
+                wo_anchor < end_dt,
             )
         )
         if part_id:

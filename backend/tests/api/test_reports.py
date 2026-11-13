@@ -1,4 +1,4 @@
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Optional
 
 import pytest
@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from app.core.security import create_access_token
+from app.core.time_utils import CENTRAL_TIME_ZONE, local_date_range_to_utc, local_today
 from app.models.part import Part
 from app.models.purchasing import POStatus, PurchaseOrder, PurchaseOrderLine, Vendor
 from app.models.time_entry import TimeEntry, TimeEntryType
@@ -14,6 +15,18 @@ from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from tests.api.kiosk_test_helpers import COMPANY_A, COMPANY_B, ensure_company, make_user
+
+
+def _central_today_anchor():
+    """(today's Central date, a naive-UTC instant one minute into that Central day).
+
+    /reports/daily-output buckets by Central calendar day ending at Central TODAY. The
+    old anchor (``date.today()`` UTC midnight + 9 h) fell outside every bucket for six
+    hours of each UTC day once the buckets became Central days.
+    """
+    today = local_today(CENTRAL_TIME_ZONE)
+    day_start, _ = local_date_range_to_utc(today, today, CENTRAL_TIME_ZONE)
+    return today, day_start + timedelta(minutes=1)
 
 
 @pytest.mark.api
@@ -51,7 +64,10 @@ class TestReportsAPI:
         db_session.add(work_order)
         db_session.flush()
 
-        completed_at = datetime.utcnow()
+        # A fixed instant (19:30 CST on Jan 15 = 01:30Z Jan 16): the report's days are
+        # Central calendar days, so deriving the day from utcnow() would be wrong for six
+        # hours of every UTC day.
+        completed_at = datetime(2026, 1, 16, 1, 30)
         operation = WorkOrderOperation(
             work_order_id=work_order.id,
             work_center_id=work_center.id,
@@ -71,8 +87,8 @@ class TestReportsAPI:
             "/api/v1/reports/employee-time",
             headers=auth_headers,
             params={
-                "start_date": completed_at.date().isoformat(),
-                "end_date": completed_at.date().isoformat(),
+                "start_date": "2026-01-15",
+                "end_date": "2026-01-15",
                 "user_id": operator_user.id,
             },
         )
@@ -84,6 +100,9 @@ class TestReportsAPI:
         assert data[0]["quantity_produced"] == 5
         assert data[0]["entries"][0]["source"] == "operation_completion"
         assert data[0]["entries"][0]["work_order_number"] == "WO-REPORT-COMP"
+        # The row's date is its Central day, not the UTC one.
+        assert data[0]["entries"][0]["date"] == "2026-01-15"
+        assert data[0]["entries"][0]["completed_at"] == "2026-01-16T01:30:00Z"
 
     def test_employee_time_includes_entries_clocked_out_inside_window(
         self, client: TestClient, auth_headers: dict, operator_user: User, db_session
@@ -126,7 +145,8 @@ class TestReportsAPI:
             status=OperationStatus.COMPLETE,
             quantity_complete=2,
             completed_by=operator_user.id,
-            actual_end=datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=1),
+            # Jan 15 Central runs 06:00Z Jan 15 -> 06:00Z Jan 16 (CST).
+            actual_end=datetime(2026, 1, 15, 7, 0),
             company_id=1,
         )
         db_session.add(operation)
@@ -138,8 +158,9 @@ class TestReportsAPI:
             operation_id=operation.id,
             work_center_id=work_center.id,
             entry_type=TimeEntryType.RUN,
-            clock_in=datetime.combine(date.today() - timedelta(days=1), datetime.max.time()),
-            clock_out=datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=1),
+            # Clocked in one microsecond before Central midnight, out inside the day.
+            clock_in=datetime(2026, 1, 15, 5, 59, 59, 999999),
+            clock_out=datetime(2026, 1, 15, 7, 0),
             duration_hours=1,
             quantity_produced=2,
             company_id=1,
@@ -151,8 +172,8 @@ class TestReportsAPI:
             "/api/v1/reports/employee-time",
             headers=auth_headers,
             params={
-                "start_date": date.today().isoformat(),
-                "end_date": date.today().isoformat(),
+                "start_date": "2026-01-15",
+                "end_date": "2026-01-15",
                 "user_id": operator_user.id,
             },
         )
@@ -590,8 +611,8 @@ class TestReportsTenantIsolation:
         assert data["total_completed"] == 1
 
     def test_daily_output_excludes_other_company_operations(self, client: TestClient, db_session: Session):
-        # Anchor inside today's bucket so the default 14-day window covers it.
-        completed_at = datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=9)
+        # Anchor inside today's (Central) bucket so the default 14-day window covers it.
+        central_today, completed_at = _central_today_anchor()
         admin_a = make_user(db_session, role=UserRole.ADMIN, company_id=COMPANY_A)
         admin_b = make_user(db_session, role=UserRole.ADMIN, company_id=COMPANY_B)
 
@@ -620,7 +641,7 @@ class TestReportsTenantIsolation:
 
         assert response.status_code == status.HTTP_200_OK
         buckets = response.json()
-        today = next(row for row in buckets if row["date"] == date.today().isoformat())
+        today = next(row for row in buckets if row["date"] == central_today.isoformat())
         assert today["completed"] == 10
         assert today["scrapped"] == 2
         # And nothing leaked into any other bucket either.
@@ -676,7 +697,7 @@ class TestReportsTenantIsolation:
     def test_daily_output_excludes_soft_deleted_work_orders(self, client: TestClient, db_session: Session):
         """daily-output and production-summary sit on the same dashboard, so the
         trend must not count output the summary excludes."""
-        completed_at = datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=9)
+        central_today, completed_at = _central_today_anchor()
         admin_a = make_user(db_session, role=UserRole.ADMIN, company_id=COMPANY_A)
 
         _seed_production(
@@ -703,7 +724,7 @@ class TestReportsTenantIsolation:
 
         buckets = client.get("/api/v1/reports/daily-output", headers=_headers_for(admin_a)).json()
 
-        today = next(row for row in buckets if row["date"] == date.today().isoformat())
+        today = next(row for row in buckets if row["date"] == central_today.isoformat())
         assert today["completed"] == 10  # not 17
         assert today["scrapped"] == 2  # not 3
 

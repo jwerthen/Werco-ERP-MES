@@ -1,9 +1,10 @@
 from datetime import date, datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
+from app.api.date_window import LOCAL_DATE_FROM_DESCRIPTION, LOCAL_DATE_TO_DESCRIPTION, company_date_window
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
 from app.models.job_costing import CostEntry, JobCost, JobCostStatus
@@ -61,23 +62,30 @@ def build_job_cost_response(job_cost: JobCost) -> dict:
 def list_job_costs(
     status: Optional[str] = None,
     work_order_id: Optional[int] = None,
-    date_from: Optional[date] = None,
-    date_to: Optional[date] = None,
+    date_from: Optional[date] = Query(
+        None, description=f"Job costs created on or after. {LOCAL_DATE_FROM_DESCRIPTION}"
+    ),
+    date_to: Optional[date] = Query(None, description=f"Job costs created on or before. {LOCAL_DATE_TO_DESCRIPTION}"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """List all job costs with optional filtering."""
+    """List all job costs with optional filtering.
+
+    ``date_from``/``date_to`` filter ``created_at`` by inclusive calendar date in the
+    company time zone (local midnight to the next local midnight); a reversed range is 422.
+    """
+    created_from, created_before = company_date_window(db, company_id, date_from, date_to)
     query = access.job_cost_query(db, company_id)
 
     if status:
         query = query.filter(JobCost.status == status)
     if work_order_id:
         query = query.filter(JobCost.work_order_id == work_order_id)
-    if date_from:
-        query = query.filter(JobCost.created_at >= datetime.combine(date_from, datetime.min.time()))
-    if date_to:
-        query = query.filter(JobCost.created_at <= datetime.combine(date_to, datetime.max.time()))
+    if created_from is not None:
+        query = query.filter(JobCost.created_at >= created_from)
+    if created_before is not None:
+        query = query.filter(JobCost.created_at < created_before)
 
     job_costs = query.order_by(JobCost.updated_at.desc()).all()
     return [build_job_cost_response(jc) for jc in job_costs]

@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+from app.api.date_window import company_period
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
 from app.models.analytics import ReportTemplate
@@ -37,7 +38,7 @@ from app.schemas.analytics import (
     WIPAgingResponse,
 )
 from app.services.adoption_metrics_service import get_adoption_metrics
-from app.services.analytics_service import AnalyticsService, get_date_range
+from app.services.analytics_service import AnalyticsService
 from app.services.audit_service import AuditService
 from app.services.export_audit import log_export
 from app.services.export_safety import sanitize_csv_mapping, sanitize_csv_row
@@ -62,8 +63,8 @@ def get_kpi_dashboard(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get all KPIs for the executive dashboard."""
-    start, end = get_date_range(period, start_date, end_date)
-    service = AnalyticsService(db, company_id)
+    start, end, zone = company_period(db, company_id, period, start_date, end_date)
+    service = AnalyticsService(db, company_id, zone=zone)
     return service.get_kpi_dashboard(start, end, work_center_id)
 
 
@@ -82,8 +83,8 @@ def get_oee_details(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get detailed OEE breakdown with time series."""
-    start, end = get_date_range(period, start_date, end_date)
-    service = AnalyticsService(db, company_id)
+    start, end, zone = company_period(db, company_id, period, start_date, end_date)
+    service = AnalyticsService(db, company_id, zone=zone)
     return service.get_oee_details(start, end, work_center_id, granularity)
 
 
@@ -102,8 +103,8 @@ def get_production_trends(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get production trend data for charts."""
-    start, end = get_date_range(period, start_date, end_date)
-    service = AnalyticsService(db, company_id)
+    start, end, zone = company_period(db, company_id, period, start_date, end_date)
+    service = AnalyticsService(db, company_id, zone=zone)
     return service.get_production_trends(start, end, group_by, granularity)
 
 
@@ -120,7 +121,7 @@ def get_flow_metrics_endpoint(
     company_id: int = Depends(get_current_company_id),
 ):
     """Measured flow: lead times, queue times, Little's Law throughput, PCE."""
-    start, end = get_date_range(period, start_date, end_date)
+    start, end, zone = company_period(db, company_id, period, start_date, end_date)
     return get_flow_metrics(db, company_id, start, end)
 
 
@@ -151,7 +152,7 @@ def get_fpy_endpoint(
 
     RTY is omitted when work_center_id is set (it is a full-route metric).
     """
-    start, end = get_date_range(period, start_date, end_date)
+    start, end, zone = company_period(db, company_id, period, start_date, end_date)
     return get_fpy_rty(db, company_id, start, end, work_center_id=work_center_id, part_id=part_id)
 
 
@@ -169,7 +170,7 @@ def get_scrap_pareto_endpoint(
     company_id: int = Depends(get_current_company_id),
 ):
     """Scrap quantity/cost Pareto by reason code (uncoded = 'unspecified')."""
-    start, end = get_date_range(period, start_date, end_date)
+    start, end, zone = company_period(db, company_id, period, start_date, end_date)
     return get_scrap_pareto(db, company_id, start, end, work_center_id=work_center_id, part_id=part_id)
 
 
@@ -185,7 +186,7 @@ def get_adoption_endpoint(
     """Digital adoption (completion channel, clock-in coverage, backfill rate,
     weekly trend) + hidden-factory metrics (rework share, maintenance mix,
     MTBF/MTTR per work center)."""
-    start, end = get_date_range(period, start_date, end_date)
+    start, end, zone = company_period(db, company_id, period, start_date, end_date)
     return get_adoption_metrics(db, company_id, start, end)
 
 
@@ -203,8 +204,8 @@ def get_cost_analysis(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get cost analysis for completed jobs."""
-    start, end = get_date_range(period, start_date, end_date)
-    service = AnalyticsService(db, company_id)
+    start, end, zone = company_period(db, company_id, period, start_date, end_date)
+    service = AnalyticsService(db, company_id, zone=zone)
     return service.get_cost_analysis(start, end, work_order_id)
 
 
@@ -224,8 +225,8 @@ def get_quality_metrics(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get quality metrics and Pareto data."""
-    start, end = get_date_range(period, start_date, end_date)
-    service = AnalyticsService(db, company_id)
+    start, end, zone = company_period(db, company_id, period, start_date, end_date)
+    service = AnalyticsService(db, company_id, zone=zone)
     return service.get_quality_metrics(start, end, metric_type)
 
 
@@ -243,8 +244,8 @@ def get_inventory_analytics(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get inventory turnover and analytics."""
-    start, end = get_date_range(period, start_date, end_date)
-    service = AnalyticsService(db, company_id)
+    start, end, zone = company_period(db, company_id, period, start_date, end_date)
+    service = AnalyticsService(db, company_id, zone=zone)
     return service.get_inventory_analytics(start, end, category)
 
 

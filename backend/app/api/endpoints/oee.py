@@ -12,6 +12,7 @@ from app.db.database import get_db
 from app.models.oee import CalculationSource, OEERecord, OEETarget
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
+from app.schemas.base import UTCModel
 from app.services.audit_service import AuditService
 
 # Lean Phase 1: the ~220-line auto-calculation moved verbatim to
@@ -89,7 +90,7 @@ class OEERecordUpdate(BaseModel):
     notes: Optional[str] = None
 
 
-class OEERecordResponse(BaseModel):
+class OEERecordResponse(UTCModel):
     id: int
     work_center_id: int
     work_center_name: Optional[str] = None
@@ -141,7 +142,7 @@ class OEETargetUpdate(BaseModel):
     target_quality_pct: Optional[float] = None
 
 
-class OEETargetResponse(BaseModel):
+class OEETargetResponse(UTCModel):
     id: int
     work_center_id: int
     work_center_name: Optional[str] = None
