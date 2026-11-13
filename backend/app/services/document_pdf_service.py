@@ -1,12 +1,77 @@
 """Shared customer/supplier document rendering for downloads and email snapshots."""
 
-from datetime import datetime
+import re
+from datetime import date, datetime, timedelta
 from io import BytesIO
+from typing import List, Optional, Tuple
 
 from fastapi import HTTPException
 
 from app.services.pdf_text import pdf_escape
 from app.services.quote_pdf_service import build_customer_quote_pdf
+
+# A quote's validity: the "Valid Until" it prints when the quote carries none, and the first term.
+QUOTE_VALIDITY_DAYS = 30
+
+# The customer quote's Terms block, in order. ``{fob}`` is the FOB point, built from the
+# issuing company's own address (``quote_fob_term``) -- never a hard-coded city, because the
+# ERP serves more than one company.
+QUOTE_TERMS = (
+    "Quote valid for 30 days from the quote date.",
+    "{fob}",
+    "All prices are in U.S. dollars (USD).",
+    "Sales tax is not included.",
+    "Lead time and payment terms are confirmed at time of order.",
+    "Subject to drawing/specification review at order entry.",
+)
+FOB_FALLBACK = "FOB Origin."
+
+# "City, ST" or "City, ST 74012" / "City, ST 74012-1234": the trailing locality of a US address.
+_CITY_STATE = re.compile(r"^(?P<city>[A-Za-z][A-Za-z .'-]*?)\s*,\s*(?P<state>[A-Za-z]{2})(?:\s+\d{5}(?:-\d{4})?)?$")
+
+
+def company_city_state(address: Optional[str]) -> Optional[Tuple[str, str]]:
+    """``(city, ST)`` read from a company's free-text address, or ``None`` when it has none.
+
+    ``Company.address`` is one Text column, so the locality is read from its last line that
+    ends in "City, ST [ZIP]" -- a one-line address ("415 East Houston Street, Broken Arrow,
+    OK 74012") and a multi-line one both work; a trailing country line is skipped. A city
+    containing digits (a street) is never taken.
+    """
+    for line in reversed([line.strip() for line in (address or "").splitlines() if line.strip()]):
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) < 2:
+            continue
+        match = _CITY_STATE.match(f"{parts[-2]}, {parts[-1]}")
+        if match:
+            return match.group("city").strip(), match.group("state").upper()
+    return None
+
+
+def quote_fob_term(address: Optional[str]) -> str:
+    located = company_city_state(address)
+    return f"FOB {located[0]}, {located[1]}." if located else FOB_FALLBACK
+
+
+def quote_terms(address: Optional[str]) -> List[str]:
+    """The Terms block for a quote issued by the company at ``address``."""
+    fob = quote_fob_term(address)
+    return [term.format(fob=fob) for term in QUOTE_TERMS]
+
+
+def company_quote_terms(db, company_id) -> List[str]:
+    from app.models.company import Company
+
+    company = db.query(Company).filter(Company.id == company_id).first()
+    return quote_terms(company.address if company is not None else None)
+
+
+def quote_valid_until(quote) -> Optional[date]:
+    """The quote's own ``valid_until``, else its quote date + 30 days (the first term)."""
+    if quote.valid_until:
+        return quote.valid_until
+    quote_date = quote.quote_date.date() if isinstance(quote.quote_date, datetime) else quote.quote_date
+    return quote_date + timedelta(days=QUOTE_VALIDITY_DAYS) if quote_date else None
 
 
 def quote_pdf_context(db, quote, company_id, lock=False):
@@ -69,6 +134,7 @@ def build_quote_document(db, quote, company_id):
         lines.append(
             dict(
                 part_display=f'{line.part.part_number} - {line.description}' if line.part else line.description,
+                revision=line.part_revision,
                 qty=line.quantity,
                 material=metadata.get("material"),
                 thickness=metadata.get("thickness"),
@@ -84,16 +150,12 @@ def build_quote_document(db, quote, company_id):
         customer_email=quote.customer_email,
         rfq_reference=context["rfq_reference"],
         quote_date=formatted(quote.quote_date) or '',
-        valid_until=formatted(quote.valid_until),
+        valid_until=formatted(quote_valid_until(quote)),
         lead_time_label=f'{quote.lead_time_days} business days' if quote.lead_time_days else None,
         total_amount=float(quote.total or 0),
         line_summaries=lines,
         assumptions=context["assumptions"],
-        exclusions=[
-            'Quote excludes taxes, freight, and duties unless stated otherwise.',
-            'Subject to drawing/specification review at order entry.',
-            'Operation-level cycle times are internal and not included in customer quote.',
-        ],
+        terms=company_quote_terms(db, company_id),
     )
 
 

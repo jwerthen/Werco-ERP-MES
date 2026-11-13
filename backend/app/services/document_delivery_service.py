@@ -24,7 +24,13 @@ from app.models.quote import Quote, QuoteLine, QuoteStatus
 from app.models.role_permission import DEFAULT_ROLE_PERMISSIONS, RolePermission
 from app.models.user import User, UserRole
 from app.schemas.document_delivery import DocumentDeliveryResponse
-from app.services.document_pdf_service import build_purchase_order_document, build_quote_document, quote_pdf_context
+from app.services.document_pdf_service import (
+    build_purchase_order_document,
+    build_quote_document,
+    company_quote_terms,
+    quote_pdf_context,
+)
+from app.services.quote_send_gate import assert_quote_sendable
 
 MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
 MAX_DOCUMENT_LINES = 250
@@ -238,6 +244,9 @@ class DocumentDeliveryService:
                     for line in sorted(record.lines, key=lambda line: line.id)
                 ],
                 estimate=context,
+                # The PDF's Terms block is built from the company's address, so a changed FOB
+                # point is a changed document (a prepared delivery must be re-previewed).
+                terms=company_quote_terms(self.db, self.company_id),
             )
             return record, digest(data), record.customer_email or '', record.quote_number, None
         query = (
@@ -341,6 +350,9 @@ class DocumentDeliveryService:
         if unresolved or reusable:
             return self.response(unresolved or same, replayed=True)
         if entity_type == 'quote':
+            # The drawing-revision send gate (409, nothing written): a customer quote is not
+            # rendered for email while any line lacks its revision.
+            assert_quote_sendable(source)
             pdf = build_quote_document(self.db, source, self.company_id)
         else:
             pdf = build_purchase_order_document({**print_data, 'printed_at': current_issue_date().strftime('%m/%d/%Y')})
@@ -421,6 +433,9 @@ class DocumentDeliveryService:
             raise HTTPException(
                 409, 'The document changed after this PDF was prepared. Create a fresh preview before sending.'
             )
+        if record.entity_type == 'quote':
+            # Re-held at send: a snapshot prepared before the gate existed must not reach SMTP.
+            assert_quote_sendable(source)
         record.recipient = str(payload.recipient)
         record.subject, record.body = payload.subject, payload.body
         record.request_key, record.request_hash = payload.request_key, request_hash

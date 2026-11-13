@@ -101,6 +101,15 @@ class QuoteLine(Base, TenantMixin):
 
     # Part reference (optional - could be custom description)
     part_id = Column(Integer, ForeignKey("parts.id"), nullable=True)
+    # The DRAWING revision this line quotes -- distinct from ``Quote.revision``, which is the
+    # quote DOCUMENT's own revision. Defaulted from the part's current revision when the line
+    # is created (``quote_send_gate.default_quote_line_revision``), editable through
+    # ``PUT /quotes/{id}`` ``line_revisions``, and required on every line before the quote can
+    # reach the customer (``quote_send_gate.quote_send_blockers``); ``N/A`` is the explicit value
+    # for a line with no drawing. Nullable with no backfill: a pre-122 line never recorded one,
+    # and guessing it would rewrite a customer document with no audit row.
+    # Lock-step with migration 122_car_form_quote_rev.
+    part_revision = Column(String(20), nullable=True)
 
     # A conversion belongs to its quoted line, not just the whole document.
     work_order_id = Column(

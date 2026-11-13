@@ -5,7 +5,15 @@ from typing import List, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.core.validation import DescriptionLong, Money, MoneySmall
-from app.models.quality import CARStatus, CARType, FAIStatus, NCRDisposition, NCRSource, NCRStatus
+from app.models.quality import (
+    CARInitiationReason,
+    CARStatus,
+    CARType,
+    FAIStatus,
+    NCRDisposition,
+    NCRSource,
+    NCRStatus,
+)
 from app.schemas.base import UTCModel
 
 
@@ -143,7 +151,50 @@ class NCRResponse(UTCModel):
 
 
 # CAR Schemas
-class CARCreate(BaseModel):
+
+# Two-decimal currency matching the ``Numeric(12, 2)`` cost columns on ``cars``.
+CARCost = Optional[Decimal]
+
+
+class CARFormFields(BaseModel):
+    """The fields of Werco's controlled CAR form ("AS9100 PROCESS - Corrective Action Report").
+
+    Shared by create and update. All optional; ``max_length`` matches each column
+    (migration 122_car_form_quote_rev). ``part_id`` / ``customer_id`` / ``vendor_id`` are
+    resolved tenant-scoped by ``quality_record_service`` before anything is written. The
+    customer NAME is never accepted here -- it is snapshotted from the customer record --
+    and the Quality Manager approval is server-stamped by its own verb
+    (``POST /quality/car/{id}/quality-approval``), never sent in a body.
+    """
+
+    initiation_reason: Optional[CARInitiationReason] = Field(
+        None, description="Reason for initiation (one box). 'other' requires initiation_reason_other."
+    )
+    initiation_reason_other: Optional[str] = Field(None, max_length=255, description="The 'Other ____' text")
+    rma_number: Optional[str] = Field(None, max_length=50, description="RMA # (free text)")
+    submitted_date: Optional[date] = Field(
+        None,
+        description="Date Submitted. Defaults to today (Central) at create; a past date back-enters a paper CAR.",
+    )
+    part_id: Optional[int] = Field(None, gt=0, description="Part number (if applicable): a live part of your company")
+    customer_id: Optional[int] = Field(None, gt=0, description="Customer: a live customer of your company")
+    vendor_id: Optional[int] = Field(
+        None, gt=0, description="Vendor the CAR is against (may be inactive or removed; must be your company's)"
+    )
+    vendor_po_number: Optional[str] = Field(None, max_length=100, description="P.O number (if C/A applies to a vendor)")
+    cost_labor: CARCost = Field(None, ge=0, max_digits=12, decimal_places=2)
+    cost_material: CARCost = Field(None, ge=0, max_digits=12, decimal_places=2)
+    cost_outside_services: CARCost = Field(None, ge=0, max_digits=12, decimal_places=2)
+    cost_shipping: CARCost = Field(None, ge=0, max_digits=12, decimal_places=2)
+    management_action: Optional[str] = Field(None, max_length=2000)
+    vendor_approval_name: Optional[str] = Field(None, max_length=255)
+    vendor_approval_title: Optional[str] = Field(None, max_length=255)
+    vendor_approval_date: Optional[date] = None
+    customer_approval_name: Optional[str] = Field(None, max_length=255)
+    customer_approval_date: Optional[date] = None
+
+
+class CARCreate(CARFormFields):
     car_type: CARType = Field(default=CARType.CORRECTIVE)
     priority: int = Field(default=3, ge=1, le=10, description="Priority (1=highest, 10=lowest)")
     title: str = Field(..., min_length=10, max_length=200)
@@ -169,7 +220,7 @@ class CARCreate(BaseModel):
         return self
 
 
-class CARUpdate(BaseModel):
+class CARUpdate(CARFormFields):
     expected_updated_at: Optional[datetime] = Field(
         None,
         description=(
@@ -216,8 +267,51 @@ class CARResponse(UTCModel):
     verification_method: Optional[str]
     verification_results: Optional[str]
     due_date: Optional[date]
+    containment_due: Optional[date] = None
+    corrective_due: Optional[date] = None
     closed_date: Optional[date]
     created_at: datetime
+
+    # Responsibility (ids, plus display names resolved for the detail screen and the print).
+    initiated_by: Optional[int] = None
+    initiated_by_name: Optional[str] = None
+    assigned_to: Optional[int] = None
+    assigned_to_name: Optional[str] = None
+    verified_by: Optional[int] = None
+    verified_by_name: Optional[str] = None
+    closed_by: Optional[int] = None
+    closed_by_name: Optional[str] = None
+
+    # Werco CAR form fields (migration 122_car_form_quote_rev).
+    initiation_reason: Optional[CARInitiationReason] = None
+    initiation_reason_other: Optional[str] = None
+    rma_number: Optional[str] = None
+    submitted_date: Optional[date] = None
+    part_id: Optional[int] = None
+    part_number: Optional[str] = None
+    part_name: Optional[str] = None
+    part_revision: Optional[str] = Field(None, description="The part's current revision (read from the part)")
+    customer_id: Optional[int] = None
+    customer_name: Optional[str] = None
+    vendor_id: Optional[int] = None
+    vendor_name: Optional[str] = None
+    vendor_po_number: Optional[str] = None
+    cost_labor: Optional[Decimal] = None
+    cost_material: Optional[Decimal] = None
+    cost_outside_services: Optional[Decimal] = None
+    cost_shipping: Optional[Decimal] = None
+    cost_total: Optional[Decimal] = Field(
+        None, description="Sum of the entered cost buckets, computed at read time; null when none is entered"
+    )
+    management_action: Optional[str] = None
+    vendor_approval_name: Optional[str] = None
+    vendor_approval_title: Optional[str] = None
+    vendor_approval_date: Optional[date] = None
+    customer_approval_name: Optional[str] = None
+    customer_approval_date: Optional[date] = None
+    quality_approved_by: Optional[int] = None
+    quality_approved_by_name: Optional[str] = None
+    quality_approved_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True

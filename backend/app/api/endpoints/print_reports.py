@@ -164,6 +164,8 @@ def get_work_order_print_data(
 class QuoteLinePrintData(BaseModel):
     line_number: int
     part_number: Optional[str] = None
+    part_revision: Optional[str] = None  # the drawing revision this line quotes
+    part_current_revision: Optional[str] = None  # the linked part's revision today
     description: str
     quantity: str
     unit_price: str
@@ -215,6 +217,10 @@ def get_quote_print_data(
             QuoteLinePrintData(
                 line_number=line.line_number,
                 part_number=line.part.part_number if line.part else None,
+                part_revision=line.part_revision,
+                part_current_revision=(
+                    line.part.revision if line.part is not None and line.part.company_id == company_id else None
+                ),
                 description=line.description,
                 quantity=format_number(line.quantity, 0),
                 unit_price=format_currency(line.unit_price),

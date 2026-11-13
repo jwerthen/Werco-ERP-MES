@@ -1,7 +1,9 @@
 from datetime import date
+from io import BytesIO
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -169,8 +171,11 @@ def create_car_from_ncr(
 
     Idempotent: when the NCR already links a CAR that is not void, answers 409 naming
     that CAR instead of creating a second one.
+    The new CAR is prefilled from the NCR: its part (the form's "Part number") and its PO
+    number (the vendor "P.O number"), with today's Central date as "Date Submitted".
     """
-    return quality_record_service.create_car_from_ncr(db, company_id, ncr_id, current_user, audit)
+    car = quality_record_service.create_car_from_ncr(db, company_id, ncr_id, current_user, audit)
+    return quality_record_service.car_response(db, company_id, car)
 
 
 # ============== CAR Endpoints ==============
@@ -191,7 +196,8 @@ def list_cars(
     if status:
         query = query.filter(CorrectiveActionRequest.status == status)
 
-    return query.order_by(CorrectiveActionRequest.created_at.desc()).offset(skip).limit(limit).all()
+    cars = query.order_by(CorrectiveActionRequest.created_at.desc()).offset(skip).limit(limit).all()
+    return quality_record_service.car_responses(db, company_id, cars)
 
 
 @router.post("/car", response_model=CARResponse)
@@ -202,8 +208,18 @@ def create_car(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Create a new CAR (its CREATE audit row commits with it)."""
-    return quality_record_service.create_car(db, company_id, car_in, current_user, audit)
+    """Create a new CAR (its CREATE audit row commits with it).
+
+    Carries the fields of Werco's controlled CAR form: reason for initiation (one value;
+    ``other`` requires ``initiation_reason_other``, else 422), RMA #, Date Submitted (defaults
+    to today in Central; a past date back-enters a paper CAR), part, customer, vendor and
+    vendor PO, the four cost buckets, management action and the vendor / customer approvals.
+    A part or customer must be a live record of your company and a vendor must be your
+    company's (it may be inactive or removed -- a supplier CAR may document the removal);
+    anything else is a 404 and nothing is written. The customer's name is snapshotted.
+    """
+    car = quality_record_service.create_car(db, company_id, car_in, current_user, audit)
+    return quality_record_service.car_response(db, company_id, car)
 
 
 @router.get("/car/{car_id}", response_model=CARResponse)
@@ -213,8 +229,29 @@ def get_car(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Get CAR details"""
-    return quality_record_service.get_car(db, company_id, car_id)
+    """Get CAR details, including the CAR form fields and resolved display names."""
+    car = quality_record_service.get_car(db, company_id, car_id)
+    return quality_record_service.car_response(db, company_id, car)
+
+
+@router.get("/car/{car_id}/pdf")
+def get_car_pdf(
+    car_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Download the printable CAR (PDF) in the layout of Werco's controlled CAR form.
+
+    Same read access as ``GET /quality/car/{id}``; a CAR of another company is a 404. The
+    header is your company's own name, address and phone. Writes nothing.
+    """
+    car_number, pdf_bytes = quality_record_service.render_car_pdf(db, company_id, car_id)
+    return StreamingResponse(
+        BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{car_number}.pdf"'},
+    )
 
 
 @router.put("/car/{car_id}", response_model=CARResponse)
@@ -233,8 +270,35 @@ def update_car(
     corrective action, verification method and results. A CLOSED CAR refuses every change
     (409) except a status-only reopen; a VOID CAR refuses all. Voiding goes through
     ``POST /quality/car/{id}/void``.
+
+    The CAR form fields are editable here too: a CHANGED part or customer must be a live
+    record of your company (an unchanged one is not re-checked), a changed vendor must be
+    your company's, and the reason ``other`` requires ``initiation_reason_other`` (422). The
+    Quality Manager approval is not editable here -- record it with
+    ``POST /quality/car/{id}/quality-approval``.
     """
-    return quality_record_service.update_car(db, company_id, car_id, car_in, current_user, audit)
+    car = quality_record_service.update_car(db, company_id, car_id, car_in, current_user, audit)
+    return quality_record_service.car_response(db, company_id, car)
+
+
+@router.post("/car/{car_id}/quality-approval", response_model=CARResponse)
+def approve_car_quality(
+    car_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(quality_record_service.WRITE_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Record the CAR form's Quality Manager approval (Admin, Manager or Quality).
+
+    The server stamps the approver (you) and the time; neither is taken from the request.
+    Recorded once: an already-approved CAR is refused (409), as is a VOID one (409). A
+    standing API token is refused (403) -- the approval names a person. It does not gate
+    closure and does not freeze the CAR's other fields. The APPROVE audit row commits with
+    the stamp, or neither is saved (503).
+    """
+    car = quality_record_service.approve_car_quality(db, company_id, car_id, current_user, audit)
+    return quality_record_service.car_response(db, company_id, car)
 
 
 @router.post("/car/{car_id}/void", response_model=CARResponse)
@@ -253,7 +317,8 @@ def void_car(
     already-void CAR is refused (409). The reason is recorded on the status-change audit
     row, written in the same transaction.
     """
-    return quality_record_service.void_car(db, company_id, car_id, void_in.reason, current_user, audit)
+    car = quality_record_service.void_car(db, company_id, car_id, void_in.reason, current_user, audit)
+    return quality_record_service.car_response(db, company_id, car)
 
 
 @router.post("/car/{car_id}/restore", response_model=CARResponse)
@@ -269,7 +334,8 @@ def restore_car(
     A CAR that is not void is refused (409). Any closure fields a legacy void row still
     carries are cleared. The RESTORE audit row is written in the same transaction.
     """
-    return quality_record_service.restore_car(db, company_id, car_id, current_user, audit)
+    car = quality_record_service.restore_car(db, company_id, car_id, current_user, audit)
+    return quality_record_service.car_response(db, company_id, car)
 
 
 # ============== FAI Endpoints ==============

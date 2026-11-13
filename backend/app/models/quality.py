@@ -1,9 +1,9 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, Date, DateTime
+from sqlalchemy import Boolean, CheckConstraint, Column, Date, DateTime
 from sqlalchemy import Enum as SQLEnum
-from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Float, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
@@ -48,6 +48,33 @@ class CARType(str, enum.Enum):
     CORRECTIVE = "corrective"
     PREVENTIVE = "preventive"
     IMPROVEMENT = "improvement"
+
+
+class CARInitiationReason(str, enum.Enum):
+    """The "Reason for initiation" boxes on Werco's controlled CAR form (one per CAR).
+
+    Stored as a plain ``String(40)`` held to these eight values by the CHECK
+    ``ck_cars_initiation_reason`` (migration 122_car_form_quote_rev) rather than a
+    native PostgreSQL enum, so adding a reason later is a CHECK swap, not an
+    ``ALTER TYPE`` (precedent ``continuous_improvement.py``). A different concept from
+    ``CARType`` (corrective / preventive / improvement).
+    """
+
+    MANAGEMENT_REVIEW = "management_review"
+    NONCONFORMANCE_TREND = "nonconformance_trend"
+    CUSTOMER_FEEDBACK = "customer_feedback"
+    INTERNAL_AUDIT = "internal_audit"
+    PRODUCTION_PROBLEMS = "production_problems"
+    EXTERNAL_AUDIT = "external_audit"
+    CONTINUOUS_IMPROVEMENT = "continuous_improvement"
+    OTHER = "other"
+
+
+# Lock-step with migration 122_car_form_quote_rev, which creates this CHECK with the
+# identical text (the fresh-bootstrap round-trip compares the two).
+CAR_INITIATION_REASON_CHECK = "initiation_reason IN ({})".format(
+    ", ".join(f"'{reason.value}'" for reason in CARInitiationReason)
+)
 
 
 class FAIStatus(str, enum.Enum):
@@ -155,6 +182,8 @@ class CorrectiveActionRequest(Base, TenantMixin):
         Index("ix_cars_status", "status"),
         Index("ix_cars_due_date", "due_date"),
         UniqueConstraint("company_id", "car_number", name="uq_cars_company_car_number"),
+        # Lock-step with migration 122_car_form_quote_rev.
+        CheckConstraint(CAR_INITIATION_REASON_CHECK, name="ck_cars_initiation_reason"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -195,6 +224,37 @@ class CorrectiveActionRequest(Base, TenantMixin):
     assigned_to = Column(Integer, ForeignKey("users.id"), nullable=True)
     verified_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     closed_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    # Werco's controlled CAR form ("AS9100 PROCESS - Corrective Action Report"). Every column
+    # below is nullable with no default and no backfill: a pre-122 CAR simply never recorded
+    # them. Lock-step with migration 122_car_form_quote_rev (names, types, FK names, the one
+    # index). Writes go through app/services/quality_record_service.py, which resolves each
+    # reference tenant-scoped and records every change on the required audit row.
+    initiation_reason = Column(String(40), nullable=True)  # one CARInitiationReason value
+    initiation_reason_other = Column(String(255), nullable=True)  # required when the reason is "other"
+    rma_number = Column(String(50), nullable=True)  # free text: a Werco RMA, a customer's, or paper back-entry
+    submitted_date = Column(Date, nullable=True)  # "Date Submitted"; defaults to today (Central) at create
+    part_id = Column(Integer, ForeignKey("parts.id", name="fk_cars_part_id"), nullable=True, index=True)
+    customer_id = Column(Integer, ForeignKey("customers.id", name="fk_cars_customer_id"), nullable=True)
+    customer_name = Column(String(255), nullable=True)  # snapshot of the customer at selection
+    vendor_id = Column(Integer, ForeignKey("vendors.id", name="fk_cars_vendor_id"), nullable=True)
+    vendor_po_number = Column(String(100), nullable=True)  # "P.O number (if C/A applies to a vendor)"
+    # Cost of the corrective action. Blank is not zero, so each stays NULL until entered; the
+    # total is computed at read time and never stored.
+    cost_labor = Column(Numeric(12, 2), nullable=True)
+    cost_material = Column(Numeric(12, 2), nullable=True)
+    cost_outside_services = Column(Numeric(12, 2), nullable=True)
+    cost_shipping = Column(Numeric(12, 2), nullable=True)
+    management_action = Column(Text, nullable=True)
+    vendor_approval_name = Column(String(255), nullable=True)
+    vendor_approval_title = Column(String(255), nullable=True)
+    vendor_approval_date = Column(Date, nullable=True)
+    customer_approval_name = Column(String(255), nullable=True)
+    customer_approval_date = Column(Date, nullable=True)
+    # Quality Manager approval: server-stamped by POST /quality/car/{id}/quality-approval only,
+    # never accepted from a request body.
+    quality_approved_by = Column(Integer, ForeignKey("users.id", name="fk_cars_quality_approved_by"), nullable=True)
+    quality_approved_at = Column(DateTime, nullable=True)
 
     # Audit
     created_at = Column(DateTime, default=datetime.utcnow)

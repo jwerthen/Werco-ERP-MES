@@ -46,6 +46,7 @@ def quote(db_session, admin_user):
             company_id=1,
             quote_id=quote.id,
             line_number=1,
+            part_revision='B',  # the send gate refuses a quote line without its drawing revision
             description='Bracket <REF>',
             quantity=5,
             unit_price=5,
