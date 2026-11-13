@@ -28,6 +28,7 @@ import OperationMaterialTieModal from '../components/workorders/OperationMateria
 import DuplicateWorkOrderModal from '../components/workorders/DuplicateWorkOrderModal';
 import SaveAsTemplateModal from '../components/workorders/SaveAsTemplateModal';
 import BackflushPreviewPanel from '../components/workorders/BackflushPreviewPanel';
+import OperationHoursSource from '../components/workorders/OperationHoursSource';
 import OperationStepsPanel from '../components/processSheets/OperationStepsPanel';
 import {
   extractStepsBypassed,
@@ -2716,6 +2717,7 @@ export default function WorkOrderDetail() {
                         </td>
                         <td className="px-4 py-3 text-sm">
                           {(Number(op.setup_time_hours || 0) + Number(op.run_time_hours || 0)).toFixed(2)}
+                          <OperationHoursSource operation={op} />
                         </td>
                         {isAdminView && (
                           <>

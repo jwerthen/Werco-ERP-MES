@@ -27,6 +27,8 @@ import {
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
 import { EmptyState, ErrorState, FormField, useToast } from '../components/ui';
 import { formatCentralDate, getCentralDateStamp, getCentralTodayISODate } from '../utils/centralTime';
+import type { ProductionCalendar } from '../types/productionCalendar';
+import { patternForWorkCenter } from '../utils/productionCalendar';
 
 // ============== Types ==============
 
@@ -85,7 +87,11 @@ interface OEERecord {
   work_center_id: number;
   work_center_name?: string | null;
   record_date: string;
+  /** The label snapshot: a defined shift's code, or a legacy free-text label. */
   shift?: string | null;
+  /** Migration 120: the defined shift (null for whole-day and legacy rows) and its name. */
+  shift_id?: number | null;
+  shift_name?: string | null;
   availability_pct: number;
   performance_pct: number;
   quality_pct: number;
@@ -158,6 +164,23 @@ function defaultDateRange(): { from: string; to: string } {
   };
 }
 
+/** A fresh Add Record form. `recordDate` is the PRODUCTION day it defaults to. */
+function blankAddForm(recordDate: string) {
+  return {
+    work_center_id: 0,
+    record_date: recordDate,
+    // A defined shift of the work center's pattern; null = the whole production day.
+    shift_id: null as number | null,
+    planned_production_time: 480,
+    actual_run_time: 0,
+    ideal_cycle_time: 0,
+    total_pieces: 0,
+    good_pieces: 0,
+    rejected_pieces: 0,
+    notes: '',
+  };
+}
+
 // ============== Component ==============
 
 export default function OEE() {
@@ -168,6 +191,8 @@ export default function OEE() {
   const [dashboard, setDashboard] = useState<OEEDashboard | null>(null);
   const [trends, setTrends] = useState<OEETrend[]>([]);
   const [records, setRecords] = useState<OEERecord[]>([]);
+  // Shift choices come from the production calendar; null = not loaded (or failed).
+  const [calendar, setCalendar] = useState<ProductionCalendar | null>(null);
   const loadRequest = useRef(0);
   const [loading, setLoading] = useState(true);
   const [sectionErrors, setSectionErrors] = useState<string[]>([]);
@@ -179,18 +204,7 @@ export default function OEE() {
   const [dateTo, setDateTo] = useState<string>(defaultDates.to);
 
   const [showAddModal, setShowAddModal] = useState(false);
-  const [addForm, setAddForm] = useState({
-    work_center_id: 0,
-    record_date: getCentralTodayISODate(),
-    shift: '',
-    planned_production_time: 480,
-    actual_run_time: 0,
-    ideal_cycle_time: 0,
-    total_pieces: 0,
-    good_pieces: 0,
-    rejected_pieces: 0,
-    notes: '',
-  });
+  const [addForm, setAddForm] = useState(() => blankAddForm(getCentralTodayISODate()));
 
   const loadData = useCallback(async () => {
     const request = ++loadRequest.current;
@@ -211,11 +225,12 @@ export default function OEE() {
       // allSettled (not all): the work-centers call only feeds the filter dropdown, so
       // its failure must not blank the whole dashboard. Only a failed core /oee/dashboard
       // call sets loadError (which the render gate pairs with `!dashboard`).
-      const [wcRes, dashRes, trendsRes, recordsRes] = await Promise.allSettled([
+      const [wcRes, dashRes, trendsRes, recordsRes, calendarRes] = await Promise.allSettled([
         api.get('/work-centers/', { params: { active_only: true } }),
         api.get('/oee/dashboard', { params: dateParams }),
         api.get('/oee/trends', { params: detailParams }),
         api.get('/oee/records', { params: detailParams }),
+        api.getProductionCalendar(),
       ]);
 
       if (request !== loadRequest.current) return;
@@ -254,6 +269,13 @@ export default function OEE() {
         setRecords([]);
         failedSections.push('records');
       }
+
+      if (calendarRes.status === 'fulfilled') {
+        setCalendar(calendarRes.value);
+      } else {
+        setCalendar(null);
+        failedSections.push('shift choices');
+      }
       setSectionErrors(failedSections);
     } catch (err) {
       if (request !== loadRequest.current) return;
@@ -281,7 +303,9 @@ export default function OEE() {
       await api.post('/oee/records', {
         work_center_id: addForm.work_center_id,
         record_date: addForm.record_date,
-        shift: addForm.shift || null,
+        // A defined shift of this work center's pattern, or null for a whole production
+        // day. Only shift_id is sent: a new free-text label is refused (422) server-side.
+        shift_id: addForm.shift_id,
         // Backend OEERecordCreate field names (endpoints/oee.py ~L48). The old body sent
         // planned_production_time/total_pieces/... which Pydantic silently ignored, so every
         // "Add Record" created an all-zero record. actual_run_time doubles as the performance
@@ -297,18 +321,7 @@ export default function OEE() {
         notes: addForm.notes || null,
       });
       setShowAddModal(false);
-      setAddForm({
-        work_center_id: 0,
-        record_date: getCentralTodayISODate(),
-        shift: '',
-        planned_production_time: 480,
-        actual_run_time: 0,
-        ideal_cycle_time: 0,
-        total_pieces: 0,
-        good_pieces: 0,
-        rejected_pieces: 0,
-        notes: '',
-      });
+      setAddForm(blankAddForm(calendar?.today.production_day ?? getCentralTodayISODate()));
       showToast('success', 'OEE record added');
       loadData();
     } catch (err: any) {
@@ -327,20 +340,15 @@ export default function OEE() {
   };
 
   const openAddRecord = () => {
-    setAddForm({
-      work_center_id: 0,
-      record_date: getCentralTodayISODate(),
-      shift: '',
-      planned_production_time: 480,
-      actual_run_time: 0,
-      ideal_cycle_time: 0,
-      total_pieces: 0,
-      good_pieces: 0,
-      rejected_pieces: 0,
-      notes: '',
-    });
+    setAddForm(blankAddForm(calendar?.today.production_day ?? getCentralTodayISODate()));
     setShowAddModal(true);
   };
+
+  // The active shifts of a work center's pattern (its own, else the default) -- the only
+  // ones the server accepts on an OEE record for it.
+  const shiftOptionsFor = (workCenterId: number) =>
+    workCenterId ? (patternForWorkCenter(calendar, workCenterId)?.shifts ?? []).filter(sh => sh.is_active) : [];
+  const addShiftOptions = shiftOptionsFor(addForm.work_center_id);
 
   const selectedWcData = selectedWorkCenter
     ? dashboard?.work_centers?.find(wc => wc.work_center_id === parseInt(selectedWorkCenter))
@@ -768,7 +776,9 @@ export default function OEE() {
                   <tr key={rec.id} className="hover">
                     <td className="text-sm tabular-nums">{rec.record_date}</td>
                     <td className="font-medium text-sm">{rec.work_center_name || `WC-${rec.work_center_id}`}</td>
-                    <td className="text-sm">{rec.shift || '-'}</td>
+                    <td className="text-sm" title={rec.shift_name && rec.shift ? rec.shift : undefined}>
+                      {rec.shift_name || rec.shift || '-'}
+                    </td>
                     <td>
                       <span className={`font-bold text-sm tabular-nums ${oeeColor(rec.oee_pct)}`}>
                         {fmtPct(rec.oee_pct)}
@@ -819,7 +829,17 @@ export default function OEE() {
                     {...field}
                     className="select select-bordered w-full"
                     value={addForm.work_center_id}
-                    onChange={e => setAddForm({ ...addForm, work_center_id: parseInt(e.target.value) })}
+                    onChange={e => {
+                      const workCenterId = parseInt(e.target.value);
+                      // A shift is only valid in its work center's pattern: drop one that
+                      // the newly chosen work center does not use.
+                      const keep = shiftOptionsFor(workCenterId).some(sh => sh.id === addForm.shift_id);
+                      setAddForm({
+                        ...addForm,
+                        work_center_id: workCenterId,
+                        shift_id: keep ? addForm.shift_id : null,
+                      });
+                    }}
                     required
                   >
                     <option value={0} disabled>
@@ -833,7 +853,12 @@ export default function OEE() {
                   </select>
                 )}
               </FormField>
-              <FormField label="Date" required labelClassName="font-medium">
+              <FormField
+                label="Production Day"
+                required
+                labelClassName="font-medium"
+                help="A shift past midnight belongs to the day it started."
+              >
                 {field => (
                   <input
                     {...field}
@@ -848,18 +873,33 @@ export default function OEE() {
             </div>
 
             <div className="grid grid-cols-3 gap-4">
-              <FormField label="Shift" labelClassName="font-medium">
+              <FormField
+                label="Shift"
+                labelClassName="font-medium"
+                help={
+                  addForm.work_center_id && addShiftOptions.length === 0
+                    ? 'No shifts are defined for this work center (Admin Settings → Production Calendar).'
+                    : undefined
+                }
+              >
                 {field => (
                   <select
                     {...field}
                     className="select select-bordered w-full"
-                    value={addForm.shift}
-                    onChange={e => setAddForm({ ...addForm, shift: e.target.value })}
+                    value={addForm.shift_id ?? ''}
+                    disabled={!addForm.work_center_id}
+                    onChange={e =>
+                      setAddForm({ ...addForm, shift_id: e.target.value ? parseInt(e.target.value) : null })
+                    }
                   >
-                    <option value="">N/A</option>
-                    <option value="1st">1st Shift</option>
-                    <option value="2nd">2nd Shift</option>
-                    <option value="3rd">3rd Shift</option>
+                    <option value="">
+                      {addForm.work_center_id ? 'Whole production day' : 'Select a work center first'}
+                    </option>
+                    {addShiftOptions.map(sh => (
+                      <option key={sh.id} value={sh.id}>
+                        {sh.code} · {sh.name} ({sh.start}–{sh.end})
+                      </option>
+                    ))}
                   </select>
                 )}
               </FormField>

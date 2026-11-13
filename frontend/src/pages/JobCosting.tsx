@@ -47,7 +47,10 @@ interface JobCostRecord {
   estimated_total_cost: number;
   actual_material_cost: number;
   actual_labor_cost: number;
+  /** OVERHEAD plus OTHER entries (the work-order read calls this "burden"). */
   actual_overhead_cost: number;
+  /** SUBCONTRACT (outside processing) entries — its own element, never folded into overhead. */
+  actual_subcontract_cost?: number;
   actual_total_cost: number;
   material_variance: number;
   labor_variance: number;
@@ -115,7 +118,15 @@ const entryTypeLabel: Record<string, string> = {
   material: 'Material',
   labor: 'Labor',
   overhead: 'Overhead',
+  subcontract: 'Subcontract',
   other: 'Other',
+};
+
+const entryTypeBadge: Record<string, string> = {
+  material: 'du-badge-primary',
+  labor: 'du-badge-secondary',
+  overhead: 'du-badge-accent',
+  subcontract: 'du-badge-info',
 };
 
 // Central-local "today" (YYYY-MM-DD) so date-only form defaults don't roll to
@@ -642,7 +653,7 @@ export default function JobCosting() {
                       <td colSpan={10} className="bg-base-200 p-0">
                         <div className="p-4 space-y-4">
                           {/* Cost breakdown cards */}
-                          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                          <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
                             <div className={`rounded-sm p-3 ${varianceBg(jc.material_variance)}`}>
                               <p className="text-xs font-medium text-slate-400 uppercase">Material</p>
                               <div className="flex justify-between mt-1">
@@ -672,6 +683,16 @@ export default function JobCosting() {
                               <p className={`text-sm font-medium mt-1 ${varianceColor(jc.overhead_variance)}`}>
                                 Variance: {fmt(jc.overhead_variance)}
                               </p>
+                            </div>
+                            {/* Actual-only: there is no subcontract estimate. Listed so the four
+                                elements reconcile to the actual total. */}
+                            <div className="rounded-sm p-3 bg-slate-800" data-testid="subcontract-actual">
+                              <p className="text-xs font-medium text-slate-400 uppercase">Subcontract</p>
+                              <div className="flex justify-between mt-1">
+                                <span className="text-sm text-slate-400">No estimate</span>
+                                <span className="text-sm">Act: {fmt(jc.actual_subcontract_cost ?? 0)}</span>
+                              </div>
+                              <p className="text-xs text-slate-400 mt-1">Outside processing</p>
                             </div>
                           </div>
 
@@ -725,13 +746,7 @@ export default function JobCosting() {
                                         <td>
                                           <span
                                             className={`du-badge du-badge-xs ${
-                                              entry.entry_type === 'material'
-                                                ? 'du-badge-primary'
-                                                : entry.entry_type === 'labor'
-                                                ? 'du-badge-secondary'
-                                                : entry.entry_type === 'overhead'
-                                                ? 'du-badge-accent'
-                                                : 'du-badge-ghost'
+                                              entryTypeBadge[entry.entry_type] ?? 'du-badge-ghost'
                                             }`}
                                           >
                                             {entryTypeLabel[entry.entry_type] || entry.entry_type}
@@ -981,6 +996,7 @@ export default function JobCosting() {
                       <option value="material">Material</option>
                       <option value="labor">Labor</option>
                       <option value="overhead">Overhead</option>
+                      <option value="subcontract">Subcontract (outside processing)</option>
                       <option value="other">Other</option>
                     </select>
                   )}
