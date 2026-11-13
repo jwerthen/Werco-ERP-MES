@@ -557,8 +557,12 @@ DOWN`) — the board visibly rewards a clean day without any layout reflow.
 
 A fixed-height footer panel: a lead cell — blue `TODAY` eyebrow over the live Central date — then
 six equal hairline-divided cells: `OPS DONE`, `PIECES`, `ON CLOCK` (green), `LABOR HRS`
-(1 decimal), `RECEIPTS`, `SCRAP EVENTS` (amber when > 0) — live, resetting at **Central
-midnight**, from the `today` block. Semantics in the
+(1 decimal), `RECEIPTS`, `SCRAP EVENTS` (amber when > 0) — live, resetting at the **start of the
+production day** (the company's production calendar: e.g. 05:00 Central for Werco; Central midnight
+when no calendar is configured — see `docs/API.md` → Production calendar & shifts), from the `today`
+block. Time entries count on the production day they are attributed to (greatest shift overlap), so
+an early 04:55 weld clock-in counts on today's 1st shift and a 04:00 entry on a 05:00-start shop on
+yesterday. Semantics in the
 payload section below. Missing block (old backend) → `—` values; the bar never disappears. (The
 `PLANT 30d` KPI cluster that used to occupy the right ~40% of this band was removed on owner
 feedback 2026-07-15 — see the KPI-strip deprecation note below.)

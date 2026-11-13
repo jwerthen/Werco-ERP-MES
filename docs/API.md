@@ -10342,6 +10342,113 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 > entries regardless of the flag and is **tenant-scoped** (a job cost is looked up by id **and**
 > company, closing a prior cross-tenant lookup).
 
+### Production calendar & shifts
+
+`app/api/endpoints/production_calendar.py`, mounted at `/production-calendar` (P1.2, migration
+`120_production_calendar`). A **production day** is the shop's working day, not the calendar date: it
+starts at the company's configured **production-day start** on the local clock (`Company.timezone`,
+default America/Chicago) and runs to the same wall-clock time the next day; **a shift that runs past
+midnight belongs to the day it started**. So with Werco's 05:00 start a weld entry at **01:30 Wednesday
+is Tuesday's production day and Tuesday's 2nd shift**. A production day is 23 h / 25 h long across the
+DST changes (boundaries are wall-clock times).
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/production-calendar` | The calendar: `configured`, `version`, `timezone`, `production_day_start`, `patterns[]` (each with `work_center_ids` and `shifts[]`: `code`, `name`, `start`/`end` HH:MM, `start_minute`/`end_minute`, `ends_next_day`, `days` 0=Mon..6=Sun, `planned_minutes`, `is_active`), and `today` — the current production day's UTC window and every active shift on it as UTC instants (`Z`) | Yes |
+| PUT | `/production-calendar` | Replace the **whole** calendar after a version check | **Admin** |
+| GET | `/production-calendar/resolve` | Which production day and shift an instant (`at`, ISO-8601; offset-less = UTC; default now) belongs to at a `work_center_id` | Yes |
+| POST | `/production-calendar/working-calendars/sync` | Set each work center's weekly working hours from its shifts (`dry_run`, default `true`; `expected_version`) | Admin / Manager / Supervisor |
+
+**Unconfigured company (no calendar saved).** The production day is the **company-local calendar day**
+(day start 00:00) and there are no shifts. This replaced the old **UTC-date** day boundaries of OEE,
+the OEE cron, reports, downtime filters, job-cost labor dates and analytics on **2026-11-13** — for every
+tenant, configured or not, a "day" is now a local day (or a production day), never a UTC date.
+Historical `auto` OEE rows computed before that date stay as computed (UTC days); a re-run computes the
+production day.
+
+**Attribution rules.** An **instant** belongs to the production day it falls in; inside two
+overlapping shifts (the rest-of-shop 15:30–16:00 hand-off) it belongs to the **outgoing** (earlier-start)
+shift — `resolve` returns it as `shift` and lists both in `overlapping`. An **interval** (a time entry,
+a downtime event) belongs to the shift it overlaps **most** (a tie goes to the outgoing shift) and to
+that shift's production day; one that overlaps no shift belongs to the production day of its start. So
+an early **04:55 weld clock-in** that runs into the 05:00 1st shift counts on that day's 1st shift, not
+the previous production day. A work center belongs to at most one **pattern**; one in no pattern (and an
+entry with no work center) uses the company's single **default** pattern.
+
+**Who reads production days.** OEE records and `POST /oee/calculate` (`record_date` is a production
+day), the nightly OEE cron, the wallboard **today** pulse, the shop-floor dashboard `completed_today`
+(its ETag folds in the production day and calendar version), `GET /reports/daily-output` and
+`GET /reports/employee-time` (each entry's `date` is its production day, plus `shift_code`), the
+downtime `date_from`/`date_to` filters, job-cost labor `entry_date`, the analytics OEE figures, and
+every analytics `period`'s "today". **Due-today / overdue / lateness stay on the company calendar
+date** — they compare calendar due dates.
+
+**The ERP's own OEE convention is unchanged.** Availability stays productive run ÷ **staffed (clocked)**
+time; BREAK entries are not newly excluded and a shift's `planned_minutes` is **not** the availability
+denominator. `planned_minutes` (planned production time, breaks and lunch excluded) is exposed so a
+consumer can compute planned-time availability itself.
+
+**`PUT /production-calendar`** (Admin only). Send the whole document with `expected_version` as read
+(`0` before the first save) — a stale version is **409** (`This production calendar changed. Reload it
+before saving.`). It is validated as a set before anything is written (**422**): `production_day_start`
+and every `start`/`end` are `HH:MM`; an `end` at or before its `start` ends the next day; every shift
+must start at or after the production-day start and end by the next day's start (so it belongs to the
+day it starts on); `planned_minutes` ≤ the shift's length; at most one `is_default` pattern; a work
+center in at most one pattern; unique pattern names and shift codes (case-insensitive); work centers
+must be this company's. Existing patterns and shifts keep their `id`; **anything omitted is removed —
+except a shift an OEE record references**, which must be retired with `is_active: false` (removing it
+is 422) and whose `code` can never change (422). Retired shifts stay in the document and on historical
+records but are no longer attributed. An identical document is a no-op (no version bump). A save writes
+one **required** `audit_log` row (`resource_type` `production_calendar`, the whole before/after
+document) in the same transaction — **503**, nothing saved, when it cannot. Saving does **not** change
+working calendars; run the sync.
+
+**Werco's configuration (worked example).** Not seeded by the migration — an Admin applies it once
+(replace the `work_center_ids` with the ids of WLD-01 … WLD-06), then runs the sync dry run and commit:
+
+```json
+PUT /api/v1/production-calendar
+{
+  "expected_version": 0,
+  "production_day_start": "05:00",
+  "patterns": [
+    {
+      "name": "Weld shop",
+      "is_default": false,
+      "work_center_ids": [101, 102, 103, 104, 105, 106],
+      "shifts": [
+        {"code": "W1", "name": "Weld 1st", "start": "05:00", "end": "15:30", "days": [0, 1, 2, 3, 4], "planned_minutes": 600},
+        {"code": "W2", "name": "Weld 2nd", "start": "15:30", "end": "02:00", "days": [0, 1, 2, 3, 4], "planned_minutes": 600}
+      ]
+    },
+    {
+      "name": "Rest of shop",
+      "is_default": true,
+      "work_center_ids": [],
+      "shifts": [
+        {"code": "S1", "name": "1st shift", "start": "07:30", "end": "16:00", "days": [0, 1, 2, 3, 4], "planned_minutes": 480},
+        {"code": "S2", "name": "2nd shift", "start": "15:30", "end": "00:00", "days": [0, 1, 2, 3, 4], "planned_minutes": 480}
+      ]
+    }
+  ]
+}
+```
+
+**`POST /production-calendar/working-calendars/sync`** (Admin / Manager / Supervisor — the roles of
+`PUT /scheduling/work-centers/{id}/calendar`). For every **active** work center covered by a pattern
+(its own, or the default), the new Mon..Sun `weekly_hours` are the sum of `planned_minutes` ÷ 60 of the
+active shifts **starting** each weekday — Werco weld `[20, 20, 20, 20, 20, 0, 0]`, rest of shop
+`[16, 16, 16, 16, 16, 0, 0]`. `dry_run=true` (the default) writes nothing and returns, per work center,
+`current_version`, `current_weekly_hours`, `new_weekly_hours`, `overrides_kept` and `changed` (a work
+center with no saved calendar, `current_version` 0, is always a change). `dry_run=false` (pass the
+dry run's `expected_version`; a different calendar version is **409**) writes every changed work center
+through the scheduling calendar's own writer (`working_calendar_service.save_working_calendar`): dated
+overrides are **kept**, `version` is bumped, and one **required** `working_calendar` audit row is written
+per work center (`extra_data.source` = `production_calendar_sync`; **503**, nothing saved, when one
+cannot). **This moves every scheduling projection, capacity heat map and delivery prediction** for
+those work centers (a center with no saved calendar was planned at a flat 8 h every day, weekends
+included) — review the dry run first.
+
 ### OEE Tracking
 
 OEE = **Availability × Performance × Quality** per work center. **Reads** (dashboards/trends) are open
@@ -10353,9 +10460,9 @@ records, targets) require **Admin / Manager / Supervisor**.
 | GET | `/oee/dashboard` | OEE per work center, plant-wide OEE, targets (`period` 7d/30d/90d/365d, or explicit `date_from`/`date_to` which take precedence) | Yes |
 | GET | `/oee/trends` | OEE time-series for charts (`work_center_id`, `period`, or explicit `date_from`/`date_to`) | Yes |
 | GET | `/oee/six-big-losses/{work_center_id}` | Six-big-losses breakdown | Yes |
-| GET | `/oee/records` | List OEE records (filters: WC, date range, shift) | Yes |
+| GET | `/oee/records` | List OEE records (filters: WC, date range, `shift` label, `shift_id`) | Yes |
 | GET | `/oee/records/{record_id}` | Get one OEE record | Yes |
-| POST | `/oee/calculate/{work_center_id}` | Auto-calculate the day/shift OEE record from data | Admin / Manager / Supervisor |
+| POST | `/oee/calculate/{work_center_id}` | Auto-calculate the production-day (or `shift_id`) OEE record from data | Admin / Manager / Supervisor |
 | POST | `/oee/records` | Create an OEE record (manual inputs) | Admin / Manager / Supervisor |
 | PUT | `/oee/records/{record_id}` | Update + recalculate an OEE record | Admin / Manager / Supervisor |
 | DELETE | `/oee/records/{record_id}` | Delete an OEE record | Admin / Manager / Supervisor |
@@ -10378,9 +10485,13 @@ records, targets) require **Admin / Manager / Supervisor**.
 > call. (These were RBAC-gated but unaudited prior to 2026-06-09.)
 
 > **`POST /oee/calculate/{work_center_id}` (auto-calculate).** Builds (or upserts, per work center +
-> date + shift) a real `OEERecord` for `record_date` (default today) from the day's **closed**
-> `TimeEntry` rows, the routing standard cycle time, and reported `DowntimeEvent` rows — on the
-> **staffed-time** convention so it agrees with the `/analytics/kpis` headline:
+> date + shift) a real `OEERecord` for `record_date` — a **production day** (default: the current one;
+> see Production calendar & shifts) — from the **closed** `TimeEntry` rows and reported `DowntimeEvent`
+> rows **attributed** to that production day (greatest shift overlap, ties to the outgoing shift), plus
+> the routing standard cycle time — on the **staffed-time** convention so it agrees with the
+> `/analytics/kpis` headline. With `shift_id` only what is attributed to that shift counts, and the
+> record carries `shift_id` and `shift` = the shift's code; the shift-scoped records of a day partition
+> its whole-day record. A legacy `shift` text resolves only when it equals a defined code:
 > - **Availability** = productive-run minutes ÷ **staffed (clocked)** minutes at the WC; productive run
 >   = (RUN+SETUP) minutes − **UNPLANNED** `DowntimeEvent` minutes. (Returns/stores 0 availability when
 >   there is no staffed time for that WC/day.)
@@ -10396,6 +10507,16 @@ records, targets) require **Admin / Manager / Supervisor**.
 > `app/services/oee_service.py` (`compute_oee_for_work_center`) — the nightly auto-calc cron runs the
 > **same code** (below), so a manual trigger and the cron can never disagree on the math.
 
+> **Shifts are defined shifts (migration 120).** `OEERecord.shift_id` references a shift of the
+> production calendar; `shift` stays as the **label snapshot** (the code). Writes (`POST`/`PUT
+> /oee/records`, `POST /oee/calculate`) take `shift_id` — a shift that is not this company's is **404**,
+> one that is retired or not in the work center's pattern **422** (a record may keep its own retired
+> shift). The legacy `shift` text is accepted only when it equals a defined code (it resolves to that
+> shift); **any other text is 422**; blank means no shift. Pre-120 free-text labels (`1st`, `Day`) were
+> **not** backfilled and stay readable as labels with `shift_id: null`. Responses add `shift_id` and
+> `shift_name`. `GET /oee/dashboard`, `/oee/trends` and `/oee/six-big-losses` periods count back from the
+> current production day.
+>
 > **One OEE record per (work center, date, shift) — duplicates are 409 (Lean Phase 1).** A unique
 > index (`uq_oee_company_wc_date_shift`, migration `063`) enforces at most one `OEERecord` per
 > company + work center + `record_date` + shift, where a **`null` shift and an empty-string shift are
@@ -10409,8 +10530,11 @@ records, targets) require **Admin / Manager / Supervisor**.
 > `calculation_source`: **`manual`** (hand-entered via `POST /oee/records`, or the on-demand
 > `POST /oee/calculate/{work_center_id}` trigger — a human asked for it; all pre-existing rows
 > backfill to it) or **`auto`** (minted only by the nightly ARQ cron, `run_oee_auto_calc_job` at
-> **02:30 UTC**, which computes **yesterday's** whole-day record per active company + active work
-> center). The cron **never overwrites a `manual` record** — a hand-entered record for that WC/day
+> **02:30 UTC**, which computes each company's **previous production day** — `current_production_day
+> − 1` on that company's calendar, never the container's `date.today()` — as a whole-day record per
+> active work center; with a 05:00 day start, Monday's production day closes Tuesday 05:00 and is
+> computed Tuesday ~20:30 Central). The cron writes whole-day records only; per-shift records come from
+> `POST /oee/calculate/{work_center_id}?shift_id=`. The cron **never overwrites a `manual` record** — a hand-entered record for that WC/day
 > (any shift) is authoritative and the cron skips the WC; `auto` records **are** recomputed by
 > re-runs (idempotent refresh). Idle work centers (no closed clocked entry and no unplanned downtime
 > that day) are skipped entirely — no staffed time is uncomputable, not an all-zero measurement.
@@ -10421,7 +10545,10 @@ records, targets) require **Admin / Manager / Supervisor**.
 
 `app/api/endpoints/downtime.py`, mounted at `/downtime`. An event is reported against a work center
 (optionally a work order) and resolved when the machine runs again; **UNPLANNED** event minutes are
-the availability input to `POST /oee/calculate/{work_center_id}` above.
+the availability input to `POST /oee/calculate/{work_center_id}` above. The `date_from` / `date_to`
+filters on the list, `/summary` and `/by-work-center` are inclusive **production days** (events that
+started from the production-day start of `date_from` to the start of the production day after
+`date_to`; local midnights when no production calendar is configured); a reversed range is **422**.
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
@@ -12186,14 +12313,16 @@ local midnight on the start date to the **exclusive** next local midnight after 
 converted to UTC — so a Central "January 15" is `2026-01-15T06:00:00Z` up to (not including)
 `2026-01-16T06:00:00Z` in winter and `05:00Z`–`05:00Z` in summer, and the DST days are 23 and 25
 hours long. Analytics "today" / `7d` / `30d` / `90d` / `ytd` count back from the company's
-wall-clock date, not the server's. A reversed range (`start > end`) is **422** `"Start date must be
+current **production day** (its wall-clock date when no production calendar is configured), not the
+server's date. A reversed range (`start > end`) is **422** `"Start date must be
 on or before end date"`; `9999-12-31` as an end date is **422** `"End date is outside the supported
 range"`. Applies to `/exports/work-orders/export`, `/exports/inventory/transactions/export`,
-`/downtime/` + `/downtime/summary` + `/downtime/by-work-center`, `GET /job-costs/`,
-`/reports/employee-time`, `/reports/daily-output` (Central-day buckets ending today; each
-employee-time entry's `date` is its local clock-in day), `/reports/ship-otd` and every
-`/analytics/*` period. Filters on a `Date` column (PO `order_date`, `Quote.quote_date`, OEE
-`record_date`) compare dates directly and are unchanged.
+`GET /job-costs/`, `/reports/ship-otd` and every `/analytics/*` period. **Production-day filters**
+(P1.2): `/downtime/` + `/downtime/summary` + `/downtime/by-work-center`, `/reports/employee-time` and
+`/reports/daily-output` read the same dates as **production days** — from the company's configured
+production-day start, which is local midnight when no production calendar is configured (so they read
+exactly as above until one is) — see Production calendar & shifts. Filters on a `Date` column (PO
+`order_date`, `Quote.quote_date`, OEE `record_date`) compare dates directly and are unchanged.
 
 > **Changed 2026-11 (P1.1).** These filters used to compare the date against **UTC** midnight, so a
 > Central day ran from 6 PM (CST) / 7 PM (CDT) the evening before to 5:59 / 6:59 PM, and every

@@ -2655,6 +2655,28 @@ and writes an `EXPORT` audit row through `AuditService`:
 > row on every record/target create/update/delete (and the auto-calc upsert), so OEE mutations are on
 > the hash chain alongside the role gate. No role change — audit-trail coverage only.
 
+### Production calendar
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| View the calendar / resolve an instant (`GET /production-calendar`, `GET /production-calendar/resolve`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Edit the calendar (`PUT /production-calendar`) | ✓ | | | | | | |
+| Sync working calendars from the shifts (`POST /production-calendar/working-calendars/sync`) | ✓ | ✓ | ✓ | | | | |
+
+> **Edit is Admin only** (`CALENDAR_EDIT_ROLES` in `app/api/endpoints/production_calendar.py`): the
+> production-day start and the shifts decide how every OEE, wallboard, report, downtime and job-cost
+> figure is bucketed, so changing them is a configuration decision, not a floor one. Every save writes a
+> **required** `production_calendar` audit row (503, nothing saved, on failure). The **sync** carries the
+> roles of `PUT /scheduling/work-centers/{id}/calendar` (`WORKING_CALENDAR_SYNC_ROLES`), whose rows it
+> writes — one required `working_calendar` audit row per work center; its dry run (the default) writes
+> nothing. Reads are open to every authenticated role in the tenant (the top-bar shift badge reads
+> them). Tenant-scoped through `get_current_company_id`; a work center or shift of another company is
+> 404 / 422. Superuser / Platform Admin bypass role checks, as elsewhere. See `docs/API.md` →
+> Production calendar & shifts.
+>
+> **OEE shift references.** OEE writes (`OEE_WRITE_ROLES`) name a defined shift by `shift_id`; the
+> role gate is unchanged.
+
 ### Downtime
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |

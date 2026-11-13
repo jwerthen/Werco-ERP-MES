@@ -62,6 +62,8 @@ from app.schemas.wallboard import (
     WallboardToday,
     WallboardWorkCenter,
 )
+from app.services.production_calendar import current_production_day, production_day_window_utc
+from app.services.production_calendar_service import attribute_time_entries, load_production_calendar
 from app.services.work_order_state_service import operation_target_quantity, per_item_operation_totals
 
 logger = logging.getLogger(__name__)
@@ -382,8 +384,11 @@ def _central_today() -> date:
 def central_day_window_utc() -> tuple[datetime, datetime]:
     """(Central midnight, now) as NAIVE-UTC datetimes for DateTime columns.
 
-    The shop_floor dashboard "completed today" boundary pattern; public so
-    tests can seed rows that are guaranteed inside the live window.
+    The Central CALENDAR day so far. The today pulse and the dashboard's
+    ``completed_today`` read the PRODUCTION day instead
+    (:func:`production_today_window_utc`), which is this same window for a company
+    with no production calendar; kept public so tests can seed rows that are
+    guaranteed inside the live window of an unconfigured company.
     """
     central_now = datetime.now(CENTRAL_TIME_ZONE)
     central_day_start = central_now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -584,8 +589,27 @@ def _compute_ship(db: Session, company_id: int, central_today: date) -> Wallboar
     )
 
 
-def _compute_today(db: Session, company_id: int) -> WallboardToday:
-    """Today-so-far pulse over the Central-midnight → now window.
+def production_today_window_utc(db: Session, company_id: int, now: Optional[datetime] = None):
+    """``(production_day, start, end, calendar)`` for the current production day, ``end`` clipped to now.
+
+    The day starts at the company's production-day start (local midnight when no
+    production calendar is configured) -- so on a 05:00-start shop, 04:00 still belongs
+    to yesterday. Naive UTC, like the columns.
+    """
+    calendar = load_production_calendar(db, company_id)
+    instant = now or datetime.utcnow()
+    day = current_production_day(calendar, instant)
+    day_start, day_end = production_day_window_utc(day, calendar)
+    return day, day_start, min(day_end, instant), calendar
+
+
+def _compute_today(db: Session, company_id: int, now: Optional[datetime] = None) -> WallboardToday:
+    """Today-so-far pulse over the current PRODUCTION day → now.
+
+    The window is the production day (``production_calendar``): local midnight for an
+    unconfigured company, the configured day start otherwise. Time entries are attributed
+    like OEE (greatest shift overlap, ties to the outgoing shift), so an early 04:55
+    clock-in on a 05:00-start weld shop counts on today's 1st shift.
 
     Aggregate counts only. Pieces/hours/scrap apply the Lean provenance rule
     (BASELINE_EXCLUDED_SOURCES) and, together with ops_completed, the
@@ -594,8 +618,18 @@ def _compute_today(db: Session, company_id: int) -> WallboardToday:
     counted. operators_on_clock is the lone exception to provenance — an open
     entry is live capture by definition.
     """
-    day_start, day_end = central_day_window_utc()
+    today, day_start, day_end, calendar = production_today_window_utc(db, company_id, now)
     baseline = or_(TimeEntry.source.is_(None), TimeEntry.source.notin_(BASELINE_EXCLUDED_SOURCES))
+
+    def _attributed(query):
+        """Rows of a time-entry query attributed to today's production day (clock-ins up to now)."""
+        return [
+            row
+            for row, _day, _occ in attribute_time_entries(
+                query, calendar, today, today, clock_in_column=TimeEntry.clock_in, now=day_end, until=day_end
+            )
+        ]
+
     live_wo = or_(WorkOrder.id.is_(None), WorkOrder.is_deleted == False)  # noqa: E712
 
     ops_completed = (
@@ -611,19 +645,19 @@ def _compute_today(db: Session, company_id: int) -> WallboardToday:
         .count()
     )
 
-    pieces = (
-        db.query(func.coalesce(func.sum(TimeEntry.quantity_produced), 0.0))
-        .select_from(TimeEntry)
-        .outerjoin(WorkOrder, TimeEntry.work_order_id == WorkOrder.id)
-        .filter(
-            TimeEntry.company_id == company_id,
-            TimeEntry.entry_type.in_([TimeEntryType.RUN, TimeEntryType.REWORK]),
-            TimeEntry.clock_in >= day_start,
-            TimeEntry.clock_in <= day_end,
-            baseline,
-            live_wo,
+    pieces = sum(
+        float(row.quantity_produced or 0.0)
+        for row in _attributed(
+            db.query(TimeEntry.clock_in, TimeEntry.clock_out, TimeEntry.work_center_id, TimeEntry.quantity_produced)
+            .select_from(TimeEntry)
+            .outerjoin(WorkOrder, TimeEntry.work_order_id == WorkOrder.id)
+            .filter(
+                TimeEntry.company_id == company_id,
+                TimeEntry.entry_type.in_([TimeEntryType.RUN, TimeEntryType.REWORK]),
+                baseline,
+                live_wo,
+            )
         )
-        .scalar()
     )
 
     wos_completed = (
@@ -646,25 +680,23 @@ def _compute_today(db: Session, company_id: int) -> WallboardToday:
     )
 
     # Hours logged today: closed labor durations + elapsed time on still-open
-    # labor entries, for entries STARTED within the Central day (an overnight
-    # entry is attributed to its start day). BREAK/DOWNTIME are not labor.
+    # labor entries attributed to today's production day (greatest shift overlap,
+    # else the production day it started on). BREAK/DOWNTIME are not labor.
     # Provenance-excluded + WO-liveness-filtered like pieces/scrap: an Excel
     # backfill batch or a soft-deleted WO's labor must not inflate the TV.
-    labor_rows = (
-        db.query(TimeEntry.clock_in, TimeEntry.clock_out, TimeEntry.duration_hours)
+    labor_rows = _attributed(
+        db.query(TimeEntry.clock_in, TimeEntry.clock_out, TimeEntry.work_center_id, TimeEntry.duration_hours)
+        .select_from(TimeEntry)
         .outerjoin(WorkOrder, TimeEntry.work_order_id == WorkOrder.id)
         .filter(
             TimeEntry.company_id == company_id,
             TimeEntry.entry_type.in_(LABOR_ENTRY_TYPES),
-            TimeEntry.clock_in >= day_start,
-            TimeEntry.clock_in <= day_end,
             baseline,
             live_wo,
         )
-        .all()
     )
     hours = 0.0
-    for clock_in, clock_out, duration_hours in labor_rows:
+    for clock_in, clock_out, _work_center_id, duration_hours in labor_rows:
         if clock_out is not None:
             if duration_hours is not None:
                 hours += float(duration_hours)
@@ -684,18 +716,18 @@ def _compute_today(db: Session, company_id: int) -> WallboardToday:
         .count()
     )
 
-    scrap_events = (
-        db.query(TimeEntry)
-        .outerjoin(WorkOrder, TimeEntry.work_order_id == WorkOrder.id)
-        .filter(
-            TimeEntry.company_id == company_id,
-            TimeEntry.quantity_scrapped > 0,
-            TimeEntry.clock_in >= day_start,
-            TimeEntry.clock_in <= day_end,
-            baseline,
-            live_wo,
+    scrap_events = len(
+        _attributed(
+            db.query(TimeEntry.id, TimeEntry.clock_in, TimeEntry.clock_out, TimeEntry.work_center_id)
+            .select_from(TimeEntry)
+            .outerjoin(WorkOrder, TimeEntry.work_order_id == WorkOrder.id)
+            .filter(
+                TimeEntry.company_id == company_id,
+                TimeEntry.quantity_scrapped > 0,
+                baseline,
+                live_wo,
+            )
         )
-        .count()
     )
 
     return WallboardToday(

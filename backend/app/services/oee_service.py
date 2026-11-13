@@ -12,13 +12,23 @@ exact same math. The only additions over the extracted code are:
 * the ``uq_oee_company_wc_date_shift`` IntegrityError (migration 063) surfacing
   as :class:`OEERecordConflictError` so callers map it to a clean 409 instead
   of a 500.
+
+Day boundaries (migration 120, P1.2): a record's ``record_date`` is a PRODUCTION day
+(``services/production_calendar``), not the UTC calendar date. Time entries and
+downtime events are read for the production day padded by ``ENTRY_LOOKBACK`` and
+attributed in Python -- greatest shift overlap, ties to the outgoing shift, else the
+production day of the start -- so an early 04:55 clock-in counts on that day's 1st shift
+and a 01:30 weld entry on Wednesday counts on Tuesday's 2nd shift. With no production
+calendar configured the production day is the company-local calendar day. A shift-scoped
+record keeps only what is attributed to that shift; the OEE metric definition (staffed-
+time availability) is unchanged.
 """
 
 import logging
 from datetime import date
-from typing import Optional
+from typing import List, Optional
 
-from sqlalchemy import func
+from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
@@ -28,6 +38,12 @@ from app.models.time_entry import TimeEntry, TimeEntryType
 from app.models.work_center import WorkCenter
 from app.models.work_order import WorkOrderOperation
 from app.services.audit_service import AuditService
+from app.services.production_calendar import ProductionCalendar, ShiftDef
+from app.services.production_calendar_service import (
+    attribute_downtime_events,
+    attribute_time_entries,
+    load_production_calendar,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -93,52 +109,93 @@ def calculate_oee(
     }
 
 
-def work_center_has_activity(db: Session, company_id: int, work_center_id: int, record_date: date) -> bool:
-    """True when the WC has any closed clocked entry OR unplanned downtime that day.
+def _attributed_entries(
+    db: Session,
+    company_id: int,
+    work_center_id: int,
+    record_date: date,
+    cal: ProductionCalendar,
+    shift: Optional[ShiftDef],
+) -> List[TimeEntry]:
+    """The CLOSED time entries at the WC attributed to ``record_date`` (and to ``shift`` when set)."""
+    query = db.query(TimeEntry).filter(
+        TimeEntry.company_id == company_id,
+        TimeEntry.work_center_id == work_center_id,
+        TimeEntry.clock_out.isnot(None),
+    )
+    return [
+        row
+        for row, _day, occ in attribute_time_entries(
+            query, cal, record_date, record_date, clock_in_column=TimeEntry.clock_in
+        )
+        if shift is None or (occ is not None and occ.shift.id == shift.id)
+    ]
+
+
+def _attributed_downtime(
+    db: Session,
+    company_id: int,
+    work_center_id: int,
+    record_date: date,
+    cal: ProductionCalendar,
+    shift: Optional[ShiftDef],
+) -> List[DowntimeEvent]:
+    """The UNPLANNED downtime events at the WC attributed to ``record_date`` (and ``shift``)."""
+    query = db.query(DowntimeEvent).filter(
+        DowntimeEvent.company_id == company_id,
+        DowntimeEvent.work_center_id == work_center_id,
+        DowntimeEvent.planned_type == DowntimePlannedType.UNPLANNED,
+    )
+    return [
+        row
+        for row, _day, occ in attribute_downtime_events(
+            query, cal, record_date, record_date, start_column=DowntimeEvent.start_time
+        )
+        if shift is None or (occ is not None and occ.shift.id == shift.id)
+    ]
+
+
+def work_center_has_activity(
+    db: Session,
+    company_id: int,
+    work_center_id: int,
+    record_date: date,
+    calendar: Optional[ProductionCalendar] = None,
+) -> bool:
+    """True when the WC has any closed clocked entry OR unplanned downtime on that production day.
 
     Used by the nightly cron to skip idle work centers -- writing an all-zero
     OEERecord for every idle WC daily would be noise, and a window with no
     staffed time is genuinely uncomputable (OEE-4), not a measured zero.
     """
-    has_entry = (
-        db.query(TimeEntry.id)
-        .filter(
-            TimeEntry.company_id == company_id,
-            TimeEntry.work_center_id == work_center_id,
-            func.date(TimeEntry.clock_in) == record_date,
-            TimeEntry.clock_out.isnot(None),
-        )
-        .first()
-    )
-    if has_entry:
+    cal = calendar or load_production_calendar(db, company_id)
+    if _attributed_entries(db, company_id, work_center_id, record_date, cal, None):
         return True
-    has_downtime = (
-        db.query(DowntimeEvent.id)
-        .filter(
-            DowntimeEvent.company_id == company_id,
-            DowntimeEvent.work_center_id == work_center_id,
-            func.date(DowntimeEvent.start_time) == record_date,
-            DowntimeEvent.planned_type == DowntimePlannedType.UNPLANNED,
-        )
-        .first()
-    )
-    return has_downtime is not None
+    return bool(_attributed_downtime(db, company_id, work_center_id, record_date, cal, None))
 
 
 def find_existing_record(
-    db: Session, company_id: int, work_center_id: int, record_date: date, shift: Optional[str]
+    db: Session, company_id: int, work_center_id: int, record_date: date, shift: Optional[ShiftDef]
 ) -> Optional[OEERecord]:
-    """Tenant-scoped lookup of the (WC, date, shift) record this calc would target."""
-    return (
-        db.query(OEERecord)
-        .filter(
-            OEERecord.company_id == company_id,
-            OEERecord.work_center_id == work_center_id,
-            OEERecord.record_date == record_date,
-            OEERecord.shift == shift,
-        )
-        .first()
+    """Tenant-scoped lookup of the (WC, production day, shift) record this calc would target.
+
+    A shift-scoped calc targets the record carrying that ``shift_id`` -- or, failing that,
+    a legacy row whose label equals the shift's code (the unique key is on the label, so
+    that row IS the key; the calc adopts it and stamps ``shift_id``). A whole-day calc
+    targets the row with no ``shift_id`` and a NULL or blank label (COALESCE(shift, ''),
+    the unique key's own rule).
+    """
+    base = db.query(OEERecord).filter(
+        OEERecord.company_id == company_id,
+        OEERecord.work_center_id == work_center_id,
+        OEERecord.record_date == record_date,
     )
+    if shift is None:
+        return base.filter(OEERecord.shift_id.is_(None), or_(OEERecord.shift.is_(None), OEERecord.shift == "")).first()
+    by_id = base.filter(OEERecord.shift_id == shift.id).first()
+    if by_id is not None:
+        return by_id
+    return base.filter(OEERecord.shift_id.is_(None), OEERecord.shift == shift.code).first()
 
 
 def compute_oee_for_work_center(
@@ -146,13 +203,20 @@ def compute_oee_for_work_center(
     company_id: int,
     work_center: WorkCenter,
     record_date: date,
-    shift: Optional[str],
+    shift: Optional[ShiftDef] = None,
     *,
     calculation_source: CalculationSource,
     created_by_user_id: Optional[int],
     audit: AuditService,
+    calendar: Optional[ProductionCalendar] = None,
 ) -> OEERecord:
-    """Compute and persist a real OEERecord for a work center/date from existing data.
+    """Compute and persist a real OEERecord for a work center / PRODUCTION day from existing data.
+
+    ``record_date`` is a production day (see the module docstring). ``shift`` (a defined
+    shift, already validated for this WC by the caller) narrows the inputs to what is
+    attributed to that shift and stamps ``shift_id`` + ``shift`` = its code; ``None`` is
+    the whole-production-day record. ``calendar`` saves a reload when the caller (the
+    cron) already holds it.
 
     Computes from the day's clocked TimeEntries, the routing standard cycle time,
     and reported DowntimeEvents -- on the STAFFED-time convention (Batch 8 / rank
@@ -178,19 +242,12 @@ def compute_oee_for_work_center(
     ``work_center`` must already be resolved tenant-scoped by the caller.
     """
     work_center_id = work_center.id
+    cal = calendar or load_production_calendar(db, company_id)
 
-    # Gather the day's CLOSED clocked entries for this WC (tenant-scoped). Use clock_in/
-    # clock_out (OEE-1 fix: there is no start_time/end_time on TimeEntry).
-    time_entries = (
-        db.query(TimeEntry)
-        .filter(
-            TimeEntry.company_id == company_id,
-            TimeEntry.work_center_id == work_center_id,
-            func.date(TimeEntry.clock_in) == record_date,
-            TimeEntry.clock_out.isnot(None),
-        )
-        .all()
-    )
+    # The production day's CLOSED clocked entries for this WC (tenant-scoped), attributed
+    # in Python (greatest shift overlap). Use clock_in/clock_out (OEE-1 fix: there is no
+    # start_time/end_time on TimeEntry).
+    time_entries = _attributed_entries(db, company_id, work_center_id, record_date, cal, shift)
 
     def _entry_minutes(te: TimeEntry) -> float:
         # Prefer the stored duration_hours; fall back to the clock span.
@@ -217,51 +274,41 @@ def compute_oee_for_work_center(
     # so total pieces cycled = good + scrap. Quality = good / (good + scrap) (OEE-7).
     total_parts = good_count + scrap_count  # all pieces cycled (perf + quality denom)
 
-    # Reported machine downtime for this WC/day (OEE-7).
+    # Reported machine downtime for this WC / production day (OEE-7), same attribution.
     downtime_minutes = float(
-        db.query(func.coalesce(func.sum(DowntimeEvent.duration_minutes), 0.0))
-        .filter(
-            DowntimeEvent.company_id == company_id,
-            DowntimeEvent.work_center_id == work_center_id,
-            func.date(DowntimeEvent.start_time) == record_date,
-            DowntimeEvent.planned_type == DowntimePlannedType.UNPLANNED,
+        sum(
+            float(event.duration_minutes or 0.0)
+            for event in _attributed_downtime(db, company_id, work_center_id, record_date, cal, shift)
         )
-        .scalar()
-        or 0.0
     )
 
     # Productive run = clocked RUN+SETUP minus reported downtime.
     productive_run_minutes = max(0.0, run_minutes - downtime_minutes)
 
     # Ideal cycle DERIVED from routing run_time_per_piece (OEE-7), quantity-weighted
-    # over the production-bearing pieces (good + scrap) cycled at this WC today; every
-    # piece run consumes a standard cycle, so weight by (produced + scrapped).
-    # run_time_per_piece is stored in hours alongside run_time_hours.
-    ideal_run_hours = float(
-        db.query(
-            func.coalesce(
-                func.sum(
-                    (TimeEntry.quantity_produced + TimeEntry.quantity_scrapped) * WorkOrderOperation.run_time_per_piece
-                ),
-                0.0,
+    # over the production-bearing pieces (good + scrap) cycled at this WC that production
+    # day; every piece run consumes a standard cycle, so weight by (produced + scrapped).
+    # run_time_per_piece is stored in hours alongside run_time_hours. Same entries as the
+    # counts above (attributed, closed); the operation read is tenant-scoped -- this runs
+    # in the nightly cron across every tenant, so both sides stay pinned.
+    bearing = [te for te in time_entries if te.entry_type in PRODUCTION_BEARING_ENTRY_TYPES and te.operation_id]
+    run_time_per_piece = {}
+    if bearing:
+        run_time_per_piece = dict(
+            db.query(WorkOrderOperation.id, WorkOrderOperation.run_time_per_piece)
+            .filter(
+                WorkOrderOperation.company_id == company_id,
+                WorkOrderOperation.id.in_({te.operation_id for te in bearing}),
             )
+            .all()
         )
-        .select_from(TimeEntry)
-        .join(WorkOrderOperation, TimeEntry.operation_id == WorkOrderOperation.id)
-        .filter(
-            TimeEntry.company_id == company_id,
-            # Defense-in-depth: also scope the JOINED side. The FK makes a
-            # cross-tenant row unlikely, but this code now runs in the nightly
-            # cron across every tenant -- both sides of the join stay pinned.
-            WorkOrderOperation.company_id == company_id,
-            TimeEntry.work_center_id == work_center_id,
-            func.date(TimeEntry.clock_in) == record_date,
-            TimeEntry.clock_out.isnot(None),
-            TimeEntry.entry_type.in_(PRODUCTION_BEARING_ENTRY_TYPES),
-        )
-        .scalar()
-        or 0.0
-    )
+    ideal_run_hours = 0.0
+    for te in bearing:
+        per_piece = run_time_per_piece.get(te.operation_id)
+        # SQL's SUM skipped a NULL product; so does this.
+        if per_piece is None or te.quantity_produced is None or te.quantity_scrapped is None:
+            continue
+        ideal_run_hours += (float(te.quantity_produced) + float(te.quantity_scrapped)) * float(per_piece)
     # Per-piece ideal cycle in seconds for the stored OEERecord (0 when no standard/no
     # parts -> performance leg degrades to 0, not a misleading 60 s assumption).
     ideal_cycle_time_seconds = (ideal_run_hours * 3600.0 / total_parts) if total_parts > 0 else 0.0
@@ -291,6 +338,8 @@ def compute_oee_for_work_center(
 
     # Check for existing record
     existing = find_existing_record(db, company_id, work_center_id, record_date, shift)
+    shift_label = shift.code if shift is not None else None
+    shift_id = shift.id if shift is not None else None
 
     if existing:
         # Snapshot pre-mutation values for the audit diff (the live model is mutated below).
@@ -310,6 +359,10 @@ def compute_oee_for_work_center(
         existing.unplanned_stop_minutes = downtime
         existing.production_reject_count = defect_parts
         existing.calculation_source = calculation_source.value
+        if shift is not None:
+            # Adopting a legacy label-only row (or re-stamping our own) for this shift.
+            existing.shift_id = shift_id
+            existing.shift = shift_label
         for field, value in oee_calcs.items():
             setattr(existing, field, value)
         # Audit (tamper-evident) the recomputed overwrite BEFORE the terminal commit so it
@@ -330,7 +383,8 @@ def compute_oee_for_work_center(
         record = OEERecord(
             work_center_id=work_center_id,
             record_date=record_date,
-            shift=shift,
+            shift=shift_label,
+            shift_id=shift_id,
             calculation_source=calculation_source.value,
             planned_production_time_minutes=planned_time,
             actual_run_time_minutes=actual_run_minutes,
@@ -359,7 +413,8 @@ def compute_oee_for_work_center(
             # (the COALESCE key also makes NULL and '' shift the same record).
             db.rollback()
             raise OEERecordConflictError(
-                f"An OEE record already exists for work center {work_center_id} on {record_date} " f"(shift={shift!r})"
+                f"An OEE record already exists for work center {work_center_id} on {record_date} "
+                f"(shift={shift_label!r})"
             ) from exc
         audit.log_create(
             resource_type="oee_record",
@@ -373,7 +428,8 @@ def compute_oee_for_work_center(
         except IntegrityError as exc:
             db.rollback()
             raise OEERecordConflictError(
-                f"An OEE record already exists for work center {work_center_id} on {record_date} " f"(shift={shift!r})"
+                f"An OEE record already exists for work center {work_center_id} on {record_date} "
+                f"(shift={shift_label!r})"
             ) from exc
         db.refresh(record)
 

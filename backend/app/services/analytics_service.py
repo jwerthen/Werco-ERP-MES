@@ -4,11 +4,12 @@ Analytics Service - Core aggregation and calculation logic
 
 import logging
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import Date, and_, case, cast, func, or_
+from sqlalchemy import and_, case, func, or_
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -53,6 +54,12 @@ from app.services.labor_cost_service import (
     is_labor_cost_rollup_enabled,
     resolve_labor_rates,
     resolve_overhead_rate,
+)
+from app.services.production_calendar import ProductionCalendar
+from app.services.production_calendar_service import (
+    attribute_downtime_events,
+    attribute_time_entries,
+    load_production_calendar,
 )
 
 logger = logging.getLogger(__name__)
@@ -138,14 +145,17 @@ def get_date_range(
     custom_end: Optional[date] = None,
     *,
     zone: Optional[ZoneInfo] = None,
+    today: Optional[date] = None,
 ) -> Tuple[date, date]:
     """Convert a period string to an inclusive calendar-date range.
 
-    "Today" is the date on the company's wall clock (``zone``; America/Chicago when not
-    given), never the server's ``date.today()`` -- a UTC server flips to tomorrow at
-    6/7 PM Central. Routers pass ``company_zone(db, company_id)``.
+    "Today" is ``today`` when given -- routers pass the company's CURRENT PRODUCTION DAY
+    (``app.api.date_window.company_period``) -- else the date on the company's wall clock
+    (``zone``; America/Chicago when not given), never the server's ``date.today()``: a
+    UTC server flips to tomorrow at 6/7 PM Central.
     """
-    today = local_today(zone or CENTRAL_TIME_ZONE)
+    if today is None:
+        today = local_today(zone or CENTRAL_TIME_ZONE)
 
     if period == "custom" and custom_start and custom_end:
         return custom_start, custom_end
@@ -169,11 +179,61 @@ def get_prior_period(start: date, end: date) -> Tuple[date, date]:
     return prior_start, prior_end
 
 
+@dataclass(frozen=True)
+class _OEEEntry:
+    day: date
+    work_center_id: Optional[int]
+    entry_type: Any
+    hours: float
+    good: float
+    scrapped: float
+    ideal_hours: Optional[float]
+
+
+@dataclass(frozen=True)
+class _OEEDowntime:
+    day: date
+    work_center_id: Optional[int]
+    hours: float
+
+
+@dataclass(frozen=True)
+class _OEEInputs:
+    """Closed time entries and UNPLANNED downtime attributed to production days ``start..end``."""
+
+    start: date
+    end: date
+    entries_by_day: Dict[date, Tuple[_OEEEntry, ...]]
+    downtime_by_day: Dict[date, Tuple[_OEEDowntime, ...]]
+
+    def days(self, start: date, end: date):
+        day = max(start, self.start)
+        last = min(end, self.end)
+        while day <= last:
+            yield day
+            day += timedelta(days=1)
+
+
 class AnalyticsService:
-    def __init__(self, db: Session, company_id: int, zone: Optional[ZoneInfo] = None):
+    def __init__(
+        self,
+        db: Session,
+        company_id: int,
+        zone: Optional[ZoneInfo] = None,
+        calendar: Optional[ProductionCalendar] = None,
+    ):
         self.db = db
         self.company_id = company_id
         self._zone = zone
+        self._calendar = calendar
+        self._oee_cache: List[_OEEInputs] = []
+
+    @property
+    def calendar(self) -> ProductionCalendar:
+        """The company's production calendar: the OEE figures read PRODUCTION days."""
+        if self._calendar is None:
+            self._calendar = load_production_calendar(self.db, self.company_id)
+        return self._calendar
 
     @property
     def zone(self) -> ZoneInfo:
@@ -244,21 +304,114 @@ class AnalyticsService:
             sparkline=sparkline,
         )
 
+    # ---- OEE on PRODUCTION days (P1.2) --------------------------------------------------
+    #
+    # The OEE trio reads the same attributed inputs as the persisted ``OEERecord``
+    # (``services/oee_service``): CLOSED time entries and UNPLANNED downtime, each
+    # attributed to a production day by the production calendar (greatest shift overlap,
+    # ties to the outgoing shift, else the production day of the start), so
+    # /analytics/kpis, /analytics/oee and /oee agree for identical data. ``start``/``end``
+    # are production days (company-local calendar days when no calendar is configured).
+    # Inputs are fetched once per covering range and reused (``get_oee_details`` asks for
+    # every day and every work center of the range it already loaded).
+
+    def _oee_inputs(self, start: date, end: date) -> _OEEInputs:
+        for cached in self._oee_cache:
+            if cached.start <= start and end <= cached.end:
+                return cached
+        calendar = self.calendar
+        entry_query = self.db.query(TimeEntry).filter(
+            TimeEntry.company_id == self.company_id,
+            TimeEntry.clock_out.isnot(None),
+        )
+        # G5-A opt-in: when REQUIRE_APPROVED_LABOR_FOR_COST is ON, the staffed/run hours
+        # (and the pieces cycled in them) count ONLY supervisor-approved entries (uniform
+        # with the job-costing recompute + completion cost rollup, so the metrics agree on
+        # which labor is "counted"). Default OFF -> no predicate -> byte-identical OEE.
+        if is_approved_labor_required(self.company_id):
+            entry_query = entry_query.filter(TimeEntry.approved.isnot(None))
+        attributed = attribute_time_entries(entry_query, calendar, start, end, clock_in_column=TimeEntry.clock_in)
+        op_ids = {
+            row.operation_id
+            for row, _day, _occ in attributed
+            if row.operation_id is not None and row.entry_type in PRODUCTION_BEARING_ENTRY_TYPES
+        }
+        per_piece: Dict[int, Optional[float]] = {}
+        if op_ids:
+            per_piece = dict(
+                self.db.query(WorkOrderOperation.id, WorkOrderOperation.run_time_per_piece)
+                .filter(WorkOrderOperation.company_id == self.company_id, WorkOrderOperation.id.in_(op_ids))
+                .all()
+            )
+        entries = []
+        for row, day, _occ in attributed:
+            ideal: Optional[float] = None
+            if row.entry_type in PRODUCTION_BEARING_ENTRY_TYPES and row.operation_id is not None:
+                standard = per_piece.get(row.operation_id)
+                if standard is not None and row.quantity_produced is not None and row.quantity_scrapped is not None:
+                    # Every piece cycled -- good AND scrapped -- consumed a standard cycle (OEE-7).
+                    ideal = (float(row.quantity_produced) + float(row.quantity_scrapped)) * float(standard)
+            entries.append(
+                _OEEEntry(
+                    day=day,
+                    work_center_id=row.work_center_id,
+                    entry_type=row.entry_type,
+                    hours=float(row.duration_hours or 0.0),
+                    good=float(row.quantity_produced or 0.0),
+                    scrapped=float(row.quantity_scrapped or 0.0),
+                    ideal_hours=ideal,
+                )
+            )
+        downtime_query = self.db.query(DowntimeEvent).filter(
+            DowntimeEvent.company_id == self.company_id,
+            DowntimeEvent.planned_type == DowntimePlannedType.UNPLANNED,
+        )
+        downtime = [
+            _OEEDowntime(day=day, work_center_id=row.work_center_id, hours=float(row.duration_minutes or 0.0) / 60.0)
+            for row, day, _occ in attribute_downtime_events(
+                downtime_query, calendar, start, end, start_column=DowntimeEvent.start_time
+            )
+        ]
+        entries_by_day: Dict[date, List[_OEEEntry]] = defaultdict(list)
+        for entry in entries:
+            entries_by_day[entry.day].append(entry)
+        downtime_by_day: Dict[date, List[_OEEDowntime]] = defaultdict(list)
+        for event in downtime:
+            downtime_by_day[event.day].append(event)
+        inputs = _OEEInputs(
+            start=start,
+            end=end,
+            entries_by_day={day: tuple(rows) for day, rows in entries_by_day.items()},
+            downtime_by_day={day: tuple(rows) for day, rows in downtime_by_day.items()},
+        )
+        self._oee_cache.append(inputs)
+        return inputs
+
+    def _oee_entries(self, start: date, end: date, work_center_id: Optional[int]) -> List[_OEEEntry]:
+        inputs = self._oee_inputs(start, end)
+        return [
+            entry
+            for day in inputs.days(start, end)
+            for entry in inputs.entries_by_day.get(day, ())
+            if not work_center_id or entry.work_center_id == work_center_id
+        ]
+
     def _downtime_event_hours(self, start: date, end: date, work_center_id: Optional[int] = None) -> float:
-        """Logged machine-downtime hours for the WC(s) in the window (OEE-7).
+        """Logged machine-downtime hours for the WC(s) over production days ``start..end`` (OEE-7).
 
         Reads ``DowntimeEvent`` (which the old availability calc never consulted) so
         real reported downtime reduces availability on top of un-clocked idle time.
-        Tenant-scoped. Returns hours (the model stores ``duration_minutes``).
+        Tenant-scoped, UNPLANNED only, attributed like the persisted OEE record.
         """
-        query = self.db.query(func.coalesce(func.sum(DowntimeEvent.duration_minutes), 0.0)).filter(
-            DowntimeEvent.company_id == self.company_id,
-            *self._between(DowntimeEvent.start_time, start, end),
-            DowntimeEvent.planned_type == DowntimePlannedType.UNPLANNED,
+        inputs = self._oee_inputs(start, end)
+        return float(
+            sum(
+                event.hours
+                for day in inputs.days(start, end)
+                for event in inputs.downtime_by_day.get(day, ())
+                if not work_center_id or event.work_center_id == work_center_id
+            )
         )
-        if work_center_id:
-            query = query.filter(DowntimeEvent.work_center_id == work_center_id)
-        return float(query.scalar() or 0.0) / 60.0
 
     def _get_oee_value(self, start: date, end: date, work_center_id: Optional[int] = None) -> Optional[float]:
         """
@@ -272,77 +425,25 @@ class AnalyticsService:
         minus logged ``DowntimeEvent`` hours (OEE-7). Performance = ideal cycle (from
         ``run_time_per_piece``) × pieces ÷ productive run. Quality = good ÷
         (good+scrapped). Pieces/scrap are counted across the production-bearing entry
-        types uniformly (OEE-5).
+        types uniformly (OEE-5). ``start``/``end`` are PRODUCTION days (see above).
 
         Returns ``None`` ("n/a") when the WC has no staffed time in the window — that
         is genuinely uncomputable, not zero (do not let "no data" read as 0% OEE).
-
-        OPTIMIZATION: a single conditional-aggregation query (no per-row Python loop).
         """
-        # Half-open company-local window: [local midnight on start, next local midnight after end).
-        start_dt, end_dt = self._window(start, end)
-
-        # Single aggregation query: staffed hours (ALL clocked entries), productive
-        # run hours (RUN+SETUP), and production-bearing pieces/scrap in one pass.
-        time_entry_stats = self.db.query(
-            # Staffed/clocked hours: EVERY entry type (availability denominator, OEE-4)
-            func.coalesce(func.sum(TimeEntry.duration_hours), 0).label('staffed_hours'),
-            # Productive run hours: RUN + SETUP (availability numerator / perf denominator)
-            func.coalesce(
-                func.sum(
-                    case(
-                        (TimeEntry.entry_type.in_([TimeEntryType.RUN, TimeEntryType.SETUP]), TimeEntry.duration_hours),
-                        else_=0,
-                    )
-                ),
-                0,
-            ).label('run_hours'),
-            # Good pieces = quantity_produced (production-bearing entry types, OEE-5)
-            func.coalesce(
-                func.sum(
-                    case(
-                        (TimeEntry.entry_type.in_(PRODUCTION_BEARING_ENTRY_TYPES), TimeEntry.quantity_produced),
-                        else_=0,
-                    )
-                ),
-                0,
-            ).label('good_units'),
-            # Scrapped pieces (same entry-type set, OEE-5/OEE-7)
-            func.coalesce(
-                func.sum(
-                    case(
-                        (TimeEntry.entry_type.in_(PRODUCTION_BEARING_ENTRY_TYPES), TimeEntry.quantity_scrapped),
-                        else_=0,
-                    )
-                ),
-                0,
-            ).label('scrapped_units'),
-        ).filter(
-            TimeEntry.company_id == self.company_id,
-            TimeEntry.clock_in >= start_dt,
-            TimeEntry.clock_in < end_dt,
-            TimeEntry.clock_out.isnot(None),
+        entries = self._oee_entries(start, end, work_center_id)
+        # Staffed/clocked hours: EVERY entry type (availability denominator, OEE-4).
+        staffed_hours = sum(entry.hours for entry in entries)
+        # Productive run hours: RUN + SETUP (availability numerator / perf denominator).
+        run_hours = sum(
+            entry.hours for entry in entries if entry.entry_type in (TimeEntryType.RUN, TimeEntryType.SETUP)
         )
-
-        # G5-A opt-in: when REQUIRE_APPROVED_LABOR_FOR_COST is ON, the staffed/run hours
-        # that feed this OEE/labor leg count ONLY supervisor-approved entries (uniform
-        # with the job-costing recompute + completion cost rollup, so the metrics agree
-        # on which labor is "counted"). Default OFF -> no predicate -> byte-identical OEE.
-        if is_approved_labor_required(self.company_id):
-            time_entry_stats = time_entry_stats.filter(TimeEntry.approved.isnot(None))
-
-        if work_center_id:
-            time_entry_stats = time_entry_stats.filter(TimeEntry.work_center_id == work_center_id)
-
-        stats = time_entry_stats.first()
-
-        staffed_hours = float(stats.staffed_hours or 0)
-        run_hours = float(stats.run_hours or 0)
         # quantity_produced is the GOOD count (it increments quantity_complete on
         # clock-out), so total pieces cycled = good + scrap (OEE-7 — do not subtract
         # scrap from a good-only count, which would understate quality).
-        good_units = int(stats.good_units or 0)
-        scrapped_units = int(stats.scrapped_units or 0)
+        good_units = int(sum(entry.good for entry in entries if entry.entry_type in PRODUCTION_BEARING_ENTRY_TYPES))
+        scrapped_units = int(
+            sum(entry.scrapped for entry in entries if entry.entry_type in PRODUCTION_BEARING_ENTRY_TYPES)
+        )
         total_units = good_units + scrapped_units
 
         # No staffed time at this WC in the window -> genuinely uncomputable (OEE-4/OEE-6
@@ -390,11 +491,11 @@ class AnalyticsService:
         return int(result or 0)
 
     def _get_ideal_production_hours(self, start: date, end: date, work_center_id: Optional[int] = None) -> float:
-        """Ideal (standard) run hours for the pieces CYCLED in the window (OEE-7).
+        """Ideal (standard) run hours for the pieces CYCLED over production days ``start..end`` (OEE-7).
 
         ideal hours = Σ((quantity_produced + quantity_scrapped) × WorkOrderOperation.run_time_per_piece),
         i.e. the routing standard cycle time per piece — NOT a hardcoded 60 s — over
-        the same production-bearing entry types the pieces are counted from (OEE-5),
+        the same closed, production-bearing entries the pieces are counted from (OEE-5),
         so the performance numerator and the piece count agree. ``run_time_per_piece``
         is stored in hours (alongside ``setup_time_hours``/``run_time_hours``), so the
         product is already in hours.
@@ -402,166 +503,28 @@ class AnalyticsService:
         Standard OEE Performance counts EVERY piece run through the cycle — including
         scrap — because cycle time was spent producing the scrapped pieces too (scrap
         is discounted separately in the Quality leg). Weighting by
-        ``quantity_produced + quantity_scrapped`` here matches ``auto_calculate_oee``
-        in ``app/api/endpoints/oee.py`` so the /analytics/kpis OEE headline and the
-        persisted ``OEERecord`` agree for identical data.
+        ``quantity_produced + quantity_scrapped`` here matches
+        ``services/oee_service.compute_oee_for_work_center`` so the /analytics/kpis OEE
+        headline and the persisted ``OEERecord`` agree for identical data.
         """
-        query = (
-            self.db.query(
-                func.sum(
-                    (TimeEntry.quantity_produced + TimeEntry.quantity_scrapped) * WorkOrderOperation.run_time_per_piece
-                )
-            )
-            # Explicit left side: the (produced + scrapped) sum spans both mappers, so the
-            # join FROM is ambiguous to autoresolution — anchor it on TimeEntry (mirrors
-            # the same join in ``auto_calculate_oee``).
-            .select_from(TimeEntry)
-            .join(WorkOrderOperation, TimeEntry.operation_id == WorkOrderOperation.id)
-            .filter(
-                TimeEntry.company_id == self.company_id,
-                *self._between(TimeEntry.clock_in, start, end),
-                TimeEntry.entry_type.in_(PRODUCTION_BEARING_ENTRY_TYPES),
-            )
+        return float(
+            sum(entry.ideal_hours for entry in self._oee_entries(start, end, work_center_id) if entry.ideal_hours)
         )
-
-        if work_center_id:
-            query = query.filter(TimeEntry.work_center_id == work_center_id)
-
-        result = query.scalar()
-        return float(result or 0)
 
     def _get_oee_sparkline(self, start: date, end: date, work_center_id: Optional[int] = None) -> List[float]:
         """
-        Get daily OEE values for sparkline on the SAME staffed-time convention as
-        ``_get_oee_value`` (OEE-4): availability = productive run ÷ staffed (clocked)
-        time, performance = ideal time ÷ productive run, quality = good ÷ total — NOT
-        the old operating-÷-plant-capacity proxy. A day with no staffed time renders
-        as ``0.0`` (sparklines are a ``List[float]`` glyph, not a headline figure; the
-        headline value already carries the n/a via ``KPIValue.value``).
-
-        OPTIMIZATION: two GROUP-BY-date aggregations (entry stats + routing ideal
-        hours) instead of N per-day queries.
+        Daily OEE values for the sparkline -- one per PRODUCTION day, on the SAME
+        staffed-time convention and the SAME attributed inputs as ``_get_oee_value``
+        (it is that value, per day). A day with no staffed time renders as ``0.0``
+        (sparklines are a ``List[float]`` glyph, not a headline figure; the headline
+        value already carries the n/a via ``KPIValue.value``).
         """
-        # Half-open company-local window: [local midnight on start, next local midnight after end).
-        start_dt, end_dt = self._window(start, end)
-
-        # Daily entry stats: staffed (all entries), productive run (RUN+SETUP),
-        # production-bearing pieces/scrap.
-        daily_stats_query = (
-            self.db.query(
-                cast(TimeEntry.clock_in, Date).label('entry_date'),
-                func.coalesce(func.sum(TimeEntry.duration_hours), 0).label('staffed_hours'),
-                func.coalesce(
-                    func.sum(
-                        case(
-                            (
-                                TimeEntry.entry_type.in_([TimeEntryType.RUN, TimeEntryType.SETUP]),
-                                TimeEntry.duration_hours,
-                            ),
-                            else_=0,
-                        )
-                    ),
-                    0,
-                ).label('run_hours'),
-                func.coalesce(
-                    func.sum(
-                        case(
-                            (TimeEntry.entry_type.in_(PRODUCTION_BEARING_ENTRY_TYPES), TimeEntry.quantity_produced),
-                            else_=0,
-                        )
-                    ),
-                    0,
-                ).label('good_units'),
-                func.coalesce(
-                    func.sum(
-                        case(
-                            (TimeEntry.entry_type.in_(PRODUCTION_BEARING_ENTRY_TYPES), TimeEntry.quantity_scrapped),
-                            else_=0,
-                        )
-                    ),
-                    0,
-                ).label('scrapped_units'),
-            )
-            .filter(
-                TimeEntry.company_id == self.company_id,
-                TimeEntry.clock_in >= start_dt,
-                TimeEntry.clock_in < end_dt,
-                TimeEntry.clock_out.isnot(None),
-            )
-            .group_by(cast(TimeEntry.clock_in, Date))
-            .order_by(cast(TimeEntry.clock_in, Date))
-        )
-
-        if work_center_id:
-            daily_stats_query = daily_stats_query.filter(TimeEntry.work_center_id == work_center_id)
-
-        daily_stats = daily_stats_query.all()
-        stats_by_date = {row.entry_date: row for row in daily_stats}
-
-        # Daily ideal (routing-standard) hours = Σ(pieces × run_time_per_piece).
-        ideal_query = (
-            self.db.query(
-                cast(TimeEntry.clock_in, Date).label('entry_date'),
-                func.coalesce(func.sum(TimeEntry.quantity_produced * WorkOrderOperation.run_time_per_piece), 0).label(
-                    'ideal_hours'
-                ),
-            )
-            .join(WorkOrderOperation, TimeEntry.operation_id == WorkOrderOperation.id)
-            .filter(
-                TimeEntry.company_id == self.company_id,
-                TimeEntry.clock_in >= start_dt,
-                TimeEntry.clock_in < end_dt,
-                TimeEntry.clock_out.isnot(None),
-                TimeEntry.entry_type.in_(PRODUCTION_BEARING_ENTRY_TYPES),
-            )
-            .group_by(cast(TimeEntry.clock_in, Date))
-        )
-        if work_center_id:
-            ideal_query = ideal_query.filter(TimeEntry.work_center_id == work_center_id)
-        ideal_by_date = {row.entry_date: float(row.ideal_hours or 0) for row in ideal_query.all()}
-
-        # Daily reported machine downtime (UNPLANNED DowntimeEvents), in hours.
-        downtime_query = self.db.query(
-            cast(DowntimeEvent.start_time, Date).label('event_date'),
-            func.coalesce(func.sum(DowntimeEvent.duration_minutes), 0).label('downtime_minutes'),
-        ).filter(
-            DowntimeEvent.company_id == self.company_id,
-            DowntimeEvent.start_time >= start_dt,
-            DowntimeEvent.start_time < end_dt,
-            DowntimeEvent.planned_type == DowntimePlannedType.UNPLANNED,
-        )
-        if work_center_id:
-            downtime_query = downtime_query.filter(DowntimeEvent.work_center_id == work_center_id)
-        downtime_by_date = {
-            row.event_date: float(row.downtime_minutes or 0) / 60.0
-            for row in downtime_query.group_by(cast(DowntimeEvent.start_time, Date)).all()
-        }
-
-        # Calculate OEE for each day on the staffed-time convention.
+        self._oee_inputs(start, end)  # one fetch for the whole range
         sparkline = []
         current = start
         while current <= end:
-            row = stats_by_date.get(current)
-            staffed = float(row.staffed_hours or 0) if row else 0.0
-            if row is not None and staffed > 0:
-                run_hours = float(row.run_hours or 0)
-                good_units = int(row.good_units or 0)
-                scrapped = int(row.scrapped_units or 0)
-                total_units = good_units + scrapped  # good = produced; total = good + scrap
-                productive_run = max(0.0, run_hours - downtime_by_date.get(current, 0.0))
-                ideal_hours = ideal_by_date.get(current, 0.0)
-
-                availability = max(0.0, min(productive_run / staffed, 1.0))
-                performance = ideal_hours / productive_run if productive_run > 0 else 0.0
-                performance = max(0.0, min(performance, 1.0))
-                quality = good_units / total_units if total_units > 0 else 1.0
-                quality = max(0.0, min(quality, 1.0))
-
-                daily_oee = availability * performance * quality * 100
-                sparkline.append(round(min(daily_oee, 100.0), 1))
-            else:
-                sparkline.append(0.0)
-
+            daily_oee = self._get_oee_value(current, current, work_center_id)
+            sparkline.append(round(min(daily_oee, 100.0), 1) if daily_oee is not None else 0.0)
             current += timedelta(days=1)
 
         # Limit to last 7 points for sparkline

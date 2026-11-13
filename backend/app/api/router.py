@@ -55,6 +55,7 @@ from app.api.endpoints import (
     po_upload,
     print_reports,
     process_sheets,
+    production_calendar,
     purchasing,
     qms_standards,
     quality,
@@ -161,6 +162,7 @@ api_router.include_router(import_templates.router, prefix="/import", tags=["Impo
 api_router.include_router(import_batches.router, prefix="/import/batches", tags=["Import Batches"])
 api_router.include_router(print_reports.router, prefix="/print", tags=["Print Reports"])
 api_router.include_router(oee.router, prefix="/oee", tags=["OEE Tracking"])
+api_router.include_router(production_calendar.router, prefix="/production-calendar", tags=["Production Calendar"])
 api_router.include_router(operational_events.router, prefix="/operational-events", tags=["Operational Events"])
 api_router.include_router(downtime.router, prefix="/downtime", tags=["Downtime Tracking"])
 api_router.include_router(job_costing.router, prefix="/job-costs", tags=["Job Costing"])

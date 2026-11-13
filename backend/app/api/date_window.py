@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 
 from app.core.time_utils import local_date_range_to_utc
 from app.services.company_time import company_zone
+from app.services.production_calendar import ProductionCalendar, production_days_window_utc
 
 # The text every ``date`` filter parameter description in a query-string contract uses,
 # so the MCP tool schemas generated from them all say the same thing.
@@ -74,13 +75,46 @@ def company_period(
 ) -> Tuple[date, date, ZoneInfo]:
     """Resolve an analytics ``period`` (today / 7d / 30d / 90d / ytd / custom) on the company clock.
 
-    Returns ``(start, end, zone)``: an inclusive local-date range whose "today" is the
-    company's wall-clock date, plus the zone the service should read it in. A custom
-    range that is reversed or out of range is a 422.
+    Returns ``(start, end, zone)``: an inclusive date range whose "today" is the
+    company's CURRENT PRODUCTION DAY (``production_calendar``; the company-local calendar
+    date when no production calendar is configured, so 01:30 on a 05:00-start shop is
+    still yesterday's production day), plus the zone the service should read it in. A
+    custom range that is reversed or out of range is a 422.
     """
     from app.services.analytics_service import get_date_range
+    from app.services.production_calendar import current_production_day
+    from app.services.production_calendar_service import load_production_calendar
 
-    zone = company_zone(db, company_id)
-    start, end = get_date_range(period, start_date, end_date, zone=zone)
+    calendar = load_production_calendar(db, company_id)
+    zone = calendar.tz
+    start, end = get_date_range(period, start_date, end_date, zone=zone, today=current_production_day(calendar))
     date_window(start, end, zone)
     return start, end, zone
+
+
+# The production-day twins. A production day starts at the company's configured
+# production-day start (Werco: 05:00) on the local clock and belongs to the date it
+# starts on; with no production calendar configured it is the company-local calendar day,
+# so these read exactly like the calendar-day helpers above.
+PRODUCTION_DAY_FROM_DESCRIPTION = (
+    "Inclusive start: a PRODUCTION day (the company's production calendar: the day starts at its "
+    "configured production-day start on the local clock, local midnight when none is configured)"
+)
+PRODUCTION_DAY_TO_DESCRIPTION = (
+    "Inclusive end: a PRODUCTION day, through the start of the next production day (local midnight "
+    "when no production calendar is configured)"
+)
+
+
+def production_date_window(
+    cal: ProductionCalendar, start: Optional[date], end: Optional[date]
+) -> Tuple[Optional[datetime], Optional[datetime]]:
+    """Naive-UTC ``[start_utc, end_utc)`` for an inclusive PRODUCTION-day range; 422 when unusable.
+
+    Same refusals and texts as :func:`company_date_window`; filter with a strict ``<`` on
+    the end bound.
+    """
+    try:
+        return production_days_window_utc(start, end, cal)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc

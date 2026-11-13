@@ -329,6 +329,17 @@ statement, writes no row, and adds no environment variable, secret, cron or work
   under, and the migration will not pick which company's record to change.
   See [API.md → Customer Complaints & RMA](API.md#customer-complaints--rma).
 
+**Production calendar (P1.2).** Apply additive **120_production_calendar** (after
+**118_dashboard_layouts** here; re-chained after 119 at release) through the normal API boot
+migration path: four empty tenant tables plus the nullable `oee_records.shift_id` FK + index, no
+backfill, no seeded calendar, RLS/revokes as for every new table. Deploy-time behavior change: every
+tenant's day boundaries for OEE, the OEE cron, reports, downtime filters, job-cost labor dates and
+analytics move from UTC dates to company-local (production) days. Post-deploy steps (owner): save
+Werco's calendar (`docs/API.md` → Production calendar & shifts, worked example), run the
+working-calendar sync dry run, review the per-work-center diff, commit. Verify with
+`GET /production-calendar/resolve?at=2026-11-18T07:30:00Z&work_center_id=<WLD-01>` → production day
+2026-11-17, shift `W2`. No environment variable, secret or new worker job.
+
 **Saved dashboard layouts.** Apply additive **118_dashboard_layouts** after
 **117_operation_short_declared** through the normal API boot migration path. It creates the empty
 per-company, per-user `dashboard_layouts` table and seeds no rows, so every role keeps the default

@@ -8,7 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Query as OrmQuery
 from sqlalchemy.orm import Session, joinedload, with_loader_criteria
 
-from app.api.date_window import LOCAL_DATE_FROM_DESCRIPTION, LOCAL_DATE_TO_DESCRIPTION, company_date_window
+from app.api.date_window import PRODUCTION_DAY_FROM_DESCRIPTION, PRODUCTION_DAY_TO_DESCRIPTION, production_date_window
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
 from app.db.tenant_filter import tenant_filter, tenant_query
@@ -19,6 +19,7 @@ from app.models.work_order import WorkOrder
 from app.schemas.base import UTCModel
 from app.services.audit_service import AuditService
 from app.services.operational_event_service import OperationalEventService
+from app.services.production_calendar_service import load_production_calendar
 
 router = APIRouter()
 
@@ -314,13 +315,17 @@ def get_active_downtime(
 def _filter_start_time_window(
     query: OrmQuery, db: Session, company_id: int, date_from: Optional[date], date_to: Optional[date]
 ) -> OrmQuery:
-    """Keep events that STARTED within the inclusive company-local date range.
+    """Keep events that STARTED within the inclusive PRODUCTION-day range.
 
-    ``DowntimeEvent.start_time`` is naive UTC; the range runs from local midnight on
-    ``date_from`` to (exclusive) local midnight after ``date_to``. 422 for a reversed or
-    out-of-range pair (``app.api.date_window``).
+    ``DowntimeEvent.start_time`` is naive UTC; the range runs from the start of
+    production day ``date_from`` (the company's configured production-day start, e.g.
+    05:00, or local midnight when none is configured) to the (exclusive) start of the
+    production day after ``date_to`` -- so an event at 01:30 belongs to the previous
+    day, like the shift it happened on. 422 for a reversed or out-of-range pair.
     """
-    start_utc, end_utc = company_date_window(db, company_id, date_from, date_to)
+    if date_from is None and date_to is None:
+        return query
+    start_utc, end_utc = production_date_window(load_production_calendar(db, company_id), date_from, date_to)
     if start_utc is not None:
         query = query.filter(DowntimeEvent.start_time >= start_utc)
     if end_utc is not None:
@@ -328,8 +333,8 @@ def _filter_start_time_window(
     return query
 
 
-_DATE_FROM_DESCRIPTION = f"Events that started on or after. {LOCAL_DATE_FROM_DESCRIPTION}"
-_DATE_TO_DESCRIPTION = f"Events that started on or before. {LOCAL_DATE_TO_DESCRIPTION}"
+_DATE_FROM_DESCRIPTION = f"Events that started on or after. {PRODUCTION_DAY_FROM_DESCRIPTION}"
+_DATE_TO_DESCRIPTION = f"Events that started on or before. {PRODUCTION_DAY_TO_DESCRIPTION}"
 
 
 @router.get("/summary")

@@ -220,6 +220,22 @@ rollback step; it does not undo documents, receipts, production or shipments
 already created by completed actions. Intake-linked Documents cannot be deleted
 through the application because the saved source and receipt must remain valid.
 
+### Production calendar (migration 120)
+
+Apply additive **120_production_calendar** through the normal API boot migration path (it follows
+**118_dashboard_layouts** in this branch; the release re-chains it after 119). It creates four empty
+tenant tables — `production_calendar_settings`, `shift_patterns`, `shift_pattern_work_centers`,
+`shift_definitions` — and adds the nullable `oee_records.shift_id` FK + index with **no backfill**
+(legacy free-text OEE `shift` labels stay). No calendar is seeded: until an Admin saves one, every
+company's production day is its company-local calendar day. PostgreSQL RLS and table/sequence revokes
+from `PUBLIC`, `anon` and `authenticated` match model bootstrap. No environment variable, secret or
+worker job is added; the 02:30 OEE cron keeps its schedule and now targets each company's previous
+production day. **Behavior change on deploy, for every tenant:** OEE, reports, downtime filters,
+job-cost labor dates and analytics move from UTC-date day boundaries to company-local (production)
+days. After deploy, an Admin applies Werco's calendar (`docs/API.md` → Production calendar & shifts →
+worked example), then runs `POST /production-calendar/working-calendars/sync` as a dry run, reviews it,
+and commits — the commit changes scheduling capacity for every covered work center.
+
 ### Saved dashboard layouts
 
 Apply additive **118_dashboard_layouts** after **117_operation_short_declared** through

@@ -26,7 +26,6 @@ Rules:
 from __future__ import annotations
 
 import logging
-from datetime import date
 from typing import Optional
 
 from sqlalchemy.orm import Session, joinedload
@@ -36,6 +35,8 @@ from app.models.time_entry import TimeEntry
 from app.models.work_order import WorkOrder, WorkOrderOperation
 from app.services.audit_service import AuditService
 from app.services.labor_cost_service import is_approved_labor_required, resolve_labor_rates
+from app.services.production_calendar import current_production_day, entry_attribution
+from app.services.production_calendar_service import load_production_calendar
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +136,10 @@ def recompute_from_time_entries(
         return None
 
     rates = resolve_labor_rates(db, company_id, [_wc_for(te) for te in time_entries])
+    # ``entry_date`` is the PRODUCTION day the labor is attributed to (P1.2): a 01:30
+    # Wednesday weld entry is Tuesday's 2nd-shift labor. Only rows rebuilt here change;
+    # existing manual entries are untouched.
+    calendar = load_production_calendar(db, company_id)
 
     # Remove existing auto-generated labor entries (tenant-scoped) before rebuilding.
     existing_auto = (
@@ -165,7 +170,11 @@ def recompute_from_time_entries(
             work_order_operation_id=te.operation_id,
             source=CostEntrySource.TIME_ENTRY,
             reference=f"TE-{te.id}",
-            entry_date=te.clock_in.date() if te.clock_in else date.today(),
+            entry_date=(
+                entry_attribution(te.clock_in, te.clock_out, calendar, _wc_for(te))[0]
+                if te.clock_in
+                else current_production_day(calendar)
+            ),
             created_by=user_id,
         )
         entry.company_id = company_id
