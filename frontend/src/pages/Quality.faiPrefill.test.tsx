@@ -30,6 +30,8 @@ jest.mock('../services/api', () => ({
     getParts: jest.fn(),
     getFAI: jest.fn(),
     prefillFAIFromSteps: jest.fn(),
+    // The FAI detail's inspector picker.
+    getAssignmentPeople: jest.fn().mockResolvedValue([]),
     createNCR: jest.fn(),
     createCAR: jest.fn(),
     createFAI: jest.fn(),

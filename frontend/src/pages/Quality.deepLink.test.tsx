@@ -37,6 +37,8 @@ jest.mock('../services/api', () => ({
     getQualitySummary: jest.fn(),
     getParts: jest.fn(),
     getFAI: jest.fn(),
+    // The FAI detail's inspector picker.
+    getAssignmentPeople: jest.fn().mockResolvedValue([]),
   },
 }));
 

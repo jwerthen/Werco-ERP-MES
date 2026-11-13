@@ -1,8 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import api from '../../services/api';
 import { ComboBox } from '../ui/ComboBox';
 
-type Kind = 'part' | 'vendor' | 'workCenter' | 'workOrder' | 'user';
+type Kind = 'part' | 'vendor' | 'workCenter' | 'workOrder' | 'user' | 'customer';
 interface Props {
   kind: Kind;
   value: string | number;
@@ -13,6 +13,13 @@ interface Props {
   disabled?: boolean;
   optional?: boolean;
   valueMode?: 'id' | 'label';
+  /** Vendors only: also offer inactive (not deleted) vendors, labelled as such. */
+  includeInactive?: boolean;
+  /**
+   * The record's current selection, kept selectable even when the lookup no longer
+   * returns it (a retired part, a removed vendor) so the field never blanks out.
+   */
+  pinned?: { value: string; label: string } | null;
 }
 /** Tenant-scoped readable lookups. Never asks the operator to know a database ID. */
 export default function EntityPicker({
@@ -23,6 +30,8 @@ export default function EntityPicker({
   disabled,
   optional,
   valueMode = 'id',
+  includeInactive = false,
+  pinned = null,
   ...aria
 }: Props) {
   const [options, setOptions] = useState<{ value: string; label: string; hint?: string }[]>([]);
@@ -37,12 +46,14 @@ export default function EntityPicker({
       kind === 'part'
         ? api.getParts({ active_only: true, item_group: 'all' })
         : kind === 'vendor'
-          ? api.getVendors({ active_only: true })
-          : kind === 'workCenter'
-            ? api.getWorkCenters()
-            : kind === 'workOrder'
-              ? api.getWorkOrders()
-              : api.getAssignmentPeople();
+          ? api.getVendors({ active_only: !includeInactive })
+          : kind === 'customer'
+            ? api.getCustomerNames()
+            : kind === 'workCenter'
+              ? api.getWorkCenters()
+              : kind === 'workOrder'
+                ? api.getWorkOrders()
+                : api.getAssignmentPeople();
     request
       .then(rows => {
         if (active)
@@ -62,7 +73,7 @@ export default function EntityPicker({
                       : kind === 'user'
                         ? row.full_name || `${row.first_name || ''} ${row.last_name || ''}`.trim() || row.email
                         : `${row.code || ''} ${row.name}`.trim(),
-              hint: row.email || row.customer_name,
+              hint: kind === 'vendor' && row.is_active === false ? 'Inactive' : row.email || row.customer_name,
             }))
           );
       })
@@ -75,12 +86,21 @@ export default function EntityPicker({
     return () => {
       active = false;
     };
-  }, [kind, attempt, valueMode]);
+  }, [kind, attempt, valueMode, includeInactive]);
+  const pinnedValue = pinned?.value ?? '';
+  const pinnedLabel = pinned?.label ?? '';
+  const choices = useMemo(
+    () =>
+      pinnedValue && !options.some(option => option.value === pinnedValue)
+        ? [{ value: pinnedValue, label: pinnedLabel || pinnedValue }, ...options]
+        : options,
+    [options, pinnedValue, pinnedLabel]
+  );
   return (
     <div className="space-y-1">
       <ComboBox
         id={id}
-        options={options}
+        options={choices}
         value={value ? String(value) : ''}
         onChange={onChange}
         disabled={disabled || loading || error}

@@ -11,6 +11,12 @@ jest.mock('../../services/api', () => ({
     getCAR: jest.fn(),
     updateNCR: jest.fn(),
     updateCAR: jest.fn(),
+    approveCARQuality: jest.fn(),
+    fetchCARPdf: jest.fn(),
+    // The CAR form's part / customer / vendor pickers.
+    getParts: jest.fn(),
+    getCustomerNames: jest.fn(),
+    getVendors: jest.fn(),
   },
 }));
 jest.mock('../../hooks/usePermissions', () => ({
@@ -43,6 +49,9 @@ const view = () => (
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mocked.getParts.mockResolvedValue([]);
+  mocked.getCustomerNames.mockResolvedValue([]);
+  mocked.getVendors.mockResolvedValue([]);
 });
 
 test('a closed record keeps only its status editable and reopens with a status-only change', async () => {

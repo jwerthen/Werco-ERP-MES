@@ -31,6 +31,9 @@ jest.mock('../services/api', () => ({
     getFAIs: jest.fn(),
     getQualitySummary: jest.fn(),
     getParts: jest.fn(),
+    // The New CAR modal's customer / vendor pickers (CAR form fields, migration 122).
+    getCustomerNames: jest.fn(),
+    getVendors: jest.fn(),
     createNCR: jest.fn(),
     createCAR: jest.fn(),
     createFAI: jest.fn(),
@@ -62,6 +65,8 @@ beforeEach(() => {
   mockedApi.getFAIs.mockResolvedValue([] as any);
   mockedApi.getQualitySummary.mockResolvedValue({ open_ncrs: 0, open_cars: 0, pending_fais: 0 } as any);
   mockedApi.getParts.mockResolvedValue([{ id: 5, part_number: 'PN-5', name: 'Bracket' }] as any);
+  mockedApi.getCustomerNames.mockResolvedValue([]);
+  mockedApi.getVendors.mockResolvedValue([]);
 });
 
 describe('Quality — New NCR unsaved-changes guard', () => {
@@ -172,8 +177,8 @@ describe('Quality — CAR and FAI modals share the guard wiring', () => {
     const heading = await screen.findByRole('heading', { name: /New First Article Inspection/i });
     expect(heading).toBeInTheDocument();
 
-    // Dirty the form via the Part select (the FAI form is select/checkbox only).
-    fireEvent.change(screen.getByLabelText(/^Part/), { target: { value: '5' } });
+    // Dirty the form via a typed field (the part is a type-ahead picker now).
+    fireEvent.change(screen.getByLabelText(/^Serial number/), { target: { value: 'SN-0001' } });
     fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }));
 
     expect(confirmSpy).toHaveBeenCalledTimes(1);
