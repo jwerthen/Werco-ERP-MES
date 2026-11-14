@@ -11,13 +11,14 @@ and expects only the middle two, at the CST and CDT boundaries and both DST days
 ``tests/test_date_filter_combine_guard.py`` keeps the old pattern out of ``app/``.
 """
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import List
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy.orm import Session
 
-from app.core.time_utils import CENTRAL_TIME_ZONE, local_date_range_to_utc, local_today
+from app.core.time_utils import CENTRAL_TIME_ZONE, local_date_range_to_utc, local_today, to_local_date
 from app.models.company import Company
 from app.models.downtime import DowntimeCategory, DowntimeEvent, DowntimePlannedType
 from app.models.job_costing import JobCost
@@ -30,7 +31,7 @@ from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
 from app.services.adoption_metrics_service import get_adoption_metrics
 from app.services.analytics_service import AnalyticsService, get_date_range
 from app.services.company_time import company_today, company_zone
-from app.services.flow_metrics_service import get_flow_metrics
+from app.services.flow_metrics_service import get_flow_metrics, get_wip_aging
 from app.services.quality_yield_service import get_fpy_rty
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
@@ -423,3 +424,197 @@ def test_company_zone_reads_the_company_row_and_falls_back_to_central(db_session
     assert company_zone(db_session, 987654) == CENTRAL_TIME_ZONE
     assert company_zone(db_session, None) == CENTRAL_TIME_ZONE
     assert company_today(db_session, 1) == local_today(CENTRAL_TIME_ZONE)
+
+
+# ---------------------------------------------------------------------------
+# Review fixes (2026-11-13): buckets in the zone of the window, calendar-date lateness
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("day,start,end", BOUNDARY_DAYS)
+def test_production_trends_points_are_central_days(db_session, operator_user, part, work_center, day, start, end):
+    """A point is the local date of its row -- never a UTC date outside the requested range."""
+    wo = _work_order(db_session, part, "WO-TRENDS-TZ")
+    for stamp in _stamps(start, end):
+        db_session.add(
+            TimeEntry(
+                user_id=operator_user.id,
+                work_order_id=wo.id,
+                work_center_id=work_center.id,
+                entry_type=TimeEntryType.RUN,
+                clock_in=stamp,
+                clock_out=stamp + timedelta(minutes=1),
+                duration_hours=1,
+                quantity_produced=10,
+                company_id=1,
+            )
+        )
+        # The simplified workflow: a completed operation with no RUN entry.
+        db_session.add(
+            WorkOrderOperation(
+                work_order_id=wo.id,
+                work_center_id=work_center.id,
+                sequence=10,
+                name="Trend op",
+                status=OperationStatus.COMPLETE,
+                quantity_complete=3,
+                actual_setup_hours=0.25,
+                actual_run_hours=0.75,
+                actual_end=stamp,
+                company_id=1,
+            )
+        )
+    db_session.commit()
+
+    trends = AnalyticsService(db_session, 1).get_production_trends(day, day)
+
+    assert [(p.date, p.units_produced, p.total_hours) for p in trends.time_series] == [(day, 26, 4.0)]
+
+
+def test_production_trends_second_shift_stays_on_its_day(db_session, operator_user, part, work_center):
+    """09:00 and 20:00 CST on Jan 15 (the second is 02:00Z Jan 16): one point, Jan 15."""
+    wo = _work_order(db_session, part, "WO-TRENDS-2ND")
+    for stamp in (datetime(2026, 1, 15, 15), datetime(2026, 1, 16, 2)):
+        db_session.add(
+            TimeEntry(
+                user_id=operator_user.id,
+                work_order_id=wo.id,
+                work_center_id=work_center.id,
+                entry_type=TimeEntryType.RUN,
+                clock_in=stamp,
+                clock_out=stamp + timedelta(hours=1),
+                duration_hours=1,
+                quantity_produced=5,
+                company_id=1,
+            )
+        )
+    db_session.commit()
+    service = AnalyticsService(db_session, 1)
+
+    plain = service.get_production_trends(date(2026, 1, 15), date(2026, 1, 15))
+    grouped = service.get_production_trends(date(2026, 1, 15), date(2026, 1, 15), group_by="work_center")
+
+    assert [(p.date, p.units_produced) for p in plain.time_series] == [(date(2026, 1, 15), 10)]
+    assert [(p.date, p.group_key, p.units_produced) for p in grouped.time_series] == [
+        (date(2026, 1, 15), str(work_center.id), 10)
+    ]
+
+
+def test_adoption_weeks_bucket_by_the_central_date(db_session, operator_user, part, work_center):
+    """Sunday 2026-01-18 20:00 CST is 02:00Z Monday: it belongs to the week of Monday Jan 12."""
+    sunday_evening = datetime(2026, 1, 19, 2)
+    wo = _work_order(db_session, part, "WO-ADOPTION-TZ")
+    db_session.add(
+        WorkOrderOperation(
+            work_order_id=wo.id,
+            work_center_id=work_center.id,
+            sequence=10,
+            name="Adoption op",
+            status=OperationStatus.COMPLETE,
+            actual_end=sunday_evening,
+            company_id=1,
+        )
+    )
+    db_session.add(
+        TimeEntry(
+            user_id=operator_user.id,
+            work_center_id=work_center.id,
+            entry_type=TimeEntryType.RUN,
+            clock_in=sunday_evening,
+            clock_out=sunday_evening + timedelta(minutes=30),
+            duration_hours=0.5,
+            company_id=1,
+        )
+    )
+    db_session.add(
+        OperationalEvent(
+            company_id=1,
+            event_type="operation_completed",
+            source_module="shop_floor",
+            event_payload={"source": "kiosk"},
+            occurred_at=sunday_evening,
+        )
+    )
+    db_session.commit()
+
+    result = get_adoption_metrics(db_session, 1, date(2026, 1, 12), date(2026, 1, 25))
+
+    assert [(week.week_start, week.operation_completions, week.time_entries) for week in result.weekly] == [
+        (date(2026, 1, 12), 1, 1)
+    ]
+
+
+def test_otd_compares_the_central_completion_date_to_the_due_date(db_session, part):
+    """Finished 19:30 CDT on its due date (00:30Z the next day): on time."""
+    _work_order(
+        db_session,
+        part,
+        "WO-OTD-EVENING",
+        status=WorkOrderStatus.COMPLETE,
+        due_date=date(2026, 7, 15),
+        actual_end=datetime(2026, 7, 16, 0, 30),
+    )
+    _work_order(
+        db_session,
+        part,
+        "WO-OTD-LATE",
+        status=WorkOrderStatus.COMPLETE,
+        due_date=date(2026, 7, 14),
+        actual_end=datetime(2026, 7, 16, 0, 45),
+    )
+    db_session.commit()
+
+    assert AnalyticsService(db_session, 1)._get_otd_value(date(2026, 7, 15), date(2026, 7, 15)) == 50.0
+
+
+def test_production_summary_on_time_uses_the_central_date(client, auth_headers, part, db_session):
+    """03:00Z is 21:00 / 22:00 Central the evening BEFORE: due that Central date, it is on time."""
+    finished = (datetime.utcnow() - timedelta(days=2)).replace(hour=3, minute=0, second=0, microsecond=0)
+    central_date = to_local_date(finished, CENTRAL_TIME_ZONE)
+    assert central_date == finished.date() - timedelta(days=1)
+    _work_order(
+        db_session,
+        part,
+        "WO-SUMMARY-OTD",
+        status=WorkOrderStatus.COMPLETE,
+        due_date=central_date,
+        actual_end=finished,
+    )
+    db_session.commit()
+
+    body = client.get("/api/v1/reports/production-summary", headers=auth_headers).json()
+
+    assert body["on_time_delivery_count"] == 1
+    assert body["on_time_delivery_pct"] == 100
+
+
+def test_due_today_filter_uses_the_company_date(client, auth_headers, part, work_center, db_session):
+    wo = _work_order(db_session, part, "WO-DUE-TODAY", due_date=date(2026, 1, 15))
+    db_session.add(
+        WorkOrderOperation(
+            work_order_id=wo.id,
+            work_center_id=work_center.id,
+            sequence=10,
+            name="Due op",
+            status=OperationStatus.READY,
+            company_id=1,
+        )
+    )
+    db_session.commit()
+
+    with patch("app.api.endpoints.shop_floor.company_today", return_value=date(2026, 1, 15)) as today:
+        body = client.get("/api/v1/shop-floor/operations", params={"due_today": True}, headers=auth_headers).json()
+
+    today.assert_called()
+    assert [row["work_order_number"] for row in body["operations"]] == ["WO-DUE-TODAY"]
+
+
+def test_wip_aging_days_to_due_counts_from_the_company_date(db_session, part):
+    _work_order(db_session, part, "WO-WIP-DUE", status=WorkOrderStatus.RELEASED, due_date=date(2026, 1, 20))
+    db_session.commit()
+
+    with patch("app.services.flow_metrics_service.local_today", return_value=date(2026, 1, 15)):
+        aging = get_wip_aging(db_session, 1)
+
+    [row] = [row for row in aging.items if row.work_order_number == "WO-WIP-DUE"]
+    assert row.days_to_due == 5

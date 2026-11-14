@@ -97,6 +97,7 @@ from app.services import (
     process_sheet_service,
 )
 from app.services.audit_service import AuditService, AuditWriteError
+from app.services.company_time import company_today
 from app.services.completion_cost_service import (
     apply_completion_cost_rollup,
     rollup_labor_hours_for_closed_entries,
@@ -151,7 +152,7 @@ from app.services.operation_action_gates import (
 from app.services.operation_hold_view import HoldBlockerView, HoldContext
 from app.services.operational_event_service import OperationalEventService
 from app.services.operator_qualification_service import evaluate_and_record_operator_qualification
-from app.services.production_calendar import current_production_day, production_day_window_utc
+from app.services.production_calendar import ProductionCalendar, current_production_day, production_day_window_utc
 from app.services.production_calendar_service import load_production_calendar
 from app.services.production_receipt_service import find_production_replay
 from app.services.production_reduction_service import (
@@ -3292,7 +3293,7 @@ def _dashboard_state_fingerprint(
     company_id: int,
     connected_user_ids: set[int],
     connected_since_by_id: dict[int, Optional[str]],
-    production_calendar=None,
+    production_calendar: Optional[ProductionCalendar] = None,
 ) -> str:
     """Cheap state fingerprint for the dashboard ETag (PERF-2).
 
@@ -3984,7 +3985,9 @@ def get_all_operations(
         )
 
     if due_today:
-        query = query.filter(WorkOrder.due_date == date.today())
+        # Due today on the company's calendar date, not the server's (a UTC container's
+        # date.today() turns over at 6 PM CST / 7 PM CDT).
+        query = query.filter(WorkOrder.due_date == company_today(db, company_id))
 
     # Canonical dispatch order (owner decision: the manager-dictated run order is
     # the order operators see EVERYWHERE work is listed). Across work centers:

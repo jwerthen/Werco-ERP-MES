@@ -63,8 +63,8 @@ def get_kpi_dashboard(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get all KPIs for the executive dashboard."""
-    start, end, zone = company_period(db, company_id, period, start_date, end_date)
-    service = AnalyticsService(db, company_id, zone=zone)
+    start, end, calendar = company_period(db, company_id, period, start_date, end_date)
+    service = AnalyticsService(db, company_id, zone=calendar.tz, calendar=calendar)
     return service.get_kpi_dashboard(start, end, work_center_id)
 
 
@@ -83,8 +83,8 @@ def get_oee_details(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get detailed OEE breakdown with time series."""
-    start, end, zone = company_period(db, company_id, period, start_date, end_date)
-    service = AnalyticsService(db, company_id, zone=zone)
+    start, end, calendar = company_period(db, company_id, period, start_date, end_date)
+    service = AnalyticsService(db, company_id, zone=calendar.tz, calendar=calendar)
     return service.get_oee_details(start, end, work_center_id, granularity)
 
 
@@ -103,8 +103,8 @@ def get_production_trends(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get production trend data for charts."""
-    start, end, zone = company_period(db, company_id, period, start_date, end_date)
-    service = AnalyticsService(db, company_id, zone=zone)
+    start, end, calendar = company_period(db, company_id, period, start_date, end_date)
+    service = AnalyticsService(db, company_id, zone=calendar.tz, calendar=calendar)
     return service.get_production_trends(start, end, group_by, granularity)
 
 
@@ -121,7 +121,7 @@ def get_flow_metrics_endpoint(
     company_id: int = Depends(get_current_company_id),
 ):
     """Measured flow: lead times, queue times, Little's Law throughput, PCE."""
-    start, end, zone = company_period(db, company_id, period, start_date, end_date)
+    start, end, calendar = company_period(db, company_id, period, start_date, end_date)
     return get_flow_metrics(db, company_id, start, end)
 
 
@@ -152,7 +152,7 @@ def get_fpy_endpoint(
 
     RTY is omitted when work_center_id is set (it is a full-route metric).
     """
-    start, end, zone = company_period(db, company_id, period, start_date, end_date)
+    start, end, calendar = company_period(db, company_id, period, start_date, end_date)
     return get_fpy_rty(db, company_id, start, end, work_center_id=work_center_id, part_id=part_id)
 
 
@@ -170,7 +170,7 @@ def get_scrap_pareto_endpoint(
     company_id: int = Depends(get_current_company_id),
 ):
     """Scrap quantity/cost Pareto by reason code (uncoded = 'unspecified')."""
-    start, end, zone = company_period(db, company_id, period, start_date, end_date)
+    start, end, calendar = company_period(db, company_id, period, start_date, end_date)
     return get_scrap_pareto(db, company_id, start, end, work_center_id=work_center_id, part_id=part_id)
 
 
@@ -186,7 +186,7 @@ def get_adoption_endpoint(
     """Digital adoption (completion channel, clock-in coverage, backfill rate,
     weekly trend) + hidden-factory metrics (rework share, maintenance mix,
     MTBF/MTTR per work center)."""
-    start, end, zone = company_period(db, company_id, period, start_date, end_date)
+    start, end, calendar = company_period(db, company_id, period, start_date, end_date)
     return get_adoption_metrics(db, company_id, start, end)
 
 
@@ -204,8 +204,8 @@ def get_cost_analysis(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get cost analysis for completed jobs."""
-    start, end, zone = company_period(db, company_id, period, start_date, end_date)
-    service = AnalyticsService(db, company_id, zone=zone)
+    start, end, calendar = company_period(db, company_id, period, start_date, end_date)
+    service = AnalyticsService(db, company_id, zone=calendar.tz, calendar=calendar)
     return service.get_cost_analysis(start, end, work_order_id)
 
 
@@ -225,8 +225,8 @@ def get_quality_metrics(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get quality metrics and Pareto data."""
-    start, end, zone = company_period(db, company_id, period, start_date, end_date)
-    service = AnalyticsService(db, company_id, zone=zone)
+    start, end, calendar = company_period(db, company_id, period, start_date, end_date)
+    service = AnalyticsService(db, company_id, zone=calendar.tz, calendar=calendar)
     return service.get_quality_metrics(start, end, metric_type)
 
 
@@ -244,8 +244,8 @@ def get_inventory_analytics(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get inventory turnover and analytics."""
-    start, end, zone = company_period(db, company_id, period, start_date, end_date)
-    service = AnalyticsService(db, company_id, zone=zone)
+    start, end, calendar = company_period(db, company_id, period, start_date, end_date)
+    service = AnalyticsService(db, company_id, zone=calendar.tz, calendar=calendar)
     return service.get_inventory_analytics(start, end, category)
 
 

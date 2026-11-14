@@ -190,16 +190,46 @@ def _local_wall(ts: datetime, tz: ZoneInfo) -> datetime:
 def production_day(ts: datetime, cal: ProductionCalendar, work_center_id: Optional[int] = None) -> date:
     """The production day an instant belongs to (naive ``ts`` is read as UTC).
 
+    Defined by the SAME boundaries the SQL windows use: the day ``d`` with
+    ``production_day_start_utc(d) <= ts < production_day_start_utc(d + 1)``. The wall-clock
+    shortcut (local wall time minus the day start) is the first guess and is exact except
+    for the hour a DST transition makes a day start skipped or repeated (a start between
+    01:00 and 02:59 in a US zone): there the ``fold=0`` boundary decides, so an instant is
+    never attributed to a day whose window does not contain it.
+
     ``work_center_id`` is accepted for the brief's ``production_day(ts, work_center)``
     signature and reserved: the day start is company-level today.
     """
     del work_center_id  # reserved; the day start is company-wide
-    return (_local_wall(ts, cal.tz) - timedelta(minutes=cal.day_start_minute)).date()
+    instant = _naive_utc(ts)
+    day = (_local_wall(instant, cal.tz) - timedelta(minutes=cal.day_start_minute)).date()
+    # At most one step either way (a DST shift is an hour); the loops are bounded anyway.
+    for _ in range(2):
+        if instant < production_day_start_utc(day, cal):
+            day -= timedelta(days=1)
+        elif instant >= production_day_start_utc(day + timedelta(days=1), cal):
+            day += timedelta(days=1)
+        else:
+            break
+    return day
 
 
 def production_day_start_utc(day: date, cal: ProductionCalendar) -> datetime:
     """Naive UTC instant at which production day ``day`` begins."""
-    return _wall_to_utc(day, cal.day_start_minute, cal.tz)
+    return _day_start_utc(day, cal.day_start_minute, cal.tz)
+
+
+@lru_cache(maxsize=4096)
+def _day_start_utc(day: date, minute: int, tz: ZoneInfo) -> datetime:
+    return _wall_to_utc(day, minute, tz)
+
+
+def lookback_from(start_utc: datetime) -> datetime:
+    """``start_utc - ENTRY_LOOKBACK``, clamped at ``datetime.min`` instead of overflowing."""
+    try:
+        return start_utc - ENTRY_LOOKBACK
+    except OverflowError:
+        return datetime.min
 
 
 def production_day_window_utc(

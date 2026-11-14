@@ -54,6 +54,17 @@ CALENDAR_AUDIT_FAILED_DETAIL = (
 SYNC_AUDIT_FAILED_DETAIL = (
     "The working calendars could not be synced because an audit record failed; nothing was changed. Retry."
 )
+CALENDAR_CONFLICT_DETAIL = (
+    "The production calendar could not be saved because a record it changes was changed at the same time "
+    "(for example, an OEE record started using a shift this save removes); nothing was saved. Reload and retry."
+)
+
+
+def _is_first_save_race(exc: IntegrityError) -> bool:
+    """True only for the one-calendar-per-company unique key (Postgres names it, SQLite names the column)."""
+    orig = getattr(exc, "orig", None)
+    haystack = str(orig) if orig is not None else str(exc)
+    return "uq_production_calendar_company" in haystack or "production_calendar_settings.company_id" in haystack
 
 
 @router.get("", response_model=ProductionCalendarResponse)
@@ -97,9 +108,13 @@ def save_production_calendar_document(
             response = save_production_calendar(db, company_id, current_user.id, payload, audit)
             db.commit()
     except IntegrityError as exc:
-        # Two first saves raced past the version check; the unique company key refused one.
         db.rollback()
-        raise HTTPException(409, STALE_VERSION_DETAIL) from exc
+        if _is_first_save_race(exc):
+            # Two first saves raced past the version check; the unique company key refused one.
+            raise HTTPException(409, STALE_VERSION_DETAIL) from exc
+        # Anything else is a concurrent write to a row the save touches (an OEE record
+        # that started using a shift this save removes): not a calendar version change.
+        raise HTTPException(409, CALENDAR_CONFLICT_DETAIL) from exc
     except Exception:
         db.rollback()
         raise

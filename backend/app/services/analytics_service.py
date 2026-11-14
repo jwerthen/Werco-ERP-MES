@@ -13,7 +13,7 @@ from sqlalchemy import and_, case, func, or_
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.sql.elements import ColumnElement
 
-from app.core.time_utils import CENTRAL_TIME_ZONE, local_today, local_window
+from app.core.time_utils import CENTRAL_TIME_ZONE, local_today, local_window, to_local_date
 from app.db.ledger_filter import work_order_ledger_filter
 from app.models.downtime import DowntimeEvent, DowntimePlannedType
 from app.models.inventory import InventoryItem, InventoryTransaction, TransactionType
@@ -593,7 +593,12 @@ class AnalyticsService:
         # On-time only when a real actual_end exists AND is on/before the due date.
         # A COMPLETE WO with a null actual_end has no verifiable completion date and is
         # counted as NOT on time.
-        on_time = sum(1 for wo in completed if wo.actual_end is not None and wo.actual_end.date() <= wo.due_date)
+        # actual_end is naive UTC and due_date a calendar date: compare on the company's date,
+        # or a job finished in the Central evening of its due date reads as a day late.
+        zone = self.zone
+        on_time = sum(
+            1 for wo in completed if wo.actual_end is not None and to_local_date(wo.actual_end, zone) <= wo.due_date
+        )
         return (on_time / len(completed)) * 100
 
     def _get_otd_sparkline(self, start: date, end: date) -> List[float]:
@@ -839,7 +844,7 @@ class AnalyticsService:
         NEITHER must_ship_by nor due_date -- they are unmeasurable and poison the
         denominator until someone enters a promise.
         """
-        today = date.today()
+        today = local_today(self.zone)  # the company's calendar date, not the server's
         shipped_in_window = self._ship_otd_candidates(start, end)
 
         promise = func.coalesce(WorkOrder.must_ship_by, WorkOrder.due_date)
@@ -1360,37 +1365,39 @@ class AnalyticsService:
         group_by: Optional[str] = None,  # work_center, part, customer
         granularity: DateGranularity = DateGranularity.DAY,
     ) -> ProductionTrendsResponse:
-        """Get production trend data."""
+        """Get production trend data, one point per company-local calendar day.
+
+        A RUN time entry counts on the local date of its clock-in, a completed operation
+        with no RUN entry (the simplified workflow) on the local date of its ``actual_end``
+        -- the same zone as the window, so no point falls outside ``start..end``. Rows are
+        bucketed here rather than by ``func.date(...)`` (a UTC date) in SQL.
+        """
         # Combine time entries and simplified operations without double-counting
-        time_entries_query = self.db.query(
-            func.date(TimeEntry.clock_in).label('date'),
-            func.sum(TimeEntry.quantity_produced).label('units_produced'),
-            func.sum(TimeEntry.quantity_scrapped).label('units_scrapped'),
-            func.sum(TimeEntry.duration_hours).label('total_hours'),
-        ).filter(
-            TimeEntry.company_id == self.company_id,
-            *self._between(TimeEntry.clock_in, start_date, end_date),
-            TimeEntry.entry_type == TimeEntryType.RUN,
+        time_entry_rows = (
+            self.db.query(
+                TimeEntry.clock_in,
+                TimeEntry.work_center_id,
+                TimeEntry.quantity_produced,
+                TimeEntry.quantity_scrapped,
+                TimeEntry.duration_hours,
+            )
+            .filter(
+                TimeEntry.company_id == self.company_id,
+                *self._between(TimeEntry.clock_in, start_date, end_date),
+                TimeEntry.entry_type == TimeEntryType.RUN,
+            )
+            .all()
         )
 
-        if group_by == "work_center":
-            time_entries_query = time_entries_query.add_columns(TimeEntry.work_center_id.label('group_key')).group_by(
-                func.date(TimeEntry.clock_in), TimeEntry.work_center_id
-            )
-        else:
-            time_entries_query = time_entries_query.group_by(func.date(TimeEntry.clock_in))
-
-        time_entry_results = time_entries_query.order_by(func.date(TimeEntry.clock_in)).all()
-
         # Only include operations that have no time entries (simplified workflow)
-        ops_query = (
+        op_rows = (
             self.db.query(
-                func.date(WorkOrderOperation.actual_end).label('date'),
-                func.sum(WorkOrderOperation.quantity_complete).label('units_produced'),
-                func.sum(WorkOrderOperation.quantity_scrapped).label('units_scrapped'),
-                func.sum((WorkOrderOperation.actual_setup_hours + WorkOrderOperation.actual_run_hours)).label(
-                    'total_hours'
-                ),
+                WorkOrderOperation.actual_end,
+                WorkOrderOperation.work_center_id,
+                WorkOrderOperation.quantity_complete,
+                WorkOrderOperation.quantity_scrapped,
+                WorkOrderOperation.actual_setup_hours,
+                WorkOrderOperation.actual_run_hours,
             )
             .outerjoin(
                 TimeEntry,
@@ -1403,33 +1410,34 @@ class AnalyticsService:
                 WorkOrderOperation.status == OperationStatus.COMPLETE,
                 TimeEntry.id.is_(None),
             )
+            .all()
         )
 
-        if group_by == "work_center":
-            ops_query = ops_query.add_columns(WorkOrderOperation.work_center_id.label('group_key')).group_by(
-                func.date(WorkOrderOperation.actual_end), WorkOrderOperation.work_center_id
-            )
-        else:
-            ops_query = ops_query.group_by(func.date(WorkOrderOperation.actual_end))
-
-        ops_results = ops_query.order_by(func.date(WorkOrderOperation.actual_end)).all()
-
-        # Merge results by date + optional group
+        # Merge results by local date + optional group. The group key keeps its historical
+        # string form (``str(work_center_id)``, "None" for an entry without one).
         combined: Dict[Tuple[date, Optional[str]], Dict[str, float]] = defaultdict(
             lambda: {"units_produced": 0.0, "units_scrapped": 0.0, "total_hours": 0.0}
         )
+        zone = self.zone
 
-        for row in time_entry_results:
-            key = (row.date, str(row.group_key) if hasattr(row, 'group_key') else None)
-            combined[key]["units_produced"] += float(row.units_produced or 0)
-            combined[key]["units_scrapped"] += float(row.units_scrapped or 0)
-            combined[key]["total_hours"] += float(row.total_hours or 0)
+        def _key(at: datetime, work_center_id: Optional[int]) -> Tuple[date, Optional[str]]:
+            local_day = to_local_date(at, zone)
+            assert local_day is not None
+            return local_day, (str(work_center_id) if group_by == "work_center" else None)
 
-        for row in ops_results:
-            key = (row.date, str(row.group_key) if hasattr(row, 'group_key') else None)
-            combined[key]["units_produced"] += float(row.units_produced or 0)
-            combined[key]["units_scrapped"] += float(row.units_scrapped or 0)
-            combined[key]["total_hours"] += float(row.total_hours or 0)
+        for clock_in, work_center_id, produced, scrapped, hours in time_entry_rows:
+            bucket = combined[_key(clock_in, work_center_id)]
+            bucket["units_produced"] += float(produced or 0)
+            bucket["units_scrapped"] += float(scrapped or 0)
+            bucket["total_hours"] += float(hours or 0)
+
+        for actual_end, work_center_id, produced, scrapped, setup_hours, run_hours in op_rows:
+            bucket = combined[_key(actual_end, work_center_id)]
+            bucket["units_produced"] += float(produced or 0)
+            bucket["units_scrapped"] += float(scrapped or 0)
+            # SQL's (setup + run) was NULL when either was, and SUM skipped it; so does this.
+            if setup_hours is not None and run_hours is not None:
+                bucket["total_hours"] += float(setup_hours) + float(run_hours)
 
         results = [
             {

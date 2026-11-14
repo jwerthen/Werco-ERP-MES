@@ -26,7 +26,7 @@ from typing import Dict, List, Optional, Tuple
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload
 
-from app.core.time_utils import local_date_range_to_utc
+from app.core.time_utils import local_date_range_to_utc, local_today
 from app.models.operational_event import OperationalEvent
 from app.models.shipping import Shipment, ShipmentStatus
 from app.models.time_entry import BASELINE_EXCLUDED_SOURCES, TimeEntry, TimeEntryType
@@ -384,7 +384,7 @@ def get_flow_metrics(db: Session, company_id: int, start: date, end: date) -> Fl
 def get_wip_aging(db: Session, company_id: int) -> WIPAgingResponse:
     """Open-WO aging list for the WIP table (tenant-scoped, current snapshot)."""
     now = datetime.utcnow()
-    today = date.today()
+    today = local_today(company_zone(db, company_id))  # days-to-due counts calendar dates in the company zone
 
     open_wos = (
         db.query(WorkOrder)

@@ -7,6 +7,7 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
+from app.api.date_window import production_date_window
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
 from app.models.oee import CalculationSource, OEERecord, OEETarget
@@ -394,6 +395,15 @@ def create_oee_record(
     return _record_to_response(record, shift_names_by_id(db, company_id, [record.shift_id]))
 
 
+def _echoes_legacy_label(record: OEERecord, update_data: dict) -> bool:
+    """True when an update re-sends the record's own legacy label (no ``shift_id``) unchanged."""
+    if "shift" not in update_data or update_data.get("shift_id") is not None:
+        return False
+    if record.shift_id is not None or not record.shift:
+        return False
+    return (update_data.get("shift") or "").strip() == record.shift.strip()
+
+
 @router.put("/records/{record_id}", response_model=OEERecordResponse)
 def update_oee_record(
     record_id: int,
@@ -418,6 +428,12 @@ def update_oee_record(
     old_values = {c.key: getattr(record, c.key) for c in record.__table__.columns}
 
     update_data = record_in.model_dump(exclude_unset=True)
+    if _echoes_legacy_label(record, update_data):
+        # A read-modify-write client sending the record back: the pre-120 free-text label
+        # (``Day``, ``1st``) is not a new shift selection, so it is left as it is rather
+        # than refused as an unknown shift.
+        update_data.pop("shift", None)
+        update_data.pop("shift_id", None)
     if "shift" in update_data or "shift_id" in update_data:
         # Same rules as create; the record's own (possibly retired) shift may be re-sent.
         definition = resolve_shift_for_write(
@@ -540,6 +556,8 @@ def auto_calculate_oee(
     calendar = load_production_calendar(db, company_id)
     if record_date is None:
         record_date = current_production_day(calendar)
+    # A day at the ends of the date range has no window to read: 422, not a 500.
+    production_date_window(calendar, record_date, record_date)
     definition = resolve_shift_for_write(db, company_id, wc.id, shift_id=shift_id, shift_label=shift)
 
     try:

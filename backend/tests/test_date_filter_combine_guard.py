@@ -205,6 +205,118 @@ def test_finder_reports_the_enclosing_qualname():
     assert find_naive_combines(source) == [("A.m", 3)]
 
 
+# --------------------------------------------------------------------------------------
+# The bucketing twin: a SQL date taken from a naive-UTC timestamp column
+# --------------------------------------------------------------------------------------
+#
+# ``func.date(Model.created_at)`` / ``cast(Model.created_at, Date)`` is the UTC date of the
+# instant, so a row bucketed by it lands on the next day after 6 PM CST / 7 PM CDT -- and
+# a company-local window then returns a point dated AFTER its own end
+# (``/analytics/production-trends`` did exactly that until 2026-11-13). Fetch the
+# timestamp and bucket it in Python with ``app.core.time_utils.to_local_date`` (or by
+# production day). ``KNOWN_UTC_DATE_READS`` names the pre-existing reads of this shape that
+# are outside P1's scope -- each a real defect with its follow-up, stale-checked so a fix
+# must delete its entry. A new one must not be added.
+
+KNOWN_UTC_DATE_READS: Dict[Tuple[str, str], Tuple[int, str]] = {
+    ("app/services/material_price_history_service.py", "_observations"): (
+        1,
+        "KNOWN DEFECT (pre-P1, follow-up): a PO with no order_date falls back to the UTC date of "
+        "created_at, so an evening Central PO is dated the next day in price history.",
+    ),
+    ("app/services/hank_operations_service.py", "HankOperationsService.impact"): (
+        1,
+        "KNOWN DEFECT (pre-P1, follow-up): an InventoryItem.expiration_date timestamp is compared to "
+        "the Central date by its UTC date, so a lot expiring in the Central evening reads a day late.",
+    ),
+}
+
+
+def _is_utc_date_bucket(node: ast.Call) -> bool:
+    func = node.func
+    if isinstance(func, ast.Attribute) and func.attr == "date":
+        owner = func.value
+        return (isinstance(owner, ast.Name) and owner.id == "func") or (
+            isinstance(owner, ast.Attribute) and owner.attr == "func"
+        )
+    if isinstance(func, ast.Name) and func.id == "cast" and len(node.args) >= 2:
+        target = node.args[1]
+        return (isinstance(target, ast.Name) and target.id == "Date") or (
+            isinstance(target, ast.Attribute) and target.attr == "Date"
+        )
+    return False
+
+
+class _BucketFinder(_Finder):
+    def visit_Call(self, node: ast.Call) -> None:
+        if _is_utc_date_bucket(node):
+            self.hits.append((".".join(self.stack) or "<module>", node.lineno))
+        self.generic_visit(node)
+
+
+def find_utc_date_buckets(source: str) -> List[Tuple[str, int]]:
+    finder = _BucketFinder()
+    finder.visit(ast.parse(source))
+    return finder.hits
+
+
+def _scan_app_buckets() -> Dict[Tuple[str, str], List[int]]:
+    found: Dict[Tuple[str, str], List[int]] = {}
+    backend = APP_ROOT.parent
+    for path in sorted(APP_ROOT.rglob("*.py")):
+        rel = path.relative_to(backend).as_posix()
+        for qualname, lineno in find_utc_date_buckets(path.read_text(encoding="utf-8")):
+            found.setdefault((rel, qualname), []).append(lineno)
+    return found
+
+
+def test_no_new_utc_date_buckets_in_app():
+    found = _scan_app_buckets()
+    offenders = [
+        f"  {key[0]}:{','.join(map(str, lines))} in {key[1]}"
+        for key, lines in sorted(found.items())
+        if len(lines) > KNOWN_UTC_DATE_READS.get(key, (0, ""))[0]
+    ]
+
+    assert not offenders, (
+        "func.date(<timestamp>) / cast(<timestamp>, Date) is the UTC date of a naive-UTC column. "
+        "Fetch the timestamp and bucket it with app.core.time_utils.to_local_date (or by "
+        "production day):\n" + "\n".join(offenders)
+    )
+
+
+def test_known_utc_date_reads_are_not_stale():
+    found = _scan_app_buckets()
+    stale = [
+        f"  {key}: allows {count}, found {len(found.get(key, []))}"
+        for key, (count, _reason) in sorted(KNOWN_UTC_DATE_READS.items())
+        if len(found.get(key, [])) != count
+    ]
+
+    assert not stale, "KNOWN_UTC_DATE_READS entries that no longer match -- delete them:\n" + "\n".join(stale)
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        "func.date(Model.created_at)",
+        "sa.func.date(Model.created_at)",
+        "cast(Model.created_at, Date)",
+        "cast(Model.created_at, sa.Date)",
+    ],
+)
+def test_bucket_finder_flags_the_utc_date_shapes(snippet):
+    assert len(find_utc_date_buckets(f"x = {snippet}")) == 1
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    ["cast(Tuple[int, int], value)", "func.sum(Model.qty)", "value.date()", "to_local_date(ts, zone)"],
+)
+def test_bucket_finder_ignores_other_calls(snippet):
+    assert find_utc_date_buckets(f"x = {snippet}") == []
+
+
 def test_the_scan_covers_the_tree():
     """Vacuity check: the walk must actually read app/ (and see the allowlisted uses)."""
     found = _scan_app()

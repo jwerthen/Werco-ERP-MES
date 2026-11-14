@@ -52,7 +52,6 @@ from app.schemas.production_calendar import (
 )
 from app.services.company_time import company_zone
 from app.services.production_calendar import (
-    ENTRY_LOOKBACK,
     MINUTES_PER_DAY,
     ProductionCalendar,
     ShiftDef,
@@ -62,6 +61,7 @@ from app.services.production_calendar import (
     days_to_mask,
     entry_attribution,
     hhmm_to_minute,
+    lookback_from,
     mask_to_days,
     minute_to_hhmm,
     occurrence_on,
@@ -84,6 +84,10 @@ AUDIT_RESOURCE_TYPE = "production_calendar"
 AUDIT_IDENTIFIER = "Production calendar"
 STALE_VERSION_DETAIL = "This production calendar changed. Reload it before saving."
 SHIFT_NOT_FOUND_DETAIL = "Shift not found"
+AT_OUT_OF_RANGE_DETAIL = "The instant is outside the supported range"
+# ``_apply`` frees a changing unique key by renaming the row to ``~<id>`` mid-save, so a
+# pattern name or shift code may not start with it (a user-named ``~5`` would collide).
+RESERVED_PREFIX = "~"
 UNKNOWN_SHIFT_DETAIL = (
     "Unknown shift '{label}'. Use a shift_id (or the code) of a shift defined in the production calendar "
     "(GET /production-calendar)."
@@ -312,9 +316,13 @@ def resolve_moment(
         instant = at  # a naive instant is UTC, like every stored timestamp
     else:
         instant = at.astimezone(timezone.utc).replace(tzinfo=None)
-    day = production_day(instant, cal, work_center_id)
-    start_utc, end_utc = production_day_window_utc(day, cal)
-    running = shifts_at(instant, cal, work_center_id)
+    try:
+        day = production_day(instant, cal, work_center_id)
+        start_utc, end_utc = production_day_window_utc(day, cal)
+        running = shifts_at(instant, cal, work_center_id)
+    except (ValueError, OverflowError) as exc:
+        # An instant within a day of the ends of the datetime range has no window.
+        raise _unprocessable(AT_OUT_OF_RANGE_DETAIL) from exc
     return ProductionMomentResponse(
         at=instant,
         work_center_id=work_center_id,
@@ -374,6 +382,8 @@ def _validate(db: Session, company_id: int, payload: ProductionCalendarUpdate) -
     if len(defaults) > 1:
         raise _unprocessable(f"Only one shift pattern can be the default; got {', '.join(defaults)}.")
     for pattern in payload.patterns:
+        if pattern.name.startswith(RESERVED_PREFIX):
+            raise _unprocessable(f"Shift pattern name '{pattern.name}' cannot start with '{RESERVED_PREFIX}'.")
         key = pattern.name.casefold()
         if key in names:
             raise _unprocessable(f"Shift pattern name '{pattern.name}' is used twice.")
@@ -389,6 +399,8 @@ def _validate(db: Session, company_id: int, payload: ProductionCalendarUpdate) -
             wc_owner[wc_id] = pattern.name
         shifts: List[_DesiredShift] = []
         for shift in pattern.shifts:
+            if shift.code.startswith(RESERVED_PREFIX):
+                raise _unprocessable(f"Shift code '{shift.code}' cannot start with '{RESERVED_PREFIX}'.")
             code_key = shift.code.casefold()
             if code_key in codes:
                 raise _unprocessable(f"Shift code '{shift.code}' is used twice; codes are unique per company.")
@@ -590,12 +602,12 @@ def _apply(
     for pattern_id, row in existing_patterns.items():
         target = desired_by_pattern.get(pattern_id)
         if target is None or target.name != row.name:
-            row.name = f"~{pattern_id}"
+            row.name = f"{RESERVED_PREFIX}{pattern_id}"
         row.is_default = False
     for shift_id, row in existing_shifts.items():
         target_shift = desired_by_shift.get(shift_id)
         if target_shift is not None and target_shift.code != row.code:
-            row.code = f"~{shift_id}"
+            row.code = f"{RESERVED_PREFIX}{shift_id}"
     db.flush()
 
     # 4. New patterns; 5. final pattern values and every shift.
@@ -720,12 +732,22 @@ def sync_working_calendars(
 ) -> Tuple[WorkingCalendarSyncResponse, List[WorkingCalendarSave]]:
     """Derive each covered work center's weekly hours from its shifts; write them unless ``dry_run``.
 
-    A dry run writes nothing. A commit locks the active work centers (ascending id) BEFORE
-    the first write, writes every changed calendar through ``save_working_calendar``
+    A dry run writes nothing. A commit first takes the production calendar's own lock
+    (the one ``PUT /production-calendar`` takes), so the hours are derived from -- and the
+    audit rows stamped with -- the calendar version that is current when they are written,
+    and a concurrent save waits for the sync rather than slipping in between the version
+    check and the writes. It then locks the active work centers (ascending id) BEFORE the
+    first write, writes every changed calendar through ``save_working_calendar``
     (overrides kept, version bumped), then writes ONE required audit row per work center
     -- after the last row lock, because the audit chain lock is global. The caller wraps
     the call in ``required_audit`` and commits.
+
+    A work center whose pattern has NO active shift is not covered: an empty (or wholly
+    retired) pattern defines no hours, and writing ``[0] * 7`` would take the work center
+    out of scheduling capacity altogether.
     """
+    if not dry_run:
+        acquire_generator_lock(db, "production_calendar", company_id)
     cal = load_production_calendar(db, company_id)
     if expected_version is not None and expected_version != cal.version:
         raise HTTPException(409, STALE_VERSION_DETAIL)
@@ -742,7 +764,9 @@ def sync_working_calendars(
         centers_query = centers_query.with_for_update().populate_existing()
     centers = centers_query.all()
     covered = [(wc, explicit.get(wc.id, default_id)) for wc in centers]
-    covered = [(wc, pid) for wc, pid in covered if pid is not None and pid in patterns]
+    covered = [
+        (wc, pid) for wc, pid in covered if pid is not None and pid in patterns and cal.shifts_for_work_center(wc.id)
+    ]
     current = load_working_calendars(db, company_id, [wc.id for wc, _ in covered]) if covered else {}
 
     rows: List[WorkingCalendarSyncRow] = []
@@ -828,7 +852,7 @@ def attribute_time_entries(
     start_utc, end_utc = production_days_window_or_empty(first_day, last_day, cal)
     if start_utc >= end_utc:
         return []
-    query = query.filter(clock_in_column >= start_utc - ENTRY_LOOKBACK, clock_in_column < end_utc)
+    query = query.filter(clock_in_column >= lookback_from(start_utc), clock_in_column < end_utc)
     if until is not None:
         query = query.filter(clock_in_column <= until)
     attributed = []
@@ -857,7 +881,7 @@ def attribute_downtime_events(
     start_utc, end_utc = production_days_window_or_empty(first_day, last_day, cal)
     if start_utc >= end_utc:
         return []
-    query = query.filter(start_column >= start_utc - ENTRY_LOOKBACK, start_column < end_utc)
+    query = query.filter(start_column >= lookback_from(start_utc), start_column < end_utc)
     attributed = []
     for row in query.all():
         end = row.end_time

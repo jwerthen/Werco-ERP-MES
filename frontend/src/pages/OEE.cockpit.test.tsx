@@ -191,7 +191,12 @@ function mockApiGet(overrides: Partial<Record<string, any>> = {}) {
   });
 }
 
-const renderOEE = () => render(<MemoryRouter><OEE /></MemoryRouter>);
+const renderOEE = () =>
+  render(
+    <MemoryRouter>
+      <OEE />
+    </MemoryRouter>
+  );
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -307,7 +312,7 @@ test('scopes the dashboard and trends by the From/To date range, not the ignored
   await screen.findByText('Plant-wide OEE');
 
   const calls = mockedApi.get.mock.calls;
-  const paramsOf = (url: string) => (calls.find((c) => c[0] === url)?.[1] as any)?.params;
+  const paramsOf = (url: string) => (calls.find(c => c[0] === url)?.[1] as any)?.params;
 
   // Dashboard is scoped by the date range (so the plant strip follows the filter)...
   expect(paramsOf('/oee/dashboard')).toHaveProperty('date_from');
@@ -396,14 +401,14 @@ test('requests work-centers with a trailing slash (not the redirect-prone slashl
   renderOEE();
   await screen.findByText('Plant-wide OEE');
 
-  const calledUrls = mockedApi.get.mock.calls.map((c) => c[0] as string);
+  const calledUrls = mockedApi.get.mock.calls.map(c => c[0] as string);
   expect(calledUrls).toContain('/work-centers/');
   // Guard against the exact regression: no slashless / query-in-path variant.
-  expect(calledUrls.some((u) => u.startsWith('/work-centers?'))).toBe(false);
-  expect(calledUrls.some((u) => u === '/work-centers')).toBe(false);
+  expect(calledUrls.some(u => u.startsWith('/work-centers?'))).toBe(false);
+  expect(calledUrls.some(u => u === '/work-centers')).toBe(false);
 
   // active_only is passed as a param, not baked into the path.
-  const wcCall = mockedApi.get.mock.calls.find((c) => (c[0] as string) === '/work-centers/');
+  const wcCall = mockedApi.get.mock.calls.find(c => (c[0] as string) === '/work-centers/');
   expect(wcCall?.[1]).toEqual({ params: { active_only: true } });
 });
 
@@ -444,7 +449,7 @@ test('shows the error state when the core dashboard request fails', async () => 
   renderOEE();
 
   expect(
-    await screen.findByText('Could not load the OEE dashboard. Check your connection and try again.'),
+    await screen.findByText('Could not load the OEE dashboard. Check your connection and try again.')
   ).toBeInTheDocument();
 
   errorSpy.mockRestore();
@@ -456,10 +461,7 @@ test('shows the error state when the core dashboard request fails', async () => 
 // pattern (its own, else the default) and the POST carries shift_id.
 // ---------------------------------------------------------------------------------------
 
-const weldWorkCenters = [
-  ...workCenters,
-  { id: 101, code: 'WLD-01', name: 'Weld bay 1', is_active: true },
-];
+const weldWorkCenters = [...workCenters, { id: 101, code: 'WLD-01', name: 'Weld bay 1', is_active: true }];
 
 async function openAddModal() {
   mockApiGet({ records, workCenters: weldWorkCenters });
@@ -470,9 +472,11 @@ async function openAddModal() {
 }
 
 const optionLabels = (select: HTMLElement) =>
-  within(select).getAllByRole('option').map((o) => o.textContent);
+  within(select)
+    .getAllByRole('option')
+    .map(o => o.textContent);
 
-test('the shift select is built from the work center\'s pattern and posts shift_id', async () => {
+test("the shift select is built from the work center's pattern and posts shift_id", async () => {
   const modal = await openAddModal();
   const shiftSelect = modal.getByRole('combobox', { name: /shift/i });
   // Nothing to choose until a work center is picked.
@@ -552,5 +556,8 @@ test('a failed calendar read keeps the page and offers only a whole-day record',
   expect(screen.getByRole('alert')).toHaveTextContent(/shift choices/);
   fireEvent.change(modal.getByRole('combobox', { name: /work center/i }), { target: { value: '1' } });
   expect(optionLabels(modal.getByRole('combobox', { name: /shift/i }))).toEqual(['Whole production day']);
+  // A failed read is not "no shifts defined": the help says the choices did not load.
+  expect(modal.getByText(/shift choices could not be loaded/i)).toBeInTheDocument();
+  expect(modal.queryByText(/no shifts are defined/i)).not.toBeInTheDocument();
   errorSpy.mockRestore();
 });

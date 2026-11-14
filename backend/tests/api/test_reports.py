@@ -104,9 +104,16 @@ class TestReportsAPI:
         assert data[0]["entries"][0]["date"] == "2026-01-15"
         assert data[0]["entries"][0]["completed_at"] == "2026-01-16T01:30:00Z"
 
-    def test_employee_time_includes_entries_clocked_out_inside_window(
+    def test_employee_time_counts_a_midnight_crossing_entry_once_and_still_shows_the_completion(
         self, client: TestClient, auth_headers: dict, operator_user: User, db_session
     ):
+        """An entry is reported on the ONE production day it is attributed to (P1 review, 2026-11-13).
+
+        This test used to pin "includes entries clocked out inside the window", which read a
+        midnight-crossing entry in BOTH days' reports and counted its hours twice. With no
+        production calendar the entry belongs to the local day it clocked in (Jan 14); Jan
+        15's report still shows the operation it completed inside Jan 15, as a completion row.
+        """
         part = Part(
             part_number="REPORT-TIME-001",
             name="Report Time Part",
@@ -168,22 +175,26 @@ class TestReportsAPI:
         db_session.add(entry)
         db_session.commit()
 
-        response = client.get(
-            "/api/v1/reports/employee-time",
-            headers=auth_headers,
-            params={
-                "start_date": "2026-01-15",
-                "end_date": "2026-01-15",
-                "user_id": operator_user.id,
-            },
-        )
+        def report(day: str):
+            response = client.get(
+                "/api/v1/reports/employee-time",
+                headers=auth_headers,
+                params={"start_date": day, "end_date": day, "user_id": operator_user.id},
+            )
+            assert response.status_code == status.HTTP_200_OK
+            return response.json()
 
-        assert response.status_code == status.HTTP_200_OK
-        data = response.json()
-        assert len(data) == 1
-        assert data[0]["total_hours"] == 1
-        assert data[0]["completed_operations"] == 1
-        assert data[0]["entries"][0]["source"] == "time_entry"
+        jan15 = report("2026-01-15")
+        assert len(jan15) == 1
+        assert jan15[0]["total_hours"] == 0
+        assert jan15[0]["completed_operations"] == 1
+        assert [entry["source"] for entry in jan15[0]["entries"]] == ["operation_completion"]
+
+        jan14 = report("2026-01-14")
+        assert len(jan14) == 1
+        assert jan14[0]["total_hours"] == 1
+        assert jan14[0]["completed_operations"] == 0
+        assert [(entry["source"], entry["date"]) for entry in jan14[0]["entries"]] == [("time_entry", "2026-01-14")]
 
     def test_work_order_costing_returns_200_for_wo_with_part(self, client: TestClient, auth_headers: dict, db_session):
         """Regression: the costing report read the nonexistent ``part.unit_cost``

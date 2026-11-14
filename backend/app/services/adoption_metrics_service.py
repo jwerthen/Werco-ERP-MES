@@ -32,6 +32,7 @@ from typing import Dict, List, Optional
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
+from app.core.time_utils import local_window, to_local_date
 from app.models.downtime import DowntimeEvent, DowntimePlannedType
 from app.models.maintenance import MaintenanceType, MaintenanceWorkOrder
 from app.models.operational_event import OperationalEvent
@@ -50,7 +51,7 @@ from app.schemas.analytics import (
     MaintenanceMixMetrics,
     WorkCenterReliability,
 )
-from app.services.company_time import company_window
+from app.services.company_time import company_window, company_zone
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +78,8 @@ def _pct(numerator: float, denominator: float) -> Optional[float]:
 
 def get_adoption_metrics(db: Session, company_id: int, start: date, end: date) -> AdoptionMetricsResponse:
     # Half-open company-local window: [local midnight on start, next local midnight after end).
-    start_dt, end_dt = company_window(db, company_id, start, end)
+    zone = company_zone(db, company_id)
+    start_dt, end_dt = local_window(start, end, zone)
     # OperationalEvent.occurred_at is DateTime(timezone=True): compare it to AWARE bounds.
     event_from = start_dt.replace(tzinfo=timezone.utc)
     event_before = end_dt.replace(tzinfo=timezone.utc)
@@ -101,7 +103,11 @@ def get_adoption_metrics(db: Session, company_id: int, start: date, end: date) -
     live = backfill = unknown = 0
     weekly: Dict[date, Dict[str, float]] = {}
 
-    def _week_bucket(day: date) -> Dict[str, float]:
+    def _week_bucket(at: datetime) -> Dict[str, float]:
+        # The week of the row's COMPANY-LOCAL date -- the zone the window is in -- not its
+        # UTC date, which moves a Sunday-evening Central row into the next week.
+        day = to_local_date(at, zone)
+        assert day is not None
         return weekly.setdefault(
             _week_start(day),
             {
@@ -120,7 +126,7 @@ def get_adoption_metrics(db: Session, company_id: int, start: date, end: date) -
         # A payload that is not a JSON object counts as an unreported source rather than
         # failing the whole report.
         source = payload.get("source") if isinstance(payload, dict) else None
-        bucket = _week_bucket(occurred_at.date())
+        bucket = _week_bucket(occurred_at)
         bucket["completions"] += 1
         if source in LIVE_CAPTURE_SOURCES:
             live += 1
@@ -165,7 +171,7 @@ def get_adoption_metrics(db: Session, company_id: int, start: date, end: date) -
             .all()
         }
     for op_id, actual_end in completed_ops:
-        bucket = _week_bucket(actual_end.date())
+        bucket = _week_bucket(actual_end)
         bucket["ops_completed"] += 1
         if op_id in covered_op_ids:
             bucket["ops_covered"] += 1
@@ -188,7 +194,7 @@ def get_adoption_metrics(db: Session, company_id: int, start: date, end: date) -
     )
     backfill_entries = 0
     for clock_in, source in entries:
-        bucket = _week_bucket(clock_in.date())
+        bucket = _week_bucket(clock_in)
         bucket["entries"] += 1
         if source in BASELINE_EXCLUDED_SOURCES:
             backfill_entries += 1

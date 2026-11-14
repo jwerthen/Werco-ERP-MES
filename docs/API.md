@@ -6115,7 +6115,7 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 |--------|----------|-------------|---------------|
 | GET | `/shop-floor/dashboard` | Shop floor dashboard | Yes |
 | GET | `/shop-floor/my-active-job` | Get current user's active job, incl. the job's written guidance (WO notes/special instructions + the operation's description/setup/run text). Top-level **`dispatch_notices`** (always present, `[]` when not clocked in): the newest planner dispatch notice per work center where the caller holds an open **labor** entry — see "Floor dispatch notices" below | Yes |
-| GET | `/shop-floor/operations` | List not-complete/cancelled operations for the desktop shop-floor pages (paginated, max 200/page; filters `work_center_id` / `status` / `search` / `due_today`) — rows in the **canonical dispatch order**, each carrying the advisory `run_order` display rank (see "Desktop parity" under the Dispatch run order note below). An **`ON_HOLD` row additionally carries `hold`** — `{ held_at, held_by_user_id, held_by_name, blocker }`, from the same batched pure-read `operation_hold_view` the kiosk `held` list uses, so the desk page and the floor cannot tell two stories about one hold. The key is **absent on every other row** (unheld payloads stay byte-identical), every field inside is nullable, and `blocker: null` covers ordinary nest holds (including a category or note saved on the hold event) and bare holds, which still carries `held_by_name` / `held_at`: reason and attribution are INDEPENDENT. **Free text (`title` / `note`) rides this response** — every caller is an identified `get_current_user` session, never a crew-station principal, so the station withholding rule does not apply and `free_text_withheld` is `false`. **Only when filtered to one `work_center_id`**, the envelope also carries `dispatch_notices` (0- or 1-item list, that machine's newest dispatch notice) and `server_time` (UTC `Z`); an unfiltered list carries neither key — see "Floor dispatch notices" below. Every row also carries **`start_blocked_reason`** (the work-order start refusal text for a draft / on-hold / terminal work order, else `null`) and **`work_order_status`**; `can_check_in` is `false` whenever `start_blocked_reason` is set, and `blocked_by_previous_operations` is unchanged. `null` is not a "startable" claim — the write verb decides at the moment of the action. `GET /shop-floor/operations/{id}` carries the same two keys on `operation` and on each `all_operations[]` entry (see Work Orders → "Draft and on-hold work orders refuse every start") | Yes |
+| GET | `/shop-floor/operations` | List not-complete/cancelled operations for the desktop shop-floor pages (paginated, max 200/page; filters `work_center_id` / `status` / `search` / `due_today` — work orders due on the **company's calendar date**, not the server's UTC date, since 2026-11-13) — rows in the **canonical dispatch order**, each carrying the advisory `run_order` display rank (see "Desktop parity" under the Dispatch run order note below). An **`ON_HOLD` row additionally carries `hold`** — `{ held_at, held_by_user_id, held_by_name, blocker }`, from the same batched pure-read `operation_hold_view` the kiosk `held` list uses, so the desk page and the floor cannot tell two stories about one hold. The key is **absent on every other row** (unheld payloads stay byte-identical), every field inside is nullable, and `blocker: null` covers ordinary nest holds (including a category or note saved on the hold event) and bare holds, which still carries `held_by_name` / `held_at`: reason and attribution are INDEPENDENT. **Free text (`title` / `note`) rides this response** — every caller is an identified `get_current_user` session, never a crew-station principal, so the station withholding rule does not apply and `free_text_withheld` is `false`. **Only when filtered to one `work_center_id`**, the envelope also carries `dispatch_notices` (0- or 1-item list, that machine's newest dispatch notice) and `server_time` (UTC `Z`); an unfiltered list carries neither key — see "Floor dispatch notices" below. Every row also carries **`start_blocked_reason`** (the work-order start refusal text for a draft / on-hold / terminal work order, else `null`) and **`work_order_status`**; `can_check_in` is `false` whenever `start_blocked_reason` is set, and `blocked_by_previous_operations` is unchanged. `null` is not a "startable" claim — the write verb decides at the moment of the action. `GET /shop-floor/operations/{id}` carries the same two keys on `operation` and on each `all_operations[]` entry (see Work Orders → "Draft and on-hold work orders refuse every start") | Yes |
 | GET | `/shop-floor/operations/{id}/documents` | Kiosk doc-viewer discovery: the operation's controlled part drawing, live nest reference PDF, nest material, and critical SPC characteristics (see note below) | Yes |
 | GET | `/shop-floor/documents/{id}/inline` | Serve a kiosk-viewable document PDF inline — DRAWING-type or live-nest-referenced only, tenant-scoped, uniform **404** on any miss (see note below) | Yes |
 | POST | `/shop-floor/clock-in` | Clock in to operation (starts a PENDING / READY one). Refusal order, all before any write: **400** already clocked in, **404** operation, **400** operation not on that work order, **400** wrong work center, **404** work order missing or soft-deleted, **409** draft / on-hold / terminal work order, **400** `Operation is not ready to start` (incl. an operation-level hold), **400** predecessors. A back-entry (`source = "backfill"`) is refused exactly like a live clock-in | Yes |
@@ -10210,12 +10210,18 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 > **Production days in reports (P1.2, 2026-11-13).** `daily-output` and `employee-time` read
 > production days on the company's production calendar (see [Production calendar &
 > shifts](#production-calendar--shifts)): local midnight to local midnight when none is configured.
-> Until 2026-11-13 both read **UTC** dates. `employee-time` includes a time entry that clocked in or
-> out inside the window (the start of production day `start_date` up to, not including, the start of
-> the production day after `end_date`); a reversed range is **422**. A time-entry row's `date` is the
-> production day the entry is **attributed** to (greatest shift overlap, ties to the outgoing shift)
-> and its `shift_code` is that shift's code, `null` when it overlaps no defined shift. So a 01:30
-> Wednesday weld entry reads as Tuesday, `W2`. A completion row's `date` is the production day of its
+> Until 2026-11-13 both read **UTC** dates. `employee-time` includes a time entry when the production
+> day it is **attributed** to (greatest shift overlap, ties to the outgoing shift; else the production
+> day of its clock-in) lies in `start_date`..`end_date`, so every entry counts on **exactly one**
+> production day; an open entry runs to now for attribution. A reversed range is **422**. A time-entry
+> row's `date` is that production day and its `shift_code` that shift's code, `null` when it overlaps
+> no defined shift. So a 01:30 Wednesday weld entry reads as Tuesday, `W2`, and a 04:55–15:30 Wednesday
+> one as Wednesday, `W1` — in Wednesday's report only. **Changed 2026-11-13 (review fix):** the first
+> P1 cut included an entry that clocked in **or out** inside the window, which put that 04:55 entry in
+> Tuesday's report too (dated Wednesday, hours added to Tuesday's total); the pre-P1 report did the
+> same across UTC midnight. An entry that crosses midnight with no calendar configured now counts on
+> the local day it clocked in, and the operation it completed after midnight still shows in the next
+> day's report as a completion row. A completion row's `date` is the production day of its
 > `actual_end`, and its `shift_code` is the shift running at that instant. The rolling-`days` reports
 > (`production-summary`, `quality-metrics`, `vendor-performance`, `work-center-utilization`,
 > `work-order-costing`) count back from the current instant and have no day boundary.
@@ -10257,6 +10263,31 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 | POST | `/analytics/custom-report` | Run a custom-report query (returns rows) | Admin / Manager |
 | GET | `/analytics/custom-report/export` | Export a saved report template (csv / xlsx / pdf) | Admin / Manager |
 
+> **Days in analytics (P1, 2026-11-13).** Every analytics range is a set of **company-local calendar
+> days** (`Company.timezone`), and a point or bucket is dated in that same zone:
+> `/analytics/production-trends` dates a RUN entry by the local date of its clock-in and a
+> simplified-workflow completion by the local date of its `actual_end` (it used `func.date(...)`, the
+> UTC date, until 2026-11-13, so evening work landed on the next day and a one-day range could return a
+> point dated after its own end); `/analytics/adoption` puts a row in the ISO week of its local date.
+> **Two bases share the KPI dashboard:** the OEE figures (headline, sparkline, `/analytics/oee`) read
+> **production days** — the company's configured day start — while every other KPI (OTD, FPY, scrap,
+> quotes, NCRs, turnover, flow, adoption) reads local **calendar** days. With no production calendar
+> configured the two are identical. With Werco's 05:00 start they differ for 00:00–05:00: at 03:00 on a
+> Wednesday, `period=today` is Tuesday's production day, so OEE counts Tuesday's 2nd shift through
+> 05:00 Wednesday while the calendar-day KPIs count Tuesday 00:00–24:00. Completion-based **OTD** and
+> the production-summary on-time count compare the company-local date of `actual_end` with `due_date`
+> (a job finished at 19:00 CDT on its due date was counted late until 2026-11-13), and ship OTD,
+> `/analytics/wip-aging`'s days-to-due and the shop-floor `due_today` filter use the company's calendar
+> date, not the server's.
+>
+> **OEE inputs changed with the production days (2026-11-13), not only the day boundary.** The KPI
+> sparkline is now exactly the per-day headline value, computed on the same inputs: (1) its ideal
+> hours count **produced + scrapped** pieces (it counted produced only, so it read lower than the
+> headline whenever there was scrap); (2) it honors `REQUIRE_APPROVED_LABOR_FOR_COST` (it ignored it);
+> (3) the headline's ideal hours count **closed** entries only, like its staffed and run hours (open
+> entries used to add ideal hours with no run time behind them). All three agree with the persisted
+> `OEERecord` (`POST /oee/calculate`).
+>
 > **Flow & quality metrics (Lean Phase 1).** Five read-only, role-gated, tenant-scoped analytics
 > endpoints. All but `/wip-aging` (a point-in-time snapshot) take the same window parameters as
 > `/analytics/kpis`: `period` (`today` / `7d` / `30d` / `90d` / `ytd` / `custom`) plus
@@ -10438,7 +10469,7 @@ DST changes (boundaries are wall-clock times).
 |--------|----------|-------------|---------------|
 | GET | `/production-calendar` | The calendar: `configured`, `version`, `timezone`, `production_day_start`, `patterns[]` (each with `work_center_ids` and `shifts[]`: `code`, `name`, `start`/`end` HH:MM, `start_minute`/`end_minute`, `ends_next_day`, `days` 0=Mon..6=Sun, `planned_minutes`, `is_active`), and `today` — the current production day's UTC window and every active shift on it as UTC instants (`Z`) | Yes |
 | PUT | `/production-calendar` | Replace the **whole** calendar after a version check | **Admin** |
-| GET | `/production-calendar/resolve` | Which production day and shift an instant (`at`, ISO-8601; offset-less = UTC; default now) belongs to at a `work_center_id` (omitted = the default pattern; another company's work center is **404**). Returns `production_day` with its UTC window, `shift` (the outgoing one in an overlap), `overlapping`, `pattern_id`, `configured` and `calendar_version` | Yes |
+| GET | `/production-calendar/resolve` | Which production day and shift an instant (`at`, ISO-8601; offset-less = UTC; default now) belongs to at a `work_center_id` (omitted = the default pattern; another company's work center is **404**). Returns `production_day` with its UTC window, `shift` (the outgoing one in an overlap), `overlapping`, `pattern_id`, `configured` and `calendar_version`. An instant within a day of the ends of the datetime range is **422** `The instant is outside the supported range` | Yes |
 | POST | `/production-calendar/working-calendars/sync` | Set each work center's weekly working hours from its shifts (`dry_run`, default `true`; `expected_version`) | Admin / Manager / Supervisor |
 
 **Unconfigured company (no calendar saved).** The production day is the **company-local calendar day**
@@ -10456,6 +10487,21 @@ that shift's production day; one that overlaps no shift belongs to the productio
 an early **04:55 weld clock-in** that runs into the 05:00 1st shift counts on that day's 1st shift, not
 the previous production day. A work center belongs to at most one **pattern**; one in no pattern (and an
 entry with no work center) uses the company's single **default** pattern.
+
+**Boundaries across DST.** The production day of an instant is the day whose window contains it, so
+the attribution and every SQL day filter always agree. A day start that names a wall time a DST change
+skips (02:00–02:59 on the spring-forward Sunday in a US zone) resolves with the pre-change offset, and
+one that repeats (01:00–01:59 on the fall-back Sunday) at its first occurrence. Werco's 05:00 start is
+unaffected.
+
+**History is re-read under the current calendar.** Persisted `OEERecord`s keep the values they were
+computed with, but every read that attributes on the fly — the analytics OEE figures, the wallboard,
+the employee-time report, the downtime filters, job-cost recompute — buckets past data under the
+calendar as it is **now**. So changing the day start, or a shift's times, days or planned minutes,
+re-buckets history on those reads, and a past day's `/analytics/oee` can stop matching its stored
+`/oee` record. Only a referenced shift's removal and `code` change are refused; the required audit row
+(the whole before/after document) is the record of what the calendar was. To keep a referenced
+shift's history unambiguous, retire it and add a new shift rather than re-timing it.
 
 **Who reads production days.** OEE records and `POST /oee/calculate` (`record_date` is a production
 day), the nightly OEE cron, the wallboard **today** pulse, the shop-floor dashboard `completed_today`
@@ -10477,14 +10523,18 @@ and every `start`/`end` are `HH:MM`; an `end` at or before its `start` ends the 
 must start at or after the production-day start and end by the next day's start (so it belongs to the
 day it starts on); `planned_minutes` ≤ the shift's length; at most one `is_default` pattern; a work
 center in at most one pattern; unique pattern names and shift codes (case-insensitive); work centers
-must be this company's; an `id` that names no existing pattern or shift is 422 (omit it to create one).
+must be this company's; an `id` that names no existing pattern or shift is 422 (omit it to create one);
+a pattern name or shift code may not start with `~` (reserved for the save's own temporary renames).
 Limits: 20 patterns, 12 shifts per pattern, 500 work centers per pattern, `planned_minutes` 1–1440.
 Existing patterns and shifts keep their `id`; **anything omitted is removed —
 except a shift an OEE record references**, which must be retired with `is_active: false` (removing it
 is 422) and whose `code` can never change (422). Retired shifts stay in the document and on historical
 records but are no longer attributed. An identical document is a no-op (no version bump). A save writes
 one **required** `audit_log` row (`resource_type` `production_calendar`, the whole before/after
-document) in the same transaction — **503**, nothing saved, when it cannot. Every successful save (a no-op
+document) in the same transaction — **503**, nothing saved, when it cannot. A save that collides with a
+concurrent write to a row it changes (an OEE record that started using a shift this save removes) is
+**409** `The production calendar could not be saved because a record it changes was changed at the same
+time …` — the version-check text is reserved for a real version race. Every successful save (a no-op
 included) broadcasts `dashboard_update` with `event: "production_calendar_updated"` to the company's
 sockets; a sync commit broadcasts `event: "working_calendar_updated"` once per written work center.
 Saving does **not** change working calendars; run the sync.
@@ -10527,8 +10577,13 @@ active shifts **starting** each weekday — Werco weld `[20, 20, 20, 20, 20, 0, 
 `[16, 16, 16, 16, 16, 0, 0]`. `dry_run=true` (the default) writes nothing and returns, per work center,
 `current_version`, `current_weekly_hours`, `new_weekly_hours`, `overrides_kept` and `changed` (a work
 center with no saved calendar, `current_version` 0, is always a change) plus the production calendar's
-`calendar_version`. `dry_run=false` (pass that `calendar_version` back as `expected_version`: a different
-calendar version is **409**; omitting it skips the check) writes every changed work center
+`calendar_version`. A work center whose pattern has **no active shift** (an empty pattern, or one whose
+shifts are all retired) is not covered — it is left out of the rows and never written, so a pattern
+cannot zero a work center's scheduling capacity. `dry_run=false` (pass that `calendar_version` back as
+`expected_version`: a different calendar version is **409**; omitting it skips the check) takes the
+production calendar's own lock first — a concurrent `PUT /production-calendar` waits, so the hours and
+the audit rows' `production_calendar_version` come from one calendar version — and writes every
+changed work center
 through the scheduling calendar's own writer (`working_calendar_service.save_working_calendar`): dated
 overrides are **kept**, `version` is bumped, and one **required** `working_calendar` audit row is written
 per work center (`extra_data.source` = `production_calendar_sync`; **503**, nothing saved, when one
@@ -10605,7 +10660,10 @@ records, targets) require **Admin / Manager / Supervisor**.
 > one that is retired or not in the work center's pattern **422** (a record may keep its own retired
 > shift). The legacy `shift` text is accepted only when it equals a defined code (it resolves to that
 > shift); **any other text is 422**; blank means no shift. Pre-120 free-text labels (`1st`, `Day`) were
-> **not** backfilled and stay readable as labels with `shift_id: null`. Responses add `shift_id` and
+> **not** backfilled and stay readable as labels with `shift_id: null`; a `PUT` that sends a record's
+> own legacy label back unchanged (with no `shift_id`) is not a shift change and is accepted, leaving
+> the label as it is, so a client can echo the record to edit its other fields. A `record_date` at the
+> ends of the date range (`9999-12-31`) is **422** on `POST /oee/calculate`. Responses add `shift_id` and
 > `shift_name`. `GET /oee/dashboard`, `/oee/trends` and `/oee/six-big-losses` periods count back from the
 > current production day.
 >
@@ -10641,6 +10699,10 @@ the availability input to `POST /oee/calculate/{work_center_id}` above. The `dat
 filters on the list, `/summary` and `/by-work-center` are inclusive **production days** (events that
 started from the production-day start of `date_from` to the start of the production day after
 `date_to`; local midnights when no production calendar is configured); a reversed range is **422**.
+These lists put an event on the production day it **started**, while OEE attributes it like a time
+entry — to the shift it overlaps most — so an event that straddles the day start (a weld stop from
+04:50 to 06:50) is listed under the earlier day's `/downtime/summary` but counts against the later
+day's OEE.
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|

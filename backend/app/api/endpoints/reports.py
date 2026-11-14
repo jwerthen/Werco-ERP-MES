@@ -2,7 +2,7 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import and_, func, or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload
 
 from app.api.date_window import (
@@ -12,7 +12,7 @@ from app.api.date_window import (
     production_date_window,
 )
 from app.api.deps import get_current_company_id, get_current_user
-from app.core.time_utils import to_utc_iso
+from app.core.time_utils import to_local_date, to_utc_iso
 from app.db.database import get_db
 from app.models.inventory import InventoryItem
 from app.models.purchasing import POReceipt, PurchaseOrder
@@ -22,14 +22,14 @@ from app.models.user import User
 from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.schemas.analytics import ShipOTDReportResponse
 from app.services.analytics_service import AnalyticsService
+from app.services.company_time import company_zone
 from app.services.production_calendar import (
     current_production_day,
-    entry_attribution,
     production_day,
     production_day_window_utc,
     shift_for,
 )
-from app.services.production_calendar_service import load_production_calendar
+from app.services.production_calendar_service import attribute_time_entries, load_production_calendar
 
 router = APIRouter()
 
@@ -60,8 +60,8 @@ def get_ship_otd_report(
     a per-customer rollup, and a promise-hygiene list of shipped/open WOs with
     NEITHER promise field set.
     """
-    start, end, zone = company_period(db, company_id, period, start_date, end_date)
-    return AnalyticsService(db, company_id, zone=zone).get_ship_otd_report(start, end)
+    start, end, calendar = company_period(db, company_id, period, start_date, end_date)
+    return AnalyticsService(db, company_id, zone=calendar.tz, calendar=calendar).get_ship_otd_report(start, end)
 
 
 @router.get("/production-summary")
@@ -101,7 +101,11 @@ def get_production_summary(
     )
 
     total_completed = len(completed_wos)
-    on_time = sum(1 for wo in completed_wos if wo.due_date and wo.actual_end and wo.actual_end.date() <= wo.due_date)
+    # actual_end is naive UTC, due_date a calendar date: compare on the company's date.
+    zone = company_zone(db, company_id)
+    on_time = sum(
+        1 for wo in completed_wos if wo.due_date and wo.actual_end and to_local_date(wo.actual_end, zone) <= wo.due_date
+    )
 
     # Hours worked.
     #
@@ -570,12 +574,14 @@ def get_employee_time_report(
 ):
     """Employee time report over an inclusive range of PRODUCTION days.
 
-    A time entry is included when it clocked in or out inside the window (the start of
-    production day ``start_date`` to the start of the production day after ``end_date``;
-    local midnights when no production calendar is configured). Each entry's ``date`` is
-    the production day it is attributed to and ``shift_code`` its shift (greatest overlap
-    with a defined shift, ties to the outgoing shift; null when it overlaps none) -- so a
-    01:30 Wednesday weld entry reads as Tuesday, 2nd shift. A reversed range is 422.
+    A time entry is included when the production day it is ATTRIBUTED to lies in the range
+    -- the shift it overlaps most (ties to the outgoing shift), else the production day of
+    its clock-in; local midnights when no production calendar is configured -- so every
+    entry is counted on exactly one production day. Its ``date`` is that production day
+    and ``shift_code`` that shift (null when it overlaps none): a 01:30 Wednesday weld
+    entry reads as Tuesday, 2nd shift, and a 04:55-15:30 one as Wednesday, 1st shift (in
+    Wednesday's report only). An open entry runs to now for attribution. Operation
+    completions count on the production day of their ``actual_end``. A reversed range is 422.
     """
     calendar = load_production_calendar(db, company_id)
     today = current_production_day(calendar)
@@ -596,29 +602,30 @@ def get_employee_time_report(
             joinedload(TimeEntry.operation),
             joinedload(TimeEntry.work_center),
         )
-        .filter(
-            TimeEntry.company_id == company_id,
-            or_(
-                and_(TimeEntry.clock_in >= start_dt, TimeEntry.clock_in < end_dt),
-                and_(
-                    TimeEntry.clock_out.isnot(None),
-                    TimeEntry.clock_out >= start_dt,
-                    TimeEntry.clock_out < end_dt,
-                ),
-            ),
-        )
+        .filter(TimeEntry.company_id == company_id)
     )
 
     if user_id:
         query = query.filter(TimeEntry.user_id == user_id)
 
-    entries = query.order_by(TimeEntry.clock_in.desc()).all()
+    # Select by ATTRIBUTION, never by "clocked in or out inside the window": an entry that
+    # straddles a production-day start (the routine 04:55 weld clock-in) would otherwise
+    # be read by both days' reports and its hours counted twice, once under a date
+    # outside the requested range.
+    report_now = datetime.utcnow()
+    attributed = attribute_time_entries(
+        query.order_by(TimeEntry.clock_in.desc()),
+        calendar,
+        start_date,
+        end_date,
+        clock_in_column=TimeEntry.clock_in,
+        now=report_now,
+    )
 
     # Group by employee
     by_employee = {}
     seen_operation_completions = set()
-    report_now = datetime.utcnow()
-    for entry in entries:
+    for entry, attributed_day, attributed_shift in attributed:
         uid = entry.user_id
         if uid not in by_employee:
             user = entry.user or db.query(User).filter(User.id == uid).first()
@@ -647,9 +654,6 @@ def get_employee_time_report(
         if operation_completed_by_user:
             by_employee[uid]["completed_operations"] += 1
             seen_operation_completions.add((uid, entry.operation_id))
-        attributed_day, attributed_shift = entry_attribution(
-            entry.clock_in, entry.clock_out, calendar, entry.work_center_id, now=report_now
-        )
         by_employee[uid]["entries"].append(
             {
                 "date": attributed_day.isoformat(),

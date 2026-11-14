@@ -7,6 +7,7 @@ Rest of shop (default): S1 07:30-16:00, S2 15:30-00:00, 480 planned min.
 2026-11-17 is a Tuesday (CST, UTC-6). 2026-03-08 and 2026-11-01 are the DST days.
 """
 
+import dataclasses
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -22,6 +23,7 @@ from app.services.production_calendar import (
     days_to_mask,
     entry_attribution,
     hhmm_to_minute,
+    lookback_from,
     mask_to_days,
     minute_to_hhmm,
     production_day,
@@ -227,3 +229,47 @@ def test_wall_time_helpers():
     for bad in ("24:00", "5", "05:60", "", "aa:bb"):
         with pytest.raises(ValueError):
             hhmm_to_minute(bad)
+
+
+# --------------------------------------------------------------------------------------
+# production_day() agrees with the SQL windows, even for a day start inside a DST shift
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "day_start,instant,expected",
+    [
+        # Spring forward, day start 02:30 (a wall time 2026-03-08 skips): the 3/8 window
+        # starts at 08:30Z (fold=0, the CST offset), so 08:10Z (03:10 CDT) is still 3/7.
+        pytest.param("02:30", datetime(2026, 3, 8, 8, 10), date(2026, 3, 7), id="spring-forward-gap"),
+        pytest.param("02:30", datetime(2026, 3, 8, 8, 30), date(2026, 3, 8), id="spring-forward-boundary"),
+        # Fall back, day start 01:30 (a wall time 2026-11-01 repeats): the 11/1 window
+        # starts at its FIRST occurrence (06:30Z), so 07:15Z (01:15 CST, second pass) is 11/1.
+        pytest.param("01:30", datetime(2026, 11, 1, 7, 15), date(2026, 11, 1), id="fall-back-repeat"),
+        pytest.param("01:30", datetime(2026, 11, 1, 6, 29), date(2026, 10, 31), id="fall-back-before"),
+    ],
+)
+def test_production_day_is_the_day_whose_window_contains_the_instant(day_start, instant, expected):
+    cal = dataclasses.replace(unconfigured_calendar(), day_start_minute=hhmm_to_minute(day_start))
+
+    assert production_day(instant, cal) == expected
+    start_utc, end_utc = production_day_window_utc(expected, cal)
+    assert start_utc <= instant < end_utc
+
+
+def test_production_day_matches_its_window_every_quarter_hour_across_both_dst_weekends():
+    """Exhaustive: every day start in the DST hours, every 15 minutes over both DST weekends."""
+    for day_start in range(0, 4 * 60, 15):
+        cal = dataclasses.replace(unconfigured_calendar(), day_start_minute=day_start)
+        for first in (datetime(2026, 3, 7, 0), datetime(2026, 10, 31, 0)):
+            instant = first
+            while instant < first + timedelta(days=3):
+                day = production_day(instant, cal)
+                start_utc, end_utc = production_day_window_utc(day, cal)
+                assert start_utc <= instant < end_utc, (day_start, instant, day)
+                instant += timedelta(minutes=15)
+
+
+def test_lookback_clamps_at_the_start_of_the_datetime_range():
+    assert lookback_from(datetime(2026, 1, 15, 6)) == datetime(2026, 1, 14, 18)
+    assert lookback_from(datetime(1, 1, 1, 5)) == datetime.min

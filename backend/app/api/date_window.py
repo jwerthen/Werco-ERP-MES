@@ -72,14 +72,16 @@ def company_period(
     period: str,
     start_date: Optional[date],
     end_date: Optional[date],
-) -> Tuple[date, date, ZoneInfo]:
+) -> Tuple[date, date, ProductionCalendar]:
     """Resolve an analytics ``period`` (today / 7d / 30d / 90d / ytd / custom) on the company clock.
 
-    Returns ``(start, end, zone)``: an inclusive date range whose "today" is the
+    Returns ``(start, end, calendar)``: an inclusive date range whose "today" is the
     company's CURRENT PRODUCTION DAY (``production_calendar``; the company-local calendar
     date when no production calendar is configured, so 01:30 on a 05:00-start shop is
-    still yesterday's production day), plus the zone the service should read it in. A
-    custom range that is reversed or out of range is a 422.
+    still yesterday's production day), plus the production calendar it was resolved on
+    (``calendar.tz`` is the zone the service reads the range in; hand both to
+    ``AnalyticsService`` so it does not load them again). A custom range that is
+    reversed or out of range is a 422.
     """
     from app.services.analytics_service import get_date_range
     from app.services.production_calendar import current_production_day
@@ -89,7 +91,7 @@ def company_period(
     zone = calendar.tz
     start, end = get_date_range(period, start_date, end_date, zone=zone, today=current_production_day(calendar))
     date_window(start, end, zone)
-    return start, end, zone
+    return start, end, calendar
 
 
 # The production-day twins. A production day starts at the company's configured

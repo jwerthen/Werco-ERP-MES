@@ -877,9 +877,13 @@ export default function OEE() {
                 label="Shift"
                 labelClassName="font-medium"
                 help={
-                  addForm.work_center_id && addShiftOptions.length === 0
-                    ? 'No shifts are defined for this work center (Admin Settings → Production Calendar).'
-                    : undefined
+                  !addForm.work_center_id
+                    ? undefined
+                    : calendar === null
+                      ? 'Shift choices could not be loaded; reload the page to pick a shift.'
+                      : addShiftOptions.length === 0
+                        ? 'No shifts are defined for this work center (Admin Settings → Production Calendar).'
+                        : undefined
                 }
               >
                 {field => (
