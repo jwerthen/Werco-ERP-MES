@@ -63,12 +63,17 @@ export const checklistPayload = (text: string): string | null => {
 
 type RoleUser = { role?: string | null; is_superuser?: boolean | null } | null | undefined;
 
-/** Schedules, work-order create/edit, assets and the PM import: ADMIN / MANAGER / SUPERVISOR. */
+/** Schedules, work-order create/edit/hold/cancel, assets and the PM import: ADMIN / MANAGER /
+ *  SUPERVISOR -- plus PLATFORM_ADMIN, whom the server's `require_role` always admits (a hidden
+ *  control the server would accept is a missing feature, not a safeguard). */
 export const canPlanMaintenance = (user: RoleUser): boolean =>
-  !!user && (!!user.is_superuser || ['admin', 'manager', 'supervisor'].includes(user.role ?? ''));
+  !!user && (!!user.is_superuser || ['admin', 'manager', 'supervisor', 'platform_admin'].includes(user.role ?? ''));
 
 /** Starting / completing a maintenance work order also admits OPERATOR. */
 export const canPerformMaintenance = (user: RoleUser): boolean => canPlanMaintenance(user) || user?.role === 'operator';
 
 /** Statuses a work order can be started from (mirrors the start verb). */
 export const STARTABLE_STATUSES = new Set(['scheduled', 'overdue', 'on_hold']);
+
+/** Statuses a work order can still be cancelled from (anything not already over). */
+export const CANCELLABLE_STATUSES = new Set(['scheduled', 'overdue', 'in_progress', 'on_hold']);

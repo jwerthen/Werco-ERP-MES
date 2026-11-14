@@ -6,13 +6,14 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
+from app.core.credentials import is_api_token_credential
 from app.db.database import get_db
 from app.models.purchasing import POReceipt, POStatus, PurchaseOrder, PurchaseOrderLine, Vendor
 from app.models.quality import NonConformanceReport
 from app.models.supplier_scorecard import ApprovedSupplierList, ScorecardPeriod, SupplierAudit, SupplierScorecard
 from app.models.user import User, UserRole
 from app.services.audit_service import AuditService
-from app.services.supplier_approval_service import REEVALUATION_STATUSES
+from app.services.supplier_approval_service import API_TOKEN_ASL_REFUSAL, REEVALUATION_STATUSES
 
 router = APIRouter()
 
@@ -1128,6 +1129,12 @@ def create_approved_supplier(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
+    """LEGACY: the Approved Supplier List lives on the vendor record since migration 123
+    (``PUT /purchasing/vendors/{id}/approval``); nothing reads this table's approvals any more.
+    Kept for its history; not an MCP tool, and an API token is refused (403) -- an approval
+    recorded here by an agent would contradict the vendor's own status."""
+    if is_api_token_credential(current_user):
+        raise HTTPException(status_code=403, detail=API_TOKEN_ASL_REFUSAL)
     # Approval gate, not the plain tenant gate: an ASL entry is a live permission to buy,
     # so a removed supplier must not be enterable on it. See ``_live_vendor_for_approval``.
     vendor = _live_vendor_for_approval(db, data.vendor_id, company_id)
@@ -1167,6 +1174,9 @@ def update_approved_supplier(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
+    """LEGACY (see ``create_approved_supplier``): not an MCP tool; an API token is refused (403)."""
+    if is_api_token_credential(current_user):
+        raise HTTPException(status_code=403, detail=API_TOKEN_ASL_REFUSAL)
     entry = (
         db.query(ApprovedSupplierList)
         .options(joinedload(ApprovedSupplierList.vendor))

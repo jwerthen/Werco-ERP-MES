@@ -60,6 +60,39 @@ const vendors = [
     version: 0,
     approval_status: null,
   },
+  {
+    id: 3,
+    code: 'VND-003',
+    name: 'Probation Plating',
+    is_approved: false,
+    is_as9100_certified: false,
+    is_iso9001_certified: false,
+    is_active: true,
+    version: 0,
+    approval_status: 'conditional',
+  },
+  {
+    id: 4,
+    code: 'VND-004',
+    name: 'Banned Castings',
+    is_approved: false,
+    is_as9100_certified: false,
+    is_iso9001_certified: false,
+    is_active: true,
+    version: 0,
+    approval_status: 'disqualified',
+  },
+  {
+    id: 5,
+    code: 'VND-005',
+    name: 'Unvetted Supply',
+    is_approved: false,
+    is_as9100_certified: false,
+    is_iso9001_certified: false,
+    is_active: true,
+    version: 0,
+    approval_status: null,
+  },
 ];
 const parts = [{ id: 9, part_number: 'HW-9', name: 'Rivet' }] as Part[];
 const purchaseOrders = [
@@ -127,6 +160,18 @@ beforeEach(() => {
 });
 
 describe('Create PO — Approved Supplier List', () => {
+  test('offers Conditional suppliers (a warning, not a gate) but never Disqualified or unapproved ones', async () => {
+    const form = await openCreatePO();
+    const picker = within(form).getByLabelText(/vendor/i) as HTMLSelectElement;
+    const offered = Array.from(picker.options).map(option => option.textContent);
+    expect(offered).toEqual([
+      'Select vendor...',
+      'VND-001 - Bramble Metals',
+      'VND-002 - Legacy Supply',
+      'VND-003 - Probation Plating (Conditional)',
+    ]);
+  });
+
   test('checks the vendor + line parts and shows the advisory warnings amber', async () => {
     const form = await openCreatePO();
     fireEvent.change(screen.getByLabelText(/vendor/i), { target: { value: '1' } });

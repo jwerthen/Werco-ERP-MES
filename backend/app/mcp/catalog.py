@@ -60,6 +60,11 @@ EXCLUDED_OPERATIONS: FrozenSet[Tuple[str, str]] = frozenset(
         ("PUT", "/api/v1/purchasing/vendors/{vendor_id}/approval"),
         ("POST", "/api/v1/purchasing/vendors/asl-import/preview"),
         ("POST", "/api/v1/purchasing/vendors/asl-import/commit"),
+        # The legacy approved_supplier_list writes (read-only history since migration 123; the
+        # ASL lives on the vendor record): an approval an agent recorded there would contradict
+        # the vendor's own status, and nothing reads it. The two reads stay tools.
+        ("POST", "/api/v1/supplier-scorecards/approved-suppliers/"),
+        ("PUT", "/api/v1/supplier-scorecards/approved-suppliers/{asl_id}"),
     }
 )
 

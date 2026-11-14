@@ -10,7 +10,9 @@ One module owns the whole vocabulary and every rule that reads or writes it:
   ``is_approved`` is derived from a status;
 * :func:`approval_warnings` -- the advisory purchase-order checks (warn, never block);
 * :func:`assert_vendor_not_disqualified` -- the one hard refusal: a purchase order cannot
-  be raised to a vendor that is Disqualified on the ASL. Every PO-create door calls it.
+  be raised to a vendor that is Disqualified on the ASL. Every PO-create door calls it, and
+  :func:`assert_purchase_order_vendor_not_disqualified` holds the same line for an existing
+  PO moving toward issue (approve, add / change lines, send, email).
 
 Callers: ``PUT /purchasing/vendors/{id}/approval``, the update-only ASL import
 (``vendor_asl_import_service``), ``PUT /purchasing/vendors/{id}`` (the is_approved
@@ -156,8 +158,22 @@ PART_TYPE_SCOPE_HINTS: Dict[str, FrozenSet[str]] = {
     ),
 }
 
+# Supplier approval is a judgment write: only a person signed in to the app makes it. Shared by
+# the approval verb, the ASL import and the legacy ``approved_supplier_list`` writes.
+API_TOKEN_ASL_REFUSAL = (
+    "Supplier approval is a person's decision: an API token cannot change the Approved Supplier List. "
+    "Sign in to the app to do this."
+)
+
 DISQUALIFIED_REFUSAL_TEMPLATE = (
     "{name} is Disqualified on the Approved Supplier List; a purchase order cannot be raised to it."
+)
+# The same gate on a purchase order that already exists (raised before the vendor was
+# Disqualified -- e.g. a 6 AM MRP auto-draft): it may be cancelled or kept as a record, but
+# not moved toward issue.
+DISQUALIFIED_PO_TEMPLATE = (
+    "{name} is Disqualified on the Approved Supplier List; purchase order {po_number} {consequence}. "
+    "Cancel it, or record a new approval decision for the supplier first."
 )
 
 _NON_ALNUM = re.compile(r"[^0-9a-z]+")
@@ -314,12 +330,19 @@ def apply_vendor_approval(
     Only the keyword arguments actually passed are written (an omitted one leaves the column
     as it is). ``status`` is a slug or None. When a status is set, ``is_approved`` is derived:
     approved / approved_customer_directed -> True, conditional / disqualified -> False. A
-    NULL status (not on the ASL) leaves ``is_approved`` exactly as it was. ``is_active`` and
-    ``is_deleted`` are never touched -- removal and approval are different decisions.
+    vendor that was never on the ASL (NULL before and after) keeps ``is_approved`` exactly as
+    it was. TAKING a vendor OFF the ASL (a status -> NULL) sets ``is_approved`` False: the
+    approval the list granted goes with it, and the restrictive value is the one that cannot
+    pass unnoticed (re-approving by the vendor checkbox is one explicit, audited edit; a
+    removal that left the vendor approved would look exactly like a legitimate approval).
+    ``is_active`` and ``is_deleted`` are never touched -- removal and approval are different
+    decisions.
     """
+    removed_from_asl = False
     if status is not _UNSET:
         if status is not None and status not in VENDOR_APPROVAL_STATUS_VALUES:
             raise AslValueError(f"Unknown supplier status '{status}'")
+        removed_from_asl = status is None and getattr(vendor, "approval_status", None) is not None
         vendor.approval_status = status
     if scopes is not _UNSET:
         vendor.approved_scopes = list(scopes) if scopes else None
@@ -336,6 +359,8 @@ def apply_vendor_approval(
     derived = derived_is_approved(vendor.approval_status)
     if derived is not None:
         vendor.is_approved = derived
+    elif removed_from_asl:
+        vendor.is_approved = False
 
 
 def changed_fields(before: Dict[str, Any], after: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -384,6 +409,23 @@ def assert_vendor_not_disqualified(vendor: Any) -> None:
         raise HTTPException(status_code=409, detail=disqualified_refusal(vendor))
 
 
+def assert_purchase_order_vendor_not_disqualified(po: Any, consequence: str) -> None:
+    """Refuse 409 moving an EXISTING purchase order toward issue while its vendor is Disqualified.
+
+    The create gate alone left a draft raised before the disqualification (the MRP auto-draft
+    cron, a buyer's draft) free to be approved, given lines, marked sent or emailed -- and
+    issuing the order is where the AS9100D 8.4 harm happens. ``consequence`` completes
+    "purchase order PO-X ..." (e.g. "cannot be sent"). Cancelling, closing, receiving what was
+    already ordered, and restoring a deleted record stay open: none of them places an order.
+    """
+    vendor = getattr(po, "vendor", None)
+    if vendor is not None and is_disqualified(vendor):
+        raise HTTPException(
+            status_code=409,
+            detail=DISQUALIFIED_PO_TEMPLATE.format(name=vendor.name, po_number=po.po_number, consequence=consequence),
+        )
+
+
 def _warning(code: str, message: str, part: Any = None) -> Dict[str, Any]:
     return {
         "code": code,
@@ -405,14 +447,20 @@ def approval_warnings(vendor: Any, parts: Iterable[Any] = (), *, today: Optional
     ``reevaluation_overdue``, ``scope_not_approved`` and ``scope_unverified``. Per-part scope
     checks run only for a vendor ON the ASL (not disqualified, not customer-directed -- a
     customer-directed source's scope is the customer's direction, not Werco's approval).
+    ``vendor_not_on_asl`` is raised for EVERY vendor with no ASL status, the vendor-checkbox
+    "approved" ones included: that checkbox is exactly the approval that bypasses the
+    controlled list, so it must not silence the warning (its text says so instead).
     """
     today = today or central_today()
     name = vendor.name
     status = getattr(vendor, "approval_status", None)
     warnings: List[Dict[str, Any]] = []
     if status is None:
-        if not getattr(vendor, "is_approved", False):
-            warnings.append(_warning("vendor_not_on_asl", f"{name} is not on the Approved Supplier List."))
+        if getattr(vendor, "is_approved", False):
+            message = f"{name} is marked approved but is not on the Approved Supplier List."
+        else:
+            message = f"{name} is not on the Approved Supplier List."
+        warnings.append(_warning("vendor_not_on_asl", message))
         return warnings
     if status == ApprovalStatus.DISQUALIFIED.value:
         warnings.append(_warning("vendor_disqualified", disqualified_refusal(vendor)))

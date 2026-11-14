@@ -99,6 +99,19 @@ export const aslStatusClass = (status: AslStatus | string | null | undefined): s
 export const derivedIsApproved = (status: AslStatus | null | undefined): boolean | null =>
   status ? APPROVED_STATUSES.has(status) : null;
 
+/**
+ * Whether the Create PO vendor picker offers this vendor. Checkbox-approved vendors as before,
+ * PLUS Conditional ones: Conditional is a warning, never a gate (owner decision 2026-11-13),
+ * and `is_approved` derives false for it, so filtering on the flag alone hid every Conditional
+ * supplier from the one screen that shows the warning. Disqualified is never offered (every
+ * PO-create door refuses it 409).
+ */
+export const isOfferedForPurchaseOrders = (vendor: {
+  is_approved?: boolean | null;
+  approval_status?: AslStatus | string | null;
+}): boolean =>
+  vendor.approval_status !== 'disqualified' && (!!vendor.is_approved || vendor.approval_status === 'conditional');
+
 /** True when the vendor owes a re-evaluation whose due date (Central) is already past. */
 export const isReevaluationOverdue = (vendor: VendorAslFields): boolean =>
   !!vendor.approval_status &&

@@ -63,7 +63,7 @@ from app.services.import_service import ParsedTable, parse_date_field
 from app.services.operational_event_service import OperationalEventService
 from app.services.part_number_resolver import resolve_part_by_number
 from app.services.process_sheet_service import ProcessSheetUnavailableError
-from app.services.supplier_approval_service import disqualified_refusal, is_disqualified
+from app.services.supplier_approval_service import approval_warnings, disqualified_refusal, is_disqualified
 from app.services.work_order_state_service import (
     operation_target_quantity,
     sync_work_order_quantity_complete,
@@ -662,10 +662,12 @@ def import_open_purchase_orders(
             row_instances.append(po)
 
             subtotal = 0.0
+            line_parts = []
             for idx, line in enumerate(lines, 1):
                 part = _find_part(db, company_id, line.part_number)
                 if not part:
                     raise ValueError(f"part '{line.part_number}' not found (row {line.row_number})")
+                line_parts.append(part)
                 line_total = line.quantity * line.unit_price
                 po_line = PurchaseOrderLine(
                     purchase_order_id=po.id,
@@ -697,6 +699,7 @@ def import_open_purchase_orders(
                 nested.rollback()
                 _expunge_rolled_back(db, row_instances)
             else:
+                warnings = approval_warnings(vendor, line_parts)
                 audit.log_create(
                     resource_type="purchase_order",
                     resource_id=po.id,
@@ -708,6 +711,8 @@ def import_open_purchase_orders(
                         "vendor_code": vendor.code,
                         "line_count": len(lines),
                         "status": POStatus.SENT.value,
+                        # The advisory ASL warnings, as every other PO-create door records them.
+                        **({"supplier_approval_warnings": warnings} if warnings else {}),
                     },
                 )
                 # Same operational event the interactive create emits, tagged

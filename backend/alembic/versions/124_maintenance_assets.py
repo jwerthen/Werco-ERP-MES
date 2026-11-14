@@ -32,6 +32,8 @@ This revision:
 ``downtime_events``
   - ``maintenance_work_order_id`` Integer NULL, FK ``maintenance_work_orders.id`` (named
     ``fk_downtime_events_maintenance_work_order_id``), indexed.
+  - ``maintenance_adopted`` Boolean NOT NULL DEFAULT false: the link came from adopting an
+    operator's open event (a cancelled work order hands such an event back, unresolved).
 
 Every object mirrors ``app/models/maintenance.py`` / ``app/models/downtime.py`` and is
 guarded INDEPENDENTLY (the 088/089 style): the fresh bootstrap (create_all -> stamp 058 ->
@@ -48,7 +50,7 @@ Downgrade
 Real, and REFUSES rather than destroy records: if any schedule, work order or log targets
 an asset (``work_center_id IS NULL``), ``work_center_id`` cannot be made NOT NULL again, and
 the downgrade raises naming the counts instead of deleting maintenance history. Otherwise it
-drops the downtime link column, the CHECKs, the asset columns, restores NOT NULL and drops
+drops the downtime link columns, the CHECKs, the asset columns, restores NOT NULL and drops
 ``maintenance_assets`` (LOSSY for the asset register itself -- export it first).
 """
 
@@ -77,6 +79,7 @@ DOWNTIME = "downtime_events"
 DOWNTIME_COLUMN = "maintenance_work_order_id"
 DOWNTIME_FK = "fk_downtime_events_maintenance_work_order_id"
 DOWNTIME_INDEX = "ix_downtime_events_maintenance_work_order_id"
+DOWNTIME_ADOPTED_COLUMN = "maintenance_adopted"
 
 # PostgreSQL only, and LOCAL (precedent 059/060/114/117/123): bounds the wait for the ACCESS
 # EXCLUSIVE locks, then hands the normal timeout back.
@@ -222,7 +225,8 @@ def _upgrade_downtime() -> None:
     add_column = offline or not _has_column(DOWNTIME, DOWNTIME_COLUMN)
     add_fk = offline or not _has_foreign_key(DOWNTIME, DOWNTIME_FK)
     add_index = offline or not _has_index(DOWNTIME, DOWNTIME_INDEX)
-    if not (add_column or add_fk or add_index):
+    add_adopted = offline or not _has_column(DOWNTIME, DOWNTIME_ADOPTED_COLUMN)
+    if not (add_column or add_fk or add_index or add_adopted):
         return
     with op.batch_alter_table(DOWNTIME) as batch:
         if add_column:
@@ -231,6 +235,12 @@ def _upgrade_downtime() -> None:
             batch.create_foreign_key(DOWNTIME_FK, "maintenance_work_orders", [DOWNTIME_COLUMN], ["id"])
         if add_index:
             batch.create_index(DOWNTIME_INDEX, [DOWNTIME_COLUMN], unique=False)
+        if add_adopted:
+            # A constant default: PostgreSQL 11+ adds it without rewriting the table, and every
+            # existing row (none is linked yet) correctly reads false.
+            batch.add_column(
+                sa.Column(DOWNTIME_ADOPTED_COLUMN, sa.Boolean(), nullable=False, server_default=sa.text("false"))
+            )
 
 
 def _secure_assets_table() -> None:
@@ -313,9 +323,12 @@ def _downgrade_downtime() -> None:
     drop_index = offline or _has_index(DOWNTIME, DOWNTIME_INDEX)
     drop_fk = offline or _has_foreign_key(DOWNTIME, DOWNTIME_FK)
     drop_column = offline or _has_column(DOWNTIME, DOWNTIME_COLUMN)
-    if not (drop_index or drop_fk or drop_column):
+    drop_adopted = offline or _has_column(DOWNTIME, DOWNTIME_ADOPTED_COLUMN)
+    if not (drop_index or drop_fk or drop_column or drop_adopted):
         return
     with op.batch_alter_table(DOWNTIME) as batch:
+        if drop_adopted:
+            batch.drop_column(DOWNTIME_ADOPTED_COLUMN)
         if drop_index:
             batch.drop_index(DOWNTIME_INDEX)
         if drop_fk:

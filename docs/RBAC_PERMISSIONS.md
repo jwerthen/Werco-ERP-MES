@@ -114,8 +114,9 @@ file names — see
 tools at all, and neither is AI **Accept & apply** (`POST /ai/recommendations/{id}/apply`): under
 owner ruling 3 only a person signed in to the app runs an AI recommendation's action, so it is in
 `catalog.EXCLUDED_OPERATIONS`, and the route refuses API tokens besides. The three Approved Supplier
-List writes (recording a supplier-approval decision and the ASL import preview / commit) are
-excluded the same way, and refuse API tokens too — see [Purchasing](#purchasing). An agent on an API token
+List writes (recording a supplier-approval decision and the ASL import preview / commit) and the two
+legacy `approved_supplier_list` writes are excluded the same way, and refuse API tokens too — see
+[Purchasing](#purchasing). An agent on an API token
 also gets a 403 the same person would not get in the UI when it tries to mark an AI action card
 handled — see [Credential policy for judgment writes](#credential-policy-for-judgment-writes)
 and [AI recommendations (Action Inbox)](#ai-recommendations-action-inbox).
@@ -163,6 +164,8 @@ Recommendations):
 | **The other count judgments** — good above the floor's labor record (office operation complete, override reason or not; force-complete above `deliverable`); `PUT /work-orders/operations/{id}` changing `quantity_complete` or a `quantity_scrapped` that is not a rise; `PUT /work-orders/{id}` changing the header's `quantity_complete` / `quantity_scrapped` in either direction; **every** correction through `POST /work-orders/operations/{id}/reduce-production` or `POST /shop-floor/operations/{id}/reduce-production`; lowering `quantity_ordered` once any operation has recorded good, scrap, a start or any labor; lowering a laser nest's `planned_runs` through `PATCH /laser-nests/{id}` once that nest's operation has (its runs are the operation's target, and the laser work order's order is derived from them). Both lowerings read one rule, `operation_action_gates.operation_has_recorded_work` (good, scrap, a start — IN_PROGRESS / COMPLETE status or a stamped `actual_start` — or any `TimeEntry`) | `is_api_token_credential` (reduce-production through `api_token_reduction_refusal`, re-checked under the row locks) | **403** `API_TOKEN_COUNT_JUDGMENT` (`Recording more good than the floor counted, …`) | **This PR's extension** of the same principle — the owner was asked about scrap and short closes, not these |
 | **Re-importing a nest package onto a laser job with recorded work** — `POST /work-orders/{id}/laser-nest-packages/import` (either import shape; the MCP tool `import_laser_nest_package` with a `work_order_id`) when any operation the import would delete has recorded work (the same `operation_has_recorded_work` rule), or the laser work order's header already carries good or scrap: the import replaces every nest operation and zeroes the header counts, erasing a person's good, scrap and any declared short. Refused before the upload is unpacked, and again under the import's lock reading the database rather than the rows the first check loaded; a token's import onto un-worked nests with a zero header, and the standalone import, which wipes nothing, are unchanged | `is_api_token_credential` (`laser_nest_service.import_would_wipe_recorded_work`) | **403** `API_TOKEN_NEST_REIMPORT` (`Re-importing a nest package replaces nests that already have recorded work …`) — its own text, so the caller is told which action was refused | **This PR's extension** of the same principle — the owner was asked about scrap and short closes, not this |
 | **Recording a supplier-approval decision or loading the Approved Supplier List** — `PUT /purchasing/vendors/{id}/approval`, `POST /purchasing/vendors/asl-import/preview` and `POST /purchasing/vendors/asl-import/commit` (the preview too: it exists only to feed a commit) | `is_api_token_credential` | **403** (`Supplier approval is a person's decision: an API token cannot change the Approved Supplier List. Sign in to the app to do this.`); also not MCP tools (`catalog.EXCLUDED_OPERATIONS`) | Design decision of the Approved Supplier List change (2026-11-13): a supplier approval on the AS9100D 8.4 list is a named person's judgment. Not an owner ruling |
+| **Writing the legacy `approved_supplier_list` table** — `POST /supplier-scorecards/approved-suppliers/` and `PUT /supplier-scorecards/approved-suppliers/{asl_id}` (read-only history since migration 123) | `is_api_token_credential` | **403**, the same text; also not MCP tools (`catalog.EXCLUDED_OPERATIONS`) | Review follow-up of the same change: an agent's "approved" entry there would contradict the vendor's own ASL status. People's use of the two routes is unchanged |
+| **Granting vendor approval by the checkbox** — `POST /purchasing/vendors` with `is_approved: true`, `PUT /purchasing/vendors/{id}` raising `is_approved` from `false` to `true`, and `POST /purchasing/vendors/import-csv` when any row asks for `is_approved` (refused before any row is written, dry run included). A token may still create and edit vendors, re-send `true` on an approved one, and withdraw approval | `is_api_token_credential` | **403** (`Approving a supplier is a person's decision: an API token cannot mark a vendor approved. Sign in to the app to do this.`) | Review follow-up of the same change: the checkbox is the approval that puts a vendor not on the ASL into the Create PO picker. Not an owner ruling |
 
 Deliberately **not** refused:
 
@@ -1194,11 +1197,18 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > judgment write: it does not refuse an API token, and both of its routes are MCP tools.
 >
 > **Starting, completing or cancelling a maintenance WO can write downtime.** A work-center WO with
-> `requires_shutdown` opens (or adopts) a downtime event on start and resolves it on complete or on a
-> `PUT` to `cancelled` / `completed` (see [Downtime](#downtime) and `docs/API.md` → Maintenance). Those
-> downtime writes ride on the maintenance verb's own role gate — an Operator who may start the WO
-> thereby opens the event — and are audited as `downtime_event` rows. Adopting an operator's open
-> event sets only its `maintenance_work_order_id` link (a field `PUT /downtime/{id}` cannot write).
+> `requires_shutdown` opens an event on start only when the machine has none open (it adopts an
+> operator's open event, or shares one another started shutdown WO holds), and on complete or a `PUT`
+> to `cancelled` resolves it, hands it to a WO still holding the machine down, or — an adopted event on
+> a cancel — hands it back to the machine still open (see [Downtime](#downtime) and `docs/API.md` →
+> Maintenance). Those downtime writes ride on the maintenance verb's own role gate — an Operator who
+> may start or complete the WO thereby writes the event — and are audited as `downtime_event` rows.
+> Adopting, handing over or handing back sets only the event's `maintenance_work_order_id` /
+> `maintenance_adopted` link (fields `PUT /downtime/{id}` cannot write). Holding and cancelling go
+> through `PUT /maintenance/work-orders/{id}` (planning roles, so the Maintenance page shows Hold /
+> Cancel to Admin / Manager / Supervisor / Platform Admin); that `PUT` refuses `in_progress` and
+> `completed` (**409**, the Start / Complete verbs own them), un-starting a started WO, and changing
+> `requires_shutdown` once started.
 
 > **Tenancy: ten of the sixteen handlers took no company argument.** `start` and `complete`
 > resolved the work order by bare id, and `dashboard` / `calendar` / `history` / `overdue`
@@ -1575,8 +1585,14 @@ Follow-up owners must be active users in the same company with purchasing access
 >   Conditional supplier approved. The Purchasing → Vendors **Edit** form locks its Approved checkbox
 >   for such a vendor and leaves `is_approved` out of the save.
 > - **The Disqualified refusal is a state rule, not a role rule.** A purchase order to a vendor
->   Disqualified on the ASL is refused **409** for every role at every PO-create door (`docs/API.md`
+>   Disqualified on the ASL is refused **409** for every role at every PO-create door, and an
+>   existing one cannot be approved, submitted for approval, given lines, sent or emailed (`docs/API.md`
 >   → Purchasing → *Approved Supplier List on the vendor record*).
+> - **Granting approval by the vendor checkbox is a person's too.** An API token is refused (403)
+>   creating a vendor with `is_approved: true`, raising it through the vendor `PUT`, or importing a
+>   vendor CSV that asks for it — see
+>   [Credential policy for judgment writes](#credential-policy-for-judgment-writes). The vendor `PUT`
+>   row-locks the vendor and refuses an explicit `is_approved: null` (422).
 > - **UI.** The **Update approval** and **Import ASL** controls on Supplier Scorecards → Approved
 >   Supplier List render only for `canWriteAsl` (Admin / Manager / Quality, or a superuser;
 >   `frontend/src/utils/supplierApproval.ts`). It omits Platform Admin, matching the other purchasing

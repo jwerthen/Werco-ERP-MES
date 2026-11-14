@@ -212,12 +212,14 @@ export function UpdateApprovalDialog({ vendor, onClose, onSaved }: Props) {
           </FormField>
           <div className="self-end text-xs text-slate-400" data-testid="derived-approval">
             {derived === null
-              ? 'Not on the ASL: the vendor’s Approved flag is left as it is.'
+              ? vendor.approval_status
+                ? 'Taking the vendor off the ASL turns its Approved flag off; tick Approved on the vendor if it should stay buyable.'
+                : 'Not on the ASL: the vendor’s Approved flag is left as it is.'
               : derived
                 ? 'Purchase orders can be raised to this vendor (Approved flag on).'
                 : status === 'disqualified'
-                  ? 'Disqualified: every new purchase order to this vendor is refused.'
-                  : 'Conditional: the vendor is dropped from the purchase-order vendor list (Approved flag off).'}
+                  ? 'Disqualified: purchase orders to this vendor are refused — new ones, and sending or approving existing drafts.'
+                  : 'Conditional: purchase orders can still be raised, each carrying a Conditional warning (Approved flag off).'}
           </div>
         </div>
 

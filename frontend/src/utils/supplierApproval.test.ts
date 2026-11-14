@@ -3,6 +3,7 @@ import {
   basisLabels,
   canWriteAsl,
   derivedIsApproved,
+  isOfferedForPurchaseOrders,
   isReevaluationOverdue,
   scopeLabels,
 } from './supplierApproval';
@@ -25,6 +26,15 @@ describe('supplierApproval helpers', () => {
     expect(derivedIsApproved('disqualified')).toBe(false);
     // Not on the ASL: the flag is left as it is.
     expect(derivedIsApproved(null)).toBeNull();
+  });
+
+  it('offers checkbox-approved and Conditional vendors for purchase orders, never Disqualified', () => {
+    expect(isOfferedForPurchaseOrders({ is_approved: true, approval_status: 'approved' })).toBe(true);
+    expect(isOfferedForPurchaseOrders({ is_approved: true, approval_status: null })).toBe(true);
+    expect(isOfferedForPurchaseOrders({ is_approved: false, approval_status: 'conditional' })).toBe(true);
+    expect(isOfferedForPurchaseOrders({ is_approved: false, approval_status: 'disqualified' })).toBe(false);
+    expect(isOfferedForPurchaseOrders({ is_approved: true, approval_status: 'disqualified' })).toBe(false);
+    expect(isOfferedForPurchaseOrders({ is_approved: false, approval_status: null })).toBe(false);
   });
 
   it('flags an overdue re-evaluation against Central today, never for Disqualified', () => {

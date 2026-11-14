@@ -264,7 +264,8 @@ path. No environment variable, secret, cron or worker job is added.
   model bootstrap). On `maintenance_schedules`, `maintenance_work_orders` and `maintenance_logs` it
   adds `asset_id` (FK and index), makes `work_center_id` nullable and adds the CHECK
   `ck_<table>_one_target` (exactly one target; every existing row has a work center, so it validates).
-  It adds `downtime_events.maintenance_work_order_id` (FK and index). No data changes.
+  It adds `downtime_events.maintenance_work_order_id` (FK and index) and `downtime_events.maintenance_adopted`
+  (Boolean NOT NULL DEFAULT false — a constant default, so no table rewrite on PostgreSQL 11+). No data changes.
 - **Locks.** Both revisions run `SET LOCAL lock_timeout = '5s'`. They take ACCESS EXCLUSIVE locks on
   `vendors`, `parts`, the three maintenance tables and `downtime_events`, held until the boot
   transaction commits; the CHECKs validate and the indexes build inside it. A long transaction holding

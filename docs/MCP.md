@@ -3,7 +3,7 @@
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
 (Cursor, Claude Code, a chat bot) gets **775 tools** — 15 hand-written *convenience* tools plus
-**760 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+**758 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
 as the same request from the web app.
 
 This is the runbook: how to run it, how to authenticate, what the tools are called, which rules
@@ -18,7 +18,8 @@ operations), **and again on 2026-11-11 after the saved dashboard layout routes a
 Approved Supplier List and equipment-asset / PM-import routes** added ten tools (the asset CRUD and
 history, the PM import preview / commit, `list_vendors_reevaluation_due` and
 `check_supplier_approval`) while the three ASL writes joined `EXCLUDED_OPERATIONS` (15 convenience +
-760 generated, 16 shadowed).
+760 generated, 16 shadowed) — and the two legacy `approved_supplier_list` writes followed them in the
+same change (15 convenience + 758 generated, 16 shadowed).
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
 `backend/tests/test_mcp_docs_names.py` checks every tool name this file, `CLAUDE.md` and `API.md`
@@ -201,7 +202,7 @@ routes authenticate every call; in IN-PROCESS mode it uses the real `ErpTokenVer
  "generated_tools":   [{"name": "...", "method": "GET", "path": "/api/v1/...", "tag": "...",
                         "function": "...", "annotations": {...}, "deprecated": false}],
  "shadowed_operations": [["GET", "/api/v1/inventory/"], ...],
- "counts": {"convenience": 15, "generated": 760, "shadowed": 16}
+ "counts": {"convenience": 15, "generated": 758, "shadowed": 16}
 }
 ```
 
@@ -439,7 +440,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `MRP` (`/mrp`) | Material Requirements Planning | `create_mrp_run`, `get_latest_mrp_run`, `get_mrp_actions`, `get_current_shortages`, `process_mrp_action` |
 | `Purchasing` (`/purchasing`) | Purchasing, Parts, Documents | `list_purchase_orders`★, `get_purchase_order`, `create_purchase_order`, `add_po_line`, `send_purchase_order`, `list_vendors`, `create_vendor`, `restore_vendor`, `check_supplier_approval` (the Create PO screen's Approved Supplier List check) |
 | `POUpload` (`/po-upload`) | PO Upload | `upload_and_extract_po`, `upload_and_extract_quote`, `upload_and_extract_invoice`, `create_po_from_upload`, `search_vendors` |
-| `SupplierScorecards` (`/supplier-scorecards`) | Supplier Scorecards, Purchasing | `list_scorecards`, `scorecard_dashboard`, `auto_calculate_scorecard`, `create_audit`, `list_vendors`, `list_vendors_reevaluation_due` — the Approved Supplier List tab reads the vendor record; recording an approval and the ASL import (`PUT /purchasing/vendors/{vendor_id}/approval`, `POST /purchasing/vendors/asl-import/preview`, `/commit`) are deliberately **not** tools (§6.1). `list_approved_suppliers` still reads the legacy table the page no longer uses |
+| `SupplierScorecards` (`/supplier-scorecards`) | Supplier Scorecards, Purchasing | `list_scorecards`, `scorecard_dashboard`, `auto_calculate_scorecard`, `create_audit`, `list_vendors`, `list_vendors_reevaluation_due` — the Approved Supplier List tab reads the vendor record; recording an approval and the ASL import (`PUT /purchasing/vendors/{vendor_id}/approval`, `POST /purchasing/vendors/asl-import/preview`, `/commit`) are deliberately **not** tools (§6.1), and neither are the legacy table's two writes. `list_approved_suppliers` still reads the legacy table the page no longer uses |
 | `Traceability` (`/traceability`) | Traceability | `search_lots`, `trace_lot`, `trace_serial` |
 | `Quotes` (`/quotes`) | Quotes, Parts | `quotes_list_quotes`, `quotes_get_quote`, `quotes_update_quote`, `quotes_send_quote`, `generate_quote_pdf`, `get_conversion_plan`, `convert_to_work_order` |
 | `FabricationQuoting` (`/fabrication-quotes`) | Fabrication Quoting | `fabrication_quoting_list_quotes`, `fabrication_quoting_create_quote`, `fabrication_quoting_get_quote`, `fabrication_quoting_update_quote`, `calculate`, `fabrication_quoting_approve_quote`, `fabrication_quoting_revise_quote`, `fabrication_quoting_handoff_quote`, `export_package` |
@@ -492,7 +493,7 @@ minus two further, named sets:
   They are listed **by name** rather than skipped silently, so a new route that forgets its
   `security` dependency — even under a tag that already has tools — fails the coverage guard
   (`catalog.unaccounted_operations`, §14) until it is either secured or named there.
-- **`EXCLUDED_OPERATIONS`** — six operations, none with a convenience twin:
+- **`EXCLUDED_OPERATIONS`** — eight operations, none with a convenience twin:
   - The two Excel-cutover loaders, `POST /work-orders/import` and
     `POST /purchasing/purchase-orders/import` (`migration_import_service`). They record a *past*
     system's state rather than perform a user action: the work-order loader mints work orders
@@ -512,7 +513,11 @@ minus two further, named sets:
     Recording a supplier-approval decision and loading the controlled QL 7.4 list (AS9100D 8.4) are
     a named person's judgment, so they are app actions only; the preview goes with its commit, which
     it exists to feed. The routes also refuse API tokens (403) on their own. Agents keep the reads:
-    `list_vendors_reevaluation_due` and `check_supplier_approval`. See
+    `list_vendors_reevaluation_due` and `check_supplier_approval`. The two **legacy**
+    `approved_supplier_list` writes (`POST /supplier-scorecards/approved-suppliers/`, `PUT
+    .../approved-suppliers/{asl_id}`) are excluded with them — that table is read-only history since
+    migration 123, and an approval an agent recorded there would contradict the vendor's own status;
+    both routes refuse API tokens too, and `list_approved_suppliers` / `get_approved_supplier` stay. See
     [API.md → Purchasing](API.md#purchasing) → *Approved Supplier List on the vendor record*.
 
 The `Import Batches` tag also excludes the recoverable Import Center review, receipt,
@@ -682,7 +687,7 @@ Every other operation stays generated — including the neighbours of the shadow
 (`work_orders_start_work_order`, `work_orders_update_operation`, `preview_laser_nest_package_import`,
 `get_work_order_by_number`, `update_laser_nest`, `get_inventory_summary`, `get_purchase_order`, …) —
 except the operations in `EXCLUDED_OPERATIONS` (§6.1) — the two cutover loaders, AI Accept &
-apply and the three Approved Supplier List writes — which have no tool and no replacement. Adding a convenience tool whose route is *not* in the shadow set is a build error
+apply, the three Approved Supplier List writes and the two legacy ASL-table writes — which have no tool and no replacement. Adding a convenience tool whose route is *not* in the shadow set is a build error
 (`build_registry` refuses a duplicate name) rather than a silent win.
 
 ---
@@ -1018,8 +1023,8 @@ count, in which case there is nothing left to close.
 - Tests (all in the default `pytest tests/` run, so in CI's required "Backend Tests" job):
   - `backend/tests/test_mcp_catalog.py` (no DB) — membership against the live `app.openapi()` (every
     secured, unshadowed, unexcluded operation is exactly one tool; `PUBLIC_OPERATIONS` names exactly
-    the unsecured routes; `EXCLUDED_OPERATIONS` are exactly the two loaders, the AI apply route and the
-    three Approved Supplier List writes,
+    the unsecured routes; `EXCLUDED_OPERATIONS` are exactly the two loaders, the AI apply route, the
+    three Approved Supplier List writes and the two legacy ASL-table writes,
     and the record-only accept stays a tool), names (unique, wire-valid,
     ≤ 64, collisions prefixed, the numeric-suffix fallback proven on synthetic input and unused on
     the live catalog), schemas (`$ref`-free, `additionalProperties: false`, every JSON body's

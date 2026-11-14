@@ -150,6 +150,9 @@ class TestMembership:
             ("PUT", "/api/v1/purchasing/vendors/{vendor_id}/approval"),
             ("POST", "/api/v1/purchasing/vendors/asl-import/preview"),
             ("POST", "/api/v1/purchasing/vendors/asl-import/commit"),
+            # The legacy approved_supplier_list writes (read-only history since migration 123).
+            ("POST", "/api/v1/supplier-scorecards/approved-suppliers/"),
+            ("PUT", "/api/v1/supplier-scorecards/approved-suppliers/{asl_id}"),
         }
 
     def test_asl_writes_are_not_tools_but_the_asl_reads_are(self, catalog):

@@ -28,6 +28,7 @@ jest.mock('../services/api', () => ({
     createMaintenanceSchedule: jest.fn(),
     createMaintenanceWorkOrder: jest.fn(),
     startMaintenanceWorkOrder: jest.fn(),
+    updateMaintenanceWorkOrder: jest.fn(),
   },
 }));
 let mockRole = 'supervisor';
@@ -88,6 +89,7 @@ beforeEach(() => {
   mockedApi.createMaintenanceSchedule.mockResolvedValue({});
   mockedApi.createMaintenanceWorkOrder.mockResolvedValue({});
   mockedApi.startMaintenanceWorkOrder.mockResolvedValue({ ...scheduledWO, status: 'in_progress' });
+  mockedApi.updateMaintenanceWorkOrder.mockResolvedValue({ ...scheduledWO, status: 'cancelled' });
 });
 
 async function openScheduleForm() {
@@ -195,8 +197,38 @@ describe('Maintenance — work-order actions and roles', () => {
     const table = await screen.findByTestId('data-table');
     await waitFor(() => expect(within(table).getByText('Replace way wipers')).toBeInTheDocument());
     expect(within(table).getByRole('button', { name: /Start work order/ })).toBeInTheDocument();
+    expect(within(table).queryByRole('button', { name: /Cancel work order/ })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /New Work Order/ })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /New Schedule/ })).not.toBeInTheDocument();
+  });
+
+  it('puts a started work order on hold and cancels one through the PUT, confirming the cancel', async () => {
+    // Without these the only way to end an abandoned shutdown work order -- and the downtime it
+    // keeps open on the machine -- was the raw API.
+    mockedApi.getMaintenanceWorkOrders.mockResolvedValue([{ ...scheduledWO, status: 'in_progress' }]);
+    renderPage('/maintenance?tab=work_orders');
+    const table = await screen.findByTestId('data-table');
+    await waitFor(() => expect(within(table).getByText('Replace way wipers')).toBeInTheDocument());
+    const row = within(table).getByText('Replace way wipers').closest('tr') as HTMLElement;
+
+    fireEvent.click(within(row).getByRole('button', { name: 'Put work order MWO-2026-0031 on hold' }));
+    await waitFor(() => expect(mockedApi.updateMaintenanceWorkOrder).toHaveBeenCalledWith(31, { status: 'on_hold' }));
+
+    fireEvent.click(within(row).getByRole('button', { name: 'Cancel work order MWO-2026-0031' }));
+    const confirm = await screen.findByRole('dialog');
+    expect(confirm).toHaveTextContent('Downtime it is recording on the machine ends');
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Cancel work order' }));
+    await waitFor(() =>
+      expect(mockedApi.updateMaintenanceWorkOrder).toHaveBeenLastCalledWith(31, { status: 'cancelled' })
+    );
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+
+  it('shows planning controls to a platform admin, whom the server admits', async () => {
+    mockRole = 'platform_admin';
+    renderPage('/maintenance?tab=work_orders');
+    await screen.findByTestId('data-table');
+    expect(await screen.findByRole('button', { name: /New Work Order/ })).toBeInTheDocument();
   });
 
   it('is read-only for a viewer', async () => {

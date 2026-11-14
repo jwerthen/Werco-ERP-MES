@@ -318,6 +318,9 @@ class AslImportRow(UTCModel):
 class AslImportResponse(UTCModel):
     filename: Optional[str] = None
     source_hash: str
+    # Digest of what the commit would write, read against the vendors as they are now; the
+    # commit must echo the preview's (409 when a vendor changed in between).
+    plan_hash: str
     document: AslImportDocument
     committed: bool
     summary: AslImportSummary

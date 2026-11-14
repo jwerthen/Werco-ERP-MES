@@ -25,7 +25,11 @@ from app.schemas.work_order import WorkOrderCreate, WorkOrderOperationCreate
 from app.services.audit_service import AuditService
 from app.services.mrp_service import MRPService
 from app.services.operational_event_service import OperationalEventService
-from app.services.supplier_approval_service import assert_vendor_not_disqualified, not_disqualified_clause
+from app.services.supplier_approval_service import (
+    approval_warnings,
+    assert_vendor_not_disqualified,
+    not_disqualified_clause,
+)
 
 
 def _digest(value: Any) -> str:
@@ -392,12 +396,18 @@ class MRPSupplyService:
         )
         po.subtotal = po.total = amount
         self.db.flush()
+        create_extra = {'vendor_code': vendor.code, 'line_count': 1, 'source': 'mrp_review'}
+        # The advisory ASL warnings this draft carries, on the create row itself (as every
+        # create_purchase_order_command door records them).
+        warnings = approval_warnings(vendor, [part])
+        if warnings:
+            create_extra['supplier_approval_warnings'] = warnings
         audit.log_create(
             'purchase_order',
             po.id,
             po.po_number,
             new_values=po,
-            extra_data={'vendor_code': vendor.code, 'line_count': 1, 'source': 'mrp_review'},
+            extra_data=create_extra,
         )
         OperationalEventService(self.db).emit_best_effort(
             company_id=self.company_id,

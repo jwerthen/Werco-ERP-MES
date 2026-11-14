@@ -18,7 +18,13 @@ from app.schemas.mrp import MRPPurchaseBatchResponse
 from app.schemas.purchasing import POCreate, POLineCreate
 from app.services.mrp_supply_service import MRPSupplyService, _digest
 from app.services.operational_event_service import OperationalEventService
-from app.services.supplier_approval_service import assert_vendor_not_disqualified
+from app.services.supplier_approval_service import approval_warnings, assert_vendor_not_disqualified
+
+
+def _warnings_extra(vendor, parts):
+    """The advisory ASL warnings for a batch draft, for its create audit row (only when any)."""
+    warnings = approval_warnings(vendor, parts)
+    return {'supplier_approval_warnings': warnings} if warnings else {}
 
 
 class MRPPurchaseBatchService(MRPSupplyService):
@@ -220,6 +226,7 @@ class MRPPurchaseBatchService(MRPSupplyService):
                     'line_count': len(group),
                     'source': 'mrp_batch_review',
                     'mrp_action_ids': [line.action_id for line in group],
+                    **_warnings_extra(vendor, [parts_by_id[validated.part_id] for validated in data.lines]),
                 },
             )
             OperationalEventService(self.db).emit_best_effort(

@@ -28,7 +28,7 @@ import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { AslStatusPill } from '../components/suppliers/AslStatusPill';
 import { SupplierApprovalWarnings } from '../components/suppliers/SupplierApprovalWarnings';
 import type { AslStatus, SupplierApprovalCheck, SupplierApprovalWarning } from '../types/supplierApproval';
-import { aslStatusLabel } from '../utils/supplierApproval';
+import { aslStatusLabel, isOfferedForPurchaseOrders } from '../utils/supplierApproval';
 import {
   Button,
   ConfirmDialog,
@@ -2194,13 +2194,12 @@ export default function Purchasing() {
                   required
                 >
                   <option value={0}>Select vendor...</option>
-                  {vendors
-                    .filter(v => v.is_approved)
-                    .map(v => (
-                      <option key={v.id} value={v.id}>
-                        {v.code} - {v.name}
-                      </option>
-                    ))}
+                  {vendors.filter(isOfferedForPurchaseOrders).map(v => (
+                    <option key={v.id} value={v.id}>
+                      {v.code} - {v.name}
+                      {v.approval_status === 'conditional' ? ' (Conditional)' : ''}
+                    </option>
+                  ))}
                 </select>
               )}
             </FormField>

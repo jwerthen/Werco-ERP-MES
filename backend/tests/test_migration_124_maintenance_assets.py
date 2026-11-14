@@ -157,6 +157,10 @@ def test_upgrade_adds_every_object_and_existing_rows_survive(scratch):
         row = connection.execute(sa.text(f"SELECT work_center_id, asset_id FROM {table} WHERE id = 1")).one()
         assert tuple(row) == (1, None)
     assert "maintenance_work_order_id" in _columns(connection, "downtime_events")
+    adopted = _columns(connection, "downtime_events")["maintenance_adopted"]
+    assert adopted["nullable"] is False and str(adopted["default"]) == "false"
+    # The existing (unlinked) event reads as not adopted.
+    assert not connection.execute(sa.text("SELECT maintenance_adopted FROM downtime_events WHERE id = 1")).scalar()
     assert "fk_downtime_events_maintenance_work_order_id" in _names(connection, "downtime_events", "fk")
     assert "ix_downtime_events_maintenance_work_order_id" in _names(connection, "downtime_events", "index")
     # The batch rebuilds kept what was there.
@@ -236,6 +240,7 @@ def test_downgrade_refuses_while_a_row_targets_an_asset_then_is_real(scratch):
         assert "asset_id" not in columns and columns["work_center_id"]["nullable"] is False
         assert f"ck_{table}_one_target" not in _names(connection, table, "check")
     assert "maintenance_work_order_id" not in _columns(connection, "downtime_events")
+    assert "maintenance_adopted" not in _columns(connection, "downtime_events")
     migration.downgrade()  # a second downgrade is a no-op, not an error
     assert (
         connection.execute(sa.text("SELECT name FROM maintenance_schedules WHERE id = 1")).scalar()
@@ -276,6 +281,11 @@ def test_the_upgraded_asset_table_matches_the_model(scratch):
     assert unique.name in _names(connection, "maintenance_assets", "unique")
     [fk] = DowntimeEvent.__table__.c.maintenance_work_order_id.foreign_keys
     assert fk.name == "fk_downtime_events_maintenance_work_order_id"
+    adopted_model = DowntimeEvent.__table__.c.maintenance_adopted
+    adopted_reflected = _columns(connection, "downtime_events")["maintenance_adopted"]
+    assert adopted_reflected["nullable"] == adopted_model.nullable is False
+    assert str(adopted_reflected["type"]) == str(adopted_model.type)
+    assert str(adopted_reflected["default"]) == str(adopted_model.server_default.arg) == "false"
     assert {index.name for index in DowntimeEvent.__table__.indexes} >= {"ix_downtime_events_maintenance_work_order_id"}
 
 
@@ -318,6 +328,7 @@ def test_postgres_upgrade_and_model_bootstrap_are_default_deny():
         "ADD CONSTRAINT fk_downtime_events_maintenance_work_order_id FOREIGN KEY(maintenance_work_order_id) "
         "REFERENCES maintenance_work_orders (id)"
     ) in migration_sql
+    assert "ALTER TABLE downtime_events ADD COLUMN maintenance_adopted BOOLEAN DEFAULT false NOT NULL" in migration_sql
     assert "SET LOCAL lock_timeout = '5s'" in migration_sql
     assert "INSERT INTO" not in migration_sql and "UPDATE " not in migration_sql
 
@@ -328,4 +339,5 @@ def test_postgres_downgrade_restores_not_null_and_drops_the_table():
         assert f"ALTER TABLE {table} ALTER COLUMN work_center_id SET NOT NULL" in sql
         assert f"ALTER TABLE {table} DROP COLUMN asset_id" in sql
     assert "ALTER TABLE downtime_events DROP COLUMN maintenance_work_order_id" in sql
+    assert "ALTER TABLE downtime_events DROP COLUMN maintenance_adopted" in sql
     assert "DROP TABLE maintenance_assets" in sql

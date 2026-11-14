@@ -122,6 +122,8 @@ export interface AslImportRow {
 export interface AslImportResponse {
   filename?: string | null;
   source_hash: string;
+  /** What the commit would write, read against the vendors now; the commit echoes it (409 on drift). */
+  plan_hash: string;
   document: AslImportDocument;
   committed: boolean;
   summary: AslImportSummary;

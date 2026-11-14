@@ -145,7 +145,7 @@ def test_conditional_and_disqualified_derive_not_approved(client, db_session, st
     assert response.json()["is_approved"] is expected
 
 
-def test_taking_a_vendor_off_the_asl_leaves_is_approved_and_omitted_fields_alone(client, db_session):
+def test_taking_a_vendor_off_the_asl_withdraws_approval_and_leaves_omitted_fields_alone(client, db_session):
     admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
     vendor = make_vendor(db_session, is_approved=True, approval_status="approved", reevaluation_due=date(2027, 1, 1))
     response = client.put(
@@ -155,8 +155,11 @@ def test_taking_a_vendor_off_the_asl_leaves_is_approved_and_omitted_fields_alone
     )
     assert response.status_code == status.HTTP_200_OK, response.text
     body = response.json()
-    assert body["approval_status"] is None and body["is_approved"] is True
+    assert body["approval_status"] is None and body["is_approved"] is False  # fails closed
     assert body["reevaluation_due"] == "2027-01-01"
+    [row] = vendor_audit_rows(db_session, vendor.id)
+    assert row.old_values == {"approval_status": "approved", "is_approved": True}
+    assert row.new_values == {"approval_status": None, "is_approved": False}
 
 
 def test_a_no_change_request_writes_nothing(client, db_session):
@@ -691,3 +694,164 @@ def test_po_update_and_supplier_confirmation_responses_carry_current_warnings(cl
     )
     assert confirmed.status_code == status.HTTP_200_OK, confirmed.text
     assert [w["code"] for w in confirmed.json()["supplier_approval_warnings"]] == ["vendor_conditional"]
+
+
+# =========================================================================== review fixes (p2b-fix)
+
+
+def _disqualify(db: Session, vendor: Vendor) -> None:
+    db.expire_all()
+    stored = db.get(Vendor, vendor.id)
+    stored.approval_status = "disqualified"
+    stored.is_approved = False
+    db.commit()
+
+
+def test_an_existing_draft_cannot_move_toward_issue_once_its_vendor_is_disqualified(client, db_session):
+    """The create gate alone left a draft raised BEFORE the disqualification -- the 6 AM MRP
+    auto-draft, a buyer's draft -- free to be approved, given lines and sent. Sending is where
+    the order is actually placed. Each move toward issue is now 409; cancelling still works."""
+    manager = make_user(db_session, role=UserRole.MANAGER, company_id=1)
+    vendor = make_vendor(db_session, approval_status="approved", is_approved=True)
+    part = make_part(db_session)
+    created = client.post(POS, headers=headers_for(manager), json=_po_body(vendor, part))
+    assert created.status_code == status.HTTP_200_OK, created.text
+    po_id = created.json()["id"]
+    _disqualify(db_session, vendor)
+    headers = headers_for(manager)
+
+    expected = (
+        f"{vendor.name} is Disqualified on the Approved Supplier List; purchase order {created.json()['po_number']} "
+        "{}. Cancel it, or record a new approval decision for the supplier first."
+    )
+    attempts = [
+        (client.post(f"{POS}/{po_id}/send", headers=headers), "cannot be sent"),
+        (
+            client.put(f"{POS}/{po_id}", headers=headers, json={"version": 0, "status": "approved"}),
+            "cannot be approved",
+        ),
+        (
+            client.put(f"{POS}/{po_id}", headers=headers, json={"version": 0, "status": "pending_approval"}),
+            "cannot be submitted for approval",
+        ),
+        (
+            client.post(
+                f"{POS}/{po_id}/lines",
+                headers=headers,
+                json={"part_id": part.id, "quantity_ordered": 1, "unit_price": 1},
+            ),
+            "cannot have lines added or changed",
+        ),
+        (
+            client.put(
+                f"{POS}/{po_id}",
+                headers=headers,
+                json={"version": 0, "lines": [{"part_id": part.id, "quantity_ordered": 3, "unit_price": 5}]},
+            ),
+            "cannot have lines added or changed",
+        ),
+    ]
+    for response, consequence in attempts:
+        assert response.status_code == status.HTTP_409_CONFLICT, response.text
+        assert response.json()["detail"] == expected.format(consequence)
+
+    db_session.expire_all()
+    po = db_session.get(PurchaseOrder, po_id)
+    assert po.status == POStatus.DRAFT and po.order_date is None and len(po.lines) == 1
+
+    notes = client.put(f"{POS}/{po_id}", headers=headers, json={"version": 0, "notes": "Supplier disqualified"})
+    assert notes.status_code == status.HTTP_200_OK, notes.text
+    cancelled = client.put(f"{POS}/{po_id}", headers=headers, json={"version": 0, "status": "cancelled"})
+    assert cancelled.status_code == status.HTTP_200_OK, cancelled.text
+
+
+def test_emailing_a_po_to_a_disqualified_supplier_is_refused(client, db_session):
+    from app.services.document_delivery_service import DocumentDeliveryService
+
+    manager = make_user(db_session, role=UserRole.MANAGER, company_id=1)
+    vendor = make_vendor(db_session, approval_status="approved", is_approved=True)
+    created = client.post(POS, headers=headers_for(manager), json=_po_body(vendor, make_part(db_session)))
+    _disqualify(db_session, vendor)
+    service = DocumentDeliveryService(db_session, 1, manager, AuditService(db_session, manager))
+    with pytest.raises(HTTPException) as refused:
+        service.source("purchase_order", created.json()["id"])
+    assert refused.value.status_code == 409 and "cannot be emailed" in refused.value.detail
+
+
+def test_vendor_put_refuses_an_explicit_null_is_approved(client, db_session):
+    """``bool(None) == False`` matched the derived value of a Conditional / Disqualified vendor,
+    so an explicit null passed the contradiction check and the blind setattr stored NULL."""
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    for fields in ({"approval_status": "conditional", "is_approved": False}, {}):
+        vendor = make_vendor(db_session, **fields)
+        response = client.put(
+            f"{VENDORS}/{vendor.id}", headers=headers_for(admin), json={"version": 0, "is_approved": None}
+        )
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, response.text
+        db_session.expire_all()
+        assert db_session.get(Vendor, vendor.id).is_approved is False
+
+
+def test_an_api_token_cannot_grant_vendor_approval_by_any_door(client, db_session, admin_headers):
+    """The vendor checkbox is the approval that puts a vendor not on the ASL into the Create PO
+    picker (and, before this fix, silenced its not-on-ASL warning). A standing token may still
+    create and edit vendors and withdraw an approval, but not grant one."""
+    manager = make_user(db_session, role=UserRole.MANAGER, company_id=1)
+    headers = api_token_headers(client, admin_headers, manager)
+
+    vendor = make_vendor(db_session)
+    raised = client.put(f"{VENDORS}/{vendor.id}", headers=headers, json={"version": 0, "is_approved": True})
+    assert raised.status_code == status.HTTP_403_FORBIDDEN, raised.text
+    assert "person" in raised.json()["detail"]
+    db_session.expire_all()
+    assert db_session.get(Vendor, vendor.id).is_approved is False
+
+    created = client.post(
+        VENDORS, headers=headers, json={"code": f"TOK{_next():05d}", "name": "Token vendor", "is_approved": True}
+    )
+    assert created.status_code == status.HTTP_403_FORBIDDEN, created.text
+    plain = client.post(VENDORS, headers=headers, json={"code": f"TOK{_next():05d}", "name": "Token vendor 2"})
+    assert plain.status_code == status.HTTP_200_OK, plain.text
+
+    csv = f"code,name,is_approved\nTOK{_next():05d},Imported One,false\nTOK{_next():05d},Imported Two,yes\n".encode()
+    imported = client.post(
+        f"{VENDORS}/import-csv", headers=headers, files={"file": ("vendors.csv", io.BytesIO(csv), "text/csv")}
+    )
+    assert imported.status_code == status.HTTP_403_FORBIDDEN, imported.text
+    db_session.expire_all()
+    assert db_session.query(Vendor).filter(Vendor.name.like("Imported %")).count() == 0
+
+    approved = make_vendor(db_session, is_approved=True)
+    echo = client.put(f"{VENDORS}/{approved.id}", headers=headers, json={"version": 0, "is_approved": True})
+    withdraw = client.put(f"{VENDORS}/{approved.id}", headers=headers, json={"version": 0, "is_approved": False})
+    assert echo.status_code == withdraw.status_code == status.HTTP_200_OK, (echo.text, withdraw.text)
+
+    person = client.put(
+        f"{VENDORS}/{vendor.id}", headers=headers_for(manager), json={"version": 0, "is_approved": True}
+    )
+    assert person.status_code == status.HTTP_200_OK, person.text
+
+
+def test_the_legacy_asl_table_refuses_an_api_token_and_is_not_an_mcp_tool(client, db_session, admin_headers):
+    """The legacy ``approved_supplier_list`` table is read-only history since migration 123. Its
+    two write routes stay for people (their own guards are unchanged) but an agent may not
+    record an approval there that contradicts the vendor's own ASL status."""
+    from app.main import app
+    from app.mcp.catalog import EXCLUDED_OPERATIONS, build_catalog
+
+    manager = make_user(db_session, role=UserRole.MANAGER, company_id=1)
+    headers = api_token_headers(client, admin_headers, manager)
+    vendor = make_vendor(db_session, approval_status="disqualified")
+    legacy = "/api/v1/supplier-scorecards/approved-suppliers/"
+    refused = client.post(legacy, headers=headers, json={"vendor_id": vendor.id, "approval_status": "approved"})
+    assert refused.status_code == status.HTTP_403_FORBIDDEN, refused.text
+    assert refused.json()["detail"].startswith("Supplier approval is a person's decision")
+    created = client.post(legacy, headers=headers_for(manager), json={"vendor_id": vendor.id})
+    assert created.status_code == status.HTTP_200_OK, created.text
+    assert client.put(f"{legacy}{created.json()['id']}", headers=headers, json={"notes": "x"}).status_code == 403
+
+    for operation in (("POST", legacy), ("PUT", legacy + "{asl_id}")):
+        assert operation in EXCLUDED_OPERATIONS
+    names = {tool.name for tool in build_catalog(app.openapi())}
+    assert {"create_approved_supplier", "update_approved_supplier"}.isdisjoint(names)
+    assert {"list_approved_suppliers", "get_approved_supplier"} <= names

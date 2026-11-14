@@ -90,6 +90,17 @@ describe('UpdateApprovalDialog', () => {
     });
   });
 
+  it('says what each status does to the Approved flag, including taking a listed vendor off', () => {
+    const listed = { ...vendor, approval_status: 'approved' as const, is_approved: true };
+    render(<UpdateApprovalDialog vendor={listed} onClose={jest.fn()} onSaved={jest.fn()} />);
+    const dialog = screen.getByRole('dialog');
+    const derived = () => within(dialog).getByTestId('derived-approval');
+    fireEvent.change(within(dialog).getByLabelText('ASL status'), { target: { value: 'conditional' } });
+    expect(derived()).toHaveTextContent('can still be raised, each carrying a Conditional warning');
+    fireEvent.change(within(dialog).getByLabelText('ASL status'), { target: { value: '' } });
+    expect(derived()).toHaveTextContent('Taking the vendor off the ASL turns its Approved flag off');
+  });
+
   it('keeps the dialog open and shows the server refusal (stale vendor 409)', async () => {
     mockedApi.updateVendorApproval.mockRejectedValue({
       response: {
@@ -101,7 +112,9 @@ describe('UpdateApprovalDialog', () => {
     render(<UpdateApprovalDialog vendor={vendor} onClose={jest.fn()} onSaved={onSaved} />);
     const dialog = screen.getByRole('dialog');
     fireEvent.change(within(dialog).getByLabelText('ASL status'), { target: { value: 'disqualified' } });
-    expect(within(dialog).getByTestId('derived-approval')).toHaveTextContent('every new purchase order');
+    expect(within(dialog).getByTestId('derived-approval')).toHaveTextContent(
+      'purchase orders to this vendor are refused'
+    );
     fireEvent.change(within(dialog).getByLabelText(/Reason for this change/), { target: { value: 'Audit failure' } });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save approval' }));
 

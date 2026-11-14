@@ -14,6 +14,7 @@ import {
   Button,
   FormField,
   LoadingButton,
+  ConfirmDialog,
 } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
@@ -24,6 +25,7 @@ import {
   MAINTENANCE_FREQUENCY_LABELS,
   MAINTENANCE_PRIORITY_LABELS,
   MAINTENANCE_TYPE_LABELS,
+  CANCELLABLE_STATUSES,
   STARTABLE_STATUSES,
   canPerformMaintenance,
   canPlanMaintenance,
@@ -55,6 +57,8 @@ import {
   CheckCircleIcon,
   CalendarDaysIcon,
   PlayIcon,
+  PauseIcon,
+  NoSymbolIcon,
 } from '@heroicons/react/24/outline';
 
 type Tab = 'dashboard' | 'schedules' | 'work_orders' | 'assets';
@@ -171,6 +175,7 @@ export default function Maintenance() {
   const [showCompleteModal, setShowCompleteModal] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [selectedWO, setSelectedWO] = useState<MaintenanceWorkOrder | null>(null);
+  const [cancelTarget, setCancelTarget] = useState<MaintenanceWorkOrder | null>(null);
 
   const [scheduleForm, setScheduleForm] = useState(BLANK_SCHEDULE);
   const [scheduleTarget, setScheduleTarget] = useState<MaintenanceTarget>(BLANK_TARGET);
@@ -369,6 +374,32 @@ export default function Maintenance() {
     [actionBusy, loadData, showToast]
   );
 
+  // Hold / cancel go through the work-order PUT (planning roles). Server-gated, so not
+  // optimistic: the row changes only when the server says it did.
+  const handleSetStatus = useCallback(
+    async (wo: MaintenanceWorkOrder, status: 'on_hold' | 'cancelled') => {
+      if (actionBusy) return false;
+      setActionBusy(true);
+      try {
+        await api.updateMaintenanceWorkOrder(wo.id, { status });
+        showToast('success', `${wo.wo_number} ${status === 'on_hold' ? 'put on hold' : 'cancelled'}`);
+        void loadData();
+        return true;
+      } catch (err: any) {
+        showToast('error', errorText(err, status === 'on_hold' ? 'Failed to put on hold' : 'Failed to cancel'));
+        return false;
+      } finally {
+        setActionBusy(false);
+      }
+    },
+    [actionBusy, loadData, showToast]
+  );
+
+  const confirmCancel = async () => {
+    if (!cancelTarget) return;
+    if (await handleSetStatus(cancelTarget, 'cancelled')) setCancelTarget(null);
+  };
+
   const handleComplete = async () => {
     if (!selectedWO || actionBusy) return;
     setActionBusy(true);
@@ -437,9 +468,39 @@ export default function Maintenance() {
               <CheckCircleIcon className="w-4 h-4" aria-hidden="true" />
             </button>
           )}
+          {canPlan && wo.status === 'in_progress' && (
+            <button
+              type="button"
+              onClick={e => {
+                e.stopPropagation();
+                void handleSetStatus(wo, 'on_hold');
+              }}
+              disabled={actionBusy}
+              className="text-xs px-2 py-1 bg-amber-600 text-white rounded-sm hover:bg-amber-700 disabled:opacity-60"
+              title="Put on hold"
+              aria-label={`Put work order ${wo.wo_number} on hold`}
+            >
+              <PauseIcon className="w-4 h-4" aria-hidden="true" />
+            </button>
+          )}
+          {canPlan && CANCELLABLE_STATUSES.has(wo.status) && (
+            <button
+              type="button"
+              onClick={e => {
+                e.stopPropagation();
+                setCancelTarget(wo);
+              }}
+              disabled={actionBusy}
+              className="text-xs px-2 py-1 bg-slate-600 text-white rounded-sm hover:bg-red-700 disabled:opacity-60"
+              title="Cancel work order"
+              aria-label={`Cancel work order ${wo.wo_number}`}
+            >
+              <NoSymbolIcon className="w-4 h-4" aria-hidden="true" />
+            </button>
+          )}
         </div>
       ) : null,
-    [actionBusy, canPerform, handleStart]
+    [actionBusy, canPerform, canPlan, handleSetStatus, handleStart]
   );
 
   // ---- Work Orders tab columns ----
@@ -1322,6 +1383,22 @@ export default function Maintenance() {
       </Modal>
 
       {/* Complete Work Order Modal */}
+      <ConfirmDialog
+        open={!!cancelTarget}
+        title={cancelTarget ? `Cancel ${cancelTarget.wo_number}?` : 'Cancel work order?'}
+        message={
+          cancelTarget?.status === 'in_progress' || cancelTarget?.status === 'on_hold'
+            ? 'The work order is closed without being completed. Downtime it is recording on the machine ends — unless another maintenance work order still has the machine shut down, or the downtime was an operator’s breakdown report, which stays open.'
+            : 'The work order is closed without being completed.'
+        }
+        confirmLabel="Cancel work order"
+        cancelLabel="Keep it"
+        variant="danger"
+        pending={actionBusy}
+        onConfirm={() => void confirmCancel()}
+        onCancel={() => setCancelTarget(null)}
+      />
+
       <Modal
         open={showCompleteModal && !!selectedWO}
         onClose={closeCompleteModal}

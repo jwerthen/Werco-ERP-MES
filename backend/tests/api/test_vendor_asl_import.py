@@ -93,7 +93,13 @@ def preview_and_commit(client, headers, content, name="QL 7.4 - ASL.xlsx"):
     preview = upload(client, PREVIEW, headers, content, name=name)
     assert preview.status_code == status.HTTP_200_OK, preview.text
     return preview, upload(
-        client, COMMIT, headers, content, name=name, expected_source_hash=preview.json()["source_hash"]
+        client,
+        COMMIT,
+        headers,
+        content,
+        name=name,
+        expected_source_hash=preview.json()["source_hash"],
+        expected_plan_hash=preview.json()["plan_hash"],
     )
 
 
@@ -299,15 +305,68 @@ def test_preview_reports_every_matching_error(client, db_session, quality, suppl
 
 
 def test_a_vendor_code_column_matches_by_code(client, db_session, quality, suppliers):
+    """The code picks the vendor -- e.g. between two that share a normalized name -- and the
+    row's SUPPLIER NAME must still name it (spacing / dash differences are fine)."""
+    make_vendor(db_session, "Harbor  labs")  # a second "Harbor Labs" once normalized
     header = HEADER + ["VENDOR CODE"]
-    code = suppliers["northwind_okc"].code
+    harbor = suppliers["harbor"]
     rows = [
-        ["Northwind (OKC branch)", None, "Approved", "Paint / Powders", None, "AS9100 Cert", None, None, None, code]
+        ["Harbor Labs", None, "Approved", "Hardware", None, "AS9100 Cert", None, None, None, harbor.code.lower()],
+        [
+            "Northwind Coatings-OKC",
+            None,
+            "Approved",
+            "Paint / Powders",
+            None,
+            None,
+            None,
+            None,
+            None,
+            suppliers["northwind_okc"].code,
+        ],
     ]
     body = upload(client, PREVIEW, headers_for(quality), asl_workbook(rows, header=header)).json()
-    (row,) = body["rows"]
-    assert row["match_by"] == "code" and row["vendor_id"] == suppliers["northwind_okc"].id and row["error"] is None
-    assert any("never changes a name" in w for w in row["warnings"])
+    first, second = body["rows"]
+    assert first["match_by"] == "code" and first["vendor_id"] == harbor.id and first["error"] is None
+    assert second["vendor_id"] == suppliers["northwind_okc"].id and second["error"] is None
+
+
+def test_a_code_that_names_another_supplier_is_a_row_error_not_a_warning(client, db_session, quality, suppliers):
+    """A mistyped code (VND-012 for VND-021) used to bind the row to the coded vendor with only
+    a warning, landing this supplier's approval -- Disqualified, say -- on ANOTHER supplier's
+    controlled record while the intended one went untouched. Now the code and the name must
+    agree, and a code with no name to check it against is refused too."""
+    header = HEADER + ["VENDOR CODE"]
+    wrong = suppliers["delta"]
+    rows = [
+        ["Harbor Labs", None, "Disqualified", None, None, None, None, None, "Failed audit", wrong.code],
+        [None, None, "Approved", "Hardware", None, None, None, None, None, suppliers["harbor"].code],
+    ]
+    content = asl_workbook(rows, header=header)
+    body = upload(client, PREVIEW, headers_for(quality), content).json()
+    first, second = body["rows"]
+    assert first["outcome"] == "error" and first["vendor_id"] is None and first["changes"] == {}
+    assert f"is {wrong.code} 'Delta-Forge Metals', but SUPPLIER NAME is 'Harbor Labs'" in first["error"]
+    assert second["outcome"] == "error" and second["error"] == "SUPPLIER NAME is required"
+    _, commit = preview_and_commit(client, headers_for(quality), content)
+    assert commit.status_code == status.HTTP_409_CONFLICT
+    db_session.expire_all()
+    assert db_session.get(Vendor, wrong.id).approval_status is None
+    assert db_session.get(Vendor, suppliers["harbor"].id).approval_status is None
+    assert asl_audit_rows(db_session) == []
+
+
+def test_a_code_shared_by_two_live_vendors_differing_in_case_is_ambiguous(client, db_session, quality, suppliers):
+    """Legacy codes can differ only in case. That is ambiguity -- not a deleted vendor -- and
+    the error says so."""
+    make_vendor(db_session, "Casey Supply", code="cas-1")
+    make_vendor(db_session, "Casey Supply", code="CAS-1")
+    header = HEADER + ["VENDOR CODE"]
+    rows = [["Casey Supply", None, "Approved", "Hardware", None, None, None, None, None, "Cas-1"]]
+    (row,) = upload(client, PREVIEW, headers_for(quality), asl_workbook(rows, header=header)).json()["rows"]
+    assert row["outcome"] == "error"
+    assert "matches 2 vendors whose codes differ only in case (CAS-1, cas-1)" in row["error"]
+    assert "deleted" not in row["error"]
 
 
 # =========================================================================== commit
@@ -373,7 +432,14 @@ def test_any_row_error_refuses_the_whole_commit(client, db_session, quality, sup
 def test_a_file_other_than_the_previewed_one_is_refused(client, db_session, quality, suppliers):
     previewed = upload(client, PREVIEW, headers_for(quality), asl_workbook(good_rows())).json()
     other = asl_workbook(good_rows()[:2])
-    response = upload(client, COMMIT, headers_for(quality), other, expected_source_hash=previewed["source_hash"])
+    response = upload(
+        client,
+        COMMIT,
+        headers_for(quality),
+        other,
+        expected_source_hash=previewed["source_hash"],
+        expected_plan_hash=previewed["plan_hash"],
+    )
     assert response.status_code == status.HTTP_409_CONFLICT, response.text
     assert "Preview it again" in response.json()["detail"]
     assert asl_audit_rows(db_session) == []
@@ -388,13 +454,20 @@ def test_a_lost_required_audit_rolls_the_import_back(client, db_session, quality
     from app.services.audit_service import AuditService, AuditWriteError
 
     content = asl_workbook(good_rows())
-    source_hash = upload(client, PREVIEW, headers_for(quality), content).json()["source_hash"]
+    previewed = upload(client, PREVIEW, headers_for(quality), content).json()
 
     def refusing(self, *args, **kwargs):
         raise AuditWriteError("simulated")
 
     monkeypatch.setattr(AuditService, "log_required", refusing)
-    response = upload(client, COMMIT, headers_for(quality), content, expected_source_hash=source_hash)
+    response = upload(
+        client,
+        COMMIT,
+        headers_for(quality),
+        content,
+        expected_source_hash=previewed["source_hash"],
+        expected_plan_hash=previewed["plan_hash"],
+    )
     assert response.status_code == 503, response.text
     db_session.rollback()
     assert db_session.get(Vendor, suppliers["northwind"].id).approval_status is None
@@ -416,7 +489,8 @@ def test_an_api_token_is_refused_on_both_routes(client, db_session, admin_header
     headers = {"Authorization": f"Bearer {issued.json()['token']}", "X-Requested-With": "XMLHttpRequest"}
     content = asl_workbook(good_rows())
     assert upload(client, PREVIEW, headers, content).status_code == 403
-    assert upload(client, COMMIT, headers, content, expected_source_hash="0" * 64).status_code == 403
+    committed = upload(client, COMMIT, headers, content, expected_source_hash="0" * 64, expected_plan_hash="0" * 64)
+    assert committed.status_code == 403
     assert asl_audit_rows(db_session) == []
 
 
@@ -440,32 +514,74 @@ def test_tenant_isolation(client, db_session, suppliers):
 # =========================================================================== edges the sheet will hit
 
 
-def test_a_blank_status_takes_a_listed_vendor_off_the_asl_with_a_warning(client, db_session, quality, suppliers):
-    """A blank STATUS is "not on the ASL". For a vendor that IS on the list today, that is a
-    removal -- the preview must say so (not the "not on the list yet" wording), the commit
-    must record it as an audited change, and ``is_approved`` is left exactly as it was (a
-    NULL status derives nothing)."""
-    harbor = suppliers["harbor"]
-    harbor.approval_status = "approved"
-    harbor.approved_scopes = ["hardware"]
-    harbor.reevaluation_due = date(2027, 3, 1)
+def test_a_blank_status_never_takes_a_listed_vendor_off_the_asl(client, db_session, quality, suppliers):
+    """A blank STATUS used to record a LISTED vendor as "not on the ASL" -- leaving
+    ``is_approved`` true with no warning on its POs, and, from Disqualified, lifting the one
+    hard purchase-order refusal. Taking a supplier off the list is a decision, so the import
+    refuses it as a row error and points at Update approval, which records the reason."""
+    for key, listed_as in (("harbor", "approved"), ("delta", "disqualified")):
+        suppliers[key].approval_status = listed_as
+        suppliers[key].is_approved = listed_as == "approved"
     db_session.commit()
-    rows = [["Harbor Labs", None, None, None, None, None, None, None, None]]
-    preview, commit = preview_and_commit(client, headers_for(quality), asl_workbook(rows))
-    (row,) = preview.json()["rows"]
-    assert row["outcome"] == "update" and row["changes"] == {"approval_status": {"old": "approved", "new": None}}
-    assert row["warnings"] == [
-        f"STATUS is blank: this removes {harbor.code} from the Approved Supplier List (was Approved)."
+    rows = [
+        ["Harbor Labs", None, None, None, None, None, None, None, None],
+        ["Delta-Forge Metals", None, " ", None, None, None, None, None, None],
+        ["Blue Sky Plastics", None, None, None, None, None, None, None, None],  # never listed: fine
     ]
-    assert preview.json()["summary"]["not_on_asl_count"] == 1
-    assert commit.status_code == status.HTTP_200_OK, commit.text
+    preview, commit = preview_and_commit(client, headers_for(quality), asl_workbook(rows))
+    harbor_row, delta_row, bluesky_row = preview.json()["rows"]
+    for row, key, label in ((harbor_row, "harbor", "Approved"), (delta_row, "delta", "Disqualified")):
+        assert row["outcome"] == "error" and row["changes"] == {}
+        assert f"{suppliers[key].code} is {label} on the Approved Supplier List" in row["error"]
+        assert f"/vendors/{suppliers[key].id}/approval" in row["error"]
+    assert bluesky_row["outcome"] == "unchanged" and bluesky_row["error"] is None
+    assert any("not on the Approved Supplier List yet" in w for w in bluesky_row["warnings"])
+    assert commit.status_code == status.HTTP_409_CONFLICT, commit.text
 
     db_session.expire_all()
-    stored = db_session.get(Vendor, harbor.id)
-    assert stored.approval_status is None and stored.is_approved is True
-    assert stored.approved_scopes == ["hardware"] and stored.reevaluation_due == date(2027, 3, 1)  # blanks keep
-    (audit,) = [r for r in asl_audit_rows(db_session) if r.resource_type == "vendor"]
-    assert audit.old_values == {"approval_status": "approved"} and audit.new_values == {"approval_status": None}
+    assert db_session.get(Vendor, suppliers["harbor"].id).approval_status == "approved"
+    assert db_session.get(Vendor, suppliers["delta"].id).approval_status == "disqualified"
+    assert asl_audit_rows(db_session) == []
+
+
+def test_a_decision_recorded_after_the_preview_is_not_overwritten(client, db_session, quality, suppliers):
+    """The preview showed Harbor Labs unchanged (Approved). Quality then Disqualified it. The
+    commit used to re-plan against the database and write Approved straight back -- a change
+    the committer never saw. ``plan_hash`` binds the commit to what the preview showed."""
+    harbor = suppliers["harbor"]
+    harbor.approval_status, harbor.approved_scopes, harbor.approval_bases = "approved", ["hardware"], ["as9100"]
+    db_session.commit()
+    content = asl_workbook([["Harbor Labs", None, "Approved", "Hardware", None, "AS9100 Cert", None, None, None]])
+    previewed = upload(client, PREVIEW, headers_for(quality), content).json()
+    assert previewed["rows"][0]["outcome"] == "unchanged" and len(previewed["plan_hash"]) == 64
+
+    updated_at = client.get(f"/api/v1/purchasing/vendors/{harbor.id}", headers=headers_for(quality)).json()[
+        "updated_at"
+    ]
+    decided = client.put(
+        f"/api/v1/purchasing/vendors/{harbor.id}/approval",
+        headers=headers_for(quality),
+        json={"approval_status": "disqualified", "reason": "Failed audit", "expected_updated_at": updated_at},
+    )
+    assert decided.status_code == status.HTTP_200_OK, decided.text
+
+    commit = upload(
+        client,
+        COMMIT,
+        headers_for(quality),
+        content,
+        expected_source_hash=previewed["source_hash"],
+        expected_plan_hash=previewed["plan_hash"],
+    )
+    assert commit.status_code == status.HTTP_409_CONFLICT, commit.text
+    assert "changed after this file was previewed" in commit.json()["detail"]
+    db_session.expire_all()
+    assert db_session.get(Vendor, harbor.id).approval_status == "disqualified"
+    assert [row.resource_type for row in asl_audit_rows(db_session)] == ["vendor"]  # the decision only
+
+    again = upload(client, PREVIEW, headers_for(quality), content).json()
+    assert again["plan_hash"] != previewed["plan_hash"]
+    assert again["rows"][0]["changes"]["approval_status"] == {"old": "disqualified", "new": "approved"}
 
 
 def test_a_disqualified_row_warns_and_the_loaded_status_refuses_a_po(client, db_session, quality, suppliers):
@@ -528,10 +644,17 @@ def test_the_commit_re_matches_against_the_database_not_the_preview(client, db_s
     """The preview is a snapshot, never authorization: a vendor deleted after the preview
     turns the commit into a 409 naming the restore, and nothing is written."""
     content = asl_workbook(good_rows())
-    source_hash = upload(client, PREVIEW, headers_for(quality), content).json()["source_hash"]
+    previewed = upload(client, PREVIEW, headers_for(quality), content).json()
     suppliers["harbor"].soft_delete(quality.id)
     db_session.commit()
-    commit = upload(client, COMMIT, headers_for(quality), content, expected_source_hash=source_hash)
+    commit = upload(
+        client,
+        COMMIT,
+        headers_for(quality),
+        content,
+        expected_source_hash=previewed["source_hash"],
+        expected_plan_hash=previewed["plan_hash"],
+    )
     assert commit.status_code == status.HTTP_409_CONFLICT, commit.text
     (error,) = commit.json()["detail"]["errors"]
     assert error["supplier_name"] == "Harbor Labs" and "restore" in error["error"]

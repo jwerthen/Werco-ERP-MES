@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.api.audit_guard import required_audit
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
@@ -50,7 +50,7 @@ router = APIRouter()
 _PLANNING_ROLES = [UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]
 _PERFORMING_ROLES = [UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR, UserRole.OPERATOR]
 
-# A maintenance work order in one of these is over: any downtime it holds open is resolved.
+# A maintenance work order in one of these is over: any downtime it holds open is settled.
 _TERMINAL_STATUSES = (MaintenanceStatus.COMPLETED, MaintenanceStatus.CANCELLED)
 
 # Widest calendar window a single request may ask for. Unbounded, the endpoint
@@ -375,6 +375,14 @@ def _target_fields(row: Any) -> Dict[str, Any]:
     }
 
 
+def _work_orders_with_targets(db: Session):
+    """A work-order query that loads each row's target with it: the serializers read
+    ``work_center`` and ``asset`` on every row, one lazy load apiece otherwise."""
+    return db.query(MaintenanceWorkOrder).options(
+        joinedload(MaintenanceWorkOrder.work_center), joinedload(MaintenanceWorkOrder.asset)
+    )
+
+
 def _serialize_schedule(s: MaintenanceSchedule) -> dict:
     return {
         "id": s.id,
@@ -472,7 +480,11 @@ def list_schedules(
 ):
     """List PM schedules with optional filters (``work_center_id`` or ``asset_id`` narrows to
     one target). Each row names its target: ``target_type`` is ``work_center`` or ``asset``."""
-    query = db.query(MaintenanceSchedule).filter(MaintenanceSchedule.company_id == company_id)
+    query = (
+        db.query(MaintenanceSchedule)
+        .options(joinedload(MaintenanceSchedule.work_center), joinedload(MaintenanceSchedule.asset))
+        .filter(MaintenanceSchedule.company_id == company_id)
+    )
     if is_active is not None:
         query = query.filter(MaintenanceSchedule.is_active == is_active)
     if work_center_id:
@@ -712,7 +724,7 @@ def list_work_orders(
     strictly more accurate -- their counts no longer depend on whether a human
     has loaded this page today.
     """
-    query = db.query(MaintenanceWorkOrder).filter(MaintenanceWorkOrder.company_id == company_id)
+    query = _work_orders_with_targets(db).filter(MaintenanceWorkOrder.company_id == company_id)
     if status:
         query = query.filter(MaintenanceWorkOrder.status == status)
     if work_center_id:
@@ -754,7 +766,7 @@ def get_overdue_work_orders(
     """
     today = date.today()
     wos = (
-        db.query(MaintenanceWorkOrder)
+        _work_orders_with_targets(db)
         .filter(
             MaintenanceWorkOrder.company_id == company_id,
             MaintenanceWorkOrder.status.in_([MaintenanceStatus.SCHEDULED, MaintenanceStatus.OVERDUE]),
@@ -788,7 +800,8 @@ def create_work_order(
     """Create a new maintenance work order on a work center OR an equipment asset.
 
     Give exactly one of ``work_center_id`` / ``asset_id``, or neither together with a
-    ``schedule_id`` to inherit that schedule's target. ``requires_shutdown`` on a WORK-CENTER
+    ``schedule_id`` to inherit that schedule's target (an explicit target that differs from the
+    schedule's is **409**: completing the work order advances that schedule). ``requires_shutdown`` on a WORK-CENTER
     work order means starting it records machine downtime (an asset never does)."""
     # A foreign schedule_id would otherwise be accepted verbatim, and
     # complete_work_order writes last_completed_date / next_due_date straight
@@ -799,8 +812,19 @@ def create_work_order(
         schedule = _schedule_or_404(db, data.schedule_id, company_id)
 
     work_center_id, asset_id = data.work_center_id, data.asset_id
-    if work_center_id is None and asset_id is None and schedule is not None:
-        work_center_id, asset_id = schedule.work_center_id, schedule.asset_id
+    if schedule is not None:
+        if work_center_id is None and asset_id is None:
+            work_center_id, asset_id = schedule.work_center_id, schedule.asset_id
+        elif (work_center_id, asset_id) != (schedule.work_center_id, schedule.asset_id):
+            # Completing the work order advances THIS schedule's due date, so work done on another
+            # machine would be recorded as this machine's PM.
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"This work order's target must be its schedule's ('{schedule.name}'). Leave the work center "
+                    "and asset empty to use the schedule's, or open the work order without the schedule."
+                ),
+            )
     _resolve_target(db, company_id, work_center_id=work_center_id, asset_id=asset_id)
 
     wo_number = _generate_wo_number(db)
@@ -830,6 +854,61 @@ def create_work_order(
     return _serialize_wo(wo)
 
 
+def _assert_wo_edit_allowed(wo: MaintenanceWorkOrder, update_data: Dict[str, Any]) -> None:
+    """Refuse (409), before the first ``setattr``, the edits only a verb may make.
+
+    ``PUT`` used to ``setattr`` any status, so ``in_progress`` started a work order with no
+    ``started_at``, no log and no downtime event; ``completed`` closed one without advancing its
+    PM schedule or recording its downtime minutes; and a started work order could be returned
+    to ``scheduled`` with its downtime event still open, or have ``requires_shutdown`` flipped
+    so the event it opened was never closed (or one it should have opened never was)."""
+    current = MaintenanceStatus(wo.status)
+    # Started: in progress, or on hold after a start (a work order can also be held before one).
+    started = current == MaintenanceStatus.IN_PROGRESS or (
+        current == MaintenanceStatus.ON_HOLD and wo.started_at is not None
+    )
+    target = update_data.get("status")
+    if target is not None and MaintenanceStatus(target) != current:
+        target = MaintenanceStatus(target)
+        if target == MaintenanceStatus.IN_PROGRESS:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Start maintenance work order {wo.wo_number} with Start (POST /maintenance/work-orders/"
+                    f"{wo.id}/start): it records the start and any machine downtime."
+                ),
+            )
+        if target == MaintenanceStatus.COMPLETED:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Complete maintenance work order {wo.wo_number} with Complete (POST /maintenance/work-orders/"
+                    f"{wo.id}/complete): it records the findings, costs and downtime and advances its PM schedule."
+                ),
+            )
+        if started and target in (MaintenanceStatus.SCHEDULED, MaintenanceStatus.OVERDUE):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Maintenance work order {wo.wo_number} has been started; it can be put on hold, completed "
+                    f"or cancelled, not returned to {target.value}."
+                ),
+            )
+    if (
+        "requires_shutdown" in update_data
+        and bool(update_data["requires_shutdown"]) != bool(wo.requires_shutdown)
+        and started
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Maintenance work order {wo.wo_number} has been started, so whether it shuts the machine down "
+                "can no longer change: its downtime is already being recorded (or not). Cancel it and open a new "
+                "work order instead."
+            ),
+        )
+
+
 @router.put("/work-orders/{wo_id}")
 def update_work_order(
     wo_id: int,
@@ -839,13 +918,23 @@ def update_work_order(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Update a maintenance work order.
+    """Update a maintenance work order: its details, and ``status`` among scheduled, overdue,
+    on hold and cancelled.
 
-    Moving it to ``cancelled`` (or ``completed``) resolves any downtime event it holds open,
-    so a work order that ends without ``/complete`` never leaves its machine marked down."""
+    The verbs own the rest of the lifecycle, because they own its records: **409** for
+    ``status: in_progress`` (use ``POST .../start`` -- it stamps the start and records the
+    machine downtime), for ``status: completed`` (use ``POST .../complete`` -- findings, costs,
+    downtime minutes and the PM schedule's next due date), for returning a STARTED work order
+    (in progress / on hold) to scheduled or overdue, and for changing ``requires_shutdown`` on
+    a started work order (its downtime is already being recorded, or not). Re-sending the
+    current value is accepted. Moving to ``cancelled`` settles any downtime the work order
+    holds: resolved, handed to another shutdown work order still holding the machine down, or
+    -- for an operator's event the work order adopted -- handed back to the machine, still
+    open. ``on_hold`` keeps the machine down (the downtime runs on until the work order ends)."""
     wo = _wo_or_404(db, wo_id, company_id, for_update=True)
 
     update_data = data.model_dump(exclude_unset=True)
+    _assert_wo_edit_allowed(wo, update_data)
     old_values = {c.key: getattr(wo, c.key) for c in wo.__table__.columns}
     was_terminal = wo.status in _TERMINAL_STATUSES
 
@@ -853,7 +942,7 @@ def update_work_order(
         setattr(wo, field, value)
 
     if not was_terminal and wo.status in _TERMINAL_STATUSES:
-        downtime_service.resolve_maintenance_downtime(
+        downtime_service.end_maintenance_downtime(
             db,
             wo,
             company_id=company_id,
@@ -861,6 +950,7 @@ def update_work_order(
             audit=audit,
             ended_at=datetime.utcnow(),
             resolution=f"Maintenance work order {wo.wo_number} set to {wo.status.value}",
+            cancelled=wo.status == MaintenanceStatus.CANCELLED,
         )
 
     db.flush()
@@ -926,7 +1016,7 @@ def start_work_order(
         wo.wo_number,
         old_status,
         MaintenanceStatus.IN_PROGRESS.value,
-        extra_data={"downtime_event_id": downtime.id} if downtime is not None else None,
+        extra_data=downtime.audit_extra() if downtime is not None else None,
     )
     db.commit()
     db.refresh(wo)
@@ -965,7 +1055,7 @@ def complete_work_order(
     wo.total_cost = data.labor_cost + data.parts_cost
     wo.downtime_minutes = data.downtime_minutes
 
-    resolved = downtime_service.resolve_maintenance_downtime(
+    resolved = downtime_service.end_maintenance_downtime(
         db,
         wo,
         company_id=company_id,
@@ -1059,7 +1149,7 @@ def get_calendar(
         raise HTTPException(status_code=400, detail=f"Date range must not exceed {_MAX_CALENDAR_DAYS} days")
 
     wos = (
-        db.query(MaintenanceWorkOrder)
+        _work_orders_with_targets(db)
         .filter(
             MaintenanceWorkOrder.company_id == company_id,
             MaintenanceWorkOrder.scheduled_date >= start_date,

@@ -19,7 +19,7 @@ from app.models.supplier_part import SupplierPartMapping
 from app.models.user import User
 from app.models.work_order import WorkOrder, WorkOrderStatus
 from app.services.audit_service import AuditService
-from app.services.supplier_approval_service import not_disqualified_clause
+from app.services.supplier_approval_service import approval_warnings, not_disqualified_clause
 
 logger = logging.getLogger(__name__)
 
@@ -163,11 +163,17 @@ class MRPAutoService:
         self.db.add(po_line)
 
         # Audit log
+        details = {"mrp_action_id": action.id, "mode": mode, "auto_created": True}
+        # The advisory ASL warnings this automatic PO carries (Conditional, not on the ASL,
+        # re-evaluation overdue, out of scope), recorded on its create row like every other door.
+        warnings = approval_warnings(vendor, [part])
+        if warnings:
+            details["supplier_approval_warnings"] = warnings
         self._create_audit_log(
             action="CREATE_PO",
             entity_type="PurchaseOrder",
             entity_id=po.id,
-            details={"mrp_action_id": action.id, "mode": mode, "auto_created": True},
+            details=details,
             user_id=user_id,
         )
 

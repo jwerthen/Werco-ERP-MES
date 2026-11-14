@@ -159,10 +159,20 @@ def test_is_approved_is_derived_from_the_status(status, expected, was):
 
 
 @pytest.mark.parametrize("was", [True, False])
-def test_no_status_leaves_is_approved_exactly_as_it_was(was):
-    row = vendor(is_approved=was, approval_status="approved")
-    asl.apply_vendor_approval(row, status=None)
+def test_a_vendor_never_on_the_asl_keeps_is_approved_exactly_as_it_was(was):
+    row = vendor(is_approved=was, approval_status=None)
+    asl.apply_vendor_approval(row, status=None, approval_notes="note")
     assert row.approval_status is None and row.is_approved is was
+
+
+@pytest.mark.parametrize("listed_as", ["approved", "approved_customer_directed", "conditional", "disqualified"])
+def test_taking_a_vendor_off_the_asl_withdraws_its_approval(listed_as):
+    """A status -> NULL used to leave ``is_approved`` as it was, so an Approved vendor taken off
+    the list stayed in the Create PO picker with no warning. Removal now fails closed: the
+    list's approval goes with it (re-approving by the vendor checkbox is one explicit edit)."""
+    row = vendor(is_approved=listed_as.startswith("approved"), approval_status=listed_as)
+    asl.apply_vendor_approval(row, status=None)
+    assert row.approval_status is None and row.is_approved is False
 
 
 def test_writer_touches_only_what_it_is_given_and_never_active_or_deleted():
@@ -195,9 +205,15 @@ def codes(warnings):
     return [w["code"] for w in warnings]
 
 
-def test_a_vendor_not_on_the_asl_warns_unless_it_is_legacy_approved():
-    assert codes(asl.approval_warnings(vendor(), [], today=TODAY)) == ["vendor_not_on_asl"]
-    assert asl.approval_warnings(vendor(is_approved=True), [part(1, "hardware")], today=TODAY) == []
+def test_a_vendor_not_on_the_asl_always_warns_even_when_checkbox_approved():
+    """The vendor checkbox is the approval that bypasses the controlled list, so it must not
+    silence the warning -- it changes the wording instead."""
+    [plain] = asl.approval_warnings(vendor(), [], today=TODAY)
+    assert plain["code"] == "vendor_not_on_asl"
+    assert plain["message"] == "Northwind Metals is not on the Approved Supplier List."
+    [checkbox] = asl.approval_warnings(vendor(is_approved=True), [part(1, "hardware")], today=TODAY)
+    assert checkbox["code"] == "vendor_not_on_asl"
+    assert checkbox["message"] == "Northwind Metals is marked approved but is not on the Approved Supplier List."
 
 
 def test_disqualified_is_a_warning_on_reads_and_a_409_on_create():

@@ -158,7 +158,7 @@ def test_mrp_supply_draft_to_a_disqualified_supplier_is_409_and_writes_nothing(
 
 def test_mrp_purchase_batch_refuses_a_disqualified_supplier_before_any_draft(client, admin_headers, db_session):
     admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
-    good = make_vendor(db_session, approval_status="approved", is_approved=True)
+    good = make_vendor(db_session, approval_status="conditional")  # a warning, never a gate
     bad = make_vendor(db_session, approval_status="approved", is_approved=True)
     parts = [_seed_make_wo_with_purchased_component(db_session, 1, f"ASLB{_next()}") for _ in range(2)]
     for part, vendor in zip(parts, (good, bad)):
@@ -205,6 +205,9 @@ def test_mrp_purchase_batch_refuses_a_disqualified_supplier_before_any_draft(cli
     created = client.post("/api/v1/mrp/purchase-batch/drafts", headers=admin_headers, json=request)
     assert created.status_code == 200, created.text
     assert po_count(db_session) == 2
+    by_vendor = {po.vendor_id: po.id for po in db_session.query(PurchaseOrder).all()}
+    assert _warning_codes(_po_create_extra(db_session, by_vendor[good.id])) == ["vendor_conditional"]
+    assert "supplier_approval_warnings" not in _po_create_extra(db_session, by_vendor[bad.id])
 
 
 # =========================================================================== MRP auto-PO vendor picker
@@ -300,3 +303,69 @@ def test_auto_evidence_counts_approved_on_the_asl_not_merely_active(db_session):
     db_session.commit()
     healthy = _query_suppliers(db_session, 1)
     assert healthy["health_detail"] == "2 suppliers approved on the ASL, 1 performance evaluations"
+
+
+# =========================================================================== warnings on the create row
+
+
+def _po_create_extra(db: Session, po_id: int) -> dict:
+    from app.models.audit_log import AuditLog
+
+    db.rollback()
+    row = (
+        db.query(AuditLog)
+        .filter(
+            AuditLog.resource_type == "purchase_order",
+            AuditLog.resource_id == po_id,
+            AuditLog.action.in_(["CREATE", "CREATE_PO"]),
+        )
+        .one()
+    )
+    return row.extra_data or {}
+
+
+def _warning_codes(extra: dict) -> list:
+    return [warning["code"] for warning in extra.get("supplier_approval_warnings", [])]
+
+
+def test_the_mrp_doors_record_the_asl_warnings_on_the_create_row(client, admin_headers, db_session, shortage):
+    """Every create through ``create_purchase_order_command`` stamps the advisory warnings on its
+    create audit row; the doors that build their POs directly (MRP review draft, MRP auto) did
+    not, so a draft to a Conditional supplier carried no evidence the warning existed."""
+    part, vendor, action = shortage
+    vendor.approval_status, vendor.is_approved = "conditional", False
+    db_session.commit()
+    review = _review(client, admin_headers, action)
+    created = client.post(
+        f"/api/v1/mrp/actions/{action.id}/supply-draft",
+        headers=admin_headers,
+        json=_draft_payload(review, vendor.id, key="asl-warn-draft"),
+    )
+    assert created.status_code == 200, created.text
+    [po] = db_session.query(PurchaseOrder).all()
+    assert _warning_codes(_po_create_extra(db_session, po.id)) == ["vendor_conditional"]
+
+    # The auto-PO path (the 6 AM AUTO_DRAFT job) -- an approved supplier records no warnings key.
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    auto_po = MRPAutoService(db_session, company_id=1)._create_po_from_action(action, "auto_draft", admin.id)
+    db_session.commit()
+    assert _warning_codes(_po_create_extra(db_session, auto_po.id)) == ["vendor_conditional"]
+
+
+def test_the_open_po_loader_records_the_asl_warnings_on_the_create_row(client, db_session):
+    import io
+
+    from tests.api.test_receiving_compliance import headers_for
+
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    vendor = make_vendor(db_session)  # not on the ASL
+    part = make_part(db_session)
+    csv = f"vendor_code,part_number,quantity,unit_price\n{vendor.code},{part.part_number},3,1.50\n".encode()
+    response = client.post(
+        "/api/v1/purchasing/purchase-orders/import",
+        headers=headers_for(admin),
+        files={"file": ("open-pos.csv", io.BytesIO(csv), "text/csv")},
+    )
+    assert response.status_code == 200, response.text
+    [po] = db_session.query(PurchaseOrder).all()
+    assert _warning_codes(_po_create_extra(db_session, po.id)) == ["vendor_not_on_asl"]

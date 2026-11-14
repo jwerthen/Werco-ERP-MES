@@ -3373,10 +3373,15 @@ class ApiService {
     return response.data;
   }
 
-  async commitVendorAslImport(file: File, expectedSourceHash: string): Promise<AslImportResponse> {
+  async commitVendorAslImport(
+    file: File,
+    expectedSourceHash: string,
+    expectedPlanHash: string
+  ): Promise<AslImportResponse> {
     const formData = new FormData();
     formData.append('file', file);
     formData.append('expected_source_hash', expectedSourceHash);
+    formData.append('expected_plan_hash', expectedPlanHash);
     const response = await this.api.post<AslImportResponse>('/purchasing/vendors/asl-import/commit', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
       timeout: importTimeout(false),

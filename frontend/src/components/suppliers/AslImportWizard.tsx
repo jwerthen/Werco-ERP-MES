@@ -77,7 +77,8 @@ const OUTCOME_CLASS: Record<string, string> = {
  * Approved Supplier List import: upload → preview diff → commit.
  *
  * UPDATE-ONLY onto existing vendors (it never creates one). The preview writes nothing
- * and returns a `source_hash`; the commit sends the same file plus that hash, is
+ * and returns a `source_hash` and a `plan_hash`; the commit sends the same file plus both,
+ * so a file OR a vendor changed since the preview is a 409 (preview again). It is
  * all-or-nothing (any row error refuses it), and re-running an unchanged sheet writes
  * nothing. Server-gated end to end, so nothing here is optimistic.
  */
@@ -128,7 +129,7 @@ export function AslImportWizard({ onClose, onCommitted }: Props) {
     setError('');
     setRefusal(null);
     try {
-      const committed = await api.commitVendorAslImport(file, preview.source_hash);
+      const committed = await api.commitVendorAslImport(file, preview.source_hash, preview.plan_hash);
       setResult(committed);
       setStep('done');
       showToast(

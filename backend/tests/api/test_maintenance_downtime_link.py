@@ -173,20 +173,105 @@ class TestNoDoubleCounting:
             )
             .one()
         )
-        assert link.new_values == {"maintenance_work_order_id": wo["id"]}
+        assert link.new_values == {"maintenance_work_order_id": wo["id"], "maintenance_adopted": True}
+        assert event.maintenance_adopted is True
 
         client.post(f"{WORK_ORDERS}/{wo['id']}/complete", headers=headers, json={})
         [event] = events_for(db_session, work_center_id=wc.id)
         assert event.end_time is not None
 
-    def test_an_event_another_work_order_owns_is_not_adopted(self, client, db_session, headers):
+    def test_a_second_shutdown_work_order_shares_the_open_event_and_inherits_it(self, client, db_session, headers):
+        """Two shutdown WOs on one machine (a monthly and an annual PM started together, or a
+        corrective WO started during a PM) are ONE stoppage. The second used to open a second
+        open event, and every downtime total sums ``duration_minutes`` without merging overlaps,
+        so the minutes counted twice. Now it shares the first WO's event; when the first ends the
+        event is handed over, and it resolves once, when the LAST work order ends."""
+        wc = make_wc(db_session)
+        first = create_wo(client, headers, work_center_id=wc.id, maintenance_type="corrective")
+        second = create_wo(client, headers, work_center_id=wc.id, maintenance_type="corrective")
+        assert client.post(f"{WORK_ORDERS}/{first['id']}/start", headers=headers).status_code == 200
+        assert client.post(f"{WORK_ORDERS}/{second['id']}/start", headers=headers).status_code == 200
+
+        [event] = events_for(db_session, work_center_id=wc.id)
+        assert event.maintenance_work_order_id == first["id"] and event.end_time is None
+        start_row = (
+            db_session.query(AuditLog)
+            .filter(
+                AuditLog.resource_type == "maintenance_work_order",
+                AuditLog.resource_id == second["id"],
+                AuditLog.action == "STATUS_CHANGE",
+            )
+            .one()
+        )
+        assert start_row.extra_data == {
+            "downtime_event_id": event.id,
+            "downtime_link": "shared",
+            "downtime_shared_with": first["wo_number"],
+        }
+
+        backdate(db_session, first["id"], 60)
+        first_done = client.post(f"{WORK_ORDERS}/{first['id']}/complete", headers=headers, json={})
+        assert first_done.status_code == 200, first_done.text
+        assert first_done.json()["downtime_minutes"] == 0  # the stoppage runs on under the second WO
+        [event] = events_for(db_session, work_center_id=wc.id)
+        assert event.end_time is None and event.maintenance_work_order_id == second["id"]
+        assert [row["id"] for row in client.get("/api/v1/downtime/active", headers=headers).json()] == [event.id]
+
+        second_done = client.post(f"{WORK_ORDERS}/{second['id']}/complete", headers=headers, json={})
+        assert second_done.status_code == 200, second_done.text
+        [event] = events_for(db_session, work_center_id=wc.id)
+        assert event.end_time is not None and 59 <= event.duration_minutes <= 61
+        assert second_done.json()["downtime_minutes"] == event.duration_minutes
+        today = datetime.utcnow().date()
+        summary = client.get(
+            "/api/v1/downtime/summary",
+            headers=headers,
+            params={"date_from": (today - timedelta(days=1)).isoformat(), "date_to": today.isoformat()},
+        ).json()
+        assert summary["unplanned_hours"] == pytest.approx(1.0, abs=0.05)  # once, not twice
+
+    def test_cancelling_the_first_work_order_hands_the_event_to_the_one_still_working(
+        self, client, db_session, headers
+    ):
         wc = make_wc(db_session)
         first = create_wo(client, headers, work_center_id=wc.id)
         second = create_wo(client, headers, work_center_id=wc.id)
         client.post(f"{WORK_ORDERS}/{first['id']}/start", headers=headers)
         client.post(f"{WORK_ORDERS}/{second['id']}/start", headers=headers)
-        owners = sorted(event.maintenance_work_order_id for event in events_for(db_session, work_center_id=wc.id))
-        assert owners == sorted([first["id"], second["id"]])
+        assert (
+            client.put(f"{WORK_ORDERS}/{first['id']}", headers=headers, json={"status": "cancelled"}).status_code == 200
+        )
+        [event] = events_for(db_session, work_center_id=wc.id)
+        assert event.end_time is None and event.maintenance_work_order_id == second["id"]
+        assert (
+            client.put(f"{WORK_ORDERS}/{second['id']}", headers=headers, json={"status": "cancelled"}).status_code
+            == 200
+        )
+        [event] = events_for(db_session, work_center_id=wc.id)
+        assert event.end_time is not None
+
+    def test_a_held_sharer_still_inherits_and_a_later_start_after_the_end_opens_fresh(
+        self, client, db_session, headers
+    ):
+        wc = make_wc(db_session)
+        first = create_wo(client, headers, work_center_id=wc.id)
+        second = create_wo(client, headers, work_center_id=wc.id)
+        client.post(f"{WORK_ORDERS}/{first['id']}/start", headers=headers)
+        client.post(f"{WORK_ORDERS}/{second['id']}/start", headers=headers)
+        assert (
+            client.put(f"{WORK_ORDERS}/{second['id']}", headers=headers, json={"status": "on_hold"}).status_code == 200
+        )
+        client.post(f"{WORK_ORDERS}/{first['id']}/complete", headers=headers, json={})
+        [event] = events_for(db_session, work_center_id=wc.id)
+        assert event.end_time is None and event.maintenance_work_order_id == second["id"]
+        resumed = client.post(f"{WORK_ORDERS}/{second['id']}/start", headers=headers)
+        assert resumed.status_code == 200 and len(events_for(db_session, work_center_id=wc.id)) == 1
+        assert client.post(f"{WORK_ORDERS}/{second['id']}/complete", headers=headers, json={}).status_code == 200
+        third = create_wo(client, headers, work_center_id=wc.id)
+        client.post(f"{WORK_ORDERS}/{third['id']}/start", headers=headers)
+        events = events_for(db_session, work_center_id=wc.id)
+        assert len(events) == 2 and [e.end_time is None for e in events] == [False, True]
+        assert events[1].maintenance_work_order_id == third["id"]
 
     def test_resuming_from_hold_opens_no_second_event(self, client, db_session, headers):
         wc = make_wc(db_session)
@@ -195,6 +280,26 @@ class TestNoDoubleCounting:
         assert client.put(f"{WORK_ORDERS}/{wo['id']}", headers=headers, json={"status": "on_hold"}).status_code == 200
         assert client.post(f"{WORK_ORDERS}/{wo['id']}/start", headers=headers).status_code == 200
         assert len(events_for(db_session, maintenance_work_order_id=wo["id"])) == 1
+
+    def test_a_mis_tenanted_legacy_work_order_opens_no_event_on_the_foreign_machine(self, client, db_session):
+        """A legacy company-2 maintenance WO pointing at company 1's machine (written before the
+        maintenance writes checked whose machine it was) must not open a company-2 event there:
+        the downtime reads would render company 1's machine name to company 2."""
+        foreign_wc = make_wc(db_session, company_id=1)
+        tech = make_user(db_session, role=UserRole.SUPERVISOR, company_id=2)
+        legacy = MaintenanceWorkOrder(
+            company_id=2,
+            work_center_id=foreign_wc.id,
+            wo_number="MWO-LEGACY-X",
+            title="Legacy mis-tenanted",
+            status=MaintenanceStatus.SCHEDULED,
+            requires_shutdown=True,
+        )
+        db_session.add(legacy)
+        db_session.commit()
+        resp = client.post(f"{WORK_ORDERS}/{legacy.id}/start", headers=headers_for(tech))
+        assert resp.status_code == 200, resp.text
+        assert events_for(db_session) == []
 
     def test_a_mis_tenanted_legacy_event_is_never_adopted(self, client, db_session, headers):
         wc = make_wc(db_session)
@@ -218,17 +323,62 @@ class TestNoDoubleCounting:
 
 
 class TestEndingWithoutComplete:
-    @pytest.mark.parametrize("final", ["cancelled", "completed"])
-    def test_cancel_or_close_via_put_resolves_the_event(self, client, db_session, headers, final):
+    def test_cancel_via_put_resolves_the_event_it_opened(self, client, db_session, headers):
         wc = make_wc(db_session)
         wo = create_wo(client, headers, work_center_id=wc.id)
         client.post(f"{WORK_ORDERS}/{wo['id']}/start", headers=headers)
-        resp = client.put(f"{WORK_ORDERS}/{wo['id']}", headers=headers, json={"status": final})
+        resp = client.put(f"{WORK_ORDERS}/{wo['id']}", headers=headers, json={"status": "cancelled"})
         assert resp.status_code == status.HTTP_200_OK, resp.text
         [event] = events_for(db_session, maintenance_work_order_id=wo["id"])
-        assert event.end_time is not None and f"set to {final}" in event.resolution
+        assert event.end_time is not None and "set to cancelled" in event.resolution
         db_session.expire_all()
-        assert db_session.get(MaintenanceWorkOrder, wo["id"]).status == MaintenanceStatus(final)
+        assert db_session.get(MaintenanceWorkOrder, wo["id"]).status == MaintenanceStatus.CANCELLED
+
+    def test_cancelling_hands_an_adopted_breakdown_back_to_the_machine_still_open(self, client, db_session, headers):
+        """An operator logged the breakdown; a corrective WO adopted it; the WO is cancelled (to
+        be redone differently). The machine is still broken, so the event must stay OPEN --
+        unlinked, for the next work order to adopt -- not be resolved as if it were fixed."""
+        wc = make_wc(db_session)
+        logged = client.post(
+            "/api/v1/downtime/",
+            headers=headers,
+            json={"work_center_id": wc.id, "category": "mechanical", "description": "Spindle seized"},
+        ).json()
+        wo = create_wo(client, headers, work_center_id=wc.id, maintenance_type="corrective")
+        client.post(f"{WORK_ORDERS}/{wo['id']}/start", headers=headers)
+        assert client.put(f"{WORK_ORDERS}/{wo['id']}", headers=headers, json={"status": "cancelled"}).status_code == 200
+
+        [event] = events_for(db_session, work_center_id=wc.id)
+        assert event.id == logged["id"] and event.end_time is None and event.resolved_by is None
+        assert event.maintenance_work_order_id is None and event.maintenance_adopted is False
+        handback = (
+            db_session.query(AuditLog)
+            .filter(
+                AuditLog.resource_type == "downtime_event",
+                AuditLog.resource_id == event.id,
+                AuditLog.action == "UPDATE",
+            )
+            .order_by(AuditLog.id)
+            .all()[-1]
+        )
+        assert handback.new_values == {"maintenance_work_order_id": None, "maintenance_adopted": False}
+
+        redo = create_wo(client, headers, work_center_id=wc.id, maintenance_type="corrective")
+        client.post(f"{WORK_ORDERS}/{redo['id']}/start", headers=headers)
+        [event] = events_for(db_session, work_center_id=wc.id)
+        assert event.maintenance_work_order_id == redo["id"] and event.maintenance_adopted is True
+        client.post(f"{WORK_ORDERS}/{redo['id']}/complete", headers=headers, json={})
+        [event] = events_for(db_session, work_center_id=wc.id)
+        assert event.end_time is not None  # completing the repair does resolve it
+
+    def test_completing_resolves_an_adopted_breakdown(self, client, db_session, headers):
+        wc = make_wc(db_session)
+        client.post("/api/v1/downtime/", headers=headers, json={"work_center_id": wc.id, "category": "mechanical"})
+        wo = create_wo(client, headers, work_center_id=wc.id, maintenance_type="corrective")
+        client.post(f"{WORK_ORDERS}/{wo['id']}/start", headers=headers)
+        client.post(f"{WORK_ORDERS}/{wo['id']}/complete", headers=headers, json={})
+        [event] = events_for(db_session, work_center_id=wc.id)
+        assert event.end_time is not None
 
     def test_a_manually_resolved_event_is_not_resolved_twice(self, client, db_session, headers):
         wc = make_wc(db_session)
@@ -266,3 +416,97 @@ class TestOeeTreatment:
         summary = client.get("/api/v1/downtime/summary", headers=headers, params=summary_dates).json()
         assert summary["planned_hours"] == pytest.approx(1.0, abs=0.05)
         assert summary["unplanned_hours"] == pytest.approx(1.0, abs=0.05)
+
+
+class TestPutCannotBypassTheVerbs:
+    """``PUT /maintenance/work-orders/{id}`` is also an MCP tool. Its blind setattr loop used to
+    start a work order with no ``started_at`` and no downtime event, complete one without the
+    PM schedule advancing, return a started one to scheduled with its event still open, and
+    flip ``requires_shutdown`` under a running stoppage. Each is now a 409 that writes nothing."""
+
+    def _refused(self, client, db_session, headers, wo_id, body):
+        before = client.get(f"{WORK_ORDERS}/{wo_id}", headers=headers).json()
+        resp = client.put(f"{WORK_ORDERS}/{wo_id}", headers=headers, json=body)
+        assert resp.status_code == status.HTTP_409_CONFLICT, resp.text
+        after = client.get(f"{WORK_ORDERS}/{wo_id}", headers=headers).json()
+        assert after["status"] == before["status"] and after["requires_shutdown"] == before["requires_shutdown"]
+        return resp.json()["detail"]
+
+    def test_in_progress_is_the_start_verbs(self, client, db_session, headers):
+        wc = make_wc(db_session)
+        wo = create_wo(client, headers, work_center_id=wc.id)
+        detail = self._refused(client, db_session, headers, wo["id"], {"status": "in_progress"})
+        assert "/start" in detail
+        assert events_for(db_session) == []
+
+    def test_completed_is_the_complete_verbs(self, client, db_session, headers):
+        wc = make_wc(db_session)
+        wo = create_wo(client, headers, work_center_id=wc.id)
+        client.post(f"{WORK_ORDERS}/{wo['id']}/start", headers=headers)
+        detail = self._refused(client, db_session, headers, wo["id"], {"status": "completed"})
+        assert "/complete" in detail
+        [event] = events_for(db_session, maintenance_work_order_id=wo["id"])
+        assert event.end_time is None
+
+    @pytest.mark.parametrize("back_to", ["scheduled", "overdue"])
+    def test_a_started_work_order_cannot_be_unstarted(self, client, db_session, headers, back_to):
+        wc = make_wc(db_session)
+        wo = create_wo(client, headers, work_center_id=wc.id)
+        client.post(f"{WORK_ORDERS}/{wo['id']}/start", headers=headers)
+        self._refused(client, db_session, headers, wo["id"], {"status": back_to})
+        client.put(f"{WORK_ORDERS}/{wo['id']}", headers=headers, json={"status": "on_hold"})
+        self._refused(client, db_session, headers, wo["id"], {"status": back_to})
+
+    def test_requires_shutdown_is_fixed_once_started(self, client, db_session, headers):
+        wc = make_wc(db_session)
+        no_shutdown = create_wo(client, headers, work_center_id=wc.id, requires_shutdown=False)
+        client.post(f"{WORK_ORDERS}/{no_shutdown['id']}/start", headers=headers)
+        self._refused(client, db_session, headers, no_shutdown["id"], {"requires_shutdown": True})
+        shutdown = create_wo(client, headers, work_center_id=make_wc(db_session).id)
+        client.post(f"{WORK_ORDERS}/{shutdown['id']}/start", headers=headers)
+        self._refused(client, db_session, headers, shutdown["id"], {"requires_shutdown": False})
+        assert len(events_for(db_session, end_time=None)) == 1
+
+    def test_echoes_holds_and_unstarted_edits_still_work(self, client, db_session, headers):
+        wc = make_wc(db_session)
+        wo = create_wo(client, headers, work_center_id=wc.id)
+        # Not started: the shutdown flag and the planning statuses stay editable.
+        for body in ({"requires_shutdown": False}, {"requires_shutdown": True}, {"status": "on_hold"}):
+            assert client.put(f"{WORK_ORDERS}/{wo['id']}", headers=headers, json=body).status_code == 200
+        assert client.put(f"{WORK_ORDERS}/{wo['id']}", headers=headers, json={"status": "scheduled"}).status_code == 200
+        client.post(f"{WORK_ORDERS}/{wo['id']}/start", headers=headers)
+        echo = {"status": "in_progress", "requires_shutdown": True, "title": "Renamed"}
+        assert client.put(f"{WORK_ORDERS}/{wo['id']}", headers=headers, json=echo).status_code == 200
+        assert client.put(f"{WORK_ORDERS}/{wo['id']}", headers=headers, json={"status": "on_hold"}).status_code == 200
+        [event] = events_for(db_session, maintenance_work_order_id=wo["id"])
+        assert event.end_time is None  # a hold keeps the machine down
+
+
+class TestScheduleTarget:
+    def test_an_explicit_target_must_be_the_schedules(self, client, db_session, headers):
+        """Completing a work order advances ITS schedule's due date, so a work order on another
+        machine must not carry the schedule."""
+        wc, other = make_wc(db_session), make_wc(db_session)
+        schedule = client.post(
+            "/api/v1/maintenance/schedules",
+            headers=headers,
+            json={"name": "Synthetic monthly PM", "work_center_id": wc.id, "frequency": "monthly"},
+        )
+        assert schedule.status_code == 200, schedule.text
+        schedule_id = schedule.json()["id"]
+        refused = client.post(
+            WORK_ORDERS, headers=headers, json={"title": "PM", "schedule_id": schedule_id, "work_center_id": other.id}
+        )
+        assert refused.status_code == status.HTTP_409_CONFLICT, refused.text
+        asset = make_asset(db_session)
+        refused = client.post(
+            WORK_ORDERS, headers=headers, json={"title": "PM", "schedule_id": schedule_id, "asset_id": asset.id}
+        )
+        assert refused.status_code == status.HTTP_409_CONFLICT
+        assert db_session.query(MaintenanceWorkOrder).count() == 0
+        same = client.post(
+            WORK_ORDERS, headers=headers, json={"title": "PM", "schedule_id": schedule_id, "work_center_id": wc.id}
+        )
+        inherited = client.post(WORK_ORDERS, headers=headers, json={"title": "PM", "schedule_id": schedule_id})
+        assert same.status_code == inherited.status_code == 200
+        assert same.json()["work_center_id"] == inherited.json()["work_center_id"] == wc.id

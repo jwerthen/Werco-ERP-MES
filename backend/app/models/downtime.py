@@ -3,7 +3,7 @@ from datetime import datetime
 
 from sqlalchemy import Boolean, Column, DateTime
 from sqlalchemy import Enum as SQLEnum
-from sqlalchemy import Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Float, ForeignKey, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
@@ -40,13 +40,21 @@ class DowntimeEvent(Base, TenantMixin):
     work_order_id = Column(Integer, ForeignKey("work_orders.id"), nullable=True)
     # The maintenance work order this stoppage belongs to (migration 124): set when a
     # work-center maintenance WO that requires shutdown starts and opens -- or adopts -- the
-    # event, so completing / cancelling that WO resolves it. NULL for every other event.
+    # event, so completing / cancelling that WO resolves it (or hands it to another shutdown
+    # WO still holding the machine down). NULL for every other event.
     maintenance_work_order_id = Column(
         Integer,
         ForeignKey("maintenance_work_orders.id", name="fk_downtime_events_maintenance_work_order_id"),
         nullable=True,
         index=True,
     )
+    # True while that link came from ADOPTING an event an operator logged first (the stoppage
+    # predates the work order). Cancelling such a work order hands the event back to the
+    # machine -- unlinked, still open -- rather than resolving a breakdown nobody fixed.
+    # False for an event a maintenance work order opened itself, and for every other event.
+    # ``text("false")``, not the string: a quoted 'false' is a TEXT value on SQLite, which reads
+    # back truthy. Byte-identical in migration 124 (a test pins it).
+    maintenance_adopted = Column(Boolean, nullable=False, default=False, server_default=text("false"))
 
     start_time = Column(DateTime, nullable=False, default=datetime.utcnow)
     end_time = Column(DateTime, nullable=True)

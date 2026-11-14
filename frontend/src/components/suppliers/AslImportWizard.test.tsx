@@ -15,11 +15,13 @@ jest.mock('../../services/api', () => ({
 const mockedApi = api as jest.Mocked<typeof api>;
 
 const HASH = 'a'.repeat(64);
+const PLAN = 'b'.repeat(64);
 const file = new File(['xlsx'], 'QL 7.4 - Approved Supplier List.xlsx');
 
 const preview = (overrides: Partial<AslImportResponse['summary']> = {}): AslImportResponse => ({
   filename: file.name,
   source_hash: HASH,
+  plan_hash: PLAN,
   document: { form_number: 'QL 7.4', revision: 'A', rev_date: '2026-01-30' },
   committed: false,
   summary: {
@@ -101,7 +103,7 @@ describe('AslImportWizard', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Commit 1 vendor update/ }));
     await screen.findByRole('heading', { name: 'Approved Supplier List imported' });
-    expect(mockedApi.commitVendorAslImport).toHaveBeenCalledWith(file, HASH);
+    expect(mockedApi.commitVendorAslImport).toHaveBeenCalledWith(file, HASH, PLAN);
     expect(onCommitted).toHaveBeenCalled();
   });
 

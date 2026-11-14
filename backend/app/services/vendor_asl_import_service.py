@@ -7,10 +7,12 @@ exactly one existing live vendor or it is a row error. It is therefore not route
 the create-only Import Center batch flow (``import_batch_service``); it is its own
 preview / commit pair, like the routing import.
 
-Matching (an AS9100-controlled list must never bind a row to the wrong supplier):
+Matching (an AS9100-controlled list must never bind a row to the wrong supplier). SUPPLIER
+NAME is required on every row:
 
 1. a ``vendor_code`` (or ``code`` / ``supplier_code``) column, when filled, matches the
-   vendor by code (case-insensitive);
+   vendor by code (case-insensitive) -- and the row's normalized name must then be that
+   vendor's too, or it is a row error (a mistyped code never binds silently);
 2. otherwise the EXACT normalized name: casefold, whitespace collapsed, en/em dashes read as
    '-', spaces beside '-' and '.' removed ("Cinder- Forge" == "Cinder-Forge",
    "R.T.Hollis" == "R.T. Hollis"). Nothing fuzzier: two names that differ in a word are two
@@ -21,9 +23,10 @@ binding the same vendor are ROW ERRORS, and any row error makes the commit refus
 having written nothing -- all-or-nothing.
 
 Values: an unknown status / scope / basis label is a row error naming the allowed labels.
-A blank STATUS records the vendor as not on the ASL (approval_status NULL; ``is_approved`` is
-left as it is) with a warning. Every other blank cell leaves the vendor's value unchanged --
-a blank date never clears one. APPROVED DATE overwrites ``approval_date`` (audited). The
+A blank STATUS on a vendor not on the ASL leaves it off (with a warning); on a vendor that IS
+on the ASL it is a row error -- an import never takes a supplier off the list (from
+Disqualified that would lift the one hard PO refusal); Update approval does, with a reason.
+Every other blank cell leaves the vendor's value unchanged -- a blank date never clears one. APPROVED DATE overwrites ``approval_date`` (audited). The
 address and the name are compared only and never written.
 
 Idempotent: a row whose values already match writes nothing, and a re-run of the same sheet
@@ -37,6 +40,7 @@ caller's single transaction (``app.api.audit_guard.required_audit`` rolls it all
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 from types import SimpleNamespace
@@ -177,24 +181,38 @@ def _restore_hint(vendor: Vendor) -> str:
 
 def _match(plan: _RowPlan, row: Dict[str, str], index: _Index) -> None:
     code = _cell(row, CODE_COLUMNS).upper()
+    if not plan.supplier_name:
+        # Required even beside a vendor_code: the code alone cannot be checked against
+        # anything, and a mistyped code would bind the row to the wrong supplier silently.
+        plan.errors.append("SUPPLIER NAME is required")
+        return
     if code:
         plan.match_by = "code"
         hits = index.by_code.get(code, [])
         live = [vendor for vendor in hits if not vendor.is_deleted]
         if len(live) == 1:
-            plan.vendor = live[0]
-            if plan.supplier_name and vendor_name_key(plan.supplier_name) != vendor_name_key(live[0].name):
-                plan.warnings.append(
-                    f"SUPPLIER NAME '{plan.supplier_name}' differs from vendor {live[0].code}'s name "
-                    f"'{live[0].name}'; this import never changes a name."
+            vendor = live[0]
+            if vendor_name_key(plan.supplier_name) != vendor_name_key(vendor.name):
+                # A code and a name that disagree are a typo in one of them (VND-012 for VND-021)
+                # or codes swapped since; either way binding would land this supplier's approval
+                # on another supplier's controlled record. Refused, never a warning.
+                plan.errors.append(
+                    f"vendor_code '{code}' is {vendor.code} '{vendor.name}', but SUPPLIER NAME is "
+                    f"'{plan.supplier_name}'; a row binds only when its code and name name the same vendor. "
+                    "Correct the code or the name (rename the vendor first if its name has changed)"
                 )
+                return
+            plan.vendor = vendor
+        elif len(live) > 1:
+            codes = ", ".join(sorted(vendor.code for vendor in live))
+            plan.errors.append(
+                f"vendor_code '{code}' matches {len(live)} vendors whose codes differ only in case ({codes}); "
+                "rename one of them first"
+            )
         elif hits:
             plan.errors.append(_restore_hint(hits[0]))
         else:
             plan.errors.append(f"no vendor with code '{code}'")
-        return
-    if not plan.supplier_name:
-        plan.errors.append("SUPPLIER NAME is required (or fill vendor_code)")
         return
     plan.match_by = "name"
     hits = index.by_name.get(vendor_name_key(plan.supplier_name), [])
@@ -264,12 +282,18 @@ def _diff(plan: _RowPlan) -> None:
     status = plan.values.get("status")
     if status is None:
         if before.get("approval_status"):
-            plan.warnings.append(
-                f"STATUS is blank: this removes {vendor.code} from the Approved Supplier List "
-                f"(was {asl.status_label(before['approval_status'])})."
+            # Taking a supplier OFF the list is a decision -- and from Disqualified it lifts the
+            # one hard purchase-order refusal -- so a blank cell never makes it. It goes through
+            # Update approval, which records who decided and why.
+            plan.errors.append(
+                f"STATUS is blank, but {vendor.code} is {asl.status_label(before['approval_status'])} on the "
+                "Approved Supplier List; an import never takes a supplier off the list. Fill its STATUS, or remove "
+                "it with Update approval (PUT /api/v1/purchasing/vendors/"
+                f"{vendor.id}/approval), which records the reason"
             )
-        else:
-            plan.warnings.append("STATUS is blank: the vendor is recorded as not on the Approved Supplier List yet.")
+            plan.changes = {}
+            return
+        plan.warnings.append("STATUS is blank: the vendor is recorded as not on the Approved Supplier List yet.")
     elif status == asl.ApprovalStatus.DISQUALIFIED.value:
         plan.warnings.append("Disqualified: purchase orders to this vendor will be refused.")
     if not vendor.is_active:
@@ -339,12 +363,33 @@ def _company_vendors(db: Session, company_id: int, *, lock: bool) -> List[Vendor
     return query.all()
 
 
+def plan_hash(plans: Sequence[_RowPlan]) -> str:
+    """A digest of what the plan WOULD WRITE, read against the vendors as they are now.
+
+    The preview returns it; the commit recomputes it under its row locks and refuses (409) when
+    it differs. ``source_hash`` proves the file is the one previewed; this proves the vendors
+    are -- so a decision recorded after the preview (Quality disqualifying a vendor the preview
+    showed as unchanged) is never silently written over by a commit nobody re-read."""
+    canonical = [
+        {
+            "row": plan.row,
+            "vendor_id": plan.vendor.id if plan.vendor is not None else None,
+            "outcome": plan.outcome,
+            "changes": plan.changes,
+            "errors": plan.errors,
+        }
+        for plan in plans
+    ]
+    return hashlib.sha256(json.dumps(canonical, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
 def _response(
     filename: Optional[str], content_hash: str, table: ParsedTable, plans: Sequence[_RowPlan], *, committed: bool
 ) -> Dict[str, Any]:
     return {
         "filename": filename,
         "source_hash": content_hash,
+        "plan_hash": plan_hash(plans),
         "document": document_identity(table),
         "committed": committed,
         "summary": _summary(plans),
@@ -366,13 +411,15 @@ def commit_asl_import(
     filename: Optional[str],
     content: bytes,
     expected_source_hash: str,
+    expected_plan_hash: str,
     audit: AuditService,
 ) -> Dict[str, Any]:
     """Apply the sheet. All-or-nothing; the CALLER commits (inside ``required_audit``).
 
-    The file must be the one the preview read (``expected_source_hash``, 409 otherwise).
-    Every probe re-runs under row locks on the company's vendors, so the commit acts on the
-    database as it is now, not as it was at preview time.
+    The file must be the one the preview read (``expected_source_hash``, 409 otherwise), and the
+    plan -- every row's match, outcome and changes, re-run under row locks on the company's
+    vendors -- must be the one the preview showed (``expected_plan_hash``, 409 otherwise): a
+    vendor changed since the preview means the committer has not seen what would be written.
     """
     content_hash = source_hash(content)
     if (expected_source_hash or "").strip().lower() != content_hash:
@@ -393,6 +440,15 @@ def commit_asl_import(
                     for plan in errors
                 ],
             },
+        )
+    # After the row errors (they say what to fix): a clean plan that is not the previewed one.
+    if (expected_plan_hash or "").strip().lower() != plan_hash(plans):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "The vendors changed after this file was previewed, so the import would no longer write what the "
+                "preview showed. Preview it again, then commit."
+            ),
         )
 
     document = document_identity(table)
