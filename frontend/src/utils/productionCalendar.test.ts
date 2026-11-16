@@ -12,6 +12,8 @@ import {
   draftFromCalendar,
   draftIssues,
   formatShiftDays,
+  isProductionCalendar,
+  parseProductionCalendar,
   patternForWorkCenter,
   productionDayEnded,
   runningOccurrences,
@@ -20,6 +22,7 @@ import {
   wallTimeToMinute,
 } from './productionCalendar';
 import { unconfiguredCalendar, wercoCalendar } from '../test-utils/productionCalendarFixtures';
+import type { ProductionCalendar } from '../types/productionCalendar';
 
 const at = (iso: string) => Date.parse(iso);
 
@@ -272,5 +275,51 @@ describe('client-side validation mirrors the server rules', () => {
     draft.patterns[1].is_default = false;
     expect(draftIssues(draft)).toEqual([]);
     expect(buildCalendarUpdate(draft, 3).patterns.map(p => p.is_default)).toEqual([false, false]);
+  });
+});
+
+describe('a body that is not a calendar never throws', () => {
+  // The header HUD reads the calendar on every page; one throw there puts the whole app
+  // behind the global error boundary. That is what failed every mocked Playwright spec
+  // whose catch-all answers an unknown API call with `{}`.
+  const valid = wercoCalendar();
+  const malformed: Array<[string, unknown]> = [
+    ['null', null],
+    ['undefined', undefined],
+    ['an empty object', {}],
+    ['an HTML page', '<!doctype html><html></html>'],
+    ['an array', []],
+    ['no today', { ...valid, today: undefined }],
+    ['today without occurrences', { ...valid, today: { ...valid.today, occurrences: undefined } }],
+    ['today without end_utc', { ...valid, today: { ...valid.today, end_utc: undefined } }],
+    ['no patterns', { ...valid, patterns: undefined }],
+    ['a pattern without shifts', { ...valid, patterns: [{ ...valid.patterns[0], shifts: undefined }] }],
+    ['a pattern without work centers', { ...valid, patterns: [{ ...valid.patterns[0], work_center_ids: null }] }],
+    ['a null shift', { ...valid, patterns: [{ ...valid.patterns[0], shifts: [null] }] }],
+    ['a null occurrence', { ...valid, today: { ...valid.today, occurrences: [null] } }],
+    ['configured not a boolean', { ...valid, configured: 'yes' }],
+  ];
+
+  test('well-formed calendars pass', () => {
+    expect(isProductionCalendar(wercoCalendar())).toBe(true);
+    expect(isProductionCalendar(unconfiguredCalendar())).toBe(true);
+    expect(parseProductionCalendar(valid)).toBe(valid);
+  });
+
+  test.each(malformed)('rejects %s', (_label, body) => {
+    expect(isProductionCalendar(body)).toBe(false);
+    expect(() => parseProductionCalendar(body)).toThrow(
+      'The production calendar response was not in the expected format.'
+    );
+  });
+
+  test.each(malformed)('every helper treats %s as no calendar', (_label, body) => {
+    const calendar = body as ProductionCalendar;
+    const now = Date.parse('2026-11-10T16:00:00Z');
+    expect(productionDayEnded(calendar, now)).toBe(true);
+    expect(defaultPattern(calendar)).toBeNull();
+    expect(patternForWorkCenter(calendar, 101)).toBeNull();
+    expect(runningOccurrences(calendar, now, 2)).toEqual([]);
+    expect(currentDefaultShift(calendar, now)).toEqual({ current: null, overlapping: [] });
   });
 });

@@ -98,6 +98,26 @@ test('a failed read degrades to the em dash without throwing', async () => {
   expect(badge()).toHaveTextContent('—');
 });
 
+test.each([
+  ['an empty object', {}],
+  ['an HTML page', '<!doctype html><html></html>'],
+  ['a calendar without today', { ...wercoCalendar(), today: undefined }],
+])('a body that is not a calendar (%s) degrades to the em dash, never a crash', async (_label, body) => {
+  // The badge renders in the header of every page: a throw here would put the whole app
+  // behind the global error boundary (it did, for every Playwright spec whose catch-all
+  // answers an unknown API call with `{}`).
+  freezeAt('2026-11-10T16:00:00Z');
+  mockApi.getProductionCalendar.mockResolvedValue(body as unknown as ReturnType<typeof wercoCalendar>);
+  render(<HudShift />);
+  await waitFor(() => expect(badge()).toHaveAttribute('title', 'Shift unavailable'));
+  expect(badge()).toHaveTextContent('—');
+  // The 30-second tick re-reads the (still absent) calendar without throwing either.
+  await act(async () => {
+    jest.advanceTimersByTime(30_000);
+  });
+  expect(badge()).toHaveTextContent('—');
+});
+
 test('refetches for the next production day when today ends', async () => {
   freezeAt('2026-11-11T10:59:00Z'); // 04:59 CST: last minute of Tuesday's production day
   const wednesday = wercoCalendar({
