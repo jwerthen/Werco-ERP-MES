@@ -1,7 +1,7 @@
 """Approved Supplier List on the vendor record, plus parts.supply_scope
 
 Revision ID: 123_vendor_asl
-Revises: 118_dashboard_layouts
+Revises: 122_car_form_quote_rev
 Create Date: 2026-11-13
 
 Context
@@ -52,7 +52,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision = "123_vendor_asl"
-down_revision = "118_dashboard_layouts"
+down_revision = "122_car_form_quote_rev"
 branch_labels = None
 depends_on = None
 

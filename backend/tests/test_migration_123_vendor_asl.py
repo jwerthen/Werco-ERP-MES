@@ -34,7 +34,7 @@ pytestmark = [pytest.mark.unit]
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MIGRATION_FILE = os.path.join(BACKEND_DIR, "alembic", "versions", "123_vendor_asl.py")
 REVISION = "123_vendor_asl"
-DOWN_REVISION = "118_dashboard_layouts"
+DOWN_REVISION = "122_car_form_quote_rev"
 
 VENDOR_COLUMNS = {
     "approval_status": sa.String,
