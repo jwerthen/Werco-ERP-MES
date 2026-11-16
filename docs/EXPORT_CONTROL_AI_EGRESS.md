@@ -356,7 +356,9 @@ were the right one.
 - **Allowed:** filters over fields the redaction keeps, such as ids, statuses, dates, counts,
   booleans, pagination and closed-vocabulary categories (`part_type`, `work_order_type`, downtime
   `category`), the OEE records' `shift_id`, the calendar resolver's `at` and
-  `work_center_id`, and the FAI log's date range, `status`, `part_id` and `work_order_id`.
+  `work_center_id`, the FAI log's date range, `status`, `part_id` and `work_order_id`, the
+  maintenance work orders' `asset_id`, and the re-evaluation list's `within_days` and
+  `include_inactive`.
 
 A new query parameter on an allowlisted route is refused until it is classified; a guard test in
 `backend/tests/api/test_ai_external_token.py` fails CI until it is.
