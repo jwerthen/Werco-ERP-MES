@@ -231,4 +231,7 @@ class AutoLinkSummary(BaseModel):
     clauses_without_evidence: int
     total_evidence_created: int
     total_evidence_updated: int
+    # Evidence rules whose query failed this run: reported as not_assessed in the roll-up,
+    # nothing persisted for them (their stored evidence is left as the last good run wrote it).
+    total_evidence_failed: int = 0
     compliance_summary: dict = Field(default_factory=dict)  # {"compliant": 38, "partial": 5, ...}
