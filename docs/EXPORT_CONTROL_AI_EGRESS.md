@@ -147,7 +147,7 @@ it.
 | Routing | its part is withheld |
 | FAI | its part or its work order is withheld. Each row of the FAI log of record (`/quality/fai/log`) is judged like the FAI it names, by its `fai_id`, `part_id` and `work_order_id` |
 | NCR | its part, work order or receipt is withheld |
-| CAR | any of its links is withheld. Its OWN links (the CAR form, migration `122`): its part, its customer (`customer_id`) and the customer-name snapshot taken when that customer was chosen, judged on its own like any free-text name (a controlled customer's current or former name controls; a snapshot no customer carries is unresolvable). And its referrers: an NCR or a customer complaint that references it is withheld, or the complaint's customer is controlled or unresolvable. A CAR is cleared only when **every** link clears, so a CAR raised from a cleared NCR is withheld the moment its customer is set to a controlled one |
+| CAR | any of its links is withheld. Its OWN links (the CAR form, migration `122`): its part, its customer (`customer_id`) and the customer-name snapshot taken when that customer was chosen, judged on its own like any free-text name (a controlled customer's current or former name controls; a snapshot no customer carries is unresolvable). A blank-customer material-supply part is **no link** on a CAR: it names no customer, so it neither clears nor withholds one. And its referrers: an NCR or a customer complaint that references it **or ever did** is withheld, or the complaint's customer is controlled or unresolvable. A CAR is cleared only when **every** link clears, so a CAR raised from a cleared NCR is withheld the moment its customer is set to a controlled one, and a CAR raised from a withheld NCR or complaint stays withheld after the link moves (the CAR voided and the record escalated again, or the NCR's `car_id` re-pointed or cleared) |
 | Quote | its name is blank, controlled or matches no customer; or its work order, any line's part or work order, or the customer on the fabrication quote it came from is withheld |
 | Purchase order | any line's part is withheld, or it has no lines |
 | Receipt | its PO line's part is withheld |
@@ -162,7 +162,8 @@ The ERP cannot tie these to any customer, so they are withheld with `denial_reas
 
 - standalone laser work orders (no part, no customer, no parent) and their operations;
 - NCRs with no part, work order or receipt;
-- CARs with no part or customer of their own that no NCR or complaint references;
+- CARs with no customer of their own, no part that names one (a generic-stock part does not), and
+  no NCR or complaint that references them or ever did;
 - purchase orders and receipts with no part, or whose line parts are raw-material / hardware stock
   with a blank customer. The part record itself still passes; the buy cannot be tied to the job it
   was for;
@@ -539,11 +540,21 @@ Deactivating Werco Assistant revokes its tokens too.
   customer's name or code. Both resolve to no customer, so they are withheld until someone
   creates a customer under that name. A rename made through the app cannot leave no row: its row
   is required evidence.
+- **A CAR's former referrers come from the audit log too.** A CAR copies the title and description
+  of the NCR or complaint it is raised from, but the link that places it can move: voiding the CAR
+  lets the record raise a fresh one, and `PUT /quality/ncr/{id}` re-points or clears `car_id`. So
+  a CAR is judged by every NCR and complaint that **ever** referenced it, read from those records'
+  own `audit_log` rows (the escalation's and every NCR edit's old and new `car_id`, all written as
+  required evidence with the link they record). A CAR therefore stays withheld once any withheld
+  record has named it, even after a person moves the link. The referrer itself is judged as it
+  stands today: an NCR edited off the ITAR work order is served in full, and so are the CARs only it
+  ever placed. A link changed outside the app (direct SQL) leaves no row and is not seen.
 - **The stdio bridge.** A bridge started with an AI-external token narrows its own listing from the
   token's unverified `ai_ext` claim and has no egress check of its own. The API layer refuses every
   call regardless, and that is the control.
 - **The cost is per request.** The index is rebuilt on every AI-external response (it loads all of
-  the company's parts, work orders, operations, PO lines, receipts, NCRs, quotes and quote lines),
+  the company's parts, work orders, operations, PO lines, receipts, NCRs, complaints, CARs, FAIs,
+  quotes and quote lines, plus the non-CREATE audit rows of every withheld NCR and complaint),
   and each withheld record writes a ledger row, so `/parts/` writes one per blank-customer
   engineering part. "No cache in v1" was the agreed design; a load check (or a per-request-window
   cache) is an open follow-up. Prefer narrow, filtered reads.

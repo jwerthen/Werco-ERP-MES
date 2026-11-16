@@ -20,15 +20,18 @@ Three jobs, one module:
      history, :func:`customer_former_names`): a rename frees nothing, even when another
      customer later takes the old name. Records the ERP cannot tie to any customer
      (standalone laser work orders, NCRs with no part / work order / receipt, CARs with no
-     part or customer of their own that no NCR or complaint references,
-     raw-material purchase orders and receipts, engineering parts with no customer) are
-     withheld as UNLINKABLE. A material-supply part (purchased / raw material / hardware /
-     consumable) with a blank customer is generic stock and passes.
+     customer of their own, no part that names a customer, and no NCR or complaint that
+     references or ever referenced them, raw-material purchase orders and receipts,
+     engineering parts with no customer) are withheld as UNLINKABLE. A material-supply part
+     (purchased / raw material / hardware / consumable) with a blank customer is generic
+     stock and passes -- but on a CAR it is no tie to a customer, so it neither clears nor
+     controls the CAR.
    * The linkage map (docs/EXPORT_CONTROL_AI_EGRESS.md): work orders via their name, part,
      component parts and parent; operations, time entries and downtime via the work order;
      routings via the part; FAI via part and work order; NCRs via part, work order and
-     receipt; CARs via their own part, customer and customer-name snapshot AND the NCRs and
-     complaints that reference them; quotes via name, work
+     receipt; CARs via their own part, customer and customer-name snapshot AND every NCR and
+     complaint that references them or ever did (their audit history,
+     :func:`car_former_referrers`); quotes via name, work
      order, line parts and the fabrication quote's customer; purchase orders and receipts
      via their line parts.
 
@@ -92,6 +95,7 @@ from app.models.quote import Quote, QuoteLine
 from app.models.routing import Routing
 from app.models.work_order import WorkOrder, WorkOrderOperation
 from app.services.audit_service import AuditService
+from app.services.customer_complaint_service import COMPLAINT_RESOURCE
 from app.services.export_control_redaction import (
     UNLINKABLE,
     Control,
@@ -104,6 +108,7 @@ from app.services.export_control_redaction import (
     redact_payload,
     worst,
 )
+from app.services.quality_record_service import NCR_RESOURCE
 
 logger = logging.getLogger(__name__)
 
@@ -253,6 +258,82 @@ def customer_former_names(db: Session, company_id: int, customer_ids: Iterable[i
                 value = values.get(field_name)
                 if isinstance(value, str) and value.strip():
                     former[row.resource_id].add(value.strip())
+    return dict(former)
+
+
+_HISTORY_CHUNK = 500  # ids per IN list when reading referrers' audit history
+
+
+def _car_ids_named(*values: Any) -> Set[int]:
+    """Every CAR id an audit row's ``car_id`` value -- or its ``changes.car_id`` old / new -- names."""
+    found: Set[int] = set()
+
+    def add(value: Any) -> None:
+        if isinstance(value, bool):
+            return
+        if isinstance(value, int):
+            found.add(value)
+        elif isinstance(value, str) and value.strip().isdigit():
+            found.add(int(value.strip()))
+
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        add(value.get("car_id"))
+        changes = value.get("changes")
+        diff = changes.get("car_id") if isinstance(changes, dict) else None
+        if isinstance(diff, dict):
+            add(diff.get("old"))
+            add(diff.get("new"))
+    return found
+
+
+def car_former_referrers(
+    db: Session, company_id: int, ncr_ids: Iterable[int], complaint_ids: Iterable[int]
+) -> Dict[int, Set[Tuple[str, int]]]:
+    """CAR id -> every ``("ncr" | "complaint", id)`` among the given records whose own audit history names it.
+
+    A CAR raised from an NCR or a complaint copies its title and description (and, since
+    migration 122, its part and customer), and is placed by the record that references it.
+    But that reference MOVES: voiding the CAR lets the NCR or complaint raise a fresh one
+    (``create_car_from_ncr`` / ``create_car_from_complaint`` re-point the link), and
+    ``PUT /quality/ncr/{id}`` re-points or clears ``car_id``. Judged by its CURRENT
+    referrers alone, the first CAR then lost the ITAR NCR's control -- and with only a
+    generic-stock part or a cleared customer of its own, it was served in full to an
+    AI-external token, the ITAR text the inspector typed included (red-team finding,
+    2026-11-16). So a CAR keeps the control of every NCR and complaint that EVER referenced it.
+
+    The history is the referrers' own ``audit_log`` rows, every one of them written as
+    REQUIRED evidence in the same transaction as the link it records: the escalations'
+    UPDATE row (old -> new ``car_id``), and ``update_ncr``'s UPDATE / STATUS_CHANGE row
+    (``old_values`` / ``new_values`` / ``extra_data.changes``). The table is append-only
+    (the 008/060 triggers), as :func:`customer_former_names` relies on too. CREATE rows are
+    not read: no create path sets ``car_id``, and a link that later moved is named by the
+    row that moved it, as its old value.
+
+    The caller passes only the records that are NOT cleared (controlled or unlinkable): a
+    cleared former referrer adds nothing to a CAR's standing.
+    """
+    former: Dict[int, Set[Tuple[str, int]]] = defaultdict(set)
+    for resource_type, label, ids in ((NCR_RESOURCE, "ncr", ncr_ids), (COMPLAINT_RESOURCE, "complaint", complaint_ids)):
+        ordered = sorted(set(ids))
+        for start in range(0, len(ordered), _HISTORY_CHUNK):
+            rows = (
+                tenant_filter(
+                    db.query(AuditLog.resource_id, AuditLog.old_values, AuditLog.new_values, AuditLog.extra_data),
+                    AuditLog,
+                    company_id,
+                )
+                .filter(
+                    AuditLog.resource_type == resource_type,
+                    AuditLog.resource_id.in_(ordered[start : start + _HISTORY_CHUNK]),
+                    AuditLog.action != "CREATE",
+                )
+                .all()
+            )
+            for row in rows:
+                for car_id in _car_ids_named(row.old_values, row.new_values, row.extra_data):
+                    former[car_id].add((label, row.resource_id))
     return dict(former)
 
 
@@ -507,21 +588,21 @@ def build_controlled_index(db: Session, company_id: int) -> ControlledIndex:
 
     # ---- CARs: placed by the NCRs and complaints that reference them ...
     known_customer_ids = {customer.id for customer in customers}
-    complaints = (
-        tenant_filter(
-            db.query(
-                CustomerComplaint.customer_id,
-                CustomerComplaint.customer_name,
-                CustomerComplaint.part_id,
-                CustomerComplaint.work_order_id,
-                CustomerComplaint.car_id,
-            ),
-            CustomerComplaint,
-            company_id,
-        )
-        .filter(CustomerComplaint.car_id.isnot(None))
-        .all()
-    )
+    # Every complaint, not only those linking a CAR now: a complaint whose link moved still
+    # places the CARs it raised (see the history below).
+    complaints = tenant_filter(
+        db.query(
+            CustomerComplaint.id,
+            CustomerComplaint.customer_id,
+            CustomerComplaint.customer_name,
+            CustomerComplaint.part_id,
+            CustomerComplaint.work_order_id,
+            CustomerComplaint.car_id,
+        ),
+        CustomerComplaint,
+        company_id,
+    ).all()
+    complaint_control: Dict[int, Optional[Control]] = {}
     for complaint in complaints:
         if complaint.customer_id is not None and complaint.customer_id in controlled:
             by_customer: Optional[Control] = controlled[complaint.customer_id]
@@ -537,16 +618,32 @@ def build_controlled_index(db: Session, company_id: int) -> ControlledIndex:
             links.append(part_control.get(complaint.part_id, UNLINKABLE))
         if complaint.work_order_id is not None:
             links.append(wo_control.get(complaint.work_order_id, UNLINKABLE))
-        car_referrers[complaint.car_id].append(worst(*links))
+        complaint_control[complaint.id] = worst(*links)
+        if complaint.car_id is not None:
+            car_referrers[complaint.car_id].append(complaint_control[complaint.id])
+    # ... and by every NCR and complaint that EVER referenced them. A link moves -- void the
+    # CAR and escalate again, or re-point / clear the NCR's ``car_id`` -- but the CAR keeps the
+    # text it copied, and what was typed into it while it was that record's CAR.
+    former_referrers = car_former_referrers(
+        db,
+        company_id,
+        [ncr_id for ncr_id, ncr_ctl in ncr_control.items() if ncr_ctl is not None],
+        [complaint_id for complaint_id, complaint_ctl in complaint_control.items() if complaint_ctl is not None],
+    )
+    for car_id, sources in former_referrers.items():
+        for label, source_id in sources:
+            car_referrers[car_id].append(ncr_control[source_id] if label == "ncr" else complaint_control[source_id])
     # ---- and by the CAR's OWN links (migration 122_car_form_quote_rev): the CAR form's part,
     # customer and the customer-name snapshot taken when the customer was chosen. A CAR is
     # cleared only when EVERY link -- referrers and direct -- resolves to a known, uncontrolled
-    # customer (or generic stock); any controlled or unresolvable link withholds it. So a CAR
-    # escalated from a cleared NCR is withheld the moment its customer is set to a controlled
-    # one. The snapshot is judged on its own as well (positive clearance, the former-names rule
-    # included): it names the customer as the CAR recorded it, and it outlives a rename.
-    # Soft-deleted / voided CARs, parts and customers are included (invariant 3's
-    # historical-record exception), as everywhere in this index.
+    # customer; any controlled or unresolvable link withholds it. So a CAR escalated from a
+    # cleared NCR is withheld the moment its customer is set to a controlled one. The snapshot
+    # is judged on its own as well (positive clearance, the former-names rule included): it
+    # names the customer as the CAR recorded it, and it outlives a rename. A generic-stock part
+    # (material supply, blank customer) is NO link: it names no customer, so it can neither
+    # clear a CAR nor withhold one -- a CAR whose only link is one is unlinkable, as a CAR
+    # with no links at all is. Soft-deleted / voided CARs, parts and customers are included
+    # (invariant 3's historical-record exception), as everywhere in this index.
     cars = tenant_filter(
         db.query(
             CorrectiveActionRequest.id,
@@ -562,7 +659,10 @@ def build_controlled_index(db: Session, company_id: int) -> ControlledIndex:
     for car in cars:
         car_links: List[Optional[Control]] = list(car_referrers.get(car.id, []))
         if car.part_id is not None:
-            car_links.append(part_control.get(car.part_id, UNLINKABLE))
+            if car.part_id not in part_control:
+                car_links.append(UNLINKABLE)
+            elif part_control[car.part_id] is not None or car.part_id not in material_blank:
+                car_links.append(part_control[car.part_id])
         if car.customer_id is not None:
             if car.customer_id in controlled:
                 car_links.append(controlled[car.customer_id])

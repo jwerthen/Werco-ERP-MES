@@ -351,9 +351,11 @@ a 123 downgrade drops every recorded ASL value. Verification steps and the full 
 **121_job_cost_subcontract** through the normal API boot migration path. It adds 21 nullable columns
 (four named foreign keys, one index, one CHECK) to `cars` and `quote_lines.part_revision`, with no
 backfill, no table and no RLS, revoke or role statement. Each `ALTER` takes a brief ACCESS EXCLUSIVE
-lock under `SET LOCAL lock_timeout = '5s'`. No environment variable, secret, cron or worker job is
-added. Migrate before or with the API, and deploy the API before or with the worker: new code on an
-un-migrated database fails every CAR and quote-line load.
+lock under `SET LOCAL lock_timeout = '5s'`; a timeout fails the boot, and in a boot that also ran
+121 it leaves the database at `120_production_calendar` (stamp back before an older image restarts —
+see 121 below). No environment variable, secret, cron or worker job is added. Migrate before or
+with the API, and deploy the API before or with the worker: new code on an un-migrated database
+fails every CAR and quote-line load.
 - **User-visible at deploy.** Every existing quote line lacks a drawing revision, so Send, quote
   email and the PDF of a quote not yet issued answer **409** until each line's Rev (or `N/A`) is
   entered on a draft or pending quote. A sent, accepted or converted quote still reprints as issued.
@@ -377,7 +379,13 @@ un-migrated database fails every CAR and quote-line load.
 column on `job_costs` and, where the native `costentrytype` enum exists, its `SUBCONTRACT` label. No
 backfill, no environment variable, no worker job. Before rolling back to a pre-121 image, re-key any
 `SUBCONTRACT` cost entries to `other` through the API — older code cannot load them (see
-`DEPLOYMENT.md` → Job cost subcontract element).
+`DEPLOYMENT.md` → Job cost subcontract element). **121 splits its boot in two:** its enum-label
+step commits every revision the same boot applied before it, so a boot that fails at or after 121
+leaves the database at `120_production_calendar`, not where it started, and an older image then
+cannot start (`Can't locate revision identified by '120_production_calendar'`). Before that image
+restarts, stamp back to its head (`alembic stamp 119_api_token_scope`, or `118_dashboard_layouts`
+for an image before 119); the next forward boot re-runs 119 and 120 as guarded no-ops
+([DEPLOYMENT.md → Job cost subcontract element](DEPLOYMENT.md#job-cost-subcontract-element-migration-121)).
 
 **Production calendar (P1.2).** Apply additive **120_production_calendar** after
 **119_api_token_scope** through the normal API boot

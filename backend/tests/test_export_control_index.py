@@ -9,8 +9,9 @@
   or unresolvable -> unlinkable. A blank material-supply part is generic stock and passes.
 - The linkage map: one-step part closure from controlled work orders, parents control
   children, a standalone laser work order is unlinkable, NCRs via part / WO / receipt, CARs
-  via their own part, customer and customer-name snapshot AND the NCRs and complaints that
-  reference them (every link must clear), raw-material purchases are unlinkable,
+  via their own part (generic stock is no link), customer and customer-name snapshot AND every
+  NCR and complaint that references them or ever did (every link must clear), raw-material
+  purchases are unlinkable,
   quotes via name, lines and the fabrication quote's customer.
 - Tenant isolation: another company's contracts never classify anything here.
 """
@@ -36,6 +37,7 @@ from app.models.quote import Quote, QuoteLine
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import WorkOrder, WorkOrderOperation
+from app.services.audit_service import AuditService
 from app.services.export_control_redaction import UNLINKABLE
 from app.services.export_control_service import build_controlled_index, controlled_customers
 from tests.api.kiosk_test_helpers import ensure_company
@@ -487,6 +489,154 @@ class TestLinkageMap:
         assert control(index, "car", referred_by_itar.id).customer_id == itar.id
         # A CAR id the index never enumerated is never "fine".
         assert index.by_id("car", 10**9) is UNLINKABLE
+
+    def test_a_generic_stock_part_neither_clears_nor_withholds_a_car(
+        self, db_session: Session, itar: Customer, clear: Customer
+    ):
+        """A material-supply part with a blank customer passes as a PART, but it names no
+        customer, so on a CAR it is no link at all (red-team finding, 2026-11-16): a CAR whose
+        only link is generic stock is unlinkable, as a CAR with no links is; any real link
+        decides it."""
+
+        def car(**links):
+            row = CorrectiveActionRequest(
+                car_number=f"CAR-{_n()}", title="t", problem_description="p", company_id=1, **links
+            )
+            db_session.add(row)
+            db_session.flush()
+            return row
+
+        stock = part(db_session, None, part_type="raw_material")
+        only_stock = car(part_id=stock.id)
+        stock_and_clear_customer = car(part_id=stock.id, customer_id=clear.id, customer_name=clear.name)
+        stock_by_clear_ncr = car(part_id=stock.id)
+        db_session.add(
+            NonConformanceReport(
+                ncr_number=f"N-{_n()}",
+                source="in_process",
+                title="t",
+                description="d",
+                part_id=part(db_session, "Open Commerce").id,
+                car_id=stock_by_clear_ncr.id,
+                company_id=1,
+            )
+        )
+        # Stock an ITAR job consumes is controlled by the one-step closure: then it does decide.
+        consumed = part(db_session, None, part_type="raw_material")
+        work_order(db_session, customer_name="Acme Defense", part_row=consumed)
+        consumed_stock = car(part_id=consumed.id, customer_id=clear.id, customer_name=clear.name)
+        db_session.flush()
+
+        index = build_controlled_index(db_session, 1)
+        assert control(index, "part", stock.id) is None, "the part record itself still passes"
+        assert control(index, "car", only_stock.id) is UNLINKABLE
+        assert control(index, "car", stock_and_clear_customer.id) is None
+        assert control(index, "car", stock_by_clear_ncr.id) is None
+        assert control(index, "car", consumed_stock.id).customer_id == itar.id
+
+    def test_a_car_keeps_the_control_of_every_record_that_ever_referenced_it(
+        self, db_session: Session, itar: Customer, clear: Customer
+    ):
+        """Red-team finding (2026-11-16): the link that places a CAR moves -- the CAR is voided
+        and the record escalated again, or the NCR's ``car_id`` is re-pointed or cleared -- but
+        the CAR keeps what it copied. The referrers' own audit rows (old and new ``car_id``,
+        and ``extra_data.changes``) say which CARs they ever named. Every CAR below has a
+        cleared customer of its own and no current referrer, so only that history places it."""
+
+        def car():
+            row = CorrectiveActionRequest(
+                car_number=f"CAR-{_n()}",
+                title="t",
+                problem_description="p",
+                customer_id=clear.id,
+                customer_name=clear.name,
+                company_id=1,
+            )
+            db_session.add(row)
+            db_session.flush()
+            return row
+
+        def ncr(part_row: Optional[Part]) -> NonConformanceReport:
+            row = NonConformanceReport(
+                ncr_number=f"N-{_n()}",
+                source="in_process",
+                title="t",
+                description="d",
+                part_id=part_row.id if part_row is not None else None,
+                company_id=1,
+            )
+            db_session.add(row)
+            db_session.flush()
+            return row
+
+        moved_from, unlinked, via_changes, by_unlinkable, by_complaint = car(), car(), car(), car(), car()
+        by_clear_ncr, named_elsewhere, never_named = car(), car(), car()
+        itar_ncr = ncr(part(db_session, "Acme Defense"))
+        clear_ncr = ncr(part(db_session, "Open Commerce"))
+        orphan_ncr = ncr(None)  # names no part, work order or receipt: unlinkable
+        complaint = CustomerComplaint(
+            complaint_number=f"CC-{_n()}",
+            customer_id=itar.id,
+            customer_name=itar.name,
+            title="t",
+            description="d",
+            company_id=1,
+        )
+        db_session.add(complaint)
+        db_session.flush()
+
+        ensure_company(db_session, 2)
+        audit = AuditService(db_session, company_id=1)
+        # The escalation's / re-point's UPDATE row: old -> new car_id.
+        audit.log_required(
+            "UPDATE", "ncr", resource_id=itar_ncr.id, old_values={"car_id": moved_from.id}, new_values={"car_id": None}
+        )
+        # PUT car_id: null -- and a link named only as a new value.
+        audit.log_required(
+            "UPDATE", "ncr", resource_id=itar_ncr.id, old_values={"car_id": None}, new_values={"car_id": unlinked.id}
+        )
+        # A status change carries the link only in extra_data.changes.
+        audit.log_required(
+            "STATUS_CHANGE",
+            "ncr",
+            resource_id=itar_ncr.id,
+            old_values={"status": "open"},
+            new_values={"status": "closed"},
+            extra_data={"changes": {"car_id": {"old": via_changes.id, "new": None}}},
+        )
+        # An unlinkable referrer withholds its former CARs as unlinkable.
+        audit.log_required(
+            "UPDATE", "ncr", resource_id=orphan_ncr.id, old_values={"car_id": by_unlinkable.id}, new_values={}
+        )
+        # A complaint's escalation row: the full snapshot, old -> new.
+        audit.log_required(
+            "UPDATE",
+            "customer_complaint",
+            resource_id=complaint.id,
+            old_values={"status": "received", "car_id": by_complaint.id},
+            new_values={"status": "received", "car_id": None},
+        )
+        # A CLEARED referrer's history adds nothing.
+        audit.log_required(
+            "UPDATE", "ncr", resource_id=clear_ncr.id, old_values={"car_id": by_clear_ncr.id}, new_values={}
+        )
+        # Another company's row about the same NCR id never counts here.
+        AuditService(db_session, company_id=2).log_required(
+            "UPDATE",
+            "ncr",
+            resource_id=itar_ncr.id,
+            old_values={"car_id": named_elsewhere.id},
+            new_values={},
+            company_id=2,
+        )
+        db_session.flush()
+
+        index = build_controlled_index(db_session, 1)
+        for withheld in (moved_from, unlinked, via_changes, by_complaint):
+            assert control(index, "car", withheld.id).customer_id == itar.id, withheld.car_number
+        assert control(index, "car", by_unlinkable.id) is UNLINKABLE
+        for cleared in (by_clear_ncr, named_elsewhere, never_named):
+            assert control(index, "car", cleared.id) is None, cleared.car_number
 
     def test_fais_and_quotes(self, db_session: Session, itar: Customer, clear: Customer):
         itar_part = part(db_session, "Acme Defense")
