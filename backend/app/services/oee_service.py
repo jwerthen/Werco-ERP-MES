@@ -15,7 +15,7 @@ exact same math. The only additions over the extracted code are:
 
 Day boundaries (migration 120, P1.2): a record's ``record_date`` is a PRODUCTION day
 (``services/production_calendar``), not the UTC calendar date. Time entries and
-downtime events are read for the production day padded by ``ENTRY_LOOKBACK`` and
+downtime events that OVERLAP the production day (however long they run) are read and
 attributed in Python -- greatest shift overlap, ties to the outgoing shift, else the
 production day of the start -- so an early 04:55 clock-in counts on that day's 1st shift
 and a 01:30 weld entry on Wednesday counts on Tuesday's 2nd shift. With no production
@@ -126,7 +126,12 @@ def _attributed_entries(
     return [
         row
         for row, _day, occ in attribute_time_entries(
-            query, cal, record_date, record_date, clock_in_column=TimeEntry.clock_in
+            query,
+            cal,
+            record_date,
+            record_date,
+            clock_in_column=TimeEntry.clock_in,
+            clock_out_column=TimeEntry.clock_out,
         )
         if shift is None or (occ is not None and occ.shift.id == shift.id)
     ]
@@ -149,7 +154,12 @@ def _attributed_downtime(
     return [
         row
         for row, _day, occ in attribute_downtime_events(
-            query, cal, record_date, record_date, start_column=DowntimeEvent.start_time
+            query,
+            cal,
+            record_date,
+            record_date,
+            start_column=DowntimeEvent.start_time,
+            end_column=DowntimeEvent.end_time,
         )
         if shift is None or (occ is not None and occ.shift.id == shift.id)
     ]

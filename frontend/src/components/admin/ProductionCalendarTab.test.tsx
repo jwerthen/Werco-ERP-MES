@@ -3,7 +3,9 @@
  * working-calendar sync (dry run, then confirmed commit).
  *
  * Locks: the whole document is PUT with the version it was read at; a 409 opens a
- * reload prompt and a 422 shows the server's reason verbatim; nothing is optimistic;
+ * reload prompt (with the server's reason when it is not the version check) and a 422
+ * shows the server's reason verbatim; a calendar may have NO default pattern, and a new
+ * pattern never becomes the default on its own; nothing is optimistic;
  * the sync previews (dry_run=true) before a confirmed commit carrying the preview's
  * calendar version; and the controls follow the server's role gates (save = Admin,
  * sync = Admin/Manager/Supervisor). The api module is mocked at the boundary with the
@@ -121,7 +123,8 @@ test('renders the saved calendar: day start, patterns, members and shifts', asyn
   // W2 runs past midnight; S2 ends AT midnight, which is not "next day".
   expect(within(weld).getByText('next day')).toBeInTheDocument();
   const rest = screen.getByTestId('pattern-1');
-  expect(within(rest).getByRole('radio', { name: /default pattern/i })).toBeChecked();
+  expect(within(rest).getByRole('checkbox', { name: /default pattern/i })).toBeChecked();
+  expect(within(weld).getByRole('checkbox', { name: /default pattern/i })).not.toBeChecked();
   expect(within(rest).queryByText('next day')).toBeNull();
   // A weld bay is already in the weld pattern, so the default pattern cannot take it.
   expect(within(rest).getByRole('checkbox', { name: /WLD-01/ })).toBeDisabled();
@@ -173,11 +176,27 @@ test('a new shift is sent without an id', async () => {
     target: { value: 'W3' },
   });
   fireEvent.change(within(weld).getByRole('textbox', { name: /name for W3/i }), { target: { value: 'Weld 3rd' } });
+  // W1 + W2 already plan 1200 of the 1440 minutes a weekday can hold.
+  fireEvent.change(within(weld).getByRole('spinbutton', { name: /planned minutes for W3/i }), {
+    target: { value: '240' },
+  });
   fireEvent.click(screen.getByRole('button', { name: /save calendar/i }));
   await waitFor(() => expect(mockApi.updateProductionCalendar).toHaveBeenCalled());
   const added = mockApi.updateProductionCalendar.mock.calls[0][0].patterns[0].shifts[2];
   expect(added).not.toHaveProperty('id');
-  expect(added).toMatchObject({ code: 'W3', name: 'Weld 3rd', start: '07:00', end: '15:30' });
+  expect(added).toMatchObject({ code: 'W3', name: 'Weld 3rd', start: '07:00', end: '15:30', planned_minutes: 240 });
+});
+
+test('more than a day of planned shifts on one weekday blocks Save, like the server', async () => {
+  await loaded();
+  const weld = screen.getByTestId('pattern-0');
+  fireEvent.click(within(weld).getByRole('button', { name: /add shift/i }));
+  expect(
+    screen.getByText(
+      'Weld shop plans 1680 minutes of active shifts starting on Mon; the shifts starting on one day can plan at most 1440 minutes (24 hours).'
+    )
+  ).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /save calendar/i })).toBeDisabled();
 });
 
 test('client-side issues block Save before a round trip', async () => {
@@ -201,6 +220,69 @@ test('a 409 opens a reload prompt; Reload re-reads the calendar', async () => {
   fireEvent.click(within(dialog).getByRole('button', { name: 'Reload' }));
   await waitFor(() => expect(mockApi.getProductionCalendar).toHaveBeenCalledTimes(2));
   await waitFor(() => expect(screen.getByLabelText(/production day starts/i)).toHaveValue('05:00'));
+});
+
+test('a 409 that is not the version check shows the server reason, not "someone saved"', async () => {
+  const detail =
+    'The production calendar could not be saved because a record it changes was changed at the same time ' +
+    '(for example, an OEE record started using a shift this save removes); nothing was saved. Reload and retry.';
+  mockApi.updateProductionCalendar.mockRejectedValue(axiosError(409, detail));
+  await loaded();
+  fireEvent.change(screen.getByLabelText(/production day starts/i), { target: { value: '04:30' } });
+  fireEvent.click(screen.getByRole('button', { name: /save calendar/i }));
+
+  const dialog = await screen.findByRole('dialog', { name: /production calendar not saved/i });
+  expect(dialog).toHaveTextContent('a record it changes was changed at the same time');
+  expect(within(dialog).queryByText(/Someone saved the production calendar/)).toBeNull();
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Keep editing' }));
+  // The reason stays on the page after the prompt closes, and the edits are kept.
+  expect(screen.getAllByRole('alert').some(alert => alert.textContent === detail && alert.tagName === 'P')).toBe(true);
+  expect(screen.getByLabelText(/production day starts/i)).toHaveValue('04:30');
+});
+
+test('a new pattern is not the default; a weld-only calendar saves with NO default pattern', async () => {
+  mockApi.getProductionCalendar.mockResolvedValue(unconfiguredCalendar());
+  mockApi.updateProductionCalendar.mockResolvedValue(wercoCalendar({ version: 1 }));
+  renderTab();
+  fireEvent.click(await screen.findByRole('button', { name: /add pattern/i }));
+  const pattern = screen.getByTestId('pattern-0');
+  const defaultBox = within(pattern).getByRole('checkbox', { name: /default pattern/i });
+  expect(defaultBox).not.toBeChecked();
+  expect(within(pattern).getByText(/covers no work center until you select some/)).toBeInTheDocument();
+
+  fireEvent.change(within(pattern).getByLabelText(/pattern name/i), { target: { value: 'Weld shop' } });
+  fireEvent.click(within(pattern).getByRole('checkbox', { name: /WLD-01/ }));
+  fireEvent.change(within(pattern).getByRole('textbox', { name: /code for weld shop shift 1/i }), {
+    target: { value: 'W1' },
+  });
+  fireEvent.change(within(pattern).getByRole('textbox', { name: /name for W1/i }), { target: { value: 'Weld 1st' } });
+  expect(within(pattern).getByText(/1 selected/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: /save calendar/i }));
+
+  await waitFor(() => expect(mockApi.updateProductionCalendar).toHaveBeenCalledTimes(1));
+  const body = mockApi.updateProductionCalendar.mock.calls[0][0];
+  expect(body.patterns).toHaveLength(1);
+  expect(body.patterns[0]).toMatchObject({ name: 'Weld shop', is_default: false, work_center_ids: [101] });
+});
+
+test('the default checkbox moves the default, and unchecking it leaves none', async () => {
+  mockApi.updateProductionCalendar.mockResolvedValue(wercoCalendar({ version: 4 }));
+  await loaded();
+  const weldDefault = within(screen.getByTestId('pattern-0')).getByRole('checkbox', { name: /default pattern/i });
+  const restDefault = within(screen.getByTestId('pattern-1')).getByRole('checkbox', { name: /default pattern/i });
+
+  fireEvent.click(weldDefault);
+  expect(weldDefault).toBeChecked();
+  expect(restDefault).not.toBeChecked();
+
+  fireEvent.click(weldDefault);
+  expect(weldDefault).not.toBeChecked();
+  expect(restDefault).not.toBeChecked();
+  fireEvent.click(screen.getByRole('button', { name: /save calendar/i }));
+
+  await waitFor(() => expect(mockApi.updateProductionCalendar).toHaveBeenCalledTimes(1));
+  const body = mockApi.updateProductionCalendar.mock.calls[0][0];
+  expect(body.patterns.map((p: { is_default: boolean }) => p.is_default)).toEqual([false, false]);
 });
 
 test('a 422 shows the server reason verbatim and keeps the edits', async () => {

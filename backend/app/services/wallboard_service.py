@@ -626,7 +626,14 @@ def _compute_today(db: Session, company_id: int, now: Optional[datetime] = None)
         return [
             row
             for row, _day, _occ in attribute_time_entries(
-                query, calendar, today, today, clock_in_column=TimeEntry.clock_in, now=day_end, until=day_end
+                query,
+                calendar,
+                today,
+                today,
+                clock_in_column=TimeEntry.clock_in,
+                clock_out_column=TimeEntry.clock_out,
+                now=day_end,
+                until=day_end,
             )
         ]
 

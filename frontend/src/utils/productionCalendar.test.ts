@@ -248,4 +248,29 @@ describe('client-side validation mirrors the server rules', () => {
     draft.patterns[0].shifts[1].end = '05:30';
     expect(draftIssues(draft).join(' ')).toMatch(/end by the next day's start/);
   });
+
+  test('active shifts starting on one day may plan at most 24 hours (the working-calendar range)', () => {
+    const draft = draftFromCalendar(wercoCalendar());
+    const weld = draft.patterns[0];
+    // A parallel crew: W1 + W2 + B1 = 600 + 600 + 600 minutes on each weekday.
+    weld.shifts.push({ ...weld.shifts[0], key: 'b1', id: undefined, code: 'B1', name: 'B 1st' });
+    expect(draftIssues(draft)).toEqual(
+      expect.arrayContaining([
+        'Weld shop plans 1800 minutes of active shifts starting on Mon; the shifts starting on one day can plan at most 1440 minutes (24 hours).',
+      ])
+    );
+    // Exactly a day is fine, and a retired shift plans nothing.
+    weld.shifts[2].planned_minutes = 240;
+    expect(draftIssues(draft)).toEqual([]);
+    weld.shifts[2].planned_minutes = 600;
+    weld.shifts[2].is_active = false;
+    expect(draftIssues(draft)).toEqual([]);
+  });
+
+  test('no default pattern at all is a valid calendar', () => {
+    const draft = draftFromCalendar(wercoCalendar());
+    draft.patterns[1].is_default = false;
+    expect(draftIssues(draft)).toEqual([]);
+    expect(buildCalendarUpdate(draft, 3).patterns.map(p => p.is_default)).toEqual([false, false]);
+  });
 });

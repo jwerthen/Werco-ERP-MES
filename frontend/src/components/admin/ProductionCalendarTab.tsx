@@ -9,10 +9,15 @@
  * pattern's current shift from here.
  *
  * Writes are server-GATED, so nothing here is optimistic:
- *   - Save sends the WHOLE document with `expected_version`; a 409 (someone saved in
- *     between) opens a reload prompt, a 422 shows the server's reason verbatim.
+ *   - Save sends the WHOLE document with `expected_version`; a 409 opens a reload prompt
+ *     (someone saved in between -- or, for any other 409, the server's own reason), a 422
+ *     shows the server's reason verbatim.
  *   - "Sync working calendars" is a dry run first (a current-vs-new table, writes
  *     nothing), then a confirmed commit carrying the dry run's calendar version.
+ *
+ * Default pattern: at most one, and possibly none (the server accepts both). A new pattern
+ * starts NOT default and the control is a checkbox, so an Admin configuring one area first
+ * (the weld shop) never makes its shifts every other work center's by accident.
  *
  * RBAC mirrors the server: saving is Admin only (CALENDAR_EDIT_ROLES), the sync is
  * Admin / Manager / Supervisor (WORKING_CALENDAR_SYNC_ROLES). The tab sits inside the
@@ -53,6 +58,9 @@ import { formatCentralDateTime, formatCentralTime } from '../../utils/centralTim
 
 const WEEKDAY_LONG = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
+/** The server's version-check 409 (`STALE_VERSION_DETAIL`, production_calendar_service.py). */
+const STALE_VERSION_DETAIL = 'This production calendar changed. Reload it before saving.';
+
 const formatLength = (minutes: number | null): string => {
   if (minutes == null) return '—';
   const h = Math.floor(minutes / 60);
@@ -72,10 +80,13 @@ const blankShift = (): ShiftDraft => ({
   sort_order: 0,
 });
 
-const blankPattern = (isDefault: boolean): PatternDraft => ({
+const blankPattern = (): PatternDraft => ({
   key: newDraftKey('p'),
   name: '',
-  is_default: isDefault,
+  // Never default on its own: a default pattern covers every work center no other
+  // pattern names, so that is the Admin's explicit choice (the checkbox), not a side
+  // effect of adding the first pattern.
+  is_default: false,
   sort_order: 0,
   work_center_ids: [],
   shifts: [blankShift()],
@@ -98,7 +109,8 @@ export default function ProductionCalendarTab() {
   const [loadError, setLoadError] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const [staleOpen, setStaleOpen] = useState(false);
+  // A refused save the Admin should reload over: `null` = closed, else the server's 409 detail.
+  const [conflictDetail, setConflictDetail] = useState<string | null>(null);
 
   const [syncResult, setSyncResult] = useState<WorkingCalendarSyncResult | null>(null);
   const [syncPreviewing, setSyncPreviewing] = useState(false);
@@ -166,20 +178,24 @@ export default function ProductionCalendarTab() {
       current ? { ...current, patterns: current.patterns.map(p => (p.key === key ? { ...p, ...patch } : p)) } : current
     );
 
-  const setDefaultPattern = (key: string) =>
+  /** Check = this pattern becomes THE default (any other loses it); uncheck = no default at all. */
+  const setDefaultPattern = (key: string, isDefault: boolean) =>
     setDraft(current =>
-      current ? { ...current, patterns: current.patterns.map(p => ({ ...p, is_default: p.key === key })) } : current
+      current
+        ? {
+            ...current,
+            patterns: current.patterns.map(p =>
+              p.key === key ? { ...p, is_default: isDefault } : isDefault ? { ...p, is_default: false } : p
+            ),
+          }
+        : current
     );
 
   const removePattern = (key: string) =>
     setDraft(current => (current ? { ...current, patterns: current.patterns.filter(p => p.key !== key) } : current));
 
   const addPattern = () =>
-    setDraft(current =>
-      current
-        ? { ...current, patterns: [...current.patterns, blankPattern(!current.patterns.some(p => p.is_default))] }
-        : current
-    );
+    setDraft(current => (current ? { ...current, patterns: [...current.patterns, blankPattern()] } : current));
 
   const toggleWorkCenter = (patternKey: string, workCenterId: number, checked: boolean) =>
     setDraft(current =>
@@ -268,7 +284,11 @@ export default function ProductionCalendarTab() {
     } catch (err) {
       const detail = apiErrorDetail(err, 'Failed to save the production calendar');
       if (apiErrorStatus(err) === 409) {
-        setStaleOpen(true);
+        // Every 409 here is answered by a reload, but only the version check means someone
+        // else saved: any other one (a concurrent record change, a lost lock race) carries
+        // its own reason, which the prompt shows instead of the "someone saved" text.
+        setConflictDetail(detail);
+        if (detail !== STALE_VERSION_DETAIL) setSaveError(detail);
       } else {
         setSaveError(detail);
       }
@@ -464,14 +484,16 @@ export default function ProductionCalendarTab() {
                     />
                   )}
                 </FormField>
-                <label className="flex items-center gap-2 pb-2 text-sm text-surface-700">
+                <label
+                  className="flex items-center gap-2 pb-2 text-sm text-surface-700"
+                  title="The default pattern also covers every work center not named in another pattern. At most one; none is allowed."
+                >
                   <input
-                    type="radio"
-                    name="production-calendar-default-pattern"
-                    className="radio radio-sm"
+                    type="checkbox"
+                    className="checkbox checkbox-sm"
                     checked={pattern.is_default}
                     disabled={inputsDisabled}
-                    onChange={() => setDefaultPattern(pattern.key)}
+                    onChange={e => setDefaultPattern(pattern.key, e.target.checked)}
                   />
                   Default pattern
                 </label>
@@ -494,7 +516,9 @@ export default function ProductionCalendarTab() {
                   <span className="font-normal text-surface-500">
                     {pattern.is_default
                       ? '— plus every work center not in another pattern'
-                      : `— ${pattern.work_center_ids.length} selected`}
+                      : pattern.work_center_ids.length === 0
+                        ? '— none selected: this pattern covers no work center until you select some or make it the default'
+                        : `— ${pattern.work_center_ids.length} selected`}
                   </span>
                 </legend>
                 {workCentersFailed && (
@@ -786,17 +810,23 @@ export default function ProductionCalendarTab() {
       )}
 
       <ConfirmDialog
-        open={staleOpen}
-        title="Production calendar changed"
-        message="Someone saved the production calendar after you loaded it. Reload to see the saved version — your unsaved edits here will be discarded."
+        open={conflictDetail !== null}
+        title={
+          conflictDetail === STALE_VERSION_DETAIL ? 'Production calendar changed' : 'Production calendar not saved'
+        }
+        message={
+          conflictDetail === STALE_VERSION_DETAIL
+            ? 'Someone saved the production calendar after you loaded it. Reload to see the saved version — your unsaved edits here will be discarded.'
+            : `${conflictDetail ?? ''} Reloading shows the saved calendar and discards your unsaved edits here.`
+        }
         confirmLabel="Reload"
         cancelLabel="Keep editing"
         variant="warning"
         onConfirm={() => {
-          setStaleOpen(false);
+          setConflictDetail(null);
           void load();
         }}
-        onCancel={() => setStaleOpen(false)}
+        onCancel={() => setConflictDetail(null)}
       />
 
       <ConfirmDialog

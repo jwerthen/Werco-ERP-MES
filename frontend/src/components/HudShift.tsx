@@ -34,24 +34,30 @@ const HudShift = React.memo(function HudShift() {
   const lastAttempt = useRef(0);
   const lastFailed = useRef(false);
   const inFlight = useRef(false);
+  // Whether the component is mounted NOW -- not whether the effect run that started a
+  // request is still current. Under StrictMode (development) the effect mounts, unmounts
+  // and mounts again; the second run skips its fetch because the first is in flight, so
+  // the first run's answer must still be applied, or the badge stays blank until the
+  // next refetch.
+  const mounted = useRef(false);
 
   useEffect(() => {
-    let cancelled = false;
+    mounted.current = true;
     const fetchCalendar = async () => {
       if (inFlight.current) return;
       inFlight.current = true;
       lastAttempt.current = Date.now();
       try {
         const data = await api.getProductionCalendar();
-        if (cancelled) return;
         calendarRef.current = data;
         lastFailed.current = false;
+        if (!mounted.current) return;
         setCalendar(data);
         setFailed(false);
       } catch {
         // Degrade to the em dash; the last good calendar stays until its day ends.
         lastFailed.current = true;
-        if (!cancelled) setFailed(true);
+        if (mounted.current) setFailed(true);
       } finally {
         inFlight.current = false;
       }
@@ -68,7 +74,7 @@ const HudShift = React.memo(function HudShift() {
     void fetchCalendar();
     const id = setInterval(tick, TICK_MS);
     return () => {
-      cancelled = true;
+      mounted.current = false;
       clearInterval(id);
     };
   }, []);

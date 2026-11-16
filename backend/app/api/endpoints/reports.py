@@ -619,6 +619,7 @@ def get_employee_time_report(
         start_date,
         end_date,
         clock_in_column=TimeEntry.clock_in,
+        clock_out_column=TimeEntry.clock_out,
         now=report_now,
     )
 

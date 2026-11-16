@@ -17,9 +17,12 @@ through ``working_calendar_service.save_working_calendar`` -- the scheduling edi
 writer -- keeping every dated override.
 
 The attribution helpers at the bottom read time entries / downtime events for a range of
-production days and attribute each row in Python (``entry_attribution``), reaching
-``ENTRY_LOOKBACK`` before the window so an early clock-in that mostly overlaps the day's
-first shift is counted on that day. SQL alone cannot express "greatest shift overlap".
+production days and attribute each row in Python (``entry_attribution``). SQL alone cannot
+express "greatest shift overlap", so the query selects every row that could be attributed
+to the range -- every interval that OVERLAPS it, started no earlier than the attribution
+reach allows (``attribution_read_from``) -- and Python keeps the ones attributed to it. So
+an early clock-in that mostly overlaps the day's first shift, and a forgotten clock-out
+closed the next afternoon, are each counted on the one day they are attributed to.
 """
 
 from dataclasses import dataclass
@@ -27,6 +30,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from fastapi import HTTPException
+from sqlalchemy import or_
 from sqlalchemy.orm import Query, Session
 
 from app.db.locks import acquire_generator_lock
@@ -56,12 +60,12 @@ from app.services.production_calendar import (
     ProductionCalendar,
     ShiftDef,
     ShiftOccurrence,
+    attribution_read_from,
     build_calendar,
     current_production_day,
     days_to_mask,
     entry_attribution,
     hhmm_to_minute,
-    lookback_from,
     mask_to_days,
     minute_to_hhmm,
     occurrence_on,
@@ -74,10 +78,12 @@ from app.services.production_calendar import (
     weekly_hours_for,
 )
 from app.services.working_calendar_service import (
+    MAX_WORKING_HOURS_PER_DAY,
     WorkingCalendarSave,
     audit_working_calendar_save,
     load_working_calendars,
     save_working_calendar,
+    working_hours_out_of_range,
 )
 
 AUDIT_RESOURCE_TYPE = "production_calendar"
@@ -93,6 +99,7 @@ UNKNOWN_SHIFT_DETAIL = (
     "(GET /production-calendar)."
 )
 SYNC_SOURCE = "production_calendar_sync"
+WEEKDAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 
 
 # --------------------------------------------------------------------------------------
@@ -369,6 +376,25 @@ class _DesiredPattern:
     shifts: List[_DesiredShift]
 
 
+def _refuse_more_than_a_day_of_planned_time(pattern_name: str, shifts: List[_DesiredShift]) -> None:
+    """422 when the ACTIVE shifts of one pattern that start on one weekday plan more than 1440 minutes.
+
+    The sync writes that sum, in hours, as the work center's ``weekly_hours`` for the
+    weekday (``weekly_hours_for``), and a working calendar holds 0-24 hours a day (the
+    scheduling editor's ``CalendarHours``). Shifts may overlap -- parallel crews are a
+    real configuration -- but together they cannot plan more than a day of work, or the
+    sync would store a calendar the scheduling editor can never save again.
+    """
+    for weekday, day_name in enumerate(WEEKDAY_NAMES):
+        planned = sum(shift.planned_minutes for shift in shifts if shift.is_active and shift.days_mask & (1 << weekday))
+        if planned > MINUTES_PER_DAY:
+            raise _unprocessable(
+                f"Shift pattern '{pattern_name}' plans {planned} minutes of active shifts starting on {day_name}; "
+                f"the shifts starting on one day can plan at most {MINUTES_PER_DAY} minutes (24 hours), "
+                "the most a work center's working calendar holds for a day."
+            )
+
+
 def _validate(db: Session, company_id: int, payload: ProductionCalendarUpdate) -> Tuple[int, List[_DesiredPattern]]:
     """Whole-document validation; every refusal is a 422 raised before the first write."""
     day_start = hhmm_to_minute(payload.production_day_start)
@@ -390,7 +416,8 @@ def _validate(db: Session, company_id: int, payload: ProductionCalendarUpdate) -
         names[key] = pattern.name
         if pattern.id is not None:
             pattern_ids.append(pattern.id)
-        for wc_id in pattern.work_center_ids:
+        # A work center listed twice in ONE pattern is the same membership, not a conflict.
+        for wc_id in dict.fromkeys(pattern.work_center_ids):
             if wc_id in wc_owner:
                 raise _unprocessable(
                     f"Work center {wc_id} is in both '{wc_owner[wc_id]}' and '{pattern.name}'; "
@@ -432,6 +459,7 @@ def _validate(db: Session, company_id: int, payload: ProductionCalendarUpdate) -
                     sort_order=shift.sort_order,
                 )
             )
+        _refuse_more_than_a_day_of_planned_time(pattern.name, shifts)
         patterns.append(
             _DesiredPattern(
                 id=pattern.id,
@@ -793,6 +821,18 @@ def sync_working_calendars(
         if changed:
             to_write.append((wc, new_hours, now_calendar))
 
+    # Refused before the first write -- and on the dry run too, so the preview and the commit
+    # agree. ``_validate`` keeps a saved calendar inside the range; this guards a calendar
+    # stored before that check (or written around it), never a silent out-of-contract write.
+    out_of_range = [row for row in rows if working_hours_out_of_range(row.new_weekly_hours)]
+    if out_of_range:
+        named = ", ".join(f"{row.work_center_code} ('{row.pattern_name}')" for row in out_of_range)
+        raise _unprocessable(
+            f"The production calendar plans more than {MAX_WORKING_HOURS_PER_DAY:g} hours on one day for "
+            f"work center(s) {named}. Lower the planned minutes of the active shifts that start that day, "
+            "save the calendar, then sync again."
+        )
+
     saves: List[WorkingCalendarSave] = []
     if not dry_run:
         for wc, new_hours, now_calendar in to_write:
@@ -831,6 +871,36 @@ def sync_working_calendars(
 # --------------------------------------------------------------------------------------
 
 
+def _attribution_candidates(
+    query: Query,
+    cal: ProductionCalendar,
+    first_day: date,
+    start_utc: datetime,
+    end_utc: datetime,
+    start_column: Any,
+    end_column: Any,
+) -> Query:
+    """Narrow ``query`` to every interval that could be attributed to ``[start_utc, end_utc)``.
+
+    An interval attributed to a production day of the range either overlaps one of that
+    day's shifts -- every shift lies inside its production day's window, so the interval
+    overlaps the range -- or overlaps no shift and belongs to the day it STARTED on, inside
+    the range. Either way it starts before ``end_utc`` and (it started inside the range, or
+    it is open, or it ends after ``start_utc``). It also starts no earlier than
+    ``attribution_read_from(first_day)``: attribution never reaches further than
+    ``ATTRIBUTION_REACH_DAYS`` past the production day of the start. The selection is
+    therefore an exact superset of what Python attributes to the range, with no fixed
+    look-back that a long interval could outrun, and stays an indexed range on the start
+    column. ``end_column IS NULL`` covers an open time entry, an unresolved downtime event
+    and a downtime row carrying only ``duration_minutes`` (Python derives its end).
+    """
+    return query.filter(
+        start_column >= attribution_read_from(first_day, cal),
+        start_column < end_utc,
+        or_(start_column >= start_utc, end_column.is_(None), end_column > start_utc),
+    )
+
+
 def attribute_time_entries(
     query: Query,
     cal: ProductionCalendar,
@@ -838,21 +908,23 @@ def attribute_time_entries(
     last_day: date,
     *,
     clock_in_column: Any,
+    clock_out_column: Any,
     now: Optional[datetime] = None,
     until: Optional[datetime] = None,
 ) -> List[Tuple[Any, date, Optional[ShiftOccurrence]]]:
     """``(row, production_day, shift)`` for every row of ``query`` attributed to ``first_day..last_day``.
 
     ``query`` is the caller's tenant-scoped time-entry query; it must select rows that
-    carry ``clock_in`` / ``clock_out`` / ``work_center_id``. The SQL window is the
-    production-day range padded by ``ENTRY_LOOKBACK`` before its start (``until`` caps
-    clock-ins at "now" for a today-so-far read); attribution happens here, per row.
-    Open entries run to ``now`` (default: no open-entry extension).
+    carry ``clock_in`` / ``clock_out`` / ``work_center_id``. The SQL selects every entry
+    that could be attributed to the range (:func:`_attribution_candidates`: it overlaps
+    the range's window, however long it is); ``until`` caps clock-ins at "now" for a
+    today-so-far read. Attribution happens here, per row. Open entries run to ``now``
+    (default: no open-entry extension).
     """
     start_utc, end_utc = production_days_window_or_empty(first_day, last_day, cal)
     if start_utc >= end_utc:
         return []
-    query = query.filter(clock_in_column >= lookback_from(start_utc), clock_in_column < end_utc)
+    query = _attribution_candidates(query, cal, first_day, start_utc, end_utc, clock_in_column, clock_out_column)
     if until is not None:
         query = query.filter(clock_in_column <= until)
     attributed = []
@@ -870,18 +942,19 @@ def attribute_downtime_events(
     last_day: date,
     *,
     start_column: Any,
+    end_column: Any,
 ) -> List[Tuple[Any, date, Optional[ShiftOccurrence]]]:
     """``(row, production_day, shift)`` for downtime rows (``start_time`` / ``end_time`` /
     ``duration_minutes`` / ``work_center_id``) attributed to ``first_day..last_day``.
 
     An event belongs to the shift it overlaps most (its end is ``end_time``, else start +
     ``duration_minutes``), like a time entry; one overlapping no shift belongs to the
-    production day it started on.
+    production day it started on. Selected like time entries (:func:`_attribution_candidates`).
     """
     start_utc, end_utc = production_days_window_or_empty(first_day, last_day, cal)
     if start_utc >= end_utc:
         return []
-    query = query.filter(start_column >= lookback_from(start_utc), start_column < end_utc)
+    query = _attribution_candidates(query, cal, first_day, start_utc, end_utc, start_column, end_column)
     attributed = []
     for row in query.all():
         end = row.end_time

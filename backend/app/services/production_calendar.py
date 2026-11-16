@@ -53,11 +53,15 @@ MINUTES_PER_DAY = 1440
 ALL_DAYS_MASK = 0b1111111
 WEEKDAYS_MASK = 0b0011111
 
-# How far before a production-day window a time-entry query must reach so an entry that
-# started before the day's start but mostly overlaps one of its shifts (the early 04:55
-# clock-in) is still read and attributed in Python. Entries are hours long; twelve hours
-# is the margin the attribution helpers below are designed around.
-ENTRY_LOOKBACK = timedelta(hours=12)
+# How many production days AFTER the production day of an interval's start the interval can
+# be attributed to. :func:`shift_for_interval` scans the shifts of the production day before
+# the start's through this many days after it (a malformed weeks-long interval cannot make
+# it walk every day in between), so a row attributed to production day ``d`` always STARTS
+# on or after the start of production day ``d - ATTRIBUTION_REACH_DAYS``. That is the bound
+# the SQL selection reads back to (:func:`attribution_read_from`): the two are one rule, so
+# a long interval -- a forgotten clock-out closed the next afternoon, a breakdown over two
+# nights -- is always read by the query of the day it is attributed to.
+ATTRIBUTION_REACH_DAYS = 2
 
 
 @dataclass(frozen=True)
@@ -224,10 +228,17 @@ def _day_start_utc(day: date, minute: int, tz: ZoneInfo) -> datetime:
     return _wall_to_utc(day, minute, tz)
 
 
-def lookback_from(start_utc: datetime) -> datetime:
-    """``start_utc - ENTRY_LOOKBACK``, clamped at ``datetime.min`` instead of overflowing."""
+def attribution_read_from(first_day: date, cal: ProductionCalendar) -> datetime:
+    """Naive UTC: the earliest START of an interval that can be attributed to ``first_day`` or later.
+
+    The start of production day ``first_day - ATTRIBUTION_REACH_DAYS``, clamped at
+    ``datetime.min`` at the start of the date range. An interval attributed to day ``d``
+    starts on a production day no earlier than ``d - ATTRIBUTION_REACH_DAYS`` (the scan
+    bound of :func:`shift_for_interval`; with no shift overlap it is the start's own day),
+    so a selection ``start >= attribution_read_from(first_day)`` never misses one.
+    """
     try:
-        return start_utc - ENTRY_LOOKBACK
+        return production_day_start_utc(first_day - timedelta(days=ATTRIBUTION_REACH_DAYS), cal)
     except OverflowError:
         return datetime.min
 
@@ -357,12 +368,14 @@ def shift_for_interval(
     hi = _naive_utc(end)
     if hi <= lo:
         return shift_for(lo, cal, work_center_id)
-    first_day = production_day(lo, cal) - timedelta(days=1)
+    start_day = production_day(lo, cal)
+    first_day = start_day - timedelta(days=1)
+    # Cap the scan so a malformed months-long interval cannot make attribution loop over
+    # every day in between. The cap is ATTRIBUTION_REACH_DAYS, which the SQL selection
+    # (attribution_read_from) reads back to -- change the two together, never one.
     last_day = production_day(hi, cal)
-    # Entries are hours long; cap the scan so a malformed months-long interval cannot
-    # make attribution loop over every day in between.
-    if (last_day - first_day).days > 3:
-        last_day = first_day + timedelta(days=3)
+    if (last_day - start_day).days > ATTRIBUTION_REACH_DAYS:
+        last_day = start_day + timedelta(days=ATTRIBUTION_REACH_DAYS)
     best: Optional[ShiftOccurrence] = None
     best_overlap = timedelta(0)
     day = first_day

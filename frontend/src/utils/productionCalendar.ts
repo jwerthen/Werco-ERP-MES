@@ -272,6 +272,18 @@ export function draftIssues(draft: CalendarDraft): string[] {
         );
       }
     });
+    // The sync writes these sums as the working calendar's hours, which hold 0-24 a day.
+    WEEKDAY_SHORT.forEach((dayLabel, day) => {
+      const planned = pattern.shifts
+        .filter(shift => shift.is_active && shift.days.includes(day) && Number.isFinite(shift.planned_minutes))
+        .reduce((sum, shift) => sum + shift.planned_minutes, 0);
+      if (planned > MINUTES_PER_DAY) {
+        issues.push(
+          `${label} plans ${planned} minutes of active shifts starting on ${dayLabel}; ` +
+            `the shifts starting on one day can plan at most ${MINUTES_PER_DAY} minutes (24 hours).`
+        );
+      }
+    });
   });
   return issues;
 }

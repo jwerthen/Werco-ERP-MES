@@ -19,11 +19,14 @@ from app.core.time_utils import (
     local_date_range_to_utc,
 )
 from app.services.production_calendar import (
+    ATTRIBUTION_REACH_DAYS,
+    ShiftDef,
+    attribution_read_from,
+    build_calendar,
     current_production_day,
     days_to_mask,
     entry_attribution,
     hhmm_to_minute,
-    lookback_from,
     mask_to_days,
     minute_to_hhmm,
     production_day,
@@ -270,6 +273,79 @@ def test_production_day_matches_its_window_every_quarter_hour_across_both_dst_we
                 instant += timedelta(minutes=15)
 
 
-def test_lookback_clamps_at_the_start_of_the_datetime_range():
-    assert lookback_from(datetime(2026, 1, 15, 6)) == datetime(2026, 1, 14, 18)
-    assert lookback_from(datetime(1, 1, 1, 5)) == datetime.min
+# --------------------------------------------------------------------------------------
+# The SQL selection bound (round-2 review, 2026-11-15): a long interval is attributed to a
+# later production day than the one it started on, and the selection must still read it.
+# --------------------------------------------------------------------------------------
+
+
+def test_attribution_read_from_is_the_start_of_the_production_day_reach_days_earlier():
+    # Tuesday 2026-11-17 -> Sunday 2026-11-15 05:00 CST = 11:00 UTC.
+    assert ATTRIBUTION_REACH_DAYS == 2
+    assert attribution_read_from(date(2026, 11, 17), CAL) == datetime(2026, 11, 15, 11, 0)
+    # Clamped instead of overflowing at the start of the date range.
+    assert attribution_read_from(date(1, 1, 2), CAL) == datetime.min
+
+
+def test_a_24_hour_weld_entry_is_attributed_to_the_next_production_day():
+    """Mon 16:00 -> Tue 16:00: W1 Tuesday overlaps 10.5 h, W2 Monday 10 h -> Tuesday's W1."""
+    clock_in = central(2026, 11, 16, 16, 0)
+    day, occ = entry_attribution(clock_in, clock_in + timedelta(hours=24), CAL, WELD)
+    assert (day, occ.shift.code) == (date(2026, 11, 17), "W1")
+    # More than the old fixed 12 h look-back before Tuesday's 05:00 start -- the reason the
+    # selection now reads back to attribution_read_from instead.
+    assert clock_in < production_day_window_utc(day, CAL)[0] - timedelta(hours=12)
+    assert clock_in >= attribution_read_from(day, CAL)
+
+
+def _one_shift_calendar(days):
+    """A default pattern with one 07:00-15:00 shift on ``days``; day start 05:00 Central."""
+    shift = ShiftDef(
+        id=31,
+        code="X1",
+        name="Only",
+        pattern_id=3,
+        start_minute=420,
+        end_minute=900,
+        days_mask=days_to_mask(days),
+        planned_minutes=480,
+    )
+    return build_calendar(
+        company_id=1, tz=CENTRAL_TIME_ZONE, day_start_minute=300, version=1, patterns=[(3, True, [], [shift])]
+    )
+
+
+@pytest.mark.parametrize(
+    "cal, work_center_id",
+    [
+        (CAL, WELD),
+        (CAL, REST),
+        (_one_shift_calendar([0, 1, 2, 3, 4]), None),
+        (_one_shift_calendar([2]), None),  # Wednesday only: long intervals reach two days ahead
+        (_one_shift_calendar([3]), None),  # Thursday only: beyond the reach from Monday
+    ],
+)
+def test_every_attribution_lies_inside_the_sql_selection(cal, work_center_id):
+    """The invariant ``_attribution_candidates`` rests on, over starts every 75 min and long lengths.
+
+    An interval attributed to production day ``d`` starts at or after
+    ``attribution_read_from(d)``, starts before ``d``'s window ends, and either starts inside
+    the window or ends after it begins. If the attribution scan ever reached further than
+    ``ATTRIBUTION_REACH_DAYS``, the selection would silently drop rows again.
+    """
+    first = central(2026, 11, 15, 0)
+    for step in range(0, 6 * 24 * 60, 75):
+        clock_in = first + timedelta(minutes=step)
+        for hours in (0, 1, 8, 13, 24, 30, 42, 58, 80, 200):
+            clock_out = clock_in + timedelta(hours=hours)
+            day, _occ = entry_attribution(clock_in, clock_out, cal, work_center_id)
+            window_start, window_end = production_day_window_utc(day, cal)
+            assert clock_in >= attribution_read_from(day, cal), (clock_in, hours, day)
+            assert clock_in < window_end, (clock_in, hours, day)
+            assert clock_in >= window_start or clock_out > window_start, (clock_in, hours, day)
+
+
+def test_a_wednesday_only_shift_takes_a_58_hour_entry_from_monday():
+    cal = _one_shift_calendar([2])
+    day, occ = entry_attribution(central(2026, 11, 16, 6, 0), central(2026, 11, 18, 16, 0), cal, None)
+    assert (day, occ.shift.code) == (date(2026, 11, 18), "X1")

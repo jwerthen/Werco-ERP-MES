@@ -1254,7 +1254,13 @@ The platform rule is **store UTC, serve UTC (`Z`), display Central**:
   `services/production_calendar.py` (`production_day`, `production_day_window_utc`,
   `current_production_day`, `shift_for`, `entry_attribution`) or `date_window.production_date_window`
   for a 422-raising HTTP range. An instant in a shift overlap belongs to the outgoing shift; an
-  interval to the shift it overlaps most. With no calendar configured a production day is the
+  interval to the shift it overlaps most — which can be a LATER production day than the one it
+  started on, so read time entries / downtime for a range through
+  `production_calendar_service.attribute_time_entries` / `attribute_downtime_events`: they select
+  every interval that overlaps the range back to `attribution_read_from` (the attribution scan's
+  own reach, `ATTRIBUTION_REACH_DAYS`) and keep what Python attributes to it. Never a fixed
+  look-back on the start column: the 12 h one they replaced lost a 24 h forgotten clock-out from
+  every day. With no calendar configured a production day is the
   company-local calendar day, so these read exactly like the calendar-date helpers. **Due dates,
   due-today and lateness stay calendar dates** — don't move them onto production days. See
   `docs/API.md` → Production calendar & shifts.

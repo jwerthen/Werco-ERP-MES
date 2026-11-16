@@ -10486,7 +10486,19 @@ a downtime event) belongs to the shift it overlaps **most** (a tie goes to the o
 that shift's production day; one that overlaps no shift belongs to the production day of its start. So
 an early **04:55 weld clock-in** that runs into the 05:00 1st shift counts on that day's 1st shift, not
 the previous production day. A work center belongs to at most one **pattern**; one in no pattern (and an
-entry with no work center) uses the company's single **default** pattern.
+entry with no work center) uses the company's **default** pattern — at most one, and possibly none, in
+which case such a work center has no shifts.
+
+**However long it runs, an interval counts on exactly one production day.** Greatest overlap can put a
+long interval on a later production day than the one it started on — a weld clock-in at 16:00 Monday that
+is not clocked out until 16:00 Tuesday overlaps Tuesday's W1 (10.5 h) more than Monday's W2 (10 h), so it
+is **Tuesday's**; a rest-of-shop breakdown from 16:00 Monday to 10:00 Wednesday is Tuesday's S1. Every
+reader that attributes — OEE and its cron, the analytics OEE figures, the wallboard, the employee-time
+report — reads every interval that **overlaps** the requested days, back as far as attribution can
+reach (two production days before the first one), so such an interval is counted on its attributed day,
+including in a single-day report or a range that starts on that day. Until 2026-11-15 these reads only
+looked 12 hours before the day start, and an interval like those two was counted on **no** day at all;
+before 2026-11-13 it counted on the UTC date it started.
 
 **Boundaries across DST.** The production day of an instant is the day whose window contains it, so
 the attribution and every SQL day filter always agree. A day start that names a wall time a DST change
@@ -10521,8 +10533,11 @@ consumer can compute planned-time availability itself.
 before saving.`). It is validated as a set before anything is written (**422**): `production_day_start`
 and every `start`/`end` are `HH:MM`; an `end` at or before its `start` ends the next day; every shift
 must start at or after the production-day start and end by the next day's start (so it belongs to the
-day it starts on); `planned_minutes` ≤ the shift's length; at most one `is_default` pattern; a work
-center in at most one pattern; unique pattern names and shift codes (case-insensitive); work centers
+day it starts on); `planned_minutes` ≤ the shift's length; the **active** shifts of one pattern that
+start on one weekday plan at most **1440 minutes** together (shifts may overlap — parallel crews — but the
+sync writes that sum as the work center's hours for the day, and a working calendar holds 0–24 h; added
+2026-11-15); at most one `is_default` pattern (none is allowed: then a work center in no pattern has no
+shifts); a work center in at most one pattern (listed twice in the same pattern it is one membership); unique pattern names and shift codes (case-insensitive); work centers
 must be this company's; an `id` that names no existing pattern or shift is 422 (omit it to create one);
 a pattern name or shift code may not start with `~` (reserved for the save's own temporary renames).
 Limits: 20 patterns, 12 shifts per pattern, 500 work centers per pattern, `planned_minutes` 1–1440.
@@ -10579,7 +10594,11 @@ active shifts **starting** each weekday — Werco weld `[20, 20, 20, 20, 20, 0, 
 center with no saved calendar, `current_version` 0, is always a change) plus the production calendar's
 `calendar_version`. A work center whose pattern has **no active shift** (an empty pattern, or one whose
 shifts are all retired) is not covered — it is left out of the rows and never written, so a pattern
-cannot zero a work center's scheduling capacity. `dry_run=false` (pass that `calendar_version` back as
+cannot zero a work center's scheduling capacity. A derived day of more than **24 hours** — only possible
+for a calendar saved before the 1440-minute rule above, or written around it — is **422** on the dry run
+and the commit alike, naming the work centers and their patterns, and nothing is written; the shared
+writer refuses any weekly hours outside 0–24 for every caller, so the sync can never store a calendar
+the scheduling editor's own `PUT` would refuse. `dry_run=false` (pass that `calendar_version` back as
 `expected_version`: a different calendar version is **409**; omitting it skips the check) takes the
 production calendar's own lock first — a concurrent `PUT /production-calendar` waits, so the hours and
 the audit rows' `production_calendar_version` come from one calendar version — and writes every
@@ -10590,7 +10609,10 @@ per work center (`extra_data.source` = `production_calendar_sync`; **503**, noth
 cannot). **This moves every scheduling projection, capacity heat map and delivery prediction** for
 those work centers (a center with no saved calendar was planned at its `capacity_hours_per_day`, 8 h
 when unset, every day, weekends included) — review the dry run first. In the app the editor and the
-sync are on Admin Settings → **Production Calendar** (`/admin/settings?tab=calendar`, Admin only); a
+sync are on Admin Settings → **Production Calendar** (`/admin/settings?tab=calendar`, Admin only; a
+pattern the Admin adds there starts **not** default, and its **Default pattern** checkbox makes it the
+one default or, unchecked, leaves the calendar with none — so configuring the weld shop first never
+hands its shifts to every other work center); a
 Manager or Supervisor runs the sync through this route or the MCP tool
 `sync_working_calendars_from_shifts`.
 

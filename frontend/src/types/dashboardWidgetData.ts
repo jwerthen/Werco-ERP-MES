@@ -20,8 +20,8 @@ import type { WorkOrderBrowseResponse } from './workOrderBrowse';
 
 /**
  * One row of `GET /downtime/active` (`DowntimeEventResponse`, backend/app/api/endpoints/downtime.py).
- * A plain `BaseModel`, not `UTCModel`: datetimes may arrive WITHOUT a `Z` — parse them with
- * `utils/centralTime.toDate`, which treats a zone-less string as UTC.
+ * Inherits `UTCModel` (since P1.1, 2026-11-13): datetimes arrive as UTC with a `Z`. Parse them
+ * with `utils/centralTime.toDate`, which also reads an older API's zone-less value as UTC.
  */
 export interface ActiveDowntimeEvent {
   id: number;

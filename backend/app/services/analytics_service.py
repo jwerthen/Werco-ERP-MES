@@ -330,7 +330,14 @@ class AnalyticsService:
         # which labor is "counted"). Default OFF -> no predicate -> byte-identical OEE.
         if is_approved_labor_required(self.company_id):
             entry_query = entry_query.filter(TimeEntry.approved.isnot(None))
-        attributed = attribute_time_entries(entry_query, calendar, start, end, clock_in_column=TimeEntry.clock_in)
+        attributed = attribute_time_entries(
+            entry_query,
+            calendar,
+            start,
+            end,
+            clock_in_column=TimeEntry.clock_in,
+            clock_out_column=TimeEntry.clock_out,
+        )
         op_ids = {
             row.operation_id
             for row, _day, _occ in attributed
@@ -369,7 +376,12 @@ class AnalyticsService:
         downtime = [
             _OEEDowntime(day=day, work_center_id=row.work_center_id, hours=float(row.duration_minutes or 0.0) / 60.0)
             for row, day, _occ in attribute_downtime_events(
-                downtime_query, calendar, start, end, start_column=DowntimeEvent.start_time
+                downtime_query,
+                calendar,
+                start,
+                end,
+                start_column=DowntimeEvent.start_time,
+                end_column=DowntimeEvent.end_time,
             )
         ]
         entries_by_day: Dict[date, List[_OEEEntry]] = defaultdict(list)

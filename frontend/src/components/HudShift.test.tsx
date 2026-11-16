@@ -41,6 +41,29 @@ test('renders the default pattern shift running now', async () => {
   expect(badge()).toHaveAttribute('title', '1st shift · 7:30 AM – 4:00 PM');
 });
 
+test('under StrictMode the first answer is applied at once and the calendar is read once', async () => {
+  freezeAt('2026-11-10T16:00:00Z'); // 10:00 CST
+  let resolve: (value: ReturnType<typeof wercoCalendar>) => void = () => {};
+  mockApi.getProductionCalendar.mockImplementation(
+    () =>
+      new Promise(r => {
+        resolve = r;
+      })
+  );
+  render(
+    <React.StrictMode>
+      <HudShift />
+    </React.StrictMode>
+  );
+  // The effect ran twice (mount, unmount, mount); the in-flight read is shared.
+  expect(mockApi.getProductionCalendar).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    resolve(wercoCalendar());
+  });
+  // No waiting for a refetch tick: the shift shows as soon as the one read answers.
+  expect(badge()).toHaveTextContent('S1');
+});
+
 test('in the 15:30-16:00 hand-off it shows the OUTGOING shift', async () => {
   freezeAt('2026-11-10T21:45:00Z'); // 15:45 CST
   mockApi.getProductionCalendar.mockResolvedValue(wercoCalendar());

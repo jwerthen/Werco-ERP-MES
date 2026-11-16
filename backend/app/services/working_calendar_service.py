@@ -42,6 +42,16 @@ def working_hours(calendars, center_id, day: date, default=8.0):
 
 
 WORKING_CALENDAR_CONFLICT_DETAIL = "This working calendar changed. Reload it before saving your edits."
+# The per-day range a working calendar holds -- the scheduling editor's ``CalendarHours``
+# (``app/schemas/scheduling.py``, 0..24). The shared writer enforces it for every caller.
+MAX_WORKING_HOURS_PER_DAY = 24.0
+
+
+def working_hours_out_of_range(weekly_hours: List[float]) -> bool:
+    """True unless ``weekly_hours`` is seven values, each within ``0..MAX_WORKING_HOURS_PER_DAY`` (NaN is out)."""
+    if len(weekly_hours) != 7:
+        return True
+    return any(not 0 <= float(hours) <= MAX_WORKING_HOURS_PER_DAY for hours in weekly_hours)
 
 
 @dataclass
@@ -75,8 +85,17 @@ def save_working_calendar(
     caller resolves ``center`` tenant-scoped (and row-locks it), writes the audit row
     for the returned save (:func:`audit_working_calendar_save`) and commits. A stale
     ``expected_version`` is HTTP 409 before anything is written. ``overrides`` are
-    stored sorted by date; ``version`` is bumped and ``updated_by`` stamped.
+    stored sorted by date; ``version`` is bumped and ``updated_by`` stamped. Weekly hours
+    outside ``0..24`` a day are HTTP 422 before anything is written: the scheduling PUT's
+    schema already refuses them, and no other caller may store a calendar that editor
+    could never save back.
     """
+    if working_hours_out_of_range(weekly_hours):
+        raise HTTPException(
+            422,
+            f"Working hours for work center {center.code} must be seven values between 0 and "
+            f"{MAX_WORKING_HOURS_PER_DAY:g} hours.",
+        )
     before = load_working_calendars(db, company_id, [center.id])[center.id]
     if before["version"] != expected_version:
         raise HTTPException(409, WORKING_CALENDAR_CONFLICT_DETAIL)
