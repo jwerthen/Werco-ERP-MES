@@ -6,6 +6,7 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
+from app.core.credentials import is_api_token_credential
 from app.db.database import get_db
 from app.models.purchasing import POReceipt, POStatus, PurchaseOrder, PurchaseOrderLine, Vendor
 from app.models.quality import NonConformanceReport
@@ -13,6 +14,7 @@ from app.models.supplier_scorecard import ApprovedSupplierList, ScorecardPeriod,
 from app.models.user import User, UserRole
 from app.schemas.base import UTCModel
 from app.services.audit_service import AuditService
+from app.services.supplier_approval_service import API_TOKEN_ASL_REFUSAL, REEVALUATION_STATUSES, central_today
 
 router = APIRouter()
 
@@ -500,8 +502,9 @@ def scorecard_dashboard(
     probationary_count = sum(1 for s in latest if s.rating == "Probationary")
     disqualified_count = sum(1 for s in latest if s.rating == "Disqualified")
 
-    # Audits due within 30 days
-    thirty_days = date.today() + timedelta(days=30)
+    # Audits / re-evaluations due within 30 days, counted from the shop's day (Central), the
+    # same "today" the ASL re-evaluation list uses -- not the server's local date.
+    thirty_days = central_today() + timedelta(days=30)
     audits_due = (
         db.query(SupplierAudit)
         .filter(
@@ -512,13 +515,19 @@ def scorecard_dashboard(
         .count()
     )
 
-    # Reviews due (ASL)
+    # Reviews due (ASL): supplier re-evaluations due within 30 days (or already overdue), read
+    # off the vendor record -- the Approved Supplier List lives on ``Vendor`` since migration
+    # 123. The legacy ``approved_supplier_list`` table is read-only history and no longer
+    # counted here (it kept no link to the vendor's real status and drifted from it).
     reviews_due = (
-        db.query(ApprovedSupplierList)
+        db.query(Vendor)
         .filter(
-            ApprovedSupplierList.company_id == company_id,
-            ApprovedSupplierList.next_review_date != None,
-            ApprovedSupplierList.next_review_date <= thirty_days,
+            Vendor.company_id == company_id,
+            Vendor.is_deleted == False,  # noqa: E712
+            Vendor.is_active == True,  # noqa: E712
+            Vendor.approval_status.in_(sorted(REEVALUATION_STATUSES)),
+            Vendor.reevaluation_due != None,  # noqa: E711
+            Vendor.reevaluation_due <= thirty_days,
         )
         .count()
     )
@@ -1122,6 +1131,12 @@ def create_approved_supplier(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
+    """LEGACY: the Approved Supplier List lives on the vendor record since migration 123
+    (``PUT /purchasing/vendors/{id}/approval``); nothing reads this table's approvals any more.
+    Kept for its history; not an MCP tool, and an API token is refused (403) -- an approval
+    recorded here by an agent would contradict the vendor's own status."""
+    if is_api_token_credential(current_user):
+        raise HTTPException(status_code=403, detail=API_TOKEN_ASL_REFUSAL)
     # Approval gate, not the plain tenant gate: an ASL entry is a live permission to buy,
     # so a removed supplier must not be enterable on it. See ``_live_vendor_for_approval``.
     vendor = _live_vendor_for_approval(db, data.vendor_id, company_id)
@@ -1161,6 +1176,9 @@ def update_approved_supplier(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
+    """LEGACY (see ``create_approved_supplier``): not an MCP tool; an API token is refused (403)."""
+    if is_api_token_credential(current_user):
+        raise HTTPException(status_code=403, detail=API_TOKEN_ASL_REFUSAL)
     entry = (
         db.query(ApprovedSupplierList)
         .options(joinedload(ApprovedSupplierList.vendor))

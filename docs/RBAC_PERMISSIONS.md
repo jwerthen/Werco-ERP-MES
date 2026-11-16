@@ -137,7 +137,10 @@ file names — see
 [MCP.md → DRAFT guarantees](MCP.md#9-draft-guarantees). The two Excel-cutover loaders are not
 tools at all, and neither is AI **Accept & apply** (`POST /ai/recommendations/{id}/apply`): under
 owner ruling 3 only a person signed in to the app runs an AI recommendation's action, so it is in
-`catalog.EXCLUDED_OPERATIONS`, and the route refuses API tokens besides. An agent on an API token
+`catalog.EXCLUDED_OPERATIONS`, and the route refuses API tokens besides. The three Approved Supplier
+List writes (recording a supplier-approval decision and the ASL import preview / commit) and the two
+legacy `approved_supplier_list` writes are excluded the same way, and refuse API tokens too — see
+[Purchasing](#purchasing). An agent on an API token
 also gets a 403 the same person would not get in the UI when it tries to mark an AI action card
 handled — see [Credential policy for judgment writes](#credential-policy-for-judgment-writes)
 and [AI recommendations (Action Inbox)](#ai-recommendations-action-inbox).
@@ -154,7 +157,7 @@ AI-external token bound to a **Viewer** user.
 ### Credential policy for judgment writes
 
 A few writes record a **person's judgment** — not just a permitted action — and some of them are
-restricted to certain *credentials*, on top of the role gate. The restrictions have six sources,
+restricted to certain *credentials*, on top of the role gate. The restrictions have seven sources,
 and each row below names its own: owner ruling 3 of 2026-11-05 (the two AI rows), the owner's
 decision of 2026-11-07 (a standing API token may not declare scrap or close work short), this
 PR's extensions of that decision (scrap reasons, the re-stamp short close and the other count
@@ -162,7 +165,8 @@ judgments), the owner's decision of 2026-11-13 (only an Admin, signed in, marks 
 export-controlled), the lead's design decision of 2026-11-13 for the two quality-approval verbs (CAR
 Quality Manager approval, FAI customer approval) and its review follow-ups (the FAI final
 disposition and the CAR form's vendor / customer sign-off boxes), and the lead's decisions of
-2026-11-15 (an egress kill switch is a person's judgment; a narrowed token's read writes nothing).
+2026-11-15 (an egress kill switch is a person's judgment; a narrowed token's read writes nothing),
+and the Approved Supplier List change of 2026-11-13 (the supplier-approval rows).
 This section is the **one list** of those credential rules — what refuses a credential,
 what is deliberately left open (and who decided each), and what is deliberately not refused —
 across the AI governance (ruling 3), floor-gates (ruling 2) and short-count (ruling 1) changes;
@@ -185,7 +189,8 @@ list of credential predicates.
 Writes that apply them — each refused before any write and before any audit row (the 403 texts
 live in `ai_action_applier.py` and `operation_action_gates.py`, for the quality judgments in
 `quality_record_service.py` and `fai_service.py`, for export control
-`app/api/endpoints/customers.py`, and for the egress switches `app/core/credentials.py`; where each sits in its route's
+`app/api/endpoints/customers.py`, for the egress switches `app/core/credentials.py`, and for the supplier-approval rows
+`app/services/supplier_approval_service.py` and `app/api/endpoints/purchasing.py`; where each sits in its route's
 check order is in `docs/API.md` → Work Orders → "Short count at completion" and → AI
 Recommendations):
 
@@ -204,6 +209,9 @@ Recommendations):
 | **Recording an FAI's customer approval** — `POST /quality/fai/{id}/customer-approval` (the MCP tool `record_fai_customer_approval`). It asserts that a person saw the customer's acceptance | `is_api_token_credential` | **403** `API_TOKEN_CUSTOMER_APPROVAL` (`A standing API token cannot record an FAI's customer approval. A person signed in to the app must record it.`) | Lead's design decision for the FAI log of record (2026-11-13), applying the 2026-11-07 principle; not an owner ruling |
 | **Recording an FAI's final disposition** — `PUT /quality/fai/{id}` setting `status` to `passed`, `failed` or `conditional`. It is the inspection's quality judgment: it stamps the approver and freezes the evidence for good. Refused before the row lock; a token's non-final edits (notes, `in_progress`, inspector, inspection date) are unchanged | `is_api_token_credential` | **403** `API_TOKEN_FAI_DISPOSITION` (`A standing API token cannot record an FAI's final disposition. A person signed in to the app must record it.`) | Review follow-up to the lead's 2026-11-13 decision (the lesser customer approval already refused tokens, so the disposition before it could not stay open); not an owner ruling |
 | **Filling or changing a CAR's vendor or customer approval boxes** — `vendor_approval_name` / `_title` / `_date` and `customer_approval_name` / `_date` on `POST /quality/car` (any non-blank value) or `PUT /quality/car/{id}` (any change, clearing included; re-sending the stored value is no change). The printed controlled form shows them as the vendor's and customer's sign-offs | `is_api_token_credential` | **403** `API_TOKEN_CAR_SIGNOFF` (`A standing API token cannot record or change a CAR's vendor or customer approval. A person signed in to the app must record it.`) | Review follow-up to the lead's 2026-11-13 decision, for the same reason as the FAI customer approval; not an owner ruling |
+| **Recording a supplier-approval decision or loading the Approved Supplier List** — `PUT /purchasing/vendors/{id}/approval`, `POST /purchasing/vendors/asl-import/preview` and `POST /purchasing/vendors/asl-import/commit` (the preview too: it exists only to feed a commit) | `is_api_token_credential` | **403** (`Supplier approval is a person's decision: an API token cannot change the Approved Supplier List. Sign in to the app to do this.`); also not MCP tools (`catalog.EXCLUDED_OPERATIONS`) | Design decision of the Approved Supplier List change (2026-11-13): a supplier approval on the AS9100D 8.4 list is a named person's judgment. Not an owner ruling |
+| **Writing the legacy `approved_supplier_list` table** — `POST /supplier-scorecards/approved-suppliers/` and `PUT /supplier-scorecards/approved-suppliers/{asl_id}` (read-only history since migration 123) | `is_api_token_credential` | **403**, the same text; also not MCP tools (`catalog.EXCLUDED_OPERATIONS`) | Review follow-up of the same change: an agent's "approved" entry there would contradict the vendor's own ASL status. People's use of the two routes is unchanged |
+| **Granting vendor approval by the checkbox** — `POST /purchasing/vendors` with `is_approved: true`, `PUT /purchasing/vendors/{id}` raising `is_approved` from `false` to `true`, and `POST /purchasing/vendors/import-csv` when any row asks for `is_approved` (refused before any row is written, dry run included). A token may still create and edit vendors, re-send `true` on an approved one, and withdraw approval | `is_api_token_credential` | **403** (`Approving a supplier is a person's decision: an API token cannot mark a vendor approved. Sign in to the app to do this.`) | Review follow-up of the same change: the checkbox is the approval that puts a vendor not on the ASL into the Create PO picker. Not an owner ruling |
 
 Deliberately **not** refused:
 
@@ -1228,9 +1236,11 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
 |------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
-| View (schedules, work orders, overdue, calendar, dashboard, history) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| View (schedules, work orders, overdue, calendar, dashboard, history, equipment assets and asset history) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Create / edit PM schedule (`POST`/`PUT /maintenance/schedules`) | ✓ | ✓ | ✓ | | | | |
 | Deactivate PM schedule (`DELETE /maintenance/schedules/{id}`) | ✓ | ✓ | ✓ | | | | |
+| Import PM schedules (`POST /maintenance/schedules/import/preview`, `/import/commit`; may create equipment assets) | ✓ | ✓ | ✓ | | | | |
+| Create / edit / retire equipment asset (`POST /maintenance/assets`, `PUT`/`DELETE /maintenance/assets/{id}`) | ✓ | ✓ | ✓ | | | | |
 | Create / edit maintenance WO (`POST`/`PUT /maintenance/work-orders`) | ✓ | ✓ | ✓ | | | | |
 | Start / complete maintenance WO (`POST .../{id}/start`, `.../complete`) | ✓ | ✓ | ✓ | ✓ | | | |
 | Add event log entry (`POST /maintenance/log`) | ✓ | ✓ | ✓ | ✓ | | | |
@@ -1250,10 +1260,31 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > (`App.tsx` → `routeAccessRequirements`), which every role holds, so refusing reads would break the
 > page for its intended audience.
 >
-> ⚠️ **The client has no matching gate yet.** `Maintenance.tsx` renders its Create / Start /
-> Complete controls unconditionally, so a Viewer or Operator will see a control the server now
-> refuses and get a 403 toast after clicking. Pairing the client gate with the server gate — the way
-> the work-center status `<select>` is paired above — is a follow-up.
+> **The client now matches the server gate.** `Maintenance.tsx` shows the planning controls (New
+> Schedule, New Work Order, Import PM Schedules, the Assets tab's add / edit / retire / reactivate)
+> only to `canPlanMaintenance` (Admin / Manager / Supervisor, or a superuser) and Start / Complete
+> only to `canPerformMaintenance` (those plus Operator) — `frontend/src/utils/maintenance.ts`; every
+> other role gets the read-only page. Neither helper names Platform Admin, so a platform admin who is
+> not a superuser sees the read-only page although the server would accept the write.
+>
+> **Assets and the PM import follow the planning tier.** Equipment-asset writes and both PM import
+> routes are `_PLANNING_ROLES` (Admin / Manager / Supervisor), like schedules; asset reads are open to
+> every role, like the rest of the router. The PM import is planning data, not a credential-restricted
+> judgment write: it does not refuse an API token, and both of its routes are MCP tools.
+>
+> **Starting, completing or cancelling a maintenance WO can write downtime.** A work-center WO with
+> `requires_shutdown` opens an event on start only when the machine has none open (it adopts an
+> operator's open event, or shares one another started shutdown WO holds), and on complete or a `PUT`
+> to `cancelled` resolves it, hands it to a WO still holding the machine down, or — an adopted event on
+> a cancel — hands it back to the machine still open (see [Downtime](#downtime) and `docs/API.md` →
+> Maintenance). Those downtime writes ride on the maintenance verb's own role gate — an Operator who
+> may start or complete the WO thereby writes the event — and are audited as `downtime_event` rows.
+> Adopting, handing over or handing back sets only the event's `maintenance_work_order_id` /
+> `maintenance_adopted` link (fields `PUT /downtime/{id}` cannot write). Holding and cancelling go
+> through `PUT /maintenance/work-orders/{id}` (planning roles, so the Maintenance page shows Hold /
+> Cancel to Admin / Manager / Supervisor / Platform Admin); that `PUT` refuses `in_progress` and
+> `completed` (**409**, the Start / Complete verbs own them), un-starting a started WO, and changing
+> `requires_shutdown` once started.
 
 > **Tenancy: ten of the sixteen handlers took no company argument.** `start` and `complete`
 > resolved the work order by bare id, and `dashboard` / `calendar` / `history` / `overdue`
@@ -1321,7 +1352,7 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 >
 > ⚠️ **The client has no matching gate yet.** `ToolManagement.tsx` renders its write controls
 > unconditionally, so a Viewer sees controls the server now refuses and gets a 403 toast. Pairing the
-> client gate with the server gate is a follow-up, as for Maintenance above.
+> client gate with the server gate is a follow-up (Maintenance above has since been paired).
 
 ### Supplier Scorecards, Audits & Approved Supplier List
 
@@ -1331,7 +1362,15 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 | Create / edit scorecard | ✓ | ✓ | | | | | |
 | Auto-calculate scorecard (`POST .../calculate/{vendor_id}`) | ✓ | ✓ | | | | | |
 | Create / edit supplier audit | ✓ | ✓ | | | | | |
-| Create / edit ASL entry | ✓ | ✓ | | | | | |
+| Create / edit **legacy** ASL entry (`/supplier-scorecards/approved-suppliers`) | ✓ | ✓ | | | | | |
+| Record a supplier-approval decision / import the ASL **on the vendor record** — see [Purchasing](#purchasing) | ✓ | ✓ | | | ✓ | | |
+| Open the **Supplier Scorecards** screen (route + nav: `purchasing:view` or `quality:approve`) | ✓ | ✓ | ✓ | | ✓ | | ✓ |
+
+> **The Approved Supplier List moved to the vendor record (migration `123`).** The page's
+> **Approved Supplier List** tab now reads vendors and writes through `PUT
+> /purchasing/vendors/{id}/approval` and the ASL import, whose roles (Admin / Manager / **Quality**)
+> are in the [Purchasing](#purchasing) table. The legacy `approved-suppliers` routes keep the Admin /
+> Manager gate above and are unchanged, but the page no longer calls them.
 
 > **The write tiers are unchanged** — this router already gated its writes to Admin / Manager. The
 > table is recorded here because it never was, and because the reads are open to every role: a
@@ -1592,6 +1631,8 @@ and [the observation architecture](STOCK_OBSERVATION_ARCHITECTURE.md).
 | Record supplier confirmation / assign follow-up | ✓ | ✓ | ✓ | | | | |
 | Delete / restore vendor (soft) | ✓ | ✓ | | | | | |
 | Delete / restore purchase order (soft) | ✓ | ✓ | | | | | |
+| Record a supplier-approval decision (`PUT /purchasing/vendors/{id}/approval`) | ✓ | ✓ | | | ✓ | | |
+| Import the Approved Supplier List (`POST /purchasing/vendors/asl-import/preview`, `/commit`) | ✓ | ✓ | | | ✓ | | |
 
 Supplier confirmation also rechecks the company's `purchasing:view` and
 `purchasing:create` permissions at save time and refuses read-only company contexts.
@@ -1604,6 +1645,53 @@ Follow-up owners must be active users in the same company with purchasing access
 > the **View** row above reflects intended UI visibility rather than a server-enforced
 > restriction. Only the write/approve actions (Create, Approve, send, line edits) are
 > role-gated. Receiving (below) follows the same read-broad / write-restricted pattern.
+
+> **Approved Supplier List writes are Admin / Manager / Quality, and a person's only (migration
+> `123`, 2026-11-13).** `ASL_WRITE_ROLES` in `app/api/endpoints/purchasing.py` gates `PUT
+> /purchasing/vendors/{id}/approval` and both ASL import routes. **Quality** sits beside Admin /
+> Manager here, although the general vendor edit stays Admin / Manager, because the QL 7.4 form's
+> owner is "Purchasing / Quality". Superuser / Platform Admin bypass, as elsewhere. All three routes
+> refuse an **API token** (403) before any write and are not MCP tools — see
+> [Credential policy for judgment writes](#credential-policy-for-judgment-writes). The two ASL
+> reads, `GET /purchasing/vendors/reevaluation-due` and `POST /purchasing/supplier-approval-check`,
+> are open to any authenticated user in the tenant, like the other purchasing reads.
+>
+> - **The Admin / Manager vendor edit cannot go around it.** On a vendor with an ASL status,
+>   `is_approved` follows the status, and `PUT /purchasing/vendors/{id}` refuses **409** an
+>   `is_approved` that contradicts it — so the vendor-edit tier cannot mark a Disqualified or
+>   Conditional supplier approved. The Purchasing → Vendors **Edit** form locks its Approved checkbox
+>   for such a vendor and leaves `is_approved` out of the save.
+> - **The Disqualified refusal is a state rule, not a role rule.** A purchase order to a vendor
+>   Disqualified on the ASL is refused **409** for every role at every PO-create door, and an
+>   existing one cannot be approved, submitted for approval, given lines, sent or emailed (`docs/API.md`
+>   → Purchasing → *Approved Supplier List on the vendor record*).
+> - **Granting approval by the vendor checkbox is a person's too.** An API token is refused (403)
+>   creating a vendor with `is_approved: true`, raising it through the vendor `PUT`, or importing a
+>   vendor CSV that asks for it — see
+>   [Credential policy for judgment writes](#credential-policy-for-judgment-writes). The vendor `PUT`
+>   row-locks the vendor and refuses an explicit `is_approved: null` (422).
+> - **UI.** The **Update approval** and **Import ASL** controls on Supplier Scorecards → Approved
+>   Supplier List render only for `canWriteAsl` (Admin / Manager / Quality, or a superuser;
+>   `frontend/src/utils/supplierApproval.ts`). It omits Platform Admin, matching the other purchasing
+>   write controls. **The Quality role opens that page** (lead decision L2, 2026-11-15: the ASL's
+>   owner is Purchasing / Quality). `/supplier-scorecards` is route- and nav-gated on
+>   `anyOf: ['purchasing:view', 'quality:approve']` (`frontend/src/utils/routeAccess.ts`; the sidebar
+>   reads the same requirement through `canAccessPath`, so the two cannot disagree). The shipped
+>   Quality set has no `purchasing:view`, and `quality:approve` is held by exactly Platform Admin /
+>   Admin / Manager / Quality — the ASL approval roles — so the change adds Quality and nobody else
+>   (`quality:view` would also have admitted Operator). No server gate moved: every read the page
+>   makes (`GET /supplier-scorecards/supplier-scorecards/dashboard`, `/supplier-scorecards/`,
+>   `/supplier-audits/`, `GET /purchasing/vendors`, `/purchasing/vendors/reevaluation-due`) was
+>   already open to any signed-in user of the tenant, and no purchasing write was widened. Because
+>   scorecard and supplier-audit writes stay Admin / Manager, the page hides **New Scorecard** /
+>   **New Audit** from every other role (`canManageSupplierScorecards`,
+>   `frontend/src/utils/recordWriteAccess.ts`) rather than offer a guaranteed 403.
+> - **No same-name twin of a Disqualified supplier** (lead decision L1, 2026-11-15). A state rule
+>   on every door that creates a vendor, for every role: a name that normalizes (the ASL import's
+>   own rule) to a live vendor Disqualified on the ASL is refused **409** by `POST
+>   /purchasing/vendors` and the PO upload's create-new-vendor path, and is a row error in the vendor
+>   CSV import and the Import Center vendor batch (`docs/API.md` → Purchasing → *Approved Supplier
+>   List on the vendor record*).
 
 > **PO status edits: a state rule landed, and the Approve row is still not enforced on `PUT`
 > (2026-11-05).** `PUT /purchasing/purchase-orders/{id}` is `require_role([ADMIN, MANAGER,
@@ -2614,6 +2702,8 @@ generated catalog, matching the existing import boundary.
 | Import routings (`POST /routing/import/preview`, `/import/commit`) | ✓ | ✓ | ✓ | | | | |
 | Import open work orders (`POST /work-orders/import`) | ✓ | ✓ | ✓ | | | | |
 | Import open purchase orders (`POST /purchasing/purchase-orders/import`) | ✓ | ✓ | | | | | |
+| Import the Approved Supplier List (`POST /purchasing/vendors/asl-import/preview`, `/commit`; update-only) | ✓ | ✓ | | | ✓ | | |
+| Import PM schedules (`POST /maintenance/schedules/import/preview`, `/import/commit`) | ✓ | ✓ | ✓ | | | | |
 
 > **Endpoint mapping (A0.2 Excel migration kit, enforced in code).** All rows above apply
 > identically to dry-run (`?dry_run=true`) and commit calls.
@@ -2646,6 +2736,15 @@ generated catalog, matching the existing import boundary.
 >   page; the upload/preview/commit lives in the wizard, not in the Import Center.
 > - The entity-import role sets (parts/materials → A/M/S; customers/vendors/work centers → A/M) are
 >   unchanged from the pre-existing CSV imports and match each module's Create row above.
+> - **ASL import mirrors recording a supplier approval** (`ASL_WRITE_ROLES`, Admin / Manager /
+>   Quality — see [Purchasing](#purchasing)): it writes the same vendor fields as `PUT
+>   /purchasing/vendors/{id}/approval`, never creates a vendor, refuses an API token (403) on both
+>   routes, and neither route is an MCP tool. **PM schedule import mirrors creating a PM schedule**
+>   (`_PLANNING_ROLES`, Admin / Manager / Supervisor — see [Maintenance](#maintenance-pm-schedules-maintenance-work-orders-event-log)),
+>   including the equipment assets it creates; it accepts an API token and both routes are MCP tools.
+>   Both are their own preview / commit pairs, not `/import/batches`; the Import Center shows them as
+>   linked cards that open Supplier Scorecards and Maintenance respectively, and both commits write
+>   required audit rows (not `source = "import"`: `asl_import` and `pm_import`).
 > - **Audit:** every committed import row writes a tamper-evident `audit_log` entry tagged
 >   `source = "import"`; dry runs write nothing (savepoint rollback). See `docs/API.md` →
 >   Bulk Imports & Templates and `docs/EXCEL_MIGRATION_RUNBOOK.md`.
@@ -2852,6 +2951,14 @@ and writes an `EXPORT` audit row through `AuditService`:
 >
 > ⚠️ **The client has no matching gate yet.** `DowntimeTracking.tsx` shows its create and resolve
 > controls to a Viewer, who now gets a 403 toast.
+>
+> **Maintenance work orders also open and resolve events (migration `124`)**, under the maintenance
+> verbs' own gates rather than the table above: starting a work-center maintenance WO that requires
+> shutdown (Admin / Manager / Supervisor / Operator) opens or adopts an event, and completing it (the
+> same roles) or a `PUT` to `cancelled` (Admin / Manager / Supervisor) resolves it; `completed` is only
+> reachable through `POST .../complete`, and a completed or cancelled work order cannot be reopened
+> (`PUT` 409). An operator's `POST /downtime/` on a machine a maintenance work order holds down is 409. See
+> [Maintenance](#maintenance-pm-schedules-maintenance-work-orders-event-log).
 
 > **Before deploying, check for legacy cross-tenant rows.** The write guards stop *new* mis-tenanted
 > events; they do nothing about rows written before them. Event reads now render such a row's foreign

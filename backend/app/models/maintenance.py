@@ -1,9 +1,18 @@
+"""Preventive maintenance: equipment assets, PM schedules, maintenance work orders and logs.
+
+A maintenance record targets EXACTLY ONE thing: a production ``WorkCenter`` or a non-production
+``MaintenanceAsset`` (forklifts, air compressors, a manual mill -- equipment that is maintained
+but never scheduled, dispatched, run on a kiosk or counted in OEE). ``work_center_id`` and
+``asset_id`` are both nullable and a CHECK on each table (``ONE_TARGET_CHECK``) holds exactly
+one of them set. Lock-step with migration ``124_maintenance_assets``.
+"""
+
 import enum
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, Date, DateTime
+from sqlalchemy import DDL, Boolean, CheckConstraint, Column, Date, DateTime
 from sqlalchemy import Enum as SQLEnum
-from sqlalchemy import Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Float, ForeignKey, Integer, String, Text, UniqueConstraint, event
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
@@ -55,13 +64,77 @@ FREQUENCY_DAYS_MAP = {
 }
 
 
+# Exactly one maintenance target per row (byte-identical in migration 124; a test pins it).
+ONE_TARGET_CHECK = (
+    "(work_center_id IS NOT NULL AND asset_id IS NULL) OR (work_center_id IS NULL AND asset_id IS NOT NULL)"
+)
+
+
+class MaintenanceAsset(Base, TenantMixin):
+    """A maintained piece of NON-PRODUCTION equipment (owner decision 2026-11-13).
+
+    Deliberately not a ``WorkCenter`` (a fake work center would surface in scheduling, OEE,
+    dispatch, the kiosk and routing pickers) and not the calibration ``equipment`` table
+    (gauges with calibration intervals). Nothing outside ``/maintenance`` reads this table.
+    ``asset_tag`` is unique per company; ``is_active`` is the retirement flag (no physical
+    delete). ``version`` is the compare-and-swap counter ``PUT /maintenance/assets/{id}``
+    checks.
+    """
+
+    __tablename__ = "maintenance_assets"
+    __table_args__ = (UniqueConstraint("company_id", "asset_tag", name="uq_maintenance_assets_company_asset_tag"),)
+
+    id = Column(Integer, primary_key=True)
+    asset_tag = Column(String(50), nullable=False)
+    name = Column(String(255), nullable=False)
+    asset_type = Column(String(50), nullable=True)
+    manufacturer = Column(String(100), nullable=True)
+    model = Column(String(100), nullable=True)
+    serial_number = Column(String(100), nullable=True)
+    location = Column(String(100), nullable=True)
+    notes = Column(Text, nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True, server_default="true")
+    version = Column(Integer, nullable=False, default=1, server_default="1")
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+# Mirror migration 124 for model-bootstrap installations (precedent: dashboard_layouts). App-
+# layer tenancy is the enforcement; the Supabase Data API roles get nothing.
+_ASSET_SECURITY_SQL = (
+    "ALTER TABLE maintenance_assets ENABLE ROW LEVEL SECURITY",
+    "REVOKE ALL ON TABLE maintenance_assets FROM PUBLIC",
+    "REVOKE ALL ON SEQUENCE maintenance_assets_id_seq FROM PUBLIC",
+    """DO $$ BEGIN
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+        REVOKE ALL ON TABLE maintenance_assets FROM anon;
+        REVOKE ALL ON SEQUENCE maintenance_assets_id_seq FROM anon;
+      END IF;
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+        REVOKE ALL ON TABLE maintenance_assets FROM authenticated;
+        REVOKE ALL ON SEQUENCE maintenance_assets_id_seq FROM authenticated;
+      END IF;
+    END $$""",
+)
+for _statement in _ASSET_SECURITY_SQL:
+    event.listen(MaintenanceAsset.__table__, "after_create", DDL(_statement).execute_if(dialect="postgresql"))
+
+
 class MaintenanceSchedule(Base, TenantMixin):
     """Preventive Maintenance schedule template"""
 
     __tablename__ = "maintenance_schedules"
+    __table_args__ = (CheckConstraint(ONE_TARGET_CHECK, name="ck_maintenance_schedules_one_target"),)
 
     id = Column(Integer, primary_key=True, index=True)
-    work_center_id = Column(Integer, ForeignKey("work_centers.id"), nullable=False)
+    # Exactly one of the two (ONE_TARGET_CHECK).
+    work_center_id = Column(Integer, ForeignKey("work_centers.id"), nullable=True)
+    asset_id = Column(
+        Integer,
+        ForeignKey("maintenance_assets.id", name="fk_maintenance_schedules_asset_id"),
+        nullable=True,
+        index=True,
+    )
 
     name = Column(String(255), nullable=False)
     description = Column(Text)
@@ -87,6 +160,7 @@ class MaintenanceSchedule(Base, TenantMixin):
 
     # Relationships
     work_center = relationship("WorkCenter", foreign_keys=[work_center_id])
+    asset = relationship("MaintenanceAsset", foreign_keys=[asset_id])
     work_orders = relationship("MaintenanceWorkOrder", back_populates="schedule")
 
 
@@ -94,10 +168,18 @@ class MaintenanceWorkOrder(Base, TenantMixin):
     """Individual maintenance work order / task"""
 
     __tablename__ = "maintenance_work_orders"
+    __table_args__ = (CheckConstraint(ONE_TARGET_CHECK, name="ck_maintenance_work_orders_one_target"),)
 
     id = Column(Integer, primary_key=True, index=True)
     schedule_id = Column(Integer, ForeignKey("maintenance_schedules.id"), nullable=True)
-    work_center_id = Column(Integer, ForeignKey("work_centers.id"), nullable=False)
+    # Exactly one of the two (ONE_TARGET_CHECK).
+    work_center_id = Column(Integer, ForeignKey("work_centers.id"), nullable=True)
+    asset_id = Column(
+        Integer,
+        ForeignKey("maintenance_assets.id", name="fk_maintenance_work_orders_asset_id"),
+        nullable=True,
+        index=True,
+    )
 
     wo_number = Column(String(50), unique=True, index=True, nullable=False)
 
@@ -134,6 +216,7 @@ class MaintenanceWorkOrder(Base, TenantMixin):
 
     # Relationships
     work_center = relationship("WorkCenter", foreign_keys=[work_center_id])
+    asset = relationship("MaintenanceAsset", foreign_keys=[asset_id])
     schedule = relationship("MaintenanceSchedule", back_populates="work_orders")
 
 
@@ -141,9 +224,17 @@ class MaintenanceLog(Base, TenantMixin):
     """History entry for maintenance events"""
 
     __tablename__ = "maintenance_logs"
+    __table_args__ = (CheckConstraint(ONE_TARGET_CHECK, name="ck_maintenance_logs_one_target"),)
 
     id = Column(Integer, primary_key=True, index=True)
-    work_center_id = Column(Integer, ForeignKey("work_centers.id"), nullable=False)
+    # Exactly one of the two (ONE_TARGET_CHECK).
+    work_center_id = Column(Integer, ForeignKey("work_centers.id"), nullable=True)
+    asset_id = Column(
+        Integer,
+        ForeignKey("maintenance_assets.id", name="fk_maintenance_logs_asset_id"),
+        nullable=True,
+        index=True,
+    )
     maintenance_wo_id = Column(Integer, ForeignKey("maintenance_work_orders.id"), nullable=True)
 
     event_type = Column(String(50), nullable=False)  # completed, inspection, repair, part_replacement, observation
@@ -157,4 +248,5 @@ class MaintenanceLog(Base, TenantMixin):
 
     # Relationships
     work_center = relationship("WorkCenter", foreign_keys=[work_center_id])
+    asset = relationship("MaintenanceAsset", foreign_keys=[asset_id])
     work_order = relationship("MaintenanceWorkOrder", foreign_keys=[maintenance_wo_id])

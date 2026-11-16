@@ -690,6 +690,11 @@ def test_dashboard_counts_only_the_callers_own_suppliers(client: TestClient, db_
     make_scorecard(db_session, company_id=COMPANY_A, vendor_id=stolen.id, overall_score=42.0, rating="Disqualified")
     make_audit(db_session, company_id=COMPANY_A, vendor_id=stolen.id)
     make_asl(db_session, company_id=COMPANY_A, vendor_id=stolen.id)
+    # Reviews-due reads the Approved Supplier List on the VENDOR since migration 123 (the
+    # legacy approved_supplier_list row above is read-only history and no longer counted).
+    stolen.approval_status = "approved"
+    stolen.reevaluation_due = date.today() + timedelta(days=5)
+    db_session.commit()
 
     vendor_b = make_vendor(db_session, company_id=COMPANY_B, name="B preferred supplier")
     make_scorecard(db_session, company_id=COMPANY_B, vendor_id=vendor_b.id, overall_score=95.0, rating="Excellent")

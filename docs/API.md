@@ -726,8 +726,9 @@ tokens" below), never wider.
 >    (`READ_ONLY_DENY_TAG_FLOOR`), so an empty or truncated value still denies them.
 > 4. **AI-external, `(method, route)` not on the allowlist** (a fixed set of `GET` routes in
 >    `app/core/export_control.py`: work orders, shop-floor operations, downtime, work centers, OEE,
->    parts, routings, NCR / CAR / FAI and the FAI log of record, quotes, vendors, purchase orders,
->    receiving, maintenance work orders, the production calendar) → **403** `"This resource is not available to an AI-external API token."`. Then every
+>    parts, routings, NCR / CAR / FAI and the FAI log of record, quotes, vendors and the overdue
+>    supplier re-evaluation list, purchase orders, receiving, maintenance work orders, the production
+>    calendar) → **403** `"This resource is not available to an AI-external API token."`. Then every
 >    query parameter (and value) must be on that route's list in `AI_EXTERNAL_QUERY_PARAMS`:
 >    free-text `search`, the `customer` filter and `sort` / `group` by part or customer are refused
 >    **403** `"This query parameter is not available to an AI-external API token: free-text search,
@@ -4879,7 +4880,7 @@ environment variable or deployment configuration change is needed.
 | GET | `/parts/` | List all parts | Yes |
 | POST | `/parts/` | Create part | Yes |
 | GET | `/parts/{id}` | Get part by ID | Yes |
-| PUT | `/parts/{id}` | Update part — resolves **any** part in the company, engineering or material/supply. (**409** when it turns `backflush_components` on and the part's readiness check reports blockers, and **409** when it reclassifies a material part into a produced one while an **unfinished** work order still ties it — see below) | Admin / Manager / Supervisor |
+| PUT | `/parts/{id}` | Update part — resolves **any** part in the company, engineering or material/supply. (**409** when it turns `backflush_components` on and the part's readiness check reports blockers, and **409** when it reclassifies a material part into a produced one while an **unfinished** work order still ties it — see below). Also sets `supply_scope` (see [Part Schema](#part-schema)) | Admin / Manager / Supervisor |
 | DELETE | `/parts/{id}` | Delete part (soft delete — restorable). `hard_delete=true` is refused **400** while work orders, BOMs or BOM lines reference the part, or while a CAR names it (`Cannot hard delete: Part is named on N corrective action report(s); soft delete it instead`; `DELETE /materials/{id}?hard_delete=true` applies the same CAR check) | Admin |
 | POST | `/parts/{id}/restore` | Restore a soft-deleted part, **returning it to the `is_active` it had when it was deleted** — not an unconditional re-activate, and an unknowable prior value comes back **inactive**. **400** if it is not actually deleted. See note below | Admin / Manager |
 | POST | `/parts/{id}/deactivate` | Take a part out of use — `is_active=false` + `status='obsolete'`. **Not** a delete; `is_deleted` is never written. Reason required. **409** if it still has stock and `acknowledge_remaining_stock` was not set | **Admin / Manager** |
@@ -5297,6 +5298,18 @@ environment variable or deployment configuration change is needed.
 > A **work-order material tie** remains the way to make one specific job consume material **without**
 > this flag, and is the only one of the two with production mileage — see
 > [Work Orders](#work-orders) → "Material ties".
+
+> **`supply_scope` — the Approved Supplier List scope a purchase of this part falls under**
+> (`parts.supply_scope`, migration `123_vendor_asl`; `null` = not set). `PartResponse` returns it on
+> every part and material read, the list helper included. It is **advisory**: it drives the purchase
+> order `scope_not_approved` warning and never refuses anything; with no scope set, the warning falls
+> back to a `part_type` hint (`scope_unverified`). See Purchasing → *Approved Supplier List on the
+> vendor record*. Like `backflush_components` it is on `PartUpdate` but **not** on `PartBase` /
+> `PartCreate`: it is set through `PUT /parts/{id}`, `PUT /materials/{id}` and the optional
+> `supply_scope` column of the materials import (`POST /materials/import-csv` and its template), never
+> by a create. Either the scope slug (`raw_material_metallics`) or the QL 7.4 label (*Raw Material -
+> Metallics*) is accepted and stored as the slug; anything else is **422** (a row error on the import).
+> An explicit `null` clears it. No screen edits it yet.
 
 ### BOM (Bill of Materials)
 
@@ -5834,22 +5847,30 @@ uploads go through text extraction + LLM. See
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| GET | `/maintenance/schedules` | List PM schedules | Yes |
+| GET | `/maintenance/schedules` | List PM schedules (`is_active` default true; `work_center_id` or `asset_id` narrows to one target) | Yes |
 | GET | `/maintenance/schedules/{id}` | PM schedule detail | Yes |
-| POST | `/maintenance/schedules` | Create PM schedule | Admin / Manager / Supervisor |
-| PUT | `/maintenance/schedules/{id}` | Update PM schedule | Admin / Manager / Supervisor |
+| POST | `/maintenance/schedules` | Create PM schedule on a work center **or** an equipment asset | Admin / Manager / Supervisor |
+| PUT | `/maintenance/schedules/{id}` | Update PM schedule (the target is not changed here) | Admin / Manager / Supervisor |
 | DELETE | `/maintenance/schedules/{id}` | Deactivate PM schedule (`is_active` → `false`; no soft-delete mixin) | Admin / Manager / Supervisor |
-| GET | `/maintenance/work-orders` | List maintenance work orders (**pure read**, see below) | Yes |
+| POST | `/maintenance/schedules/import/preview` | Dry run of a PM schedule sheet (multipart `file`; template `maintenance-schedules`). Writes nothing | Admin / Manager / Supervisor |
+| POST | `/maintenance/schedules/import/commit` | Apply a previewed PM sheet (multipart `file` + form field `expected_source_hash`). All-or-nothing | Admin / Manager / Supervisor |
+| GET | `/maintenance/work-orders` | List maintenance work orders (**pure read**, see below; `asset_id` filter beside `work_center_id`) | Yes |
 | GET | `/maintenance/work-orders/overdue` | Overdue maintenance work orders (**pure read**) | Yes |
 | GET | `/maintenance/work-orders/{id}` | Maintenance work order detail | Yes |
-| POST | `/maintenance/work-orders` | Create maintenance work order | Admin / Manager / Supervisor |
-| PUT | `/maintenance/work-orders/{id}` | Update maintenance work order | Admin / Manager / Supervisor |
-| POST | `/maintenance/work-orders/{id}/start` | Start (→ `in_progress`) | Admin / Manager / Supervisor / Operator |
-| POST | `/maintenance/work-orders/{id}/complete` | Complete (→ `completed`, advances the linked schedule) | Admin / Manager / Supervisor / Operator |
+| POST | `/maintenance/work-orders` | Create maintenance work order on a work center **or** an asset (or neither, with a `schedule_id`, to inherit the schedule's target) | Admin / Manager / Supervisor |
+| PUT | `/maintenance/work-orders/{id}` | Update maintenance work order; `status` among `scheduled`, `overdue`, `on_hold`, `cancelled` only (**409** for `in_progress` / `completed` — use the verbs — for returning a started work order to `scheduled` / `overdue`, and for changing `requires_shutdown` once started). Moving it to `cancelled` settles any downtime event it holds | Admin / Manager / Supervisor |
+| POST | `/maintenance/work-orders/{id}/start` | Start (→ `in_progress`). A work-center work order with `requires_shutdown` opens, adopts or shares a downtime event — never a second open one on the machine | Admin / Manager / Supervisor / Operator |
+| POST | `/maintenance/work-orders/{id}/complete` | Complete (→ `completed`, advances the linked schedule) and resolve the work order's open downtime event | Admin / Manager / Supervisor / Operator |
 | GET | `/maintenance/calendar` | Work orders in a date window (**capped at 366 days**) | Yes |
-| GET | `/maintenance/dashboard` | Counts, cost, per-machine MTBF/MTTR | Yes |
+| GET | `/maintenance/dashboard` | Counts, cost, per-machine MTBF/MTTR (work centers only) | Yes |
 | GET | `/maintenance/history/{work_center_id}` | Event log for one machine (`limit` 1…5000, default 100) | Yes |
-| POST | `/maintenance/log` | Add a maintenance event log entry | Admin / Manager / Supervisor / Operator |
+| GET | `/maintenance/assets` | List equipment assets (`include_inactive` default false, `search` on tag / name / type), each with `active_schedule_count` and `open_work_order_count` | Yes |
+| GET | `/maintenance/assets/{id}` | Equipment asset detail | Yes |
+| GET | `/maintenance/assets/{id}/history` | Event log for one asset, newest first (`limit` 1…5000, default 100) | Yes |
+| POST | `/maintenance/assets` | Register an equipment asset. **409** on a tag the company already uses (ignoring case) | Admin / Manager / Supervisor |
+| PUT | `/maintenance/assets/{id}` | Edit an asset; `version` required (**409** if stale); only the fields sent change | Admin / Manager / Supervisor |
+| DELETE | `/maintenance/assets/{id}` | Retire an asset (`is_active` → `false`; never a physical delete) | Admin / Manager / Supervisor |
+| POST | `/maintenance/log` | Add a maintenance event log entry on a work center **or** an asset | Admin / Manager / Supervisor / Operator |
 
 > ⚠️ **Three write paths were returning 500 in production, two of them *after* committing.**
 > `MaintenanceLog` carries `TenantMixin`'s NOT NULL `company_id` (migration `026` drops the interim
@@ -5916,6 +5937,144 @@ uploads go through text extraction + LLM. See
 > **`wo_number` allocation stays install-wide on purpose.** `MaintenanceWorkOrder.wo_number` carries
 > a *global* unique constraint, so a per-tenant sequence would hand two companies the same number
 > and the second insert would fail. The scan reads only the highest number, never row content.
+
+> **Equipment assets: a maintenance record targets a work center OR an asset (migration
+> `124_maintenance_assets`).** Equipment that is maintained but is not a production work center — a
+> forklift, an air compressor, a manual mill — is a `maintenance_assets` row (`asset_tag` unique per
+> company ignoring case, `name`, optional `asset_type` / `manufacturer` / `model` / `serial_number` /
+> `location` / `notes`, `is_active`, `version`). It is not a work center and not a calibration
+> `equipment` row, so it never appears in scheduling, OEE, dispatch, the kiosk or the routing pickers.
+>
+> - Schedules, work orders and log entries carry **exactly one** of `work_center_id` / `asset_id`
+>   (a database CHECK, `ck_<table>_one_target`, holds the same rule). Both or neither is **422**
+>   (*"Give work_center_id or asset_id, not both"* / *"Exactly one of work_center_id or asset_id is
+>   required"*). A work order created with neither but with a `schedule_id` takes the schedule's
+>   target. A foreign or missing `asset_id` is a flat **404** *"Asset not found"*, the same posture as
+>   `work_center_id`; a retired asset still resolves, so its history stays readable and correctable.
+> - Every schedule, work-order and log payload now names its target: `work_center_id`,
+>   `work_center_name`, `asset_id`, `asset_tag`, `asset_name`, `target_type` (`work_center` or
+>   `asset`), `target_code` and `target_name`, tenant-guarded on egress like `work_center_name`.
+>   Schedules also return `checklist_items`, the stored `checklist` parsed tolerantly (a JSON array of
+>   strings, or one item per line for older rows).
+> - The dashboard's counts and cost include asset work orders; its MTBF / MTTR `work_center_metrics`
+>   stay work-center only, and `GET /maintenance/history/{work_center_id}` stays a work-center read
+>   (assets use `/maintenance/assets/{id}/history`).
+> - Asset writes are audited (`maintenance_asset` CREATE / UPDATE; a retire is the `is_active` flip,
+>   logged as an UPDATE). `PUT` takes the asset's current `version` (**409** *"This asset was changed by
+>   someone else…"* when stale) and rejects unknown fields; retiring keeps the asset's schedules, work
+>   orders and history (deactivate its schedules separately if they should stop coming due — the
+>   Maintenance → Schedules tab's **Deactivate** row action, `DELETE /maintenance/schedules/{id}`,
+>   planning roles), and `PUT` with `is_active: true` brings it back.
+
+> **Typed fields: `usage_based` is now 422, not 500.** `frequency`, `maintenance_type`, `priority` and
+> (on `PUT /maintenance/work-orders/{id}`) `status` are typed against the model enums, so an unknown
+> value — the old form's `usage_based` frequency included — is a **422** instead of the `ValueError`
+> 500 a hand-rolled enum conversion used to raise. Frequencies are `daily`, `weekly`, `biweekly`,
+> `monthly`, `quarterly`, `semi_annual`, `annual` and `custom`; `custom` requires `frequency_days`
+> (1–3650) on create, and on update whenever the schedule would be left `custom` without it (**422**).
+> `name` and `title` may not be blank, an explicit `null` on an always-set field of a schedule or work
+> order update is **422**, and `downtime_minutes` on complete may not be negative.
+
+> **Maintenance work order → downtime event (migration `124`).** A **work-center** maintenance work
+> order with `requires_shutdown` records the stoppage through the same helpers as `POST /downtime/`
+> (`app/services/downtime_service.py`), linked by `downtime_events.maintenance_work_order_id`. **A
+> machine never carries two open events for one stoppage** — OEE, the downtime summary, the analytics
+> and the adoption metrics all sum `duration_minutes` without merging overlaps, so a second open event
+> would count the minutes twice:
+>
+> - **Start** opens a downtime event on the work order's work center only when the machine has no
+>   open event: preventive / predictive → `planned_maintenance` + `planned` (outside OEE availability
+>   loss); corrective / emergency → `mechanical` + `unplanned` (counts against OEE and in MTBF / MTTR).
+>   An **open** event no maintenance work order owns (an operator logged the breakdown first) is
+>   **adopted** — linked, marked `maintenance_adopted`, and audited as a `downtime_event` UPDATE. An
+>   open event **another** started shutdown work order holds is **shared**: this work order opens
+>   nothing (two PMs during one shutdown, a corrective job during a PM). A work order that already owns
+>   an open event (restarted from hold) opens none. The start audit row carries
+>   `extra_data.downtime_event_id` and `downtime_link` (`opened` / `adopted` / `shared` / `owned`),
+>   plus `downtime_shared_with` (the holding work order's number) when shared.
+> - **Ending a work order** (`/complete`, or `PUT` to `cancelled`) settles each open event it owns, in
+>   this order: if another shutdown work order still holds the machine down (in progress, or on hold
+>   after a start, and never completed), the event is **handed over** to it, still open, so the
+>   stoppage resolves once — when the last work order ends — however this one ended (a cancelled
+>   adopter's hand-over keeps the event's `maintenance_adopted` mark, so if that work order is cancelled
+>   too the breakdown still goes back to the machine); otherwise a **cancelled** work order hands an
+>   **adopted** operator's event back to the machine, unlinked and still **open** (cancelling did not
+>   fix the breakdown; the next work order adopts it); otherwise the event is **resolved**. Each hand-over / hand-back is a `downtime_event` UPDATE audit
+>   row. On complete, when the request leaves `downtime_minutes` at 0, the work order records the total
+>   minutes of the events it resolved (a positive value from the technician is kept; a work order that
+>   handed its event on records 0, so the stoppage's minutes land once, on the last one). The complete
+>   audit row lists `resolved_downtime_event_ids`.
+> - **`PUT` cannot bypass the verbs** (it is also an MCP tool): `status: in_progress` is **409** (use
+>   `/start`), `status: completed` is **409** (use `/complete` — findings, costs, downtime minutes and the
+>   PM schedule's next due date), a started work order (in progress, or on hold after a start) cannot go
+>   back to `scheduled` / `overdue` (**409**), `requires_shutdown` cannot change once it has
+>   started (**409**), and a **completed or cancelled** work order is a final record — any status
+>   change out of either is **409** (*"… is completed, a final record; it cannot be moved to …"*;
+>   open a new work order instead). Reopening one used to let a completed work order on hold take over
+>   the next work order's downtime event, which then never closed, and a second `/complete` overwrite
+>   the maintenance record and advance its PM schedule again. Re-sending the current value is accepted.
+>   `on_hold` keeps the machine down.
+> - **An operator report cannot double it either.** `POST /downtime/` on a machine a maintenance work
+>   order already holds down (its event is open, the work order in progress or on hold after a start)
+>   is **409** naming the work order and the open event: the stoppage is already being recorded, and
+>   it ends when that work order is completed or cancelled. An operator's report filed *before* the
+>   start is adopted, as above.
+> - An **asset** work order never records downtime, and neither does a legacy work order whose
+>   `work_center_id` points at another company's machine. Each opened / resolved event writes its usual
+>   `downtime_event` audit row and emits the same `downtime_started` / `downtime_resolved`
+>   operational event an operator report does (the `downtime_started` payload adds
+>   `maintenance_work_order_id`). Start and end row-lock the work order and then the work center, so
+>   concurrent starts / ends on one machine are serialized and cannot both open an event.
+> - **Schedule target.** `POST /maintenance/work-orders` with a `schedule_id` and an explicit
+>   `work_center_id` / `asset_id` that is not the schedule's is **409** — completing the work order
+>   advances that schedule's due date. Leave both empty to inherit the schedule's target.
+
+> **PM schedule import — `POST /maintenance/schedules/import/preview` then `/commit`** (Admin /
+> Manager / Supervisor). Template `maintenance-schedules`, **one row per task**; `.xlsx` or `.csv`
+> through the shared parser (10 MB cap), with any title block above the header row skipped (the header
+> is the first of the first 10 non-blank rows holding `task` and `frequency`). It is its own preview /
+> commit pair, not an Import Center batch; Import Center's **PM Schedules** card links to Maintenance →
+> Schedules → **Import PM Schedules**.
+>
+> - **Columns:** `task` and `frequency` are required. Each row targets **one** of
+>   `work_center_code` (case-insensitive; an inactive work center loads with a warning) or `asset_tag`.
+>   An `asset_tag` that matches no asset is **created** on commit when the row carries `asset_name`
+>   (and optionally `asset_type`) — the preview lists it under `assets_to_create`; an existing asset is
+>   never renamed or retyped. Optional: `schedule_name`, `frequency_days` (custom only),
+>   `next_due_date`, `estimated_duration_hours` (0–1000), `requires_shutdown`, `priority`.
+> - **Frequency:** the model's values plus the sheet spellings (`yearly` → `annual`, `semi-annual`,
+>   `bi-weekly`, `every 2 weeks`…). A cadence-less value (*as necessary*, *as needed*, *as required*…)
+>   **skips** that row with a warning; it is never guessed. *Bi-annual* is not accepted (it means twice
+>   a year to some and every two years to others) and is a row error like any unrecognized value.
+> - **Grouping:** rows sharing a target, a frequency (and `frequency_days` for custom) and a schedule
+>   name become **one** schedule whose checklist is the ordered, de-duplicated task list (a JSON array).
+>   The default name is *"<target code> <Frequency> PM"* (e.g. *CNC-01 Monthly PM*), so a machine with
+>   monthly and yearly tasks gets two schedules. New schedules are `preventive`; their next due date is
+>   the sheet's, else today (Central).
+> - **Upsert:** an existing **active** schedule with the same target and name (case and spacing
+>   ignored) is updated — checklist replaced, frequency set, and next due date / duration / shutdown /
+>   priority set only where the sheet fills them (a blank cell never overwrites). An inactive namesake
+>   gets a new schedule plus a warning.
+> - **Row errors:** both or neither target; an unknown work-center code; an unknown asset tag without
+>   `asset_name`; an unrecognized frequency, priority, date or number; a custom row without
+>   `frequency_days`; two rows of one schedule giving different schedule-level values; one schedule
+>   name given two frequencies on one target; two active schedules already holding the name. A row
+>   error marks the other rows of its schedule as not loaded.
+> - **Response** (both routes): `{filename, source_hash, committed, summary{…}, rows[], schedules[],
+>   assets_to_create[]}` — per-row outcome (`create` / `update` / `unchanged` / `skipped` / `error`),
+>   per-schedule target, tasks, values and field `changes`, and the assets to create. The preview
+>   writes nothing.
+> - **Commit:** `expected_source_hash` must be the preview's `source_hash` (**409** otherwise).
+>   Concurrent imports for one company are serialized and every probe re-runs against current data.
+>   **All-or-nothing:** any row error is **409** with `detail = {message, errors[{row, target, task,
+>   error}]}` and nothing written; a tag created by someone else mid-import is a **409** asking to
+>   preview again. A commit writes one **required** audit row per created asset (`maintenance_asset`
+>   CREATE) and per created / updated schedule (`maintenance_schedule` CREATE / UPDATE,
+>   `extra_data.source = "pm_import"`), plus one `maintenance_schedule_import` IMPORT summary row;
+>   **503** with nothing saved if one cannot be written. Re-running the same sheet changes nothing and
+>   writes no audit row. File-level problems are **400**.
+> - Importing a schedule creates no work order. Nothing generates due PM work orders automatically
+>   today.
 
 ### Tool & Fixture Management (tool crib)
 
@@ -8565,6 +8724,14 @@ in `RBAC_PERMISSIONS.md`.
 > and what `POST /qms-standards/{standard_id}/auto-link` persists) counted **soft-deleted** vendors in
 > its `total_count` / "N suppliers" figure while the "(M active)" half excluded them — inventing an
 > approval gap, in an artifact meant for a registrar. Both halves now filter `is_deleted`.
+>
+> **"Approved" now means approved on the Approved Supplier List — expect that number to drop too.**
+> The same row used to report its *active* vendor count as the approved count, overstating it by
+> every active vendor that is Conditional, Disqualified or not on the ASL. The description now reads
+> *"N suppliers (M active), K approved on the ASL, S performance scorecards"*, where K counts live,
+> active vendors whose `approval_status` is Approved or Approved - Customer Directed (migration
+> `123`; see Purchasing → *Approved Supplier List on the vendor record*). Until the ASL is loaded, K is
+> 0. The "no performance scorecards" warning still quotes the active count.
 
 > **Deletes are soft (records retained):** the three `DELETE` endpoints above return **204** but
 > do not physically remove rows — the standard / clause / evidence is marked deleted and disappears
@@ -8951,13 +9118,18 @@ when an estimate is approved and handed off in Fabrication Quoting (`/fabricatio
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
 | GET | `/purchasing/vendors` | List vendors (`active_only` default true; `approved_only` default false; `deleted_only` default false). `deleted_only=true` returns **only** soft-deleted vendors — the restore view, and it **suppresses `active_only`**; see note below | Yes |
-| POST | `/purchasing/vendors` | Create vendor | Admin / Manager |
+| POST | `/purchasing/vendors` | Create vendor. **409** when the name normalizes to a live vendor's that is Disqualified on the Approved Supplier List (no same-name twin; see *Approved Supplier List on the vendor record* below) | Admin / Manager |
+| GET | `/purchasing/vendors/reevaluation-due` | Vendors whose Approved Supplier List re-evaluation is overdue (`within_days` 0–3650, default 0; `include_inactive` default false). See *Approved Supplier List on the vendor record* below | Yes |
+| POST | `/purchasing/vendors/asl-import/preview` | Dry run of an **update-only** Approved Supplier List load (multipart `file`). Writes nothing | Admin / Manager / Quality; **403** for an API token |
+| POST | `/purchasing/vendors/asl-import/commit` | Apply a previewed ASL file (multipart `file` + form fields `expected_source_hash` and `expected_plan_hash`). All-or-nothing | Admin / Manager / Quality; **403** for an API token |
+| PUT | `/purchasing/vendors/{vendor_id}/approval` | Record a supplier-approval decision (status, scopes, bases, dates, notes) with a required `reason` and `expected_updated_at`. **404** on a soft-deleted vendor | Admin / Manager / Quality; **403** for an API token |
+| POST | `/purchasing/supplier-approval-check` | Pure read: the vendor's ASL status, the advisory warnings for buying the given parts from it, and whether a PO to it would be refused | Yes |
 | GET | `/purchasing/vendors/{vendor_id}` | Get vendor by ID | Yes |
-| PUT | `/purchasing/vendors/{vendor_id}` | Update vendor — `code` is editable (see note). **404** on a soft-deleted vendor | Admin / Manager |
+| PUT | `/purchasing/vendors/{vendor_id}` | Update vendor — `code` is editable (see note). **404** on a soft-deleted vendor. **409** when `is_approved` contradicts the vendor's Approved Supplier List status (see below) | Admin / Manager |
 | DELETE | `/purchasing/vendors/{vendor_id}` | Soft-delete a vendor — records the current `is_active` into `is_active_before_delete`, **then** sets `is_active=false`. Guarded, see note below | Admin / Manager |
 | POST | `/purchasing/vendors/{vendor_id}/restore` | Restore a soft-deleted vendor, **preserving the `is_active` it had when it was deleted** — not an unconditional re-activate (see note). **400** if it is not actually deleted. Reachable from **Purchasing → Vendors → Deleted** | Admin / Manager |
 | GET | `/purchasing/purchase-orders` | List purchase orders (filters: `status`, `vendor_id`, `deleted_only`). `deleted_only=true` returns **only** soft-deleted POs — the restore view, see note below. Bounded: `limit` **1–5000, default 5000**, `offset` ≥ 0 | Yes |
-| POST | `/purchasing/purchase-orders` | Create purchase order with its lines | Admin / Manager / Supervisor |
+| POST | `/purchasing/purchase-orders` | Create purchase order with its lines. **409** when the vendor is Disqualified on the Approved Supplier List; other ASL findings come back as `supplier_approval_warnings` (see below) | Admin / Manager / Supervisor |
 | GET | `/purchasing/purchase-orders/{po_id}` | Get PO by ID | Yes |
 | PUT | `/purchasing/purchase-orders/{po_id}/supplier-confirmation` | Record acknowledgment, supplier-confirmed date and follow-up owner/due date on sent/partial POs; requires current `expected_updated_at`, stale returns 409. Requested dates remain unchanged | Admin / Manager / Supervisor, plus purchasing view/create permission |
 | PUT | `/purchasing/purchase-orders/{po_id}` | Update purchase order. **404** on a soft-deleted PO; a `status` is held to a transition whitelist — **409** naming the verb that owns the move, **422** on an unknown value or an explicit `null` (see *PO status edits* below); **400** on a `status` change to anything but `closed`/`cancelled` while the vendor is soft-deleted (see note) | Admin / Manager / Supervisor |
@@ -9354,6 +9526,258 @@ when an estimate is approved and handed off in Fabrication Quoting (`/fabricatio
 >   - The toast also names where the vendor went — **Vendors → Inactive** — because a restored-inactive
 >     vendor leaves the archive without appearing on the default Vendors list.
 
+#### Approved Supplier List on the vendor record
+
+The Approved Supplier List (AS9100D 8.4, Werco form QL 7.4) is recorded on the `vendors` row itself
+(migration `123_vendor_asl`). The vocabularies, labels, sheet aliases and every rule below live in
+one module, `app/services/supplier_approval_service.py`; `apply_vendor_approval` there is the only
+writer of the ASL columns.
+
+**Fields.** `VendorResponse` (every vendor read, list and detail) carries six read-only fields. None of
+them is on `VendorCreate` / `VendorUpdate`, so the vendor `POST` / `PUT` can never set them; they are
+written only by `PUT /purchasing/vendors/{id}/approval` and the ASL import.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `approval_status` | slug or `null` | `approved`, `conditional`, `disqualified`, `approved_customer_directed` (label *Approved - Customer Directed*). `null` = **not on the ASL** — every vendor reads `null` until a status is recorded (no backfill) |
+| `approved_scopes` | list of slugs or `null` | The QL 7.4 "Approved scope of supply" (19 values, e.g. `raw_material_metallics`, `hardware`, `special_process_plating_coating`) |
+| `approval_bases` | list of slugs or `null` | The QL 7.4 "Approval basis": `as9100`, `as9120`, `iso9001`, `iso17025`, `nadcap`, `questionnaire`, `customer_requirement` |
+| `reevaluation_due` | date or `null` | Re-evaluation due date |
+| `last_performance_evaluation` | date or `null` | Last performance evaluation date |
+| `approval_notes` | text or `null` | The ASL's own NOTES column, kept apart from the vendor's general `notes` |
+
+Every write accepts either the slug or the QL 7.4 label, ignoring case, spacing and en/em dashes, plus
+the sheet's own misspellings (*"Raw Material – Metalics"*, *"NDT / Inspection / Labroatory
+Services"*) and the basis labels without their *" Cert"* suffix. Anything else is **422** (a row error
+on the import), naming the allowed labels. The existing `approval_date` column is the ASL's
+*Approved date*.
+
+**`is_approved` follows the status.** Whenever a status is set, `is_approved` is derived from it:
+Approved / Approved - Customer Directed → `true`; Conditional / Disqualified → `false`. A vendor that
+was never on the ASL (`null` before and after) keeps `is_approved` as it was. **Taking a vendor off the
+ASL** (a status → `null`) sets `is_approved` to `false`: the list's approval goes with it, and the
+restrictive value is the one that cannot pass unnoticed (re-approving by the vendor checkbox is one
+explicit, audited edit). `is_active` and `is_deleted` are never touched: removal and approval are
+separate decisions. Because `is_approved` is derived, `PUT /purchasing/vendors/{id}` refuses **409**
+an `is_approved` that contradicts the status of a vendor on the ASL (*"{name} is {Status} on the
+Approved Supplier List, so its approval follows that status. Change it with Update approval (PUT
+/purchasing/vendors/{id}/approval)."*). Re-sending the derived value is accepted, and a vendor with no
+ASL status keeps the editable checkbox it always had. That `PUT` row-locks the vendor (so a concurrent
+approval decision cannot land between its check and its write), refuses an explicit `is_approved:
+null` (**422**), and refuses an **API token** raising `is_approved` to `true` (**403** *"Approving a
+supplier is a person's decision: an API token cannot mark a vendor approved. Sign in to the app to do
+this."*). The same text refuses a token's `POST /purchasing/vendors` with `is_approved: true` and its
+`POST /purchasing/vendors/import-csv` when any row asks for `is_approved` (before any row is written,
+dry run included). A token may still create and edit vendors and withdraw an approval.
+
+**`PUT /purchasing/vendors/{vendor_id}/approval`** — a person's supplier-approval decision.
+
+- **Who:** Admin / Manager / Quality (the QL 7.4 owner is "Purchasing / Quality", so Quality sits
+  beside the Admin / Manager vendor-edit tier here). An **API token** is refused **403** before any
+  write: *"Supplier approval is a person's decision: an API token cannot change the Approved Supplier
+  List. Sign in to the app to do this."* The route is also not an MCP tool. See
+  `docs/RBAC_PERMISSIONS.md` → Credential policy for judgment writes.
+- **Body** (unknown fields are **422**): `approval_status` is **required** (`null` takes the vendor
+  off the ASL, and sets `is_approved` to `false`). `approved_scopes` (≤ 19), `approval_bases` (≤ 7), `approval_date`,
+  `reevaluation_due`, `last_performance_evaluation` and `approval_notes` (≤ 4000 chars) are applied
+  **only when sent**: an omitted field is left as it is, an explicit `null` (or an empty string for a
+  date or the notes) clears it. `reason` (1–2000 chars, not blank) is required and recorded on the
+  audit row. `expected_updated_at` is required and must equal the vendor's current `updated_at`
+  (`Vendor` has no `version` column, so this is the compare-and-swap); otherwise **409** *"This vendor
+  changed since you opened it. Reload it before saving the approval."*
+- **Approval date:** when the request makes a vendor approved that was not, and sends no
+  `approval_date`, today's date (Central) is recorded — even over a date the vendor already carries
+  (a Conditional row's APPROVED DATE from the ASL import, or the date of an approval it has since
+  lost): the new approval is today's. Send the date to record another. The **Update approval** dialog
+  is built on this: choosing a status that approves a not-approved vendor blanks the date on file and
+  says today will be recorded, and any date it then shows is sent, so what it displays is what is
+  stored.
+- **Result:** the updated `VendorResponse`. The vendor row is locked for the write. One **required**
+  audit row (`vendor` UPDATE carrying only the fields that changed, `is_approved` included,
+  `extra_data.source = "approval"` and the `reason`); if it cannot be written nothing is saved
+  (**503**). A request that
+  changes nothing writes nothing. **404** on a soft-deleted vendor — restore it first.
+
+**`GET /purchasing/vendors/reevaluation-due`** — the overdue supplier re-evaluation list. Vendors
+whose status is Approved, Conditional or Approved - Customer Directed (Disqualified carries no
+re-evaluation obligation and is never listed) and whose `reevaluation_due` is before today (Central)
+plus `within_days` — so the default `within_days=0` returns only re-evaluations already past due.
+Live vendors only, active ones only unless `include_inactive=true`; oldest due date first. Each row is
+a `VendorResponse` plus `days_overdue` (today minus the due date; zero or negative for a vendor
+inside the requested window but not yet past due). Any authenticated user; a pure read. The Supplier
+Scorecards dashboard's `reviews_due` counts the same statuses, live and active, whose re-evaluation
+is overdue or due within the next 30 days.
+
+**`POST /purchasing/supplier-approval-check`** — `{vendor_id, part_ids[]}` (≤ 500 part ids) →
+`{vendor_id, vendor_name, approval_status, is_approved, reevaluation_due, refused, refusal,
+warnings[]}`. A pure read for the Create PO screen: `refused` is `true` (and `refusal` carries the
+exact 409 text) when the vendor is Disqualified. Part ids not found in the active company, or
+soft-deleted, are ignored. **404** for a vendor that is not this company's or is soft-deleted. Any
+authenticated user.
+
+**Purchase-order warnings — advisory, never a refusal.** Each warning is `{code, message, part_id,
+part_number}` (`part_*` set on the per-part codes only):
+
+| Code | When |
+|---|---|
+| `vendor_not_on_asl` | The vendor has no ASL status — including a vendor approved by the checkbox (*"{name} is marked approved but is not on the Approved Supplier List."*): that checkbox is the approval that bypasses the controlled list, so it does not silence the warning |
+| `vendor_conditional` | Status Conditional |
+| `vendor_disqualified` | Status Disqualified (the check and the PO reads report it; every create refuses it, below) |
+| `reevaluation_overdue` | Approved / Conditional / Customer Directed with `reevaluation_due` before today (Central) |
+| `scope_not_approved` | A line's part has a `supply_scope` the vendor's `approved_scopes` does not include |
+| `scope_unverified` | A line's part has no `supply_scope`, its `part_type` hints at a scope (`hardware` → Hardware; `raw_material` → any Raw Material scope; `consumable` → Adhesives, Paint / Powders or Welding Materials) and the vendor holds none of them. `purchased`, `manufactured` and `assembly` give no hint |
+
+The per-part scope checks run only for a vendor on the ASL that is not Disqualified and not
+Customer Directed (a customer-directed source's scope is the customer's direction, not Werco's
+approval).
+
+The warnings are returned as `supplier_approval_warnings` on the `POResponse` from `POST
+/purchasing/purchase-orders`, `GET /purchasing/purchase-orders/{po_id}`, `PUT
+/purchasing/purchase-orders/{po_id}` and `PUT .../supplier-confirmation`, and on the `POUploadResponse`
+from `POST /po-upload/create-from-upload`. They are computed when the response is built, from the
+vendor's **current** ASL entry and the lines' parts — never stored on the PO, so they change when the
+ASL does. The PO detail view shows a `vendor_disqualified` entry red, as the stop on sending,
+approving or adding lines to that order (below), never among the amber advisories. The list read (`GET /purchasing/purchase-orders`) does not carry them. To an **AI-external API token** a
+warning is part of its purchase order: inside an order withheld for export control, each warning
+(code, message and part number) is withheld with it, while a cleared order's warnings are served in
+full. The vendor's own ASL fields and `GET /purchasing/vendors/reevaluation-due` are vendor reference
+data and are served in full (that list is on the AI-external allowlist), with the residual text pass
+removing any controlled part number typed into `approval_notes`. `POST
+/purchasing/supplier-approval-check` is a `POST`, so no read-only or AI-external token reaches it. The create **audit
+row** records the warnings shown at creation in `extra_data.supplier_approval_warnings` (only when
+there are any) on every create through `create_purchase_order_command` (this route, the Hank
+purchase-order task and the AI action applier's draft PO), on the PO-upload create, and on the doors
+that build their POs directly — the MRP review draft (`POST /mrp/actions/{action_id}/supply-draft`), the
+MRP purchase batch, the MRP auto-PO job (its `CREATE_PO` row's `extra_data`) and the open-PO Excel
+loader — so a decision to buy anyway is part of the evidence.
+
+**Disqualified is the one hard gate (owner decision 2026-11-13).** No purchase order can be raised to a
+vendor that is Disqualified on the ASL: **409** *"{Vendor} is Disqualified on the Approved Supplier
+List; a purchase order cannot be raised to it."*, raised before anything is written, at every door
+that creates a PO:
+
+- `POST /purchasing/purchase-orders`, the Hank purchase-order task and the AI action applier's draft
+  PO — all through `create_purchase_order_command`. Hank also refuses at **prepare**, so it never
+  offers a plan the gate would refuse.
+- `POST /po-upload/create-from-upload`, before any part is created.
+- `POST /mrp/actions/{action_id}/supply-draft` (purchase) and `POST /mrp/purchase-batch/drafts`. The
+  MRP supply review's supplier list, and the MRP auto-PO vendor picker (`AUTO_DRAFT` / `AUTO_SUBMIT`),
+  never offer or choose a Disqualified vendor. The picker does not **re-route** either: a part whose
+  only supplier on record (supplier-part mapping or purchase history) is Disqualified is not handed to
+  the "first active vendor" fallback, which would draft it to an unrelated supplier. The auto-PO job
+  writes no purchase order for it and records the reason on the MRP action (*"{Vendor} is Disqualified
+  on the Approved Supplier List and is the only supplier this part is sourced from …; MRP does not pick
+  another supplier for it. Choose one on the MRP supply review."*). The fallback stays for a part with
+  no sourcing at all.
+- The open-PO Excel loader (`POST /purchasing/purchase-orders/import`), as that purchase order's row
+  error with the same text.
+
+**An existing PO cannot move toward issue either.** A PO raised before its vendor was Disqualified (the
+6 AM MRP auto-draft, a buyer's draft) is refused **409** *"{Vendor} is Disqualified on the Approved
+Supplier List; purchase order {PO} {cannot be sent | cannot be approved | cannot be submitted for
+approval | cannot have lines added or changed | cannot be emailed}. Cancel it, or record a new approval
+decision for the supplier first."* on `POST .../send`, a `PUT` to `approved` / `pending_approval`, a
+`PUT` carrying `lines`, `POST .../lines`, and the document-delivery preview / send of the PO email.
+Cancelling or closing it, editing its other fields, receiving what was already ordered and
+`POST .../restore` (undoing a mistaken delete of a record) stay open.
+
+**No same-name twin of a Disqualified supplier (lead decision L1, 2026-11-15).** A new vendor row
+carries no ASL status, so a twin would take the orders the Disqualified record refuses. Every door
+that **creates** a vendor therefore refuses a name that normalizes — by the ASL import's own rule
+(casefold, whitespace collapsed, en / em dashes read as `-`, spaces beside `-` and `.` removed;
+`supplier_approval_service.vendor_name_key`) — to a **live** (not soft-deleted) vendor whose
+`approval_status` is `disqualified`, switched off or not: **409** *"{Vendor} is Disqualified on the
+Approved Supplier List; a new vendor record cannot be created under that name. Re-evaluate the
+existing vendor instead."*, naming the existing vendor, before anything is written:
+
+- `POST /purchasing/vendors`;
+- `POST /po-upload/create-from-upload` with `create_vendor` (no vendor and no purchase order);
+- `POST /purchasing/vendors/import-csv`, and the Import Center vendor batch that runs it, as that
+  row's error with the same text (dry run included; the other rows are unaffected).
+
+Hank, the AI action applier and the open-PO loader never create vendors. Not refused: renaming an
+existing vendor, restoring a deleted one, and a name that differs in a word.
+
+Conditional, overdue and out-of-scope purchases are allowed with their warnings. The Purchasing
+**Create PO** vendor picker offers vendors with `is_approved = true` **plus Conditional vendors**
+(labelled *(Conditional)*; their `is_approved` derives `false`, and Conditional is a warning, not a
+gate), never a Disqualified one; the form shows the warnings for the chosen vendor and lines, from
+`POST /purchasing/supplier-approval-check`.
+
+**ASL import — `POST /purchasing/vendors/asl-import/preview` then `/commit`.** An **update-only**
+load of the ASL onto **existing** vendors. It never creates a vendor: production already holds every
+supplier on the list, so creating rows would duplicate them. It is its own preview / commit pair (like
+the routing import), not an Import Center batch; Import Center's **Approved Supplier List** card links
+to Supplier Scorecards → Approved Supplier List → **Import ASL**.
+
+- **Who:** Admin / Manager / Quality; an API token is refused **403** with the approval verb's text,
+  and neither route is an MCP tool.
+- **File:** the QL 7.4 workbook as-is, the `approved-supplier-list` template, or a CSV (shared
+  parser, 10 MB cap). An `.xlsx` with a sheet named **Approved Supplier List** (any case) is read from
+  that sheet, else the first sheet. The header row is the first of the first 10 non-blank rows that
+  contains both `supplier_name` and `status` (normalized), so the form's title block is skipped; a
+  file with no such row is **400**. Form number, revision and rev date are read from the title block
+  when it labels them, and returned as `document`.
+- **Columns:** `supplier_name` and `status` are required columns, and SUPPLIER NAME is required on
+  every row. Optional: `supplier_address`,
+  `approved_scope_of_supply`, `approved_date`, `approval_basis`, `re_evaluation_due_date`,
+  `performance_evaluation_date`, `notes`, and `vendor_code` (also read as `code` / `supplier_code`).
+  Several scopes or bases in one cell are separated by `;`, `,` or a line break.
+- **Matching** (a controlled list must never bind a row to the wrong supplier): a filled `vendor_code`
+  matches by code, case-insensitively — and the row's SUPPLIER NAME must then normalize to that
+  vendor's name too, or it is a row error (a mistyped code never lands one supplier's approval on
+  another's record; rename the vendor first if its name has changed); otherwise the **exact** normalized
+  name (case, repeated spaces, en/em dashes and spaces next to `-` or `.` ignored — *"Cinder- Forge"* =
+  *"Cinder-Forge"*, *"R.T.Hollis"* = *"R.T. Hollis"*). Nothing fuzzier. **Row errors:** a blank SUPPLIER
+  NAME; no match; a code whose vendor's name differs from SUPPLIER NAME; a code matching two live
+  vendors whose codes differ only in case; a name matching more than one live vendor (add
+  `vendor_code`); a match that is soft-deleted (the error names `POST
+  /api/v1/purchasing/vendors/{id}/restore`); two rows binding the same vendor; an unknown status,
+  scope or basis label; an unreadable date; a blank STATUS on a vendor that is on the ASL (below).
+- **Values:** a blank STATUS on a vendor not on the ASL leaves it off, with a warning. On a vendor that
+  **is** on the ASL it is a **row error**: an import never takes a supplier off the list (from
+  Disqualified that would lift the one hard PO refusal) — **Update approval** does, with a reason.
+  Every other blank cell leaves the vendor's value unchanged; a blank date never clears one. APPROVED
+  DATE overwrites `approval_date`. NOTES go to `approval_notes` (first 4000 characters), never to the
+  vendor's `notes`. The address and the name are compared only, and a difference is a warning; the
+  import never writes either. A Disqualified row and an inactive vendor also carry a warning.
+- **Response** (both routes): `{filename, source_hash, plan_hash, document{form_number, revision, rev_date},
+  committed, summary{total_rows, matched_rows, update_count, unchanged_count, error_count,
+  warning_count, not_on_asl_count}, rows[{row, supplier_name, vendor_id, vendor_code, vendor_name,
+  match_by, outcome, changes, warnings[], error}]}`. `outcome` is `update`, `unchanged` or `error`;
+  `changes` maps each changed field to `{old, new}` (dates as ISO text). The preview takes no
+  `AuditService` and writes nothing.
+- **Commit:** `expected_source_hash` (64 characters) must be the preview's `source_hash` — **409**
+  *"This file is not the one that was previewed. Preview it again, then commit."* otherwise. Every
+  probe re-runs under row locks on the company's vendors. **All-or-nothing:** any row error is **409**
+  with `detail = {message, errors[{row, supplier_name, error}]}` and nothing written. Then
+  `expected_plan_hash` (64 characters) must be the preview's `plan_hash` — a digest of every row's
+  match, outcome and changes — or **409** *"The vendors changed after this file was previewed, so the
+  import would no longer write what the preview showed. Preview it again, then commit."*: a decision
+  recorded after the preview (Quality disqualifying a vendor the preview showed unchanged) is never
+  silently written over. Only changed
+  vendors are written, each with a **required** audit row (`vendor` UPDATE, changed fields only,
+  `extra_data.source = "asl_import"` plus the form identity, filename, source hash, row number,
+  supplier name and match method), and one `vendor_asl_import` IMPORT summary row. If an audit row
+  cannot be written nothing is saved (**503**). Re-running the same sheet changes nothing and writes
+  no audit row. File-level problems are **400**.
+
+**Part `supply_scope`.** A part can carry the ASL scope its purchases fall under (`parts.supply_scope`,
+also migration `123`). It drives the `scope_not_approved` warning only. It is settable through `PUT
+/parts/{id}`, `PUT /materials/{id}` and the materials import — see [Part Schema](#part-schema).
+
+**Legacy `approved_supplier_list` table.** The `/supplier-scorecards/approved-suppliers` routes and
+their rows are unchanged for people (next section), except that the two **write** routes refuse an
+**API token** (**403**, the approval verb's text) and are not MCP tools — an agent's "approved" entry
+there would contradict the vendor's own status. Nothing reads them for the ASL any more: the Supplier
+Scorecards page's **Approved Supplier List** tab is built on the vendor fields above, and the
+scorecard dashboard's `reviews_due` counts vendor re-evaluations (due within 30 days of the Central
+day). The tab reads **every live vendor, switched-off ones included** (`GET
+/purchasing/vendors?active_only=false`, and the re-evaluation list with `include_inactive=true`),
+marking those *Inactive*: the ASL import and **Update approval** both write to them, and a
+Disqualified supplier is often also switched off. The QMS auto-evidence supplier
+card's "approved" count now means approved **on the ASL** (see QMS Standards).
+
 ### Supplier Scorecards, Audits & Approved Supplier List
 
 `app/api/endpoints/supplier_scorecards.py`, mounted at `/supplier-scorecards`.
@@ -9372,10 +9796,18 @@ when an estimate is approved and handed off in Fabrication Quoting (`/fabricatio
 | GET | `/supplier-scorecards/supplier-audits/` | List supplier audits | Yes |
 | POST | `/supplier-scorecards/supplier-audits/` | Create supplier audit | Admin / Manager |
 | PUT | `/supplier-scorecards/supplier-audits/{id}` | Update supplier audit | Admin / Manager |
-| GET | `/supplier-scorecards/approved-suppliers/` | List ASL entries | Yes |
-| GET | `/supplier-scorecards/approved-suppliers/{id}` | ASL entry detail | Yes |
-| POST | `/supplier-scorecards/approved-suppliers/` | Create ASL entry — **409** on a soft-deleted vendor (see note) | Admin / Manager |
-| PUT | `/supplier-scorecards/approved-suppliers/{id}` | Update ASL entry — **409** on `approval_status` / `approved_date` / `certifications_verified` while the vendor is soft-deleted (see note) | Admin / Manager |
+| GET | `/supplier-scorecards/approved-suppliers/` | List **legacy** ASL entries | Yes |
+| GET | `/supplier-scorecards/approved-suppliers/{id}` | **Legacy** ASL entry detail | Yes |
+| POST | `/supplier-scorecards/approved-suppliers/` | Create a **legacy** ASL entry — **409** on a soft-deleted vendor (see note). Not an MCP tool | Admin / Manager; **403** for an API token |
+| PUT | `/supplier-scorecards/approved-suppliers/{id}` | Update a **legacy** ASL entry — **409** on `approval_status` / `approved_date` / `certifications_verified` while the vendor is soft-deleted (see note). Not an MCP tool | Admin / Manager; **403** for an API token |
+
+> **The Approved Supplier List now lives on the vendor record** (migration `123`; see Purchasing →
+> *Approved Supplier List on the vendor record*). The four `approved-suppliers` routes above and the
+> `approved_supplier_list` table behind them are unchanged and kept as read-only history in practice:
+> the Supplier Scorecards page no longer reads or writes them, and `GET
+> .../supplier-scorecards/dashboard` → `reviews_due` now counts vendors whose ASL re-evaluation is
+> overdue or due within 30 days (Approved / Conditional / Customer Directed, live and active) instead
+> of legacy rows' `next_review_date`. The notes below describe those legacy routes.
 
 > ⚠️ **`POST .../calculate/{vendor_id}` was returning 500 in production, for two reasons.** The
 > `SupplierScorecard` insert omitted `TenantMixin`'s NOT NULL `company_id` — but the handler never
@@ -9491,7 +9923,7 @@ call per file (at most 2 concurrent) and one `create-from-upload` call per revie
 | POST | `/po-upload/upload-po` | Upload a PO document (`.pdf`/`.doc`/`.docx`, 10 MB cap; else **400**) — AI-extracts data for review before commit | Yes |
 | POST | `/po-upload/upload-quote` | Upload a vendor quote document — AI-extracts data to build a PO | Yes |
 | POST | `/po-upload/upload-invoice` | Legacy alias of `upload-quote` (same extraction behavior) | Yes |
-| POST | `/po-upload/create-from-upload` | Create the PO from the reviewed extraction — can create the vendor and missing parts. Part-number matching is **case-insensitive** and ignores surrounding whitespace: the same number repeated across lines / `create_parts` creates the part **once** (stored as the first occurrence's stripped form) and attaches every matching line to it; an active part already holding the number is reused, and a line with no `part_id` resolves by part number to an existing active part even when it isn't in `create_parts`. **400** if `line_items` is empty, the PO number already exists, a supplied `vendor_id` / line `part_id` doesn't exist in the active company **or is soft-deleted**, a line's part number matches no active part and isn't in `create_parts`, or a new part's number belongs to a **soft-deleted** part (restore it via `POST /parts/{id}/restore` or use a different number) | Admin / Manager / Supervisor |
+| POST | `/po-upload/create-from-upload` | Create the PO from the reviewed extraction — can create the vendor and missing parts. Part-number matching is **case-insensitive** and ignores surrounding whitespace: the same number repeated across lines / `create_parts` creates the part **once** (stored as the first occurrence's stripped form) and attaches every matching line to it; an active part already holding the number is reused, and a line with no `part_id` resolves by part number to an existing active part even when it isn't in `create_parts`. **400** if `line_items` is empty, the PO number already exists, a supplied `vendor_id` / line `part_id` doesn't exist in the active company **or is soft-deleted**, a line's part number matches no active part and isn't in `create_parts`, or a new part's number belongs to a **soft-deleted** part (restore it via `POST /parts/{id}/restore` or use a different number). **409** when the vendor is Disqualified on the Approved Supplier List, checked before any part is created; otherwise the response's `supplier_approval_warnings` lists the advisory ASL warnings, which the create audit row also records (see Purchasing → *Approved Supplier List on the vendor record*) | Admin / Manager / Supervisor |
 | GET | `/po-upload/pdf/{path}` | Serve the uploaded source document for preview (`s3://` refs and local paths) | Yes |
 | GET | `/po-upload/search-parts` | Part typeahead for extraction-review matching. `q` matches **part number, name, description, and customer part number** — every whitespace-separated term must appear, then results are ranked by similar-word score so a query like `raw material` surfaces `A36 Raw Material Sheet`. `limit` **1–50**, default 10 | Yes |
 | GET | `/po-upload/search-vendors` | Vendor typeahead for extraction-review matching (`q`, `limit` **1–50**, default 10) — active, **non-soft-deleted** vendors only | Yes |
@@ -11154,7 +11586,7 @@ day's OEE.
 | GET | `/downtime/by-work-center` | Resolved-event hours per work center | Yes |
 | GET | `/downtime/reason-codes` | Reason-code vocabulary (`category`, `active_only`) | Yes |
 | GET | `/downtime/{id}` | One event | Yes |
-| POST | `/downtime/` | Report (start) an event | Any role except Viewer |
+| POST | `/downtime/` | Report (start) an event. **409** when a maintenance work order already holds the machine down (its downtime event is open) — see the note below | Any role except Viewer |
 | POST | `/downtime/{id}/resolve` | Resolve: sets `end_time` (default now) and `duration_minutes` | Any role except Viewer |
 | PUT | `/downtime/{id}` | Correct an event after the fact | Admin / Manager / Supervisor |
 | POST | `/downtime/reason-codes` | Create a reason code | Admin / Manager / Supervisor |
@@ -11209,6 +11641,20 @@ There is no delete endpoint.
 > `planned_type` (NOT NULL columns) is **422**. A reason-code edit onto a code the tenant already has
 > is **400** `"Reason code already exists"`. Reason codes are unique per company (migration `116`),
 > so another tenant's identical code is accepted — see Calibration → `equipment_id` codes.
+
+> **Maintenance work orders open and close events too (migration `124`).** Starting a work-center
+> maintenance work order with `requires_shutdown` opens an event only when the machine has none open
+> (it adopts an operator's open event, or shares one another shutdown work order holds), and completing
+> or cancelling it resolves the event, hands it to a work order still holding the machine down, or —
+> for an adopted event on a cancel — hands it back to the machine still open — see Maintenance →
+> *Maintenance work order → downtime event*. Such an event carries `maintenance_work_order_id` in
+> `DowntimeEventResponse` (`null` on every other event); `PUT /downtime/{id}` cannot change it (it is
+> not in the allowlist). It can still be resolved here like any other event; the maintenance work
+> order then has nothing left to resolve and, on complete, records the resolved minutes. Create and
+> resolve here run through the same `app/services/downtime_service.py` helpers. One create rule is new:
+> `POST /downtime/` refuses **409** a report on a machine a maintenance work order is holding down
+> (*"{machine} is already down for maintenance work order {MWO} (downtime event DT-{id} is open), so
+> this stoppage is already being recorded. …"*) — a second open event would count the stoppage twice.
 
 ### Users (Admin)
 
@@ -12484,13 +12930,25 @@ saved independently, bad rows are skipped and reported in `errors[]`.
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| GET | `/import/templates` | List the 10 downloadable templates (entity, title, columns, download path) | Yes |
+| GET | `/import/templates` | List the 12 downloadable templates (entity, title, columns, download path) | Yes |
 | GET | `/import/templates/{entity}` | Download the styled XLSX template (`werco-import-template-{entity}.xlsx`); 404 lists valid entities | Yes |
 
-Template entities: `users`, `parts`, `materials`, `customers`, `vendors`, `work-centers`,
-`work-orders`, `purchase-orders`, `bom`, `routings`. Each workbook has an **Import** sheet (styled header + one
+Template entities: `users`, `parts`, `materials`, `customers`, `vendors`, `approved-supplier-list`,
+`work-centers`, `work-orders`, `purchase-orders`, `bom`, `routings`, `maintenance-schedules`. Each
+workbook has an **Import** sheet (styled header + one
 `# `-prefixed guidance row, skipped on import) and an **Examples** sheet (never read by the
-importer).
+importer). The `materials` template carries an optional `supply_scope` column (see
+[Part Schema](#part-schema)).
+
+> **Two preview / commit imports outside Import Center batches** (like the routing import): the
+> `approved-supplier-list` template feeds `POST /purchasing/vendors/asl-import/preview` / `/commit`
+> (an **update-only** load onto existing vendors — see Purchasing → *Approved Supplier List on the
+> vendor record*), and `maintenance-schedules` feeds `POST /maintenance/schedules/import/preview` /
+> `/commit` (see Maintenance → *PM schedule import*). Both commits require the preview's
+> `source_hash`, are all-or-nothing and write required audit rows. Both find a header row below a
+> title block (the first of the first 10 non-blank rows holding the import's key columns), and the ASL
+> import reads a sheet named *Approved Supplier List* when the workbook has one — the only two imports
+> that do either.
 
 **Entity imports** (all pre-existing; now accepting XLSX, a `dry_run` query param, and audit-logging
 every created row):
@@ -12501,7 +12959,7 @@ every created row):
 | POST | `/parts/import-csv` | `part_number`, `name`, `part_type` | Admin / Manager / Supervisor |
 | POST | `/materials/import-csv` | `part_number`, `name`, `part_type` | Admin / Manager / Supervisor |
 | POST | `/customers/import-csv` | `name` | Admin / Manager |
-| POST | `/purchasing/vendors/import-csv` | `name` | Admin / Manager |
+| POST | `/purchasing/vendors/import-csv` | `name` (a row named like a live Disqualified vendor is a row error; see Purchasing → *Approved Supplier List on the vendor record*) | Admin / Manager |
 | POST | `/work-centers/import-csv` | `code`, `name`, `work_center_type` | Admin / Manager |
 
 **Open-document migration imports** (new):
@@ -13672,19 +14130,23 @@ What matters from this file's point of view:
   routers with the caller's own bearer token. The router is the boundary: the same `require_role`
   gates, tenant scoping, audit rows, optimistic-locking 409s and per-endpoint size caps apply, and a
   401/403/409/422 comes back verbatim as an `is_error` tool result carrying the server's `detail`.
-- **The catalog is this API.** 756 tools are generated from `app.openapi()` at startup — every
+- **The catalog is this API.** 764 tools are generated from `app.openapi()` at startup — every
   secured operation except the `Authentication`, `Carrier Webhooks`, `Error Logging` (and its router-level `errors` twin) and `WebSocket` tags, the
   unauthenticated health/station-login routes (named one by one in `catalog.PUBLIC_OPERATIONS`) and
-  the nine operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders
+  the fourteen operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders
   (`POST /work-orders/import`, `POST /purchasing/purchase-orders/import` — they mint work orders
-  RELEASED / IN_PROGRESS and POs SENT, a record of a past system rather than a user action) and
+  RELEASED / IN_PROGRESS and POs SENT, a record of a past system rather than a user action),
   AI Accept & apply (`POST /ai/recommendations/{recommendation_id}/apply` — owner ruling 3: only a
   person signed in to the app runs an AI recommendation's action; the route also refuses API
-  tokens) and the two customer export-control writes (`POST /customers/{id}/contracts`,
+  tokens), the two customer export-control writes (`POST /customers/{id}/contracts`,
   `PUT /customers/{id}/contracts/{contract_id}` — only an Admin signed in to the app marks a
-  customer controlled) and the four company egress kill-switch writes (`PUT /companies/me/ai-egress`,
+  customer controlled), the four company egress kill-switch writes (`PUT /companies/me/ai-egress`,
   `PUT /companies/me/sms-egress`, `PUT /admin/settings/shipping-profile`, `PUT /receiving/print-profile`
-  — an egress switch is a person's judgment; the routes also refuse API tokens) — plus 15 fixed-name convenience tools that shadow 16
+  — an egress switch is a person's judgment; the routes also refuse API tokens), the three Approved
+  Supplier List writes (`PUT /purchasing/vendors/{vendor_id}/approval`,
+  `POST /purchasing/vendors/asl-import/preview` and `/commit` — a supplier-approval decision is a
+  person's judgment; the routes also refuse API tokens) and the two legacy `approved_supplier_list`
+  writes (`POST /supplier-scorecards/approved-suppliers/`, `PUT .../approved-suppliers/{asl_id}`) — plus 15 fixed-name convenience tools that shadow 16
   raw routes (`POST /work-orders/`, `PUT /work-orders/{id}`, `POST /work-orders/{id}/release`, the two
   nest-package imports, the manual nest add, `GET /search/`, …) to enforce agent rules the routes do
   not: create/duplicate always land DRAFT, release is a separate explicit tool and the generic update

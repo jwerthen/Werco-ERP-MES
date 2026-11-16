@@ -23,6 +23,7 @@ from app.schemas.part import PartCreate, PartResponse, PartUpdate
 from app.services.audit_service import AuditService
 from app.services.import_service import ImportFileError, parse_import_file
 from app.services.part_number_resolver import find_part_number_conflict
+from app.services.supplier_approval_service import parse_scope
 
 router = APIRouter()
 
@@ -193,6 +194,9 @@ async def import_materials_csv(
                     drawing_number=row.get("drawing_number") or None,
                 )
                 is_active = _parse_bool(row.get("is_active", ""), True)
+                # Optional ASL scope column (slug or QL 7.4 label). Not on PartCreate -- set on
+                # the row below -- so it stays a materials-import / PUT-only field.
+                supply_scope = parse_scope(row.get("supply_scope"))
             except (ValueError, ValidationError) as exc:
                 errors.append(PartCsvImportError(row=row_number, part_number=part_number or None, reason=str(exc)))
                 continue
@@ -206,6 +210,7 @@ async def import_materials_csv(
                 material = Part(**material_in.model_dump(), created_by=current_user.id)
                 material.company_id = company_id
                 material.is_active = is_active
+                material.supply_scope = supply_scope
                 material.status = row.get("status") or "active"
                 db.add(material)
                 db.flush()

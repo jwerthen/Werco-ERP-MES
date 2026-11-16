@@ -73,6 +73,12 @@ EGRESS_SWITCH_OPERATIONS: FrozenSet[Tuple[str, str]] = frozenset(
         ("PUT", "/api/v1/receiving/print-profile"),
     }
 )
+
+# And the Approved Supplier List writes (AS9100D 8.4): recording a supplier-approval
+# decision and loading the controlled QL 7.4 list are a named person's judgment, so they
+# are app actions only (the routes also refuse API tokens). The import preview goes with
+# its commit -- it exists only to feed one. Agents keep the reads: the re-evaluation-due
+# list and the supplier-approval check.
 EXCLUDED_OPERATIONS: FrozenSet[Tuple[str, str]] = (
     frozenset(
         {
@@ -81,6 +87,14 @@ EXCLUDED_OPERATIONS: FrozenSet[Tuple[str, str]] = (
             ("POST", "/api/v1/ai/recommendations/{recommendation_id}/apply"),
             ("POST", "/api/v1/customers/{customer_id}/contracts"),
             ("PUT", "/api/v1/customers/{customer_id}/contracts/{contract_id}"),
+            ("PUT", "/api/v1/purchasing/vendors/{vendor_id}/approval"),
+            ("POST", "/api/v1/purchasing/vendors/asl-import/preview"),
+            ("POST", "/api/v1/purchasing/vendors/asl-import/commit"),
+            # The legacy approved_supplier_list writes (read-only history since migration 123; the
+            # ASL lives on the vendor record): an approval an agent recorded there would contradict
+            # the vendor's own status, and nothing reads it. The two reads stay tools.
+            ("POST", "/api/v1/supplier-scorecards/approved-suppliers/"),
+            ("PUT", "/api/v1/supplier-scorecards/approved-suppliers/{asl_id}"),
         }
     )
     | EGRESS_SWITCH_OPERATIONS

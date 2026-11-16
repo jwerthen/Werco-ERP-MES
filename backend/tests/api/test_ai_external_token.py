@@ -57,6 +57,7 @@ from app.core.export_control import (
     ai_external_error_detail,
 )
 from app.core.security import create_api_token
+from app.core.time_utils import central_today
 from app.main import app
 from app.middleware.export_control import (
     CONDITIONAL_REQUEST_HEADERS,
@@ -70,6 +71,7 @@ from app.models.customer import Customer
 from app.models.downtime import DowntimeEvent
 from app.models.governance import ControlledAccessEvent, CustomerContract
 from app.models.inventory import InventoryTransaction
+from app.models.maintenance import MaintenanceAsset, MaintenanceWorkOrder
 from app.models.operational_event import OperationalEvent
 from app.models.part import Part
 from app.models.quality import NonConformanceReport
@@ -197,6 +199,8 @@ CANARY_CASES: Dict[Tuple[str, str], Tuple[UrlFor, bool]] = {
     ("GET", "/quotes/{quote_id}"): (_url("/quotes/{quote_id}"), True),
     ("GET", "/purchasing/vendors"): (_url("/purchasing/vendors"), False),
     ("GET", "/purchasing/vendors/{vendor_id}"): (_url("/purchasing/vendors/{vendor_id}"), False),
+    # Primed: the vendor's re-evaluation is overdue and its ASL notes name the ITAR part number.
+    ("GET", "/purchasing/vendors/reevaluation-due"): (_url("/purchasing/vendors/reevaluation-due"), True),
     ("GET", "/purchasing/purchase-orders"): (_url("/purchasing/purchase-orders"), False),
     ("GET", "/purchasing/purchase-orders/{po_id}"): (_url("/purchasing/purchase-orders/{po_id}"), True),
     ("GET", "/receiving/history"): (_url("/receiving/history"), True),
@@ -227,6 +231,19 @@ def _open_itar_downtime(db: Session, w: World) -> DowntimeEvent:
     return event
 
 
+def _vendor_reevaluation_overdue(db: Session, w: World) -> None:
+    """Put the seed vendor on the overdue re-evaluation list (P2.2) with ASL notes a person typed
+    naming the controlled part number. The vendor is reference data -- cleared, served in full --
+    so only the residual text pass stands between that part number and the token."""
+    vendor = w.vendor
+    vendor.approval_status = "approved"
+    vendor.approved_scopes = ["machining"]
+    vendor.approval_bases = ["as9100"]
+    vendor.reevaluation_due = central_today() - timedelta(days=30)
+    vendor.approval_notes = f"Approved for {w.itar_part.part_number} machining"
+    db.commit()
+
+
 # The status an AI-external token gets where it is not 200. A by-number part lookup that
 # finds a WITHHELD part answers the same 404 a number nobody carries gets: a 200, even
 # fully redacted, would confirm the probed part number exists (code review P0, finding 1).
@@ -246,6 +263,7 @@ NUMERIC_CANARY_ROUTES = (
 # downtime events are resolved, so without this /downtime/active would be empty -- a vacuous case).
 CANARY_PRIMERS: Dict[Tuple[str, str], Callable[[Session, World], Any]] = {
     ("GET", "/downtime/active"): _open_itar_downtime,
+    ("GET", "/purchasing/vendors/reevaluation-due"): _vendor_reevaluation_overdue,
 }
 
 
@@ -1256,6 +1274,135 @@ class TestProductionCalendar:
         assert (after["version"], after["production_day_start"]) == (saved["version"], "05:00"), "nothing changed"
 
 
+class TestSupplierApprovalAndEquipmentAssets:
+    """The Approved Supplier List and equipment-asset fields (P2.2 / P2.3) on routes the plugin
+    reads. A purchase order's ASL warnings name a part, so inside a WITHHELD order they are
+    withheld with it; the vendor's ASL record and the maintenance asset fields are reference
+    data with no customer linkage and pass in full; the supplier-approval check is a POST, so no
+    read-only token reaches it."""
+
+    @staticmethod
+    def _scope_mismatch(db: Session, w: World) -> None:
+        """The vendor is Approved for machining only; both PO parts are bought for plating, so
+        each PO carries a ``scope_not_approved`` warning naming its part."""
+        w.vendor.approval_status = "approved"
+        w.vendor.approved_scopes = ["machining"]
+        w.itar_part.supply_scope = "special_process_plating_coating"
+        w.clear_part.supply_scope = "special_process_plating_coating"
+        db.commit()
+
+    def test_a_withheld_purchase_order_withholds_its_supplier_approval_warnings(
+        self, client: TestClient, db_session: Session, world: World, ai_token, auth_headers: dict
+    ):
+        self._scope_mismatch(db_session, world)
+        part_number = world.itar_part.part_number
+        url = f"{API}/purchasing/purchase-orders/{world.itar_po.id}"
+
+        person = client.get(url, headers=auth_headers)
+        assert person.status_code == 200, person.text[:400]
+        (person_warning,) = [
+            w for w in person.json()["supplier_approval_warnings"] if w["code"] == "scope_not_approved"
+        ]
+        assert person_warning["part_number"] == part_number and part_number in person_warning["message"], "vacuous"
+
+        _id, token = ai_token
+        redacted = client.get(url, headers=bearer(token))
+        assert redacted.status_code == 200, redacted.text[:400]
+        assert part_number.encode() not in redacted.content and part_number.lower().encode() not in redacted.content
+        assert not contains_canary(redacted.content), redacted.text[:800]
+        body = redacted.json()
+        assert body["export_controlled"] is True
+        (warning,) = [w for w in body["supplier_approval_warnings"] if w.get("part_id") == world.itar_part.id]
+        assert warning["export_controlled"] is True
+        for key in ("code", "message", "part_number"):
+            assert warning[key] == REDACTED_VALUE, key
+        # The person still gets everything.
+        assert contains_canary(client.get(url, headers=auth_headers).content)
+
+    def test_a_cleared_purchase_orders_warnings_pass_in_full(
+        self, client: TestClient, db_session: Session, world: World, ai_token
+    ):
+        self._scope_mismatch(db_session, world)
+        _id, token = ai_token
+        response = client.get(f"{API}/purchasing/purchase-orders/{world.clear_po.id}", headers=bearer(token))
+        assert response.status_code == 200, response.text[:400]
+        (warning,) = [w for w in response.json()["supplier_approval_warnings"] if w["code"] == "scope_not_approved"]
+        assert warning["part_number"] == world.clear_part.part_number
+        assert world.clear_part.part_number in warning["message"] and "export_controlled" not in warning
+
+    def test_the_vendors_asl_record_is_reference_data_served_in_full(
+        self, client: TestClient, db_session: Session, world: World, ai_token, auth_headers: dict
+    ):
+        _vendor_reevaluation_overdue(db_session, world)
+        _id, token = ai_token
+        for url in (
+            f"{API}/purchasing/vendors/{world.vendor.id}",
+            f"{API}/purchasing/vendors/reevaluation-due",
+        ):
+            response = client.get(url, headers=bearer(token))
+            assert response.status_code == 200, (url, response.text[:400])
+            body = response.json()
+            row = body if isinstance(body, dict) else next(v for v in body if v["id"] == world.vendor.id)
+            assert row["approval_status"] == "approved"
+            assert row["approved_scopes"] == ["machining"] and row["approval_bases"] == ["as9100"]
+            assert row["reevaluation_due"] == world.vendor.reevaluation_due.isoformat()
+            assert "export_controlled" not in row
+            # The ASL notes stay -- only the controlled part number they name is scrubbed.
+            assert row["approval_notes"] == f"Approved for {REDACTED_VALUE} machining"
+            if "days_overdue" in row:
+                assert row["days_overdue"] == 30
+        assert _events(db_session, action="ai_external_redacted") == [], "a vendor is never a withheld record"
+
+    def test_an_asset_targeted_maintenance_work_order_is_served_in_full(
+        self, client: TestClient, db_session: Session, world: World, ai_token
+    ):
+        asset = MaintenanceAsset(
+            asset_tag="FORK-02", name="Yard forklift", asset_type="forklift", company_id=world.company_id
+        )
+        db_session.add(asset)
+        db_session.flush()
+        mwo = MaintenanceWorkOrder(
+            asset_id=asset.id,
+            wo_number="MWO-ASSET-1",
+            title="Mast chain lube",
+            scheduled_date=datetime.utcnow().date(),
+            company_id=world.company_id,
+        )
+        db_session.add(mwo)
+        db_session.commit()
+
+        _id, token = ai_token
+        listed = client.get(f"{API}/maintenance/work-orders?asset_id={asset.id}", headers=bearer(token))
+        assert listed.status_code == 200, listed.text[:400]
+        (row,) = listed.json()
+        assert (row["id"], row["asset_id"], row["asset_tag"], row["asset_name"]) == (
+            mwo.id,
+            asset.id,
+            "FORK-02",
+            "Yard forklift",
+        )
+        assert row["target_type"] == "asset" and row["work_center_id"] is None and "export_controlled" not in row
+        single = client.get(f"{API}/maintenance/work-orders/{mwo.id}", headers=bearer(token))
+        assert single.status_code == 200 and single.json()["asset_tag"] == "FORK-02"
+        assert _events(db_session, action="ai_external_redacted") == []
+
+    @pytest.mark.parametrize("ai_external", [True, False], ids=["ai-external", "read-only"])
+    def test_the_supplier_approval_check_is_a_post_no_read_only_token_reaches(
+        self, client: TestClient, world: World, admin_headers: dict, viewer: User, ai_external: bool
+    ):
+        _id, token = issue_token(client, admin_headers, viewer, scope="read_only", ai_external=ai_external)
+        payload = {"vendor_id": world.vendor.id, "part_ids": [world.itar_part.id]}
+        refused = client.post(f"{API}/purchasing/supplier-approval-check", json=payload, headers=bearer(token))
+        assert refused.status_code == 403, refused.text[:400]
+        assert refused.json() == {"detail": READ_ONLY_ROUTE_WRITES_DETAIL}
+        assert not contains_canary(refused.content)
+        # A person's session still runs it.
+        assert (
+            client.post(f"{API}/purchasing/supplier-approval-check", json=payload, headers=admin_headers).status_code
+            == 200
+        )
+
+
 # --------------------------------------------------------------------------- file bytes
 
 
@@ -1558,6 +1705,8 @@ class TestFilterOracles:
             "/oee/records?shift_id=1&limit=5",
             "/production-calendar/resolve?at=2026-11-10T12:00:00Z",
             "/quality/fai/log?status=pending&limit=5&offset=0&start_date=2026-01-01&end_date=2026-12-31",
+            "/maintenance/work-orders?asset_id=1&status=scheduled",
+            "/purchasing/vendors/reevaluation-due?within_days=30&include_inactive=true",
         ],
     )
     def test_filters_over_kept_fields_still_work(self, client: TestClient, world: World, ai_token, query: str):

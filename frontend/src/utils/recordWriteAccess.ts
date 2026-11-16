@@ -32,3 +32,7 @@ export const canExportRecords = (actor: Actor): boolean => hasWriteRole(actor, [
 export const canEditProductionCalendar = (actor: Actor): boolean => hasWriteRole(actor, ['admin']);
 export const canSyncWorkingCalendars = (actor: Actor): boolean =>
   hasWriteRole(actor, ['admin', 'manager', 'supervisor']);
+// Supplier scorecard and supplier audit writes (create / update / auto-calculate) — mirrors the
+// require_role([ADMIN, MANAGER]) on backend/app/api/endpoints/supplier_scorecards.py. The page is
+// also open to Quality (it owns the ASL tab), which reads these but cannot write them.
+export const canManageSupplierScorecards = (actor: Actor): boolean => hasWriteRole(actor, ['admin', 'manager']);

@@ -407,6 +407,53 @@ class TestClosedVocabularyStrings:
         assert redact_payload({"work_order_id": 1, key: 330}, _index()).payload[key] == 330
 
 
+class TestSupplierApprovalAndAssetFields:
+    """The P2.2 / P2.3 fields, classified. A purchase-order ASL warning carries ``part_id``, so it
+    is judged by its part like any record (and withheld with a withheld order); the vendor's ASL
+    record and the asset fields are reference data that only matter inside a withheld record,
+    where the closed-vocabulary slugs and free text are withheld like any text, the status and
+    dates stay, and ``days_overdue`` is a count of days."""
+
+    def test_a_warning_naming_a_controlled_part_is_withheld_on_its_own(self):
+        warning = {"code": "scope_not_approved", "message": "not approved (part PN-SECRET-10)", "part_id": 10}
+        out = redact_payload({"id": 2, "supplier_approval_warnings": [warning]}, _index()).payload
+        (withheld,) = out["supplier_approval_warnings"]
+        assert withheld == {"code": R, "message": R, "part_id": 10, REDACTED_MARKER_KEY: True}
+
+    def test_a_vendor_level_warning_inside_a_withheld_order_is_withheld_with_it(self):
+        order = {"id": 1, "work_order_id": 1, "supplier_approval_warnings": [{"code": "vendor_not_on_asl"}]}
+        (warning,) = redact_payload(order, _index()).payload["supplier_approval_warnings"]
+        assert warning == {"code": R, REDACTED_MARKER_KEY: True}
+
+    def test_asl_and_asset_fields_inside_a_withheld_record(self):
+        record = {
+            "work_order_id": 1,
+            "approval_status": "approved",
+            "approved_scopes": ["machining"],
+            "approval_bases": ["as9100"],
+            "reevaluation_due": "2026-01-15",
+            "last_performance_evaluation": "2025-12-01",
+            "approval_notes": "free text",
+            "supply_scope": "special_process_plating_coating",
+            "days_overdue": 12,
+            "asset_id": 4,
+            "asset_tag": "FORK-02",
+            "asset_name": "Yard forklift",
+        }
+        out = redact_payload(record, _index()).payload
+        kept = ("approval_status", "reevaluation_due", "last_performance_evaluation", "days_overdue", "asset_id")
+        for key in kept:
+            assert out[key] == record[key], key
+        assert out["approved_scopes"] == [R] and out["approval_bases"] == [R]
+        for key in ("approval_notes", "supply_scope", "asset_tag", "asset_name"):
+            assert out[key] == R, key
+        assert kept_numeric_key("days_overdue") is True
+
+    def test_a_cleared_vendor_passes_untouched(self):
+        vendor = {"id": 3, "name": "Plain Plating", "approval_status": "conditional", "approved_scopes": ["hardware"]}
+        assert redact_payload(vendor, _index()).payload == vendor
+
+
 class TestIdentification:
     @pytest.mark.parametrize(
         "record,expected",

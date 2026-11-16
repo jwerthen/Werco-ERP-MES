@@ -17,8 +17,9 @@ from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import WorkOrder
 from app.schemas.base import UTCModel
+from app.services import downtime_service
 from app.services.audit_service import AuditService
-from app.services.operational_event_service import OperationalEventService
+from app.services.downtime_service import event_identifier as _event_identifier
 from app.services.production_calendar_service import load_production_calendar
 
 router = APIRouter()
@@ -158,6 +159,8 @@ class DowntimeEventResponse(UTCModel):
     id: int
     work_center_id: int
     work_order_id: Optional[int] = None
+    # Set when a maintenance work order opened or adopted this event (migration 124).
+    maintenance_work_order_id: Optional[int] = None
     start_time: datetime
     end_time: Optional[datetime] = None
     duration_minutes: Optional[float] = None
@@ -283,10 +286,6 @@ def _changed_ref(update_data: dict, field: str, current: Optional[int]) -> Optio
     if field not in update_data or update_data[field] == current:
         return None
     return update_data[field]
-
-
-def _event_identifier(event: DowntimeEvent) -> str:
-    return f"DT-{event.id}"
 
 
 def _event_audit_values(event: DowntimeEvent) -> dict:
@@ -590,39 +589,37 @@ def create_downtime_event(
 ):
     """Start a new downtime event. **Role: any tenant role except VIEWER.**
 
-    ``work_center_id`` and ``work_order_id`` must belong to the active company (404).
+    ``work_center_id`` and ``work_order_id`` must belong to the active company (404). **409**
+    when a maintenance work order already has the machine shut down: its downtime event is
+    open and records this stoppage, and a second open event would count it twice in every
+    downtime total. It ends when that work order is completed or cancelled.
     """
     _assert_event_refs_in_company(db, company_id, work_center_id=data.work_center_id, work_order_id=data.work_order_id)
-    event = DowntimeEvent(
+    held = downtime_service.maintenance_hold_on_machine(db, company_id, data.work_center_id)
+    if held is not None:
+        held_event, holder = held
+        machine = holder.work_center.code if holder.work_center is not None else "This machine"
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{machine} is already down for maintenance work order {holder.wo_number} (downtime event "
+                f"{_event_identifier(held_event)} is open), so this stoppage is already being recorded. It ends "
+                "when that work order is completed or cancelled."
+            ),
+        )
+    event = downtime_service.open_downtime_event(
+        db,
+        company_id=company_id,
         work_center_id=data.work_center_id,
-        work_order_id=data.work_order_id,
-        start_time=data.start_time or datetime.utcnow(),
+        reported_by=current_user.id,
+        audit=audit,
+        start_time=data.start_time,
         category=data.category,
         planned_type=data.planned_type,
         reason_code=data.reason_code,
         description=data.description,
-        reported_by=current_user.id,
+        work_order_id=data.work_order_id,
     )
-    event.company_id = company_id
-    db.add(event)
-    db.flush()
-    OperationalEventService(db).emit_best_effort(
-        company_id=company_id,
-        event_type="downtime_started",
-        source_module="downtime",
-        entity_type="downtime_event",
-        entity_id=event.id,
-        work_order_id=event.work_order_id,
-        user_id=current_user.id,
-        severity="medium" if data.planned_type == DowntimePlannedType.UNPLANNED else "info",
-        event_payload={
-            "work_center_id": event.work_center_id,
-            "category": data.category.value if hasattr(data.category, "value") else data.category,
-            "planned_type": data.planned_type.value if hasattr(data.planned_type, "value") else data.planned_type,
-            "reason_code": data.reason_code,
-        },
-    )
-    audit.log_create("downtime_event", event.id, _event_identifier(event), new_values=event)
     db.commit()
 
     # Reload with relationships
@@ -695,39 +692,15 @@ def resolve_downtime_event(
     if end_time <= event.start_time:
         raise HTTPException(status_code=400, detail="End time must be after start time")
 
-    event.end_time = end_time
-    event.duration_minutes = round((end_time - event.start_time).total_seconds() / 60.0, 2)
-    event.resolved_by = current_user.id
-    if data.resolution:
-        event.resolution = data.resolution
-
-    OperationalEventService(db).emit_best_effort(
+    # Module-qualified: this handler's own name shadows the helper's.
+    downtime_service.resolve_downtime_event(
+        db,
+        event,
         company_id=company_id,
-        event_type="downtime_resolved",
-        source_module="downtime",
-        entity_type="downtime_event",
-        entity_id=event.id,
-        work_order_id=event.work_order_id,
-        user_id=current_user.id,
-        severity="info",
-        event_payload={
-            "work_center_id": event.work_center_id,
-            "duration_minutes": event.duration_minutes,
-            "resolution": event.resolution,
-        },
-    )
-    audit.log_status_change(
-        "downtime_event",
-        event.id,
-        _event_identifier(event),
-        old_status="active",
-        new_status="resolved",
-        description=f"Resolved downtime event {_event_identifier(event)}",
-        extra_data={
-            "end_time": end_time.isoformat(),
-            "duration_minutes": event.duration_minutes,
-            "resolution": event.resolution,
-        },
+        resolved_by=current_user.id,
+        end_time=end_time,
+        audit=audit,
+        resolution=data.resolution,
     )
     db.commit()
 

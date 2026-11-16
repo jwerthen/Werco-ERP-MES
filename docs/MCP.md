@@ -2,8 +2,8 @@
 
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
-(Cursor, Claude Code, a chat bot) gets **771 tools** — 15 hand-written *convenience* tools plus
-**756 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+(Cursor, Claude Code, a chat bot) gets **779 tools** — 15 hand-written *convenience* tools plus
+**764 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
 as the same request from the web app. A **read-only** API token is shown fewer tools, and an
 **AI-external** one fewer still (§4.1, §4.2).
 
@@ -31,6 +31,14 @@ read-only catalog is unchanged at 8 convenience + 292 generated (the four are wr
 `export_fai_log`; no existing name shifted): 15 convenience + **756** generated, 16 shadowed. The
 read-only catalog is 8 convenience + **294** generated: `list_fai_log` and `get_car_pdf` are reads,
 though a read-only token calling `get_car_pdf` is still refused the PDF bytes (§4.1).
+**Re-checked again on 2026-11-15 after the Approved Supplier List and equipment-asset / PM-import
+routes (P2b) merged on top.** They add ten tools (the asset CRUD and history, the PM import preview /
+commit, `list_vendors_reevaluation_due` and `check_supplier_approval`) while the three ASL writes and
+the two legacy `approved_supplier_list` writes join `EXCLUDED_OPERATIONS` (§6.1); no existing name
+shifted: 15 convenience + **764** generated, 16 shadowed. The read-only catalog is 8 convenience +
+**298** generated (the four new reads: `list_maintenance_assets`, `get_maintenance_asset`,
+`get_maintenance_asset_history`, `list_vendors_reevaluation_due`; `check_supplier_approval` is a
+`POST`, so it is not among them).
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
 `backend/tests/test_mcp_docs_names.py` checks every tool name this file, `CLAUDE.md` and `API.md`
@@ -223,13 +231,13 @@ routes authenticate every call; in IN-PROCESS mode it uses the real `ErpTokenVer
  "generated_tools":   [{"name": "...", "method": "GET", "path": "/api/v1/...", "tag": "...",
                         "function": "...", "annotations": {...}, "deprecated": false}],
  "shadowed_operations": [["GET", "/api/v1/inventory/"], ...],
- "counts": {"convenience": 15, "generated": 756, "shadowed": 16}
+ "counts": {"convenience": 15, "generated": 764, "shadowed": 16}
 }
 ```
 
 `--print-catalog --read-only` prints the same keys filtered to what a read-only token is shown
 (tools that only read, under no tag in `WERCO_MCP_READ_ONLY_DENY_TAGS`), with the counts
-recomputed (`"convenience": 8, "generated": 294` on 2026-11-15), plus `"scope": "read_only"` and
+recomputed (`"convenience": 8, "generated": 298` on 2026-11-15), plus `"scope": "read_only"` and
 the `"deny_tags"` applied. Without `--read-only` the output is the full catalog with the keys
 above, as before. There is no flag for the AI-external catalog; §4.2 lists it.
 
@@ -462,7 +470,7 @@ introspect its own user.
   - a denied tag gets **403** `"Read-only API token cannot access this resource."`;
   - a request that matches no route fails closed with that same 403.
 - **The MCP door** narrows `tools/list` to the tools that only read and carry no denied tag. On
-  2026-11-15 that is 8 convenience + 294 generated tools; `--print-catalog --read-only` prints
+  2026-11-15 that is 8 convenience + 298 generated tools; `--print-catalog --read-only` prints
   them. Calling any other tool by name answers, **before argument validation or dispatch**:
   - **403** `"Read-only API token: this tool writes."` for a tool that writes; the write check
     comes first, so a writing tool under a denied tag gets this text;
@@ -530,10 +538,10 @@ three more rules:
    extraction and the connector: turn it on only once the empowered official has cleared it.
    Only an Admin signed in to the app flips it: `PUT /companies/me/ai-egress` refuses every API
    token **403** and is not a tool (§6.1), so no agent can open — or close — its own connector.
-2. **Only the allowlisted reads.** The token may call only the 47 `GET` routes in
+2. **Only the allowlisted reads.** The token may call only the 48 `GET` routes in
    `app/core/export_control.py` → `AI_EXTERNAL_ALLOWED_ROUTES`. Any other route answers **403**
    `"This resource is not available to an AI-external API token."` at the API, and the same text
-   at the door when a tool is called by name. Its `tools/list` holds exactly these 47 tools.
+   at the door when a tool is called by name. Its `tools/list` holds exactly these 48 tools.
    Convenience tools are included only when every route they can call is allowlisted, so
    `search`, `get_shop_floor_dashboard` and `list_inventory` are out:
 
@@ -547,11 +555,11 @@ three more rules:
    | Parts and routings | `list_parts`★, `get_part`, `get_part_by_number`, `list_routings`, `get_routing`, `get_routing_by_part` |
    | Quality | `list_quality_ncrs`★, `get_ncr`, `list_cars`, `get_car`, `list_fais`, `get_fai`, `list_fai_log` (each log row judged like the FAI it names; not `get_car_pdf`: file bytes) |
    | Quotes | `quotes_list_quotes`, `quotes_get_quote` |
-   | Purchasing and receiving | `list_purchase_orders`★, `get_purchase_order`, `list_vendors`, `get_vendor`, `get_receiving_history`, `get_receipt_detail` |
+   | Purchasing and receiving | `list_purchase_orders`★, `get_purchase_order`, `list_vendors`, `list_vendors_reevaluation_due`, `get_vendor`, `get_receiving_history`, `get_receipt_detail` (a withheld order's `supplier_approval_warnings` are withheld with it; `check_supplier_approval` is a `POST`, so not here) |
    | Maintenance work orders | `preventive_maintenance_list_work_orders`, `get_overdue_work_orders`, `preventive_maintenance_get_work_order` |
    | Production calendar | `get_production_calendar`, `resolve_production_moment` (reference data: always served in full) |
 
-   (★ = convenience tool; 5 convenience + 42 generated.) Adding a route needs a canary conformance
+   (★ = convenience tool; 5 convenience + 43 generated.) Adding a route needs a canary conformance
    test, and CI fails without one. **Filters are narrowed too:** each route accepts only the query
    parameters in `AI_EXTERNAL_QUERY_PARAMS` — free-text `search`, the `customer` filter and
    `sort` / `group` by part or customer are refused **403** `"This query parameter is not
@@ -608,7 +616,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `TvPair` (`/tv`) | Authentication (display tokens) | *No tool* — the `Authentication` tag is excluded on purpose; issue/revoke display tokens from the UI (`WALLBOARD.md`) |
 | `WorkCenters` (`/work-centers`) | Work Centers | `list_work_centers`★, `create_work_center`, `update_work_center`, `update_work_center_status`, `delete_work_center`, `list_work_center_types` |
 | `Scheduling` (`/scheduling`) | Scheduling, Work Centers, Work Orders | `get_scheduled_jobs`, `schedule_work_order`, `schedule_work_order_earliest`, `run_scheduling`, `get_capacity_heatmap`, `get_scheduling_conflicts`, `unschedule_work_order` |
-| `Maintenance` (`/maintenance`) | Preventive Maintenance | `list_schedules`, `create_schedule`, `preventive_maintenance_list_work_orders`, `preventive_maintenance_create_work_order`, `preventive_maintenance_complete_work_order`, `get_calendar` |
+| `Maintenance` (`/maintenance`) | Preventive Maintenance | `list_schedules`, `create_schedule`, `preventive_maintenance_list_work_orders`, `preventive_maintenance_create_work_order`, `preventive_maintenance_start_work_order`, `preventive_maintenance_complete_work_order`, `get_calendar`, `list_maintenance_assets`, `create_maintenance_asset`, `update_maintenance_asset`, `retire_maintenance_asset`, `get_maintenance_asset_history`, `preview_pm_schedule_import`, `commit_pm_schedule_import` |
 | `DowntimeTracking` (`/downtime`) | Downtime Tracking, Work Centers | `list_downtime_events`, `create_downtime_event`, `resolve_downtime_event`, `get_downtime_summary`, `list_reason_codes` |
 | `OEE` (`/oee`) | OEE Tracking, Work Centers, Production Calendar | `get_oee_dashboard`, `list_oee_records`, `get_oee_trends`, `auto_calculate_oee`, `get_six_big_losses`, `get_production_calendar` (the shift choices: OEE writes name a defined shift by its id, and a record's date is a production day) |
 | `JobCosting` (`/job-costing`) | Job Costing, Work Orders | `list_job_costs`, `get_job_cost`, `get_summary`, `add_entry` (incl. subcontract entries), `calculate_costs`, `variance_report` |
@@ -628,9 +636,9 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `Receiving` (`/receiving`) | Receiving & Inspection, Purchasing | `get_open_purchase_orders`, `receive_material`, `get_inspection_queue`, `inspect_receipt`, `correct_receipt`, `void_receipt`, `print_receiving_label` |
 | `Shipping` (`/shipping`) | Shipping | `get_ready_to_ship`, `create_shipment`, `mark_shipped`, `rate_shop`, `buy_label`, `get_tracking`, `issue_certificate_of_conformance` |
 | `MRP` (`/mrp`) | Material Requirements Planning | `create_mrp_run`, `get_latest_mrp_run`, `get_mrp_actions`, `get_current_shortages`, `process_mrp_action` |
-| `Purchasing` (`/purchasing`) | Purchasing, Parts, Documents | `list_purchase_orders`★, `get_purchase_order`, `create_purchase_order`, `add_po_line`, `send_purchase_order`, `list_vendors`, `create_vendor`, `restore_vendor` |
+| `Purchasing` (`/purchasing`) | Purchasing, Parts, Documents | `list_purchase_orders`★, `get_purchase_order`, `create_purchase_order`, `add_po_line`, `send_purchase_order`, `list_vendors`, `create_vendor`, `restore_vendor`, `check_supplier_approval` (the Create PO screen's Approved Supplier List check) |
 | `POUpload` (`/po-upload`) | PO Upload | `upload_and_extract_po`, `upload_and_extract_quote`, `upload_and_extract_invoice`, `create_po_from_upload`, `search_vendors` |
-| `SupplierScorecards` (`/supplier-scorecards`) | Supplier Scorecards | `list_scorecards`, `scorecard_dashboard`, `auto_calculate_scorecard`, `create_audit`, `list_approved_suppliers` |
+| `SupplierScorecards` (`/supplier-scorecards`) | Supplier Scorecards, Purchasing | `list_scorecards`, `scorecard_dashboard`, `auto_calculate_scorecard`, `create_audit`, `list_vendors`, `list_vendors_reevaluation_due` — the Approved Supplier List tab reads the vendor record; recording an approval and the ASL import (`PUT /purchasing/vendors/{vendor_id}/approval`, `POST /purchasing/vendors/asl-import/preview`, `/commit`) are deliberately **not** tools (§6.1), and neither are the legacy table's two writes. `list_approved_suppliers` still reads the legacy table the page no longer uses |
 | `Traceability` (`/traceability`) | Traceability | `search_lots`, `trace_lot`, `trace_serial` |
 | `Quotes` (`/quotes`) | Quotes, Parts | `quotes_list_quotes`, `quotes_get_quote`, `quotes_update_quote`, `quotes_send_quote`, `generate_quote_pdf`, `get_conversion_plan`, `convert_to_work_order` |
 | `FabricationQuoting` (`/fabrication-quotes`) | Fabrication Quoting | `fabrication_quoting_list_quotes`, `fabrication_quoting_create_quote`, `fabrication_quoting_get_quote`, `fabrication_quoting_update_quote`, `calculate`, `fabrication_quoting_approve_quote`, `fabrication_quoting_revise_quote`, `fabrication_quoting_handoff_quote`, `export_package` |
@@ -683,7 +691,7 @@ minus two further, named sets:
   They are listed **by name** rather than skipped silently, so a new route that forgets its
   `security` dependency — even under a tag that already has tools — fails the coverage guard
   (`catalog.unaccounted_operations`, §14) until it is either secured or named there.
-- **`EXCLUDED_OPERATIONS`** — nine operations, none with a convenience twin:
+- **`EXCLUDED_OPERATIONS`** — fourteen operations, none with a convenience twin:
   - The two Excel-cutover loaders, `POST /work-orders/import` and
     `POST /purchasing/purchase-orders/import` (`migration_import_service`). They record a *past*
     system's state rather than perform a user action: the work-order loader mints work orders
@@ -716,6 +724,17 @@ minus two further, named sets:
     writes — the exclusion closes the door a person's own JWT would leave open through a tool. The
     two profile routes are their switches' only writers, so they are out whole; their reads
     (`get_shipping_profile`, `get_print_profile`) stay tools.
+  - The three **Approved Supplier List** writes: `PUT /purchasing/vendors/{vendor_id}/approval`,
+    `POST /purchasing/vendors/asl-import/preview` and `POST /purchasing/vendors/asl-import/commit`.
+    Recording a supplier-approval decision and loading the controlled QL 7.4 list (AS9100D 8.4) are
+    a named person's judgment, so they are app actions only; the preview goes with its commit, which
+    it exists to feed. The routes also refuse API tokens (403) on their own. Agents keep the reads:
+    `list_vendors_reevaluation_due` and `check_supplier_approval`. The two **legacy**
+    `approved_supplier_list` writes (`POST /supplier-scorecards/approved-suppliers/`, `PUT
+    .../approved-suppliers/{asl_id}`) are excluded with them — that table is read-only history since
+    migration 123, and an approval an agent recorded there would contradict the vendor's own status;
+    both routes refuse API tokens too, and `list_approved_suppliers` / `get_approved_supplier` stay. See
+    [API.md → Purchasing](API.md#purchasing) → *Approved Supplier List on the vendor record*.
 
 The `Import Batches` tag also excludes the recoverable Import Center review, receipt,
 correction and commit routes. These wrap the same cutover loaders, including their
@@ -723,8 +742,9 @@ historical status transitions, so exposing a generic batch commit would reopen t
 excluded-loader path. File correction and credential input stay in Import Center.
 
 On the commit that shipped API tokens: 706 operations, 689 secured, 680 candidates, 16 shadowed
-(§8), 2 excluded → **662 generated tools**. On 2026-11-15, with nine excluded and the CAR form /
-FAI log routes added: **756 generated tools** (`--print-catalog` `counts`).
+(§8), 2 excluded → **662 generated tools**. On 2026-11-15, with fourteen excluded and the CAR form /
+FAI log, Approved Supplier List and equipment-asset / PM-import routes added: **764 generated tools**
+(`--print-catalog` `counts`).
 
 ### 6.2 Naming and the collision policy (`app/mcp/naming.py`)
 
@@ -885,7 +905,8 @@ Every other operation stays generated — including the neighbours of the shadow
 (`work_orders_start_work_order`, `work_orders_update_operation`, `preview_laser_nest_package_import`,
 `get_work_order_by_number`, `update_laser_nest`, `get_inventory_summary`, `get_purchase_order`, …) —
 except the operations in `EXCLUDED_OPERATIONS` (§6.1) — the two cutover loaders, AI Accept &
-apply, the two customer export-control writes and the four egress kill-switch writes — which have no tool and no replacement. Adding a convenience tool whose route is *not* in the shadow set is a build error
+apply, the two customer export-control writes, the four egress kill-switch writes, the three Approved Supplier
+List writes and the two legacy ASL-table writes — which have no tool and no replacement. Adding a convenience tool whose route is *not* in the shadow set is a build error
 (`build_registry` refuses a duplicate name) rather than a silent win.
 
 ---
@@ -1230,7 +1251,9 @@ count, in which case there is nothing left to close.
   - `backend/tests/test_mcp_catalog.py` (no DB) — membership against the live `app.openapi()` (every
     secured, unshadowed, unexcluded operation is exactly one tool; `PUBLIC_OPERATIONS` names exactly
     the unsecured routes; `EXCLUDED_OPERATIONS` are exactly the two loaders, the AI apply route,
-    the two customer export-control writes and the four egress kill-switch writes, and the record-only accept stays a tool), names (unique, wire-valid,
+    the two customer export-control writes, the four egress kill-switch writes, the three Approved
+    Supplier List writes and the two legacy ASL-table writes, and the record-only accept stays a tool),
+    names (unique, wire-valid,
     ≤ 64, collisions prefixed, the numeric-suffix fallback proven on synthetic input and unused on
     the live catalog), schemas (`$ref`-free, `additionalProperties: false`, every JSON body's
     property set equal to the document's — the `title` field included), and the two convenience

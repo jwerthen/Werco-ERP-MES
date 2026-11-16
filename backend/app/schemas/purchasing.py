@@ -1,12 +1,13 @@
 from datetime import date, datetime
 from decimal import Decimal
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.validation import Money, MoneySmall
 from app.models.purchasing import POStatus
 from app.schemas.base import UTCModel
+from app.services.supplier_approval_service import AslValueError, parse_bases, parse_scopes, parse_status
 
 
 def blank_str_to_none(v: object) -> object:
@@ -163,8 +164,167 @@ class VendorResponse(VendorBase):
     # the note on VendorUpdate) and no request can seed it.
     is_active_before_delete: Optional[bool] = None
 
+    # Approved Supplier List (AS9100D 8.4, form QL 7.4). READ-ONLY on this schema: written only
+    # by ``PUT /purchasing/vendors/{id}/approval`` and the ASL import, never by VendorCreate /
+    # VendorUpdate. ``approval_status`` NULL = not on the ASL. Slugs, not labels -- see
+    # app/services/supplier_approval_service.py for the vocabularies and their labels.
+    approval_status: Optional[str] = None
+    approved_scopes: Optional[List[str]] = None
+    approval_bases: Optional[List[str]] = None
+    reevaluation_due: Optional[date] = None
+    last_performance_evaluation: Optional[date] = None
+    approval_notes: Optional[str] = None
+
     class Config:
         from_attributes = True
+
+
+class VendorReevaluationDueResponse(VendorResponse):
+    """A vendor on the overdue re-evaluation list. ``days_overdue`` is negative for a
+    re-evaluation that falls due inside the requested window but is not yet past."""
+
+    days_overdue: int
+
+
+class VendorApprovalUpdate(BaseModel):
+    """``PUT /purchasing/vendors/{id}/approval`` -- a person's supplier-approval decision.
+
+    ``approval_status`` must be sent (null = remove from the ASL). Every other field is
+    applied only when SENT: an omitted field is left as it is, an explicit null clears it.
+    Labels or slugs are accepted for status / scopes / bases (422 on anything else).
+    ``reason`` is required and recorded on the audit row; ``expected_updated_at`` is the
+    vendor's ``updated_at`` as read (409 when the vendor changed since).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    approval_status: Optional[str] = Field(
+        ..., description="approved, conditional, disqualified, approved_customer_directed, or null = not on the ASL"
+    )
+    approved_scopes: Optional[List[str]] = Field(None, max_length=19)
+    approval_bases: Optional[List[str]] = Field(None, max_length=7)
+    approval_date: Optional[date] = None
+    reevaluation_due: Optional[date] = None
+    last_performance_evaluation: Optional[date] = None
+    approval_notes: Optional[str] = Field(None, max_length=4000)
+    reason: str = Field(..., min_length=1, max_length=2000)
+    expected_updated_at: Optional[datetime] = Field(...)
+
+    @field_validator('approval_status', mode='before')
+    @classmethod
+    def normalize_status(cls, value: object) -> Optional[str]:
+        try:
+            return parse_status(value)
+        except AslValueError as exc:
+            raise ValueError(str(exc)) from exc
+
+    @field_validator('approved_scopes', mode='before')
+    @classmethod
+    def normalize_scopes(cls, value: object) -> Optional[List[str]]:
+        if value is None:
+            return None
+        try:
+            return parse_scopes(value)
+        except AslValueError as exc:
+            raise ValueError(str(exc)) from exc
+
+    @field_validator('approval_bases', mode='before')
+    @classmethod
+    def normalize_bases(cls, value: object) -> Optional[List[str]]:
+        if value is None:
+            return None
+        try:
+            return parse_bases(value)
+        except AslValueError as exc:
+            raise ValueError(str(exc)) from exc
+
+    @field_validator('approval_date', 'reevaluation_due', 'last_performance_evaluation', mode='before')
+    @classmethod
+    def empty_dates_to_none(cls, value: object) -> object:
+        return blank_str_to_none(value)
+
+    @field_validator('approval_notes', mode='before')
+    @classmethod
+    def blank_notes_to_none(cls, value: object) -> object:
+        return blank_str_to_none(value)
+
+    @field_validator('reason')
+    @classmethod
+    def reason_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError('reason is required')
+        return value
+
+
+class SupplierApprovalWarning(UTCModel):
+    """One advisory Approved Supplier List warning for a purchase (never a refusal)."""
+
+    code: str
+    message: str
+    part_id: Optional[int] = None
+    part_number: Optional[str] = None
+
+
+class SupplierApprovalCheckRequest(BaseModel):
+    vendor_id: int = Field(..., gt=0)
+    part_ids: List[int] = Field(default_factory=list, max_length=500)
+
+
+class SupplierApprovalCheckResponse(UTCModel):
+    vendor_id: int
+    vendor_name: str
+    approval_status: Optional[str] = None
+    is_approved: bool = False
+    reevaluation_due: Optional[date] = None
+    # True when a purchase order to this vendor would be REFUSED (Disqualified); ``refusal``
+    # carries the exact 409 text the create doors answer with.
+    refused: bool = False
+    refusal: Optional[str] = None
+    warnings: List[SupplierApprovalWarning] = Field(default_factory=list)
+
+
+class AslImportDocument(UTCModel):
+    form_number: Optional[str] = None
+    revision: Optional[str] = None
+    rev_date: Optional[str] = None
+
+
+class AslImportSummary(UTCModel):
+    total_rows: int
+    matched_rows: int
+    update_count: int
+    unchanged_count: int
+    error_count: int
+    warning_count: int
+    not_on_asl_count: int
+
+
+class AslImportRow(UTCModel):
+    row: int
+    supplier_name: str
+    vendor_id: Optional[int] = None
+    vendor_code: Optional[str] = None
+    vendor_name: Optional[str] = None
+    match_by: Optional[str] = None
+    # update | unchanged | error
+    outcome: str
+    # field -> {"old": ..., "new": ...}; dates as ISO text
+    changes: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    warnings: List[str] = Field(default_factory=list)
+    error: Optional[str] = None
+
+
+class AslImportResponse(UTCModel):
+    filename: Optional[str] = None
+    source_hash: str
+    # Digest of what the commit would write, read against the vendors as they are now; the
+    # commit must echo the preview's (409 when a vendor changed in between).
+    plan_hash: str
+    document: AslImportDocument
+    committed: bool
+    summary: AslImportSummary
+    rows: List[AslImportRow]
 
 
 # PO Line schemas
@@ -331,6 +491,9 @@ class POResponse(POBase):
     lines: List[POLineResponse] = Field(default_factory=list)
     created_at: datetime
     updated_at: Optional[datetime] = None
+    # Advisory Approved Supplier List warnings for this vendor and these lines, computed when
+    # the response is built (never stored). Empty on a path that does not compute them.
+    supplier_approval_warnings: List[SupplierApprovalWarning] = Field(default_factory=list)
 
     class Config:
         from_attributes = True

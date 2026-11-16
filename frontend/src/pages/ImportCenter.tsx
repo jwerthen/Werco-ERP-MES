@@ -79,6 +79,17 @@ const importTypes: Record<string, ImportTypeConfig> = {
     mode: 'direct',
     notes: ['Uploads directly here.', 'Vendor code must be unique. Approval can be true or false.'],
   },
+  approved_supplier_list: {
+    label: 'Approved Supplier List',
+    entity: 'approved-supplier-list',
+    href: '/supplier-scorecards?tab=asl',
+    mode: 'linked',
+    notes: [
+      'Use Supplier Scorecards → Approved Supplier List → "Import ASL" to preview every change before committing.',
+      'Update-only: each row must match an existing vendor (vendor_code, else exact name). No vendor is created.',
+      'The QL 7.4 workbook can be uploaded as-is; its title block is skipped. Admin, manager or quality.',
+    ],
+  },
   work_centers: {
     label: 'Work Centers',
     entity: 'work-centers',
@@ -106,6 +117,17 @@ const importTypes: Record<string, ImportTypeConfig> = {
       'Imports open (issued, not yet received) purchase orders.',
       'Rows sharing a po_number become lines of one PO; a blank po_number gets a generated number.',
       'Vendors and parts must already exist. POs land in issued status so receiving can act on them.',
+    ],
+  },
+  maintenance_schedules: {
+    label: 'PM Schedules',
+    entity: 'maintenance-schedules',
+    href: '/maintenance?tab=schedules',
+    mode: 'linked',
+    notes: [
+      'Use Maintenance → Schedules → "Import PM Schedules" to preview before committing.',
+      'One row per task, targeting a work_center_code OR an asset_tag. Rows sharing a target, frequency and name become one schedule.',
+      'A new asset_tag with an asset_name creates the equipment asset. Admin, manager or supervisor.',
     ],
   },
   inventory: {

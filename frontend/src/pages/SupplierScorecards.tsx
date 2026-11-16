@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import EntityPicker from '../components/operations/EntityPicker';
 import {
@@ -31,6 +32,9 @@ import { Modal } from '../components/ui/Modal';
 import { FormField } from '../components/ui/FormField';
 import { useToast, DataTable, DataTableColumn, MobileDataCard } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
+import { ApprovedSupplierListPanel, ASL_FILTERS, AslFilter } from '../components/suppliers/ApprovedSupplierListPanel';
+import { useAuth } from '../context/AuthContext';
+import { canManageSupplierScorecards } from '../utils/recordWriteAccess';
 
 interface DashboardStats {
   total_rated: number;
@@ -52,16 +56,6 @@ interface Scorecard {
   status: string;
 }
 
-interface ApprovedSupplier {
-  id: number;
-  vendor_id: number;
-  vendor_name: string;
-  status: string;
-  approved_date: string;
-  commodity: string;
-  notes: string;
-}
-
 interface Audit {
   id: number;
   vendor_id: number;
@@ -76,6 +70,19 @@ interface Audit {
 
 const TABS = ['Scorecards', 'Approved Supplier List', 'Audits'] as const;
 type Tab = (typeof TABS)[number];
+
+// The active tab and the ASL filter live in the URL (`?tab=asl&asl=overdue`) so a reload,
+// a shared link and the Import Center's "Approved Supplier List" card all land on the
+// same view.
+const TAB_PARAM: Record<Tab, string> = {
+  Scorecards: 'scorecards',
+  'Approved Supplier List': 'asl',
+  Audits: 'audits',
+};
+const tabFromParam = (value: string | null): Tab =>
+  (Object.keys(TAB_PARAM) as Tab[]).find(tab => TAB_PARAM[tab] === value) ?? 'Scorecards';
+const aslFilterFromParam = (value: string | null): AslFilter =>
+  ASL_FILTERS.includes(value as AslFilter) ? (value as AslFilter) : 'all';
 
 const scoreColor = (score: number) => {
   if (score >= 80) return 'bg-green-500/100';
@@ -162,7 +169,22 @@ const SupplierScorecards = () => {
   const [actionBusy, setActionBusy] = useState(false);
   const [actionError, setActionError] = useState('');
   const [auditDetail, setAuditDetail] = useState<any>(null);
-  const [activeTab, setActiveTab] = useState<Tab>('Scorecards');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeTab = tabFromParam(searchParams.get('tab'));
+  const aslFilter = aslFilterFromParam(searchParams.get('asl'));
+  const setActiveTab = (tab: Tab) => {
+    const next = new URLSearchParams(searchParams);
+    next.set('tab', TAB_PARAM[tab]);
+    if (tab !== 'Approved Supplier List') next.delete('asl');
+    setSearchParams(next, { replace: true });
+  };
+  const setAslFilter = (filter: AslFilter) => {
+    const next = new URLSearchParams(searchParams);
+    next.set('tab', TAB_PARAM['Approved Supplier List']);
+    if (filter === 'all') next.delete('asl');
+    else next.set('asl', filter);
+    setSearchParams(next, { replace: true });
+  };
   const [search, setSearch] = useState('');
   const [stats, setStats] = useState<DashboardStats>({
     total_rated: 0,
@@ -171,11 +193,14 @@ const SupplierScorecards = () => {
     audits_due_soon: 0,
   });
   const [scorecards, setScorecards] = useState<Scorecard[]>([]);
-  const [approvedSuppliers, setApprovedSuppliers] = useState<ApprovedSupplier[]>([]);
   const [audits, setAudits] = useState<Audit[]>([]);
   const [expandedRow, setExpandedRow] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
+  const { user } = useAuth();
+  // Scorecard / audit writes are Admin / Manager server-side; Quality reaches this page for the
+  // ASL tab and gets no button that is a guaranteed 403.
+  const canManage = canManageSupplierScorecards(user);
   const [showScorecardModal, setShowScorecardModal] = useState(false);
   const [showAuditModal, setShowAuditModal] = useState(false);
 
@@ -200,15 +225,15 @@ const SupplierScorecards = () => {
     setLoading(true);
     setLoadError(false);
     try {
-      const [dashRes, scRes, aslRes, audRes] = await Promise.all([
+      // The Approved Supplier List tab reads the VENDOR record through its own panel; the
+      // legacy approved_supplier_list table is read-only history and no longer fetched.
+      const [dashRes, scRes, audRes] = await Promise.all([
         api.getSupplierScorecardsDashboard(),
         api.getSupplierScorecards({}),
-        api.getApprovedSuppliers({}),
         api.getSupplierAudits({}),
       ]);
       setStats(dashRes.data ?? dashRes);
       setScorecards(scRes.data?.results ?? scRes.data ?? scRes);
-      setApprovedSuppliers(aslRes.data?.results ?? aslRes.data ?? aslRes);
       setAudits(audRes.data?.results ?? audRes.data ?? audRes);
     } catch (e) {
       console.error('Failed to fetch supplier scorecard data', e);
@@ -225,11 +250,6 @@ const SupplierScorecards = () => {
   const filteredScorecards = useMemo(
     () => scorecards.filter(s => s.vendor_name?.toLowerCase().includes(search.toLowerCase())),
     [scorecards, search]
-  );
-
-  const filteredASL = useMemo(
-    () => approvedSuppliers.filter(s => s.vendor_name?.toLowerCase().includes(search.toLowerCase())),
-    [approvedSuppliers, search]
   );
 
   const filteredAudits = useMemo(
@@ -449,62 +469,6 @@ const SupplierScorecards = () => {
     [expandedRow, toggleExpand]
   );
 
-  // ---- Approved Supplier List columns ----
-  const aslColumns = useMemo<Array<DataTableColumn<ApprovedSupplier>>>(
-    () => [
-      {
-        key: 'vendor_name',
-        header: 'Vendor',
-        sortable: true,
-        accessor: s => s.vendor_name,
-        render: s => <span className="font-medium text-white">{s.vendor_name}</span>,
-      },
-      {
-        key: 'status',
-        header: 'Status',
-        sortable: true,
-        accessor: s => s.status,
-        render: s => <StatusPill status={s.status} />,
-      },
-      {
-        key: 'approved_date',
-        header: 'Approved Date',
-        sortable: true,
-        accessor: s => s.approved_date,
-        render: s => <span className="text-slate-400">{s.approved_date}</span>,
-      },
-      {
-        key: 'commodity',
-        header: 'Commodity',
-        sortable: true,
-        accessor: s => s.commodity,
-        render: s => <span className="text-slate-400">{s.commodity}</span>,
-      },
-      {
-        key: 'notes',
-        header: 'Notes',
-        accessor: s => s.notes,
-        render: s => <span className="text-slate-400 max-w-xs truncate block">{s.notes}</span>,
-      },
-    ],
-    []
-  );
-
-  const aslMobileCard = useCallback(
-    (s: ApprovedSupplier) => (
-      <MobileDataCard
-        title={s.vendor_name}
-        badge={<StatusPill status={s.status} />}
-        fields={[
-          { label: 'Approved', value: s.approved_date || '—' },
-          { label: 'Commodity', value: s.commodity || '—' },
-          { label: 'Notes', value: s.notes || '—', fullWidth: true },
-        ]}
-      />
-    ),
-    []
-  );
-
   // ---- Audits columns ----
   const auditColumns = useMemo<Array<DataTableColumn<Audit>>>(
     () => [
@@ -597,7 +561,7 @@ const SupplierScorecards = () => {
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold text-white">Supplier Scorecards</h1>
         <div className="flex gap-2">
-          {activeTab === 'Scorecards' && (
+          {activeTab === 'Scorecards' && canManage && (
             <button
               onClick={() => setShowScorecardModal(true)}
               className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium"
@@ -605,7 +569,7 @@ const SupplierScorecards = () => {
               <PlusIcon className="w-4 h-4" /> New Scorecard
             </button>
           )}
-          {activeTab === 'Audits' && (
+          {activeTab === 'Audits' && canManage && (
             <button
               onClick={() => setShowAuditModal(true)}
               className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium"
@@ -678,7 +642,10 @@ const SupplierScorecards = () => {
               description: search
                 ? 'No scorecards match your search.'
                 : 'Rated suppliers will appear here once you create a scorecard.',
-              action: search ? undefined : { label: 'New Scorecard', onClick: () => setShowScorecardModal(true) },
+              action:
+                search || !canManage
+                  ? undefined
+                  : { label: 'New Scorecard', onClick: () => setShowScorecardModal(true) },
             }}
           />
           {/* Expanded score breakdown (desktop) — preserves the click-to-expand charts. */}
@@ -702,25 +669,9 @@ const SupplierScorecards = () => {
         </div>
       )}
 
-      {/* Approved Supplier List Tab */}
+      {/* Approved Supplier List Tab — on the vendor record (AS9100D 8.4, QL 7.4) */}
       {activeTab === 'Approved Supplier List' && (
-        <DataTable<ApprovedSupplier>
-          columns={aslColumns}
-          data={filteredASL}
-          rowKey={s => s.id}
-          defaultSort={{ key: 'vendor_name', dir: 'asc' }}
-          pageSize={25}
-          csvExport={{ filename: 'approved-suppliers' }}
-          loading={loading}
-          error={loadError}
-          onRetry={fetchData}
-          mobileCards={aslMobileCard}
-          empty={{
-            icon: ShieldCheckIcon,
-            title: 'No approved suppliers found',
-            description: search ? 'No approved suppliers match your search.' : 'Approved suppliers will appear here.',
-          }}
-        />
+        <ApprovedSupplierListPanel search={search} filter={aslFilter} onFilterChange={setAslFilter} />
       )}
 
       {/* Audits Tab */}
@@ -741,7 +692,7 @@ const SupplierScorecards = () => {
             icon: CalendarDaysIcon,
             title: 'No audits found',
             description: search ? 'No audits match your search.' : 'Supplier audits will appear here once you log one.',
-            action: search ? undefined : { label: 'New Audit', onClick: () => setShowAuditModal(true) },
+            action: search || !canManage ? undefined : { label: 'New Audit', onClick: () => setShowAuditModal(true) },
           }}
         />
       )}

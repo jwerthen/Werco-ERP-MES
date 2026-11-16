@@ -311,7 +311,20 @@ def test_create_po_persists_committed_create_audit_row(client: TestClient, db_se
     assert row.new_values["total"] == 70.0
     assert row.new_values["vendor_id"] == vendor.id
 
-    assert row.extra_data == {"vendor_code": vendor.code, "line_count": 2}
+    # The fixture vendor is not on the Approved Supplier List and not approved, so the create
+    # row also records the advisory ASL warning the buyer was shown (migration 123).
+    assert row.extra_data == {
+        "vendor_code": vendor.code,
+        "line_count": 2,
+        "supplier_approval_warnings": [
+            {
+                "code": "vendor_not_on_asl",
+                "message": f"{vendor.name} is not on the Approved Supplier List.",
+                "part_id": None,
+                "part_number": None,
+            }
+        ],
+    }
 
     # Document create is ONE audit row: no per-line purchase_order_line rows.
     assert _committed_audit_rows(db_session, resource_type=LINE_RESOURCE) == []

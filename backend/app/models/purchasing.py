@@ -57,11 +57,26 @@ class InspectionMethod(str, enum.Enum):
     SAMPLING = "sampling"
 
 
+# Lock-step with migration 123_vendor_asl: the Approved Supplier List statuses the
+# ``vendors.approval_status`` CHECK admits (NULL = the vendor is not on the ASL). The
+# vocabulary, labels and sheet aliases live in app/services/supplier_approval_service.py,
+# which a test holds equal to this tuple.
+VENDOR_APPROVAL_STATUS_VALUES = ("approved", "conditional", "disqualified", "approved_customer_directed")
+VENDOR_APPROVAL_STATUS_CHECK = "approval_status IS NULL OR approval_status IN ({})".format(
+    ", ".join(f"'{value}'" for value in VENDOR_APPROVAL_STATUS_VALUES)
+)
+
+
 class Vendor(Base, SoftDeleteMixin, TenantMixin):
     """Supplier/Vendor master"""
 
     __tablename__ = "vendors"
-    __table_args__ = (UniqueConstraint('company_id', 'code', name='uq_vendors_company_code'),)
+    __table_args__ = (
+        UniqueConstraint('company_id', 'code', name='uq_vendors_company_code'),
+        # Lock-step with migration 123_vendor_asl.
+        CheckConstraint(VENDOR_APPROVAL_STATUS_CHECK, name="ck_vendors_approval_status"),
+        Index("ix_vendors_company_reevaluation_due", "company_id", "reevaluation_due"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     code = Column(String(50), index=True, nullable=False)
@@ -88,6 +103,23 @@ class Vendor(Base, SoftDeleteMixin, TenantMixin):
     is_approved = Column(Boolean, default=False)
     approval_date = Column(Date, nullable=True)
     quality_rating = Column(Float, nullable=True)  # 1-5 scale
+
+    # Approved Supplier List (AS9100D 8.4; Werco form QL 7.4). Lock-step with migration
+    # 123_vendor_asl. Written ONLY by ``supplier_approval_service.apply_vendor_approval``,
+    # reached from ``PUT /purchasing/vendors/{id}/approval`` and the update-only ASL import;
+    # deliberately absent from VendorCreate/VendorUpdate so the blind-setattr vendor PUT can
+    # never set them. ``is_approved`` is DERIVED from ``approval_status`` whenever a status is
+    # set (approved / approved_customer_directed -> True; conditional / disqualified -> False)
+    # and the vendor PUT refuses 409 a contradicting ``is_approved``. NULL status = not on the
+    # ASL, and leaves ``is_approved`` as whatever it was. No backfill: forward-only.
+    approval_status = Column(String(40), nullable=True)
+    approved_scopes = Column(JSON(none_as_null=True), nullable=True)  # list of scope slugs
+    approval_bases = Column(JSON(none_as_null=True), nullable=True)  # list of basis slugs
+    reevaluation_due = Column(Date, nullable=True)
+    last_performance_evaluation = Column(Date, nullable=True)
+    # The ASL's own NOTES column, kept apart from the general ``notes`` so an ASL import can
+    # never overwrite a buyer's vendor notes.
+    approval_notes = Column(Text, nullable=True)
 
     # Certifications
     is_as9100_certified = Column(Boolean, default=False)

@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+from app.schemas.purchasing import SupplierApprovalWarning
+
 
 class VendorExtracted(BaseModel):
     name: Optional[str] = None
@@ -119,3 +121,5 @@ class POUploadResponse(BaseModel):
     lines_created: int = 0
     vendor_created: bool = False
     parts_created: int = 0
+    # Advisory Approved Supplier List warnings for the new PO (never a refusal).
+    supplier_approval_warnings: List[SupplierApprovalWarning] = Field(default_factory=list)

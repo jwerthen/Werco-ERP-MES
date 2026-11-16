@@ -54,3 +54,21 @@ test('parent close preserves dirty supplier response and blocks close during sav
   expect(confirm).not.toHaveBeenCalled();
   expect(onClose).toHaveBeenCalledTimes(1);
 });
+
+test('a vendor disqualified after the draft was raised shows as the red stop on this order, never as advisory', async () => {
+  const refusal = 'Bramble Metals is Disqualified on the Approved Supplier List; a purchase order cannot be raised to it.';
+  (api.getPurchaseOrder as jest.Mock).mockResolvedValue({
+    ...record,
+    status: 'draft',
+    supplier_approval_warnings: [{ code: 'vendor_disqualified', message: refusal }],
+  });
+  render(
+    <MemoryRouter>
+      <PurchaseOrderDetail id={7} onClose={jest.fn()} onSaved={jest.fn()} onLoaded={jest.fn()} />
+    </MemoryRouter>
+  );
+  const stop = await screen.findByRole('alert');
+  expect(stop).toHaveTextContent(refusal);
+  expect(stop).toHaveTextContent('This order cannot be sent, approved, submitted for approval or given new lines');
+  expect(screen.queryByText(/the order can still be raised/)).not.toBeInTheDocument();
+});

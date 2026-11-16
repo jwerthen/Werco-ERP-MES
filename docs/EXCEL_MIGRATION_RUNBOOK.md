@@ -10,7 +10,7 @@
 
 ## The three golden rules
 
-1. **Always review before committing.** For the eight import types uploaded directly in Import Center, **Validate file (dry run)** saves an **Import receipt** with the input rows and validation results, plus an audit entry. It creates no business records. Review the ready rows, check **I reviewed the ready rows and authorize their import**, then choose **Commit ready rows**. BOMs and routings use their separate module wizards, described below.
+1. **Always review before committing.** For the eight import types uploaded directly in Import Center, **Validate file (dry run)** saves an **Import receipt** with the input rows and validation results, plus an audit entry. It creates no business records. Review the ready rows, check **I reviewed the ready rows and authorize their import**, then choose **Commit ready rows**. BOMs and routings use their separate module wizards, described below, and so do the Approved Supplier List and PM schedule loads ([Two update loads](#two-update-loads-approved-supplier-list-and-pm-schedules)).
 2. **Follow the load order.** Each step below creates the records the next step looks up. Loading out of order doesn't corrupt anything — the rows just fail with "not found" errors — but it wastes your time.
 3. **Excel is retired on a date, not gradually.** After cutover, paper travelers may *mirror* the system during the transition period, but the Excel workbooks may not be updated again. A spreadsheet that keeps changing after go-live becomes a second source of truth, and then nobody trusts either one.
 
@@ -18,7 +18,7 @@
 
 ## File basics (read once)
 
-- **Formats:** Excel **`.xlsx`** or **`.csv`** (UTF-8). The importer reads only the **first sheet** of a workbook.
+- **Formats:** Excel **`.xlsx`** or **`.csv`** (UTF-8). The importer reads only the **first sheet** of a workbook. (One exception: the Approved Supplier List load reads a sheet named *Approved Supplier List* when the workbook has one.)
 - **Templates:** every direct-import type has a **Download template (.xlsx)** button in the Import Center. Each template has:
   - an **Import** sheet — the styled header row plus one *guidance row* whose cells start with `# `. Guidance rows are skipped automatically on import; you can leave them in or delete them.
   - an **Examples** sheet with realistic filled-in rows. The importer never reads this sheet, so the examples can't be imported by accident.
@@ -88,6 +88,10 @@ For steps 1–6 and 10–11, the current Import Center uses `/api/v1/import/batc
 - **Required column:** `name`.
 - **Optional columns:** `code` (generated when blank), `contact_name`, `email`, `phone`, `payment_terms`, `lead_time_days` (default 14), `is_approved`, `is_as9100_certified`, `is_iso9001_certified`.
 - **Why now:** the open-PO import (step 10) requires each row's `vendor_code` to already exist.
+- **Row error:** a row whose name matches (ignoring case, extra spaces and dashes, the Approved
+  Supplier List's matching rule) a vendor that is **Disqualified** on the Approved Supplier List.
+  A new record under that name would take the purchase orders the Disqualified one refuses;
+  re-evaluate the existing vendor instead. The other rows still import.
 - **Tip:** if you let the system generate vendor codes, download/print the vendor list afterward — you'll need the exact codes for the open-PO spreadsheet.
 
 ### Step 5 — Parts
@@ -103,7 +107,7 @@ For steps 1–6 and 10–11, the current Import Center uses `/api/v1/import/batc
 - **Legacy API:** `POST /api/v1/materials/import-csv` (Admin, Manager, or Supervisor).
 - **Template:** `materials`.
 - **Required columns:** `part_number` (unique, uppercased), `name`, `part_type` (`purchased`, `raw_material`, `hardware`, or `consumable`).
-- **Optional columns:** `description`, `unit_of_measure` (default each — **fill this in**, see below), `standard_cost`, `lead_time_days`, `reorder_point`, `reorder_quantity`.
+- **Optional columns:** `description`, `unit_of_measure` (default each — **fill this in**, see below), `standard_cost`, `lead_time_days`, `reorder_point`, `reorder_quantity`, `supply_scope` (the Approved Supplier List scope of supply a purchase of this item falls under, e.g. *Raw Material - Metallics* or *Hardware*; it only drives a warning on a purchase order to a supplier not approved for that scope, and an unknown value is a row error).
 - **Fill `unit_of_measure` for anything you don't actually stock in each** — sheet, plate, bar, wire, coating, adhesive. It still defaults to `each` here (unlike a BOM line, which now inherits from the part), and **this column is the value BOM lines inherit from in step 7**. Getting it right once here is how a sheet-metal BOM comes out saying `sheets` without anyone typing it. Getting it wrong is silently consistent — the part says `each`, the lines inherit `each`, nothing flags it — until you correct the part later and every line that quietly agreed starts blocking automatic backflush. It is far cheaper to be right in this spreadsheet than to remediate afterwards.
 - **Why now:** BOM buy-components and most open-PO lines point at materials. Same master table as parts — part numbers must be unique across both.
 
@@ -181,6 +185,37 @@ This column is how you tell the system "this job is already partway done on pape
 
 ---
 
+## Two update loads: Approved Supplier List and PM schedules
+
+These two loads are not Import Center batches and not part of the numbered sequence. Each is its own **preview → commit** wizard in its module, like the routing import: the preview shows exactly what would change and writes nothing, and the commit applies **that same file** (it is refused if the file differs from the one previewed) **all or nothing** — one bad row means nothing is saved. Both can be re-run safely: a file that changes nothing writes nothing. The Import Center shows a card for each, with the template download, that links to the wizard.
+
+### Approved Supplier List (after step 4 — vendors must exist)
+
+- **Where:** **Supplier Scorecards → Approved Supplier List → Import ASL** (Import Center → **Approved Supplier List** links there). **Admin, Manager or Quality**, signed in as a person.
+- **Endpoints:** `POST /api/v1/purchasing/vendors/asl-import/preview`, then `POST /api/v1/purchasing/vendors/asl-import/commit` (multipart `file`; the commit also sends the preview's `source_hash` as `expected_source_hash` and its `plan_hash` as `expected_plan_hash`). An API token is refused. **Template:** `approved-supplier-list`.
+- **Update-only — it never creates a vendor.** Every supplier on the list must already be a vendor (step 4). Each row is matched to **exactly one** existing vendor, and only that vendor's Approved Supplier List fields change.
+- **The QL 7.4 workbook can be uploaded as it is.** The title block above the header row is skipped automatically, and the *Approved Supplier List* sheet is read even when it is not the first tab. The form number, revision and rev date from the title block are shown in the preview and recorded with the import.
+- **Columns:** `supplier_name` and `status` are required; optional `supplier_address`, `approved_scope_of_supply`, `approved_date`, `approval_basis`, `re_evaluation_due_date`, `performance_evaluation_date`, `notes`, and `vendor_code`. The sheet's own headers (SUPPLIER NAME, APPROVED SCOPE OF SUPPLY, RE-EVALUATION DUE DATE…) already match. Put several scopes or bases in one cell separated by `;`.
+- **How a row finds its vendor:** by `vendor_code` when that column is filled; otherwise by **exact** name, ignoring case, extra spaces and dashes (*"Cinder- Forge"* finds *"Cinder-Forge"*). Nothing fuzzier — two names that differ by a word are two suppliers. If a name matches more than one vendor, add a `vendor_code` column and fill it for that row. SUPPLIER NAME is required on every row, and a coded row must still name the same vendor — a code alone never re-binds a row to a differently named vendor (rename the vendor in Purchasing first if its name has really changed).
+- **What it writes:** the status, scopes, approval basis, approved date, re-evaluation due date, performance evaluation date and ASL notes. The vendor's **Approved** flag follows the status (Approved / Approved - Customer Directed → approved; Conditional / Disqualified → not approved). **A Disqualified vendor cannot be sent a new purchase order** from then on, and its open drafts cannot be approved, extended or sent. A blank STATUS leaves a vendor that is not on the list off it; on a vendor that **is** on the list it is a row error — the import never takes a supplier off the list (use **Update approval**, which records the reason). Any other blank cell leaves the vendor's existing value alone — a blank date never erases one. The supplier's name and address are compared only, never changed; a difference shows as a warning.
+- **Row errors (nothing is saved until all are fixed):** a blank SUPPLIER NAME; no vendor with that name or code; a code whose vendor has a different name; a name matching more than one vendor; a blank STATUS on a vendor already on the list; a match that was deleted (restore the vendor first — Purchasing → Vendors → Deleted); two rows matching the same vendor; a status, scope or basis that is not one of the QL 7.4 dropdown values (the sheet's own spellings, such as *Metalics* and *Labroatory*, are accepted); a date that can't be read.
+- **Audit:** each changed vendor gets its own audit entry (only the changed fields, source `asl_import`, with the row number and file), plus one summary entry for the import.
+
+### PM schedules (after step 1 — work centers must exist)
+
+- **Where:** **Maintenance → Schedules → Import PM Schedules** (Import Center → **PM Schedules** links there). **Admin, Manager or Supervisor.**
+- **Endpoints:** `POST /api/v1/maintenance/schedules/import/preview`, then `POST /api/v1/maintenance/schedules/import/commit` (multipart `file`; the commit also sends `expected_source_hash`). **Template:** `maintenance-schedules`.
+- **One row per PM task.** Each row names its machine by **`work_center_code`** (a production work center, any case) **or** by **`asset_tag`** (non-production equipment — a forklift, compressor, manual mill — which is never scheduled, dispatched or counted in OEE). Not both.
+- **Required columns:** `task`, `frequency`, and one of `work_center_code` / `asset_tag`. **Optional:** `asset_name` and `asset_type` (an `asset_tag` the system does not know yet is **created** when `asset_name` is filled — the preview lists every asset it will create; an existing asset is never renamed), `schedule_name`, `frequency_days` (required for `custom`), `next_due_date`, `estimated_duration_hours`, `requires_shutdown`, `priority`.
+- **Frequencies:** `daily`, `weekly`, `biweekly`, `monthly`, `quarterly`, `semi_annual`, `annual` (**yearly** works too) or `custom` with `frequency_days`. A row whose frequency is *as necessary* has no schedule and is **skipped** with a warning — give it a real frequency to load it. *Bi-annual* is refused because it is ambiguous.
+- **How rows become schedules:** rows with the same machine, frequency and schedule name become **one** schedule, and their tasks become its checklist in sheet order (a repeated task is listed once). With no `schedule_name` the name is *"<machine code> <Frequency> PM"* — so a machine with monthly and yearly tasks gets two schedules. A schedule's next due date is the sheet's, or today for a new schedule.
+- **Re-importing updates rather than duplicates:** an active schedule on the same machine with the same name gets the sheet's checklist and frequency, and any duration, shutdown, priority or due date the sheet fills in. A blank cell never overwrites.
+- **Row errors:** an unknown work-center code; both or neither of `work_center_code` / `asset_tag`; an unknown `asset_tag` with no `asset_name`; an unreadable frequency, priority, date or number; two rows of one schedule giving different durations, priorities or due dates; one schedule name used with two frequencies on the same machine.
+- **What it does not do:** it creates schedules, not maintenance work orders. Work orders are still opened from the Maintenance page.
+- **Audit:** each created asset and each created or updated schedule gets its own audit entry (source `pm_import`), plus one summary entry.
+
+---
+
 ## The dry-run discipline
 
 The eight import types uploaded directly in Import Center now follow a saved-review workflow:
@@ -247,7 +282,10 @@ The night before / morning of:
 | Commit fails, disconnects, or says to refresh the receipt | Some groups may already have committed; a failed response is not proof that nothing happened | Use **Refresh receipt**, or reopen it from **Saved import batches**. Review the remaining ready rows and authorize **Commit ready rows** again. Created rows are preserved and will not repeat in this batch |
 | "Batch changed. Reload its receipt before continuing." | Another request changed the saved batch version | Refresh its receipt and review the current statuses before authorizing more rows; do not overwrite the newer receipt |
 | "Corrections must contain distinct failed rows from this batch; created rows cannot change" | The correction file has a missing/changed row ID, a duplicate row, or a successful row | Download a fresh failed-row CSV from this receipt, keep `_import_row_id` unchanged, and correct only its failed inputs |
-| 403 / "permission" error on upload | Your role can't run this import | Users: **Admin** only. Customers, vendors, work centers, open POs: **Admin/Manager**. Parts, materials, routings, open WOs: **Admin/Manager/Supervisor**. Anyone signed in can download templates |
+| 403 / "permission" error on upload | Your role can't run this import | Users: **Admin** only. Customers, vendors, work centers, open POs: **Admin/Manager**. Parts, materials, routings, open WOs, PM schedules: **Admin/Manager/Supervisor**. Approved Supplier List: **Admin/Manager/Quality**, and never with an API token. Anyone signed in can download templates |
+| "…rows have errors; nothing was imported…" (ASL or PM schedule commit) | These two loads are all-or-nothing: one bad row stops the whole commit | Fix the rows the message lists, then **preview again** and commit the corrected file |
+| "This file is not the one that was previewed…" (ASL or PM schedule commit) | The file changed after the preview | Preview the file you mean to load, then commit that same file |
+| "The vendors changed after this file was previewed…" (ASL commit) | Someone changed a vendor's approval (or deleted / renamed a vendor) between your preview and your commit, so the commit would no longer write what you reviewed | Preview again, check the changed rows, then commit |
 | "role 'platform_admin' cannot be assigned via import" | A user row tried to grant the cross-company oversight role | Use a normal role; platform admins are provisioned outside tenant imports, by design |
 | "…already exists" on a row you don't think is a duplicate | Duplicate detection is **case-insensitive**: `wo-1001` collides with `WO-1001`, `EMP-7` with `emp-7`, and in-file duplicates are caught too | Find and fix the casing variant; don't just re-submit |
 | "part 'X' has no released routing" (open-WO import) | The routing exists but wasn't **released**, or doesn't exist | Step 8: build/release the routing, then download and validate the failed rows through this batch's correction controls |

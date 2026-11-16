@@ -31,6 +31,7 @@ from app.services.document_pdf_service import (
     quote_pdf_context,
 )
 from app.services.quote_send_gate import assert_quote_sendable
+from app.services.supplier_approval_service import assert_purchase_order_vendor_not_disqualified
 
 MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
 MAX_DOCUMENT_LINES = 250
@@ -272,6 +273,9 @@ class DocumentDeliveryService:
             or not record.vendor.is_active
         ):
             raise HTTPException(409, 'The supplier is unavailable. Review this purchase order first.')
+        # Emailing the order to the supplier IS issuing it: refused while the supplier is
+        # Disqualified on the Approved Supplier List (the same gate as Send).
+        assert_purchase_order_vendor_not_disqualified(record, 'cannot be emailed')
         if not record.lines or len(record.lines) > MAX_DOCUMENT_LINES:
             raise HTTPException(422, 'Email documents require between 1 and 250 lines.')
         for line in record.lines:

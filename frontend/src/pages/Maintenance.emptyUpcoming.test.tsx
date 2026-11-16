@@ -6,15 +6,36 @@ import Maintenance from './Maintenance';
 
 jest.mock('../services/api', () => ({
   __esModule: true,
-  default: { getMaintenanceDashboard: jest.fn(), getMaintenanceSchedules: jest.fn(), getMaintenanceWorkOrders: jest.fn(), getWorkCenters: jest.fn(), createMaintenanceSchedule: jest.fn() },
+  default: {
+    getMaintenanceDashboard: jest.fn(),
+    getMaintenanceSchedules: jest.fn(),
+    getMaintenanceWorkOrders: jest.fn(),
+    getMaintenanceAssets: jest.fn(),
+    getWorkCenters: jest.fn(),
+    createMaintenanceSchedule: jest.fn(),
+  },
+}));
+jest.mock('../context/AuthContext', () => ({
+  useAuth: () => ({ user: { id: 1, role: 'manager' }, isAuthenticated: true, isLoading: false }),
 }));
 const mockedApi = api as jest.Mocked<typeof api>;
 
+const DASHBOARD = {
+  overdue_count: 0,
+  due_this_week: 0,
+  completed_this_month: 0,
+  completion_rate: 0,
+  total_cost_month: 0,
+  in_progress: 0,
+  work_center_metrics: [],
+};
+
 beforeEach(() => {
   jest.clearAllMocks();
-  mockedApi.getMaintenanceDashboard.mockResolvedValue({ upcoming: [], recent_work_orders: [] });
+  mockedApi.getMaintenanceDashboard.mockResolvedValue(DASHBOARD);
   mockedApi.getMaintenanceSchedules.mockResolvedValue([]);
   mockedApi.getMaintenanceWorkOrders.mockResolvedValue([]);
+  mockedApi.getMaintenanceAssets.mockResolvedValue([]);
   mockedApi.getWorkCenters.mockResolvedValue([{ id: 1, code: 'LAS-01', name: 'Laser' }] as any);
   mockedApi.createMaintenanceSchedule.mockResolvedValue({});
 });
@@ -23,21 +44,32 @@ it.each([
   ['New Schedule', 'New Maintenance Schedule'],
   ['New Work Order', 'New Maintenance Work Order'],
 ])('opens the existing %s form from the Upcoming empty panel', async (action, heading) => {
-  render(<MemoryRouter><Maintenance /></MemoryRouter>);
+  render(
+    <MemoryRouter>
+      <Maintenance />
+    </MemoryRouter>
+  );
   await screen.findAllByText('No schedules configured');
   fireEvent.click(screen.getByRole('button', { name: /^dashboard$/i }));
-  const empty = (await screen.findByText('No upcoming maintenance')).closest('[data-testid="empty-state"]') as HTMLElement;
+  const empty = (await screen.findByText('No upcoming maintenance')).closest(
+    '[data-testid="empty-state"]'
+  ) as HTMLElement;
   fireEvent.click(within(empty).getByRole('button', { name: action }));
   expect(within(await screen.findByRole('dialog')).getByRole('heading', { name: heading })).toBeInTheDocument();
 });
 
 it('defaults to Schedules once and preserves a later Dashboard choice after saving', async () => {
-  render(<MemoryRouter><Maintenance /></MemoryRouter>);
+  render(
+    <MemoryRouter>
+      <Maintenance />
+    </MemoryRouter>
+  );
   await screen.findAllByText('No schedules configured');
   fireEvent.click(screen.getByRole('button', { name: /^dashboard$/i }));
   const empty = screen.getByText('No upcoming maintenance').closest('[data-testid="empty-state"]') as HTMLElement;
   fireEvent.click(within(empty).getByRole('button', { name: 'New Schedule' }));
   const dialog = await screen.findByRole('dialog');
+  fireEvent.change(within(dialog).getByLabelText(/^Name/), { target: { value: 'Laser optics PM' } });
   const picker = within(dialog).getByRole('combobox', { name: /^Work Center/ });
   await waitFor(() => expect(picker).toBeEnabled());
   fireEvent.click(picker);

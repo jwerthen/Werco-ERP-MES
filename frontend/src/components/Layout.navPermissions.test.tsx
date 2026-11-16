@@ -100,9 +100,7 @@ function sidebar(): HTMLElement {
 }
 
 function hasNavEntry(label: string): boolean {
-  return Array.from(sidebar().querySelectorAll('a, button')).some((el) =>
-    (el.textContent || '').includes(label)
-  );
+  return Array.from(sidebar().querySelectorAll('a, button')).some(el => (el.textContent || '').includes(label));
 }
 
 const MISMATCHES = 'BOM Unit Mismatches';
@@ -120,7 +118,7 @@ describe('nav permission gate matches the server role gate', () => {
       'shipping',
       'viewer',
     ] as const;
-    const withEdit = roles.filter((r) => getPermissionsForRole(r as any).includes('boms:edit'));
+    const withEdit = roles.filter(r => getPermissionsForRole(r as any).includes('boms:edit'));
     expect(withEdit).toEqual(['platform_admin', 'admin', 'manager', 'supervisor']);
 
     // The excluded roles still hold boms:view — which is precisely why the item
@@ -135,7 +133,7 @@ describe('Layout sidebar — permission-gated nav item', () => {
     mockUser.value = null;
   });
 
-  it.each(['admin', 'manager', 'supervisor'])('shows the worklist to %s', (role) => {
+  it.each(['admin', 'manager', 'supervisor'])('shows the worklist to %s', role => {
     renderLayout(role);
     expect(hasNavEntry(MISMATCHES)).toBe(true);
     // It sits inside the Engineering group, next to Bill of Materials.
@@ -189,8 +187,8 @@ describe('Layout sidebar — permission-gated nav item', () => {
       'Admin',
     ];
     const rendered = Array.from(sidebar().querySelectorAll('p'))
-      .map((p) => (p.textContent || '').trim())
-      .filter((t) => SECTION_HEADERS.includes(t));
+      .map(p => (p.textContent || '').trim())
+      .filter(t => SECTION_HEADERS.includes(t));
     expect(rendered.sort()).toEqual([...SECTION_HEADERS].sort());
   });
 });
@@ -200,12 +198,18 @@ describe('Fabrication Quoting navigation', () => {
     mockUser.value = null;
   });
 
-  it.each(['admin', 'manager', 'supervisor', 'viewer'])('offers the fabrication quoting route to %s with purchasing:view', (role) => {
-    renderLayout(role, '/fabrication-quotes');
-    expect(within(sidebar()).getByRole('link', { name: 'Fabrication Quoting' })).toHaveAttribute('href', '/fabrication-quotes');
-  });
+  it.each(['admin', 'manager', 'supervisor', 'viewer'])(
+    'offers the fabrication quoting route to %s with purchasing:view',
+    role => {
+      renderLayout(role, '/fabrication-quotes');
+      expect(within(sidebar()).getByRole('link', { name: 'Fabrication Quoting' })).toHaveAttribute(
+        'href',
+        '/fabrication-quotes'
+      );
+    }
+  );
 
-  it.each(['operator', 'quality', 'shipping'])('hides Fabrication Quoting from %s without purchasing:view', (role) => {
+  it.each(['operator', 'quality', 'shipping'])('hides Fabrication Quoting from %s without purchasing:view', role => {
     renderLayout(role, '/fabrication-quotes');
     expect(within(sidebar()).queryByRole('link', { name: 'Fabrication Quoting' })).not.toBeInTheDocument();
   });
@@ -216,23 +220,71 @@ describe('Material Price History navigation', () => {
     mockUser.value = null;
   });
 
-  it.each(['admin', 'manager', 'supervisor', 'viewer'])('offers price history to %s with purchasing:view', (role) => {
+  it.each(['admin', 'manager', 'supervisor', 'viewer'])('offers price history to %s with purchasing:view', role => {
     renderLayout(role, '/purchasing/price-history?part=42');
     const historyLink = within(sidebar()).getByRole('link', { name: 'Material Price History' });
     expect(historyLink).toHaveAttribute('href', '/purchasing/price-history');
     expect(historyLink).toHaveClass('text-fd-ink');
     expect(within(sidebar()).getByRole('link', { name: 'Purchase Orders' })).not.toHaveClass('text-fd-ink');
-    expect(canAccessPath('/purchasing/price-history?part=42', permission =>
-      getPermissionsForRole(role as any).includes(permission)
-    )).toBe(true);
+    expect(
+      canAccessPath('/purchasing/price-history?part=42', permission =>
+        getPermissionsForRole(role as any).includes(permission)
+      )
+    ).toBe(true);
   });
 
-  it.each(['operator', 'quality', 'shipping'])('hides price history from %s without purchasing:view', (role) => {
+  it.each(['operator', 'quality', 'shipping'])('hides price history from %s without purchasing:view', role => {
     renderLayout(role, '/purchasing/price-history');
     expect(within(sidebar()).queryByRole('link', { name: 'Material Price History' })).not.toBeInTheDocument();
-    expect(canAccessPath('/purchasing/price-history', permission =>
-      getPermissionsForRole(role as any).includes(permission)
-    )).toBe(false);
+    expect(
+      canAccessPath('/purchasing/price-history', permission => getPermissionsForRole(role as any).includes(permission))
+    ).toBe(false);
+  });
+});
+
+describe('Supplier Scorecards navigation (the ASL owner is Purchasing / Quality)', () => {
+  // Lead decision L2: the Approved Supplier List tab lives on /supplier-scorecards and the server
+  // lets QUALITY write the ASL, so the quality role must reach the screen. Route and nav share one
+  // requirement (`anyOf: purchasing:view | quality:approve`), so they cannot disagree; every GET the
+  // page makes is open to any signed-in user server-side.
+  afterEach(() => {
+    mockUser.value = null;
+  });
+
+  const allows = (role: string, path = '/supplier-scorecards') =>
+    canAccessPath(path, permission => getPermissionsForRole(role as any).includes(permission));
+
+  it('quality:approve is exactly the ASL approval roles (ADMIN / MANAGER / QUALITY, + platform admin)', () => {
+    const roles = ['platform_admin', 'admin', 'manager', 'supervisor', 'operator', 'quality', 'shipping', 'viewer'];
+    expect(roles.filter(r => getPermissionsForRole(r as any).includes('quality:approve'))).toEqual([
+      'platform_admin',
+      'admin',
+      'manager',
+      'quality',
+    ]);
+    // The reason the gate is not plain purchasing:view: the quality set does not carry it.
+    expect(getPermissionsForRole('quality' as any)).not.toContain('purchasing:view');
+  });
+
+  it.each(['admin', 'manager', 'supervisor', 'viewer', 'quality'])('offers Supplier Scorecards to %s', role => {
+    renderLayout(role, '/supplier-scorecards');
+    expect(within(sidebar()).getByRole('link', { name: 'Supplier Scorecards' })).toHaveAttribute(
+      'href',
+      '/supplier-scorecards'
+    );
+    expect(allows(role)).toBe(true);
+    expect(allows(role, '/supplier-scorecards?tab=asl&asl=overdue')).toBe(true);
+  });
+
+  it.each(['operator', 'shipping'])('hides Supplier Scorecards from %s, and the route refuses it too', role => {
+    renderLayout(role, '/supplier-scorecards');
+    expect(within(sidebar()).queryByRole('link', { name: 'Supplier Scorecards' })).not.toBeInTheDocument();
+    expect(allows(role)).toBe(false);
+  });
+
+  it('widening the screen for quality does not open the rest of purchasing to it', () => {
+    expect(allows('quality', '/purchasing')).toBe(false);
+    expect(allows('quality', '/purchasing/price-history')).toBe(false);
   });
 });
 
@@ -244,7 +296,7 @@ describe('API Tokens navigation', () => {
     mockUser.value = null;
   });
 
-  it.each(['admin', 'platform_admin'])('offers API Tokens to %s', (role) => {
+  it.each(['admin', 'platform_admin'])('offers API Tokens to %s', role => {
     renderLayout(role, '/admin/api-tokens');
     expect(within(sidebar()).getByRole('link', { name: 'API Tokens' })).toHaveAttribute('href', '/admin/api-tokens');
   });
@@ -261,13 +313,10 @@ describe('API Tokens navigation', () => {
     expect(within(sidebar()).getByRole('link', { name: 'API Tokens' })).toBeInTheDocument();
   });
 
-  it.each(['manager', 'supervisor'])(
-    'hides API Tokens from %s while the Administration group itself is open',
-    (role) => {
-      renderLayout(role, '/supplier-scorecards');
-      // A sibling in the same group renders, so the absence below is the gate, not a closed group.
-      expect(within(sidebar()).getByRole('link', { name: 'Supplier Scorecards' })).toBeInTheDocument();
-      expect(within(sidebar()).queryByRole('link', { name: 'API Tokens' })).not.toBeInTheDocument();
-    }
-  );
+  it.each(['manager', 'supervisor'])('hides API Tokens from %s while the Administration group itself is open', role => {
+    renderLayout(role, '/supplier-scorecards');
+    // A sibling in the same group renders, so the absence below is the gate, not a closed group.
+    expect(within(sidebar()).getByRole('link', { name: 'Supplier Scorecards' })).toBeInTheDocument();
+    expect(within(sidebar()).queryByRole('link', { name: 'API Tokens' })).not.toBeInTheDocument();
+  });
 });

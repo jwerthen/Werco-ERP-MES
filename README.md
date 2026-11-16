@@ -47,20 +47,21 @@ Shipped modules, grouped by domain:
 
 ### Purchasing & Supply Chain
 - Vendors, **purchase orders** (create/send), **MRP** (shortage detection and suggested-PO generation), receiving, **supplier scorecards**, and **PO upload** (AI parsing of PO/quote PDFs, single or multi-document batch).
+- **Approved Supplier List** (AS9100D 8.4) on the vendor record — status, approved scopes, approval basis and re-evaluation dates, an update-only import of the QL 7.4 workbook, an overdue re-evaluation list, advisory scope warnings on purchase orders, and a hard refusal of any new PO to a Disqualified supplier.
 - **Material price history** — track inventory unit costs from PO to PO, with price movement filters, per-item charts, supplier/date comparisons, source-PO links, and CSV export. Reads existing committed POs automatically; see [Material Price History](docs/MATERIAL_PRICE_HISTORY.md).
 
 ### Quality & Compliance
 - **NCR / CAR / FAI**, **SPC**, **calibration** management, **customer complaints**, **QMS standards**, and **operator certifications / skill matrix**.
 
 ### Maintenance & Tooling
-- Preventive/corrective **maintenance** and **tool management**.
+- Preventive/corrective **maintenance** on work centers and on non-production **equipment assets**, with a PM schedule import and machine downtime recorded automatically by shutdown maintenance work orders; and **tool management**.
 
 ### Analytics & Reporting
 - **Analytics** (production, quality, inventory, forecasting, costs), **reports**, and **job costing**.
 
 ### Administration & Governance
 - **RBAC** (8 roles, server-side `require_role` gating), **multi-tenant** company scoping, **tamper-evident audit log** (SHA-256 hash chain), users/employee provisioning, work centers, custom fields, admin settings (incl. an **AI usage & cost** dashboard — per-task/per-model token, spend, and latency telemetry for the LLM features), setup wizard, and a platform-admin overview for cross-company oversight.
-- **Import Center / Excel migration kit** — XLSX + CSV bulk imports (users, parts, materials, customers, vendors, work centers, routings) plus open-work-order and open-purchase-order loaders for go-live, with server-generated Excel templates and a dry-run-preview-then-commit flow (see [docs/EXCEL_MIGRATION_RUNBOOK.md](docs/EXCEL_MIGRATION_RUNBOOK.md)).
+- **Import Center / Excel migration kit** — XLSX + CSV bulk imports (users, parts, materials, customers, vendors, work centers, routings) plus open-work-order and open-purchase-order loaders for go-live, and preview-then-commit loads of the Approved Supplier List and PM schedules, with server-generated Excel templates and a dry-run-preview-then-commit flow (see [docs/EXCEL_MIGRATION_RUNBOOK.md](docs/EXCEL_MIGRATION_RUNBOOK.md)).
 
 ## Architecture
 

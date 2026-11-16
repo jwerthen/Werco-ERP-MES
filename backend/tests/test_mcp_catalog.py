@@ -143,8 +143,9 @@ class TestMembership:
         # The exclusions are the two Excel-cutover loaders, AI Accept & apply (owner ruling 3:
         # only a named person's click runs a recommendation), the two customer
         # export-control writes (only an Admin signed in to the app marks a customer
-        # controlled) and the four company egress kill-switch writes (lead decision
-        # 2026-11-15: an egress switch is a person's judgment) -- nothing else.
+        # controlled), the four company egress kill-switch writes (lead decision
+        # 2026-11-15: an egress switch is a person's judgment) and the Approved Supplier
+        # List writes (a supplier-approval decision is a person's judgment) -- nothing else.
         assert set(EXCLUDED_OPERATIONS) == {
             ("POST", "/api/v1/work-orders/import"),
             ("POST", "/api/v1/purchasing/purchase-orders/import"),
@@ -155,6 +156,12 @@ class TestMembership:
             ("PUT", "/api/v1/companies/me/sms-egress"),
             ("PUT", "/api/v1/admin/settings/shipping-profile"),
             ("PUT", "/api/v1/receiving/print-profile"),
+            ("PUT", "/api/v1/purchasing/vendors/{vendor_id}/approval"),
+            ("POST", "/api/v1/purchasing/vendors/asl-import/preview"),
+            ("POST", "/api/v1/purchasing/vendors/asl-import/commit"),
+            # The legacy approved_supplier_list writes (read-only history since migration 123).
+            ("POST", "/api/v1/supplier-scorecards/approved-suppliers/"),
+            ("PUT", "/api/v1/supplier-scorecards/approved-suppliers/{asl_id}"),
         }
         assert EGRESS_SWITCH_OPERATIONS <= set(EXCLUDED_OPERATIONS)
 
@@ -185,6 +192,20 @@ class TestMembership:
         assert ("PUT", "/api/v1/customers/{customer_id}/contracts/{contract_id}") not in by_key
         assert {"create_customer_export_contract", "update_customer_export_contract"}.isdisjoint(names)
         assert by_key[("GET", "/api/v1/customers/{customer_id}/export-control")] == "get_customer_export_control"
+
+    def test_asl_writes_are_not_tools_but_the_asl_reads_are(self, catalog):
+        """A supplier-approval decision and the QL 7.4 load are a person's judgment (the routes
+        also refuse API tokens), so agents get no tool for them -- but they keep the two reads
+        the exclusion's comment promises: the overdue re-evaluation list and the PO check."""
+        by_path = {tool.key: tool.name for tool in catalog}
+        for write in (
+            ("PUT", "/api/v1/purchasing/vendors/{vendor_id}/approval"),
+            ("POST", "/api/v1/purchasing/vendors/asl-import/preview"),
+            ("POST", "/api/v1/purchasing/vendors/asl-import/commit"),
+        ):
+            assert write not in by_path, write
+        assert by_path[("GET", "/api/v1/purchasing/vendors/reevaluation-due")] == "list_vendors_reevaluation_due"
+        assert by_path[("POST", "/api/v1/purchasing/supplier-approval-check")] == "check_supplier_approval"
 
     def test_ai_apply_is_not_a_tool_but_record_only_accept_is(self, catalog):
         by_path = {tool.key: tool.name for tool in catalog}

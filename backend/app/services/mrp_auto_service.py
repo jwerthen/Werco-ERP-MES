@@ -6,7 +6,7 @@ Handles automatic creation of POs and WOs from MRP actions
 import asyncio
 import logging
 from datetime import date, datetime
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -19,6 +19,7 @@ from app.models.supplier_part import SupplierPartMapping
 from app.models.user import User
 from app.models.work_order import WorkOrder, WorkOrderStatus
 from app.services.audit_service import AuditService
+from app.services.supplier_approval_service import approval_warnings, not_disqualified_clause
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,13 @@ class MRPAutoMode:
     REVIEW = "REVIEW"  # Generate actions, require manual approval
     AUTO_DRAFT = "AUTO_DRAFT"  # Auto-create POs/WOs in draft status
     AUTO_SUBMIT = "AUTO_SUBMIT"  # Auto-create and release POs/WOs (requires admin)
+
+
+class DisqualifiedSourcingError(ValueError):
+    """The part's only suppliers are Disqualified on the ASL; MRP will not choose another.
+
+    A ``ValueError`` so ``process_actions`` records it on the action like every other
+    "cannot create this PO" reason."""
 
 
 class MRPAutoService:
@@ -162,11 +170,17 @@ class MRPAutoService:
         self.db.add(po_line)
 
         # Audit log
+        details = {"mrp_action_id": action.id, "mode": mode, "auto_created": True}
+        # The advisory ASL warnings this automatic PO carries (Conditional, not on the ASL,
+        # re-evaluation overdue, out of scope), recorded on its create row like every other door.
+        warnings = approval_warnings(vendor, [part])
+        if warnings:
+            details["supplier_approval_warnings"] = warnings
         self._create_audit_log(
             action="CREATE_PO",
             entity_type="PurchaseOrder",
             entity_id=po.id,
-            details={"mrp_action_id": action.id, "mode": mode, "auto_created": True},
+            details=details,
             user_id=user_id,
         )
 
@@ -298,7 +312,11 @@ class MRPAutoService:
         Lookup priority:
         1. Check SupplierPartMapping for vendor associations
         2. Check recent purchase order history for most-used vendor
-        3. Fall back to first active vendor
+        3. Fall back to first active vendor -- only for a part with NO sourcing
+
+        No priority ever picks a vendor Disqualified on the Approved Supplier List. A part whose
+        only suppliers (by mapping or history) are Disqualified raises
+        ``DisqualifiedSourcingError`` rather than falling to priority 3.
 
         Args:
             part_id: The part ID to find a vendor for
@@ -330,6 +348,8 @@ class MRPAutoService:
                 Vendor.is_active == True,
                 Vendor.is_deleted == False,
                 Vendor.company_id == self.company_id,
+                # Never auto-pick a vendor Disqualified on the Approved Supplier List.
+                not_disqualified_clause(),
             )
             .first()
         )
@@ -351,6 +371,8 @@ class MRPAutoService:
                 Vendor.is_active == True,
                 Vendor.is_deleted == False,
                 Vendor.company_id == self.company_id,
+                # Never auto-pick a vendor Disqualified on the Approved Supplier List.
+                not_disqualified_clause(),
                 PurchaseOrder.company_id == self.company_id,
             )
             .group_by(Vendor.id)
@@ -363,7 +385,21 @@ class MRPAutoService:
             logger.debug(f"Found vendor {vendor.name} from PO history for part {part_id}")
             return vendor
 
-        # Priority 3: Fall back to first active vendor
+        # The part HAS sourcing, and every live supplier of it is Disqualified. Priority 3 is an
+        # arbitrary "first active vendor" (no ORDER BY, no scope or approval filter), so falling
+        # through would silently re-route the part to an unrelated supplier -- a normal-looking
+        # draft nobody asked for, where before the disqualification the draft went to the real
+        # supplier and the issue gate stopped it. Refuse instead: the error lands on the MRP
+        # action, and a buyer chooses the supplier on the MRP supply review.
+        disqualified = self._disqualified_sourcing_vendor(part_id)
+        if disqualified is not None:
+            raise DisqualifiedSourcingError(
+                f"{disqualified.name} is Disqualified on the Approved Supplier List and is the only supplier "
+                "this part is sourced from (supplier-part mapping or purchase history); MRP does not pick "
+                "another supplier for it. Choose one on the MRP supply review."
+            )
+
+        # Priority 3: Fall back to first active vendor -- only for a part with no sourcing at all.
         logger.debug(f"No specific vendor found for part {part_id}, using first active vendor")
         vendor = (
             self.db.query(Vendor)
@@ -371,10 +407,47 @@ class MRPAutoService:
                 Vendor.is_active == True,
                 Vendor.is_deleted == False,
                 Vendor.company_id == self.company_id,
+                # Never auto-pick a vendor Disqualified on the Approved Supplier List.
+                not_disqualified_clause(),
             )
             .first()
         )
         return vendor
+
+    def _disqualified_sourcing_vendor(self, part_id: int) -> Optional[Vendor]:
+        """A live, active supplier of this part -- by supplier-part mapping, else by purchase
+        history -- WITHOUT the Disqualified filter. Called only once priorities 1 and 2 found no
+        usable supplier, so anything it returns is a Disqualified one."""
+        mapped = (
+            self.db.query(Vendor)
+            .join(SupplierPartMapping, SupplierPartMapping.vendor_id == Vendor.id)
+            .filter(
+                SupplierPartMapping.company_id == self.company_id,
+                SupplierPartMapping.part_id == part_id,
+                SupplierPartMapping.is_active == True,
+                Vendor.is_active == True,
+                Vendor.is_deleted == False,
+                Vendor.company_id == self.company_id,
+            )
+            .order_by(Vendor.id)
+            .first()
+        )
+        if mapped is not None:
+            return mapped
+        return (
+            self.db.query(Vendor)
+            .join(PurchaseOrder, PurchaseOrder.vendor_id == Vendor.id)
+            .join(PurchaseOrderLine, PurchaseOrderLine.purchase_order_id == PurchaseOrder.id)
+            .filter(
+                PurchaseOrderLine.part_id == part_id,
+                PurchaseOrder.company_id == self.company_id,
+                Vendor.is_active == True,
+                Vendor.is_deleted == False,
+                Vendor.company_id == self.company_id,
+            )
+            .order_by(Vendor.id)
+            .first()
+        )
 
     def _get_part_cost(self, part_id: int, vendor_id: int) -> float:
         """

@@ -35,6 +35,7 @@ from app.schemas.purchasing import POCreate
 from app.services import notification_links
 from app.services.audit_service import AuditService, AuditWriteError
 from app.services.erp_draft_commands import attach_document_command, create_purchase_order_command
+from app.services.supplier_approval_service import assert_vendor_not_disqualified
 from app.services.work_order_duplicate_service import duplicate_work_order
 
 ACTION_ROLES = {
@@ -347,6 +348,9 @@ class HankTaskService:
             if not vendors or vendors[0].is_deleted or not vendors[0].is_active:
                 raise HTTPException(404, 'Active vendor not found')
             vendor = vendors[0]
+            # Refuse at prepare as well as at execute (create_purchase_order_command), so Hank
+            # never offers a plan the ASL's Disqualified gate would refuse.
+            assert_vendor_not_disqualified(vendor)
             ids = {line['part_id'] for line in data['lines']}
             parts = self._rows(Part, Part.id.in_(ids), locked=locked)
             if len(parts) != len(ids) or any(row.is_deleted or not row.is_active for row in parts):
