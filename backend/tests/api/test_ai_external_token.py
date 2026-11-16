@@ -202,6 +202,9 @@ CANARY_CASES: Dict[Tuple[str, str], Tuple[UrlFor, bool]] = {
     ("GET", "/maintenance/work-orders"): (_url("/maintenance/work-orders"), True),
     ("GET", "/maintenance/work-orders/overdue"): (_url("/maintenance/work-orders/overdue"), True),
     ("GET", "/maintenance/work-orders/{wo_id}"): (_url("/maintenance/work-orders/{wo_id}"), True),
+    # Reference data with no customer linkage: always served cleared (TestProductionCalendar).
+    ("GET", "/production-calendar"): (_url("/production-calendar"), False),
+    ("GET", "/production-calendar/resolve"): (_url("/production-calendar/resolve"), False),
 }
 
 
@@ -807,6 +810,117 @@ class TestNarrowedTokenReadsWriteNothing:
         assert client.get(f"{API}/work-orders/{wo.id}", headers=user_headers(viewer)).status_code == 200
         assert calls == [wo.id]
 
+    def test_the_by_number_read_writes_nothing_either(
+        self, client: TestClient, db_session: Session, world: World, admin_headers: dict, viewer: User, monkeypatch
+    ):
+        """P1 brought ``GET /work-orders/by-number/{n}`` to parity with the read by id (same body,
+        cost and hours figures included). It never reconciles -- for anyone -- so a narrowed
+        token's call to it must leave the database exactly as it found it too."""
+        _part, wo, _op = _reconcilable_job(db_session, world, "0004")
+        db_session.commit()
+        enqueued: List[int] = []
+        monkeypatch.setattr(notification_outbox, "_enqueue_dispatch", enqueued.append)
+        for ai_external in (True, False):
+            _id, token = issue_token(client, admin_headers, viewer, scope="read_only", ai_external=ai_external)
+            before = _db_state(db_session)
+            response = client.get(f"{API}/work-orders/by-number/{wo.work_order_number}", headers=bearer(token))
+            assert response.status_code == 200, response.text[:400]
+            assert response.json()["status"] == WorkOrderStatus.IN_PROGRESS.value
+            assert _db_state(db_session) == before, "a narrowed token's by-number GET wrote something"
+        assert enqueued == []
+
+
+class TestProductionCalendar:
+    """The plugin reads the production calendar (P1.2) to bucket its own figures by the shop's
+    production day and shift. Both reads are reference data with no customer linkage -- served
+    to an AI-external token exactly as to a person, nothing withheld and nothing ledgered -- and
+    the two writes stay refused to every read-only token."""
+
+    @staticmethod
+    def _save_calendar(client: TestClient, admin_headers: dict, world: World) -> dict:
+        document = {
+            "expected_version": 0,
+            "production_day_start": "05:00",
+            "patterns": [
+                {
+                    "name": "Weld two-shift",
+                    "is_default": True,
+                    "work_center_ids": [world.work_center.id],
+                    "shifts": [
+                        {
+                            "code": "W1",
+                            "name": "Weld 1st",
+                            "start": "05:00",
+                            "end": "15:30",
+                            "days": [0, 1, 2, 3, 4],
+                            "planned_minutes": 570,
+                        },
+                        {
+                            "code": "W2",
+                            "name": "Weld 2nd",
+                            "start": "15:30",
+                            "end": "02:00",
+                            "days": [0, 1, 2, 3, 4],
+                            "planned_minutes": 570,
+                        },
+                    ],
+                }
+            ],
+        }
+        saved = client.put(f"{API}/production-calendar", json=document, headers=admin_headers)
+        assert saved.status_code == 200, saved.text[:400]
+        return saved.json()
+
+    def test_both_reads_are_served_in_full_and_ledger_nothing(
+        self, client: TestClient, db_session: Session, world: World, ai_token, admin_headers: dict
+    ):
+        saved = self._save_calendar(client, admin_headers, world)
+        assert saved["configured"] is True and saved["patterns"][0]["shifts"], "vacuous: nothing configured"
+        _id, token = ai_token
+        before = len(_events(db_session))
+        for url in (
+            f"{API}/production-calendar",
+            f"{API}/production-calendar/resolve?at=2026-11-11T07:30:00Z&work_center_id={world.work_center.id}",
+        ):
+            redacted = client.get(url, headers=bearer(token))
+            person = client.get(url, headers=admin_headers)
+            assert redacted.status_code == person.status_code == 200, (url, redacted.text[:400])
+            body = redacted.json()
+            assert REDACTED_VALUE not in redacted.text and "export_controlled" not in redacted.text, url
+            if url.endswith("/production-calendar"):
+                # ``today`` is computed from the wall clock; everything else is the stored document.
+                body.pop("today")
+                expected = person.json()
+                expected.pop("today")
+                assert body == expected
+                assert [s["code"] for s in body["patterns"][0]["shifts"]] == ["W1", "W2"]
+            else:
+                assert body == person.json()
+                assert body["shift"]["code"] == "W2", "01:30 Wednesday Central is Tuesday's 2nd shift"
+        assert len(_events(db_session)) == before, "reference data is never ledgered as withheld"
+
+    @pytest.mark.parametrize("ai_external", [True, False], ids=["ai_external", "read_only"])
+    def test_the_writes_stay_refused_to_every_read_only_token(
+        self, client: TestClient, world: World, admin_headers: dict, viewer: User, ai_external: bool
+    ):
+        saved = self._save_calendar(client, admin_headers, world)
+        _id, token = issue_token(client, admin_headers, viewer, scope="read_only", ai_external=ai_external)
+        document = {"expected_version": saved["version"], "production_day_start": "06:00", "patterns": []}
+        refusals = [
+            client.put(f"{API}/production-calendar", json=document, headers=bearer(token)),
+            # The sync defaults to a dry run, and is still a POST: a read-only token never calls it.
+            client.post(f"{API}/production-calendar/working-calendars/sync", headers=bearer(token)),
+            client.post(
+                f"{API}/production-calendar/working-calendars/sync?dry_run=false&expected_version={saved['version']}",
+                headers=bearer(token),
+            ),
+        ]
+        for refused in refusals:
+            assert refused.status_code == 403, refused.text[:400]
+            assert refused.json() == {"detail": READ_ONLY_ROUTE_WRITES_DETAIL}
+        after = client.get(f"{API}/production-calendar", headers=admin_headers).json()
+        assert (after["version"], after["production_day_start"]) == (saved["version"], "05:00"), "nothing changed"
+
 
 # --------------------------------------------------------------------------- file bytes
 
@@ -1101,6 +1215,8 @@ class TestFilterOracles:
             "/parts/?part_type=manufactured&limit=10&active_only=true",
             "/quotes/?status=draft&limit=5",
             "/shop-floor/operations?status=ready&page=1&page_size=10",
+            "/oee/records?shift_id=1&limit=5",
+            "/production-calendar/resolve?at=2026-11-10T12:00:00Z",
         ],
     )
     def test_filters_over_kept_fields_still_work(self, client: TestClient, world: World, ai_token, query: str):

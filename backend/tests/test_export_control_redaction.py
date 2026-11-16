@@ -16,6 +16,7 @@ import pytest
 
 from app.core.export_control import REDACTED_MARKER_KEY, REDACTED_VALUE, ai_external_error_detail
 from app.services.export_control_redaction import (
+    KEPT_ENUM_VALUES,
     MIN_SENSITIVE_TOKEN_LENGTH,
     UNLINKABLE,
     VALIDATION_ERROR_MESSAGE,
@@ -336,6 +337,38 @@ def test_every_numeric_field_an_allowlisted_route_serves_is_classified():
     assert len(fields) > 50, "vacuous: the schema walk found too few numeric fields"
     withheld = {key for key in fields if not kept_numeric_key(key)}
     assert withheld == EXPECTED_WITHHELD_NUMERIC_FIELDS, {key: sorted(fields[key]) for key in withheld}
+
+
+class TestClosedVocabularyStrings:
+    """P1.4 put ``hours_source`` on every work-order operation. Its value is a server-derived
+    category (the schema types it as a ``Literal``), so inside a withheld record it stays --
+    but only as one of its own values: anything else under the key is withheld like any text."""
+
+    def test_the_kept_values_are_exactly_the_schemas_literal(self):
+        import typing
+
+        from app.schemas.work_order import WorkOrderOperationResponse
+
+        annotation = WorkOrderOperationResponse.model_fields["hours_source"].annotation
+        (literal,) = [arg for arg in typing.get_args(annotation) if typing.get_origin(arg) is typing.Literal]
+        assert KEPT_ENUM_VALUES["hours_source"] == frozenset(typing.get_args(literal))
+
+    @pytest.mark.parametrize("value", sorted(KEPT_ENUM_VALUES["hours_source"]))
+    def test_a_closed_vocabulary_value_stays_inside_a_withheld_record(self, value):
+        record = {"work_order_id": 1, "hours_source": value, "hours_include_backfill": True, "name": "ITAR op"}
+        out = redact_payload(record, _index()).payload
+        assert out["hours_source"] == value
+        assert out["hours_include_backfill"] is True
+        assert out["name"] == R and out[REDACTED_MARKER_KEY] is True
+
+    def test_any_other_value_under_the_key_is_withheld(self):
+        out = redact_payload({"work_order_id": 1, "hours_source": "ITAR drawing 7781-A"}, _index()).payload
+        assert out["hours_source"] == R
+
+    @pytest.mark.parametrize("key", ["start_minute", "end_minute", "production_day_start_minute"])
+    def test_a_production_calendar_wall_time_in_minutes_is_kept(self, key):
+        assert kept_numeric_key(key) is True
+        assert redact_payload({"work_order_id": 1, key: 330}, _index()).payload[key] == 330
 
 
 class TestIdentification:

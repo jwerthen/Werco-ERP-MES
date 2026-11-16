@@ -77,8 +77,10 @@ CLASSIFICATION_UNKNOWN = "unknown"
 # (METHOD, path template RELATIVE to ``settings.API_V1_PREFIX``) an AI-external token may
 # call -- the brief's read set and nothing else: work orders, shop-floor operations,
 # downtime, work centers, OEE, parts, routings, NCR / CAR / FAI, quotes, vendors, purchase
-# orders, receiving history, maintenance work orders. GET only. There is no time-entry GET
-# route; time entries reach the plugin through the work-order timeline.
+# orders, receiving history, maintenance work orders -- plus the production calendar (P1.2:
+# the production-day start and the shifts, so the plugin buckets its own figures by the
+# shop's production day). GET only. There is no time-entry GET route; time entries reach the
+# plugin through the work-order timeline.
 #
 # EVERY entry needs a canary conformance case in tests/api/test_ai_external_token.py
 # (seed a controlled record whose text carries a canary, call the route as an AI-external
@@ -143,6 +145,13 @@ AI_EXTERNAL_ALLOWED_ROUTES: FrozenSet[Tuple[str, str]] = frozenset(
         ("GET", "/maintenance/work-orders"),
         ("GET", "/maintenance/work-orders/overdue"),
         ("GET", "/maintenance/work-orders/{wo_id}"),
+        # Production calendar: reference data with no customer linkage -- the day start, the
+        # shift patterns (names, codes, wall times, work-center ids) and the instant -> day /
+        # shift resolver. Nothing in it names a work order, part or customer, so it is always
+        # served cleared. The two writes (PUT /production-calendar and the working-calendar
+        # sync POST) stay refused: a read-only token never writes.
+        ("GET", "/production-calendar"),
+        ("GET", "/production-calendar/resolve"),
     }
 )
 
@@ -232,6 +241,8 @@ AI_EXTERNAL_QUERY_PARAMS: Mapping[str, Mapping[str, Optional[FrozenSet[str]]]] =
         "date_from": _ANY,
         "date_to": _ANY,
         "shift": _ANY,
+        # A defined shift's id (P1.2): a filter over a kept id.
+        "shift_id": _ANY,
         "skip": _ANY,
         "limit": _ANY,
     },
@@ -290,6 +301,9 @@ AI_EXTERNAL_QUERY_PARAMS: Mapping[str, Mapping[str, Optional[FrozenSet[str]]]] =
     },
     "/maintenance/work-orders/overdue": {},
     "/maintenance/work-orders/{wo_id}": {},
+    "/production-calendar": {},
+    # ``at`` is an instant and ``work_center_id`` a kept id: neither filters withheld text.
+    "/production-calendar/resolve": {"at": _ANY, "work_center_id": _ANY},
 }
 
 

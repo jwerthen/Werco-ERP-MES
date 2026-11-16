@@ -227,8 +227,9 @@ Inside a withheld object a **keep-allowlist** applies. These stay true:
 - numbers, both JSON numbers and numeric **strings** (a Decimal serializes as one), **only**
   under a key that names an id, count, quantity, duration, money amount, rate, percentage or
   sequence. The key must be an id (`id`, `*_id`, `*_ids`, or a `*_by` user id), a status, a kept
-  identifier, one of `char_number`, `line_number`, `step_number`, `balloon_number` or a
-  pagination key, or contain one of `quantity`, `qty`, `count`, `hours`, `minutes`, `seconds`,
+  identifier, one of `char_number`, `line_number`, `step_number`, `balloon_number`, a
+  pagination key or the production calendar's `start_minute` / `end_minute` /
+  `production_day_start_minute` (a wall time in minutes after local midnight), or contain one of `quantity`, `qty`, `count`, `hours`, `minutes`, `seconds`,
   `days`, `duration`, `time`, `cost`, `price`, `total`, `amount`, `tax`, `shipping`, `stock`,
   `reorder`, `percent`, `pct`, `rate`, `sequence`, `version`, `priority`, `runs`, `piece`,
   `parts`, `order`, `rank`, `rating`, `score`, `confidence`, `efficiency`, `passed`, `failed`,
@@ -248,7 +249,13 @@ Inside a withheld object a **keep-allowlist** applies. These stay true:
   legacy AI estimate's `totals.grand_total` stays and its `totals.material` does not;
 - the business identifiers `work_order_number`, `wo_number`, `operation_number`, `ncr_number`,
   `car_number`, `fai_number`, `quote_number`, `po_number`, `receipt_number`, `lot_number`,
-  `work_center_code` and `work_center_name`.
+  `work_center_code` and `work_center_name`;
+- a closed-vocabulary category, only as one of its own values (`KEPT_ENUM_VALUES` in
+  `app/services/export_control_redaction.py`): an operation's `hours_source` stays when it is
+  `time_entries`, `manual`, `standard` or `none` (the schema's `Literal`, pinned by the test), and
+  any other value under that key is withheld. Its companions on the work-order read keep through
+  the rules above: `recorded_setup_hours` / `recorded_run_hours` (hours), `hours_include_backfill`
+  (a boolean), and the `job_cost_actuals` figures and `issued_material_cost` (money).
 
 **Every other value becomes `"[export-controlled]"`.** That includes part numbers, descriptions,
 customer names, notes, instructions and specifications, nominal dimensions, tolerances and measured
@@ -278,7 +285,7 @@ true.
 ## 5. The AI-external allowlist
 
 `app/core/export_control.py` → `AI_EXTERNAL_ALLOWED_ROUTES` (GET only, relative to `/api/v1`).
-This is the brief's read set and nothing else:
+This is the brief's read set, plus the production calendar (P1.2), and nothing else:
 
 | Area | Routes |
 |---|---|
@@ -292,8 +299,9 @@ This is the brief's read set and nothing else:
 | Quotes | `/quotes/`, `/quotes/{quote_id}` |
 | Purchasing and receiving | `/purchasing/vendors`, `/purchasing/vendors/{vendor_id}`, `/purchasing/purchase-orders`, `/purchasing/purchase-orders/{po_id}`, `/receiving/history`, `/receiving/receipt/{receipt_id}` |
 | Maintenance work orders | `/maintenance/work-orders`, `/maintenance/work-orders/overdue`, `/maintenance/work-orders/{wo_id}` |
+| Production calendar | `/production-calendar`, `/production-calendar/resolve` |
 
-That is 44 routes. The MCP tool names they map to (5 convenience + 39 generated) are listed in
+That is 46 routes. The MCP tool names they map to (5 convenience + 41 generated) are listed in
 [MCP.md → 4.2](MCP.md#42-ai-external-tokens-and-export-control). Every other route, global search
 and the shop-floor dashboard included, is refused by gate 4.
 
@@ -302,6 +310,13 @@ Pareto `top_reasons` falls back to an event's free-text `description` in an obje
 record key. A controlled job's downtime text could not be linked and withheld there, so the route
 is refused rather than risk a leak. The per-event downtime reads carry `work_order_id` and are
 redacted.
+
+The **production calendar** reads are reference data. The day start, the shift patterns (names,
+codes, wall times, work-center ids) and the instant-to-day-and-shift resolver name no work order,
+part or customer, so both are served in full and ledger nothing. They let the plugin bucket its own
+figures by the shop's production day and shift. The calendar's two writes, `PUT
+/production-calendar` and the working-calendar sync `POST` (a dry run included), are refused to
+every read-only token like any other write.
 
 ### 5.1 Query parameters
 
@@ -318,7 +333,8 @@ were the right one.
   `sort=part` / `sort=customer` and `group=customer` / `group=part` on `/work-orders/browse`.
 - **Allowed:** filters over fields the redaction keeps, such as ids, statuses, dates, counts,
   booleans, pagination and closed-vocabulary categories (`part_type`, `work_order_type`, downtime
-  `category`).
+  `category`), the OEE records' `shift_id`, and the calendar resolver's `at` and
+  `work_center_id`.
 
 A new query parameter on an allowlisted route is refused until it is classified; a guard test in
 `backend/tests/api/test_ai_external_token.py` fails CI until it is.

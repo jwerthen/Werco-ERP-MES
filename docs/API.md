@@ -10610,6 +10610,13 @@ DST changes (boundaries are wall-clock times).
 | GET | `/production-calendar/resolve` | Which production day and shift an instant (`at`, ISO-8601; offset-less = UTC; default now) belongs to at a `work_center_id` (omitted = the default pattern; another company's work center is **404**). Returns `production_day` with its UTC window, `shift` (the outgoing one in an overlap), `overlapping`, `pattern_id`, `configured` and `calendar_version`. An instant within a day of the ends of the datetime range is **422** `The instant is outside the supported range` | Yes |
 | POST | `/production-calendar/working-calendars/sync` | Set each work center's weekly working hours from its shifts (`dry_run`, default `true`; `expected_version`) | Admin / Manager / Supervisor |
 
+**API tokens.** Both reads are open to every API token, read-only and AI-external ones included: they
+are on the AI-external allowlist as reference data with no customer linkage, always served in full and
+never ledgered (`resolve` takes `at` and `work_center_id` from such a token; see
+[EXPORT_CONTROL_AI_EGRESS.md → The AI-external allowlist](EXPORT_CONTROL_AI_EGRESS.md#5-the-ai-external-allowlist)).
+The `PUT` and the sync `POST`, a dry run included, refuse every read-only token **403** `Read-only API
+token cannot modify data.`
+
 **Unconfigured company (no calendar saved).** The production day is the **company-local calendar day**
 (day start 00:00) and there are no shifts. This replaced the old **UTC-date** day boundaries of OEE,
 the OEE cron, reports, downtime filters, job-cost labor dates and analytics on **2026-11-13** — for every
