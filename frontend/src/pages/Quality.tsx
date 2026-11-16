@@ -264,6 +264,13 @@ export default function QualityPage() {
   const [faiDetailError, setFaiDetailError] = useState<string | null>(null);
   const [prefilling, setPrefilling] = useState(false);
   const [prefillResult, setPrefillResult] = useState<FAIPrefillResult | null>(null);
+  // The FAI Log view stays mounted under the detail modal and loadData() never reads the
+  // log, so every FAI write here bumps this to make the log re-read its current page.
+  const [faiLogVersion, setFaiLogVersion] = useState(0);
+  const refreshFaiLists = () => {
+    loadData();
+    setFaiLogVersion(version => version + 1);
+  };
 
   // Form states
   const [ncrForm, setNcrForm] = useState(BLANK_NCR_FORM);
@@ -489,7 +496,7 @@ export default function QualityPage() {
       });
       setShowFAIModal(false);
       setFaiForm(BLANK_FAI_FORM);
-      loadData();
+      refreshFaiLists();
     } catch (err: any) {
       const detail = err.response?.data?.detail;
       setCreateError(
@@ -624,7 +631,7 @@ export default function QualityPage() {
   const refreshFaiDetail = async () => {
     if (faiDetailId == null) return;
     await loadFaiDetail(faiDetailId);
-    loadData();
+    refreshFaiLists();
   };
 
   /**
@@ -645,7 +652,7 @@ export default function QualityPage() {
           (result.unmatched_count > 0 ? ` — ${result.unmatched_count} unmatched` : '')
       );
       await loadFaiDetail(faiDetailId);
-      loadData();
+      refreshFaiLists();
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to prefill from process steps');
     } finally {
@@ -1338,7 +1345,7 @@ export default function QualityPage() {
               )}
             </div>
             {faiView === 'log' ? (
-              <FaiLogView onOpenFai={openFaiDetail} canExport={canExportFAILog} />
+              <FaiLogView onOpenFai={openFaiDetail} canExport={canExportFAILog} refreshKey={faiLogVersion} />
             ) : (
               <>
                 <TableWorkspaceControls workspace={faiWorkspace} />

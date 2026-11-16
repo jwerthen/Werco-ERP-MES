@@ -14,6 +14,10 @@
  *   final — it stamps the completion date (Central) and the approver.
  * - The customer's approval is its own audited verb, after a Passed or Conditional
  *   disposition, recorded once.
+ * - One measurement editor is open at a time and is never replaced while it holds unsaved
+ *   entries. A save sends only the fields the inspector changed, and an open editor follows
+ *   a re-read of its row (e.g. Prefill from process steps), so it never writes stale blanks
+ *   over saved evidence.
  */
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
@@ -21,7 +25,13 @@ import api from '../../services/api';
 import EntityPicker from '../operations/EntityPicker';
 import { Button, ConfirmDialog, FormField, LoadingButton, useToast } from '../ui';
 import { formatCentralDate, getCentralTodayISODate } from '../../utils/centralTime';
-import { FAI_FINAL_STATUSES, type FAICharacteristic, type FAIRecord, type FAIStatus } from '../../types/quality';
+import {
+  FAI_FINAL_STATUSES,
+  type FAICharacteristic,
+  type FAICharacteristicUpdate,
+  type FAIRecord,
+  type FAIStatus,
+} from '../../types/quality';
 
 export type FAIDetailRecord = FAIRecord & { characteristics: FAICharacteristic[] };
 
@@ -97,7 +107,42 @@ const measurementOf = (char: FAICharacteristic): Measurement => ({
   notes: char.notes || '',
 });
 
+const MEASUREMENT_KEYS = ['actual_value', 'measuring_device', 'result', 'notes'] as const;
+
 const nullable = (value: string) => (value.trim() === '' ? null : value);
+
+/**
+ * The open measurement editor. `baseline` is the row's saved measurement (JSON of a
+ * `Measurement`) the entries are compared with: dirtiness, the fields a save sends, and
+ * which fields follow a re-read all read it.
+ */
+interface MeasurementEditor {
+  id: number;
+  charNumber: number;
+  value: Measurement;
+  baseline: string;
+  /** The saved values changed underneath the open editor (a prefill, another writer). */
+  rebased: boolean;
+}
+
+const editorFor = (char: FAICharacteristic): MeasurementEditor => {
+  const value = measurementOf(char);
+  return { id: char.id, charNumber: char.char_number, value, baseline: JSON.stringify(value), rebased: false };
+};
+
+/**
+ * Only the fields the inspector changed from the saved measurement. The server writes
+ * every key it is sent, so sending an untouched field would put back the value the editor
+ * opened with — erasing whatever was saved since (a prefill from process steps, say).
+ */
+const measurementChanges = (value: Measurement, saved: Measurement): FAICharacteristicUpdate => {
+  const changes: FAICharacteristicUpdate = {};
+  if (value.actual_value !== saved.actual_value) changes.actual_value = nullable(value.actual_value);
+  if (value.measuring_device !== saved.measuring_device) changes.measuring_device = nullable(value.measuring_device);
+  if (value.result !== saved.result) changes.is_conforming = value.result === '' ? null : value.result === 'pass';
+  if (value.notes !== saved.notes) changes.notes = nullable(value.notes);
+  return changes;
+};
 
 const DISPOSITIONS: Array<{ value: FAIStatus; label: string }> = [
   { value: 'passed', label: 'Passed' },
@@ -132,8 +177,54 @@ export default function FaiInspectionPanel({
     [fai.characteristics]
   );
   const [adding, setAdding] = useState<NewCharacteristic | null>(null);
-  const [editing, setEditing] = useState<{ id: number; value: Measurement; baseline: string } | null>(null);
+  const [editing, setEditing] = useState<MeasurementEditor | null>(null);
   const [removeTarget, setRemoveTarget] = useState<FAICharacteristic | null>(null);
+
+  // The edited row's saved measurement as the latest read of the FAI has it ('' once the
+  // row is gone). A re-read can change it under the open editor — Prefill from process
+  // steps fills empty actual values — so the editor follows: fields the inspector has not
+  // touched take the saved values, the inspector's own entries are kept, and the editor
+  // says so. Never a stale editor that would write the old blanks back.
+  const editingId = editing?.id ?? null;
+  const editedSaved = useMemo(() => {
+    if (editingId == null) return null;
+    const row = fai.characteristics.find(char => char.id === editingId);
+    return row ? JSON.stringify(measurementOf(row)) : '';
+  }, [editingId, fai.characteristics]);
+  useEffect(() => {
+    if (!editing || editedSaved == null || editing.baseline === editedSaved) return;
+    if (editedSaved === '') {
+      // Removed by another writer: its entries can no longer be saved anywhere.
+      if (JSON.stringify(editing.value) !== editing.baseline) {
+        setError(
+          `Characteristic ${editing.charNumber} is no longer on this FAI; its unsaved measurement was discarded.`
+        );
+      }
+      setEditing(null);
+      return;
+    }
+    const saved = JSON.parse(editedSaved) as Measurement;
+    const opened = JSON.parse(editing.baseline) as Measurement;
+    const follow = <K extends keyof Measurement>(key: K): Measurement[K] =>
+      editing.value[key] === opened[key] ? saved[key] : editing.value[key];
+    // Tell the inspector when what they see moved (an untouched field) or when the saved
+    // value of a field they are editing changed — not when the re-read only echoes their
+    // own save back, just before the editor closes.
+    const changedUnderneath = MEASUREMENT_KEYS.some(
+      key => saved[key] !== opened[key] && (editing.value[key] === opened[key] || saved[key] !== editing.value[key])
+    );
+    setEditing({
+      ...editing,
+      baseline: editedSaved,
+      rebased: editing.rebased || changedUnderneath,
+      value: {
+        actual_value: follow('actual_value'),
+        measuring_device: follow('measuring_device'),
+        result: follow('result'),
+        notes: follow('notes'),
+      },
+    });
+  }, [editing, editedSaved]);
 
   // ── Disposition / customer approval ──────────────────────────────────
   const [disposition, setDisposition] = useState<FAIStatus | ''>('');
@@ -222,17 +313,15 @@ export default function FaiInspectionPanel({
   const saveMeasurement = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!editing) return;
-    const char = fai.characteristics.find(row => row.id === editing.id);
+    const changes = measurementChanges(editing.value, JSON.parse(editing.baseline) as Measurement);
+    if (Object.keys(changes).length === 0) {
+      setEditing(null);
+      return;
+    }
     const saved = await run(
       'measure',
-      () =>
-        api.updateFAICharacteristic(fai.id, editing.id, {
-          actual_value: nullable(editing.value.actual_value),
-          measuring_device: nullable(editing.value.measuring_device),
-          is_conforming: editing.value.result === '' ? null : editing.value.result === 'pass',
-          notes: nullable(editing.value.notes),
-        }),
-      `Characteristic ${char?.char_number ?? ''} recorded`.trim(),
+      () => api.updateFAICharacteristic(fai.id, editing.id, changes),
+      `Characteristic ${editing.charNumber} recorded`,
       'Could not record the measurement'
     );
     if (saved) setEditing(null);
@@ -353,12 +442,15 @@ export default function FaiInspectionPanel({
                 </select>
               )}
             </FormField>
-            <FormField label="Inspection date">
+            <FormField label="Inspection date" help="The date the first article was inspected. Not in the future.">
               {field => (
                 <input
                   {...field}
                   type="date"
                   className="input"
+                  // The server refuses a future date (422): a final disposition would freeze it,
+                  // and no customer approval date could then be recorded.
+                  max={getCentralTodayISODate()}
                   value={recordForm.inspection_date}
                   onChange={event => setRecordForm(form => ({ ...form, inspection_date: event.target.value }))}
                 />
@@ -595,12 +687,18 @@ export default function FaiInspectionPanel({
                           <Button
                             size="sm"
                             variant="ghost"
-                            disabled={busy !== null || editing?.id === char.id}
+                            // One editor at a time, and opening another never drops typed
+                            // entries: while the open one is unsaved, the other rows wait.
+                            disabled={busy !== null || editing?.id === char.id || editingDirty}
+                            title={
+                              editingDirty && editing?.id !== char.id
+                                ? `Save or cancel the measurement for characteristic ${editing?.charNumber} first`
+                                : undefined
+                            }
                             aria-label={`Record measurement for characteristic ${char.char_number}`}
                             onClick={() => {
                               setError('');
-                              const value = measurementOf(char);
-                              setEditing({ id: char.id, value, baseline: JSON.stringify(value) });
+                              setEditing(editorFor(char));
                             }}
                           >
                             Record
@@ -625,6 +723,12 @@ export default function FaiInspectionPanel({
                             className="space-y-3"
                             aria-label={`Measurement for characteristic ${char.char_number}`}
                           >
+                            {editing.rebased && (
+                              <p role="status" className="text-xs text-fd-amber">
+                                The saved measurement changed while this was open (for example, Prefill from process
+                                steps). Fields you had not changed now show the saved values; your own entries are kept.
+                              </p>
+                            )}
                             <fieldset disabled={busy !== null} className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                               <FormField label="Actual value">
                                 {field => (
@@ -722,7 +826,7 @@ export default function FaiInspectionPanel({
                                 type="submit"
                                 size="sm"
                                 loading={busy === 'measure'}
-                                disabled={busy !== null}
+                                disabled={busy !== null || !editingDirty}
                               >
                                 Save measurement
                               </LoadingButton>

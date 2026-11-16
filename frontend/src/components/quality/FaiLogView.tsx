@@ -77,9 +77,15 @@ interface FaiLogViewProps {
   onOpenFai: (faiId: number) => void;
   /** The server's EXPORT_ROLES (Admin / Manager). */
   canExport: boolean;
+  /**
+   * Bumped by the page after every FAI write it makes (create, a detail write, prefill):
+   * the log re-reads the current page, so a disposition or a new FAI shows without a
+   * filter change or a reload.
+   */
+  refreshKey?: number;
 }
 
-export default function FaiLogView({ onOpenFai, canExport }: FaiLogViewProps) {
+export default function FaiLogView({ onOpenFai, canExport, refreshKey = 0 }: FaiLogViewProps) {
   const { showToast } = useToast();
   const [searchParams, setSearchParams] = useSearchParams();
   const urlSearch = searchParams.get(PARAM.search) || '';
@@ -174,7 +180,7 @@ export default function FaiLogView({ onOpenFai, canExport }: FaiLogViewProps) {
     return () => {
       active = false;
     };
-  }, [filters, page, attempt]);
+  }, [filters, page, attempt, refreshKey]);
 
   const handleExport = async () => {
     if (exporting || !canExport) return;

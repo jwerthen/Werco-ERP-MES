@@ -591,6 +591,24 @@ class TestCustomerApproval:
         same_day = _approve(client, _user(db_session), fai, {"customer_approval_date": "2026-09-10"})
         assert same_day.status_code == 200, same_day.text
 
+    def test_a_frozen_future_inspection_date_does_not_block_the_approval(self, client, db_session, monkeypatch):
+        # A row finalized with a typo'd future inspection date (stored before PUT refused one)
+        # can no longer be corrected. Neither today nor the inspection date itself would pass
+        # both date rules, so the lower bound does not apply to it.
+        monkeypatch.setattr(fai_service, "central_today", lambda: date(2026, 11, 15))
+        fai = _fai(
+            db_session,
+            _part(db_session),
+            status=FAIStatus.PASSED,
+            inspection_date=date(2027, 12, 20),
+            completed_date=date(2026, 11, 15),
+        )
+
+        response = _approve(client, _user(db_session), fai)
+
+        assert response.status_code == 200, response.text
+        assert response.json()["customer_approval_date"] == "2026-11-15"
+
     def test_the_body_is_optional_and_defaults_to_today(self, client, db_session, monkeypatch):
         # Every field of the body is optional, so a bodyless call (an MCP tool call with no
         # arguments) records today's approval instead of answering 422.
@@ -791,6 +809,51 @@ class TestCreateAndDisposition:
         assert response.json()["completed_date"] == "2001-02-03"
         assert response.json()["approved_by"] == user.id
         assert response.json()["approved_by_name"] == user.full_name
+
+    def test_a_future_inspection_date_is_refused_and_nothing_changes(self, client, db_session, monkeypatch):
+        # Regression: a typo'd future inspection date, frozen by the disposition, left the
+        # customer approval no date it could carry (not before the inspection, not future).
+        monkeypatch.setattr(fai_service, "central_today", lambda: date(2026, 11, 15))
+        fai = _fai(db_session, _part(db_session), status=FAIStatus.IN_PROGRESS)
+        user = _user(db_session, role=UserRole.QUALITY)
+        before = _snapshot(db_session)
+
+        response = client.put(
+            f"{BASE}/{fai.id}", headers=_headers(user), json={"version": 0, "inspection_date": "2027-12-20"}
+        )
+
+        assert response.status_code == 422, response.text
+        assert response.json()["detail"] == "The inspection date cannot be in the future."
+        assert _snapshot(db_session) == before
+        today = client.put(
+            f"{BASE}/{fai.id}", headers=_headers(user), json={"version": 0, "inspection_date": "2026-11-15"}
+        )
+        assert today.status_code == 200, today.text
+        assert today.json()["inspection_date"] == "2026-11-15"
+
+    def test_the_disposition_refuses_a_stored_future_inspection_date(self, client, db_session, monkeypatch):
+        # A future date stored before PUT refused one is corrected before the disposition
+        # freezes it; a disposition that corrects it in the same request goes through.
+        monkeypatch.setattr(fai_service, "central_today", lambda: date(2026, 11, 15))
+        fai = _fai(db_session, _part(db_session), status=FAIStatus.IN_PROGRESS, inspection_date=date(2027, 12, 20))
+        user = _user(db_session, role=UserRole.QUALITY)
+        before = _snapshot(db_session)
+
+        response = client.put(f"{BASE}/{fai.id}", headers=_headers(user), json={"version": 0, "status": "passed"})
+
+        assert response.status_code == 409, response.text
+        assert "12/20/2027" in response.json()["detail"] and fai.fai_number in response.json()["detail"]
+        assert _snapshot(db_session) == before
+        corrected = client.put(
+            f"{BASE}/{fai.id}",
+            headers=_headers(user),
+            json={"version": 0, "status": "passed", "inspection_date": "2026-11-14"},
+        )
+        assert corrected.status_code == 200, corrected.text
+        assert corrected.json()["inspection_date"] == "2026-11-14"
+        assert corrected.json()["completed_date"] == "2026-11-15"
+        approval = _approve(client, user, fai)
+        assert approval.status_code == 200, approval.text
 
     @pytest.mark.parametrize("final_status", ["passed", "failed", "conditional"])
     def test_api_token_cannot_record_the_final_disposition(self, client, db_session, final_status):

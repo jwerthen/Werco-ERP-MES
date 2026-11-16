@@ -8015,7 +8015,12 @@ changing the inspection. A standing API token setting a final status is refused 
 standing API token cannot record an FAI's final disposition. A person signed in to the app must
 record it."`) before the row lock and any write; it may still make the non-final edits its role
 allows. Finalization records the actual actor in `approved_by` and the completion
-date (today on the Central calendar, not the server host's date). A final status (`passed`,
+date (today on the Central calendar, not the server host's date). `inspection_date` records an
+inspection that happened, so a future one is **422** (`"The inspection date cannot be in the
+future."`), before the row lock. A final disposition is **409** while the stored inspection date
+is in the future (a value written before that bound existed), naming the date: correct it first,
+or in the same request. Otherwise the disposition would freeze a date no customer approval could
+satisfy (the approval may not predate the inspection and may not be in the future). A final status (`passed`,
 `failed`, `conditional`) **or any existing `completed_date`** makes all header, characteristic, and
 prefill writes return **409**: corrections require a new inspection. The customer approval is the one
 write allowed after that (see below). The legacy `version` request field is not an optimistic-lock
@@ -8049,7 +8054,8 @@ froze the evidence, so it has its own verb. It writes only `customer_approved = 
 
 - `customer_approval_date` defaults to today (Central). A past date back-enters an approval received
   earlier, but not one before the FAI's `inspection_date` when it has one (**422**); a future date
-  is **422**.
+  is **422**. The lower bound is not applied when the stored `inspection_date` is itself after today:
+  that is a typo the final disposition froze, and no date could satisfy both rules.
 - Only a **PASSED** or **CONDITIONAL** inspection can carry it. One with no final disposition yet is
   **409** ("Record FAI …'s final disposition (Passed or Conditional) before its customer
   approval."). A **FAILED** one is **409** too: a failure is answered by a new inspection.

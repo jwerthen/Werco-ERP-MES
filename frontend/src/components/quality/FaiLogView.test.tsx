@@ -184,3 +184,24 @@ test('a failed load offers a retry', async () => {
   fireEvent.click(await screen.findByRole('button', { name: /retry/i }));
   await waitFor(() => expect(mocked.getFAILog).toHaveBeenCalledTimes(2));
 });
+
+test('a new refreshKey re-reads the same page with the same filters', async () => {
+  const entry = '/quality?tab=fai&fai_view=log&log_status=pending&log_page=2';
+  const tree = (refreshKey: number) => (
+    <ToastProvider>
+      <MemoryRouter initialEntries={[entry]}>
+        <FaiLogView onOpenFai={jest.fn()} canExport refreshKey={refreshKey} />
+      </MemoryRouter>
+    </ToastProvider>
+  );
+  const { rerender } = render(tree(0));
+  await screen.findAllByText('FAI-20261113-001');
+  expect(mocked.getFAILog).toHaveBeenCalledTimes(1);
+
+  mocked.getFAILog.mockResolvedValue([row(1, { status: 'failed' })]);
+  rerender(tree(1));
+
+  await waitFor(() => expect(mocked.getFAILog).toHaveBeenCalledTimes(2));
+  expect(mocked.getFAILog.mock.calls[1][0]).toEqual(mocked.getFAILog.mock.calls[0][0]);
+  expect(mocked.getFAILog.mock.calls[1][0]).toMatchObject({ status: 'pending', offset: FAI_LOG_PAGE_SIZE });
+});

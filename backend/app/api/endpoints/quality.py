@@ -457,7 +457,9 @@ def update_fai(
     Setting ``status`` to passed, failed or conditional is the final disposition (Admin,
     Manager or Quality; 403 otherwise, and 403 for a standing API token -- a person records
     it): it stamps the completion date (Central) and the approver and freezes the inspection
-    evidence (later edits are 409). The customer's approval is recorded afterwards with
+    evidence (later edits are 409). ``inspection_date`` cannot be in the future (422), and a
+    disposition is refused (409) while the stored inspection date is in the future -- correct
+    it first, or in the same request. The customer's approval is recorded afterwards with
     ``POST /quality/fai/{id}/customer-approval``.
     """
     fai = fai_service.update_fai(db, company_id, fai_id, fai_in, current_user, audit)
@@ -477,11 +479,11 @@ def record_fai_customer_approval(
 
     Writes only ``customer_approved`` and ``customer_approval_date`` (default today, Central --
     the body is optional; a past date back-enters an earlier approval, but not one before the
-    FAI's inspection date; a future date is 422). Only a PASSED or
-    CONDITIONAL FAI can carry it: an FAI without its final disposition, or a FAILED one, is
-    refused (409). Recorded once (409 if already recorded). A standing API token is refused
-    (403) -- a person must record it. The APPROVE audit row commits with the approval, or
-    neither is saved (503).
+    FAI's inspection date unless that stored date is itself in the future; a future date is
+    422). Only a PASSED or CONDITIONAL FAI can carry it: an FAI without its final
+    disposition, or a FAILED one, is refused (409). Recorded once (409 if already recorded).
+    A standing API token is refused (403) -- a person must record it. The APPROVE audit row
+    commits with the approval, or neither is saved (503).
     """
     fai = fai_service.record_customer_approval(db, company_id, fai_id, approval_in, current_user, audit)
     return fai_service.fai_response(db, company_id, fai)

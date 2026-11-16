@@ -10,6 +10,7 @@ import { MemoryRouter } from 'react-router-dom';
 import FaiInspectionPanel, { type FAIDetailRecord } from './FaiInspectionPanel';
 import { ToastProvider } from '../ui/Toast';
 import api from '../../services/api';
+import { getCentralTodayISODate } from '../../utils/centralTime';
 
 jest.mock('../../services/api', () => ({
   __esModule: true,
@@ -136,26 +137,122 @@ test('adds a characteristic with the next number, then re-reads the FAI', async 
   expect(screen.queryByRole('form', { name: 'New characteristic' })).not.toBeInTheDocument();
 });
 
-test('records a measurement result for a characteristic', async () => {
+test('records a measurement result for a characteristic, sending only what was entered', async () => {
   mocked.updateFAICharacteristic.mockResolvedValue(char({ actual_value: '0.5002', is_conforming: true }));
   const { onChanged } = renderPanel();
 
   fireEvent.click(screen.getByRole('button', { name: 'Record measurement for characteristic 1' }));
   const form = screen.getByRole('form', { name: 'Measurement for characteristic 1' });
+  // Nothing entered yet: nothing to save.
+  expect(within(form).getByRole('button', { name: 'Save measurement' })).toBeDisabled();
   fireEvent.change(within(form).getByLabelText('Actual value'), { target: { value: '0.5002' } });
   fireEvent.change(within(form).getByLabelText('Measuring device'), { target: { value: 'Bore gauge' } });
   fireEvent.change(within(form).getByLabelText('Result'), { target: { value: 'pass' } });
   fireEvent.click(within(form).getByRole('button', { name: 'Save measurement' }));
 
+  // The untouched notes are not sent: the server writes every key it receives.
   await waitFor(() =>
     expect(mocked.updateFAICharacteristic).toHaveBeenCalledWith(7, 71, {
       actual_value: '0.5002',
       measuring_device: 'Bore gauge',
       is_conforming: true,
-      notes: null,
     })
   );
   await waitFor(() => expect(onChanged).toHaveBeenCalled());
+});
+
+const twoChars: FAIDetailRecord = {
+  ...baseFai,
+  total_characteristics: 2,
+  characteristics: [char(), char({ id: 72, char_number: 2, characteristic: 'Flange thickness' })],
+};
+
+function renderRerenderable(fai: FAIDetailRecord) {
+  const onChanged = jest.fn().mockResolvedValue(undefined);
+  const onDirtyChange = jest.fn();
+  const tree = (record: FAIDetailRecord) => (
+    <ToastProvider>
+      <MemoryRouter>
+        <FaiInspectionPanel fai={record} canEdit canApprove onChanged={onChanged} onDirtyChange={onDirtyChange} />
+      </MemoryRouter>
+    </ToastProvider>
+  );
+  const { rerender } = render(tree(fai));
+  return { rerender: (record: FAIDetailRecord) => rerender(tree(record)), onChanged, onDirtyChange };
+}
+
+test('another row cannot be opened over a measurement with unsaved entries', () => {
+  renderPanel(twoChars);
+  const recordTwo = () => screen.getByRole('button', { name: 'Record measurement for characteristic 2' });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Record measurement for characteristic 1' }));
+  // An untouched editor may be swapped for another row: nothing would be lost.
+  expect(recordTwo()).toBeEnabled();
+  const form = screen.getByRole('form', { name: 'Measurement for characteristic 1' });
+  fireEvent.change(within(form).getByLabelText('Actual value'), { target: { value: '0.5003' } });
+
+  // Regression: Record on row 2 replaced row 1's typed entries with no prompt.
+  expect(recordTwo()).toBeDisabled();
+  expect(recordTwo()).toHaveAttribute('title', 'Save or cancel the measurement for characteristic 1 first');
+  fireEvent.click(recordTwo());
+  expect(screen.getByRole('form', { name: 'Measurement for characteristic 1' })).toBeInTheDocument();
+  expect(screen.getByLabelText('Actual value')).toHaveValue('0.5003');
+  expect(screen.queryByRole('form', { name: 'Measurement for characteristic 2' })).not.toBeInTheDocument();
+
+  fireEvent.click(within(form).getByRole('button', { name: 'Cancel' }));
+  expect(recordTwo()).toBeEnabled();
+});
+
+test('an open editor follows a re-read of its row and never writes stale blanks over saved values', async () => {
+  mocked.updateFAICharacteristic.mockResolvedValue(char({ is_conforming: true }));
+  const { rerender } = renderRerenderable(baseFai);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Record measurement for characteristic 1' }));
+  fireEvent.change(screen.getByLabelText('Measuring device'), { target: { value: 'Mic #12' } });
+  // Prefill from process steps fills the empty actual value and the page re-reads the FAI.
+  rerender({
+    ...baseFai,
+    characteristics: [char({ actual_value: '1.0041', measuring_device: 'Mitutoyo caliper 7' })],
+  });
+
+  // Regression: the editor kept the blank it opened with and its save erased the prefill.
+  await waitFor(() => expect(screen.getByLabelText('Actual value')).toHaveValue('1.0041'));
+  expect(screen.getByLabelText('Measuring device')).toHaveValue('Mic #12');
+  expect(screen.getByRole('status')).toHaveTextContent('The saved measurement changed while this was open');
+  fireEvent.change(screen.getByLabelText('Result'), { target: { value: 'pass' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save measurement' }));
+
+  await waitFor(() =>
+    expect(mocked.updateFAICharacteristic).toHaveBeenCalledWith(7, 71, {
+      measuring_device: 'Mic #12',
+      is_conforming: true,
+    })
+  );
+});
+
+test("a re-read that only echoes the inspector's own entries back is not reported as a change", () => {
+  const { rerender } = renderRerenderable(baseFai);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Record measurement for characteristic 1' }));
+  fireEvent.change(screen.getByLabelText('Actual value'), { target: { value: '0.5003' } });
+  rerender({ ...baseFai, characteristics: [char({ actual_value: '0.5003' })] });
+
+  expect(screen.getByLabelText('Actual value')).toHaveValue('0.5003');
+  expect(screen.queryByRole('status')).not.toBeInTheDocument();
+});
+
+test('an editor whose row was removed by another writer closes and says its entries were discarded', async () => {
+  const { rerender } = renderRerenderable(twoChars);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Record measurement for characteristic 1' }));
+  fireEvent.change(screen.getByLabelText('Actual value'), { target: { value: '0.5003' } });
+  rerender({ ...twoChars, total_characteristics: 1, characteristics: [twoChars.characteristics[1]] });
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(
+    'Characteristic 1 is no longer on this FAI; its unsaved measurement was discarded.'
+  );
+  expect(screen.queryByRole('form', { name: /^Measurement for/ })).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Record measurement for characteristic 2' })).toBeEnabled();
 });
 
 test('removing a characteristic is confirmed first', async () => {
@@ -167,6 +264,11 @@ test('removing a characteristic is confirmed first', async () => {
   fireEvent.click(await screen.findByRole('button', { name: 'Remove characteristic' }));
 
   await waitFor(() => expect(mocked.deleteFAICharacteristic).toHaveBeenCalledWith(7, 71));
+});
+
+test('the inspection date cannot be set in the future (the server refuses it too)', () => {
+  renderPanel();
+  expect(screen.getByLabelText('Inspection date')).toHaveAttribute('max', getCentralTodayISODate());
 });
 
 test('saves the inspection record (date, inspector) and reports unsaved entries meanwhile', async () => {

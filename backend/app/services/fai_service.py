@@ -245,12 +245,29 @@ def update_fai(db: Session, company_id: int, fai_id: int, data: FAIUpdate, user:
     if finalizing and is_api_token_credential(user):
         # Before the row lock and before any write: the disposition is a person's judgment.
         raise HTTPException(status_code=403, detail=API_TOKEN_FAI_DISPOSITION)
+    today = central_today()
+    if changes.get("inspection_date") is not None and changes["inspection_date"] > today:
+        # The inspection date records an inspection that happened. A future one is a typo,
+        # and the final disposition would freeze it: the customer approval cannot predate
+        # the inspection and cannot be in the future, so it could never be recorded.
+        raise HTTPException(status_code=422, detail="The inspection date cannot be in the future.")
     with fai_transaction(db):
         fai = editable_fai(db, company_id, fai_id)
         if finalizing and not (user.is_superuser or user.role == UserRole.PLATFORM_ADMIN or user.role in APPROVE_ROLES):
             raise HTTPException(status_code=403, detail="FAI approval requires Admin, Manager or Quality")
         if "status" in changes and changes["status"] is None:
             raise HTTPException(status_code=422, detail="FAI status cannot be null")
+        inspected = changes["inspection_date"] if "inspection_date" in changes else fai.inspection_date
+        if finalizing and inspected is not None and inspected > today:
+            # A future date stored before the bound above existed. The disposition freezes it
+            # for good, so it is corrected first, while the FAI can still be edited.
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"FAI {fai.fai_number}'s inspection date ({inspected:%m/%d/%Y}) is in the future. "
+                    "Correct the inspection date before recording the final disposition."
+                ),
+            )
         if changes.get("inspector_id") is not None:
             inspector = tenant_query(db, User, company_id).filter(User.id == changes["inspector_id"]).first()
             if inspector is None:
@@ -387,7 +404,8 @@ def record_customer_approval(
     disposition first) and so is a FAILED one (409, a failure is answered by a new inspection).
     Recorded once (409 when already recorded), so the record keeps the first approval. The
     date defaults to today (Central); a past date back-enters an approval received earlier, but
-    not one before the FAI's recorded inspection date, and a future one is refused (422). The
+    not one before the FAI's recorded inspection date (unless that recorded date is itself in
+    the future -- a frozen typo), and a future one is refused (422). The
     body is optional (no body = today). A standing API token is refused (403). The row is
     locked first; the APPROVE audit row commits with the approval or neither is saved (503).
     """
@@ -421,8 +439,11 @@ def record_customer_approval(
                 status_code=409,
                 detail=f"FAI {fai.fai_number} already has its customer approval; it is recorded once.",
             )
-        if fai.inspection_date is not None and approval_date < fai.inspection_date:
+        if fai.inspection_date is not None and fai.inspection_date <= today and approval_date < fai.inspection_date:
             # The customer approves an inspected first article; it cannot predate the inspection.
+            # Not applied to a stored inspection date after today: a typo written before
+            # update_fai refused one, which the final disposition then froze for good. There
+            # the bound would leave no date (on or before today) the approval could carry.
             raise HTTPException(
                 status_code=422,
                 detail=(
