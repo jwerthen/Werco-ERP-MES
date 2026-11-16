@@ -789,6 +789,10 @@ def _query_spc(db: Session, company_id: int) -> dict:
 AUDIT_TRIGGERS_SENTENCE = "Database triggers block UPDATE and DELETE on every entry."
 
 
+def _entries(n: int) -> str:
+    return f"{n} entry" if n == 1 else f"{n} entries"
+
+
 def _query_audit_log(db: Session, company_id: int) -> dict:
     """Evidence row for the audit trail. It must not claim tamper-evidence the system lacks.
 
@@ -824,7 +828,7 @@ def _query_audit_log(db: Session, company_id: int) -> dict:
     recent = int(recent or 0)
     recent_paused = int(recent_paused or 0)
 
-    counts = f"{total} audit log entries ({recent} in last 12 months)"
+    counts = f"{total} audit log {'entry' if total == 1 else 'entries'} ({recent} in last 12 months)"
 
     if total == 0:
         health = "no_data"
@@ -843,24 +847,24 @@ def _query_audit_log(db: Session, company_id: int) -> dict:
         suggested = "partial"
         description = (
             f"{counts}; SHA-256 integrity chain paused "
-            f"({recent_paused} entries in last 12 months written without it)"
+            f"({_entries(recent_paused)} in last 12 months written without it)"
         )
         health_detail = (
             "The integrity hash chain is paused (AUDIT_HASH_CHAIN_ENABLED is off): entries written "
             "while it is paused carry no integrity hash and can never be cryptographically verified. "
-            f"{recent_paused} of {recent} entries in the last 12 months were written while paused. "
+            f"Entries in the last 12 months written while paused: {recent_paused} of {recent}. "
             f"{AUDIT_TRIGGERS_SENTENCE}"
         )
     elif recent_paused:
         health = "warning"
         suggested = "partial"
         description = (
-            f"{counts}; SHA-256 integrity chain active, but {recent_paused} entries in last 12 months "
-            "were written while it was paused"
+            f"{counts}; SHA-256 integrity chain active, but {_entries(recent_paused)} in last 12 months "
+            f"{'was' if recent_paused == 1 else 'were'} written while it was paused"
         )
         health_detail = (
-            f"{recent_paused} of {recent} entries in the last 12 months were written while the integrity "
-            "hash chain was paused: they carry no integrity hash and can never be cryptographically "
+            "Entries in the last 12 months written while the integrity hash chain was paused: "
+            f"{recent_paused} of {recent}. They carry no integrity hash and can never be cryptographically "
             f"verified. The chain is active for new entries. {AUDIT_TRIGGERS_SENTENCE}"
         )
     else:
@@ -868,7 +872,7 @@ def _query_audit_log(db: Session, company_id: int) -> dict:
         suggested = "compliant"
         description = f"{counts}, SHA-256 integrity chain"
         health_detail = (
-            f"Immutable audit trail with {total} entries, integrity hash chain active; "
+            f"Immutable audit trail with {_entries(total)}, integrity hash chain active; "
             "no entries in the last 12 months were written while it was paused"
         )
 

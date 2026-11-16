@@ -169,7 +169,7 @@ def test_chain_on_but_paused_entries_in_window_is_warning_and_partial(db_session
         "6 audit log entries (6 in last 12 months); SHA-256 integrity chain active, "
         "but 3 entries in last 12 months were written while it was paused"
     )
-    assert "3 of 6 entries in the last 12 months were written while the integrity hash chain was paused" in (
+    assert "Entries in the last 12 months written while the integrity hash chain was paused: 3 of 6." in (
         result["health_detail"]
     )
     assert "can never be cryptographically verified" in result["health_detail"]
@@ -220,7 +220,7 @@ def test_chain_paused_now_is_warning_and_partial_and_says_so(db_session: Session
         "The integrity hash chain is paused (AUDIT_HASH_CHAIN_ENABLED is off): entries written "
         "while it is paused carry no integrity hash and can never be cryptographically verified."
     )
-    assert "2 of 3 entries in the last 12 months were written while paused." in result["health_detail"]
+    assert "Entries in the last 12 months written while paused: 2 of 3." in result["health_detail"]
     # The append-only triggers do not depend on the setting, so the row may state them.
     assert result["health_detail"].endswith(AUDIT_TRIGGERS_SENTENCE)
     _assert_no_chain_claim(result)
