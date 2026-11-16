@@ -59,7 +59,7 @@ def _pg(type_) -> str:
 def test_revision_ids():
     module = _load()
     assert module.revision == "122_car_form_quote_rev"
-    assert module.down_revision == "118_dashboard_layouts"
+    assert module.down_revision == "121_job_cost_subcontract"
     assert len(module.revision) <= 32
     assert os.path.basename(MIGRATION_PATH)[:-3] == module.revision
 

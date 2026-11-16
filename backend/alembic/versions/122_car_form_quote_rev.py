@@ -1,7 +1,7 @@
 """CAR form fields (Werco's controlled CAR form) and the drawing revision on quote lines
 
 Revision ID: 122_car_form_quote_rev
-Revises: 118_dashboard_layouts
+Revises: 121_job_cost_subcontract
 Create Date: 2026-11-13
 
 Context
@@ -91,8 +91,8 @@ Dropping these columns discards every recorded CAR form field (reason, RMA, part
 customer, vendor, costs, approvals -- including the Quality Manager approval stamp) and
 every entered quote-line drawing revision. Pre-122 code never reads them, so a code
 rollback does NOT need this downgrade -- it needs a STAMP: from a checkout of the CURRENT
-release run ``alembic stamp 118_dashboard_layouts`` (or whatever this revision's
-``down_revision`` is after the release re-chain) before redeploying the older image. The
+release run ``alembic stamp 121_job_cost_subcontract`` (this revision's ``down_revision``)
+before redeploying the older image. The
 values stay, and the next forward upgrade re-runs this revision as a guarded no-op that
 keeps them. The CREATE / UPDATE / APPROVE audit rows still record every value written,
 but nothing re-derives the columns from them.
@@ -122,7 +122,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision = "122_car_form_quote_rev"
-down_revision = "118_dashboard_layouts"
+down_revision = "121_job_cost_subcontract"
 branch_labels = None
 depends_on = None
 

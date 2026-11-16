@@ -222,7 +222,7 @@ through the application because the saved source and receipt must remain valid.
 
 ### CAR form fields, quote line revisions and the FAI log (migration 122)
 
-Apply additive **122_car_form_quote_rev** after **118_dashboard_layouts** through the normal API
+Apply additive **122_car_form_quote_rev** after **121_job_cost_subcontract** through the normal API
 boot migration path. It adds 21 nullable columns to `cars` (the controlled CAR form's fields, with
 the foreign keys `fk_cars_part_id`, `fk_cars_customer_id`, `fk_cars_vendor_id` and
 `fk_cars_quality_approved_by`, the index `ix_cars_part_id` and the CHECK
@@ -267,7 +267,7 @@ Verify in a test company:
 
 Rollback: keep the columns. Older code never reads them. Once `122` has run, an older image cannot
 boot until the database is stamped back, so from a checkout of this release run
-`alembic stamp 118_dashboard_layouts` before redeploying it. The values stay, and the next forward
+`alembic stamp 121_job_cost_subcontract` before redeploying it. The values stay, and the next forward
 deploy re-runs `122` as a guarded no-op. The downgrade is **not** a rollback step: it drops every
 recorded CAR form field, Quality Manager approval and quote-line revision. The audit rows that
 recorded them remain, but nothing rebuilds the columns from them. See
