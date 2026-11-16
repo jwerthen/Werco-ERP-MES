@@ -229,7 +229,10 @@ the foreign keys `fk_cars_part_id`, `fk_cars_customer_id`, `fk_cars_vendor_id` a
 `ck_cars_initiation_reason`) and one, `part_revision`, to `quote_lines`. It creates no table and runs
 no RLS, revoke or role statement (both tables have had RLS since `059`). It reads and writes no row,
 so there is no backfill. Each `ADD COLUMN` is metadata-only on PostgreSQL, but each statement still
-takes a brief ACCESS EXCLUSIVE lock, bounded by `SET LOCAL lock_timeout = '5s'`. No environment
+takes a brief ACCESS EXCLUSIVE lock, bounded by `SET LOCAL lock_timeout = '5s'`. A timeout fails the
+boot. When the same boot also ran 121, the database is then left at `120_production_calendar`, not
+where it started, and an older image must be stamped back before it restarts (see
+[One boot, two transactions](#job-cost-subcontract-element-migration-121) under 121). No environment
 variable, secret, cron or worker job is added. The FAI log of record and its export need no
 migration.
 
