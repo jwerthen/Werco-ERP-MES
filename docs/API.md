@@ -8746,17 +8746,20 @@ in `RBAC_PERMISSIONS.md`.
 > |-----------|----------------------------------|------------------------------------------|--------------------|
 > | on | 0 | `healthy` / `compliant` | `…, SHA-256 integrity chain` (`health_detail` names the 12-month window checked) |
 > | on | K > 0 | `warning` / `partial` | `…; SHA-256 integrity chain active, but K entries in last 12 months were written while it was paused` |
-> | paused | any | `warning` / `partial` | `…; SHA-256 integrity chain paused (K entries in last 12 months written without it)` |
+> | paused | any (the company has entries) | `warning` / `partial` | `…; SHA-256 integrity chain paused (K entries in last 12 months written without it)` |
 > | either | no entries at all | `no_data` / `not_assessed` | unchanged when on; `…; SHA-256 integrity chain paused` when paused |
 >
 > The warning rows' `health_detail` says the paused entries carry no integrity hash and cannot be
 > cryptographically verified, and states that database triggers still block UPDATE and DELETE on every
-> entry (those are independent of the setting). A clause backed by this row therefore rolls up
-> `partial`, never `compliant`, while the chain is or recently was paused. Only `description` is
-> persisted by `POST /qms-standards/{standard_id}/auto-link`, so stored evidence picks up the new
-> wording on the next auto-link run. Paused entries older than 12 months are not counted (the count
-> rides the existing 12-month scan); the row's `title`, `module_reference` and `evidence_type` do not
-> change with the chain state.
+> entry (those are independent of the setting). A clause backed by this row therefore gets a suggested
+> roll-up (`overall_suggested_compliance`, auto-link's `compliance_summary`) of `partial` at best, never
+> `compliant`, while the chain is or recently was paused. That is a suggestion only: neither endpoint
+> writes the clause's `compliance_status`. Of the fields that change, auto-link
+> (`POST /qms-standards/{standard_id}/auto-link`) stores only `description` (`health_status`,
+> `health_detail` and `suggested_compliance` are computed per call and never persisted), so stored
+> evidence picks up the new wording on the next auto-link run. Paused entries older than 12 months are
+> not counted (the count rides the existing 12-month scan); the row's `title`, `module_reference` and
+> `evidence_type` do not change with the chain state.
 
 > **Deletes are soft (records retained):** the three `DELETE` endpoints above return **204** but
 > do not physically remove rows — the standard / clause / evidence is marked deleted and disappears
