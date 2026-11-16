@@ -13,6 +13,15 @@ Security properties (compliance-relevant):
   powerful as that user: it carries the user's role and ``require_role`` decides
   exactly as it does for the SPA. There is no god role, no scope widening, and
   no bypass of any endpoint gate.
+- ``scope`` and ``ai_external`` (migration ``119_api_token_scope``) can only
+  NARROW what the bound user can do, never widen it. ``scope = "read_only"``
+  refuses every non-GET route and every route under a tag in
+  ``WERCO_MCP_READ_ONLY_DENY_TAGS`` (``app.api.deps.get_current_user``, and again at
+  the MCP door); ``ai_external`` marks a read-only token whose answers leave the
+  company for an outside AI service (only ever set together with ``read_only``).
+  Both are fixed at mint: there is no update verb -- changing either is revoke
+  and re-mint. ``"full"`` / ``false`` are the server defaults, so every row
+  minted before ``119`` reads exactly as it behaved.
 - The ROW is authoritative, never the JWT's claims. The auth path pins
   ``_active_company_id`` to this row's ``company_id`` — a forged or replayed
   claim can never widen tenancy, and a platform admin's context switch never
@@ -48,13 +57,29 @@ convention — an index declared only in a migration is skipped entirely by the
 pins the two equal).
 """
 
+import enum
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index, Integer, String
+from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, ForeignKey, Index, Integer, String
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
 from app.db.mixins import TenantMixin
+
+
+class ApiTokenScope(str, enum.Enum):
+    """What a token may do AS its user. ``FULL`` is everything the user's role allows;
+    ``READ_ONLY`` narrows that to reads outside the denied tags. Never wider than the user."""
+
+    FULL = "full"
+    READ_ONLY = "read_only"
+
+
+# Byte-identical to the condition in ``119_api_token_scope`` (the lock-step test compares
+# the two strings). A String + CHECK rather than a native ENUM: the recent house style,
+# and it never needs an ``ALTER TYPE`` on live Postgres.
+API_TOKEN_SCOPE_CHECK_NAME = "ck_api_tokens_scope"
+API_TOKEN_SCOPE_CHECK_CONDITION = "scope IN ('full', 'read_only')"
 
 
 class ApiToken(Base, TenantMixin):
@@ -66,6 +91,8 @@ class ApiToken(Base, TenantMixin):
         # "Which live tokens exist in this company?" — the default list read
         # (include_revoked=false), tenant-led.
         Index("ix_api_tokens_company_revoked", "company_id", "revoked"),
+        # The only two scopes there are; anything else would be a value no gate knows.
+        CheckConstraint(API_TOKEN_SCOPE_CHECK_CONDITION, name=API_TOKEN_SCOPE_CHECK_NAME),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -99,6 +126,14 @@ class ApiToken(Base, TenantMixin):
     # The Admin who issued it.
     created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    # Fixed at mint (119). ``full`` = the user's whole role; ``read_only`` = GET only and
+    # never a denied tag. The server default is what every pre-119 row reads.
+    scope = Column(String(16), nullable=False, default=ApiTokenScope.FULL.value, server_default="full")
+    # Fixed at mint (119). True only on a read-only token whose answers go to an outside
+    # AI service; the export-control rules key on it. Plain-string server default, like
+    # ``revoked`` (never ``sa.text("false")``).
+    ai_external = Column(Boolean, nullable=False, default=False, server_default="false")
 
     user = relationship("User", foreign_keys=[user_id])
     creator = relationship("User", foreign_keys=[created_by])

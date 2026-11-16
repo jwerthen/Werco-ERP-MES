@@ -235,3 +235,39 @@ describe('Material Price History navigation', () => {
     )).toBe(false);
   });
 });
+
+describe('API Tokens navigation', () => {
+  // Every /api-tokens verb is require_role([ADMIN]) server-side (platform admins and
+  // superusers pass), and the /admin/api-tokens route is wrapped in AdminRoute with the
+  // same set. The sidebar must agree, or it advertises a guaranteed 403.
+  afterEach(() => {
+    mockUser.value = null;
+  });
+
+  it.each(['admin', 'platform_admin'])('offers API Tokens to %s', (role) => {
+    renderLayout(role, '/admin/api-tokens');
+    expect(within(sidebar()).getByRole('link', { name: 'API Tokens' })).toHaveAttribute('href', '/admin/api-tokens');
+  });
+
+  it('a superuser flag alone grants it', () => {
+    mockUser.value = { id: 9, role: 'manager', is_superuser: true, first_name: 'S', last_name: 'U', email: 's@x.y' };
+    render(
+      <MemoryRouter initialEntries={['/work-centers']}>
+        <Layout>
+          <div>child</div>
+        </Layout>
+      </MemoryRouter>
+    );
+    expect(within(sidebar()).getByRole('link', { name: 'API Tokens' })).toBeInTheDocument();
+  });
+
+  it.each(['manager', 'supervisor'])(
+    'hides API Tokens from %s while the Administration group itself is open',
+    (role) => {
+      renderLayout(role, '/supplier-scorecards');
+      // A sibling in the same group renders, so the absence below is the gate, not a closed group.
+      expect(within(sidebar()).getByRole('link', { name: 'Supplier Scorecards' })).toBeInTheDocument();
+      expect(within(sidebar()).queryByRole('link', { name: 'API Tokens' })).not.toBeInTheDocument();
+    }
+  );
+});

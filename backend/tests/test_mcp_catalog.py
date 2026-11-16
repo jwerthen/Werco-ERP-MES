@@ -28,6 +28,7 @@ import pytest
 
 from app.main import app
 from app.mcp.catalog import (
+    EGRESS_SWITCH_OPERATIONS,
     EXCLUDED_OPERATIONS,
     EXCLUDED_TAGS,
     JSON_CONTENT_TYPE,
@@ -139,13 +140,51 @@ class TestMembership:
         secured = {(m, p) for m, p, _o, _pp in iter_secured_operations(app.openapi())}
         assert set(SHADOWED_OPERATIONS) <= secured
         assert set(EXCLUDED_OPERATIONS) <= secured
-        # The exclusions are the two Excel-cutover loaders plus AI Accept & apply (owner
-        # ruling 3: only a named person's click runs a recommendation) -- nothing else.
+        # The exclusions are the two Excel-cutover loaders, AI Accept & apply (owner ruling 3:
+        # only a named person's click runs a recommendation), the two customer
+        # export-control writes (only an Admin signed in to the app marks a customer
+        # controlled) and the four company egress kill-switch writes (lead decision
+        # 2026-11-15: an egress switch is a person's judgment) -- nothing else.
         assert set(EXCLUDED_OPERATIONS) == {
             ("POST", "/api/v1/work-orders/import"),
             ("POST", "/api/v1/purchasing/purchase-orders/import"),
             ("POST", "/api/v1/ai/recommendations/{recommendation_id}/apply"),
+            ("POST", "/api/v1/customers/{customer_id}/contracts"),
+            ("PUT", "/api/v1/customers/{customer_id}/contracts/{contract_id}"),
+            ("PUT", "/api/v1/companies/me/ai-egress"),
+            ("PUT", "/api/v1/companies/me/sms-egress"),
+            ("PUT", "/api/v1/admin/settings/shipping-profile"),
+            ("PUT", "/api/v1/receiving/print-profile"),
         }
+        assert EGRESS_SWITCH_OPERATIONS <= set(EXCLUDED_OPERATIONS)
+
+    def test_flipping_an_egress_kill_switch_is_never_a_tool(self, catalog):
+        """Lead decision 2026-11-15: an egress kill switch is a person's judgment. The routes
+        refuse every API token, but a person's own JWT reaches a tool -- so the writes are not
+        tools at all. The profile READS stay tools."""
+        by_key = {tool.key: tool.name for tool in catalog}
+        names = set(by_key.values())
+        for key in EGRESS_SWITCH_OPERATIONS:
+            assert key not in by_key, key
+        assert {
+            "update_my_company_ai_egress",
+            "update_my_company_sms_egress",
+            "upsert_shipping_profile",
+            "upsert_print_profile",
+        }.isdisjoint(names)
+        assert by_key[("GET", "/api/v1/admin/settings/shipping-profile")] == "get_shipping_profile"
+        assert by_key[("GET", "/api/v1/receiving/print-profile")] == "get_print_profile"
+
+    def test_marking_a_customer_export_controlled_is_never_a_tool(self, catalog):
+        """Compliance review P0, finding 2: a person's own JWT reaches a tool, so an agent
+        holding one could switch a customer's export control OFF and the AI-external connector
+        would get that customer's records unredacted. The writes are not tools; the read is."""
+        by_key = {tool.key: tool.name for tool in catalog}
+        names = set(by_key.values())
+        assert ("POST", "/api/v1/customers/{customer_id}/contracts") not in by_key
+        assert ("PUT", "/api/v1/customers/{customer_id}/contracts/{contract_id}") not in by_key
+        assert {"create_customer_export_contract", "update_customer_export_contract"}.isdisjoint(names)
+        assert by_key[("GET", "/api/v1/customers/{customer_id}/export-control")] == "get_customer_export_control"
 
     def test_ai_apply_is_not_a_tool_but_record_only_accept_is(self, catalog):
         by_path = {tool.key: tool.name for tool in catalog}

@@ -5,19 +5,29 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Upl
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, EmailStr, ValidationError, field_validator
 from sqlalchemy import or_
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
+from app.api.audit_guard import required_audit
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
+from app.core.credentials import is_api_token_credential
 from app.core.time_utils import to_utc_iso
 from app.db.database import get_db
 from app.db.tenant_filter import tenant_query
 from app.models.customer import Customer
+from app.models.governance import DataClassification
 from app.models.part import Part, PartType
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder, WorkOrderStatus
 from app.schemas.base import UTCModel
-from app.services.audit_service import AuditService
+from app.schemas.export_control import (
+    CustomerContractCreate,
+    CustomerContractResponse,
+    CustomerContractUpdate,
+    CustomerExportControlResponse,
+)
+from app.services import export_control_service
+from app.services.audit_service import AuditService, AuditWriteError
 from app.services.import_service import ImportFileError, parse_import_file
 
 router = APIRouter()
@@ -44,6 +54,34 @@ CUSTOMER_UPDATE_ROLES = [UserRole.ADMIN, UserRole.MANAGER]
 # a new customer" away from a role that may open work orders. Changing an EXISTING
 # record (its CoC/FAI requirements, terms, name) stays ``CUSTOMER_UPDATE_ROLES``.
 CUSTOMER_CREATE_ROLES = [UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]
+
+CUSTOMER_RENAME_AUDIT_UNAVAILABLE_DETAIL = (
+    "The audit record for this customer rename could not be saved; nothing was changed. Retry."
+)
+CUSTOMER_HARD_DELETE_CONTRACTS_DETAIL = (
+    "Cannot hard delete: Customer has export-control contracts or handling instructions. Soft delete it instead."
+)
+
+
+def _log_customer_update(
+    audit: AuditService, customer: Customer, previous: dict, update_data: dict, *, required: bool
+) -> None:
+    """The customer UPDATE audit row: best-effort, except for a rename, where it is REQUIRED.
+
+    ``export_control_service.customer_former_names`` reads a customer's former names from
+    these rows: an old name of an export-controlled customer stays controlled whoever carries
+    it next. A rename whose row was silently lost would free that name, so a rename raises
+    ``AuditWriteError`` (the caller's ``required_audit`` rolls back and answers 503) instead.
+    """
+    if not required:
+        audit.log_update("customer", customer.id, customer.name, old_values=previous, new_values=update_data)
+        return
+    try:
+        entry = audit.log_update("customer", customer.id, customer.name, old_values=previous, new_values=update_data)
+    except DBAPIError as exc:
+        raise AuditWriteError("The customer rename's audit record could not be saved") from exc
+    if entry is None:
+        raise AuditWriteError("The customer rename's audit record could not be saved")
 
 
 class CustomerCreate(BaseModel):
@@ -606,7 +644,10 @@ def update_customer(
     """Update a live customer in the active company. Admin / Manager only.
 
     Only the supplied fields change; a rename must stay unique within the company.
-    Writes an audit_log UPDATE row with the supplied fields' old and new values.
+    Writes an audit_log UPDATE row with the supplied fields' old and new values. For a
+    RENAME that row is required evidence: if it cannot be written, nothing is saved (503).
+    Export control reads a customer's former names from these rows, so a rename that left
+    no row would free a controlled customer's old name for another customer to clear.
     """
     customer = (
         db.query(Customer)
@@ -619,10 +660,11 @@ def update_customer(
 
     update_data = customer_in.model_dump(exclude_unset=True)
     previous = {field: getattr(customer, field) for field in update_data}
+    renamed = "name" in update_data and update_data["name"] != customer.name
 
     # Check name uniqueness if changing. Sees soft-deleted rows on purpose (see
     # create_customer): the per-company constraint spans them.
-    if "name" in update_data and update_data["name"] != customer.name:
+    if renamed:
         if tenant_query(db, Customer, company_id).filter(Customer.name == update_data["name"]).first():
             raise HTTPException(status_code=400, detail="Customer name already exists")
 
@@ -636,7 +678,8 @@ def update_customer(
         # commit would raise PendingRollbackError (500), not IntegrityError. Flushing
         # here surfaces the constraint violation to this handler first.
         db.flush()
-        audit.log_update("customer", customer.id, customer.name, old_values=previous, new_values=update_data)
+        with required_audit(db, CUSTOMER_RENAME_AUDIT_UNAVAILABLE_DETAIL):
+            _log_customer_update(audit, customer, previous, update_data, required=renamed)
         db.commit()
     except IntegrityError as exc:
         # TOCTOU backstop for a concurrent rename onto the same name.
@@ -683,6 +726,14 @@ def delete_customer(
             raise HTTPException(
                 status_code=400,
                 detail=f"Cannot hard delete: Customer has {part_count} associated parts",
+            )
+        # Export control: a customer with a contract or handling instruction keeps its ROW --
+        # it is what ties its historical records (work orders, quotes) to its export control,
+        # and a hard delete would free its name for another customer to clear them.
+        if export_control_service.customer_has_export_control_records(db, company_id, customer.id):
+            raise HTTPException(
+                status_code=400,
+                detail=CUSTOMER_HARD_DELETE_CONTRACTS_DETAIL,
             )
 
         # Log BEFORE the terminal commit so the audit row commits atomically
@@ -748,3 +799,170 @@ def restore_customer(
     db.commit()
 
     return {"message": f"Customer {customer.name} restored"}
+
+
+# --------------------------------------------------------------------------- export control
+#
+# Claude-plugin brief P0.3. A customer is EXPORT-CONTROLLED when any of its contracts is
+# ITAR / export controlled / CUI (any active flag, any dates -- the obligations outlive the
+# contract); an AI-external API token then sees that customer's work orders, parts, NCRs,
+# quotes, ... redacted. These three routes are the ONLY writer of ``customer_contracts``.
+# Owner decision 2026-11-13: only an ADMIN may mark or un-mark a customer, and only as a
+# person in the app -- never through an API token (403), whatever the token's role or scope.
+
+# Who may read or change a customer's export control.
+EXPORT_CONTROL_ROLES = [UserRole.ADMIN]
+EXPORT_CONTROL_API_TOKEN_DETAIL = (
+    "An API token cannot read or change a customer's export control: an Admin does it, signed in to the app."
+)
+EXPORT_CONTROL_AUDIT_UNAVAILABLE_DETAIL = (
+    "The audit record for this export-control change could not be saved; nothing was changed. Retry."
+)
+
+
+def _refuse_api_token(current_user: User) -> None:
+    if is_api_token_credential(current_user):
+        raise HTTPException(status_code=403, detail=EXPORT_CONTROL_API_TOKEN_DETAIL)
+
+
+def _export_control_customer_or_404(db: Session, company_id: int, customer_id: int) -> Customer:
+    try:
+        return export_control_service.customer_for_export_control(db, company_id, customer_id)
+    except export_control_service.CustomerNotFound as exc:
+        raise HTTPException(status_code=404, detail="Customer not found") from exc
+
+
+def _export_control_view(db: Session, company_id: int, customer: Customer) -> CustomerExportControlResponse:
+    control = export_control_service.customer_control_of(db, company_id, customer.id)
+    contracts = []
+    for contract in export_control_service.customer_contracts(db, company_id, customer.id):
+        row = CustomerContractResponse.model_validate(contract)
+        row.controlling = export_control_service.contract_is_controlling(contract)
+        contracts.append(row)
+    return CustomerExportControlResponse(
+        customer_id=customer.id,
+        customer_name=customer.name,
+        customer_is_deleted=bool(customer.is_deleted),
+        controlled=control is not None,
+        data_classification=control.classification if control is not None else None,
+        controlling_contract_id=control.contract_id if control is not None else None,
+        contracts=contracts,
+    )
+
+
+@router.get(
+    "/{customer_id}/export-control",
+    response_model=CustomerExportControlResponse,
+    summary="Read a customer's export-control standing and contracts",
+)
+def get_customer_export_control(
+    customer_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(EXPORT_CONTROL_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+):
+    """A customer's export control: ``controlled`` (derived from every contract and classified
+    handling instruction it has ever had), the winning classification, and every contract.
+
+    ADMIN only, and never through an API token (403). A soft-deleted customer is readable:
+    its historical records stay controlled. 404 for a customer outside the active company.
+    """
+    _refuse_api_token(current_user)
+    customer = _export_control_customer_or_404(db, company_id, customer_id)
+    return _export_control_view(db, company_id, customer)
+
+
+@router.post(
+    "/{customer_id}/contracts",
+    response_model=CustomerExportControlResponse,
+    status_code=201,
+    summary="Add a contract to a customer (mark it ITAR / export controlled / CUI)",
+)
+def create_customer_export_contract(
+    customer_id: int,
+    payload: CustomerContractCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(EXPORT_CONTROL_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Record a contract under the customer; ``itar_controlled`` / ``export_controlled`` /
+    ``contains_cui`` (or classification ``itar_export_controlled`` / ``cui``) makes the customer
+    export-controlled for AI-external API tokens from the next request on.
+
+    ADMIN only, never through an API token (403). ``reason`` is required and recorded on the
+    REQUIRED audit row (and on a customer STATUS_CHANGE row when the customer's control
+    changes); if the audit cannot be written nothing is saved (503). A duplicate
+    ``contract_number`` in the company is 409. Returns the customer's export-control view.
+    """
+    _refuse_api_token(current_user)
+    customer = _export_control_customer_or_404(db, company_id, customer_id)
+    values = payload.model_dump(exclude={"reason"})
+    values["default_data_classification"] = payload.default_data_classification.value
+    try:
+        with required_audit(db, EXPORT_CONTROL_AUDIT_UNAVAILABLE_DETAIL):
+            export_control_service.create_customer_contract(
+                db,
+                audit,
+                company_id=company_id,
+                customer=customer,
+                values=values,
+                reason=payload.reason,
+                actor_id=current_user.id,
+            )
+            db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="A contract with that number already exists") from exc
+    db.refresh(customer)
+    return _export_control_view(db, company_id, customer)
+
+
+@router.put(
+    "/{customer_id}/contracts/{contract_id}",
+    response_model=CustomerExportControlResponse,
+    summary="Change a customer's contract (including un-marking export control)",
+)
+def update_customer_export_contract(
+    customer_id: int,
+    contract_id: int,
+    payload: CustomerContractUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(EXPORT_CONTROL_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Change the supplied fields of one of the customer's contracts. There is no delete:
+    un-marking a customer is this ``PUT`` with the flags false.
+
+    ADMIN only, never through an API token (403). ``reason`` is required and recorded on the
+    REQUIRED audit row (503 and nothing saved if it cannot be written). 404 when the contract
+    is not this customer's in the active company; 409 on a duplicate ``contract_number``. A
+    request that changes nothing writes nothing.
+    """
+    _refuse_api_token(current_user)
+    customer = _export_control_customer_or_404(db, company_id, customer_id)
+    changes = payload.model_dump(exclude_unset=True, exclude={"reason"})
+    if "default_data_classification" in changes and changes["default_data_classification"] is not None:
+        changes["default_data_classification"] = DataClassification(changes["default_data_classification"]).value
+    try:
+        with required_audit(db, EXPORT_CONTROL_AUDIT_UNAVAILABLE_DETAIL):
+            export_control_service.update_customer_contract(
+                db,
+                audit,
+                company_id=company_id,
+                customer=customer,
+                contract_id=contract_id,
+                changes=changes,
+                reason=payload.reason,
+                actor_id=current_user.id,
+            )
+            db.commit()
+    except export_control_service.CustomerNotFound as exc:
+        db.rollback()
+        raise HTTPException(status_code=404, detail="Contract not found") from exc
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="A contract with that number already exists") from exc
+    db.refresh(customer)
+    return _export_control_view(db, company_id, customer)

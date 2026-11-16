@@ -69,6 +69,7 @@ import {
   QueueListIcon,
   ScaleIcon,
   LightBulbIcon,
+  KeyIcon,
 } from '@heroicons/react/24/outline';
 import NotificationBell from './NotificationBell';
 
@@ -245,6 +246,8 @@ const navSections: NavSection[] = [
           { name: 'Supplier Scorecards', href: '/supplier-scorecards', icon: ChartBarIcon },
           { name: 'Custom Fields', href: '/custom-fields', icon: AdjustmentsHorizontalIcon },
           { name: 'Admin Settings', href: '/admin/settings', icon: Cog6ToothIcon, adminOnly: true },
+          // Same role set as the route's AdminRoute and the server's require_role([ADMIN]).
+          { name: 'API Tokens', href: '/admin/api-tokens', icon: KeyIcon, adminOnly: true },
           { name: 'Platform Overview', href: '/platform', icon: BuildingOfficeIcon, platformOnly: true },
           { name: 'Audit Log', href: '/audit-log', icon: ShieldCheckIcon },
           { name: 'Visitor Log', href: '/visitor-log', icon: UserGroupIcon },

@@ -444,15 +444,23 @@ curl https://werco-api-production.up.railway.app/health/ready
    **404**. The startup log line `MCP door serving at /mcp` confirms the lifespan armed it. A
    **503** `MCP door is not running` means the route is mounted but the lifespan never ran.
 4. Hand agents an **API token** for a dedicated user (e.g. *Werco Assistant*): an Admin mints it
-   with `POST /api/v1/api-tokens/` ([API.md → API tokens](API.md#api-tokens-bots-and-mcp-clients)),
+   at **Admin → API Tokens** or with `POST /api/v1/api-tokens/`
+   ([API.md → API tokens](API.md#api-tokens-bots-and-mcp-clients)),
    it never expires unless issued with a lifetime, and it is revoked with a reason. No server-side
-   secret and no new variable are involved — it is signed with the existing `SECRET_KEY`, so
-   rotating that key revokes every API token at once. A normal 15-minute access token also works,
-   but then the client must renew it itself.
+   secret is involved — it is signed with the existing `SECRET_KEY`, so rotating that key revokes
+   every API token at once. A normal 15-minute access token also works, but then the client must
+   renew it itself. An agent that only reads gets a **read-only** token. An **outside AI service**
+   such as Claude's custom connector gets a read-only, **AI-external** token bound to a Viewer
+   user. That token is refused at the door until the company's AI egress is turned on, which only
+   happens after the empowered official clears it. Follow
+   [EXPORT_CONTROL_AI_EGRESS.md → Hand-back](EXPORT_CONTROL_AI_EGRESS.md#8-hand-back-connecting-claude-after-p0-ships).
+   Narrowed tokens need migration `119_api_token_scope`
+   ([DEPLOYMENT.md](DEPLOYMENT.md#read-only-and-ai-external-api-tokens-migration-119)).
 
 Turning it off is the same variable set back to `false` plus a redeploy; nothing else is left
 behind. The caps (`WERCO_MCP_MAX_UPLOAD_BYTES` 25 MB envelope, `WERCO_MCP_MAX_RESULT_CHARS`,
-`WERCO_MCP_MAX_BLOB_BYTES`) are documented in
+`WERCO_MCP_MAX_BLOB_BYTES`) and the read-only deny list (`WERCO_MCP_READ_ONLY_DENY_TAGS`, which
+also governs direct `/api/v1` calls) are documented in
 [ENVIRONMENT_VARIABLES.md → MCP](ENVIRONMENT_VARIABLES.md#mcp-model-context-protocol-door-and-bridge).
 
 ---

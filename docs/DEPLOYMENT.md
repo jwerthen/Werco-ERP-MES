@@ -281,6 +281,57 @@ everyone to the default; the audit rows recording each change remain. See
 [API.md → Personal dashboard layout](API.md#personal-dashboard-layout) and
 [DASHBOARD.md → Customizing the dashboard](DASHBOARD.md#customizing-the-dashboard).
 
+### Read-only and AI-external API tokens (migration 119)
+
+Apply additive **119_api_token_scope** after **118_dashboard_layouts** through the normal API boot
+migration path. It adds two columns to the existing `api_tokens` table, and one CHECK, each
+guarded on its own:
+
+- `scope VARCHAR(16) NOT NULL DEFAULT 'full'`;
+- `ai_external BOOLEAN NOT NULL DEFAULT false`;
+- `ck_api_tokens_scope`, which admits only `'full'` and `'read_only'`.
+
+There is no backfill. Every existing token reads `full` / `false` and behaves exactly as before,
+its JWT included. No new table, so there is no RLS statement. On PostgreSQL the DDL runs under
+`SET LOCAL lock_timeout`.
+
+One new setting, `WERCO_MCP_READ_ONLY_DENY_TAGS`, has a working default; leave it unset. The API
+**refuses to start** if it names a tag no route carries, because a misspelled tag would deny
+nothing ([ENVIRONMENT_VARIABLES.md](ENVIRONMENT_VARIABLES.md#mcp-model-context-protocol-door-and-bridge)).
+No secret, cron or worker job is added. The export-control middleware is part of the API image.
+
+Deploy the API before the frontend: **Admin → API Tokens** and the Customers **Export control**
+panel call the new fields and routes. The same release also gates
+`PUT /shop-floor/operations/{id}/start` and `POST /shop-floor/operations/{id}/complete` to Admin /
+Manager / Supervisor / Operator / Quality. A Viewer or Shipping user who used them is refused
+**403**; operators and both kiosks are unchanged
+([RBAC → Work Orders](RBAC_PERMISSIONS.md#work-orders)).
+
+Verify in a test company:
+
+1. **Read-only.** Mint `{"scope": "read_only", "ai_external": false}`. A `GET` succeeds. A `POST`
+   answers **403** `Read-only API token cannot modify data.`, and `GET /api/v1/users/me` answers
+   **403** `Read-only API token cannot access this resource.`.
+2. **AI egress off.** Mint `{"scope": "read_only"}` (AI-external by default). With the company's
+   AI egress off it answers **403** `AI egress is disabled …` on every route, and at `/mcp` when
+   the door is enabled.
+3. **Redaction.** As an Admin, add an **ITAR controlled** contract to a customer (Customers →
+   Export control). The Audit Log shows a `customer_contract` CREATE row. With that test company's
+   AI egress on, the token from step 2 reads that customer's work order with `[export-controlled]`
+   text, and `controlled_access_events` gains a row.
+4. **Existing tokens.** `SELECT scope, ai_external, count(*) FROM api_tokens GROUP BY 1, 2;` shows
+   every pre-existing row as `full` / `false`.
+
+**Rollback.** Older code ignores both columns and the narrowing claims, so it accepts a read-only or
+AI-external token **as a full token** and redacts nothing. **Revoke every narrowed token before
+rolling the API back** (Admin → API Tokens). A deliberate 119 downgrade drops both columns and the
+CHECK, and with them the record of which tokens were narrowed, so it **refuses** (raises before any
+DDL, naming the count) while any un-revoked read-only or AI-external token exists: revoke them
+first (`SELECT id, label FROM api_tokens WHERE (scope <> 'full' OR ai_external) AND revoked =
+false`). An offline `--sql` downgrade cannot check: run that query by hand. A code-only rollback
+(database left at 119) is not checked at all, so the revoke step is still yours. See
+[EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md).
+
 ### Existing ERP frontend: Fabrication Quoting
 
 The fabrication estimator lives at [wercomfg.app/fabrication-quotes](https://wercomfg.app/fabrication-quotes), under **Sales & Quoting → Fabrication Quoting**. It uses the existing ERP authentication, API, Railway services and Vercel project. Old estimator URLs redirect here. See [the implementation and operating guide](FABRICATION_QUOTING.md).

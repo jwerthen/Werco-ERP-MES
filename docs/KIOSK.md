@@ -1463,7 +1463,12 @@ every station-login failure write tamper-evident audit rows.
 All labor mutations then hit the **existing** shop-floor endpoints with the operator token, so
 the badge-identified **operator — never the station — is the audit actor**, and tenant scoping,
 optimistic locking, qualification warnings (G5-B), and `source: "kiosk"` telemetry all apply
-unchanged.
+unchanged. So does the badge holder's **role**: the mint itself checks none, but since P0.4
+(2026-11-13) `POST /shop-floor/operations/{id}/complete` takes Admin / Manager / Supervisor /
+Operator / Quality. A **Viewer** or **Shipping** badge therefore mints, and is refused **403**
+`Insufficient permissions` at COMPLETE. If its production report went first, that report is saved
+and only the close is refused. Clock-in, production and clock-out still accept that badge
+([RBAC → Work Orders](RBAC_PERMISSIONS.md#work-orders)).
 
 ### What the crew sees and does
 

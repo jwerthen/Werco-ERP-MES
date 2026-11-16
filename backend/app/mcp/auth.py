@@ -26,6 +26,9 @@ written as that user.
   That read is the one place this package touches the database, and it is the
   brief's own rule: one row check, shared, never a second copy. The routes still
   re-validate on every dispatch; the door check is a courtesy, not the control.
+  The same read hands the row's ``scope`` / ``ai_external`` (migration ``119``) to the
+  server in ``AccessToken.claims``, which is how the door narrows ``tools/list`` and
+  refuses a write tool before dispatch for a read-only token -- with no second read.
 
 Nothing here logs a token or a password.
 """
@@ -38,11 +41,13 @@ import json
 import os
 from dataclasses import dataclass
 from datetime import timezone
-from typing import Any, Mapping, Optional, Protocol
+from typing import Any, Dict, Mapping, Optional, Protocol
 
 from mcp.server.auth.provider import AccessToken
 from starlette.concurrency import run_in_threadpool
 
+from app.core.security import AI_EXTERNAL_CLAIM as _AI_EXTERNAL_JWT_CLAIM
+from app.core.security import API_SCOPE_CLAIM as _API_SCOPE_JWT_CLAIM
 from app.core.security import verify_api_token as _verify_erp_api_token
 from app.core.security import verify_token as _verify_erp_access_token
 from app.mcp.results import ExecResult
@@ -55,6 +60,20 @@ ENV_TOKEN = "WERCO_ERP_TOKEN"
 ENV_REFRESH_TOKEN = "WERCO_ERP_REFRESH_TOKEN"
 ENV_EMAIL = "WERCO_ERP_EMAIL"
 ENV_PASSWORD = "WERCO_ERP_PASSWORD"  # nosec B105 - the NAME of an env var, not a secret
+
+# ``AccessToken.claims`` keys ``ErpTokenVerifier`` sets from the api_tokens ROW (never from
+# the JWT) for an API token; the server reads them to narrow a read-only caller.
+CLAIM_API_TOKEN_SCOPE = "api_token_scope"
+CLAIM_API_TOKEN_AI_EXTERNAL = "api_token_ai_external"
+# For an AI-external token only (P0.3): the row's company and identity -- what the door's
+# AI-egress guard needs to refuse and to name the token in the controlled-access ledger --
+# and whether that company's AI egress was ON when the token was verified for THIS request.
+CLAIM_API_TOKEN_COMPANY_ID = "api_token_company_id"
+CLAIM_API_TOKEN_ID = "api_token_id"
+CLAIM_API_TOKEN_JTI_PREFIX = "api_token_jti_prefix"
+CLAIM_API_TOKEN_LABEL = "api_token_label"
+CLAIM_API_TOKEN_AI_EGRESS = "api_token_ai_egress"
+_SCOPE_FULL = "full"
 
 
 class TokenExchange(Protocol):
@@ -89,6 +108,41 @@ class AuthContext:
     client_host: str = "127.0.0.1"
     host_header: Optional[str] = None
     token_source: Optional["TokenSource"] = None
+    # The caller's narrowing (an API token minted read-only / AI-external). Defaulted so
+    # every existing constructor keeps meaning "full". The API layer re-decides on every
+    # dispatch from the row; these only let the server refuse before dispatching.
+    read_only: bool = False
+    ai_external: bool = False
+
+
+@dataclass(frozen=True)
+class CallerScope:
+    """What a caller's credential narrows them to. ``FULL_SCOPE`` = a person or a full token."""
+
+    read_only: bool = False
+    ai_external: bool = False
+
+
+FULL_SCOPE = CallerScope()
+
+
+@dataclass(frozen=True)
+class ApiTokenGrant:
+    """A LIVE API token's row, as the door needs it: who, until when, and how narrowed.
+
+    ``ai_egress_allowed`` is read only for an AI-external token (``llm_client.ai_egress_allowed``,
+    the one reader of ``Company.allow_ai_egress``) and is None otherwise.
+    """
+
+    user_id: int
+    expires_at: Optional[int]
+    scope: str
+    ai_external: bool
+    company_id: Optional[int] = None
+    api_token_id: Optional[int] = None
+    jti_prefix: Optional[str] = None
+    label: Optional[str] = None
+    ai_egress_allowed: Optional[bool] = None
 
 
 def bearer_token_from_header(value: Optional[str]) -> Optional[str]:
@@ -138,8 +192,8 @@ def token_is_acceptable(token: str) -> bool:
     return access_token_claims(token) is not None or api_token_claims(token) is not None
 
 
-def live_api_token_principal(token: str) -> Optional[tuple[int, Optional[int]]]:
-    """``(user_id, expires_at as epoch seconds or None)`` for a LIVE API token, else None.
+def live_api_token_grant(token: str) -> Optional[ApiTokenGrant]:
+    """The LIVE API token's :class:`ApiTokenGrant`, else None.
 
     Runs ``api_token_service.check_api_token`` -- the ONE row check shared with
     ``get_current_user`` -- in a short-lived session opened here and closed before
@@ -147,9 +201,12 @@ def live_api_token_principal(token: str) -> Optional[tuple[int, Optional[int]]]:
     the door: there is no user to name a 403 to). Blocking; the verifier runs it in a
     worker thread. Imports are local so ``python -m app.mcp`` can still set its
     environment placeholders before ``app.core.config`` is imported (see
-    ``app.mcp.__init__``).
+    ``app.mcp.__init__``). ``scope`` / ``ai_external`` come from the ROW; for an
+    AI-external token the company's AI-egress switch is read too (fail closed: any error
+    there is "off").
     """
     from app.db.database import SessionLocal
+    from app.services import llm_client
     from app.services.api_token_service import check_api_token
 
     db = SessionLocal()
@@ -162,9 +219,42 @@ def live_api_token_principal(token: str) -> Optional[tuple[int, Optional[int]]]:
             return None
         expires_at = record.expires_at
         epoch = int(expires_at.replace(tzinfo=timezone.utc).timestamp()) if expires_at is not None else None
-        return int(user.id), epoch
+        ai_external = record.ai_external is not False
+        return ApiTokenGrant(
+            user_id=int(user.id),
+            expires_at=epoch,
+            scope=str(record.scope),
+            ai_external=bool(record.ai_external),
+            company_id=int(record.company_id),
+            api_token_id=int(record.id),
+            jti_prefix=record.jti_prefix,
+            label=record.label,
+            ai_egress_allowed=bool(llm_client.ai_egress_allowed(record.company_id)) if ai_external else None,
+        )
     finally:
         db.close()
+
+
+def live_api_token_principal(token: str) -> Optional[tuple[int, Optional[int]]]:
+    """``(user_id, expires_at as epoch seconds or None)`` for a LIVE API token, else None.
+
+    The tuple view of :func:`live_api_token_grant` (same check, same session rules).
+    """
+    grant = live_api_token_grant(token)
+    if grant is None:
+        return None
+    return grant.user_id, grant.expires_at
+
+
+def _unverified_payload(token: str) -> Optional[Mapping[str, Any]]:
+    """The JWT payload decoded WITHOUT verification, or None. Metadata only -- never trust it."""
+    try:
+        payload_segment = token.split(".")[1]
+        padded = payload_segment + "=" * (-len(payload_segment) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+    except (IndexError, ValueError, TypeError):
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def unverified_expiry(token: str) -> Optional[int]:
@@ -174,16 +264,42 @@ def unverified_expiry(token: str) -> Optional[int]:
     backend uses it to short-circuit an already-expired token without a second
     signature check.
     """
-    try:
-        payload_segment = token.split(".")[1]
-        padded = payload_segment + "=" * (-len(payload_segment) % 4)
-        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
-    except (IndexError, ValueError, TypeError):
-        return None
-    exp = payload.get("exp") if isinstance(payload, dict) else None
+    payload = _unverified_payload(token)
+    exp = payload.get("exp") if payload is not None else None
     if isinstance(exp, (int, float)):
         return int(exp)
     return None
+
+
+def scope_from_row_claims(claims: Optional[Mapping[str, Any]]) -> Optional[CallerScope]:
+    """The narrowing ``ErpTokenVerifier`` recorded from the api_tokens ROW, or None if it recorded none.
+
+    Fails closed on a malformed record: a scope that is not exactly ``"full"`` is read-only,
+    an ``ai_external`` that is not exactly ``False`` is AI-external.
+    """
+    if not claims or CLAIM_API_TOKEN_SCOPE not in claims:
+        return None
+    return CallerScope(
+        read_only=claims.get(CLAIM_API_TOKEN_SCOPE) != _SCOPE_FULL,
+        ai_external=claims.get(CLAIM_API_TOKEN_AI_EXTERNAL, True) is not False,
+    )
+
+
+def api_token_scope_hint(token: str) -> CallerScope:
+    """A token's OWN narrowing claims (``api_scope`` / ``ai_ext``), read without verification.
+
+    For the stdio bridge and the dev remote passthrough, which have no row to read (REMOTE
+    mode cannot even check the signature). Used ONLY to narrow: a forged hint can hide tools
+    from its own holder or refuse their calls, never permit anything, because every
+    dispatched route re-decides from the api_tokens row. Not an API JWT -> ``FULL_SCOPE``.
+    """
+    payload = _unverified_payload(token)
+    if payload is None or payload.get("type") != "api":
+        return FULL_SCOPE
+    return CallerScope(
+        read_only=payload.get(_API_SCOPE_JWT_CLAIM, _SCOPE_FULL) != _SCOPE_FULL,
+        ai_external=payload.get(_AI_EXTERNAL_JWT_CLAIM) is True,
+    )
 
 
 class ErpTokenVerifier:
@@ -206,11 +322,30 @@ class ErpTokenVerifier:
             )
         if api_token_claims(token) is None:
             return None
-        principal = await run_in_threadpool(live_api_token_principal, token)
-        if principal is None:
+        grant = await run_in_threadpool(live_api_token_grant, token)
+        if grant is None:
             return None
-        user_id, expires_at = principal
-        return AccessToken(token=token, client_id=str(user_id), scopes=[], expires_at=expires_at)
+        # ``scopes`` stays [] (RequireAuthMiddleware checks none); the row's narrowing rides
+        # in ``claims`` so the server can narrow tools/list and refuse before dispatch, and
+        # (AI-external only) the door's egress guard can refuse before the transport.
+        claims: Dict[str, Any] = {CLAIM_API_TOKEN_SCOPE: grant.scope, CLAIM_API_TOKEN_AI_EXTERNAL: grant.ai_external}
+        if grant.ai_external:
+            claims.update(
+                {
+                    CLAIM_API_TOKEN_COMPANY_ID: grant.company_id,
+                    CLAIM_API_TOKEN_ID: grant.api_token_id,
+                    CLAIM_API_TOKEN_JTI_PREFIX: grant.jti_prefix,
+                    CLAIM_API_TOKEN_LABEL: grant.label,
+                    CLAIM_API_TOKEN_AI_EGRESS: grant.ai_egress_allowed is True,
+                }
+            )
+        return AccessToken(
+            token=token,
+            client_id=str(grant.user_id),
+            scopes=[],
+            expires_at=grant.expires_at,
+            claims=claims,
+        )
 
 
 class TokenSource:
@@ -234,6 +369,10 @@ class TokenSource:
     ) -> None:
         self._exchange = exchange
         self._access_token = access_token or None
+        # The token the bridge was STARTED with (``WERCO_ERP_TOKEN``), kept apart from the
+        # rotating ``_access_token`` so the listing can be narrowed for a static read-only API
+        # token without ever logging in just to list.
+        self._static_token = access_token or None
         self._refresh_token = refresh_token or None
         self._email = email or None
         self._password = password or None
@@ -251,6 +390,11 @@ class TokenSource:
             password=env.get(ENV_PASSWORD) or "",
         )
         return source if source.configured else None
+
+    @property
+    def static_token(self) -> Optional[str]:
+        """The statically configured token (``WERCO_ERP_TOKEN``), or None."""
+        return self._static_token
 
     @property
     def configured(self) -> bool:

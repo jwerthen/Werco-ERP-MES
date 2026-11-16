@@ -1,6 +1,18 @@
 import type { BOMExploded } from '../types/engineering';
 import type { MaterialPriceHistoryParams, MaterialPriceHistoryResponse, MaterialPriceHistoryDetailParams, MaterialPriceHistoryDetail } from '../types/materialPriceHistory';
 import type { EmailRecipientsSettings } from '../types/emailRecipients';
+import type {
+  ApiToken,
+  ApiTokenCreateInput,
+  ApiTokenIssued,
+  ApiTokenListParams,
+  ApiTokenListResponse,
+} from '../types/apiToken';
+import type {
+  CustomerContractCreateInput,
+  CustomerContractUpdateInput,
+  CustomerExportControl,
+} from '../types/exportControl';
 import axios, { AxiosInstance, AxiosError, AxiosRequestConfig } from 'axios';
 import { normalizeAxiosErrorDetail } from '../utils/apiError';
 import {
@@ -3755,6 +3767,27 @@ class ApiService {
     return response.data;
   }
 
+  // Long-lived per-user API tokens (bots / MCP clients). ADMIN only server-side,
+  // and refused (403) to an API-token credential, so only a signed-in Admin
+  // reaches these. The create response carries the JWT exactly ONCE: callers
+  // keep it in component state for the reveal and never log or store it.
+  async listApiTokens(params: ApiTokenListParams = {}): Promise<ApiToken[]> {
+    const response = await this.api.get<ApiTokenListResponse>('/api-tokens/', {
+      params: { user_id: params.userId, include_revoked: params.includeRevoked ?? false },
+    });
+    return response.data.api_tokens;
+  }
+
+  async createApiToken(data: ApiTokenCreateInput): Promise<ApiTokenIssued> {
+    const response = await this.api.post<ApiTokenIssued>('/api-tokens/', data);
+    return response.data;
+  }
+
+  async revokeApiToken(tokenId: number, reason: string): Promise<ApiToken> {
+    const response = await this.api.post<ApiToken>(`/api-tokens/${tokenId}/revoke`, { reason });
+    return response.data;
+  }
+
   // Visitor log (admin). Staff-authenticated via the normal client — the tablet
   // sign-in/out path uses the isolated services/signinClient.ts (PIN-station token)
   // instead, so a station credential never enters the global axios auth state.
@@ -3988,6 +4021,33 @@ class ApiService {
 
   async getCustomerStats(customerId: number): Promise<CustomerStatsResponse> {
     const response = await this.api.get<CustomerStatsResponse>(`/customers/${customerId}/stats`);
+    return response.data;
+  }
+
+  // Customer export control (ITAR / export controlled / CUI contracts). ADMIN
+  // only, never through an API token. Writes require a `reason` that lands on a
+  // REQUIRED audit row (503 and nothing saved when it cannot be written); there
+  // is no delete — un-marking is an update that clears the flags. Every verb
+  // answers the customer's whole export-control view.
+  async getCustomerExportControl(customerId: number): Promise<CustomerExportControl> {
+    const response = await this.api.get<CustomerExportControl>(`/customers/${customerId}/export-control`);
+    return response.data;
+  }
+
+  async createCustomerContract(customerId: number, data: CustomerContractCreateInput): Promise<CustomerExportControl> {
+    const response = await this.api.post<CustomerExportControl>(`/customers/${customerId}/contracts`, data);
+    return response.data;
+  }
+
+  async updateCustomerContract(
+    customerId: number,
+    contractId: number,
+    data: CustomerContractUpdateInput
+  ): Promise<CustomerExportControl> {
+    const response = await this.api.put<CustomerExportControl>(
+      `/customers/${customerId}/contracts/${contractId}`,
+      data
+    );
     return response.data;
   }
 

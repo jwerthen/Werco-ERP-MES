@@ -30,7 +30,7 @@ from app.api.deps import (
 )
 from app.core.cache import invalidate_work_centers_cache
 from app.core.config import settings
-from app.core.credentials import is_api_token_credential
+from app.core.credentials import is_api_token_credential, is_narrowed_api_token
 from app.core.observability import report_absorbed_exception
 from app.core.realtime import safe_broadcast
 from app.core.time_utils import CENTRAL_TIME_ZONE, to_utc_iso
@@ -233,12 +233,16 @@ def _emit_reconcile_events(
     EVT-4: reconcile-on-read materializes operation/WO completions from durable
     TimeEntry evidence. Those transitions must produce the SAME in-process signal as
     the live completion paths -- ``operation_completed`` / ``work_order_completed`` --
-    so AI/realtime consumers aren't blind to reconcile-driven completions. This is
-    intentionally IN-PROCESS ONLY: we do NOT fire outbound notifications/webhooks from
-    a GET/reconcile path (a read must not have outbound side-effects; rank 12 will move
-    reconcile to a debounced ARQ job, at which point the outbound dispatch can move with
-    it). Best-effort and tenant-scoped (``emit`` validates the WO/op belong to
-    ``company_id``); a signal failure must never 500 a read, so this is wrapped.
+    so AI/realtime consumers aren't blind to reconcile-driven completions. The outbound
+    completion-SIGNAL job (``enqueue_work_order_completion_signals``) is deliberately not
+    enqueued from a GET/reconcile path (rank 12 will move reconcile to a debounced ARQ job,
+    at which point it can move with it). NOTIFICATIONS are not suppressed, though:
+    ``OperationalEventService.emit`` tees every notification-catalog source event into the
+    transactional outbox, and both of these are sources (``wo.completed`` is in-app + email
+    by default), so they are delivered when the read commits, attributed to the reader --
+    an API token's user included (docs/EXPORT_CONTROL_AI_EGRESS.md, section 9). Best-effort
+    and tenant-scoped (``emit`` validates the WO/op belong to ``company_id``); a signal
+    failure must never 500 a read, so this is wrapped.
     """
     if not transitions:
         return
@@ -567,13 +571,24 @@ def _reconcile_and_commit(db: Session, work_orders: list[WorkOrder], current_use
 
     (The root ``sequence_number`` race is a separately-tracked follow-up; this
     guard only guarantees reads never 500.)
+
+    READ-ONLY MEANS READ-ONLY (lead decision, Claude-plugin brief build 2026-11-15): a
+    narrowed API token -- read-only, AI-external, or both (``is_narrowed_api_token``) --
+    never reconciles. Its GET serves the STORED state and writes nothing: no status flip,
+    no audit row, no OperationalEvent (so no outbox notification), no inventory movement,
+    no cost or scheduling rollup, all of which would otherwise be recorded as the token's
+    user. People, full API tokens and kiosk / display credentials are unchanged, and the
+    next read by one of them reconciles exactly as before (the reconcile is idempotent).
     """
+    if is_narrowed_api_token(current_user):
+        return
     transitions: list[StatusTransition] = []
     try:
         if reconcile_work_orders_from_completion_evidence(db, work_orders, transitions):
             _audit_reconcile_transitions(db, current_user, transitions, company_id)
             # EVT-4: emit the in-process completion events for the materialized
-            # transitions (NO outbound notify/webhook on a read -- see helper).
+            # transitions (no completion-signal job on a read; notifications DO go out
+            # through the outbox -- see helper).
             _emit_reconcile_events(db, company_id, current_user, transitions)
             # MS-2: refresh cached work-center availability for reconcile-driven WO
             # completions, joined to this read's unit of work (commit=False).
@@ -4152,22 +4167,42 @@ def get_all_operations(
     return response
 
 
+# The floor's PERFORMING roles for the two operation verbs below (owner decision P0.4,
+# 2026-11-13): Viewer and Shipping are 403 before anything is read. Matches the
+# ``work_orders:complete`` permission set and Hank's report_production roles; ``require_role``
+# still admits superusers and PLATFORM_ADMIN. The kiosk keeps working: both of its
+# credentials -- the single-operator employee-login token and the crew station's
+# badge-minted ``scope="kiosk"`` token -- are the operator's OWN access JWT, resolved to
+# the live user and role. NOT applied to clock-in / clock-out / production / hold / resume
+# (a documented residual: a Viewer can still start through clock-in and complete through a
+# full-count clock-out -- see docs/RBAC_PERMISSIONS.md).
+_FLOOR_OPERATION_ROLES = [
+    UserRole.ADMIN,
+    UserRole.MANAGER,
+    UserRole.SUPERVISOR,
+    UserRole.OPERATOR,
+    UserRole.QUALITY,
+]
+
+
 @router.put("/operations/{operation_id}/start")
 def start_operation(
     operation_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(_FLOOR_OPERATION_ROLES)),
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
     """
-    Mark operation as in progress and create a time entry.
+    Mark operation as in progress and create a time entry (Admin / Manager / Supervisor /
+    Operator / Quality; Viewer and Shipping are 403).
     - Sets status to IN_PROGRESS
     - Records actual_start_time
     - Creates a TimeEntry so the dashboard shows the operator on this job
     - Lifts a RELEASED work order to IN_PROGRESS (never a draft one)
 
-    Open to any authenticated user (the operator's verb). Refused before any write:
+    Admin / Manager / Supervisor / Operator / Quality (the operator's verb); Viewer and
+    Shipping are 403 before anything is read. Refused before any write:
     unknown operation (404); already complete / already in progress (400); work order
     missing or soft-deleted (404); **409** when the work order is a draft ("release
     first": release_work_order), on hold (work_orders_resume_work_order lifts it), or
@@ -4624,7 +4659,7 @@ def complete_operation(
     operation_id: int,
     completion_data: OperationCompleteRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(_FLOOR_OPERATION_ROLES)),
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
@@ -4634,6 +4669,7 @@ def complete_operation(
     itself and never closes short on its own: if recorded good does not cover every unit
     that reached the operation, it is refused 409 and nothing is written -- record the
     pieces first, or leave it open. An API token may not report scrap or close short (403).
+    Admin / Manager / Supervisor / Operator / Quality; Viewer and Shipping are 403.
 
     A CLOSE verb (owner ruling 1, 2026-11-05) -- there is no partial branch. On 200 the
     operation is COMPLETE, ``is_fully_complete`` is always true, and every open TimeEntry
@@ -4649,8 +4685,9 @@ def complete_operation(
     **409** names them otherwise, because their unreported pieces will not be counted.
     Unknown keys are **422**.
 
-    Refused before any write, in order: terminal work order **409**; already complete
-    **400**; operation ON_HOLD **409** (other non-startable status **400**); a READY
+    Refused before any write, in order: role not Admin / Manager / Supervisor / Operator /
+    Quality **403** (before the operation is read; a malformed JSON body is still **422**
+    first, and nothing is written either way); terminal work order **409**; already complete **400**; operation ON_HOLD **409** (other non-startable status **400**); a READY
     operation under a DRAFT / ON_HOLD work order **409** (completing it starts it); bad
     ``quantity_complete`` / missing target **400**; predecessors incomplete **400**; no
     labor ever recorded **400** (floor only -- the office twin deliberately has no such

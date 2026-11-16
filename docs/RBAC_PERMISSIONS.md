@@ -98,13 +98,37 @@ agent sees exactly the 403s a Supervisor sees in the UI, bulk export stays Admin
 audited, Users / Admin Settings / Audit reads stay server-gated, and the read-broad rule for domain
 reads applies unchanged.
 
+**A token can be minted narrower than its user — never wider** (migration `119_api_token_scope`,
+Claude-plugin brief P0, 2026-11-13). The narrowing is fixed at mint, audited, and read from the
+`api_tokens` row on every request (`get_current_user`); the MCP door applies the same rule to its
+listing. It applies through the door and on direct `/api/v1` calls alike, and a full token is
+unchanged.
+
+- **Read-only** (`scope = "read_only"`):
+  - only `GET` / `HEAD` / `OPTIONS`, whatever the user's role; anything else is **403**;
+  - nothing under a tag in `WERCO_MCP_READ_ONLY_DENY_TAGS` (Documents, Document Deliveries, Data
+    Export, Users, Audit, Admin Settings, Carrier Integrations, Platform Administration, Company
+    Management, API Tokens, Hank Intake) — **403**; API Tokens, Users, Audit, Documents and Data
+    Export are a floor the setting can never drop;
+  - no file bytes (a non-JSON response becomes **403**), and a GET exporter that writes an
+    `EXPORT` audit row refuses it **403** before writing that row;
+  - global search drops the `user` result type.
+- **AI-external** (`ai_external = true`; always read-only): additionally refused unless the
+  company's `allow_ai_egress` is on, limited to a fixed read allowlist, and served export-controlled
+  and unlinkable records redacted. See [docs/EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md).
+
+So a Viewer-bound read-only token sees **less** than the Viewer does in the UI, never more. The
+predicates are in [Credential policy for judgment writes](#credential-policy-for-judgment-writes).
+
 There is **no MCP identity, no MCP role and no MCP-only permission**: the package reaches no
-service (its one database read is the door's API-token row check, which decides only whether the
-credential is still live — never what it may do), it cannot bypass `require_role`, and a 401/403
+service. Its database reads are the door's API-token row check, plus the company's AI-egress
+switch for an AI-external token. They decide whether the credential is still live and how far a
+narrowed token is narrowed — never anything wider than the user's role. It cannot bypass `require_role`, and a 401/403
 from the route is returned verbatim rather than worked around. Kiosk-scoped badge tokens, wallboard
 display tokens and station tokens are refused at the door because they are not user credentials;
-an API token is accepted, as the one user it is bound to. The one thing
-the MCP layer *adds* is stricter, not looser: its hand-written tools force new and duplicated work
+an API token is accepted, as the one user it is bound to. What
+the MCP layer *adds* is stricter, not looser. A narrowed token's listing and by-name refusals
+mirror the API's own gates (above). Its hand-written tools force new and duplicated work
 orders to land DRAFT, keep release an explicit separate call (the header-update tool refuses
 `status: released` / `in_progress`, which the raw `PUT` would have accepted with no release stamp),
 set an imported or hand-keyed nest package back to DRAFT with its operations pending (a job on hold
@@ -121,18 +145,22 @@ and [AI recommendations (Action Inbox)](#ai-recommendations-action-inbox).
 Operationally: give agents a **dedicated user** (e.g. *Werco Assistant*, at the role the agent
 needs — the owner's assistant is an Admin; a Manager or a narrower role tightens what it can do) so
 the audit trail attributes agent writes and the role can be changed without touching a person's
-account — and hand it an **API token** (`POST /api-tokens/`, Admin only) rather than a 15-minute
-access token: same role, same audit attribution, revocable with a reason, and fenced from `/auth`
-and `/api-tokens` so it can never mint another credential.
+account — and hand it an **API token** (`POST /api-tokens/` or Admin → API Tokens, Admin only)
+rather than a 15-minute access token: same role, same audit attribution, revocable with a reason,
+and fenced from `/auth` and `/api-tokens` so it can never mint another credential. An agent that
+only needs to read gets a **read-only** token. An **outside AI service** gets a read-only,
+AI-external token bound to a **Viewer** user.
 
 ### Credential policy for judgment writes
 
 A few writes record a **person's judgment** — not just a permitted action — and some of them are
-restricted to certain *credentials*, on top of the role gate. The restrictions have three sources,
+restricted to certain *credentials*, on top of the role gate. The restrictions have five sources,
 and each row below names its own: owner ruling 3 of 2026-11-05 (the two AI rows), the owner's
-decision of 2026-11-07 (a standing API token may not declare scrap or close work short), and this
+decision of 2026-11-07 (a standing API token may not declare scrap or close work short), this
 PR's extensions of that decision (scrap reasons, the re-stamp short close and the other count
-judgments). This section is the **one list** of those credential rules — what refuses a credential,
+judgments), the owner's decision of 2026-11-13 (only an Admin, signed in, marks a customer
+export-controlled), and the lead's decisions of 2026-11-15 (an egress kill switch is a person's
+judgment; a narrowed token's read writes nothing). This section is the **one list** of those credential rules — what refuses a credential,
 what is deliberately left open (and who decided each), and what is deliberately not refused —
 across the AI governance (ruling 3), floor-gates (ruling 2) and short-count (ruling 1) changes;
 other documents point here. The predicates live once, in
@@ -143,9 +171,17 @@ request:
 |---|---|---|
 | `is_interactive_person` | A long-lived **API token**, and any station- or badge-scoped (`kiosk`) token | A person signed in with their own access JWT |
 | `is_api_token_credential` (the write is refused when true) | A long-lived **API token** | An interactive session, and a crew-station badge token (a person standing at the kiosk) |
+| `is_read_only_api_token` (migration `119`) | An API token minted `scope = "read_only"` — and, failing closed, any API token whose scope is not exactly `full`. `get_current_user` refuses it every non-`GET` / `HEAD` / `OPTIONS` request and every route under a tag in `WERCO_MCP_READ_ONLY_DENY_TAGS` (**403**); global search drops its `user` results | A full API token, an interactive session, a badge token |
+| `is_ai_external_credential` (migration `119`) | An API token minted `ai_external = true` (failing closed: any value but exactly `false`). Refused while the company's AI egress is off and outside the fixed read allowlist (**403**), and served export-controlled records redacted ([EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md)) | Every other credential |
+| `is_narrowed_api_token` | The union of the two above (an AI-external row is read-only whatever its scope says). Its reconcile-on-read GETs (`GET /work-orders/`, `/work-orders/{id}`, `/shop-floor/dashboard`, `/shop-floor/operations`, `/shop-floor/operations/{id}`) skip the reconcile and serve the stored state — no status flip, audit row, event, notification, inventory movement or rollup (lead decision 2026-11-15, "read-only means read-only"); a GET exporter refuses it **403** before writing its `EXPORT` row | A full API token, an interactive session, a badge or display token — their reads reconcile as before |
+
+The three narrowing predicates are access rules, not judgment-write rules: they decide what a token
+may read or call at all, on every route, and whether its reads may write. They are listed here so that this table stays the one
+list of credential predicates.
 
 Writes that apply them — each refused before any write and before any audit row (the 403 texts
-live in `ai_action_applier.py` and `operation_action_gates.py`; where each sits in its route's
+live in `ai_action_applier.py`, `operation_action_gates.py`, for export control
+`app/api/endpoints/customers.py`, and for the egress switches `app/core/credentials.py`; where each sits in its route's
 check order is in `docs/API.md` → Work Orders → "Short count at completion" and → AI
 Recommendations):
 
@@ -157,6 +193,8 @@ Recommendations):
 | **Writing or changing a scrap reason or code** (`scrap_reason` / `scrap_reason_code_id`), even with no new scrap: clock-out (onto the caller's own time entry), `PUT /work-orders/{id}`, force-complete re-sending the recorded scrap with a different reason or code (or with none over a recorded one), `PUT /work-orders/operations/{id}`. Sending no reason, or the stored one, is no change | `is_api_token_credential`, through `api_token_changes_scrap_reason` | **403** `API_TOKEN_SCRAP` | **This PR's extension** of the 2026-11-07 decision: re-categorizing a person's scrap is the same evidence (the scrap Pareto groups by the code) |
 | **Closing work short** — a short close by either operation-complete verb whose scrap is already on record (one declaring new scrap gets `API_TOKEN_SCRAP` first), a force-complete below the order, and an office reduce-production re-stamp that would set a declared short | `is_api_token_credential` (reduce-production through `production_reduction_service.api_token_reduction_refusal`) | **403** `API_TOKEN_SHORT_CLOSE` (`Closing work short must be done by a person …`) | Owner decision 2026-11-07 (a token keeps only the full-count close); the re-stamp case is **this PR's extension** |
 | **The other count judgments** — good above the floor's labor record (office operation complete, override reason or not; force-complete above `deliverable`); `PUT /work-orders/operations/{id}` changing `quantity_complete` or a `quantity_scrapped` that is not a rise; `PUT /work-orders/{id}` changing the header's `quantity_complete` / `quantity_scrapped` in either direction; **every** correction through `POST /work-orders/operations/{id}/reduce-production` or `POST /shop-floor/operations/{id}/reduce-production`; lowering `quantity_ordered` once any operation has recorded good, scrap, a start or any labor; lowering a laser nest's `planned_runs` through `PATCH /laser-nests/{id}` once that nest's operation has (its runs are the operation's target, and the laser work order's order is derived from them). Both lowerings read one rule, `operation_action_gates.operation_has_recorded_work` (good, scrap, a start — IN_PROGRESS / COMPLETE status or a stamped `actual_start` — or any `TimeEntry`) | `is_api_token_credential` (reduce-production through `api_token_reduction_refusal`, re-checked under the row locks) | **403** `API_TOKEN_COUNT_JUDGMENT` (`Recording more good than the floor counted, …`) | **This PR's extension** of the same principle — the owner was asked about scrap and short closes, not these |
+| **Marking a customer export-controlled, or un-marking it** — `POST /customers/{id}/contracts` and `PUT /customers/{id}/contracts/{contract_id}` (ITAR / export controlled / CUI contract flags), and reading the standing behind them, `GET /customers/{id}/export-control` | `is_api_token_credential`, inline in `app/api/endpoints/customers.py` (after the Admin role gate) | **403** `"An API token cannot read or change a customer's export control: an Admin does it, signed in to the app."` — any token, whatever its role or scope | Owner decision 2026-11-13 (Claude-plugin brief P0.3): only an Admin, signed in, marks or un-marks a customer |
+| **Turning a company egress kill switch on or off** — `PUT /companies/me/ai-egress` (`allow_ai_egress`, which also gates every AI-external connector), `PUT /companies/me/sms-egress` (`allow_sms_egress`), `PUT /admin/settings/shipping-profile` (`allow_carrier_egress`) and `PUT /receiving/print-profile` (`allow_print_egress`). The two profile routes are refused **whole**, since each is its switch's only writer. None of the four is an MCP tool (`catalog.EXCLUDED_OPERATIONS`), so a person's own JWT cannot reach them through an agent either. The AI flip's UPDATE and STATUS_CHANGE rows are **required** evidence (`required_audit`; **503**, nothing changed, when either cannot be written) | `is_api_token_credential`, inline at the top of each route (after the Admin role gate) | **403** `API_TOKEN_EGRESS_SWITCH` (`"A company egress kill switch (AI, SMS, carrier or label-print egress) is turned on or off by an Admin signed in to the app, not an API token: opening or closing data egress is a person's judgment."`) — any token, whatever its role or scope (a read-only token meets the read-only gate's 403 first) | Lead decision 2026-11-15 (Claude-plugin brief build, round-2 owner question): opening or closing data egress is a person's judgment |
 | **Re-importing a nest package onto a laser job with recorded work** — `POST /work-orders/{id}/laser-nest-packages/import` (either import shape; the MCP tool `import_laser_nest_package` with a `work_order_id`) when any operation the import would delete has recorded work (the same `operation_has_recorded_work` rule), or the laser work order's header already carries good or scrap: the import replaces every nest operation and zeroes the header counts, erasing a person's good, scrap and any declared short. Refused before the upload is unpacked, and again under the import's lock reading the database rather than the rows the first check loaded; a token's import onto un-worked nests with a zero header, and the standalone import, which wipes nothing, are unchanged | `is_api_token_credential` (`laser_nest_service.import_would_wipe_recorded_work`) | **403** `API_TOKEN_NEST_REIMPORT` (`Re-importing a nest package replaces nests that already have recorded work …`) — its own text, so the caller is told which action was refused | **This PR's extension** of the same principle — the owner was asked about scrap and short closes, not this |
 
 Deliberately **not** refused:
@@ -229,9 +267,9 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 | Hold work order (`PUT` `status: on_hold`; released / in-progress only) | ✓ | ✓ | ✓ | | | | |
 | Resume work order (lift a work-order hold) | ✓ | ✓ | ✓ | | | | |
 | Start operation (office verb) | ✓ | ✓ | ✓ | | ✓ | | |
-| Start operation (shop-floor verb) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Start operation (shop-floor verb) | ✓ | ✓ | ✓ | ✓ | ✓ | | |
 | Complete (office verb) | ✓ | ✓ | ✓ | | ✓ | | |
-| Complete (shop-floor verb) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Complete (shop-floor verb) | ✓ | ✓ | ✓ | ✓ | ✓ | | |
 | Hold / resume operation (shop-floor verb) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Resolve / dismiss the blocker behind a hold | ✓ | ✓ | ✓ | | | | |
 | Approve labor (TimeEntry) | ✓ | ✓ | ✓ | | ✓ | | |
@@ -281,7 +319,8 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > the labor-cost gate) — that returns **403** even for an approver-role user. A cross-tenant id returns
 > **404**. Both actions are audited (`time_entry_approve` / `time_entry_unapprove`).
 
-> **Start operation — the office verb is now gated; the shop-floor verb is not** (`feat/work-center-op-pool`).
+> **Start operation — both start verbs are role-gated** (the office verb since `feat/work-center-op-pool`,
+> the shop-floor verb since owner decision P0.4, 2026-11-13).
 > The **Start operation** row above is split across two endpoints exactly like the **Complete** row is:
 > - `POST /api/v1/work-orders/operations/{id}/start` — the **office** verb — is enforced in code to
 >   `require_role([ADMIN, MANAGER, SUPERVISOR, QUALITY])`. It previously had **no role gate at all**
@@ -295,22 +334,42 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 >   reachable. The gate **matches its office twin** `…/operations/{id}/complete` —
 >   being able to start an operation but not complete it, or the reverse, is incoherent — which is why
 >   QUALITY is included here for the same reason it is there.
-> - `PUT /api/v1/shop-floor/operations/{id}/start` — the **operator** verb — is deliberately
->   **unchanged** and stays open to any authenticated user, per the note directly below. Operators
->   start work there and on the kiosk, never through the office page, so **no operator lost a
->   capability**; the Operator ✓ on the Start operation row is that verb.
+> - `PUT /api/v1/shop-floor/operations/{id}/start` — the **operator** verb — is
+>   `require_role([ADMIN, MANAGER, SUPERVISOR, OPERATOR, QUALITY])` (`_FLOOR_OPERATION_ROLES` in
+>   `app/api/endpoints/shop_floor.py`), per the note directly below. Operators start work there and
+>   on the kiosk, never through the office page, so **no operator lost a capability**; the Operator ✓
+>   on the Start operation row is that verb.
 >
-> **The shop-floor rows above are ticked for every role on purpose — that is what the code does, not
-> an aspiration.** `PUT /shop-floor/operations/{id}/start` and `POST /shop-floor/operations/{id}/complete`
-> both take a bare `Depends(get_current_user)`, so a **Viewer** or **Shipping** user can clock in and
-> then complete an operation — closing it at the good count recorded on the floor (or declaring the
-> shortfall as scrap with a reason), receiving finished goods, consuming tied material and writing
-> chain rows. The new labor-evidence gate on floor completion does **not** close
-> this: it is a record-quality check, not an authorization one, and the same caller satisfies it with
-> one extra clock-in request. This is **pre-existing** and was not introduced by the pooling work, but
-> pooling widens its reach (1 reachable operation on a batch WO becomes N). Ticking the cells honestly
-> is deliberate: a matrix that claimed a gate here would be worse than one that admits there isn't one.
-> Closing it means `require_role([...])` on those two verbs — an open owner decision, tracked, not done.
+> **The two shop-floor operation verbs are role-gated; the hole they left is narrowed, not closed
+> (owner decision P0.4, 2026-11-13).** `PUT /shop-floor/operations/{id}/start` and
+> `POST /shop-floor/operations/{id}/complete` used to take a bare `Depends(get_current_user)`, so a
+> **Viewer** or **Shipping** user could start and complete an operation — closing it at the good
+> count recorded on the floor, receiving finished goods, consuming tied material and writing chain
+> rows. Both now take `require_role([ADMIN, MANAGER, SUPERVISOR, OPERATOR, QUALITY])`: the
+> `work_orders:complete` set, and Hank's `report_production` set. Viewer and Shipping get **403**
+> `Insufficient permissions` before the operation is read or the body is validated, so no
+> existence oracle is left either. Superuser and Platform Admin pass as everywhere. Both kiosk
+> credentials carry the badge holder's **live** role, so operators are unchanged:
+> - the crew station's badge-minted `scope="kiosk"` token;
+> - the single-operator `/kiosk` employee-login token.
+>
+> The badge mint (`POST /auth/kiosk-badge-token`) stays role-blind, so a Viewer or Shipping badge
+> at the crew station still mints and is then refused at complete. If that badge's production
+> report went first, the report is saved and the close is refused.
+>
+> **This narrows the hole; it does not close it.** These routes still take a bare
+> `get_current_user`, so a Viewer can still start and complete work through them:
+> - `POST /shop-floor/clock-in` starts a PENDING / READY operation (IN_PROGRESS, `actual_start`,
+>   `started_by`, the work-order lift) for any authenticated user;
+> - `POST /shop-floor/clock-out/{id}` completes the operation on a full good count, running the
+>   same finalize and inventory seam;
+> - `POST /shop-floor/operations/{id}/production`, `…/reduce-production`, `PUT …/hold` and
+>   `PUT …/resume`.
+>
+> The labor-evidence gate on floor completion is a record-quality check, not an authorization one.
+> Gating clock-in and the full-count auto-complete is a further owner decision, not taken. A
+> **read-only API token** is refused every one of these writes whatever its user's role (see
+> [MCP / agent access](#mcp--agent-access)), so an agent's read-only token cannot use this path.
 >
 > No role gained anything. The office operation-start verb has **no UI caller today** — the floor's
 > operation Start / Check In controls (`ShopFloorSimple`, the Time Clock, both kiosks) call
@@ -345,7 +404,8 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > verbatim 403). Superuser and Platform Admin pass through `require_role` as everywhere else. See
 > `docs/API.md` → Work Orders → "Draft and on-hold work orders refuse every start".
 
-> **The shop-floor verbs stay operator-open, but now refuse draft and on-hold work orders.**
+> **The shop-floor verbs stay open to operators (clock-in to any authenticated user; the start verb
+> to the floor roles since P0.4), but now refuse draft and on-hold work orders.**
 > `POST /shop-floor/clock-in`, `PUT /shop-floor/operations/{id}/start` and the READY auto-start inside
 > both operation-complete verbs refuse **409** for **every** role — Admin included — when the
 > operation's work order is DRAFT ("release first") or ON_HOLD ("Resume Work Order"). This is a
@@ -362,7 +422,8 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > cell changed.** A short count at operation completion is reported as scrap with a reason, or the
 > operation stays open; it is never closed at the counted quantity. The role gates are exactly the
 > rows above — what changed is what each verb will close, and for whom:
-> - **Complete (shop-floor verb)** — still every role (see the note above). It is now a **close**:
+> - **Complete (shop-floor verb)** — Admin / Manager / Supervisor / Operator / Quality (P0.4; see
+>   the note above). It is now a **close**:
 >   it books the good already recorded on the floor and refuses **409**, writing nothing, while any
 >   received unit is unaccounted. It credits nothing to anyone's time entry, and a short close
 >   with someone else still clocked in needs `acknowledge_open_entries` (their unreported pieces will
@@ -404,7 +465,7 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > are new to this matrix; **neither gate changed**. `PUT /api/v1/shop-floor/operations/{id}/hold` and
 > `PUT /api/v1/shop-floor/operations/{id}/resume` (`app/api/endpoints/shop_floor.py`) take a bare
 > `Depends(get_current_user)` — no role gate, matching the other operator write verbs (clock-in,
-> production, complete, reduce-production) — and are tenant-scoped (a cross-tenant id → **404**) and
+> production, reduce-production; the shop-floor complete verb is role-gated since P0.4) — and are tenant-scoped (a cross-tenant id → **404**) and
 > audited (resume writes a **`STATUS_CHANGE`** row carrying old→new status,
 > `extra_data.transition = "resume_operation"`, and the ids of any blocker still open at resume). The
 > **blocker** verbs are a tier up, and on a different router: `PUT /api/v1/work-order-blockers/{id}`
@@ -507,8 +568,9 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > no new endpoint, and no new gate.
 
 > **Operator-qualification gate is record-only (Batch 11C / G5-B).** `POST /api/v1/shop-floor/clock-in`
-> and `PUT /api/v1/shop-floor/operations/{id}/start` stay **operator-facing** — open to **any
-> authenticated user** (`get_current_user`), no new role gate. The G5-B qualification gate (no active
+> and `PUT /api/v1/shop-floor/operations/{id}/start` stay **operator-facing**: clock-in is open to
+> **any authenticated user** (`get_current_user`), and the start verb is the floor roles (Admin /
+> Manager / Supervisor / Operator / Quality, since P0.4); the qualification gate added no role gate. The G5-B qualification gate (no active
 > `SkillMatrix` entry at level ≥ 2 for the work center, or a missing/expired required
 > `OperatorCertification`) **only records** a tamper-evident `audit_log` row
 > (`OPERATOR_QUALIFICATION_EXCEPTION`) + a warning event and surfaces a `qualification_exceptions`
@@ -520,7 +582,8 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > OVER-reported on their **own unapproved** labor — open clock-in first, then their own earlier
 > unapproved sessions — before completion; a miscount fix, not scrap) is
 > **operator-facing**, open to **any authenticated user** (`get_current_user`), matching the other
-> operator write verbs (clock-in, production, complete, hold). It adds **no new role or permission**.
+> operator write verbs (clock-in, production, hold; the shop-floor complete verb is role-gated since
+> P0.4). It adds **no new role or permission**.
 > Authorization is by **evidence, not role**: the walk-back is bounded to the caller's **own
 > unapproved** entries on the operation (crew-safe — never another operator's count; **approved**
 > labor is excluded — approval is the immutability boundary, G5-A) and is refused **409** once
@@ -714,10 +777,11 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > soft-deleted work order, resolves to `kind: "unknown"`). URL-shaped traveler codes resolve too;
 > the URL's host is deliberately **not** validated — a scanned URL carries no tenant authority, and
 > tenancy always derives from the authenticated caller. The per-action gating it reports
-> (`legal_actions` / `blockers`) reflects operation / time-entry **state**, not role — the
-> shop-floor write verbs it mirrors (clock-in, production, complete, hold, resume) are themselves
-> operator-facing (any authenticated user), so the resolver bypasses no role check. See
-> `docs/API.md` → Scanner.
+> (`legal_actions` / `blockers`) reflects operation / time-entry **state**, not role. Clock-in,
+> production, hold and resume are open to any authenticated user. The shop-floor complete verb is
+> the floor roles (P0.4), so the resolver can list `complete` for a Viewer who will then get
+> **403**. That is a display mismatch, not a bypass: the resolver performs no write and the verb
+> refuses. See `docs/API.md` → Scanner.
 
 > **Operation sequencing (pool vs routing) is an Edit-row capability — no new role, no new permission.**
 > `WorkOrder.sequential_operations` (migration `081`) decides whether a work order's operations are a
@@ -1937,7 +2001,9 @@ contract; they do not bypass tenant scoping or the read-only context fence.
 > `GET` / `PUT /receiving/print-profile` (ProxyBox base URL / target / API key, copies,
 > paper size, and the `auto_print_on_receipt` + `allow_print_egress` toggles) — is
 > **admin-only** via `get_admin_user`, so only an admin can enter the printer credential
-> or flip the outbound-egress kill switch (default OFF, audited as a status change). See
+> or flip the outbound-egress kill switch (default OFF, audited as a status change). The `PUT`
+> is the switch's only writer, so it refuses **any API token 403** whatever its role and is not
+> an MCP tool (lead decision 2026-11-15 — [Credential policy for judgment writes](#credential-policy-for-judgment-writes)). See
 > [docs/THERMAL_LABEL_PRINTING.md](THERMAL_LABEL_PRINTING.md).
 
 ### Shipping
@@ -2408,6 +2474,23 @@ See [API → Personal dashboard layout](API.md#personal-dashboard-layout).
 | Edit | ✓ | ✓ | | | | | |
 | Delete (soft or hard) / restore | ✓ | ✓ | | | | | |
 | Import (`POST /customers/import-csv`) | ✓ | ✓ | | | | | |
+| Export control: read, add or change contracts (`GET /customers/{id}/export-control`, `POST /customers/{id}/contracts`, `PUT /customers/{id}/contracts/{contract_id}`) — never through an API token | ✓ | | | | | | |
+
+> **Export control is Admin-only, and a person's act (owner decision 2026-11-13, Claude-plugin
+> brief P0.3).** All three routes take `require_role([ADMIN])` (`EXPORT_CONTROL_ROLES`). On top of
+> that they refuse **any** API token, whatever its role or scope, with **403** `"An API token cannot
+> read or change a customer's export control: an Admin does it, signed in to the app."`. They are
+> the only writer of `customer_contracts`. A contract flagged ITAR / export controlled / CUI (or
+> classified `itar_export_controlled` / `cui`) makes the customer export-controlled, whatever the
+> contract's `active` flag or dates. Its records are then redacted for AI-external API tokens.
+> Every write carries a required `reason` and REQUIRED audit rows (503, nothing saved, when they
+> cannot be written). There is no delete: un-marking is a `PUT` that clears the flags, also with
+> a reason.
+>
+> The UI is the **Export control** panel on the customer detail in Customers. It is shown to
+> Admin, Platform Admin and superuser, the role set `require_role([ADMIN])` admits, so a hidden
+> panel and a refused call agree. Manager keeps Edit on the customer record itself but not this.
+> See [docs/EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md).
 
 > **Create and Edit were open to every authenticated user until this change**
 > (`POST /customers/`, `PUT /customers/{id}` depended on `get_current_user` only). Both are now
@@ -2985,6 +3068,11 @@ and writes an `EXPORT` audit row through `AuditService`:
 >   a 5-minute `scope="kiosk"` access token for the badge-identified user — on the allowed paths
 >   the operator IS `current_user`, so the shop-floor endpoints' existing role/tenant/audit rules
 >   apply unchanged and every labor mutation is attributed to the operator, never the station.
+>   The mint itself checks no role, so a Viewer or Shipping badge mints. Since P0.4 (2026-11-13)
+>   that badge is then refused **403** `Insufficient permissions` by the role-gated
+>   `POST /shop-floor/operations/{id}/complete` (Admin / Manager / Supervisor / Operator / Quality),
+>   while clock-in, production and clock-out still accept it — see
+>   [Work Orders](#work-orders).
 >   Outside `/api/v1/shop-floor/*` (+ `POST /auth/employee-logout`) the token is **403**
 >   (path-fenced in `get_current_user`). No refresh token is ever minted.
 >
@@ -3000,8 +3088,8 @@ and writes an `EXPORT` audit row through `AuditService`:
 | Integrations (`admin:integrations`) | ✓ | | | | | | |
 | Audit Logs | ✓ | ✓ | | | | | |
 | AI usage & cost summary (`/ai-usage/summary`) | ✓ | ✓ | | | | | |
-| AI egress kill switch (`PUT /companies/me/ai-egress`) | ✓ | | | | | | |
-| SMS egress kill switch (`PUT /companies/me/sms-egress`) | ✓ | | | | | | |
+| AI egress kill switch (`PUT /companies/me/ai-egress`; signed in — any API token 403) | ✓ | | | | | | |
+| SMS egress kill switch (`PUT /companies/me/sms-egress`; signed in — any API token 403) | ✓ | | | | | | |
 | Wallboard display tokens (`/auth/display-token` issue/list/revoke + setup-code reissue) | ✓ | ✓ | | | | | |
 | API tokens for bots / MCP clients (`/api-tokens` issue/list/revoke) | ✓ | | | | | | |
 | Visitor sign-in stations (`/visitor-logs/stations` create/list/revoke/reset-pin) | ✓ | ✓ | | | | | |
@@ -3029,7 +3117,9 @@ and writes an `EXPORT` audit row through `AuditService`:
 > `GET`/`PUT …/shipping-profile` (which holds the `allow_carrier_egress` kill switch). Carrier
 > secrets are write-only (Fernet-encrypted, never returned — only `api_key_last4` /
 > `has_webhook_secret`); deletes are soft deletes; create/update/delete and the egress toggle are
-> audited. The new `admin:integrations` permission string (granted to **Admin** in
+> audited. `PUT …/shipping-profile` is the `allow_carrier_egress` switch's only writer, so it refuses
+> **any API token 403** whatever its role and is not an MCP tool (lead decision 2026-11-15 —
+> [Credential policy for judgment writes](#credential-policy-for-judgment-writes)). The new `admin:integrations` permission string (granted to **Admin** in
 > `app/models/role_permission.py`) drives the frontend Carrier Integrations tab's visibility. See
 > [docs/SHIPPING_CARRIER_INTEGRATION.md](SHIPPING_CARRIER_INTEGRATION.md).
 >
@@ -3093,13 +3183,24 @@ and writes an `EXPORT` audit row through `AuditService`:
 > an `ai_egress_enabled` / `ai_egress_disabled` status change). The toggle is surfaced in the UI at
 > **Admin Settings → AI Privacy** (`/admin/settings?tab=aiprivacy`); within that tab the control is
 > interactive for ADMIN (enabling egress requires explicit confirmation) and read-only for
-> other roles. See [docs/API.md](API.md) →
-> Company (self-service) and [docs/AI_QUOTING_AGENT_RUNBOOK.md](AI_QUOTING_AGENT_RUNBOOK.md).
+> other roles. Since the Claude-plugin brief P0.3 (2026-11-13) the same switch also gates every
+> **AI-external API token**. While it is off such a token is refused **403** on every API route
+> and at the MCP door, so turning it on also opens an outside AI connector
+> ([docs/EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md)). **No API token flips it**
+> (lead decision 2026-11-15 — [Credential policy for judgment writes](#credential-policy-for-judgment-writes)): any token, whatever its role or scope, is refused **403**
+> before anything is read (a read-only one by the read-only gate first: the `PUT` is a write, and
+> Company Management is a denied tag), and the route is not an MCP tool. A flip's two audit rows
+> are **required** evidence — if either cannot be written the flip rolls back and the answer is
+> **503**. See
+> [docs/API.md](API.md) → Company (self-service) and
+> [docs/AI_QUOTING_AGENT_RUNBOOK.md](AI_QUOTING_AGENT_RUNBOOK.md).
 
 > **SMS egress kill switch (`PUT /api/v1/companies/me/sms-egress`).** Enforced **in code** via
 > `require_role([ADMIN])` — **Admin-only**, for the same reason as the AI switch above: it gates all
 > outbound notification SMS to **Twilio, which sits outside the CUI boundary**, so flipping it is a
-> CUI-boundary decision reserved to Admins. It only ever mutates the caller's **own active company**
+> CUI-boundary decision reserved to Admins, and to an Admin **signed in to the app**: any API token
+> is refused **403** and the route is not an MCP tool (lead decision 2026-11-15 — [Credential policy for judgment writes](#credential-policy-for-judgment-writes)). It only
+> ever mutates the caller's **own active company**
 > (`get_current_company_id`; never taken from the request body). Flipping `Company.allow_sms_egress`
 > writes tamper-evident `audit_log` rows **twice** — a field update **and** an
 > `sms_egress_enabled` / `sms_egress_disabled` status change. Every company is created **OFF**, and
@@ -3166,9 +3267,17 @@ and writes an `EXPORT` audit row through `AuditService`:
 > an active, non-platform user of the same company (404 / 409 otherwise), and the default lifetime
 > is *never* — so give each agent a **dedicated account** at the role it needs (see
 > [MCP / agent access](#mcp--agent-access)) rather than a person's login, and revoke with a reason
-> when it is retired. No UI yet: `curl`, or the `create_api_token` / `list_api_tokens` /
-> `revoke_api_token` MCP tools with an interactive Admin JWT. See [docs/API.md](API.md) →
-> Authentication → API tokens.
+> when it is retired. **A token can be minted narrower than its user** (migration `119`): `scope`
+> `read_only` limits it to `GET` / `HEAD` / `OPTIONS` outside the tags in
+> `WERCO_MCP_READ_ONLY_DENY_TAGS`. `ai_external` (always read-only; the default for a read-only
+> token) also makes it subject to the company's AI egress switch, a fixed read allowlist and
+> export-control redaction. Both are fixed at mint and audited — see
+> [MCP / agent access](#mcp--agent-access). Tokens are issued, listed and revoked in the app at
+> **Admin → API Tokens** (`/admin/api-tokens`). That page is behind `AdminRoute` and an
+> `adminOnly` nav entry, the same Admin / Platform Admin / superuser set `require_role([ADMIN])`
+> admits. They can also be managed with `curl`, or with the `create_api_token` /
+> `list_api_tokens` / `revoke_api_token` MCP tools and an interactive Admin JWT. See
+> [docs/API.md](API.md) → Authentication → API tokens.
 
 ## Backend Implementation
 
