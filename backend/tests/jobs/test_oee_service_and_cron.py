@@ -9,7 +9,9 @@ cron reuses the identical code. Locked here:
     math on the OEE-1/4/5/7 conventions) + ``calculation_source='manual'``,
   * the migration-063 uniqueness rule: a second (company, WC, date, shift)
     record is a clean 409 on create, update-into-collision, and the NULL-vs-''
-    shift key collision (COALESCE key: no shift == blank shift),
+    shift key collision (COALESCE key: no shift == blank shift). Since migration
+    120 a write's ``shift`` text must name a DEFINED shift code (it resolves to
+    that shift); the collision tests define shifts A and B first,
   * cron skip policy: manual records are authoritative (any shift), idle WCs
     are skipped, 'auto' rows are recomputed idempotently (still one row),
     ``calculation_source='auto'`` + created_by NULL, tenant confinement,
@@ -143,9 +145,47 @@ def _record_payload(wc_id: int, shift):
     }
 
 
+def _define_shifts(db: Session, user, *codes: str) -> None:
+    """A default shift pattern holding one weekday shift per code (migration 120)."""
+    from app.schemas.production_calendar import ProductionCalendarUpdate
+    from app.services.audit_service import AuditService
+    from app.services.production_calendar_service import save_production_calendar
+
+    payload = {
+        "expected_version": 0,
+        "production_day_start": "00:00",
+        "patterns": [
+            {
+                "name": "Plant",
+                "is_default": True,
+                "shifts": [
+                    {
+                        "code": code,
+                        "name": f"Shift {code}",
+                        "start": f"{6 + 2 * i:02d}:00",
+                        "end": f"{7 + 2 * i:02d}:00",
+                        "days": [0, 1, 2, 3, 4],
+                        "planned_minutes": 60,
+                    }
+                    for i, code in enumerate(codes)
+                ],
+            }
+        ],
+    }
+    save_production_calendar(
+        db,
+        user.company_id,
+        user.id,
+        ProductionCalendarUpdate.model_validate(payload),
+        AuditService(db, user=None, company_id=user.company_id),
+    )
+    db.commit()
+
+
 def test_duplicate_record_create_is_409(client: TestClient, db_session: Session):
     user = make_user(db_session, role=UserRole.MANAGER)
     wc = make_work_center(db_session)
+    _define_shifts(db_session, user, "Day")
 
     first = client.post("/api/v1/oee/records", json=_record_payload(wc.id, "Day"), headers=headers_for(user))
     assert first.status_code == status.HTTP_200_OK, first.text
@@ -172,6 +212,7 @@ def test_null_shift_and_blank_shift_are_the_same_record_key(client: TestClient, 
 def test_update_into_shift_collision_is_409(client: TestClient, db_session: Session):
     user = make_user(db_session, role=UserRole.MANAGER)
     wc = make_work_center(db_session)
+    _define_shifts(db_session, user, "A", "B")
 
     client.post("/api/v1/oee/records", json=_record_payload(wc.id, "A"), headers=headers_for(user))
     created_b = client.post("/api/v1/oee/records", json=_record_payload(wc.id, "B"), headers=headers_for(user))

@@ -26,3 +26,9 @@ export const canApproveFAIs = (actor: Actor): boolean => hasWriteRole(actor, ['a
 // Server-side spreadsheet exports (GET /exports/*) — mirrors EXPORT_ROLES in
 // backend/app/api/endpoints/exports.py. Quality is deliberately NOT in it.
 export const canExportRecords = (actor: Actor): boolean => hasWriteRole(actor, ['admin', 'manager']);
+// Production calendar (backend/app/api/endpoints/production_calendar.py): saving the
+// calendar is CALENDAR_EDIT_ROLES (Admin); the working-calendar sync is
+// WORKING_CALENDAR_SYNC_ROLES, the roles of the scheduling calendar PUT it writes through.
+export const canEditProductionCalendar = (actor: Actor): boolean => hasWriteRole(actor, ['admin']);
+export const canSyncWorkingCalendars = (actor: Actor): boolean =>
+  hasWriteRole(actor, ['admin', 'manager', 'supervisor']);

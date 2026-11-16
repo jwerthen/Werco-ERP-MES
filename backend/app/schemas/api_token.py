@@ -12,6 +12,7 @@ from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.models.api_token import ApiTokenScope
 from app.schemas.base import UTCModel
 
 MAX_API_TOKEN_EXPIRES_DAYS = 3650
@@ -27,6 +28,22 @@ class ApiTokenCreate(BaseModel):
         ge=1,
         le=MAX_API_TOKEN_EXPIRES_DAYS,
         description="Lifetime in days (1..3650). Omit for a token that never expires -- the default for a standing bot.",
+    )
+    scope: ApiTokenScope = Field(
+        ApiTokenScope.FULL,
+        description=(
+            "What the token may do AS its user: 'full' (default) = everything the user's role allows; "
+            "'read_only' = GET routes only, never a route under a tag in WERCO_MCP_READ_ONLY_DENY_TAGS (403). "
+            "A scope only narrows the user, never widens. Fixed at mint: revoke and re-mint to change it."
+        ),
+    )
+    ai_external: Optional[bool] = Field(
+        None,
+        description=(
+            "Mark a token whose answers go to an outside AI service (export-control rules apply). "
+            "Omit for the default: true for a read_only token, false for a full one. true with scope 'full' is "
+            "refused 422 -- an AI-external token must be read-only. Fixed at mint."
+        ),
     )
 
     @field_validator("label")
@@ -64,6 +81,8 @@ class ApiTokenResponse(UTCModel):
     label: str
     user_id: int
     jti_prefix: str
+    scope: ApiTokenScope
+    ai_external: bool
     expires_at: Optional[datetime] = None
     revoked: bool
     revoked_at: Optional[datetime] = None

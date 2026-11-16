@@ -55,6 +55,7 @@ from app.api.endpoints import (
     po_upload,
     print_reports,
     process_sheets,
+    production_calendar,
     purchasing,
     qms_standards,
     quality,
@@ -90,7 +91,10 @@ api_router.include_router(consumables.router, prefix="/consumables", tags=["Cons
 api_router.include_router(document_deliveries.router, prefix="/document-deliveries", tags=["Document Deliveries"])
 api_router.include_router(operations_inbox.router, prefix="/operations-inbox", tags=["Operations Inbox"])
 api_router.include_router(hank.router, prefix="/hank", tags=["Hank"])
-api_router.include_router(hank_intake.router, prefix="/hank", tags=["Hank"])
+# Its own tag (not "Hank") so WERCO_MCP_READ_ONLY_DENY_TAGS can deny the intake UPLOADS -- and
+# their source bytes -- to read-only API tokens without denying the rest of Hank. Changes no
+# generated MCP tool name.
+api_router.include_router(hank_intake.router, prefix="/hank", tags=["Hank Intake"])
 api_router.include_router(hank_operations.router, prefix="/hank", tags=["Hank"])
 api_router.include_router(hank_preferences.router, prefix="/hank", tags=["Hank"])
 api_router.include_router(hank_tasks.router, prefix="/hank", tags=["Hank"])
@@ -161,6 +165,7 @@ api_router.include_router(import_templates.router, prefix="/import", tags=["Impo
 api_router.include_router(import_batches.router, prefix="/import/batches", tags=["Import Batches"])
 api_router.include_router(print_reports.router, prefix="/print", tags=["Print Reports"])
 api_router.include_router(oee.router, prefix="/oee", tags=["OEE Tracking"])
+api_router.include_router(production_calendar.router, prefix="/production-calendar", tags=["Production Calendar"])
 api_router.include_router(operational_events.router, prefix="/operational-events", tags=["Operational Events"])
 api_router.include_router(downtime.router, prefix="/downtime", tags=["Downtime Tracking"])
 api_router.include_router(job_costing.router, prefix="/job-costs", tags=["Job Costing"])

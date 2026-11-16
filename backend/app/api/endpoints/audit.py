@@ -2,7 +2,6 @@ from datetime import datetime, timedelta
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
@@ -11,12 +10,13 @@ from app.core.time_utils import to_utc_iso
 from app.db.database import get_db
 from app.models.audit_log import AuditLog
 from app.models.user import User, UserRole
+from app.schemas.base import UTCModel
 from app.services.audit_integrity_service import AuditIntegrityService
 
 router = APIRouter()
 
 
-class AuditLogResponse(BaseModel):
+class AuditLogResponse(UTCModel):
     id: int
     sequence_number: Optional[int] = None
     integrity_hash: Optional[str] = None

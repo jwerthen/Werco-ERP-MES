@@ -1293,7 +1293,11 @@ CONVENIENCE_TOOLS: Tuple[ConvenienceTool, ...] = (
     ConvenienceTool(
         "get_work_order",
         "GET /api/v1/work-orders/{id} (or /by-number/{n}) — One work order with its operations, nests, status and "
-        "optimistic-lock version. [Work Orders]",
+        "optimistic-lock version. Cost: job_cost_actuals (JobCost material / labor / burden / subcontract / total; "
+        "null when the job has no JobCost) and issued_material_cost (net material issued from inventory, a "
+        "different basis). Per operation, hours_source says where actual_setup_hours / actual_run_hours come from "
+        "(time_entries = measured clock-in/out, manual, none; never standards) beside recorded_setup_hours / "
+        "recorded_run_hours and hours_include_backfill. [Work Orders]",
         _strict(_GET_WORK_ORDER_SCHEMA),
         _READ,
         _get_work_order,
@@ -1392,7 +1396,77 @@ CONVENIENCE_TOOLS: Tuple[ConvenienceTool, ...] = (
 
 CONVENIENCE_TOOL_NAMES: FrozenSet[str] = frozenset(tool.name for tool in CONVENIENCE_TOOLS)
 
+# Every (METHOD, OpenAPI path template) each convenience tool MAY dispatch -- what it
+# actually does, not what its annotation claims. It decides the tool's read/write class for
+# a read-only API token (a READ is a tool every one of whose routes is a GET) and, for an
+# AI-external token, whether every route it touches is allowlisted. ``tests/test_mcp_
+# read_only.py`` drives each tool through a recording executor and fails CI when a tool
+# dispatches a route that is not declared here, or when a read tool sends anything but GET.
+CONVENIENCE_TOOL_ROUTES: Mapping[str, FrozenSet[Tuple[str, str]]] = {
+    "search": frozenset({("GET", f"{API}/search/")}),
+    "list_work_centers": frozenset({("GET", f"{API}/work-centers/")}),
+    "create_work_order": frozenset({("POST", f"{API}/work-orders/")}),
+    "add_operation": frozenset(
+        {
+            ("GET", f"{API}/work-centers/"),
+            ("GET", f"{API}/work-orders/{{work_order_id}}"),
+            ("POST", f"{API}/work-orders/{{work_order_id}}/operations"),
+        }
+    ),
+    "get_work_order": frozenset(
+        {
+            ("GET", f"{API}/work-orders/{{work_order_id}}"),
+            ("GET", f"{API}/work-orders/by-number/{{wo_number}}"),
+        }
+    ),
+    "update_work_order": frozenset({("PUT", f"{API}/work-orders/{{work_order_id}}")}),
+    "duplicate_work_order": frozenset({("POST", f"{API}/work-orders/{{work_order_id}}/duplicate")}),
+    "release_work_order": frozenset({("POST", f"{API}/work-orders/{{work_order_id}}/release")}),
+    "import_laser_nest_package": frozenset(
+        {
+            ("GET", f"{API}/work-orders/{{work_order_id}}"),
+            ("GET", f"{API}/work-orders/"),
+            ("GET", f"{API}/parts/{{part_id}}"),
+            ("POST", f"{API}/work-orders/{{work_order_id}}/laser-nest-packages/import"),
+            ("POST", f"{API}/work-orders/laser-nest-packages/standalone/import"),
+            ("PUT", f"{API}/work-orders/{{work_order_id}}"),
+            ("PUT", f"{API}/work-orders/operations/{{operation_id}}"),
+        }
+    ),
+    "add_laser_nest": frozenset(
+        {
+            ("GET", f"{API}/work-orders/{{work_order_id}}"),
+            ("GET", f"{API}/work-orders/"),
+            ("GET", f"{API}/parts/{{part_id}}"),
+            ("POST", f"{API}/work-orders/{{work_order_id}}/laser-nests/manual"),
+            ("PUT", f"{API}/work-orders/{{work_order_id}}"),
+            ("PUT", f"{API}/work-orders/operations/{{operation_id}}"),
+        }
+    ),
+    "get_shop_floor_dashboard": frozenset(
+        {("GET", f"{API}/shop-floor/dashboard"), ("GET", f"{API}/shop-floor/dispatch-board")}
+    ),
+    "list_inventory": frozenset({("GET", f"{API}/inventory/"), ("GET", f"{API}/inventory/summary")}),
+    "list_purchase_orders": frozenset({("GET", f"{API}/purchasing/purchase-orders")}),
+    "list_quality_ncrs": frozenset({("GET", f"{API}/quality/ncr")}),
+    "list_parts": frozenset({("GET", f"{API}/parts/")}),
+}
+
+
+def convenience_tool_reads(tool: ConvenienceTool) -> bool:
+    """A READ: every route the tool may dispatch is a GET. A tool with no declared routes is
+    NOT a read (fails closed): a read-only token never sees, and is refused, what it cannot place."""
+    routes = CONVENIENCE_TOOL_ROUTES.get(tool.name)
+    return bool(routes) and all(method == "GET" for method, _path in routes)
+
+
 _TAG_SUFFIX = re.compile(r"\[([^\]]+)\]\s*$")
+
+
+def convenience_tool_tag(tool: ConvenienceTool) -> Optional[str]:
+    """The OpenAPI tag the tool's description claims with its trailing ``[Tag]`` (None if it claims none)."""
+    match = _TAG_SUFFIX.search(tool.description)
+    return match.group(1) if match else None
 
 
 def convenience_tags(tools: Sequence[ConvenienceTool] = CONVENIENCE_TOOLS) -> FrozenSet[str]:

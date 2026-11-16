@@ -6,6 +6,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.schemas.base import UTCModel
+
 
 class ConsumablePerson(BaseModel):
     id: int
@@ -51,7 +53,7 @@ class ConsumableCheckoutCreate(BaseModel):
     request_id: UUID
 
 
-class ConsumableCheckoutResponse(BaseModel):
+class ConsumableCheckoutResponse(UTCModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
     inventory_item_id: int

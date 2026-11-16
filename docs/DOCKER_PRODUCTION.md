@@ -251,7 +251,7 @@ The `worker` service runs `arq app.worker.WorkerSettings` and executes the sched
 | `check_calibrations_job` | daily |
 | `check_late_work_orders_job`, `check_low_stock_job`, `check_quote_expiring_job` | daily (mornings) |
 | `aggregate_ai_learning_job` | daily 05:30 |
-| `run_oee_auto_calc_job` | daily 02:30 — computes **yesterday's** OEE record per active company + active work center (Lean Phase 1) |
+| `run_oee_auto_calc_job` | daily 02:30 — computes each company's **previous production day** OEE record per active work center (Lean Phase 1; production day since migration 120) |
 | `cleanup_old_logs_job` | Sundays 02:00 — purges ephemeral job/notification logs only (**not** audit logs) |
 | `archive_aged_audit_logs_job` | **1st of each month, 03:00** — exports aged audit rows to cold storage (CMMC AU-3.3.8) |
 
@@ -263,9 +263,16 @@ on-demand-triggered records are `'manual'`. The cron **never overwrites a `manua
 hand-entered record for that work center/day is authoritative, any shift), recomputes its own
 `'auto'` records idempotently on re-runs, and skips idle work centers (no clocked entries, no
 unplanned downtime) rather than writing all-zero rows. One tenant's failure never aborts the others.
-For a re-run/backfill of a specific day or tenant, enqueue manually with `company_id` /
-`record_date` (ISO date) kwargs. Writes are audited with the system as actor. See `docs/API.md` →
-OEE Tracking for the `calculation_source` field and the one-record-per-(WC, date, shift) 409 rule.
+The target day is per company: `current_production_day − 1` on that company's production calendar
+(its company-local calendar day when none is configured), never the container's `date.today()`.
+02:30 UTC is the previous Central evening, so with Werco's 05:00 day start Monday's production day
+ends Tuesday 05:00 and is computed Tuesday ~20:30 Central (21:30 under CDT). The
+cron writes whole-day records only; the job result carries `record_dates_by_company` (and
+`record_date` when every company resolved the same day). For a re-run/backfill of a specific day or
+tenant, enqueue manually with `company_id` / `record_date` (ISO date, a **production day**) kwargs.
+Writes are audited with the system as actor. See `docs/API.md` → OEE Tracking for the
+`calculation_source` field and the one-record-per-(WC, date, shift) 409 rule, and → Production
+calendar & shifts for production days.
 
 #### Audit archival — provision cold storage
 

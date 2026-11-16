@@ -40,6 +40,13 @@ Why it is shaped the way it is:
   never writes to one), and the SDK's own stateless handler answers a GET the same
   way; answering here also keeps the app's ``GZipMiddleware`` from holding an SSE
   response's headers until the transport's first 15 s keepalive ping.
+- The AI-egress guard (Claude-plugin brief P0.3). An AI-external API token whose company
+  has ``Company.allow_ai_egress`` off is answered HTTP 403 ``{"detail": ...}`` by
+  :class:`AiEgressDoorGuard`, between the bearer check and the MCP transport -- so
+  ``initialize`` and ``tools/list``, which dispatch nothing inward, are refused too, not
+  only tool calls. The decision comes from the verifier's row read (``AccessToken.claims``);
+  the refusal is recorded in ``controlled_access_events`` by the export-control middleware,
+  which wraps this route like every other.
 - Lifespan. The SDK's session manager runs in a task group that must outlive every
   request, and Starlette never runs a sub-application's lifespan, so ``McpDoor.lifespan``
   is entered from ``main.py``'s own lifespan. Each entry builds a FRESH session manager
@@ -64,13 +71,80 @@ from starlette.routing import Match
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.core.config import settings
-from app.mcp.auth import ErpTokenVerifier
+from app.core.export_control import (
+    AI_EGRESS_DISABLED_DETAIL,
+    EXPORT_CONTROL_STATE_KEY,
+    REASON_AI_EGRESS_DISABLED,
+    ExportControlMarker,
+)
+from app.mcp.auth import (
+    CLAIM_API_TOKEN_AI_EGRESS,
+    CLAIM_API_TOKEN_AI_EXTERNAL,
+    CLAIM_API_TOKEN_COMPANY_ID,
+    CLAIM_API_TOKEN_ID,
+    CLAIM_API_TOKEN_JTI_PREFIX,
+    CLAIM_API_TOKEN_LABEL,
+    CLAIM_API_TOKEN_SCOPE,
+    ErpTokenVerifier,
+)
 from app.mcp.catalog import build_catalog
 from app.mcp.convenience import CONVENIENCE_TOOL_NAMES, SHADOWED_OPERATIONS
 from app.mcp.executor import Executor, InProcessExecutor
 from app.mcp.server import build_server
 
 DOOR_ROUTE_NAME = "mcp_door"
+
+
+class AiEgressDoorGuard:
+    """403 for an AI-external API token whose company's AI egress is off -- before the MCP transport.
+
+    Runs inside ``RequireAuthMiddleware``, so ``scope["user"]`` is the verified principal.
+    It acts only on a principal whose claims record an API-token ROW (``ErpTokenVerifier``);
+    a person's access token, a full token, or a read-only token that is not AI-external
+    passes straight through. An AI-external record is refused unless the verifier read the
+    company's switch as ON for this very request (a missing or malformed value is "off").
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        claims = _row_claims(scope)
+        if claims is not None and claims.get(CLAIM_API_TOKEN_AI_EXTERNAL) is not False:
+            if claims.get(CLAIM_API_TOKEN_AI_EGRESS) is not True:
+                _mark_refusal(scope, claims)
+                await JSONResponse(status_code=403, content={"detail": AI_EGRESS_DISABLED_DETAIL})(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+def _row_claims(scope: Scope) -> Optional[dict]:
+    """The verifier's api_tokens-row claims for this request, or None (a person / no row record)."""
+    access_token = getattr(scope.get("user"), "access_token", None)
+    claims = getattr(access_token, "claims", None)
+    if not isinstance(claims, dict) or CLAIM_API_TOKEN_SCOPE not in claims:
+        return None
+    return claims
+
+
+def _mark_refusal(scope: Scope, claims: dict) -> None:
+    """Hand the refusal to the export-control middleware, which writes the ledger row (one writer)."""
+    company_id = claims.get(CLAIM_API_TOKEN_COMPANY_ID)
+    if not isinstance(company_id, int):
+        return  # no company to file it under; the 403 stands regardless
+    user = scope.get("user")
+    user_id = getattr(getattr(user, "access_token", None), "client_id", None)
+    scope.setdefault("state", {})[EXPORT_CONTROL_STATE_KEY] = ExportControlMarker(
+        company_id=company_id,
+        user_id=int(user_id) if isinstance(user_id, str) and user_id.isdigit() else None,
+        api_token_id=claims.get(CLAIM_API_TOKEN_ID),
+        jti_prefix=claims.get(CLAIM_API_TOKEN_JTI_PREFIX),
+        label=claims.get(CLAIM_API_TOKEN_LABEL),
+        read_only=True,
+        ai_external=True,
+        route=scope.get("path"),
+        refusal_reason=REASON_AI_EGRESS_DISABLED,
+    )
 
 
 class McpDoor:
@@ -100,7 +174,8 @@ class McpDoor:
             max_request_body_size=self.max_request_body_size,
         )
         transport: ASGIApp = StreamableHTTPASGIApp(manager)
-        guarded: ASGIApp = RequireAuthMiddleware(transport, required_scopes=[], resource_metadata_url=None)
+        gated: ASGIApp = AiEgressDoorGuard(transport)
+        guarded: ASGIApp = RequireAuthMiddleware(gated, required_scopes=[], resource_metadata_url=None)
         chain: ASGIApp = AuthenticationMiddleware(
             AuthContextMiddleware(guarded), backend=BearerAuthBackend(self.verifier)
         )

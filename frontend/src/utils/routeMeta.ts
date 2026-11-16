@@ -102,6 +102,7 @@ export const routeTitles: Record<string, string> = {
   '/supplier-scorecards': 'Supplier Scorecards',
   '/custom-fields': 'Custom Fields',
   '/admin/settings': 'Admin Settings',
+  '/admin/api-tokens': 'API Tokens',
   '/platform': 'Platform Overview',
   '/audit-log': 'Audit Log',
   '/visitor-log': 'Visitor Log',

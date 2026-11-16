@@ -15,6 +15,7 @@ from app.models.quote import Quote, QuoteLine, QuoteStatus
 from app.models.rfq_quote import QuoteEstimate, RfqPackage
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder
+from app.schemas.base import UTCModel
 from app.services.audit_service import AuditService
 from app.services.quote_send_gate import (
     assert_quote_printable,
@@ -184,7 +185,7 @@ class AIEstimateResponse(BaseModel):
     line_summaries: List[AIEstimateLineSummaryResponse] = []
 
 
-class QuoteResponse(BaseModel):
+class QuoteResponse(UTCModel):
     id: int
     quote_number: str
     revision: str

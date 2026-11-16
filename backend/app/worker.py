@@ -289,8 +289,9 @@ async def print_receiving_label_job(ctx, *, company_id: int, receipt_id: int, us
 async def run_oee_auto_calc_job(ctx, company_id: int = None, record_date: str = None):
     """Nightly OEE auto-calculation (Lean Phase 1).
 
-    Computes YESTERDAY's OEERecord per active company + active work center with
-    ``calculation_source='auto'``; never overwrites a 'manual' record. ARQ fires
+    Computes each company's PREVIOUS PRODUCTION DAY (``current_production_day - 1`` on
+    its production calendar) per active work center with ``calculation_source='auto'``;
+    never overwrites a 'manual' record. ARQ fires
     cron coroutines with only ``ctx``, so the fan-out defaults live in the task.
     ``record_date`` (ISO date string, manual enqueues only) re-runs a specific day.
     """
@@ -395,7 +396,7 @@ ALL_CRON_JOBS: List[CronJob] = [
     cron(check_low_stock_job, hour=7, minute=30),  # 7:30 AM daily -- sends email (aggregated)
     cron(check_quote_expiring_job, hour=9, minute=0),  # 9 AM daily -- sends email
     cron(aggregate_ai_learning_job, hour=5, minute=30),  # 5:30 AM daily -- WRITES recommendations/events
-    cron(run_oee_auto_calc_job, hour=2, minute=30),  # 2:30 AM daily (yesterday's OEE, Lean Phase 1)
+    cron(run_oee_auto_calc_job, hour=2, minute=30),  # 2:30 AM daily (previous production day's OEE, P1.2)
     cron(cleanup_runtime_metrics_job, hour=2, minute=15),
     cron(cleanup_old_logs_job, weekday=0, hour=2, minute=0),  # Sunday 2 AM -- physical DELETEs (not audit)
     cron(archive_aged_audit_logs_job, day=1, hour=3, minute=0),  # 1st of month, 3 AM -- needs a durable volume

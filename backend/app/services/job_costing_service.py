@@ -26,7 +26,6 @@ Rules:
 from __future__ import annotations
 
 import logging
-from datetime import date
 from typing import Optional
 
 from sqlalchemy.orm import Session, joinedload
@@ -36,6 +35,8 @@ from app.models.time_entry import TimeEntry
 from app.models.work_order import WorkOrder, WorkOrderOperation
 from app.services.audit_service import AuditService
 from app.services.labor_cost_service import is_approved_labor_required, resolve_labor_rates
+from app.services.production_calendar import current_production_day, entry_attribution
+from app.services.production_calendar_service import load_production_calendar
 
 logger = logging.getLogger(__name__)
 
@@ -45,10 +46,18 @@ def recalculate_totals(job_cost: JobCost) -> None:
 
     Identical math to the endpoint's ``recalculate_job_cost`` -- centralized so the
     completion sync and the endpoint stay in lock-step. Mutates ``job_cost`` in place.
+
+    SUBCONTRACT has its OWN branch and its own total (``actual_subcontract_cost``). It must
+    never reach the ``else`` below, which folds OTHER into ``actual_overhead_cost`` -- the
+    work-order read reports that column as burden, so a subcontract entry falling through
+    would be shown as burden. ``actual_overhead_cost`` keeps its stored meaning (OVERHEAD +
+    OTHER) so existing variances do not shift; there is no subcontract estimate, so
+    subcontract reaches only the total and ``total_variance``.
     """
     material_total = 0.0
     labor_total = 0.0
     overhead_total = 0.0
+    subcontract_total = 0.0
     other_total = 0.0
 
     for entry in job_cost.entries:
@@ -58,13 +67,16 @@ def recalculate_totals(job_cost: JobCost) -> None:
             labor_total += entry.total_cost
         elif entry.entry_type == CostEntryType.OVERHEAD or entry.entry_type == "overhead":
             overhead_total += entry.total_cost
+        elif entry.entry_type == CostEntryType.SUBCONTRACT or entry.entry_type == "subcontract":
+            subcontract_total += entry.total_cost
         else:
             other_total += entry.total_cost
 
     job_cost.actual_material_cost = material_total
     job_cost.actual_labor_cost = labor_total
     job_cost.actual_overhead_cost = overhead_total + other_total
-    job_cost.actual_total_cost = material_total + labor_total + overhead_total + other_total
+    job_cost.actual_subcontract_cost = subcontract_total
+    job_cost.actual_total_cost = material_total + labor_total + overhead_total + other_total + subcontract_total
 
     job_cost.estimated_total_cost = (
         job_cost.estimated_material_cost + job_cost.estimated_labor_cost + job_cost.estimated_overhead_cost
@@ -135,6 +147,10 @@ def recompute_from_time_entries(
         return None
 
     rates = resolve_labor_rates(db, company_id, [_wc_for(te) for te in time_entries])
+    # ``entry_date`` is the PRODUCTION day the labor is attributed to (P1.2): a 01:30
+    # Wednesday weld entry is Tuesday's 2nd-shift labor. Only rows rebuilt here change;
+    # existing manual entries are untouched.
+    calendar = load_production_calendar(db, company_id)
 
     # Remove existing auto-generated labor entries (tenant-scoped) before rebuilding.
     existing_auto = (
@@ -165,7 +181,11 @@ def recompute_from_time_entries(
             work_order_operation_id=te.operation_id,
             source=CostEntrySource.TIME_ENTRY,
             reference=f"TE-{te.id}",
-            entry_date=te.clock_in.date() if te.clock_in else date.today(),
+            entry_date=(
+                entry_attribution(te.clock_in, te.clock_out, calendar, _wc_for(te))[0]
+                if te.clock_in
+                else current_production_day(calendar)
+            ),
             created_by=user_id,
         )
         entry.company_id = company_id

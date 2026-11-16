@@ -174,7 +174,7 @@ is set**, so "6 AM" means 06:00 UTC = **01:00 Central**.
 | `check_low_stock_job` | 07:30 daily | **One aggregated** message per tenant to `department` `Purchasing` + `Inventory`. **Digest-only.** Low blast radius. |
 | `send_daily_digest_job` | 08:00 daily | One digest email per opted-in user. |
 | `aggregate_ai_learning_job` | 05:30 daily | Writes `AIRecommendation` rows and emits `work_order_blocker_escalated` events, which re-enter the outbox and generate more notifications. Never applies a recommendation and makes no LLM call (the auto-execute agent was removed 2026-11-05). |
-| `run_oee_auto_calc_job` | 02:30 daily | Writes `OEERecord` (`calculation_source='auto'`) for **yesterday only**; never overwrites `manual`. No backfill. Quiet. |
+| `run_oee_auto_calc_job` | 02:30 daily | Writes whole-day `OEERecord`s (`calculation_source='auto'`) for each company's **previous production day only** (`current_production_day − 1` on its production calendar, the company-local calendar day when none is configured; migration 120); never overwrites `manual`. No backfill. Quiet. |
 | `cleanup_runtime_metrics_job` | Daily 02:15 | **Physical DELETEs**: anonymous browser performance samples older than 30 days. No business records or audit logs. |
 | `cleanup_old_logs_job` | Sun 02:00 | **Physical DELETEs**: completed jobs, notification logs, read notifications >90 d. Audit logs explicitly excluded. |
 | `archive_aged_audit_logs_job` | 1st of month 03:00 | Exports aged audit rows to NDJSON in `AUDIT_ARCHIVE_DIR`. **Never deletes.** Needs a durable volume — see §8. |
@@ -455,7 +455,7 @@ Suggested order, safest first. Change `WORKER_CRON_JOBS`, redeploy, watch one cy
 adding the next:
 
 1. `relay_pending_notifications_job` — bounded by design (24 h floor, 500/pass).
-2. `run_oee_auto_calc_job` — writes yesterday's OEE only, no email.
+2. `run_oee_auto_calc_job` — writes each company's previous production day of OEE only, no email.
 3. `check_low_stock_job` — one aggregated message per tenant.
 4. `poll_tracking_job` — no-op while `allow_carrier_egress` is off.
 5. `check_quote_expiring_job`, `check_calibrations_job` — window-bounded.

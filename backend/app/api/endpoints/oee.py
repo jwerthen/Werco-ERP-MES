@@ -2,16 +2,18 @@ from datetime import date, datetime, timedelta
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
+from app.api.date_window import production_date_window
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
 from app.models.oee import CalculationSource, OEERecord, OEETarget
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
+from app.schemas.base import UTCModel
 from app.services.audit_service import AuditService
 
 # Lean Phase 1: the ~220-line auto-calculation moved verbatim to
@@ -24,6 +26,13 @@ from app.services.oee_service import (  # noqa: F401  (re-exported)
     OEERecordConflictError,
     calculate_oee,
     compute_oee_for_work_center,
+)
+from app.services.production_calendar import current_production_day
+from app.services.production_calendar_service import (
+    load_production_calendar,
+    resolve_shift_for_write,
+    shift_def_for,
+    shift_names_by_id,
 )
 
 # Clear 409 detail shared by every writer that can trip the
@@ -45,10 +54,21 @@ router = APIRouter()
 # ============== Pydantic Schemas ==============
 
 
+_SHIFT_ID_DESCRIPTION = (
+    "A shift defined in the production calendar (GET /production-calendar) for this work center's "
+    "pattern; omit for a whole-production-day record"
+)
+_LEGACY_SHIFT_DESCRIPTION = (
+    "Legacy label: accepted only when it equals a defined shift's code (it then resolves to that shift); "
+    "prefer shift_id. Blank means no shift."
+)
+
+
 class OEERecordCreate(BaseModel):
     work_center_id: int
-    record_date: date
-    shift: Optional[str] = None
+    record_date: date = Field(description="The PRODUCTION day the record covers")
+    shift_id: Optional[int] = Field(None, description=_SHIFT_ID_DESCRIPTION)
+    shift: Optional[str] = Field(None, description=_LEGACY_SHIFT_DESCRIPTION)
     planned_production_time_minutes: float = 0.0
     actual_run_time_minutes: float = 0.0
     downtime_minutes: float = 0.0
@@ -69,7 +89,8 @@ class OEERecordCreate(BaseModel):
 
 
 class OEERecordUpdate(BaseModel):
-    shift: Optional[str] = None
+    shift_id: Optional[int] = Field(None, description=_SHIFT_ID_DESCRIPTION)
+    shift: Optional[str] = Field(None, description=_LEGACY_SHIFT_DESCRIPTION)
     planned_production_time_minutes: Optional[float] = None
     actual_run_time_minutes: Optional[float] = None
     downtime_minutes: Optional[float] = None
@@ -89,12 +110,16 @@ class OEERecordUpdate(BaseModel):
     notes: Optional[str] = None
 
 
-class OEERecordResponse(BaseModel):
+class OEERecordResponse(UTCModel):
     id: int
     work_center_id: int
     work_center_name: Optional[str] = None
     record_date: date
+    # The label snapshot: the defined shift's code, or a legacy free-text label.
     shift: Optional[str] = None
+    # Migration 120: the defined shift (NULL for whole-day and legacy rows) and its name.
+    shift_id: Optional[int] = None
+    shift_name: Optional[str] = None
     # Lean Phase 1: 'manual' (hand-entered / on-demand trigger) vs 'auto' (nightly
     # cron). Plain str on the read path so an unknown future token reads fine.
     calculation_source: str = CalculationSource.MANUAL.value
@@ -141,7 +166,7 @@ class OEETargetUpdate(BaseModel):
     target_quality_pct: Optional[float] = None
 
 
-class OEETargetResponse(BaseModel):
+class OEETargetResponse(UTCModel):
     id: int
     work_center_id: int
     work_center_name: Optional[str] = None
@@ -159,14 +184,16 @@ class OEETargetResponse(BaseModel):
 # (calculate_oee lives in app/services/oee_service.py and is re-exported above.)
 
 
-def _record_to_response(record: OEERecord) -> dict:
-    """Convert OEERecord to response dict with work_center_name."""
+def _record_to_response(record: OEERecord, shift_names: Optional[dict] = None) -> dict:
+    """Convert OEERecord to response dict with work_center_name (and shift_name when known)."""
     data = {
         "id": record.id,
         "work_center_id": record.work_center_id,
         "work_center_name": record.work_center.name if record.work_center else None,
         "record_date": record.record_date,
         "shift": record.shift,
+        "shift_id": record.shift_id,
+        "shift_name": (shift_names or {}).get(record.shift_id) if record.shift_id else None,
         "calculation_source": record.calculation_source or CalculationSource.MANUAL.value,
         "planned_production_time_minutes": record.planned_production_time_minutes,
         "actual_run_time_minutes": record.actual_run_time_minutes,
@@ -196,9 +223,13 @@ def _record_to_response(record: OEERecord) -> dict:
     return data
 
 
-def _parse_period(period: str) -> date:
-    """Convert period string like '7d', '30d', '90d' to a start date."""
-    today = date.today()
+def _parse_period(period: str, today: Optional[date] = None) -> date:
+    """Convert period string like '7d', '30d', '90d' to a start date.
+
+    ``today`` is the company's current PRODUCTION day (routers pass it); the server's
+    ``date.today()`` is only the fallback for a caller that has none.
+    """
+    today = today or date.today()
     if period == "7d":
         return today - timedelta(days=7)
     elif period == "30d":
@@ -211,7 +242,14 @@ def _parse_period(period: str) -> date:
         return today - timedelta(days=30)
 
 
-def _resolve_window(period: str, date_from: Optional[date], date_to: Optional[date]) -> tuple[date, Optional[date]]:
+def _production_today(db: Session, company_id: int) -> date:
+    """The company's current production day -- what "today" means for OEE periods."""
+    return current_production_day(load_production_calendar(db, company_id))
+
+
+def _resolve_window(
+    period: str, date_from: Optional[date], date_to: Optional[date], today: Optional[date] = None
+) -> tuple[date, Optional[date]]:
     """Resolve the ``[start, end]`` reporting window for the dashboard/trends reads.
 
     An explicit ``date_from`` takes precedence over the ``period`` preset; ``date_to`` is the
@@ -220,7 +258,7 @@ def _resolve_window(period: str, date_from: Optional[date], date_to: Optional[da
     it already scopes the records table, instead of those staying pinned to the period preset.
     Passing neither date preserves the legacy behavior (period-derived start, open end).
     """
-    start = date_from if date_from is not None else _parse_period(period)
+    start = date_from if date_from is not None else _parse_period(period, today)
     return start, date_to
 
 
@@ -232,14 +270,15 @@ def list_oee_records(
     work_center_id: Optional[int] = None,
     date_from: Optional[date] = None,
     date_to: Optional[date] = None,
-    shift: Optional[str] = None,
+    shift: Optional[str] = Query(None, description="Exact label (a shift code or a legacy free-text label)"),
+    shift_id: Optional[int] = Query(None, description="A defined shift's id"),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=5000),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """List OEE records with optional filters."""
+    """List OEE records with optional filters. ``record_date`` is a production day."""
     query = db.query(OEERecord).filter(OEERecord.company_id == company_id).options(joinedload(OEERecord.work_center))
 
     if work_center_id:
@@ -250,9 +289,12 @@ def list_oee_records(
         query = query.filter(OEERecord.record_date <= date_to)
     if shift:
         query = query.filter(OEERecord.shift == shift)
+    if shift_id is not None:
+        query = query.filter(OEERecord.shift_id == shift_id)
 
     records = query.order_by(OEERecord.record_date.desc()).offset(skip).limit(limit).all()
-    return [_record_to_response(r) for r in records]
+    names = shift_names_by_id(db, company_id, (r.shift_id for r in records))
+    return [_record_to_response(r, names) for r in records]
 
 
 @router.get("/records/{record_id}", response_model=OEERecordResponse)
@@ -272,7 +314,7 @@ def get_oee_record(
 
     if not record:
         raise HTTPException(status_code=404, detail="OEE record not found")
-    return _record_to_response(record)
+    return _record_to_response(record, shift_names_by_id(db, company_id, [record.shift_id]))
 
 
 @router.post("/records", response_model=OEERecordResponse)
@@ -283,7 +325,13 @@ def create_oee_record(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Create a new OEE record with auto-calculated OEE metrics."""
+    """Create a new OEE record with auto-calculated OEE metrics.
+
+    ``shift_id`` names a defined shift of this work center's pattern (404 for one that is
+    not this company's, 422 when retired or in another pattern); the record's ``shift``
+    label is stamped with its code. A legacy ``shift`` text resolves only when it equals a
+    defined code -- any other text is 422. Neither = a whole-production-day record.
+    """
     # Verify work center exists
     wc = (
         db.query(WorkCenter)
@@ -292,6 +340,9 @@ def create_oee_record(
     )
     if not wc:
         raise HTTPException(status_code=404, detail="Work center not found")
+    definition = resolve_shift_for_write(
+        db, company_id, wc.id, shift_id=record_in.shift_id, shift_label=record_in.shift
+    )
 
     # Calculate OEE
     oee_calcs = calculate_oee(
@@ -305,8 +356,10 @@ def create_oee_record(
     )
 
     record = OEERecord(
-        **record_in.model_dump(),
+        **record_in.model_dump(exclude={"shift", "shift_id"}),
         **oee_calcs,
+        shift=definition.code if definition is not None else None,
+        shift_id=definition.id if definition is not None else None,
         calculation_source=CalculationSource.MANUAL.value,
         created_by=current_user.id,
     )
@@ -339,7 +392,16 @@ def create_oee_record(
     # Reload with relationship
     record = db.query(OEERecord).options(joinedload(OEERecord.work_center)).filter(OEERecord.id == record.id).first()
 
-    return _record_to_response(record)
+    return _record_to_response(record, shift_names_by_id(db, company_id, [record.shift_id]))
+
+
+def _echoes_legacy_label(record: OEERecord, update_data: dict) -> bool:
+    """True when an update re-sends the record's own legacy label (no ``shift_id``) unchanged."""
+    if "shift" not in update_data or update_data.get("shift_id") is not None:
+        return False
+    if record.shift_id is not None or not record.shift:
+        return False
+    return (update_data.get("shift") or "").strip() == record.shift.strip()
 
 
 @router.put("/records/{record_id}", response_model=OEERecordResponse)
@@ -366,7 +428,27 @@ def update_oee_record(
     old_values = {c.key: getattr(record, c.key) for c in record.__table__.columns}
 
     update_data = record_in.model_dump(exclude_unset=True)
+    if _echoes_legacy_label(record, update_data):
+        # A read-modify-write client sending the record back: the pre-120 free-text label
+        # (``Day``, ``1st``) is not a new shift selection, so it is left as it is rather
+        # than refused as an unknown shift.
+        update_data.pop("shift", None)
+        update_data.pop("shift_id", None)
+    if "shift" in update_data or "shift_id" in update_data:
+        # Same rules as create; the record's own (possibly retired) shift may be re-sent.
+        definition = resolve_shift_for_write(
+            db,
+            company_id,
+            record.work_center_id,
+            shift_id=update_data.get("shift_id"),
+            shift_label=update_data.get("shift"),
+            current_shift_id=record.shift_id,
+        )
+        record.shift = definition.code if definition is not None else None
+        record.shift_id = definition.id if definition is not None else None
     for field, value in update_data.items():
+        if field in ("shift", "shift_id"):
+            continue
         setattr(record, field, value)
 
     # Recalculate OEE
@@ -404,7 +486,7 @@ def update_oee_record(
         db.rollback()
         raise HTTPException(status_code=409, detail=_OEE_DUPLICATE_DETAIL) from exc
     db.refresh(record)
-    return _record_to_response(record)
+    return _record_to_response(record, shift_names_by_id(db, company_id, [record.shift_id]))
 
 
 @router.delete("/records/{record_id}")
@@ -443,8 +525,13 @@ def delete_oee_record(
 @router.post("/calculate/{work_center_id}")
 def auto_calculate_oee(
     work_center_id: int,
-    record_date: date = None,
-    shift: Optional[str] = None,
+    record_date: Optional[date] = Query(
+        None, description="The PRODUCTION day to compute (default: the current production day)"
+    ),
+    shift_id: Optional[int] = Query(
+        None, description="Compute only what is attributed to this defined shift (default: the whole day)"
+    ),
+    shift: Optional[str] = Query(None, description=_LEGACY_SHIFT_DESCRIPTION),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(OEE_WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
@@ -458,13 +545,20 @@ def auto_calculate_oee(
     nightly cron runs the same code. A manual trigger stamps
     ``calculation_source='manual'`` and overwrites whatever record exists for the
     (WC, date, shift) key; a lost create race surfaces as 409.
-    """
-    if record_date is None:
-        record_date = date.today()
 
+    ``record_date`` is a PRODUCTION day: time entries and downtime are attributed to it
+    by the production calendar (greatest shift overlap, ties to the outgoing shift). With
+    ``shift_id`` only what is attributed to that shift counts and the record carries it.
+    """
     wc = db.query(WorkCenter).filter(WorkCenter.id == work_center_id, WorkCenter.company_id == company_id).first()
     if not wc:
         raise HTTPException(status_code=404, detail="Work center not found")
+    calendar = load_production_calendar(db, company_id)
+    if record_date is None:
+        record_date = current_production_day(calendar)
+    # A day at the ends of the date range has no window to read: 422, not a 500.
+    production_date_window(calendar, record_date, record_date)
+    definition = resolve_shift_for_write(db, company_id, wc.id, shift_id=shift_id, shift_label=shift)
 
     try:
         record = compute_oee_for_work_center(
@@ -472,15 +566,16 @@ def auto_calculate_oee(
             company_id,
             wc,
             record_date,
-            shift,
+            shift_def_for(definition) if definition is not None else None,
             calculation_source=CalculationSource.MANUAL,
             created_by_user_id=current_user.id,
             audit=audit,
+            calendar=calendar,
         )
     except OEERecordConflictError as exc:
         raise HTTPException(status_code=409, detail=_OEE_DUPLICATE_DETAIL) from exc
 
-    return _record_to_response(record)
+    return _record_to_response(record, shift_names_by_id(db, company_id, [record.shift_id]))
 
 
 # ============== Dashboard Endpoint ==============
@@ -501,7 +596,7 @@ def get_oee_dashboard(
     ``period`` preset. This keeps the plant strip / tiles / comparison scoped to the same window
     as the records table rather than pinned to the last 30 days.
     """
-    start_date, end_date = _resolve_window(period, date_from, date_to)
+    start_date, end_date = _resolve_window(period, date_from, date_to, _production_today(db, company_id))
 
     # Get all active work centers
     work_centers = db.query(WorkCenter).filter(WorkCenter.company_id == company_id, WorkCenter.is_active == True).all()
@@ -597,7 +692,7 @@ def get_oee_trends(
     Honors the ``date_from``..``date_to`` range (falling back to the ``period`` preset) so the
     chart follows the UI's From/To filter rather than always showing the last 30 days.
     """
-    start_date, end_date = _resolve_window(period, date_from, date_to)
+    start_date, end_date = _resolve_window(period, date_from, date_to, _production_today(db, company_id))
 
     query = (
         db.query(OEERecord)
@@ -660,7 +755,7 @@ def get_six_big_losses(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get breakdown of the six big losses for a work center."""
-    start_date = _parse_period(period)
+    start_date = _parse_period(period, _production_today(db, company_id))
 
     wc = db.query(WorkCenter).filter(WorkCenter.id == work_center_id, WorkCenter.company_id == company_id).first()
     if not wc:

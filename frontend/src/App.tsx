@@ -74,6 +74,7 @@ const PrintShippingLabel = lazyWithRetry(() => import('./pages/PrintShippingLabe
 const AuditLog = lazyWithRetry(() => import('./pages/AuditLog'));
 const FabricationQuoting = lazyWithRetry(() => import('./pages/FabricationQuoting'));
 const AdminSettings = lazyWithRetry(() => import('./pages/AdminSettings'));
+const ApiTokens = lazyWithRetry(() => import('./pages/ApiTokens'));
 const POUpload = lazyWithRetry(() => import('./pages/POUpload'));
 const Analytics = lazyWithRetry(() => import('./pages/Analytics'));
 const JobCosting = lazyWithRetry(() => import('./pages/JobCosting'));
@@ -1098,6 +1099,21 @@ function AppRoutes() {
               <Layout>
                 <LazyRoute>
                   <AdminSettings />
+                </LazyRoute>
+              </Layout>
+            </AdminRoute>
+          }
+        />
+
+        {/* API Tokens — every /api-tokens verb is require_role([ADMIN]) server-side
+            (platform admins / superusers pass), exactly AdminRoute's role set. */}
+        <Route
+          path="/admin/api-tokens"
+          element={
+            <AdminRoute>
+              <Layout>
+                <LazyRoute>
+                  <ApiTokens />
                 </LazyRoute>
               </Layout>
             </AdminRoute>

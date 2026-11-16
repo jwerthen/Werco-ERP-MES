@@ -329,6 +329,35 @@ statement, writes no row, and adds no environment variable, secret, cron or work
   under, and the migration will not pick which company's record to change.
   See [API.md → Customer Complaints & RMA](API.md#customer-complaints--rma).
 
+**Job cost subcontract (P1.3).** Apply additive **121_job_cost_subcontract** after
+**120_production_calendar** through the normal API boot migration path: one NOT NULL DEFAULT 0
+column on `job_costs` and, where the native `costentrytype` enum exists, its `SUBCONTRACT` label. No
+backfill, no environment variable, no worker job. Before rolling back to a pre-121 image, re-key any
+`SUBCONTRACT` cost entries to `other` through the API — older code cannot load them (see
+`DEPLOYMENT.md` → Job cost subcontract element).
+
+**Production calendar (P1.2).** Apply additive **120_production_calendar** after
+**119_api_token_scope** through the normal API boot
+migration path: four empty tenant tables plus the nullable `oee_records.shift_id` FK + index, no
+backfill, no seeded calendar, RLS/revokes as for every new table. Deploy-time behavior change: every
+tenant's day boundaries for OEE, the OEE cron, reports, downtime filters, job-cost labor dates and
+analytics move from UTC dates to company-local (production) days. Once the calendar is saved, the
+wallboard TODAY bar and the dashboard's "Operations Completed Today" reset at the production-day start
+(05:00 for Werco) instead of Central midnight. Post-deploy steps (owner): save
+Werco's calendar (`docs/API.md` → Production calendar & shifts, worked example), run the
+working-calendar sync dry run, review the per-work-center diff, commit. Verify with
+`GET /production-calendar/resolve?at=2026-11-18T07:30:00Z&work_center_id=<WLD-01>` → production day
+2026-11-17, shift `W2`. No environment variable, secret or new worker job.
+
+**Company-local dates and export datetime cells (P1.1).** No migration, environment variable or
+worker job, but consumer-visible on deploy: every `/exports/*` datetime cell changes from naive UTC
+(`2026-01-15 23:30:00`) to company-local ISO-8601 with its offset (`2026-01-15T17:30:00-06:00`);
+calendar-date filters (the work-order and inventory-transaction exports, `GET /job-costs/`, analytics
+periods, `/reports/ship-otd`) select company-local days instead of UTC dates, and a reversed range is
+**422**; about 30 JSON response models that emitted zone-less datetimes now carry the `Z` (same
+instant). Tell anyone with a script or spreadsheet that parses an export — see `docs/API.md` →
+Spreadsheet Exports → Date filters and datetime cells.
+
 **Saved dashboard layouts.** Apply additive **118_dashboard_layouts** after
 **117_operation_short_declared** through the normal API boot migration path. It creates the empty
 per-company, per-user `dashboard_layouts` table and seeds no rows, so every role keeps the default
@@ -440,15 +469,23 @@ curl https://werco-api-production.up.railway.app/health/ready
    **404**. The startup log line `MCP door serving at /mcp` confirms the lifespan armed it. A
    **503** `MCP door is not running` means the route is mounted but the lifespan never ran.
 4. Hand agents an **API token** for a dedicated user (e.g. *Werco Assistant*): an Admin mints it
-   with `POST /api/v1/api-tokens/` ([API.md → API tokens](API.md#api-tokens-bots-and-mcp-clients)),
+   at **Admin → API Tokens** or with `POST /api/v1/api-tokens/`
+   ([API.md → API tokens](API.md#api-tokens-bots-and-mcp-clients)),
    it never expires unless issued with a lifetime, and it is revoked with a reason. No server-side
-   secret and no new variable are involved — it is signed with the existing `SECRET_KEY`, so
-   rotating that key revokes every API token at once. A normal 15-minute access token also works,
-   but then the client must renew it itself.
+   secret is involved — it is signed with the existing `SECRET_KEY`, so rotating that key revokes
+   every API token at once. A normal 15-minute access token also works, but then the client must
+   renew it itself. An agent that only reads gets a **read-only** token. An **outside AI service**
+   such as Claude's custom connector gets a read-only, **AI-external** token bound to a Viewer
+   user. That token is refused at the door until the company's AI egress is turned on, which only
+   happens after the empowered official clears it. Follow
+   [EXPORT_CONTROL_AI_EGRESS.md → Hand-back](EXPORT_CONTROL_AI_EGRESS.md#8-hand-back-connecting-claude-after-p0-ships).
+   Narrowed tokens need migration `119_api_token_scope`
+   ([DEPLOYMENT.md](DEPLOYMENT.md#read-only-and-ai-external-api-tokens-migration-119)).
 
 Turning it off is the same variable set back to `false` plus a redeploy; nothing else is left
 behind. The caps (`WERCO_MCP_MAX_UPLOAD_BYTES` 25 MB envelope, `WERCO_MCP_MAX_RESULT_CHARS`,
-`WERCO_MCP_MAX_BLOB_BYTES`) are documented in
+`WERCO_MCP_MAX_BLOB_BYTES`) and the read-only deny list (`WERCO_MCP_READ_ONLY_DENY_TAGS`, which
+also governs direct `/api/v1` calls) are documented in
 [ENVIRONMENT_VARIABLES.md → MCP](ENVIRONMENT_VARIABLES.md#mcp-model-context-protocol-door-and-bridge).
 
 ---

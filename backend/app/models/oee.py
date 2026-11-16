@@ -46,7 +46,16 @@ class OEERecord(Base, TenantMixin):
     id = Column(Integer, primary_key=True, index=True)
     work_center_id = Column(Integer, ForeignKey("work_centers.id"), nullable=False, index=True)
     record_date = Column(Date, nullable=False, index=True)
+    # ``shift`` is the LABEL snapshot: the shift's code when ``shift_id`` is set (so the
+    # COALESCE(shift, '') unique key above keeps guarding), or legacy free text
+    # ('1st' / 'Day' from before migration 120), kept verbatim and never backfilled.
     shift = Column(String(50), nullable=True)
+    # Migration 120: the defined shift this record covers (``shift_definitions``), NULL
+    # for whole-production-day records and legacy free-text rows. Writers resolve it
+    # tenant-scoped; a referenced definition is retired, never deleted.
+    shift_id = Column(
+        Integer, ForeignKey("shift_definitions.id", name="fk_oee_records_shift_id"), nullable=True, index=True
+    )
 
     # Lean Phase 1: how this snapshot was produced. 'manual' = hand-entered (all
     # pre-063 rows backfill to it via server_default); the Phase 1 auto-calculator

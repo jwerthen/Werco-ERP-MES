@@ -4,7 +4,6 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
@@ -22,6 +21,7 @@ from app.models.shipping import (
 )
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder, WorkOrderStatus
+from app.schemas.base import UTCModel
 from app.schemas.shipping import (
     AddressValidationRequest,
     AddressValidationResponse,
@@ -101,7 +101,7 @@ def _map_carrier_error(exc: CarrierError) -> HTTPException:
     return HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=message or "Carrier provider error")
 
 
-class CertificateOfConformanceResponse(BaseModel):
+class CertificateOfConformanceResponse(UTCModel):
     """Metadata for an issued Certificate of Conformance (the PDF is a separate endpoint)."""
 
     id: int

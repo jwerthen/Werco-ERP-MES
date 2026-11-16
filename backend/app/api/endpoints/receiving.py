@@ -25,7 +25,9 @@ from app.api.deps import (
     get_current_user,
     require_role,
 )
+from app.core.credentials import API_TOKEN_EGRESS_SWITCH, is_api_token_credential
 from app.core.queue import enqueue_job_best_effort
+from app.core.time_utils import to_utc_iso
 from app.db.database import get_db
 from app.models.inventory import (
     InventoryItem,
@@ -157,7 +159,7 @@ def get_open_purchase_orders(
                     "required_date": po.required_date,
                     "expected_date": po.expected_date,
                     "supplier_confirmed_date": po.supplier_confirmed_date,
-                    "supplier_acknowledged_at": po.supplier_acknowledged_at,
+                    "supplier_acknowledged_at": to_utc_iso(po.supplier_acknowledged_at),
                     "status": po.status.value,
                     "lines": lines_data,
                     "total_lines": len(lines_data),
@@ -210,7 +212,7 @@ def get_purchase_order_for_receiving(
                     "quantity_received": r.quantity_received,
                     "lot_number": r.lot_number,
                     "status": (r.status.value if hasattr(r.status, "value") else r.status),
-                    "received_at": r.received_at,
+                    "received_at": to_utc_iso(r.received_at),
                 }
             )
 
@@ -246,7 +248,7 @@ def get_purchase_order_for_receiving(
         "required_date": po.required_date,
         "expected_date": po.expected_date,
         "supplier_confirmed_date": po.supplier_confirmed_date,
-        "supplier_acknowledged_at": po.supplier_acknowledged_at,
+        "supplier_acknowledged_at": to_utc_iso(po.supplier_acknowledged_at),
         "status": po.status.value,
         "notes": po.notes,
         "lines": lines_data,
@@ -460,9 +462,9 @@ def get_receipt_detail(
         "carrier": receipt.carrier,
         "tracking_number": receipt.tracking_number,
         "location_code": receipt.location.code if receipt.location else None,
-        "received_at": receipt.received_at,
+        "received_at": to_utc_iso(receipt.received_at),
         "received_by_name": receipt.receiver.full_name if receipt.receiver else None,
-        "inspected_at": receipt.inspected_at,
+        "inspected_at": to_utc_iso(receipt.inspected_at),
         "inspected_by_name": receipt.inspector.full_name if receipt.inspector else None,
         "notes": receipt.notes,
     }
@@ -1492,9 +1494,9 @@ def get_receiving_history(
                 ),
                 "inspection_method": (r.inspection_method.value if r.inspection_method else None),
                 "defect_type": r.defect_type.value if r.defect_type else None,
-                "received_at": r.received_at,
+                "received_at": to_utc_iso(r.received_at),
                 "received_by_name": r.receiver.full_name if r.receiver else None,
-                "inspected_at": r.inspected_at,
+                "inspected_at": to_utc_iso(r.inspected_at),
                 "inspected_by_name": r.inspector.full_name if r.inspector else None,
             }
         )
@@ -1706,7 +1708,14 @@ def upsert_print_profile(
     OFF (model + this upsert default) and only flips when an admin sets it here; the
     toggle is audited as a status change so enabling/disabling print egress is on the
     tamper-evident trail. ``api_key`` is write-only: encrypted at rest, never returned.
+
+    This route is the switch's only writer, so the whole route is a person's judgment:
+    ANY API token is refused 403 (``API_TOKEN_EGRESS_SWITCH``) before anything is read or
+    written, whatever the request carries, and it is not an MCP tool
+    (``catalog.EXCLUDED_OPERATIONS``).
     """
+    if is_api_token_credential(current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=API_TOKEN_EGRESS_SWITCH)
     profile = db.query(CompanyPrintProfile).filter(CompanyPrintProfile.company_id == company_id).first()
     update = data.model_dump(exclude_unset=True)
     is_create = profile is None

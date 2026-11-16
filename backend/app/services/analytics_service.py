@@ -4,12 +4,16 @@ Analytics Service - Core aggregation and calculation logic
 
 import logging
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
-from sqlalchemy import Date, and_, case, cast, func, or_
+from sqlalchemy import and_, case, func, or_
 from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.sql.elements import ColumnElement
 
+from app.core.time_utils import CENTRAL_TIME_ZONE, local_today, local_window, to_local_date
 from app.db.ledger_filter import work_order_ledger_filter
 from app.models.downtime import DowntimeEvent, DowntimePlannedType
 from app.models.inventory import InventoryItem, InventoryTransaction, TransactionType
@@ -44,11 +48,18 @@ from app.schemas.analytics import (
     TrendDirection,
     VendorQuality,
 )
+from app.services.company_time import company_zone
 from app.services.labor_cost_service import (
     is_approved_labor_required,
     is_labor_cost_rollup_enabled,
     resolve_labor_rates,
     resolve_overhead_rate,
+)
+from app.services.production_calendar import ProductionCalendar
+from app.services.production_calendar_service import (
+    attribute_downtime_events,
+    attribute_time_entries,
+    load_production_calendar,
 )
 
 logger = logging.getLogger(__name__)
@@ -129,10 +140,22 @@ def calculate_trend(current: float, prior: float) -> Tuple[TrendDirection, float
 
 
 def get_date_range(
-    period: str, custom_start: Optional[date] = None, custom_end: Optional[date] = None
+    period: str,
+    custom_start: Optional[date] = None,
+    custom_end: Optional[date] = None,
+    *,
+    zone: Optional[ZoneInfo] = None,
+    today: Optional[date] = None,
 ) -> Tuple[date, date]:
-    """Convert period string to date range."""
-    today = date.today()
+    """Convert a period string to an inclusive calendar-date range.
+
+    "Today" is ``today`` when given -- routers pass the company's CURRENT PRODUCTION DAY
+    (``app.api.date_window.company_period``) -- else the date on the company's wall clock
+    (``zone``; America/Chicago when not given), never the server's ``date.today()``: a
+    UTC server flips to tomorrow at 6/7 PM Central.
+    """
+    if today is None:
+        today = local_today(zone or CENTRAL_TIME_ZONE)
 
     if period == "custom" and custom_start and custom_end:
         return custom_start, custom_end
@@ -156,10 +179,82 @@ def get_prior_period(start: date, end: date) -> Tuple[date, date]:
     return prior_start, prior_end
 
 
+@dataclass(frozen=True)
+class _OEEEntry:
+    day: date
+    work_center_id: Optional[int]
+    entry_type: Any
+    hours: float
+    good: float
+    scrapped: float
+    ideal_hours: Optional[float]
+
+
+@dataclass(frozen=True)
+class _OEEDowntime:
+    day: date
+    work_center_id: Optional[int]
+    hours: float
+
+
+@dataclass(frozen=True)
+class _OEEInputs:
+    """Closed time entries and UNPLANNED downtime attributed to production days ``start..end``."""
+
+    start: date
+    end: date
+    entries_by_day: Dict[date, Tuple[_OEEEntry, ...]]
+    downtime_by_day: Dict[date, Tuple[_OEEDowntime, ...]]
+
+    def days(self, start: date, end: date):
+        day = max(start, self.start)
+        last = min(end, self.end)
+        while day <= last:
+            yield day
+            day += timedelta(days=1)
+
+
 class AnalyticsService:
-    def __init__(self, db: Session, company_id: int):
+    def __init__(
+        self,
+        db: Session,
+        company_id: int,
+        zone: Optional[ZoneInfo] = None,
+        calendar: Optional[ProductionCalendar] = None,
+    ):
         self.db = db
         self.company_id = company_id
+        self._zone = zone
+        self._calendar = calendar
+        self._oee_cache: List[_OEEInputs] = []
+
+    @property
+    def calendar(self) -> ProductionCalendar:
+        """The company's production calendar: the OEE figures read PRODUCTION days."""
+        if self._calendar is None:
+            self._calendar = load_production_calendar(self.db, self.company_id)
+        return self._calendar
+
+    @property
+    def zone(self) -> ZoneInfo:
+        """The company's time zone: every ``start``/``end`` date here is a calendar day in it."""
+        if self._zone is None:
+            self._zone = company_zone(self.db, self.company_id)
+        return self._zone
+
+    def _window(self, start: date, end: date) -> Tuple[datetime, datetime]:
+        """Naive-UTC ``[start_utc, end_utc)`` for an inclusive company-local date range.
+
+        The end bound is EXCLUSIVE (the next local midnight): filter with a strict ``<``.
+        A reversed range reads as empty here, as it always has; the routers refuse it
+        with a 422 before it gets this far (``app.api.date_window``).
+        """
+        return local_window(start, end, self.zone)
+
+    def _between(self, column: Any, start: date, end: date) -> Tuple[ColumnElement, ColumnElement]:
+        """``column`` within the inclusive company-local date range, as two filter clauses."""
+        start_utc, end_utc = self._window(start, end)
+        return column >= start_utc, column < end_utc
 
     # ============ KPI CALCULATIONS ============
 
@@ -209,22 +304,126 @@ class AnalyticsService:
             sparkline=sparkline,
         )
 
+    # ---- OEE on PRODUCTION days (P1.2) --------------------------------------------------
+    #
+    # The OEE trio reads the same attributed inputs as the persisted ``OEERecord``
+    # (``services/oee_service``): CLOSED time entries and UNPLANNED downtime, each
+    # attributed to a production day by the production calendar (greatest shift overlap,
+    # ties to the outgoing shift, else the production day of the start), so
+    # /analytics/kpis, /analytics/oee and /oee agree for identical data. ``start``/``end``
+    # are production days (company-local calendar days when no calendar is configured).
+    # Inputs are fetched once per covering range and reused (``get_oee_details`` asks for
+    # every day and every work center of the range it already loaded).
+
+    def _oee_inputs(self, start: date, end: date) -> _OEEInputs:
+        for cached in self._oee_cache:
+            if cached.start <= start and end <= cached.end:
+                return cached
+        calendar = self.calendar
+        entry_query = self.db.query(TimeEntry).filter(
+            TimeEntry.company_id == self.company_id,
+            TimeEntry.clock_out.isnot(None),
+        )
+        # G5-A opt-in: when REQUIRE_APPROVED_LABOR_FOR_COST is ON, the staffed/run hours
+        # (and the pieces cycled in them) count ONLY supervisor-approved entries (uniform
+        # with the job-costing recompute + completion cost rollup, so the metrics agree on
+        # which labor is "counted"). Default OFF -> no predicate -> byte-identical OEE.
+        if is_approved_labor_required(self.company_id):
+            entry_query = entry_query.filter(TimeEntry.approved.isnot(None))
+        attributed = attribute_time_entries(
+            entry_query,
+            calendar,
+            start,
+            end,
+            clock_in_column=TimeEntry.clock_in,
+            clock_out_column=TimeEntry.clock_out,
+        )
+        op_ids = {
+            row.operation_id
+            for row, _day, _occ in attributed
+            if row.operation_id is not None and row.entry_type in PRODUCTION_BEARING_ENTRY_TYPES
+        }
+        per_piece: Dict[int, Optional[float]] = {}
+        if op_ids:
+            per_piece = dict(
+                self.db.query(WorkOrderOperation.id, WorkOrderOperation.run_time_per_piece)
+                .filter(WorkOrderOperation.company_id == self.company_id, WorkOrderOperation.id.in_(op_ids))
+                .all()
+            )
+        entries = []
+        for row, day, _occ in attributed:
+            ideal: Optional[float] = None
+            if row.entry_type in PRODUCTION_BEARING_ENTRY_TYPES and row.operation_id is not None:
+                standard = per_piece.get(row.operation_id)
+                if standard is not None and row.quantity_produced is not None and row.quantity_scrapped is not None:
+                    # Every piece cycled -- good AND scrapped -- consumed a standard cycle (OEE-7).
+                    ideal = (float(row.quantity_produced) + float(row.quantity_scrapped)) * float(standard)
+            entries.append(
+                _OEEEntry(
+                    day=day,
+                    work_center_id=row.work_center_id,
+                    entry_type=row.entry_type,
+                    hours=float(row.duration_hours or 0.0),
+                    good=float(row.quantity_produced or 0.0),
+                    scrapped=float(row.quantity_scrapped or 0.0),
+                    ideal_hours=ideal,
+                )
+            )
+        downtime_query = self.db.query(DowntimeEvent).filter(
+            DowntimeEvent.company_id == self.company_id,
+            DowntimeEvent.planned_type == DowntimePlannedType.UNPLANNED,
+        )
+        downtime = [
+            _OEEDowntime(day=day, work_center_id=row.work_center_id, hours=float(row.duration_minutes or 0.0) / 60.0)
+            for row, day, _occ in attribute_downtime_events(
+                downtime_query,
+                calendar,
+                start,
+                end,
+                start_column=DowntimeEvent.start_time,
+                end_column=DowntimeEvent.end_time,
+            )
+        ]
+        entries_by_day: Dict[date, List[_OEEEntry]] = defaultdict(list)
+        for entry in entries:
+            entries_by_day[entry.day].append(entry)
+        downtime_by_day: Dict[date, List[_OEEDowntime]] = defaultdict(list)
+        for event in downtime:
+            downtime_by_day[event.day].append(event)
+        inputs = _OEEInputs(
+            start=start,
+            end=end,
+            entries_by_day={day: tuple(rows) for day, rows in entries_by_day.items()},
+            downtime_by_day={day: tuple(rows) for day, rows in downtime_by_day.items()},
+        )
+        self._oee_cache.append(inputs)
+        return inputs
+
+    def _oee_entries(self, start: date, end: date, work_center_id: Optional[int]) -> List[_OEEEntry]:
+        inputs = self._oee_inputs(start, end)
+        return [
+            entry
+            for day in inputs.days(start, end)
+            for entry in inputs.entries_by_day.get(day, ())
+            if not work_center_id or entry.work_center_id == work_center_id
+        ]
+
     def _downtime_event_hours(self, start: date, end: date, work_center_id: Optional[int] = None) -> float:
-        """Logged machine-downtime hours for the WC(s) in the window (OEE-7).
+        """Logged machine-downtime hours for the WC(s) over production days ``start..end`` (OEE-7).
 
         Reads ``DowntimeEvent`` (which the old availability calc never consulted) so
         real reported downtime reduces availability on top of un-clocked idle time.
-        Tenant-scoped. Returns hours (the model stores ``duration_minutes``).
+        Tenant-scoped, UNPLANNED only, attributed like the persisted OEE record.
         """
-        query = self.db.query(func.coalesce(func.sum(DowntimeEvent.duration_minutes), 0.0)).filter(
-            DowntimeEvent.company_id == self.company_id,
-            DowntimeEvent.start_time >= datetime.combine(start, datetime.min.time()),
-            DowntimeEvent.start_time <= datetime.combine(end, datetime.max.time()),
-            DowntimeEvent.planned_type == DowntimePlannedType.UNPLANNED,
+        inputs = self._oee_inputs(start, end)
+        return float(
+            sum(
+                event.hours
+                for day in inputs.days(start, end)
+                for event in inputs.downtime_by_day.get(day, ())
+                if not work_center_id or event.work_center_id == work_center_id
+            )
         )
-        if work_center_id:
-            query = query.filter(DowntimeEvent.work_center_id == work_center_id)
-        return float(query.scalar() or 0.0) / 60.0
 
     def _get_oee_value(self, start: date, end: date, work_center_id: Optional[int] = None) -> Optional[float]:
         """
@@ -238,77 +437,25 @@ class AnalyticsService:
         minus logged ``DowntimeEvent`` hours (OEE-7). Performance = ideal cycle (from
         ``run_time_per_piece``) × pieces ÷ productive run. Quality = good ÷
         (good+scrapped). Pieces/scrap are counted across the production-bearing entry
-        types uniformly (OEE-5).
+        types uniformly (OEE-5). ``start``/``end`` are PRODUCTION days (see above).
 
         Returns ``None`` ("n/a") when the WC has no staffed time in the window — that
         is genuinely uncomputable, not zero (do not let "no data" read as 0% OEE).
-
-        OPTIMIZATION: a single conditional-aggregation query (no per-row Python loop).
         """
-        start_dt = datetime.combine(start, datetime.min.time())
-        end_dt = datetime.combine(end, datetime.max.time())
-
-        # Single aggregation query: staffed hours (ALL clocked entries), productive
-        # run hours (RUN+SETUP), and production-bearing pieces/scrap in one pass.
-        time_entry_stats = self.db.query(
-            # Staffed/clocked hours: EVERY entry type (availability denominator, OEE-4)
-            func.coalesce(func.sum(TimeEntry.duration_hours), 0).label('staffed_hours'),
-            # Productive run hours: RUN + SETUP (availability numerator / perf denominator)
-            func.coalesce(
-                func.sum(
-                    case(
-                        (TimeEntry.entry_type.in_([TimeEntryType.RUN, TimeEntryType.SETUP]), TimeEntry.duration_hours),
-                        else_=0,
-                    )
-                ),
-                0,
-            ).label('run_hours'),
-            # Good pieces = quantity_produced (production-bearing entry types, OEE-5)
-            func.coalesce(
-                func.sum(
-                    case(
-                        (TimeEntry.entry_type.in_(PRODUCTION_BEARING_ENTRY_TYPES), TimeEntry.quantity_produced),
-                        else_=0,
-                    )
-                ),
-                0,
-            ).label('good_units'),
-            # Scrapped pieces (same entry-type set, OEE-5/OEE-7)
-            func.coalesce(
-                func.sum(
-                    case(
-                        (TimeEntry.entry_type.in_(PRODUCTION_BEARING_ENTRY_TYPES), TimeEntry.quantity_scrapped),
-                        else_=0,
-                    )
-                ),
-                0,
-            ).label('scrapped_units'),
-        ).filter(
-            TimeEntry.company_id == self.company_id,
-            TimeEntry.clock_in >= start_dt,
-            TimeEntry.clock_in <= end_dt,
-            TimeEntry.clock_out.isnot(None),
+        entries = self._oee_entries(start, end, work_center_id)
+        # Staffed/clocked hours: EVERY entry type (availability denominator, OEE-4).
+        staffed_hours = sum(entry.hours for entry in entries)
+        # Productive run hours: RUN + SETUP (availability numerator / perf denominator).
+        run_hours = sum(
+            entry.hours for entry in entries if entry.entry_type in (TimeEntryType.RUN, TimeEntryType.SETUP)
         )
-
-        # G5-A opt-in: when REQUIRE_APPROVED_LABOR_FOR_COST is ON, the staffed/run hours
-        # that feed this OEE/labor leg count ONLY supervisor-approved entries (uniform
-        # with the job-costing recompute + completion cost rollup, so the metrics agree
-        # on which labor is "counted"). Default OFF -> no predicate -> byte-identical OEE.
-        if is_approved_labor_required(self.company_id):
-            time_entry_stats = time_entry_stats.filter(TimeEntry.approved.isnot(None))
-
-        if work_center_id:
-            time_entry_stats = time_entry_stats.filter(TimeEntry.work_center_id == work_center_id)
-
-        stats = time_entry_stats.first()
-
-        staffed_hours = float(stats.staffed_hours or 0)
-        run_hours = float(stats.run_hours or 0)
         # quantity_produced is the GOOD count (it increments quantity_complete on
         # clock-out), so total pieces cycled = good + scrap (OEE-7 — do not subtract
         # scrap from a good-only count, which would understate quality).
-        good_units = int(stats.good_units or 0)
-        scrapped_units = int(stats.scrapped_units or 0)
+        good_units = int(sum(entry.good for entry in entries if entry.entry_type in PRODUCTION_BEARING_ENTRY_TYPES))
+        scrapped_units = int(
+            sum(entry.scrapped for entry in entries if entry.entry_type in PRODUCTION_BEARING_ENTRY_TYPES)
+        )
         total_units = good_units + scrapped_units
 
         # No staffed time at this WC in the window -> genuinely uncomputable (OEE-4/OEE-6
@@ -345,8 +492,7 @@ class AnalyticsService:
             - func.coalesce(func.sum(TimeEntry.quantity_scrapped), 0)
         ).filter(
             TimeEntry.company_id == self.company_id,
-            TimeEntry.clock_in >= datetime.combine(start, datetime.min.time()),
-            TimeEntry.clock_in <= datetime.combine(end, datetime.max.time()),
+            *self._between(TimeEntry.clock_in, start, end),
             TimeEntry.entry_type.in_(PRODUCTION_BEARING_ENTRY_TYPES),
         )
 
@@ -357,11 +503,11 @@ class AnalyticsService:
         return int(result or 0)
 
     def _get_ideal_production_hours(self, start: date, end: date, work_center_id: Optional[int] = None) -> float:
-        """Ideal (standard) run hours for the pieces CYCLED in the window (OEE-7).
+        """Ideal (standard) run hours for the pieces CYCLED over production days ``start..end`` (OEE-7).
 
         ideal hours = Σ((quantity_produced + quantity_scrapped) × WorkOrderOperation.run_time_per_piece),
         i.e. the routing standard cycle time per piece — NOT a hardcoded 60 s — over
-        the same production-bearing entry types the pieces are counted from (OEE-5),
+        the same closed, production-bearing entries the pieces are counted from (OEE-5),
         so the performance numerator and the piece count agree. ``run_time_per_piece``
         is stored in hours (alongside ``setup_time_hours``/``run_time_hours``), so the
         product is already in hours.
@@ -369,167 +515,28 @@ class AnalyticsService:
         Standard OEE Performance counts EVERY piece run through the cycle — including
         scrap — because cycle time was spent producing the scrapped pieces too (scrap
         is discounted separately in the Quality leg). Weighting by
-        ``quantity_produced + quantity_scrapped`` here matches ``auto_calculate_oee``
-        in ``app/api/endpoints/oee.py`` so the /analytics/kpis OEE headline and the
-        persisted ``OEERecord`` agree for identical data.
+        ``quantity_produced + quantity_scrapped`` here matches
+        ``services/oee_service.compute_oee_for_work_center`` so the /analytics/kpis OEE
+        headline and the persisted ``OEERecord`` agree for identical data.
         """
-        query = (
-            self.db.query(
-                func.sum(
-                    (TimeEntry.quantity_produced + TimeEntry.quantity_scrapped) * WorkOrderOperation.run_time_per_piece
-                )
-            )
-            # Explicit left side: the (produced + scrapped) sum spans both mappers, so the
-            # join FROM is ambiguous to autoresolution — anchor it on TimeEntry (mirrors
-            # the same join in ``auto_calculate_oee``).
-            .select_from(TimeEntry)
-            .join(WorkOrderOperation, TimeEntry.operation_id == WorkOrderOperation.id)
-            .filter(
-                TimeEntry.company_id == self.company_id,
-                TimeEntry.clock_in >= datetime.combine(start, datetime.min.time()),
-                TimeEntry.clock_in <= datetime.combine(end, datetime.max.time()),
-                TimeEntry.entry_type.in_(PRODUCTION_BEARING_ENTRY_TYPES),
-            )
+        return float(
+            sum(entry.ideal_hours for entry in self._oee_entries(start, end, work_center_id) if entry.ideal_hours)
         )
-
-        if work_center_id:
-            query = query.filter(TimeEntry.work_center_id == work_center_id)
-
-        result = query.scalar()
-        return float(result or 0)
 
     def _get_oee_sparkline(self, start: date, end: date, work_center_id: Optional[int] = None) -> List[float]:
         """
-        Get daily OEE values for sparkline on the SAME staffed-time convention as
-        ``_get_oee_value`` (OEE-4): availability = productive run ÷ staffed (clocked)
-        time, performance = ideal time ÷ productive run, quality = good ÷ total — NOT
-        the old operating-÷-plant-capacity proxy. A day with no staffed time renders
-        as ``0.0`` (sparklines are a ``List[float]`` glyph, not a headline figure; the
-        headline value already carries the n/a via ``KPIValue.value``).
-
-        OPTIMIZATION: two GROUP-BY-date aggregations (entry stats + routing ideal
-        hours) instead of N per-day queries.
+        Daily OEE values for the sparkline -- one per PRODUCTION day, on the SAME
+        staffed-time convention and the SAME attributed inputs as ``_get_oee_value``
+        (it is that value, per day). A day with no staffed time renders as ``0.0``
+        (sparklines are a ``List[float]`` glyph, not a headline figure; the headline
+        value already carries the n/a via ``KPIValue.value``).
         """
-        start_dt = datetime.combine(start, datetime.min.time())
-        end_dt = datetime.combine(end, datetime.max.time())
-
-        # Daily entry stats: staffed (all entries), productive run (RUN+SETUP),
-        # production-bearing pieces/scrap.
-        daily_stats_query = (
-            self.db.query(
-                cast(TimeEntry.clock_in, Date).label('entry_date'),
-                func.coalesce(func.sum(TimeEntry.duration_hours), 0).label('staffed_hours'),
-                func.coalesce(
-                    func.sum(
-                        case(
-                            (
-                                TimeEntry.entry_type.in_([TimeEntryType.RUN, TimeEntryType.SETUP]),
-                                TimeEntry.duration_hours,
-                            ),
-                            else_=0,
-                        )
-                    ),
-                    0,
-                ).label('run_hours'),
-                func.coalesce(
-                    func.sum(
-                        case(
-                            (TimeEntry.entry_type.in_(PRODUCTION_BEARING_ENTRY_TYPES), TimeEntry.quantity_produced),
-                            else_=0,
-                        )
-                    ),
-                    0,
-                ).label('good_units'),
-                func.coalesce(
-                    func.sum(
-                        case(
-                            (TimeEntry.entry_type.in_(PRODUCTION_BEARING_ENTRY_TYPES), TimeEntry.quantity_scrapped),
-                            else_=0,
-                        )
-                    ),
-                    0,
-                ).label('scrapped_units'),
-            )
-            .filter(
-                TimeEntry.company_id == self.company_id,
-                TimeEntry.clock_in >= start_dt,
-                TimeEntry.clock_in <= end_dt,
-                TimeEntry.clock_out.isnot(None),
-            )
-            .group_by(cast(TimeEntry.clock_in, Date))
-            .order_by(cast(TimeEntry.clock_in, Date))
-        )
-
-        if work_center_id:
-            daily_stats_query = daily_stats_query.filter(TimeEntry.work_center_id == work_center_id)
-
-        daily_stats = daily_stats_query.all()
-        stats_by_date = {row.entry_date: row for row in daily_stats}
-
-        # Daily ideal (routing-standard) hours = Σ(pieces × run_time_per_piece).
-        ideal_query = (
-            self.db.query(
-                cast(TimeEntry.clock_in, Date).label('entry_date'),
-                func.coalesce(func.sum(TimeEntry.quantity_produced * WorkOrderOperation.run_time_per_piece), 0).label(
-                    'ideal_hours'
-                ),
-            )
-            .join(WorkOrderOperation, TimeEntry.operation_id == WorkOrderOperation.id)
-            .filter(
-                TimeEntry.company_id == self.company_id,
-                TimeEntry.clock_in >= start_dt,
-                TimeEntry.clock_in <= end_dt,
-                TimeEntry.clock_out.isnot(None),
-                TimeEntry.entry_type.in_(PRODUCTION_BEARING_ENTRY_TYPES),
-            )
-            .group_by(cast(TimeEntry.clock_in, Date))
-        )
-        if work_center_id:
-            ideal_query = ideal_query.filter(TimeEntry.work_center_id == work_center_id)
-        ideal_by_date = {row.entry_date: float(row.ideal_hours or 0) for row in ideal_query.all()}
-
-        # Daily reported machine downtime (UNPLANNED DowntimeEvents), in hours.
-        downtime_query = self.db.query(
-            cast(DowntimeEvent.start_time, Date).label('event_date'),
-            func.coalesce(func.sum(DowntimeEvent.duration_minutes), 0).label('downtime_minutes'),
-        ).filter(
-            DowntimeEvent.company_id == self.company_id,
-            DowntimeEvent.start_time >= start_dt,
-            DowntimeEvent.start_time <= end_dt,
-            DowntimeEvent.planned_type == DowntimePlannedType.UNPLANNED,
-        )
-        if work_center_id:
-            downtime_query = downtime_query.filter(DowntimeEvent.work_center_id == work_center_id)
-        downtime_by_date = {
-            row.event_date: float(row.downtime_minutes or 0) / 60.0
-            for row in downtime_query.group_by(cast(DowntimeEvent.start_time, Date)).all()
-        }
-
-        # Calculate OEE for each day on the staffed-time convention.
+        self._oee_inputs(start, end)  # one fetch for the whole range
         sparkline = []
         current = start
         while current <= end:
-            row = stats_by_date.get(current)
-            staffed = float(row.staffed_hours or 0) if row else 0.0
-            if row is not None and staffed > 0:
-                run_hours = float(row.run_hours or 0)
-                good_units = int(row.good_units or 0)
-                scrapped = int(row.scrapped_units or 0)
-                total_units = good_units + scrapped  # good = produced; total = good + scrap
-                productive_run = max(0.0, run_hours - downtime_by_date.get(current, 0.0))
-                ideal_hours = ideal_by_date.get(current, 0.0)
-
-                availability = max(0.0, min(productive_run / staffed, 1.0))
-                performance = ideal_hours / productive_run if productive_run > 0 else 0.0
-                performance = max(0.0, min(performance, 1.0))
-                quality = good_units / total_units if total_units > 0 else 1.0
-                quality = max(0.0, min(quality, 1.0))
-
-                daily_oee = availability * performance * quality * 100
-                sparkline.append(round(min(daily_oee, 100.0), 1))
-            else:
-                sparkline.append(0.0)
-
+            daily_oee = self._get_oee_value(current, current, work_center_id)
+            sparkline.append(round(min(daily_oee, 100.0), 1) if daily_oee is not None else 0.0)
             current += timedelta(days=1)
 
         # Limit to last 7 points for sparkline
@@ -573,8 +580,8 @@ class AnalyticsService:
         due date in the window) rather than conflating "no data" with a perfect 100%.
         Tenant-scoped and soft-delete-filtered.
         """
-        start_dt = datetime.combine(start, datetime.min.time())
-        end_dt = datetime.combine(end, datetime.max.time())
+        # Half-open company-local window: [local midnight on start, next local midnight after end).
+        start_dt, end_dt = self._window(start, end)
 
         # Completion-time anchor: actual_end when present, else updated_at.
         completion_time = func.coalesce(WorkOrder.actual_end, WorkOrder.updated_at)
@@ -586,7 +593,7 @@ class AnalyticsService:
                 WorkOrder.is_deleted == False,
                 WorkOrder.status == WorkOrderStatus.COMPLETE,
                 completion_time >= start_dt,
-                completion_time <= end_dt,
+                completion_time < end_dt,
                 WorkOrder.due_date.isnot(None),
             )
             .all()
@@ -598,7 +605,12 @@ class AnalyticsService:
         # On-time only when a real actual_end exists AND is on/before the due date.
         # A COMPLETE WO with a null actual_end has no verifiable completion date and is
         # counted as NOT on time.
-        on_time = sum(1 for wo in completed if wo.actual_end is not None and wo.actual_end.date() <= wo.due_date)
+        # actual_end is naive UTC and due_date a calendar date: compare on the company's date,
+        # or a job finished in the Central evening of its due date reads as a day late.
+        zone = self.zone
+        on_time = sum(
+            1 for wo in completed if wo.actual_end is not None and to_local_date(wo.actual_end, zone) <= wo.due_date
+        )
         return (on_time / len(completed)) * 100
 
     def _get_otd_sparkline(self, start: date, end: date) -> List[float]:
@@ -844,7 +856,7 @@ class AnalyticsService:
         NEITHER must_ship_by nor due_date -- they are unmeasurable and poison the
         denominator until someone enters a promise.
         """
-        today = date.today()
+        today = local_today(self.zone)  # the company's calendar date, not the server's
         shipped_in_window = self._ship_otd_candidates(start, end)
 
         promise = func.coalesce(WorkOrder.must_ship_by, WorkOrder.due_date)
@@ -1013,8 +1025,7 @@ class AnalyticsService:
             self.db.query(func.sum(TimeEntry.quantity_produced))
             .filter(
                 TimeEntry.company_id == self.company_id,
-                TimeEntry.clock_in >= datetime.combine(start, datetime.min.time()),
-                TimeEntry.clock_in <= datetime.combine(end, datetime.max.time()),
+                *self._between(TimeEntry.clock_in, start, end),
                 TimeEntry.entry_type == TimeEntryType.RUN,
             )
             .scalar()
@@ -1026,8 +1037,7 @@ class AnalyticsService:
             self.db.query(func.sum(TimeEntry.quantity_scrapped))
             .filter(
                 TimeEntry.company_id == self.company_id,
-                TimeEntry.clock_in >= datetime.combine(start, datetime.min.time()),
-                TimeEntry.clock_in <= datetime.combine(end, datetime.max.time()),
+                *self._between(TimeEntry.clock_in, start, end),
                 TimeEntry.entry_type.in_(PRODUCTION_BEARING_ENTRY_TYPES),
             )
             .scalar()
@@ -1039,8 +1049,7 @@ class AnalyticsService:
             self.db.query(func.sum(TimeEntry.quantity_produced))
             .filter(
                 TimeEntry.company_id == self.company_id,
-                TimeEntry.clock_in >= datetime.combine(start, datetime.min.time()),
-                TimeEntry.clock_in <= datetime.combine(end, datetime.max.time()),
+                *self._between(TimeEntry.clock_in, start, end),
                 TimeEntry.entry_type == TimeEntryType.REWORK,
             )
             .scalar()
@@ -1088,8 +1097,7 @@ class AnalyticsService:
             )
             .filter(
                 TimeEntry.company_id == self.company_id,
-                TimeEntry.clock_in >= datetime.combine(start, datetime.min.time()),
-                TimeEntry.clock_in <= datetime.combine(end, datetime.max.time()),
+                *self._between(TimeEntry.clock_in, start, end),
                 TimeEntry.entry_type.in_(PRODUCTION_BEARING_ENTRY_TYPES),
             )
             .first()
@@ -1124,7 +1132,7 @@ class AnalyticsService:
             .filter(
                 NonConformanceReport.company_id == self.company_id,
                 NonConformanceReport.is_deleted == False,  # noqa: E712
-                NonConformanceReport.created_at <= datetime.combine(prior_end, datetime.max.time()),
+                NonConformanceReport.created_at < self._window(prior_end, prior_end)[1],
                 or_(NonConformanceReport.closed_date.is_(None), NonConformanceReport.closed_date > prior_end),
             )
             .scalar()
@@ -1170,8 +1178,7 @@ class AnalyticsService:
             self.db.query(func.count(Quote.id))
             .filter(
                 Quote.company_id == self.company_id,
-                Quote.updated_at >= datetime.combine(start, datetime.min.time()),
-                Quote.updated_at <= datetime.combine(end, datetime.max.time()),
+                *self._between(Quote.updated_at, start, end),
                 Quote.status.in_([QuoteStatus.ACCEPTED, QuoteStatus.REJECTED, QuoteStatus.CONVERTED]),
             )
             .scalar()
@@ -1182,8 +1189,7 @@ class AnalyticsService:
             self.db.query(func.count(Quote.id))
             .filter(
                 Quote.company_id == self.company_id,
-                Quote.updated_at >= datetime.combine(start, datetime.min.time()),
-                Quote.updated_at <= datetime.combine(end, datetime.max.time()),
+                *self._between(Quote.updated_at, start, end),
                 Quote.status.in_([QuoteStatus.ACCEPTED, QuoteStatus.CONVERTED]),
             )
             .scalar()
@@ -1243,8 +1249,7 @@ class AnalyticsService:
             .filter(
                 InventoryTransaction.company_id == self.company_id,
                 InventoryTransaction.transaction_type.in_(CONSUMPTION_TRANSACTION_TYPES),
-                InventoryTransaction.created_at >= datetime.combine(start, datetime.min.time()),
-                InventoryTransaction.created_at <= datetime.combine(end, datetime.max.time()),
+                *self._between(InventoryTransaction.created_at, start, end),
             )
             .scalar()
             or 0
@@ -1372,38 +1377,39 @@ class AnalyticsService:
         group_by: Optional[str] = None,  # work_center, part, customer
         granularity: DateGranularity = DateGranularity.DAY,
     ) -> ProductionTrendsResponse:
-        """Get production trend data."""
+        """Get production trend data, one point per company-local calendar day.
+
+        A RUN time entry counts on the local date of its clock-in, a completed operation
+        with no RUN entry (the simplified workflow) on the local date of its ``actual_end``
+        -- the same zone as the window, so no point falls outside ``start..end``. Rows are
+        bucketed here rather than by ``func.date(...)`` (a UTC date) in SQL.
+        """
         # Combine time entries and simplified operations without double-counting
-        time_entries_query = self.db.query(
-            func.date(TimeEntry.clock_in).label('date'),
-            func.sum(TimeEntry.quantity_produced).label('units_produced'),
-            func.sum(TimeEntry.quantity_scrapped).label('units_scrapped'),
-            func.sum(TimeEntry.duration_hours).label('total_hours'),
-        ).filter(
-            TimeEntry.company_id == self.company_id,
-            TimeEntry.clock_in >= datetime.combine(start_date, datetime.min.time()),
-            TimeEntry.clock_in <= datetime.combine(end_date, datetime.max.time()),
-            TimeEntry.entry_type == TimeEntryType.RUN,
+        time_entry_rows = (
+            self.db.query(
+                TimeEntry.clock_in,
+                TimeEntry.work_center_id,
+                TimeEntry.quantity_produced,
+                TimeEntry.quantity_scrapped,
+                TimeEntry.duration_hours,
+            )
+            .filter(
+                TimeEntry.company_id == self.company_id,
+                *self._between(TimeEntry.clock_in, start_date, end_date),
+                TimeEntry.entry_type == TimeEntryType.RUN,
+            )
+            .all()
         )
 
-        if group_by == "work_center":
-            time_entries_query = time_entries_query.add_columns(TimeEntry.work_center_id.label('group_key')).group_by(
-                func.date(TimeEntry.clock_in), TimeEntry.work_center_id
-            )
-        else:
-            time_entries_query = time_entries_query.group_by(func.date(TimeEntry.clock_in))
-
-        time_entry_results = time_entries_query.order_by(func.date(TimeEntry.clock_in)).all()
-
         # Only include operations that have no time entries (simplified workflow)
-        ops_query = (
+        op_rows = (
             self.db.query(
-                func.date(WorkOrderOperation.actual_end).label('date'),
-                func.sum(WorkOrderOperation.quantity_complete).label('units_produced'),
-                func.sum(WorkOrderOperation.quantity_scrapped).label('units_scrapped'),
-                func.sum((WorkOrderOperation.actual_setup_hours + WorkOrderOperation.actual_run_hours)).label(
-                    'total_hours'
-                ),
+                WorkOrderOperation.actual_end,
+                WorkOrderOperation.work_center_id,
+                WorkOrderOperation.quantity_complete,
+                WorkOrderOperation.quantity_scrapped,
+                WorkOrderOperation.actual_setup_hours,
+                WorkOrderOperation.actual_run_hours,
             )
             .outerjoin(
                 TimeEntry,
@@ -1412,38 +1418,38 @@ class AnalyticsService:
             .filter(
                 WorkOrderOperation.company_id == self.company_id,
                 WorkOrderOperation.actual_end.isnot(None),
-                WorkOrderOperation.actual_end >= datetime.combine(start_date, datetime.min.time()),
-                WorkOrderOperation.actual_end <= datetime.combine(end_date, datetime.max.time()),
+                *self._between(WorkOrderOperation.actual_end, start_date, end_date),
                 WorkOrderOperation.status == OperationStatus.COMPLETE,
                 TimeEntry.id.is_(None),
             )
+            .all()
         )
 
-        if group_by == "work_center":
-            ops_query = ops_query.add_columns(WorkOrderOperation.work_center_id.label('group_key')).group_by(
-                func.date(WorkOrderOperation.actual_end), WorkOrderOperation.work_center_id
-            )
-        else:
-            ops_query = ops_query.group_by(func.date(WorkOrderOperation.actual_end))
-
-        ops_results = ops_query.order_by(func.date(WorkOrderOperation.actual_end)).all()
-
-        # Merge results by date + optional group
+        # Merge results by local date + optional group. The group key keeps its historical
+        # string form (``str(work_center_id)``, "None" for an entry without one).
         combined: Dict[Tuple[date, Optional[str]], Dict[str, float]] = defaultdict(
             lambda: {"units_produced": 0.0, "units_scrapped": 0.0, "total_hours": 0.0}
         )
+        zone = self.zone
 
-        for row in time_entry_results:
-            key = (row.date, str(row.group_key) if hasattr(row, 'group_key') else None)
-            combined[key]["units_produced"] += float(row.units_produced or 0)
-            combined[key]["units_scrapped"] += float(row.units_scrapped or 0)
-            combined[key]["total_hours"] += float(row.total_hours or 0)
+        def _key(at: datetime, work_center_id: Optional[int]) -> Tuple[date, Optional[str]]:
+            local_day = to_local_date(at, zone)
+            assert local_day is not None
+            return local_day, (str(work_center_id) if group_by == "work_center" else None)
 
-        for row in ops_results:
-            key = (row.date, str(row.group_key) if hasattr(row, 'group_key') else None)
-            combined[key]["units_produced"] += float(row.units_produced or 0)
-            combined[key]["units_scrapped"] += float(row.units_scrapped or 0)
-            combined[key]["total_hours"] += float(row.total_hours or 0)
+        for clock_in, work_center_id, produced, scrapped, hours in time_entry_rows:
+            bucket = combined[_key(clock_in, work_center_id)]
+            bucket["units_produced"] += float(produced or 0)
+            bucket["units_scrapped"] += float(scrapped or 0)
+            bucket["total_hours"] += float(hours or 0)
+
+        for actual_end, work_center_id, produced, scrapped, setup_hours, run_hours in op_rows:
+            bucket = combined[_key(actual_end, work_center_id)]
+            bucket["units_produced"] += float(produced or 0)
+            bucket["units_scrapped"] += float(scrapped or 0)
+            # SQL's (setup + run) was NULL when either was, and SUM skipped it; so does this.
+            if setup_hours is not None and run_hours is not None:
+                bucket["total_hours"] += float(setup_hours) + float(run_hours)
 
         results = [
             {
@@ -1515,8 +1521,7 @@ class AnalyticsService:
             query = query.filter(WorkOrder.id == work_order_id)
         else:
             query = query.filter(
-                WorkOrder.actual_end >= datetime.combine(start_date, datetime.min.time()),
-                WorkOrder.actual_end <= datetime.combine(end_date, datetime.max.time()),
+                *self._between(WorkOrder.actual_end, start_date, end_date),
             )
 
         work_orders = query.options(joinedload(WorkOrder.operations), joinedload(WorkOrder.part)).all()
@@ -1614,7 +1619,7 @@ class AnalyticsService:
         exactly); summing it with a bare ``abs()`` would turn a credit into extra cost.
         """
         # ISSUE -> +|total_cost|, RETURN -> -|total_cost|. Same CASE as
-        # ``completion_cost_service._issued_material_cost``; keep the two in step.
+        # ``completion_cost_service.issued_material_cost``; keep the two in step.
         total = (
             self.db.query(func.coalesce(func.sum(_signed_cogs_cost()), 0.0))
             .filter(
@@ -1640,8 +1645,7 @@ class AnalyticsService:
             .filter(
                 NonConformanceReport.company_id == self.company_id,
                 NonConformanceReport.is_deleted == False,  # noqa: E712
-                NonConformanceReport.created_at >= datetime.combine(start_date, datetime.min.time()),
-                NonConformanceReport.created_at <= datetime.combine(end_date, datetime.max.time()),
+                *self._between(NonConformanceReport.created_at, start_date, end_date),
             )
             .group_by(NonConformanceReport.disposition)
             .order_by(func.count(NonConformanceReport.id).desc())
@@ -1696,8 +1700,7 @@ class AnalyticsService:
                 Vendor.is_deleted == False,  # noqa: E712
                 PurchaseOrder.is_deleted == False,  # noqa: E712
                 POReceipt.is_deleted == False,  # noqa: E712
-                POReceipt.received_at >= datetime.combine(start_date, datetime.min.time()),
-                POReceipt.received_at <= datetime.combine(end_date, datetime.max.time()),
+                *self._between(POReceipt.received_at, start_date, end_date),
             )
             .group_by(Vendor.id, Vendor.name)
             .all()
@@ -1762,8 +1765,7 @@ class AnalyticsService:
             .filter(
                 InventoryTransaction.company_id == self.company_id,
                 InventoryTransaction.transaction_type.in_(CONSUMPTION_TRANSACTION_TYPES),
-                InventoryTransaction.created_at >= datetime.combine(start_date, datetime.min.time()),
-                InventoryTransaction.created_at <= datetime.combine(end_date, datetime.max.time()),
+                *self._between(InventoryTransaction.created_at, start_date, end_date),
             )
             .group_by(InventoryTransaction.part_id)
             .all()

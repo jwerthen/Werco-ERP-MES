@@ -21,6 +21,12 @@ class CostEntryType(str, enum.Enum):
     LABOR = "labor"
     OVERHEAD = "overhead"
     OTHER = "other"
+    # Outside processing / subcontracted work (plating, heat treat, ...). Its own total
+    # (``JobCost.actual_subcontract_cost``) and never folded into overhead the way OTHER
+    # is. Manual entries only: no PO line or receipt is linked to a work order, so
+    # nothing posts one automatically. Native Postgres label 'SUBCONTRACT' (the member
+    # NAME -- no values_callable) added by migration 121.
+    SUBCONTRACT = "subcontract"
 
 
 class CostEntrySource(str, enum.Enum):
@@ -47,7 +53,12 @@ class JobCost(Base, TenantMixin):
     # Actual costs
     actual_material_cost = Column(Float, default=0.0)
     actual_labor_cost = Column(Float, default=0.0)
+    # OVERHEAD + OTHER entries (the stored meaning since before SUBCONTRACT existed).
     actual_overhead_cost = Column(Float, default=0.0)
+    # SUBCONTRACT entries only (migration 121). NOT NULL with a server default so every
+    # pre-121 row reads 0 -- true, since no SUBCONTRACT entry could exist before it.
+    actual_subcontract_cost = Column(Float, nullable=False, default=0.0, server_default="0")
+    # material + labor + overhead (incl. OTHER) + subcontract.
     actual_total_cost = Column(Float, default=0.0)
 
     # Variance (actual - estimated)

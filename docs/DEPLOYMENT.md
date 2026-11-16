@@ -220,35 +220,7 @@ rollback step; it does not undo documents, receipts, production or shipments
 already created by completed actions. Intake-linked Documents cannot be deleted
 through the application because the saved source and receipt must remain valid.
 
-### Saved dashboard layouts
-
-Apply additive **118_dashboard_layouts** after **117_operation_short_declared** through
-the normal API boot migration path. It creates an empty tenant/user `dashboard_layouts`
-table with a unique company/user key, a `version >= 1` check and indexes on `company_id`
-and `user_id`. No layout is seeded: until a person saves one, reads return
-`layout: null` without creating rows and every role keeps the default dashboard.
-PostgreSQL RLS and table/sequence revokes from `PUBLIC`, `anon`, and `authenticated`
-match model bootstrap. No environment variable, secret, cron or worker job is added.
-
-Deploy order is free. The frontend tolerates an API that does not have the routes yet:
-a 404 (or 405) from `GET /dashboard/layout` renders the default dashboard with
-**Customize** hidden. An older frontend never calls the new routes.
-
-Verify in a test company: open `/`, press **Customize**, add a panel from **Add widgets**
-and press **Done**, then reload in another browser and see the same layout; open edit mode
-in two tabs, press **Done** with a change in one and then in the other, and get the
-"changed in another tab" refusal (a tab that was merely left open is not stale enough:
-Customize re-reads the layout on entry); **Reset to default**. The Audit Log should show
-`dashboard_layout` CREATE and UPDATE rows. Confirm RLS with
-`SELECT relrowsecurity FROM pg_class WHERE relname = 'dashboard_layouts';` (true).
-
-Keep the table on ordinary application rollback: older code ignores it and renders
-the fixed dashboard. A deliberate 118 downgrade drops every saved layout, returning
-everyone to the default; the audit rows recording each change remain. See
-[API.md → Personal dashboard layout](API.md#personal-dashboard-layout) and
-[DASHBOARD.md → Customizing the dashboard](DASHBOARD.md#customizing-the-dashboard).
-
-### CAR form fields, quote line revisions and the FAI log
+### CAR form fields, quote line revisions and the FAI log (migration 122)
 
 Apply additive **122_car_form_quote_rev** after **118_dashboard_layouts** through the normal API
 boot migration path. It adds 21 nullable columns to `cars` (the controlled CAR form's fields, with
@@ -300,6 +272,118 @@ deploy re-runs `122` as a guarded no-op. The downgrade is **not** a rollback ste
 recorded CAR form field, Quality Manager approval and quote-line revision. The audit rows that
 recorded them remain, but nothing rebuilds the columns from them. See
 [API.md → Quality](API.md#quality) and [API.md → Quotes](API.md#quotes).
+
+### Job cost subcontract element (migration 121)
+
+Apply additive **121_job_cost_subcontract** after **120_production_calendar** through the normal API
+boot migration path. It adds `job_costs.actual_subcontract_cost` (FLOAT NOT NULL DEFAULT 0 —
+metadata-only on PostgreSQL 11+, every existing row reads 0, which is true: no subcontract entry could
+exist before it) and, where `cost_entries.entry_type` is the native `costentrytype` enum, the
+`SUBCONTRACT` label (in its own autocommit step; a database whose column is migration 024's VARCHAR
+has no type and needs no label). No table, environment variable, secret or worker job is added.
+Deploy the API before or with the ARQ worker. **Rollback:** pre-121 code cannot load a cost entry of
+type `SUBCONTRACT`; before redeploying an older image, list them (`SELECT id, company_id, job_cost_id
+FROM cost_entries WHERE entry_type = 'SUBCONTRACT'`) and re-key them to `other` through the API
+(delete + re-add, both audited). The enum label stays on downgrade.
+
+### Production calendar (migration 120)
+
+Apply additive **120_production_calendar** after **119_api_token_scope** through the normal API boot
+migration path. It creates four empty
+tenant tables — `production_calendar_settings`, `shift_patterns`, `shift_pattern_work_centers`,
+`shift_definitions` — and adds the nullable `oee_records.shift_id` FK + index with **no backfill**
+(legacy free-text OEE `shift` labels stay). No calendar is seeded: until an Admin saves one, every
+company's production day is its company-local calendar day. PostgreSQL RLS and table/sequence revokes
+from `PUBLIC`, `anon` and `authenticated` match model bootstrap. No environment variable, secret or
+worker job is added; the 02:30 OEE cron keeps its schedule and now targets each company's previous
+production day. **Behavior change on deploy, for every tenant:** OEE, reports, downtime filters,
+job-cost labor dates and analytics move from UTC-date day boundaries to company-local (production)
+days (the export, job-cost and analytics **calendar-date** filters move to company-local days in the
+same release — see `DEPLOYMENT_RUNBOOK.md` → Company-local dates and export datetime cells). Once a
+calendar is saved, the wallboard TODAY bar and the dashboard's "Operations Completed Today" reset at
+the production-day start instead of Central midnight. After deploy, an Admin applies Werco's calendar
+(Admin Settings → Production Calendar, or `docs/API.md` → Production calendar & shifts → worked
+example), then runs `POST /production-calendar/working-calendars/sync` as a dry run, reviews it, and
+commits — the commit changes scheduling capacity for every covered work center.
+
+### Saved dashboard layouts
+
+Apply additive **118_dashboard_layouts** after **117_operation_short_declared** through
+the normal API boot migration path. It creates an empty tenant/user `dashboard_layouts`
+table with a unique company/user key, a `version >= 1` check and indexes on `company_id`
+and `user_id`. No layout is seeded: until a person saves one, reads return
+`layout: null` without creating rows and every role keeps the default dashboard.
+PostgreSQL RLS and table/sequence revokes from `PUBLIC`, `anon`, and `authenticated`
+match model bootstrap. No environment variable, secret, cron or worker job is added.
+
+Deploy order is free. The frontend tolerates an API that does not have the routes yet:
+a 404 (or 405) from `GET /dashboard/layout` renders the default dashboard with
+**Customize** hidden. An older frontend never calls the new routes.
+
+Verify in a test company: open `/`, press **Customize**, add a panel from **Add widgets**
+and press **Done**, then reload in another browser and see the same layout; open edit mode
+in two tabs, press **Done** with a change in one and then in the other, and get the
+"changed in another tab" refusal (a tab that was merely left open is not stale enough:
+Customize re-reads the layout on entry); **Reset to default**. The Audit Log should show
+`dashboard_layout` CREATE and UPDATE rows. Confirm RLS with
+`SELECT relrowsecurity FROM pg_class WHERE relname = 'dashboard_layouts';` (true).
+
+Keep the table on ordinary application rollback: older code ignores it and renders
+the fixed dashboard. A deliberate 118 downgrade drops every saved layout, returning
+everyone to the default; the audit rows recording each change remain. See
+[API.md → Personal dashboard layout](API.md#personal-dashboard-layout) and
+[DASHBOARD.md → Customizing the dashboard](DASHBOARD.md#customizing-the-dashboard).
+
+### Read-only and AI-external API tokens (migration 119)
+
+Apply additive **119_api_token_scope** after **118_dashboard_layouts** through the normal API boot
+migration path. It adds two columns to the existing `api_tokens` table, and one CHECK, each
+guarded on its own:
+
+- `scope VARCHAR(16) NOT NULL DEFAULT 'full'`;
+- `ai_external BOOLEAN NOT NULL DEFAULT false`;
+- `ck_api_tokens_scope`, which admits only `'full'` and `'read_only'`.
+
+There is no backfill. Every existing token reads `full` / `false` and behaves exactly as before,
+its JWT included. No new table, so there is no RLS statement. On PostgreSQL the DDL runs under
+`SET LOCAL lock_timeout`.
+
+One new setting, `WERCO_MCP_READ_ONLY_DENY_TAGS`, has a working default; leave it unset. The API
+**refuses to start** if it names a tag no route carries, because a misspelled tag would deny
+nothing ([ENVIRONMENT_VARIABLES.md](ENVIRONMENT_VARIABLES.md#mcp-model-context-protocol-door-and-bridge)).
+No secret, cron or worker job is added. The export-control middleware is part of the API image.
+
+Deploy the API before the frontend: **Admin → API Tokens** and the Customers **Export control**
+panel call the new fields and routes. The same release also gates
+`PUT /shop-floor/operations/{id}/start` and `POST /shop-floor/operations/{id}/complete` to Admin /
+Manager / Supervisor / Operator / Quality. A Viewer or Shipping user who used them is refused
+**403**; operators and both kiosks are unchanged
+([RBAC → Work Orders](RBAC_PERMISSIONS.md#work-orders)).
+
+Verify in a test company:
+
+1. **Read-only.** Mint `{"scope": "read_only", "ai_external": false}`. A `GET` succeeds. A `POST`
+   answers **403** `Read-only API token cannot modify data.`, and `GET /api/v1/users/me` answers
+   **403** `Read-only API token cannot access this resource.`.
+2. **AI egress off.** Mint `{"scope": "read_only"}` (AI-external by default). With the company's
+   AI egress off it answers **403** `AI egress is disabled …` on every route, and at `/mcp` when
+   the door is enabled.
+3. **Redaction.** As an Admin, add an **ITAR controlled** contract to a customer (Customers →
+   Export control). The Audit Log shows a `customer_contract` CREATE row. With that test company's
+   AI egress on, the token from step 2 reads that customer's work order with `[export-controlled]`
+   text, and `controlled_access_events` gains a row.
+4. **Existing tokens.** `SELECT scope, ai_external, count(*) FROM api_tokens GROUP BY 1, 2;` shows
+   every pre-existing row as `full` / `false`.
+
+**Rollback.** Older code ignores both columns and the narrowing claims, so it accepts a read-only or
+AI-external token **as a full token** and redacts nothing. **Revoke every narrowed token before
+rolling the API back** (Admin → API Tokens). A deliberate 119 downgrade drops both columns and the
+CHECK, and with them the record of which tokens were narrowed, so it **refuses** (raises before any
+DDL, naming the count) while any un-revoked read-only or AI-external token exists: revoke them
+first (`SELECT id, label FROM api_tokens WHERE (scope <> 'full' OR ai_external) AND revoked =
+false`). An offline `--sql` downgrade cannot check: run that query by hand. A code-only rollback
+(database left at 119) is not checked at all, so the revoke step is still yours. See
+[EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md).
 
 ### Existing ERP frontend: Fabrication Quoting
 

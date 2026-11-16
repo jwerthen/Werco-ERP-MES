@@ -29,6 +29,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_audit_service, get_current_company_id, require_role
+from app.core.credentials import API_TOKEN_EGRESS_SWITCH, is_api_token_credential
 from app.db.database import get_db
 from app.models.carrier_account import CarrierAccount, CompanyShippingProfile
 from app.models.user import User, UserRole
@@ -330,7 +331,14 @@ def upsert_shipping_profile(
     SAFETY: ``allow_carrier_egress`` is the customer-data egress kill switch. It
     is created OFF (the model + create schema default False) and only flips when
     an admin explicitly sets it here; the egress toggle is audited as a status
-    change so enabling/disabling egress is on the tamper-evident trail."""
+    change so enabling/disabling egress is on the tamper-evident trail.
+
+    This route is the switch's only writer, so the whole route is a person's judgment:
+    ANY API token is refused 403 (``API_TOKEN_EGRESS_SWITCH``) before anything is read or
+    written, whatever the request carries, and it is not an MCP tool
+    (``catalog.EXCLUDED_OPERATIONS``)."""
+    if is_api_token_credential(current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=API_TOKEN_EGRESS_SWITCH)
     profile = db.query(CompanyShippingProfile).filter(CompanyShippingProfile.company_id == company_id).first()
     update = data.model_dump(exclude_unset=True)
     is_create = profile is None

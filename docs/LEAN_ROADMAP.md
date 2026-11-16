@@ -93,7 +93,7 @@ Zero new floor behavior; surfaces data already captured. Lean terms served: OTD,
 
 ### Phase 4 — Capacity honesty & Changeover (shift calendar / constraint / SMED)
 
-- **4a. ShiftCalendar** — company default + per-WC override: weekday→hours + `ShiftCalendarException` (holiday/overtime). Single seam: replace the flat `capacity_hours_per_day or 8.0` + hardcoded weekend skip ([scheduling_service.py:155, 319](../backend/app/services/scheduling_service.py)) with `calendar.capacity_hours(wc, date)`; later feeds calendar-based OEE availability and workday-true lead times.
+- **4a. ShiftCalendar** — *partly delivered 2026-11 (P1.2, migration 120): the production calendar defines the production-day start, shift patterns per work-center group and shifts with planned minutes, and `POST /production-calendar/working-calendars/sync` derives `WorkingCalendar.weekly_hours` from them; the scheduling seam already reads `WorkingCalendar` (migration 096). Holiday/overtime exceptions stay the working calendar's dated overrides.* Original plan: company default + per-WC override: weekday→hours + `ShiftCalendarException` (holiday/overtime). Single seam: replace the flat `capacity_hours_per_day or 8.0` + hardcoded weekend skip ([scheduling_service.py:155, 319](../backend/app/services/scheduling_service.py)) with `calendar.capacity_hours(wc, date)`; later feeds calendar-based OEE availability and workday-true lead times.
 - **4b. Constraint designation** — `is_constraint` on WorkCenter + a 75–85% utilization target band on dashboards/heatmap; scheduler protects the constraint (buffer before it; light drum-buffer-rope, not full TOC).
 - **4c. SMED analytics + setup checklists** — changeover trend per WC and per part-transition (setup TimeEntries + CHANGEOVER downtime; definition: **last good part → first good part**, linked to first-pass inspection); internal/external setup step tagging (reuse the process-sheet step machinery or a routing setup checklist) so the kiosk shows external steps during the prior run; a from→to setup matrix feeding `optimize_setup` (today it only groups identical parts).
 
@@ -130,7 +130,7 @@ These definitions are the contract for every implementation above — dashboards
 | **Queue time** | op N `actual_end` → op N+1 `actual_start` (with `operation_ready` events as the true ready marker). **Series breaks 2026-08-11 and 2026-08-12 — see the note below the table.** |
 | **Throughput time** | Little's Law: WIP ÷ throughput |
 | **PCE** | Value-added (run) hours ÷ total elapsed lead time (typical shops 0.4–5% — don't be alarmed by small numbers) |
-| **OEE** | Availability × Performance × Quality; staffed-time availability convention until a shift calendar exists (Phase 4a) |
+| **OEE** | Availability × Performance × Quality; staffed-time availability convention. A shift calendar now exists (production calendar, migration 120: production-day start + shifts with `planned_minutes`) and OEE records are per PRODUCTION day (optionally per shift), but the ERP's own availability denominator is deliberately unchanged — planned-time availability is left to consumers |
 | **MTBF** | Run time ÷ number of failures |
 | **MTTR** | Total repair time ÷ number of failures — clock starts at failure and **includes parts wait** |
 | **Availability (reliability)** | MTBF ÷ (MTBF + MTTR) |

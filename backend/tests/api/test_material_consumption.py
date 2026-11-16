@@ -51,7 +51,7 @@ from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
 from app.models.work_order_material import AllocationSource, AllocationStatus, WorkOrderMaterialAllocation
 from app.services.analytics_service import AnalyticsService
 from app.services.audit_service import AuditService
-from app.services.completion_cost_service import _issued_material_cost
+from app.services.completion_cost_service import issued_material_cost
 from app.services.completion_inventory_service import (
     BACKFLUSH_SHORTAGE_AUDIT_ACTION,
     apply_completion_inventory_effects,
@@ -1228,7 +1228,7 @@ def test_tied_material_is_in_job_cost_actuals(db_session: Session):
     run_effects(db_session, wo, user)
     db_session.expire_all()
 
-    assert _issued_material_cost(db_session, wo, COMPANY_A) == 480.0
+    assert issued_material_cost(db_session, wo, COMPANY_A) == 480.0
     # The analytics leg must agree exactly — they share one predicate.
     assert AnalyticsService(db_session, COMPANY_A)._issued_material_cost(wo.id) == 480.0
 
@@ -1251,7 +1251,7 @@ def test_tied_and_backflushed_material_both_count_once(db_session: Session):
     db_session.expire_all()
 
     # 5 sheets @ 80 (tied, operation-scoped) + 10 bolts @ 3 (BOM backflush, WO-scoped).
-    assert _issued_material_cost(db_session, wo, COMPANY_A) == 430.0
+    assert issued_material_cost(db_session, wo, COMPANY_A) == 430.0
     assert AnalyticsService(db_session, COMPANY_A)._issued_material_cost(wo.id) == 430.0
 
 
@@ -1269,7 +1269,7 @@ def test_untied_work_order_material_cost_is_unchanged(db_session: Session):
     run_effects(db_session, wo, user)
     db_session.expire_all()
 
-    assert _issued_material_cost(db_session, wo, COMPANY_A) == 30.0
+    assert issued_material_cost(db_session, wo, COMPANY_A) == 30.0
 
 
 def test_material_cost_never_reaches_across_tenants(db_session: Session):
@@ -1285,8 +1285,8 @@ def test_material_cost_never_reaches_across_tenants(db_session: Session):
     run_effects(db_session, wo, user_a)
     db_session.expire_all()
 
-    assert _issued_material_cost(db_session, wo, COMPANY_A) == 160.0
-    assert _issued_material_cost(db_session, wo, COMPANY_B) == 0.0
+    assert issued_material_cost(db_session, wo, COMPANY_A) == 160.0
+    assert issued_material_cost(db_session, wo, COMPANY_B) == 0.0
     assert AnalyticsService(db_session, COMPANY_B)._issued_material_cost(wo.id) == 0.0
 
 

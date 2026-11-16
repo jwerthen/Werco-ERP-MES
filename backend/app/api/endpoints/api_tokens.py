@@ -22,6 +22,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
+from app.api.audit_guard import required_audit
 from app.api.deps import get_audit_service, get_current_company_id, require_role
 from app.db.database import get_db
 from app.models.user import User, UserRole
@@ -38,6 +39,13 @@ from app.services.audit_service import AuditService
 router = APIRouter()
 
 _API_TOKEN_ADMIN_ROLES = [UserRole.ADMIN]
+
+# Issuing and revoking are REQUIRED audit evidence (compliance review P0, finding 5): a
+# failed audit write rolls the row back and answers 503 -- no token minted, none revoked.
+ISSUE_AUDIT_UNAVAILABLE_DETAIL = "The audit record for this API token could not be saved; no token was issued. Retry."
+REVOKE_AUDIT_UNAVAILABLE_DETAIL = (
+    "The audit record for this revocation could not be saved; the token was not revoked. Retry."
+)
 
 
 @router.post("/", response_model=ApiTokenIssueResponse, status_code=201, summary="Issue an API token")
@@ -58,19 +66,27 @@ def create_api_token(
     for a token that never expires (the default for a standing bot); the
     target must belong to this company (404 otherwise), be active (409) and
     not be a platform admin / superuser (409 -- no token ever acts as one).
-    Issuance is audited, every write the token makes carries an audit marker
+    Issuance is audited (required evidence: 503 and no token if the audit row cannot be
+    written), every write the token makes carries an audit marker
     naming it, and deactivating its user revokes it; a dedicated bot user
-    account is recommended.
+    account is recommended. ``scope`` narrows the token: ``read_only`` refuses
+    (403) every non-GET route and every route under a tag in
+    ``WERCO_MCP_READ_ONLY_DENY_TAGS``, whatever the user's role; ``ai_external``
+    (default true for a read-only token, 422 on a full one) marks a token whose
+    answers go to an outside AI service. Both are fixed at mint and audited.
     """
-    record, token = api_token_service.issue_api_token(
-        db,
-        company_id=company_id,
-        user_id=payload.user_id,
-        label=payload.label,
-        expires_days=payload.expires_days,
-        created_by=current_user.id,
-        audit=audit,
-    )
+    with required_audit(db, ISSUE_AUDIT_UNAVAILABLE_DETAIL):
+        record, token = api_token_service.issue_api_token(
+            db,
+            company_id=company_id,
+            user_id=payload.user_id,
+            label=payload.label,
+            expires_days=payload.expires_days,
+            created_by=current_user.id,
+            audit=audit,
+            scope=payload.scope.value,
+            ai_external=payload.ai_external,
+        )
     return ApiTokenIssueResponse(**ApiTokenResponse.model_validate(record).model_dump(), token=token)
 
 
@@ -85,7 +101,8 @@ def list_api_tokens(
     """List this company's API tokens, newest first (ADMIN only; metadata only, never a secret).
 
     Each row carries the holder (``user_id``), its ``label``, ``jti_prefix``
-    (the correlation handle, not a credential), ``expires_at`` (null = never),
+    (the correlation handle, not a credential), its ``scope`` and ``ai_external``
+    flag, ``expires_at`` (null = never),
     the revocation trail and ``last_used_at`` (touched at most once per five
     minutes, so it is a liveness marker, not a hit counter).
     """
@@ -106,18 +123,21 @@ def revoke_api_token(
 ):
     """Revoke an API token with a reason (ADMIN only, tenant-scoped, audited, one-way).
 
+    The audit rows are required evidence: 503 and the token stays live if they cannot be written.
+
     The holder is refused (401) on its very next request -- the row is
     re-read on every call. Revocation is a status flip, never a delete: the
     row stays as the record of who held access, and a second revoke is 409
     because the first revocation's reason, actor and instant are the record.
     404 when the token is not this company's.
     """
-    record = api_token_service.revoke_api_token(
-        db,
-        company_id=company_id,
-        token_id=token_id,
-        revoked_by=current_user.id,
-        reason=payload.reason,
-        audit=audit,
-    )
+    with required_audit(db, REVOKE_AUDIT_UNAVAILABLE_DETAIL):
+        record = api_token_service.revoke_api_token(
+            db,
+            company_id=company_id,
+            token_id=token_id,
+            revoked_by=current_user.id,
+            reason=payload.reason,
+            audit=audit,
+        )
     return ApiTokenResponse.model_validate(record)

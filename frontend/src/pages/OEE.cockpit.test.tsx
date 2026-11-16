@@ -20,6 +20,7 @@ import { render, screen, fireEvent, within, waitFor } from '@testing-library/rea
 import { MemoryRouter } from 'react-router-dom';
 import api from '../services/api';
 import OEE from './OEE';
+import { wercoCalendar } from '../test-utils/productionCalendarFixtures';
 
 // recharts ResponsiveContainer needs ResizeObserver, absent in jsdom.
 global.ResizeObserver = class {
@@ -30,7 +31,7 @@ global.ResizeObserver = class {
 
 jest.mock('../services/api', () => ({
   __esModule: true,
-  default: { get: jest.fn(), post: jest.fn() },
+  default: { get: jest.fn(), post: jest.fn(), getProductionCalendar: jest.fn() },
 }));
 
 const mockedApi = api as jest.Mocked<typeof api>;
@@ -190,12 +191,18 @@ function mockApiGet(overrides: Partial<Record<string, any>> = {}) {
   });
 }
 
-const renderOEE = () => render(<MemoryRouter><OEE /></MemoryRouter>);
+const renderOEE = () =>
+  render(
+    <MemoryRouter>
+      <OEE />
+    </MemoryRouter>
+  );
 
 beforeEach(() => {
   jest.clearAllMocks();
   mockApiGet();
   mockedApi.post.mockResolvedValue({ data: {} } as any);
+  mockedApi.getProductionCalendar.mockResolvedValue(wercoCalendar());
 });
 
 test('renders the 4-up plant MiniStat strip (plant A/P/Q derived from work centers)', async () => {
@@ -305,7 +312,7 @@ test('scopes the dashboard and trends by the From/To date range, not the ignored
   await screen.findByText('Plant-wide OEE');
 
   const calls = mockedApi.get.mock.calls;
-  const paramsOf = (url: string) => (calls.find((c) => c[0] === url)?.[1] as any)?.params;
+  const paramsOf = (url: string) => (calls.find(c => c[0] === url)?.[1] as any)?.params;
 
   // Dashboard is scoped by the date range (so the plant strip follows the filter)...
   expect(paramsOf('/oee/dashboard')).toHaveProperty('date_from');
@@ -394,14 +401,14 @@ test('requests work-centers with a trailing slash (not the redirect-prone slashl
   renderOEE();
   await screen.findByText('Plant-wide OEE');
 
-  const calledUrls = mockedApi.get.mock.calls.map((c) => c[0] as string);
+  const calledUrls = mockedApi.get.mock.calls.map(c => c[0] as string);
   expect(calledUrls).toContain('/work-centers/');
   // Guard against the exact regression: no slashless / query-in-path variant.
-  expect(calledUrls.some((u) => u.startsWith('/work-centers?'))).toBe(false);
-  expect(calledUrls.some((u) => u === '/work-centers')).toBe(false);
+  expect(calledUrls.some(u => u.startsWith('/work-centers?'))).toBe(false);
+  expect(calledUrls.some(u => u === '/work-centers')).toBe(false);
 
   // active_only is passed as a param, not baked into the path.
-  const wcCall = mockedApi.get.mock.calls.find((c) => (c[0] as string) === '/work-centers/');
+  const wcCall = mockedApi.get.mock.calls.find(c => (c[0] as string) === '/work-centers/');
   expect(wcCall?.[1]).toEqual({ params: { active_only: true } });
 });
 
@@ -442,8 +449,115 @@ test('shows the error state when the core dashboard request fails', async () => 
   renderOEE();
 
   expect(
-    await screen.findByText('Could not load the OEE dashboard. Check your connection and try again.'),
+    await screen.findByText('Could not load the OEE dashboard. Check your connection and try again.')
   ).toBeInTheDocument();
 
+  errorSpy.mockRestore();
+});
+
+// ---------------------------------------------------------------------------------------
+// Shifts come from the production calendar (GET /production-calendar), not a hard-coded
+// '1st'/'2nd'/'3rd' list: the select offers the active shifts of the chosen work center's
+// pattern (its own, else the default) and the POST carries shift_id.
+// ---------------------------------------------------------------------------------------
+
+const weldWorkCenters = [...workCenters, { id: 101, code: 'WLD-01', name: 'Weld bay 1', is_active: true }];
+
+async function openAddModal() {
+  mockApiGet({ records, workCenters: weldWorkCenters });
+  renderOEE();
+  await screen.findByText('Plant-wide OEE');
+  fireEvent.click(screen.getByRole('button', { name: /add record/i }));
+  return within(await screen.findByRole('dialog', { name: 'Add OEE record' }));
+}
+
+const optionLabels = (select: HTMLElement) =>
+  within(select)
+    .getAllByRole('option')
+    .map(o => o.textContent);
+
+test("the shift select is built from the work center's pattern and posts shift_id", async () => {
+  const modal = await openAddModal();
+  const shiftSelect = modal.getByRole('combobox', { name: /shift/i });
+  // Nothing to choose until a work center is picked.
+  expect(shiftSelect).toBeDisabled();
+
+  // LASER-1 is in no pattern: the DEFAULT pattern (rest of shop) applies.
+  fireEvent.change(modal.getByRole('combobox', { name: /work center/i }), { target: { value: '1' } });
+  expect(optionLabels(shiftSelect)).toEqual([
+    'Whole production day',
+    'S1 · 1st shift (07:30–16:00)',
+    'S2 · 2nd shift (15:30–00:00)',
+  ]);
+
+  // A weld work center gets the weld shifts instead.
+  fireEvent.change(modal.getByRole('combobox', { name: /work center/i }), { target: { value: '101' } });
+  expect(optionLabels(shiftSelect)).toEqual([
+    'Whole production day',
+    'W1 · Weld 1st (05:00–15:30)',
+    'W2 · Weld 2nd (15:30–02:00)',
+  ]);
+  fireEvent.change(shiftSelect, { target: { value: '2' } });
+  fireEvent.click(modal.getByRole('button', { name: /add record/i }));
+
+  await waitFor(() => expect(mockedApi.post).toHaveBeenCalled());
+  const [, body] = mockedApi.post.mock.calls[0] as [string, Record<string, any>];
+  expect(body).toMatchObject({ work_center_id: 101, shift_id: 2 });
+  // No free-text label: new writes name a defined shift.
+  expect(body).not.toHaveProperty('shift');
+});
+
+test('switching to a work center in another pattern clears a shift it does not use', async () => {
+  const modal = await openAddModal();
+  const wc = modal.getByRole('combobox', { name: /work center/i });
+  const shiftSelect = modal.getByRole('combobox', { name: /shift/i }) as HTMLSelectElement;
+  fireEvent.change(wc, { target: { value: '101' } });
+  fireEvent.change(shiftSelect, { target: { value: '1' } });
+  expect(shiftSelect.value).toBe('1');
+  fireEvent.change(wc, { target: { value: '2' } });
+  expect(shiftSelect.value).toBe('');
+});
+
+test('retired shifts are not offered', async () => {
+  const calendar = wercoCalendar();
+  calendar.patterns[1].shifts[1].is_active = false;
+  mockedApi.getProductionCalendar.mockResolvedValue(calendar);
+  const modal = await openAddModal();
+  fireEvent.change(modal.getByRole('combobox', { name: /work center/i }), { target: { value: '1' } });
+  expect(optionLabels(modal.getByRole('combobox', { name: /shift/i }))).toEqual([
+    'Whole production day',
+    'S1 · 1st shift (07:30–16:00)',
+  ]);
+});
+
+test('the record date defaults to the current PRODUCTION day', async () => {
+  const modal = await openAddModal();
+  expect(modal.getByLabelText(/production day/i)).toHaveValue('2026-11-10');
+});
+
+test('the records table shows the shift name, or the legacy label for old rows', async () => {
+  mockApiGet({
+    records: [
+      { ...records[0], id: 10, shift: 'W2', shift_id: 2, shift_name: 'Weld 2nd' },
+      { ...records[0], id: 11, shift: '1st', shift_id: null, shift_name: null },
+    ],
+  });
+  renderOEE();
+  await screen.findByText('Plant-wide OEE');
+  const table = within(screen.getByRole('table'));
+  expect(table.getByText('Weld 2nd')).toBeInTheDocument();
+  expect(table.getByText('1st')).toBeInTheDocument();
+});
+
+test('a failed calendar read keeps the page and offers only a whole-day record', async () => {
+  const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+  mockedApi.getProductionCalendar.mockRejectedValue(new Error('500'));
+  const modal = await openAddModal();
+  expect(screen.getByRole('alert')).toHaveTextContent(/shift choices/);
+  fireEvent.change(modal.getByRole('combobox', { name: /work center/i }), { target: { value: '1' } });
+  expect(optionLabels(modal.getByRole('combobox', { name: /shift/i }))).toEqual(['Whole production day']);
+  // A failed read is not "no shifts defined": the help says the choices did not load.
+  expect(modal.getByText(/shift choices could not be loaded/i)).toBeInTheDocument();
+  expect(modal.queryByText(/no shifts are defined/i)).not.toBeInTheDocument();
   errorSpy.mockRestore();
 });

@@ -26,6 +26,7 @@ from typing import Dict, List, Optional, Tuple
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload
 
+from app.core.time_utils import local_date_range_to_utc, local_today
 from app.models.operational_event import OperationalEvent
 from app.models.shipping import Shipment, ShipmentStatus
 from app.models.time_entry import BASELINE_EXCLUDED_SOURCES, TimeEntry, TimeEntryType
@@ -39,6 +40,7 @@ from app.schemas.analytics import (
     WIPAgingItem,
     WIPAgingResponse,
 )
+from app.services.company_time import company_window, company_zone
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +113,7 @@ def _excluded_backfill_hours(db: Session, company_id: int, start_dt: datetime, e
         .filter(
             TimeEntry.company_id == company_id,
             TimeEntry.clock_in >= start_dt,
-            TimeEntry.clock_in <= end_dt,
+            TimeEntry.clock_in < end_dt,
             TimeEntry.clock_out.isnot(None),
             TimeEntry.source.in_(BASELINE_EXCLUDED_SOURCES),
         )
@@ -144,9 +146,13 @@ def _ready_times_by_operation(db: Session, company_id: int, operation_ids: List[
 
 
 def get_flow_metrics(db: Session, company_id: int, start: date, end: date) -> FlowMetricsResponse:
-    """Window flow summary + per-WO lead-time detail + per-WC queue times."""
-    start_dt = datetime.combine(start, datetime.min.time())
-    end_dt = datetime.combine(end, datetime.max.time())
+    """Window flow summary + per-WO lead-time detail + per-WC queue times.
+
+    ``start``/``end`` are inclusive calendar dates in the company time zone; the window
+    is ``[local midnight on start, next local midnight after end)`` in naive UTC.
+    """
+    start_dt, end_dt = company_window(db, company_id, start, end)
+    zone = company_zone(db, company_id)
     now = datetime.utcnow()
 
     # ── Completed WOs in the window (anchor: actual_end) ────────────────────────
@@ -159,7 +165,7 @@ def get_flow_metrics(db: Session, company_id: int, start: date, end: date) -> Fl
             WorkOrder.status.in_(COMPLETED_STATUSES),
             WorkOrder.actual_end.isnot(None),
             WorkOrder.actual_end >= start_dt,
-            WorkOrder.actual_end <= end_dt,
+            WorkOrder.actual_end < end_dt,
         )
         .all()
     )
@@ -224,7 +230,7 @@ def get_flow_metrics(db: Session, company_id: int, start: date, end: date) -> Fl
             WorkOrder.is_deleted == False,  # noqa: E712
             WorkOrderOperation.actual_start.isnot(None),
             WorkOrderOperation.actual_start >= start_dt,
-            WorkOrderOperation.actual_start <= end_dt,
+            WorkOrderOperation.actual_start < end_dt,
         )
         .all()
     )
@@ -321,7 +327,7 @@ def get_flow_metrics(db: Session, company_id: int, start: date, end: date) -> Fl
             WorkOrder.is_deleted == False,  # noqa: E712
             WorkOrder.status.notin_([WorkOrderStatus.CANCELLED, WorkOrderStatus.DRAFT]),
             WorkOrder.released_at.isnot(None),
-            WorkOrder.released_at <= end_dt,
+            WorkOrder.released_at < end_dt,
             or_(WorkOrder.actual_end.is_(None), WorkOrder.actual_end >= start_dt),
         )
         .all()
@@ -329,11 +335,13 @@ def get_flow_metrics(db: Session, company_id: int, start: date, end: date) -> Fl
     wip_total = 0
     day = start
     while day <= end:
-        day_end = datetime.combine(day, datetime.max.time())
+        # Open at the END of the local day: released before the next local midnight and
+        # not completed by it.
+        _, next_midnight = local_date_range_to_utc(day, day, zone)
         wip_total += sum(
             1
             for released_at, actual_end in wip_candidates
-            if released_at <= day_end and (actual_end is None or actual_end > day_end)
+            if released_at < next_midnight and (actual_end is None or actual_end >= next_midnight)
         )
         day += timedelta(days=1)
     avg_wip = wip_total / window_days if wip_candidates else 0.0
@@ -376,7 +384,7 @@ def get_flow_metrics(db: Session, company_id: int, start: date, end: date) -> Fl
 def get_wip_aging(db: Session, company_id: int) -> WIPAgingResponse:
     """Open-WO aging list for the WIP table (tenant-scoped, current snapshot)."""
     now = datetime.utcnow()
-    today = date.today()
+    today = local_today(company_zone(db, company_id))  # days-to-due counts calendar dates in the company zone
 
     open_wos = (
         db.query(WorkOrder)

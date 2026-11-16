@@ -20,6 +20,7 @@ from app.models.part import Part
 from app.models.purchasing import POReceipt, Vendor
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder
+from app.schemas.base import UTCModel
 from app.services.audit_service import AuditService, AuditWriteError
 from app.services.document_numbering import generate_document_number as generate_shared_document_number
 from app.services.erp_draft_commands import _audit_document, _audit_values, attach_document_command
@@ -73,7 +74,7 @@ class DocumentPartResponse(BaseModel):
         from_attributes = True
 
 
-class DocumentResponse(BaseModel):
+class DocumentResponse(UTCModel):
     part: Optional[DocumentPartResponse] = None
     id: int
     document_number: str

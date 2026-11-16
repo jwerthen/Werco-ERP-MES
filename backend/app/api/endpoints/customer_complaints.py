@@ -33,6 +33,7 @@ from app.models.customer_complaint import (
     RMAStatus,
 )
 from app.models.user import User
+from app.schemas.base import UTCModel
 from app.services import customer_complaint_service as complaints
 from app.services.audit_service import AuditService
 from app.services.customer_complaint_service import APPROVER_ROLES, AUTHOR_ROLES, complaint_transaction
@@ -140,7 +141,7 @@ class CloseRequest(BaseModel):
     satisfaction_notes: Optional[str] = None
 
 
-class ComplaintResponse(BaseModel):
+class ComplaintResponse(UTCModel):
     id: int
     complaint_number: str
     customer_id: Optional[int] = None
@@ -214,7 +215,7 @@ class RMAUpdate(BaseModel):
     notes: Optional[str] = None
 
 
-class RMAResponse(BaseModel):
+class RMAResponse(UTCModel):
     id: int
     rma_number: str
     complaint_id: Optional[int] = None
