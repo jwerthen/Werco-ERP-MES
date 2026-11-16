@@ -154,12 +154,13 @@ AI-external token bound to a **Viewer** user.
 ### Credential policy for judgment writes
 
 A few writes record a **person's judgment** — not just a permitted action — and some of them are
-restricted to certain *credentials*, on top of the role gate. The restrictions have four sources,
+restricted to certain *credentials*, on top of the role gate. The restrictions have five sources,
 and each row below names its own: owner ruling 3 of 2026-11-05 (the two AI rows), the owner's
 decision of 2026-11-07 (a standing API token may not declare scrap or close work short), this
 PR's extensions of that decision (scrap reasons, the re-stamp short close and the other count
-judgments), and the owner's decision of 2026-11-13 (only an Admin, signed in, marks a customer
-export-controlled). This section is the **one list** of those credential rules — what refuses a credential,
+judgments), the owner's decision of 2026-11-13 (only an Admin, signed in, marks a customer
+export-controlled), and the lead's decisions of 2026-11-15 (an egress kill switch is a person's
+judgment; a narrowed token's read writes nothing). This section is the **one list** of those credential rules — what refuses a credential,
 what is deliberately left open (and who decided each), and what is deliberately not refused —
 across the AI governance (ruling 3), floor-gates (ruling 2) and short-count (ruling 1) changes;
 other documents point here. The predicates live once, in
@@ -172,14 +173,15 @@ request:
 | `is_api_token_credential` (the write is refused when true) | A long-lived **API token** | An interactive session, and a crew-station badge token (a person standing at the kiosk) |
 | `is_read_only_api_token` (migration `119`) | An API token minted `scope = "read_only"` — and, failing closed, any API token whose scope is not exactly `full`. `get_current_user` refuses it every non-`GET` / `HEAD` / `OPTIONS` request and every route under a tag in `WERCO_MCP_READ_ONLY_DENY_TAGS` (**403**); global search drops its `user` results | A full API token, an interactive session, a badge token |
 | `is_ai_external_credential` (migration `119`) | An API token minted `ai_external = true` (failing closed: any value but exactly `false`). Refused while the company's AI egress is off and outside the fixed read allowlist (**403**), and served export-controlled records redacted ([EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md)) | Every other credential |
+| `is_narrowed_api_token` | The union of the two above (an AI-external row is read-only whatever its scope says). Its reconcile-on-read GETs (`GET /work-orders/`, `/work-orders/{id}`, `/shop-floor/dashboard`, `/shop-floor/operations`, `/shop-floor/operations/{id}`) skip the reconcile and serve the stored state — no status flip, audit row, event, notification, inventory movement or rollup (lead decision 2026-11-15, "read-only means read-only"); a GET exporter refuses it **403** before writing its `EXPORT` row | A full API token, an interactive session, a badge or display token — their reads reconcile as before |
 
-The two narrowing predicates are access rules, not judgment-write rules: they decide what a token
-may read or call at all, on every route. They are listed here so that this table stays the one
+The three narrowing predicates are access rules, not judgment-write rules: they decide what a token
+may read or call at all, on every route, and whether its reads may write. They are listed here so that this table stays the one
 list of credential predicates.
 
 Writes that apply them — each refused before any write and before any audit row (the 403 texts
-live in `ai_action_applier.py`, `operation_action_gates.py` and, for export control,
-`app/api/endpoints/customers.py`; where each sits in its route's
+live in `ai_action_applier.py`, `operation_action_gates.py`, for export control
+`app/api/endpoints/customers.py`, and for the egress switches `app/core/credentials.py`; where each sits in its route's
 check order is in `docs/API.md` → Work Orders → "Short count at completion" and → AI
 Recommendations):
 
@@ -192,6 +194,7 @@ Recommendations):
 | **Closing work short** — a short close by either operation-complete verb whose scrap is already on record (one declaring new scrap gets `API_TOKEN_SCRAP` first), a force-complete below the order, and an office reduce-production re-stamp that would set a declared short | `is_api_token_credential` (reduce-production through `production_reduction_service.api_token_reduction_refusal`) | **403** `API_TOKEN_SHORT_CLOSE` (`Closing work short must be done by a person …`) | Owner decision 2026-11-07 (a token keeps only the full-count close); the re-stamp case is **this PR's extension** |
 | **The other count judgments** — good above the floor's labor record (office operation complete, override reason or not; force-complete above `deliverable`); `PUT /work-orders/operations/{id}` changing `quantity_complete` or a `quantity_scrapped` that is not a rise; `PUT /work-orders/{id}` changing the header's `quantity_complete` / `quantity_scrapped` in either direction; **every** correction through `POST /work-orders/operations/{id}/reduce-production` or `POST /shop-floor/operations/{id}/reduce-production`; lowering `quantity_ordered` once any operation has recorded good, scrap, a start or any labor; lowering a laser nest's `planned_runs` through `PATCH /laser-nests/{id}` once that nest's operation has (its runs are the operation's target, and the laser work order's order is derived from them). Both lowerings read one rule, `operation_action_gates.operation_has_recorded_work` (good, scrap, a start — IN_PROGRESS / COMPLETE status or a stamped `actual_start` — or any `TimeEntry`) | `is_api_token_credential` (reduce-production through `api_token_reduction_refusal`, re-checked under the row locks) | **403** `API_TOKEN_COUNT_JUDGMENT` (`Recording more good than the floor counted, …`) | **This PR's extension** of the same principle — the owner was asked about scrap and short closes, not these |
 | **Marking a customer export-controlled, or un-marking it** — `POST /customers/{id}/contracts` and `PUT /customers/{id}/contracts/{contract_id}` (ITAR / export controlled / CUI contract flags), and reading the standing behind them, `GET /customers/{id}/export-control` | `is_api_token_credential`, inline in `app/api/endpoints/customers.py` (after the Admin role gate) | **403** `"An API token cannot read or change a customer's export control: an Admin does it, signed in to the app."` — any token, whatever its role or scope | Owner decision 2026-11-13 (Claude-plugin brief P0.3): only an Admin, signed in, marks or un-marks a customer |
+| **Turning a company egress kill switch on or off** — `PUT /companies/me/ai-egress` (`allow_ai_egress`, which also gates every AI-external connector), `PUT /companies/me/sms-egress` (`allow_sms_egress`), `PUT /admin/settings/shipping-profile` (`allow_carrier_egress`) and `PUT /receiving/print-profile` (`allow_print_egress`). The two profile routes are refused **whole**, since each is its switch's only writer. None of the four is an MCP tool (`catalog.EXCLUDED_OPERATIONS`), so a person's own JWT cannot reach them through an agent either. The AI flip's UPDATE and STATUS_CHANGE rows are **required** evidence (`required_audit`; **503**, nothing changed, when either cannot be written) | `is_api_token_credential`, inline at the top of each route (after the Admin role gate) | **403** `API_TOKEN_EGRESS_SWITCH` (`"A company egress kill switch (AI, SMS, carrier or label-print egress) is turned on or off by an Admin signed in to the app, not an API token: opening or closing data egress is a person's judgment."`) — any token, whatever its role or scope (a read-only token meets the read-only gate's 403 first) | Lead decision 2026-11-15 (Claude-plugin brief build, round-2 owner question): opening or closing data egress is a person's judgment |
 | **Re-importing a nest package onto a laser job with recorded work** — `POST /work-orders/{id}/laser-nest-packages/import` (either import shape; the MCP tool `import_laser_nest_package` with a `work_order_id`) when any operation the import would delete has recorded work (the same `operation_has_recorded_work` rule), or the laser work order's header already carries good or scrap: the import replaces every nest operation and zeroes the header counts, erasing a person's good, scrap and any declared short. Refused before the upload is unpacked, and again under the import's lock reading the database rather than the rows the first check loaded; a token's import onto un-worked nests with a zero header, and the standalone import, which wipes nothing, are unchanged | `is_api_token_credential` (`laser_nest_service.import_would_wipe_recorded_work`) | **403** `API_TOKEN_NEST_REIMPORT` (`Re-importing a nest package replaces nests that already have recorded work …`) — its own text, so the caller is told which action was refused | **This PR's extension** of the same principle — the owner was asked about scrap and short closes, not this |
 
 Deliberately **not** refused:
@@ -1998,7 +2001,9 @@ contract; they do not bypass tenant scoping or the read-only context fence.
 > `GET` / `PUT /receiving/print-profile` (ProxyBox base URL / target / API key, copies,
 > paper size, and the `auto_print_on_receipt` + `allow_print_egress` toggles) — is
 > **admin-only** via `get_admin_user`, so only an admin can enter the printer credential
-> or flip the outbound-egress kill switch (default OFF, audited as a status change). See
+> or flip the outbound-egress kill switch (default OFF, audited as a status change). The `PUT`
+> is the switch's only writer, so it refuses **any API token 403** whatever its role and is not
+> an MCP tool (lead decision 2026-11-15 — [Credential policy for judgment writes](#credential-policy-for-judgment-writes)). See
 > [docs/THERMAL_LABEL_PRINTING.md](THERMAL_LABEL_PRINTING.md).
 
 ### Shipping
@@ -3048,8 +3053,8 @@ and writes an `EXPORT` audit row through `AuditService`:
 | Integrations (`admin:integrations`) | ✓ | | | | | | |
 | Audit Logs | ✓ | ✓ | | | | | |
 | AI usage & cost summary (`/ai-usage/summary`) | ✓ | ✓ | | | | | |
-| AI egress kill switch (`PUT /companies/me/ai-egress`) | ✓ | | | | | | |
-| SMS egress kill switch (`PUT /companies/me/sms-egress`) | ✓ | | | | | | |
+| AI egress kill switch (`PUT /companies/me/ai-egress`; signed in — any API token 403) | ✓ | | | | | | |
+| SMS egress kill switch (`PUT /companies/me/sms-egress`; signed in — any API token 403) | ✓ | | | | | | |
 | Wallboard display tokens (`/auth/display-token` issue/list/revoke + setup-code reissue) | ✓ | ✓ | | | | | |
 | API tokens for bots / MCP clients (`/api-tokens` issue/list/revoke) | ✓ | | | | | | |
 | Visitor sign-in stations (`/visitor-logs/stations` create/list/revoke/reset-pin) | ✓ | ✓ | | | | | |
@@ -3077,7 +3082,9 @@ and writes an `EXPORT` audit row through `AuditService`:
 > `GET`/`PUT …/shipping-profile` (which holds the `allow_carrier_egress` kill switch). Carrier
 > secrets are write-only (Fernet-encrypted, never returned — only `api_key_last4` /
 > `has_webhook_secret`); deletes are soft deletes; create/update/delete and the egress toggle are
-> audited. The new `admin:integrations` permission string (granted to **Admin** in
+> audited. `PUT …/shipping-profile` is the `allow_carrier_egress` switch's only writer, so it refuses
+> **any API token 403** whatever its role and is not an MCP tool (lead decision 2026-11-15 —
+> [Credential policy for judgment writes](#credential-policy-for-judgment-writes)). The new `admin:integrations` permission string (granted to **Admin** in
 > `app/models/role_permission.py`) drives the frontend Carrier Integrations tab's visibility. See
 > [docs/SHIPPING_CARRIER_INTEGRATION.md](SHIPPING_CARRIER_INTEGRATION.md).
 >
@@ -3144,15 +3151,21 @@ and writes an `EXPORT` audit row through `AuditService`:
 > other roles. Since the Claude-plugin brief P0.3 (2026-11-13) the same switch also gates every
 > **AI-external API token**. While it is off such a token is refused **403** on every API route
 > and at the MCP door, so turning it on also opens an outside AI connector
-> ([docs/EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md)). A read-only token cannot flip
-> the switch itself: the `PUT` is a write, and Company Management is a denied tag. See
+> ([docs/EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md)). **No API token flips it**
+> (lead decision 2026-11-15 — [Credential policy for judgment writes](#credential-policy-for-judgment-writes)): any token, whatever its role or scope, is refused **403**
+> before anything is read (a read-only one by the read-only gate first: the `PUT` is a write, and
+> Company Management is a denied tag), and the route is not an MCP tool. A flip's two audit rows
+> are **required** evidence — if either cannot be written the flip rolls back and the answer is
+> **503**. See
 > [docs/API.md](API.md) → Company (self-service) and
 > [docs/AI_QUOTING_AGENT_RUNBOOK.md](AI_QUOTING_AGENT_RUNBOOK.md).
 
 > **SMS egress kill switch (`PUT /api/v1/companies/me/sms-egress`).** Enforced **in code** via
 > `require_role([ADMIN])` — **Admin-only**, for the same reason as the AI switch above: it gates all
 > outbound notification SMS to **Twilio, which sits outside the CUI boundary**, so flipping it is a
-> CUI-boundary decision reserved to Admins. It only ever mutates the caller's **own active company**
+> CUI-boundary decision reserved to Admins, and to an Admin **signed in to the app**: any API token
+> is refused **403** and the route is not an MCP tool (lead decision 2026-11-15 — [Credential policy for judgment writes](#credential-policy-for-judgment-writes)). It only
+> ever mutates the caller's **own active company**
 > (`get_current_company_id`; never taken from the request body). Flipping `Company.allow_sms_egress`
 > writes tamper-evident `audit_log` rows **twice** — a field update **and** an
 > `sms_egress_enabled` / `sms_egress_disabled` status change. Every company is created **OFF**, and

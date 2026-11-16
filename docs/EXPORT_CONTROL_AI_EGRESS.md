@@ -436,9 +436,12 @@ Two limits apply:
    The token is shown **once**. Copy it straight into step 4. Never paste it into a chat, a ticket
    or a committed file. The mint is audited (`API_TOKEN_ISSUED`, with scope and AI-external).
 3. **Turn on AI egress only after the empowered official clears it.** Until then the token is
-   refused 403 at the door, which is the intended state. When cleared, an Admin turns it on under
-   **Admin Settings → AI Privacy** (`PUT /companies/me/ai-egress`, audited). Turning it on also
-   enables AI document extraction for the company; this one switch gates both.
+   refused 403 at the door, which is the intended state. When cleared, an Admin **signed in to the
+   app** turns it on under **Admin Settings → AI Privacy** (`PUT /companies/me/ai-egress`). The flip's
+   audit rows are required evidence (if they cannot be written nothing changes and the answer is
+   503), the route refuses every API token **403**, and it is not an MCP tool — no agent can open
+   or close its own connector. Turning it on also enables AI document extraction for the company;
+   this one switch gates both.
 4. **Add the connector in Claude.** Add a custom connector with the URL
    `https://<api-host>/mcp` (the production API host is listed in
    [DEPLOYMENT_RUNBOOK.md → URLs](DEPLOYMENT_RUNBOOK.md#urls)). Choose **No sign-in**, and add the
@@ -470,20 +473,20 @@ Deactivating Werco Assistant revokes its tokens too.
   ones, which bounds where its hidden value sorts, though not what it is. Counts are preserved by
   design. A work-order number lookup confirms that a work-order number exists; work-order numbers
   are kept identifiers anyway.
-- **Read-only means no non-GET request, not "causes no writes".** Allowlisted reads that reconcile
-  on read can still write:
-  - `GET /work-orders/`, `/work-orders/{id}` and `/shop-floor/operations…` run reconcile-on-read
-    and commit whatever it finds, all recorded as Werco Assistant (audit rows carry the token's
-    `extra_data.credential`). That is not only status. When an operation's closed labor already
-    holds a full good count, one such GET **completes the operation, and the work order with
-    it**. It then posts that work order's finished-goods receipt to inventory, runs the gated BOM
-    backflush and tied-material consumption, so stock can leave inventory, and rolls up job
-    hours and cost. It also emits the `operation_completed` / `work_order_completed` events,
-    which the notification outbox turns into the in-app and email completion notifications
-    (`wo.completed` goes to Supervisors and Managers by default). The outbound completion-signal
-    job is still not enqueued from a read. A person opening the same work order would trigger
-    the same reconcile. The difference is only who is recorded as having done it;
-  - every request touches the token's `last_used_at`, at most once per 5 minutes.
+- **Read-only means read-only** (lead decision, 2026-11-15). A read-only or AI-external token
+  (`app.core.credentials.is_narrowed_api_token`) sends no write request, and its reads cause no
+  write either. The reads that reconcile on read — `GET /work-orders/`, `/work-orders/{id}`,
+  `/shop-floor/dashboard`, `/shop-floor/operations` and `/shop-floor/operations/{id}` — skip the
+  reconcile for it and serve the **stored** state: no operation or work-order completion, no
+  finished-goods receipt, no backflush or tied-material consumption, no job hour or cost rollup,
+  no scheduling refresh, no audit row, no `operation_completed` / `work_order_completed` event
+  and so no notification. A person opening the same work order (or a full token) reconciles it
+  exactly as before. The cost is freshness: until such a read happens, what Werco Assistant sees
+  can lag what the floor's closed labor already recorded (an operation whose labor holds the full
+  count still reads as in progress). Two writes remain, and both are about the credential, not the
+  data:
+  - every request touches the token's `last_used_at`, at most once per 5 minutes;
+  - an AI-external response writes its `controlled_access_events` ledger rows (§7).
 
   GET **exporters** that write an `EXPORT` audit row before streaming the file (visitor log CSV,
   Import Center failed rows, consumable checkouts, and everything through `export_audit.log_export`)
@@ -508,6 +511,10 @@ Deactivating Werco Assistant revokes its tokens too.
   MCP catalog (`EXCLUDED_OPERATIONS`), so an agent holding a person's own JWT cannot switch a
   customer's control off either; the routes also refuse every API token (403). Reading a
   customer's standing stays a tool.
+- **Neither is flipping an egress switch** (lead decision, 2026-11-15). `PUT /companies/me/ai-egress`
+  — and the SMS, carrier and label-print switches' routes — refuse every API token **403**
+  (`API_TOKEN_EGRESS_SWITCH`) and are excluded from the MCP catalog, so the connector can never
+  turn its own gate on, or another company integration's off.
 - **Handling instructions have no writer** in the app. Contracts are the supported way to mark a
   customer.
 - **CMMC.** This is an AS9100D / customer-contract control, not a CMMC artifact. The frozen
@@ -527,8 +534,10 @@ Deactivating Werco Assistant revokes its tokens too.
 | Response middleware | `app/middleware/export_control.py` (registered first in `app/main.py`, so it is innermost) |
 | Door egress guard, AI-external listing | `app/mcp/http.py` (`AiEgressDoorGuard`), `app/mcp/server.py` |
 | Contract routes | `app/api/endpoints/customers.py`, `app/schemas/export_control.py` |
+| No reconcile-on-read for a narrowed token | `is_narrowed_api_token` (`app/core/credentials.py`), checked in both `_reconcile_and_commit` copies (`app/api/endpoints/work_orders.py`, `shop_floor.py`) and before `GET /work-orders/{id}`'s component-quantity re-derivation |
+| Egress switches refuse API tokens | `API_TOKEN_EGRESS_SWITCH` (`app/core/credentials.py`); `companies.py`, `integrations.py`, `receiving.py`; `catalog.EGRESS_SWITCH_OPERATIONS` |
 | UI | `frontend/src/pages/ApiTokens.tsx`, `frontend/src/components/customers/CustomerExportControlPanel.tsx` |
-| Tests | `backend/tests/api/test_ai_external_token.py` (gates, canary conformance per allowlisted route, ledger, 503), `tests/api/test_customer_export_control.py`, `tests/test_export_control_index.py`, `tests/test_export_control_redaction.py`, `tests/test_mcp_ai_external.py` |
+| Tests | `backend/tests/api/test_ai_external_token.py` (gates, canary conformance per allowlisted route, ledger, 503, a narrowed token's reconcile-on-read GET writing nothing), `tests/api/test_egress_switch_credentials.py`, `tests/api/test_customer_export_control.py`, `tests/test_export_control_index.py`, `tests/test_export_control_redaction.py`, `tests/test_mcp_ai_external.py` |
 
 Related: [API.md → API tokens](API.md#api-tokens-bots-and-mcp-clients),
 [MCP.md → 4. Auth model](MCP.md#4-auth-model),

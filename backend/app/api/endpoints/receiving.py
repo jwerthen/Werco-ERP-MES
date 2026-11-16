@@ -25,6 +25,7 @@ from app.api.deps import (
     get_current_user,
     require_role,
 )
+from app.core.credentials import API_TOKEN_EGRESS_SWITCH, is_api_token_credential
 from app.core.queue import enqueue_job_best_effort
 from app.db.database import get_db
 from app.models.inventory import (
@@ -1706,7 +1707,14 @@ def upsert_print_profile(
     OFF (model + this upsert default) and only flips when an admin sets it here; the
     toggle is audited as a status change so enabling/disabling print egress is on the
     tamper-evident trail. ``api_key`` is write-only: encrypted at rest, never returned.
+
+    This route is the switch's only writer, so the whole route is a person's judgment:
+    ANY API token is refused 403 (``API_TOKEN_EGRESS_SWITCH``) before anything is read or
+    written, whatever the request carries, and it is not an MCP tool
+    (``catalog.EXCLUDED_OPERATIONS``).
     """
+    if is_api_token_credential(current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=API_TOKEN_EGRESS_SWITCH)
     profile = db.query(CompanyPrintProfile).filter(CompanyPrintProfile.company_id == company_id).first()
     update = data.model_dump(exclude_unset=True)
     is_create = profile is None

@@ -2,8 +2,8 @@
 
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
-(Cursor, Claude Code, a chat bot) gets **766 tools** — 15 hand-written *convenience* tools plus
-**751 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+(Cursor, Claude Code, a chat bot) gets **762 tools** — 15 hand-written *convenience* tools plus
+**747 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
 as the same request from the web app. A **read-only** API token is shown fewer tools, and an
 **AI-external** one fewer still (§4.1, §4.2).
 
@@ -20,6 +20,9 @@ read-only / AI-external token work (P0) added one Customers tool**
 (`get_customer_export_control`; the two contract WRITES are in `EXCLUDED_OPERATIONS`, §6.1) and
 moved the Hank intake routes to their own `Hank Intake` tag with no name change: 15 convenience +
 751 generated, 16 shadowed. The read-only catalog is 8 convenience + 290 generated tools.
+**Re-checked again on 2026-11-15 after the four company egress kill-switch writes left the
+catalog** (`EXCLUDED_OPERATIONS`, §6.1): 15 convenience + **747** generated, 16 shadowed; the
+read-only catalog is unchanged at 8 convenience + 290 generated (the four are writes).
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
 `backend/tests/test_mcp_docs_names.py` checks every tool name this file, `CLAUDE.md` and `API.md`
@@ -464,16 +467,16 @@ their tags are not on the deny list.
 **Global search** (`search`) never returns `user` results to a read-only token, whatever its
 user's role.
 
-**"Read-only" means "sends no write request", not "causes no write".** Some reads reconcile
-work-order and operation status as they run. `GET /work-orders/{id}`, the work-order list and the
-shop-floor operation reads among them commit that reconciliation as the token's user, and it is
-more than a status change. When closed labor already holds a full good count, one such read
-completes the operation, and the work order with it. It then posts the finished-goods receipt to
-inventory, runs the gated backflush and tied-material consumption, and rolls up job cost. It also
-emits the completion events that the notification outbox delivers as in-app and email
-notifications. All of it is recorded as the token's user, and the audit rows are marked with
-`extra_data.credential`. A person opening the same work order would do the same; only the recorded
-actor differs. See [EXPORT_CONTROL_AI_EGRESS.md → 9](EXPORT_CONTROL_AI_EGRESS.md#9-known-limits).
+**Read-only means read-only — no write request, and no write caused by a read** (lead decision,
+2026-11-15). Some reads reconcile work-order and operation status as they run: `GET /work-orders/{id}`
+(`get_work_order`), the work-order list, `GET /shop-floor/dashboard` and the shop-floor operation
+reads. For a read-only or AI-external token (`app.core.credentials.is_narrowed_api_token`) they do
+not: the read serves the **stored** state and writes nothing — no operation or work-order
+completion, no finished-goods receipt, backflush or tied-material consumption, no cost or scheduling
+rollup, no audit row, no completion event and so no notification. A person's identical read (and a
+full token's) still reconciles exactly as before, so until one happens what the narrowed token sees
+can lag what the floor's labor already recorded. See
+[EXPORT_CONTROL_AI_EGRESS.md → 9](EXPORT_CONTROL_AI_EGRESS.md#9-known-limits).
 Every request also touches the token's `last_used_at`, at most once per 5 minutes. Conversely,
 read-shaped `POST` routes (previews, calculations, natural-language search) are refused like any
 other write.
@@ -505,6 +508,8 @@ three more rules:
    HTTP 403 from `/mcp` itself, before the MCP transport runs, so `initialize` and `tools/list` are
    refused too. Every API route refuses it the same way. One switch now gates both AI document
    extraction and the connector: turn it on only once the empowered official has cleared it.
+   Only an Admin signed in to the app flips it: `PUT /companies/me/ai-egress` refuses every API
+   token **403** and is not a tool (§6.1), so no agent can open — or close — its own connector.
 2. **Only the allowlisted reads.** The token may call only the 44 `GET` routes in
    `app/core/export_control.py` → `AI_EXTERNAL_ALLOWED_ROUTES`. Any other route answers **403**
    `"This resource is not available to an AI-external API token."` at the API, and the same text
@@ -632,7 +637,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `VisitorSignIn` (`/visitor-signin`) | Visitor Logs | `sign_in`, `sign_out` (under the caller's own role; the tablet's shared-PIN station login is unauthenticated plumbing and is not a tool) |
 | `AdminSettings` (`/admin/settings`) | Admin Settings, Users | `list_work_center_rates`, `update_work_center_rate`, `list_work_center_types_admin`, `update_work_center_types_admin`, `get_email_recipients`, `update_email_recipients`, `get_role_permissions`, `update_role_permissions`, `get_audit_log`, `list_users` |
 | `PlatformOverview` (`/platform`) | Platform Administration | `platform_overview`, `list_companies`, `company_dashboard`, `browse_company_users` (platform admins only — the route decides) |
-| `CompanyRegister` (`/register-company`) | Company Management | `get_my_company`, `update_my_company`, `update_my_company_ai_egress`, `update_my_company_sms_egress` — the public registration form itself is unauthenticated and has no tool |
+| `CompanyRegister` (`/register-company`) | Company Management | `get_my_company`, `update_my_company` — the public registration form itself is unauthenticated and has no tool; **the AI and SMS egress kill switches are not tools**: `PUT /companies/me/ai-egress` and `PUT /companies/me/sms-egress` are in `EXCLUDED_OPERATIONS` (§6.1) and refuse **403** to every API token, as do the carrier and label-print switches' profile writes (`PUT /admin/settings/shipping-profile`, `PUT /receiving/print-profile`; their `get_shipping_profile` / `get_print_profile` reads stay tools) |
 | `ApiTokens` (`/admin/api-tokens`) | API Tokens | `create_api_token`, `list_api_tokens`, `revoke_api_token` (Admin only; a call authenticated **by** an API token gets the route's 403 fence — §4) |
 | `Login` (`/login`), `Register` (`/register`) | Authentication | *No tool* — excluded on purpose; identity comes from the JWT (§4) |
 | `NotFound`, `Unauthorized` | — | No API calls |
@@ -657,7 +662,7 @@ minus two further, named sets:
   They are listed **by name** rather than skipped silently, so a new route that forgets its
   `security` dependency — even under a tag that already has tools — fails the coverage guard
   (`catalog.unaccounted_operations`, §14) until it is either secured or named there.
-- **`EXCLUDED_OPERATIONS`** — five operations, none with a convenience twin:
+- **`EXCLUDED_OPERATIONS`** — nine operations, none with a convenience twin:
   - The two Excel-cutover loaders, `POST /work-orders/import` and
     `POST /purchasing/purchase-orders/import` (`migration_import_service`). They record a *past*
     system's state rather than perform a user action: the work-order loader mints work orders
@@ -681,6 +686,15 @@ minus two further, named sets:
     switch a customer's control off and the connector would get that customer's records
     unredacted from the next request on. Reading a customer's standing
     (`get_customer_export_control`) stays a tool.
+  - The four company **egress kill-switch writes** (`catalog.EGRESS_SWITCH_OPERATIONS`; lead
+    decision 2026-11-15: an egress switch is a person's judgment): `PUT /companies/me/ai-egress`
+    (`allow_ai_egress`, which also opens or closes every AI-external connector),
+    `PUT /companies/me/sms-egress`, `PUT /admin/settings/shipping-profile` (`allow_carrier_egress`)
+    and `PUT /receiving/print-profile` (`allow_print_egress`). The routes refuse every API token
+    **403** (`app.core.credentials.API_TOKEN_EGRESS_SWITCH`), and — as with the export-control
+    writes — the exclusion closes the door a person's own JWT would leave open through a tool. The
+    two profile routes are their switches' only writers, so they are out whole; their reads
+    (`get_shipping_profile`, `get_print_profile`) stay tools.
 
 The `Import Batches` tag also excludes the recoverable Import Center review, receipt,
 correction and commit routes. These wrap the same cutover loaders, including their
@@ -688,7 +702,8 @@ historical status transitions, so exposing a generic batch commit would reopen t
 excluded-loader path. File correction and credential input stay in Import Center.
 
 On the commit that shipped API tokens: 706 operations, 689 secured, 680 candidates, 16 shadowed
-(§8), 2 excluded → **662 generated tools**.
+(§8), 2 excluded → **662 generated tools**. On 2026-11-15, with nine excluded: **747 generated
+tools** (`--print-catalog` `counts`).
 
 ### 6.2 Naming and the collision policy (`app/mcp/naming.py`)
 
@@ -849,7 +864,7 @@ Every other operation stays generated — including the neighbours of the shadow
 (`work_orders_start_work_order`, `work_orders_update_operation`, `preview_laser_nest_package_import`,
 `get_work_order_by_number`, `update_laser_nest`, `get_inventory_summary`, `get_purchase_order`, …) —
 except the operations in `EXCLUDED_OPERATIONS` (§6.1) — the two cutover loaders, AI Accept &
-apply and the two customer export-control writes — which have no tool and no replacement. Adding a convenience tool whose route is *not* in the shadow set is a build error
+apply, the two customer export-control writes and the four egress kill-switch writes — which have no tool and no replacement. Adding a convenience tool whose route is *not* in the shadow set is a build error
 (`build_registry` refuses a duplicate name) rather than a silent win.
 
 ---
@@ -1193,8 +1208,8 @@ count, in which case there is nothing left to close.
 - Tests (all in the default `pytest tests/` run, so in CI's required "Backend Tests" job):
   - `backend/tests/test_mcp_catalog.py` (no DB) — membership against the live `app.openapi()` (every
     secured, unshadowed, unexcluded operation is exactly one tool; `PUBLIC_OPERATIONS` names exactly
-    the unsecured routes; `EXCLUDED_OPERATIONS` are exactly the two loaders, the AI apply route
-    and the two customer export-control writes, and the record-only accept stays a tool), names (unique, wire-valid,
+    the unsecured routes; `EXCLUDED_OPERATIONS` are exactly the two loaders, the AI apply route,
+    the two customer export-control writes and the four egress kill-switch writes, and the record-only accept stays a tool), names (unique, wire-valid,
     ≤ 64, collisions prefixed, the numeric-suffix fallback proven on synthetic input and unused on
     the live catalog), schemas (`$ref`-free, `additionalProperties: false`, every JSON body's
     property set equal to the document's — the `title` field included), and the two convenience

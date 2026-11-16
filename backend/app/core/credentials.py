@@ -42,6 +42,14 @@ Both FAIL CLOSED for an API token: a scope that is not exactly ``"full"`` (missi
 included) reads as read-only, and an ``ai_external`` that is not exactly ``False`` reads
 as AI-external. For a non-token credential both are False.
 
+:func:`is_narrowed_api_token` is the union of the two -- the one predicate for "this
+credential is a read-only connector" (an AI-external row is read-only whatever its scope
+says). Reconcile-on-read uses it: a narrowed token's GET serves the stored state and
+writes nothing (lead decision, Claude-plugin brief build 2026-11-15).
+
+:data:`API_TOKEN_EGRESS_SWITCH` is the refusal every company egress kill-switch route
+answers an API token (any scope): opening or closing data egress is a person's judgment.
+
 This module is pure: it imports nothing from the app, so any layer can use it.
 """
 
@@ -64,6 +72,21 @@ READ_ONLY_ROUTE_WRITES_DETAIL = "Read-only API token cannot modify data."
 READ_ONLY_ROUTE_DENIED_DETAIL = "Read-only API token cannot access this resource."
 READ_ONLY_TOOL_WRITES_DETAIL = "Read-only API token: this tool writes."
 READ_ONLY_TOOL_DENIED_DETAIL = "Read-only API token: this tool is not available to read-only tokens."
+
+# The company egress kill switches -- ``allow_ai_egress`` (PUT /companies/me/ai-egress),
+# ``allow_sms_egress`` (PUT /companies/me/sms-egress), ``allow_carrier_egress`` (PUT
+# /admin/settings/shipping-profile) and ``allow_print_egress`` (PUT /receiving/print-profile)
+# -- decide what leaves the CUI boundary, and the AI one also opens or closes every
+# AI-external connector. Flipping one is a person's judgment (lead decision, Claude-plugin
+# brief build 2026-11-15), so each of those routes refuses ANY API token, whatever its role
+# or scope, with this text before it reads or writes anything; the two profile routes are
+# refused whole, since they are the only writer of their switch. None of them is an MCP tool
+# (``app.mcp.catalog.EXCLUDED_OPERATIONS``), so an agent on a person's own JWT cannot reach
+# them either. docs/RBAC_PERMISSIONS.md -> Credential policy for judgment writes quotes it.
+API_TOKEN_EGRESS_SWITCH = (
+    "A company egress kill switch (AI, SMS, carrier or label-print egress) is turned on or off by an Admin "
+    "signed in to the app, not an API token: opening or closing data egress is a person's judgment."
+)
 
 
 def is_api_token_credential(user: Any) -> bool:
@@ -97,3 +120,13 @@ def is_ai_external_credential(user: Any) -> bool:
     missing marker included -- is AI-external.
     """
     return is_api_token_credential(user) and getattr(user, "_api_token_ai_external", None) is not False
+
+
+def is_narrowed_api_token(user: Any) -> bool:
+    """True when a read-only OR an AI-external API token authenticated the request.
+
+    The union of :func:`is_read_only_api_token` and :func:`is_ai_external_credential` (both
+    fail closed), because an AI-external row is read-only whatever its scope says. False for
+    a full API token, an interactive session, a kiosk badge and a display / station token.
+    """
+    return is_read_only_api_token(user) or is_ai_external_credential(user)

@@ -27,7 +27,7 @@ from typing import Any, Mapping, Optional, Sequence
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.core.credentials import is_ai_external_credential, is_read_only_api_token
+from app.core.credentials import is_narrowed_api_token
 from app.core.export_control import READ_ONLY_FILE_REFUSED_DETAIL
 from app.services.audit_service import AuditService
 
@@ -87,7 +87,7 @@ def refuse_file_export_to_narrowed_token(user: Any) -> None:
     BEFORE writing anything: :func:`log_export` itself, and the hand-rolled ones
     (visitor log CSV, Import Center failed rows, consumable checkouts).
     """
-    if is_read_only_api_token(user) or is_ai_external_credential(user):
+    if is_narrowed_api_token(user):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=READ_ONLY_FILE_REFUSED_DETAIL)
 
 

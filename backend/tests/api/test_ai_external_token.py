@@ -640,18 +640,86 @@ class TestRefusals:
 
 # --------------------------------------------------------------------------- reads that write
 
+# Every GET that reconciles on read (``_reconcile_and_commit`` in work_orders.py and
+# shop_floor.py). The dashboard is not on the AI-external allowlist, so an AI-external token
+# is refused it 403 before the route runs -- which writes nothing either.
+RECONCILE_READS: Dict[str, Callable[[WorkOrder, WorkOrderOperation], str]] = {
+    "work_order": lambda wo, op: f"{API}/work-orders/{wo.id}",
+    "work_order_list": lambda wo, op: f"{API}/work-orders/",
+    "shop_floor_operations": lambda wo, op: f"{API}/shop-floor/operations",
+    "shop_floor_operation": lambda wo, op: f"{API}/shop-floor/operations/{op.id}",
+    "shop_floor_dashboard": lambda wo, op: f"{API}/shop-floor/dashboard",
+}
+AI_EXTERNAL_RECONCILE_READS = {"work_order", "work_order_list", "shop_floor_operations", "shop_floor_operation"}
 
-class TestReadsThatWrite:
-    """Code review P0 round 2, finding 4: the docs said a narrowed token's reconcile-on-read
-    GET "can commit status reconciliation and audit rows". It does more, and the docs now say
-    so (docs/EXPORT_CONTROL_AI_EGRESS.md section 9, MCP.md 4.1, API.md): it can complete
-    operations and work orders, post the finished-goods receipt (and any gated backflush /
-    tied-material consumption), and emit the completion events that drive notifications --
-    every one recorded as the token's user. This pins the documented behavior; a change to it
-    (an owner decision) must change those three docs."""
 
+def _reconcilable_job(db: Session, world: World, suffix: str) -> Tuple[Part, WorkOrder, WorkOrderOperation]:
+    """An IN_PROGRESS work order whose one operation's closed labor already holds the full
+    good count: the next reconcile-on-read completes the operation AND the work order, posts
+    the finished-goods receipt and emits the completion events."""
+    part = Part(
+        part_number=f"RECON-PART-{suffix}",
+        name="reconciled part",
+        part_type="manufactured",
+        customer_name=world.clear_customer.name,
+        company_id=world.company_id,
+    )
+    db.add(part)
+    db.flush()
+    wo = WorkOrder(
+        work_order_number=f"WO-RECON-{suffix}",
+        part_id=part.id,
+        quantity_ordered=5,
+        status=WorkOrderStatus.IN_PROGRESS,
+        customer_name=world.clear_customer.name,
+        company_id=world.company_id,
+    )
+    db.add(wo)
+    db.flush()
+    op = WorkOrderOperation(
+        work_order_id=wo.id,
+        work_center_id=world.work_center.id,
+        sequence=10,
+        operation_number="10",
+        name="Weld",
+        status=OperationStatus.IN_PROGRESS,
+        company_id=world.company_id,
+    )
+    db.add(op)
+    db.flush()
+    make_closed_time_entry(db, user=world.reporter, op=op, quantity_produced=5)
+    return part, wo, op
+
+
+def _db_state(db: Session) -> Dict[str, Any]:
+    """Everything a reconcile-on-read can write, as a comparable value."""
+    db.expire_all()
+    return {
+        "work_orders": sorted(
+            (row.id, str(row.status), row.version, float(row.quantity_complete or 0))
+            for row in db.query(WorkOrder).all()
+        ),
+        "operations": sorted(
+            (row.id, str(row.status), row.version, float(row.quantity_complete or 0))
+            for row in db.query(WorkOrderOperation).all()
+        ),
+        "audit_rows": db.query(AuditLog).count(),
+        "operational_events": db.query(OperationalEvent).count(),
+        "inventory_transactions": db.query(InventoryTransaction).count(),
+    }
+
+
+class TestNarrowedTokenReadsWriteNothing:
+    """Lead decision 2026-11-15 ("read-only means read-only"), replacing the round-2 pin of the
+    old behavior: a read-only or AI-external token's reconcile-on-read GET serves the STORED
+    state and writes nothing -- no status flip, no audit row, no OperationalEvent, no inventory
+    movement, no outbox enqueue -- while a person's identical GET (and a full token's) still
+    reconciles exactly as before. docs/EXPORT_CONTROL_AI_EGRESS.md section 9, MCP.md 4.1 and
+    API.md say so."""
+
+    @pytest.mark.parametrize("route", sorted(RECONCILE_READS))
     @pytest.mark.parametrize("ai_external", [True, False], ids=["ai_external", "read_only"])
-    def test_a_reconcile_get_completes_work_as_the_tokens_user(
+    def test_a_narrowed_tokens_get_writes_nothing_and_a_persons_reconciles(
         self,
         client: TestClient,
         db_session: Session,
@@ -659,46 +727,34 @@ class TestReadsThatWrite:
         admin_headers: dict,
         viewer: User,
         ai_external: bool,
+        route: str,
         monkeypatch,
     ):
-        part = Part(
-            part_number="RECON-PART-1",
-            name="reconciled part",
-            part_type="manufactured",
-            customer_name=world.clear_customer.name,
-            company_id=world.company_id,
-        )
-        db_session.add(part)
-        db_session.flush()
-        wo = WorkOrder(
-            work_order_number="WO-RECON-0001",
-            part_id=part.id,
-            quantity_ordered=5,
-            status=WorkOrderStatus.IN_PROGRESS,
-            customer_name=world.clear_customer.name,
-            company_id=world.company_id,
-        )
-        db_session.add(wo)
-        db_session.flush()
-        op = WorkOrderOperation(
-            work_order_id=wo.id,
-            work_center_id=world.work_center.id,
-            sequence=10,
-            operation_number="10",
-            name="Weld",
-            status=OperationStatus.IN_PROGRESS,
-            company_id=world.company_id,
-        )
-        db_session.add(op)
-        db_session.flush()
-        make_closed_time_entry(db_session, user=world.reporter, op=op, quantity_produced=5)
+        part, wo, op = _reconcilable_job(db_session, world, "0001")
+        db_session.commit()
         _id, token = issue_token(client, admin_headers, viewer, scope="read_only", ai_external=ai_external)
         enqueued: List[int] = []
         monkeypatch.setattr(notification_outbox, "_enqueue_dispatch", enqueued.append)
+        url = RECONCILE_READS[route](wo, op)
 
-        response = client.get(f"{API}/work-orders/{wo.id}", headers=bearer(token))
-        assert response.status_code == 200, response.text[:400]
+        before = _db_state(db_session)
+        response = client.get(url, headers=bearer(token))
+        if ai_external and route not in AI_EXTERNAL_RECONCILE_READS:
+            assert response.status_code == 403, response.text[:400]
+            assert response.json()["detail"] == AI_EXTERNAL_ROUTE_DENIED_DETAIL
+        else:
+            assert response.status_code == 200, response.text[:400]
+        if route == "work_order":
+            assert response.json()["status"] == WorkOrderStatus.IN_PROGRESS.value, "the stored state is served"
 
+        assert _db_state(db_session) == before, "a narrowed token's GET wrote something"
+        assert enqueued == [], "nothing reached the notification outbox"
+        assert db_session.get(WorkOrderOperation, op.id).status == OperationStatus.IN_PROGRESS
+        assert db_session.get(WorkOrder, wo.id).status == WorkOrderStatus.IN_PROGRESS
+
+        # The same GET by the same user, signed in as a person, reconciles as it always has.
+        person = client.get(url, headers=user_headers(viewer))
+        assert person.status_code == 200, person.text[:400]
         db_session.expire_all()
         assert db_session.get(WorkOrderOperation, op.id).status == OperationStatus.COMPLETE
         assert db_session.get(WorkOrder, wo.id).status == WorkOrderStatus.COMPLETE
@@ -713,6 +769,43 @@ class TestReadsThatWrite:
         assert {"operation_completed", "work_order_completed"} <= set(completions)
         assert {"operation_completed", "work_order_completed"} <= set(SOURCE_EVENT_TYPE_TO_KEY), "notification sources"
         assert completions["work_order_completed"] in enqueued, "the outbox enqueued its notification at commit"
+        assert _db_state(db_session)["audit_rows"] > before["audit_rows"], "the person's reconcile is audited"
+
+    def test_a_full_token_still_reconciles(
+        self, client: TestClient, db_session: Session, world: World, admin_headers: dict, test_user: User
+    ):
+        """Only the NARROWED tokens changed: a full token's GET reconciles, recorded as its user."""
+        _part, wo, op = _reconcilable_job(db_session, world, "0002")
+        db_session.commit()
+        _id, token = issue_token(client, admin_headers, test_user)
+        response = client.get(f"{API}/work-orders/{wo.id}", headers=bearer(token))
+        assert response.status_code == 200, response.text[:400]
+        db_session.expire_all()
+        assert db_session.get(WorkOrderOperation, op.id).status == OperationStatus.COMPLETE
+        assert db_session.get(WorkOrder, wo.id).status == WorkOrderStatus.COMPLETE
+
+    def test_the_component_quantity_rederivation_is_skipped_too(
+        self, client: TestClient, db_session: Session, world: World, admin_headers: dict, viewer: User, monkeypatch
+    ):
+        """``GET /work-orders/{id}`` also re-derives component quantities from the BOM and commits
+        them; a narrowed token's GET never calls it, a person's does."""
+        from app.api.endpoints import work_orders as work_orders_endpoint
+
+        calls: List[int] = []
+        real = work_orders_endpoint._reconcile_operation_component_quantities
+
+        def spy(db, work_order, company_id):
+            calls.append(work_order.id)
+            return real(db, work_order, company_id)
+
+        monkeypatch.setattr(work_orders_endpoint, "_reconcile_operation_component_quantities", spy)
+        _part, wo, _op = _reconcilable_job(db_session, world, "0003")
+        db_session.commit()
+        _id, token = issue_token(client, admin_headers, viewer, scope="read_only", ai_external=False)
+        assert client.get(f"{API}/work-orders/{wo.id}", headers=bearer(token)).status_code == 200
+        assert calls == []
+        assert client.get(f"{API}/work-orders/{wo.id}", headers=user_headers(viewer)).status_code == 200
+        assert calls == [wo.id]
 
 
 # --------------------------------------------------------------------------- file bytes

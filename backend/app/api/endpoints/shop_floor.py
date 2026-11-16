@@ -30,7 +30,7 @@ from app.api.deps import (
 )
 from app.core.cache import invalidate_work_centers_cache
 from app.core.config import settings
-from app.core.credentials import is_api_token_credential
+from app.core.credentials import is_api_token_credential, is_narrowed_api_token
 from app.core.observability import report_absorbed_exception
 from app.core.realtime import safe_broadcast
 from app.core.time_utils import CENTRAL_TIME_ZONE, to_utc_iso
@@ -568,7 +568,17 @@ def _reconcile_and_commit(db: Session, work_orders: list[WorkOrder], current_use
 
     (The root ``sequence_number`` race is a separately-tracked follow-up; this
     guard only guarantees reads never 500.)
+
+    READ-ONLY MEANS READ-ONLY (lead decision, Claude-plugin brief build 2026-11-15): a
+    narrowed API token -- read-only, AI-external, or both (``is_narrowed_api_token``) --
+    never reconciles. Its GET serves the STORED state and writes nothing: no status flip,
+    no audit row, no OperationalEvent (so no outbox notification), no inventory movement,
+    no cost or scheduling rollup, all of which would otherwise be recorded as the token's
+    user. People, full API tokens and kiosk / display credentials are unchanged, and the
+    next read by one of them reconciles exactly as before (the reconcile is idempotent).
     """
+    if is_narrowed_api_token(current_user):
+        return
     transitions: list[StatusTransition] = []
     try:
         if reconcile_work_orders_from_completion_evidence(db, work_orders, transitions):

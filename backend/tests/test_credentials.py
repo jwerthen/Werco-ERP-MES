@@ -127,3 +127,31 @@ def test_a_non_token_credential_is_never_narrowed(user):
     """A person (or a badge) never inherits a token's narrowing, whatever stale markers say."""
     assert credentials.is_read_only_api_token(user) is False
     assert credentials.is_ai_external_credential(user) is False
+    assert credentials.is_narrowed_api_token(user) is False
+
+
+@pytest.mark.parametrize(
+    "scope,ai_external,expected",
+    [
+        ("full", False, False),
+        ("read_only", False, True),
+        ("read_only", True, True),
+        # A tampered full + AI-external row is still narrowed (AI-external is read-only whatever
+        # its scope says), and every missing marker fails closed.
+        ("full", True, True),
+        (None, False, True),
+        ("full", None, True),
+    ],
+)
+def test_is_narrowed_api_token_is_the_union_and_fails_closed(scope, ai_external, expected):
+    user = SimpleNamespace(
+        _api_token_id=7, _token_scope="api", _api_token_scope=scope, _api_token_ai_external=ai_external
+    )
+    assert credentials.is_narrowed_api_token(user) is expected
+
+
+def test_the_egress_switch_refusal_text_is_the_documented_one():
+    assert credentials.API_TOKEN_EGRESS_SWITCH == (
+        "A company egress kill switch (AI, SMS, carrier or label-print egress) is turned on or off by an Admin "
+        "signed in to the app, not an API token: opening or closing data egress is a person's judgment."
+    )

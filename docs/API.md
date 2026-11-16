@@ -750,13 +750,17 @@ tokens" below), never wider.
 > not tell them apart either. If the check fails, the answer is **503**
 > `"Export-control check failed; nothing was sent."`.
 >
-> Global search (`GET /search/`) never returns `user` results to a read-only token. "Read-only"
-> means no non-GET request. A reconcile-on-read GET (`/work-orders/`, `/work-orders/{id}`, the
-> shop-floor operation reads) still commits what the reconcile finds, as the token's user. When
-> closed labor already holds a full good count, that includes completing the operation and the work
-> order, posting the finished-goods receipt and any gated backflush or tied-material consumption,
-> rolling up job cost, and emitting the completion events that the notification outbox delivers as
-> in-app and email notifications. GET exporters that write an `EXPORT` audit row (visitor log CSV,
+> Global search (`GET /search/`) never returns `user` results to a read-only token. **Read-only
+> means read-only** (lead decision 2026-11-15): a read-only or AI-external token
+> (`app.core.credentials.is_narrowed_api_token`) never reconciles on read. Its `GET /work-orders/`,
+> `GET /work-orders/{id}`, `GET /shop-floor/dashboard`, `GET /shop-floor/operations` and
+> `GET /shop-floor/operations/{id}` serve the **stored** state and write nothing — no status flip,
+> no component-quantity re-derivation, no audit row, no operational event or notification, no
+> finished-goods receipt, backflush or material consumption, no cost or scheduling rollup. The
+> next such read by a person or a full token reconciles exactly as before, so until then what a
+> narrowed token sees can lag what the floor's labor already recorded. The writes that remain
+> are the token's `last_used_at` touch and, for an AI-external token, the `controlled_access_events`
+> ledger. GET exporters that write an `EXPORT` audit row (visitor log CSV,
 > Import Center failed rows, consumable checkouts, `/analytics` report export) refuse a read-only
 > token **403** `"Read-only API token cannot download files."` before that row is written. The rules for which records are withheld, and the steps to hand
 > a token to Claude, are in [docs/EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md).
@@ -9182,7 +9186,7 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 | GET | `/receiving/locations` | Receivable inventory locations | Yes |
 | POST | `/receiving/receipt/{receipt_id}/print-label` | Manually (re)print the 4×6 thermal receiving label | Admin / Manager / Supervisor |
 | GET | `/receiving/print-profile` | Get the company ProxyBox print profile (key masked; **404** until created) | Admin |
-| PUT | `/receiving/print-profile` | Create / update the print profile, incl. the `allow_print_egress` kill switch | Admin |
+| PUT | `/receiving/print-profile` | Create / update the print profile, incl. the `allow_print_egress` kill switch | Admin, signed in (any API token **403**; not an MCP tool) |
 
 > **Lot number (`lot_number`).** Optional on `POST /receiving/receive` (max 50 chars): when
 > blank or omitted the server auto-assigns the receipt number (unique, company-scoped) as the
@@ -9481,7 +9485,9 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 >   Omitted fields are left unchanged. Read responses expose only `api_key_last4` /
 >   `has_api_key`; secrets never appear in audit / event payloads. Flipping
 >   `allow_print_egress` (default OFF) is recorded as a **status change** on the
->   tamper-evident audit trail.
+>   tamper-evident audit trail. The route is the switch's only writer, so the **whole**
+>   route refuses any API token **403** before reading or writing anything, and it is not an
+>   MCP tool — see [Egress kill switches are a person's judgment](#egress-kill-switches-are-a-persons-judgment).
 >
 > Auto-print on receipt is a separate, best-effort ARQ job enqueued by
 > `POST /receiving/receive` after commit; it no-ops unless the profile is active with
@@ -10964,15 +10970,18 @@ The active company's own profile and self-managed settings. Mounted under `/comp
 |--------|----------|-------------|---------------|
 | GET | `/companies/me` | Get the active company (includes `allow_ai_egress`, `allow_sms_egress`, and `user_count`) | Any authenticated user |
 | PUT | `/companies/me` | Update the active company's settings | Admin |
-| PUT | `/companies/me/ai-egress` | Toggle the company's **AI document-extraction egress kill switch** (`allow_ai_egress`), which also gates every AI-external API token | Admin |
-| PUT | `/companies/me/sms-egress` | Toggle the company's **notification-SMS egress kill switch** (`allow_sms_egress`) | Admin |
+| PUT | `/companies/me/ai-egress` | Toggle the company's **AI document-extraction egress kill switch** (`allow_ai_egress`), which also gates every AI-external API token | Admin, signed in (any API token **403**; not an MCP tool) |
+| PUT | `/companies/me/sms-egress` | Toggle the company's **notification-SMS egress kill switch** (`allow_sms_egress`) | Admin, signed in (any API token **403**; not an MCP tool) |
 
 > **`allow_ai_egress` is the AI-egress CUI kill switch (default OFF).** It gates **all** outbound
 > AI document-extraction egress to the Anthropic API (the AI analogue of `allow_carrier_egress` /
 > `allow_print_egress`), enforced fail-closed at the shared LLM client. `PUT /companies/me/ai-egress`
 > takes `{ "allow_ai_egress": boolean }` and returns the updated `CompanyResponse`; the flip is
 > recorded on the tamper-evident audit trail as both a field update and an
-> `ai_egress_enabled` / `ai_egress_disabled` **status change**. While OFF, AI features (PO/quote,
+> `ai_egress_enabled` / `ai_egress_disabled` **status change**, both **required** evidence in the
+> flip's own transaction: if either row cannot be written the flip is rolled back and the answer
+> is **503** `"The audit record for this AI egress change could not be saved; nothing was changed.
+> Retry."`. Sending the value the company already has writes nothing. While OFF, AI features (PO/quote,
 > BOM, QMS, routing, laser-nest PDF extraction, Copilot, NL search) **degrade gracefully** — no
 > request leaves the boundary (laser-nest extraction falls back to filename-only). It is also the
 > per-company switch for applying AI recommendations (owner ruling 3, 2026-11-05): while OFF,
@@ -11004,6 +11013,19 @@ The active company's own profile and self-managed settings. Mounted under `/comp
 > configuration and a per-user opt-in with a saved phone number. Exposed in the UI at
 > **Admin Settings → SMS Privacy** (`/admin/settings?tab=smsprivacy`). See
 > [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#sms-channel-twilio).
+
+#### Egress kill switches are a person's judgment
+
+> The four routes that flip a company egress kill switch — `PUT /companies/me/ai-egress`,
+> `PUT /companies/me/sms-egress`, `PUT /admin/settings/shipping-profile` (`allow_carrier_egress`)
+> and `PUT /receiving/print-profile` (`allow_print_egress`) — refuse **any** API token, whatever
+> its role or scope, with **403** `"A company egress kill switch (AI, SMS, carrier or label-print egress) is turned on or off by an Admin signed in to the app, not an API token: opening or closing data egress is a person's judgment."`, before reading or writing anything (lead decision,
+> Claude-plugin brief build 2026-11-15; `app.core.credentials.API_TOKEN_EGRESS_SWITCH`). A
+> read-only token meets the read-only gate's `"Read-only API token cannot modify data."` first.
+> The two profile routes are refused whole, since each is its switch's only writer. None of the
+> four is an MCP tool (`catalog.EXCLUDED_OPERATIONS`), so an agent holding a person's own JWT
+> cannot reach them either; the profile `GET`s stay tools. An Admin signed in to the app is
+> unchanged. See [RBAC_PERMISSIONS.md → Credential policy for judgment writes](RBAC_PERMISSIONS.md#credential-policy-for-judgment-writes).
 
 ### Company onboarding and platform administration
 
@@ -11038,7 +11060,7 @@ shipping integration. All routes are mounted under `/admin/settings` and gated t
 | DELETE | `/admin/settings/carrier-accounts/{id}` | **Soft-delete** a carrier account (never physical — purchased labels/BOLs reference it) | Admin |
 | POST | `/admin/settings/carrier-accounts/{id}/test-connection` | Validate the stored credential (the **only** carrier call exempt from the egress kill switch — sends no customer data) | Admin |
 | GET | `/admin/settings/shipping-profile` | Get the company shipping profile (ship-from origin + egress flag); **404** until created | Admin |
-| PUT | `/admin/settings/shipping-profile` | Create / update the shipping profile, including the `allow_carrier_egress` kill switch | Admin |
+| PUT | `/admin/settings/shipping-profile` | Create / update the shipping profile, including the `allow_carrier_egress` kill switch | Admin, signed in (any API token **403**; not an MCP tool) |
 
 > **Secrets are write-only.** `api_key` and `webhook_secret` are accepted on create/update,
 > **Fernet-encrypted** before storage, and **never returned** — read responses expose only
@@ -11048,7 +11070,10 @@ shipping integration. All routes are mounted under `/admin/settings` and gated t
 >
 > **`allow_carrier_egress` is the CUI kill switch (default OFF).** A new profile is created with
 > egress **disabled**; it flips only when an admin sets it on `PUT /shipping-profile`, and that toggle
-> is recorded as a **status change** on the tamper-evident audit trail. While OFF, every
+> is recorded as a **status change** on the tamper-evident audit trail. The route is the switch's
+> only writer, so the **whole** route refuses any API token **403** before reading or writing
+> anything, and it is not an MCP tool — see
+> [Egress kill switches are a person's judgment](#egress-kill-switches-are-a-persons-judgment). While OFF, every
 > customer-data-bearing carrier call (`/shipping/validate-address`, `/rate-shop`, `/buy-label`,
 > `/buy-bol`, `/schedule-pickup`, `/void-label`, `/refund`) is blocked with **409**.
 
@@ -13001,17 +13026,19 @@ What matters from this file's point of view:
   routers with the caller's own bearer token. The router is the boundary: the same `require_role`
   gates, tenant scoping, audit rows, optimistic-locking 409s and per-endpoint size caps apply, and a
   401/403/409/422 comes back verbatim as an `is_error` tool result carrying the server's `detail`.
-- **The catalog is this API.** 751 tools are generated from `app.openapi()` at startup — every
+- **The catalog is this API.** 747 tools are generated from `app.openapi()` at startup — every
   secured operation except the `Authentication`, `Carrier Webhooks`, `Error Logging` (and its router-level `errors` twin) and `WebSocket` tags, the
   unauthenticated health/station-login routes (named one by one in `catalog.PUBLIC_OPERATIONS`) and
-  the five operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders
+  the nine operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders
   (`POST /work-orders/import`, `POST /purchasing/purchase-orders/import` — they mint work orders
   RELEASED / IN_PROGRESS and POs SENT, a record of a past system rather than a user action) and
   AI Accept & apply (`POST /ai/recommendations/{recommendation_id}/apply` — owner ruling 3: only a
   person signed in to the app runs an AI recommendation's action; the route also refuses API
   tokens) and the two customer export-control writes (`POST /customers/{id}/contracts`,
   `PUT /customers/{id}/contracts/{contract_id}` — only an Admin signed in to the app marks a
-  customer controlled) — plus 15 fixed-name convenience tools that shadow 16
+  customer controlled) and the four company egress kill-switch writes (`PUT /companies/me/ai-egress`,
+  `PUT /companies/me/sms-egress`, `PUT /admin/settings/shipping-profile`, `PUT /receiving/print-profile`
+  — an egress switch is a person's judgment; the routes also refuse API tokens) — plus 15 fixed-name convenience tools that shadow 16
   raw routes (`POST /work-orders/`, `PUT /work-orders/{id}`, `POST /work-orders/{id}/release`, the two
   nest-package imports, the manual nest add, `GET /search/`, …) to enforce agent rules the routes do
   not: create/duplicate always land DRAFT, release is a separate explicit tool and the generic update

@@ -5,6 +5,7 @@ Company self-registration and self-management endpoints.
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
+from app.api.audit_guard import required_audit
 from app.api.deps import (
     get_admin_user,
     get_audit_service,
@@ -13,6 +14,7 @@ from app.api.deps import (
     require_role,
 )
 from app.core.config import settings
+from app.core.credentials import API_TOKEN_EGRESS_SWITCH, is_api_token_credential
 from app.core.security import create_access_token, create_refresh_token
 from app.db.database import get_db
 from app.models.company import Company
@@ -29,6 +31,23 @@ from app.services.audit_service import AuditService
 from app.services.company_onboarding import onboard_company
 
 router = APIRouter()
+
+# What the AI-egress flip answers when its REQUIRED audit rows cannot be written (nothing saved).
+AI_EGRESS_AUDIT_UNAVAILABLE_DETAIL = (
+    "The audit record for this AI egress change could not be saved; nothing was changed. Retry."
+)
+
+
+def _refuse_api_token_egress_switch(current_user: User) -> None:
+    """403 for ANY API token on an egress kill-switch route, before anything is read or written.
+
+    Opening or closing data egress is a person's judgment (lead decision, Claude-plugin brief
+    build 2026-11-15): an Admin signed in to the app, never a standing machine credential,
+    whatever its role or scope. A crew-station badge token never reaches these routes (its
+    path fence keeps it on the shop floor).
+    """
+    if is_api_token_credential(current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=API_TOKEN_EGRESS_SWITCH)
 
 
 @router.post("/register", response_model=Token, summary="Register a new company")
@@ -128,47 +147,57 @@ def update_my_company_ai_egress(
     ADMIN-only, matching the sibling CUI egress kill switches
     ``allow_carrier_egress`` / ``allow_print_egress`` (a CUI-boundary decision is
     reserved to Admins). It is created OFF and only flips when an admin sets it here.
-    The flip is audited both as a field-level update AND as a security-relevant
-    status change so enabling/disabling egress lands on the tamper-evident trail.
+
+    A person's judgment: ANY API token is refused 403 (``API_TOKEN_EGRESS_SWITCH``) before
+    anything is read, and the route is not an MCP tool (``catalog.EXCLUDED_OPERATIONS``).
+
+    A real flip is REQUIRED evidence: a field-level UPDATE row and a security-relevant
+    STATUS_CHANGE row, written in the same transaction as the flip. If either cannot be
+    written the flip is rolled back and the answer is 503 -- nothing changed. Setting the
+    value the company already has writes nothing.
 
     Tenant-safe: only ever mutates the caller's OWN active company -- the company
     is loaded by ``get_current_company_id`` and never taken from the request body.
     """
+    _refuse_api_token_egress_switch(current_user)
     company = db.query(Company).filter(Company.id == company_id).first()
     if not company:
         raise HTTPException(status_code=404, detail="Company not found")
 
-    previous_egress = company.allow_ai_egress
-    company.allow_ai_egress = payload.allow_ai_egress
-    db.flush()
+    previous_egress = bool(company.allow_ai_egress)
+    if previous_egress == payload.allow_ai_egress:
+        # No change: nothing to write, nothing to audit (the STATUS_CHANGE fires only on a flip).
+        return CompanyResponse.model_validate(company)
 
     identifier = company.name or f"company:{company_id}"
-
-    audit.log_update(
-        resource_type="company",
-        resource_id=company.id,
-        resource_identifier=identifier,
-        old_values={"allow_ai_egress": previous_egress},
-        new_values={"allow_ai_egress": company.allow_ai_egress},
-        description="Company AI egress setting updated",
-    )
-
-    # The egress kill switch flipping is a security-relevant status change --
-    # record it explicitly on the tamper-evident trail whenever it actually changed.
-    if previous_egress != company.allow_ai_egress:
-        audit.log_status_change(
-            "company",
-            company.id,
-            identifier,
-            "ai_egress_enabled" if previous_egress else "ai_egress_disabled",
-            "ai_egress_enabled" if company.allow_ai_egress else "ai_egress_disabled",
+    with required_audit(db, AI_EGRESS_AUDIT_UNAVAILABLE_DETAIL):
+        company.allow_ai_egress = payload.allow_ai_egress
+        db.flush()
+        audit.log_required(
+            action=AuditService.ACTIONS["UPDATE"],
+            resource_type="company",
+            resource_id=company.id,
+            resource_identifier=identifier,
+            description="Company AI egress setting updated",
+            old_values={"allow_ai_egress": previous_egress},
+            new_values={"allow_ai_egress": company.allow_ai_egress},
+            extra_data={"changes": {"allow_ai_egress": {"old": previous_egress, "new": company.allow_ai_egress}}},
+        )
+        # The egress kill switch flipping is a security-relevant status change -- recorded
+        # explicitly on the tamper-evident trail, as required evidence too.
+        audit.log_required(
+            action=AuditService.ACTIONS["STATUS_CHANGE"],
+            resource_type="company",
+            resource_id=company.id,
+            resource_identifier=identifier,
             description=(
                 "AI document-extraction egress "
                 f"{'ENABLED' if company.allow_ai_egress else 'DISABLED'} for company {company_id}"
             ),
+            old_values={"status": "ai_egress_enabled" if previous_egress else "ai_egress_disabled"},
+            new_values={"status": "ai_egress_enabled" if company.allow_ai_egress else "ai_egress_disabled"},
         )
-
-    db.commit()
+        db.commit()
     db.refresh(company)
     return CompanyResponse.model_validate(company)
 
@@ -197,9 +226,13 @@ def update_my_company_sms_egress(
     The flip is audited both as a field-level update AND as a security-relevant status
     change so enabling/disabling egress lands on the tamper-evident trail.
 
+    A person's judgment: ANY API token is refused 403 (``API_TOKEN_EGRESS_SWITCH``) before
+    anything is read, and the route is not an MCP tool (``catalog.EXCLUDED_OPERATIONS``).
+
     Tenant-safe: only ever mutates the caller's OWN active company -- the company is
     loaded by ``get_current_company_id`` and never taken from the request body.
     """
+    _refuse_api_token_egress_switch(current_user)
     company = db.query(Company).filter(Company.id == company_id).first()
     if not company:
         raise HTTPException(status_code=404, detail="Company not found")
