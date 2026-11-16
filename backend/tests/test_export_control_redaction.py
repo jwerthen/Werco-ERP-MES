@@ -10,6 +10,7 @@ that the input is never mutated.
 from __future__ import annotations
 
 import copy
+from typing import Any, Dict, Optional, Set
 
 import pytest
 
@@ -24,6 +25,7 @@ from app.services.export_control_redaction import (
     compile_sensitive_pattern,
     customer_control,
     is_masked_lookup,
+    kept_numeric_key,
     normalize_key,
     redact_payload,
     scrub_text,
@@ -188,7 +190,7 @@ class TestNumbersInsideAWithheldRecord:
         ):
             assert out[key] == record[key], key
 
-    def test_json_numbers_stay_true_except_under_a_measurement_key(self):
+    def test_json_numbers_stay_only_under_id_count_quantity_money_and_duration_keys(self):
         record = {
             "work_order_id": 1,
             "quantity_ordered": 7,
@@ -197,6 +199,10 @@ class TestNumbersInsideAWithheldRecord:
             "target_quantity": 10,
             "char_number": 1,
             "total": 1234.5,
+            "created_by": 42,
+            "oee_pct": 81.5,
+            "good_parts": 40,
+            "hourly_rate": 85.0,
             "nominal": 0.25,
             "upper_limit": 0.2505,
             "measured_value": 0.2502,
@@ -205,15 +211,131 @@ class TestNumbersInsideAWithheldRecord:
             "is_conforming": True,
         }
         out = redact_payload(record, _index()).payload
-        for key in ("quantity_ordered", "priority", "actual_hours", "target_quantity", "char_number", "total"):
+        for key in (
+            "quantity_ordered",
+            "priority",
+            "actual_hours",
+            "target_quantity",
+            "char_number",
+            "total",
+            "created_by",
+            "oee_pct",
+            "good_parts",
+            "hourly_rate",
+        ):
             assert out[key] == record[key], key
         for key in ("nominal", "upper_limit", "measured_value", "diameter", "weight"):
             assert out[key] == R, key
         assert out["is_conforming"] is True
 
+    def test_a_number_under_a_key_nobody_listed_is_withheld(self):
+        """Code review P0 round 2, finding 2: JSON numbers were a DENYLIST. A legacy AI estimate's
+        ``flat_area`` (in2) and every number in its free-form JSON (``assumed_inches``) went out
+        true because no listed fragment was in the key. Numbers are now an allowlist, like text."""
+        estimate = {
+            "quote_id": 1,
+            "line_summaries": [
+                {
+                    "part_number": "PN-X",
+                    "flat_area": 7329.15287,
+                    "cut_length": 4321.98765,
+                    "bend_count": 7,
+                    "hole_count": 13,
+                    "quantity": 25,
+                    "unit_price": 12.5,
+                }
+            ],
+            "assumptions": [{"feature": "hole", "assumed_inches": 0.3125987, "assumed_mm": 7.94}],
+            "missing_specs": [{"field": "flange", "guess_in": 1.4142135}],
+            "confidence": {"overall": 0.8, "detail": {"profile_inches": 3.141592, "bend_radius_guess": 0.0625}},
+        }
+        base = _index()
+        index = _index(
+            controlled={**base.controlled, "quote": {1: ITAR}},
+            known={**base.known, "quote": frozenset({1})},
+        )
+        out = redact_payload(estimate, index).payload
+        line = out["line_summaries"][0]
+        assert line["flat_area"] == R and line["cut_length"] == R
+        assert (line["bend_count"], line["hole_count"], line["quantity"], line["unit_price"]) == (7, 13, 25, 12.5)
+        assert out["assumptions"][0]["assumed_inches"] == R and out["assumptions"][0]["assumed_mm"] == R
+        assert out["missing_specs"][0]["guess_in"] == R
+        assert out["confidence"]["detail"]["profile_inches"] == R
+        assert out["confidence"]["detail"]["bend_radius_guess"] == R
+        assert out["confidence"]["overall"] == R, "a key that names no count or amount keeps nothing"
+
+    @pytest.mark.parametrize("key", ["total_length", "length_count", "tolerance_percent", "total_weight", "area_qty"])
+    def test_a_dimension_key_is_withheld_even_when_it_also_names_a_count(self, key):
+        assert kept_numeric_key(key) is False
+        out = redact_payload({"work_order_id": 1, key: 12.5}, _index()).payload
+        assert out[key] == R
+
+    def test_a_number_with_no_counting_key_is_withheld_but_ids_stay(self):
+        out = redact_payload({"work_order_id": 1, "readings": [0.2501, 0.2502], "part_ids": [10, 11]}, _index())
+        assert out.payload["readings"] == [R, R]
+        assert out.payload["part_ids"] == [10, 11]
+
     def test_a_cleared_record_keeps_its_dimensions(self):
-        record = {"work_order_id": 2, "nominal": "0.2500", "diameter": 0.5}
+        record = {"work_order_id": 2, "nominal": "0.2500", "diameter": 0.5, "flat_area": 12.0}
         assert redact_payload(record, _index()).payload == record
+
+
+def _numeric_response_keys() -> Dict[str, Set[str]]:
+    """Every numeric property of every AI-external allowlisted route's 2xx response schema -> its routes."""
+    from app.core.config import settings
+    from app.core.export_control import AI_EXTERNAL_ALLOWED_ROUTES
+    from app.main import app
+
+    spec = app.openapi()
+    components = spec.get("components", {}).get("schemas", {})
+    prefix = settings.API_V1_PREFIX.rstrip("/")
+    found: Dict[str, Set[str]] = {}
+
+    def walk(schema: Any, key: Optional[str], seen: frozenset, route: str) -> None:
+        if not isinstance(schema, dict):
+            return
+        ref = schema.get("$ref")
+        if isinstance(ref, str):
+            name = ref.rsplit("/", 1)[-1]
+            if name not in seen:
+                walk(components.get(name, {}), key, seen | {name}, route)
+            return
+        for combinator in ("anyOf", "oneOf", "allOf"):
+            for option in schema.get(combinator, []):
+                walk(option, key, seen, route)
+        if schema.get("type") in ("number", "integer") and key is not None:
+            found.setdefault(key, set()).add(route)
+        if isinstance(schema.get("items"), dict):
+            walk(schema["items"], key, seen, route)
+        for name, prop in (schema.get("properties") or {}).items():
+            walk(prop, name, seen, route)
+        if isinstance(schema.get("additionalProperties"), dict):
+            walk(schema["additionalProperties"], key, seen, route)
+
+    for method, path in AI_EXTERNAL_ALLOWED_ROUTES:
+        operation = spec["paths"][prefix + path][method.lower()]
+        for status, response in operation.get("responses", {}).items():
+            if status.startswith("2"):
+                for media in (response.get("content") or {}).values():
+                    walk(media.get("schema", {}), None, frozenset(), path)
+    return found
+
+
+# The numeric response fields withheld inside a withheld record: dimensions of the article.
+# Everything else an allowlisted route types as a number is a count, quantity, duration, money
+# amount, rate, percentage, id or sequence and stays true (the settled design: counts, ids,
+# statuses, dates, quantities and OEE stay true).
+EXPECTED_WITHHELD_NUMERIC_FIELDS = {"cut_length", "flat_area"}
+
+
+def test_every_numeric_field_an_allowlisted_route_serves_is_classified():
+    """The guard for the number allowlist: a new numeric field on an AI-external response is
+    either kept (it names a count / amount / id ...) or listed here as a withheld dimension --
+    never silently withheld (a count going missing) and never silently kept (a dimension)."""
+    fields = _numeric_response_keys()
+    assert len(fields) > 50, "vacuous: the schema walk found too few numeric fields"
+    withheld = {key for key in fields if not kept_numeric_key(key)}
+    assert withheld == EXPECTED_WITHHELD_NUMERIC_FIELDS, {key: sorted(fields[key]) for key in withheld}
 
 
 class TestIdentification:

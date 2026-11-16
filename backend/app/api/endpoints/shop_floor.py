@@ -230,12 +230,16 @@ def _emit_reconcile_events(
     EVT-4: reconcile-on-read materializes operation/WO completions from durable
     TimeEntry evidence. Those transitions must produce the SAME in-process signal as
     the live completion paths -- ``operation_completed`` / ``work_order_completed`` --
-    so AI/realtime consumers aren't blind to reconcile-driven completions. This is
-    intentionally IN-PROCESS ONLY: we do NOT fire outbound notifications/webhooks from
-    a GET/reconcile path (a read must not have outbound side-effects; rank 12 will move
-    reconcile to a debounced ARQ job, at which point the outbound dispatch can move with
-    it). Best-effort and tenant-scoped (``emit`` validates the WO/op belong to
-    ``company_id``); a signal failure must never 500 a read, so this is wrapped.
+    so AI/realtime consumers aren't blind to reconcile-driven completions. The outbound
+    completion-SIGNAL job (``enqueue_work_order_completion_signals``) is deliberately not
+    enqueued from a GET/reconcile path (rank 12 will move reconcile to a debounced ARQ job,
+    at which point it can move with it). NOTIFICATIONS are not suppressed, though:
+    ``OperationalEventService.emit`` tees every notification-catalog source event into the
+    transactional outbox, and both of these are sources (``wo.completed`` is in-app + email
+    by default), so they are delivered when the read commits, attributed to the reader --
+    an API token's user included (docs/EXPORT_CONTROL_AI_EGRESS.md, section 9). Best-effort
+    and tenant-scoped (``emit`` validates the WO/op belong to ``company_id``); a signal
+    failure must never 500 a read, so this is wrapped.
     """
     if not transitions:
         return
@@ -570,7 +574,8 @@ def _reconcile_and_commit(db: Session, work_orders: list[WorkOrder], current_use
         if reconcile_work_orders_from_completion_evidence(db, work_orders, transitions):
             _audit_reconcile_transitions(db, current_user, transitions, company_id)
             # EVT-4: emit the in-process completion events for the materialized
-            # transitions (NO outbound notify/webhook on a read -- see helper).
+            # transitions (no completion-signal job on a read; notifications DO go out
+            # through the outbox -- see helper).
             _emit_reconcile_events(db, company_id, current_user, transitions)
             # MS-2: refresh cached work-center availability for reconcile-driven WO
             # completions, joined to this read's unit of work (commit=False).

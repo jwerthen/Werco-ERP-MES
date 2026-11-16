@@ -40,13 +40,17 @@ uncompressed JSON) then reads the marker:
   per withheld record is written and committed, then the body is sent with a corrected
   `Content-Length` and no `ETag`. One exception: `GET /parts/by-number/{part_number}` that finds a
   **withheld** part answers the same **404** a number nobody carries gets (the lookup is still
-  ledgered). A 200, even fully redacted, would confirm that the probed part number exists.
+  ledgered). A 200, even fully redacted, would confirm that the probed part number exists. The
+  two 404s also **cost the same**: a number that matches nothing builds the same index and
+  commits one `ai_external_lookup_miss` ledger row before it is answered, so response time does
+  not tell a withheld part from a missing one either.
 - **JSON, error status (a route's own error, not a gate refusal):** the body is replaced by one
   fixed text per status code, `"Request failed (<code> <phrase>); details are withheld from
   AI-external API tokens."`, with fresh headers. A **422** also carries `errors`: each one's `type`
   and location (`["query", "limit"]`) and `"msg": "Invalid value."`, never the value sent. A route
   error can echo the request (a 422's `input`, a 404 naming the number asked for), and scrubbing
-  an echoed part number to `[export-controlled]` would itself confirm the probe. No ledger rows.
+  an echoed part number to `[export-controlled]` would itself confirm the probe. No ledger rows,
+  except the part-number lookup's own 404 above (`ai_external_lookup_miss`).
 - **A refusal marker on a non-error response** (something caught a gate's 403 and the route
   answered 2xx anyway): **503**, nothing of that body is sent. The refusal is still ledgered.
 - **Any failure** building the index, redacting or writing the ledger: **503**
@@ -110,6 +114,28 @@ name that matches no customer might be a controlled customer misspelled, so it i
 the text pass. If a cleared customer and a controlled customer share a normalized name or code,
 that key counts as controlled.
 
+**A controlled customer's former names stay controlled.** Every name and code a controlled
+customer has carried, read from its own `audit_log` rows (the CREATE row, each rename's UPDATE
+row), counts as that customer's, and is added to the text pass. So renaming a controlled customer
+frees nothing: if another customer later takes the old name, or already carries it as a name or
+code, the records filed under the old name stay withheld. The same holds when the rename came
+first and the customer was marked afterwards. Former names only ever control. A record is still
+cleared only by a customer's **current** name or code, so an old name of an uncontrolled customer
+resolves to nothing and is withheld as unlinkable. Two writes back this up:
+
+- A **rename** (`PUT /customers/{id}` changing `name`) writes its audit row as required evidence.
+  If the row cannot be written, the rename is refused **503** `"The audit record for this customer
+  rename could not be saved; nothing was changed. Retry."` and nothing is saved. Other customer
+  edits keep their best-effort audit.
+- A customer that has any export-control contract or handling instruction cannot be
+  **hard-deleted**: **400** `"Cannot hard delete: Customer has export-control contracts or handling
+  instructions. Soft delete it instead."` A soft-deleted customer keeps its row, its names and its
+  contracts.
+
+The cost is over-redaction of an unrelated customer who happens to take the old name: its
+records are withheld too, because a name cannot tell the two apart. Rename that customer to fix
+it.
+
 ### Linkage map
 
 | Record | Withheld when |
@@ -147,8 +173,9 @@ The ERP cannot tie these to any customer, so they are withheld with `denial_reas
 
 **Expect over-redaction.** Free-text names that drifted from the customer master after a rename, a
 typo, or a name never entered are withheld until they resolve. That is the fail-closed direction.
-Nothing leaks, but the connector sees more `[export-controlled]` than the data strictly needs. To
-size it before go-live, run these read-only queries:
+Taking a renamed customer's old name for another customer does not clear those records either
+(see former names, above). The connector sees more `[export-controlled]` than the data strictly
+needs. To size it before go-live, run these read-only queries:
 
 ```sql
 -- Work orders whose customer_name matches no customer of their company (by name or code)
@@ -186,7 +213,10 @@ these hold:
   operation detail's `all_operations` (its siblings, by `id`) and a work-order timeline's `items`
   (an operation's start / finish, by its `#operation-<id>` link). A cleared work order can hold a
   withheld operation, one whose component part is unlinkable, and that operation's name must not
-  reach the token through a sibling's detail or the timeline.
+  reach the token through a sibling's detail or the timeline. Every timeline item one operation
+  owns also carries `operation_id`: its start and finish, its production receipts, process-step
+  evidence and labor, and a blocker filed against it. A blocker links to `#job-blockers`, not to
+  its operation, so its free-text title is withheld through that field.
 
 Inside a withheld object a **keep-allowlist** applies. These stay true:
 
@@ -194,16 +224,28 @@ Inside a withheld object a **keep-allowlist** applies. These stay true:
 - status, state, priority, sequence and version;
 - date and time fields;
 - booleans and nulls;
-- JSON numbers, **except** under a key that names a measurement or dimension of the article
-  (`nominal`, `toleran…`, `…value`, `measur…`, `dimension`, `diameter`, `thickness`, `length`,
-  `width`, `height`, `depth`, `angle`, `radius`, `weight`, `torque`, `pressure`, `temperature`,
-  `hardness`, `tensile`, `limit`, `target`) and no count / quantity / duration / money word;
-- numeric **strings** (a Decimal serializes as one) only under a key naming a count, quantity,
-  duration, money amount or sequence (`quantity`, `qty`, `count`, `hours`, `minutes`, `seconds`,
-  `days`, `duration`, `cost`, `price`, `total`, `amount`, `tax`, `shipping`, `stock`, `reorder`,
-  `percent`, `sequence`, `version`, `priority`, `runs`, `pieces`). This is an allowlist: an FAI's
-  `nominal`, `tolerance_plus`, `tolerance_minus` and `actual_value`, and an NCR's `actual_value` /
-  `required_value`, are withheld, as is a number under any key the list does not name;
+- numbers, both JSON numbers and numeric **strings** (a Decimal serializes as one), **only**
+  under a key that names an id, count, quantity, duration, money amount, rate, percentage or
+  sequence. The key must be an id (`id`, `*_id`, `*_ids`, or a `*_by` user id), a status, a kept
+  identifier, one of `char_number`, `line_number`, `step_number`, `balloon_number` or a
+  pagination key, or contain one of `quantity`, `qty`, `count`, `hours`, `minutes`, `seconds`,
+  `days`, `duration`, `time`, `cost`, `price`, `total`, `amount`, `tax`, `shipping`, `stock`,
+  `reorder`, `percent`, `pct`, `rate`, `sequence`, `version`, `priority`, `runs`, `piece`,
+  `parts`, `order`, `rank`, `rating`, `score`, `confidence`, `efficiency`, `passed`, `failed`,
+  `complete` or `short`. A numeric string under a text key (a numeric part number) is withheld
+  anyway. A key that names a dimension or measurement of the article is withheld even when it
+  also names a count or total (`total_length`, `tolerance_percent`): `nominal`, `toleran…`,
+  `measur…`, `dimension`, `diameter`, `thickness`, `length`, `width`, `height`, `depth`,
+  `angle`, `radius`, `area`, `perimeter`, `volume`, `weight`, `mass`, `gauge`, `inch`, `torque`,
+  `pressure`, `temperature`, `hardness`, `tensile`, or the word `mm` / `cm`. This is an
+  allowlist: an FAI's `nominal`, `tolerance_plus`, `tolerance_minus` and `actual_value`, an NCR's
+  `actual_value` / `required_value`, a legacy AI estimate's `flat_area` and `cut_length`, and a
+  number under any key the list does not name, such as `assumed_inches` in an estimate's
+  free-form JSON, are withheld. Every numeric field an allowlisted route types in its response
+  schema is pinned kept or withheld by
+  `tests/test_export_control_redaction.py`; today only `flat_area` and `cut_length` are withheld.
+  Members of a free-form JSON object keep a number only under their own counting key, so a
+  legacy AI estimate's `totals.grand_total` stays and its `totals.material` does not;
 - the business identifiers `work_order_number`, `wo_number`, `operation_number`, `ncr_number`,
   `car_number`, `fai_number`, `quote_number`, `po_number`, `receipt_number`, `lot_number`,
   `work_center_code` and `work_center_name`.
@@ -348,10 +390,10 @@ The middleware writes the ledger in its own short-lived session, as one bulk ins
 
 | Column | Value |
 |---|---|
-| `action` | `ai_external_redacted` (one row per withheld record per request, deduplicated) or `ai_external_refused` (one row per refused request) |
-| `record_type` / `record_id` | the withheld record, for example `work_order` / `412`; `request` / NULL for a refusal |
+| `action` | `ai_external_redacted` (one row per withheld record per request, deduplicated), `ai_external_refused` (one row per refused request) or `ai_external_lookup_miss` (one row per part-number lookup that matched nothing, §1) |
+| `record_type` / `record_id` | the withheld record, for example `work_order` / `412`; `request` / NULL for a refusal; `part` / NULL for a lookup miss |
 | `allowed` | always false |
-| `denial_reason` | `export_controlled_customer`, `unlinkable_record`, `ai_egress_disabled`, `route_not_allowlisted`, `query_parameter_not_allowlisted` or `non_json_response` |
+| `denial_reason` | `export_controlled_customer`, `unlinkable_record`, `ai_egress_disabled`, `route_not_allowlisted`, `query_parameter_not_allowlisted`, `non_json_response` or `not_found` (a lookup miss) |
 | `data_classification` | `itar_export_controlled`, `cui`, or `unknown` (unlinkable records and refusals) |
 | `user_id` | the token's user |
 | `request_id` / `source_ip` | the request's correlation id and client address |
@@ -430,9 +472,17 @@ Deactivating Werco Assistant revokes its tokens too.
   are kept identifiers anyway.
 - **Read-only means no non-GET request, not "causes no writes".** Allowlisted reads that reconcile
   on read can still write:
-  - `GET /work-orders/`, `/work-orders/{id}` and `/shop-floor/operations…` can commit status
-    reconciliation and audit rows, attributed to Werco Assistant with the token's
-    `extra_data.credential`;
+  - `GET /work-orders/`, `/work-orders/{id}` and `/shop-floor/operations…` run reconcile-on-read
+    and commit whatever it finds, all recorded as Werco Assistant (audit rows carry the token's
+    `extra_data.credential`). That is not only status. When an operation's closed labor already
+    holds a full good count, one such GET **completes the operation, and the work order with
+    it**. It then posts that work order's finished-goods receipt to inventory, runs the gated BOM
+    backflush and tied-material consumption, so stock can leave inventory, and rolls up job
+    hours and cost. It also emits the `operation_completed` / `work_order_completed` events,
+    which the notification outbox turns into the in-app and email completion notifications
+    (`wo.completed` goes to Supervisors and Managers by default). The outbound completion-signal
+    job is still not enqueued from a read. A person opening the same work order would trigger
+    the same reconcile. The difference is only who is recorded as having done it;
   - every request touches the token's `last_used_at`, at most once per 5 minutes.
 
   GET **exporters** that write an `EXPORT` audit row before streaming the file (visitor log CSV,
@@ -440,6 +490,12 @@ Deactivating Werco Assistant revokes its tokens too.
   refuse a read-only or AI-external token **403** `"Read-only API token cannot download files."`
   *before* that row is written, so the audit trail never records an export the caller did not
   receive. A new exporter must call `refuse_file_export_to_narrowed_token` the same way.
+- **Former customer names come from the audit log.** They are read from the customer's own
+  `audit_log` rows (§3). A rename made outside the app, such as direct SQL, leaves no row, so
+  that old name is not protected. Neither is a name a free-text record carries that was never a
+  customer's name or code. Both resolve to no customer, so they are withheld until someone
+  creates a customer under that name. A rename made through the app cannot leave no row: its row
+  is required evidence.
 - **The stdio bridge.** A bridge started with an AI-external token narrows its own listing from the
   token's unverified `ai_ext` claim and has no egress check of its own. The API layer refuses every
   call regardless, and that is the control.

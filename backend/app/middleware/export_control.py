@@ -205,6 +205,18 @@ class _Responder:
         if message["type"] == "http.response.start":
             await self._on_start(message)
             return
+        if self.mode is None:
+            # A message before the response starts -- Starlette's ``http.response.debug``,
+            # which a template response sends when the server offers that extension. With no
+            # marker the request is none of this layer's business: forward it untouched (it
+            # used to fall through to the buffering branch and turn a person's response into a
+            # 503). With a marker nothing unchecked may pass: it is dropped, and the response
+            # that follows is checked as usual.
+            if isinstance(self.state.get(EXPORT_CONTROL_STATE_KEY), ExportControlMarker):
+                logger.warning("Dropped %s sent before the response started (export control)", message["type"])
+                return
+            await self._send(message)
+            return
         if self.mode == self.PASS:
             await self._send(message)
             return

@@ -36,6 +36,8 @@ from fastapi import Depends
 from fastapi.responses import PlainTextResponse, RedirectResponse
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from app.api import deps
@@ -67,10 +69,16 @@ from app.models.audit_log import AuditLog
 from app.models.customer import Customer
 from app.models.downtime import DowntimeEvent
 from app.models.governance import ControlledAccessEvent, CustomerContract
+from app.models.inventory import InventoryTransaction
+from app.models.operational_event import OperationalEvent
 from app.models.part import Part
+from app.models.rfq_quote import QuoteEstimate, QuoteLineSummary, RfqPackage
 from app.models.user import User, UserRole
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
-from app.services import export_control_service, llm_client
+from app.models.work_order_blocker import WorkOrderBlocker
+from app.services import export_control_service, llm_client, notification_outbox
+from app.services.notification_catalog import SOURCE_EVENT_TYPE_TO_KEY
+from tests.api.completion_test_helpers import make_closed_time_entry
 from tests.api.export_control_helpers import (
     CANARY,
     CLEAR_CUSTOMER_CODE,
@@ -367,6 +375,61 @@ class TestRedactedRecords:
         assert itar["due_date"] == world.itar_wo.due_date.isoformat()
         assert itar["part_number"] == REDACTED_VALUE
 
+    def test_a_legacy_ai_estimates_dimensions_are_withheld_as_numbers(
+        self, client: TestClient, db_session: Session, world: World, ai_token, auth_headers: dict
+    ):
+        """Code review P0 round 2, finding 2: ``GET /quotes/{id}`` still serves a legacy AI
+        estimate (no code writes them any more) as ``ai_estimate``. On a withheld quote its line
+        summaries' ``flat_area`` (in2) and every number in its free-form JSON went out true --
+        numbers were withheld only under a LISTED measurement key. They are an allowlist now."""
+        package = RfqPackage(rfq_number="RFQ-ITAR-1", rfq_reference=f"{CANARY}-RFQ", company_id=world.company_id)
+        db_session.add(package)
+        db_session.flush()
+        estimate = QuoteEstimate(
+            rfq_package_id=package.id,
+            quote_id=world.itar_quote.id,
+            grand_total=5000.0,
+            lead_time_min_days=5,
+            lead_time_max_days=9,
+            confidence_detail={"bend_radius_guess": 0.0625111, "profile_inches": 3.141592},
+            assumptions=[{"feature": "hole", "assumed_inches": 0.3125987, "assumed_mm": 7.94}],
+            missing_specs=[{"field": "flange", "guess_in": 1.4142135}],
+            company_id=world.company_id,
+        )
+        db_session.add(estimate)
+        db_session.flush()
+        db_session.add(
+            QuoteLineSummary(
+                quote_estimate_id=estimate.id,
+                part_number=world.itar_part.part_number,
+                part_name=f"{CANARY} estimate line",
+                quantity=25,
+                flat_area=7329.15287,
+                cut_length=4321.98765,
+                bend_count=7,
+                hole_count=13,
+                company_id=world.company_id,
+            )
+        )
+        db_session.commit()
+        dimensions = (b"7329.15287", b"4321.98765", b"0.3125987", b"7.94", b"1.4142135", b"3.141592", b"0.0625111")
+        url = f"{API}/quotes/{world.itar_quote.id}"
+        person = client.get(url, headers=auth_headers)
+        assert person.status_code == 200 and person.json()["ai_estimate"] is not None
+        assert all(value in person.content for value in dimensions), "vacuous: the estimate is not served"
+        _id, token = ai_token
+        redacted = client.get(url, headers=bearer(token))
+        assert redacted.status_code == 200
+        leaked = [value for value in dimensions if value in redacted.content]
+        assert leaked == [], redacted.text[:1500]
+        body = redacted.json()["ai_estimate"]
+        (line,) = body["line_summaries"]
+        assert line["flat_area"] == REDACTED_VALUE and line["cut_length"] == REDACTED_VALUE
+        assert (line["bend_count"], line["hole_count"], line["quantity"]) == (7, 13, 25.0), "counts stay true"
+        assert body["totals"]["grand_total"] == 5000.0, "money stays true"
+        assert (body["lead_time"]["min_days"], body["lead_time"]["max_days"]) == (5, 9)
+        assert not contains_canary(redacted.content)
+
     def test_cleared_records_pass_in_full(self, client: TestClient, world: World, ai_token):
         _id, token = ai_token
         rows = client.get(f"{API}/work-orders/", headers=bearer(token)).json()
@@ -573,6 +636,83 @@ class TestRefusals:
             assert client.get(f"{API}/search/?q=x", headers=headers).status_code == 200
             response = client.get(f"{API}/work-orders/{world.itar_wo.id}", headers=headers)
             assert contains_canary(response.content)
+
+
+# --------------------------------------------------------------------------- reads that write
+
+
+class TestReadsThatWrite:
+    """Code review P0 round 2, finding 4: the docs said a narrowed token's reconcile-on-read
+    GET "can commit status reconciliation and audit rows". It does more, and the docs now say
+    so (docs/EXPORT_CONTROL_AI_EGRESS.md section 9, MCP.md 4.1, API.md): it can complete
+    operations and work orders, post the finished-goods receipt (and any gated backflush /
+    tied-material consumption), and emit the completion events that drive notifications --
+    every one recorded as the token's user. This pins the documented behavior; a change to it
+    (an owner decision) must change those three docs."""
+
+    @pytest.mark.parametrize("ai_external", [True, False], ids=["ai_external", "read_only"])
+    def test_a_reconcile_get_completes_work_as_the_tokens_user(
+        self,
+        client: TestClient,
+        db_session: Session,
+        world: World,
+        admin_headers: dict,
+        viewer: User,
+        ai_external: bool,
+        monkeypatch,
+    ):
+        part = Part(
+            part_number="RECON-PART-1",
+            name="reconciled part",
+            part_type="manufactured",
+            customer_name=world.clear_customer.name,
+            company_id=world.company_id,
+        )
+        db_session.add(part)
+        db_session.flush()
+        wo = WorkOrder(
+            work_order_number="WO-RECON-0001",
+            part_id=part.id,
+            quantity_ordered=5,
+            status=WorkOrderStatus.IN_PROGRESS,
+            customer_name=world.clear_customer.name,
+            company_id=world.company_id,
+        )
+        db_session.add(wo)
+        db_session.flush()
+        op = WorkOrderOperation(
+            work_order_id=wo.id,
+            work_center_id=world.work_center.id,
+            sequence=10,
+            operation_number="10",
+            name="Weld",
+            status=OperationStatus.IN_PROGRESS,
+            company_id=world.company_id,
+        )
+        db_session.add(op)
+        db_session.flush()
+        make_closed_time_entry(db_session, user=world.reporter, op=op, quantity_produced=5)
+        _id, token = issue_token(client, admin_headers, viewer, scope="read_only", ai_external=ai_external)
+        enqueued: List[int] = []
+        monkeypatch.setattr(notification_outbox, "_enqueue_dispatch", enqueued.append)
+
+        response = client.get(f"{API}/work-orders/{wo.id}", headers=bearer(token))
+        assert response.status_code == 200, response.text[:400]
+
+        db_session.expire_all()
+        assert db_session.get(WorkOrderOperation, op.id).status == OperationStatus.COMPLETE
+        assert db_session.get(WorkOrder, wo.id).status == WorkOrderStatus.COMPLETE
+        receipts = (
+            db_session.query(InventoryTransaction)
+            .filter(InventoryTransaction.reference_id == wo.id, InventoryTransaction.part_id == part.id)
+            .all()
+        )
+        assert receipts and {row.created_by for row in receipts} == {viewer.id}
+        events = db_session.query(OperationalEvent).filter(OperationalEvent.work_order_id == wo.id).all()
+        completions = {event.event_type: event.id for event in events if event.user_id == viewer.id}
+        assert {"operation_completed", "work_order_completed"} <= set(completions)
+        assert {"operation_completed", "work_order_completed"} <= set(SOURCE_EVENT_TYPE_TO_KEY), "notification sources"
+        assert completions["work_order_completed"] in enqueued, "the outbox enqueued its notification at commit"
 
 
 # --------------------------------------------------------------------------- file bytes
@@ -906,6 +1046,77 @@ class TestProbeEchoes:
             client.get(f"{API}/parts/by-number/{world.itar_part.part_number}", headers=auth_headers).status_code == 200
         )
 
+    def test_a_masked_miss_does_the_work_a_withheld_hit_does(
+        self, client: TestClient, db_session: Session, world: World, ai_token, monkeypatch
+    ):
+        """Code review P0 round 2, finding 1: the two 404s were byte-identical but not equally
+        expensive. A withheld hit built the company's export-control index (about fifteen
+        company-wide queries) and committed a ledger row before answering; a number nobody
+        carries answered from the route's own 404 with no database work at all, several times
+        faster -- so latency confirmed that a guessed ITAR part number exists. Both now build the
+        index once and commit one ledger INSERT."""
+        builds: List[int] = []
+        real_build = export_control_service.build_controlled_index
+
+        def counting_build(db, company_id):
+            builds.append(company_id)
+            return real_build(db, company_id)
+
+        monkeypatch.setattr(export_control_service, "build_controlled_index", counting_build)
+        statements: List[str] = []
+
+        def record(_conn, _cursor, statement, _parameters, _context, _executemany):
+            statements.append(statement)
+
+        _id, token = ai_token
+        # Warm-up: the token's last_used_at touch (at most once per 5 minutes) lands here, not
+        # in one of the two measured requests.
+        assert client.get(f"{API}/work-centers/", headers=bearer(token)).status_code == 200
+
+        def cost(number: str):
+            builds.clear()
+            statements.clear()
+            event.listen(Engine, "before_cursor_execute", record)
+            try:
+                response = client.get(f"{API}/parts/by-number/{number}", headers=bearer(token))
+            finally:
+                event.remove(Engine, "before_cursor_execute", record)
+            return response, len(builds), list(statements)
+
+        hit, hit_builds, hit_sql = cost(world.itar_part.part_number)
+        miss, miss_builds, miss_sql = cost("NO-SUCH-PART-ZZZ")
+
+        assert hit.status_code == miss.status_code == 404
+        assert hit.content == miss.content
+        assert hit_builds == miss_builds == 1, (hit_builds, miss_builds)
+
+        def ledger_inserts(sql: List[str]) -> int:
+            return sum(1 for s in sql if s.lstrip().upper().startswith("INSERT INTO CONTROLLED_ACCESS_EVENTS"))
+
+        assert ledger_inserts(hit_sql) == ledger_inserts(miss_sql) == 1
+        # What is left is the route's own work: a hit serializes the part, a miss also tries the
+        # alias tier. A couple of statements, against the ~twenty the index and ledger cost.
+        assert abs(len(hit_sql) - len(miss_sql)) <= 2, (len(hit_sql), len(miss_sql))
+
+        (miss_row,) = _events(db_session, action="ai_external_lookup_miss")
+        assert miss_row.record_type == "part" and miss_row.record_id is None
+        assert miss_row.allowed is False and miss_row.denial_reason == "not_found"
+        assert miss_row.data_classification == "unknown"
+        assert ("part", world.itar_part.id) in {
+            (row.record_type, row.record_id) for row in _events(db_session, action="ai_external_redacted")
+        }
+
+    def test_a_masked_miss_fails_closed_like_a_hit(self, client: TestClient, world: World, ai_token, monkeypatch):
+        def broken(db, rows):
+            raise RuntimeError("ledger down")
+
+        monkeypatch.setattr(export_control_service, "insert_controlled_access_events", broken)
+        _id, token = ai_token
+        hit = client.get(f"{API}/parts/by-number/{world.itar_part.part_number}", headers=bearer(token))
+        miss = client.get(f"{API}/parts/by-number/NO-SUCH-PART-ZZZ", headers=bearer(token))
+        assert hit.status_code == miss.status_code == 503
+        assert hit.content == miss.content == json.dumps({"detail": EXPORT_CONTROL_FAILED_DETAIL}).encode()
+
     @pytest.mark.parametrize(
         "probe_template,control_template",
         [
@@ -1041,6 +1252,52 @@ class TestNestedRecords:
             own = find_record(body["all_operations"], key="id", value=world.clear_op.id)
             assert "export_controlled" not in own and own["name"] == "Brake"
 
+    def test_a_blocker_on_a_withheld_operation_is_withheld_in_a_cleared_timeline(
+        self, client: TestClient, db_session: Session, world: World, ai_token, auth_headers: dict
+    ):
+        """Code review P0 round 2, finding 3: a blocker filed against an operation links to
+        ``#job-blockers``, not to the operation, so the timeline's link-based rule could not tie
+        it to its (withheld) operation and the blocker's free-text title went out in full. Every
+        operation-scoped timeline item now carries ``operation_id``."""
+        sibling = _sibling_with_unlinkable_component(db_session, world)
+        job_blocker = WorkOrderBlocker(
+            work_order_id=world.clear_wo.id,
+            title=f"{CLEAR_TEXT} job-level blocker",
+            status="open",
+            reported_at=datetime.utcnow() - timedelta(minutes=50),
+            company_id=world.company_id,
+        )
+        op_blocker = WorkOrderBlocker(
+            work_order_id=world.clear_wo.id,
+            operation_id=sibling.id,
+            title="SIBLINGCANARY weldment fixture missing",
+            status="resolved",
+            reported_at=datetime.utcnow() - timedelta(minutes=40),
+            resolved_at=datetime.utcnow() - timedelta(minutes=30),
+            company_id=world.company_id,
+        )
+        db_session.add_all([job_blocker, op_blocker])
+        db_session.commit()
+        url = f"{API}/work-orders/{world.clear_wo.id}/timeline?category=blocker"
+        person = client.get(url, headers=auth_headers)
+        assert person.status_code == 200
+        person_items = person.json()["items"]
+        assert sum(b"SIBLINGCANARY" in json.dumps(item).encode() for item in person_items) == 2, "vacuous"
+        assert {item["operation_id"] for item in person_items} == {sibling.id, None}
+
+        _id, token = ai_token
+        response = client.get(url, headers=bearer(token))
+        assert response.status_code == 200
+        assert b"SIBLINGCANARY" not in response.content, response.text[:800]
+        items = response.json()["items"]
+        withheld = [item for item in items if item.get("operation_id") == sibling.id]
+        assert len(withheld) == 2
+        for item in withheld:
+            assert item["export_controlled"] is True and item["detail"] == REDACTED_VALUE
+            assert item["occurred_at"] and item["actor_id"] is None, "dates and ids stay true"
+        (job_item,) = [item for item in items if item.get("operation_id") is None]
+        assert "export_controlled" not in job_item and job_item["detail"].startswith(CLEAR_TEXT)
+
 
 # --------------------------------------------------------------------------- export audit rows
 
@@ -1155,6 +1412,20 @@ class TestMiddlewareMessages:
     async def test_no_marker_passes_every_message_untouched(self):
         messages = [_start(b"application/pdf"), {"type": "http.response.body", "body": b"%PDF", "more_body": False}]
         assert await _drive(messages) == messages
+
+    async def test_a_message_before_the_response_starts(self):
+        """Nit N1 (code review P0 round 2): a message before ``http.response.start`` (Starlette's
+        ``http.response.debug``, sent by a template response) fell through to the buffering
+        branch and turned an UNMARKED caller's response into a 503. Unmarked, it is forwarded
+        untouched; marked, it is dropped and the response that follows is still checked."""
+        debug = {"type": "http.response.debug", "info": {"template": "x.html", "context": {"notes": "ITARCANARY"}}}
+        body = {"type": "http.response.body", "body": b'{"ok": true}', "more_body": False}
+        assert await _drive([debug, _start(), body]) == [debug, _start(), body]
+
+        marked = await _drive([debug, _start(), body], marker=_marker(ai_external=False))
+        assert debug not in marked
+        assert [message["type"] for message in marked] == ["http.response.start", "http.response.body"]
+        assert marked[0]["status"] == 200 and marked[1]["body"] == b'{"ok": true}'
 
     async def test_an_encoded_body_fails_closed(self):
         messages = [

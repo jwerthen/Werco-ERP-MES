@@ -16,12 +16,19 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
-from app.api.endpoints.customers import EXPORT_CONTROL_API_TOKEN_DETAIL, EXPORT_CONTROL_AUDIT_UNAVAILABLE_DETAIL
+from app.api.endpoints.customers import (
+    CUSTOMER_HARD_DELETE_CONTRACTS_DETAIL,
+    CUSTOMER_RENAME_AUDIT_UNAVAILABLE_DETAIL,
+    EXPORT_CONTROL_API_TOKEN_DETAIL,
+    EXPORT_CONTROL_AUDIT_UNAVAILABLE_DETAIL,
+)
 from app.core.export_control import REDACTED_VALUE
 from app.models.audit_log import AuditLog
 from app.models.customer import Customer
 from app.models.governance import CustomerContract
+from app.models.part import Part
 from app.models.user import User, UserRole
+from app.models.work_order import WorkOrder, WorkOrderStatus
 from app.services.audit_service import AuditService
 from tests.api.export_control_helpers import (
     bearer,
@@ -371,6 +378,142 @@ class TestEffect:
         assert cleared.status_code == 200 and cleared.json()["controlled"] is False
         # Only the seed's own (uncontrolled) contract and this one are left; neither controls.
         assert contains_canary(client.get(url, headers=bearer(token)).content)
+
+
+class TestRenamesFreeNothing:
+    """Code review P0 round 2, finding 5: the free-text name join knew only CURRENT names. A
+    Manager renamed a controlled customer (a plain setattr that cascades nothing), a
+    Supervisor created a new customer under the old name, and every historical record filed
+    under that name resolved to the new, CLEARED customer -- served in full to an AI-external
+    token, with no record edited and no Admin un-marking anything. A name a controlled customer
+    has ever carried now stays controlled (its audit history), whoever carries it next."""
+
+    def test_a_controlled_customers_old_name_stays_controlled_after_another_customer_takes_it(
+        self,
+        client: TestClient,
+        db_session: Session,
+        admin_headers: dict,
+        manager_headers: dict,
+        supervisor_headers: dict,
+    ):
+        world = seed_world(db_session)
+        old_name = world.itar_customer.name
+        viewer = make_viewer(db_session)
+        _id, token = issue_token(client, admin_headers, viewer, scope="read_only")
+        wo_url = f"/api/v1/work-orders/{world.itar_wo.id}"
+        part_url = f"/api/v1/parts/{world.itar_part.id}"
+        assert client.get(wo_url, headers=bearer(token)).json()["export_controlled"] is True
+
+        renamed = client.put(
+            f"{API}/{world.itar_customer.id}", json={"name": "Renamed Holdings"}, headers=manager_headers
+        )
+        assert renamed.status_code == 200, renamed.text
+        taken = client.post(f"{API}/", json={"name": old_name, "code": "NEWCO1"}, headers=supervisor_headers)
+        assert taken.status_code == 200, taken.text
+
+        for url in (wo_url, part_url):
+            response = client.get(url, headers=bearer(token))
+            assert response.status_code == 200
+            assert response.json()["export_controlled"] is True, url
+            assert not contains_canary(response.content), f"{url} leaked: {response.text[:600]}"
+        assert not contains_canary(client.get("/api/v1/work-orders/", headers=bearer(token)).content)
+
+    def test_a_name_held_before_the_customer_was_marked_is_controlled_too(
+        self,
+        client: TestClient,
+        db_session: Session,
+        admin_headers: dict,
+        manager_headers: dict,
+        supervisor_headers: dict,
+        plain_customer: Customer,
+    ):
+        """The rename may come FIRST: an uncontrolled customer is renamed, later marked ITAR, and
+        then someone creates a customer under its old name. Its old records are still its."""
+        bracket = Part(
+            part_number="NW-BRKT-1",
+            name="NWCANARY bracket",
+            part_type="manufactured",
+            customer_name=plain_customer.name,
+            company_id=1,
+        )
+        db_session.add(bracket)
+        db_session.flush()
+        job = WorkOrder(
+            work_order_number="WO-NW-0001",
+            part_id=bracket.id,
+            quantity_ordered=3,
+            status=WorkOrderStatus.RELEASED,
+            customer_name=plain_customer.name,
+            notes="NWCANARY northwind job notes",
+            company_id=1,
+        )
+        db_session.add(job)
+        db_session.commit()
+        viewer = make_viewer(db_session)
+        _id, token = issue_token(client, admin_headers, viewer, scope="read_only")
+        url = f"/api/v1/work-orders/{job.id}"
+
+        renamed = client.put(
+            f"{API}/{plain_customer.id}", json={"name": "Northwind Aerospace"}, headers=manager_headers
+        )
+        assert renamed.status_code == 200, renamed.text
+        assert _mark(client, admin_headers, plain_customer.id).status_code == 201
+        taken = client.post(f"{API}/", json={"name": "Northwind Aero", "code": "NWA2"}, headers=supervisor_headers)
+        assert taken.status_code == 200, taken.text
+
+        response = client.get(url, headers=bearer(token))
+        assert response.status_code == 200
+        assert b"NWCANARY" not in response.content, response.text[:600]
+        assert response.json()["export_controlled"] is True
+
+    def test_a_rename_without_its_audit_row_saves_nothing(
+        self, client: TestClient, db_session: Session, manager_headers: dict, plain_customer: Customer, monkeypatch
+    ):
+        """The former names come from the audit rows, so a rename's row is required evidence."""
+        monkeypatch.setattr(AuditService, "log", lambda self, *args, **kwargs: None)
+        response = client.put(f"{API}/{plain_customer.id}", json={"name": "Lost Name Co"}, headers=manager_headers)
+        assert response.status_code == 503
+        assert response.json()["detail"] == CUSTOMER_RENAME_AUDIT_UNAVAILABLE_DETAIL
+        db_session.expire_all()
+        assert db_session.get(Customer, plain_customer.id).name == "Northwind Aero"
+        # Any other edit stays best-effort, as before.
+        other = client.put(f"{API}/{plain_customer.id}", json={"notes": "net 45 now"}, headers=manager_headers)
+        assert other.status_code == 200 and other.json()["notes"] == "net 45 now"
+
+    def test_a_former_name_never_clears(
+        self, client: TestClient, db_session: Session, admin_headers: dict, manager_headers: dict, plain_customer
+    ):
+        """History only ever CONTROLS: positive clearance still needs a customer's CURRENT name or code."""
+        bracket = Part(
+            part_number="NW-BRKT-2",
+            name="NWCLEAR bracket",
+            part_type="manufactured",
+            customer_name=plain_customer.name,
+            company_id=1,
+        )
+        db_session.add(bracket)
+        db_session.commit()
+        renamed = client.put(
+            f"{API}/{plain_customer.id}", json={"name": "Northwind Aerospace"}, headers=manager_headers
+        )
+        assert renamed.status_code == 200
+        viewer = make_viewer(db_session)
+        _id, token = issue_token(client, admin_headers, viewer, scope="read_only")
+        response = client.get(f"/api/v1/parts/{bracket.id}", headers=bearer(token))
+        assert response.status_code == 200
+        assert response.json()["export_controlled"] is True, "an old name resolves to no customer: unlinkable"
+        assert b"NWCLEAR" not in response.content
+
+    def test_a_customer_with_a_contract_cannot_be_hard_deleted(
+        self, client: TestClient, db_session: Session, admin_headers: dict, plain_customer: Customer
+    ):
+        """A hard delete would free the name the same way a rename did."""
+        assert _mark(client, admin_headers, plain_customer.id).status_code == 201
+        response = client.delete(f"{API}/{plain_customer.id}?hard_delete=true", headers=admin_headers)
+        assert response.status_code == 400
+        assert response.json()["detail"] == CUSTOMER_HARD_DELETE_CONTRACTS_DETAIL
+        db_session.expire_all()
+        assert db_session.get(Customer, plain_customer.id) is not None
 
 
 def test_the_routes_are_tenant_scoped_through_the_dependency():

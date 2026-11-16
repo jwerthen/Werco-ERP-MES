@@ -52,6 +52,10 @@ EXPORT_CONTROL_FAILED_DETAIL = "Export-control check failed; nothing was sent."
 # ``controlled_access_events.action``
 ACTION_REDACTED = "ai_external_redacted"
 ACTION_REFUSED = "ai_external_refused"
+# A masked lookup (:data:`AI_EXTERNAL_MASKED_LOOKUPS`) whose number matched NOTHING. Recorded
+# so that a miss does the same work as a withheld hit (index build + ledger write + commit):
+# the two answer byte-identical 404s, and unequal work would let latency tell them apart.
+ACTION_LOOKUP_MISS = "ai_external_lookup_miss"
 
 # ``controlled_access_events.denial_reason``
 REASON_EXPORT_CONTROLLED_CUSTOMER = "export_controlled_customer"
@@ -60,6 +64,7 @@ REASON_AI_EGRESS_DISABLED = "ai_egress_disabled"
 REASON_ROUTE_NOT_ALLOWLISTED = "route_not_allowlisted"
 REASON_NON_JSON_RESPONSE = "non_json_response"
 REASON_QUERY_NOT_ALLOWLISTED = "query_parameter_not_allowlisted"
+REASON_NOT_FOUND = "not_found"
 
 # ``controlled_access_events.data_classification`` values this feature writes (a subset of
 # ``app.models.governance.DataClassification``; repeated, not imported, to stay pure).
@@ -307,7 +312,11 @@ def ai_external_query_allowed(route_path: Optional[str], query: Iterable[Tuple[s
 # Business-number lookups whose number is WITHHELD text (a part number is; a work-order
 # number is a kept identifier, so ``/work-orders/by-number/...`` is not here). When the
 # number names a withheld record, the AI-external answer is the same 404 a number nobody
-# carries gets -- a 200 (even fully redacted) would confirm the number exists.
+# carries gets -- a 200 (even fully redacted) would confirm the number exists. The two 404s
+# also COST the same: the route's own miss builds the index and commits one
+# ``ai_external_lookup_miss`` ledger row, as a withheld hit builds it and commits its
+# ``ai_external_redacted`` rows. Otherwise latency alone would re-open the oracle (code
+# review P0 round 2, finding 1).
 # route (relative) -> (path parameter, record type)
 AI_EXTERNAL_MASKED_LOOKUPS: Mapping[str, Tuple[str, str]] = {
     "/parts/by-number/{part_number}": ("part_number", "part"),

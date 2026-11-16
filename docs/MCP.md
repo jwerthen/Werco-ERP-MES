@@ -466,10 +466,17 @@ user's role.
 
 **"Read-only" means "sends no write request", not "causes no write".** Some reads reconcile
 work-order and operation status as they run. `GET /work-orders/{id}`, the work-order list and the
-shop-floor operation reads among them can commit that reconciliation and its audit rows as the
-token's user, marked with `extra_data.credential`. Every request also touches the token's
-`last_used_at`, at most once per 5 minutes. Conversely, read-shaped `POST` routes (previews,
-calculations, natural-language search) are refused like any other write.
+shop-floor operation reads among them commit that reconciliation as the token's user, and it is
+more than a status change. When closed labor already holds a full good count, one such read
+completes the operation, and the work order with it. It then posts the finished-goods receipt to
+inventory, runs the gated backflush and tied-material consumption, and rolls up job cost. It also
+emits the completion events that the notification outbox delivers as in-app and email
+notifications. All of it is recorded as the token's user, and the audit rows are marked with
+`extra_data.credential`. A person opening the same work order would do the same; only the recorded
+actor differs. See [EXPORT_CONTROL_AI_EGRESS.md → 9](EXPORT_CONTROL_AI_EGRESS.md#9-known-limits).
+Every request also touches the token's `last_used_at`, at most once per 5 minutes. Conversely,
+read-shaped `POST` routes (previews, calculations, natural-language search) are refused like any
+other write.
 
 **Where the door learns the scope.** On the HTTP door, `ErpTokenVerifier`'s row read puts the
 row's `scope` / `ai_external` in the authenticated principal, so no second read is needed. An API

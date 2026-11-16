@@ -16,8 +16,11 @@ Three jobs, one module:
      ``customer_name`` is served in full ONLY when that name (casefolded, stripped,
      whitespace collapsed) is the name or code of a known customer row -- deleted ones
      included -- with no controlling contract. A blank, unresolvable or controlled name is
-     withheld. Records the ERP cannot tie to any customer (standalone laser work orders,
-     NCRs with no part / work order / receipt, CARs no NCR or complaint references,
+     withheld, and so is any name or code a controlled customer has EVER carried (its audit
+     history, :func:`customer_former_names`): a rename frees nothing, even when another
+     customer later takes the old name. Records the ERP cannot tie to any customer
+     (standalone laser work orders, NCRs with no part / work order / receipt, CARs no NCR
+     or complaint references,
      raw-material purchase orders and receipts, engineering parts with no customer) are
      withheld as UNLINKABLE. A material-supply part (purchased / raw material / hardware /
      consumable) with a blank customer is generic stock and passes.
@@ -57,16 +60,20 @@ from sqlalchemy import insert
 from sqlalchemy.orm import Session
 
 from app.core.export_control import (
+    ACTION_LOOKUP_MISS,
     ACTION_REDACTED,
     ACTION_REFUSED,
+    AI_EXTERNAL_MASKED_LOOKUPS,
     CLASSIFICATION_CUI,
     CLASSIFICATION_ITAR,
     CLASSIFICATION_UNKNOWN,
     REASON_EXPORT_CONTROLLED_CUSTOMER,
+    REASON_NOT_FOUND,
     ExportControlMarker,
 )
 from app.db import database as _database
 from app.db.tenant_filter import tenant_filter, tenant_query
+from app.models.audit_log import AuditLog
 from app.models.customer import Customer
 from app.models.customer_complaint import CustomerComplaint
 from app.models.fabrication_quote import FabricationQuote
@@ -209,10 +216,54 @@ def _customer_controlled(control: Optional[Control]) -> bool:
     return control is not None and control.reason == REASON_EXPORT_CONTROLLED_CUSTOMER
 
 
+def customer_former_names(db: Session, company_id: int, customer_ids: Iterable[int]) -> Dict[int, Set[str]]:
+    """customer id -> every name / code the customer's own audit history says it has carried.
+
+    The free-text join (a record's ``customer_name``) knows only the customer master's CURRENT
+    names, and a rename cascades to nothing. So renaming a controlled customer, then creating
+    (or renaming) another customer into the old name, made every historical record filed
+    under that name resolve to the NEW, cleared customer -- served in full to an AI-external
+    token, with no record edited and no Admin un-marking anything (code review P0 round 2,
+    finding 5). The customer master's ``audit_log`` rows carry the history: every rename's
+    UPDATE row has the old and new name (``update_customer`` writes it as REQUIRED evidence),
+    a CREATE row the first name and code, a hard delete's row the whole record. The table is
+    append-only (the 008/060 triggers refuse UPDATE and DELETE, and archival keeps the live
+    rows), so the history cannot be edited away.
+
+    Only ``customer_ids`` are read -- the caller passes the controlled customers: a former
+    name CONTROLS (it is withheld like a current one) but never CLEARS, so the owner's
+    positive-clearance rule (a name clears only as a known customer's current name or code)
+    is unchanged.
+    """
+    ids = sorted(set(customer_ids))
+    if not ids:
+        return {}
+    rows = (
+        tenant_filter(db.query(AuditLog.resource_id, AuditLog.old_values, AuditLog.new_values), AuditLog, company_id)
+        .filter(AuditLog.resource_type == "customer", AuditLog.resource_id.in_(ids))
+        .all()
+    )
+    former: Dict[int, Set[str]] = defaultdict(set)
+    for row in rows:
+        for values in (row.old_values, row.new_values):
+            if not isinstance(values, dict):
+                continue
+            for field_name in ("name", "code"):
+                value = values.get(field_name)
+                if isinstance(value, str) and value.strip():
+                    former[row.resource_id].add(value.strip())
+    return dict(former)
+
+
 class _NameResolver:
     """Positive clearance for a free-text ``customer_name``."""
 
-    def __init__(self, customers: Sequence[Any], controlled: Mapping[int, Control]) -> None:
+    def __init__(
+        self,
+        customers: Sequence[Any],
+        controlled: Mapping[int, Control],
+        former_names: Optional[Mapping[int, Iterable[str]]] = None,
+    ) -> None:
         self.status: Dict[str, Optional[Control]] = {}
         self.controlled_names: Dict[str, Tuple[int, Control]] = {}
         for customer in customers:
@@ -222,13 +273,25 @@ class _NameResolver:
                 if not key:
                     continue
                 if control is not None:
-                    # A key shared by a cleared and a controlled customer is controlled: fail closed.
-                    self.status[key] = worst(self.status.get(key), control)
-                    existing = self.controlled_names.get(key)
-                    if existing is None or control.rank > existing[1].rank:
-                        self.controlled_names[key] = (customer.id, control)
+                    self._control(key, customer.id, control)
                 elif key not in self.status:
                     self.status[key] = None
+        # A name a controlled customer used to carry stays controlled, whoever carries it now.
+        for customer_id, names in (former_names or {}).items():
+            control = controlled.get(customer_id)
+            if control is None:
+                continue
+            for raw in names:
+                key = normalize_key(raw)
+                if key:
+                    self._control(key, customer_id, control)
+
+    def _control(self, key: str, customer_id: int, control: Control) -> None:
+        # A key shared by a cleared and a controlled customer is controlled: fail closed.
+        self.status[key] = worst(self.status.get(key), control)
+        existing = self.controlled_names.get(key)
+        if existing is None or control.rank > existing[1].rank:
+            self.controlled_names[key] = (customer_id, control)
 
     def resolve(self, raw: Any) -> Optional[Control]:
         """``_BLANK`` for no name, UNLINKABLE for a name no customer carries, else the customer's control (None = cleared)."""
@@ -249,11 +312,14 @@ def build_controlled_index(db: Session, company_id: int) -> ControlledIndex:
     controlled = controlled_customers(db, company_id)
     # Soft-deleted customers deliberately included: a deleted customer still names its history.
     customers = tenant_filter(db.query(Customer.id, Customer.name, Customer.code), Customer, company_id).all()
-    names = _NameResolver(customers, controlled)
+    former = customer_former_names(db, company_id, controlled)
+    names = _NameResolver(customers, controlled, former)
     sensitive: Set[str] = set()
     for customer in customers:
         if customer.id in controlled:
             sensitive.update(_tokens(customer.name, customer.code))
+    for held in former.values():
+        sensitive.update(_tokens(*held))
 
     # ---- parts (soft-deleted included: a historical record can still name one)
     parts = tenant_filter(
@@ -744,8 +810,24 @@ def apply_export_control(
     (``ai_external_error_body``): its text could echo the request, and scrubbing an echo
     would confirm a probe. Blocking (the middleware runs it in a worker thread). Raises on
     any failure -- the caller then sends 503 and nothing else.
+
+    A masked lookup's OWN 404 (the number matched nothing) does the same work a withheld
+    hit does before it is answered: the index is built and one ``ai_external_lookup_miss``
+    row is written and committed (code review P0 round 2, finding 1). The two 404s are
+    byte-identical, and a miss that skipped the index build and the commit answered several
+    times faster -- latency alone confirmed that a guessed part number exists.
     """
+    lookup = route_path is not None and route_path in AI_EXTERNAL_MASKED_LOOKUPS
     if not 200 <= status_code < 300:
+        if lookup and status_code == 404:
+            _record_masked_lookup_miss(
+                marker,
+                route_path=route_path,
+                request_id=request_id,
+                source_ip=source_ip,
+                route=route or marker.route,
+                session_factory=session_factory,
+            )
         return ExportControlOutcome(status_code, ai_external_error_body(status_code, payload), rebuilt=True)
     db = _session(session_factory)
     try:
@@ -760,6 +842,52 @@ def apply_export_control(
         if is_masked_lookup(route_path, result):
             return ExportControlOutcome(404, ai_external_error_body(404, None), rebuilt=True)
         return ExportControlOutcome(status_code, result.payload)
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def _record_masked_lookup_miss(
+    marker: ExportControlMarker,
+    *,
+    route_path: str,
+    request_id: Optional[str],
+    source_ip: Optional[str],
+    route: Optional[str],
+    session_factory: Optional[SessionFactory],
+) -> None:
+    """The withheld-hit path's work, for a masked lookup that matched nothing: index, one ledger row, commit.
+
+    The index is built and discarded on purpose: it is the cost being matched, not a
+    result anything reads. Raises on any failure, exactly like the hit path (the caller
+    then answers 503), so a miss and a hit also fail alike.
+    """
+    _param, record_type = AI_EXTERNAL_MASKED_LOOKUPS[route_path]
+    db = _session(session_factory)
+    try:
+        build_controlled_index(db, marker.company_id)
+        insert_controlled_access_events(
+            db,
+            [
+                _event_row(
+                    marker,
+                    record_type=record_type,
+                    record_id=None,
+                    action=ACTION_LOOKUP_MISS,
+                    reason=REASON_NOT_FOUND,
+                    classification=CLASSIFICATION_UNKNOWN,
+                    customer_id=None,
+                    contract_id=None,
+                    request_id=request_id,
+                    source_ip=source_ip,
+                    route=route,
+                    occurred_at=_utcnow(),
+                )
+            ],
+        )
+        db.commit()
     except Exception:
         db.rollback()
         raise
@@ -798,6 +926,23 @@ def customer_for_export_control(db: Session, company_id: int, customer_id: int) 
     if customer is None:
         raise CustomerNotFound("Customer not found")
     return customer
+
+
+def customer_has_export_control_records(db: Session, company_id: int, customer_id: int) -> bool:
+    """Does any contract or handling instruction of the company name this customer (any flags, any state)?"""
+    contract = (
+        tenant_filter(db.query(CustomerContract.id), CustomerContract, company_id)
+        .filter(CustomerContract.customer_id == customer_id)
+        .first()
+    )
+    if contract is not None:
+        return True
+    instruction = (
+        tenant_filter(db.query(CustomerHandlingInstruction.id), CustomerHandlingInstruction, company_id)
+        .filter(CustomerHandlingInstruction.customer_id == customer_id)
+        .first()
+    )
+    return instruction is not None
 
 
 def customer_contracts(db: Session, company_id: int, customer_id: int) -> List[CustomerContract]:

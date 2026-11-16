@@ -18,13 +18,16 @@ Two passes:
 
    Inside a controlled object a KEEP-allowlist applies -- ids, statuses, priority /
    sequence / version, dates and times, booleans, nulls, the business identifiers in
-   :data:`KEPT_IDENTIFIER_KEYS`, numeric strings ONLY under a count / quantity / duration /
-   money / sequence key (:data:`NUMERIC_KEEP_KEY_FRAGMENTS`), and JSON numbers except under
-   a measurement key (:data:`MEASUREMENT_KEY_FRAGMENTS`: a nominal, tolerance, measured
-   value or dimension is technical data) -- and every other value becomes
+   :data:`KEPT_IDENTIFIER_KEYS`, and numbers -- JSON numbers and numeric strings alike --
+   ONLY under a key naming an id, count, quantity, duration, money amount, rate, percentage
+   or sequence (:func:`kept_numeric_key`) and never under one naming a dimension or
+   measurement of the article (:data:`DIMENSION_KEY_FRAGMENTS`: a nominal, tolerance,
+   measured value, length or area is technical data) -- and every other value becomes
    ``"[export-controlled]"``. A denylist of "sensitive" keys would leak the next text
-   column somebody adds; the allowlist cannot. ``"export_controlled": true`` is added to
-   every redacted object. Counts, ids, statuses, dates and quantities therefore stay true.
+   column somebody adds; the allowlist cannot -- and that holds for numbers too: a number
+   under a key nobody listed (``flat_area``, an AI estimate's free-form ``assumed_inches``)
+   is withheld. ``"export_controlled": true`` is added to every redacted object. Counts,
+   ids, statuses, dates, quantities, money and OEE figures therefore stay true.
 
 2. **Residual text.** Every remaining string in the response -- cleared records, error
    ``detail`` text and object keys included -- has each sensitive token (the part numbers,
@@ -347,11 +350,16 @@ _TEXTUAL_KEY_FRAGMENTS = (
     "material",
 )
 
-# Inside a withheld object a numeric STRING (a Decimal serializes as one) stays only under a
-# key naming a count, quantity, duration, money amount or sequence -- an ALLOWLIST, so a
-# nominal, tolerance or measured value (``"nominal": "0.2500"``) is withheld whatever its
-# key is called. Compliance review P0, finding 1 (blocker): before this, any numeric string
-# under a non-text key passed, and an ITAR FAI's dimensions went out.
+# Inside a withheld object a NUMBER -- a JSON number, or a numeric string (a Decimal
+# serializes as one) -- stays only under a key naming an id, count, quantity, duration,
+# money amount, rate, percentage or sequence: an ALLOWLIST, like the one for text. Compliance
+# review P0, finding 1 (blocker): numeric strings under any non-text key passed, and an ITAR
+# FAI's dimensions went out. Code review P0 round 2, finding 2: JSON numbers were still a
+# DENYLIST (withheld only under a listed measurement key), so a legacy AI estimate's
+# ``flat_area`` and every number in its free-form ``assumptions`` (``assumed_inches``) went
+# out true. Every numeric property of every allowlisted route's response schema is pinned
+# kept-or-withheld by ``tests/test_export_control_redaction.py``, so a new count that this
+# list does not name fails CI rather than going quietly missing.
 NUMERIC_KEEP_KEY_FRAGMENTS = (
     "quantity",
     "qty",
@@ -361,6 +369,7 @@ NUMERIC_KEEP_KEY_FRAGMENTS = (
     "seconds",
     "days",
     "duration",
+    "time",
     "cost",
     "price",
     "total",
@@ -370,20 +379,50 @@ NUMERIC_KEEP_KEY_FRAGMENTS = (
     "stock",
     "reorder",
     "percent",
+    "pct",
+    "rate",
     "sequence",
     "version",
     "priority",
     "runs",
-    "pieces",
+    "piece",
+    "parts",
+    "order",
+    "rank",
+    "rating",
+    "score",
+    "confidence",
+    "efficiency",
+    "passed",
+    "failed",
+    "complete",
+    "short",
 )
-# A JSON NUMBER inside a withheld object stays true (counts, quantities, money, hours) unless
-# its key names a measurement or dimension of the article -- technical data, withheld even
-# as a number. A key that also names a count / quantity / duration / money amount
-# (``actual_hours``, ``target_quantity``) keeps its value.
-MEASUREMENT_KEY_FRAGMENTS = (
+# Whole keys (not fragments) whose number is a count, a position or pagination.
+NUMERIC_KEEP_KEYS = frozenset(
+    {
+        "char_number",
+        "line_number",
+        "step_number",
+        "balloon_number",
+        "skip",
+        "limit",
+        "offset",
+        "page",
+        "page_size",
+        "in_progress",
+        "overdue",
+        "due_today",
+    }
+)
+# A key naming a dimension or measurement of the article: its number is technical data and is
+# withheld even when the key ALSO names a count / total (``total_length``,
+# ``tolerance_percent``). "value", "limit" and "target" are not here: on their own they keep
+# nothing (no keep fragment), and with one they are money, pagination or an OEE target
+# (``total_value``, ``target_quantity``, ``target_oee_pct``).
+DIMENSION_KEY_FRAGMENTS = (
     "nominal",
     "toleran",
-    "value",
     "measur",
     "dimension",
     "diameter",
@@ -394,15 +433,22 @@ MEASUREMENT_KEY_FRAGMENTS = (
     "depth",
     "angle",
     "radius",
+    "area",
+    "perimeter",
+    "volume",
     "weight",
+    "mass",
+    "gauge",
+    "inch",
     "torque",
     "pressure",
     "temperature",
     "hardness",
     "tensile",
-    "limit",
-    "target",
 )
+# Unit tokens that name a dimension only as a whole word (``bend_mm``; never ``comments``).
+DIMENSION_KEY_TOKENS = frozenset({"mm", "cm"})
+_KEY_TOKENS = re.compile(r"[a-z0-9]+")
 
 _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?$")
 _NUMERIC = re.compile(r"^[+-]?\d+(\.\d+)?([eE][+-]?\d+)?$")
@@ -426,17 +472,38 @@ def _is_textual_key(key: str) -> bool:
     return any(fragment in lowered for fragment in _TEXTUAL_KEY_FRAGMENTS)
 
 
-def _names_a_count_or_amount(key: str) -> bool:
+def names_a_dimension(key: str) -> bool:
+    """Does ``key`` name a dimension or measurement of the article (see DIMENSION_KEY_FRAGMENTS)?"""
     lowered = key.lower()
-    return any(fragment in lowered for fragment in NUMERIC_KEEP_KEY_FRAGMENTS)
+    if any(fragment in lowered for fragment in DIMENSION_KEY_FRAGMENTS):
+        return True
+    return any(token in DIMENSION_KEY_TOKENS for token in _KEY_TOKENS.findall(lowered))
 
 
-def _is_measurement_key(key: Optional[str]) -> bool:
-    """A key whose NUMBER, inside a withheld object, is technical data (see MEASUREMENT_KEY_FRAGMENTS)."""
-    if key is None or _is_id_key(key) or _names_a_count_or_amount(key):
+def kept_numeric_key(key: Optional[str]) -> bool:
+    """Inside a withheld object, may a NUMBER under ``key`` stay? The allowlist, for numbers.
+
+    Yes for an id (``*_id``, ``*_ids``, ``id``, and the ``*_by`` user ids), a status-like or
+    kept-identifier key, a whole key in :data:`NUMERIC_KEEP_KEYS`, or a key naming a count /
+    quantity / duration / money / rate / percentage / sequence
+    (:data:`NUMERIC_KEEP_KEY_FRAGMENTS`) -- unless it also names a dimension
+    (:func:`names_a_dimension`). No for everything else, a key nobody listed included, and for
+    a number with no key at all.
+    """
+    if key is None:
         return False
     lowered = key.lower()
-    return any(fragment in lowered for fragment in MEASUREMENT_KEY_FRAGMENTS)
+    if (
+        _is_id_key(lowered)
+        or lowered.endswith("_by")
+        or _is_status_key(lowered)
+        or lowered in KEPT_IDENTIFIER_KEYS
+        or lowered in NUMERIC_KEEP_KEYS
+    ):
+        return True
+    if names_a_dimension(lowered):
+        return False
+    return any(fragment in lowered for fragment in NUMERIC_KEEP_KEY_FRAGMENTS)
 
 
 def _structurally_inert(key: Optional[str], value: str) -> bool:
@@ -464,8 +531,9 @@ def _kept_string(key: Optional[str], value: str) -> bool:
         return True
     if _is_date_key(key):
         return True
-    # A number as text: only a count / quantity / duration / money / sequence (the allowlist).
-    return bool(_NUMERIC.match(value)) and _names_a_count_or_amount(key) and not _is_textual_key(key)
+    # A number as text: the same allowlist as a JSON number, and never under a text key (a
+    # purely numeric part number is still a part number).
+    return bool(_NUMERIC.match(value)) and kept_numeric_key(key) and not _is_textual_key(key)
 
 
 # --------------------------------------------------------------------------- the walk
@@ -548,7 +616,7 @@ class _Walker:
             if controlled and not _kept_string(key, value):
                 return REDACTED_VALUE
             return self.scrub(key, value)
-        if controlled and isinstance(value, (int, float)) and not isinstance(value, bool) and _is_measurement_key(key):
+        if controlled and isinstance(value, (int, float)) and not isinstance(value, bool) and not kept_numeric_key(key):
             return REDACTED_VALUE
         return value
 

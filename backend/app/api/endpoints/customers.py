@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Upl
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, EmailStr, ValidationError, field_validator
 from sqlalchemy import or_
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from app.api.audit_guard import required_audit
@@ -27,7 +27,7 @@ from app.schemas.export_control import (
     CustomerExportControlResponse,
 )
 from app.services import export_control_service
-from app.services.audit_service import AuditService
+from app.services.audit_service import AuditService, AuditWriteError
 from app.services.import_service import ImportFileError, parse_import_file
 
 router = APIRouter()
@@ -54,6 +54,34 @@ CUSTOMER_UPDATE_ROLES = [UserRole.ADMIN, UserRole.MANAGER]
 # a new customer" away from a role that may open work orders. Changing an EXISTING
 # record (its CoC/FAI requirements, terms, name) stays ``CUSTOMER_UPDATE_ROLES``.
 CUSTOMER_CREATE_ROLES = [UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]
+
+CUSTOMER_RENAME_AUDIT_UNAVAILABLE_DETAIL = (
+    "The audit record for this customer rename could not be saved; nothing was changed. Retry."
+)
+CUSTOMER_HARD_DELETE_CONTRACTS_DETAIL = (
+    "Cannot hard delete: Customer has export-control contracts or handling instructions. Soft delete it instead."
+)
+
+
+def _log_customer_update(
+    audit: AuditService, customer: Customer, previous: dict, update_data: dict, *, required: bool
+) -> None:
+    """The customer UPDATE audit row: best-effort, except for a rename, where it is REQUIRED.
+
+    ``export_control_service.customer_former_names`` reads a customer's former names from
+    these rows: an old name of an export-controlled customer stays controlled whoever carries
+    it next. A rename whose row was silently lost would free that name, so a rename raises
+    ``AuditWriteError`` (the caller's ``required_audit`` rolls back and answers 503) instead.
+    """
+    if not required:
+        audit.log_update("customer", customer.id, customer.name, old_values=previous, new_values=update_data)
+        return
+    try:
+        entry = audit.log_update("customer", customer.id, customer.name, old_values=previous, new_values=update_data)
+    except DBAPIError as exc:
+        raise AuditWriteError("The customer rename's audit record could not be saved") from exc
+    if entry is None:
+        raise AuditWriteError("The customer rename's audit record could not be saved")
 
 
 class CustomerCreate(BaseModel):
@@ -616,7 +644,10 @@ def update_customer(
     """Update a live customer in the active company. Admin / Manager only.
 
     Only the supplied fields change; a rename must stay unique within the company.
-    Writes an audit_log UPDATE row with the supplied fields' old and new values.
+    Writes an audit_log UPDATE row with the supplied fields' old and new values. For a
+    RENAME that row is required evidence: if it cannot be written, nothing is saved (503).
+    Export control reads a customer's former names from these rows, so a rename that left
+    no row would free a controlled customer's old name for another customer to clear.
     """
     customer = (
         db.query(Customer)
@@ -629,10 +660,11 @@ def update_customer(
 
     update_data = customer_in.model_dump(exclude_unset=True)
     previous = {field: getattr(customer, field) for field in update_data}
+    renamed = "name" in update_data and update_data["name"] != customer.name
 
     # Check name uniqueness if changing. Sees soft-deleted rows on purpose (see
     # create_customer): the per-company constraint spans them.
-    if "name" in update_data and update_data["name"] != customer.name:
+    if renamed:
         if tenant_query(db, Customer, company_id).filter(Customer.name == update_data["name"]).first():
             raise HTTPException(status_code=400, detail="Customer name already exists")
 
@@ -646,7 +678,8 @@ def update_customer(
         # commit would raise PendingRollbackError (500), not IntegrityError. Flushing
         # here surfaces the constraint violation to this handler first.
         db.flush()
-        audit.log_update("customer", customer.id, customer.name, old_values=previous, new_values=update_data)
+        with required_audit(db, CUSTOMER_RENAME_AUDIT_UNAVAILABLE_DETAIL):
+            _log_customer_update(audit, customer, previous, update_data, required=renamed)
         db.commit()
     except IntegrityError as exc:
         # TOCTOU backstop for a concurrent rename onto the same name.
@@ -693,6 +726,14 @@ def delete_customer(
             raise HTTPException(
                 status_code=400,
                 detail=f"Cannot hard delete: Customer has {part_count} associated parts",
+            )
+        # Export control: a customer with a contract or handling instruction keeps its ROW --
+        # it is what ties its historical records (work orders, quotes) to its export control,
+        # and a hard delete would free its name for another customer to clear them.
+        if export_control_service.customer_has_export_control_records(db, company_id, customer.id):
+            raise HTTPException(
+                status_code=400,
+                detail=CUSTOMER_HARD_DELETE_CONTRACTS_DETAIL,
             )
 
         # Log BEFORE the terminal commit so the audit row commits atomically

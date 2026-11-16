@@ -36,6 +36,26 @@ def _value(value):
     return value.value if hasattr(value, "value") else value
 
 
+# The column naming the operation a timeline row belongs to, per source model. Every item a
+# single operation owns carries ``operation_id``, so a reader can tie it to that operation by
+# a field rather than by parsing its link -- and the AI-external redaction does exactly that
+# (``operation_id`` is an identifying key there): a blocker filed against an operation links
+# to ``#job-blockers``, not to the operation, and its free-text title reached an AI-external
+# token although the operation itself was withheld (code review P0 round 2, finding 3).
+_OPERATION_COLUMN = {
+    WorkOrderOperation: "id",
+    ProductionReceipt: "operation_id",
+    TimeEntry: "operation_id",
+    WorkOrderBlocker: "operation_id",
+    OperationStepRecord: "work_order_operation_id",
+}
+
+
+def _operation_id(model, row):
+    column = _OPERATION_COLUMN.get(model)
+    return getattr(row, column) if column else None
+
+
 def list_work_order_timeline(
     db, company_id, work_order_id, *, category=None, actor_id=None, start_at=None, end_at=None, cursor=None, limit=30
 ):
@@ -118,6 +138,7 @@ def list_work_order_timeline(
                     "actor_name": None,
                     "source_label": source_label,
                     "source_url": source_url,
+                    "operation_id": _operation_id(model, row),
                     "_source": source,
                     "_row_id": row.id,
                     "_part_id": row.part_id if model is InventoryTransaction else None,
