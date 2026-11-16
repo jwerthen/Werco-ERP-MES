@@ -145,9 +145,9 @@ it.
 | Operation | its work order, or its component part, is withheld |
 | Time entries, downtime events | they carry the work order's id, which identifies them as that work order's (there is no time-entry list route on the allowlist; time entries reach the connector through the work-order timeline) |
 | Routing | its part is withheld |
-| FAI | its part or its work order is withheld |
+| FAI | its part or its work order is withheld. Each row of the FAI log of record (`/quality/fai/log`) is judged like the FAI it names, by its `fai_id`, `part_id` and `work_order_id` |
 | NCR | its part, work order or receipt is withheld |
-| CAR | an NCR or a customer complaint that references it is withheld, or the complaint's customer is controlled or unresolvable |
+| CAR | any of its links is withheld. Its OWN links (the CAR form, migration `122`): its part, its customer (`customer_id`) and the customer-name snapshot taken when that customer was chosen, judged on its own like any free-text name (a controlled customer's current or former name controls; a snapshot no customer carries is unresolvable). And its referrers: an NCR or a customer complaint that references it is withheld, or the complaint's customer is controlled or unresolvable. A CAR is cleared only when **every** link clears, so a CAR raised from a cleared NCR is withheld the moment its customer is set to a controlled one |
 | Quote | its name is blank, controlled or matches no customer; or its work order, any line's part or work order, or the customer on the fabrication quote it came from is withheld |
 | Purchase order | any line's part is withheld, or it has no lines |
 | Receipt | its PO line's part is withheld |
@@ -162,7 +162,7 @@ The ERP cannot tie these to any customer, so they are withheld with `denial_reas
 
 - standalone laser work orders (no part, no customer, no parent) and their operations;
 - NCRs with no part, work order or receipt;
-- CARs that no NCR or complaint references;
+- CARs with no part or customer of their own that no NCR or complaint references;
 - purchase orders and receipts with no part, or whose line parts are raw-material / hardware stock
   with a blank customer. The part record itself still passes; the buy cannot be tied to the job it
   was for;
@@ -204,8 +204,10 @@ these hold:
   `component_part_id`, `customer_id`, `operation_id`, `ncr_id`, `car_id`, `fai_id`, `quote_id`,
   `po_id` / `purchase_order_id`, `receipt_id`, the matching `*_number` keys, or `customer_name` /
   `customer`);
-- it is a top-level record of a route whose objects identify themselves only by `id`. For
-  example, a CAR carries no foreign key at all;
+- it is a top-level record of a route whose objects identify themselves by `id`. For example, a
+  CAR's body never names the NCR or complaint that places it, so `/quality/car` and
+  `/quality/car/{car_id}` judge each CAR by its `id` (its own `part_id` / `customer_id` are checked
+  as identifying keys too);
 - the route's own path parameter names a withheld record. Then the **whole** response is that
   record's (for example `/work-orders/{work_order_id}/timeline`);
 - it sits inside a withheld object;
@@ -226,7 +228,8 @@ Inside a withheld object a **keep-allowlist** applies. These stay true:
 - booleans and nulls;
 - numbers, both JSON numbers and numeric **strings** (a Decimal serializes as one), **only**
   under a key that names an id, count, quantity, duration, money amount, rate, percentage or
-  sequence. The key must be an id (`id`, `*_id`, `*_ids`, or a `*_by` user id), a status, a kept
+  sequence. The key must be an id (`id`, `*_id`, `*_ids`, a `*_by` user id, or a CAR's
+  `assigned_to` user id), a status, a kept
   identifier, one of `char_number`, `line_number`, `step_number`, `balloon_number`, a
   pagination key or the production calendar's `start_minute` / `end_minute` /
   `production_day_start_minute` (a wall time in minutes after local midnight), or contain one of `quantity`, `qty`, `count`, `hours`, `minutes`, `seconds`,
@@ -234,7 +237,10 @@ Inside a withheld object a **keep-allowlist** applies. These stay true:
   `reorder`, `percent`, `pct`, `rate`, `sequence`, `version`, `priority`, `runs`, `piece`,
   `parts`, `order`, `rank`, `rating`, `score`, `confidence`, `efficiency`, `passed`, `failed`,
   `complete` or `short`. A numeric string under a text key (a numeric part number) is withheld
-  anyway. A key that names a dimension or measurement of the article is withheld even when it
+  anyway, except under the money keys `cost_material` (a CAR's material cost) and `material_cost`
+  (a part's): a `Decimal` reaches the token as a numeric string and "material" is a text
+  fragment, so these two amounts are named whole (`NUMERIC_STRING_KEEP_KEYS`) instead of being
+  withheld as text. A key that names a dimension or measurement of the article is withheld even when it
   also names a count or total (`total_length`, `tolerance_percent`): `nominal`, `toleran…`,
   `measur…`, `dimension`, `diameter`, `thickness`, `length`, `width`, `height`, `depth`,
   `angle`, `radius`, `area`, `perimeter`, `volume`, `weight`, `mass`, `gauge`, `inch`, `torque`,
@@ -245,11 +251,13 @@ Inside a withheld object a **keep-allowlist** applies. These stay true:
   free-form JSON, are withheld. Every numeric field an allowlisted route types in its response
   schema is pinned kept or withheld by
   `tests/test_export_control_redaction.py`; today only `flat_area` and `cut_length` are withheld.
+  Every `Decimal` field is pinned through the string path as well, since that is how it is sent.
   Members of a free-form JSON object keep a number only under their own counting key, so a
   legacy AI estimate's `totals.grand_total` stays and its `totals.material` does not;
 - the business identifiers `work_order_number`, `wo_number`, `operation_number`, `ncr_number`,
   `car_number`, `fai_number`, `quote_number`, `po_number`, `receipt_number`, `lot_number`,
-  `work_center_code` and `work_center_name`;
+  `work_center_code` and `work_center_name`, and `job_number` (the FAI log's name for the work
+  order's number);
 - a closed-vocabulary category, only as one of its own values (`KEPT_ENUM_VALUES` in
   `app/services/export_control_redaction.py`): an operation's `hours_source` stays when it is
   `time_entries`, `manual`, `standard` or `none` (the schema's `Literal`, pinned by the test), and
@@ -295,13 +303,13 @@ This is the brief's read set, plus the production calendar (P1.2), and nothing e
 | Work centers | `/work-centers/`, `/work-centers/types`, `/work-centers/{work_center_id}` |
 | OEE | `/oee/records`, `/oee/records/{record_id}`, `/oee/dashboard`, `/oee/trends`, `/oee/six-big-losses/{work_center_id}`, `/oee/targets` |
 | Parts and routings | `/parts/`, `/parts/{part_id}`, `/parts/by-number/{part_number}`, `/routing/`, `/routing/{routing_id}`, `/routing/by-part/{part_id}` |
-| Quality | `/quality/ncr`, `/quality/ncr/{ncr_id}`, `/quality/car`, `/quality/car/{car_id}`, `/quality/fai`, `/quality/fai/{fai_id}` |
+| Quality | `/quality/ncr`, `/quality/ncr/{ncr_id}`, `/quality/car`, `/quality/car/{car_id}`, `/quality/fai`, `/quality/fai/{fai_id}`, `/quality/fai/log` (the FAI log of record) |
 | Quotes | `/quotes/`, `/quotes/{quote_id}` |
 | Purchasing and receiving | `/purchasing/vendors`, `/purchasing/vendors/{vendor_id}`, `/purchasing/purchase-orders`, `/purchasing/purchase-orders/{po_id}`, `/receiving/history`, `/receiving/receipt/{receipt_id}` |
 | Maintenance work orders | `/maintenance/work-orders`, `/maintenance/work-orders/overdue`, `/maintenance/work-orders/{wo_id}` |
 | Production calendar | `/production-calendar`, `/production-calendar/resolve` |
 
-That is 46 routes. The MCP tool names they map to (5 convenience + 41 generated) are listed in
+That is 47 routes. The MCP tool names they map to (5 convenience + 42 generated) are listed in
 [MCP.md → 4.2](MCP.md#42-ai-external-tokens-and-export-control). Every other route, global search
 and the shop-floor dashboard included, is refused by gate 4.
 
@@ -329,12 +337,13 @@ Refused, not stripped: silently ignoring a filter would hand an agent the wrong 
 were the right one.
 
 - **Refused:** `search` on `/parts/`, `/work-orders/`, `/work-orders/browse`,
-  `/shop-floor/operations` and `/quotes/`; `customer` on `/work-orders/browse` and `/quotes/`;
+  `/shop-floor/operations`, `/quotes/` and `/quality/fai/log`; `customer` on `/work-orders/browse`,
+  `/quotes/` and `/quality/fai/log`;
   `sort=part` / `sort=customer` and `group=customer` / `group=part` on `/work-orders/browse`.
 - **Allowed:** filters over fields the redaction keeps, such as ids, statuses, dates, counts,
   booleans, pagination and closed-vocabulary categories (`part_type`, `work_order_type`, downtime
-  `category`), the OEE records' `shift_id`, and the calendar resolver's `at` and
-  `work_center_id`.
+  `category`), the OEE records' `shift_id`, the calendar resolver's `at` and
+  `work_center_id`, and the FAI log's date range, `status`, `part_id` and `work_order_id`.
 
 A new query parameter on an allowlisted route is refused until it is classified; a guard test in
 `backend/tests/api/test_ai_external_token.py` fails CI until it is.

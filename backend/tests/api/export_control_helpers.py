@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from typing import Any, Dict, Optional, Tuple
 
 from fastapi.testclient import TestClient
@@ -350,6 +351,18 @@ def seed_world(db: Session, *, company_id: int = 1, controlled: bool = True, pre
         problem_description=_canary("car problem"),
         root_cause=_canary("car root cause"),
         due_date=today + timedelta(days=30),
+        # The CAR form's fields (migration 122): every text one carries the canary, the cost
+        # buckets are money and must stay true inside the withheld CAR.
+        initiation_reason="other",
+        initiation_reason_other=_canary("car reason other"),
+        rma_number=_canary("RMA"),
+        vendor_po_number=_canary("vendor PO"),
+        management_action=_canary("management action"),
+        vendor_approval_name=_canary("vendor approver"),
+        vendor_approval_title=_canary("vendor title"),
+        customer_approval_name=_canary("customer approver"),
+        cost_labor=Decimal("125.50"),
+        cost_material=Decimal("40.00"),
         company_id=company_id,
     )
     # Referenced by no NCR and no complaint: cannot be tied to any customer.
@@ -402,7 +415,7 @@ def seed_world(db: Session, *, company_id: int = 1, controlled: bool = True, pre
     itar_fai = FirstArticleInspection(
         fai_number=f"{p}FAI-0001",
         part_id=itar_part.id,
-        part_revision="A",
+        part_revision=f"{CANARY}-R",
         work_order_id=itar_wo.id,
         notes=_canary("fai notes"),
         due_date=today + timedelta(days=5),
@@ -458,6 +471,7 @@ def seed_world(db: Session, *, company_id: int = 1, controlled: bool = True, pre
                 quote_id=itar_quote.id,
                 line_number=1,
                 part_id=itar_part.id,
+                part_revision=_canary("rev"),  # the drawing revision quoted (P2.4)
                 description=_canary("quote line"),
                 quantity=7,
                 unit_price=176.36,

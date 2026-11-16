@@ -9,7 +9,8 @@
   or unresolvable -> unlinkable. A blank material-supply part is generic stock and passes.
 - The linkage map: one-step part closure from controlled work orders, parents control
   children, a standalone laser work order is unlinkable, NCRs via part / WO / receipt, CARs
-  via the NCRs and complaints that reference them, raw-material purchases are unlinkable,
+  via their own part, customer and customer-name snapshot AND the NCRs and complaints that
+  reference them (every link must clear), raw-material purchases are unlinkable,
   quotes via name, lines and the fabrication quote's customer.
 - Tenant isolation: another company's contracts never classify anything here.
 """
@@ -432,6 +433,60 @@ class TestLinkageMap:
         assert control(index, "car", by_complaint.id).customer_id == itar.id
         assert control(index, "car", by_clear_ncr.id) is None
         assert control(index, "car", orphan.id) is UNLINKABLE
+
+    def test_cars_also_follow_their_own_part_and_customer(self, db_session: Session, itar: Customer, clear: Customer):
+        """Migration 122 gave a CAR its own part, customer and customer-name snapshot. A CAR is
+        cleared only when EVERY link -- direct and via referrers -- clears; any controlled or
+        unresolvable one withholds it, and the snapshot is judged on its own."""
+
+        def car(**links):
+            row = CorrectiveActionRequest(
+                car_number=f"CAR-{_n()}", title="t", problem_description="p", company_id=1, **links
+            )
+            db_session.add(row)
+            db_session.flush()
+            return row
+
+        clear_part, itar_part = part(db_session, "Open Commerce"), part(db_session, "Acme Defense")
+        by_clear_customer = car(customer_id=clear.id, customer_name=clear.name)
+        by_itar_customer = car(customer_id=itar.id, customer_name=itar.name)
+        by_clear_part = car(part_id=clear_part.id)
+        by_itar_part = car(part_id=itar_part.id)
+        clear_part_itar_customer = car(part_id=clear_part.id, customer_id=itar.id, customer_name=itar.name)
+        # The snapshot alone names the controlled customer (by code, any case): withheld even
+        # though the id clears -- the CAR recorded that name.
+        snapshot_controlled = car(customer_id=clear.id, customer_name="  acmed ")
+        # A snapshot no customer carries (a renamed customer's old name, a typo): fail closed.
+        snapshot_unresolvable = car(customer_id=clear.id, customer_name="Open Comerce")
+        # Escalated from a CLEARED NCR, then its customer set to the controlled one.
+        escalated = car(part_id=clear_part.id, customer_id=itar.id, customer_name=itar.name)
+        # And the other way round: a controlled referrer is not cleared by a cleared customer.
+        referred_by_itar = car(customer_id=clear.id, customer_name=clear.name)
+        for linked_car, linked_part in ((escalated, clear_part), (referred_by_itar, itar_part)):
+            db_session.add(
+                NonConformanceReport(
+                    ncr_number=f"N-{_n()}",
+                    source="in_process",
+                    title="t",
+                    description="d",
+                    part_id=linked_part.id,
+                    car_id=linked_car.id,
+                    company_id=1,
+                )
+            )
+        db_session.flush()
+
+        index = build_controlled_index(db_session, 1)
+        assert control(index, "car", by_clear_customer.id) is None
+        assert control(index, "car", by_clear_part.id) is None
+        for withheld in (by_itar_customer, by_itar_part, clear_part_itar_customer, snapshot_controlled):
+            assert control(index, "car", withheld.id).customer_id == itar.id, withheld.car_number
+        assert control(index, "car", snapshot_unresolvable.id) is UNLINKABLE
+        assert "Open Comerce" in index.sensitive_tokens, "an unresolvable snapshot may be a controlled name misspelled"
+        assert control(index, "car", escalated.id).customer_id == itar.id
+        assert control(index, "car", referred_by_itar.id).customer_id == itar.id
+        # A CAR id the index never enumerated is never "fine".
+        assert index.by_id("car", 10**9) is UNLINKABLE
 
     def test_fais_and_quotes(self, db_session: Session, itar: Customer, clear: Customer):
         itar_part = part(db_session, "Acme Defense")

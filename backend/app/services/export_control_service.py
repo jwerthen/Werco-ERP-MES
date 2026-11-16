@@ -19,15 +19,16 @@ Three jobs, one module:
      withheld, and so is any name or code a controlled customer has EVER carried (its audit
      history, :func:`customer_former_names`): a rename frees nothing, even when another
      customer later takes the old name. Records the ERP cannot tie to any customer
-     (standalone laser work orders, NCRs with no part / work order / receipt, CARs no NCR
-     or complaint references,
+     (standalone laser work orders, NCRs with no part / work order / receipt, CARs with no
+     part or customer of their own that no NCR or complaint references,
      raw-material purchase orders and receipts, engineering parts with no customer) are
      withheld as UNLINKABLE. A material-supply part (purchased / raw material / hardware /
      consumable) with a blank customer is generic stock and passes.
    * The linkage map (docs/EXPORT_CONTROL_AI_EGRESS.md): work orders via their name, part,
      component parts and parent; operations, time entries and downtime via the work order;
      routings via the part; FAI via part and work order; NCRs via part, work order and
-     receipt; CARs via the NCRs and complaints that reference them; quotes via name, work
+     receipt; CARs via their own part, customer and customer-name snapshot AND the NCRs and
+     complaints that reference them; quotes via name, work
      order, line parts and the fabrication quote's customer; purchase orders and receipts
      via their line parts.
 
@@ -504,7 +505,7 @@ def build_controlled_index(db: Session, company_id: int) -> ControlledIndex:
         if ncr.car_id is not None:
             car_referrers[ncr.car_id].append(ncr_control[ncr.id])
 
-    # ---- CARs: placed only by the NCRs and complaints that reference them
+    # ---- CARs: placed by the NCRs and complaints that reference them ...
     known_customer_ids = {customer.id for customer in customers}
     complaints = (
         tenant_filter(
@@ -537,10 +538,44 @@ def build_controlled_index(db: Session, company_id: int) -> ControlledIndex:
         if complaint.work_order_id is not None:
             links.append(wo_control.get(complaint.work_order_id, UNLINKABLE))
         car_referrers[complaint.car_id].append(worst(*links))
+    # ---- and by the CAR's OWN links (migration 122_car_form_quote_rev): the CAR form's part,
+    # customer and the customer-name snapshot taken when the customer was chosen. A CAR is
+    # cleared only when EVERY link -- referrers and direct -- resolves to a known, uncontrolled
+    # customer (or generic stock); any controlled or unresolvable link withholds it. So a CAR
+    # escalated from a cleared NCR is withheld the moment its customer is set to a controlled
+    # one. The snapshot is judged on its own as well (positive clearance, the former-names rule
+    # included): it names the customer as the CAR recorded it, and it outlives a rename.
+    # Soft-deleted / voided CARs, parts and customers are included (invariant 3's
+    # historical-record exception), as everywhere in this index.
     cars = tenant_filter(
-        db.query(CorrectiveActionRequest.id, CorrectiveActionRequest.car_number), CorrectiveActionRequest, company_id
+        db.query(
+            CorrectiveActionRequest.id,
+            CorrectiveActionRequest.car_number,
+            CorrectiveActionRequest.part_id,
+            CorrectiveActionRequest.customer_id,
+            CorrectiveActionRequest.customer_name,
+        ),
+        CorrectiveActionRequest,
+        company_id,
     ).all()
-    car_control = {car.id: (worst(*car_referrers[car.id]) if car_referrers.get(car.id) else UNLINKABLE) for car in cars}
+    car_control: Dict[int, Optional[Control]] = {}
+    for car in cars:
+        car_links: List[Optional[Control]] = list(car_referrers.get(car.id, []))
+        if car.part_id is not None:
+            car_links.append(part_control.get(car.part_id, UNLINKABLE))
+        if car.customer_id is not None:
+            if car.customer_id in controlled:
+                car_links.append(controlled[car.customer_id])
+            elif car.customer_id in known_customer_ids:
+                car_links.append(None)
+            else:
+                car_links.append(UNLINKABLE)  # an id the index never enumerated: never "fine"
+        snapshot = names.resolve(car.customer_name)
+        if snapshot is not _BLANK:
+            car_links.append(snapshot)
+            if snapshot is UNLINKABLE or _customer_controlled(snapshot):
+                sensitive.update(_tokens(car.customer_name))
+        car_control[car.id] = worst(*car_links) if car_links else UNLINKABLE
 
     # ---- FAIs
     fais = tenant_filter(

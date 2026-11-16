@@ -726,8 +726,8 @@ tokens" below), never wider.
 >    (`READ_ONLY_DENY_TAG_FLOOR`), so an empty or truncated value still denies them.
 > 4. **AI-external, `(method, route)` not on the allowlist** (a fixed set of `GET` routes in
 >    `app/core/export_control.py`: work orders, shop-floor operations, downtime, work centers, OEE,
->    parts, routings, NCR / CAR / FAI, quotes, vendors, purchase orders, receiving, maintenance work
->    orders) → **403** `"This resource is not available to an AI-external API token."`. Then every
+>    parts, routings, NCR / CAR / FAI and the FAI log of record, quotes, vendors, purchase orders,
+>    receiving, maintenance work orders, the production calendar) → **403** `"This resource is not available to an AI-external API token."`. Then every
 >    query parameter (and value) must be on that route's list in `AI_EXTERNAL_QUERY_PARAMS`:
 >    free-text `search`, the `customer` filter and `sort` / `group` by part or customer are refused
 >    **403** `"This query parameter is not available to an AI-external API token: free-text search,
@@ -8120,6 +8120,14 @@ the caller's most recent closed unapproved session.)
 > - **Escalations prefill the form.** `POST /quality/ncr/{id}/create-car`: see the bullet above.
 >   `POST /complaints/complaints/{id}/create-car`: see **Customer Complaints & RMA**.
 > - A CLOSED CAR still refuses every `PUT` except a status-only reopen, form fields included.
+> - **Export control (AI-external tokens).** The CAR's own `part_id`, `customer_id` and
+>   `customer_name` snapshot place it, alongside the NCRs and complaints that reference it: a CAR is
+>   served in full to an AI-external API token only when every one of those links clears, so
+>   setting a controlled customer on a CAR raised from a cleared NCR withholds it from the next
+>   request on. Inside a withheld CAR the form's text (reason, RMA #, vendor PO, management action,
+>   approval names and titles) is `"[export-controlled]"`; the cost buckets and `cost_total` stay
+>   true. `GET /quality/car/{car_id}/pdf` is a file and is refused to every read-only token. See
+>   [EXPORT_CONTROL_AI_EGRESS.md → Linkage map](EXPORT_CONTROL_AI_EGRESS.md#linkage-map).
 >
 > **Quality Manager approval (`POST /quality/car/{car_id}/quality-approval`).** Records the form's
 > Quality Manager approval. No body: the server stamps `quality_approved_by` (the caller) and
@@ -8277,6 +8285,14 @@ once the FAI has its final disposition). It adds `fai_id`, `part_id`, `part_revi
   another company's record shows blanks rather than its labels.
 - Paging is offset-based with a ceiling of 500. Ask for one row more than a page to learn whether
   another page exists (the FAI tab's **Log** view does).
+- **AI-external API tokens** may read the log (it is on the AI-external allowlist). Each row is
+  judged like the FAI it names (by `fai_id`, `part_id` and `work_order_id`): a row of an
+  export-controlled or unlinkable FAI keeps its ids, `fai_number`, `job_number`, `status`, dates,
+  booleans and counts, and every other value is `"[export-controlled]"`. The `customer` and `search`
+  filters match withheld text, so they are refused **403** to such a token; the date range,
+  `status`, `part_id`, `work_order_id`, `limit` and `offset` are allowed. The export is a file and
+  stays refused to every read-only token. See
+  [EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md#5-the-ai-external-allowlist).
 
 The export, `GET /exports/fai/export`, takes the same filters plus `format` (`csv` / `xlsx`, sheet
 "FAI Log") and `columns`, and is gated **Admin / Manager** and audited like every `/exports/*`
@@ -8903,7 +8919,9 @@ when an estimate is approved and handed off in Fabrication Quoting (`/fabricatio
 >   the planner changes it, because saving records it). `part_number` is tenant-checked the same way:
 >   a legacy line pointing at another company's part names no part. The Quotes editor has a Rev input per line and sends only
 >   the revisions that changed. The detail table shows a Rev column ("Missing" when blank) and names
->   the lines the gate will refuse.
+>   the lines the gate will refuse. Inside a quote withheld from an AI-external API token, both
+>   revisions are `"[export-controlled]"` like the rest of the line's text (a drawing revision is
+>   technical data); the quantities and prices stay true.
 >
 > **Customer quote PDF contents.** The line table has a **Rev** column (the line's `part_revision`).
 > The title no longer carries "Rev": the quote's own revision prints on its own line as **Quote Rev**.
@@ -13654,7 +13672,7 @@ What matters from this file's point of view:
   routers with the caller's own bearer token. The router is the boundary: the same `require_role`
   gates, tenant scoping, audit rows, optimistic-locking 409s and per-endpoint size caps apply, and a
   401/403/409/422 comes back verbatim as an `is_error` tool result carrying the server's `detail`.
-- **The catalog is this API.** 751 tools are generated from `app.openapi()` at startup — every
+- **The catalog is this API.** 756 tools are generated from `app.openapi()` at startup — every
   secured operation except the `Authentication`, `Carrier Webhooks`, `Error Logging` (and its router-level `errors` twin) and `WebSocket` tags, the
   unauthenticated health/station-login routes (named one by one in `catalog.PUBLIC_OPERATIONS`) and
   the nine operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders
