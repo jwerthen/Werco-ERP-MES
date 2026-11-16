@@ -33,6 +33,13 @@ Two more rules, both enforced here so they have one copy:
   issuer is) and :func:`check_api_token` refuses such a holder at USE, so a
   promotion after issue can never widen a standing token. This mirrors the
   tenant user verbs, which refuse to *assign* ``platform_admin``.
+- **Scope only narrows, and only at mint.** ``scope`` (``full`` / ``read_only``) and
+  ``ai_external`` are written once by :func:`issue_api_token` and never updated (revoke
+  and re-mint to change them). An AI-external token must be read-only (**422**), and an
+  omitted ``ai_external`` defaults to true for a read-only token. The narrowed JWT
+  carries matching ``api_scope`` / ``ai_ext`` claims, and :func:`check_api_token` refuses
+  a token whose claims disagree with its row -- the ROW is authoritative; the claims exist
+  only so the stdio bridge can narrow its tool listing without a database.
 - **Revocation is a conditional write.** The flip carries ``revoked = false``
   in its ``WHERE`` (:func:`_flip_revoked`), so two revokers -- concurrent, or
   one holding a stale identity-mapped row -- can never both write: the first
@@ -61,10 +68,10 @@ from sqlalchemy import or_
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.core.security import create_api_token, verify_api_token
+from app.core.security import AI_EXTERNAL_CLAIM, API_SCOPE_CLAIM, create_api_token, verify_api_token
 from app.core.time_utils import to_utc_iso
 from app.db.tenant_filter import tenant_query
-from app.models.api_token import ApiToken
+from app.models.api_token import ApiToken, ApiTokenScope
 from app.models.user import User, UserRole
 from app.schemas.api_token import MAX_API_TOKEN_EXPIRES_DAYS
 from app.services.audit_service import AuditService
@@ -83,6 +90,8 @@ AUTH_EVENT_REVOKED = "API_TOKEN_REVOKED"
 # ``last_used_at`` is a coarse liveness marker, not a hit counter.
 LAST_USED_TOUCH_INTERVAL = timedelta(minutes=5)
 PLATFORM_PRINCIPAL_DETAIL = "API tokens cannot be issued for platform administrators"
+AI_EXTERNAL_REQUIRES_READ_ONLY_DETAIL = "An AI-external API token must be read-only."
+_VALID_SCOPES = frozenset(member.value for member in ApiTokenScope)
 # The reason stamped on every token the deactivation sweep revokes.
 DEACTIVATION_REVOKE_REASON = "user deactivated"
 
@@ -113,6 +122,10 @@ def check_api_token(db: Session, token: str, *, now: Optional[datetime] = None) 
       6. the user exists and belongs to the row's company
       7. the user is not a platform principal (superuser / ``PLATFORM_ADMIN``):
          a holder promoted after issue is refused, never widened
+    Step 5 also covers the narrowing claims (migration ``119``): the JWT's ``api_scope``
+    (absent = ``full``) must equal the row's ``scope`` and its ``ai_ext`` (absent =
+    false) the row's ``ai_external``. The row is what every gate reads; the claims can
+    never stand in for it.
     Pure read: no touch, no audit, no commit. ``is_active`` is the CALLER's
     decision -- see the module docstring.
     """
@@ -129,6 +142,10 @@ def check_api_token(db: Session, token: str, *, now: Optional[datetime] = None) 
         return None
 
     if claims.get("user_id") != record.user_id or claims.get("company_id") != record.company_id:
+        return None
+    if claims.get(API_SCOPE_CLAIM, ApiTokenScope.FULL.value) != record.scope:
+        return None
+    if (claims.get(AI_EXTERNAL_CLAIM) is True) != bool(record.ai_external):
         return None
 
     user = db.query(User).filter(User.id == record.user_id).first()
@@ -195,7 +212,9 @@ def resolve_api_token_user(
 # --------------------------------------------------------------------------- admin verbs
 
 
-def _log_auth_event(audit: AuditService, action: str, *, user: User, record: ApiToken, extra: Dict) -> None:
+def _log_auth_event(
+    audit: AuditService, action: str, *, user: User, record: ApiToken, extra: Dict, required: bool = False
+) -> None:
     """The ``authentication`` row ``auth.log_auth_event`` would write, via the request-scoped audit.
 
     Written through the caller's ``AuditService`` (actor = the Admin, IP and
@@ -203,8 +222,10 @@ def _log_auth_event(audit: AuditService, action: str, *, user: User, record: Api
     helper: a service must not import a router, and ``auth.py`` already
     imports ``deps`` which imports this module. Same ``resource_type``, same
     ``resource_id`` (the token's USER), same identifier (their email).
+    ``required`` -- through ``log_required`` (``AuditWriteError`` on failure).
     """
-    audit.log(
+    write = audit.log_required if required else audit.log
+    write(
         action=action,
         resource_type="authentication",
         resource_id=user.id,
@@ -224,6 +245,8 @@ def issue_api_token(
     expires_days: Optional[int],
     created_by: int,
     audit: AuditService,
+    scope: str = ApiTokenScope.FULL.value,
+    ai_external: Optional[bool] = None,
 ) -> Tuple[ApiToken, str]:
     """Create an ``api_tokens`` row + the matching JWT. Returns ``(record, jwt)``.
 
@@ -233,8 +256,27 @@ def issue_api_token(
     standing credential to one) and be active (**409**). ``expires_days`` ``None`` means
     the row's ``expires_at`` is NULL (never expires); otherwise 1..3650. The
     JWT is returned exactly once and is never persisted; the audit row and the
-    ``API_TOKEN_ISSUED`` auth event carry metadata only.
+    ``API_TOKEN_ISSUED`` auth event carry metadata only -- the scope and
+    ``ai_external`` included.
+
+    ``scope`` is ``full`` (default) or ``read_only`` (**422** otherwise). ``ai_external``
+    ``None`` means "the default for the scope": true for ``read_only``, false for
+    ``full``; ``ai_external=True`` with ``scope="full"`` is **422** (an AI-external token
+    must be read-only). Both are checked before any read, like ``expires_days``.
     """
+    scope = getattr(scope, "value", scope)
+    if scope not in _VALID_SCOPES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"scope must be one of {', '.join(sorted(_VALID_SCOPES))}",
+        )
+    read_only = scope == ApiTokenScope.READ_ONLY.value
+    effective_ai_external = read_only if ai_external is None else bool(ai_external)
+    if effective_ai_external and not read_only:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=AI_EXTERNAL_REQUIRES_READ_ONLY_DETAIL
+        )
+
     if expires_days is not None and not 1 <= expires_days <= MAX_API_TOKEN_EXPIRES_DAYS:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -265,12 +307,19 @@ def issue_api_token(
         created_by=created_by,
         created_at=now,
         company_id=company_id,
+        scope=scope,
+        ai_external=effective_ai_external,
     )
     db.add(record)
     db.flush()  # assign the PK so the audit rows carry a real resource_id
 
     lifetime = "never expires" if expires_at is None else f"expires {expires_at.date().isoformat()}"
-    audit.log_create(
+    # REQUIRED evidence (compliance review P0, finding 5): a standing credential -- one whose
+    # answers may leave the company -- never exists without the record of who minted it and
+    # with what scope. ``AuditWriteError`` propagates before the commit; the route's
+    # ``required_audit`` rolls the row back and answers 503, and no JWT is ever created.
+    audit.log_required(
+        action=AuditService.ACTIONS["CREATE"],
         resource_type=API_TOKEN_RESOURCE_TYPE,
         resource_id=record.id,
         resource_identifier=label,
@@ -281,15 +330,39 @@ def issue_api_token(
             "company_id": company_id,
             "expires_at": to_utc_iso(expires_at) if expires_at is not None else None,
             "jti_prefix": record.jti_prefix,
+            "scope": scope,
+            "ai_external": effective_ai_external,
         },
-        description=f"Issued API token '{label}' for {target.email} ({lifetime})",
+        description=f"Issued {_scope_phrase(scope, effective_ai_external)}API token '{label}' for {target.email} "
+        f"({lifetime})",
     )
-    _log_auth_event(audit, AUTH_EVENT_ISSUED, user=target, record=record, extra={"expires_at": lifetime})
+    _log_auth_event(
+        audit,
+        AUTH_EVENT_ISSUED,
+        user=target,
+        record=record,
+        extra={"expires_at": lifetime, "scope": scope, "ai_external": effective_ai_external},
+        required=True,
+    )
     db.commit()
     db.refresh(record)
 
-    token = create_api_token(jti=jti, user_id=target.id, company_id=company_id, expires_at=expires_at)
+    token = create_api_token(
+        jti=jti,
+        user_id=target.id,
+        company_id=company_id,
+        expires_at=expires_at,
+        scope=scope,
+        ai_external=effective_ai_external,
+    )
     return record, token
+
+
+def _scope_phrase(scope: str, ai_external: bool) -> str:
+    """``"read-only, AI-external "`` / ``"read-only "`` / ``""`` -- the audit description's qualifier."""
+    if scope != ApiTokenScope.READ_ONLY.value:
+        return ""
+    return "read-only, AI-external " if ai_external else "read-only "
 
 
 def list_api_tokens(
@@ -326,20 +399,42 @@ def _flip_revoked(db: Session, record: ApiToken, *, revoked_by: int, reason: str
     return updated == 1
 
 
-def _audit_revocation(audit: AuditService, record: ApiToken, holder: Optional[User], reason: str) -> None:
-    """The status-change row + ``API_TOKEN_REVOKED`` event one revocation writes (metadata only)."""
+def _audit_revocation(
+    audit: AuditService, record: ApiToken, holder: Optional[User], reason: str, *, required: bool = False
+) -> None:
+    """The status-change row + ``API_TOKEN_REVOKED`` event one revocation writes (metadata only).
+
+    ``required`` -- the explicit revoke verb: both rows through ``log_required``. The
+    deactivation companion (``revoke_api_tokens_for_user``) keeps its caller's posture.
+    """
     holder_email = holder.email if holder is not None else f"user {record.user_id}"
-    audit.log_status_change(
-        resource_type=API_TOKEN_RESOURCE_TYPE,
-        resource_id=record.id,
-        resource_identifier=record.label,
-        old_status="active",
-        new_status="revoked",
-        description=f"Revoked API token '{record.label}' for {holder_email}: {reason}",
-        extra_data={"reason": reason, "user_id": record.user_id, "jti_prefix": record.jti_prefix},
-    )
+    description = f"Revoked API token '{record.label}' for {holder_email}: {reason}"
+    extra_data = {"reason": reason, "user_id": record.user_id, "jti_prefix": record.jti_prefix}
+    if required:
+        audit.log_required(
+            action=AuditService.ACTIONS["STATUS_CHANGE"],
+            resource_type=API_TOKEN_RESOURCE_TYPE,
+            resource_id=record.id,
+            resource_identifier=record.label,
+            description=description,
+            old_values={"status": "active"},
+            new_values={"status": "revoked"},
+            extra_data=extra_data,
+        )
+    else:
+        audit.log_status_change(
+            resource_type=API_TOKEN_RESOURCE_TYPE,
+            resource_id=record.id,
+            resource_identifier=record.label,
+            old_status="active",
+            new_status="revoked",
+            description=description,
+            extra_data=extra_data,
+        )
     if holder is not None:
-        _log_auth_event(audit, AUTH_EVENT_REVOKED, user=holder, record=record, extra={"reason": reason})
+        _log_auth_event(
+            audit, AUTH_EVENT_REVOKED, user=holder, record=record, extra={"reason": reason}, required=required
+        )
 
 
 def revoke_api_token(
@@ -380,7 +475,8 @@ def revoke_api_token(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="API token is already revoked")
 
     holder = db.query(User).filter(User.id == record.user_id).first()
-    _audit_revocation(audit, record, holder, reason)
+    # REQUIRED evidence: the route's ``required_audit`` rolls the flip back on failure (503).
+    _audit_revocation(audit, record, holder, reason, required=True)
     db.commit()
     db.refresh(record)
     return record

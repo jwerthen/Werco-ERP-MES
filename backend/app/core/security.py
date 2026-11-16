@@ -132,9 +132,25 @@ def verify_display_token(token: str) -> Optional[dict]:
 
 
 API_TOKEN_TYPE = "api"
+# Narrowing claims, present ONLY on a narrowed token so a FULL token's JWT is byte-for-byte
+# the shape it always was. ``api_scope`` -- not ``scope``, which access JWTs already use for
+# the kiosk badge. The api_tokens ROW stays authoritative: ``check_api_token`` refuses a
+# token whose claims disagree with its row, so a claim can only ever NARROW (the stdio
+# bridge reads it to filter its tool listing without a database).
+API_SCOPE_CLAIM = "api_scope"
+AI_EXTERNAL_CLAIM = "ai_ext"
+_API_SCOPE_FULL = "full"
 
 
-def create_api_token(jti: str, user_id: int, company_id: int, expires_at: Optional[datetime] = None) -> str:
+def create_api_token(
+    jti: str,
+    user_id: int,
+    company_id: int,
+    expires_at: Optional[datetime] = None,
+    *,
+    scope: str = _API_SCOPE_FULL,
+    ai_external: bool = False,
+) -> str:
     """Create a long-lived, revocable API token bound to ONE real user.
 
     The ``type`` claim is ``"api"`` -- NOT ``"access"`` -- so ``verify_token`` rejects
@@ -148,6 +164,10 @@ def create_api_token(jti: str, user_id: int, company_id: int, expires_at: Option
     standing bot credential is "never expires", and PyJWT accepts a token
     with no ``exp``. Rotating ``SECRET_KEY`` invalidates every API token at once
     -- that is a feature, not a hazard.
+
+    ``scope`` / ``ai_external`` mirror the row (migration ``119``) and add the
+    ``api_scope`` / ``ai_ext`` claims only for a narrowed token; a full token's claims
+    are unchanged.
     """
     to_encode: dict[str, Any] = {
         "sub": f"api:{jti}",
@@ -159,6 +179,10 @@ def create_api_token(jti: str, user_id: int, company_id: int, expires_at: Option
     }
     if expires_at is not None:
         to_encode["exp"] = expires_at
+    if scope != _API_SCOPE_FULL:
+        to_encode[API_SCOPE_CLAIM] = scope
+    if ai_external:
+        to_encode[AI_EXTERNAL_CLAIM] = True
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
@@ -175,11 +199,17 @@ def verify_api_token(token: str) -> Optional[dict]:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
         if payload.get("type") != API_TOKEN_TYPE:
             return None
-        return {
+        claims = {
             "jti": payload.get("jti"),
             "user_id": payload.get("user_id"),
             "company_id": payload.get("company_id"),
         }
+        # The narrowing claims pass through only when present, so a full token's claim
+        # dict is exactly the three keys it always was.
+        for narrowing in (API_SCOPE_CLAIM, AI_EXTERNAL_CLAIM):
+            if narrowing in payload:
+                claims[narrowing] = payload[narrowing]
+        return claims
     except InvalidTokenError:
         return None
 

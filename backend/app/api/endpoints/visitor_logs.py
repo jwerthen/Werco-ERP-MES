@@ -48,6 +48,7 @@ from app.schemas.visitor_log import (
 )
 from app.services import signin_station_service, visitor_log_service
 from app.services.audit_service import AuditService
+from app.services.export_audit import refuse_file_export_to_narrowed_token
 from app.services.export_safety import sanitize_csv_row
 
 logger = logging.getLogger(__name__)
@@ -232,6 +233,7 @@ def export_visitors_csv(
     date_to: Optional[datetime] = Query(None),
 ):
     """Export the visitor log as CSV (ADMIN/MANAGER). The export is audited."""
+    refuse_file_export_to_narrowed_token(current_user)  # before the EXPORT row: no file reaches one
     items, total = visitor_log_service.list_visitors(
         db,
         company_id=company_id,

@@ -34,7 +34,7 @@ from app.api.deps import get_audit_service, get_current_company_id, get_current_
 from app.api.endpoints.bom import tenant_parts_by_id
 from app.api.endpoints.user_workspaces import require_workspace_access
 from app.core.cache import invalidate_work_centers_cache
-from app.core.credentials import is_api_token_credential
+from app.core.credentials import is_api_token_credential, is_narrowed_api_token
 from app.core.observability import report_absorbed_exception
 from app.core.realtime import safe_broadcast
 from app.core.time_utils import to_utc_iso
@@ -353,10 +353,14 @@ def _emit_reconcile_events(
     EVT-4: reconcile-on-read materializes operation/WO completions from durable
     TimeEntry evidence. Those transitions must produce the SAME in-process signal as
     the live completion paths -- ``operation_completed`` / ``work_order_completed`` --
-    so AI/realtime consumers aren't blind to reconcile-driven completions. IN-PROCESS
-    ONLY: we do NOT fire outbound notifications/webhooks from a GET/reconcile path
-    (a read must not have outbound side-effects; rank 12 will move reconcile to a
-    debounced ARQ job, at which point the outbound dispatch can move with it).
+    so AI/realtime consumers aren't blind to reconcile-driven completions. The outbound
+    completion-SIGNAL job (``enqueue_work_order_completion_signals``) is deliberately not
+    enqueued from a GET/reconcile path (rank 12 will move reconcile to a debounced ARQ
+    job, at which point it can move with it). NOTIFICATIONS are not suppressed, though:
+    ``OperationalEventService.emit`` tees every notification-catalog source event into the
+    transactional outbox, and both of these are sources (``wo.completed`` is in-app + email
+    by default), so they are delivered when the read commits, attributed to the reader --
+    an API token's user included (docs/EXPORT_CONTROL_AI_EGRESS.md, section 9).
     Best-effort and tenant-scoped (``emit`` validates the WO/op belong to
     ``company_id``); wrapped so a signal failure never 500s a read.
     """
@@ -586,13 +590,24 @@ def _reconcile_and_commit(db: Session, work_orders: list[WorkOrder], current_use
 
     (The root ``sequence_number`` race is a separately-tracked follow-up; this
     guard only guarantees reads never 500.)
+
+    READ-ONLY MEANS READ-ONLY (lead decision, Claude-plugin brief build 2026-11-15): a
+    narrowed API token -- read-only, AI-external, or both (``is_narrowed_api_token``) --
+    never reconciles. Its GET serves the STORED state and writes nothing: no status flip,
+    no audit row, no OperationalEvent (so no outbox notification), no inventory movement,
+    no cost or scheduling rollup, all of which would otherwise be recorded as the token's
+    user. People, full API tokens and kiosk / display credentials are unchanged, and the
+    next read by one of them reconciles exactly as before (the reconcile is idempotent).
     """
+    if is_narrowed_api_token(current_user):
+        return
     transitions: list[StatusTransition] = []
     try:
         if reconcile_work_orders_from_completion_evidence(db, work_orders, transitions):
             _audit_reconcile_transitions(db, current_user, transitions, company_id)
             # EVT-4: in-process completion events for the materialized transitions
-            # (NO outbound notify/webhook on a read -- see helper).
+            # (no completion-signal job on a read; notifications DO go out through the
+            # outbox -- see helper).
             _emit_reconcile_events(db, company_id, current_user, transitions)
             # MS-2: refresh cached work-center availability for reconcile-driven WO
             # completions, joined to this read's unit of work (commit=False).
@@ -4206,12 +4221,17 @@ def get_work_order(
     # a concurrent-write conflict is benign on a GET (idempotent), so swallow
     # StaleDataError and serve the read against the freshest committed state
     # rather than 500'ing.
-    try:
-        if _reconcile_operation_component_quantities(db, work_order, company_id):
-            db.commit()
-    except StaleDataError:
-        db.rollback()
-        db.expire_all()
+    #
+    # Neither runs for a narrowed (read-only / AI-external) API token: its GET serves the
+    # stored state and writes nothing (lead decision 2026-11-15; see _reconcile_and_commit,
+    # which makes the same check). The component-quantity re-derivation is a write too.
+    if not is_narrowed_api_token(current_user):
+        try:
+            if _reconcile_operation_component_quantities(db, work_order, company_id):
+                db.commit()
+        except StaleDataError:
+            db.rollback()
+            db.expire_all()
     # AUD-3: terminal reconcile-driven transitions are audited to the requesting user.
     _reconcile_and_commit(db, [work_order], current_user, company_id)
     _enrich_work_order_operations(work_order, db=db, company_id=company_id)
