@@ -6084,7 +6084,10 @@ uploads go through text extraction + LLM. See
 >   **active** PM schedules by `next_due_date` (before today; today through today + 7) with **no open
 >   work order** (`scheduled` / `overdue` / `in_progress` / `on_hold`) carrying their `schedule_id`.
 >   A schedule with an open work order is counted through that work order, so the two pairs never
->   count one PM twice. The Maintenance page's Overdue / Due This Week tiles and the dashboard's
+>   count one PM twice — but only as far as the work-order counts reach: a PM whose work order is
+>   `in_progress` shows only on the **In progress** tile, and one `on_hold` is on **no** tile (an
+>   on-hold maintenance work order never was; find it on the Work Orders tab's On Hold filter). The
+>   Maintenance page's Overdue / Due This Week tiles and the dashboard's
 >   **Maintenance Due** widget show the sum, the page with a *"N work orders · M PMs not started"*
 >   split. "Today" is the server's `date.today()` (UTC on the deployed server), as for the work-order
 >   counts, and a schedule on a retired asset still counts until the schedule itself is deactivated.

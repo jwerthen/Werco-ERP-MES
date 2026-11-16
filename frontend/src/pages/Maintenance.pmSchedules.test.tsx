@@ -239,7 +239,10 @@ describe('Maintenance — completing a PM work order', () => {
       { item: 'Drain tank', done: true },
       { item: 'Check belt', done: false },
     ]);
-    expect(await screen.findByText(/MWO-2026-0041 completed — Compressor Annual PM is next due/)).toBeInTheDocument();
+    // The date comes from the completion response, not from the cached schedule (still Dec 1, 2026).
+    expect(
+      await screen.findByText('MWO-2026-0041 completed — Compressor Annual PM is next due Nov 16, 2027')
+    ).toBeInTheDocument();
   });
 
   it('sends no checklist for a work order that has none (the server keeps what it has)', async () => {
@@ -326,13 +329,25 @@ describe('Maintenance — editing a schedule', () => {
 
 describe('Maintenance — KPI tiles count PMs nobody has started', () => {
   it('adds unstarted PM schedules to the work-order counts and shows the split', async () => {
+    mockedApi.getMaintenanceDashboard.mockResolvedValue({
+      overdue_count: 1,
+      due_this_week: 2,
+      schedules_overdue: 30,
+      schedules_due_this_week: 4,
+      completed_this_month: 0,
+      completion_rate: 0,
+      total_cost_month: 0,
+      in_progress: 1,
+      work_center_metrics: [],
+    });
     renderPage('/maintenance?tab=dashboard');
     expect(await screen.findByText('Overdue')).toBeInTheDocument();
     const overdue = screen.getByText('Overdue').closest('div')?.parentElement as HTMLElement;
     expect(overdue).toHaveTextContent('31');
     expect(overdue).toHaveTextContent('1 work order · 30 PMs not started');
     const due = screen.getByText('Due This Week').closest('div')?.parentElement as HTMLElement;
-    expect(due).toHaveTextContent('2 work orders · 0 PMs not started');
+    expect(due).toHaveTextContent('6');
+    expect(due).toHaveTextContent('2 work orders · 4 PMs not started');
   });
 });
 

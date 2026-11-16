@@ -203,9 +203,9 @@ class WorkOrderUpdate(BaseModel):
 
 
 class WorkOrderComplete(BaseModel):
-    # Omitted keeps the checklist the work order already carries (a PM work order opened from a
-    # schedule is created with the schedule's checklist); a value -- or an explicit null --
-    # replaces it.
+    # Omitted keeps the checklist the work order already carries (the Maintenance page's Start PM
+    # opens a PM work order with the schedule's checklist; the create endpoint stores whatever
+    # checklist_results it is sent and never copies one); a value -- or an explicit null -- replaces it.
     checklist_results: Optional[str] = None
     findings: Optional[str] = None
     notes: Optional[str] = None
@@ -1243,7 +1243,9 @@ def get_dashboard(
     those: ACTIVE schedules by ``next_due_date`` (before today; today through today + 7) that
     have no open work order (scheduled / overdue / in progress / on hold) carrying their
     ``schedule_id``. A schedule with an open work order is represented by that work order, so
-    the two pairs never count the same PM twice and add up to "everything overdue / due"."""
+    the two pairs never count the same PM twice -- but only as far as the work-order counts reach:
+    a PM whose work order is in progress shows only in ``in_progress``, and one on hold is in no
+    count here at all (an on-hold maintenance work order never was)."""
     today = date.today()
     week_end = today + timedelta(days=7)
     month_start = today.replace(day=1)
