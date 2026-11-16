@@ -9,9 +9,10 @@ import logging
 from datetime import datetime, timedelta
 from typing import List
 
-from sqlalchemy import func
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.audit_log import AuditLog
 from app.models.calibration import CalibrationRecord, CalibrationStatus, Equipment
 from app.models.customer_complaint import ComplaintStatus, CustomerComplaint
@@ -32,6 +33,7 @@ from app.models.quality import (
 from app.models.spc import SPCCharacteristic
 from app.models.supplier_scorecard import SupplierScorecard
 from app.models.work_order import WorkOrder
+from app.services.audit_service import PAUSED_CHAIN_PLACEHOLDER
 from app.services.supplier_approval_service import APPROVED_STATUSES
 
 logger = logging.getLogger(__name__)
@@ -784,29 +786,96 @@ def _query_spc(db: Session, company_id: int) -> dict:
     )
 
 
+AUDIT_TRIGGERS_SENTENCE = "Database triggers block UPDATE and DELETE on every entry."
+
+
 def _query_audit_log(db: Session, company_id: int) -> dict:
+    """Evidence row for the audit trail. It must not claim tamper-evidence the system lacks.
+
+    The SHA-256 hash chain is PAUSABLE at runtime (``settings.AUDIT_HASH_CHAIN_ENABLED``,
+    CLAUDE.md invariant 2, docs/AUDIT_LOG_RETENTION_RUNBOOK.md -> Pausing the hash chain).
+    A row written while it is paused carries the ``PAUSED_CHAIN_PLACEHOLDER`` instead of a
+    hash and can never be verified after the fact. So the row reports two facts:
+
+    * whether the chain is on NOW (the setting, read per call), and
+    * how many of the company's entries in the last 12 months carry the paused placeholder.
+
+    Either one -- paused now, or paused at some point in the window -- caps the row at
+    ``warning`` / ``partial`` and says so in ``description`` (the text auto-link persists) and
+    ``health_detail``. Only chain-on with no paused entries in the window is ``healthy`` /
+    ``compliant``. The 008/060 UPDATE/DELETE triggers are independent of the setting, so
+    every branch may state them; none may call a paused span hash-chained.
+
+    The paused count rides the same scan as the 12-month count (one conditional
+    aggregate), so it costs nothing extra; it is not computed over the whole history,
+    which is why the healthy text names the 12-month window it actually checked.
+    """
     cutoff = _recent_cutoff()
+    chain_enabled = settings.AUDIT_HASH_CHAIN_ENABLED
     total = db.query(func.count(AuditLog.id)).filter(AuditLog.company_id == company_id).scalar() or 0
-    recent = (
-        db.query(func.count(AuditLog.id))
+    recent, recent_paused = (
+        db.query(
+            func.count(AuditLog.id),
+            func.coalesce(func.sum(case((AuditLog.integrity_hash == PAUSED_CHAIN_PLACEHOLDER, 1), else_=0)), 0),
+        )
         .filter(AuditLog.company_id == company_id, AuditLog.timestamp >= cutoff)
-        .scalar()
-        or 0
+        .one()
     )
+    recent = int(recent or 0)
+    recent_paused = int(recent_paused or 0)
+
+    counts = f"{total} audit log entries ({recent} in last 12 months)"
 
     if total == 0:
         health = "no_data"
-        health_detail = "No audit log entries found"
         suggested = "not_assessed"
+        if chain_enabled:
+            description = f"{counts}, SHA-256 integrity chain"
+            health_detail = "No audit log entries found"
+        else:
+            description = f"{counts}; SHA-256 integrity chain paused"
+            health_detail = (
+                "No audit log entries found. The integrity hash chain is paused, "
+                "so entries written now will not be hash-chained."
+            )
+    elif not chain_enabled:
+        health = "warning"
+        suggested = "partial"
+        description = (
+            f"{counts}; SHA-256 integrity chain paused "
+            f"({recent_paused} entries in last 12 months written without it)"
+        )
+        health_detail = (
+            "The integrity hash chain is paused (AUDIT_HASH_CHAIN_ENABLED is off): entries written "
+            "while it is paused carry no integrity hash and can never be cryptographically verified. "
+            f"{recent_paused} of {recent} entries in the last 12 months were written while paused. "
+            f"{AUDIT_TRIGGERS_SENTENCE}"
+        )
+    elif recent_paused:
+        health = "warning"
+        suggested = "partial"
+        description = (
+            f"{counts}; SHA-256 integrity chain active, but {recent_paused} entries in last 12 months "
+            "were written while it was paused"
+        )
+        health_detail = (
+            f"{recent_paused} of {recent} entries in the last 12 months were written while the integrity "
+            "hash chain was paused: they carry no integrity hash and can never be cryptographically "
+            f"verified. The chain is active for new entries. {AUDIT_TRIGGERS_SENTENCE}"
+        )
     else:
         health = "healthy"
-        health_detail = f"Immutable audit trail with {total} entries, integrity hash chain active"
         suggested = "compliant"
+        description = f"{counts}, SHA-256 integrity chain"
+        health_detail = (
+            f"Immutable audit trail with {total} entries, integrity hash chain active; "
+            "no entries in the last 12 months were written while it was paused"
+        )
 
     return dict(
         evidence_type="module",
         title="Audit Trail (Immutable Hash-Chain Log)",
-        description=f"{total} audit log entries ({recent} in last 12 months), SHA-256 integrity chain",
+        description=description,
         module_reference="/audit",
         total_count=total,
         recent_count=recent,

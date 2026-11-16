@@ -8733,6 +8733,31 @@ in `RBAC_PERMISSIONS.md`.
 > `123`; see Purchasing → *Approved Supplier List on the vendor record*). Until the ASL is loaded, K is
 > 0. The "no performance scorecards" warning still quotes the active count.
 
+> **The Audit Trail evidence row reports a paused hash chain instead of claiming one.** The
+> *Audit Trail (Immutable Hash-Chain Log)* row used to say "integrity hash chain active" and suggest
+> `compliant` whenever the company had any audit entries — even with the chain paused
+> (`AUDIT_HASH_CHAIN_ENABLED=false`; see
+> [Pausing the hash chain](AUDIT_LOG_RETENTION_RUNBOOK.md#pausing-the-hash-chain-audit_hash_chain_enabled)),
+> when new entries carry the `LEGACY_CHAIN_PAUSED` placeholder and can never be verified. It now
+> reads the setting on every call and counts the company's entries from the last 12 months that carry
+> that placeholder:
+>
+> | Chain now | Paused entries in last 12 months | `health_status` / `suggested_compliance` | `description` says |
+> |-----------|----------------------------------|------------------------------------------|--------------------|
+> | on | 0 | `healthy` / `compliant` | `…, SHA-256 integrity chain` (`health_detail` names the 12-month window checked) |
+> | on | K > 0 | `warning` / `partial` | `…; SHA-256 integrity chain active, but K entries in last 12 months were written while it was paused` |
+> | paused | any | `warning` / `partial` | `…; SHA-256 integrity chain paused (K entries in last 12 months written without it)` |
+> | either | no entries at all | `no_data` / `not_assessed` | unchanged when on; `…; SHA-256 integrity chain paused` when paused |
+>
+> The warning rows' `health_detail` says the paused entries carry no integrity hash and cannot be
+> cryptographically verified, and states that database triggers still block UPDATE and DELETE on every
+> entry (those are independent of the setting). A clause backed by this row therefore rolls up
+> `partial`, never `compliant`, while the chain is or recently was paused. Only `description` is
+> persisted by `POST /qms-standards/{standard_id}/auto-link`, so stored evidence picks up the new
+> wording on the next auto-link run. Paused entries older than 12 months are not counted (the count
+> rides the existing 12-month scan); the row's `title`, `module_reference` and `evidence_type` do not
+> change with the chain state.
+
 > **Deletes are soft (records retained):** the three `DELETE` endpoints above return **204** but
 > do not physically remove rows — the standard / clause / evidence is marked deleted and disappears
 > from all reads (including the nested clauses/evidence on `GET /qms-standards/{standard_id}`), while
