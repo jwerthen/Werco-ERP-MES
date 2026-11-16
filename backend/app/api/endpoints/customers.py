@@ -727,6 +727,11 @@ def delete_customer(
                 status_code=400,
                 detail=f"Cannot hard delete: Customer has {part_count} associated parts",
             )
+        from app.services.quality_record_service import car_reference_count, car_reference_refusal
+
+        car_refusal = car_reference_refusal(car_reference_count(db, company_id, customer_id=customer.id), "Customer")
+        if car_refusal is not None:
+            raise HTTPException(status_code=400, detail=car_refusal)
         # Export control: a customer with a contract or handling instruction keeps its ROW --
         # it is what ties its historical records (work orders, quotes) to its export control,
         # and a hard delete would free its name for another customer to clear them.

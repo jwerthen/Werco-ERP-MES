@@ -6,12 +6,7 @@ import api from '../services/api';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { formatCentralDate } from '../utils/centralTime';
 import { canWriteQuotes } from '../utils/recordWriteAccess';
-import {
-  PlusIcon,
-  PaperAirplaneIcon,
-  ArrowRightIcon,
-  DocumentTextIcon,
-} from '@heroicons/react/24/outline';
+import { PlusIcon, PaperAirplaneIcon, ArrowRightIcon, DocumentTextIcon } from '@heroicons/react/24/outline';
 import { Modal } from '../components/ui/Modal';
 import { useUnsavedChanges } from '../hooks/useUnsavedChanges';
 import { FormField } from '../components/ui/FormField';
@@ -32,6 +27,10 @@ interface QuoteLine {
   line_number: number;
   part_id?: number;
   part_number?: string;
+  /** The drawing revision this line quotes; required on every line before the quote is sent. */
+  part_revision?: string | null;
+  /** The linked part's revision today — what the editor pre-fills when part_revision is empty. */
+  part_current_revision?: string | null;
   description: string;
   quantity: number;
   unit_price: number;
@@ -82,7 +81,14 @@ interface QuoteDraft {
   internal_notes?: string;
   lines: Array<{
     id?: number;
+    line_number?: number;
     part_id: number;
+    /** What the editor's Rev box holds (pre-filled from the part's current revision). */
+    part_revision: string;
+    /** What the line holds on the server, to send only the revisions that change. */
+    saved_part_revision: string;
+    /** The part's current revision the empty box was pre-filled with ('' when it was not). */
+    prefilled_part_revision: string;
     description: string;
     quantity: number;
     unit_price: number;
@@ -114,6 +120,21 @@ const emptyDraft = (): QuoteDraft => ({
   lines: [],
 });
 const quoteStatuses = ['open', 'all', 'draft', 'pending', 'sent', 'accepted', 'rejected', 'converted', 'expired'];
+
+/**
+ * A line's drawing revision as the server takes it (`quote_send_gate.normalize_line_revision`):
+ * 1-20 letters/digits, upper-cased, or the explicit N/A for a line with no drawing (setup
+ * charge, freight, a packaged line). The server re-checks it; this only gives the planner the
+ * sentence before the round trip.
+ */
+const NO_DRAWING_REVISION = 'N/A';
+const isValidLineRevision = (value: string) => value === NO_DRAWING_REVISION || /^[A-Z0-9]{1,20}$/.test(value);
+/** Line numbers still missing a drawing revision — the same lines the server's send gate names. */
+const linesMissingRevision = (lines: QuoteLine[]) =>
+  [...lines]
+    .sort((a, b) => a.line_number - b.line_number)
+    .filter(line => !(line.part_revision || '').trim())
+    .map(line => line.line_number);
 
 export default function Quotes() {
   const navigate = useNavigate();
@@ -188,7 +209,14 @@ export default function Quotes() {
           payment_terms: quote.payment_terms || '',
           notes: quote.notes || '',
           internal_notes: quote.internal_notes,
-          lines: quote.lines.map(line => ({ ...line, part_id: line.part_id || 0, labor_hours: line.labor_hours || 0 })),
+          lines: quote.lines.map(line => ({
+            ...line,
+            part_id: line.part_id || 0,
+            labor_hours: line.labor_hours || 0,
+            part_revision: (line.part_revision || line.part_current_revision || '').toUpperCase(),
+            saved_part_revision: line.part_revision || '',
+            prefilled_part_revision: line.part_revision ? '' : (line.part_current_revision || '').toUpperCase(),
+          })),
         }
       : emptyDraft();
     setNewQuote(draft);
@@ -262,7 +290,8 @@ export default function Quotes() {
     setLoadError(false);
     try {
       const rows = await api.getQuotes({ status: status === 'open' ? undefined : status, search: query || undefined });
-      if (request === listRequest.current) setQuotes(status === 'open' ? rows.filter(quote => ['draft', 'sent', 'pending'].includes(quote.status)) : rows);
+      if (request === listRequest.current)
+        setQuotes(status === 'open' ? rows.filter(quote => ['draft', 'sent', 'pending'].includes(quote.status)) : rows);
     } catch {
       if (request === listRequest.current) setLoadError(true);
     } finally {
@@ -288,6 +317,27 @@ export default function Quotes() {
       setFormError('Enter a customer and at least one line with a description, positive quantity and valid price.');
       return;
     }
+    const lineRevisions: Array<{ line_id: number; part_revision: string }> = [];
+    for (let index = 0; index < newQuote.lines.length; index += 1) {
+      const line = newQuote.lines[index];
+      const label = `Line ${line.line_number ?? index + 1}`;
+      const revision = line.part_revision.trim().toUpperCase();
+      if (!revision) {
+        if (line.saved_part_revision) {
+          setFormError(`${label}: a drawing revision, once entered, can be corrected but not cleared.`);
+          return;
+        }
+        continue;
+      }
+      if (!isValidLineRevision(revision)) {
+        setFormError(
+          `${label}: the drawing revision must be 1-20 letters or digits, or N/A for a line with no drawing.`
+        );
+        return;
+      }
+      if (line.id && revision !== line.saved_part_revision)
+        lineRevisions.push({ line_id: line.id, part_revision: revision });
+    }
     savingRef.current = true;
     setSaving(true);
     setFormError('');
@@ -307,6 +357,8 @@ export default function Quotes() {
       const result = await api.updateQuote(editId, {
         ...commercialFields,
         valid_until: newQuote.valid_until || null,
+        // Only the revisions this save changes (each is audited per line, old -> new).
+        ...(lineRevisions.length ? { line_revisions: lineRevisions } : {}),
       });
       // Mark clean before navigation; a successful save must not trigger the leave guard.
       markSaved();
@@ -321,7 +373,8 @@ export default function Quotes() {
       setFormError(
         typeof detail === 'string'
           ? detail
-          : detail?.message || 'Could not save quote. Your entries have been kept. Refresh the quote before retrying if another editor has changed it.'
+          : detail?.message ||
+              'Could not save quote. Your entries have been kept. Refresh the quote before retrying if another editor has changed it.'
       );
       if (err.response?.status === 409) void loadData();
     } finally {
@@ -437,7 +490,19 @@ export default function Quotes() {
   // Row actions (Send / Convert / WO-created) — shared by table + mobile cards.
   const renderRowActions = (q: Quote) => (
     <div className="flex flex-wrap justify-center gap-2">
-      {canEmail && <button type="button" className="text-fd-link hover:underline text-sm" aria-label={`Email ${q.quote_number}`} onClick={event => { event.stopPropagation(); setEmailQuoteId(q.id); }}>Email</button>}
+      {canEmail && (
+        <button
+          type="button"
+          className="text-fd-link hover:underline text-sm"
+          aria-label={`Email ${q.quote_number}`}
+          onClick={event => {
+            event.stopPropagation();
+            setEmailQuoteId(q.id);
+          }}
+        >
+          Email
+        </button>
+      )}
       {canWriteQuote && ['draft', 'pending'].includes(q.status) && (
         <button
           onClick={e => {
@@ -536,7 +601,9 @@ export default function Quotes() {
       accessor: q => q.total,
       csv: q => q.total,
       render: q => (
-        <span className="font-medium">${q.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+        <span className="font-medium">
+          ${q.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+        </span>
       ),
     },
     {
@@ -564,7 +631,10 @@ export default function Quotes() {
       onClick={() => selectQuote(q)}
       fields={[
         { label: 'Date', value: formatCentralDate(q.quote_date) },
-        { label: 'Valid Until', value: q.valid_until ? formatCentralDate(q.valid_until) : q.status === 'draft' ? 'Not set' : '—' },
+        {
+          label: 'Valid Until',
+          value: q.valid_until ? formatCentralDate(q.valid_until) : q.status === 'draft' ? 'Not set' : '—',
+        },
         {
           label: 'Total',
           value: `$${q.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
@@ -577,12 +647,18 @@ export default function Quotes() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Customer Quotes" description="Review approved estimates, prepare customer documents and follow quotes into production." actions={<>
-          <Button onClick={() => navigate('/fabrication-quotes')} className="flex items-center">
-            <PlusIcon className="h-5 w-5 mr-2" />
-            New Quote
-          </Button>
-      </>} />
+      <PageHeader
+        title="Customer Quotes"
+        description="Review approved estimates, prepare customer documents and follow quotes into production."
+        actions={
+          <>
+            <Button onClick={() => navigate('/fabrication-quotes')} className="flex items-center">
+              <PlusIcon className="h-5 w-5 mr-2" />
+              New Quote
+            </Button>
+          </>
+        }
+      />
 
       <div className="flex flex-wrap gap-3">
         <input
@@ -632,7 +708,11 @@ export default function Quotes() {
               </div>
               <div className="text-left sm:text-right">
                 <p className="text-xl font-bold text-slate-100">
-                  ${selectedQuote.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  $
+                  {selectedQuote.total.toLocaleString(undefined, {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })}
                 </p>
                 <button onClick={clearSelectedQuote} className="mt-2 text-sm text-werco-300 hover:text-werco-200">
                   Clear selection
@@ -649,6 +729,16 @@ export default function Quotes() {
                 )}
                 {renderRowActions(selectedQuote)}
               </div>
+              {['draft', 'pending'].includes(selectedQuote.status) &&
+                linesMissingRevision(selectedQuote.lines).length > 0 && (
+                  <p role="status" className="border border-fd-amber/40 bg-fd-amber/10 px-3 py-2 text-sm text-fd-amber">
+                    Line{linesMissingRevision(selectedQuote.lines).length === 1 ? '' : 's'}{' '}
+                    {linesMissingRevision(selectedQuote.lines).join(', ')} ha
+                    {linesMissingRevision(selectedQuote.lines).length === 1 ? 's' : 've'} no drawing revision. The quote
+                    cannot be sent or printed for the customer until every line has one
+                    {canWriteQuote ? ': edit the draft to enter them (N/A for a line with no drawing).' : '.'}
+                  </p>
+                )}
               {selectedQuote.status === 'pending' && (
                 <p className="text-sm text-slate-300">
                   Estimate approved. Review the quote lines and terms, then send it using your usual channel and mark it
@@ -676,11 +766,13 @@ export default function Quotes() {
                   <caption className="text-left font-semibold pb-2">Quote lines ({selectedQuote.lines.length})</caption>
                   <thead>
                     <tr>
-                      {['Line', 'Part / description', 'Quantity', 'Unit price', 'Total', 'Production'].map(label => (
-                        <th key={label} className="text-left px-3 py-2">
-                          {label}
-                        </th>
-                      ))}
+                      {['Line', 'Part / description', 'Rev', 'Quantity', 'Unit price', 'Total', 'Production'].map(
+                        label => (
+                          <th key={label} className="text-left px-3 py-2">
+                            {label}
+                          </th>
+                        )
+                      )}
                     </tr>
                   </thead>
                   <tbody>
@@ -691,6 +783,13 @@ export default function Quotes() {
                           <div>{line.part_number || 'Custom item'}</div>
                           <div>{line.description}</div>
                           {line.notes && <p className="text-slate-400 whitespace-pre-wrap">{line.notes}</p>}
+                        </td>
+                        <td className="p-3 font-mono">
+                          {line.part_revision ? (
+                            line.part_revision
+                          ) : (
+                            <span className="font-sans text-xs font-semibold uppercase text-fd-amber">Missing</span>
+                          )}
                         </td>
                         <td className="p-3 tabular-nums">{line.quantity.toLocaleString()}</td>
                         <td className="p-3 tabular-nums">${line.unit_price.toFixed(2)}</td>
@@ -754,7 +853,16 @@ export default function Quotes() {
         />
       </div>
 
-      {emailQuoteId && <DocumentDeliveryComposer key={emailQuoteId} entityType="quote" entityId={emailQuoteId} canReconcile={!!user?.is_superuser || ['admin', 'manager'].includes(user?.role || '')} onClose={() => setEmailQuoteId(null)} onAccepted={() => void loadData()} />}
+      {emailQuoteId && (
+        <DocumentDeliveryComposer
+          key={emailQuoteId}
+          entityType="quote"
+          entityId={emailQuoteId}
+          canReconcile={!!user?.is_superuser || ['admin', 'manager'].includes(user?.role || '')}
+          onClose={() => setEmailQuoteId(null)}
+          onAccepted={() => void loadData()}
+        />
+      )}
       {/* Customer quote review */}
       <Modal
         open={showCreateModal}
@@ -769,9 +877,15 @@ export default function Quotes() {
         </h3>
         <p className="text-sm text-slate-300 mb-4">
           Pricing and quantities are preserved with this customer quote.{' '}
-          <Link className="text-fd-link underline" to={fabricationQuoteId ? `/fabrication-quotes?id=${fabricationQuoteId}` : '/fabrication-quotes'}>
-            {fabricationQuoteId ? 'Open fabrication estimate to revise' : 'Create a fabrication estimate for new pricing'}
-          </Link>.
+          <Link
+            className="text-fd-link underline"
+            to={fabricationQuoteId ? `/fabrication-quotes?id=${fabricationQuoteId}` : '/fabrication-quotes'}
+          >
+            {fabricationQuoteId
+              ? 'Open fabrication estimate to revise'
+              : 'Create a fabrication estimate for new pricing'}
+          </Link>
+          .
         </p>
         <form onSubmit={handleCreate} className="space-y-4">
           <fieldset disabled={saving} className="min-w-0 space-y-4">
@@ -872,18 +986,71 @@ export default function Quotes() {
 
             <div className="overflow-x-auto">
               <table className="w-full text-sm text-left">
-                <caption className="text-left font-semibold mb-2">Quoted line items (read only)</caption>
-                <thead><tr><th className="p-2">Description</th><th className="p-2">Quantity</th><th className="p-2">Unit price</th><th className="p-2">Total</th></tr></thead>
-                <tbody>{newQuote.lines.map((line, index) => (
-                  <tr key={line.id || index} className="border-t border-fd-line">
-                    <td className="p-2">{line.description}</td>
-                    <td className="p-2">{line.quantity.toLocaleString()}</td>
-                    <td className="p-2">${line.unit_price.toFixed(2)}</td>
-                    <td className="p-2">${(line.quantity * line.unit_price).toFixed(2)}</td>
+                <caption className="text-left font-semibold mb-2">
+                  Quoted line items
+                  <span className="block text-xs font-normal text-slate-400">
+                    Prices and quantities are read only. Enter each line&apos;s drawing revision (N/A for a line with no
+                    drawing). A blank box is pre-filled from the part&apos;s current revision and marked until you
+                    change it; saving the draft records it, so check it against the drawing first. Every line needs one
+                    before the quote can be sent.
+                  </span>
+                </caption>
+                <thead>
+                  <tr>
+                    <th className="p-2">Description</th>
+                    <th className="p-2">Rev</th>
+                    <th className="p-2">Quantity</th>
+                    <th className="p-2">Unit price</th>
+                    <th className="p-2">Total</th>
                   </tr>
-                ))}</tbody>
+                </thead>
+                <tbody>
+                  {newQuote.lines.map((line, index) => {
+                    // A box still holding the part's current revision it was pre-filled with is
+                    // a suggestion, not an entry yet: say so, so the planner checks it against
+                    // the drawing before the save records it as theirs.
+                    const prefilled =
+                      !!line.prefilled_part_revision && line.part_revision === line.prefilled_part_revision;
+                    const hintId = `quote-line-${line.id ?? index}-rev-hint`;
+                    return (
+                      <tr key={line.id || index} className="border-t border-fd-line">
+                        <td className="p-2">{line.description}</td>
+                        <td className="p-2">
+                          <input
+                            className={`input w-24 font-mono uppercase${prefilled ? ' border-fd-amber' : ''}`}
+                            aria-label={`Line ${line.line_number ?? index + 1} drawing revision`}
+                            aria-describedby={prefilled ? hintId : undefined}
+                            maxLength={20}
+                            placeholder="Rev"
+                            value={line.part_revision}
+                            onChange={event => {
+                              const value = event.target.value.toUpperCase();
+                              setNewQuote(previous => ({
+                                ...previous,
+                                lines: previous.lines.map((row, rowIndex) =>
+                                  rowIndex === index ? { ...row, part_revision: value } : row
+                                ),
+                              }));
+                            }}
+                          />
+                          {prefilled && (
+                            <span id={hintId} className="mt-1 block text-xs text-fd-amber">
+                              From the part — check the drawing
+                            </span>
+                          )}
+                        </td>
+                        <td className="p-2">{line.quantity.toLocaleString()}</td>
+                        <td className="p-2">${line.unit_price.toFixed(2)}</td>
+                        <td className="p-2">${(line.quantity * line.unit_price).toFixed(2)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
               </table>
-              <p className="text-right font-semibold mt-3">Total: ${calculateTotal().toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+              <p className="text-right font-semibold mt-3">
+                Total: $
+                {calculateTotal().toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </p>
             </div>
 
             <FormField label="Payment terms">
@@ -1027,8 +1194,12 @@ export default function Quotes() {
         confirmLabel="Mark as sent without expiry"
         cancelLabel="Return to quote"
         pending={missingExpiryTarget !== null && sendingIds.has(missingExpiryTarget.id)}
-        onConfirm={() => { if (missingExpiryTarget) void handleSend(missingExpiryTarget.id, true); }}
-        onCancel={() => { if (!missingExpiryTarget || !sendingIds.has(missingExpiryTarget.id)) setMissingExpiryTarget(null); }}
+        onConfirm={() => {
+          if (missingExpiryTarget) void handleSend(missingExpiryTarget.id, true);
+        }}
+        onCancel={() => {
+          if (!missingExpiryTarget || !sendingIds.has(missingExpiryTarget.id)) setMissingExpiryTarget(null);
+        }}
       />
     </div>
   );

@@ -27,6 +27,7 @@ from app.models.quote import Quote, QuoteLine, QuoteStatus
 from app.models.role_permission import DEFAULT_ROLE_PERMISSIONS, RolePermission
 from app.models.user import User, UserRole
 from app.services.audit_service import AuditService
+from app.services.quote_send_gate import default_quote_line_revision
 
 
 def canonical(value) -> str:
@@ -563,6 +564,9 @@ def handoff(db, company_id, user, quote_id, expected_revision):
             company_id=company_id,
             quote_id=quote.id,
             line_number=1,
+            # The one QuoteLine construction site: it names no part, so the default is None and
+            # the planner enters the drawing revision (or N/A) before the quote can be sent.
+            part_revision=default_quote_line_revision(db, company_id, None),
             description=row.title + " — complete quoted package",
             quantity=1,
             unit_price=float(price),

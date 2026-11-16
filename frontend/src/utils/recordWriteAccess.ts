@@ -21,6 +21,11 @@ export const canEditFAIs = (actor: Actor): boolean =>
 // Customer quote writes (edit terms / accept / reject / expire, mark sent, convert to work
 // orders) — mirrors QUOTE_WRITE_ROLES in backend/app/api/endpoints/quotes.py.
 export const canWriteQuotes = (actor: Actor): boolean => hasWriteRole(actor, ['admin', 'manager', 'supervisor']);
+// FAI final disposition and the customer-approval verb — mirrors fai_service.APPROVE_ROLES.
+export const canApproveFAIs = (actor: Actor): boolean => hasWriteRole(actor, ['admin', 'manager', 'quality']);
+// Server-side spreadsheet exports (GET /exports/*) — mirrors EXPORT_ROLES in
+// backend/app/api/endpoints/exports.py. Quality is deliberately NOT in it.
+export const canExportRecords = (actor: Actor): boolean => hasWriteRole(actor, ['admin', 'manager']);
 // Production calendar (backend/app/api/endpoints/production_calendar.py): saving the
 // calendar is CALENDAR_EDIT_ROLES (Admin); the working-calendar sync is
 // WORKING_CALENDAR_SYNC_ROLES, the roles of the scheduling calendar PUT it writes through.

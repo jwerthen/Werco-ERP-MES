@@ -365,7 +365,13 @@ DATETIME_COLUMN_BY_EXPORT = {
     "/api/v1/exports/quotes/export": "created_at",
     TXN_URL: "created_at",
 }
-EXPORTS_WITHOUT_A_DATETIME_COLUMN = {"/api/v1/exports/purchase-orders/lines/export"}
+# The FAI log of record (P2.5) is datetime-free too: its date columns (``log_date``,
+# ``inspection_date``, ``completed_date``, ``customer_approval_date``) are calendar DATES and
+# ``created_at`` is not an export column -- pinned by the schema check below.
+EXPORTS_WITHOUT_A_DATETIME_COLUMN = {
+    "/api/v1/exports/purchase-orders/lines/export",
+    "/api/v1/exports/fai/export",
+}
 
 
 def test_every_export_route_is_checked_for_datetime_offsets():
@@ -379,6 +385,20 @@ def test_every_export_route_is_checked_for_datetime_offsets():
     }
     assert export_routes, "the walk found no export routes"
     assert export_routes == set(DATETIME_COLUMN_BY_EXPORT) | EXPORTS_WITHOUT_A_DATETIME_COLUMN
+
+
+def test_the_fai_log_export_has_no_datetime_column():
+    """Every column ``GET /exports/fai/export`` can write is a date, text, number or boolean on
+    ``FAILogRow`` -- never a datetime, which would need the company-local offset above. A
+    datetime column added to the export fails here until it is moved to DATETIME_COLUMN_BY_EXPORT."""
+    import typing
+
+    from app.api.endpoints.exports import FAI_LOG_EXTRA_COLUMNS, FAI_LOG_LEGACY_COLUMNS
+    from app.schemas.quality import FAILogRow
+
+    for column in FAI_LOG_LEGACY_COLUMNS + FAI_LOG_EXTRA_COLUMNS:
+        annotation = FAILogRow.model_fields[column].annotation
+        assert annotation is not datetime and datetime not in typing.get_args(annotation), column
 
 
 def test_export_audit_still_records_the_requested_dates_not_utc_instants(client, admin_headers):

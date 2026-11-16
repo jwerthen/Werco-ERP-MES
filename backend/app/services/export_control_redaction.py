@@ -11,7 +11,8 @@ Two passes:
    * one of its identifying keys (:data:`ID_KEYS`, :data:`NUMBER_KEYS`, :data:`NAME_KEYS`)
      names a record the index holds as controlled or unlinkable;
    * it is a top-level record of a route whose objects carry no such key for themselves
-     (:data:`ROUTE_SHAPES`: a CAR is ``{"id": ...}`` and nothing else) and its ``id`` hits;
+     (:data:`ROUTE_SHAPES`: a CAR's body never names the NCR or complaint that places it)
+     and its ``id`` hits;
    * the route's own path parameter names such a record (:data:`PATH_PARAM_KEYS`: the
      whole response to ``/work-orders/{work_order_id}/timeline`` is that work order); or
    * it descends from a controlled object.
@@ -222,6 +223,8 @@ NUMBER_KEYS: Mapping[str, str] = {
     "quote_number": "quote",
     "po_number": "purchase_order",
     "receipt_number": "receipt",
+    # The FAI log of record (``GET /quality/fai/log``) calls the work order's number the job #.
+    "job_number": "work_order",
 }
 
 # keys whose (string) value is a customer name
@@ -317,6 +320,8 @@ KEPT_IDENTIFIER_KEYS: FrozenSet[str] = frozenset(
         "lot_number",
         "work_center_code",
         "work_center_name",
+        # The work order's number under the FAI log's name for it (its "Job #").
+        "job_number",
     }
 )
 _STATUS_KEYS = frozenset({"status", "state", "priority", "sequence", "version", "date"})
@@ -419,8 +424,18 @@ NUMERIC_KEEP_KEYS = frozenset(
         "start_minute",
         "end_minute",
         "production_day_start_minute",
+        # A user id that does not end in ``_id`` / ``_by``: the CAR's assignee (P2.1).
+        "assigned_to",
     }
 )
+# Money keys whose NAME also carries a text fragment ("material"). A ``Decimal`` serializes as a
+# numeric STRING, and a numeric string under a text key is withheld (a numeric part number is
+# still a part number) -- so these amounts went out as ``[export-controlled]`` while every other
+# cost stayed true: the CAR form's ``cost_material`` (P2.1) and a part's ``material_cost``.
+# Named whole, never by fragment: "material" stays a text fragment for every other key.
+# ``tests/test_export_control_redaction.py`` walks every Decimal an allowlisted route serves
+# through the STRING path, so a new one is classified rather than silently withheld.
+NUMERIC_STRING_KEEP_KEYS = frozenset({"cost_material", "material_cost"})
 # Inside a withheld object, a STRING under one of these keys stays only when it is one of the
 # key's closed-vocabulary values: the value is a server-derived category the response schema
 # types as a ``Literal``, so it cannot carry the record's text. Any other value under the key
@@ -548,6 +563,8 @@ def _kept_string(key: Optional[str], value: str) -> bool:
         return True
     if _is_date_key(key):
         return True
+    if key in NUMERIC_STRING_KEEP_KEYS:
+        return bool(_NUMERIC.match(value))
     # A number as text: the same allowlist as a JSON number, and never under a text key (a
     # purely numeric part number is still a part number).
     return bool(_NUMERIC.match(value)) and kept_numeric_key(key) and not _is_textual_key(key)

@@ -40,6 +40,14 @@ Rules every writer here keeps:
   not void answers 409 naming that CAR instead of minting a second one and silently
   relinking. A CAR is retired with the reasoned :func:`void_car` (undone by
   :func:`restore_car`), after which the NCR may raise a fresh one.
+* **The CAR form fields** (Werco's controlled form, migration ``122_car_form_quote_rev``)
+  follow the same rules: a NEW ``part_id`` / ``customer_id`` must name a live row of the
+  company and a new ``vendor_id`` one of its vendors -- inactive or removed included, since
+  a supplier CAR may be the record of that removal (invariant 3) -- while an unchanged
+  reference is never re-checked; the customer's name is snapshotted at selection; the
+  reason ``other`` needs its text (422); the cost total is computed at read time, never
+  stored. The Quality Manager approval is its own verb (:func:`approve_car_quality`):
+  server-stamped, once, never by an API token, never from a request body.
 
 Lock order: every row lock (``SELECT ... FOR UPDATE``) and number-generator advisory
 lock is taken BEFORE the first audit row, because the audit chain lock is global.
@@ -49,17 +57,23 @@ import enum
 from contextlib import contextmanager
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from fastapi import HTTPException
-from sqlalchemy import inspect
+from sqlalchemy import inspect, or_
 from sqlalchemy.orm import Query, Session, selectinload
 
+from app.core.credentials import is_api_token_credential
+from app.core.time_utils import CENTRAL_TIME_ZONE, central_today, ensure_utc
 from app.db.database import atomic_transaction
 from app.db.locks import acquire_generator_lock
 from app.db.tenant_filter import tenant_query
+from app.models.company import Company
+from app.models.customer import Customer
 from app.models.part import Part
+from app.models.purchasing import Vendor
 from app.models.quality import (
+    CARInitiationReason,
     CARStatus,
     CorrectiveActionRequest,
     NCRSource,
@@ -69,7 +83,7 @@ from app.models.quality import (
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder
 from app.models.work_order_blocker import WorkOrderBlocker, WorkOrderBlockerStatus
-from app.schemas.quality import CARCreate, CARUpdate, NCRCreate, NCRUpdate
+from app.schemas.quality import CARCreate, CARResponse, CARUpdate, NCRCreate, NCRUpdate
 from app.services.audit_service import AuditService, AuditWriteError
 from app.services.operational_event_service import OperationalEventService
 from app.services.quality_numbering import generate_car_number as _generate_car_number
@@ -87,6 +101,36 @@ REFERENCE_NOT_FOUND = {
     "work_order_id": "Work order not found",
     "assigned_to": "Assigned user not found",
     "car_id": "CAR not found",
+    "customer_id": "Customer not found",
+    "vendor_id": "Vendor not found",
+}
+
+# A standing machine credential (the Werco Assistant over MCP, any bot) may not record the
+# Quality Manager approval: it is a person's judgment that the corrective action is
+# acceptable, and the stamp names that person. ``is_api_token_credential`` -- a crew-station
+# badge is a person, but the verb is not reachable from the kiosk anyway.
+API_TOKEN_QUALITY_APPROVAL = (
+    "A standing API token cannot record a CAR's quality approval. A person signed in to the app must record it."
+)
+# The form's vendor-management and customer approval boxes are the same kind of assertion --
+# that a person saw the vendor's / customer's sign-off -- so a standing API token may not
+# write or change them either (on create or update; leaving them out is fine).
+CAR_SIGNOFF_FIELDS = (
+    "vendor_approval_name",
+    "vendor_approval_title",
+    "vendor_approval_date",
+    "customer_approval_name",
+    "customer_approval_date",
+)
+API_TOKEN_CAR_SIGNOFF = (
+    "A standing API token cannot record or change a CAR's vendor or customer approval. "
+    "A person signed in to the app must record it."
+)
+# Dates on the form that record something that already happened: never later than today (Central).
+_CAR_RECORD_DATES = {
+    "submitted_date": "Date Submitted",
+    "vendor_approval_date": "The vendor approval date",
+    "customer_approval_date": "The customer approval date",
 }
 
 # Columns a request may never null out (each has a model default and readers that
@@ -242,6 +286,32 @@ def _assignable_user_or_404(db: Session, company_id: int, user_id: int) -> User:
     if user is None:
         raise HTTPException(status_code=404, detail=REFERENCE_NOT_FOUND["assigned_to"])
     return user
+
+
+def _live_customer_or_404(db: Session, company_id: int, customer_id: int) -> Customer:
+    """A live customer of the active company -- naming one on a CAR is a selection."""
+    customer = (
+        tenant_query(db, Customer, company_id)
+        .filter(Customer.id == customer_id, Customer.is_deleted.is_(False))
+        .first()
+    )
+    if customer is None:
+        raise HTTPException(status_code=404, detail=REFERENCE_NOT_FOUND["customer_id"])
+    return customer
+
+
+def _company_vendor_or_404(db: Session, company_id: int, vendor_id: int) -> Vendor:
+    """A vendor of the active company -- deliberately NOT filtered on ``is_deleted`` / ``is_active``.
+
+    A supplier CAR is a RECORD, not a selection (invariant 3's records-vs-selection rule):
+    it may be the very document that records why a supplier was switched off or removed
+    (AS9100D 8.4), so gating it on a live vendor would make that record the one nobody can
+    file. Only the tenant is enforced.
+    """
+    vendor = tenant_query(db, Vendor, company_id).filter(Vendor.id == vendor_id).first()
+    if vendor is None:
+        raise HTTPException(status_code=404, detail=REFERENCE_NOT_FOUND["vendor_id"])
+    return vendor
 
 
 def _linkable_car_or_404(db: Session, company_id: int, car_id: int) -> CorrectiveActionRequest:
@@ -584,6 +654,67 @@ def _car_for_update_or_404(db: Session, company_id: int, car_id: int) -> Correct
     return car
 
 
+def _normalize_car_values(values: Dict[str, Any]) -> None:
+    """Store the reason as its plain string value (the column is a String + CHECK, not an Enum)."""
+    reason = values.get("initiation_reason")
+    if isinstance(reason, enum.Enum):
+        values["initiation_reason"] = reason.value
+
+
+def _refuse_token_signoff(user: User, values: Dict[str, Any], *, changes: bool) -> None:
+    """403 (before any write) when an API token writes a vendor / customer sign-off box.
+
+    ``changes=False``: ``values`` is a create body, and a box left blank (absent, null or
+    whitespace) sets nothing. ``changes=True``: ``values`` holds only the CHANGED fields of an
+    update, so any sign-off key in it -- clearing one included -- is a change, while re-sending
+    the stored value never reaches here.
+    """
+    if not is_api_token_credential(user):
+        return
+    for field in CAR_SIGNOFF_FIELDS:
+        if field not in values:
+            continue
+        value = values[field]
+        if changes or (value is not None and not (isinstance(value, str) and not value.strip())):
+            raise HTTPException(status_code=403, detail=API_TOKEN_CAR_SIGNOFF)
+
+
+def _check_record_dates(values: Dict[str, Any]) -> None:
+    """422 (before any write) when a date recording a past event is after today (Central)."""
+    today = central_today()
+    for field, label in _CAR_RECORD_DATES.items():
+        value = values.get(field)
+        if value is not None and value > today:
+            raise HTTPException(status_code=422, detail=f"{label} cannot be in the future.")
+
+
+def _check_initiation_reason(reason: Optional[str], other_text: Optional[str]) -> None:
+    """The form's "Other ____" box needs its blank filled in (422 before anything is written)."""
+    if reason == CARInitiationReason.OTHER.value and not str(other_text or "").strip():
+        raise HTTPException(
+            status_code=422,
+            detail="initiation_reason_other is required when the reason for initiation is 'other'",
+        )
+
+
+def _resolve_car_references(db: Session, company_id: int, values: Dict[str, Any]) -> Optional[Customer]:
+    """Resolve every NEW form reference in ``values`` tenant-scoped (404 before any write).
+
+    Only the keys present with a non-null value are checked -- on update ``values`` is the
+    CHANGED fields only, so an unchanged reference (a record of what the CAR already names,
+    possibly since retired) is never re-checked. A new part or customer must be live; a
+    vendor need only be the company's (see :func:`_company_vendor_or_404`). Returns the
+    resolved customer, so its name can be snapshotted.
+    """
+    if values.get("part_id") is not None:
+        _live_part_or_404(db, company_id, values["part_id"])
+    if values.get("vendor_id") is not None:
+        _company_vendor_or_404(db, company_id, values["vendor_id"])
+    if values.get("customer_id") is not None:
+        return _live_customer_or_404(db, company_id, values["customer_id"])
+    return None
+
+
 def create_car_from_ncr(
     db: Session, company_id: int, ncr_id: int, user: User, audit: AuditService
 ) -> CorrectiveActionRequest:
@@ -610,11 +741,22 @@ def create_car_from_ncr(
                         f"(id {existing.id}). Open that CAR instead of creating another."
                     ),
                 )
+        # Prefill from the NCR (the form's "Part number" and vendor "P.O number"). The NCR's
+        # part is a RECORD the CAR inherits, not a new selection, so a since-retired part is
+        # still carried; a legacy foreign part id (pre-validation rows) is not -- reads already
+        # treat it as no part (``ncr_query``), and it must not cross into a new record.
+        part_id = None
+        if ncr.part_id is not None:
+            owned = tenant_query(db, Part, company_id).filter(Part.id == ncr.part_id).with_entities(Part.id).first()
+            part_id = ncr.part_id if owned is not None else None
         car = CorrectiveActionRequest(
             car_number=generate_car_number(db, company_id),
             title=f"CAR for {ncr.ncr_number}: {ncr.title}"[:255],
             problem_description=ncr.description,
             initiated_by=user.id,
+            submitted_date=central_today(),
+            part_id=part_id,
+            vendor_po_number=(ncr.po_number or None),
         )
         car.company_id = company_id
         db.add(car)
@@ -670,10 +812,18 @@ def create_car_from_ncr(
 def create_car(
     db: Session, company_id: int, data: CARCreate, user: User, audit: AuditService
 ) -> CorrectiveActionRequest:
+    values = data.model_dump()
+    _refuse_token_signoff(user, values, changes=False)
+    _normalize_car_values(values)
+    _check_initiation_reason(values.get("initiation_reason"), values.get("initiation_reason_other"))
+    _check_record_dates(values)
     with quality_record_transaction(db):
-        car = CorrectiveActionRequest(
-            car_number=generate_car_number(db, company_id), **data.model_dump(), initiated_by=user.id
-        )
+        # Every reference is resolved before the number generator's lock and the first write.
+        customer = _resolve_car_references(db, company_id, values)
+        values["customer_name"] = customer.name if customer is not None else None
+        if values.get("submitted_date") is None:
+            values["submitted_date"] = central_today()
+        car = CorrectiveActionRequest(car_number=generate_car_number(db, company_id), **values, initiated_by=user.id)
         car.company_id = company_id
         db.add(car)
         db.flush()
@@ -719,7 +869,10 @@ def update_car(
         _refuse_nulls(requested, _CAR_NON_NULLABLE)
         if requested.get("status") == CARStatus.VOID:
             raise HTTPException(status_code=422, detail="Use the reasoned void action to void a quality record")
+        _normalize_car_values(requested)
         changes = _changed_fields(car, requested)
+        _refuse_token_signoff(user, changes, changes=True)
+        _check_record_dates(changes)
         if changes:
             _write_car_changes(db, company_id, car, requested, changes, user, audit)
     return get_car(db, company_id, car_id)
@@ -747,18 +900,40 @@ def _write_car_changes(
             raise HTTPException(status_code=422, detail="Closure requires " + ", ".join(missing))
     if changes.get("assigned_to") is not None:
         _assignable_user_or_404(db, company_id, changes["assigned_to"])
+    if (
+        "initiation_reason" in changes
+        and changes["initiation_reason"] != CARInitiationReason.OTHER.value
+        and "initiation_reason_other" not in requested
+        and car.initiation_reason_other is not None
+    ):
+        # Moving the reason off "Other" clears its "____" text (recorded old -> None), so the
+        # record and the print never carry an orphaned Other text beside another box.
+        changes["initiation_reason_other"] = None
+    if "initiation_reason" in changes or "initiation_reason_other" in changes:
+        _check_initiation_reason(
+            changes.get("initiation_reason", car.initiation_reason),
+            changes.get("initiation_reason_other", car.initiation_reason_other),
+        )
+    # Only CHANGED references are resolved: an unchanged one is a record, not a new selection.
+    customer = _resolve_car_references(db, company_id, changes)
+    snapshot_customer = "customer_id" in changes
 
     # Independent side effects: a CLOSED CAR reopened straight into VERIFICATION both
     # records its verifier AND stops naming a closer. (closing and verifying cannot both
-    # hold; closing and reopening cannot either -- a reopen leaves CLOSED.)
-    side_fields: List[str] = (["verified_by"] if verifying else []) + (
-        ["closed_date", "closed_by"] if closing or reopening else []
+    # hold; closing and reopening cannot either -- a reopen leaves CLOSED.) A new customer
+    # re-snapshots its name; clearing the customer clears the name with it.
+    side_fields: List[str] = (
+        (["verified_by"] if verifying else [])
+        + (["closed_date", "closed_by"] if closing or reopening else [])
+        + (["customer_name"] if snapshot_customer else [])
     )
     tracked = list(changes) + side_fields
     old = {field: _value(getattr(car, field)) for field in tracked}
     previous_status = car.status
     for field, value in changes.items():
         setattr(car, field, value)
+    if snapshot_customer:
+        car.customer_name = customer.name if customer is not None else None
     if verifying:
         car.verified_by = user.id
     if closing:
@@ -910,3 +1085,250 @@ def restore_car(db: Session, company_id: int, car_id: int, user: User, audit: Au
             },
         )
     return get_car(db, company_id, car_id)
+
+
+def approve_car_quality(
+    db: Session, company_id: int, car_id: int, user: User, audit: AuditService
+) -> CorrectiveActionRequest:
+    """Record the form's "Quality Manager Approval": server-stamped approver and instant.
+
+    Once per CAR: an already-approved CAR is refused (409) rather than re-stamped, so the
+    record keeps naming who approved it first; a VOID CAR is refused (409). Allowed in every
+    other status, CLOSED included -- the approval does not gate closure (the existing
+    closure evidence rules are unchanged) and does not freeze the CAR's other fields. A
+    standing API token is refused (403): the stamp names a person. The CAR row is locked
+    first so two concurrent approvals serialize and the second sees the first's stamp; the
+    APPROVE audit row commits with the stamp or neither does (503).
+    """
+    if is_api_token_credential(user):
+        raise HTTPException(status_code=403, detail=API_TOKEN_QUALITY_APPROVAL)
+    with quality_record_transaction(db):
+        car = _car_for_update_or_404(db, company_id, car_id)
+        if car.status == CARStatus.VOID:
+            raise HTTPException(
+                status_code=409, detail=f"CAR {car.car_number} is void; a voided CAR cannot be approved."
+            )
+        if car.quality_approved_at is not None or car.quality_approved_by is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"CAR {car.car_number} already has its quality approval; it is recorded once.",
+            )
+        old: Dict[str, Any] = {"quality_approved_by": None, "quality_approved_at": None}
+        car.quality_approved_by = user.id
+        car.quality_approved_at = datetime.utcnow()
+        new: Dict[str, Any] = {
+            "quality_approved_by": car.quality_approved_by,
+            "quality_approved_at": _value(car.quality_approved_at),
+        }
+        _audit(
+            audit,
+            "APPROVE",
+            CAR_RESOURCE,
+            car,
+            car.car_number,
+            description=f"Recorded quality manager approval of CAR {car.car_number}",
+            old=old,
+            new=new,
+            extra={"changes": _diff(old, new), "quality_approval": True, "status": _value(car.status)},
+        )
+        OperationalEventService(db).emit_best_effort(
+            company_id=company_id,
+            event_type="car_updated",
+            source_module="quality",
+            entity_type="car",
+            entity_id=car.id,
+            user_id=user.id,
+            severity="info",
+            event_payload={
+                "car_number": car.car_number,
+                "changed_fields": ["quality_approved_at", "quality_approved_by"],
+                "previous_status": _value(car.status),
+                "status": _value(car.status),
+                "priority": car.priority,
+            },
+        )
+    return get_car(db, company_id, car_id)
+
+
+def car_reference_count(
+    db: Session, company_id: int, *, part_id: Optional[int] = None, customer_id: Optional[int] = None
+) -> int:
+    """How many of the company's CARs name this part or customer (any status, VOID included).
+
+    The physical-delete probe for ``DELETE /parts|materials|customers/{id}?hard_delete=true``:
+    a CAR holds a real foreign key (``fk_cars_part_id`` / ``fk_cars_customer_id``) to what it
+    names, so deleting that row would fail at COMMIT on PostgreSQL (a 500) -- and a CAR is a
+    quality record that must keep naming it. Tenant-scoped: every CAR writer resolves the part
+    and customer within the company, so no other company's CAR can reference them.
+    """
+    if part_id is None and customer_id is None:
+        return 0
+    query = tenant_query(db, CorrectiveActionRequest, company_id)
+    if part_id is not None:
+        query = query.filter(CorrectiveActionRequest.part_id == part_id)
+    if customer_id is not None:
+        query = query.filter(CorrectiveActionRequest.customer_id == customer_id)
+    return query.count()
+
+
+def car_reference_refusal(count: int, label: str) -> Optional[str]:
+    """The 400 detail a hard delete answers when CARs name the record, else ``None``."""
+    if count <= 0:
+        return None
+    noun = "corrective action report" if count == 1 else "corrective action reports"
+    return f"Cannot hard delete: {label} is named on {count} {noun}; soft delete it instead"
+
+
+# ------------------------------------------------------------------------- CAR reads
+
+# Users a CAR names. ``assigned_to`` is a client SELECTION, validated tenant-scoped at write
+# time, so it resolves tenant-scoped only. The other four are server-stamped ATTRIBUTION
+# facts (the caller at create / verification / closure / approval); a platform admin acting
+# in this company's context is not one of its users, so those fall back to a lookup by id
+# restricted to platform principals (superuser / PLATFORM_ADMIN, as ``fai_responses``) rather
+# than printing a blank approver -- never an ordinary user of another company.
+_CAR_SELECTED_USER_FIELDS = ("assigned_to",)
+_CAR_STAMPED_USER_FIELDS = ("initiated_by", "verified_by", "closed_by", "quality_approved_by")
+_CAR_COST_FIELDS = ("cost_labor", "cost_material", "cost_outside_services", "cost_shipping")
+
+
+def car_cost_total(car: Any) -> Optional[Decimal]:
+    """The form's cost total, computed at read time (never stored): ``None`` when nothing is entered."""
+    entered = [Decimal(str(getattr(car, field))) for field in _CAR_COST_FIELDS if getattr(car, field) is not None]
+    return sum(entered, Decimal("0")) if entered else None
+
+
+def car_responses(db: Session, company_id: int, cars: Sequence[CorrectiveActionRequest]) -> List[CARResponse]:
+    """``CARResponse`` for each CAR, with display names resolved in four batched, tenant-scoped reads.
+
+    Part and vendor names are read WITHOUT an ``is_deleted`` filter on purpose: a CAR is a
+    historical record and keeps naming the part / supplier it was raised against after
+    either is retired (invariant 3's records exception). The tenant is always enforced, so a
+    legacy row carrying another company's id shows no name rather than theirs. The customer
+    name is the snapshot stored on the CAR.
+    """
+    cars = list(cars)
+    if not cars:
+        return []
+
+    def ids(fields: Iterable[str]) -> set:
+        return {getattr(car, field) for car in cars for field in fields if getattr(car, field) is not None}
+
+    user_ids = ids(_CAR_SELECTED_USER_FIELDS + _CAR_STAMPED_USER_FIELDS)
+    users = {u.id: u for u in tenant_query(db, User, company_id).filter(User.id.in_(user_ids))} if user_ids else {}
+    stamped_elsewhere = ids(_CAR_STAMPED_USER_FIELDS) - set(users)
+    # Only a PLATFORM principal is named from outside the company (as ``fai_responses`` does):
+    # an ordinary user of another company -- a legacy or imported row, a moved account -- must
+    # never have their name printed on this company's CAR.
+    attributed = (
+        {
+            u.id: u
+            for u in db.query(User).filter(
+                User.id.in_(stamped_elsewhere),
+                or_(User.is_superuser.is_(True), User.role == UserRole.PLATFORM_ADMIN),
+            )
+        }
+        if stamped_elsewhere
+        else {}
+    )
+    part_ids, vendor_ids = ids(("part_id",)), ids(("vendor_id",))
+    parts = {p.id: p for p in tenant_query(db, Part, company_id).filter(Part.id.in_(part_ids))} if part_ids else {}
+    vendors = (
+        {v.id: v for v in tenant_query(db, Vendor, company_id).filter(Vendor.id.in_(vendor_ids))} if vendor_ids else {}
+    )
+
+    def user_name(car: Any, field: str) -> Optional[str]:
+        user_id = getattr(car, field)
+        found = users.get(user_id) or (attributed.get(user_id) if field in _CAR_STAMPED_USER_FIELDS else None)
+        return found.full_name if found is not None else None
+
+    responses = []
+    for car in cars:
+        values = {column.key: getattr(car, column.key) for column in inspect(type(car)).columns}
+        part = parts.get(car.part_id)
+        vendor = vendors.get(car.vendor_id)
+        values.update(
+            {f"{field}_name": user_name(car, field) for field in _CAR_SELECTED_USER_FIELDS + _CAR_STAMPED_USER_FIELDS},
+            part_number=part.part_number if part is not None else None,
+            part_name=part.name if part is not None else None,
+            part_current_revision=part.revision if part is not None else None,
+            vendor_name=vendor.name if vendor is not None else None,
+            cost_total=car_cost_total(car),
+        )
+        responses.append(CARResponse.model_validate(values))
+    return responses
+
+
+def car_response(db: Session, company_id: int, car: CorrectiveActionRequest) -> CARResponse:
+    return car_responses(db, company_id, [car])[0]
+
+
+# ------------------------------------------------------------------------ printable CAR
+
+
+def _form_date(value: Optional[date]) -> Optional[str]:
+    return value.strftime("%m/%d/%Y") if value else None
+
+
+def _form_money(value: Optional[Decimal]) -> Optional[str]:
+    return f"{Decimal(str(value)):,.2f}" if value is not None else None
+
+
+def car_print_context(db: Session, company_id: int, car: CorrectiveActionRequest) -> Dict[str, Any]:
+    """Every value the printable CAR shows, resolved tenant-scoped and formatted. Writes nothing.
+
+    The header is the active company's own record (name / address / phone) -- never a
+    hard-coded block -- and the Quality Manager approval date is the Central-calendar date
+    of the UTC stamp (store UTC, display Central).
+    """
+    view = car_response(db, company_id, car)
+    company = db.query(Company).filter(Company.id == company_id).first()
+    approved_at = ensure_utc(view.quality_approved_at)
+    return dict(
+        car_number=view.car_number,
+        company_name=company.name if company is not None else "",
+        company_address=company.address if company is not None else None,
+        company_phone=company.phone if company is not None else None,
+        status_label=view.status.value.replace("_", " ").title(),
+        initiated_by=view.initiated_by_name,
+        rma_number=view.rma_number,
+        submitted_date=_form_date(view.submitted_date),
+        due_date=_form_date(view.due_date),
+        part_number=view.part_number,
+        vendor_po_number=view.vendor_po_number,
+        vendor_name=view.vendor_name,
+        customer_name=view.customer_name,
+        initiation_reason=view.initiation_reason.value if view.initiation_reason else None,
+        initiation_reason_other=view.initiation_reason_other,
+        problem_sections=[(None, view.title), (None, view.problem_description)],
+        root_cause_sections=[(None, view.root_cause), ("Root cause analysis", view.root_cause_analysis)],
+        corrective_action_sections=[
+            (None, view.corrective_action),
+            ("Containment action", view.containment_action),
+            ("Preventive action", view.preventive_action),
+        ],
+        cost_labor=_form_money(view.cost_labor),
+        cost_material=_form_money(view.cost_material),
+        cost_outside_services=_form_money(view.cost_outside_services),
+        cost_shipping=_form_money(view.cost_shipping),
+        cost_total=_form_money(view.cost_total),
+        vendor_approval_name=view.vendor_approval_name,
+        vendor_approval_title=view.vendor_approval_title,
+        vendor_approval_date=_form_date(view.vendor_approval_date),
+        management_action=view.management_action,
+        customer_approval_name=view.customer_approval_name,
+        customer_approval_date=_form_date(view.customer_approval_date),
+        quality_approved_by=view.quality_approved_by_name,
+        quality_approved_date=(
+            _form_date(approved_at.astimezone(CENTRAL_TIME_ZONE).date()) if approved_at is not None else None
+        ),
+    )
+
+
+def render_car_pdf(db: Session, company_id: int, car_id: int) -> tuple:
+    """``(car_number, pdf_bytes)`` for one CAR of the active company (404 otherwise)."""
+    from app.services.car_pdf_service import build_corrective_action_report_pdf
+
+    car = get_car(db, company_id, car_id)
+    context = car_print_context(db, company_id, car)
+    return car.car_number, build_corrective_action_report_pdf(**context)

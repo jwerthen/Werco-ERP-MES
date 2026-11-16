@@ -27,10 +27,14 @@ def build_customer_quote_pdf(
     total_amount: float,
     line_summaries: List[Dict[str, Any]],
     assumptions: List[Dict[str, Any]],
-    exclusions: List[str],
+    terms: List[str],
 ) -> bytes:
     """
     Build a customer-ready quote PDF that omits operation-time line details.
+
+    ``revision`` is the quote DOCUMENT's revision and prints as "Quote Rev", so it is never
+    read as a drawing revision; each line's drawing revision (``line["revision"]``) prints in
+    the table's Rev column. ``terms`` prints under a "Terms" heading.
     """
     try:
         from reportlab.lib import colors
@@ -54,13 +58,9 @@ def build_customer_quote_pdf(
     styles = getSampleStyleSheet()
     story: List[Any] = []
 
-    story.append(
-        Paragraph(
-            f"<b>Customer Quote {pdf_escape(quote_number)} Rev {pdf_escape(revision)}</b>",
-            styles["Title"],
-        )
-    )
+    story.append(Paragraph(f"<b>Customer Quote {pdf_escape(quote_number)}</b>", styles["Title"]))
     story.append(Spacer(1, 8))
+    story.append(Paragraph(f"<b>Quote Rev:</b> {pdf_escape(revision)}", styles["Normal"]))
     story.append(Paragraph(f"<b>Customer:</b> {pdf_escape(customer_name)}", styles["Normal"]))
     if customer_contact:
         story.append(Paragraph(f"<b>Contact:</b> {pdf_escape(customer_contact)}", styles["Normal"]))
@@ -75,11 +75,12 @@ def build_customer_quote_pdf(
         story.append(Paragraph(f"<b>Lead Time:</b> {pdf_escape(lead_time_label)}", styles["Normal"]))
     story.append(Spacer(1, 12))
 
-    table_rows = [["Part", "Qty", "Material", "Thickness", "Finish", "Line Total"]]
+    table_rows = [["Part", "Rev", "Qty", "Material", "Thickness", "Finish", "Line Total"]]
     for line in line_summaries:
         table_rows.append(
             [
                 Paragraph(pdf_escape(line.get("part_display") or "-"), styles["Normal"]),
+                str(line.get("revision") or "-"),
                 str(line.get("qty") or 1),
                 line.get("material") or "TBD",
                 line.get("thickness") or "TBD",
@@ -88,7 +89,7 @@ def build_customer_quote_pdf(
             ]
         )
 
-    table = Table(table_rows, repeatRows=1, colWidths=[205, 40, 65, 60, 65, 105])
+    table = Table(table_rows, repeatRows=1, colWidths=[180, 35, 40, 65, 55, 60, 105])
     table.setStyle(
         TableStyle(
             [
@@ -97,7 +98,7 @@ def build_customer_quote_pdf(
                 ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
                 ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#cbd5e1")),
                 ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
-                ("ALIGN", (1, 1), (1, -1), "RIGHT"),
+                ("ALIGN", (2, 1), (2, -1), "RIGHT"),
                 ("ALIGN", (-1, 1), (-1, -1), "RIGHT"),
             ]
         )
@@ -116,10 +117,10 @@ def build_customer_quote_pdf(
             story.append(Paragraph(f"- {pdf_escape(field)}: {pdf_escape(assumption)}", styles["Normal"]))
         story.append(Spacer(1, 8))
 
-    if exclusions:
-        story.append(Paragraph("<b>Exclusions / Notes</b>", styles["Heading4"]))
-        for exclusion in exclusions:
-            story.append(Paragraph(f"- {pdf_escape(exclusion)}", styles["Normal"]))
+    if terms:
+        story.append(Paragraph("<b>Terms</b>", styles["Heading4"]))
+        for term in terms:
+            story.append(Paragraph(f"- {pdf_escape(term)}", styles["Normal"]))
 
     doc.build(story)
     return buffer.getvalue()

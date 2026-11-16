@@ -27,6 +27,7 @@ import re
 
 import pytest
 
+from app.services.car_pdf_service import build_corrective_action_report_pdf
 from app.services.coc_pdf_service import build_certificate_of_conformance_pdf
 from app.services.pdf_text import pdf_escape
 from app.services.quote_pdf_service import build_customer_quote_pdf
@@ -153,9 +154,11 @@ def build_quote_with(value: str) -> bytes:
         valid_until="2026-08-30",
         lead_time_label=value,
         total_amount=1234.5,
-        line_summaries=[{"part_display": value, "qty": 2, "material": value, "thickness": "0.125", "finish": value}],
+        line_summaries=[
+            {"part_display": value, "revision": "B", "qty": 2, "material": value, "thickness": "0.125", "finish": value}
+        ],
         assumptions=[{"field": value, "assumption": value}],
-        exclusions=[value],
+        terms=[value],
     )
 
 
@@ -178,6 +181,53 @@ def build_coc_with(value: str) -> bytes:
     )
 
 
+def build_car_with(value: str) -> bytes:
+    """The printable CAR with ``value`` in every Paragraph-rendered field (and a line break)."""
+    return build_corrective_action_report_pdf(
+        car_number=f"CAR-2001 {value}",
+        company_name=value,
+        company_address=f"{value}\nBroken Arrow, OK 74012",
+        company_phone=value,
+        initiated_by=value,
+        rma_number=value,
+        submitted_date="11/13/2026",
+        due_date="12/01/2026",
+        part_number=value,
+        vendor_po_number=value,
+        vendor_name=value,
+        customer_name=value,
+        initiation_reason="other",
+        initiation_reason_other=value,
+        problem_sections=[(None, value), (None, f"first line\n{value}")],
+        root_cause_sections=[(None, value), (value, value)],
+        corrective_action_sections=[(None, value)],
+        cost_labor="1,200.00",
+        cost_material=None,
+        cost_outside_services=None,
+        cost_shipping=None,
+        cost_total="1,200.00",
+        vendor_approval_name=value,
+        vendor_approval_title=value,
+        vendor_approval_date="11/13/2026",
+        management_action=value,
+        customer_approval_name=value,
+        customer_approval_date=None,
+        quality_approved_by=value,
+        quality_approved_date="11/13/2026",
+        status_label=value,
+    )
+
+
+@pytest.mark.parametrize("value", HOSTILE_VALUES)
+def test_car_pdf_renders_hostile_values_literally(value: str):
+    """The printable CAR is a quality record: a value that renders altered is a records defect."""
+    text = extract_pdf_text(build_car_with(value))
+
+    assert value in text, f"{value!r} did not survive into the CAR PDF text; got: {text[:400]!r}"
+    assert f"Other: {value}" in text
+    assert "first line" in text
+
+
 @pytest.mark.parametrize("value", HOSTILE_VALUES)
 def test_quote_pdf_renders_hostile_values_literally(value: str):
     """No exception, and the value survives into the page text verbatim."""
@@ -196,7 +246,7 @@ def test_coc_pdf_renders_hostile_values_literally(value: str):
 
 def test_builders_emit_valid_pdfs():
     """Cheap structural check alongside the text assertions."""
-    for pdf in (build_quote_with("R&D <REF>"), build_coc_with("R&D <REF>")):
+    for pdf in (build_quote_with("R&D <REF>"), build_coc_with("R&D <REF>"), build_car_with("R&D <REF>")):
         assert pdf.startswith(b"%PDF-"), pdf[:20]
         assert b"%%EOF" in pdf[-2048:]
 
@@ -245,7 +295,7 @@ def test_table_cells_are_not_markup_and_need_no_escaping():
             }
         ],
         assumptions=[],
-        exclusions=[],
+        terms=[],
     )
 
     text = extract_pdf_text(pdf)

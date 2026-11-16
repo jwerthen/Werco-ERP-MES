@@ -18,9 +18,11 @@ from app.db.database import get_db
 from app.models.inventory import InventoryItem, InventoryTransaction
 from app.models.part import Part, PartType
 from app.models.purchasing import POStatus, PurchaseOrder, PurchaseOrderLine
+from app.models.quality import FAIStatus
 from app.models.quote import Quote, QuoteStatus
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder, WorkOrderStatus
+from app.services import fai_service
 from app.services.audit_service import AuditService
 from app.services.company_time import company_zone
 from app.services.export_audit import log_export
@@ -874,6 +876,137 @@ def export_inventory_transactions(
         )
     else:
         content = generate_excel(data, export_columns, "Transactions", zone=zone)
+        return StreamingResponse(
+            io.BytesIO(content),
+            media_type=get_content_type(format),
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
+        )
+
+
+# FAI Log Export -- the FAI log of record as a file
+#
+# The first seven default columns are the paper log this replaces, in its order (form QF
+# 7.5-3.4: FAI Report #, Date Submitted, Part #, Product Description, Customer, Job #,
+# Complete (X)); the rest are what that log never captured. ``is_complete`` is written as
+# the form's "X" (blank while open) so the file reads like the log it continues.
+FAI_LOG_LEGACY_COLUMNS = [
+    "fai_number",
+    "log_date",
+    "part_number",
+    "part_name",
+    "customer",
+    "job_number",
+    "is_complete",
+]
+FAI_LOG_EXTRA_COLUMNS = [
+    "part_revision",
+    "customer_po",
+    "status",
+    "fai_type",
+    "reason",
+    "serial_number",
+    "inspection_date",
+    "completed_date",
+    "customer_approval_required",
+    "customer_approved",
+    "customer_approval_date",
+]
+
+
+@router.get("/fai/export")
+def export_fai_log(
+    format: ExportFormat = Query(ExportFormat.CSV, description="Export format (csv or xlsx)"),
+    start_date: Optional[date] = Query(None, description="Log date from (inclusive, Central)"),
+    end_date: Optional[date] = Query(None, description="Log date to (inclusive, Central)"),
+    status: Optional[FAIStatus] = Query(None, description="Filter by FAI status (result)"),
+    customer: Optional[str] = Query(None, max_length=255, description="Customer name contains"),
+    part_id: Optional[int] = Query(None, gt=0, description="Filter by part"),
+    work_order_id: Optional[int] = Query(None, gt=0, description="Filter by work order (job)"),
+    search: Optional[str] = Query(
+        None, max_length=255, description="FAI #, part # or description, job #, customer PO or serial contains"
+    ),
+    columns: Optional[List[str]] = Query(None, description="Columns to include"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(EXPORT_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Export the FAI log of record to CSV or Excel (ADMIN/MANAGER). The export is audited.
+
+    Same lines and filters as ``GET /quality/fai/log``, newest first. A line keeps naming a
+    since-deleted part or work order: the log is a historical record.
+    """
+    query = fai_service.fai_log_query(
+        db,
+        company_id,
+        start_date=start_date,
+        end_date=end_date,
+        status=status,
+        customer=customer,
+        part_id=part_id,
+        work_order_id=work_order_id,
+        search=search,
+    )
+    lines = fai_service.fai_log_rows(fetch_export_rows(query))
+
+    default_columns = FAI_LOG_LEGACY_COLUMNS + FAI_LOG_EXTRA_COLUMNS
+    export_columns = columns if columns else default_columns
+
+    data = []
+    for line in lines:
+        row = {
+            "fai_number": line.fai_number,
+            "log_date": line.log_date,
+            "part_number": line.part_number or "",
+            "part_name": line.part_name or "",
+            "customer": line.customer or "",
+            "job_number": line.job_number or "",
+            "is_complete": "X" if line.is_complete else "",
+            "part_revision": line.part_revision or "",
+            "customer_po": line.customer_po or "",
+            "status": line.status.value,
+            "fai_type": line.fai_type or "",
+            "reason": line.reason or "",
+            "serial_number": line.serial_number or "",
+            "inspection_date": line.inspection_date,
+            "completed_date": line.completed_date,
+            "customer_approval_required": line.customer_approval_required,
+            "customer_approved": line.customer_approved,
+            "customer_approval_date": line.customer_approval_date,
+        }
+        data.append({k: v for k, v in row.items() if k in export_columns})
+
+    log_export(
+        db,
+        audit,
+        dataset="fai",
+        label="FAI log",
+        row_count=len(data),
+        export_format=format.value,
+        columns=export_columns,
+        known_columns=default_columns,
+        filters={
+            "start_date": start_date,
+            "end_date": end_date,
+            "status": status,
+            "customer": customer,
+            "part_id": part_id,
+            "work_order_id": work_order_id,
+            "search": search,
+        },
+    )
+
+    filename = f"fai_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{get_file_extension(format)}"
+
+    if format == ExportFormat.CSV:
+        content = generate_csv(data, export_columns)
+        return StreamingResponse(
+            io.StringIO(content),
+            media_type=get_content_type(format),
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
+        )
+    else:
+        content = generate_excel(data, export_columns, "FAI Log")
         return StreamingResponse(
             io.BytesIO(content),
             media_type=get_content_type(format),

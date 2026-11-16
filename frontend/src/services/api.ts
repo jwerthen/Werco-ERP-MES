@@ -3068,6 +3068,26 @@ class ApiService {
     return response.data;
   }
 
+  /**
+   * Record the CAR form's Quality Manager approval (Admin / Manager / Quality).
+   * The server stamps the approver and time; nothing is sent. Server-gated (VOID or
+   * already-approved 409, API token 403), so callers stay non-optimistic.
+   */
+  async approveCARQuality(id: number): Promise<import('../types/quality').CARRecord> {
+    const response = await this.api.post(`/quality/car/${id}/quality-approval`);
+    return response.data;
+  }
+
+  /**
+   * The printable CAR (form layout) as an object URL — mirrors
+   * fetchLaserNestDocument: the route needs the JWT, so a bare `src` would not
+   * authenticate. The caller revokes the URL.
+   */
+  async fetchCARPdf(id: number): Promise<string> {
+    const response = await this.api.get(`/quality/car/${id}/pdf`, { responseType: 'blob' });
+    return window.URL.createObjectURL(new Blob([response.data], { type: 'application/pdf' }));
+  }
+
   async getFAIs(params?: { status?: string; part_id?: number }) {
     const rows: any[] = [];
     for (let skip = 0; ; skip += 500) {
@@ -3098,9 +3118,69 @@ class ApiService {
     return response.data;
   }
 
-  async updateFAI(id: number, data: any) {
+  async updateFAI(id: number, data: import('../types/quality').FAIUpdatePayload) {
     const response = await this.api.put(`/quality/fai/${id}`, data);
     return response.data;
+  }
+
+  /**
+   * Record the customer's approval of a dispositioned FAI (Admin / Manager / Quality).
+   * Omit the date for today (Central). Server-gated: an undispositioned or FAILED FAI
+   * and a second recording are 409, so callers stay non-optimistic.
+   */
+  async recordFAICustomerApproval(
+    id: number,
+    data: { customer_approval_date?: string } = {}
+  ): Promise<import('../types/quality').FAIRecord> {
+    const response = await this.api.post(`/quality/fai/${id}/customer-approval`, data);
+    return response.data;
+  }
+
+  async addFAICharacteristic(
+    faiId: number,
+    data: import('../types/quality').FAICharacteristicCreate
+  ): Promise<import('../types/quality').FAICharacteristic> {
+    const response = await this.api.post(`/quality/fai/${faiId}/characteristics`, data);
+    return response.data;
+  }
+
+  async updateFAICharacteristic(
+    faiId: number,
+    charId: number,
+    data: import('../types/quality').FAICharacteristicUpdate
+  ): Promise<import('../types/quality').FAICharacteristic> {
+    const response = await this.api.put(`/quality/fai/${faiId}/characteristics/${charId}`, data);
+    return response.data;
+  }
+
+  async deleteFAICharacteristic(faiId: number, charId: number): Promise<{ message: string }> {
+    const response = await this.api.delete(`/quality/fai/${faiId}/characteristics/${charId}`);
+    return response.data;
+  }
+
+  /**
+   * One page of the FAI log of record, newest first. Offset-paged with no total:
+   * ask for one row more than a page to learn whether another page exists.
+   */
+  async getFAILog(
+    params: import('../types/quality').FAILogParams = {}
+  ): Promise<import('../types/quality').FAILogRow[]> {
+    const response = await this.api.get('/quality/fai/log', { params });
+    return response.data;
+  }
+
+  /** The FAI log as a file (ADMIN / MANAGER; the export is audited server-side). */
+  async exportFAILog(
+    params: import('../types/quality').FAILogFilters & { format?: 'csv' | 'xlsx' } = {}
+  ): Promise<{ blob: Blob; filename: string }> {
+    const format = params.format ?? 'xlsx';
+    const response = await this.api.get('/exports/fai/export', {
+      params: { ...params, format },
+      responseType: 'blob',
+    });
+    const disposition: string | undefined = response.headers?.['content-disposition'];
+    const match = disposition?.match(/filename="?([^";]+)"?/i);
+    return { blob: response.data, filename: match?.[1] || `fai_log.${format}` };
   }
 
   async getQualitySummary() {

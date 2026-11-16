@@ -36,7 +36,7 @@ from fastapi import Depends
 from fastapi.responses import PlainTextResponse, RedirectResponse
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
-from sqlalchemy import event
+from sqlalchemy import event, func
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -72,6 +72,7 @@ from app.models.governance import ControlledAccessEvent, CustomerContract
 from app.models.inventory import InventoryTransaction
 from app.models.operational_event import OperationalEvent
 from app.models.part import Part
+from app.models.quality import NonConformanceReport
 from app.models.rfq_quote import QuoteEstimate, QuoteLineSummary, RfqPackage
 from app.models.user import User, UserRole
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
@@ -191,6 +192,7 @@ CANARY_CASES: Dict[Tuple[str, str], Tuple[UrlFor, bool]] = {
     ("GET", "/quality/car/{car_id}"): (_url("/quality/car/{car_id}"), True),
     ("GET", "/quality/fai"): (_url("/quality/fai"), True),
     ("GET", "/quality/fai/{fai_id}"): (_url("/quality/fai/{fai_id}"), True),
+    ("GET", "/quality/fai/log"): (_url("/quality/fai/log"), True),
     ("GET", "/quotes/"): (_url("/quotes/"), True),
     ("GET", "/quotes/{quote_id}"): (_url("/quotes/{quote_id}"), True),
     ("GET", "/purchasing/vendors"): (_url("/purchasing/vendors"), False),
@@ -452,6 +454,338 @@ class TestRedactedRecords:
         assert "export_controlled" not in mwo
         assert mwo["title"] == "Replace hydraulic seal"
         assert mwo["description"] == f"found while running {REDACTED_VALUE}"
+
+
+# --------------------------------------------------------------------------- P2a: CAR form, quote Rev, FAI log
+
+# The CAR form's text fields (migration 122). Inside a withheld CAR every one is withheld;
+# the cost buckets and their computed total are money and stay true.
+CAR_FORM_TEXT_KEYS = (
+    "initiation_reason_other",
+    "rma_number",
+    "vendor_po_number",
+    "management_action",
+    "vendor_approval_name",
+    "vendor_approval_title",
+    "customer_approval_name",
+)
+CAR_MONEY_KEYS = ("cost_labor", "cost_material", "cost_outside_services", "cost_shipping", "cost_total")
+CAR_LEAK = "CARLEAKTEXT"
+
+
+class TestCarFormQuoteRevisionAndFaiLog:
+    """The P2a records (CAR form fields, quote-line drawing revisions, the FAI log of record),
+    built blind to P0's export control: their new text is withheld inside a withheld record,
+    their money stays true, and a CAR is judged by its OWN part and customer too."""
+
+    def test_a_withheld_car_withholds_every_form_text_and_keeps_its_money(
+        self, client: TestClient, world: World, ai_token, auth_headers: dict
+    ):
+        url = f"{API}/quality/car/{world.itar_car.id}"
+        person = client.get(url, headers=auth_headers).json()
+        for key in CAR_FORM_TEXT_KEYS:
+            assert CANARY in person[key], f"vacuous: {key} carries no canary"
+        assert (person["cost_labor"], person["cost_total"]) == ("125.50", "165.50")
+        _id, token = ai_token
+        response = client.get(url, headers=bearer(token))
+        assert response.status_code == 200
+        assert not contains_canary(response.content), response.text[:800]
+        body = response.json()
+        assert body["export_controlled"] is True and body["id"] == world.itar_car.id
+        for key in CAR_FORM_TEXT_KEYS + ("title", "problem_description", "root_cause", "initiation_reason"):
+            assert body[key] == REDACTED_VALUE, key
+        for key in CAR_MONEY_KEYS:
+            assert body[key] == person[key], f"{key}: money stays true"
+        assert (body["car_number"], body["status"], body["priority"]) == (
+            person["car_number"],
+            person["status"],
+            person["priority"],
+        )
+
+    def test_a_car_escalated_from_a_cleared_ncr_is_withheld_once_its_customer_is_controlled(
+        self, client: TestClient, db_session: Session, world: World, ai_token, admin_headers: dict
+    ):
+        """The lead's cross-stream finding: P0 placed a CAR only through the NCRs and complaints
+        that reference it, but P2a gave a CAR its own customer and part. A CAR raised from a
+        CLEARED NCR whose customer is then set to the ITAR customer must be withheld."""
+        created = client.post(f"{API}/quality/ncr/{world.clear_ncr.id}/create-car", headers=admin_headers)
+        assert created.status_code == 200, created.text
+        car_id = created.json()["id"]
+        assert created.json()["part_id"] == world.clear_part.id, "prefilled from the cleared NCR"
+        url = f"{API}/quality/car/{car_id}"
+        form = {
+            "rma_number": f"{CAR_LEAK}-RMA",
+            "management_action": f"{CAR_LEAK} management action",
+            "vendor_approval_name": f"{CAR_LEAK} vendor approver",
+            "customer_approval_name": f"{CAR_LEAK} customer approver",
+            "cost_labor": "80.00",
+            "version": 0,  # required by CARUpdate, ignored (CARs carry no version column)
+        }
+        assert client.put(url, json=form, headers=admin_headers).status_code == 200
+        _id, token = ai_token
+
+        cleared = client.get(url, headers=bearer(token))
+        assert cleared.status_code == 200
+        assert "export_controlled" not in cleared.json(), "every link clears: served in full"
+        assert cleared.json()["rma_number"] == f"{CAR_LEAK}-RMA"
+
+        moved = client.put(url, json={"customer_id": world.itar_customer.id, "version": 0}, headers=admin_headers)
+        assert moved.status_code == 200, moved.text
+        leaks = (
+            CAR_LEAK.encode(),
+            world.itar_customer.name.encode(),
+            world.clear_part.part_number.encode(),
+        )
+        person = client.get(url, headers=admin_headers)
+        assert person.json()["customer_name"] == world.itar_customer.name
+        assert person.json()["part_number"] == world.clear_part.part_number
+        for raw in leaks:
+            assert raw in person.content, f"a person sees the CAR in full: {raw!r}"
+
+        for path in (url, f"{API}/quality/car"):
+            redacted = client.get(path, headers=bearer(token))
+            assert redacted.status_code == 200, path
+            for raw in leaks:
+                assert raw not in redacted.content, f"{path} leaked {raw!r}: {redacted.text[:800]}"
+            assert not contains_canary(redacted.content)
+        body = client.get(url, headers=bearer(token)).json()
+        assert body["export_controlled"] is True
+        assert (body["id"], body["customer_id"], body["part_id"]) == (
+            car_id,
+            world.itar_customer.id,
+            world.clear_part.id,
+        )
+        for key in ("customer_name", "part_number", "rma_number", "management_action", "vendor_approval_name"):
+            assert body[key] == REDACTED_VALUE, key
+        assert body["customer_approval_name"] == REDACTED_VALUE
+        assert body["cost_labor"] == "80.00" and body["cost_total"] == "80.00", "money stays true"
+        events = _events(db_session, record_type="car", record_id=car_id)
+        assert events and {event.denial_reason for event in events} == {"export_controlled_customer"}
+        assert {event.data_classification for event in events} == {"itar_export_controlled"}
+
+    def test_quote_line_revisions_are_withheld_inside_a_withheld_quote(
+        self, client: TestClient, world: World, ai_token, auth_headers: dict
+    ):
+        url = f"{API}/quotes/{world.itar_quote.id}"
+        (person_line,) = client.get(url, headers=auth_headers).json()["lines"]
+        assert CANARY in person_line["part_revision"]
+        assert person_line["part_current_revision"] == "A", "the part's revision today (a part revision is 1-5 chars)"
+        _id, token = ai_token
+        response = client.get(url, headers=bearer(token))
+        assert response.status_code == 200 and not contains_canary(response.content)
+        (line,) = response.json()["lines"]
+        assert line["part_revision"] == REDACTED_VALUE
+        assert line["part_current_revision"] == REDACTED_VALUE
+        assert (line["quantity"], line["line_number"]) == (person_line["quantity"], person_line["line_number"])
+        clear = client.get(f"{API}/quotes/{world.clear_quote.id}", headers=bearer(token)).json()
+        assert "export_controlled" not in clear, "a cleared quote keeps its line revisions"
+
+    def test_the_fai_log_judges_each_row_like_the_fai_it_names(
+        self, client: TestClient, db_session: Session, world: World, ai_token, auth_headers: dict
+    ):
+        person = client.get(f"{API}/quality/fai/log", headers=auth_headers)
+        assert person.status_code == 200
+        person_itar = find_record(person.json(), key="fai_id", value=world.itar_fai.id)
+        assert person_itar is not None and CANARY in person_itar["part_number"]
+        assert CANARY in person_itar["customer"] and CANARY in person_itar["part_revision"]
+
+        _id, token = ai_token
+        response = client.get(f"{API}/quality/fai/log", headers=bearer(token))
+        assert response.status_code == 200
+        assert not contains_canary(response.content), response.text[:800]
+        rows = response.json()
+        assert len(rows) == len(person.json()), "rows are redacted, never dropped"
+        itar = find_record(rows, key="fai_id", value=world.itar_fai.id)
+        assert itar["export_controlled"] is True
+        for key in ("part_number", "part_name", "customer", "part_revision", "part_current_revision"):
+            assert itar[key] == REDACTED_VALUE, key
+        for key in (
+            "fai_number",
+            "job_number",
+            "status",
+            "log_date",
+            "part_id",
+            "work_order_id",
+            "total_characteristics",
+            "is_complete",
+            "customer_approved",
+        ):
+            assert itar[key] == person_itar[key], f"{key}: ids, numbers, statuses, dates and counts stay true"
+        assert itar["job_number"] == world.itar_wo.work_order_number
+
+        clear = find_record(rows, key="fai_id", value=world.clear_fai.id)
+        assert "export_controlled" not in clear
+        assert clear["part_number"] == world.clear_part.part_number
+        assert clear["customer"] == world.clear_customer.name
+        events = _events(db_session, record_type="fai", record_id=world.itar_fai.id)
+        assert events and {event.denial_reason for event in events} == {"export_controlled_customer"}
+
+    def test_the_car_and_quote_pdfs_never_reach_a_read_only_token(
+        self, client: TestClient, world: World, admin_headers: dict, auth_headers: dict, viewer: User
+    ):
+        """GET /quality/car/{id}/pdf answers PDF bytes: the read-only byte rule refuses them, and
+        an AI-external token never reaches the route (it is off the allowlist). The quote PDF is
+        a POST: the read-only method gate refuses it before the send gate is even consulted."""
+        car_pdf = f"{API}/quality/car/{world.itar_car.id}/pdf"
+        person = client.get(car_pdf, headers=auth_headers)
+        assert person.status_code == 200 and person.headers["content-type"] == "application/pdf"
+
+        _id, read_only = issue_token(client, admin_headers, viewer, scope="read_only", ai_external=False)
+        refused = client.get(car_pdf, headers=bearer(read_only))
+        assert refused.status_code == 403
+        assert refused.json() == {"detail": READ_ONLY_FILE_REFUSED_DETAIL}
+        assert b"%PDF" not in refused.content
+
+        _id, ai_external = issue_token(client, admin_headers, viewer, scope="read_only", label="ai")
+        refused = client.get(car_pdf, headers=bearer(ai_external))
+        assert refused.status_code == 403
+        assert refused.json() == {"detail": AI_EXTERNAL_ROUTE_DENIED_DETAIL}
+
+        for token in (read_only, ai_external):
+            quote_pdf = client.post(f"{API}/quotes/{world.clear_quote.id}/generate-pdf", headers=bearer(token))
+            assert quote_pdf.status_code == 403
+            assert quote_pdf.json() == {"detail": READ_ONLY_ROUTE_WRITES_DETAIL}
+
+
+MOVE_LEAK = "MOVEDLINKLEAK"
+
+
+class TestCarLinksThatMove:
+    """Red-team finding (2026-11-16): a CAR raised from an ITAR record copies its title and
+    description, but the link that placed it MOVES -- the CAR is voided and the record
+    escalated again, or the NCR's ``car_id`` is re-pointed or cleared. Judged by its CURRENT
+    referrers plus its own generic-stock part (or cleared customer), the first CAR was then
+    served in full to an AI-external token. Each case below is the ITAR job's record with a
+    generic-stock part (a raw-material sheet, blank customer), so only the work order
+    controls it; the CAR must stay withheld AS ITAR (not merely as unlinkable) once the link
+    has moved, while a person still reads it in full."""
+
+    @staticmethod
+    def _itar_job_ncr(client: TestClient, admin_headers: dict, world: World) -> int:
+        response = client.post(
+            f"{API}/quality/ncr",
+            json={
+                "part_id": world.material_part.id,
+                "work_order_id": world.itar_wo.id,
+                "source": "in_process",
+                "title": f"{MOVE_LEAK} cracked sheet on the controlled bracket",
+                "description": f"{MOVE_LEAK} program detail typed by the inspector",
+            },
+            headers=admin_headers,
+        )
+        assert response.status_code in (200, 201), response.text
+        return response.json()["id"]
+
+    @staticmethod
+    def _escalate(client: TestClient, admin_headers: dict, ncr_id: int) -> int:
+        response = client.post(f"{API}/quality/ncr/{ncr_id}/create-car", headers=admin_headers)
+        assert response.status_code == 200, response.text
+        return response.json()["id"]
+
+    @staticmethod
+    def _void(client: TestClient, admin_headers: dict, car_id: int) -> None:
+        response = client.post(
+            f"{API}/quality/car/{car_id}/void", json={"reason": "raised in error"}, headers=admin_headers
+        )
+        assert response.status_code == 200, response.text
+
+    @staticmethod
+    def _assert_withheld_as_itar(
+        client: TestClient, db_session: Session, token: str, admin_headers: dict, car_id: int
+    ) -> None:
+        url = f"{API}/quality/car/{car_id}"
+        person = client.get(url, headers=admin_headers)
+        assert person.status_code == 200 and MOVE_LEAK.encode() in person.content, "vacuous: no leak text"
+        db_session.expire_all()
+        before = db_session.query(func.max(ControlledAccessEvent.id)).scalar() or 0
+        for path in (url, f"{API}/quality/car"):
+            response = client.get(path, headers=bearer(token))
+            assert response.status_code == 200, path
+            assert MOVE_LEAK.encode() not in response.content, f"{path} leaked: {response.text[:800]}"
+        body = client.get(url, headers=bearer(token)).json()
+        assert body["export_controlled"] is True and body["id"] == car_id
+        assert body["title"] == REDACTED_VALUE and body["problem_description"] == REDACTED_VALUE
+        events = [event for event in _events(db_session, record_type="car", record_id=car_id) if event.id > before]
+        assert events, "no ledger row for the withheld CAR"
+        # ITAR, not "unknown": the CAR is placed by the ITAR record it came from, not merely
+        # withheld because nothing else ties it to a customer.
+        assert {event.data_classification for event in events} == {"itar_export_controlled"}
+        assert {event.denial_reason for event in events} == {"export_controlled_customer"}
+
+    def test_a_voided_car_stays_withheld_after_the_ncr_is_escalated_again(
+        self, client: TestClient, db_session: Session, world: World, ai_token, admin_headers: dict
+    ):
+        _id, token = ai_token
+        ncr_id = self._itar_job_ncr(client, admin_headers, world)
+        first = self._escalate(client, admin_headers, ncr_id)
+        self._assert_withheld_as_itar(client, db_session, token, admin_headers, first)
+
+        self._void(client, admin_headers, first)
+        second = self._escalate(client, admin_headers, ncr_id)
+        assert second != first
+        for car_id in (first, second):
+            self._assert_withheld_as_itar(client, db_session, token, admin_headers, car_id)
+
+    def test_a_car_stays_withheld_after_the_ncr_is_re_pointed_or_unlinked(
+        self, client: TestClient, db_session: Session, world: World, ai_token, admin_headers: dict
+    ):
+        _id, token = ai_token
+        ncr_id = self._itar_job_ncr(client, admin_headers, world)
+        first = self._escalate(client, admin_headers, ncr_id)
+        # Consolidate under another (open) CAR: the first CAR is open and has no referrer now.
+        moved = client.put(
+            f"{API}/quality/ncr/{ncr_id}", json={"version": 0, "car_id": world.orphan_car.id}, headers=admin_headers
+        )
+        assert moved.status_code == 200, moved.text
+        self._assert_withheld_as_itar(client, db_session, token, admin_headers, first)
+
+        # Type ITAR detail into the CAR the NCR now names, then unlink the NCR from it too.
+        typed = client.put(
+            f"{API}/quality/car/{world.orphan_car.id}",
+            json={"management_action": f"{MOVE_LEAK} action typed while linked", "version": 0},
+            headers=admin_headers,
+        )
+        assert typed.status_code == 200, typed.text
+        cleared = client.put(f"{API}/quality/ncr/{ncr_id}", json={"version": 0, "car_id": None}, headers=admin_headers)
+        assert cleared.status_code == 200, cleared.text
+        db_session.expire_all()
+        assert db_session.get(NonConformanceReport, ncr_id).car_id is None
+        for car_id in (first, world.orphan_car.id):
+            self._assert_withheld_as_itar(client, db_session, token, admin_headers, car_id)
+
+    def test_a_voided_car_stays_withheld_after_the_complaint_raises_another(
+        self, client: TestClient, db_session: Session, world: World, ai_token, admin_headers: dict
+    ):
+        """The complaint names the CLEARED customer, so the CAR's own customer and snapshot
+        clear: only the complaint's ITAR work order ever placed it."""
+        _id, token = ai_token
+        created = client.post(
+            f"{API}/complaints/complaints/",
+            json={
+                "customer_id": world.clear_customer.id,
+                "customer_name": world.clear_customer.name,
+                "part_id": world.material_part.id,
+                "work_order_id": world.itar_wo.id,
+                "title": f"{MOVE_LEAK} returned brackets",
+                "description": f"{MOVE_LEAK} customer report naming the program",
+            },
+            headers=admin_headers,
+        )
+        assert created.status_code == 200, created.text
+        complaint_id = created.json()["id"]
+
+        def raise_car() -> int:
+            response = client.post(f"{API}/complaints/complaints/{complaint_id}/create-car", headers=admin_headers)
+            assert response.status_code == 200, response.text
+            return response.json()["car_id"]
+
+        first = raise_car()
+        self._assert_withheld_as_itar(client, db_session, token, admin_headers, first)
+        self._void(client, admin_headers, first)
+        second = raise_car()
+        assert second != first
+        for car_id in (first, second):
+            self._assert_withheld_as_itar(client, db_session, token, admin_headers, car_id)
 
 
 # --------------------------------------------------------------------------- positive clearance
@@ -1131,6 +1465,9 @@ REFUSED_QUERY_PARAMS: Dict[str, frozenset] = {
     "/work-orders/browse": frozenset({"search", "customer"}),
     "/shop-floor/operations": frozenset({"search"}),
     "/quotes/": frozenset({"customer", "search"}),
+    # The FAI log (P2.5): a customer-name substring and a search over FAI #, part number /
+    # description, job #, customer PO and serial both match withheld text.
+    "/quality/fai/log": frozenset({"customer", "search"}),
 }
 
 
@@ -1183,6 +1520,9 @@ class TestFilterOracles:
             "/quotes/?search=ITAR",
             "/parts/?not_a_parameter=1",
             "/work-orders/?status=released&search=x",
+            "/quality/fai/log?customer=ITARCANARY Defense Systems",
+            "/quality/fai/log?search=ITARCANARY-PN",
+            "/quality/fai/log?status=pending&search=x",
         ],
     )
     def test_text_filters_are_refused_and_ledgered(
@@ -1217,6 +1557,7 @@ class TestFilterOracles:
             "/shop-floor/operations?status=ready&page=1&page_size=10",
             "/oee/records?shift_id=1&limit=5",
             "/production-calendar/resolve?at=2026-11-10T12:00:00Z",
+            "/quality/fai/log?status=pending&limit=5&offset=0&start_date=2026-01-01&end_date=2026-12-31",
         ],
     )
     def test_filters_over_kept_fields_still_work(self, client: TestClient, world: World, ai_token, query: str):

@@ -35,10 +35,10 @@ a file a manager opens, so counting rows would pass on a file that still leaks.
 Two sibling exporters (purchase orders, parts) carry the same-shape assertion so
 this file is the home for the defect class rather than a single-defect
 regression test, and a parameterized sweep at the end asserts the property for
-**all seven** exporters -- tenant scoping belongs to the category, not to the one
+**every** exporter -- tenant scoping belongs to the category, not to the one
 route that happened to be broken.
 
-All seven now require ADMIN/MANAGER (``docs/RBAC_PERMISSIONS.md`` -> Bulk data
+Every one now requires ADMIN/MANAGER (``docs/RBAC_PERMISSIONS.md`` -> Bulk data
 export), so ``make_user`` here defaults to ADMIN. The gate itself is covered in
 ``test_export_gate_and_audit.py``.
 
@@ -392,10 +392,10 @@ def test_parts_export_excludes_other_company(client: TestClient, db_session: Ses
 # Every exporter, swept
 #
 # The three tests above grew out of one confirmed defect and cover three of the
-# seven routes. Tenant scoping is a property of the CATEGORY, not of the route
-# that happened to be broken, so the sweep below asserts it for all seven --
-# including work orders, inventory, quotes and the inventory ledger, which had
-# no cross-tenant coverage at all.
+# routes. Tenant scoping is a property of the CATEGORY, not of the route
+# that happened to be broken, so the sweep below asserts it for every one --
+# including work orders, inventory, quotes, the inventory ledger and the FAI
+# log, which had no cross-tenant coverage at all.
 #
 # Each company is seeded with one row of every exported kind, and every one of
 # those rows carries the same per-company TAG in a field that appears in the
@@ -408,6 +408,7 @@ def test_parts_export_excludes_other_company(client: TestClient, db_session: Ses
 def seed_tagged_tenant(db: Session, *, company_id: int) -> str:
     """Seed one row of every exported dataset, all stamped with a unique tag."""
     from app.models.inventory import InventoryItem, InventoryTransaction, TransactionType
+    from app.models.quality import FAIStatus, FirstArticleInspection
     from app.models.quote import Quote, QuoteStatus
 
     tag = f"TAG{_next():05d}X"
@@ -425,18 +426,29 @@ def seed_tagged_tenant(db: Session, *, company_id: int) -> str:
     db.add(part)
     db.flush()
 
+    work_order = WorkOrder(
+        work_order_number=f"EXPI-{tag}-WO",
+        part_id=part.id,
+        quantity_ordered=7.0,
+        status=WorkOrderStatus.RELEASED,
+        priority=3,
+        customer_name=f"Customer {tag}",
+        customer_po=f"EXPI-{tag}-CPO",
+        due_date=date.today(),
+        company_id=company_id,
+        is_deleted=False,
+    )
+    db.add(work_order)
+    db.flush()
     db.add(
-        WorkOrder(
-            work_order_number=f"EXPI-{tag}-WO",
+        FirstArticleInspection(
+            fai_number=f"EXPI-{tag}-FAI",
             part_id=part.id,
-            quantity_ordered=7.0,
-            status=WorkOrderStatus.RELEASED,
-            priority=3,
-            customer_name=f"Customer {tag}",
-            customer_po=f"EXPI-{tag}-CPO",
-            due_date=date.today(),
+            part_revision="A",
+            work_order_id=work_order.id,
+            status=FAIStatus.PASSED,
+            completed_date=date.today(),
             company_id=company_id,
-            is_deleted=False,
         )
     )
     db.add(
@@ -524,6 +536,7 @@ ALL_EXPORT_ROUTES = [
     "/api/v1/exports/purchase-orders/lines/export",
     "/api/v1/exports/quotes/export",
     "/api/v1/exports/inventory/transactions/export",
+    "/api/v1/exports/fai/export",
 ]
 
 

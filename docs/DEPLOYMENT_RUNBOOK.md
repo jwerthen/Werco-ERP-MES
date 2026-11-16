@@ -329,6 +329,33 @@ statement, writes no row, and adds no environment variable, secret, cron or work
   under, and the migration will not pick which company's record to change.
   See [API.md → Customer Complaints & RMA](API.md#customer-complaints--rma).
 
+**CAR form fields and quote line revisions (P2.1 / P2.4).** Apply additive **122_car_form_quote_rev** after
+**121_job_cost_subcontract** through the normal API boot migration path. It adds 21 nullable columns
+(four named foreign keys, one index, one CHECK) to `cars` and `quote_lines.part_revision`, with no
+backfill, no table and no RLS, revoke or role statement. Each `ALTER` takes a brief ACCESS EXCLUSIVE
+lock under `SET LOCAL lock_timeout = '5s'`; a timeout fails the boot, and in a boot that also ran
+121 it leaves the database at `120_production_calendar` (stamp back before an older image restarts —
+see 121 below). No environment variable, secret, cron or worker job is added. Migrate before or
+with the API, and deploy the API before or with the worker: new code on an un-migrated database
+fails every CAR and quote-line load.
+- **User-visible at deploy.** Every existing quote line lacks a drawing revision, so Send, quote
+  email and the PDF of a quote not yet issued answer **409** until each line's Rev (or `N/A`) is
+  entered on a draft or pending quote. A sent, accepted or converted quote still reprints as issued.
+  Quote email previews prepared before the deploy fail at send with **409** and must be previewed
+  again; a delivery still `sending` / `unknown` at the deploy that is later accepted or reconciled
+  leaves its quote's status unchanged ("its workflow status was retained"), so mark that quote sent
+  by hand. The PDF's FOB term is read from the company address.
+- **Verify after deploy:** a CAR's **Print CAR** and **Record quality approval** (a second approval
+  is **409**; `car` APPROVE row in the Audit Log), a draft quote refused at Send until its Revs are
+  entered, and an FAI customer approval followed by the FAI **Log** view and an Admin/Manager export
+  (`fai` EXPORT row).
+- **Rollback: stamp to `121`, do not downgrade.** Keep the columns; older code never reads them.
+  Before redeploying an older image, from a checkout of this release run
+  `railway run --service werco-api alembic stamp 121_job_cost_subcontract`, or its boot cannot find
+  `122` and fails `/health`. The downgrade drops every recorded CAR form field, Quality Manager
+  approval and quote-line revision. See
+  [CAR form fields, quote line revisions and the FAI log](DEPLOYMENT.md#car-form-fields-quote-line-revisions-and-the-fai-log-migration-122).
+
 **Job cost subcontract (P1.3).** Apply additive **121_job_cost_subcontract** after
 **120_production_calendar** through the normal API boot migration path: one NOT NULL DEFAULT 0
 column on `job_costs` and, where the native `costentrytype` enum exists, its `SUBCONTRACT` label. No

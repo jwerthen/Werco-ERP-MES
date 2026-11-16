@@ -2,8 +2,8 @@
 
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
-(Cursor, Claude Code, a chat bot) gets **766 tools** — 15 hand-written *convenience* tools plus
-**751 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+(Cursor, Claude Code, a chat bot) gets **771 tools** — 15 hand-written *convenience* tools plus
+**756 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
 as the same request from the web app. A **read-only** API token is shown fewer tools, and an
 **AI-external** one fewer still (§4.1, §4.2).
 
@@ -26,6 +26,11 @@ generated tools (the two production-calendar reads among them).
 **Re-checked again on 2026-11-15 after the four company egress kill-switch writes left the
 catalog** (`EXCLUDED_OPERATIONS`, §6.1): 15 convenience + **751** generated, 16 shadowed; the
 read-only catalog is unchanged at 8 convenience + 292 generated (the four are writes).
+**Re-checked again on 2026-11-15 after the CAR form / FAI log routes (P2a) added five tools**
+(`get_car_pdf`, `approve_car_quality`, `list_fai_log`, `record_fai_customer_approval`,
+`export_fai_log`; no existing name shifted): 15 convenience + **756** generated, 16 shadowed. The
+read-only catalog is 8 convenience + **294** generated: `list_fai_log` and `get_car_pdf` are reads,
+though a read-only token calling `get_car_pdf` is still refused the PDF bytes (§4.1).
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
 `backend/tests/test_mcp_docs_names.py` checks every tool name this file, `CLAUDE.md` and `API.md`
@@ -218,13 +223,13 @@ routes authenticate every call; in IN-PROCESS mode it uses the real `ErpTokenVer
  "generated_tools":   [{"name": "...", "method": "GET", "path": "/api/v1/...", "tag": "...",
                         "function": "...", "annotations": {...}, "deprecated": false}],
  "shadowed_operations": [["GET", "/api/v1/inventory/"], ...],
- "counts": {"convenience": 15, "generated": 751, "shadowed": 16}
+ "counts": {"convenience": 15, "generated": 756, "shadowed": 16}
 }
 ```
 
 `--print-catalog --read-only` prints the same keys filtered to what a read-only token is shown
 (tools that only read, under no tag in `WERCO_MCP_READ_ONLY_DENY_TAGS`), with the counts
-recomputed (`"convenience": 8, "generated": 292` on 2026-11-15), plus `"scope": "read_only"` and
+recomputed (`"convenience": 8, "generated": 294` on 2026-11-15), plus `"scope": "read_only"` and
 the `"deny_tags"` applied. Without `--read-only` the output is the full catalog with the keys
 above, as before. There is no flag for the AI-external catalog; §4.2 lists it.
 
@@ -374,6 +379,17 @@ list):
 - **Nor close an AI action card** (owner ruling 3): `accept_ai_recommendation` on an action card
   (record-only, "Mark handled") answers **403** to an API token, and AI Accept & apply is not a tool
   at all.
+- **Nor record a quality approval** (the lead's design decision of 2026-11-13, applying the same
+  principle; not an owner ruling): `approve_car_quality` answers **403** `"A standing API token
+  cannot record a CAR's quality approval. A person signed in to the app must record it."` and
+  `record_fai_customer_approval` answers **403** `"A standing API token cannot record an FAI's
+  customer approval. A person signed in to the app must record it."`, both before any write. The
+  same applies to the judgments around them: `update_fai` setting a final status (`passed`,
+  `failed`, `conditional`) answers **403** `"A standing API token cannot record an FAI's final
+  disposition. …"`, and `create_car` / `update_car` filling or changing a vendor or customer
+  approval box answers **403** `"A standing API token cannot record or change a CAR's vendor or
+  customer approval. …"`. The reads beside them (`get_car_pdf`, `list_fai_log`) stay open; a
+  read-only token is still refused `get_car_pdf`'s PDF bytes (§4.1).
 - **Deliberately left open.** `work_orders_resume_work_order` lifts a work-order hold for a token
   whose user holds Admin / Manager / Supervisor, audited as that user (owner decision 2026-11-07).
   `dismiss_ai_recommendation`, snooze and feedback stay open to every credential — a design decision
@@ -446,7 +462,7 @@ introspect its own user.
   - a denied tag gets **403** `"Read-only API token cannot access this resource."`;
   - a request that matches no route fails closed with that same 403.
 - **The MCP door** narrows `tools/list` to the tools that only read and carry no denied tag. On
-  2026-11-15 that is 8 convenience + 292 generated tools; `--print-catalog --read-only` prints
+  2026-11-15 that is 8 convenience + 294 generated tools; `--print-catalog --read-only` prints
   them. Calling any other tool by name answers, **before argument validation or dispatch**:
   - **403** `"Read-only API token: this tool writes."` for a tool that writes; the write check
     comes first, so a writing tool under a denied tag gets this text;
@@ -464,8 +480,9 @@ introspect its own user.
 **No file bytes.** A response that is not JSON is replaced by **403** `"Read-only API token cannot
 download files."` by the export-control middleware. That covers any status except 204 / 304 /
 1xx, and includes PDFs, CSVs, XLSX, drawings and a redirect to file storage. So drawings under
-Shop Floor or Laser Nests, a CoC PDF and Fabrication Quoting source files are refused even though
-their tags are not on the deny list.
+Shop Floor or Laser Nests, a CoC PDF, the printable CAR (`get_car_pdf`) and Fabrication Quoting
+source files are refused even though their tags are not on the deny list. The quote PDF
+(`generate_quote_pdf`) is a `POST`, so the method gate refuses it first.
 
 **Global search** (`search`) never returns `user` results to a read-only token, whatever its
 user's role.
@@ -513,10 +530,10 @@ three more rules:
    extraction and the connector: turn it on only once the empowered official has cleared it.
    Only an Admin signed in to the app flips it: `PUT /companies/me/ai-egress` refuses every API
    token **403** and is not a tool (§6.1), so no agent can open — or close — its own connector.
-2. **Only the allowlisted reads.** The token may call only the 46 `GET` routes in
+2. **Only the allowlisted reads.** The token may call only the 47 `GET` routes in
    `app/core/export_control.py` → `AI_EXTERNAL_ALLOWED_ROUTES`. Any other route answers **403**
    `"This resource is not available to an AI-external API token."` at the API, and the same text
-   at the door when a tool is called by name. Its `tools/list` holds exactly these 46 tools.
+   at the door when a tool is called by name. Its `tools/list` holds exactly these 47 tools.
    Convenience tools are included only when every route they can call is allowlisted, so
    `search`, `get_shop_floor_dashboard` and `list_inventory` are out:
 
@@ -528,13 +545,13 @@ three more rules:
    | Work centers | `list_work_centers`★, `list_work_center_types`, `get_work_center` |
    | OEE | `list_oee_records`, `get_oee_record`, `get_oee_dashboard`, `get_oee_trends`, `get_six_big_losses`, `list_oee_targets` |
    | Parts and routings | `list_parts`★, `get_part`, `get_part_by_number`, `list_routings`, `get_routing`, `get_routing_by_part` |
-   | Quality | `list_quality_ncrs`★, `get_ncr`, `list_cars`, `get_car`, `list_fais`, `get_fai` |
+   | Quality | `list_quality_ncrs`★, `get_ncr`, `list_cars`, `get_car`, `list_fais`, `get_fai`, `list_fai_log` (each log row judged like the FAI it names; not `get_car_pdf`: file bytes) |
    | Quotes | `quotes_list_quotes`, `quotes_get_quote` |
    | Purchasing and receiving | `list_purchase_orders`★, `get_purchase_order`, `list_vendors`, `get_vendor`, `get_receiving_history`, `get_receipt_detail` |
    | Maintenance work orders | `preventive_maintenance_list_work_orders`, `get_overdue_work_orders`, `preventive_maintenance_get_work_order` |
    | Production calendar | `get_production_calendar`, `resolve_production_moment` (reference data: always served in full) |
 
-   (★ = convenience tool; 5 convenience + 41 generated.) Adding a route needs a canary conformance
+   (★ = convenience tool; 5 convenience + 42 generated.) Adding a route needs a canary conformance
    test, and CI fails without one. **Filters are narrowed too:** each route accepts only the query
    parameters in `AI_EXTERNAL_QUERY_PARAMS` — free-text `search`, the `customer` filter and
    `sort` / `group` by part or customer are refused **403** `"This query parameter is not
@@ -620,7 +637,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `FabricationQuoting` sources, nesting and actuals | Fabrication Quoting | `upload_file`, `original_file`, `nest`, `save_nest`, `revisions`, `revision`, `list_actuals`, `record_actuals` |
 | `FabricationQuoting` process profiles | Fabrication Quoting | `list_profiles`, `list_revisions`, `save_profile`, `capabilities` |
 | `Customers` (`/customers`) | Customers | `list_customers`, `create_customer`, `update_customer`, `get_customer_stats`, `import_customers_csv`, `get_customer_export_control` (read-only; **marking a customer controlled is not a tool**: `POST /customers/{customer_id}/contracts` and `PUT /customers/{customer_id}/contracts/{contract_id}` are in `EXCLUDED_OPERATIONS` (§6.1) — Admin only, in the app's Export control panel, and refused **403** to every API token — [EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md#6-marking-a-customer-export-controlled-admin)) |
-| `Quality` (`/quality`) | Quality Management, Parts | `list_quality_ncrs`★, `get_ncr`, `create_ncr`, `update_ncr`, `void_ncr`, `list_cars`, `create_fai`, `get_quality_summary`, `list_scrap_reason_codes` |
+| `Quality` (`/quality`) | Quality Management, Parts, Data Export | `list_quality_ncrs`★, `get_ncr`, `create_ncr`, `update_ncr`, `void_ncr`, `list_cars`, `get_car_pdf`, `approve_car_quality`, `create_fai`, `record_fai_customer_approval`, `list_fai_log`, `export_fai_log`, `get_quality_summary`, `list_scrap_reason_codes` |
 | `SPC` (`/spc`) | Statistical Process Control, Parts | `list_characteristics`, `add_measurements`, `get_chart_data`, `calculate_control_limits`, `get_capability`, `statistical_process_control_get_dashboard` |
 | `CustomerComplaints` (`/customer-complaints`) | Customer Complaints & RMA | `list_complaints`, `create_complaint`, `create_rma`, `get_8d_report`, `customer_complaints_rma_get_dashboard` |
 | `Calibration` (`/calibration`) | Calibration | `list_equipment`, `get_equipment_due_soon`, `record_calibration`, `get_calibration_history` |
@@ -706,8 +723,8 @@ historical status transitions, so exposing a generic batch commit would reopen t
 excluded-loader path. File correction and credential input stay in Import Center.
 
 On the commit that shipped API tokens: 706 operations, 689 secured, 680 candidates, 16 shadowed
-(§8), 2 excluded → **662 generated tools**. On 2026-11-15, with nine excluded: **751 generated
-tools** (`--print-catalog` `counts`).
+(§8), 2 excluded → **662 generated tools**. On 2026-11-15, with nine excluded and the CAR form /
+FAI log routes added: **756 generated tools** (`--print-catalog` `counts`).
 
 ### 6.2 Naming and the collision policy (`app/mcp/naming.py`)
 

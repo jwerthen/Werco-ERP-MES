@@ -5,8 +5,17 @@ import { tabKeyboard } from '../components/operations/tabKeyboard';
 import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import QualityRecordDetail from '../components/operations/QualityRecordDetail';
+import CarFormFields, {
+  BLANK_CAR_FORM_VALUES,
+  carFormPayload,
+  type CarFormValues,
+} from '../components/quality/CarFormFields';
+import FaiInspectionPanel, { type FAIDetailRecord } from '../components/quality/FaiInspectionPanel';
+import FaiLogView from '../components/quality/FaiLogView';
+import FaiWorkOrderPicker from '../components/quality/FaiWorkOrderPicker';
 import { Modal } from '../components/ui/Modal';
 import {
+  ComboBox,
   ErrorState,
   useToast,
   DataTable,
@@ -22,7 +31,7 @@ import {
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { formatCentralDate } from '../utils/centralTime';
 import { usePermissions } from '../hooks/usePermissions';
-import { canEditFAIs } from '../utils/recordWriteAccess';
+import { canApproveFAIs, canEditFAIs, canExportRecords } from '../utils/recordWriteAccess';
 import useUnsavedChanges from '../hooks/useUnsavedChanges';
 import type { FAIPrefillResult } from '../types/processSheet';
 import { ScrapReasonCode, SCRAP_CATEGORIES } from '../types/scrapReason';
@@ -70,6 +79,8 @@ interface CAR {
   root_cause?: string;
   corrective_action?: string;
   due_date?: string;
+  submitted_date?: string | null;
+  quality_approved_at?: string | null;
   created_at: string;
 }
 
@@ -86,29 +97,9 @@ interface FAI {
   characteristics_passed: number;
   characteristics_failed: number;
   due_date?: string;
+  work_order_number?: string | null;
+  customer_name?: string | null;
   created_at: string;
-}
-
-interface FAICharacteristic {
-  id: number;
-  char_number: number;
-  characteristic: string;
-  nominal?: string | null;
-  tolerance_plus?: string | null;
-  tolerance_minus?: string | null;
-  specification?: string | null;
-  actual_value?: string | null;
-  measuring_device?: string | null;
-  is_conforming?: boolean | null;
-  is_critical: boolean;
-  is_major: boolean;
-  notes?: string | null;
-}
-
-/** GET /quality/fai/{id} — list row fields + the characteristics. */
-interface FAIDetail extends FAI {
-  work_order_id?: number | null;
-  characteristics: FAICharacteristic[];
 }
 
 interface QualitySummary {
@@ -149,18 +140,31 @@ const BLANK_NCR_FORM = {
   actual_value: '',
   required_value: '',
 };
-const BLANK_CAR_FORM = {
+const BLANK_CAR_FORM: {
+  title: string;
+  problem_description: string;
+  car_type: string;
+  priority: number;
+} & CarFormValues = {
   title: '',
   problem_description: '',
   car_type: 'corrective',
   priority: 3,
+  ...BLANK_CAR_FORM_VALUES,
 };
 const BLANK_FAI_FORM = {
   part_id: 0,
+  work_order_id: '',
+  part_revision: '',
+  serial_number: '',
+  due_date: '',
   fai_type: 'full',
   reason: 'new_part',
   customer_approval_required: false,
 };
+// A drawing revision as FAICreate takes it: letters and digits (upper-cased on save).
+const FAI_REVISION_PATTERN = /^[A-Z0-9]{1,20}$/;
+type FaiView = 'inspections' | 'log';
 
 export default function QualityPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -230,14 +234,17 @@ export default function QualityPage() {
 
   const recordKind = searchParams.get('car') ? 'car' : 'ncr';
   const recordId = Number(searchParams.get('car') || searchParams.get('ncr') || 0);
-  const openQualityRecord = useCallback((kind: 'ncr' | 'car', id: number) => {
-    const next = new URLSearchParams(searchParams);
-    next.delete('ncr');
-    next.delete('car');
-    next.set('tab', kind);
-    next.set(kind, String(id));
-    setSearchParams(next);
-  }, [searchParams, setSearchParams]);
+  const openQualityRecord = useCallback(
+    (kind: 'ncr' | 'car', id: number) => {
+      const next = new URLSearchParams(searchParams);
+      next.delete('ncr');
+      next.delete('car');
+      next.set('tab', kind);
+      next.set(kind, String(id));
+      setSearchParams(next);
+    },
+    [searchParams, setSearchParams]
+  );
   const closeQualityRecord = () => {
     const next = new URLSearchParams(searchParams);
     next.delete('ncr');
@@ -252,10 +259,18 @@ export default function QualityPage() {
 
   // FAI detail (characteristics + the PR 4 prefill-from-steps action).
   const [faiDetailId, setFaiDetailId] = useState<number | null>(null);
-  const [faiDetail, setFaiDetail] = useState<FAIDetail | null>(null);
+  const [faiDetail, setFaiDetail] = useState<FAIDetailRecord | null>(null);
+  const [faiDetailDirty, setFaiDetailDirty] = useState(false);
   const [faiDetailError, setFaiDetailError] = useState<string | null>(null);
   const [prefilling, setPrefilling] = useState(false);
   const [prefillResult, setPrefillResult] = useState<FAIPrefillResult | null>(null);
+  // The FAI Log view stays mounted under the detail modal and loadData() never reads the
+  // log, so every FAI write here bumps this to make the log re-read its current page.
+  const [faiLogVersion, setFaiLogVersion] = useState(0);
+  const refreshFaiLists = () => {
+    loadData();
+    setFaiLogVersion(version => version + 1);
+  };
 
   // Form states
   const [ncrForm, setNcrForm] = useState(BLANK_NCR_FORM);
@@ -273,6 +288,7 @@ export default function QualityPage() {
   const { confirmDiscard: confirmDiscardNcr } = useUnsavedChanges(isNcrDirty);
   const { confirmDiscard: confirmDiscardCar } = useUnsavedChanges(isCarDirty);
   const { confirmDiscard: confirmDiscardFai } = useUnsavedChanges(isFaiDirty);
+  const { confirmDiscard: confirmDiscardFaiDetail } = useUnsavedChanges(faiDetailId != null && faiDetailDirty);
 
   // Cancel/Close gates. The successful create paths close directly (never
   // through these), so saving never prompts.
@@ -299,7 +315,18 @@ export default function QualityPage() {
   const { can, role, isSuperuser } = usePermissions();
   const canManageScrapCodes = can('quality:approve');
   const canEditFAI = canEditFAIs({ role, is_superuser: isSuperuser });
-  const faiIsFinal = !!faiDetail?.completed_date || ['passed', 'failed', 'conditional'].includes(faiDetail?.status || '');
+  const canApproveFAI = canApproveFAIs({ role, is_superuser: isSuperuser });
+  const canExportFAILog = canExportRecords({ role, is_superuser: isSuperuser });
+  // Inspections (the working list) or the FAI log of record — URL-backed like the tab.
+  const faiView: FaiView = searchParams.get('fai_view') === 'log' ? 'log' : 'inspections';
+  const selectFaiView = (view: FaiView) => {
+    const next = new URLSearchParams(searchParams);
+    if (view === 'log') next.set('fai_view', 'log');
+    else next.delete('fai_view');
+    setSearchParams(next, { replace: true });
+  };
+  const faiIsFinal =
+    !!faiDetail?.completed_date || ['passed', 'failed', 'conditional'].includes(faiDetail?.status || '');
   // Voiding an NCR mirrors DELETE /quality/ncr/{id} (require_role ADMIN / MANAGER
   // / QUALITY). usePermissions().can already returns true for a superuser, and
   // quality:approve is held by exactly admin/manager/quality — so this matches.
@@ -421,7 +448,8 @@ export default function QualityPage() {
     setCreating(true);
     setCreateError('');
     try {
-      await api.createCAR(carForm);
+      const { title, problem_description, car_type, priority, ...formValues } = carForm;
+      await api.createCAR({ title, problem_description, car_type, priority, ...carFormPayload(formValues) });
       setShowCARModal(false);
       setCarForm(BLANK_CAR_FORM);
       loadData();
@@ -443,13 +471,32 @@ export default function QualityPage() {
     e.preventDefault();
     if (!canEditFAI) return;
     if (creating) return;
+    if (!faiForm.part_id) {
+      setCreateError('Select the part being inspected.');
+      return;
+    }
+    const revision = faiForm.part_revision.trim().toUpperCase();
+    if (revision && !FAI_REVISION_PATTERN.test(revision)) {
+      setCreateError('Revision must be 1-20 letters or digits (for example B or 02).');
+      return;
+    }
     setCreating(true);
     setCreateError('');
     try {
-      await api.createFAI(faiForm);
+      await api.createFAI({
+        part_id: faiForm.part_id,
+        work_order_id: faiForm.work_order_id ? Number(faiForm.work_order_id) : null,
+        // Blank records the part's current revision (the server stamps it).
+        part_revision: revision || null,
+        serial_number: faiForm.serial_number.trim() || null,
+        due_date: faiForm.due_date || null,
+        fai_type: faiForm.fai_type,
+        reason: faiForm.reason,
+        customer_approval_required: faiForm.customer_approval_required,
+      });
       setShowFAIModal(false);
       setFaiForm(BLANK_FAI_FORM);
-      loadData();
+      refreshFaiLists();
     } catch (err: any) {
       const detail = err.response?.data?.detail;
       setCreateError(
@@ -575,6 +622,16 @@ export default function QualityPage() {
     setFaiDetail(null);
     setFaiDetailError(null);
     setPrefillResult(null);
+    setFaiDetailDirty(false);
+  };
+  const requestCloseFaiDetail = () => {
+    if (faiDetailDirty && !confirmDiscardFaiDetail()) return;
+    closeFaiDetail();
+  };
+  const refreshFaiDetail = async () => {
+    if (faiDetailId == null) return;
+    await loadFaiDetail(faiDetailId);
+    refreshFaiLists();
   };
 
   /**
@@ -595,13 +652,22 @@ export default function QualityPage() {
           (result.unmatched_count > 0 ? ` — ${result.unmatched_count} unmatched` : '')
       );
       await loadFaiDetail(faiDetailId);
-      loadData();
+      refreshFaiLists();
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to prefill from process steps');
     } finally {
       setPrefilling(false);
     }
   };
+
+  const partOptions = useMemo(
+    () => parts.map(part => ({ value: String(part.id), label: `${part.part_number} — ${part.name}` })),
+    [parts]
+  );
+  const selectedFaiPart = useMemo(
+    () => (faiForm.part_id ? parts.find(part => part.id === faiForm.part_id) : undefined),
+    [parts, faiForm.part_id]
+  );
 
   const filteredNcrs = useMemo(
     () =>
@@ -615,25 +681,38 @@ export default function QualityPage() {
     [ncrs, ncrStatusFilter]
   );
 
-  const renderNCRVoidAction = useCallback((ncr: NCR) =>
-    ncr.status === 'void' ? (
-      <button type="button" className="btn-secondary btn-sm" aria-label={`View NCR ${ncr.ncr_number}`} onClick={event => { event.stopPropagation(); openQualityRecord('ncr', ncr.id); }}>View</button>
-    ) : canVoidNCR ? (
-      <button
-        type="button"
-        onClick={e => {
-          e.stopPropagation();
-          setVoidNCRReason('');
-          setVoidNCRTarget(ncr);
-        }}
-        title="Void NCR"
-        aria-label={`Void NCR ${ncr.ncr_number}`}
-        className="inline-flex items-center gap-1.5 border border-red-500/40 text-red-300 hover:border-red-500 hover:text-red-200 text-sm px-3 py-1 transition-colors"
-      >
-        <XCircleIcon className="h-4 w-4" aria-hidden="true" />
-        Void
-      </button>
-    ) : null, [canVoidNCR, openQualityRecord]);
+  const renderNCRVoidAction = useCallback(
+    (ncr: NCR) =>
+      ncr.status === 'void' ? (
+        <button
+          type="button"
+          className="btn-secondary btn-sm"
+          aria-label={`View NCR ${ncr.ncr_number}`}
+          onClick={event => {
+            event.stopPropagation();
+            openQualityRecord('ncr', ncr.id);
+          }}
+        >
+          View
+        </button>
+      ) : canVoidNCR ? (
+        <button
+          type="button"
+          onClick={e => {
+            e.stopPropagation();
+            setVoidNCRReason('');
+            setVoidNCRTarget(ncr);
+          }}
+          title="Void NCR"
+          aria-label={`Void NCR ${ncr.ncr_number}`}
+          className="inline-flex items-center gap-1.5 border border-red-500/40 text-red-300 hover:border-red-500 hover:text-red-200 text-sm px-3 py-1 transition-colors"
+        >
+          <XCircleIcon className="h-4 w-4" aria-hidden="true" />
+          Void
+        </button>
+      ) : null,
+    [canVoidNCR, openQualityRecord]
+  );
 
   const ncrColumns = useMemo<Array<DataTableColumn<NCR>>>(
     () => [
@@ -757,6 +836,16 @@ export default function QualityPage() {
         render: car => <StatusBadge status={car.status} colorMap={ncrStatusColors} />,
       },
       {
+        key: 'submitted_date',
+        header: 'Submitted',
+        sortable: true,
+        accessor: car => car.submitted_date ?? '',
+        csv: car => (car.submitted_date ? formatCentralDate(car.submitted_date) : ''),
+        render: car => (
+          <span className="text-sm">{car.submitted_date ? formatCentralDate(car.submitted_date) : '-'}</span>
+        ),
+      },
+      {
         key: 'due_date',
         header: 'Due Date',
         sortable: true,
@@ -789,6 +878,13 @@ export default function QualityPage() {
             {fai.part_revision && <span className="text-slate-500 ml-1">Rev {fai.part_revision}</span>}
           </span>
         ),
+      },
+      {
+        key: 'work_order_number',
+        header: 'Job #',
+        sortable: true,
+        accessor: fai => fai.work_order_number ?? '',
+        render: fai => <span className="font-mono">{fai.work_order_number || '-'}</span>,
       },
       {
         key: 'fai_type',
@@ -924,7 +1020,8 @@ export default function QualityPage() {
     const next = new URLSearchParams(searchParams);
     for (const key of ['search', 'filter']) {
       const value = filters[key];
-      if (typeof value === 'string' && value) next.set(key, value); else next.delete(key);
+      if (typeof value === 'string' && value) next.set(key, value);
+      else next.delete(key);
     }
     next.set('filter', typeof filters.filter === 'string' ? filters.filter : '');
     setNcrStatusFilter(typeof filters.filter === 'string' ? filters.filter : '');
@@ -933,12 +1030,28 @@ export default function QualityPage() {
   const qualityFilters = { search: searchParams.get('search') || '', filter: ncrStatusFilter };
   const applyQualitySearch = (filters: Record<string, string>) => {
     const next = new URLSearchParams(searchParams);
-    if (typeof filters.search === 'string' && filters.search) next.set('search', filters.search); else next.delete('search');
+    if (typeof filters.search === 'string' && filters.search) next.set('search', filters.search);
+    else next.delete('search');
     setSearchParams(next);
   };
-  const ncrWorkspace = useTableWorkspace('quality', 'ncr', ncrColumns, qualityFilters, applyQualityFilters, { key: 'created_at', dir: 'desc' });
-  const carWorkspace = useTableWorkspace('quality', 'car', carColumns, { search: qualityFilters.search }, applyQualitySearch);
-  const faiWorkspace = useTableWorkspace('quality', 'fai', faiColumns, { search: qualityFilters.search }, applyQualitySearch);
+  const ncrWorkspace = useTableWorkspace('quality', 'ncr', ncrColumns, qualityFilters, applyQualityFilters, {
+    key: 'created_at',
+    dir: 'desc',
+  });
+  const carWorkspace = useTableWorkspace(
+    'quality',
+    'car',
+    carColumns,
+    { search: qualityFilters.search },
+    applyQualitySearch
+  );
+  const faiWorkspace = useTableWorkspace(
+    'quality',
+    'fai',
+    faiColumns,
+    { search: qualityFilters.search },
+    applyQualitySearch
+  );
 
   if (loadError) {
     return (
@@ -1200,55 +1313,86 @@ export default function QualityPage() {
         {activeTab === 'fai' && (
           <>
             <div className="flex flex-wrap justify-between items-start gap-3 mb-4">
-              <h2 className="text-lg font-semibold">First Article Inspections</h2>
+              <div className="flex min-w-0 flex-wrap items-center gap-3">
+                <h2 className="text-lg font-semibold">First Article Inspections</h2>
+                <div role="group" aria-label="FAI view" className="inline-flex border border-fd-line">
+                  {(
+                    [
+                      { id: 'inspections', label: 'Inspections' },
+                      { id: 'log', label: 'Log' },
+                    ] as Array<{ id: FaiView; label: string }>
+                  ).map(view => (
+                    <button
+                      key={view.id}
+                      type="button"
+                      aria-pressed={faiView === view.id}
+                      onClick={() => selectFaiView(view.id)}
+                      className={`px-3 py-1 text-sm ${
+                        faiView === view.id
+                          ? 'bg-werco-primary/20 text-werco-primary'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      {view.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
               {canEditFAI && (
                 <Button onClick={() => setShowFAIModal(true)} className="flex items-center">
                   <PlusIcon className="h-5 w-5 mr-1" /> New FAI
                 </Button>
               )}
             </div>
-            <TableWorkspaceControls workspace={faiWorkspace} />
-            <DataTable
-              columns={faiWorkspace.displayColumns(faiColumns)}
-              {...faiWorkspace.tableProps}
-              data={fais}
-              rowKey={fai => fai.id}
-              loading={loading}
-              defaultSort={{ key: 'fai_number', dir: 'desc' }}
-              pageSize={25}
-              csvExport={{ filename: 'fais' }}
-              onRowClick={fai => openFaiDetail(fai.id)}
-              empty={{
-                icon: DocumentMagnifyingGlassIcon,
-                title: 'No FAIs found',
-                description: 'First article inspections will appear here once they are created.',
-                action: canEditFAI ? { label: 'New FAI', onClick: () => setShowFAIModal(true) } : undefined,
-              }}
-              mobileCards={fai => (
-                <MobileDataCard
-                  title={fai.fai_number}
-                  subtitle={`${fai.part?.part_number ?? ''}${fai.part_revision ? ` Rev ${fai.part_revision}` : ''}`}
-                  badge={<StatusBadge status={fai.status} />}
-                  onClick={() => openFaiDetail(fai.id)}
-                  fields={[
-                    { label: 'Type', value: <span className="capitalize">{fai.fai_type}</span> },
-                    {
-                      label: 'Pass/Fail',
-                      value: (
-                        <span>
-                          <span className="text-green-600">{fai.characteristics_passed}</span>
-                          {' / '}
-                          <span className="text-red-600">{fai.characteristics_failed}</span>
-                          {' / '}
-                          <span className="text-slate-400">{fai.total_characteristics}</span>
-                        </span>
-                      ),
-                    },
-                    { label: 'Due Date', value: fai.due_date ? formatCentralDate(fai.due_date) : '-' },
-                  ]}
+            {faiView === 'log' ? (
+              <FaiLogView onOpenFai={openFaiDetail} canExport={canExportFAILog} refreshKey={faiLogVersion} />
+            ) : (
+              <>
+                <TableWorkspaceControls workspace={faiWorkspace} />
+                <DataTable
+                  columns={faiWorkspace.displayColumns(faiColumns)}
+                  {...faiWorkspace.tableProps}
+                  data={fais}
+                  rowKey={fai => fai.id}
+                  loading={loading}
+                  defaultSort={{ key: 'fai_number', dir: 'desc' }}
+                  pageSize={25}
+                  csvExport={{ filename: 'fais' }}
+                  onRowClick={fai => openFaiDetail(fai.id)}
+                  empty={{
+                    icon: DocumentMagnifyingGlassIcon,
+                    title: 'No FAIs found',
+                    description: 'First article inspections will appear here once they are created.',
+                    action: canEditFAI ? { label: 'New FAI', onClick: () => setShowFAIModal(true) } : undefined,
+                  }}
+                  mobileCards={fai => (
+                    <MobileDataCard
+                      title={fai.fai_number}
+                      subtitle={`${fai.part?.part_number ?? ''}${fai.part_revision ? ` Rev ${fai.part_revision}` : ''}`}
+                      badge={<StatusBadge status={fai.status} />}
+                      onClick={() => openFaiDetail(fai.id)}
+                      fields={[
+                        { label: 'Type', value: <span className="capitalize">{fai.fai_type}</span> },
+                        {
+                          label: 'Pass/Fail',
+                          value: (
+                            <span>
+                              <span className="text-green-600">{fai.characteristics_passed}</span>
+                              {' / '}
+                              <span className="text-red-600">{fai.characteristics_failed}</span>
+                              {' / '}
+                              <span className="text-slate-400">{fai.total_characteristics}</span>
+                            </span>
+                          ),
+                        },
+                        { label: 'Job #', value: fai.work_order_number || '-' },
+                        { label: 'Due Date', value: fai.due_date ? formatCentralDate(fai.due_date) : '-' },
+                      ]}
+                    />
+                  )}
                 />
-              )}
-            />
+              </>
+            )}
           </>
         )}
         {/* Scrap Codes Tab (Lean Phase 1) — the vocabulary behind every scrap
@@ -1437,7 +1581,7 @@ export default function QualityPage() {
       </Modal>
 
       {/* FAI detail — characteristics + prefill-from-steps (Process Sheets PR 4) */}
-      <Modal open={faiDetailId != null} onClose={closeFaiDetail} size="3xl" ariaLabelledBy="fai-detail-title">
+      <Modal open={faiDetailId != null} onClose={requestCloseFaiDetail} size="5xl" ariaLabelledBy="fai-detail-title">
         <div className="flex justify-between items-start mb-4 gap-4">
           <div>
             <h3 id="fai-detail-title" className="text-lg font-semibold">
@@ -1446,14 +1590,15 @@ export default function QualityPage() {
             {faiDetail && (
               <p className="text-sm text-slate-400 mt-0.5">
                 {faiDetail.part?.part_number || '-'}
-                {faiDetail.part_revision ? ` Rev ${faiDetail.part_revision}` : ''} ·{' '}
+                {faiDetail.part_revision ? ` Rev ${faiDetail.part_revision}` : ''}
+                {faiDetail.part?.name ? ` — ${faiDetail.part.name}` : ''} ·{' '}
                 <span className="capitalize">{faiDetail.fai_type}</span>
               </p>
             )}
           </div>
           <div className="flex items-center gap-3">
             {faiDetail && <StatusBadge status={faiDetail.status} />}
-            <button onClick={closeFaiDetail} aria-label="Close dialog">
+            <button onClick={requestCloseFaiDetail} aria-label="Close dialog">
               <XMarkIcon className="h-6 w-6" aria-hidden="true" />
             </button>
           </div>
@@ -1524,53 +1669,14 @@ export default function QualityPage() {
               </div>
             )}
 
-            {faiDetail.characteristics.length === 0 ? (
-              <p className="py-6 text-center text-sm text-slate-400">No characteristics on this FAI yet.</p>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="min-w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-slate-700 text-left text-xs uppercase tracking-wider text-slate-400">
-                      <th className="py-2 pr-3">#</th>
-                      <th className="py-2 pr-3">Characteristic</th>
-                      <th className="py-2 pr-3">Nominal / Spec</th>
-                      <th className="py-2 pr-3">Actual</th>
-                      <th className="py-2 pr-3">Device</th>
-                      <th className="py-2">Conforming</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {faiDetail.characteristics.map(char => (
-                      <tr key={char.id} className="border-b border-slate-800">
-                        <td className="py-2 pr-3 font-mono text-slate-400">{char.char_number}</td>
-                        <td className="py-2 pr-3">
-                          {char.characteristic}
-                          {char.is_critical && (
-                            <span className="ml-1 rounded border border-fd-red/50 px-1 py-0.5 font-mono text-[10px] font-bold uppercase text-fd-red">
-                              Critical
-                            </span>
-                          )}
-                        </td>
-                        <td className="py-2 pr-3 font-mono text-slate-300">
-                          {char.nominal || char.specification || '—'}
-                        </td>
-                        <td className="py-2 pr-3 font-mono">{char.actual_value || '—'}</td>
-                        <td className="py-2 pr-3 text-slate-300">{char.measuring_device || '—'}</td>
-                        <td className="py-2">
-                          {char.is_conforming == null ? (
-                            <span className="text-slate-500">—</span>
-                          ) : char.is_conforming ? (
-                            <span className="text-green-500">Pass</span>
-                          ) : (
-                            <span className="text-red-400">Fail</span>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
+            <FaiInspectionPanel
+              key={faiDetail.id}
+              fai={faiDetail}
+              canEdit={canEditFAI}
+              canApprove={canApproveFAI}
+              onChanged={refreshFaiDetail}
+              onDirtyChange={setFaiDetailDirty}
+            />
           </>
         )}
       </Modal>
@@ -1621,11 +1727,15 @@ export default function QualityPage() {
           {!ncrForm.part_id && (
             <FormField label="Unknown part reason" required help="This reason will be saved with the NCR description.">
               {field => (
-                  <textarea {...field} required className="input" rows={2}
-                    value={ncrForm.unknown_part_reason}
-                    onChange={event => setNcrForm({ ...ncrForm, unknown_part_reason: event.target.value })}
-                    placeholder="Explain why the affected part cannot be identified"
-                  />
+                <textarea
+                  {...field}
+                  required
+                  className="input"
+                  rows={2}
+                  value={ncrForm.unknown_part_reason}
+                  onChange={event => setNcrForm({ ...ncrForm, unknown_part_reason: event.target.value })}
+                  placeholder="Explain why the affected part cannot be identified"
+                />
               )}
             </FormField>
           )}
@@ -1720,7 +1830,7 @@ export default function QualityPage() {
       </Modal>
 
       {/* CAR Modal */}
-      <Modal open={showCARModal} onClose={requestCloseCARModal} size="lg" closeOnBackdrop={false}>
+      <Modal open={showCARModal} onClose={requestCloseCARModal} size="3xl" closeOnBackdrop={false}>
         <div className="flex flex-wrap justify-between items-start gap-3 mb-4">
           <h3 className="text-lg font-semibold">New Corrective Action Request</h3>
           <button onClick={requestCloseCARModal} aria-label="Close dialog">
@@ -1787,6 +1897,11 @@ export default function QualityPage() {
               />
             )}
           </FormField>
+          <CarFormFields
+            values={carForm}
+            onChange={patch => setCarForm(current => ({ ...current, ...patch }))}
+            parts={parts}
+          />
           <div className="flex justify-end gap-3">
             <Button type="button" variant="secondary" onClick={requestCloseCARModal}>
               Cancel
@@ -1799,7 +1914,7 @@ export default function QualityPage() {
       </Modal>
 
       {/* FAI Modal */}
-      <Modal open={canEditFAI && showFAIModal} onClose={requestCloseFAIModal} size="lg" closeOnBackdrop={false}>
+      <Modal open={canEditFAI && showFAIModal} onClose={requestCloseFAIModal} size="xl" closeOnBackdrop={false}>
         <div className="flex flex-wrap justify-between items-start gap-3 mb-4">
           <h3 className="text-lg font-semibold">New First Article Inspection</h3>
           <button onClick={requestCloseFAIModal} aria-label="Close dialog">
@@ -1814,22 +1929,85 @@ export default function QualityPage() {
           )}
           <FormField label="Part" required>
             {field => (
-              <select
-                {...field}
-                value={faiForm.part_id}
-                onChange={e => setFaiForm({ ...faiForm, part_id: parseInt(e.target.value) })}
-                className="input"
-                required
-              >
-                <option value={0}>Select part...</option>
-                {parts.map(p => (
-                  <option key={p.id} value={p.id}>
-                    {p.part_number} - {p.name}
-                  </option>
-                ))}
-              </select>
+              <ComboBox
+                id={field.id}
+                ariaDescribedBy={field['aria-describedby']}
+                options={partOptions}
+                value={faiForm.part_id ? String(faiForm.part_id) : ''}
+                onChange={value => {
+                  const part = parts.find(p => String(p.id) === value);
+                  setFaiForm({
+                    ...faiForm,
+                    part_id: part ? part.id : 0,
+                    // The drawing revision in force for that part; editable before saving.
+                    part_revision: part?.revision ? String(part.revision).toUpperCase() : '',
+                    work_order_id: '',
+                  });
+                }}
+                placeholder="Search by part number or name…"
+                noResultsLabel="No matching parts"
+              />
             )}
           </FormField>
+          <FormField
+            label="Work order (job)"
+            help="Links the customer, PO and job # into the FAI log. Open work orders for this part."
+          >
+            {field => (
+              <FaiWorkOrderPicker
+                id={field.id}
+                aria-describedby={field['aria-describedby']}
+                partId={faiForm.part_id}
+                partNumber={selectedFaiPart?.part_number ?? ''}
+                value={faiForm.work_order_id}
+                onChange={value => setFaiForm({ ...faiForm, work_order_id: value })}
+              />
+            )}
+          </FormField>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <FormField
+              label="Revision inspected"
+              help={
+                selectedFaiPart
+                  ? `The part is at Rev ${selectedFaiPart.revision || '—'}.`
+                  : 'Blank records the part’s current revision.'
+              }
+            >
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  maxLength={20}
+                  className="input font-mono uppercase"
+                  value={faiForm.part_revision}
+                  onChange={e => setFaiForm({ ...faiForm, part_revision: e.target.value.toUpperCase() })}
+                />
+              )}
+            </FormField>
+            <FormField label="Serial number">
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  maxLength={100}
+                  className="input"
+                  value={faiForm.serial_number}
+                  onChange={e => setFaiForm({ ...faiForm, serial_number: e.target.value })}
+                />
+              )}
+            </FormField>
+            <FormField label="Due date">
+              {field => (
+                <input
+                  {...field}
+                  type="date"
+                  className="input"
+                  value={faiForm.due_date}
+                  onChange={e => setFaiForm({ ...faiForm, due_date: e.target.value })}
+                />
+              )}
+            </FormField>
+          </div>
           <div className="grid grid-cols-2 gap-4">
             <FormField label="FAI Type">
               {field => (

@@ -76,7 +76,8 @@ CLASSIFICATION_UNKNOWN = "unknown"
 
 # (METHOD, path template RELATIVE to ``settings.API_V1_PREFIX``) an AI-external token may
 # call -- the brief's read set and nothing else: work orders, shop-floor operations,
-# downtime, work centers, OEE, parts, routings, NCR / CAR / FAI, quotes, vendors, purchase
+# downtime, work centers, OEE, parts, routings, NCR / CAR / FAI (and the FAI log of record,
+# P2.5), quotes, vendors, purchase
 # orders, receiving history, maintenance work orders -- plus the production calendar (P1.2:
 # the production-day start and the shifts, so the plugin buckets its own figures by the
 # shop's production day). GET only. There is no time-entry GET route; time entries reach the
@@ -131,6 +132,10 @@ AI_EXTERNAL_ALLOWED_ROUTES: FrozenSet[Tuple[str, str]] = frozenset(
         ("GET", "/quality/car/{car_id}"),
         ("GET", "/quality/fai"),
         ("GET", "/quality/fai/{fai_id}"),
+        # The FAI log of record (P2.5): one row per FAI, each judged like the FAI it names
+        # (by ``fai_id``, ``part_id`` and ``work_order_id``) -- a withheld row keeps its ids,
+        # FAI #, job #, status, dates and counts, and nothing else.
+        ("GET", "/quality/fai/log"),
         # Quotes
         ("GET", "/quotes/"),
         ("GET", "/quotes/{quote_id}"),
@@ -278,6 +283,18 @@ AI_EXTERNAL_QUERY_PARAMS: Mapping[str, Mapping[str, Optional[FrozenSet[str]]]] =
     "/quality/car/{car_id}": {},
     "/quality/fai": {"skip": _ANY, "limit": _ANY, "status": _ANY, "part_id": _ANY},
     "/quality/fai/{fai_id}": {},
+    # Not ``customer`` (a customer-name substring) or ``search`` (FAI #, part number /
+    # description, job #, customer PO, serial): both match text the redaction withholds.
+    # The log-date range, status and the two ids filter kept fields.
+    "/quality/fai/log": {
+        "start_date": _ANY,
+        "end_date": _ANY,
+        "status": _ANY,
+        "part_id": _ANY,
+        "work_order_id": _ANY,
+        "limit": _ANY,
+        "offset": _ANY,
+    },
     "/quotes/": {"status": _ANY, "limit": _ANY, "offset": _ANY},
     "/quotes/{quote_id}": {},
     "/purchasing/vendors": {"active_only": _ANY, "approved_only": _ANY, "deleted_only": _ANY},

@@ -281,7 +281,20 @@ class TestNumbersInsideAWithheldRecord:
         assert redact_payload(record, _index()).payload == record
 
 
-def _numeric_response_keys() -> Dict[str, Set[str]]:
+# How a pydantic ``Decimal`` appears in a RESPONSE schema: a string with this pattern. It reaches
+# the token as a numeric STRING, so it is classified through the string path, not the number one.
+_DECIMAL_PATTERN = "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+
+
+def _is_number(schema: Dict[str, Any]) -> bool:
+    return schema.get("type") in ("number", "integer")
+
+
+def _is_decimal_string(schema: Dict[str, Any]) -> bool:
+    return schema.get("type") == "string" and schema.get("pattern") == _DECIMAL_PATTERN
+
+
+def _numeric_response_keys(predicate=_is_number) -> Dict[str, Set[str]]:
     """Every numeric property of every AI-external allowlisted route's 2xx response schema -> its routes."""
     from app.core.config import settings
     from app.core.export_control import AI_EXTERNAL_ALLOWED_ROUTES
@@ -304,7 +317,7 @@ def _numeric_response_keys() -> Dict[str, Set[str]]:
         for combinator in ("anyOf", "oneOf", "allOf"):
             for option in schema.get(combinator, []):
                 walk(option, key, seen, route)
-        if schema.get("type") in ("number", "integer") and key is not None:
+        if predicate(schema) and key is not None:
             found.setdefault(key, set()).add(route)
         if isinstance(schema.get("items"), dict):
             walk(schema["items"], key, seen, route)
@@ -337,6 +350,29 @@ def test_every_numeric_field_an_allowlisted_route_serves_is_classified():
     assert len(fields) > 50, "vacuous: the schema walk found too few numeric fields"
     withheld = {key for key in fields if not kept_numeric_key(key)}
     assert withheld == EXPECTED_WITHHELD_NUMERIC_FIELDS, {key: sorted(fields[key]) for key in withheld}
+
+
+def test_every_decimal_an_allowlisted_route_serves_is_classified_as_the_string_it_is():
+    """A ``Decimal`` is a numeric STRING on the wire, and a numeric string under a key naming text
+    is withheld -- so ``kept_numeric_key`` alone said "kept" for the CAR form's ``cost_material``
+    (and a part's ``material_cost``) while the token got ``[export-controlled]``: money silently
+    withheld. Every Decimal is now walked through the string path a withheld record applies."""
+    fields = _numeric_response_keys(_is_decimal_string)
+    assert {"cost_material", "cost_total", "material_cost", "unit_price"} <= set(fields), "vacuous: walk missed them"
+    withheld = set()
+    for key in fields:
+        out = redact_payload({"work_order_id": 1, key: "12.50"}, _index()).payload
+        if out[key] != "12.50":
+            withheld.add(key)
+    assert withheld == set(), {key: sorted(fields[key]) for key in withheld}
+
+
+@pytest.mark.parametrize("key", ["cost_material", "material_cost"])
+def test_a_material_cost_is_money_but_material_is_still_text(key):
+    out = redact_payload({"work_order_id": 1, key: "40.00", "material": "6061", "material_spec": "4130"}, _index())
+    assert out.payload[key] == "40.00"
+    assert out.payload["material"] == R and out.payload["material_spec"] == R
+    assert redact_payload({"work_order_id": 1, key: "ITAR alloy"}, _index()).payload[key] == R
 
 
 class TestClosedVocabularyStrings:

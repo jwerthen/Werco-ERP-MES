@@ -154,13 +154,16 @@ AI-external token bound to a **Viewer** user.
 ### Credential policy for judgment writes
 
 A few writes record a **person's judgment** — not just a permitted action — and some of them are
-restricted to certain *credentials*, on top of the role gate. The restrictions have five sources,
+restricted to certain *credentials*, on top of the role gate. The restrictions have six sources,
 and each row below names its own: owner ruling 3 of 2026-11-05 (the two AI rows), the owner's
 decision of 2026-11-07 (a standing API token may not declare scrap or close work short), this
 PR's extensions of that decision (scrap reasons, the re-stamp short close and the other count
 judgments), the owner's decision of 2026-11-13 (only an Admin, signed in, marks a customer
-export-controlled), and the lead's decisions of 2026-11-15 (an egress kill switch is a person's
-judgment; a narrowed token's read writes nothing). This section is the **one list** of those credential rules — what refuses a credential,
+export-controlled), the lead's design decision of 2026-11-13 for the two quality-approval verbs (CAR
+Quality Manager approval, FAI customer approval) and its review follow-ups (the FAI final
+disposition and the CAR form's vendor / customer sign-off boxes), and the lead's decisions of
+2026-11-15 (an egress kill switch is a person's judgment; a narrowed token's read writes nothing).
+This section is the **one list** of those credential rules — what refuses a credential,
 what is deliberately left open (and who decided each), and what is deliberately not refused —
 across the AI governance (ruling 3), floor-gates (ruling 2) and short-count (ruling 1) changes;
 other documents point here. The predicates live once, in
@@ -180,7 +183,8 @@ may read or call at all, on every route, and whether its reads may write. They a
 list of credential predicates.
 
 Writes that apply them — each refused before any write and before any audit row (the 403 texts
-live in `ai_action_applier.py`, `operation_action_gates.py`, for export control
+live in `ai_action_applier.py` and `operation_action_gates.py`, for the quality judgments in
+`quality_record_service.py` and `fai_service.py`, for export control
 `app/api/endpoints/customers.py`, and for the egress switches `app/core/credentials.py`; where each sits in its route's
 check order is in `docs/API.md` → Work Orders → "Short count at completion" and → AI
 Recommendations):
@@ -196,6 +200,10 @@ Recommendations):
 | **Marking a customer export-controlled, or un-marking it** — `POST /customers/{id}/contracts` and `PUT /customers/{id}/contracts/{contract_id}` (ITAR / export controlled / CUI contract flags), and reading the standing behind them, `GET /customers/{id}/export-control` | `is_api_token_credential`, inline in `app/api/endpoints/customers.py` (after the Admin role gate) | **403** `"An API token cannot read or change a customer's export control: an Admin does it, signed in to the app."` — any token, whatever its role or scope | Owner decision 2026-11-13 (Claude-plugin brief P0.3): only an Admin, signed in, marks or un-marks a customer |
 | **Turning a company egress kill switch on or off** — `PUT /companies/me/ai-egress` (`allow_ai_egress`, which also gates every AI-external connector), `PUT /companies/me/sms-egress` (`allow_sms_egress`), `PUT /admin/settings/shipping-profile` (`allow_carrier_egress`) and `PUT /receiving/print-profile` (`allow_print_egress`). The two profile routes are refused **whole**, since each is its switch's only writer. None of the four is an MCP tool (`catalog.EXCLUDED_OPERATIONS`), so a person's own JWT cannot reach them through an agent either. The AI flip's UPDATE and STATUS_CHANGE rows are **required** evidence (`required_audit`; **503**, nothing changed, when either cannot be written) | `is_api_token_credential`, inline at the top of each route (after the Admin role gate) | **403** `API_TOKEN_EGRESS_SWITCH` (`"A company egress kill switch (AI, SMS, carrier or label-print egress) is turned on or off by an Admin signed in to the app, not an API token: opening or closing data egress is a person's judgment."`) — any token, whatever its role or scope (a read-only token meets the read-only gate's 403 first) | Lead decision 2026-11-15 (Claude-plugin brief build, round-2 owner question): opening or closing data egress is a person's judgment |
 | **Re-importing a nest package onto a laser job with recorded work** — `POST /work-orders/{id}/laser-nest-packages/import` (either import shape; the MCP tool `import_laser_nest_package` with a `work_order_id`) when any operation the import would delete has recorded work (the same `operation_has_recorded_work` rule), or the laser work order's header already carries good or scrap: the import replaces every nest operation and zeroes the header counts, erasing a person's good, scrap and any declared short. Refused before the upload is unpacked, and again under the import's lock reading the database rather than the rows the first check loaded; a token's import onto un-worked nests with a zero header, and the standalone import, which wipes nothing, are unchanged | `is_api_token_credential` (`laser_nest_service.import_would_wipe_recorded_work`) | **403** `API_TOKEN_NEST_REIMPORT` (`Re-importing a nest package replaces nests that already have recorded work …`) — its own text, so the caller is told which action was refused | **This PR's extension** of the same principle — the owner was asked about scrap and short closes, not this |
+| **Recording a CAR's Quality Manager approval** — `POST /quality/car/{id}/quality-approval` (the MCP tool `approve_car_quality`). The stamp names the approving person | `is_api_token_credential` | **403** `API_TOKEN_QUALITY_APPROVAL` (`A standing API token cannot record a CAR's quality approval. A person signed in to the app must record it.`) | Lead's design decision for the CAR form (2026-11-13), applying the 2026-11-07 principle; not an owner ruling |
+| **Recording an FAI's customer approval** — `POST /quality/fai/{id}/customer-approval` (the MCP tool `record_fai_customer_approval`). It asserts that a person saw the customer's acceptance | `is_api_token_credential` | **403** `API_TOKEN_CUSTOMER_APPROVAL` (`A standing API token cannot record an FAI's customer approval. A person signed in to the app must record it.`) | Lead's design decision for the FAI log of record (2026-11-13), applying the 2026-11-07 principle; not an owner ruling |
+| **Recording an FAI's final disposition** — `PUT /quality/fai/{id}` setting `status` to `passed`, `failed` or `conditional`. It is the inspection's quality judgment: it stamps the approver and freezes the evidence for good. Refused before the row lock; a token's non-final edits (notes, `in_progress`, inspector, inspection date) are unchanged | `is_api_token_credential` | **403** `API_TOKEN_FAI_DISPOSITION` (`A standing API token cannot record an FAI's final disposition. A person signed in to the app must record it.`) | Review follow-up to the lead's 2026-11-13 decision (the lesser customer approval already refused tokens, so the disposition before it could not stay open); not an owner ruling |
+| **Filling or changing a CAR's vendor or customer approval boxes** — `vendor_approval_name` / `_title` / `_date` and `customer_approval_name` / `_date` on `POST /quality/car` (any non-blank value) or `PUT /quality/car/{id}` (any change, clearing included; re-sending the stored value is no change). The printed controlled form shows them as the vendor's and customer's sign-offs | `is_api_token_credential` | **403** `API_TOKEN_CAR_SIGNOFF` (`A standing API token cannot record or change a CAR's vendor or customer approval. A person signed in to the app must record it.`) | Review follow-up to the lead's 2026-11-13 decision, for the same reason as the FAI customer approval; not an owner ruling |
 
 Deliberately **not** refused:
 
@@ -209,6 +217,10 @@ Deliberately **not** refused:
   owner decision. The 2026-11-07 decision
   covered standing API tokens only; whether an agent on a person's JWT may make these writes was
   not part of it.
+- **Not yet decided (owner question):** a CAR status move through `PUT /quality/car/{id}` to
+  `verification` or `closed` stamps `verified_by` / `closed_by` with the token's user, and is not
+  refused for a standing API token today. It is the same kind of write as the rows above; whether
+  it gets the same rule is open.
 - Scrap fields that are not production scrap records: `POST /fabrication-quotes/{quote_id}/actuals`
   (the MCP tool `record_actuals`) takes a `scrap_quantity` but stores it as a quoting-calibration
   observation (`FabricationQuoteActual.observation_json`), and a BOM line's `scrap_factor` is a
@@ -1730,6 +1742,12 @@ Follow-up owners must be active users in the same company with purchasing access
 > customer quote. Each write is now also audited on the tamper-evident chain (see `docs/API.md` →
 > Quotes).
 >
+> **Line drawing revisions (migration `122`).** Entering each line's drawing revision is the `PUT`
+> verb's `line_revisions`, so it sits on the **Edit terms** row with no new role. The revision gate
+> that refuses sending, the quote PDF and quote email while a line lacks one (**409**) is a record-state
+> rule, not a permission: it applies to every role, superuser and Platform Admin included. See
+> `docs/API.md` → Quotes → "Drawing revision on every quote line".
+>
 > **Reads stay read-broad.** Per the [Access enforcement model](#access-enforcement-model), the list,
 > detail, conversion-plan and PDF routes are tenant-scoped but not role-restricted; the **View** row is
 > the intended UI. In the UI, `/quotes` requires `purchasing:view` (`frontend/src/utils/routeAccess.ts`),
@@ -2066,6 +2084,8 @@ contract; they do not bypass tenant scoping or the read-only context fence.
 | Approve | ✓ | ✓ | | | ✓ | | |
 | Author unfinished FAI / characteristics / process-step prefill | ✓ | ✓ | ✓ | | ✓ | | |
 | Final FAI disposition (`passed` / `failed` / `conditional`) | ✓ | ✓ | | | ✓ | | |
+| Record FAI customer approval (`POST /quality/fai/{id}/customer-approval`) | ✓ | ✓ | | | ✓ | | |
+| Record CAR Quality Manager approval (`POST /quality/car/{id}/quality-approval`) | ✓ | ✓ | | | ✓ | | |
 | Calibration | ✓ | ✓ | | | ✓ | | |
 | Manage scrap reason codes | ✓ | ✓ | | | ✓ | | |
 | Void / restore NCR | ✓ | ✓ | | | ✓ | | |
@@ -2089,6 +2109,24 @@ contract; they do not bypass tenant scoping or the read-only context fence.
 > (**503** with rollback on audit loss). Unfinished-characteristic deletion retains its full prior
 > contents in the audit trail. Reads remain broad within the tenant; prefill never overwrites an
 > existing measurement or sets conformance. See [API: FAI](API.md#first-article-inspections-fai).
+>
+> **FAI customer approval — endpoint mapping.** `POST /quality/fai/{fai_id}/customer-approval` is
+> enforced **in code** to the **Record FAI customer approval** row via
+> `require_role(fai_service.APPROVE_ROLES)` = **Admin / Manager / Quality**, the same set as final
+> disposition. It is the one write allowed on an FAI after its final disposition, and it writes only
+> `customer_approved` and `customer_approval_date`: on a PASSED or CONDITIONAL inspection, once
+> (**409** otherwise), with a required `APPROVE` audit row (**503** with rollback on audit loss). A
+> standing API token is refused **403** whatever its user's role (see
+> [Credential policy for judgment writes](#credential-policy-for-judgment-writes)), and so is a token
+> setting the final disposition itself through `PUT /quality/fai/{id}`. The UI shows the
+> control to the same roles (`canApproveFAIs` in `frontend/src/utils/recordWriteAccess.ts`).
+>
+> **FAI log of record — read-broad, export gated.** `GET /quality/fai/log` depends on
+> `get_current_user` only, like every FAI read: any authenticated user of the company can read the
+> log. Downloading it as a file, `GET /exports/fai/export`, is a bulk export: **Admin / Manager**
+> and audited (see [Bulk Data Export](#bulk-data-export)). Quality is deliberately not in that set,
+> and the Log view's **Export log** button is hidden from Quality, Supervisor and the other roles
+> (`canExportRecords`).
 >
 > **Scrap reason codes (Lean Phase 1) — read-broad / write-restricted.** Managing the tenant's
 > structured scrap vocabulary (`POST /api/v1/quality/scrap-reason-codes`,
@@ -2127,13 +2165,26 @@ contract; they do not bypass tenant scoping or the read-only context fence.
 > close, reopen, assign) and `POST /quality/ncr/{ncr_id}/create-car` are enforced **in code** via
 > `require_role(quality_record_service.WRITE_ROLES)` = **Admin / Manager / Quality**, the **Approve**
 > row (the frontend detail screen gates on `quality:approve`, which the same three roles hold).
-> Filing an NCR (`POST /quality/ncr`), opening a CAR (`POST /quality/car`) and all NCR / CAR reads
-> depend on `get_current_user` only, so any authenticated user of the company can file one
-> (Operators included). Every one of these writes commits with a required audit row (**503** with
-> rollback on audit loss) and validates `part_id` / `work_order_id` / `assigned_to` / `car_id`
-> against the active company before writing (**404**). A CLOSED NCR or CAR refuses every change
-> except a status-only reopen (**409**), for every role. See `docs/API.md` → Quality → "NCR / CAR
-> writes".
+> Filing an NCR (`POST /quality/ncr`), opening a CAR (`POST /quality/car`, CAR form fields included)
+> and all NCR / CAR reads, the printable CAR (`GET /quality/car/{car_id}/pdf`) among them, depend on
+> `get_current_user` only, so any authenticated user of the company can file one (Operators
+> included). Every one of these writes commits with a required audit row (**503** with rollback on
+> audit loss) and validates `part_id` / `work_order_id` / `assigned_to` / `car_id`, and a CAR's
+> `customer_id` / `vendor_id`, against the active company before writing (**404**; a vendor may be
+> inactive or removed, since a supplier CAR can record that removal). A CLOSED NCR or CAR refuses
+> every change except a status-only reopen (**409**), for every role. See `docs/API.md` → Quality →
+> "NCR / CAR writes".
+>
+> **CAR Quality Manager approval — endpoint mapping.** `POST /quality/car/{car_id}/quality-approval`
+> is enforced **in code** to the **Record CAR Quality Manager approval** row via the same
+> `quality_record_service.WRITE_ROLES` = **Admin / Manager / Quality**; Supervisor, Operator,
+> Shipping and Viewer get **403**. The server stamps the approver and time (neither is accepted in a
+> request body), once per CAR (**409** when already approved or VOID), with a required `APPROVE` audit
+> row. It does not gate closure. A standing API token is refused **403** whatever its user's role
+> (see [Credential policy for judgment writes](#credential-policy-for-judgment-writes)), and so is a
+> token filling or changing the form's vendor or customer approval boxes on `POST` / `PUT`. The CAR
+> detail screen shows **Record quality approval** only to `quality:approve` holders, the same three
+> roles by default.
 
 > **Calibration — endpoint mapping (now enforced in code).** `POST /api/v1/calibration/equipment`,
 > `PUT /calibration/equipment/{id}` and `POST /calibration/equipment/{id}/calibrate` are enforced to
@@ -2622,13 +2673,14 @@ and writes an `EXPORT` audit row through `AuditService`:
 | `GET /api/v1/exports/purchase-orders/lines/export` | `purchase_order_line` | **`unit_price`** per line — the open purchase commitments |
 | `GET /api/v1/exports/quotes/export` | `quote` | **customer contact + email (PII)**, subtotal / total |
 | `GET /api/v1/exports/inventory/transactions/export` | `inventory_transaction` | the whole valuation ledger incl. free-text `notes` |
+| `GET /api/v1/exports/fai/export` | `fai` | the FAI log of record: every first article with its customer, customer PO, job, result and customer approval |
 | `GET /api/v1/analytics/custom-report/export` | `custom_report` | a tenant-authored query over a whole data source — unbounded by construction |
 | `GET /api/v1/consumables/checkouts/export.csv` | `consumable_checkout` | employee names/departments, quantities, issuer and free-text notes |
 
 > **Two surfaces sit at a stricter tier and stay there.** `GET /visitor-logs/export.csv` is
 > `require_role([ADMIN, MANAGER])` because **visitor PII is a documented exception to read-broad**
 > (its list endpoint is gated too) — a PII decision, not this one, and it is the audit-shape
-> precedent the seven `/exports/*` routes now follow.
+> precedent the eight `/exports/*` routes now follow.
 > `GET /estimate-workbench/{id}/export/audit.xlsx|.json|customer.pdf` is
 > `require_role([ADMIN, MANAGER, SUPERVISOR])` and is **out of scope**: the path carries an estimate
 > id, so it is one record, not a dataset. The gate above is a **floor** — an existing stricter tier
@@ -2663,7 +2715,7 @@ and writes an `EXPORT` audit row through `AuditService`:
 > byte can leave without one.
 
 > **Not bulk exports, deliberately ungated:** single-record documents — `GET /shipping/{id}/coc/pdf`,
-> `POST /quotes/{id}/generate-pdf`, `GET /laser-nests/{id}/document`,
+> `GET /quality/car/{id}/pdf`, `POST /quotes/{id}/generate-pdf`, `GET /laser-nests/{id}/document`,
 > `GET /shop-floor/documents/{id}/inline` (gating it would break the kiosk document viewer),
 > `GET /documents/{id}/download`, `GET /po-upload/pdf/{path}`,
 > `GET /rfq-packages/{id}/internal-estimate-export` — and `GET /import/templates/{entity}`, a static
