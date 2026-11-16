@@ -359,7 +359,13 @@ un-migrated database fails every CAR and quote-line load.
 column on `job_costs` and, where the native `costentrytype` enum exists, its `SUBCONTRACT` label. No
 backfill, no environment variable, no worker job. Before rolling back to a pre-121 image, re-key any
 `SUBCONTRACT` cost entries to `other` through the API — older code cannot load them (see
-`DEPLOYMENT.md` → Job cost subcontract element).
+`DEPLOYMENT.md` → Job cost subcontract element). **121 splits its boot in two:** its enum-label
+step commits every revision the same boot applied before it, so a boot that fails at or after 121
+leaves the database at `120_production_calendar`, not where it started, and an older image then
+cannot start (`Can't locate revision identified by '120_production_calendar'`). Before that image
+restarts, stamp back to its head (`alembic stamp 119_api_token_scope`, or `118_dashboard_layouts`
+for an image before 119); the next forward boot re-runs 119 and 120 as guarded no-ops
+([DEPLOYMENT.md → Job cost subcontract element](DEPLOYMENT.md#job-cost-subcontract-element-migration-121)).
 
 **Production calendar (P1.2).** Apply additive **120_production_calendar** after
 **119_api_token_scope** through the normal API boot
