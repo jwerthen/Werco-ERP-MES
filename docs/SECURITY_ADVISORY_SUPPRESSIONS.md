@@ -685,7 +685,7 @@ tenant data:
 
 | Writer | Covers |
 |---|---|
-| `app/services/export_service.py` (`generate_csv` + `generate_excel`) | all 14 `/api/v1/exports/*` responses (7 endpoints × csv/xlsx) |
+| `app/services/export_service.py` (`generate_csv` + `generate_excel`) | all `/api/v1/exports/*` responses: 7 endpoints × csv/xlsx when the fix shipped, 8 since the FAI log export (`GET /exports/fai/export`) was added on the same writers |
 | `app/services/estimate_workbench_export_service.py` | the 5-sheet estimate audit workbook |
 | `app/api/endpoints/analytics.py` | custom-report CSV |
 | `app/api/endpoints/visitor_logs.py` | `GET /visitor-logs/export.csv` |

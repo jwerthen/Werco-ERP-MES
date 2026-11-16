@@ -342,6 +342,12 @@ class TestWorkOrderLifecycle:
             assert not shown.is_error, shown.content
             assert shown.structured_content["id"] == wo_id
             assert [op["name"] for op in shown.structured_content["operations"]] == ["Laser", "Brake"]
+            # P1.3 / P1.4 ride both branches (by-number now shares the enrichment): no JobCost
+            # yet, nothing issued, and no hours recorded on either operation.
+            assert shown.structured_content["job_cost_actuals"] is None
+            assert shown.structured_content["issued_material_cost"] == 0.0
+            assert [op["hours_source"] for op in shown.structured_content["operations"]] == ["none", "none"]
+            assert [op["recorded_run_hours"] for op in shown.structured_content["operations"]] == [0.0, 0.0]
 
         duplicated = await call(server, "duplicate_work_order", {"work_order_id": wo_id, "quantity_ordered": 7})
         assert not duplicated.is_error, duplicated.content

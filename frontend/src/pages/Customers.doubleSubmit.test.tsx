@@ -16,6 +16,12 @@ import { MemoryRouter } from 'react-router-dom';
 import Customers from './Customers';
 import api from '../services/api';
 
+// Customers reads the signed-in role to gate the ADMIN-only export-control panel;
+// a Manager keeps this suite independent of it.
+jest.mock('../context/AuthContext', () => ({
+  useAuth: () => ({ user: { role: 'manager', is_superuser: false }, isAuthenticated: true, isLoading: false }),
+}));
+
 jest.mock('../services/api', () => ({
   __esModule: true,
   default: {

@@ -2,9 +2,10 @@
 
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
-(Cursor, Claude Code, a chat bot) gets **775 tools** — 15 hand-written *convenience* tools plus
-**758 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
-as the same request from the web app.
+(Cursor, Claude Code, a chat bot) gets **779 tools** — 15 hand-written *convenience* tools plus
+**764 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+as the same request from the web app. A **read-only** API token is shown fewer tools, and an
+**AI-external** one fewer still (§4.1, §4.2).
 
 This is the runbook: how to run it, how to authenticate, what the tools are called, which rules
 the convenience tools enforce, what a result looks like, and what to do when a call fails.
@@ -15,11 +16,29 @@ and the short-count close rules added no tool** (15 convenience + 747 generated 
 operations), **and again on 2026-11-11 after the saved dashboard layout routes added three tools**
 (`get_my_dashboard_layout`, `save_my_dashboard_layout`, `reset_my_dashboard_layout` under the new
 `Dashboard` tag: 15 convenience + 750 generated, 16 shadowed), **and again on 2026-11-13 after the
-Approved Supplier List and equipment-asset / PM-import routes** added ten tools (the asset CRUD and
-history, the PM import preview / commit, `list_vendors_reevaluation_due` and
-`check_supplier_approval`) while the three ASL writes joined `EXCLUDED_OPERATIONS` (15 convenience +
-760 generated, 16 shadowed) — and the two legacy `approved_supplier_list` writes followed them in the
-same change (15 convenience + 758 generated, 16 shadowed).
+production calendar routes added four tools** (`get_production_calendar`,
+`save_production_calendar_document`, `resolve_production_moment`, `sync_working_calendars_from_shifts`
+under the new `Production Calendar` tag; no existing name shifted) **and the read-only / AI-external
+token work (P0) added one Customers tool** (`get_customer_export_control`; the two contract WRITES are
+in `EXCLUDED_OPERATIONS`, §6.1) and moved the Hank intake routes to their own `Hank Intake` tag with no
+name change: 15 convenience + 755 generated, 16 shadowed. The read-only catalog is 8 convenience + 292
+generated tools (the two production-calendar reads among them).
+**Re-checked again on 2026-11-15 after the four company egress kill-switch writes left the
+catalog** (`EXCLUDED_OPERATIONS`, §6.1): 15 convenience + **751** generated, 16 shadowed; the
+read-only catalog is unchanged at 8 convenience + 292 generated (the four are writes).
+**Re-checked again on 2026-11-15 after the CAR form / FAI log routes (P2a) added five tools**
+(`get_car_pdf`, `approve_car_quality`, `list_fai_log`, `record_fai_customer_approval`,
+`export_fai_log`; no existing name shifted): 15 convenience + **756** generated, 16 shadowed. The
+read-only catalog is 8 convenience + **294** generated: `list_fai_log` and `get_car_pdf` are reads,
+though a read-only token calling `get_car_pdf` is still refused the PDF bytes (§4.1).
+**Re-checked again on 2026-11-15 after the Approved Supplier List and equipment-asset / PM-import
+routes (P2b) merged on top.** They add ten tools (the asset CRUD and history, the PM import preview /
+commit, `list_vendors_reevaluation_due` and `check_supplier_approval`) while the three ASL writes and
+the two legacy `approved_supplier_list` writes join `EXCLUDED_OPERATIONS` (§6.1); no existing name
+shifted: 15 convenience + **764** generated, 16 shadowed. The read-only catalog is 8 convenience +
+**298** generated (the four new reads: `list_maintenance_assets`, `get_maintenance_asset`,
+`get_maintenance_asset_history`, `list_vendors_reevaluation_due`; `check_supplier_approval` is a
+`POST`, so it is not among them).
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
 `backend/tests/test_mcp_docs_names.py` checks every tool name this file, `CLAUDE.md` and `API.md`
@@ -36,15 +55,18 @@ quote against the live catalog, so a name that shifts fails CI instead of going 
   bearer token. The request passes the full middleware stack and the route's own dependencies
   (`get_current_user`, `get_current_company_id`, `require_role`, `get_audit_service`). **The router
   is the RBAC, tenancy and audit boundary**; nothing in `app/mcp/` imports a service or builds a
-  user, and its one database read is the door's API-token row check (§4), which decides whether
-  a credential is still live and nothing else.
+  user. Its database reads are the door's API-token row check (§4) and, for an AI-external token,
+  the company's AI-egress switch. They decide whether a credential is still live and how far its
+  token narrows it (§4.1, §4.2), and never widen anything.
 - **OpenAPI as the catalog.** Generated tools are built from `app.openapi()` at startup — the same
   dict Swagger renders in non-production. A router that ships tomorrow is a tool tomorrow, with no
   list to update. (`app.openapi()` builds the document in process even in production, where the
   served `/api/openapi.json` route is deliberately disabled; the catalog does not re-enable it.)
-- **Reads broad, writes real.** 67 of the API's 72 tags are in (re-counted 2026-11-11). Data Export, Users, Audit,
+- **Reads broad, writes real.** 68 of the API's 73 tags are in (re-counted 2026-11-13). Data Export, Users, Audit,
   Admin Settings, Platform Administration and Company Management are included: their own
-  `require_role` gates and audit rows are the control, not the catalog.
+  `require_role` gates and audit rows are the control, not the catalog. A **read-only** API token
+  is the exception: those tags, and the others in `WERCO_MCP_READ_ONLY_DENY_TAGS`, are hidden
+  from it and refused (§4.1).
 
 **It is not:**
 
@@ -66,7 +88,10 @@ quote against the live catalog, so a name that shifts fails CI instead of going 
   that can reach the operation completes it, exactly as at the kiosk (its result's
   `operation_status` is then `"complete"` — the instructions tell the agent to check it before
   calling a complete tool). The same gates (labor-record requirement, predecessor gating, 409 on a
-  stale version, **409 on a draft or on-hold work order**) apply. `clock_in`,
+  stale version, **409 on a draft or on-hold work order**) apply, and so does the role gate:
+  `shop_floor_start_operation` and `shop_floor_complete_operation` need Admin / Manager /
+  Supervisor / Operator / Quality, so a Viewer's or Shipping user's token is refused **403**
+  (owner decision P0.4, 2026-11-13), while `clock_in` and `clock_out` still accept any role. `clock_in`,
   `shop_floor_start_operation`, `work_orders_start_operation` and completing a READY operation are
   refused on a job that is not released (`release_work_order` first) or is on hold
   (`work_orders_resume_work_order` first). **Nothing closes short** (owner ruling 1):
@@ -176,10 +201,14 @@ WERCO_ERP_URL=https://<api-host> WERCO_ERP_TOKEN=<access token> WERCO_ERP_REFRES
 
 # The catalog as JSON — no token, no database, no WERCO_ERP_URL needed
 .venv311/bin/python -m app.mcp --print-catalog > catalog.json
+
+# The catalog a READ-ONLY API token is shown (§4.1)
+.venv311/bin/python -m app.mcp --print-catalog --read-only > catalog-read-only.json
 ```
 
 CLI flags: `--transport stdio|http` (default `stdio`, or `WERCO_MCP_TRANSPORT`), `--host` / `--port`
-(HTTP only; defaults `WERCO_MCP_HOST` / `WERCO_MCP_PORT`, else `127.0.0.1:8765`), `--print-catalog`.
+(HTTP only; defaults `WERCO_MCP_HOST` / `WERCO_MCP_PORT`, else `127.0.0.1:8765`), `--print-catalog`,
+`--read-only` (only together with `--print-catalog`; alone it is a usage error, exit 2).
 
 **stdout is the wire.** The app's own logging handler writes to `sys.stdout`
 (`app/core/logging.py`), which would corrupt the protocol on import; the CLI captures the real
@@ -202,9 +231,15 @@ routes authenticate every call; in IN-PROCESS mode it uses the real `ErpTokenVer
  "generated_tools":   [{"name": "...", "method": "GET", "path": "/api/v1/...", "tag": "...",
                         "function": "...", "annotations": {...}, "deprecated": false}],
  "shadowed_operations": [["GET", "/api/v1/inventory/"], ...],
- "counts": {"convenience": 15, "generated": 758, "shadowed": 16}
+ "counts": {"convenience": 15, "generated": 764, "shadowed": 16}
 }
 ```
+
+`--print-catalog --read-only` prints the same keys filtered to what a read-only token is shown
+(tools that only read, under no tag in `WERCO_MCP_READ_ONLY_DENY_TAGS`), with the counts
+recomputed (`"convenience": 8, "generated": 298` on 2026-11-15), plus `"scope": "read_only"` and
+the `"deny_tags"` applied. Without `--read-only` the output is the full catalog with the keys
+above, as before. There is no flag for the AI-external catalog; §4.2 lists it.
 
 ### 3.3 Client configuration
 
@@ -352,6 +387,17 @@ list):
 - **Nor close an AI action card** (owner ruling 3): `accept_ai_recommendation` on an action card
   (record-only, "Mark handled") answers **403** to an API token, and AI Accept & apply is not a tool
   at all.
+- **Nor record a quality approval** (the lead's design decision of 2026-11-13, applying the same
+  principle; not an owner ruling): `approve_car_quality` answers **403** `"A standing API token
+  cannot record a CAR's quality approval. A person signed in to the app must record it."` and
+  `record_fai_customer_approval` answers **403** `"A standing API token cannot record an FAI's
+  customer approval. A person signed in to the app must record it."`, both before any write. The
+  same applies to the judgments around them: `update_fai` setting a final status (`passed`,
+  `failed`, `conditional`) answers **403** `"A standing API token cannot record an FAI's final
+  disposition. …"`, and `create_car` / `update_car` filling or changing a vendor or customer
+  approval box answers **403** `"A standing API token cannot record or change a CAR's vendor or
+  customer approval. …"`. The reads beside them (`get_car_pdf`, `list_fai_log`) stay open; a
+  read-only token is still refused `get_car_pdf`'s PDF bytes (§4.1).
 - **Deliberately left open.** `work_orders_resume_work_order` lifts a work-order hold for a token
   whose user holds Admin / Manager / Supervisor, audited as that user (owner decision 2026-11-07).
   `dismiss_ai_recommendation`, snooze and feedback stay open to every credential — a design decision
@@ -375,21 +421,173 @@ Full reference: [API.md → API tokens](API.md#api-tokens-bots-and-mcp-clients).
 Kiosk-scoped badge tokens (`scope == "kiosk"`) are refused at the door and in `resolve_auth`: they
 are path-fenced to the shop-floor routes and would 403 on almost every tool. Wallboard display
 tokens and station tokens are not user credentials and are refused for the same reason. An API
-token is accepted: the door runs its row check (`live_api_token_principal` — a short-lived session
-opened for that one read, the only place the package touches the database) and `resolve_auth`
-then accepts it by signature, because the dispatched route re-runs the same row check.
+token is accepted. The door runs its row check (`live_api_token_grant`, with
+`live_api_token_principal` as its tuple view) in a short-lived session opened for that read. That
+check, plus the AI-egress read for an AI-external token, is the only place the package touches the
+database. The check also hands the row's `scope` / `ai_external` to the server, which narrows that
+caller's listing and refusals (§4.1, §4.2). `resolve_auth` then accepts the token by signature,
+because the dispatched route re-runs the same row check.
 
 **Recommended:** a dedicated user for agent work — e.g. *Werco Assistant*, at the role the agent
 needs (the owner's assistant is an **Admin**; a Manager, Supervisor or Viewer narrows what the
 agent can do) — holding an **API token** rather than a person's login, so the audit trail says which
 writes an agent made, and so the credential can be revoked with a reason, or the role changed,
-without touching a person's account. No credentials, tokens or passwords are ever logged; the
+without touching a person's account. A token for an **outside AI service** (Claude's custom
+connector, for example) is minted **read-only and AI-external** for a **Viewer** user (§4.1,
+§4.2, and the hand-back steps in [EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md#8-hand-back-connecting-claude-after-p0-ships)).
+No credentials, tokens or passwords are ever logged; the
 bridge logs only *which kinds* of credential are configured (`access-token` — an API token counts
 as one, `refresh-token`, `password-login`).
 
 `POST /auth/login` is rate-limited at 5/min and `/auth/refresh` at 30/min per IP
 ([ENVIRONMENT_VARIABLES.md → Rate Limiting](ENVIRONMENT_VARIABLES.md#rate-limiting)); a bridge that
 re-logs-in on every call would hit the login limit, which is one reason the refresh path exists.
+
+### 4.1 Read-only API tokens
+
+An API token minted with `"scope": "read_only"` (migration `119_api_token_scope`; `POST
+/api/v1/api-tokens/` or **Admin → API Tokens**) can only read, whatever its user's role. A scope
+only ever narrows the user, and it is fixed at mint: to change it, revoke the token and mint
+another. The mint is audited with the scope. Existing tokens are `full` and behave exactly as
+before.
+
+**What it may do.** It may send `GET` / `HEAD` / `OPTIONS` to any route its user's role allows,
+except a route carrying a tag in `WERCO_MCP_READ_ONLY_DENY_TAGS`. The default list is: Documents,
+Document Deliveries, Data Export, Users, Audit, Admin Settings, Carrier Integrations, Platform
+Administration, Company Management, API Tokens and Hank Intake. The Hank intake routes were moved
+from `Hank` to their own `Hank Intake` tag for this, with no tool name changed, so the rest of
+Hank stays readable. "CAD source storage" has no live router (retired 2026-09-16); the CAD source
+bytes that remain, Fabrication Quoting's source files (`original_file`), are covered by the file
+rule below. Denying Users also removes `get_current_user_info`, so a read-only token cannot
+introspect its own user.
+
+**Enforced twice, with the same rule:**
+
+- **The API layer** (`get_current_user`) answers every direct `/api/v1` call and every dispatched
+  tool call:
+  - any other method gets **403** `"Read-only API token cannot modify data."`, before the route
+    reads anything; the shop-floor start / complete verbs are included;
+  - a denied tag gets **403** `"Read-only API token cannot access this resource."`;
+  - a request that matches no route fails closed with that same 403.
+- **The MCP door** narrows `tools/list` to the tools that only read and carry no denied tag. On
+  2026-11-15 that is 8 convenience + 298 generated tools; `--print-catalog --read-only` prints
+  them. Calling any other tool by name answers, **before argument validation or dispatch**:
+  - **403** `"Read-only API token: this tool writes."` for a tool that writes; the write check
+    comes first, so a writing tool under a denied tag gets this text;
+  - **403** `"Read-only API token: this tool is not available to read-only tokens."` for a tool
+    under a denied tag.
+
+  Every tool stays registered, so a refused tool is a 403, never a 404. A convenience tool counts
+  as a read only when every route it can dispatch is a `GET`
+  (`convenience.CONVENIENCE_TOOL_ROUTES`). The 8 read tools are `search`, `list_work_centers`,
+  `get_work_order`, `get_shop_floor_dashboard`, `list_inventory`, `list_purchase_orders`,
+  `list_quality_ncrs` and `list_parts`. The 7 that write (`create_work_order`, `add_operation`,
+  `update_work_order`, `duplicate_work_order`, `release_work_order`, `import_laser_nest_package`,
+  `add_laser_nest`) are refused.
+
+**No file bytes.** A response that is not JSON is replaced by **403** `"Read-only API token cannot
+download files."` by the export-control middleware. That covers any status except 204 / 304 /
+1xx, and includes PDFs, CSVs, XLSX, drawings and a redirect to file storage. So drawings under
+Shop Floor or Laser Nests, a CoC PDF, the printable CAR (`get_car_pdf`) and Fabrication Quoting
+source files are refused even though their tags are not on the deny list. The quote PDF
+(`generate_quote_pdf`) is a `POST`, so the method gate refuses it first.
+
+**Global search** (`search`) never returns `user` results to a read-only token, whatever its
+user's role.
+
+**Read-only means read-only — no write request, and no write caused by a read** (lead decision,
+2026-11-15). Some reads reconcile work-order and operation status as they run: `GET /work-orders/{id}`
+(`get_work_order`), the work-order list, `GET /shop-floor/dashboard` and the shop-floor operation
+reads. For a read-only or AI-external token (`app.core.credentials.is_narrowed_api_token`) they do
+not: the read serves the **stored** state and writes nothing — no operation or work-order
+completion, no finished-goods receipt, backflush or tied-material consumption, no cost or scheduling
+rollup, no audit row, no completion event and so no notification. A person's identical read (and a
+full token's) still reconciles exactly as before, so until one happens what the narrowed token sees
+can lag what the floor's labor already recorded. See
+[EXPORT_CONTROL_AI_EGRESS.md → 9](EXPORT_CONTROL_AI_EGRESS.md#9-known-limits).
+Every request also touches the token's `last_used_at`, at most once per 5 minutes. Conversely,
+read-shaped `POST` routes (previews, calculations, natural-language search) are refused like any
+other write.
+
+**Where the door learns the scope.** On the HTTP door, `ErpTokenVerifier`'s row read puts the
+row's `scope` / `ai_external` in the authenticated principal, so no second read is needed. An API
+JWT whose verified principal carries no such record is treated as read-only and AI-external. On
+the stdio bridge, the listing is narrowed only from a static `WERCO_ERP_TOKEN`'s own claims
+(`api_scope` / `ai_ext`, which a narrowed token carries and a full token does not), read without
+verification. Those claims can only narrow. In every mode the API layer re-decides from the
+`api_tokens` row on every call, and that is the control. A token whose claims disagree with its
+row is refused outright (**401**).
+
+**Boot check.** Tags are case-sensitive (`API Tokens`, not `API tokens`). A tag in
+`WERCO_MCP_READ_ONLY_DENY_TAGS` that no route carries fails the API's startup
+(`refuse_unknown_read_only_deny_tags`), whether or not the door is enabled, because a misspelled
+tag would silently deny nothing.
+
+### 4.2 AI-external tokens and export control
+
+An **AI-external** token is minted with `"ai_external": true` for a token whose answers go to an
+outside AI service. That is the default for a read-only token, and `true` with `"scope": "full"`
+is **422** `"An AI-external API token must be read-only."`. Everything in §4.1 applies to it, and
+three more rules:
+
+1. **AI egress must be on.** While the company's `allow_ai_egress` is off (Admin Settings → AI
+   Privacy), an AI-external token is refused **403** `"AI egress is disabled for this company: an
+   AI-external API token cannot be used until an Admin enables it."`. At the HTTP door this is an
+   HTTP 403 from `/mcp` itself, before the MCP transport runs, so `initialize` and `tools/list` are
+   refused too. Every API route refuses it the same way. One switch now gates both AI document
+   extraction and the connector: turn it on only once the empowered official has cleared it.
+   Only an Admin signed in to the app flips it: `PUT /companies/me/ai-egress` refuses every API
+   token **403** and is not a tool (§6.1), so no agent can open — or close — its own connector.
+2. **Only the allowlisted reads.** The token may call only the 47 `GET` routes in
+   `app/core/export_control.py` → `AI_EXTERNAL_ALLOWED_ROUTES`. Any other route answers **403**
+   `"This resource is not available to an AI-external API token."` at the API, and the same text
+   at the door when a tool is called by name. Its `tools/list` holds exactly these 47 tools.
+   Convenience tools are included only when every route they can call is allowlisted, so
+   `search`, `get_shop_floor_dashboard` and `list_inventory` are out:
+
+   | Area | Tools |
+   |---|---|
+   | Work orders | `get_work_order`★, `work_orders_list_work_orders`, `browse_orders`, `get_work_order_by_number`, `get_work_order_timeline` |
+   | Shop-floor operations | `get_all_operations`, `get_operation_details` |
+   | Downtime | `list_downtime_events`, `get_active_downtime`, `get_downtime_by_work_center`, `list_reason_codes`, `get_downtime_event` (not `get_downtime_summary`: its Pareto can carry unlinkable free text) |
+   | Work centers | `list_work_centers`★, `list_work_center_types`, `get_work_center` |
+   | OEE | `list_oee_records`, `get_oee_record`, `get_oee_dashboard`, `get_oee_trends`, `get_six_big_losses`, `list_oee_targets` |
+   | Parts and routings | `list_parts`★, `get_part`, `get_part_by_number`, `list_routings`, `get_routing`, `get_routing_by_part` |
+   | Quality | `list_quality_ncrs`★, `get_ncr`, `list_cars`, `get_car`, `list_fais`, `get_fai`, `list_fai_log` (each log row judged like the FAI it names; not `get_car_pdf`: file bytes) |
+   | Quotes | `quotes_list_quotes`, `quotes_get_quote` |
+   | Purchasing and receiving | `list_purchase_orders`★, `get_purchase_order`, `list_vendors`, `get_vendor`, `get_receiving_history`, `get_receipt_detail` |
+   | Maintenance work orders | `preventive_maintenance_list_work_orders`, `get_overdue_work_orders`, `preventive_maintenance_get_work_order` |
+   | Production calendar | `get_production_calendar`, `resolve_production_moment` (reference data: always served in full) |
+
+   (★ = convenience tool; 5 convenience + 42 generated.) Adding a route needs a canary conformance
+   test, and CI fails without one. **Filters are narrowed too:** each route accepts only the query
+   parameters in `AI_EXTERNAL_QUERY_PARAMS` — free-text `search`, the `customer` filter and
+   `sort` / `group` by part or customer are refused **403** `"This query parameter is not
+   available to an AI-external API token: free-text search, customer filters and text sort keys
+   are refused."` (ledgered), because a filter over withheld text is an oracle on it. So
+   `list_parts` works, `list_parts` with `search` does not.
+3. **Export-controlled and unlinkable records come back redacted.** These records are returned
+   with ids, statuses, dates, quantities and the business numbers (work order, NCR, PO, …) intact:
+   - records of a customer an Admin marked ITAR / export controlled / CUI;
+   - records the ERP cannot tie to any customer (positive clearance: a free-text customer name
+     must resolve to a known, uncontrolled customer to be served in full).
+
+   Every other text field becomes `"[export-controlled]"`, and the object gains
+   `"export_controlled": true`. Each withheld record is logged to `controlled_access_events` with
+   the token named. So is each API-layer refusal under rule 1 or rule 2, and the door's egress
+   refusal. A tool the door refuses by name before dispatch is not logged, because nothing was
+   sent. A failure of that check answers
+   **503** `"Export-control check failed; nothing was sent."`. The redaction runs in the API's
+   response middleware, so it is the same through the door, the stdio bridge or a direct call.
+   An agent must report a redacted record as withheld and never guess its content; the server
+   instructions say so. A route's own error comes back as one fixed text per status code
+   (`"Request failed (404 Not Found); details are withheld from AI-external API tokens."`), never
+   echoing the request, and a part-number lookup that finds a withheld part is the same 404 as a
+   number nobody carries.
+
+The rules for which customers and records are controlled, how an Admin marks a customer, the
+ledger, and the steps to connect Claude are in
+[EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md).
 
 ---
 
@@ -420,8 +618,8 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `Scheduling` (`/scheduling`) | Scheduling, Work Centers, Work Orders | `get_scheduled_jobs`, `schedule_work_order`, `schedule_work_order_earliest`, `run_scheduling`, `get_capacity_heatmap`, `get_scheduling_conflicts`, `unschedule_work_order` |
 | `Maintenance` (`/maintenance`) | Preventive Maintenance | `list_schedules`, `create_schedule`, `preventive_maintenance_list_work_orders`, `preventive_maintenance_create_work_order`, `preventive_maintenance_start_work_order`, `preventive_maintenance_complete_work_order`, `get_calendar`, `list_maintenance_assets`, `create_maintenance_asset`, `update_maintenance_asset`, `retire_maintenance_asset`, `get_maintenance_asset_history`, `preview_pm_schedule_import`, `commit_pm_schedule_import` |
 | `DowntimeTracking` (`/downtime`) | Downtime Tracking, Work Centers | `list_downtime_events`, `create_downtime_event`, `resolve_downtime_event`, `get_downtime_summary`, `list_reason_codes` |
-| `OEE` (`/oee`) | OEE Tracking, Work Centers | `get_oee_dashboard`, `list_oee_records`, `get_oee_trends`, `auto_calculate_oee`, `get_six_big_losses` |
-| `JobCosting` (`/job-costing`) | Job Costing, Work Orders | `list_job_costs`, `get_job_cost`, `get_summary`, `calculate_costs`, `variance_report` |
+| `OEE` (`/oee`) | OEE Tracking, Work Centers, Production Calendar | `get_oee_dashboard`, `list_oee_records`, `get_oee_trends`, `auto_calculate_oee`, `get_six_big_losses`, `get_production_calendar` (the shift choices: OEE writes name a defined shift by its id, and a record's date is a production day) |
+| `JobCosting` (`/job-costing`) | Job Costing, Work Orders | `list_job_costs`, `get_job_cost`, `get_summary`, `add_entry` (incl. subcontract entries), `calculate_costs`, `variance_report` |
 | `PartsNew` (`/parts`) | Parts, Bill of Materials, Customers, Documents | `list_parts`★, `create_part`, `generate_part_number`, `create_new_revision`, `import_parts_csv` |
 | `PartDetail` (`/parts/:id`) | Parts, Bill of Materials, Routing, Setup & Readiness | `get_part`, `get_part_by_number`, `get_bom_by_part`, `get_routing_by_part`, `get_part_readiness`, `get_part_backflush_readiness` |
 | `PartEdit` (`/parts/:id/edit`) | Parts | `get_part`, `update_part`, `renumber_part`, `deactivate_part`, `activate_part` |
@@ -446,8 +644,8 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `FabricationQuoting` (`/fabrication-quotes`) | Fabrication Quoting | `fabrication_quoting_list_quotes`, `fabrication_quoting_create_quote`, `fabrication_quoting_get_quote`, `fabrication_quoting_update_quote`, `calculate`, `fabrication_quoting_approve_quote`, `fabrication_quoting_revise_quote`, `fabrication_quoting_handoff_quote`, `export_package` |
 | `FabricationQuoting` sources, nesting and actuals | Fabrication Quoting | `upload_file`, `original_file`, `nest`, `save_nest`, `revisions`, `revision`, `list_actuals`, `record_actuals` |
 | `FabricationQuoting` process profiles | Fabrication Quoting | `list_profiles`, `list_revisions`, `save_profile`, `capabilities` |
-| `Customers` (`/customers`) | Customers | `list_customers`, `create_customer`, `update_customer`, `get_customer_stats`, `import_customers_csv` |
-| `Quality` (`/quality`) | Quality Management, Parts | `list_quality_ncrs`★, `get_ncr`, `create_ncr`, `update_ncr`, `void_ncr`, `list_cars`, `create_fai`, `get_quality_summary`, `list_scrap_reason_codes` |
+| `Customers` (`/customers`) | Customers | `list_customers`, `create_customer`, `update_customer`, `get_customer_stats`, `import_customers_csv`, `get_customer_export_control` (read-only; **marking a customer controlled is not a tool**: `POST /customers/{customer_id}/contracts` and `PUT /customers/{customer_id}/contracts/{contract_id}` are in `EXCLUDED_OPERATIONS` (§6.1) — Admin only, in the app's Export control panel, and refused **403** to every API token — [EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md#6-marking-a-customer-export-controlled-admin)) |
+| `Quality` (`/quality`) | Quality Management, Parts, Data Export | `list_quality_ncrs`★, `get_ncr`, `create_ncr`, `update_ncr`, `void_ncr`, `list_cars`, `get_car_pdf`, `approve_car_quality`, `create_fai`, `record_fai_customer_approval`, `list_fai_log`, `export_fai_log`, `get_quality_summary`, `list_scrap_reason_codes` |
 | `SPC` (`/spc`) | Statistical Process Control, Parts | `list_characteristics`, `add_measurements`, `get_chart_data`, `calculate_control_limits`, `get_capability`, `statistical_process_control_get_dashboard` |
 | `CustomerComplaints` (`/customer-complaints`) | Customer Complaints & RMA | `list_complaints`, `create_complaint`, `create_rma`, `get_8d_report`, `customer_complaints_rma_get_dashboard` |
 | `Calibration` (`/calibration`) | Calibration | `list_equipment`, `get_equipment_due_soon`, `record_calibration`, `get_calibration_history` |
@@ -455,7 +653,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `ToolManagement` (`/tool-management`) | Tool & Fixture Management | `list_tools`, `checkout_tool`, `checkin_tool`, `list_inspection_due`, `tool_fixture_management_get_dashboard` |
 | `QMSStandards` (`/qms-standards`) | QMS Standards & Audit Readiness | `list_standards`, `get_audit_readiness`, `list_clauses`, `add_evidence`, `upload_pdf_and_extract_clauses` |
 | `Analytics` (`/analytics/*`) | Analytics & BI | `get_kpi_dashboard`, `get_production_trends`, `analytics_bi_get_quality_metrics`, `get_flow_metrics`, `get_fpy`, `get_wip_aging`, `run_custom_report` |
-| `Reports` (`/reports`) | Reports | `get_production_summary`, `get_work_center_utilization`, `get_inventory_value`, `get_ship_otd_report`, `reports_get_quality_metrics`, `get_employee_time_report` |
+| `Reports` (`/reports`) | Reports | `get_production_summary`, `get_work_center_utilization`, `get_inventory_value`, `get_ship_otd_report`, `reports_get_quality_metrics`, `get_daily_output`, `get_employee_time_report` (the last two read production days) |
 | `PrintTraveler` (`/print/traveler/:id`) | Work Orders, Print Reports, Parts | `get_work_order`★, `get_work_order_print_data`, `get_part` |
 | `PrintPurchaseOrder` (`/print/purchase-order/:id`) | Print Reports | `get_purchase_order_print_data` |
 | `PrintPackingSlip` (`/print/packing-slip/:id`) | Shipping | `get_shipment` |
@@ -466,14 +664,14 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `AuditLog` (`/audit-log`) | Audit | `list_audit_logs`, `get_audit_summary`, `verify_audit_integrity`, `get_integrity_status` |
 | `VisitorLog` (`/visitor-log`) | Visitor Logs | `list_visitors`, `manual_entry`, `sign_out`, `export_visitors_csv`, `create_station`, `revoke_station` |
 | `VisitorSignIn` (`/visitor-signin`) | Visitor Logs | `sign_in`, `sign_out` (under the caller's own role; the tablet's shared-PIN station login is unauthenticated plumbing and is not a tool) |
-| `AdminSettings` (`/admin/settings`) | Admin Settings, Users | `list_work_center_rates`, `update_work_center_rate`, `list_work_center_types_admin`, `update_work_center_types_admin`, `get_email_recipients`, `update_email_recipients`, `get_role_permissions`, `update_role_permissions`, `get_audit_log`, `list_users` |
+| `AdminSettings` (`/admin/settings`) | Admin Settings, Users, Production Calendar | `list_work_center_rates`, `update_work_center_rate`, `list_work_center_types_admin`, `update_work_center_types_admin`, `get_email_recipients`, `update_email_recipients`, `get_role_permissions`, `update_role_permissions`, `get_audit_log`, `list_users`; Production Calendar tab: `get_production_calendar`, `save_production_calendar_document` (Admin only), `sync_working_calendars_from_shifts` (dry run by default; Admin / Manager / Supervisor), `resolve_production_moment` (which production day and shift an instant belongs to) |
 | `PlatformOverview` (`/platform`) | Platform Administration | `platform_overview`, `list_companies`, `company_dashboard`, `browse_company_users` (platform admins only — the route decides) |
-| `CompanyRegister` (`/register-company`) | Company Management | `get_my_company`, `update_my_company`, `update_my_company_ai_egress`, `update_my_company_sms_egress` — the public registration form itself is unauthenticated and has no tool |
-| *(no page — Admin tooling, `curl` or these tools)* | API Tokens | `create_api_token`, `list_api_tokens`, `revoke_api_token` (Admin only; a call authenticated **by** an API token gets the route's 403 fence — §4) |
+| `CompanyRegister` (`/register-company`) | Company Management | `get_my_company`, `update_my_company` — the public registration form itself is unauthenticated and has no tool; **the AI and SMS egress kill switches are not tools**: `PUT /companies/me/ai-egress` and `PUT /companies/me/sms-egress` are in `EXCLUDED_OPERATIONS` (§6.1) and refuse **403** to every API token, as do the carrier and label-print switches' profile writes (`PUT /admin/settings/shipping-profile`, `PUT /receiving/print-profile`; their `get_shipping_profile` / `get_print_profile` reads stay tools) |
+| `ApiTokens` (`/admin/api-tokens`) | API Tokens | `create_api_token`, `list_api_tokens`, `revoke_api_token` (Admin only; a call authenticated **by** an API token gets the route's 403 fence — §4) |
 | `Login` (`/login`), `Register` (`/register`) | Authentication | *No tool* — excluded on purpose; identity comes from the JWT (§4) |
 | `NotFound`, `Unauthorized` | — | No API calls |
 
-Coverage: 73 page files; 68 map to at least one catalog tool. The five that do not are the three
+Coverage: 74 page files; 69 map to at least one catalog tool. The five that do not are the three
 `Authentication`-only pages (excluded by design) and the two chrome pages with no API.
 
 ---
@@ -493,7 +691,7 @@ minus two further, named sets:
   They are listed **by name** rather than skipped silently, so a new route that forgets its
   `security` dependency — even under a tag that already has tools — fails the coverage guard
   (`catalog.unaccounted_operations`, §14) until it is either secured or named there.
-- **`EXCLUDED_OPERATIONS`** — eight operations, none with a convenience twin:
+- **`EXCLUDED_OPERATIONS`** — fourteen operations, none with a convenience twin:
   - The two Excel-cutover loaders, `POST /work-orders/import` and
     `POST /purchasing/purchase-orders/import` (`migration_import_service`). They record a *past*
     system's state rather than perform a user action: the work-order loader mints work orders
@@ -508,6 +706,24 @@ minus two further, named sets:
     the record-only accept, dismiss, snooze and feedback tools, and may create recommendations;
     on an action card the record-only accept is refused for an API token and for a role that could
     not apply the action. See [API.md → AI Recommendations](API.md#ai-recommendations-action-inbox).
+  - The two customer **export-control writes**, `POST /customers/{customer_id}/contracts` and
+    `PUT /customers/{customer_id}/contracts/{contract_id}`. Marking or un-marking a customer
+    controlled decides what an outside AI connector is shown, and the owner's rule is "an Admin
+    does it, signed in to the app". The routes refuse every API token (403), but a person's own
+    access JWT (the stdio bridge's email / password, or the HTTP door) would still reach them
+    through a tool, so an agent — possibly following text injected through ERP data — could
+    switch a customer's control off and the connector would get that customer's records
+    unredacted from the next request on. Reading a customer's standing
+    (`get_customer_export_control`) stays a tool.
+  - The four company **egress kill-switch writes** (`catalog.EGRESS_SWITCH_OPERATIONS`; lead
+    decision 2026-11-15: an egress switch is a person's judgment): `PUT /companies/me/ai-egress`
+    (`allow_ai_egress`, which also opens or closes every AI-external connector),
+    `PUT /companies/me/sms-egress`, `PUT /admin/settings/shipping-profile` (`allow_carrier_egress`)
+    and `PUT /receiving/print-profile` (`allow_print_egress`). The routes refuse every API token
+    **403** (`app.core.credentials.API_TOKEN_EGRESS_SWITCH`), and — as with the export-control
+    writes — the exclusion closes the door a person's own JWT would leave open through a tool. The
+    two profile routes are their switches' only writers, so they are out whole; their reads
+    (`get_shipping_profile`, `get_print_profile`) stay tools.
   - The three **Approved Supplier List** writes: `PUT /purchasing/vendors/{vendor_id}/approval`,
     `POST /purchasing/vendors/asl-import/preview` and `POST /purchasing/vendors/asl-import/commit`.
     Recording a supplier-approval decision and loading the controlled QL 7.4 list (AS9100D 8.4) are
@@ -526,7 +742,9 @@ historical status transitions, so exposing a generic batch commit would reopen t
 excluded-loader path. File correction and credential input stay in Import Center.
 
 On the commit that shipped API tokens: 706 operations, 689 secured, 680 candidates, 16 shadowed
-(§8), 2 excluded → **662 generated tools**.
+(§8), 2 excluded → **662 generated tools**. On 2026-11-15, with fourteen excluded and the CAR form /
+FAI log, Approved Supplier List and equipment-asset / PM-import routes added: **764 generated tools**
+(`--print-catalog` `counts`).
 
 ### 6.2 Naming and the collision policy (`app/mcp/naming.py`)
 
@@ -639,7 +857,7 @@ with a 422 that names it, never accepted-and-ignored.
 | `list_work_centers` | `GET /work-centers/` | `name` (case-insensitive substring over name **and** code), `active_only` (default `true`) | Fetches with `limit=5000` and filters client-side; returns `id`, `code`, `name`, `type`, `is_active` |
 | `create_work_order` | `POST /work-orders/` | `part_id`, `quantity_ordered` (required); `work_order_type`, `parent_work_order_id`, `priority`, `due_date`, `customer_name`, `customer_po`, `unit_number`, `notes`, `special_instructions`, `sequential_operations`, `serial_numbers`, `auto_routing` (query, default `true`). **No `status` argument** — passing one is a 422 | See [DRAFT guarantees](#9-draft-guarantees). Refuses `work_order_type: "laser_cutting"` **before** calling, with the API's own wording |
 | `add_operation` | `POST /work-orders/{id}/operations` | `work_order_id`, `name`, `work_center` (required; **int id or name/code string**); `sequence` (10–990, multiple of 10); passthrough `operation_number`, `description`, `setup_instructions`, `run_instructions`, `setup_time_hours`, `run_time_hours`, `run_time_per_piece`, `requires_inspection`, `inspection_type`, `component_part_id`, `component_quantity`, `operation_group`. `quantity` is accepted by the schema only to be **refused 422 with an explanation** | **Name guard** (below). Work center by name: exact match on name or code → substring → refuses **404** on none, **409** naming the candidates on more than one ("Pass the id"). `sequence` omitted → `GET /work-orders/{id}` and use the next multiple of 10 after the current maximum (10 on an empty plan). **An operation has no quantity of its own** — it runs the work order's `quantity_ordered`; `component_quantity` is the BOM component demand for the step (the per-operation piece target on a batch job), not an operation quantity, so the spec's `quantity` is not aliased to it. Not for laser WOs (the route refuses 400) |
-| `get_work_order` | `GET /work-orders/{id}` or `/work-orders/by-number/{n}` | `work_order_id` **or** `work_order_number` (percent-encoded into the path, so `../` or `?` cannot steer the call onto another route) | Full `WorkOrderResponse`: operations, nests (`operations[].laser_nest`), status, `version` |
+| `get_work_order` | `GET /work-orders/{id}` or `/work-orders/by-number/{n}` | `work_order_id` **or** `work_order_number` (percent-encoded into the path, so `../` or `?` cannot steer the call onto another route) | Full `WorkOrderResponse`: operations, nests (`operations[].laser_nest`), status, `version`; cost by element (`job_cost_actuals`, null without a JobCost) and `issued_material_cost`; per operation `hours_source` / `recorded_setup_hours` / `recorded_run_hours` / `hours_include_backfill`. Both branches return the same body (by number does not reconcile on read) |
 | `update_work_order` | `PUT /work-orders/{id}` | `work_order_id`, `version` (required); `quantity_ordered`, `priority`, `status`, `sequential_operations`, `due_date`, `customer_name`, `customer_po`, `unit_number`, `notes`, `special_instructions`, `quantity_complete`, `quantity_scrapped`, `scrap_reason` — every `WorkOrderUpdate` field, pinned to the route's own schema by a catalog test | The header edit verb, version-gated (409 when stale). **`status` accepts `draft` / `on_hold` / `cancelled` only** (and `on_hold` only on a released or in-progress job — the route refuses a draft **409**, it has nothing on the floor to hold): `released` and `in_progress` are refused **422** naming the real verbs (`release_work_order`, `work_orders_start_work_order`; both refusals also name `work_orders_resume_work_order`, because the release verb takes draft jobs only, the start verb takes released jobs only, and a hold is lifted by the resume tool) — the route's blind `setattr` would accept them with no `released_at` / `released_by` and no operation promotion; `complete` / `closed` are refused by the route itself. `status: "draft"` is how a released-but-unstarted job is put back (the nest tools use the same PUT); the route then returns every un-worked READY operation to PENDING itself, one required audit row each (**503**, nothing changed, when those rows cannot be written). With an API token, a `quantity_scrapped` above the header's recorded scrap is refused **403** by the route (owner decision 2026-11-07 — a person reports scrap); so are, as this PR's extension, a changed `scrap_reason`, any other change to the header's `quantity_complete` / `quantity_scrapped` (either direction) and lowering `quantity_ordered` once work is recorded. Omitting those fields or re-sending the recorded values works |
 | `duplicate_work_order` | `POST /work-orders/{id}/duplicate` | `work_order_id`, `quantity_ordered` (both required — the route requires the quantity; a laser job ignores it and derives its own from the copied nests), `due_date` | Copies the *plan* onto a new DRAFT (`WORK_ORDER_TEMPLATES.md` / duplicate service); post-checks DRAFT |
 | `release_work_order` | `POST /work-orders/{id}/release` | `work_order_id` | Explicit only; the route refuses anything not DRAFT. The **only** tool that releases work |
@@ -687,7 +905,8 @@ Every other operation stays generated — including the neighbours of the shadow
 (`work_orders_start_work_order`, `work_orders_update_operation`, `preview_laser_nest_package_import`,
 `get_work_order_by_number`, `update_laser_nest`, `get_inventory_summary`, `get_purchase_order`, …) —
 except the operations in `EXCLUDED_OPERATIONS` (§6.1) — the two cutover loaders, AI Accept &
-apply, the three Approved Supplier List writes and the two legacy ASL-table writes — which have no tool and no replacement. Adding a convenience tool whose route is *not* in the shadow set is a build error
+apply, the two customer export-control writes, the four egress kill-switch writes, the three Approved Supplier
+List writes and the two legacy ASL-table writes — which have no tool and no replacement. Adding a convenience tool whose route is *not* in the shadow set is a build error
 (`build_registry` refuses a duplicate name) rather than a silent win.
 
 ---
@@ -976,9 +1195,16 @@ count, in which case there is nothing left to close.
 |---|---|---|
 | HTTP **401** with `WWW-Authenticate` from `/mcp` itself, before any tool | No bearer; an expired access token; a revoked / expired API token (deactivating its user revokes every token it held); a display / station / kiosk-scoped token | Give the agent an **API token** (`POST /api/v1/api-tokens/`, Admin) — it never 401s until revoked, so a 401 on one means an Admin revoked it: mint a new one. With a 15-minute access token, send a fresh one (`POST /auth/refresh` or `POST /auth/login`); HTTP callers renew their own, only the stdio bridge refreshes for you |
 | `{"status": 403, "detail": "API token cannot access this resource"}` | The call is authenticated by an API token and the tool fronts a `/auth` or `/api-tokens` route (`create_api_token`, `list_api_tokens`, `revoke_api_token`) | Token administration is an Admin's interactive act: use an Admin's interactive JWT (through the door or with `curl`). Nothing an API token holds changes this (§4) |
+| `{"status": 403, "detail": "Read-only API token: this tool writes."}` or `"…this tool is not available to read-only tokens."` | The token was minted read-only and the tool writes, or sits under a tag in `WERCO_MCP_READ_ONLY_DENY_TAGS`. Nothing was validated or sent (§4.1) | Use only the tools `tools/list` shows. A write needs a person, or a token minted `full` |
+| `{"status": 403, "detail": "Read-only API token cannot modify data."}` or `"Read-only API token cannot access this resource."` | The same rule answered by the API itself, for example on a stdio bridge whose listing was not narrowed | As above |
+| `{"status": 403, "detail": "Read-only API token cannot download files."}` | A read-only token reached a route that answers with a file (PDF, CSV, XLSX, drawing) | Download it in the app as a person |
+| HTTP **403** `{"detail": "AI egress is disabled for this company: …"}` from `/mcp` itself (on `initialize` / `tools/list` too), or the same text as a tool result | An AI-external token, and the company's `allow_ai_egress` is off (§4.2) | Intended until the empowered official clears AI egress; then an Admin turns it on in Admin Settings → AI Privacy |
+| `{"status": 403, "detail": "This resource is not available to an AI-external API token."}` | An AI-external token called a tool or route outside the allowlist (§4.2) | Use the tools its `tools/list` shows; widening the allowlist is a code change with a canary test |
+| `"[export-controlled]"` values and `"export_controlled": true` in a result | The record belongs to an export-controlled customer, or cannot be tied to any customer ([EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md)) | Expected. Report it as withheld; never guess its content |
+| `{"status": 503, "detail": "Export-control check failed; nothing was sent."}` | The export-control index, redaction or ledger write failed for an AI-external token. It fails closed | Retry; if it persists, check the API logs (`Export-control check failed`) |
 | Tool result `{"status": 401, "detail": "No ERP credentials configured for this bridge…"}` | stdio bridge started with none of `WERCO_ERP_TOKEN` / `WERCO_ERP_REFRESH_TOKEN` / `WERCO_ERP_EMAIL`+`WERCO_ERP_PASSWORD` | Set one; the bridge logs `Credentials configured: …` on stderr at startup |
 | Tool result `{"status": 401, "detail": "Could not obtain an ERP access token…"}` | Refresh and login both failed (wrong password, locked account, login rate limit 5/min) | Check the account in the UI; wait out the limit |
-| `{"status": 403, "detail": "Insufficient permissions"}` | The user's role does not allow that route (`require_role`) — the SPA would refuse too | Use a user with the right role; nothing in MCP can widen it |
+| `{"status": 403, "detail": "Insufficient permissions"}` | The user's role does not allow that route (`require_role`) — the SPA would refuse too. A Viewer or Shipping user gets this from `shop_floor_start_operation` and `shop_floor_complete_operation` | Use a user with the right role; nothing in MCP can widen it |
 | `{"status": 409, ...}` on `update_work_order` | Stale `version` (optimistic locking) | `get_work_order` → resend with the current `version` |
 | `{"status": 422, ...}` from `update_work_order` naming `release_work_order` / `work_orders_start_work_order` | `status: released` or `in_progress` was written through the header update | Call the named verb; the header update never releases or starts work (§9). To lift a work-order hold, call `work_orders_resume_work_order` |
 | `{"status": 409, "detail": "This work order has not been released — release first…"}` or `"This work order is on hold…"` from `clock_in`, `shop_floor_start_operation`, `work_orders_start_operation`, `work_orders_start_work_order`, a complete of a READY operation, or `work_orders_update_operation` setting `status: in_progress` (or `status: ready` on a draft, or raising `quantity_complete` on a not-started operation) | The work order is DRAFT or ON_HOLD — the floor cannot start work on it | A user with the role decides — an agent's API token included: `release_work_order` for a draft, `work_orders_resume_work_order` for a held job (Admin / Manager / Supervisor) |
@@ -1014,7 +1240,8 @@ count, in which case there is nothing left to close.
 
 - Server settings (`app/core/config.py`): `WERCO_MCP_HTTP_ENABLED`, `WERCO_MCP_HTTP_PATH`,
   `WERCO_MCP_HTTP_RATE_LIMIT`, `WERCO_MCP_MAX_RESULT_CHARS`, `WERCO_MCP_MAX_BLOB_BYTES`,
-  `WERCO_MCP_MAX_UPLOAD_BYTES`. Client-side bridge variables (read by `app/mcp/__main__.py` /
+  `WERCO_MCP_MAX_UPLOAD_BYTES`, `WERCO_MCP_READ_ONLY_DENY_TAGS` (§4.1; despite the prefix it also
+  governs direct `/api/v1` calls, and it applies whether or not the door is enabled). Client-side bridge variables (read by `app/mcp/__main__.py` /
   `auth.py`, **not** `Settings`): `WERCO_ERP_URL`, `WERCO_ERP_TOKEN`, `WERCO_ERP_REFRESH_TOKEN`,
   `WERCO_ERP_EMAIL`, `WERCO_ERP_PASSWORD`, `WERCO_MCP_TRANSPORT`, `WERCO_MCP_HOST`, `WERCO_MCP_PORT`.
   Tables in [ENVIRONMENT_VARIABLES.md → MCP](ENVIRONMENT_VARIABLES.md#mcp-model-context-protocol-door-and-bridge).
@@ -1023,9 +1250,10 @@ count, in which case there is nothing left to close.
 - Tests (all in the default `pytest tests/` run, so in CI's required "Backend Tests" job):
   - `backend/tests/test_mcp_catalog.py` (no DB) — membership against the live `app.openapi()` (every
     secured, unshadowed, unexcluded operation is exactly one tool; `PUBLIC_OPERATIONS` names exactly
-    the unsecured routes; `EXCLUDED_OPERATIONS` are exactly the two loaders, the AI apply route, the
-    three Approved Supplier List writes and the two legacy ASL-table writes,
-    and the record-only accept stays a tool), names (unique, wire-valid,
+    the unsecured routes; `EXCLUDED_OPERATIONS` are exactly the two loaders, the AI apply route,
+    the two customer export-control writes, the four egress kill-switch writes, the three Approved
+    Supplier List writes and the two legacy ASL-table writes, and the record-only accept stays a tool),
+    names (unique, wire-valid,
     ≤ 64, collisions prefixed, the numeric-suffix fallback proven on synthetic input and unused on
     the live catalog), schemas (`$ref`-free, `additionalProperties: false`, every JSON body's
     property set equal to the document's — the `title` field included), and the two convenience
@@ -1078,12 +1306,29 @@ count, in which case there is nothing left to close.
     static-token path never refreshing.
   - `backend/tests/test_migration_088_api_tokens.py` — the `api_tokens` table: single head,
     model/migration lock-step (columns, indexes, defaults), RLS Postgres-only, and the SQLite
-    upgrade / downgrade round trip.
-- API tokens (server side, no new setting): `app/api/endpoints/api_tokens.py`,
+    upgrade / downgrade round trip; `test_migration_119_api_token_scope.py` — the `scope` /
+    `ai_external` columns and the scope CHECK, model == migration.
+  - `backend/tests/test_api_token_read_only.py` — the read-only mint (default, 422s, audit), the
+    method and tag gates on direct `/api/v1` calls, the fail-closed no-route case, full tokens
+    unchanged, the deny-tag boot check, and the `user` search type dropped.
+  - `backend/tests/test_mcp_read_only.py` — the read-only listing and the by-name 403s at the door,
+    the convenience read/write classification against a recording executor, and
+    `--print-catalog --read-only`.
+  - `backend/tests/test_mcp_ai_external.py` — the door's AI-egress 403 (`initialize` and
+    `tools/list` included) and the AI-external listing; the API side, the canary conformance test
+    per allowlisted route and the ledger are in `tests/api/test_ai_external_token.py`, with
+    `tests/test_export_control_index.py` and `tests/test_export_control_redaction.py` for the pure
+    rules ([EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md#10-code-and-tests)).
+- API tokens (server side): `app/api/endpoints/api_tokens.py`,
   `app/services/api_token_service.py` (`check_api_token` is the one row check the door and
-  `get_current_user` share), `app/models/api_token.py`, migration `088_api_tokens`; the door half is
-  `app/mcp/auth.py` (`live_api_token_principal`, `ErpTokenVerifier`).
+  `get_current_user` share), `app/models/api_token.py`, migrations `088_api_tokens` and
+  `119_api_token_scope` (`scope`, `ai_external`); the narrowing gates are in `app/api/deps.py`, the
+  predicates in `app/core/credentials.py`, the AI-external allowlist in `app/core/export_control.py`
+  and the response side in `app/middleware/export_control.py`. The door half is `app/mcp/auth.py`
+  (`live_api_token_principal`, `live_api_token_grant`, `ErpTokenVerifier`), `app/mcp/http.py`
+  (`AiEgressDoorGuard`) and `app/mcp/server.py` (the per-caller listings).
 - Related: [API.md → MCP door](API.md#mcp-door-mcp), [API.md → API tokens](API.md#api-tokens-bots-and-mcp-clients),
+  [EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md),
   [RBAC_PERMISSIONS.md → MCP / agent access](RBAC_PERMISSIONS.md#mcp--agent-access),
   [DEPLOYMENT_RUNBOOK.md → Enabling the MCP door](DEPLOYMENT_RUNBOOK.md#enabling-the-mcp-door-optional),
   `.cursor/mcp.json.example`, `backend/.env.example`.

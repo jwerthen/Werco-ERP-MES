@@ -19,6 +19,7 @@ from app.models.user import User, UserRole
 from app.schemas.import_batch import ImportBatchHistory, ImportBatchResponse
 from app.services import import_batch_service as service
 from app.services.audit_service import AuditService
+from app.services.export_audit import refuse_file_export_to_narrowed_token
 from app.services.import_service import MAX_IMPORT_FILE_BYTES
 
 router = APIRouter()
@@ -120,6 +121,7 @@ def download_failed_import_rows(
     company_id: int = Depends(get_current_company_id),
 ):
     """Export only failed input rows with stable IDs for correction; passwords are never exported."""
+    refuse_file_export_to_narrowed_token(user)  # before the EXPORT row: no file reaches one
     batch = service.load_batch(db, company_id, user, batch_id)
     content = service.failed_rows_csv(db, company_id, batch)
     count = (

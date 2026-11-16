@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy import String, case, cast, func, literal, or_, select, union_all
 from sqlalchemy.orm import Session
 
+from app.core.credentials import is_read_only_api_token
 from app.models.bom import BOM
 from app.models.customer import Customer
 from app.models.part import Part
@@ -172,7 +173,11 @@ def _search_statement(company_id: int, current_user: User, q: str):
             ],
             join_part=True,
         )
-    if current_user.role in (UserRole.ADMIN, UserRole.MANAGER):
+    # People are an Admin/Manager search. A READ-ONLY API token never gets them, whatever
+    # its user's role: the Users tag is denied to read-only tokens
+    # (WERCO_MCP_READ_ONLY_DENY_TAGS), and this is the one read that would hand an agent
+    # names, emails and employee ids anyway.
+    if current_user.role in (UserRole.ADMIN, UserRole.MANAGER) and not is_read_only_api_token(current_user):
         add(
             "user",
             User,

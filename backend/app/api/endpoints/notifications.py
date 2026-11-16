@@ -2,7 +2,6 @@ from datetime import datetime, timedelta
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -11,6 +10,7 @@ from app.core.pagination import paginate_query
 from app.db.database import get_db
 from app.models.notification import Notification, NotificationLog
 from app.models.user import User, UserRole
+from app.schemas.base import UTCModel
 from app.schemas.notification import (
     CatalogEntryResponse,
     MarkAllReadResponse,
@@ -157,7 +157,7 @@ def mark_all_read(
 # ---------------------------------------------------------------------------
 
 
-class NotificationLogResponse(BaseModel):
+class NotificationLogResponse(UTCModel):
     id: int
     user_id: int
     event_type: str

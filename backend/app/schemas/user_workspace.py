@@ -4,6 +4,8 @@ from typing import Any, Dict, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.schemas.base import UTCModel
+
 
 class WorkspaceWrite(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -33,7 +35,7 @@ class WorkspaceWrite(BaseModel):
         return value
 
 
-class WorkspaceResponse(BaseModel):
+class WorkspaceResponse(UTCModel):
     model_config = ConfigDict(from_attributes=True)
 
     key: str

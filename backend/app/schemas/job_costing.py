@@ -6,6 +6,7 @@ from typing import Optional
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from app.models.job_costing import CostEntrySource, CostEntryType, JobCostStatus
+from app.schemas.base import UTCModel
 
 
 class JobCostCreate(BaseModel):
@@ -51,7 +52,7 @@ class CostEntryCreate(BaseModel):
     entry_date: date
 
 
-class CostEntryResponse(BaseModel):
+class CostEntryResponse(UTCModel):
     id: int
     job_cost_id: int
     entry_type: str
@@ -69,7 +70,7 @@ class CostEntryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-class JobCostResponse(BaseModel):
+class JobCostResponse(UTCModel):
     id: int
     work_order_id: int
     estimated_material_cost: float
@@ -78,7 +79,10 @@ class JobCostResponse(BaseModel):
     estimated_total_cost: float
     actual_material_cost: float
     actual_labor_cost: float
+    # OVERHEAD + OTHER entries.
     actual_overhead_cost: float
+    # SUBCONTRACT entries (outside processing); part of actual_total_cost, never of overhead.
+    actual_subcontract_cost: float = 0.0
     actual_total_cost: float
     material_variance: float
     labor_variance: float

@@ -8,13 +8,14 @@
  * the `{measurements: [...]}` wrapper). With real return types on the client
  * methods, that class of drift becomes a compile error instead of a silent `[]`.
  *
- * ⚠️ Timestamps: the Pydantic-schema routes (`CharacteristicResponse`,
- * `MeasurementResponse`, `ControlLimitResponse`, `CapabilityResponse`) inherit bare
- * `BaseModel`, NOT the app's `UTCModel`, so their datetimes arrive WITHOUT a trailing
- * `Z`. Only the two hand-built dict routes (`chart-data.chart_points[].measured_at`
- * and `out-of-control.last_ooc`) run through `to_utc_iso`. Always parse/format SPC
- * timestamps with `utils/centralTime.ts` — its zone-less branch treats them as UTC;
- * a bare `new Date(x)` would read them as local time.
+ * Timestamps: the Pydantic-schema routes (`CharacteristicResponse`,
+ * `MeasurementResponse`, `ControlLimitResponse`, `CapabilityResponse`) inherit the
+ * app's `UTCModel` (since P1.1, 2026-11-13), so their datetimes arrive as UTC with a
+ * trailing `Z`, like the two hand-built dict routes (`chart-data.chart_points[].measured_at`
+ * and `out-of-control.last_ooc`, via `to_utc_iso`). Still parse/format SPC timestamps
+ * with `utils/centralTime.ts` (`toDate`): it renders Central time, and its zone-less
+ * branch reads an older API's `Z`-less value as UTC, where a bare `new Date(x)` would
+ * read it as local time.
  */
 
 /** The 7 values of the backend `ChartType` enum. An off-list value is a 500, not a 422. */
@@ -46,13 +47,7 @@ export const SPC_CHART_TYPE_LABELS: Record<SPCChartType, string> = {
  * (`auto_evidence_service.py`). The client select is therefore the ONLY control that
  * exists — keep it closed, with no free-text fallback.
  */
-export const SPC_CHARACTERISTIC_TYPES = [
-  'dimensional',
-  'weight',
-  'force',
-  'temperature',
-  'visual',
-] as const;
+export const SPC_CHARACTERISTIC_TYPES = ['dimensional', 'weight', 'force', 'temperature', 'visual'] as const;
 
 export type SPCCharacteristicType = (typeof SPC_CHARACTERISTIC_TYPES)[number];
 
@@ -76,9 +71,9 @@ export interface SPCCharacteristic {
   is_active: boolean;
   is_critical: boolean;
   notes: string | null;
-  /** No trailing `Z` — parse via centralTime `toDate`. */
+  /** UTC with a trailing `Z` — parse via centralTime `toDate`. */
   created_at: string;
-  /** No trailing `Z` — parse via centralTime `toDate`. */
+  /** UTC with a trailing `Z` — parse via centralTime `toDate`. */
   updated_at: string | null;
 }
 
@@ -139,7 +134,7 @@ export interface SPCMeasurement {
   /** NOT `value`. */
   measurement_value: number;
   sample_number: number;
-  /** No trailing `Z`. */
+  /** UTC with a trailing `Z`. */
   measured_at: string;
   /** A USER ID, not a name. No SPC route joins `users`; do not attempt a lookup. */
   measured_by: number | null;
@@ -157,7 +152,7 @@ export interface SPCMeasurement {
 export interface SPCControlLimit {
   id: number;
   characteristic_id: number;
-  /** No trailing `Z`. */
+  /** UTC with a trailing `Z`. */
   calculation_date: string;
   ucl: number;
   lcl: number;
@@ -176,7 +171,7 @@ export interface SPCControlLimit {
 export interface SPCCapability {
   id: number;
   characteristic_id: number;
-  /** No trailing `Z`. */
+  /** UTC with a trailing `Z`. */
   study_date: string;
   /** Individual measurements, not subgroups. */
   sample_count: number;

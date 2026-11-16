@@ -220,38 +220,10 @@ rollback step; it does not undo documents, receipts, production or shipments
 already created by completed actions. Intake-linked Documents cannot be deleted
 through the application because the saved source and receipt must remain valid.
 
-### Saved dashboard layouts
+### Approved Supplier List, equipment assets and maintenance downtime (migrations 123 and 124)
 
-Apply additive **118_dashboard_layouts** after **117_operation_short_declared** through
-the normal API boot migration path. It creates an empty tenant/user `dashboard_layouts`
-table with a unique company/user key, a `version >= 1` check and indexes on `company_id`
-and `user_id`. No layout is seeded: until a person saves one, reads return
-`layout: null` without creating rows and every role keeps the default dashboard.
-PostgreSQL RLS and table/sequence revokes from `PUBLIC`, `anon`, and `authenticated`
-match model bootstrap. No environment variable, secret, cron or worker job is added.
-
-Deploy order is free. The frontend tolerates an API that does not have the routes yet:
-a 404 (or 405) from `GET /dashboard/layout` renders the default dashboard with
-**Customize** hidden. An older frontend never calls the new routes.
-
-Verify in a test company: open `/`, press **Customize**, add a panel from **Add widgets**
-and press **Done**, then reload in another browser and see the same layout; open edit mode
-in two tabs, press **Done** with a change in one and then in the other, and get the
-"changed in another tab" refusal (a tab that was merely left open is not stale enough:
-Customize re-reads the layout on entry); **Reset to default**. The Audit Log should show
-`dashboard_layout` CREATE and UPDATE rows. Confirm RLS with
-`SELECT relrowsecurity FROM pg_class WHERE relname = 'dashboard_layouts';` (true).
-
-Keep the table on ordinary application rollback: older code ignores it and renders
-the fixed dashboard. A deliberate 118 downgrade drops every saved layout, returning
-everyone to the default; the audit rows recording each change remain. See
-[API.md → Personal dashboard layout](API.md#personal-dashboard-layout) and
-[DASHBOARD.md → Customizing the dashboard](DASHBOARD.md#customizing-the-dashboard).
-
-### Approved Supplier List, equipment assets and maintenance downtime
-
-Apply **123_vendor_asl**, then **124_maintenance_assets**, through the normal API boot migration
-path. No environment variable, secret, cron or worker job is added.
+Apply **123_vendor_asl** (after **122_car_form_quote_rev**), then **124_maintenance_assets**, through
+the normal API boot migration path. No environment variable, secret, cron or worker job is added.
 
 - **123** adds six nullable Approved Supplier List columns to `vendors` (`approval_status`,
   `approved_scopes`, `approval_bases`, `reevaluation_due`, `last_performance_evaluation`,
@@ -281,9 +253,12 @@ path. No environment variable, secret, cron or worker job is added.
   (409); add an equipment asset and a schedule on it; start a work-center maintenance work order with
   *requires shutdown* and confirm `/downtime` shows an open event, then complete it and confirm the
   event resolves. `SELECT relrowsecurity FROM pg_class WHERE relname = 'maintenance_assets';` is true.
-- **Rollback.** Keep both migrations on an ordinary application rollback, with these cautions. Old
-  code cannot start or complete a maintenance work order that targets an **asset**: its event-log
-  insert carries no target, so the 124 CHECK refuses it (500, nothing saved). Old code does not
+- **Rollback.** Keep both migrations on an ordinary application rollback, with these cautions. Once
+  `123` has run, an older image cannot boot until the database is stamped back, so from a checkout of
+  this release run `alembic stamp 122_car_form_quote_rev` before redeploying a pre-123 image (the next
+  forward deploy re-runs both as guarded no-ops). Old code cannot start or complete a maintenance
+  work order that targets an **asset**: its event-log insert carries no target, so the 124 CHECK
+  refuses it (500, nothing saved). Old code does not
   resolve the downtime event a maintenance work order opened; resolve those on `/downtime`. Old code
   also neither refuses a purchase order to a Disqualified vendor nor stops the vendor edit from
   contradicting an ASL status. A deliberate **124** downgrade refuses, naming the counts, while any
@@ -292,6 +267,171 @@ path. No environment variable, secret, cron or worker job is added.
   first. See
   [API.md → Approved Supplier List on the vendor record](API.md#approved-supplier-list-on-the-vendor-record)
   and [API.md → Maintenance](API.md#maintenance-pm-schedules-maintenance-work-orders-event-log).
+
+### CAR form fields, quote line revisions and the FAI log (migration 122)
+
+Apply additive **122_car_form_quote_rev** after **121_job_cost_subcontract** through the normal API
+boot migration path. It adds 21 nullable columns to `cars` (the controlled CAR form's fields, with
+the foreign keys `fk_cars_part_id`, `fk_cars_customer_id`, `fk_cars_vendor_id` and
+`fk_cars_quality_approved_by`, the index `ix_cars_part_id` and the CHECK
+`ck_cars_initiation_reason`) and one, `part_revision`, to `quote_lines`. It creates no table and runs
+no RLS, revoke or role statement (both tables have had RLS since `059`). It reads and writes no row,
+so there is no backfill. Each `ADD COLUMN` is metadata-only on PostgreSQL, but each statement still
+takes a brief ACCESS EXCLUSIVE lock, bounded by `SET LOCAL lock_timeout = '5s'`. No environment
+variable, secret, cron or worker job is added. The FAI log of record and its export need no
+migration.
+
+Deploy order: the migration must run before or with the API, which the boot path does. Old code is
+safe on the new schema. New code on an un-migrated database fails every CAR and quote-line load, so
+deploy the API before or with the worker.
+
+Tell users before the deploy:
+
+- **Every existing quote line has no drawing revision.** Until each line's Rev is entered (or `N/A`
+  on a line with no drawing), **Send**, the quote email and the PDF of a quote not yet issued
+  (draft, pending, rejected, expired) answer **409** naming the lines. Revisions can be entered only
+  on a draft or pending quote. An already sent, accepted or converted quote still reprints its PDF
+  as issued (its Rev column shows `-`). To email one, move it back to draft (possible only when no
+  line is converted to a work order), enter its revisions and send it again.
+- **Quote email previews prepared before the deploy cannot be sent.** The send answers **409**
+  "The document changed after this PDF was prepared". Create a fresh preview.
+- **Quote emails still in flight at the deploy keep their quote's status.** A delivery that was
+  `sending` or `unknown` when the deploy landed and is later accepted, or reconciled as accepted,
+  does not move its quote to SENT: the snapshot it was prepared from no longer matches (the delivery
+  says "The source changed; its workflow status was retained."). Mark that quote sent by hand once
+  its revisions are entered.
+- **The quote PDF's FOB term comes from the company address.** It prints "FOB *City*, *ST*." when
+  the last address line ends in "City, ST [ZIP]", else "FOB Origin.". Check the company record.
+
+Verify in a test company:
+
+- Open a CAR with a reason, a part and a vendor. **Print CAR**, then **Record quality approval**. A
+  second approval should be refused (409). The Audit Log should show the `car` CREATE and APPROVE
+  rows.
+- On a draft quote, enter a Rev on each line and send it. Before the Rev is entered, **Send** should
+  be refused with the line numbers.
+- Disposition an FAI as Passed, record its customer approval, and find it in the FAI tab's **Log**
+  view. As an Admin or Manager, export the log and confirm an `fai` EXPORT row in the Audit Log.
+
+Rollback: keep the columns. Older code never reads them. Once `122` has run, an older image cannot
+boot until the database is stamped back, so from a checkout of this release run
+`alembic stamp 121_job_cost_subcontract` before redeploying it. The values stay, and the next forward
+deploy re-runs `122` as a guarded no-op. The downgrade is **not** a rollback step: it drops every
+recorded CAR form field, Quality Manager approval and quote-line revision. The audit rows that
+recorded them remain, but nothing rebuilds the columns from them. See
+[API.md → Quality](API.md#quality) and [API.md → Quotes](API.md#quotes).
+
+### Job cost subcontract element (migration 121)
+
+Apply additive **121_job_cost_subcontract** after **120_production_calendar** through the normal API
+boot migration path. It adds `job_costs.actual_subcontract_cost` (FLOAT NOT NULL DEFAULT 0 —
+metadata-only on PostgreSQL 11+, every existing row reads 0, which is true: no subcontract entry could
+exist before it) and, where `cost_entries.entry_type` is the native `costentrytype` enum, the
+`SUBCONTRACT` label (in its own autocommit step; a database whose column is migration 024's VARCHAR
+has no type and needs no label). No table, environment variable, secret or worker job is added.
+Deploy the API before or with the ARQ worker. **Rollback:** pre-121 code cannot load a cost entry of
+type `SUBCONTRACT`; before redeploying an older image, list them (`SELECT id, company_id, job_cost_id
+FROM cost_entries WHERE entry_type = 'SUBCONTRACT'`) and re-key them to `other` through the API
+(delete + re-add, both audited). The enum label stays on downgrade.
+
+### Production calendar (migration 120)
+
+Apply additive **120_production_calendar** after **119_api_token_scope** through the normal API boot
+migration path. It creates four empty
+tenant tables — `production_calendar_settings`, `shift_patterns`, `shift_pattern_work_centers`,
+`shift_definitions` — and adds the nullable `oee_records.shift_id` FK + index with **no backfill**
+(legacy free-text OEE `shift` labels stay). No calendar is seeded: until an Admin saves one, every
+company's production day is its company-local calendar day. PostgreSQL RLS and table/sequence revokes
+from `PUBLIC`, `anon` and `authenticated` match model bootstrap. No environment variable, secret or
+worker job is added; the 02:30 OEE cron keeps its schedule and now targets each company's previous
+production day. **Behavior change on deploy, for every tenant:** OEE, reports, downtime filters,
+job-cost labor dates and analytics move from UTC-date day boundaries to company-local (production)
+days (the export, job-cost and analytics **calendar-date** filters move to company-local days in the
+same release — see `DEPLOYMENT_RUNBOOK.md` → Company-local dates and export datetime cells). Once a
+calendar is saved, the wallboard TODAY bar and the dashboard's "Operations Completed Today" reset at
+the production-day start instead of Central midnight. After deploy, an Admin applies Werco's calendar
+(Admin Settings → Production Calendar, or `docs/API.md` → Production calendar & shifts → worked
+example), then runs `POST /production-calendar/working-calendars/sync` as a dry run, reviews it, and
+commits — the commit changes scheduling capacity for every covered work center.
+
+### Saved dashboard layouts
+
+Apply additive **118_dashboard_layouts** after **117_operation_short_declared** through
+the normal API boot migration path. It creates an empty tenant/user `dashboard_layouts`
+table with a unique company/user key, a `version >= 1` check and indexes on `company_id`
+and `user_id`. No layout is seeded: until a person saves one, reads return
+`layout: null` without creating rows and every role keeps the default dashboard.
+PostgreSQL RLS and table/sequence revokes from `PUBLIC`, `anon`, and `authenticated`
+match model bootstrap. No environment variable, secret, cron or worker job is added.
+
+Deploy order is free. The frontend tolerates an API that does not have the routes yet:
+a 404 (or 405) from `GET /dashboard/layout` renders the default dashboard with
+**Customize** hidden. An older frontend never calls the new routes.
+
+Verify in a test company: open `/`, press **Customize**, add a panel from **Add widgets**
+and press **Done**, then reload in another browser and see the same layout; open edit mode
+in two tabs, press **Done** with a change in one and then in the other, and get the
+"changed in another tab" refusal (a tab that was merely left open is not stale enough:
+Customize re-reads the layout on entry); **Reset to default**. The Audit Log should show
+`dashboard_layout` CREATE and UPDATE rows. Confirm RLS with
+`SELECT relrowsecurity FROM pg_class WHERE relname = 'dashboard_layouts';` (true).
+
+Keep the table on ordinary application rollback: older code ignores it and renders
+the fixed dashboard. A deliberate 118 downgrade drops every saved layout, returning
+everyone to the default; the audit rows recording each change remain. See
+[API.md → Personal dashboard layout](API.md#personal-dashboard-layout) and
+[DASHBOARD.md → Customizing the dashboard](DASHBOARD.md#customizing-the-dashboard).
+
+### Read-only and AI-external API tokens (migration 119)
+
+Apply additive **119_api_token_scope** after **118_dashboard_layouts** through the normal API boot
+migration path. It adds two columns to the existing `api_tokens` table, and one CHECK, each
+guarded on its own:
+
+- `scope VARCHAR(16) NOT NULL DEFAULT 'full'`;
+- `ai_external BOOLEAN NOT NULL DEFAULT false`;
+- `ck_api_tokens_scope`, which admits only `'full'` and `'read_only'`.
+
+There is no backfill. Every existing token reads `full` / `false` and behaves exactly as before,
+its JWT included. No new table, so there is no RLS statement. On PostgreSQL the DDL runs under
+`SET LOCAL lock_timeout`.
+
+One new setting, `WERCO_MCP_READ_ONLY_DENY_TAGS`, has a working default; leave it unset. The API
+**refuses to start** if it names a tag no route carries, because a misspelled tag would deny
+nothing ([ENVIRONMENT_VARIABLES.md](ENVIRONMENT_VARIABLES.md#mcp-model-context-protocol-door-and-bridge)).
+No secret, cron or worker job is added. The export-control middleware is part of the API image.
+
+Deploy the API before the frontend: **Admin → API Tokens** and the Customers **Export control**
+panel call the new fields and routes. The same release also gates
+`PUT /shop-floor/operations/{id}/start` and `POST /shop-floor/operations/{id}/complete` to Admin /
+Manager / Supervisor / Operator / Quality. A Viewer or Shipping user who used them is refused
+**403**; operators and both kiosks are unchanged
+([RBAC → Work Orders](RBAC_PERMISSIONS.md#work-orders)).
+
+Verify in a test company:
+
+1. **Read-only.** Mint `{"scope": "read_only", "ai_external": false}`. A `GET` succeeds. A `POST`
+   answers **403** `Read-only API token cannot modify data.`, and `GET /api/v1/users/me` answers
+   **403** `Read-only API token cannot access this resource.`.
+2. **AI egress off.** Mint `{"scope": "read_only"}` (AI-external by default). With the company's
+   AI egress off it answers **403** `AI egress is disabled …` on every route, and at `/mcp` when
+   the door is enabled.
+3. **Redaction.** As an Admin, add an **ITAR controlled** contract to a customer (Customers →
+   Export control). The Audit Log shows a `customer_contract` CREATE row. With that test company's
+   AI egress on, the token from step 2 reads that customer's work order with `[export-controlled]`
+   text, and `controlled_access_events` gains a row.
+4. **Existing tokens.** `SELECT scope, ai_external, count(*) FROM api_tokens GROUP BY 1, 2;` shows
+   every pre-existing row as `full` / `false`.
+
+**Rollback.** Older code ignores both columns and the narrowing claims, so it accepts a read-only or
+AI-external token **as a full token** and redacts nothing. **Revoke every narrowed token before
+rolling the API back** (Admin → API Tokens). A deliberate 119 downgrade drops both columns and the
+CHECK, and with them the record of which tokens were narrowed, so it **refuses** (raises before any
+DDL, naming the count) while any un-revoked read-only or AI-external token exists: revoke them
+first (`SELECT id, label FROM api_tokens WHERE (scope <> 'full' OR ai_external) AND revoked =
+false`). An offline `--sql` downgrade cannot check: run that query by hand. A code-only rollback
+(database left at 119) is not checked at all, so the revoke step is still yours. See
+[EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md).
 
 ### Existing ERP frontend: Fabrication Quoting
 

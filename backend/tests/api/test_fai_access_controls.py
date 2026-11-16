@@ -10,6 +10,7 @@ from app.models.operational_event import OperationalEvent
 from app.models.process_sheet import OperationStepRecord, ProcessSheet, WOOperationStep
 from app.models.quality import FAICharacteristic, FAIStatus, FirstArticleInspection
 from app.models.user import UserRole
+from app.services import fai_service
 from app.services.audit_service import AuditService
 from tests.api.kiosk_test_helpers import make_user, make_wo_with_operation, make_work_center, user_headers
 
@@ -185,7 +186,9 @@ def test_quality_approval_is_attributed_and_audited(client, db_session, inspecti
     assert response.status_code == 200, response.text
     fai = inspections[0][0]
     db_session.refresh(fai)
-    assert fai.status == FAIStatus.PASSED and fai.approved_by == user.id and fai.completed_date == date.today()
+    # The completion date is the shop's (Central) day, not the test host's local date.
+    assert fai.status == FAIStatus.PASSED and fai.approved_by == user.id
+    assert fai.completed_date == fai_service.central_today()
     entry = db_session.query(AuditLog).filter_by(resource_type='fai', resource_id=fai.id, action='STATUS_CHANGE').one()
     assert entry.old_values['status'] == 'pending' and entry.new_values['status'] == 'passed'
     assert entry.new_values['approved_by'] == user.id

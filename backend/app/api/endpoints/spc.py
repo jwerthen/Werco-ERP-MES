@@ -16,6 +16,7 @@ from app.models.spc import ChartType, SPCCharacteristic, SPCControlLimit, SPCMea
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import WorkOrder
+from app.schemas.base import UTCModel
 from app.services.audit_service import AuditService
 
 router = APIRouter()
@@ -56,7 +57,7 @@ class CharacteristicUpdate(BaseModel):
     notes: Optional[str] = None
 
 
-class CharacteristicResponse(BaseModel):
+class CharacteristicResponse(UTCModel):
     id: int
     name: str
     part_id: int
@@ -94,7 +95,7 @@ class MeasurementBatchCreate(BaseModel):
     measurements: List[MeasurementCreate]
 
 
-class MeasurementResponse(BaseModel):
+class MeasurementResponse(UTCModel):
     id: int
     characteristic_id: int
     subgroup_number: int
@@ -113,7 +114,7 @@ class MeasurementResponse(BaseModel):
         from_attributes = True
 
 
-class ControlLimitResponse(BaseModel):
+class ControlLimitResponse(UTCModel):
     id: int
     characteristic_id: int
     calculation_date: datetime
@@ -131,7 +132,7 @@ class ControlLimitResponse(BaseModel):
         from_attributes = True
 
 
-class CapabilityResponse(BaseModel):
+class CapabilityResponse(UTCModel):
     id: int
     characteristic_id: int
     study_date: datetime

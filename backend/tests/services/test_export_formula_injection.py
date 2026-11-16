@@ -247,8 +247,9 @@ def test_generate_excel_keeps_real_numbers_and_dates_typed():
     assert [sheet.cell(row=2, column=i).data_type for i in (1, 2, 3)] == ["n", "n", "n"]
     assert sheet.cell(row=2, column=1).value == -5.0
     assert sheet.cell(row=2, column=3).value == -0.005
-    # format_value stringifies datetimes/dates before they reach the cell.
-    assert sheet.cell(row=2, column=4).value == "2026-07-30 13:45:00"
+    # format_value stringifies datetimes/dates before they reach the cell. A naive
+    # datetime is UTC and renders in the export zone (default Central) WITH its offset.
+    assert sheet.cell(row=2, column=4).value == "2026-07-30T08:45:00-05:00"
     assert sheet.cell(row=2, column=5).value == "2026-07-30"
     assert sheet.cell(row=2, column=6).value is None
 

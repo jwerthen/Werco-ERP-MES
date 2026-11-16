@@ -609,12 +609,14 @@ and anchored to a tenant-scoped `api_tokens` row that is looked up on **every** 
 (`app/services/api_token_service.py::check_api_token`). It authenticates everywhere a user access
 token does, **as that user**: `require_role` decides on every route exactly as for the SPA, tenancy
 is pinned to the row's company, and every write is audited as that user. There is no bot role and no
-bot permission — the token is exactly as powerful as the user it belongs to, and no more.
+bot permission — the token is exactly as powerful as the user it belongs to, and no more. A token can
+be minted **narrower** than its user (`scope`, `ai_external` — see "Read-only and AI-external
+tokens" below), never wider.
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| POST | `/api-tokens/` | Issue a token for one user of this company. Body `{"user_id", "label", "expires_days"?}` (label 1–100 chars, whitespace-stripped; `expires_days` 1–3650, or omitted = **never expires** — the default for a standing bot) → **201** `ApiTokenIssueResponse`: the metadata listed on the GET row **plus the one-time `token`**. Target user not in this company → **404** (never a cross-tenant hint); target user disabled → **409**; target is a platform admin / superuser → **409** `"API tokens cannot be issued for platform administrators"`, whoever the issuer is | Admin |
-| GET | `/api-tokens/` | List this company's tokens, newest first — metadata only: `id, label, user_id, jti_prefix, expires_at, revoked, revoked_at, revoked_by, revoke_reason, last_used_at, created_by, created_at`. `?user_id=` narrows to one holder; `?include_revoked=true` adds revoked rows (the record of who held access) | Admin |
+| POST | `/api-tokens/` | Issue a token for one user of this company. Body `{"user_id", "label", "expires_days"?, "scope"?, "ai_external"?}` (label 1–100 chars, whitespace-stripped; `expires_days` 1–3650, or omitted = **never expires** — the default for a standing bot; `scope` `full` (default) or `read_only`; `ai_external` omitted = `true` for a `read_only` token, `false` for a `full` one) → **201** `ApiTokenIssueResponse`: the metadata listed on the GET row **plus the one-time `token`**. Unknown `scope` → **422**; `ai_external: true` with `scope: full` → **422** `"An AI-external API token must be read-only."` (nothing written); target user not in this company → **404** (never a cross-tenant hint); target user disabled → **409**; target is a platform admin / superuser → **409** `"API tokens cannot be issued for platform administrators"`, whoever the issuer is | Admin |
+| GET | `/api-tokens/` | List this company's tokens, newest first — metadata only: `id, label, user_id, jti_prefix, scope, ai_external, expires_at, revoked, revoked_at, revoked_by, revoke_reason, last_used_at, created_by, created_at`. `?user_id=` narrows to one holder; `?include_revoked=true` adds revoked rows (the record of who held access) | Admin |
 | POST | `/api-tokens/{id}/revoke` | Revoke with a reason. Body `{"reason"}` (3–255 chars, whitespace-stripped) → **200** `ApiTokenResponse`. Unknown / cross-tenant id → **404**; already revoked → **409** (the first revocation's reason, actor and instant are the record and are never overwritten) | Admin |
 
 > **Shown once, never stored.** The raw JWT is returned only in the `token` field of the `POST`
@@ -627,7 +629,8 @@ bot permission — the token is exactly as powerful as the user it belongs to, a
 > every request, the holder is **401** on its very next call. Issuance and revocation each write two
 > tamper-evident `audit_log` rows — an `api_token` create / status-change row, and an
 > `API_TOKEN_ISSUED` / `API_TOKEN_REVOKED` row under `resource_type=authentication` keyed on the
-> token's **user** — all metadata only (label, user, `jti_prefix`, lifetime, reason). The plaintext
+> token's **user** — all metadata only (label, user, `jti_prefix`, lifetime, `scope` /
+> `ai_external`, reason). The plaintext
 > never appears in a log line, an audit row or an error message. **Every audit row written under an
 > API token carries a credential marker**: `extra_data.credential = {"kind": "api_token",
 > "api_token_id", "jti_prefix", "label"}`, folded in by `AuditService` on every `log_*` helper, so a
@@ -696,6 +699,78 @@ bot permission — the token is exactly as powerful as the user it belongs to, a
 > before any route logic runs. Shop-floor labor written by an API token is never stamped as the
 > kiosk channel — the client's declared channel (or none) is stored, exactly as for a desktop session.
 >
+> **Read-only and AI-external tokens (migration `119_api_token_scope`; Claude-plugin brief P0).**
+> Two columns on the row narrow a token below its user's role. Both are fixed at mint (revoke and
+> re-mint to change them) and audited: the `CREATE` row and the `API_TOKEN_ISSUED` event carry
+> `scope` and `ai_external`. Issuing and revoking are **required** audit evidence: if either row
+> cannot be written the answer is **503** (`"The audit record for this API token could not be
+> saved; no token was issued. Retry."` / `"The audit record for this revocation could not be saved;
+> the token was not revoked. Retry."`) and nothing is saved. A narrowed token's JWT carries matching `api_scope` / `ai_ext` claims,
+> and the row check refuses a token whose claims disagree with its row (**401**). A **full** token's
+> JWT and behavior are exactly what they were before. `get_current_user` applies these gates to a
+> narrowed token, in order, after the path fence:
+>
+> 1. **AI-external, company AI egress off** (`Company.allow_ai_egress`, read through
+>    `llm_client.ai_egress_allowed`) → **403** `"AI egress is disabled for this company: an
+>    AI-external API token cannot be used until an Admin enables it."`.
+> 2. **Read-only, method not `GET` / `HEAD` / `OPTIONS`** → **403** `"Read-only API token cannot
+>    modify data."`, whatever the user's role. Nothing is written before it (a malformed JSON body
+>    is still **422** first: FastAPI decodes the body before it resolves dependencies), so the two
+>    shop-floor operation verbs are included.
+> 3. **Read-only, the matched route carries a tag in `WERCO_MCP_READ_ONLY_DENY_TAGS`** (default:
+>    Documents, Document Deliveries, Data Export, Users, Audit, Admin Settings, Carrier
+>    Integrations, Platform Administration, Company Management, API Tokens, Hank Intake) → **403**
+>    `"Read-only API token cannot access this resource."`. A request that matches no route fails
+>    closed with the same 403. Denying Users removes `GET /users/me` too. API Tokens, Users, Audit,
+>    Documents and Data Export are a floor the setting can extend but never drop
+>    (`READ_ONLY_DENY_TAG_FLOOR`), so an empty or truncated value still denies them.
+> 4. **AI-external, `(method, route)` not on the allowlist** (a fixed set of `GET` routes in
+>    `app/core/export_control.py`: work orders, shop-floor operations, downtime, work centers, OEE,
+>    parts, routings, NCR / CAR / FAI and the FAI log of record, quotes, vendors, purchase orders,
+>    receiving, maintenance work orders, the production calendar) → **403** `"This resource is not available to an AI-external API token."`. Then every
+>    query parameter (and value) must be on that route's list in `AI_EXTERNAL_QUERY_PARAMS`:
+>    free-text `search`, the `customer` filter and `sort` / `group` by part or customer are refused
+>    **403** `"This query parameter is not available to an AI-external API token: free-text search,
+>    customer filters and text sort keys are refused."`, as is any parameter the route does not
+>    declare. A filter over withheld text is an oracle on it.
+>
+> An AI-external row is treated as read-only whatever its `scope` says. On the way out, the
+> export-control middleware (`app/middleware/export_control.py`) does two things. It replaces any
+> non-JSON response to a read-only token with **403** `"Read-only API token cannot download
+> files."`; that covers any status but 204 / 304 / 1xx, so file downloads, drawings, CSV / XLSX
+> exports and redirects to file storage are all refused. For an AI-external token it also redacts
+> the JSON records of export-controlled customers, and records that cannot be tied to any
+> customer, to `"[export-controlled]"`, keeping ids, statuses, dates, quantities and money (never
+> dimensions, tolerances or measured values). It logs each withheld record and each refusal to
+> `controlled_access_events`. A route's own error comes back as one fixed text per status code
+> (`"Request failed (404 Not Found); details are withheld from AI-external API tokens."`; a 422
+> adds each error's `type` and location, never the value sent), and `GET /parts/by-number/...` that
+> finds a withheld part is that same 404. A number that matches nothing costs the same as a
+> withheld one: it builds the same index and logs one `ai_external_lookup_miss` row, so timing does
+> not tell them apart either. If the check fails, the answer is **503**
+> `"Export-control check failed; nothing was sent."`.
+>
+> Global search (`GET /search/`) never returns `user` results to a read-only token. **Read-only
+> means read-only** (lead decision 2026-11-15): a read-only or AI-external token
+> (`app.core.credentials.is_narrowed_api_token`) never reconciles on read. Its `GET /work-orders/`,
+> `GET /work-orders/{id}`, `GET /shop-floor/dashboard`, `GET /shop-floor/operations` and
+> `GET /shop-floor/operations/{id}` serve the **stored** state and write nothing — no status flip,
+> no component-quantity re-derivation, no audit row, no operational event or notification, no
+> finished-goods receipt, backflush or material consumption, no cost or scheduling rollup. The
+> next such read by a person or a full token reconciles exactly as before, so until then what a
+> narrowed token sees can lag what the floor's labor already recorded. The writes that remain
+> are the token's `last_used_at` touch and, for an AI-external token, the `controlled_access_events`
+> ledger. GET exporters that write an `EXPORT` audit row (visitor log CSV,
+> Import Center failed rows, consumable checkouts, `/analytics` report export) refuse a read-only
+> token **403** `"Read-only API token cannot download files."` before that row is written. The rules for which records are withheld, and the steps to hand
+> a token to Claude, are in [docs/EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md).
+>
+> **Conditional requests.** A request carrying a **read-only or AI-external** API token (its JWT's
+> `api_scope` / `ai_ext` claims) has `If-None-Match` / `If-Match` / `If-Modified-Since` /
+> `If-Unmodified-Since` / `If-Range` stripped before routing, so it never receives a **304**: it
+> always gets the body, which for an AI-external token is the redacted one. A full token, which
+> carries neither claim, keeps its 304s.
+>
 > **Never a platform principal.** A superuser or `platform_admin` is waved through every `require_role`
 > gate and reaches `/platform/*`, which addresses other companies by explicit id — a row pin constrains
 > none of that. So no API token is ever bound to one: `POST /api-tokens/` refuses such a target with
@@ -707,8 +782,13 @@ bot permission — the token is exactly as powerful as the user it belongs to, a
 > as access tokens. That is a feature (the emergency "revoke everything"), not a hazard; re-mint
 > afterwards. Nothing else expires them: no server restart, no password change, no refresh cycle.
 >
-> **No UI in this pass.** Tokens are minted with `curl` (below) or through the MCP tools
-> `create_api_token` / `list_api_tokens` / `revoke_api_token` with an Admin's interactive JWT.
+> **Admin → API Tokens** (`/admin/api-tokens`, Admin only) lists, issues and revokes tokens in the
+> app. It shows label, holder, scope, AI-external flag, `jti_prefix`, last used, expiry and
+> revocation. The issue dialog defaults to **Read-only** with **AI-external** checked; AI-external
+> is unavailable for **Full**. The new token is shown once with a copy button, and the dialog
+> closes only on an explicit "Done — I copied it". Revoking requires a reason. Tokens can also be
+> minted with `curl` (below) or through the MCP tools `create_api_token` / `list_api_tokens` /
+> `revoke_api_token` with an Admin's interactive JWT.
 > Recommended: a **dedicated bot user** per agent (e.g. *Werco Assistant*) at the role the bot
 > actually needs, so the audit trail names the agent and retiring it — revoking the token, or
 > deactivating the user — touches no person's account. **Deactivation retires, it never pauses:**
@@ -738,6 +818,14 @@ curl -s -X POST "$API/api-tokens/" \
   -d '{"user_id": <assistant-user-id>, "label": "Werco Assistant"}'
 # -> 201 {"id": ..., "label": "Werco Assistant", "user_id": ..., "jti_prefix": "...",
 #         "expires_at": null, "revoked": false, ..., "token": "<the API token - copy it now>"}
+
+# For an OUTSIDE AI service (e.g. Claude's custom connector): a read-only token, AI-external by
+# default, bound to a Viewer user. Useless until the company's AI egress is on
+# (docs/EXPORT_CONTROL_AI_EGRESS.md).
+curl -s -X POST "$API/api-tokens/" \
+  -H "Authorization: Bearer $ADMIN_JWT" -H "Content-Type: application/json" \
+  -d '{"user_id": <viewer-user-id>, "label": "Claude connector", "scope": "read_only"}'
+# -> 201 {..., "scope": "read_only", "ai_external": true, ..., "token": "<copy it now>"}
 
 # Later: list (metadata only), and revoke with a reason.
 curl -s "$API/api-tokens/?include_revoked=true" -H "Authorization: Bearer $ADMIN_JWT"
@@ -1299,7 +1387,9 @@ matching set before pagination: current exact matches, exact retired part aliase
 identifier prefixes, then broader matches. `total` and `categories` count the complete
 selected result set; `has_more`, `offset` and `limit` describe its page. The full
 results screen at `/search` retains query and type filters in the URL. Employee
-directory results retain the existing Admin/Manager access restriction.
+directory results retain the existing Admin/Manager access restriction, and a **read-only API
+token** never gets them, whatever its user's role: the Users tag is denied to read-only tokens, and
+`user` results would expose names, emails and employee ids anyway.
 
 Customer responses include every editable contact, address, payment, shipping and
 note field. The customer editor sends only changed fields; an omitted field is
@@ -1320,10 +1410,35 @@ active company; another company's customer id answers **404** with the same deta
 | GET | `/customers/{id}` | Customer detail | Yes |
 | GET | `/customers/{id}/stats` | Parts and assemblies filed under the customer's name, work-order counts by status, and current / past / recent work orders, **from the active company only** (see note) | Yes |
 | POST | `/customers/` | Create. `code` is optional and generated from the name when omitted. **400** `Customer name already exists` / `Customer code already exists` on a duplicate **within the company**. Writes an audit `CREATE` row in the same transaction | Admin / Manager / Supervisor |
-| PUT | `/customers/{id}` | Partial update of a live customer (**404** on a soft-deleted one). A rename onto a name already used in the company is **400** `Customer name already exists`, including when a concurrent rename races past the check. `code` is not updatable | Admin / Manager |
-| DELETE | `/customers/{id}` | Soft delete by default (also clears `is_active`). A second soft delete of an already-deleted customer is **400** `Customer is already deleted` and changes nothing. `hard_delete=true` removes the row (a soft-deleted one too), and is refused **400** while parts of the active company carry the customer's name | Admin / Manager |
+| PUT | `/customers/{id}` | Partial update of a live customer (**404** on a soft-deleted one). A rename onto a name already used in the company is **400** `Customer name already exists`, including when a concurrent rename races past the check. `code` is not updatable. A **rename** writes its audit `UPDATE` row as required evidence: if the row cannot be written, **503** `The audit record for this customer rename could not be saved; nothing was changed. Retry.` and nothing is saved (export control reads a controlled customer's former names from these rows; see [EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md)). Other edits keep a best-effort audit row | Admin / Manager |
+| DELETE | `/customers/{id}` | Soft delete by default (also clears `is_active`). A second soft delete of an already-deleted customer is **400** `Customer is already deleted` and changes nothing. `hard_delete=true` removes the row (a soft-deleted one too), and is refused **400** while parts of the active company carry the customer's name, **400** while a CAR names the customer (`Cannot hard delete: Customer is named on N corrective action report(s); soft delete it instead`), and **400** `Cannot hard delete: Customer has export-control contracts or handling instructions. Soft delete it instead.` while any contract or handling instruction names the customer | Admin / Manager |
 | POST | `/customers/{id}/restore` | Restore a soft-deleted customer (**400** if it is not deleted). Restore always sets `is_active = true` (see note) | Admin / Manager |
 | POST | `/customers/import-csv` | See [Bulk Imports & Templates](#bulk-imports--templates-excel-migration-kit) | Admin / Manager |
+| GET | `/customers/{id}/export-control` | The customer's export-control standing: `controlled` (derived from **every** contract and classified handling instruction it has ever had), `data_classification` (`itar_export_controlled` outranks `cui`), `controlling_contract_id`, `customer_is_deleted`, and every contract with its own `controlling` flag. A soft-deleted customer is readable | Admin (never an API token) |
+| POST | `/customers/{id}/contracts` | Add a contract. Body: `contract_name` (required), `contract_number`, `itar_controlled`, `export_controlled`, `contains_cui`, `default_data_classification` (default `internal`), `effective_date`, `expiration_date`, `active` (default `true`), `handling_instructions`, and a required `reason` (1–1000 chars); unknown keys **422**. → **201** with the export-control view. Duplicate `contract_number` in the company → **409** | Admin (never an API token) |
+| PUT | `/customers/{id}/contracts/{contract_id}` | Change the supplied fields of one of the customer's contracts; `reason` always required; an explicit `null` on a flag, `active`, the classification or `contract_name` is **422**. Not this customer's contract in this company → **404**; duplicate `contract_number` → **409**. A request that changes nothing writes nothing. There is no delete: un-marking is this `PUT` with the flags off | Admin (never an API token) |
+
+> **Export control (Claude-plugin brief P0.3; owner decision 2026-11-13).** These three routes are
+> the only writer of `customer_contracts`. A customer is **export-controlled** when any of its
+> contracts has `itar_controlled`, `export_controlled` or `contains_cui` set, or is classified
+> `itar_export_controlled` / `cui`. Every contract counts, whatever its `active` flag or dates,
+> because ITAR obligations outlive the contract. An AI-external API token then sees that
+> customer's work orders, parts, NCRs, quotes and purchasing records redacted
+> ([docs/EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md)).
+>
+> Only an **Admin** may read or change it. A non-Admin gets **403** `Insufficient permissions`.
+> **Any** API token, whatever its role or scope, gets **403** `"An API token cannot read or change
+> a customer's export control: an Admin does it, signed in to the app."`. Writes run inside
+> `required_audit`: a REQUIRED `customer_contract` CREATE / UPDATE row carries the `reason` and the
+> customer's controlled state before and after. When the customer's standing changes (controlled ↔
+> not, or ITAR ↔ CUI) the write also adds a `customer` `STATUS_CHANGE` row. If the audit cannot be
+> written the answer is **503** `"The audit record for this export-control change could not be
+> saved; nothing was changed. Retry."` and nothing is saved. Dates are stored as naive UTC.
+> Another company's customer is **404**. A soft-deleted customer stays readable and markable,
+> because its historical records stay controlled. The UI is the **Export control** panel on the
+> customer detail in **Customers**, shown to Admins only. The two writes are **not MCP tools**
+> (`catalog.EXCLUDED_OPERATIONS`), so not even a person's own JWT reaches them through an agent;
+> `get_customer_export_control` stays a tool.
 
 > **Create and update are now role-gated.** Both previously required only an authenticated user.
 > Update is Admin / Manager, matching the rest of the customer master's writes (import, delete,
@@ -1352,7 +1467,8 @@ active company; another company's customer id answers **404** with the same deta
 > work-order numbers and customer POs, and the hard-delete count refused the delete over the other
 > company's parts while disclosing how many it had. Both now read the active company only.
 >
-> The hard-delete check counts parts only. Customer complaints, RMAs, RFQ quotes, fabrication
+> The hard-delete check counts parts and CARs (`cars.customer_id`, migration `122`) only. Customer
+> complaints, RMAs, RFQ quotes, fabrication
 > quotes and the governance tables reference `customers.id` with no `ON DELETE`, so on PostgreSQL a
 > hard delete of a customer they still reference fails with a database error (**500**) rather than
 > a 400. Work orders that name the customer are not counted. Soft delete is unaffected.
@@ -1425,8 +1541,9 @@ company-scoped.
 | GET | `/work-orders/` | List all work orders (`skip` ≥ 0, `limit` 1–5000 default 100 — the standard list tier, see [Pagination](#pagination)). `deleted_only=true` returns **only** this company's soft-deleted work orders — the restore view, **Admin / Manager**, and the only read in the API that can see one; see "Seeing a deleted work order" below | Yes (`deleted_only=true`: Admin / Manager) |
 | GET | `/work-orders/browse` | **The bounded, server-filtered page behind the Work Orders list screen.** Returns an **envelope**, not a bare array. Query: `skip` ≥ 0 (default 0; a `skip` past the last page is clamped to that page's start, and the response's `skip` reports the clamped value), `limit` **1–100** (default 50); `status` (one `WorkOrderStatus`; omitted = every status except complete / closed / cancelled); `search` (≤ 200 chars, a **literal** case-insensitive substring — `%` / `_` are not wildcards — over WO number, customer name, customer PO, lot, unit #, part number and part name); `customer` (≤ 255, exact customer name); `hide_cots` (default `true`: hides work orders whose part is purchased / hardware / raw material; part-less ones stay); `scope` (`overdue` \| `due_today`, open work orders against the **Central** date); `work_order_type` (`production` \| `laser_cutting`, unknown → **422**; `laser_cutting` = nest packages — standalone laser work orders and the laser children a nest import hangs off a production job); `sort` (`work_order_number` \| `part` \| `customer` \| `due_date` \| `priority` (default) \| `status`, nulls last, ID tiebreaker) with `direction` (`asc` default \| `desc`); `group` (`none` default \| `customer` \| `part` \| `status`, rows ordered by group first). Response: `items` (`WorkOrderSummary` rows with operation progress), `total` (the full filtered count), `skip`, `limit`, `has_next`, `stats` (`overdue` / `in_progress` / `due_today` over the filtered set), `customers` (distinct customer names under every filter **except** `customer` — it honors `work_order_type` — capped at 1000, with `customers_truncated`), `group_totals` (full counts for only the groups on this page; `{}` when `group=none`), and `type_counts` (`{production, laser_cutting}`, both always present, zero-filled: rows per type under every **other** filter, `customer` included, deliberately **ignoring** `work_order_type` so each type chip shows its own count). A pure read sent `Cache-Control: no-store`: it **never reconciles on read** — no completion evidence, READY promotion or inventory effect — so loading the list does not heal a stranded work order the way `GET /work-orders/{id}` does (see "A read heals a stranded work order" below) | Effective `work_orders:view` in the active company (every role by default; **403** when a company role override removes it) |
 | POST | `/work-orders/` | Create work order. `work_order_type` is validated against the `WorkOrderType` vocabulary (**422** on an unknown value), and `'laser_cutting'` is **refused on create** (422) — nest-dispatch WOs are minted only by the laser nest import paths (see note below). Body accepts `sequential_operations` (**default `true`** — a sequenced routing; see "READY promotion" below) and the optional `unit_number` (≤ 50 chars — see "Unit #" below) | Yes |
-| GET | `/work-orders/{id}` | Get work order by ID | Yes |
-| GET | `/work-orders/{id}/timeline` | Chronological job history with category, actor and time filters; opaque cursor, `limit` 1–100 (default 30). Returns business events and source links, not raw audit payloads | Yes |
+| GET | `/work-orders/{id}` | Get work order by ID. Also carries the job's cost by element (`job_cost_actuals`), the inventory-ledger material figure (`issued_material_cost`) and, per operation, where its actual hours come from (`hours_source`, `recorded_setup_hours`, `recorded_run_hours`, `hours_include_backfill`) — see "Cost and actual hours on the work-order read" below | Yes |
+| GET | `/work-orders/by-number/{wo_number}` | Get work order by number: the **same body** as by ID (every computed field included). A soft-deleted work order is **404**, as by ID. Unlike the read by ID it does **not** reconcile on read — it writes nothing | Yes |
+| GET | `/work-orders/{id}/timeline` | Chronological job history with category, actor and time filters; opaque cursor, `limit` 1–100 (default 30). Returns business events and source links, not raw audit payloads. Each item a single operation owns (its start / finish, production receipts, process-step evidence, labor, a blocker filed against it) carries `operation_id`; the job's own items carry `null` | Yes |
 | PUT | `/work-orders/{id}` | Update work order (body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status, **or sets `status` to COMPLETE/CLOSED from any status other than COMPLETE/CLOSED** — see "Terminal-state lock" below). **`due_date` is the one non-`status` field that IS status-gated: changing it on a COMPLETE/CLOSED/CANCELLED work order returns 409** (see "Due date on a finished job" below). Other non-`status` fields such as `notes` / `special_instructions` / `unit_number` carry **no status gate**: they are editable at any status, including terminal ones (send `unit_number: null` — or `""`, which is trimmed to NULL — to clear it). **The flip verb for `sequential_operations`** — turning it *on* returns **409** on a laser nest WO, and **409 naming the operations** when work is already under way out of sequence; otherwise it demotes un-worked blocked operations READY → PENDING, one audit row each (see "READY promotion" below). **`status: on_hold` on a DRAFT work order returns 409** (a draft has nothing on the floor to hold — release it first); this `PUT` is the "Hold Work Order" write for a released / in-progress job, and the door that puts a held job back on the floor is `POST /work-orders/{id}/resume` (this `PUT` can still move a held job to `draft` or `cancelled`, which keeps it off the floor; its blind move to `released` / `in_progress` is a known gap — see "Draft and on-hold work orders refuse every start" below). **Any move to `draft`** (from released / in progress / on hold) returns every un-worked READY operation — laser nests included — to PENDING with one **required** audit row each; **503**, nothing changed, when those rows cannot be written (see "Returning a job to draft" below). **Lowering `quantity_ordered` below what a whole-order operation has already accounted for (its good + scrap) returns 409** naming the operation, before any field is written — lower the order only by units no operation has started; **raising** it once a whole-order or component operation has completed returns 409 too; whole-order targets restated as `component_quantity` move with the order (audited); an API token lowering it once work is recorded gets 403, as does an API token raising the header's `quantity_scrapped` (only a person declares scrap — owner decision 2026-11-07), changing `scrap_reason`, or changing the header's `quantity_complete` / `quantity_scrapped` in either direction (this PR's extension); and a `sequential_operations` flip that would re-interpret a declared short returns 409 (see "Short count at completion" below) | Admin / Manager / Supervisor |
 | DELETE | `/work-orders/{id}` | Delete work order (soft by default; `hard_delete=true` only for draft/cancelled, and refused **409** when ledger-backed ties or saved templates reference it) | Admin / Manager |
 | POST | `/work-orders/{id}/restore` | Restore a soft-deleted work order (**400** if it is not deleted). Re-opens the ties the delete cancelled — **except** any whose part has since been reclassified into one the shop produces. Returns an **envelope** (`message` + `skipped_material_allocations`), not a bare message; see "Restoring a work order" below. Reached from Work Orders → **Deleted** (`deleted_only=true` above) | Admin / Manager |
@@ -1770,7 +1887,8 @@ company-scoped.
 > operation such a user could reach; with same-work-center operations promoting together, the reachable
 > operations are exactly the ones the gate no longer refuses. An Operator gets **403** here and is
 > unaffected in practice — the shop-floor `PUT /shop-floor/operations/{id}/start` and the kiosk stay
-> operator-open by design. See `docs/RBAC_PERMISSIONS.md` → Work Orders.
+> open to operators by design (since P0.4, 2026-11-13, the shop-floor verb refuses Viewer and
+> Shipping). See `docs/RBAC_PERMISSIONS.md` → Work Orders.
 >
 > **Draft and on-hold work orders refuse every start (owner ruling 2026-11-05).** The floor cannot
 > start work on a job a supervisor has not released, or on one a supervisor has put on hold. One pure
@@ -2277,6 +2395,51 @@ company-scoped.
 > writer three ways (ORM writes, request schemas, MCP tools), so a new one fails CI until it is
 > guarded or listed as exempt with a reason.
 >
+> **Cost and actual hours on the work-order read** (P1.3 / P1.4, 2026-11-13). The two
+> single-work-order reads — `GET /work-orders/{id}` and `GET /work-orders/by-number/{wo_number}` —
+> carry two cost figures, on two different bases. Every other route that returns a
+> `WorkOrderResponse` (create, `PUT`, release, duplicate, template use, nest imports) leaves both
+> `null`.
+>
+> - **`job_cost_actuals`** — the work order's `JobCost` by element, or `null` when it has none.
+>   **Nothing creates a `JobCost` automatically** (the completion sync only updates an existing
+>   one), so expect `null` on most jobs. Fields: `job_cost_id`, `status` (`in_progress` /
+>   `completed` / `reviewed`), `actual_material_cost`, `actual_labor_cost`, `actual_burden_cost`
+>   (the JobCost's `actual_overhead_cost`: OVERHEAD **plus OTHER** entries),
+>   `actual_subcontract_cost` (SUBCONTRACT entries), `actual_total_cost` (all five types) and
+>   `updated_at`. These are the JobCost's own totals of its cost entries: labor is rebuilt from
+>   closed time entries at the work-center rate (`POST /job-costs/{id}/calculate`, or the
+>   completion sync when `LABOR_COST_ROLLUP_ENABLED` is on); material, burden and subcontract come
+>   **only** from manually added entries. Read with its own `company_id` scope — a legacy row of
+>   another company holding this work order's id on the global `job_costs.work_order_id` key is
+>   never disclosed. Plain numbers, which may be negative (a manual entry can be).
+> - **`issued_material_cost`** — net `ISSUE` minus `RETURN` cost from the inventory ledger, over
+>   all three work-order reference shapes (`work_order_ledger_filter`): the material leg of
+>   `actual_cost`. Present whether or not a JobCost exists and whatever
+>   `LABOR_COST_ROLLUP_ENABLED` says. It is **not** `job_cost_actuals.actual_material_cost`, which
+>   counts manual MATERIAL entries only; a job can show real issued material here and `0` there.
+>
+> **Where actual hours come from.** An operation's `actual_setup_hours` / `actual_run_hours` are
+> never copied from routing standards (`setup_time_hours` / `run_time_hours` are the estimate
+> only), and no API writes them by hand. Every non-zero value is a sum of time-entry
+> `duration_hours`, which is the **server's wall clock** from clock-in to clock-out. `SETUP`
+> entries credit setup hours; every other type — `RUN`, `REWORK`, `INSPECTION`, `DOWNTIME`,
+> `BREAK` — credits run hours. Clock-out credits the operation at once. Some paths close entries
+> **without** crediting it: an operation hold (`PUT /shop-floor/operations/{id}/hold`, and the
+> process-sheet OOT quality hold) always, and the auto clock-out when an operation or work order
+> completes while `LABOR_COST_ROLLUP_ENABLED` is off. A paper back-entry (`source` `backfill`)
+> records the clerk's keying session, not the labor. So each operation on the two reads above
+> also carries, derived at read time from the same batched time-entry read (never stored):
+>
+> | Field | Meaning |
+> |---|---|
+> | `hours_source` | `time_entries` — closed time entries measured hours on this operation (a closed zero-duration entry with no stored hours also reads `time_entries`: it is still a measurement). `manual` — stored hours with no time-entry hours behind them (legacy or out-of-band data; no API writes them). `none` — nothing recorded; an open entry counts for nothing until clock-out. `standard` is **reserved and never returned**. |
+> | `recorded_setup_hours` / `recorded_run_hours` | The measured sums of **closed** entries, split as clock-out splits them. They can be **higher** than `actual_setup_hours` / `actual_run_hours` after a hold or a flag-off auto clock-out. |
+> | `hours_include_backfill` | `true` when any closed entry behind those sums is a paper back-entry or an import, whose duration is keying time. |
+>
+> All four are `null` on responses not built through `_enrich_work_order_operations`. A foreign
+> company's entry on a colliding operation id never counts.
+>
 > **Read models.** `WorkOrderOperationResponse` (every response built through
 > `_enrich_work_order_operations` — `GET /work-orders/{id}`, by-number, create, duplicate, both
 > nest-package imports, template use) carries `quantity_short_declared` (the column) and, computed in
@@ -2569,11 +2732,15 @@ company-scoped.
 >   > `ISSUE` on the same work order is still refused **409** — see the error table below — but that
 >   > refusal is now a legacy-only fence and is **unreachable** in practice.
 >
-> **Tied material counts as job-cost material.** `WorkOrder.actual_cost`, the synced `JobCost`, and
-> the analytics cost variance sum `abs(total_cost)` over the work order's `ISSUE` rows under **all
-> three** reference shapes (`work_order`, `work_order_backflush` and `work_order_operation`) — one
-> shared predicate (`work_order_ledger_filter`), so the stored
-> rollup and the analytics leg cannot drift. A nest that burned six $80 sheets contributes $480.
+> **Tied material counts as work-order material cost.** `WorkOrder.actual_cost`, the work-order
+> read's `issued_material_cost` and the analytics cost variance sum `abs(total_cost)` over the work
+> order's `ISSUE` rows (less `RETURN` credits) under **all three** reference shapes (`work_order`,
+> `work_order_backflush` and `work_order_operation`) — one shared predicate
+> (`work_order_ledger_filter`), so the stored rollup and the analytics leg cannot drift. A nest that
+> burned six $80 sheets contributes $480. **A `JobCost` does not**: its sync on completion only
+> rebuilds labor from time entries, and its `actual_material_cost` is the total of manually added
+> MATERIAL entries. (This paragraph said "the synced `JobCost`" did until 2026-11-13; it never
+> did.)
 >
 > **Scrap consumes**, and posts as `ISSUE` (not `SCRAP`): lot genealogy filters on `ISSUE`, so a
 > `SCRAP` row would erase audited scrap material from the as-built record. The good/scrap split is
@@ -4713,7 +4880,7 @@ environment variable or deployment configuration change is needed.
 | POST | `/parts/` | Create part | Yes |
 | GET | `/parts/{id}` | Get part by ID | Yes |
 | PUT | `/parts/{id}` | Update part — resolves **any** part in the company, engineering or material/supply. (**409** when it turns `backflush_components` on and the part's readiness check reports blockers, and **409** when it reclassifies a material part into a produced one while an **unfinished** work order still ties it — see below). Also sets `supply_scope` (see [Part Schema](#part-schema)) | Admin / Manager / Supervisor |
-| DELETE | `/parts/{id}` | Delete part (soft delete — restorable) | Admin |
+| DELETE | `/parts/{id}` | Delete part (soft delete — restorable). `hard_delete=true` is refused **400** while work orders, BOMs or BOM lines reference the part, or while a CAR names it (`Cannot hard delete: Part is named on N corrective action report(s); soft delete it instead`; `DELETE /materials/{id}?hard_delete=true` applies the same CAR check) | Admin |
 | POST | `/parts/{id}/restore` | Restore a soft-deleted part, **returning it to the `is_active` it had when it was deleted** — not an unconditional re-activate, and an unknowable prior value comes back **inactive**. **400** if it is not actually deleted. See note below | Admin / Manager |
 | POST | `/parts/{id}/deactivate` | Take a part out of use — `is_active=false` + `status='obsolete'`. **Not** a delete; `is_deleted` is never written. Reason required. **409** if it still has stock and `acknowledge_remaining_stock` was not set | **Admin / Manager** |
 | POST | `/parts/{id}/activate` | Put a retired part back into use. Reason optional | **Admin / Manager** |
@@ -6223,15 +6390,15 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 |--------|----------|-------------|---------------|
 | GET | `/shop-floor/dashboard` | Shop floor dashboard | Yes |
 | GET | `/shop-floor/my-active-job` | Get current user's active job, incl. the job's written guidance (WO notes/special instructions + the operation's description/setup/run text). Top-level **`dispatch_notices`** (always present, `[]` when not clocked in): the newest planner dispatch notice per work center where the caller holds an open **labor** entry — see "Floor dispatch notices" below | Yes |
-| GET | `/shop-floor/operations` | List not-complete/cancelled operations for the desktop shop-floor pages (paginated, max 200/page; filters `work_center_id` / `status` / `search` / `due_today`) — rows in the **canonical dispatch order**, each carrying the advisory `run_order` display rank (see "Desktop parity" under the Dispatch run order note below). An **`ON_HOLD` row additionally carries `hold`** — `{ held_at, held_by_user_id, held_by_name, blocker }`, from the same batched pure-read `operation_hold_view` the kiosk `held` list uses, so the desk page and the floor cannot tell two stories about one hold. The key is **absent on every other row** (unheld payloads stay byte-identical), every field inside is nullable, and `blocker: null` covers ordinary nest holds (including a category or note saved on the hold event) and bare holds, which still carries `held_by_name` / `held_at`: reason and attribution are INDEPENDENT. **Free text (`title` / `note`) rides this response** — every caller is an identified `get_current_user` session, never a crew-station principal, so the station withholding rule does not apply and `free_text_withheld` is `false`. **Only when filtered to one `work_center_id`**, the envelope also carries `dispatch_notices` (0- or 1-item list, that machine's newest dispatch notice) and `server_time` (UTC `Z`); an unfiltered list carries neither key — see "Floor dispatch notices" below. Every row also carries **`start_blocked_reason`** (the work-order start refusal text for a draft / on-hold / terminal work order, else `null`) and **`work_order_status`**; `can_check_in` is `false` whenever `start_blocked_reason` is set, and `blocked_by_previous_operations` is unchanged. `null` is not a "startable" claim — the write verb decides at the moment of the action. `GET /shop-floor/operations/{id}` carries the same two keys on `operation` and on each `all_operations[]` entry (see Work Orders → "Draft and on-hold work orders refuse every start") | Yes |
+| GET | `/shop-floor/operations` | List not-complete/cancelled operations for the desktop shop-floor pages (paginated, max 200/page; filters `work_center_id` / `status` / `search` / `due_today` — work orders due on the **company's calendar date**, not the server's UTC date, since 2026-11-13) — rows in the **canonical dispatch order**, each carrying the advisory `run_order` display rank (see "Desktop parity" under the Dispatch run order note below). An **`ON_HOLD` row additionally carries `hold`** — `{ held_at, held_by_user_id, held_by_name, blocker }`, from the same batched pure-read `operation_hold_view` the kiosk `held` list uses, so the desk page and the floor cannot tell two stories about one hold. The key is **absent on every other row** (unheld payloads stay byte-identical), every field inside is nullable, and `blocker: null` covers ordinary nest holds (including a category or note saved on the hold event) and bare holds, which still carries `held_by_name` / `held_at`: reason and attribution are INDEPENDENT. **Free text (`title` / `note`) rides this response** — every caller is an identified `get_current_user` session, never a crew-station principal, so the station withholding rule does not apply and `free_text_withheld` is `false`. **Only when filtered to one `work_center_id`**, the envelope also carries `dispatch_notices` (0- or 1-item list, that machine's newest dispatch notice) and `server_time` (UTC `Z`); an unfiltered list carries neither key — see "Floor dispatch notices" below. Every row also carries **`start_blocked_reason`** (the work-order start refusal text for a draft / on-hold / terminal work order, else `null`) and **`work_order_status`**; `can_check_in` is `false` whenever `start_blocked_reason` is set, and `blocked_by_previous_operations` is unchanged. `null` is not a "startable" claim — the write verb decides at the moment of the action. `GET /shop-floor/operations/{id}` carries the same two keys on `operation` and on each `all_operations[]` entry (see Work Orders → "Draft and on-hold work orders refuse every start") | Yes |
 | GET | `/shop-floor/operations/{id}/documents` | Kiosk doc-viewer discovery: the operation's controlled part drawing, live nest reference PDF, nest material, and critical SPC characteristics (see note below) | Yes |
 | GET | `/shop-floor/documents/{id}/inline` | Serve a kiosk-viewable document PDF inline — DRAWING-type or live-nest-referenced only, tenant-scoped, uniform **404** on any miss (see note below) | Yes |
 | POST | `/shop-floor/clock-in` | Clock in to operation (starts a PENDING / READY one). Refusal order, all before any write: **400** already clocked in, **404** operation, **400** operation not on that work order, **400** wrong work center, **404** work order missing or soft-deleted, **409** draft / on-hold / terminal work order, **400** `Operation is not ready to start` (incl. an operation-level hold), **400** predecessors. A back-entry (`source = "backfill"`) is refused exactly like a live clock-in | Yes |
 | POST | `/shop-floor/clock-out/{id}` | Clock out with production data. Completes the operation on its own only on a **full good count** of the units that can reach it (the hard good ceiling; scrap never counts); the response's `operation_status` says whether it did. **400** when the good it adds goes above the good ceiling (a 0-piece clock-out always closes the entry); on an operation someone already completed it is labor-only — **409** when it carries pieces, the entry staying open (see "Short-count figures on floor reads" and the Clock Out Schema below). **400** `Quantity must be a valid number` for a NaN / infinite quantity (everyone). **403** for an API token reporting `quantity_scrapped > 0` (owner decision 2026-11-07: only a person declares scrap) or sending a scrap reason / code that would change its entry's — the entry stays open; its zero-scrap clock-out is unchanged | Yes |
-| PUT | `/shop-floor/operations/{id}/start` | Start an operation (**operator** verb — deliberately open to any authenticated user; the office twin `POST /work-orders/operations/{id}/start` is role-gated). Refusal order: **404** operation, **400** already complete / already in progress, **404** work order missing or soft-deleted, **409** draft / on-hold / terminal work order, **409** operation on hold (starting no longer lifts a hold), **400** predecessors. Lifts a RELEASED work order to IN_PROGRESS — never a draft one | Yes |
+| PUT | `/shop-floor/operations/{id}/start` | Start an operation (**operator** verb; the office twin `POST /work-orders/operations/{id}/start` is Admin / Manager / Supervisor / Quality). Refusal order: **403** `Insufficient permissions` for Viewer / Shipping (owner decision P0.4, 2026-11-13 — before anything is read), **404** operation, **400** already complete / already in progress, **404** work order missing or soft-deleted, **409** draft / on-hold / terminal work order, **409** operation on hold (starting no longer lifts a hold), **400** predecessors. Lifts a RELEASED work order to IN_PROGRESS — never a draft one | Admin / Manager / Supervisor / Operator / Quality |
 | POST | `/shop-floor/operations/{id}/production` | Add produced/scrapped quantity while staying clocked in (**400** above the operation's good ceiling — see Work Orders → "Short count at completion"). **403** for an API token reporting `quantity_scrapped_delta > 0`, with or without `open_ncr` — nothing written, no NCR (owner decision 2026-11-07: only a person declares scrap); a good-only report is unchanged | Yes |
 | POST | `/shop-floor/operations/{id}/reduce-production` | Correct (walk back) good-count an operator OVER-reported on their **own unapproved** labor (open clock-in first, then their own earlier unapproved sessions), **before** the operation/WO is complete — a miscount fix, **not** scrap (see note + schema below). A standing API token is **403** (a crew badge is a person and may) | Yes |
-| POST | `/shop-floor/operations/{id}/complete` | **Close** an operation at the good count the floor already recorded — there is no partial branch, so a **200** always means COMPLETE. Refused **409**, writing nothing, while recorded good + scrap leave any received unit unaccounted (declare the lost pieces with `quantity_scrapped` + a reason, or leave it open), **403** for an API token declaring scrap (owner decision 2026-11-07: only a person declares scrap) or closing short, **409** for a READY operation on a draft or on-hold work order (completing it would start it); an IN_PROGRESS one stays completable under the same rules. See "Floor completion contract" below | Yes |
+| POST | `/shop-floor/operations/{id}/complete` | **Close** an operation at the good count the floor already recorded — there is no partial branch, so a **200** always means COMPLETE. Viewer / Shipping get **403** `Insufficient permissions` before the operation is read or the body validated (owner decision P0.4, 2026-11-13). Refused **409**, writing nothing, while recorded good + scrap leave any received unit unaccounted (declare the lost pieces with `quantity_scrapped` + a reason, or leave it open), **403** for an API token declaring scrap (owner decision 2026-11-07: only a person declares scrap) or closing short, **409** for a READY operation on a draft or on-hold work order (completing it would start it); an IN_PROGRESS one stays completable under the same rules. See "Floor completion contract" below | Admin / Manager / Supervisor / Operator / Quality |
 | PUT | `/shop-floor/operations/{id}/hold` | Put an operation on hold and close open time entries. For a live laser nest, optional category/severity/note are saved on the hold event and **do not create a blocker**; Resume/Clear Hold is sufficient. Non-nest categorized holds retain their structured blocker behavior. Cancelled nests return **409** and must be restored first | Yes |
 | PUT | `/shop-floor/operations/{id}/resume` | Take an operation **off** hold. **Restores, never promotes**: `IN_PROGRESS` if it ever started, else `PENDING` — lifted to `READY` only where the shared promotion rule would grant it (parent WO released and non-terminal, no incomplete predecessor — which predecessors count is the work order's `sequential_operations` setting: cross-work-center only on a pool, any earlier-sequence operation on a routing), so `pending` is a normal success status. **409** if the operation backs a **cancelled (soft-deleted) laser nest** — that is a tombstone, not a hold; **400** if it is not `ON_HOLD`; cross-tenant id → **404**. Deliberately does **not** resolve the blocker that caused the hold (that stays with the blocker resolve/dismiss flow); the response carries `open_blockers` so the caller can warn (BLK-4) — each `{ id, category, severity, status, has_note, free_text_withheld }`, plus the caller-supplied `title` **only** for a non-station caller (withheld from a badge-minted crew-station token, same rule as `held`). Each `PENDING → READY` flip it does cause emits `operation_ready` (`user_id: null`). Audited **`STATUS_CHANGE`** (old→new status; `extra_data.transition = "resume_operation"`). Reachable by a badge-minted kiosk token — see "Held work" below | Yes |
 | POST | `/shop-floor/operations/{id}/inspection` | Record operation inspection complete (sets `inspection_complete`) | Admin / Manager / Supervisor / Quality |
@@ -6249,6 +6416,23 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 | GET | `/shop-floor/kiosk-stations` | List this company's kiosk stations (no PIN/`pin_hash`) → `{"stations"}` | Admin / Manager |
 | POST | `/shop-floor/kiosk-stations/{id}/revoke` | Revoke a kiosk station (idempotent status flip; tablet loses access next request) → `KioskStationResponse` | Admin / Manager |
 | POST | `/shop-floor/kiosk-stations/{id}/reset-pin` | Re-hash a kiosk station's shared PIN. Body `{"pin"}` → `KioskStationResponse` | Admin / Manager |
+
+> **The two operation verbs are role-gated; the rest of the floor is not (owner decision P0.4,
+> 2026-11-13).** `PUT /shop-floor/operations/{id}/start` and `POST /shop-floor/operations/{id}/complete`
+> now take `require_role([ADMIN, MANAGER, SUPERVISOR, OPERATOR, QUALITY])`. That is the
+> `work_orders:complete` set and Hank's `report_production` set; superusers and Platform Admin
+> pass as everywhere. Viewer and Shipping get **403** `Insufficient permissions` before anything is
+> read. Both kiosks keep working: the single-operator `/kiosk` login token and the crew station's
+> badge-minted `scope="kiosk"` token are each the operator's own access JWT, resolved to the live
+> user and role.
+>
+> The badge mint (`POST /auth/kiosk-badge-token`) does not check role, so a Viewer or Shipping
+> badge still mints and is then refused at complete. **The hole is narrowed, not closed.**
+> `POST /shop-floor/clock-in` still starts a PENDING / READY operation for any authenticated user.
+> `POST /shop-floor/clock-out/{id}` still completes one on a full good count, running the same
+> finalize and inventory seam. Production, reduce-production, hold and resume also stay open to
+> any authenticated user. So a Viewer can still start and complete work that way. See
+> [RBAC → Work Orders](RBAC_PERMISSIONS.md#work-orders).
 
 > **Wallboard display-token threat model (A0.5).** `GET /shop-floor/wallboard` is the **only**
 > endpoint a display token can reach — it is guarded by `get_display_or_user`, the sole dependency
@@ -7566,7 +7750,9 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > **`/shop-floor/dashboard` caching + bounded reconcile.** The dashboard supports conditional requests:
 > send the previous response's `ETag` back as `If-None-Match` to get a **304 Not Modified** (and no
 > body) when nothing changed. The `ETag` is a cheap state fingerprint computed **before** the reconcile,
-> so an unchanged dashboard 304s without running the reconcile or building the payload. The dashboard's
+> so an unchanged dashboard 304s without running the reconcile or building the payload. A request
+> authenticated by a read-only or AI-external API token never gets that 304: the export-control
+> middleware strips its conditional headers (see Authentication → API tokens). The dashboard's
 > reconcile scan is bounded to the most-recently-touched `SHOP_FLOOR_DASHBOARD_RECONCILE_LIMIT` open
 > work orders (default 250; see `docs/ENVIRONMENT_VARIABLES.md`) — any WO beyond the cap is still
 > reconciled when opened in its own detail / operations-list view.
@@ -7601,8 +7787,9 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > **Operator-qualification gate is warn-and-record, not blocking (G5-B).** `POST /shop-floor/clock-in`
 > and `PUT /shop-floor/operations/{id}/start` evaluate the operator against the operation's work
 > center and **record** (never block) any unsatisfied qualification gate — the clock-in / start still
-> **succeeds** and is open to **any authenticated user** (these are operator-facing; the gate only
-> records). Each unsatisfied gate writes a tamper-evident `audit_log` row (action
+> **succeeds** (these are operator-facing; the gate only records). Clock-in is open to **any
+> authenticated user**; the start verb is Admin / Manager / Supervisor / Operator / Quality since
+> P0.4 (2026-11-13), a role gate, not a qualification one. Each unsatisfied gate writes a tamper-evident `audit_log` row (action
 > **`OPERATOR_QUALIFICATION_EXCEPTION`**) plus a warning operational event, and is surfaced on a
 > `qualification_exceptions` array on the response — on the clock-in `TimeEntryResponse` and on the
 > start-operation response body. The gates are:
@@ -7943,11 +8130,13 @@ the caller's most recent closed unapproved session.)
 | PUT | `/quality/ncr/{ncr_id}` | Edit, disposition, close, reopen, assign, or link a CAR. See "NCR / CAR writes" | Admin / Manager / Quality |
 | DELETE | `/quality/ncr/{ncr_id}` | **Void** an NCR (soft-delete + status → `void`); body `{ "reason": "<non-blank>" }`. Guarded, see note | Admin / Manager / Quality |
 | POST | `/quality/ncr/{ncr_id}/restore` | Restore a voided NCR — reopens it to `open` | Admin / Manager / Quality |
-| POST | `/quality/ncr/{ncr_id}/create-car` | Raise a CAR from the NCR and link it; **409** naming the CAR when one that is not void is already linked | Admin / Manager / Quality |
+| POST | `/quality/ncr/{ncr_id}/create-car` | Raise a CAR from the NCR and link it, prefilled with the NCR's part and PO number; **409** naming the CAR when one that is not void is already linked | Admin / Manager / Quality |
 | GET | `/quality/car` | List CARs, void ones included (`status` filter) | Yes |
-| POST | `/quality/car` | Open a CAR | Yes |
+| POST | `/quality/car` | Open a CAR, including the CAR form fields. See "CAR form fields" | Yes |
 | GET | `/quality/car/{car_id}` | Get a CAR | Yes |
+| GET | `/quality/car/{car_id}/pdf` | The printable CAR (PDF, `inline`) in the layout of Werco's controlled CAR form. Writes nothing. See "Printable CAR" | Yes |
 | PUT | `/quality/car/{car_id}` | Edit, verify, close, reopen, or assign a CAR. See "NCR / CAR writes" | Admin / Manager / Quality |
+| POST | `/quality/car/{car_id}/quality-approval` | Record the form's Quality Manager approval; no body. Server-stamped, once. **409** on a VOID or already-approved CAR, **403** for a standing API token. See "Quality Manager approval" | Admin / Manager / Quality |
 | POST | `/quality/car/{car_id}/void` | **Void** a CAR; body `{ "reason": "<non-blank>" }`; returns the CAR with `status: "void"`. See note | Admin / Manager / Quality |
 | POST | `/quality/car/{car_id}/restore` | Restore a voided CAR — reopens it to `open`; **409** when the CAR is not void. See note | Admin / Manager / Quality |
 
@@ -7982,8 +8171,8 @@ the caller's most recent closed unapproved session.)
 
 > **NCR / CAR writes (`services/quality_record_service.py`).** Every NCR and CAR write behind
 > `/quality/ncr` and `/quality/car` — create, `PUT` (including disposition, closure, reopen and CAR
-> verification), `create-car`, NCR void / restore, and CAR void / restore — commits together with a
-> **required** `audit_log` row in one transaction.
+> verification), `create-car`, NCR void / restore, CAR void / restore, and the CAR quality-approval
+> verb — commits together with a **required** `audit_log` row in one transaction.
 > If that row cannot be written, the change is rolled back and the route answers **503**
 > (`"Unable to save audit record"`), the same posture as FAI and job costing. The `ncr_*` / `car_*`
 > operational events are still emitted, but as notification / timeline telemetry, not as the audit
@@ -7998,7 +8187,9 @@ the caller's most recent closed unapproved session.)
 >   `status` moved and `UPDATE` otherwise; `extra_data` flags `closure`, `reopen`,
 >   `disposition_change` (NCR) and `verification` (CAR). Create writes a `CREATE` row with the new
 >   record. `create-car` writes a CAR `CREATE` row (`extra_data.ncr_id` / `ncr_number`) **and** an NCR
->   `UPDATE` row recording the `car_required` / `car_id` link.
+>   `UPDATE` row recording the `car_required` / `car_id` link. The quality approval writes one
+>   `APPROVE` row (old/new `quality_approved_by` / `quality_approved_at`,
+>   `extra_data.quality_approval = true`).
 > - **Only real changes are written.** Each requested value is compared with the stored one (`""`
 >   equals `null`, a decimal equals the stored number, enums compare by value), and unchanged fields
 >   are dropped. A `PUT` that changes nothing writes no audit row, emits no event and returns **200**,
@@ -8009,7 +8200,8 @@ the caller's most recent closed unapproved session.)
 >   the active company (`"Part not found"` / `"Work order not found"`; a soft-deleted work order used
 >   to be accepted). On `PUT`, `assigned_to` must be an **active** user of the company
 >   (`"Assigned user not found"`) and an NCR's `car_id` one of its CARs (`"CAR not found"`; a void CAR
->   is **409**).
+>   is **409**). A CAR's form references (`part_id`, `customer_id`, `vendor_id`) are checked the same
+>   way, with one exception for vendors; see "CAR form fields" below.
 > - **Reads never expand another tenant's part.** NCR list / get and every NCR write response load
 >   `part` only when it belongs to the active company, so a legacy row whose `part_id` names another
 >   tenant's part shows `part: null`. A same-company soft-deleted part is still named (historical
@@ -8026,8 +8218,9 @@ the caller's most recent closed unapproved session.)
 > - **Other `PUT` refusals.** An explicit `null` on NCR `status` / `disposition` / `car_required` /
 >   `quantity_rejected` / `estimated_cost` / `actual_cost` or CAR `status` / `priority` is **422**
 >   (`"<field> cannot be null"`). Closing a CAR requires root cause, corrective action, verification
->   method and verification results (**422** naming the missing ones). An `expected_updated_at` that
->   no longer matches the record is **409** (`"This record changed since you opened it. …"`). That
+>   method and verification results (**422** naming the missing ones). A CAR `initiation_reason` of
+>   `other` with a blank `initiation_reason_other` is **422** (create too). An `expected_updated_at`
+>   that no longer matches the record is **409** (`"This record changed since you opened it. …"`). That
 >   is the only conflict check: the required `version` field is **ignored** (NCRs and CARs carry no
 >   version column), so a client that omits `expected_updated_at` gets last-writer-wins on the fields
 >   it changes.
@@ -8035,7 +8228,97 @@ the caller's most recent closed unapproved session.)
 >   not void, it answers **409** (`"NCR … already has corrective action CAR-… (id N). Open that CAR
 >   instead of creating another."`) rather than minting a second CAR and relinking. Once the linked
 >   CAR is voided, a fresh one may be raised and the link moves to it. It is allowed on a CLOSED NCR,
->   because it changes only `car_required` / `car_id`.
+>   because it changes only `car_required` / `car_id`. The new CAR is prefilled with the NCR's
+>   `part_id` (only when that part belongs to the company; a soft-deleted one is still carried, as the
+>   record it inherits), its `po_number` as `vendor_po_number`, and today's Central date as
+>   `submitted_date`.
+
+> **CAR form fields (migration `122_car_form_quote_rev`).** A CAR carries the fields of Werco's
+> controlled form, "AS9100 PROCESS - Corrective Action Report". `POST /quality/car` and
+> `PUT /quality/car/{car_id}` accept them (`CARFormFields`); all are optional and nullable, and a
+> CAR raised before `122` reads `null` in every one (nothing was backfilled).
+>
+> | Field | Type | Rule |
+> |---|---|---|
+> | `initiation_reason` | one of `management_review`, `nonconformance_trend`, `customer_feedback`, `internal_audit`, `production_problems`, `external_audit`, `continuous_improvement`, `other` | One value per CAR (the form's eight boxes). `other` requires a non-blank `initiation_reason_other` (**422**). Held by the DB CHECK `ck_cars_initiation_reason`. Distinct from `car_type` |
+> | `initiation_reason_other` | text ≤ 255 | The "Other ____" text. A `PUT` that moves `initiation_reason` off `other` without sending this field clears it (recorded old → `null` on the audit row) |
+> | `rma_number` | text ≤ 50 | Free text: a Werco RMA, a customer's, or a paper back-entry |
+> | `submitted_date` | date | "Date Submitted". Defaults to today in Central at create; a past date back-enters a paper CAR; a date after today (Central) is **422**. Due-date validation is unchanged |
+> | `part_id` | id | A **live** part of the active company (**404** `"Part not found"`) |
+> | `customer_id` | id | A **live** customer of the active company (**404** `"Customer not found"`). Its name is snapshotted into `customer_name`, which is never accepted in a request: re-taken when `customer_id` changes, cleared when it is cleared |
+> | `vendor_id` | id | A vendor of the active company (**404** `"Vendor not found"`). **Inactive and soft-deleted vendors are accepted**: a supplier CAR can be the record of that supplier's removal (invariant 3's records exception, AS9100D 8.4) |
+> | `vendor_po_number` | text ≤ 100 | "P.O number (if C/A applies to a vendor)" |
+> | `cost_labor`, `cost_material`, `cost_outside_services`, `cost_shipping` | decimal, ≥ 0, at most 12 digits with 2 decimal places (**422** otherwise) | Blank is not zero: each stays `null` until entered |
+> | `management_action` | text ≤ 2000 | |
+> | `vendor_approval_name`, `vendor_approval_title`, `vendor_approval_date` | text ≤ 255, date | Vendor management approval. The date cannot be after today (Central) (**422**). **A standing API token may not fill or change these** (see below) |
+> | `customer_approval_name`, `customer_approval_date` | text ≤ 255, date | Customer approval. The date cannot be after today (Central) (**422**). **A standing API token may not fill or change these** (see below) |
+>
+> - **The sign-off boxes are a person's entry.** A standing API token is refused with **403**
+>   (`"A standing API token cannot record or change a CAR's vendor or customer approval. A person
+>   signed in to the app must record it."`), before any write, when a create fills any vendor or
+>   customer approval field or an update changes (or clears) one. Leaving them blank, or re-sending
+>   the stored value beside another edit, is not refused. See
+>   [RBAC → Credential policy for judgment writes](RBAC_PERMISSIONS.md#credential-policy-for-judgment-writes).
+> - **Only a changed reference is checked.** On `PUT` a part, customer or vendor the CAR already
+>   names is never re-validated, so a CAR keeps naming a part or customer retired after it was raised.
+>   A new selection must pass the rules above.
+> - **`CARResponse` adds** every field above plus `cost_total` (the sum of the entered buckets,
+>   computed on read and never stored; `null` when none is entered), `part_number` / `part_name` /
+>   `part_current_revision` (the part's revision **today**, read from the part; the CAR records no
+>   revision of its own, and the detail screen labels it "current Rev"), `customer_name`,
+>   `vendor_name`, `containment_due` / `corrective_due`, the `initiated_by` / `assigned_to` /
+>   `verified_by` / `closed_by` ids with a `*_name` beside each, and `quality_approved_by` /
+>   `quality_approved_by_name` / `quality_approved_at`. Part and vendor names are read without an
+>   `is_deleted` filter (historical record), but always tenant-scoped, so a legacy row pointing at
+>   another company's record shows no name rather than theirs. A server-stamped user
+>   (`initiated_by`, `verified_by`, `closed_by`, `quality_approved_by`) outside the company is
+>   named only when it is a superuser or Platform Admin who acted in this company's context; an
+>   ordinary user of another company is never named. Every CAR route, list included,
+>   returns this shape.
+> - **Escalations prefill the form.** `POST /quality/ncr/{id}/create-car`: see the bullet above.
+>   `POST /complaints/complaints/{id}/create-car`: see **Customer Complaints & RMA**.
+> - A CLOSED CAR still refuses every `PUT` except a status-only reopen, form fields included.
+> - **Export control (AI-external tokens).** The CAR's own `part_id`, `customer_id` and
+>   `customer_name` snapshot place it, alongside the NCRs and complaints that reference it: a CAR is
+>   served in full to an AI-external API token only when every one of those links clears, so
+>   setting a controlled customer on a CAR raised from a cleared NCR withholds it from the next
+>   request on. Inside a withheld CAR the form's text (reason, RMA #, vendor PO, management action,
+>   approval names and titles) is `"[export-controlled]"`; the cost buckets and `cost_total` stay
+>   true. `GET /quality/car/{car_id}/pdf` is a file and is refused to every read-only token. See
+>   [EXPORT_CONTROL_AI_EGRESS.md → Linkage map](EXPORT_CONTROL_AI_EGRESS.md#linkage-map).
+>
+> **Quality Manager approval (`POST /quality/car/{car_id}/quality-approval`).** Records the form's
+> Quality Manager approval. No body: the server stamps `quality_approved_by` (the caller) and
+> `quality_approved_at` (UTC; the printed date is its Central date). Neither is ever taken from a
+> request body: a CAR's `POST` and `PUT` have no field for them. Gate **Admin / Manager / Quality**.
+>
+> - **Once.** An already-approved CAR is **409** (`"CAR … already has its quality approval; it is
+>   recorded once."`), so the record keeps naming the first approver. A VOID CAR is **409**.
+> - **A standing API token is refused** with **403** (`"A standing API token cannot record a CAR's
+>   quality approval. A person signed in to the app must record it."`), before any write: the stamp
+>   names a person. See
+>   [RBAC → Credential policy for judgment writes](RBAC_PERMISSIONS.md#credential-policy-for-judgment-writes).
+> - **It neither gates closure nor freezes the CAR.** It is allowed in every status except VOID, CLOSED
+>   included. The existing closure evidence rules are unchanged, and the other fields stay editable
+>   under the usual `PUT` rules.
+> - The CAR row is locked first, so two concurrent approvals serialize and the second gets the
+>   **409**. The required `APPROVE` audit row commits with the stamp, or neither is saved (**503**).
+>   It emits `car_updated` with `changed_fields: ["quality_approved_at", "quality_approved_by"]`.
+> - The CAR detail screen's **Record quality approval** button shows for `quality:approve` holders on
+>   an unapproved, non-void CAR, is disabled while edits are unsaved, waits for the server, and
+>   shows a refusal verbatim.
+>
+> **Printable CAR (`GET /quality/car/{car_id}/pdf`).** Returns the CAR as a PDF in the layout of the
+> controlled form (`services/car_pdf_service.py`), served `inline` as `<car_number>.pdf`. It has the
+> same read access as `GET /quality/car/{car_id}`; another company's CAR is **404**. The header is the
+> active company's own name, address and phone from its Company record. The grid then follows the
+> form: initiated by / RMA # / CAR number; date submitted / date due; part / vendor PO and vendor /
+> customer; the eight reason boxes (ASCII `[X]` / `[ ]`); problem, root cause and corrective action
+> (with containment and preventive action); the four costs and their total; vendor management
+> approval; management action; customer approval and Quality Manager approval. Nothing is truncated:
+> long text continues on the next page, and every page has a footer with the CAR number and page
+> number. Every value is escaped at the reportlab sink. It writes nothing and records no audit row
+> (one record, not a bulk export). The CAR detail screen's **Print CAR** button opens it in a preview.
 
 > **CAR void + restore (`POST /quality/car/{car_id}/void`, `POST /quality/car/{car_id}/restore`).**
 > Void retires a duplicate CAR or one raised in error. Body `CARVoidRequest` `{ "reason": "..." }`:
@@ -8067,9 +8350,11 @@ Quality**. Platform Admin/superuser role overrides retain the same tenant and re
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
 | GET | `/quality/fai` | List tenant inspections | Yes |
+| GET | `/quality/fai/log` | The FAI log of record, newest first: one `FAILogRow` per inspection. Filters `start_date` / `end_date` (inclusive Central dates), `status`, `customer` (≤ 255), `part_id`, `work_order_id`, `search` (≤ 255); `limit` 1–500 (default 100), `offset`. See "FAI log of record" | Yes |
 | GET | `/quality/fai/{fai_id}` | Read an inspection and its tenant-owned characteristics | Yes |
-| POST | `/quality/fai` | Create an inspection for an undeleted tenant part and optional undeleted tenant work order | Admin / Manager / Supervisor / Quality |
-| PUT | `/quality/fai/{fai_id}` | Edit an unfinished inspection; setting `passed`, `failed`, or `conditional` requires approval authority | Authoring roles; Admin / Manager / Quality for final disposition |
+| POST | `/quality/fai` | Create an inspection for an undeleted tenant part and optional undeleted tenant work order that builds that part (its own part, or a component of one of its operations; **422** otherwise). An omitted or blank `part_revision` records the part's current revision | Admin / Manager / Supervisor / Quality |
+| PUT | `/quality/fai/{fai_id}` | Edit an unfinished inspection; setting `passed`, `failed`, or `conditional` requires approval authority and a person (**403** for a standing API token) | Authoring roles; Admin / Manager / Quality for final disposition |
+| POST | `/quality/fai/{fai_id}/customer-approval` | Record the customer's approval of a PASSED or CONDITIONAL inspection; optional body `{ "customer_approval_date": "<date, optional>" }`. Once. **403** for a standing API token. See "Customer approval" | Admin / Manager / Quality |
 | POST | `/quality/fai/{fai_id}/characteristics` | Add a characteristic with the parent's company context | Admin / Manager / Supervisor / Quality |
 | PUT | `/quality/fai/{fai_id}/characteristics/{char_id}` | Record/correct an unfinished characteristic | Admin / Manager / Supervisor / Quality |
 | DELETE | `/quality/fai/{fai_id}/characteristics/{char_id}` | Remove an unfinished characteristic and retain its prior contents in the audit trail | Admin / Manager / Supervisor / Quality |
@@ -8078,10 +8363,103 @@ Quality**. Platform Admin/superuser role overrides retain the same tenant and re
 Every writer locks and resolves the same tenant-owned FAI before changing it. A characteristic
 must belong to both that FAI and company; unknown/foreign parents, children, inspectors, or
 referenced records return **404**. A forbidden authoring/approval role returns **403**, without
-changing the inspection. Finalization records the actual actor in `approved_by` and the completion
-date. A final status (`passed`, `failed`, `conditional`) **or any existing `completed_date`** makes
-all header, characteristic, and prefill writes return **409**: corrections require a new inspection.
-The legacy `version` request field is not an optimistic-lock guarantee for the FAI model.
+changing the inspection. A standing API token setting a final status is refused **403** (`"A
+standing API token cannot record an FAI's final disposition. A person signed in to the app must
+record it."`) before the row lock and any write; it may still make the non-final edits its role
+allows. Finalization records the actual actor in `approved_by` and the completion
+date (today on the Central calendar, not the server host's date). `inspection_date` records an
+inspection that happened, so a future one is **422** (`"The inspection date cannot be in the
+future."`), before the row lock. A final disposition is **409** while the stored inspection date
+is in the future (a value written before that bound existed), naming the date: correct it first,
+or in the same request. Otherwise the disposition would freeze a date no customer approval could
+satisfy (the approval may not predate the inspection and may not be in the future). A final status (`passed`,
+`failed`, `conditional`) **or any existing `completed_date`** makes all header, characteristic, and
+prefill writes return **409**: corrections require a new inspection. The customer approval is the one
+write allowed after that (see below). The legacy `version` request field is not an optimistic-lock
+guarantee for the FAI model.
+
+Create refuses (**422**, nothing written) a `work_order_id` whose job does not build the part: the
+log of record names the linked job's number, customer and PO, so an FAI of one part linked to
+another part's job would put that job's customer on this first article. A job builds the part when
+it is the job's own part or a `component_part_id` of one of its operations (a component FAI inside
+an assembly job); a part-less job (a standalone laser-nest work order) is not judged.
+
+Create stamps the revision inspected: `part_revision` is trimmed and upper-cased before its
+`^[A-Z0-9]+$` check, and when it is omitted or blank the part's current revision is recorded, so the
+FAI keeps naming the inspected revision after the part revs up. `reason` is bounded at 50 characters
+and a characteristic's `specification` at 255, the widths of their columns. A longer value is a
+**422** with nothing written (it used to reach PostgreSQL and fail as a **500**).
+
+`FAIResponse` now also carries `customer_approval_date`, `updated_at`, `inspector_id` /
+`inspector_name`, `approved_by` / `approved_by_name`, and, read from the linked work order,
+`work_order_number`, `customer_name` (the work order's customer, else the part's) and `customer_po`,
+plus `part_current_revision` (the part's revision today, which can differ from `part_revision`).
+Names are resolved in batched tenant-scoped reads. `approved_by_name` also resolves a superuser or
+Platform Admin who dispositioned in this company's context, because the server stamped that id.
+A since-deleted work order or part is still named (historical record).
+
+**Customer approval (`POST /quality/fai/{fai_id}/customer-approval`).** Records that the customer
+accepted the first article. A customer approval normally arrives after the final disposition, which
+froze the evidence, so it has its own verb. It writes only `customer_approved = true` and
+`customer_approval_date`. Gate **Admin / Manager / Quality**. Optional body
+`FAICustomerApprovalRequest` (unknown keys are **422**; no body records today):
+
+- `customer_approval_date` defaults to today (Central). A past date back-enters an approval received
+  earlier, but not one before the FAI's `inspection_date` when it has one (**422**); a future date
+  is **422**. The lower bound is not applied when the stored `inspection_date` is itself after today:
+  that is a typo the final disposition froze, and no date could satisfy both rules.
+- Only a **PASSED** or **CONDITIONAL** inspection can carry it. One with no final disposition yet is
+  **409** ("Record FAI …'s final disposition (Passed or Conditional) before its customer
+  approval."). A **FAILED** one is **409** too: a failure is answered by a new inspection.
+- **Once.** An FAI that already has its customer approval is **409**.
+- **A standing API token is refused** with **403** (`"A standing API token cannot record an FAI's
+  customer approval. A person signed in to the app must record it."`), before any write. See
+  [RBAC → Credential policy for judgment writes](RBAC_PERMISSIONS.md#credential-policy-for-judgment-writes).
+- The FAI row is locked first (the same lock every FAI writer takes). The required `APPROVE` audit row
+  commits with the approval, or neither is saved (**503**). It emits `fai_updated` with an unchanged
+  `status`, so the `fai.completed` notification does not fire a second time.
+
+**FAI log of record (`GET /quality/fai/log`, `GET /exports/fai/export`).** The ERP's FAI module is
+the company's FAI log of record. The spreadsheet log it replaces (form QF 7.5-3.4) is a **frozen
+archive**: by owner decision its 274 legacy rows (2016-03-14 to 2024-05-24) were **not imported**,
+and the ERP is authoritative going forward, so new first articles are logged only here. The log is a
+read of existing FAI records; no new column or migration backs it.
+
+Each `FAILogRow` starts with what the paper log carried: `fai_number` (FAI Report #), `log_date`,
+`part_number`, `part_name` (product description), `customer`, `job_number` and `is_complete` (true
+once the FAI has its final disposition). It adds `fai_id`, `part_id`, `part_revision` (inspected),
+`part_current_revision`, `customer_po`, `work_order_id`, `serial_number`, `status`, `fai_type`,
+`reason`, the characteristic counts, `inspection_date`, `completed_date`,
+`customer_approval_required`, `customer_approved`, `customer_approval_date` and `created_at`.
+
+- `log_date` is the completion date, else the inspection date, else the Central day the FAI was
+  created. `start_date` / `end_date` filter on it, inclusive.
+- `customer`, job # and customer PO come from the linked work order; `customer` falls back to the
+  part's customer. The `customer` filter matches that displayed value, and `search` matches FAI #,
+  serial number, part number or name, job # and customer PO. Both are case-insensitive substring
+  matches.
+- **Historical record.** The part and work order are joined without an `is_deleted` filter, so a line
+  keeps naming a since-deleted part or job. Both joins are tenant-scoped, so a legacy row pointing at
+  another company's record shows blanks rather than its labels.
+- Paging is offset-based with a ceiling of 500. Ask for one row more than a page to learn whether
+  another page exists (the FAI tab's **Log** view does).
+- **AI-external API tokens** may read the log (it is on the AI-external allowlist). Each row is
+  judged like the FAI it names (by `fai_id`, `part_id` and `work_order_id`): a row of an
+  export-controlled or unlinkable FAI keeps its ids, `fai_number`, `job_number`, `status`, dates,
+  booleans and counts, and every other value is `"[export-controlled]"`. The `customer` and `search`
+  filters match withheld text, so they are refused **403** to such a token; the date range,
+  `status`, `part_id`, `work_order_id`, `limit` and `offset` are allowed. The export is a file and
+  stays refused to every read-only token. See
+  [EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md#5-the-ai-external-allowlist).
+
+The export, `GET /exports/fai/export`, takes the same filters plus `format` (`csv` / `xlsx`, sheet
+"FAI Log") and `columns`, and is gated **Admin / Manager** and audited like every `/exports/*`
+route (see [Spreadsheet Exports](#spreadsheet-exports-csv--xlsx)). Its default columns are the
+paper log's seven in its order (`fai_number`, `log_date`, `part_number`, `part_name`, `customer`,
+`job_number`, `is_complete`, written as `X` or blank), then `part_revision`, `customer_po`, `status`,
+`fai_type`, `reason`, `serial_number`, `inspection_date`, `completed_date`,
+`customer_approval_required`, `customer_approved` and `customer_approval_date`. The **Export log
+(xlsx)** button on the Log view is shown only to Admin / Manager.
 
 Create numbers each inspection `FAI-YYYYMMDD-NNN` from a per-company sequence under a per-company
 lock. `fai_number` is unique per company (migration `116`). Before `116` it was globally unique, so
@@ -8207,16 +8585,16 @@ those two fields is what the check is worth.
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| GET | `/job-costs/` | List tenant job costs | Yes |
+| GET | `/job-costs/` | List tenant job costs (`status`, `work_order_id`; `date_from` / `date_to` filter `created_at` by inclusive calendar date in the company time zone — see [Timestamps](#timestamps); a reversed range is **422**) | Yes |
 | GET | `/job-costs/summary` | Summarize tenant costs | Yes |
 | GET | `/job-costs/{id}` | Read one job cost | Yes |
 | GET | `/job-costs/{id}/entries` | Read its tenant-owned entries | Yes |
 | GET | `/job-costs/{id}/variance-report` | Read its variance report | Yes |
 | POST | `/job-costs/` | Create for an undeleted tenant work order | Admin / Manager |
 | PUT | `/job-costs/{id}` | Update estimates/status | Admin / Manager |
-| POST | `/job-costs/{id}/entries` | Add a manual cost entry | Admin / Manager |
+| POST | `/job-costs/{id}/entries` | Add a manual cost entry (`entry_type` `material` / `labor` / `overhead` / `other` / `subcontract`) | Admin / Manager |
 | DELETE | `/job-costs/{id}/entries/{entry_id}` | Remove a cost entry, retaining its prior contents in the audit trail | Admin / Manager |
-| POST | `/job-costs/{id}/calculate` | Regenerate TimeEntry labor entries and recompute totals, preserving other entries | Admin / Manager |
+| POST | `/job-costs/{id}/calculate` | Regenerate TimeEntry labor entries and recompute totals, preserving other entries. Each regenerated labor entry's `entry_date` is the **production day** its time entry is attributed to (see [Production calendar & shifts](#production-calendar--shifts)); before 2026-11-13 it was the UTC date of the clock-in | Admin / Manager |
 
 All reads and writes resolve the job cost through a work order in the active company; writes
 require it to be undeleted, while reads preserve historical costs after work-order soft deletion.
@@ -8227,6 +8605,17 @@ operation/user references are rendered `null`. Same-company historical part labe
 platform-actor attribution remain readable. A second job cost for an already-costed work order
 returns **400**; a conflicting legacy row outside the tenant returns **409** without exposing it.
 Explicit `null` estimates/status and invalid enum values return **422**.
+
+**Cost elements (2026-11-13, migration 121).** A job cost totals its entries by type:
+`actual_material_cost` (MATERIAL), `actual_labor_cost` (LABOR), `actual_overhead_cost`
+(OVERHEAD **and** OTHER — its stored meaning, unchanged), and `actual_subcontract_cost`
+(SUBCONTRACT: outside processing such as plating or heat treat). `actual_total_cost` is all five
+types; subcontract is never folded into overhead. There is no subcontract **estimate**, so
+subcontract reaches `total_variance` but no per-element variance; the variance report lists a
+`subcontract` line (estimated `0`) so its lines add up to the total. Subcontract entries are
+manual: no purchase-order line or receipt carries a work-order link, so nothing posts one
+automatically. The work-order read reports these totals as `job_cost_actuals` (burden =
+`actual_overhead_cost`) — see Work Orders → "Cost and actual hours on the work-order read".
 
 Every manual write requires **Admin / Manager**, including recalculation (**403** otherwise).
 Cost entries, parent totals, and required audit rows commit atomically; audit failure returns
@@ -8490,7 +8879,10 @@ Admin / Manager / Quality (see [RBAC](RBAC_PERMISSIONS.md#customer-complaints--r
 > **NCR / CAR escalation.** `create-ncr` creates an NCR in the active company with source
 > `customer_return`. It copies the complaint's part, work order, lot, serial, quantity and
 > description, and sets the caller as `detected_by`. `create-car` creates a CAR from the
-> description, with the caller as `initiated_by`. Titles read `NCR from <complaint_number>: <title>`
+> description, with the caller as `initiated_by`, and prefills its form fields (see Quality → "CAR
+> form fields"): the complaint's part, customer and stored customer name, the `rma_number` of
+> the newest RMA raised against the complaint, `initiation_reason: customer_feedback`, and today's
+> Central date as `submitted_date`. Titles read `NCR from <complaint_number>: <title>`
 > (or `CAR from …`), truncated to 255 characters.
 > - Numbers come from the same per-company generators as `POST /quality/ncr` and `POST /quality/car`
 >   (`services/quality_numbering.py`).
@@ -8503,7 +8895,8 @@ Admin / Manager / Quality (see [RBAC](RBAC_PERMISSIONS.md#customer-complaints--r
 >   old → new id.
 > - `create-ncr` returns **409** if the complaint's stored part or work order belongs to another
 >   company (legacy rows only). A soft-deleted part or work order of the caller's own company is
->   accepted, because the NCR records what the complaint named.
+>   accepted, because the NCR records what the complaint named. `create-car` applies the same
+>   **409** to the complaint's part and customer, and likewise carries a soft-deleted one.
 >
 > Before this fix both verbs returned **500**, because they built the NCR or CAR without a
 > `company_id`.
@@ -8542,10 +8935,6 @@ Admin / Manager / Quality (see [RBAC](RBAC_PERMISSIONS.md#customer-complaints--r
 > so gaps left by the shared sequence remain. A complaint's `received_by` is the caller, and
 > `date_received` defaults to the server's current date. Before this fix,
 > `POST /complaints/complaints/` returned **500** on every call.
->
-> **Timestamp exception.** These response schemas still extend `BaseModel` rather than
-> `UTCModel`, so `created_at` / `updated_at` are not normalized to a trailing `Z` (see
-> [Timestamps](#timestamps)).
 
 ### Engineering Change Orders (ECO)
 
@@ -8601,11 +8990,11 @@ when an estimate is approved and handed off in Fabrication Quoting (`/fabricatio
 |--------|----------|-------------|---------------|
 | GET | `/quotes/` | List quotes, newest first. `status` (`all` = full history; omitted excludes `converted` / `expired`; unknown value **422**), `customer`, `search`, `limit` 1–5000 (default 100), `offset` | Yes |
 | GET | `/quotes/{quote_id}` | Get a quote | Yes |
-| PUT | `/quotes/{quote_id}` | Edit a draft/pending quote's commercial terms, or set its status (accept / reject / expire). Refusals in the note below | Admin / Manager / Supervisor |
-| POST | `/quotes/{quote_id}/send` | Mark the quote sent. Records the status only; no message is dispatched. **409** unless `draft` / `pending` / `sent` (re-sending a `sent` quote is an idempotent 200) | Admin / Manager / Supervisor |
+| PUT | `/quotes/{quote_id}` | Edit a draft/pending quote's commercial terms or its lines' drawing revisions (`line_revisions`), or set its status (accept / reject / expire). Refusals in the note below | Admin / Manager / Supervisor |
+| POST | `/quotes/{quote_id}/send` | Mark the quote sent. Records the status only; no message is dispatched. **409** unless `draft` / `pending` / `sent` (re-sending a `sent` quote is an idempotent 200); **409** while any line lacks its drawing revision (see "Drawing revision on every quote line") | Admin / Manager / Supervisor |
 | GET | `/quotes/{quote_id}/conversion-plan` | Per line: whether it can become a work order, and why not | Yes |
 | POST | `/quotes/{quote_id}/convert` | Convert the reviewed lines (`line_ids`; default all eligible) into **DRAFT** work orders, one per line, in one transaction. **400** unless `sent` / `accepted`; **422** on an ineligible line, or on unlinked quote-only lines without `acknowledge_unlinked` | Admin / Manager / Supervisor |
-| POST | `/quotes/{quote_id}/generate-pdf` | Customer-ready quote PDF | Yes |
+| POST | `/quotes/{quote_id}/generate-pdf` | Customer-ready quote PDF. On a quote not yet issued (`draft`, `pending`, `rejected`, `expired`), **409** while any line lacks its drawing revision; a `sent`, `accepted` or `converted` quote reprints as issued | Yes |
 
 > **Quote writes are role-gated and audited (2026-11-05).** `PUT`, `/send` and `/convert` share one
 > role set, `QUOTE_WRITE_ROLES` = Admin / Manager / Supervisor (superuser and Platform Admin pass, as
@@ -8620,7 +9009,10 @@ when an estimate is approved and handed off in Fabrication Quoting (`/fabricatio
 >   the approval stamp) or `conversion`. A `PUT` that echoes the current status, and a re-send of a
 >   `sent` quote, write nothing.
 > - **A content edit** writes one `quote` UPDATE row with the field diff (`status` excluded, so each
->   transition is exactly one row) and `extra_data.edited_fields`.
+>   transition is exactly one row) and `extra_data.edited_fields`. A `line_revisions` edit adds the
+>   per-line `line_revisions` map (line id → revision) to the old/new values and
+>   `extra_data.line_revision_changes` (`line_id`, `line_number`, `old`, `new` for each line that
+>   changed).
 > - **`/convert`** writes one `work_order` CREATE per work order minted — the same row `POST
 >   /work-orders/` writes, with `extra_data.source = "quote_conversion"`, `quote_id`, `quote_number`,
 >   `quote_line_id`, `quote_line_number`, `part_id` and `quantity` — plus one row on the quote: a
@@ -8637,8 +9029,84 @@ when an estimate is approved and handed off in Fabrication Quoting (`/fabricatio
 > back to `draft` / `pending`, once any line is linked to a work order; **409** on a content edit of a
 > quote that is not `draft` / `pending`; **409** when `lines` is sent (customer quote prices and lines
 > are frozen — revise the estimate in Fabrication Quoting); **409** on any status change to a
-> `converted` quote; **422** on `status: "converted"` (use `/convert`). Status transitions through
-> `PUT` are otherwise not whitelisted: for example `expired` → `sent` is still accepted, and audited.
+> `converted` quote; **422** on `status: "converted"` (use `/convert`); **422** when `line_revisions`
+> names a line id that is not on this quote, names a line twice, carries an invalid value, or puts
+> `N/A` on a line naming a manufactured or assembly part; **409**
+> on a move into `sent` or `accepted` from any other status (`draft`, `pending`, and also `rejected`
+> or `expired`, which a quote can reach without ever being sent) while any line lacks its drawing
+> revision. That check is skipped when the same request also edits content, because the edit lands the
+> quote at `draft`; `sent` → `accepted` is not a send and is not checked. Status transitions through
+> `PUT` are otherwise not whitelisted: for example `expired` → `sent` is still accepted (once every
+> line has its revision), and audited.
+>
+> **Drawing revision on every quote line (migration `122_car_form_quote_rev`).** A customer quote that
+> does not say which drawing revision it prices is ambiguous the day the customer revises the drawing.
+> `quote_lines.part_revision` (text ≤ 20, nullable) records it. It is distinct from the quote's own
+> `revision`, which is the quote **document's** revision. The rules live in
+> `services/quote_send_gate.py`:
+>
+> - **Default.** A new line takes its part's current revision when it names a part of the company.
+>   The only line the ERP creates today, the Fabrication Quoting hand-off's "complete quoted package"
+>   line, names no part, so it starts blank. Nothing is filled in at send: `parts.revision` defaults to
+>   `A`, so an automatic fill would print a plausible but unreviewed revision. Lines created before
+>   `122` were not backfilled and read `null`.
+> - **Entry.** `PUT /quotes/{quote_id}` takes `line_revisions: [{ "line_id": …, "part_revision": … }]`.
+>   Each value is trimmed and upper-cased and must be 1–20 letters and digits, or `N/A` for a line with
+>   no drawing (a setup charge, freight, a packaged line). Blank is refused (**422**): a revision, once
+>   entered, is corrected rather than erased. It is a **content edit**, so it inherits every content
+>   rule: `draft` / `pending` quotes only, no work-order-linked lines, the `expected_updated_at` check,
+>   the reset to `draft` and the cleared approval stamp. An empty list edits nothing, and so does a
+>   value equal to the one stored (no reset, no audit row). `N/A` is refused (**422**, naming the
+>   line and part) on a line naming a **manufactured or assembly** part of the company: that part has
+>   a drawing, so `N/A` would satisfy the gate without a revision. Purchased, hardware, raw-material
+>   and consumable parts, and part-less lines, may carry `N/A`.
+> - **The gate.** While any line has no revision (part-less lines included), each door that puts the
+>   quote in front of the customer refuses with **409** and writes nothing:
+>   `"Every quote line needs a drawing revision before the quote can be sent. Missing on line(s): 1, 3."`
+>   The doors are `POST /quotes/{id}/send` (when the status actually moves; re-sending a `sent` quote
+>   stays a 200), `PUT /quotes/{id}` moving a quote into `sent` or `accepted` from any other status,
+>   `POST /quotes/{id}/generate-pdf` on a quote not yet issued, and the quote email path,
+>   `POST /document-deliveries/preview` and
+>   `POST /document-deliveries/{id}/send`. The send re-checks the gate, so a preview prepared before the
+>   gate existed cannot reach SMTP.
+> - **`generate-pdf` holds the gate until the quote is issued.** A `draft`, `pending`, `rejected` or
+>   `expired` quote is refused (the last two are reachable from `draft` without a send, so a PDF of one
+>   would be the first customer document). A `sent`, `accepted` or `converted` quote reprints the
+>   document the customer already holds and is never refused for a blank revision: every quote issued
+>   since `122` passed the gate on its way to `sent`, and an issued quote's lines are frozen, so the
+>   only issued quote with blank revisions is one issued before `122` (its Rev column prints `-`).
+>   Refusing it would leave that issued document unreproducible, since a `converted` quote cannot be
+>   reopened to enter revisions. **The email path stays gated in every status**: an email is a new
+>   send. To email such a quote, move it back to `draft` with `PUT` (when no line is linked to a work
+>   order), enter its revisions and send it again (each step audited).
+> - **Reads.** `QuoteLineResponse` and the print data (`GET /print/quotes/{id}/print-data`) carry
+>   `part_revision` and `part_current_revision` (the linked part's revision today, tenant-checked; the
+>   editor pre-fills an empty Rev from it and marks the box "From the part — check the drawing" until
+>   the planner changes it, because saving records it). `part_number` is tenant-checked the same way:
+>   a legacy line pointing at another company's part names no part. The Quotes editor has a Rev input per line and sends only
+>   the revisions that changed. The detail table shows a Rev column ("Missing" when blank) and names
+>   the lines the gate will refuse. Inside a quote withheld from an AI-external API token, both
+>   revisions are `"[export-controlled]"` like the rest of the line's text (a drawing revision is
+>   technical data); the quantities and prices stay true.
+>
+> **Customer quote PDF contents.** The line table has a **Rev** column (the line's `part_revision`).
+> The title no longer carries "Rev": the quote's own revision prints on its own line as **Quote Rev**.
+> **Valid Until** is the quote's `valid_until`, else its quote date plus 30 days. The old
+> "Exclusions / Notes" block is replaced by a **Terms** block, one module constant in
+> `services/document_pdf_service.py`:
+>
+> 1. Quote valid for 30 days from the quote date. When the quote carries its own `valid_until`, this
+>    term reads "Quote valid until *MM/DD/YYYY*." instead, so the Terms never contradict Valid Until.
+> 2. FOB *City*, *ST*. The FOB point is read from the issuing company's own `address` (its last line
+>    ending in "City, ST [ZIP]"). It prints "FOB Origin." when no city and state can be read.
+> 3. All prices are in U.S. dollars (USD).
+> 4. Sales tax is not included.
+> 5. Lead time and payment terms are confirmed at time of order.
+> 6. Subject to drawing/specification review at order entry.
+>
+> The quote email snapshot hashes the Terms block, so changing the company address changes the
+> document, and a delivery prepared before the change must be previewed again (the send answers
+> **409** "The document changed after this PDF was prepared.").
 >
 > **UI.** The Quotes page shows **Edit draft**, **Send** and **Convert** only to the same role set
 > (`canWriteQuotes` in `frontend/src/utils/recordWriteAccess.ts`), so a hidden control and a refused
@@ -9458,7 +9926,7 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 | GET | `/receiving/locations` | Receivable inventory locations | Yes |
 | POST | `/receiving/receipt/{receipt_id}/print-label` | Manually (re)print the 4×6 thermal receiving label | Admin / Manager / Supervisor |
 | GET | `/receiving/print-profile` | Get the company ProxyBox print profile (key masked; **404** until created) | Admin |
-| PUT | `/receiving/print-profile` | Create / update the print profile, incl. the `allow_print_egress` kill switch | Admin |
+| PUT | `/receiving/print-profile` | Create / update the print profile, incl. the `allow_print_egress` kill switch | Admin, signed in (any API token **403**; not an MCP tool) |
 
 > **Lot number (`lot_number`).** Optional on `POST /receiving/receive` (max 50 chars): when
 > blank or omitted the server auto-assigns the receipt number (unique, company-scoped) as the
@@ -9757,7 +10225,9 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 >   Omitted fields are left unchanged. Read responses expose only `api_key_last4` /
 >   `has_api_key`; secrets never appear in audit / event payloads. Flipping
 >   `allow_print_egress` (default OFF) is recorded as a **status change** on the
->   tamper-evident audit trail.
+>   tamper-evident audit trail. The route is the switch's only writer, so the **whole**
+>   route refuses any API token **403** before reading or writing anything, and it is not an
+>   MCP tool — see [Egress kill switches are a person's judgment](#egress-kill-switches-are-a-persons-judgment).
 >
 > Auto-print on receipt is a separate, best-effort ARQ job enqueued by
 > `POST /receiving/receive` after commit; it no-ops unless the profile is active with
@@ -10548,11 +11018,38 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| GET | `/reports/work-orders` | Work order report | Yes |
-| GET | `/reports/production` | Production report | Yes |
-| GET | `/reports/quality` | Quality report | Yes |
+| GET | `/reports/production-summary` | Work orders by status, completions and on-time count, hours, produced / scrapped quantity and scrap rate over a rolling `days` window (1–365, default 30, counted back from now) | Yes |
+| GET | `/reports/quality-metrics` | NCR counts by status and source, receiving reject rate, over a rolling `days` window (default 30) | Yes |
+| GET | `/reports/inventory-value` | On-hand value at standard cost, total quantity, distinct parts | Yes |
+| GET | `/reports/vendor-performance` | Per vendor: ordered / received quantity, fill and reject rates, PO count, over a rolling `days` window (default 90; `skip`, `limit` ≤ 500) | Yes |
+| GET | `/reports/work-center-utilization` | Per-work-center utilization over a rolling `days` window (default 30; `skip`, `limit` ≤ 500) | Yes |
+| GET | `/reports/daily-output` | Operations completed and quantity scrapped per **production day** for the last `days` (1–365, default 14) production days, the current one included; an operation counts on the production day its `actual_end` falls in (see "Production days in reports" below) | Yes |
+| GET | `/reports/work-order-costing` | Per work order: estimated vs actual hours and cost (`work_order_id`, else work orders created in a rolling `days` window, default 90) | Yes |
+| GET | `/reports/employee-time` | Time entries and operation completions per employee over an inclusive range of **production days** (`start_date`, default 7 days before the current production day; `end_date`, default the current one; `user_id`). Each entry carries `date` (its production day) and `shift_code` (see below) | Yes |
 | GET | `/reports/ship-otd` | Ship-based OTD/OTIF detail report (`period` today/7d/30d/90d/ytd/custom + `start_date`/`end_date`) | Yes |
-| POST | `/reports/custom` | Generate custom report | Yes |
+
+> **Production days in reports (P1.2, 2026-11-13).** `daily-output` and `employee-time` read
+> production days on the company's production calendar (see [Production calendar &
+> shifts](#production-calendar--shifts)): local midnight to local midnight when none is configured.
+> Until 2026-11-13 both read **UTC** dates. `employee-time` includes a time entry when the production
+> day it is **attributed** to (greatest shift overlap, ties to the outgoing shift; else the production
+> day of its clock-in) lies in `start_date`..`end_date`, so every entry counts on **exactly one**
+> production day; an open entry runs to now for attribution. A reversed range is **422**. A time-entry
+> row's `date` is that production day and its `shift_code` that shift's code, `null` when it overlaps
+> no defined shift. So a 01:30 Wednesday weld entry reads as Tuesday, `W2`, and a 04:55–15:30 Wednesday
+> one as Wednesday, `W1` — in Wednesday's report only. **Changed 2026-11-13 (review fix):** the first
+> P1 cut included an entry that clocked in **or out** inside the window, which put that 04:55 entry in
+> Tuesday's report too (dated Wednesday, hours added to Tuesday's total); the pre-P1 report did the
+> same across UTC midnight. An entry that crosses midnight with no calendar configured now counts on
+> the local day it clocked in, and the operation it completed after midnight still shows in the next
+> day's report as a completion row. A completion row's `date` is the production day of its
+> `actual_end`, and its `shift_code` is the shift running at that instant. The rolling-`days` reports
+> (`production-summary`, `quality-metrics`, `vendor-performance`, `work-center-utilization`,
+> `work-order-costing`) count back from the current instant and have no day boundary.
+>
+> **Corrected 2026-11-13:** this table used to list `GET /reports/work-orders`, `/reports/production`,
+> `/reports/quality` and `POST /reports/custom`, none of which exist. The custom-report runner is
+> `POST /analytics/custom-report`.
 
 > **`GET /reports/ship-otd` (Lean Phase 1).** The customer-experienced delivery report: measures
 > `Shipment.ship_date` against the **promise** (`must_ship_by`, falling back to `due_date`), counting
@@ -10587,6 +11084,31 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 | POST | `/analytics/custom-report` | Run a custom-report query (returns rows) | Admin / Manager |
 | GET | `/analytics/custom-report/export` | Export a saved report template (csv / xlsx / pdf) | Admin / Manager |
 
+> **Days in analytics (P1, 2026-11-13).** Every analytics range is a set of **company-local calendar
+> days** (`Company.timezone`), and a point or bucket is dated in that same zone:
+> `/analytics/production-trends` dates a RUN entry by the local date of its clock-in and a
+> simplified-workflow completion by the local date of its `actual_end` (it used `func.date(...)`, the
+> UTC date, until 2026-11-13, so evening work landed on the next day and a one-day range could return a
+> point dated after its own end); `/analytics/adoption` puts a row in the ISO week of its local date.
+> **Two bases share the KPI dashboard:** the OEE figures (headline, sparkline, `/analytics/oee`) read
+> **production days** — the company's configured day start — while every other KPI (OTD, FPY, scrap,
+> quotes, NCRs, turnover, flow, adoption) reads local **calendar** days. With no production calendar
+> configured the two are identical. With Werco's 05:00 start they differ for 00:00–05:00: at 03:00 on a
+> Wednesday, `period=today` is Tuesday's production day, so OEE counts Tuesday's 2nd shift through
+> 05:00 Wednesday while the calendar-day KPIs count Tuesday 00:00–24:00. Completion-based **OTD** and
+> the production-summary on-time count compare the company-local date of `actual_end` with `due_date`
+> (a job finished at 19:00 CDT on its due date was counted late until 2026-11-13), and ship OTD,
+> `/analytics/wip-aging`'s days-to-due and the shop-floor `due_today` filter use the company's calendar
+> date, not the server's.
+>
+> **OEE inputs changed with the production days (2026-11-13), not only the day boundary.** The KPI
+> sparkline is now exactly the per-day headline value, computed on the same inputs: (1) its ideal
+> hours count **produced + scrapped** pieces (it counted produced only, so it read lower than the
+> headline whenever there was scrap); (2) it honors `REQUIRE_APPROVED_LABOR_FOR_COST` (it ignored it);
+> (3) the headline's ideal hours count **closed** entries only, like its staffed and run hours (open
+> entries used to add ideal hours with no run time behind them). All three agree with the persisted
+> `OEERecord` (`POST /oee/calculate`).
+>
 > **Flow & quality metrics (Lean Phase 1).** Five read-only, role-gated, tenant-scoped analytics
 > endpoints. All but `/wip-aging` (a point-in-time snapshot) take the same window parameters as
 > `/analytics/kpis`: `period` (`today` / `7d` / `30d` / `90d` / `ytd` / `custom`) plus
@@ -10754,6 +11276,174 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 > entries regardless of the flag and is **tenant-scoped** (a job cost is looked up by id **and**
 > company, closing a prior cross-tenant lookup).
 
+### Production calendar & shifts
+
+`app/api/endpoints/production_calendar.py`, mounted at `/production-calendar` (P1.2, migration
+`120_production_calendar`). A **production day** is the shop's working day, not the calendar date: it
+starts at the company's configured **production-day start** on the local clock (`Company.timezone`,
+default America/Chicago) and runs to the same wall-clock time the next day; **a shift that runs past
+midnight belongs to the day it started**. So with Werco's 05:00 start a weld entry at **01:30 Wednesday
+is Tuesday's production day and Tuesday's 2nd shift**. A production day is 23 h / 25 h long across the
+DST changes (boundaries are wall-clock times).
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/production-calendar` | The calendar: `configured`, `version`, `timezone`, `production_day_start`, `patterns[]` (each with `work_center_ids` and `shifts[]`: `code`, `name`, `start`/`end` HH:MM, `start_minute`/`end_minute`, `ends_next_day`, `days` 0=Mon..6=Sun, `planned_minutes`, `is_active`), and `today` — the current production day's UTC window and every active shift on it as UTC instants (`Z`) | Yes |
+| PUT | `/production-calendar` | Replace the **whole** calendar after a version check | **Admin** |
+| GET | `/production-calendar/resolve` | Which production day and shift an instant (`at`, ISO-8601; offset-less = UTC; default now) belongs to at a `work_center_id` (omitted = the default pattern; another company's work center is **404**). Returns `production_day` with its UTC window, `shift` (the outgoing one in an overlap), `overlapping`, `pattern_id`, `configured` and `calendar_version`. An instant within a day of the ends of the datetime range is **422** `The instant is outside the supported range` | Yes |
+| POST | `/production-calendar/working-calendars/sync` | Set each work center's weekly working hours from its shifts (`dry_run`, default `true`; `expected_version`) | Admin / Manager / Supervisor |
+
+**API tokens.** Both reads are open to every API token, read-only and AI-external ones included: they
+are on the AI-external allowlist as reference data with no customer linkage, always served in full and
+never ledgered (`resolve` takes `at` and `work_center_id` from such a token; see
+[EXPORT_CONTROL_AI_EGRESS.md → The AI-external allowlist](EXPORT_CONTROL_AI_EGRESS.md#5-the-ai-external-allowlist)).
+The `PUT` and the sync `POST`, a dry run included, refuse every read-only token **403** `Read-only API
+token cannot modify data.`
+
+**Unconfigured company (no calendar saved).** The production day is the **company-local calendar day**
+(day start 00:00) and there are no shifts. This replaced the old **UTC-date** day boundaries of OEE,
+the OEE cron, reports, downtime filters, job-cost labor dates and analytics on **2026-11-13** — for every
+tenant, configured or not, a "day" is now a local day (or a production day), never a UTC date.
+Historical `auto` OEE rows computed before that date stay as computed (UTC days); a re-run computes the
+production day.
+
+**Attribution rules.** An **instant** belongs to the production day it falls in; inside two
+overlapping shifts (the rest-of-shop 15:30–16:00 hand-off) it belongs to the **outgoing** (earlier-start)
+shift — `resolve` returns it as `shift` and lists both in `overlapping`. An **interval** (a time entry,
+a downtime event) belongs to the shift it overlaps **most** (a tie goes to the outgoing shift) and to
+that shift's production day; one that overlaps no shift belongs to the production day of its start. So
+an early **04:55 weld clock-in** that runs into the 05:00 1st shift counts on that day's 1st shift, not
+the previous production day. A work center belongs to at most one **pattern**; one in no pattern (and an
+entry with no work center) uses the company's **default** pattern — at most one, and possibly none, in
+which case such a work center has no shifts.
+
+**However long it runs, an interval counts on exactly one production day.** Greatest overlap can put a
+long interval on a later production day than the one it started on — a weld clock-in at 16:00 Monday that
+is not clocked out until 16:00 Tuesday overlaps Tuesday's W1 (10.5 h) more than Monday's W2 (10 h), so it
+is **Tuesday's**; a rest-of-shop breakdown from 16:00 Monday to 10:00 Wednesday is Tuesday's S1. Every
+reader that attributes — OEE and its cron, the analytics OEE figures, the wallboard, the employee-time
+report — reads every interval that **overlaps** the requested days, back as far as attribution can
+reach (two production days before the first one), so such an interval is counted on its attributed day,
+including in a single-day report or a range that starts on that day. Until 2026-11-15 these reads only
+looked 12 hours before the day start, and an interval like those two was counted on **no** day at all;
+before 2026-11-13 it counted on the UTC date it started.
+
+**Boundaries across DST.** The production day of an instant is the day whose window contains it, so
+the attribution and every SQL day filter always agree. A day start that names a wall time a DST change
+skips (02:00–02:59 on the spring-forward Sunday in a US zone) resolves with the pre-change offset, and
+one that repeats (01:00–01:59 on the fall-back Sunday) at its first occurrence. Werco's 05:00 start is
+unaffected.
+
+**History is re-read under the current calendar.** Persisted `OEERecord`s keep the values they were
+computed with, but every read that attributes on the fly — the analytics OEE figures, the wallboard,
+the employee-time report, the downtime filters, job-cost recompute — buckets past data under the
+calendar as it is **now**. So changing the day start, or a shift's times, days or planned minutes,
+re-buckets history on those reads, and a past day's `/analytics/oee` can stop matching its stored
+`/oee` record. Only a referenced shift's removal and `code` change are refused; the required audit row
+(the whole before/after document) is the record of what the calendar was. To keep a referenced
+shift's history unambiguous, retire it and add a new shift rather than re-timing it.
+
+**Who reads production days.** OEE records and `POST /oee/calculate` (`record_date` is a production
+day), the nightly OEE cron, the wallboard **today** pulse, the shop-floor dashboard `completed_today`
+(its ETag folds in the production day and calendar version), `GET /reports/daily-output` and
+`GET /reports/employee-time` (each entry's `date` is its production day, plus `shift_code`), the
+downtime `date_from`/`date_to` filters, job-cost labor `entry_date`, the analytics OEE figures, and
+every analytics `period`'s "today". **Due-today / overdue / lateness stay on the company calendar
+date** — they compare calendar due dates.
+
+**The ERP's own OEE convention is unchanged.** Availability stays productive run ÷ **staffed (clocked)**
+time; BREAK entries are not newly excluded and a shift's `planned_minutes` is **not** the availability
+denominator. `planned_minutes` (planned production time, breaks and lunch excluded) is exposed so a
+consumer can compute planned-time availability itself.
+
+**`PUT /production-calendar`** (Admin only). Send the whole document with `expected_version` as read
+(`0` before the first save) — a stale version is **409** (`This production calendar changed. Reload it
+before saving.`). It is validated as a set before anything is written (**422**): `production_day_start`
+and every `start`/`end` are `HH:MM`; an `end` at or before its `start` ends the next day; every shift
+must start at or after the production-day start and end by the next day's start (so it belongs to the
+day it starts on); `planned_minutes` ≤ the shift's length; the **active** shifts of one pattern that
+start on one weekday plan at most **1440 minutes** together (shifts may overlap — parallel crews — but the
+sync writes that sum as the work center's hours for the day, and a working calendar holds 0–24 h; added
+2026-11-15); at most one `is_default` pattern (none is allowed: then a work center in no pattern has no
+shifts); a work center in at most one pattern (listed twice in the same pattern it is one membership); unique pattern names and shift codes (case-insensitive); work centers
+must be this company's; an `id` that names no existing pattern or shift is 422 (omit it to create one);
+a pattern name or shift code may not start with `~` (reserved for the save's own temporary renames).
+Limits: 20 patterns, 12 shifts per pattern, 500 work centers per pattern, `planned_minutes` 1–1440.
+Existing patterns and shifts keep their `id`; **anything omitted is removed —
+except a shift an OEE record references**, which must be retired with `is_active: false` (removing it
+is 422) and whose `code` can never change (422). Retired shifts stay in the document and on historical
+records but are no longer attributed. An identical document is a no-op (no version bump). A save writes
+one **required** `audit_log` row (`resource_type` `production_calendar`, the whole before/after
+document) in the same transaction — **503**, nothing saved, when it cannot. A save that collides with a
+concurrent write to a row it changes (an OEE record that started using a shift this save removes) is
+**409** `The production calendar could not be saved because a record it changes was changed at the same
+time …` — the version-check text is reserved for a real version race. Every successful save (a no-op
+included) broadcasts `dashboard_update` with `event: "production_calendar_updated"` to the company's
+sockets; a sync commit broadcasts `event: "working_calendar_updated"` once per written work center.
+Saving does **not** change working calendars; run the sync.
+
+**Werco's configuration (worked example).** Not seeded by the migration — an Admin applies it once
+(replace the `work_center_ids` with the ids of WLD-01 … WLD-06), then runs the sync dry run and commit:
+
+```json
+PUT /api/v1/production-calendar
+{
+  "expected_version": 0,
+  "production_day_start": "05:00",
+  "patterns": [
+    {
+      "name": "Weld shop",
+      "is_default": false,
+      "work_center_ids": [101, 102, 103, 104, 105, 106],
+      "shifts": [
+        {"code": "W1", "name": "Weld 1st", "start": "05:00", "end": "15:30", "days": [0, 1, 2, 3, 4], "planned_minutes": 600},
+        {"code": "W2", "name": "Weld 2nd", "start": "15:30", "end": "02:00", "days": [0, 1, 2, 3, 4], "planned_minutes": 600}
+      ]
+    },
+    {
+      "name": "Rest of shop",
+      "is_default": true,
+      "work_center_ids": [],
+      "shifts": [
+        {"code": "S1", "name": "1st shift", "start": "07:30", "end": "16:00", "days": [0, 1, 2, 3, 4], "planned_minutes": 480},
+        {"code": "S2", "name": "2nd shift", "start": "15:30", "end": "00:00", "days": [0, 1, 2, 3, 4], "planned_minutes": 480}
+      ]
+    }
+  ]
+}
+```
+
+**`POST /production-calendar/working-calendars/sync`** (Admin / Manager / Supervisor — the roles of
+`PUT /scheduling/work-centers/{id}/calendar`). For every **active** work center covered by a pattern
+(its own, or the default), the new Mon..Sun `weekly_hours` are the sum of `planned_minutes` ÷ 60 of the
+active shifts **starting** each weekday — Werco weld `[20, 20, 20, 20, 20, 0, 0]`, rest of shop
+`[16, 16, 16, 16, 16, 0, 0]`. `dry_run=true` (the default) writes nothing and returns, per work center,
+`current_version`, `current_weekly_hours`, `new_weekly_hours`, `overrides_kept` and `changed` (a work
+center with no saved calendar, `current_version` 0, is always a change) plus the production calendar's
+`calendar_version`. A work center whose pattern has **no active shift** (an empty pattern, or one whose
+shifts are all retired) is not covered — it is left out of the rows and never written, so a pattern
+cannot zero a work center's scheduling capacity. A derived day of more than **24 hours** — only possible
+for a calendar saved before the 1440-minute rule above, or written around it — is **422** on the dry run
+and the commit alike, naming the work centers and their patterns, and nothing is written; the shared
+writer refuses any weekly hours outside 0–24 for every caller, so the sync can never store a calendar
+the scheduling editor's own `PUT` would refuse. `dry_run=false` (pass that `calendar_version` back as
+`expected_version`: a different calendar version is **409**; omitting it skips the check) takes the
+production calendar's own lock first — a concurrent `PUT /production-calendar` waits, so the hours and
+the audit rows' `production_calendar_version` come from one calendar version — and writes every
+changed work center
+through the scheduling calendar's own writer (`working_calendar_service.save_working_calendar`): dated
+overrides are **kept**, `version` is bumped, and one **required** `working_calendar` audit row is written
+per work center (`extra_data.source` = `production_calendar_sync`; **503**, nothing saved, when one
+cannot). **This moves every scheduling projection, capacity heat map and delivery prediction** for
+those work centers (a center with no saved calendar was planned at its `capacity_hours_per_day`, 8 h
+when unset, every day, weekends included) — review the dry run first. In the app the editor and the
+sync are on Admin Settings → **Production Calendar** (`/admin/settings?tab=calendar`, Admin only; a
+pattern the Admin adds there starts **not** default, and its **Default pattern** checkbox makes it the
+one default or, unchecked, leaves the calendar with none — so configuring the weld shop first never
+hands its shifts to every other work center); a
+Manager or Supervisor runs the sync through this route or the MCP tool
+`sync_working_calendars_from_shifts`.
+
 ### OEE Tracking
 
 OEE = **Availability × Performance × Quality** per work center. **Reads** (dashboards/trends) are open
@@ -10765,9 +11455,9 @@ records, targets) require **Admin / Manager / Supervisor**.
 | GET | `/oee/dashboard` | OEE per work center, plant-wide OEE, targets (`period` 7d/30d/90d/365d, or explicit `date_from`/`date_to` which take precedence) | Yes |
 | GET | `/oee/trends` | OEE time-series for charts (`work_center_id`, `period`, or explicit `date_from`/`date_to`) | Yes |
 | GET | `/oee/six-big-losses/{work_center_id}` | Six-big-losses breakdown | Yes |
-| GET | `/oee/records` | List OEE records (filters: WC, date range, shift) | Yes |
+| GET | `/oee/records` | List OEE records (filters: WC, date range, `shift` label, `shift_id`) | Yes |
 | GET | `/oee/records/{record_id}` | Get one OEE record | Yes |
-| POST | `/oee/calculate/{work_center_id}` | Auto-calculate the day/shift OEE record from data | Admin / Manager / Supervisor |
+| POST | `/oee/calculate/{work_center_id}` | Auto-calculate the production-day (or `shift_id`) OEE record from data | Admin / Manager / Supervisor |
 | POST | `/oee/records` | Create an OEE record (manual inputs) | Admin / Manager / Supervisor |
 | PUT | `/oee/records/{record_id}` | Update + recalculate an OEE record | Admin / Manager / Supervisor |
 | DELETE | `/oee/records/{record_id}` | Delete an OEE record | Admin / Manager / Supervisor |
@@ -10790,9 +11480,15 @@ records, targets) require **Admin / Manager / Supervisor**.
 > call. (These were RBAC-gated but unaudited prior to 2026-06-09.)
 
 > **`POST /oee/calculate/{work_center_id}` (auto-calculate).** Builds (or upserts, per work center +
-> date + shift) a real `OEERecord` for `record_date` (default today) from the day's **closed**
-> `TimeEntry` rows, the routing standard cycle time, and reported `DowntimeEvent` rows — on the
-> **staffed-time** convention so it agrees with the `/analytics/kpis` headline:
+> date + shift) a real `OEERecord` for `record_date` — a **production day** (default: the current one;
+> see Production calendar & shifts) — from the **closed** `TimeEntry` rows and reported `DowntimeEvent`
+> rows **attributed** to that production day (greatest shift overlap, ties to the outgoing shift), plus
+> the routing standard cycle time — on the **staffed-time** convention so it agrees with the
+> `/analytics/kpis` headline. With `shift_id` only what is attributed to that shift counts, and the
+> record carries `shift_id` and `shift` = the shift's code. Every entry a shift-scoped record counts is
+> also in that day's whole-day record; an entry that overlaps no defined shift counts only in the
+> whole-day record, so the shift records can add up to less than it. A legacy `shift` text resolves only when it equals a defined code (see "Shifts
+> are defined shifts" below). The metric is unchanged:
 > - **Availability** = productive-run minutes ÷ **staffed (clocked)** minutes at the WC; productive run
 >   = (RUN+SETUP) minutes − **UNPLANNED** `DowntimeEvent` minutes. (Returns/stores 0 availability when
 >   there is no staffed time for that WC/day.)
@@ -10808,6 +11504,19 @@ records, targets) require **Admin / Manager / Supervisor**.
 > `app/services/oee_service.py` (`compute_oee_for_work_center`) — the nightly auto-calc cron runs the
 > **same code** (below), so a manual trigger and the cron can never disagree on the math.
 
+> **Shifts are defined shifts (migration 120).** `OEERecord.shift_id` references a shift of the
+> production calendar; `shift` stays as the **label snapshot** (the code). Writes (`POST`/`PUT
+> /oee/records`, `POST /oee/calculate`) take `shift_id` — a shift that is not this company's is **404**,
+> one that is retired or not in the work center's pattern **422** (a record may keep its own retired
+> shift). The legacy `shift` text is accepted only when it equals a defined code (it resolves to that
+> shift); **any other text is 422**; blank means no shift. Pre-120 free-text labels (`1st`, `Day`) were
+> **not** backfilled and stay readable as labels with `shift_id: null`; a `PUT` that sends a record's
+> own legacy label back unchanged (with no `shift_id`) is not a shift change and is accepted, leaving
+> the label as it is, so a client can echo the record to edit its other fields. A `record_date` at the
+> ends of the date range (`9999-12-31`) is **422** on `POST /oee/calculate`. Responses add `shift_id` and
+> `shift_name`. `GET /oee/dashboard`, `/oee/trends` and `/oee/six-big-losses` periods count back from the
+> current production day.
+>
 > **One OEE record per (work center, date, shift) — duplicates are 409 (Lean Phase 1).** A unique
 > index (`uq_oee_company_wc_date_shift`, migration `063`) enforces at most one `OEERecord` per
 > company + work center + `record_date` + shift, where a **`null` shift and an empty-string shift are
@@ -10821,8 +11530,11 @@ records, targets) require **Admin / Manager / Supervisor**.
 > `calculation_source`: **`manual`** (hand-entered via `POST /oee/records`, or the on-demand
 > `POST /oee/calculate/{work_center_id}` trigger — a human asked for it; all pre-existing rows
 > backfill to it) or **`auto`** (minted only by the nightly ARQ cron, `run_oee_auto_calc_job` at
-> **02:30 UTC**, which computes **yesterday's** whole-day record per active company + active work
-> center). The cron **never overwrites a `manual` record** — a hand-entered record for that WC/day
+> **02:30 UTC**, which computes each company's **previous production day** — `current_production_day
+> − 1` on that company's calendar, never the container's `date.today()` — as a whole-day record per
+> active work center; with a 05:00 day start, Monday's production day closes Tuesday 05:00 and is
+> computed Tuesday ~20:30 Central). The cron writes whole-day records only; per-shift records come from
+> `POST /oee/calculate/{work_center_id}?shift_id=`. The cron **never overwrites a `manual` record** — a hand-entered record for that WC/day
 > (any shift) is authoritative and the cron skips the WC; `auto` records **are** recomputed by
 > re-runs (idempotent refresh). Idle work centers (no closed clocked entry and no unplanned downtime
 > that day) are skipped entirely — no staffed time is uncomputable, not an all-zero measurement.
@@ -10833,7 +11545,14 @@ records, targets) require **Admin / Manager / Supervisor**.
 
 `app/api/endpoints/downtime.py`, mounted at `/downtime`. An event is reported against a work center
 (optionally a work order) and resolved when the machine runs again; **UNPLANNED** event minutes are
-the availability input to `POST /oee/calculate/{work_center_id}` above.
+the availability input to `POST /oee/calculate/{work_center_id}` above. The `date_from` / `date_to`
+filters on the list, `/summary` and `/by-work-center` are inclusive **production days** (events that
+started from the production-day start of `date_from` to the start of the production day after
+`date_to`; local midnights when no production calendar is configured); a reversed range is **422**.
+These lists put an event on the production day it **started**, while OEE attributes it like a time
+entry — to the shift it overlaps most — so an event that straddles the day start (a weld stop from
+04:50 to 06:50) is listed under the earlier day's `/downtime/summary` but counts against the later
+day's OEE.
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
@@ -11254,20 +11973,28 @@ The active company's own profile and self-managed settings. Mounted under `/comp
 |--------|----------|-------------|---------------|
 | GET | `/companies/me` | Get the active company (includes `allow_ai_egress`, `allow_sms_egress`, and `user_count`) | Any authenticated user |
 | PUT | `/companies/me` | Update the active company's settings | Admin |
-| PUT | `/companies/me/ai-egress` | Toggle the company's **AI document-extraction egress kill switch** (`allow_ai_egress`) | Admin |
-| PUT | `/companies/me/sms-egress` | Toggle the company's **notification-SMS egress kill switch** (`allow_sms_egress`) | Admin |
+| PUT | `/companies/me/ai-egress` | Toggle the company's **AI document-extraction egress kill switch** (`allow_ai_egress`), which also gates every AI-external API token | Admin, signed in (any API token **403**; not an MCP tool) |
+| PUT | `/companies/me/sms-egress` | Toggle the company's **notification-SMS egress kill switch** (`allow_sms_egress`) | Admin, signed in (any API token **403**; not an MCP tool) |
 
 > **`allow_ai_egress` is the AI-egress CUI kill switch (default OFF).** It gates **all** outbound
 > AI document-extraction egress to the Anthropic API (the AI analogue of `allow_carrier_egress` /
 > `allow_print_egress`), enforced fail-closed at the shared LLM client. `PUT /companies/me/ai-egress`
 > takes `{ "allow_ai_egress": boolean }` and returns the updated `CompanyResponse`; the flip is
 > recorded on the tamper-evident audit trail as both a field update and an
-> `ai_egress_enabled` / `ai_egress_disabled` **status change**. While OFF, AI features (PO/quote,
+> `ai_egress_enabled` / `ai_egress_disabled` **status change**, both **required** evidence in the
+> flip's own transaction: if either row cannot be written the flip is rolled back and the answer
+> is **503** `"The audit record for this AI egress change could not be saved; nothing was changed.
+> Retry."`. Sending the value the company already has writes nothing. While OFF, AI features (PO/quote,
 > BOM, QMS, routing, laser-nest PDF extraction, Copilot, NL search) **degrade gracefully** — no
 > request leaves the boundary (laser-nest extraction falls back to filename-only). It is also the
 > per-company switch for applying AI recommendations (owner ruling 3, 2026-11-05): while OFF,
 > `POST /ai/recommendations/{id}/apply` is refused **403** and nothing an AI recommendation proposes
-> is applied — see [AI Recommendations](#ai-recommendations-action-inbox). New companies are
+> is applied — see [AI Recommendations](#ai-recommendations-action-inbox). It also gates the
+> **AI-external API token**, the credential an outside AI connector such as Claude holds
+> (Claude-plugin brief P0.3, 2026-11-13). While it is OFF, such a token is refused **403** on every
+> API route and at the MCP door, `initialize` and `tools/list` included. Turning it ON therefore
+> also opens that connector: do it only once the empowered official has cleared it
+> ([docs/EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md)). New companies are
 > created **OFF**; existing companies were grandfathered **ON**. The toggle is **Admin-only**
 > (`require_role([ADMIN])`), matching the sibling `allow_carrier_egress` / `allow_print_egress`
 > controls. It is exposed in the UI at
@@ -11289,6 +12016,19 @@ The active company's own profile and self-managed settings. Mounted under `/comp
 > configuration and a per-user opt-in with a saved phone number. Exposed in the UI at
 > **Admin Settings → SMS Privacy** (`/admin/settings?tab=smsprivacy`). See
 > [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#sms-channel-twilio).
+
+#### Egress kill switches are a person's judgment
+
+> The four routes that flip a company egress kill switch — `PUT /companies/me/ai-egress`,
+> `PUT /companies/me/sms-egress`, `PUT /admin/settings/shipping-profile` (`allow_carrier_egress`)
+> and `PUT /receiving/print-profile` (`allow_print_egress`) — refuse **any** API token, whatever
+> its role or scope, with **403** `"A company egress kill switch (AI, SMS, carrier or label-print egress) is turned on or off by an Admin signed in to the app, not an API token: opening or closing data egress is a person's judgment."`, before reading or writing anything (lead decision,
+> Claude-plugin brief build 2026-11-15; `app.core.credentials.API_TOKEN_EGRESS_SWITCH`). A
+> read-only token meets the read-only gate's `"Read-only API token cannot modify data."` first.
+> The two profile routes are refused whole, since each is its switch's only writer. None of the
+> four is an MCP tool (`catalog.EXCLUDED_OPERATIONS`), so an agent holding a person's own JWT
+> cannot reach them either; the profile `GET`s stay tools. An Admin signed in to the app is
+> unchanged. See [RBAC_PERMISSIONS.md → Credential policy for judgment writes](RBAC_PERMISSIONS.md#credential-policy-for-judgment-writes).
 
 ### Company onboarding and platform administration
 
@@ -11323,7 +12063,7 @@ shipping integration. All routes are mounted under `/admin/settings` and gated t
 | DELETE | `/admin/settings/carrier-accounts/{id}` | **Soft-delete** a carrier account (never physical — purchased labels/BOLs reference it) | Admin |
 | POST | `/admin/settings/carrier-accounts/{id}/test-connection` | Validate the stored credential (the **only** carrier call exempt from the egress kill switch — sends no customer data) | Admin |
 | GET | `/admin/settings/shipping-profile` | Get the company shipping profile (ship-from origin + egress flag); **404** until created | Admin |
-| PUT | `/admin/settings/shipping-profile` | Create / update the shipping profile, including the `allow_carrier_egress` kill switch | Admin |
+| PUT | `/admin/settings/shipping-profile` | Create / update the shipping profile, including the `allow_carrier_egress` kill switch | Admin, signed in (any API token **403**; not an MCP tool) |
 
 > **Secrets are write-only.** `api_key` and `webhook_secret` are accepted on create/update,
 > **Fernet-encrypted** before storage, and **never returned** — read responses expose only
@@ -11333,7 +12073,10 @@ shipping integration. All routes are mounted under `/admin/settings` and gated t
 >
 > **`allow_carrier_egress` is the CUI kill switch (default OFF).** A new profile is created with
 > egress **disabled**; it flips only when an admin sets it on `PUT /shipping-profile`, and that toggle
-> is recorded as a **status change** on the tamper-evident audit trail. While OFF, every
+> is recorded as a **status change** on the tamper-evident audit trail. The route is the switch's
+> only writer, so the **whole** route refuses any API token **403** before reading or writing
+> anything, and it is not an MCP tool — see
+> [Egress kill switches are a person's judgment](#egress-kill-switches-are-a-persons-judgment). While OFF, every
 > customer-data-bearing carrier call (`/shipping/validate-address`, `/rate-shop`, `/buy-label`,
 > `/buy-bol`, `/schedule-pickup`, `/void-label`, `/refund`) is blocked with **409**.
 
@@ -12599,12 +13342,46 @@ A platform admin can hold sockets in several companies at once. Nothing in `app/
 
 ### Timestamps
 
-All `datetime` fields in responses are serialized as **UTC ISO-8601 with a trailing `Z`**
-(e.g. `"2026-07-01T19:17:00Z"`) — the store-UTC / serve-UTC contract, applied uniformly across
-every endpoint (response schemas inherit `UTCModel`; hand-built dicts use
-`app.core.time_utils.to_utc_iso(...)`). `date`-only fields (e.g. `due_date`) are unaffected and
-stay `YYYY-MM-DD` with no time or zone. Clients should treat `Z` timestamps as UTC and convert for
-display; the web UI renders them in shop-local Central time.
+All `datetime` fields in JSON responses are serialized as **UTC ISO-8601 with a trailing `Z`**
+(e.g. `"2026-07-01T19:17:00Z"`) — the store-UTC / serve-UTC contract. Response schemas inherit
+`UTCModel` (nested models too: its encoder does not reach a nested bare `BaseModel`); hand-built
+dicts use `app.core.time_utils.to_utc_iso(...)`. `date`-only fields (e.g. `due_date`) are
+unaffected and stay `YYYY-MM-DD` with no time or zone. Clients should treat `Z` timestamps as UTC
+and convert for display; the web UI renders them in shop-local Central time.
+
+> **Changed 2026-11 (P1.1).** Until then the contract was not uniform: 30 response models (downtime
+> events and reason codes, OEE records and targets, quotes, job costs and cost entries, lot trace,
+> supplier scorecards / audits / ASL, customer complaints and RMAs, ECOs, SPC, calibration,
+> documents, notification log, CoCs, the audit log, workspaces) and five hand-built receiving /
+> serial-trace payloads emitted naive strings with **no offset** (`"2026-07-01T19:17:00"`). They now
+> carry the `Z`. The instant is unchanged — the value was always UTC — so a client that already read
+> zone-less strings as UTC (the web UI's `toDate` does) renders exactly as before.
+> `backend/tests/test_response_datetime_offset_guard.py` walks every route's response model and
+> fails CI on a datetime field without the UTC encoder.
+
+**Calendar-date query parameters are company-local days.** A `date` filter on a timestamp column
+(`start_date` / `end_date`, `date_from` / `date_to`, and an analytics `period` resolved to dates)
+names an inclusive calendar day in the **company time zone** (`Company.timezone`, default
+`America/Chicago`; a blank or unknown value falls back to Chicago, never UTC). The filter runs from
+local midnight on the start date to the **exclusive** next local midnight after the end date,
+converted to UTC — so a Central "January 15" is `2026-01-15T06:00:00Z` up to (not including)
+`2026-01-16T06:00:00Z` in winter and `05:00Z`–`05:00Z` in summer, and the DST days are 23 and 25
+hours long. Analytics "today" / `7d` / `30d` / `90d` / `ytd` count back from the company's
+current **production day** (its wall-clock date when no production calendar is configured), not the
+server's date. A reversed range (`start > end`) is **422** `"Start date must be
+on or before end date"`; `9999-12-31` as an end date is **422** `"End date is outside the supported
+range"`. Applies to `/exports/work-orders/export`, `/exports/inventory/transactions/export`,
+`GET /job-costs/`, `/reports/ship-otd` and every `/analytics/*` period. **Production-day filters**
+(P1.2): `/downtime/` + `/downtime/summary` + `/downtime/by-work-center`, `/reports/employee-time` and
+`/reports/daily-output` read the same dates as **production days** — from the company's configured
+production-day start, which is local midnight when no production calendar is configured (so they read
+exactly as above until one is) — see Production calendar & shifts. Filters on a `Date` column (PO
+`order_date`, `Quote.quote_date`, OEE `record_date`) compare dates directly and are unchanged.
+
+> **Changed 2026-11 (P1.1).** These filters used to compare the date against **UTC** midnight, so a
+> Central day ran from 6 PM (CST) / 7 PM (CDT) the evening before to 5:59 / 6:59 PM, and every
+> second-shift row landed in the next day. `backend/tests/test_date_filter_combine_guard.py` keeps the
+> old `datetime.combine(d, datetime.min/max.time())` shape out of `app/`.
 
 ### Success Response
 ```json
@@ -12778,7 +13555,7 @@ negative `LIMIT`/`OFFSET`, while SQLite silently reads a negative limit as "unbo
 | date **window width** | `start_date … end_date` at most `366` days, `400` over it (and `400` when `end_date < start_date`) | `GET /maintenance/calendar` |
 
 Some endpoints carry their own **tighter** ceiling than the tier above — `GET /parts/`,
-`GET /materials/`, `GET /process-sheets/` and `GET /bom/uom-mismatches` cap at `500`,
+`GET /materials/`, `GET /process-sheets/`, `GET /bom/uom-mismatches` and `GET /quality/fai/log` cap at `500`,
 `GET /visitor-logs/` at `200` — and those are stated with the endpoint. **No default changed**: a
 caller sending no paging parameters gets the same rows it got before (on the five previously
 unbounded endpoints below, up to their ceiling).
@@ -13058,7 +13835,7 @@ through create/read/update. Server-rendered PDFs escape at render.
 
 ### Access: bulk export is `ADMIN` / `MANAGER`, and every export is audited
 
-All seven `/exports/*` endpoints and `GET /analytics/custom-report/export` require
+All eight `/exports/*` endpoints and `GET /analytics/custom-report/export` require
 `require_role([ADMIN, MANAGER])` and return **403** otherwise. This is a deliberate carve-out from
 the read-broad domain default: the *reads* behind these datasets remain open to any authenticated
 user in the tenant, but handing the **whole dataset over as a file** — the parts master with
@@ -13072,7 +13849,7 @@ Each successful export writes one audit row (`app/services/export_audit.py`, via
 | Field | Value |
 |---|---|
 | `action` | `EXPORT` |
-| `resource_type` | the dataset — `work_order`, `part`, `inventory_item`, `purchase_order`, `purchase_order_line`, `quote`, `inventory_transaction`, `custom_report` |
+| `resource_type` | the dataset — `work_order`, `part`, `inventory_item`, `purchase_order`, `purchase_order_line`, `quote`, `inventory_transaction`, `fai`, `custom_report` |
 | `description` | `Exported {n} {dataset} record(s) to {CSV or XLSX}` |
 | `new_values` | `{"format": …, "columns": [...], "filters": {...}}` — the request, never the payload |
 
@@ -13089,6 +13866,7 @@ declared with a `max_length` and a value over it is a **422** before the export 
 | `GET /exports/inventory/export` | `warehouse` | 50 (the `inventory_items.warehouse` column width) |
 | `GET /exports/quotes/export` | `customer` | 255 (the `quotes.customer_name` column width) |
 | `GET /exports/inventory/transactions/export` | `transaction_type` | 40 |
+| `GET /exports/fai/export` | `customer`, `search` | 255 each (`customer` compares against the 255-wide customer-name columns; `search` takes the same bound) |
 
 Each bound matches the column the filter compares against, so no request that could match a row is
 refused. (Auditing is best-effort in the usual repo-wide sense: `AuditService.log` swallows a failure
@@ -13109,6 +13887,36 @@ the legacy best-effort exporters above. Its separate 10,000-row cap returns
 rather than a dataset) keep their existing, stricter gates. Single-record document downloads — CoC
 PDFs, quote PDFs, nest drawings, kiosk document views — are **not** bulk exports and are unchanged.
 
+### Date filters and datetime cells
+
+`start_date` / `end_date` on `/exports/work-orders/export` (`created_at`) and
+`/exports/inventory/transactions/export` (`created_at`) are **inclusive calendar dates in the
+company time zone** — local midnight to the exclusive next local midnight, converted to UTC (see
+[Timestamps](#timestamps)). The purchase-order, PO-line and quote exports filter a `Date` column
+(`order_date`, `quote_date`) and compare dates directly. On every export a reversed range is
+**422** `"Start date must be on or before end date"`, and `end_date=9999-12-31` on the two
+timestamp filters is **422** `"End date is outside the supported range"` (it was a 500). The audit
+row's `filters` still records the dates as requested (`"2026-01-15"`), never the converted instants.
+
+Every **datetime** cell, in CSV and XLSX, is ISO-8601 **in the company time zone with its UTC
+offset**, to the second — `2026-01-15T17:30:00-06:00` for 23:30Z on a January day,
+`2026-07-15T18:30:00-05:00` in July — so a row reads on the same local day the filter selected it
+by. That covers `created_at` on every dataset that has one, the work-order `scheduled_start` /
+`actual_start` / `actual_end`, and inventory `received_date` (a timestamp despite its name). XLSX
+datetime cells stay **text**: a spreadsheet date cannot carry an offset. **Date** cells (`due_date`,
+`order_date`, `quote_date`, `valid_until`, …) stay `YYYY-MM-DD`. Header keys are unchanged — they
+are the `columns` contract. File names are stamped on the company's wall clock.
+
+> **API consumers: the datetime cell bytes changed (2026-11, P1.1).** Datetime cells used to be
+> `2026-01-15 23:30:00` — naive **UTC** wall time, no `T`, no offset. They are now
+> `2026-01-15T17:30:00-06:00`: the same instant, shown 5–6 hours earlier on the local clock and
+> carrying the offset that says so. A parser that expected the old shape must read ISO-8601 with an
+> offset (Python `datetime.fromisoformat` does). A script that converted the old UTC wall time to
+> local by hand must stop. The two date filters also
+> moved their day boundary from UTC midnight to local midnight, so the same `start_date` /
+> `end_date` now returns that local day's rows — including the evening rows that used to fall into
+> the next day's file.
+
 ### Formula-injection neutralization (CWE-1236)
 
 Every endpoint that returns a spreadsheet artifact neutralizes formula-initiating cell text before
@@ -13119,7 +13927,7 @@ report column names — lands in those cells verbatim. Applies to:
 
 | Endpoint | Formats |
 |--------|-------------|
-| `GET /exports/{work-orders,parts,inventory,purchase-orders,purchase-orders/lines,quotes,inventory/transactions}/export` | `?format=csv` + `?format=xlsx` |
+| `GET /exports/{work-orders,parts,inventory,purchase-orders,purchase-orders/lines,quotes,inventory/transactions,fai}/export` | `?format=csv` + `?format=xlsx` |
 | `GET /analytics/custom-report/export` | csv |
 | `GET /visitor-logs/export.csv` | csv |
 | `GET /estimate-workbench/{estimate_id}/export/audit.xlsx` | xlsx |
@@ -13159,7 +13967,7 @@ cell read back in keeps whatever text it holds — as are the static XLSX import
 
 ### Row cap on `/exports/*` — refuses at 10,000 (400)
 
-All seven `/exports/*` endpoints refuse rather than truncate above **10,000 matched rows**
+All eight `/exports/*` endpoints refuse rather than truncate above **10,000 matched rows**
 (`MAX_EXPORT_ROWS` in `app/api/endpoints/exports.py` — a module constant, not env-configurable).
 The query over-fetches one row past the cap, so the condition is exact rather than estimated, and
 the refusal happens before any bytes are written:
@@ -13180,7 +13988,7 @@ whole workbook in memory before streaming, so the cap also bounds peak memory.
 > previously applied a hard `.limit(10000)` and returned the newest 10,000 rows **silently**: a
 > ledger export that looked complete and was not. The same request now returns **400**, and the
 > caller narrows `start_date` / `end_date`, `part_id` or `transaction_type` and exports again. The
-> other six endpoints had no limit at all and returned everything, so for them the 400 replaces an
+> other six endpoints of that time had no limit at all and returned everything, so for them the 400 replaces an
 > unbounded read, not a silent truncation.
 
 **Not covered by this cap:** `GET /analytics/custom-report/export`, `GET /visitor-logs/export.csv`
@@ -13278,7 +14086,7 @@ log. `unconfigured` means every enqueue will fail and no background job or cron 
 | 404 | Not Found |
 | 409 | Conflict — concurrent modification of an operation / work order / time entry on a completion or clock endpoint (the row was updated by another writer between read and commit; refresh and retry). Any endpoint also answers 409 when PostgreSQL rolled its transaction back to settle a lock conflict (deadlock or serialization failure). That transaction saved nothing, but a route that commits in stages may have saved an earlier stage, so refresh before retrying. See [Conflict (409)](#conflict-409) |
 | 413 | Content Too Large — a JSON body over `MAX_JSON_BODY_BYTES` (default 256 KB, rejected by middleware before the route runs), or a file upload over its endpoint's own cap (e.g. 50 MB `LASER_UPLOAD_MAX_BYTES`). See [Request Size Limits](#request-size-limits) |
-| 422 | Validation Error — including a paging or window parameter outside its range (`limit`, `skip`/`offset`, `days`, `max_levels`), and a free-text `/exports/*` filter over its `max_length` (`warehouse` 50, `customer` 255, `transaction_type` 40); see [Bounds on paging and window parameters](#bounds-on-paging-and-window-parameters) |
+| 422 | Validation Error — including a paging or window parameter outside its range (`limit`, `skip`/`offset`, `days`, `max_levels`), and a free-text `/exports/*` filter over its `max_length` (`warehouse` 50, `customer` 255, `transaction_type` 40, the FAI log's `search` 255); see [Bounds on paging and window parameters](#bounds-on-paging-and-window-parameters) |
 | 429 | Too Many Requests |
 | 500 | Internal Server Error — the body (`correlation_id`, and inside `detail`) and the `X-Correlation-ID` header carry a reference to quote; see [Internal Server Error (500)](#internal-server-error-500) |
 | 502 | Bad Gateway — upstream AI-service failure on an AI endpoint (e.g. `/copilot/chat?stream=false`) |
@@ -13298,17 +14106,22 @@ What matters from this file's point of view:
   routers with the caller's own bearer token. The router is the boundary: the same `require_role`
   gates, tenant scoping, audit rows, optimistic-locking 409s and per-endpoint size caps apply, and a
   401/403/409/422 comes back verbatim as an `is_error` tool result carrying the server's `detail`.
-- **The catalog is this API.** 760 tools are generated from `app.openapi()` at startup — every
+- **The catalog is this API.** 764 tools are generated from `app.openapi()` at startup — every
   secured operation except the `Authentication`, `Carrier Webhooks`, `Error Logging` (and its router-level `errors` twin) and `WebSocket` tags, the
   unauthenticated health/station-login routes (named one by one in `catalog.PUBLIC_OPERATIONS`) and
-  the eight operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders
+  the fourteen operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders
   (`POST /work-orders/import`, `POST /purchasing/purchase-orders/import` — they mint work orders
   RELEASED / IN_PROGRESS and POs SENT, a record of a past system rather than a user action),
   AI Accept & apply (`POST /ai/recommendations/{recommendation_id}/apply` — owner ruling 3: only a
   person signed in to the app runs an AI recommendation's action; the route also refuses API
-  tokens) and the three Approved Supplier List writes (`PUT /purchasing/vendors/{vendor_id}/approval`,
+  tokens), the two customer export-control writes (`POST /customers/{id}/contracts`,
+  `PUT /customers/{id}/contracts/{contract_id}` — only an Admin signed in to the app marks a
+  customer controlled), the four company egress kill-switch writes (`PUT /companies/me/ai-egress`,
+  `PUT /companies/me/sms-egress`, `PUT /admin/settings/shipping-profile`, `PUT /receiving/print-profile`
+  — an egress switch is a person's judgment; the routes also refuse API tokens), the three Approved
+  Supplier List writes (`PUT /purchasing/vendors/{vendor_id}/approval`,
   `POST /purchasing/vendors/asl-import/preview` and `/commit` — a supplier-approval decision is a
-  person's judgment; the routes also refuse API tokens), and the two legacy `approved_supplier_list`
+  person's judgment; the routes also refuse API tokens) and the two legacy `approved_supplier_list`
   writes (`POST /supplier-scorecards/approved-suppliers/`, `PUT .../approved-suppliers/{asl_id}`) — plus 15 fixed-name convenience tools that shadow 16
   raw routes (`POST /work-orders/`, `PUT /work-orders/{id}`, `POST /work-orders/{id}/release`, the two
   nest-package imports, the manual nest add, `GET /search/`, …) to enforce agent rules the routes do
@@ -13341,7 +14154,17 @@ What matters from this file's point of view:
   `create_api_token`, `list_api_tokens` and `revoke_api_token` (Admin only, like the routes). A
   call authenticated **by** an API token gets the route's **403** `"API token cannot access this
   resource"` on all three — minting, listing and revoking are an Admin's interactive act, done with
-  an interactive Admin JWT through the door, or with `curl`.
+  an interactive Admin JWT through the door, in the app (Admin → API Tokens), or with `curl`.
+- **Read-only and AI-external API tokens are narrowed at the door as well as by the API.** A
+  read-only token's `tools/list` holds only the tools that read and carry no tag in
+  `WERCO_MCP_READ_ONLY_DENY_TAGS`; calling any other tool by name answers **403** before argument
+  validation or dispatch (`"Read-only API token: this tool writes."` /
+  `"Read-only API token: this tool is not available to read-only tokens."`). An AI-external token
+  is shown only the tools whose every route is on the AI-external allowlist. When its company's
+  `allow_ai_egress` is off, it is refused HTTP **403** at `/mcp` itself, before `initialize` or
+  `tools/list`. What its tools return is redacted by the same response middleware as a direct
+  call. See [docs/MCP.md](MCP.md) §4.1 / §4.2 and
+  [docs/EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md).
 
 Settings: [ENVIRONMENT_VARIABLES.md → MCP](ENVIRONMENT_VARIABLES.md#mcp-model-context-protocol-door-and-bridge).
 Access model: [RBAC_PERMISSIONS.md → MCP / agent access](RBAC_PERMISSIONS.md#mcp--agent-access).

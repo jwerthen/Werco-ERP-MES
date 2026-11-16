@@ -105,9 +105,10 @@ class WallboardShip(BaseModel):
 
 
 class WallboardToday(BaseModel):
-    """Live today-so-far pulse. Central-midnight window (CENTRAL_TIME_ZONE day
-    start — never naive date.today()). Aggregate counts only — no names, no
-    per-person figures, no dollars."""
+    """Live today-so-far pulse over the current PRODUCTION day → now: from the
+    company's production-day start (its production calendar; local midnight
+    when none is configured) — never naive date.today(). Aggregate counts
+    only — no names, no per-person figures, no dollars."""
 
     ops_completed: int = 0
     pieces_completed: int = 0  # sum(TimeEntry.quantity_produced), RUN+REWORK,

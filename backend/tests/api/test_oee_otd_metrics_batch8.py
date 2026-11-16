@@ -24,6 +24,7 @@ from fastapi import status
 from sqlalchemy.orm import Session
 
 from app.core.security import create_access_token
+from app.core.time_utils import CENTRAL_TIME_ZONE
 from app.models.downtime import DowntimeCategory, DowntimeEvent, DowntimePlannedType
 from app.models.oee import OEERecord
 from app.models.part import Part
@@ -39,6 +40,18 @@ COMPANY_A = 1
 COMPANY_B = 2
 TEST_PASSWORD_HASH = "$2b$12$abcdefghijklmnopqrstuv"
 _seq = {"n": 0}
+
+
+def _shop_today() -> date:
+    """The shop's (Central) date: what ``POST /oee/calculate`` defaults to.
+
+    Since P1.2 the calculate default is the company's current PRODUCTION day (the Central
+    calendar day for an unconfigured company), not the server's ``date.today()`` -- a UTC
+    CI runner is a day ahead between 00:00 and 06:00 UTC. ``make_entry`` clocks in at 08:00
+    UTC on ``when`` (02:00/03:00 Central, the same Central date), so anchoring ``when`` and
+    the defaulted record on this date keeps every test independent of the time of day.
+    """
+    return datetime.now(CENTRAL_TIME_ZONE).date()
 
 
 def _next() -> int:
@@ -234,7 +247,7 @@ def test_auto_calculate_oee_returns_200_and_writes_sane_record(client, db_sessio
     wo = make_wo(db_session, part, status_=WorkOrderStatus.IN_PROGRESS)
     # run_time_per_piece = 0.1 h/pc (6 min/pc) -> ideal cycle DERIVED, not hardcoded 60 s.
     op = make_op(db_session, wo, wc, run_time_per_piece=0.1)
-    today = date.today()
+    today = _shop_today()
     # 8 clocked hours: 6 h RUN producing 50 good + 5 scrap, 2 h DOWNTIME (idle).
     make_entry(
         db_session,
@@ -287,7 +300,7 @@ def test_auto_calculate_oee_unplanned_downtime_lowers_availability(client, db_se
     wc = make_work_center(db_session)
     wo = make_wo(db_session, part, status_=WorkOrderStatus.IN_PROGRESS)
     op = make_op(db_session, wo, wc, run_time_per_piece=0.05)
-    today = date.today()
+    today = _shop_today()
     # 8 h fully clocked as RUN, but 2 h reported machine downtime within it.
     make_entry(
         db_session,
@@ -326,7 +339,7 @@ def test_auto_calculate_oee_tenant_scoped(client, db_session):
         op_b,
         entry_type=TimeEntryType.RUN,
         duration_hours=5.0,
-        when=date.today(),
+        when=_shop_today(),
         quantity_produced=99,
         company_id=COMPANY_B,
     )
@@ -346,7 +359,7 @@ def test_oee_value_none_when_no_staffed_time(db_session):
     make_user(db_session)
     wc = make_work_center(db_session)
     svc = AnalyticsService(db_session, COMPANY_A)
-    today = date.today()
+    today = _shop_today()
     assert svc._get_oee_value(today, today, wc.id) is None
 
 
@@ -358,7 +371,7 @@ def test_oee_quality_counts_rework_scrap(db_session):
     wc = make_work_center(db_session)
     wo = make_wo(db_session, part, status_=WorkOrderStatus.IN_PROGRESS)
     op = make_op(db_session, wo, wc, run_time_per_piece=0.1)
-    today = date.today()
+    today = _shop_today()
     make_entry(
         db_session,
         admin,
@@ -402,7 +415,7 @@ def test_otd_none_on_empty_denominator(db_session):
     NOT a misleading perfect 100.0."""
     make_user(db_session)
     svc = AnalyticsService(db_session, COMPANY_A)
-    today = date.today()
+    today = _shop_today()
     assert svc._get_otd_value(today - timedelta(days=7), today) is None
 
 
@@ -522,7 +535,7 @@ def test_oee_availability_exact_from_nonproductive_staffed_time(db_session):
     wo = make_wo(db_session, part, status_=WorkOrderStatus.IN_PROGRESS)
     # run_time_per_piece 0.2 h/pc; 30 pieces -> ideal = 6 h == productive run -> perf 1.0.
     op = make_op(db_session, wo, wc, run_time_per_piece=0.2)
-    today = date.today()
+    today = _shop_today()
     # 6 h RUN producing 30 good + 0 scrap (perf=1.0, quality=1.0) ...
     make_entry(
         db_session,
@@ -569,7 +582,7 @@ def test_oee_performance_exact_from_run_time_per_piece(db_session):
     op = make_op(
         db_session, wo=make_wo(db_session, part, status_=WorkOrderStatus.IN_PROGRESS), wc=wc, run_time_per_piece=0.1
     )
-    today = date.today()
+    today = _shop_today()
     # All staffed time is productive RUN (availability 1.0); 40 good, 0 scrap (quality 1.0).
     make_entry(
         db_session,
@@ -605,7 +618,7 @@ def test_oee_quality_exact_from_run_scrap(db_session):
     # ideal = 30 * 0.25 = 7.5 h. Size productive run to 7.5 h so performance = 1.0 and
     # quality is the only sub-1.0 leg.
     op = make_op(db_session, wo, wc, run_time_per_piece=0.25)
-    today = date.today()
+    today = _shop_today()
     make_entry(
         db_session,
         admin,
@@ -638,7 +651,7 @@ def test_auto_calculate_oee_performance_leg_from_routing(client, db_session):
     wc = make_work_center(db_session)
     wo = make_wo(db_session, part, status_=WorkOrderStatus.IN_PROGRESS)
     op = make_op(db_session, wo, wc, run_time_per_piece=0.1)
-    today = date.today()
+    today = _shop_today()
     # 10 h, ALL RUN (availability 1.0), 50 good + 0 scrap (quality 1.0). ideal = 50*0.1 = 5 h.
     make_entry(
         db_session,
@@ -742,7 +755,7 @@ def test_reconcile_on_read_clears_schedule_reservation(client, db_session):
         op,
         entry_type=TimeEntryType.RUN,
         duration_hours=4.0,
-        when=date.today(),
+        when=_shop_today(),
         quantity_produced=5,
         quantity_scrapped=0,
     )
@@ -770,7 +783,7 @@ def test_oee_details_serves_float_with_optional_value_schema(db_session):
     make_user(db_session)
     wc = make_work_center(db_session)
     svc = AnalyticsService(db_session, COMPANY_A)
-    today = date.today()
+    today = _shop_today()
     details = svc.get_oee_details(today, today, wc.id)
     # Empty window -> _get_oee_value None coalesced to 0.0 float (not None) for the chart.
     assert isinstance(details.summary.oee, float)
@@ -785,7 +798,7 @@ def test_otd_sparkline_serves_floats_when_value_is_na(db_session):
     (n/a weeks render 0.0) so the schema change doesn't leak None into the float list."""
     make_user(db_session)
     svc = AnalyticsService(db_session, COMPANY_A)
-    today = date.today()
+    today = _shop_today()
     sparkline = svc._get_otd_sparkline(today - timedelta(days=7), today)
     assert isinstance(sparkline, list)
     assert all(isinstance(v, float) for v in sparkline)
@@ -828,7 +841,7 @@ def test_oee_paths_agree_with_scrap(client, db_session):
     wc = make_work_center(db_session)
     wo = make_wo(db_session, part, status_=WorkOrderStatus.IN_PROGRESS)
     op = make_op(db_session, wo, wc, run_time_per_piece=0.1)
-    today = date.today()
+    today = _shop_today()
     make_entry(
         db_session,
         admin,
@@ -867,7 +880,7 @@ def test_ideal_production_hours_weights_produced_plus_scrapped(db_session):
     wc = make_work_center(db_session)
     wo = make_wo(db_session, part, status_=WorkOrderStatus.IN_PROGRESS)
     op = make_op(db_session, wo, wc, run_time_per_piece=0.1)
-    today = date.today()
+    today = _shop_today()
     make_entry(
         db_session,
         admin,
@@ -905,7 +918,7 @@ def test_oee_create_record_forbidden_for_operator(client, db_session):
     """Fix 2: OPERATOR cannot create an OEE record directly (POST /oee/records) -> 403."""
     operator = make_user(db_session, role=UserRole.OPERATOR)
     wc = make_work_center(db_session)
-    payload = {"work_center_id": wc.id, "record_date": date.today().isoformat()}
+    payload = {"work_center_id": wc.id, "record_date": _shop_today().isoformat()}
     resp = client.post("/api/v1/oee/records", json=payload, headers=headers_for(operator))
     assert resp.status_code == status.HTTP_403_FORBIDDEN, resp.text
 
@@ -934,7 +947,7 @@ def test_oee_calculate_allowed_for_supervisor(client, db_session):
         op,
         entry_type=TimeEntryType.RUN,
         duration_hours=6.0,
-        when=date.today(),
+        when=_shop_today(),
         quantity_produced=30,
         quantity_scrapped=0,
     )
@@ -1035,7 +1048,7 @@ def test_dashboard_period_fallback_when_no_date_range(client, db_session):
     """Backward compatible: with no date_from/date_to the period preset still governs the window."""
     admin = make_user(db_session)
     wc = make_work_center(db_session)
-    make_oee_record(db_session, wc, date.today(), 75.0)
+    make_oee_record(db_session, wc, _shop_today(), 75.0)
     h = headers_for(admin)
 
     resp = client.get("/api/v1/oee/dashboard?period=7d", headers=h)

@@ -175,10 +175,47 @@ export interface WorkOrder {
    */
   quantity_deliverable?: number | null;
   quantity_accounted_loss?: number | null;
+  /**
+   * P1.3 — set ONLY by the single-work-order reads (`GET /work-orders/{id}` and
+   * `/by-number/{n}`); absent/null everywhere else.
+   *
+   * - `job_cost_actuals` — the work order's JobCost actuals by element, read
+   *   tenant-scoped. Null when no JobCost exists (nothing creates one automatically).
+   * - `issued_material_cost` — a DIFFERENT basis: net ISSUE minus RETURN cost from the
+   *   inventory ledger, present whether or not a JobCost exists.
+   */
+  job_cost_actuals?: WorkOrderJobCostActuals | null;
+  issued_material_cost?: number | null;
   created_at: string;
   updated_at: string;
   operations: WorkOrderOperation[];
 }
+
+/**
+ * A work order's JobCost actuals by element (`WorkOrderResponse.job_cost_actuals`).
+ * Plain numbers: a manual cost entry may be negative.
+ */
+export interface WorkOrderJobCostActuals {
+  job_cost_id: number;
+  /** in_progress | completed | reviewed */
+  status: string;
+  actual_material_cost: number;
+  actual_labor_cost: number;
+  /** JobCost.actual_overhead_cost: OVERHEAD plus OTHER entries. */
+  actual_burden_cost: number;
+  /** SUBCONTRACT (outside processing) entries. */
+  actual_subcontract_cost: number;
+  actual_total_cost: number;
+  updated_at?: string | null;
+}
+
+/**
+ * P1.4 — where an operation's `actual_setup_hours` / `actual_run_hours` come from,
+ * derived by the server at read time: `time_entries` (closed time entries measured
+ * them), `manual` (stored hours with no time entries behind them — legacy or
+ * out-of-band data), `none` (nothing recorded). `standard` is reserved and never sent.
+ */
+export type OperationHoursSource = 'time_entries' | 'manual' | 'standard' | 'none';
 
 export type WorkOrderStatus = 'draft' | 'released' | 'in_progress' | 'on_hold' | 'complete' | 'closed' | 'cancelled';
 
@@ -198,6 +235,18 @@ export interface WorkOrderOperation extends OperationShortCountFields {
    */
   has_labor_evidence?: boolean | null;
   quantity_recorded_good?: number | null;
+  /**
+   * P1.4, from the same batched evidence read (`GET /work-orders/{id}` only):
+   * `hours_source` (see `OperationHoursSource`); `recorded_*_hours` — the measured sums
+   * of CLOSED time entries split as clock-out credits them (SETUP → setup, every other
+   * type → run), which can EXCEED the stored actuals; `hours_include_backfill` — some of
+   * those entries are paper back-entries or imports, whose duration is the keying
+   * session, not the labor.
+   */
+  hours_source?: OperationHoursSource | null;
+  recorded_setup_hours?: number | null;
+  recorded_run_hours?: number | null;
+  hours_include_backfill?: boolean | null;
   id: number;
   version: number;  // For optimistic locking
   work_order_id: number;

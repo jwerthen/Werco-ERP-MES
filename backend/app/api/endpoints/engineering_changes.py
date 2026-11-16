@@ -18,6 +18,7 @@ from app.models.engineering_change import (
     EngineeringChangeOrder,
 )
 from app.models.user import User, UserRole
+from app.schemas.base import UTCModel
 from app.services.audit_service import AuditService
 
 router = APIRouter()
@@ -103,7 +104,7 @@ class UserSummary(BaseModel):
         from_attributes = True
 
 
-class ApprovalResponse(BaseModel):
+class ApprovalResponse(UTCModel):
     id: int
     eco_id: int
     approver_id: int
@@ -118,7 +119,7 @@ class ApprovalResponse(BaseModel):
         from_attributes = True
 
 
-class TaskResponse(BaseModel):
+class TaskResponse(UTCModel):
     id: int
     eco_id: int
     task_number: int
@@ -136,7 +137,7 @@ class TaskResponse(BaseModel):
         from_attributes = True
 
 
-class ECOResponse(BaseModel):
+class ECOResponse(UTCModel):
     id: int
     eco_number: str
     title: str

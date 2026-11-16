@@ -69,12 +69,19 @@ from app.models.customer_complaint import (
     RMAStatus,
 )
 from app.models.part import Part
-from app.models.quality import CARStatus, CorrectiveActionRequest, NCRSource, NonConformanceReport
+from app.models.quality import (
+    CARInitiationReason,
+    CARStatus,
+    CorrectiveActionRequest,
+    NCRSource,
+    NonConformanceReport,
+)
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder
 from app.services.audit_service import AuditService, AuditWriteError
 from app.services.operational_event_service import OperationalEventService
 from app.services.quality_numbering import generate_car_number, generate_ncr_number
+from app.services.quality_record_service import central_today
 
 # Record and investigate a complaint; create, edit, receive and inspect an RMA.
 # This is the quality:inspect tier (docs/RBAC_PERMISSIONS.md -> Quality -> Inspect).
@@ -758,6 +765,19 @@ def create_car_from_complaint(
     complaint = _locked_complaint(db, company_id, complaint_id)
     if complaint.car_id and _linked_live(db, company_id, CorrectiveActionRequest, complaint.car_id):
         raise HTTPException(status_code=400, detail="Complaint already has a linked CAR")
+    # The CAR form is prefilled from the complaint: its part and customer (RECORDS the CAR
+    # inherits, so a since-retired one is still carried -- only the tenant is enforced, as on
+    # the NCR escalation above), the newest RMA raised against it, and the reason box
+    # "Customer Feedback".
+    _require_owned(db, company_id, Part, complaint.part_id, "part")
+    _require_owned(db, company_id, Customer, complaint.customer_id, "customer")
+    newest_rma = (
+        tenant_query(db, ReturnMaterialAuthorization, company_id)
+        .filter(ReturnMaterialAuthorization.complaint_id == complaint.id)
+        .order_by(ReturnMaterialAuthorization.id.desc())
+        .with_entities(ReturnMaterialAuthorization.rma_number)
+        .first()
+    )
 
     car = CorrectiveActionRequest(
         company_id=company_id,
@@ -765,6 +785,12 @@ def create_car_from_complaint(
         title=_title(f"CAR from {complaint.complaint_number}: {complaint.title}"),
         problem_description=complaint.description,
         initiated_by=user.id,
+        initiation_reason=CARInitiationReason.CUSTOMER_FEEDBACK.value,
+        submitted_date=central_today(),
+        part_id=complaint.part_id,
+        customer_id=complaint.customer_id,
+        customer_name=(complaint.customer_name or None),
+        rma_number=newest_rma.rma_number if newest_rma is not None else None,
     )
     db.add(car)
     db.flush()

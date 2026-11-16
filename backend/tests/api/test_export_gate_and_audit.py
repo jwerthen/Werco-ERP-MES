@@ -67,6 +67,7 @@ EXPORT_ROUTES = [
     ("/api/v1/exports/purchase-orders/lines/export", "purchase_order_line"),
     ("/api/v1/exports/quotes/export", "quote"),
     ("/api/v1/exports/inventory/transactions/export", "inventory_transaction"),
+    ("/api/v1/exports/fai/export", "fai"),
 ]
 
 # Every role that must be refused. SUPERVISOR can read all of these datasets in
@@ -358,6 +359,10 @@ BOUNDED_FILTERS = [
     ("/api/v1/exports/inventory/export", "inventory_item", "warehouse", 50),
     ("/api/v1/exports/quotes/export", "quote", "customer", 255),
     ("/api/v1/exports/inventory/transactions/export", "inventory_transaction", "transaction_type", 40),
+    # Customer matches the work order's / part's String(255) customer name; search spans
+    # part name (String(255)) and narrower identifiers, so it is bounded at the widest.
+    ("/api/v1/exports/fai/export", "fai", "customer", 255),
+    ("/api/v1/exports/fai/export", "fai", "search", 255),
 ]
 
 

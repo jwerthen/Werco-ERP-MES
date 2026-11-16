@@ -20,7 +20,6 @@ from app.models.time_entry import TimeEntry
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
-from app.models.working_calendar import WorkingCalendar
 from app.schemas.dispatch import DispatchChangeKind
 from app.schemas.scheduling import (
     LoadChartDataPoint,
@@ -50,7 +49,12 @@ from app.services.scheduling_projection import (
 )
 from app.services.scheduling_service import SchedulingService
 from app.services.work_center_type_service import get_work_center_group
-from app.services.working_calendar_service import load_working_calendars, working_hours
+from app.services.working_calendar_service import (
+    audit_working_calendar_save,
+    load_working_calendars,
+    save_working_calendar,
+    working_hours,
+)
 
 router = APIRouter()
 
@@ -1773,34 +1777,18 @@ def update_working_calendar(
     )
     if center is None:
         raise HTTPException(404, "Work center not found")
-    before = load_working_calendars(db, company_id, [work_center_id])[work_center_id]
-    if before["version"] != payload.expected_version:
-        raise HTTPException(409, "This working calendar changed. Reload it before saving your edits.")
-    row = (
-        db.query(WorkingCalendar)
-        .filter(
-            WorkingCalendar.company_id == company_id,
-            WorkingCalendar.work_center_id == work_center_id,
-        )
-        .populate_existing()
-        .first()
+    # One writer of working_calendars rows, shared with the production-calendar sync.
+    saved = save_working_calendar(
+        db,
+        company_id,
+        center,
+        weekly_hours=payload.weekly_hours,
+        overrides=[entry.model_dump(mode="json") for entry in payload.overrides],
+        expected_version=payload.expected_version,
+        user_id=current_user.id,
     )
-    if row is None:
-        row = WorkingCalendar(company_id=company_id, work_center_id=work_center_id, version=0)
-        db.add(row)
-    row.weekly_hours = payload.weekly_hours
-    row.overrides = sorted(
-        [entry.model_dump(mode="json") for entry in payload.overrides],
-        key=lambda entry: entry["date"],
-    )
-    row.version += 1
-    row.updated_by = current_user.id
-    db.flush()
-    after = load_working_calendars(db, company_id, [work_center_id])[work_center_id]
-    if before["version"] == 0:
-        audit.log_create("working_calendar", row.id, center.code, new_values=after)
-    else:
-        audit.log_update("working_calendar", row.id, center.code, old_values=before, new_values=after)
+    audit_working_calendar_save(audit, saved)
+    after = saved.after
     db.commit()
     invalidate_work_centers_cache(center.id)
     safe_broadcast(

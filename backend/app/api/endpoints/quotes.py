@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload, selectinload
 
@@ -15,7 +15,14 @@ from app.models.quote import Quote, QuoteLine, QuoteStatus
 from app.models.rfq_quote import QuoteEstimate, RfqPackage
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder
+from app.schemas.base import UTCModel
 from app.services.audit_service import AuditService
+from app.services.quote_send_gate import (
+    assert_quote_printable,
+    assert_quote_sendable,
+    normalize_line_revision,
+    refuse_na_on_drawn_parts,
+)
 
 router = APIRouter()
 
@@ -51,6 +58,18 @@ def _line_work_order_links(quote: Quote) -> Dict[str, Optional[int]]:
     return {str(line.id): line.work_order_id for line in quote.lines}
 
 
+def _line_revisions(quote: Quote) -> Dict[str, Optional[str]]:
+    # Each line's drawing revision, keyed like ``_line_work_order_links``.
+    return {str(line.id): line.part_revision for line in quote.lines}
+
+
+def _part_current_revision(line: QuoteLine, company_id: int) -> Optional[str]:
+    """The line's part's revision today (what the editor pre-fills), tenant-checked."""
+    if line.part is None or line.part.company_id != company_id:
+        return None
+    return line.part.revision
+
+
 class QuoteLineCreate(BaseModel):
     # quantity/unit_price are bounded to match the DB CHECKs migration 080
     # restored (chk_quote_lines_quantity_positive / _unit_price_non_negative), so
@@ -65,6 +84,24 @@ class QuoteLineCreate(BaseModel):
     labor_hours: float = Field(default=0.0, allow_inf_nan=False)
     labor_cost: float = Field(default=0.0, allow_inf_nan=False)
     notes: Optional[str] = None
+
+
+class QuoteLineRevisionEdit(BaseModel):
+    """One line's drawing revision, entered on a draft or pending quote."""
+
+    line_id: int = Field(..., gt=0, description="A line of THIS quote")
+    part_revision: str = Field(
+        ...,
+        description=(
+            "Drawing revision: 1-20 letters/digits, upper-cased on save, or N/A for a line with no drawing "
+            "(setup charge, freight, a packaged line)."
+        ),
+    )
+
+    @field_validator("part_revision")
+    @classmethod
+    def _normalized(cls, value: str) -> str:
+        return normalize_line_revision(value)
 
 
 class QuoteUpdate(BaseModel):
@@ -82,6 +119,10 @@ class QuoteUpdate(BaseModel):
     status: Optional[QuoteStatus] = None
     internal_notes: Optional[str] = None
     lines: Optional[List[QuoteLineCreate]] = None
+    # The only line content this verb edits: each line's drawing revision. A CONTENT edit --
+    # draft/pending quotes only, the same CAS, the reset to DRAFT and the approval clear as any
+    # other content field -- audited per line on the quote's UPDATE row.
+    line_revisions: Optional[List[QuoteLineRevisionEdit]] = None
 
 
 class QuoteConvertRequest(BaseModel):
@@ -94,6 +135,12 @@ class QuoteLineResponse(BaseModel):
     line_number: int
     part_id: Optional[int] = None
     part_number: Optional[str] = None
+    part_revision: Optional[str] = Field(
+        None, description="The drawing revision this line quotes (required on every line before sending)"
+    )
+    part_current_revision: Optional[str] = Field(
+        None, description="The linked part's current revision -- what the editor pre-fills when part_revision is empty"
+    )
     description: str
     quantity: float
     unit_price: float
@@ -138,7 +185,7 @@ class AIEstimateResponse(BaseModel):
     line_summaries: List[AIEstimateLineSummaryResponse] = []
 
 
-class QuoteResponse(BaseModel):
+class QuoteResponse(UTCModel):
     id: int
     quote_number: str
     revision: str
@@ -287,9 +334,13 @@ def _quote_response(quote: Quote, ai_estimate=None, fabrication_quote_id=None) -
                         "labor_cost",
                         "notes",
                         "work_order_id",
+                        "part_revision",
                     )
                 },
-                part_number=line.part.part_number if line.part else None,
+                part_current_revision=_part_current_revision(line, quote.company_id),
+                # Tenant-checked like the revision beside it: a legacy line whose part_id
+                # points at another company's part names no part here.
+                part_number=(line.part.part_number if line.part and line.part.company_id == quote.company_id else None),
                 work_order_number=line.work_order.work_order_number if line.work_order else None,
             )
             for line in sorted(quote.lines, key=lambda line: (line.line_number, line.id))
@@ -386,6 +437,16 @@ def update_quote(
     one, or the reset to DRAFT that a content edit forces -- writes one STATUS_CHANGE row. Both
     are written before the terminal commit, so they commit atomically with the change. Every
     refusal below is raised before the first ``setattr`` and writes nothing.
+
+    ``line_revisions`` enters each line's drawing revision (letters/digits, or ``N/A`` for a
+    line with no drawing). It is a content edit: draft/pending quotes only, and it resets the
+    quote to DRAFT and clears its approval stamp like any other; a ``line_id`` that is not a
+    line of this quote (or is repeated) is a 422, and so is ``N/A`` on a line naming a
+    manufactured or assembly part (it has a drawing). A value equal to the stored one edits
+    nothing -- no reset, no audit row. Moving a quote to ``sent`` or ``accepted``
+    here from any status other than those two (draft, pending, and also rejected or expired,
+    which a quote can reach without ever being sent) is refused (409) while any line lacks
+    its drawing revision, exactly as ``POST /quotes/{id}/send`` is.
     """
     quote = db.query(Quote).filter(Quote.id == quote_id, Quote.company_id == company_id).with_for_update().first()
     if not quote:
@@ -409,7 +470,17 @@ def update_quote(
                 detail="Quote changed since this editor was opened. Your entries are kept; reopen the latest quote before applying them.",
             )
     line_data = update_data.pop("lines", None)
+    revision_edits = update_data.pop("line_revisions", None) or []  # an empty list edits nothing
     content_keys = set(update_data) - {"status"}
+    lines_by_id = {line.id: line for line in quote.lines}
+    # Only a revision that CHANGES is a content edit. Re-sending the stored values (an editor
+    # saving unchanged rows) must not reset a pending quote to DRAFT or clear its approval. An
+    # unknown line id counts as a change, so it still reaches the 422 below.
+    if any(
+        edit["line_id"] not in lines_by_id or lines_by_id[edit["line_id"]].part_revision != edit["part_revision"]
+        for edit in revision_edits
+    ):
+        content_keys.add("line_revisions")
     has_production_links = bool(quote.work_order_id or any(line.work_order_id for line in quote.lines))
     if has_production_links and (
         content_keys or line_data is not None or update_data.get("status") in [QuoteStatus.DRAFT, QuoteStatus.PENDING]
@@ -429,9 +500,53 @@ def update_quote(
             status_code=409,
             detail="Customer quote prices and lines are frozen. Revise and approve the estimate in Fabrication Quoting.",
         )
+    edited_line_ids = [edit["line_id"] for edit in revision_edits]
+    unknown = sorted({line_id for line_id in edited_line_ids if line_id not in lines_by_id})
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"line_revisions names line id(s) that are not on this quote: {', '.join(map(str, unknown))}",
+        )
+    if len(set(edited_line_ids)) != len(edited_line_ids):
+        raise HTTPException(status_code=422, detail="line_revisions names the same line more than once")
+    refuse_na_on_drawn_parts(
+        db,
+        company_id,
+        [
+            (lines_by_id[edit["line_id"]], edit["part_revision"])
+            for edit in revision_edits
+            if lines_by_id[edit["line_id"]].part_revision != edit["part_revision"]
+        ],
+    )
+    # Every door that puts the quote in front of the customer holds the revision gate. Only a
+    # real move INTO a customer status counts (SENT -> ACCEPTED is not one: the customer
+    # already holds that document), and it is judged on the move, not the starting status:
+    # REJECTED / EXPIRED are reachable from DRAFT by a plain status update, so gating only
+    # draft/pending would let draft -> rejected -> sent carry a blank revision out. With a
+    # content edit in the same request the quote lands at DRAFT, so there is no move.
+    if (
+        update_data.get("status") in (QuoteStatus.SENT, QuoteStatus.ACCEPTED)
+        and quote.status not in (QuoteStatus.SENT, QuoteStatus.ACCEPTED)
+        and not (content_keys or line_data is not None)
+    ):
+        assert_quote_sendable(quote)
     old_snapshot = _quote_audit_snapshot(quote)
+    old_revisions = _line_revisions(quote)
     for field, value in update_data.items():
         setattr(quote, field, value)
+    revision_changes = []
+    for edit in revision_edits:
+        line = lines_by_id[edit["line_id"]]
+        if line.part_revision != edit["part_revision"]:
+            revision_changes.append(
+                {
+                    "line_id": line.id,
+                    "line_number": line.line_number,
+                    "old": line.part_revision,
+                    "new": edit["part_revision"],
+                }
+            )
+            line.part_revision = edit["part_revision"]
     if content_keys or line_data is not None:
         # Line-only changes also advance the document snapshot even when totals match.
         quote.updated_at = datetime.utcnow()
@@ -442,13 +557,20 @@ def update_quote(
     db.flush()
     new_status = _status_value(quote.status)
     if content_keys:
+        new_snapshot = _quote_audit_snapshot(quote)
+        extra_data: Dict[str, Any] = {"edited_fields": sorted(content_keys)}
+        if "line_revisions" in content_keys:
+            # Per line, old -> new: the drawing revision is customer-document content.
+            old_snapshot["line_revisions"] = old_revisions
+            new_snapshot["line_revisions"] = _line_revisions(quote)
+            extra_data["line_revision_changes"] = revision_changes
         audit.log_update(
             "quote",
             quote.id,
             quote.quote_number,
             old_values=old_snapshot,
-            new_values=_quote_audit_snapshot(quote),
-            extra_data={"edited_fields": sorted(content_keys)},
+            new_values=new_snapshot,
+            extra_data=extra_data,
         )
     if new_status != previous_status:
         audit.log_status_change(
@@ -498,6 +620,9 @@ def send_quote(
 
     Role-gated to ``QUOTE_WRITE_ROLES``. Writes one STATUS_CHANGE audit row when the status
     actually moves; re-sending an already-SENT quote stays an idempotent 200 that writes none.
+    A draft/pending quote is refused (409, nothing written) while any line lacks its drawing
+    revision -- enter them with ``PUT /quotes/{id}`` ``line_revisions`` (``N/A`` for a line
+    with no drawing).
     """
     quote = db.query(Quote).filter(Quote.id == quote_id, Quote.company_id == company_id).with_for_update().first()
     if not quote:
@@ -505,6 +630,8 @@ def send_quote(
 
     if quote.status not in [QuoteStatus.DRAFT, QuoteStatus.PENDING, QuoteStatus.SENT]:
         raise HTTPException(status_code=409, detail="Only draft or pending quotes can be marked as sent")
+    if quote.status != QuoteStatus.SENT:
+        assert_quote_sendable(quote)
     previous_status = _status_value(quote.status)
     quote.status = QuoteStatus.SENT
     db.flush()
@@ -721,7 +848,17 @@ def generate_quote_pdf(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Generate customer-ready quote PDF (no operation-time line items)."""
+    """Generate customer-ready quote PDF (no operation-time line items).
+
+    Until the quote is issued this is a new customer document, so it holds the same gate as
+    sending: a draft, pending, rejected or expired quote is refused (409) while any line lacks
+    its drawing revision. A sent, accepted or converted quote reprints the document the
+    customer already holds and is never refused for it (a quote issued before revisions were
+    recorded prints "-" in the Rev column). The PDF shows each line's Rev, the quote's own
+    revision as "Quote Rev", Valid Until (the quote's date, else quote date + 30 days) and
+    the standard Terms block (FOB from your company's address; the validity term names the
+    Valid Until date when the quote carries one).
+    """
     quote = (
         db.query(Quote)
         .options(joinedload(Quote.lines).joinedload(QuoteLine.part))
@@ -730,6 +867,7 @@ def generate_quote_pdf(
     )
     if not quote:
         raise HTTPException(status_code=404, detail="Quote not found")
+    assert_quote_printable(quote)
 
     from app.services.document_pdf_service import build_quote_document
 

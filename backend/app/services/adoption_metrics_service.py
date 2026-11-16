@@ -26,12 +26,13 @@ All queries tenant-scoped via ``company_id``.
 """
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
+from app.core.time_utils import local_window, to_local_date
 from app.models.downtime import DowntimeEvent, DowntimePlannedType
 from app.models.maintenance import MaintenanceType, MaintenanceWorkOrder
 from app.models.operational_event import OperationalEvent
@@ -50,6 +51,7 @@ from app.schemas.analytics import (
     MaintenanceMixMetrics,
     WorkCenterReliability,
 )
+from app.services.company_time import company_window, company_zone
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +77,12 @@ def _pct(numerator: float, denominator: float) -> Optional[float]:
 
 
 def get_adoption_metrics(db: Session, company_id: int, start: date, end: date) -> AdoptionMetricsResponse:
-    start_dt = datetime.combine(start, datetime.min.time())
-    end_dt = datetime.combine(end, datetime.max.time())
+    # Half-open company-local window: [local midnight on start, next local midnight after end).
+    zone = company_zone(db, company_id)
+    start_dt, end_dt = local_window(start, end, zone)
+    # OperationalEvent.occurred_at is DateTime(timezone=True): compare it to AWARE bounds.
+    event_from = start_dt.replace(tzinfo=timezone.utc)
+    event_before = end_dt.replace(tzinfo=timezone.utc)
 
     # ── Digital completion % from operation_completed events ───────────────────
     # The event window is also capped at now: a completion dated in the future has not
@@ -88,15 +94,20 @@ def get_adoption_metrics(db: Session, company_id: int, start: date, end: date) -
         .filter(
             OperationalEvent.company_id == company_id,
             OperationalEvent.event_type == "operation_completed",
-            OperationalEvent.occurred_at >= start_dt,
-            OperationalEvent.occurred_at <= min(end_dt, datetime.utcnow()),
+            OperationalEvent.occurred_at >= event_from,
+            OperationalEvent.occurred_at < event_before,
+            OperationalEvent.occurred_at <= datetime.now(timezone.utc),
         )
         .all()
     )
     live = backfill = unknown = 0
     weekly: Dict[date, Dict[str, float]] = {}
 
-    def _week_bucket(day: date) -> Dict[str, float]:
+    def _week_bucket(at: datetime) -> Dict[str, float]:
+        # The week of the row's COMPANY-LOCAL date -- the zone the window is in -- not its
+        # UTC date, which moves a Sunday-evening Central row into the next week.
+        day = to_local_date(at, zone)
+        assert day is not None
         return weekly.setdefault(
             _week_start(day),
             {
@@ -115,7 +126,7 @@ def get_adoption_metrics(db: Session, company_id: int, start: date, end: date) -
         # A payload that is not a JSON object counts as an unreported source rather than
         # failing the whole report.
         source = payload.get("source") if isinstance(payload, dict) else None
-        bucket = _week_bucket(occurred_at.date())
+        bucket = _week_bucket(occurred_at)
         bucket["completions"] += 1
         if source in LIVE_CAPTURE_SOURCES:
             live += 1
@@ -140,7 +151,7 @@ def get_adoption_metrics(db: Session, company_id: int, start: date, end: date) -
             WorkOrder.is_deleted == False,  # noqa: E712
             WorkOrderOperation.actual_end.isnot(None),
             WorkOrderOperation.actual_end >= start_dt,
-            WorkOrderOperation.actual_end <= end_dt,
+            WorkOrderOperation.actual_end < end_dt,
         )
         .all()
     )
@@ -160,7 +171,7 @@ def get_adoption_metrics(db: Session, company_id: int, start: date, end: date) -
             .all()
         }
     for op_id, actual_end in completed_ops:
-        bucket = _week_bucket(actual_end.date())
+        bucket = _week_bucket(actual_end)
         bucket["ops_completed"] += 1
         if op_id in covered_op_ids:
             bucket["ops_covered"] += 1
@@ -175,7 +186,7 @@ def get_adoption_metrics(db: Session, company_id: int, start: date, end: date) -
         .filter(
             TimeEntry.company_id == company_id,
             TimeEntry.clock_in >= start_dt,
-            TimeEntry.clock_in <= end_dt,
+            TimeEntry.clock_in < end_dt,
             TimeEntry.clock_out.isnot(None),
             or_(WorkOrder.id.is_(None), WorkOrder.is_deleted == False),  # noqa: E712
         )
@@ -183,7 +194,7 @@ def get_adoption_metrics(db: Session, company_id: int, start: date, end: date) -
     )
     backfill_entries = 0
     for clock_in, source in entries:
-        bucket = _week_bucket(clock_in.date())
+        bucket = _week_bucket(clock_in)
         bucket["entries"] += 1
         if source in BASELINE_EXCLUDED_SOURCES:
             backfill_entries += 1
@@ -222,8 +233,8 @@ def get_adoption_metrics(db: Session, company_id: int, start: date, end: date) -
 
 
 def get_hidden_factory_metrics(db: Session, company_id: int, start: date, end: date) -> HiddenFactoryMetrics:
-    start_dt = datetime.combine(start, datetime.min.time())
-    end_dt = datetime.combine(end, datetime.max.time())
+    # Half-open company-local window: [local midnight on start, next local midnight after end).
+    start_dt, end_dt = company_window(db, company_id, start, end)
 
     # ── Rework share (hours + quantity), provenance-filtered ───────────────────
     baseline_filter = or_(TimeEntry.source.is_(None), TimeEntry.source.notin_(BASELINE_EXCLUDED_SOURCES))
@@ -236,7 +247,7 @@ def get_hidden_factory_metrics(db: Session, company_id: int, start: date, end: d
         .filter(
             TimeEntry.company_id == company_id,
             TimeEntry.clock_in >= start_dt,
-            TimeEntry.clock_in <= end_dt,
+            TimeEntry.clock_in < end_dt,
             TimeEntry.clock_out.isnot(None),
             TimeEntry.entry_type.in_(LABOR_ENTRY_TYPES),
             baseline_filter,
@@ -261,7 +272,7 @@ def get_hidden_factory_metrics(db: Session, company_id: int, start: date, end: d
         .filter(
             TimeEntry.company_id == company_id,
             TimeEntry.clock_in >= start_dt,
-            TimeEntry.clock_in <= end_dt,
+            TimeEntry.clock_in < end_dt,
             TimeEntry.clock_out.isnot(None),
             TimeEntry.entry_type.in_(LABOR_ENTRY_TYPES),
             TimeEntry.source.in_(BASELINE_EXCLUDED_SOURCES),
@@ -277,7 +288,7 @@ def get_hidden_factory_metrics(db: Session, company_id: int, start: date, end: d
         .filter(
             MaintenanceWorkOrder.company_id == company_id,
             maintenance_anchor >= start_dt,
-            maintenance_anchor <= end_dt,
+            maintenance_anchor < end_dt,
         )
         .group_by(MaintenanceWorkOrder.maintenance_type)
         .all()
@@ -302,7 +313,7 @@ def get_hidden_factory_metrics(db: Session, company_id: int, start: date, end: d
             DowntimeEvent.company_id == company_id,
             DowntimeEvent.planned_type == DowntimePlannedType.UNPLANNED,
             DowntimeEvent.start_time >= start_dt,
-            DowntimeEvent.start_time <= end_dt,
+            DowntimeEvent.start_time < end_dt,
         )
         .group_by(DowntimeEvent.work_center_id)
         .all()
@@ -312,7 +323,7 @@ def get_hidden_factory_metrics(db: Session, company_id: int, start: date, end: d
         .filter(
             TimeEntry.company_id == company_id,
             TimeEntry.clock_in >= start_dt,
-            TimeEntry.clock_in <= end_dt,
+            TimeEntry.clock_in < end_dt,
             TimeEntry.clock_out.isnot(None),
             TimeEntry.entry_type.in_(STAFFED_RUN_ENTRY_TYPES),
             TimeEntry.work_center_id.isnot(None),

@@ -12,6 +12,11 @@ Modes (decided by the environment, see ``docs/MCP.md``):
 - ``WERCO_ERP_URL`` unset -> IN-PROCESS: tools dispatch into the local app object, which
   needs the real environment (a DATABASE_URL, the real SECRET_KEY). Dev only.
 
+``--print-catalog --read-only`` prints the catalog a READ-ONLY API token is shown: the same
+keys, filtered to the tools that read and carry no tag in ``WERCO_MCP_READ_ONLY_DENY_TAGS``,
+plus ``"scope": "read_only"`` and the ``"deny_tags"`` applied. ``--read-only`` alone is a
+usage error; the default ``--print-catalog`` output is unchanged.
+
 stdout is the MCP wire. The app's own logging handler writes to ``sys.stdout``
 (``app/core/logging.py``), so the wire is captured FIRST and ``sys.stdout`` is
 re-pointed at stderr before ``app.main`` is imported; everything the process prints
@@ -71,7 +76,16 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
         action="store_true",
         help="Print the tool catalog (convenience + generated) as JSON to stdout and exit. Needs no token.",
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--read-only",
+        action="store_true",
+        help="With --print-catalog: print the catalog a READ-ONLY API token is shown "
+        "(reads only, no tag in WERCO_MCP_READ_ONLY_DENY_TAGS).",
+    )
+    args = parser.parse_args(argv)
+    if args.read_only and not args.print_catalog:
+        parser.error("--read-only is only valid together with --print-catalog")
+    return args
 
 
 async def _serve_stdio(server: Any, wire: IO[str], executor: Any) -> None:
@@ -145,26 +159,35 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     from app.mcp.catalog import build_catalog, catalog_summary
     from app.mcp.convenience import CONVENIENCE_TOOL_NAMES, CONVENIENCE_TOOLS, SHADOWED_OPERATIONS
     from app.mcp.executor import InProcessExecutor, RemoteExecutor
-    from app.mcp.server import build_server
+    from app.mcp.server import build_server, read_only_view
 
     catalog = build_catalog(app.openapi(), shadowed=SHADOWED_OPERATIONS, reserved_names=CONVENIENCE_TOOL_NAMES)
 
     if args.print_catalog:
-        payload = {
+        listed_catalog: Sequence[Any] = catalog
+        listed_convenience: Sequence[Any] = CONVENIENCE_TOOLS
+        if args.read_only:
+            listed_catalog, listed_convenience = read_only_view(
+                catalog, CONVENIENCE_TOOLS, deny_tags=settings.read_only_deny_tags
+            )
+        payload: dict = {
             "server": "werco-erp",
             "version": app.version,
             "convenience_tools": [
                 {"name": tool.name, "description": tool.description, "annotations": tool.hints.as_dict()}
-                for tool in CONVENIENCE_TOOLS
+                for tool in listed_convenience
             ],
-            "generated_tools": catalog_summary(catalog),
+            "generated_tools": catalog_summary(listed_catalog),
             "shadowed_operations": sorted(list(pair) for pair in SHADOWED_OPERATIONS),
             "counts": {
-                "convenience": len(CONVENIENCE_TOOLS),
-                "generated": len(catalog),
+                "convenience": len(listed_convenience),
+                "generated": len(listed_catalog),
                 "shadowed": len(SHADOWED_OPERATIONS),
             },
         }
+        if args.read_only:
+            payload["scope"] = "read_only"
+            payload["deny_tags"] = sorted(settings.read_only_deny_tags)
         try:
             json.dump(payload, wire, indent=1)
             wire.write("\n")

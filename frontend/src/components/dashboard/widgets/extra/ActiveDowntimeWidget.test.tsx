@@ -9,7 +9,8 @@ function event(overrides: Partial<ActiveDowntimeEvent> = {}): ActiveDowntimeEven
     id: 5,
     work_center_id: 3,
     work_order_id: 88,
-    // Zone-less on purpose: DowntimeEventResponse is not a UTCModel. toDate reads it as UTC.
+    // Zone-less on purpose: the API sends a `Z` since P1.1, but an older deployment did not,
+    // and toDate must still read a zone-less value as UTC.
     start_time: '2026-11-11T13:30:00',
     end_time: null,
     duration_minutes: null,

@@ -67,7 +67,7 @@ from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
 from app.models.work_order_material import AllocationSource, AllocationStatus, WorkOrderMaterialAllocation
 from app.services.analytics_service import AnalyticsService
 from app.services.audit_service import AuditService
-from app.services.completion_cost_service import _issued_material_cost as wo_issued_material_cost
+from app.services.completion_cost_service import issued_material_cost as wo_issued_material_cost
 from app.services.completion_inventory_service import (
     FINISHED_GOODS_LOCATION,
     apply_completion_inventory_effects,
@@ -1484,7 +1484,7 @@ def test_a_work_order_with_no_returns_reads_byte_identically_to_before(client: T
                 (c["component_part_id"], c["lot_number"], c["quantity"])
                 for c in consumed_components(client, admin, control_wo, db_session)
             ),
-            # completion_cost_service._issued_material_cost
+            # completion_cost_service.issued_material_cost
             round(wo_issued_material_cost(db_session, live, COMPANY_A), 6),
             # analytics_service._issued_material_cost (work-order-scoped)
             round(analytics._issued_material_cost(control_wo.id), 6),

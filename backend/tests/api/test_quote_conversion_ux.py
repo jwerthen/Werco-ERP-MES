@@ -7,12 +7,14 @@ from app.models.work_order import WorkOrder
 
 def make_quote(db_session, client, headers, part_ids, quantities, *, custom_first=False):
     """Seed a historical customer document; new quotes use fabrication approval."""
+    # Every line carries its drawing revision (the send gate refuses a quote without one);
+    # the part-less setup line uses the explicit N/A.
     lines = [
-        dict(part_id=part, description=f"Quoted part {index}", quantity=qty, unit_price=10)
+        dict(part_id=part, part_revision="A", description=f"Quoted part {index}", quantity=qty, unit_price=10)
         for index, (part, qty) in enumerate(zip(part_ids, quantities), 1)
     ]
     if custom_first:
-        lines.insert(0, dict(description="Setup service", quantity=1, unit_price=25))
+        lines.insert(0, dict(part_revision="N/A", description="Setup service", quantity=1, unit_price=25))
     quote = Quote(
         company_id=1,
         quote_number=f"ARCHIVE-{db_session.query(Quote).count()+1}",

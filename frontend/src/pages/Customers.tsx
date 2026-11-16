@@ -25,6 +25,8 @@ import {
   statusColor,
 } from '../components/ui';
 import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext';
+import CustomerExportControlPanel from '../components/customers/CustomerExportControlPanel';
 
 interface Customer {
   id: number;
@@ -137,6 +139,11 @@ type CustomerFormData = typeof EMPTY_CUSTOMER_FORM;
 export default function Customers() {
   const navigate = useNavigate();
   const { showToast } = useToast();
+  const { user } = useAuth();
+  // Export control (ITAR / CUI contracts) is require_role([ADMIN]) server-side,
+  // which also passes platform admins and superusers — the same set AdminRoute uses.
+  const canManageExportControl =
+    user?.role === 'admin' || user?.role === 'platform_admin' || user?.is_superuser === true;
   const [searchParams, setSearchParams] = useSearchParams();
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(true);
@@ -958,6 +965,16 @@ export default function Customers() {
                   onRetry={() => viewCustomerDetails(selectedCustomer)}
                 />
               ) : null}
+
+              {canManageExportControl && (
+                <div className="mt-6">
+                  <CustomerExportControlPanel
+                    key={selectedCustomer.id}
+                    customerId={selectedCustomer.id}
+                    customerName={selectedCustomer.name}
+                  />
+                </div>
+              )}
             </div>
 
             {/* Footer */}

@@ -50,6 +50,8 @@ export interface JobTimelineEntry {
   actor_name: string | null;
   source_label: string;
   source_url: string;
+  /** The operation this item belongs to; null for the job's own items. */
+  operation_id?: number | null;
 }
 export interface JobTimelineResponse {
   items: JobTimelineEntry[];

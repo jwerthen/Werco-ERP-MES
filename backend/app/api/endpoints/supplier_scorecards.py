@@ -12,6 +12,7 @@ from app.models.purchasing import POReceipt, POStatus, PurchaseOrder, PurchaseOr
 from app.models.quality import NonConformanceReport
 from app.models.supplier_scorecard import ApprovedSupplierList, ScorecardPeriod, SupplierAudit, SupplierScorecard
 from app.models.user import User, UserRole
+from app.schemas.base import UTCModel
 from app.services.audit_service import AuditService
 from app.services.supplier_approval_service import API_TOKEN_ASL_REFUSAL, REEVALUATION_STATUSES, central_today
 
@@ -108,7 +109,7 @@ class ScorecardUpdate(BaseModel):
         return value
 
 
-class ScorecardResponse(BaseModel):
+class ScorecardResponse(UTCModel):
     id: int
     vendor_id: int
     vendor_name: Optional[str] = None
@@ -179,7 +180,7 @@ class AuditUpdate(BaseModel):
     notes: Optional[str] = None
 
 
-class AuditResponse(BaseModel):
+class AuditResponse(UTCModel):
     id: int
     vendor_id: int
     vendor_name: Optional[str] = None
@@ -224,7 +225,7 @@ class ASLUpdate(BaseModel):
     notes: Optional[str] = None
 
 
-class ASLResponse(BaseModel):
+class ASLResponse(UTCModel):
     id: int
     vendor_id: int
     vendor_name: Optional[str] = None

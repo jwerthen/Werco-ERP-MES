@@ -733,7 +733,10 @@ Findings: PERF-1, PERF-2, PERF-3, PERF-4, PERF-5.
 > The time keys are split deliberately: `today` (UTC) covers the due-today / overdue rollups, while
 > `central_today` covers `completed_today` — a Central-Time rolling window that ages a completion OUT at
 > **Central** midnight (hours after the UTC date rolls over) with **no row change**, so UTC `today`
-> alone would serve a stale 304 across that boundary. `Part` is folded in because `active_assignments`
+> alone would serve a stale 304 across that boundary. *(Superseded 2026-11-13, migration 120:
+> `completed_today` now starts at the company's production-day start, so the fingerprint also folds in
+> `production_day` and `production_calendar_version`; `central_today` is still hashed. See `docs/API.md`
+> → Production calendar & shifts.)* `Part` is folded in because `active_assignments`
 > surfaces `part_number` / `part_name` (dereferenced via the WO), so a part rename must move the ETag —
 > a stale floor display of a part identity is an AS9100D traceability hazard. If `If-None-Match` matches
 > the **pre-reconcile** fingerprint the handler returns **304 immediately**, having touched only the

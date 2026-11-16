@@ -1,12 +1,12 @@
 from datetime import datetime
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel
+from app.schemas.base import UTCModel
 
 TimelineCategory = Literal["job", "production", "labor", "material", "quality", "blocker", "audit"]
 
 
-class WorkOrderTimelineEntry(BaseModel):
+class WorkOrderTimelineEntry(UTCModel):
     id: str
     occurred_at: datetime
     category: TimelineCategory
@@ -17,9 +17,12 @@ class WorkOrderTimelineEntry(BaseModel):
     actor_name: Optional[str] = None
     source_label: str
     source_url: str
+    # The operation this item belongs to (an operation's start / finish, its production
+    # receipts, step evidence and labor, a blocker filed against it); null for the job's own.
+    operation_id: Optional[int] = None
 
 
-class WorkOrderTimelineResponse(BaseModel):
+class WorkOrderTimelineResponse(UTCModel):
     items: List[WorkOrderTimelineEntry]
     next_cursor: Optional[str] = None
     coverage: str = (

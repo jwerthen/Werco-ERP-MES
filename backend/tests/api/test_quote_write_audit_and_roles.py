@@ -99,6 +99,7 @@ def _quote(db: Session, parts: list, *, quote_status: QuoteStatus = QuoteStatus.
             company_id=1,
             line_number=index,
             part_id=part.id,
+            part_revision="A",  # the send gate refuses a quote line without its drawing revision
             description=f"Line {index}",
             quantity=2 + index,
             unit_price=10,

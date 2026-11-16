@@ -1211,6 +1211,12 @@ def delete_part(
                 detail=f"Cannot hard delete: Part has {wo_count} work orders, {bom_count} BOMs, {bom_item_count} BOM references",
             )
 
+        from app.services.quality_record_service import car_reference_count, car_reference_refusal
+
+        car_refusal = car_reference_refusal(car_reference_count(db, company_id, part_id=part_id), "Part")
+        if car_refusal is not None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=car_refusal)
+
         audit.log_delete("part", part.id, part.part_number)
         db.delete(part)
         db.commit()

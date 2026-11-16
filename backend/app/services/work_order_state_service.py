@@ -6,13 +6,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Iterable, Literal, Optional, Sequence, Union
 
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, case, func, or_
 from sqlalchemy.exc import PendingRollbackError
 from sqlalchemy.orm import Session
 
 from app.core.observability import report_absorbed_exception
 from app.db.tenant_filter import tenant_query
-from app.models.time_entry import TimeEntry, TimeEntryType
+from app.models.time_entry import BASELINE_EXCLUDED_SOURCES, TimeEntry, TimeEntryType
 from app.models.work_order import (
     OperationStatus,
     WorkOrder,
@@ -1930,10 +1930,30 @@ def upstream_figures_by_operation(
 
 @dataclass(frozen=True)
 class OperationLaborEvidence:
-    """One operation's durable labor record: SUM(quantity_produced) and how many entries."""
+    """One operation's durable labor record, from ONE grouped TimeEntry read.
+
+    ``produced`` / ``entries`` count every entry, open or closed (the labor-gate existence
+    test). The ``closed_*`` figures are the MEASURED hours: the wall-clock
+    ``duration_hours`` of CLOSED entries only, split the way clock-out credits an operation
+    (SETUP -> setup; RUN / REWORK / INSPECTION / DOWNTIME / BREAK and a NULL type -> run).
+    ``closed_backfill_entries`` counts closed entries whose ``source`` is a paper back-entry
+    or import (``BASELINE_EXCLUDED_SOURCES``) -- their duration is the keying session's
+    wall clock, not the labor's.
+    """
 
     produced: float = 0.0
     entries: int = 0
+    closed_entries: int = 0
+    closed_setup_hours: float = 0.0
+    closed_run_hours: float = 0.0
+    closed_backfill_entries: int = 0
+
+
+# Where an operation's actual hours come from, derived at READ time (P1.4). Never stored:
+# every writer of actual_setup_hours / actual_run_hours would have to maintain a column, and
+# the TimeEntry rows are the authority. ``standard`` is RESERVED and never emitted -- no
+# code copies routing standards into actual hours.
+HoursSource = Literal["time_entries", "manual", "standard", "none"]
 
 
 def operation_labor_evidence(
@@ -1945,26 +1965,71 @@ def operation_labor_evidence(
 
     Any TimeEntry counts, open or closed -- the same existence test the floor's labor gate
     uses. An operation with no entries is absent from the result. Invariant 1: a foreign
-    company's entry on a colliding operation id never contributes.
+    company's entry on a colliding operation id never contributes. No approval filter on the
+    hour sums: they are a measurement, not a cost (``REQUIRE_APPROVED_LABOR_FOR_COST`` gates
+    cost, and clock-out credits the operation regardless of approval).
     """
     ids = sorted({op_id for op_id in operation_ids if op_id is not None})
     if not ids:
         return {}
+    closed = TimeEntry.clock_out.isnot(None)
+    duration = func.coalesce(TimeEntry.duration_hours, 0.0)
+    is_setup = TimeEntry.entry_type == TimeEntryType.SETUP
+    # Clock-out credits everything that is not SETUP -- a NULL entry_type included -- to run.
+    is_run = or_(TimeEntry.entry_type.is_(None), TimeEntry.entry_type != TimeEntryType.SETUP)
     rows = (
         db.query(
             TimeEntry.operation_id,
             func.coalesce(func.sum(TimeEntry.quantity_produced), 0.0),
             func.count(TimeEntry.id),
+            func.coalesce(func.sum(case((closed, 1), else_=0)), 0),
+            func.coalesce(func.sum(case((and_(closed, is_setup), duration), else_=0.0)), 0.0),
+            func.coalesce(func.sum(case((and_(closed, is_run), duration), else_=0.0)), 0.0),
+            func.coalesce(
+                func.sum(case((and_(closed, TimeEntry.source.in_(BASELINE_EXCLUDED_SOURCES)), 1), else_=0)),
+                0,
+            ),
         )
         .filter(TimeEntry.company_id == company_id, TimeEntry.operation_id.in_(ids))
         .group_by(TimeEntry.operation_id)
         .all()
     )
     return {
-        row[0]: OperationLaborEvidence(produced=float(row[1] or 0.0), entries=int(row[2] or 0))
+        row[0]: OperationLaborEvidence(
+            produced=float(row[1] or 0.0),
+            entries=int(row[2] or 0),
+            closed_entries=int(row[3] or 0),
+            closed_setup_hours=float(row[4] or 0.0),
+            closed_run_hours=float(row[5] or 0.0),
+            closed_backfill_entries=int(row[6] or 0),
+        )
         for row in rows
         if row[0] is not None
     }
+
+
+def operation_hours_source(operation: WorkOrderOperation, evidence: Optional[OperationLaborEvidence]) -> HoursSource:
+    """Where ``operation.actual_setup_hours`` / ``actual_run_hours`` come from.
+
+    - ``time_entries`` -- closed TimeEntries recorded hours on it (measured wall clock). A
+      closed entry of zero duration is still a measurement, so it reads ``time_entries``
+      unless stored hours exist that it cannot explain.
+    - ``manual`` -- stored hours with no closed TimeEntry hours behind them. No API path
+      writes actual hours by hand today, so this marks legacy or out-of-band data.
+    - ``none`` -- nothing recorded (an open entry contributes nothing until clock-out).
+
+    ``standard`` is reserved and never returned: no code copies standards into actuals.
+    """
+    evidence = evidence or OperationLaborEvidence()
+    recorded = evidence.closed_setup_hours + evidence.closed_run_hours
+    if recorded > 0:
+        return "time_entries"
+    stored = float(operation.actual_setup_hours or 0) + float(operation.actual_run_hours or 0)
+    if stored > 0:
+        return "manual"
+    if evidence.closed_entries > 0:
+        return "time_entries"
+    return "none"
 
 
 def recorded_good_from_evidence(

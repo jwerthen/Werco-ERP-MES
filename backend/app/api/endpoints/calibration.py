@@ -14,6 +14,7 @@ from app.db.tenant_filter import tenant_query
 from app.models.audit_log import AuditLog
 from app.models.calibration import CalibrationRecord, CalibrationStatus, Equipment
 from app.models.user import User, UserRole
+from app.schemas.base import UTCModel
 from app.services.audit_service import AuditService, AuditWriteError
 
 router = APIRouter()
@@ -187,7 +188,7 @@ class EquipmentResponse(BaseModel):
         from_attributes = True
 
 
-class CalibrationRecordResponse(BaseModel):
+class CalibrationRecordResponse(UTCModel):
     id: int
     equipment_id: int
     calibration_date: date

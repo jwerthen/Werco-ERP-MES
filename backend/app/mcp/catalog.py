@@ -47,25 +47,57 @@ EXCLUDED_TAGS: FrozenSet[str] = frozenset(
 # in the app, never an agent's tool call (the route also refuses API tokens). Agents keep
 # the record-only accept, dismiss and snooze tools.
 #
+# And the two customer export-control WRITES (Claude-plugin brief P0.3; compliance review
+# P0, finding 2). Marking or un-marking a customer controlled decides what an outside AI
+# connector is shown, and the owner's rule is "an Admin does it, signed in to the app". The
+# routes refuse API tokens, but a person's own access JWT (the stdio bridge's email /
+# password, or the HTTP door) would still reach them through a tool call -- so an agent,
+# possibly following text injected through ERP data, could switch control OFF and the
+# connector would get that customer's records unredacted from the next request on. Not
+# tools, ever. Reading a customer's standing stays a tool.
+#
+# And the four company egress kill-switch WRITES (lead decision, Claude-plugin brief build
+# 2026-11-15: an egress switch is a person's judgment). ``allow_ai_egress`` also opens or
+# closes every AI-external connector, and the SMS / carrier / label-print switches decide
+# what customer data leaves the CUI boundary. The routes refuse every API token
+# (``app.core.credentials.API_TOKEN_EGRESS_SWITCH``), and for the same reason as the
+# export-control writes -- a person's own JWT would still reach them through a tool call --
+# none is a tool. The shipping and print profile PUTs are the only writers of their
+# switches, so the whole route is out; their GETs stay tools. Named on their own so the
+# credential tests walk exactly these routes (every one refuses an API token 403).
+EGRESS_SWITCH_OPERATIONS: FrozenSet[Tuple[str, str]] = frozenset(
+    {
+        ("PUT", "/api/v1/companies/me/ai-egress"),
+        ("PUT", "/api/v1/companies/me/sms-egress"),
+        ("PUT", "/api/v1/admin/settings/shipping-profile"),
+        ("PUT", "/api/v1/receiving/print-profile"),
+    }
+)
+
 # And the Approved Supplier List writes (AS9100D 8.4): recording a supplier-approval
 # decision and loading the controlled QL 7.4 list are a named person's judgment, so they
 # are app actions only (the routes also refuse API tokens). The import preview goes with
 # its commit -- it exists only to feed one. Agents keep the reads: the re-evaluation-due
 # list and the supplier-approval check.
-EXCLUDED_OPERATIONS: FrozenSet[Tuple[str, str]] = frozenset(
-    {
-        ("POST", "/api/v1/work-orders/import"),
-        ("POST", "/api/v1/purchasing/purchase-orders/import"),
-        ("POST", "/api/v1/ai/recommendations/{recommendation_id}/apply"),
-        ("PUT", "/api/v1/purchasing/vendors/{vendor_id}/approval"),
-        ("POST", "/api/v1/purchasing/vendors/asl-import/preview"),
-        ("POST", "/api/v1/purchasing/vendors/asl-import/commit"),
-        # The legacy approved_supplier_list writes (read-only history since migration 123; the
-        # ASL lives on the vendor record): an approval an agent recorded there would contradict
-        # the vendor's own status, and nothing reads it. The two reads stay tools.
-        ("POST", "/api/v1/supplier-scorecards/approved-suppliers/"),
-        ("PUT", "/api/v1/supplier-scorecards/approved-suppliers/{asl_id}"),
-    }
+EXCLUDED_OPERATIONS: FrozenSet[Tuple[str, str]] = (
+    frozenset(
+        {
+            ("POST", "/api/v1/work-orders/import"),
+            ("POST", "/api/v1/purchasing/purchase-orders/import"),
+            ("POST", "/api/v1/ai/recommendations/{recommendation_id}/apply"),
+            ("POST", "/api/v1/customers/{customer_id}/contracts"),
+            ("PUT", "/api/v1/customers/{customer_id}/contracts/{contract_id}"),
+            ("PUT", "/api/v1/purchasing/vendors/{vendor_id}/approval"),
+            ("POST", "/api/v1/purchasing/vendors/asl-import/preview"),
+            ("POST", "/api/v1/purchasing/vendors/asl-import/commit"),
+            # The legacy approved_supplier_list writes (read-only history since migration 123; the
+            # ASL lives on the vendor record): an approval an agent recorded there would contradict
+            # the vendor's own status, and nothing reads it. The two reads stay tools.
+            ("POST", "/api/v1/supplier-scorecards/approved-suppliers/"),
+            ("PUT", "/api/v1/supplier-scorecards/approved-suppliers/{asl_id}"),
+        }
+    )
+    | EGRESS_SWITCH_OPERATIONS
 )
 
 # Every operation in the document that declares NO ``security`` block, BY NAME. None
@@ -173,6 +205,9 @@ class GeneratedTool:
     file_list_fields: Tuple[str, ...] = ()
     deprecated: bool = False
     operation_id: str = ""
+    # EVERY OpenAPI tag on the operation (``tag`` above is only the first, for naming and
+    # the description suffix). The read-only deny list is tested against all of them.
+    tags: Tuple[str, ...] = ()
 
     @property
     def key(self) -> Tuple[str, str]:
@@ -517,6 +552,7 @@ def build_tool(
         file_list_fields=tuple(file_list_fields),
         deprecated=bool(operation.get("deprecated")),
         operation_id=operation_id,
+        tags=tuple(str(item) for item in tags),
     )
 
 
@@ -560,7 +596,8 @@ def build_catalog(
     ``shadowed`` is the set of ``(METHOD, path)`` pairs a convenience tool replaces;
     their generated twins are dropped so the convenience tool is the only door to
     that route (it is where the DRAFT / demote / name-guard rules live).
-    ``excluded_operations`` are dropped with NO replacement (the cutover loaders, AI Accept & apply).
+    ``excluded_operations`` are dropped with NO replacement (the cutover loaders, AI Accept & apply,
+    the export-control and egress kill-switch writes).
 
     Names are assigned over EVERY secured operation BEFORE the shadowed and excluded
     pairs are dropped, so neither ever renames a neighbour: the Routing router's

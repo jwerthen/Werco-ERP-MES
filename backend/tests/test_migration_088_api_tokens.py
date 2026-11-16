@@ -98,6 +98,15 @@ EXPECTED_COLUMNS = [
     ("company_id", False),
 ]
 
+# Columns a LATER revision adds to this table, by name -> that revision. 088 is an applied
+# migration and is never edited; the model carries these too, so the 088-vs-model
+# comparisons below leave them out and their own revision's test pins them
+# (tests/test_migration_119_api_token_scope.py).
+LATER_COLUMNS = {
+    "scope": "119_api_token_scope",
+    "ai_external": "119_api_token_scope",
+}
+
 # Every index both paths must build. The first four come from ``index=True`` /
 # ``unique=True`` on the columns themselves (company_id via TenantMixin); the last two
 # are the model's explicit ``__table_args__``.
@@ -247,6 +256,11 @@ def _model_table():
     from app.models.api_token import ApiToken
 
     return ApiToken.__table__
+
+
+def _model_columns_088() -> list:
+    """The model's columns as 088 built them: everything but the LATER_COLUMNS, in order."""
+    return [column for column in _model_table().columns if column.name not in LATER_COLUMNS]
 
 
 def _model_indexes() -> dict:
@@ -467,7 +481,7 @@ def test_every_column_matches_the_model_in_name_order_type_and_nullability():
     never empty is a diff nobody reads.
     """
     migration_columns = _record("upgrade", objects_exist=False).table_columns
-    model_columns = list(_model_table().columns)
+    model_columns = _model_columns_088()
 
     assert [column.name for column in migration_columns] == [name for name, _ in EXPECTED_COLUMNS]
     assert [column.name for column in model_columns] == [name for name, _ in EXPECTED_COLUMNS]
@@ -600,7 +614,7 @@ def test_created_at_is_python_side_only_on_both_paths():
 
 
 @pytest.mark.unit
-def test_the_table_carries_the_tenant_shape_and_no_scope_column():
+def test_the_table_carries_the_tenant_shape_and_no_widening_column():
     """Invariant 1, asserted on the new tenant surface this migration adds.
 
     ``company_id`` is the TenantMixin shape (non-null, indexed, FK to companies.id) and
@@ -608,8 +622,10 @@ def test_the_table_carries_the_tenant_shape_and_no_scope_column():
     tenancy via ``tenant_query`` stays the enforcement -- RLS here is deny-by-default
     with zero policies.
 
-    And the table carries NO role, scope or permission column: a token is only as
-    powerful as the user it belongs to, and nothing on the row can widen that.
+    And the table carries NO role or permission column: a token is only as powerful as
+    the user it belongs to, and nothing on the row can widen that. The one ``scope``
+    column there is (added by ``119_api_token_scope``, not here) can only NARROW: its
+    CHECK admits exactly ``full`` (the user's whole role) and ``read_only``.
     """
     table = _model_table()
     company_id = table.columns["company_id"]
@@ -622,8 +638,19 @@ def test_the_table_carries_the_tenant_shape_and_no_scope_column():
         assert len(columns) == 1 or columns[0] == "company_id", f"{index.name} is not tenant-led"
 
     names = {column.name for column in table.columns}
-    for forbidden in ("role", "scope", "scopes", "permissions", "is_superuser"):
+    for forbidden in ("role", "scopes", "permissions", "is_superuser"):
         assert forbidden not in names, f"{forbidden!r} would let a token widen its user's power"
+
+    # ``scope`` is 119's narrowing-only column, never 088's: a CHECK pins its two values.
+    assert LATER_COLUMNS["scope"] == "119_api_token_scope"
+    assert '"scope"' not in _body(), "088 itself never gained a scope column"
+    [check] = [
+        constraint
+        for constraint in table.constraints
+        if isinstance(constraint, sa.CheckConstraint) and constraint.name == "ck_api_tokens_scope"
+    ]
+    assert str(check.sqltext) == "scope IN ('full', 'read_only')"
+    assert table.columns["scope"].server_default.arg == "full", "an unstated scope is the user's own, never wider"
 
 
 # ---------------------------------------------------------------------------
