@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import api from '../services/api';
 import type { ProductionCalendar } from '../types/productionCalendar';
-import { currentDefaultShift, productionDayEnded } from '../utils/productionCalendar';
+import { currentDefaultShift, parseProductionCalendar, productionDayEnded } from '../utils/productionCalendar';
 import { formatCentralTime } from '../utils/centralTime';
 
 /** Re-evaluate the badge this often so it flips at shift boundaries. */
@@ -24,7 +24,9 @@ const timeRange = (startUtc: string, endUtc: string) => `${formatCentralTime(sta
  * here. In a hand-off overlap it shows the OUTGOING shift (the server's rule). It
  * refetches when the production day ends and every half hour; any failure, an
  * unconfigured calendar, or a gap between shifts reads as an em dash. It never blocks
- * the layout: nothing waits on the request.
+ * the layout: nothing waits on the request. It never takes the layout down either: it
+ * renders on every page, so a body that is not a calendar is treated as a failed read
+ * (checked here as well as in the API client), never dereferenced.
  */
 const HudShift = React.memo(function HudShift() {
   const [calendar, setCalendar] = useState<ProductionCalendar | null>(null);
@@ -48,7 +50,7 @@ const HudShift = React.memo(function HudShift() {
       inFlight.current = true;
       lastAttempt.current = Date.now();
       try {
-        const data = await api.getProductionCalendar();
+        const data = parseProductionCalendar(await api.getProductionCalendar());
         calendarRef.current = data;
         lastFailed.current = false;
         if (!mounted.current) return;
