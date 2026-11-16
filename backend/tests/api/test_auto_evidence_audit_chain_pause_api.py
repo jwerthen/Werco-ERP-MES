@@ -10,7 +10,7 @@ auditor carry the pause through:
   be read per REQUEST (no restart, no cached answer).
 * ``POST /api/v1/qms-standards/{standard_id}/auto-link`` -- the persisted view. The stored
   ``QMSClauseEvidence`` row has no health fields, so its ``description`` is the only place a
-  pause shows on the record of evidence; a re-run must overwrite a stale "chain active"
+  pause shows on the record of evidence; a re-run must overwrite a stale unqualified "chain"
   claim rather than keep it.
 
 The paused rows are written by the app's own request-scoped writer (``get_audit_service``)
@@ -185,11 +185,11 @@ def test_auto_evidence_endpoint_counts_rows_the_api_wrote_while_paused(
     assert block["recent_count"] == 2
     assert block["description"] == (
         "2 audit log entries (2 in last 12 months); SHA-256 integrity chain paused "
-        "(1 entry in last 12 months written without it)"
+        "(1 entry written without it, 1 in last 12 months)"
     )
     assert "AUDIT_HASH_CHAIN_ENABLED is off" in block["health_detail"]
-    assert "Entries in the last 12 months written while paused: 1 of 2." in block["health_detail"]
-    assert "hash chain active" not in block["health_detail"]
+    assert "Entries written while paused: 1 of 2 (1 in the last 12 months)." in block["health_detail"]
+    assert "hash chain enabled" not in block["health_detail"]
 
 
 def test_auto_evidence_endpoint_reads_the_chain_setting_per_request(
@@ -218,8 +218,7 @@ def test_auto_evidence_endpoint_reads_the_chain_setting_per_request(
     assert paused["overall_suggested_compliance"] == "partial"
     assert _audit_block(paused)["health_status"] == "warning"
     assert _audit_block(paused)["description"] == (
-        "1 audit log entry (1 in last 12 months); SHA-256 integrity chain paused "
-        "(0 entries in last 12 months written without it)"
+        "1 audit log entry (1 in last 12 months); SHA-256 integrity chain paused " "(no entries written without it yet)"
     )
 
     assert resumed == on
@@ -254,7 +253,7 @@ def test_auto_link_persists_the_paused_chain_disclosure(client: TestClient, db_s
     assert stored["live_count"] == 2
     assert stored["description"] == (
         "2 audit log entries (2 in last 12 months); SHA-256 integrity chain paused "
-        "(2 entries in last 12 months written without it)"
+        "(2 entries written without it, 2 in last 12 months)"
     )
 
 
@@ -293,7 +292,7 @@ def test_auto_link_rerun_replaces_a_stale_chain_claim_on_the_same_row(
     assert linked_paused["live_count"] == 2
     assert linked_paused["description"] == (
         "2 audit log entries (2 in last 12 months); SHA-256 integrity chain paused "
-        "(0 entries in last 12 months written without it)"
+        "(no entries written without it yet)"
     )
 
     assert third["compliance_summary"] == {"partial": 1}
@@ -302,8 +301,8 @@ def test_auto_link_rerun_replaces_a_stale_chain_claim_on_the_same_row(
     # Before the third run: + the second auto-link's CREATE, written while paused.
     assert linked_resumed["live_count"] == 3
     assert linked_resumed["description"] == (
-        "3 audit log entries (3 in last 12 months); SHA-256 integrity chain active, "
-        "but 1 entry in last 12 months was written while it was paused"
+        "3 audit log entries (3 in last 12 months); SHA-256 integrity chain enabled, "
+        "but 1 entry was written while it was paused (1 in last 12 months)"
     )
 
     assert _company_hashes(db_session).count(PAUSED_CHAIN_PLACEHOLDER) == 1

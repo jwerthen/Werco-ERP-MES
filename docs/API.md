@@ -8733,33 +8733,45 @@ in `RBAC_PERMISSIONS.md`.
 > `123`; see Purchasing → *Approved Supplier List on the vendor record*). Until the ASL is loaded, K is
 > 0. The "no performance scorecards" warning still quotes the active count.
 
-> **The Audit Trail evidence row reports a paused hash chain instead of claiming one.** The
-> *Audit Trail (Immutable Hash-Chain Log)* row used to say "integrity hash chain active" and suggest
-> `compliant` whenever the company had any audit entries — even with the chain paused
-> (`AUDIT_HASH_CHAIN_ENABLED=false`; see
+> **The Audit Trail evidence row reports a paused hash chain, and missing triggers, instead of
+> claiming them.** The *Audit Trail (Immutable Hash-Chain Log)* row used to say "integrity hash chain
+> active" and suggest `compliant` whenever the company had any audit entries — even with the chain
+> paused (`AUDIT_HASH_CHAIN_ENABLED=false`; see
 > [Pausing the hash chain](AUDIT_LOG_RETENTION_RUNBOOK.md#pausing-the-hash-chain-audit_hash_chain_enabled)),
-> when new entries carry the `LEGACY_CHAIN_PAUSED` placeholder and can never be verified. It now
-> reads the setting on every call and counts the company's entries from the last 12 months that carry
-> that placeholder:
+> when new entries carry the `LEGACY_CHAIN_PAUSED` placeholder and can never be verified. It now reads
+> three things on every call: the setting; how many of the company's entries carry that placeholder,
+> over its **whole history** (a paused span never becomes verifiable by ageing; the last-12-months
+> figure is shown alongside); and, on PostgreSQL, whether the `tr_audit_log_no_update` /
+> `tr_audit_log_no_delete` triggers exist and fire (`pg_trigger`, enabled `O`/`A`).
 >
-> | Chain now | Paused entries in last 12 months | `health_status` / `suggested_compliance` | `description` says |
-> |-----------|----------------------------------|------------------------------------------|--------------------|
-> | on | 0 | `healthy` / `compliant` | `…, SHA-256 integrity chain` (`health_detail` names the 12-month window checked) |
-> | on | K > 0 | `warning` / `partial` | `…; SHA-256 integrity chain active, but K entries in last 12 months were written while it was paused` |
-> | paused | any (the company has entries) | `warning` / `partial` | `…; SHA-256 integrity chain paused (K entries in last 12 months written without it)` |
+> | Chain now | Paused entries (any age) | `health_status` / `suggested_compliance` | `description` says |
+> |-----------|--------------------------|------------------------------------------|--------------------|
+> | on | 0 | `healthy` / `compliant` | `…, SHA-256 integrity chain` |
+> | on | K > 0 | `warning` / `partial` | `…; SHA-256 integrity chain enabled, but K entries were written while it was paused (J in last 12 months)` |
+> | paused | K ≥ 0 (the company has entries) | `warning` / `partial` | `…; SHA-256 integrity chain paused (K entries written without it, J in last 12 months)` — or `(no entries written without it yet)` |
 > | either | no entries at all | `no_data` / `not_assessed` | unchanged when on; `…; SHA-256 integrity chain paused` when paused |
 >
-> The warning rows' `health_detail` says the paused entries carry no integrity hash and cannot be
-> cryptographically verified, and states that database triggers still block UPDATE and DELETE on every
-> entry (those are independent of the setting). A clause backed by this row therefore gets a suggested
-> roll-up (`overall_suggested_compliance`, auto-link's `compliance_summary`) of `partial` at best, never
-> `compliant`, while the chain is or recently was paused. That is a suggestion only: neither endpoint
-> writes the clause's `compliance_status`. Of the fields that change, auto-link
+> If the trigger check finds either trigger missing or disabled, the row is `warning` / `partial`
+> whatever the chain state, and `description` ends `; database UPDATE/DELETE triggers missing or
+> disabled`. `health_detail` ends with the trigger finding: "Database triggers refuse UPDATE and DELETE
+> statements on audit entries." when both are in force, the missing/disabled sentence when not, and
+> "Database UPDATE/DELETE trigger status could not be checked." off PostgreSQL (dev/test SQLite) or if
+> the catalog read fails (it runs in its own savepoint, so a failure cannot abort the request). The
+> warning rows' `health_detail` also says the paused entries carry no integrity hash and can never be
+> cryptographically verified, with the split `K of N (J in the last 12 months)`. The healthy text says
+> the chain is **enabled**, not verified — chain integrity is checked by the platform-admin
+> `/audit/integrity/*` endpoints, not by this row.
+>
+> A clause backed by this row therefore gets a suggested roll-up (`overall_suggested_compliance`,
+> auto-link's `compliance_summary`) of `partial` at best, never `compliant`, once the company has any
+> paused entry, while the chain is paused, or while the triggers are missing. That is a suggestion
+> only: neither endpoint writes the clause's `compliance_status`. Of the fields that change, auto-link
 > (`POST /qms-standards/{standard_id}/auto-link`) stores only `description` (`health_status`,
 > `health_detail` and `suggested_compliance` are computed per call and never persisted), so stored
-> evidence picks up the new wording on the next auto-link run. Paused entries older than 12 months are
-> not counted (the count rides the existing 12-month scan); the row's `title`, `module_reference` and
-> `evidence_type` do not change with the chain state.
+> evidence picks up the new wording on the next auto-link run. The QMS page's linked-evidence list
+> shows a stored link's `title` and count, not its `description`; the live auto-evidence preview
+> shows `description` and `health_detail`. The row's `title`, `module_reference` and `evidence_type`
+> do not change with the chain or trigger state.
 
 > **Deletes are soft (records retained):** the three `DELETE` endpoints above return **204** but
 > do not physically remove rows — the standard / clause / evidence is marked deleted and disappears

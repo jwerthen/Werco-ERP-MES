@@ -189,10 +189,12 @@ triggers are what stand behind them. Do not describe a paused span as hash-chain
 describe the system as having no tamper controls during one either.
 
 The QMS auto-evidence *Audit Trail (Immutable Hash-Chain Log)* row follows the same framing. While the
-chain is paused, or while any of the company's entries from the last 12 months carry the
-`LEGACY_CHAIN_PAUSED` placeholder, it says so, counts those entries, still states the triggers, and
-suggests `partial` rather than `compliant` (`docs/API.md` → QMS Standards & Audit Readiness). Evidence
-links stored before that change keep the old wording until the next auto-link run.
+chain is paused, or once any of the company's entries carry the `LEGACY_CHAIN_PAUSED` placeholder, it
+says so, counts those entries, and suggests `partial` rather than `compliant` — **permanently**, since a
+paused span never becomes verifiable; that count covers the whole history, not a 12-month window. It
+states the triggers only when `pg_trigger` shows both in force, and drops to `partial` if either is
+missing or disabled (`docs/API.md` → QMS Standards & Audit Readiness). Evidence links stored before that
+change keep the old wording until the next auto-link run.
 
 ---
 

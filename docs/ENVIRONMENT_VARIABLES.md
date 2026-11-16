@@ -930,9 +930,9 @@ SC-28), exactly as for carrier secrets.
 > ⚠️ **Pausing is not fully reversible.** Rows written while paused can never be made verifiable
 > retroactively, and gap-based deletion detection is permanently lost across that window. The
 > database immutability triggers (migrations `008`/`060`) are unaffected by this setting and remain in
-> force. While paused, and until the paused entries age out of its 12-month window, the QMS
-> auto-evidence *Audit Trail* row reports the pause and suggests `partial`, not `compliant`
-> (`docs/API.md` → QMS Standards & Audit Readiness). Read `docs/AUDIT_LOG_RETENTION_RUNBOOK.md` →
+> force. While paused, and permanently once any entry has been written while paused (a paused span
+> never becomes verifiable), the QMS auto-evidence *Audit Trail* row reports the pause and suggests
+> `partial`, not `compliant` (`docs/API.md` → QMS Standards & Audit Readiness). Read `docs/AUDIT_LOG_RETENTION_RUNBOOK.md` →
 > **Pausing the hash chain** before setting it to `false`; migration `077` must be applied first (it
 > creates the sequence the paused allocator uses).
 
