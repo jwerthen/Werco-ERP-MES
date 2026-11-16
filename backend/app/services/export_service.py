@@ -5,16 +5,27 @@ import io
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
+from app.core.time_utils import CENTRAL_TIME_ZONE, to_local_iso
 from app.services.export_safety import sanitize_csv_row, write_cell
 
 
-def format_value(value: Any) -> Any:
-    """Format a value for export."""
+def format_value(value: Any, zone: ZoneInfo = CENTRAL_TIME_ZONE) -> Any:
+    """Format a value for export.
+
+    A ``datetime`` becomes ISO-8601 in ``zone``'s wall time WITH its UTC offset, e.g.
+    ``2026-01-15T17:30:00-06:00`` (a naive value is read as UTC, which is how the schema
+    stores it). Callers pass the company's zone, so a row reads on the same local day
+    the export's ``start_date`` / ``end_date`` filter selected it by. A spreadsheet
+    datetime cannot carry an offset, so XLSX cells stay text. The check runs before the
+    ``date`` branch because ``datetime`` is a ``date`` subclass. A ``date`` stays
+    ``YYYY-MM-DD``.
+    """
     if value is None:
         return ""
     if isinstance(value, datetime):
-        return value.strftime("%Y-%m-%d %H:%M:%S")
+        return to_local_iso(value, zone)
     if isinstance(value, date):
         return value.strftime("%Y-%m-%d")
     if isinstance(value, Decimal):
@@ -24,8 +35,10 @@ def format_value(value: Any) -> Any:
     return value
 
 
-def generate_csv(data: List[Dict[str, Any]], columns: Optional[List[str]] = None) -> str:
-    """Generate CSV string from list of dictionaries."""
+def generate_csv(
+    data: List[Dict[str, Any]], columns: Optional[List[str]] = None, *, zone: ZoneInfo = CENTRAL_TIME_ZONE
+) -> str:
+    """Generate CSV string from list of dictionaries (datetimes in ``zone``, with offset)."""
     if not data:
         return ""
 
@@ -41,15 +54,19 @@ def generate_csv(data: List[Dict[str, Any]], columns: Optional[List[str]] = None
     writer.writerow(sanitize_csv_row(headers))
 
     for row in data:
-        writer.writerow(sanitize_csv_row(format_value(row.get(col)) for col in headers))
+        writer.writerow(sanitize_csv_row(format_value(row.get(col), zone) for col in headers))
 
     return output.getvalue()
 
 
 def generate_excel(
-    data: List[Dict[str, Any]], columns: Optional[List[str]] = None, sheet_name: str = "Export"
+    data: List[Dict[str, Any]],
+    columns: Optional[List[str]] = None,
+    sheet_name: str = "Export",
+    *,
+    zone: ZoneInfo = CENTRAL_TIME_ZONE,
 ) -> bytes:
-    """Generate Excel file from list of dictionaries."""
+    """Generate Excel file from list of dictionaries (datetimes in ``zone``, with offset)."""
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     from openpyxl.utils import get_column_letter
@@ -88,7 +105,7 @@ def generate_excel(
 
     for row_idx, row_data in enumerate(data, 2):
         for col_idx, col in enumerate(headers, 1):
-            value = format_value(row_data.get(col))
+            value = format_value(row_data.get(col), zone)
             cell = write_cell(ws, row_idx, col_idx, value)
             cell.border = thin_border
             if isinstance(value, (int, float)):

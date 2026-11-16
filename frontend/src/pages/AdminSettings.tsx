@@ -22,6 +22,7 @@ import {
   PrinterIcon,
   ChatBubbleLeftRightIcon,
   EnvelopeIcon,
+  CalendarDaysIcon,
 } from '@heroicons/react/24/outline';
 import CarrierIntegrationsTab from '../components/admin/CarrierIntegrationsTab';
 import PrintIntegrationsTab from '../components/admin/PrintIntegrationsTab';
@@ -31,14 +32,16 @@ import AIEgressTab from '../components/admin/AIEgressTab';
 import SmsEgressTab from '../components/admin/SmsEgressTab';
 import EmailRecipientsTab from '../components/admin/EmailRecipientsTab';
 import DisplayTokensTab from '../components/admin/DisplayTokensTab';
+import ProductionCalendarTab from '../components/admin/ProductionCalendarTab';
 import { ConfirmDialog, EmptyState, ErrorState, FormField, useToast } from '../components/ui';
 
-type TabKey = 'workcenters' | 'workcentertypes' | 'employees' | 'roles' | 'carriers' | 'printing' | 'performance' | 'aiusage' | 'aiprivacy' | 'smsprivacy' | 'emails' | 'displays' | 'audit';
+type TabKey = 'workcenters' | 'workcentertypes' | 'calendar' | 'employees' | 'roles' | 'carriers' | 'printing' | 'performance' | 'aiusage' | 'aiprivacy' | 'smsprivacy' | 'emails' | 'displays' | 'audit';
 
 
 const tabs: { key: TabKey; label: string; icon: React.ComponentType<any> }[] = [
   { key: 'workcenters', label: 'Work Center Rates', icon: BuildingOfficeIcon },
   { key: 'workcentertypes', label: 'Work Center Types', icon: BuildingOfficeIcon },
+  { key: 'calendar', label: 'Production Calendar', icon: CalendarDaysIcon },
   { key: 'employees', label: 'Employees', icon: UsersIcon },
   { key: 'emails', label: 'Email Recipients', icon: EnvelopeIcon },
   { key: 'roles', label: 'Roles & Permissions', icon: ShieldCheckIcon },
@@ -328,7 +331,7 @@ export default function AdminSettings() {
           <div className="flex items-center justify-center py-12">
             <div className="spinner h-8 w-8"></div>
           </div>
-        ) : loadError && !['carriers', 'printing', 'performance', 'aiusage', 'aiprivacy', 'smsprivacy', 'displays'].includes(activeTab) ? (
+        ) : loadError && !['calendar', 'carriers', 'printing', 'performance', 'aiusage', 'aiprivacy', 'smsprivacy', 'displays'].includes(activeTab) ? (
           <ErrorState
             message="Could not load this settings tab."
             onRetry={() => loadTabData(activeTab)}
@@ -356,6 +359,7 @@ export default function AdminSettings() {
               />
             )}
             {activeTab === 'roles' && rolePermissions && <RolePermissionsManager data={rolePermissions} onUpdate={() => loadTabData('roles')} />}
+            {activeTab === 'calendar' && <ProductionCalendarTab />}
             {activeTab === 'carriers' && <CarrierIntegrationsTab />}
             {activeTab === 'printing' && <PrintIntegrationsTab />}
             {activeTab === 'performance' && <RuntimeMetricsTab />}

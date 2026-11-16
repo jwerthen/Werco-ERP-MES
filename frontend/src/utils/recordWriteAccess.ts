@@ -21,3 +21,9 @@ export const canEditFAIs = (actor: Actor): boolean =>
 // Customer quote writes (edit terms / accept / reject / expire, mark sent, convert to work
 // orders) — mirrors QUOTE_WRITE_ROLES in backend/app/api/endpoints/quotes.py.
 export const canWriteQuotes = (actor: Actor): boolean => hasWriteRole(actor, ['admin', 'manager', 'supervisor']);
+// Production calendar (backend/app/api/endpoints/production_calendar.py): saving the
+// calendar is CALENDAR_EDIT_ROLES (Admin); the working-calendar sync is
+// WORKING_CALENDAR_SYNC_ROLES, the roles of the scheduling calendar PUT it writes through.
+export const canEditProductionCalendar = (actor: Actor): boolean => hasWriteRole(actor, ['admin']);
+export const canSyncWorkingCalendars = (actor: Actor): boolean =>
+  hasWriteRole(actor, ['admin', 'manager', 'supervisor']);

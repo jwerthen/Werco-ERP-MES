@@ -106,6 +106,7 @@ from .process_sheet import (
     StepType,
     WOOperationStep,
 )
+from .production_calendar import ProductionCalendarSettings, ShiftDefinition, ShiftPattern, ShiftPatternWorkCenter
 from .production_receipt import ProductionReceipt
 from .purchasing import (
     DefectType,
@@ -328,6 +329,10 @@ __all__ = [
     "QuoteMachinedLineItem",
     "EstimateJobActual",
     "OEERecord",
+    "ProductionCalendarSettings",
+    "ShiftPattern",
+    "ShiftPatternWorkCenter",
+    "ShiftDefinition",
     "OEETarget",
     "OperationalEvent",
     "DowntimeEvent",

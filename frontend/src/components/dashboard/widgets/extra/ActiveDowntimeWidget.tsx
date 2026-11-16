@@ -1,9 +1,9 @@
 /**
  * Active Downtime — `GET /downtime/active` (open downtime events, newest first).
  *
- * `DowntimeEventResponse` is a plain BaseModel, not UTCModel, so `start_time` can arrive
- * without a `Z`; every timestamp goes through `utils/centralTime` (`toDate` treats a
- * zone-less string as UTC) and renders in Central time.
+ * `DowntimeEventResponse` inherits `UTCModel` (since P1.1, 2026-11-13), so `start_time`
+ * arrives as UTC with a `Z`; every timestamp still goes through `utils/centralTime`
+ * (`toDate` also reads an older API's zone-less value as UTC) and renders in Central time.
  *
  * The work-order link is keyed by `work_order_id`, which the server always fills. Its text is
  * `work_order.wo_number` when sent; an API deployed before the `WorkOrderInfo` alias fix sends

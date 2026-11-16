@@ -193,8 +193,12 @@ def _labor_and_overhead_cost(db: Session, work_order: WorkOrder, company_id: int
     return labor_cost, overhead_cost
 
 
-def _issued_material_cost(db: Session, work_order: WorkOrder, company_id: int) -> float:
+def issued_material_cost(db: Session, work_order: WorkOrder, company_id: int) -> float:
     """NET cost of material consumed by the WO: ISSUE (backflush + tied) minus RETURN.
+
+    Public because the work-order read (``GET /work-orders/{id}``, by-number) reports it as
+    ``issued_material_cost``: the inventory-ledger material figure, independent of
+    ``LABOR_COST_ROLLUP_ENABLED`` and of whether a ``JobCost`` exists. A pure aggregate read.
 
     Sums ``abs(total_cost)`` over every ISSUE ``InventoryTransaction`` belonging to this
     work order (ISSUE quantities are stored negative, so ``total_cost`` may be negative;
@@ -206,7 +210,7 @@ def _issued_material_cost(db: Session, work_order: WorkOrder, company_id: int) -
     consumption row -- for the headline nest case, the entire material leg of the job --
     out of ``WorkOrder.actual_cost``, the synced ``JobCost``, and the analytics variance,
     and it would now drop every reconciled component row too.
-    ``analytics_service._issued_material_cost`` calls the same helper, so the two can no
+    ``analytics_service._issued_material_cost`` calls the same predicate, so the two can no
     longer drift.
 
     **The sign is why RETURN cannot simply join the type filter.** A RETURN is the reasoned
@@ -245,14 +249,14 @@ def compute_and_store_actual_cost(db: Session, work_order: WorkOrder, company_id
 
     Computes from the (already rolled-up) actual hours at the shared WC rate plus the NET
     cost of material consumed by the WO (ISSUE txns less any reasoned RETURN credit, see
-    ``_issued_material_cost``) plus overhead. Stores the
+    ``issued_material_cost``) plus overhead. Stores the
     total on ``work_order.actual_cost`` and returns the breakdown so the JobCost sync /
     caller can reuse it without recomputing. Monotonic-up is NOT applied to cost (it is
     a deterministic function of hours+material that are themselves monotonic-up).
     Joins the caller's unit of work.
     """
     labor_cost, overhead_cost = _labor_and_overhead_cost(db, work_order, company_id)
-    material_cost = _issued_material_cost(db, work_order, company_id)
+    material_cost = issued_material_cost(db, work_order, company_id)
     total = labor_cost + material_cost + overhead_cost
     work_order.actual_cost = total
     return {

@@ -1,9 +1,18 @@
 """Nightly OEE auto-calculation job (Lean Phase 1 / issue #88).
 
-Fans out over every active company and computes YESTERDAY's OEERecord per
-active work center via the shared ``services/oee_service`` math (the exact code
-behind ``POST /oee/calculate/{work_center_id}``), stamped
+Fans out over every active company and computes the PREVIOUS PRODUCTION DAY's
+whole-day OEERecord per active work center via the shared ``services/oee_service``
+math (the exact code behind ``POST /oee/calculate/{work_center_id}``), stamped
 ``calculation_source='auto'``.
+
+Target day (migration 120, P1.2): ``current_production_day(calendar) - 1`` per company,
+on that company's production calendar (the company-local calendar day when none is
+configured) -- never the worker container's ``date.today()``. The schedule is unchanged
+(02:30 container time = UTC on Railway = the previous Central evening), so the record
+for a production day is written the evening after it closes: with a 05:00 day start,
+Monday's production day ends Tuesday 05:00 and is computed at Tuesday ~20:30 Central.
+The cron writes whole-day records only (``shift_id`` NULL); per-shift records come from
+``POST /oee/calculate/{work_center_id}?shift_id=``.
 
 Skip policy:
   * A ``calculation_source='manual'`` record for the same (WC, date) is
@@ -22,7 +31,7 @@ the tenant tag is explicit, the actor is the system.
 
 import logging
 from datetime import date, timedelta
-from typing import Optional
+from typing import Dict, Optional
 
 from app.db.session import SessionLocal
 from app.models.company import Company
@@ -34,18 +43,20 @@ from app.services.oee_service import (
     compute_oee_for_work_center,
     work_center_has_activity,
 )
+from app.services.production_calendar import current_production_day
+from app.services.production_calendar_service import load_production_calendar
 
 logger = logging.getLogger(__name__)
 
 
 async def run_oee_auto_calc_task(company_id: Optional[int] = None, record_date: Optional[date] = None) -> dict:
-    """Compute yesterday's OEE per active company + active work center.
+    """Compute each company's previous production day of OEE, per active work center.
 
     ``company_id`` confines the run to one tenant (``None`` = every active
     company, one isolated pass per tenant); ``record_date`` overrides the
-    default "yesterday" for re-runs/backfilling a specific day.
+    default (each company's ``current_production_day - 1``) for re-runs or
+    backfilling a specific production day.
     """
-    target_date = record_date or (date.today() - timedelta(days=1))
     db = SessionLocal()
     try:
         if company_id is not None:
@@ -56,9 +67,13 @@ async def run_oee_auto_calc_task(company_id: Optional[int] = None, record_date: 
             ]  # noqa: E712
 
         totals = {"companies": 0, "computed": 0, "skipped_manual": 0, "skipped_idle": 0, "errors": 0}
+        dates_by_company: Dict[int, str] = {}
         for cid in company_ids:
             try:
-                result = _run_for_company(db, cid, target_date)
+                calendar = load_production_calendar(db, cid)
+                target_date = record_date or (current_production_day(calendar) - timedelta(days=1))
+                dates_by_company[cid] = target_date.isoformat()
+                result = _run_for_company(db, cid, target_date, calendar)
                 totals["companies"] += 1
                 for key in ("computed", "skipped_manual", "skipped_idle", "errors"):
                     totals[key] += result[key]
@@ -68,14 +83,19 @@ async def run_oee_auto_calc_task(company_id: Optional[int] = None, record_date: 
                 db.rollback()
                 totals["errors"] += 1
 
-        logger.info("OEE auto-calc for %s: %s", target_date, totals)
-        return {"record_date": target_date.isoformat(), **totals}
+        distinct_dates = set(dates_by_company.values())
+        summary_date = (
+            record_date.isoformat() if record_date else (distinct_dates.pop() if len(distinct_dates) == 1 else None)
+        )
+        logger.info("OEE auto-calc for %s: %s", summary_date or dates_by_company, totals)
+        return {"record_date": summary_date, "record_dates_by_company": dates_by_company, **totals}
     finally:
         db.close()
 
 
-def _run_for_company(db, company_id: int, target_date: date) -> dict:
-    """One tenant-scoped OEE pass: every active WC, yesterday, source='auto'."""
+def _run_for_company(db, company_id: int, target_date: date, calendar=None) -> dict:
+    """One tenant-scoped OEE pass: every active WC, one production day, source='auto'."""
+    calendar = calendar or load_production_calendar(db, company_id)
     audit = AuditService(db, user=None, company_id=company_id)
     work_centers = (
         db.query(WorkCenter)
@@ -101,7 +121,7 @@ def _run_for_company(db, company_id: int, target_date: date) -> dict:
                 result["skipped_manual"] += 1
                 continue
 
-            if not work_center_has_activity(db, company_id, wc.id, target_date):
+            if not work_center_has_activity(db, company_id, wc.id, target_date, calendar):
                 result["skipped_idle"] += 1
                 continue
 
@@ -110,10 +130,11 @@ def _run_for_company(db, company_id: int, target_date: date) -> dict:
                 company_id,
                 wc,
                 target_date,
-                None,  # shift: the cron writes the whole-day (no-shift) record
+                None,  # shift: the cron writes the whole-production-day (no-shift) record
                 calculation_source=CalculationSource.AUTO,
                 created_by_user_id=None,
                 audit=audit,
+                calendar=calendar,
             )
             result["computed"] += 1
         except OEERecordConflictError:

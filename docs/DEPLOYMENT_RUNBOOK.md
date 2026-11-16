@@ -329,6 +329,41 @@ statement, writes no row, and adds no environment variable, secret, cron or work
   under, and the migration will not pick which company's record to change.
   See [API.md → Customer Complaints & RMA](API.md#customer-complaints--rma).
 
+**Job cost subcontract (P1.3).** Apply additive **121_job_cost_subcontract** after
+**120_production_calendar** through the normal API boot migration path: one NOT NULL DEFAULT 0
+column on `job_costs` and, where the native `costentrytype` enum exists, its `SUBCONTRACT` label. No
+backfill, no environment variable, no worker job. Before rolling back to a pre-121 image, re-key any
+`SUBCONTRACT` cost entries to `other` through the API — older code cannot load them (see
+`DEPLOYMENT.md` → Job cost subcontract element). **121 splits its boot in two:** its enum-label
+step commits every revision the same boot applied before it, so a boot that fails at or after 121
+leaves the database at `120_production_calendar`, not where it started, and an older image then
+cannot start (`Can't locate revision identified by '120_production_calendar'`). Before that image
+restarts, stamp back to its head (`alembic stamp 119_api_token_scope`, or `118_dashboard_layouts`
+for an image before 119); the next forward boot re-runs 119 and 120 as guarded no-ops
+([DEPLOYMENT.md → Job cost subcontract element](DEPLOYMENT.md#job-cost-subcontract-element-migration-121)).
+
+**Production calendar (P1.2).** Apply additive **120_production_calendar** after
+**119_api_token_scope** through the normal API boot
+migration path: four empty tenant tables plus the nullable `oee_records.shift_id` FK + index, no
+backfill, no seeded calendar, RLS/revokes as for every new table. Deploy-time behavior change: every
+tenant's day boundaries for OEE, the OEE cron, reports, downtime filters, job-cost labor dates and
+analytics move from UTC dates to company-local (production) days. Once the calendar is saved, the
+wallboard TODAY bar and the dashboard's "Operations Completed Today" reset at the production-day start
+(05:00 for Werco) instead of Central midnight. Post-deploy steps (owner): save
+Werco's calendar (`docs/API.md` → Production calendar & shifts, worked example), run the
+working-calendar sync dry run, review the per-work-center diff, commit. Verify with
+`GET /production-calendar/resolve?at=2026-11-18T07:30:00Z&work_center_id=<WLD-01>` → production day
+2026-11-17, shift `W2`. No environment variable, secret or new worker job.
+
+**Company-local dates and export datetime cells (P1.1).** No migration, environment variable or
+worker job, but consumer-visible on deploy: every `/exports/*` datetime cell changes from naive UTC
+(`2026-01-15 23:30:00`) to company-local ISO-8601 with its offset (`2026-01-15T17:30:00-06:00`);
+calendar-date filters (the work-order and inventory-transaction exports, `GET /job-costs/`, analytics
+periods, `/reports/ship-otd`) select company-local days instead of UTC dates, and a reversed range is
+**422**; about 30 JSON response models that emitted zone-less datetimes now carry the `Z` (same
+instant). Tell anyone with a script or spreadsheet that parses an export — see `docs/API.md` →
+Spreadsheet Exports → Date filters and datetime cells.
+
 **Saved dashboard layouts.** Apply additive **118_dashboard_layouts** after
 **117_operation_short_declared** through the normal API boot migration path. It creates the empty
 per-company, per-user `dashboard_layouts` table and seeds no rows, so every role keeps the default

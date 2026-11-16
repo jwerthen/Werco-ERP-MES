@@ -220,33 +220,52 @@ rollback step; it does not undo documents, receipts, production or shipments
 already created by completed actions. Intake-linked Documents cannot be deleted
 through the application because the saved source and receipt must remain valid.
 
-### Saved dashboard layouts
+### Job cost subcontract element (migration 121)
 
-Apply additive **118_dashboard_layouts** after **117_operation_short_declared** through
-the normal API boot migration path. It creates an empty tenant/user `dashboard_layouts`
-table with a unique company/user key, a `version >= 1` check and indexes on `company_id`
-and `user_id`. No layout is seeded: until a person saves one, reads return
-`layout: null` without creating rows and every role keeps the default dashboard.
-PostgreSQL RLS and table/sequence revokes from `PUBLIC`, `anon`, and `authenticated`
-match model bootstrap. No environment variable, secret, cron or worker job is added.
+Apply additive **121_job_cost_subcontract** after **120_production_calendar** through the normal API
+boot migration path. It adds `job_costs.actual_subcontract_cost` (FLOAT NOT NULL DEFAULT 0 —
+metadata-only on PostgreSQL 11+, every existing row reads 0, which is true: no subcontract entry could
+exist before it) and, where `cost_entries.entry_type` is the native `costentrytype` enum, the
+`SUBCONTRACT` label (in its own autocommit step; a database whose column is migration 024's VARCHAR
+has no type and needs no label). No table, environment variable, secret or worker job is added.
+Deploy the API before or with the ARQ worker. **Rollback:** pre-121 code cannot load a cost entry of
+type `SUBCONTRACT`; before redeploying an older image, list them (`SELECT id, company_id, job_cost_id
+FROM cost_entries WHERE entry_type = 'SUBCONTRACT'`) and re-key them to `other` through the API
+(delete + re-add, both audited). The enum label stays on downgrade.
 
-Deploy order is free. The frontend tolerates an API that does not have the routes yet:
-a 404 (or 405) from `GET /dashboard/layout` renders the default dashboard with
-**Customize** hidden. An older frontend never calls the new routes.
+**One boot, two transactions.** The API boot runs every pending revision in one transaction, but
+121's autocommit step first **commits everything that boot has already applied**. So a boot that
+takes the database from 118 or 119 through 121 (and on to 122–124 in a stacked release) is not
+all-or-nothing. If 121's `job_costs` ALTER, or any later revision, then fails (a `lock_timeout` behind
+a long transaction, say), the boot fails with the database left at **120_production_calendar**:
+119's columns, 120's tables and the `SUBCONTRACT` label stay; 121's column and every later revision
+roll back. The old deployment keeps serving only until its container restarts. An image whose
+migrations stop before 120 runs `alembic upgrade head` on start, fails `Can't locate revision
+identified by '120_production_calendar'`, and crash-loops. Right after such a failed boot, stamp the
+database back to the head of the image that is still serving, from a checkout of this release:
+`alembic stamp 119_api_token_scope` for the 119 image, `alembic stamp 118_dashboard_layouts` for an
+image before it. Then fix the cause and redeploy. The forward boot re-runs 119 and 120 as guarded
+no-ops and applies 121 onward. Releasing 119, 120 and 121 as separate deploys avoids the split.
 
-Verify in a test company: open `/`, press **Customize**, add a panel from **Add widgets**
-and press **Done**, then reload in another browser and see the same layout; open edit mode
-in two tabs, press **Done** with a change in one and then in the other, and get the
-"changed in another tab" refusal (a tab that was merely left open is not stale enough:
-Customize re-reads the layout on entry); **Reset to default**. The Audit Log should show
-`dashboard_layout` CREATE and UPDATE rows. Confirm RLS with
-`SELECT relrowsecurity FROM pg_class WHERE relname = 'dashboard_layouts';` (true).
+### Production calendar (migration 120)
 
-Keep the table on ordinary application rollback: older code ignores it and renders
-the fixed dashboard. A deliberate 118 downgrade drops every saved layout, returning
-everyone to the default; the audit rows recording each change remain. See
-[API.md → Personal dashboard layout](API.md#personal-dashboard-layout) and
-[DASHBOARD.md → Customizing the dashboard](DASHBOARD.md#customizing-the-dashboard).
+Apply additive **120_production_calendar** after **119_api_token_scope** through the normal API boot
+migration path. It creates four empty
+tenant tables — `production_calendar_settings`, `shift_patterns`, `shift_pattern_work_centers`,
+`shift_definitions` — and adds the nullable `oee_records.shift_id` FK + index with **no backfill**
+(legacy free-text OEE `shift` labels stay). No calendar is seeded: until an Admin saves one, every
+company's production day is its company-local calendar day. PostgreSQL RLS and table/sequence revokes
+from `PUBLIC`, `anon` and `authenticated` match model bootstrap. No environment variable, secret or
+worker job is added; the 02:30 OEE cron keeps its schedule and now targets each company's previous
+production day. **Behavior change on deploy, for every tenant:** OEE, reports, downtime filters,
+job-cost labor dates and analytics move from UTC-date day boundaries to company-local (production)
+days (the export, job-cost and analytics **calendar-date** filters move to company-local days in the
+same release — see `DEPLOYMENT_RUNBOOK.md` → Company-local dates and export datetime cells). Once a
+calendar is saved, the wallboard TODAY bar and the dashboard's "Operations Completed Today" reset at
+the production-day start instead of Central midnight. After deploy, an Admin applies Werco's calendar
+(Admin Settings → Production Calendar, or `docs/API.md` → Production calendar & shifts → worked
+example), then runs `POST /production-calendar/working-calendars/sync` as a dry run, reviews it, and
+commits — the commit changes scheduling capacity for every covered work center.
 
 ### Read-only and AI-external API tokens (migration 119)
 
@@ -298,6 +317,34 @@ first (`SELECT id, label FROM api_tokens WHERE (scope <> 'full' OR ai_external) 
 false`). An offline `--sql` downgrade cannot check: run that query by hand. A code-only rollback
 (database left at 119) is not checked at all, so the revoke step is still yours. See
 [EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md).
+
+### Saved dashboard layouts
+
+Apply additive **118_dashboard_layouts** after **117_operation_short_declared** through
+the normal API boot migration path. It creates an empty tenant/user `dashboard_layouts`
+table with a unique company/user key, a `version >= 1` check and indexes on `company_id`
+and `user_id`. No layout is seeded: until a person saves one, reads return
+`layout: null` without creating rows and every role keeps the default dashboard.
+PostgreSQL RLS and table/sequence revokes from `PUBLIC`, `anon`, and `authenticated`
+match model bootstrap. No environment variable, secret, cron or worker job is added.
+
+Deploy order is free. The frontend tolerates an API that does not have the routes yet:
+a 404 (or 405) from `GET /dashboard/layout` renders the default dashboard with
+**Customize** hidden. An older frontend never calls the new routes.
+
+Verify in a test company: open `/`, press **Customize**, add a panel from **Add widgets**
+and press **Done**, then reload in another browser and see the same layout; open edit mode
+in two tabs, press **Done** with a change in one and then in the other, and get the
+"changed in another tab" refusal (a tab that was merely left open is not stale enough:
+Customize re-reads the layout on entry); **Reset to default**. The Audit Log should show
+`dashboard_layout` CREATE and UPDATE rows. Confirm RLS with
+`SELECT relrowsecurity FROM pg_class WHERE relname = 'dashboard_layouts';` (true).
+
+Keep the table on ordinary application rollback: older code ignores it and renders
+the fixed dashboard. A deliberate 118 downgrade drops every saved layout, returning
+everyone to the default; the audit rows recording each change remain. See
+[API.md → Personal dashboard layout](API.md#personal-dashboard-layout) and
+[DASHBOARD.md → Customizing the dashboard](DASHBOARD.md#customizing-the-dashboard).
 
 ### Existing ERP frontend: Fabrication Quoting
 

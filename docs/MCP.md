@@ -2,8 +2,8 @@
 
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
-(Cursor, Claude Code, a chat bot) gets **762 tools** — 15 hand-written *convenience* tools plus
-**747 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+(Cursor, Claude Code, a chat bot) gets **766 tools** — 15 hand-written *convenience* tools plus
+**751 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
 as the same request from the web app. A **read-only** API token is shown fewer tools, and an
 **AI-external** one fewer still (§4.1, §4.2).
 
@@ -16,13 +16,16 @@ and the short-count close rules added no tool** (15 convenience + 747 generated 
 operations), **and again on 2026-11-11 after the saved dashboard layout routes added three tools**
 (`get_my_dashboard_layout`, `save_my_dashboard_layout`, `reset_my_dashboard_layout` under the new
 `Dashboard` tag: 15 convenience + 750 generated, 16 shadowed), **and again on 2026-11-13 after the
-read-only / AI-external token work (P0) added one Customers tool**
-(`get_customer_export_control`; the two contract WRITES are in `EXCLUDED_OPERATIONS`, §6.1) and
-moved the Hank intake routes to their own `Hank Intake` tag with no name change: 15 convenience +
-751 generated, 16 shadowed. The read-only catalog is 8 convenience + 290 generated tools.
+production calendar routes added four tools** (`get_production_calendar`,
+`save_production_calendar_document`, `resolve_production_moment`, `sync_working_calendars_from_shifts`
+under the new `Production Calendar` tag; no existing name shifted) **and the read-only / AI-external
+token work (P0) added one Customers tool** (`get_customer_export_control`; the two contract WRITES are
+in `EXCLUDED_OPERATIONS`, §6.1) and moved the Hank intake routes to their own `Hank Intake` tag with no
+name change: 15 convenience + 755 generated, 16 shadowed. The read-only catalog is 8 convenience + 292
+generated tools (the two production-calendar reads among them).
 **Re-checked again on 2026-11-15 after the four company egress kill-switch writes left the
-catalog** (`EXCLUDED_OPERATIONS`, §6.1): 15 convenience + **747** generated, 16 shadowed; the
-read-only catalog is unchanged at 8 convenience + 290 generated (the four are writes).
+catalog** (`EXCLUDED_OPERATIONS`, §6.1): 15 convenience + **751** generated, 16 shadowed; the
+read-only catalog is unchanged at 8 convenience + 292 generated (the four are writes).
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
 `backend/tests/test_mcp_docs_names.py` checks every tool name this file, `CLAUDE.md` and `API.md`
@@ -221,7 +224,7 @@ routes authenticate every call; in IN-PROCESS mode it uses the real `ErpTokenVer
 
 `--print-catalog --read-only` prints the same keys filtered to what a read-only token is shown
 (tools that only read, under no tag in `WERCO_MCP_READ_ONLY_DENY_TAGS`), with the counts
-recomputed (`"convenience": 8, "generated": 290` on 2026-11-13), plus `"scope": "read_only"` and
+recomputed (`"convenience": 8, "generated": 292` on 2026-11-15), plus `"scope": "read_only"` and
 the `"deny_tags"` applied. Without `--read-only` the output is the full catalog with the keys
 above, as before. There is no flag for the AI-external catalog; §4.2 lists it.
 
@@ -443,7 +446,7 @@ introspect its own user.
   - a denied tag gets **403** `"Read-only API token cannot access this resource."`;
   - a request that matches no route fails closed with that same 403.
 - **The MCP door** narrows `tools/list` to the tools that only read and carry no denied tag. On
-  2026-11-13 that is 8 convenience + 290 generated tools; `--print-catalog --read-only` prints
+  2026-11-15 that is 8 convenience + 292 generated tools; `--print-catalog --read-only` prints
   them. Calling any other tool by name answers, **before argument validation or dispatch**:
   - **403** `"Read-only API token: this tool writes."` for a tool that writes; the write check
     comes first, so a writing tool under a denied tag gets this text;
@@ -510,10 +513,10 @@ three more rules:
    extraction and the connector: turn it on only once the empowered official has cleared it.
    Only an Admin signed in to the app flips it: `PUT /companies/me/ai-egress` refuses every API
    token **403** and is not a tool (§6.1), so no agent can open — or close — its own connector.
-2. **Only the allowlisted reads.** The token may call only the 44 `GET` routes in
+2. **Only the allowlisted reads.** The token may call only the 46 `GET` routes in
    `app/core/export_control.py` → `AI_EXTERNAL_ALLOWED_ROUTES`. Any other route answers **403**
    `"This resource is not available to an AI-external API token."` at the API, and the same text
-   at the door when a tool is called by name. Its `tools/list` holds exactly these 44 tools.
+   at the door when a tool is called by name. Its `tools/list` holds exactly these 46 tools.
    Convenience tools are included only when every route they can call is allowlisted, so
    `search`, `get_shop_floor_dashboard` and `list_inventory` are out:
 
@@ -529,8 +532,9 @@ three more rules:
    | Quotes | `quotes_list_quotes`, `quotes_get_quote` |
    | Purchasing and receiving | `list_purchase_orders`★, `get_purchase_order`, `list_vendors`, `get_vendor`, `get_receiving_history`, `get_receipt_detail` |
    | Maintenance work orders | `preventive_maintenance_list_work_orders`, `get_overdue_work_orders`, `preventive_maintenance_get_work_order` |
+   | Production calendar | `get_production_calendar`, `resolve_production_moment` (reference data: always served in full) |
 
-   (★ = convenience tool; 5 convenience + 39 generated.) Adding a route needs a canary conformance
+   (★ = convenience tool; 5 convenience + 41 generated.) Adding a route needs a canary conformance
    test, and CI fails without one. **Filters are narrowed too:** each route accepts only the query
    parameters in `AI_EXTERNAL_QUERY_PARAMS` — free-text `search`, the `customer` filter and
    `sort` / `group` by part or customer are refused **403** `"This query parameter is not
@@ -589,8 +593,8 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `Scheduling` (`/scheduling`) | Scheduling, Work Centers, Work Orders | `get_scheduled_jobs`, `schedule_work_order`, `schedule_work_order_earliest`, `run_scheduling`, `get_capacity_heatmap`, `get_scheduling_conflicts`, `unschedule_work_order` |
 | `Maintenance` (`/maintenance`) | Preventive Maintenance | `list_schedules`, `create_schedule`, `preventive_maintenance_list_work_orders`, `preventive_maintenance_create_work_order`, `preventive_maintenance_complete_work_order`, `get_calendar` |
 | `DowntimeTracking` (`/downtime`) | Downtime Tracking, Work Centers | `list_downtime_events`, `create_downtime_event`, `resolve_downtime_event`, `get_downtime_summary`, `list_reason_codes` |
-| `OEE` (`/oee`) | OEE Tracking, Work Centers | `get_oee_dashboard`, `list_oee_records`, `get_oee_trends`, `auto_calculate_oee`, `get_six_big_losses` |
-| `JobCosting` (`/job-costing`) | Job Costing, Work Orders | `list_job_costs`, `get_job_cost`, `get_summary`, `calculate_costs`, `variance_report` |
+| `OEE` (`/oee`) | OEE Tracking, Work Centers, Production Calendar | `get_oee_dashboard`, `list_oee_records`, `get_oee_trends`, `auto_calculate_oee`, `get_six_big_losses`, `get_production_calendar` (the shift choices: OEE writes name a defined shift by its id, and a record's date is a production day) |
+| `JobCosting` (`/job-costing`) | Job Costing, Work Orders | `list_job_costs`, `get_job_cost`, `get_summary`, `add_entry` (incl. subcontract entries), `calculate_costs`, `variance_report` |
 | `PartsNew` (`/parts`) | Parts, Bill of Materials, Customers, Documents | `list_parts`★, `create_part`, `generate_part_number`, `create_new_revision`, `import_parts_csv` |
 | `PartDetail` (`/parts/:id`) | Parts, Bill of Materials, Routing, Setup & Readiness | `get_part`, `get_part_by_number`, `get_bom_by_part`, `get_routing_by_part`, `get_part_readiness`, `get_part_backflush_readiness` |
 | `PartEdit` (`/parts/:id/edit`) | Parts | `get_part`, `update_part`, `renumber_part`, `deactivate_part`, `activate_part` |
@@ -624,7 +628,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `ToolManagement` (`/tool-management`) | Tool & Fixture Management | `list_tools`, `checkout_tool`, `checkin_tool`, `list_inspection_due`, `tool_fixture_management_get_dashboard` |
 | `QMSStandards` (`/qms-standards`) | QMS Standards & Audit Readiness | `list_standards`, `get_audit_readiness`, `list_clauses`, `add_evidence`, `upload_pdf_and_extract_clauses` |
 | `Analytics` (`/analytics/*`) | Analytics & BI | `get_kpi_dashboard`, `get_production_trends`, `analytics_bi_get_quality_metrics`, `get_flow_metrics`, `get_fpy`, `get_wip_aging`, `run_custom_report` |
-| `Reports` (`/reports`) | Reports | `get_production_summary`, `get_work_center_utilization`, `get_inventory_value`, `get_ship_otd_report`, `reports_get_quality_metrics`, `get_employee_time_report` |
+| `Reports` (`/reports`) | Reports | `get_production_summary`, `get_work_center_utilization`, `get_inventory_value`, `get_ship_otd_report`, `reports_get_quality_metrics`, `get_daily_output`, `get_employee_time_report` (the last two read production days) |
 | `PrintTraveler` (`/print/traveler/:id`) | Work Orders, Print Reports, Parts | `get_work_order`★, `get_work_order_print_data`, `get_part` |
 | `PrintPurchaseOrder` (`/print/purchase-order/:id`) | Print Reports | `get_purchase_order_print_data` |
 | `PrintPackingSlip` (`/print/packing-slip/:id`) | Shipping | `get_shipment` |
@@ -635,7 +639,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `AuditLog` (`/audit-log`) | Audit | `list_audit_logs`, `get_audit_summary`, `verify_audit_integrity`, `get_integrity_status` |
 | `VisitorLog` (`/visitor-log`) | Visitor Logs | `list_visitors`, `manual_entry`, `sign_out`, `export_visitors_csv`, `create_station`, `revoke_station` |
 | `VisitorSignIn` (`/visitor-signin`) | Visitor Logs | `sign_in`, `sign_out` (under the caller's own role; the tablet's shared-PIN station login is unauthenticated plumbing and is not a tool) |
-| `AdminSettings` (`/admin/settings`) | Admin Settings, Users | `list_work_center_rates`, `update_work_center_rate`, `list_work_center_types_admin`, `update_work_center_types_admin`, `get_email_recipients`, `update_email_recipients`, `get_role_permissions`, `update_role_permissions`, `get_audit_log`, `list_users` |
+| `AdminSettings` (`/admin/settings`) | Admin Settings, Users, Production Calendar | `list_work_center_rates`, `update_work_center_rate`, `list_work_center_types_admin`, `update_work_center_types_admin`, `get_email_recipients`, `update_email_recipients`, `get_role_permissions`, `update_role_permissions`, `get_audit_log`, `list_users`; Production Calendar tab: `get_production_calendar`, `save_production_calendar_document` (Admin only), `sync_working_calendars_from_shifts` (dry run by default; Admin / Manager / Supervisor), `resolve_production_moment` (which production day and shift an instant belongs to) |
 | `PlatformOverview` (`/platform`) | Platform Administration | `platform_overview`, `list_companies`, `company_dashboard`, `browse_company_users` (platform admins only — the route decides) |
 | `CompanyRegister` (`/register-company`) | Company Management | `get_my_company`, `update_my_company` — the public registration form itself is unauthenticated and has no tool; **the AI and SMS egress kill switches are not tools**: `PUT /companies/me/ai-egress` and `PUT /companies/me/sms-egress` are in `EXCLUDED_OPERATIONS` (§6.1) and refuse **403** to every API token, as do the carrier and label-print switches' profile writes (`PUT /admin/settings/shipping-profile`, `PUT /receiving/print-profile`; their `get_shipping_profile` / `get_print_profile` reads stay tools) |
 | `ApiTokens` (`/admin/api-tokens`) | API Tokens | `create_api_token`, `list_api_tokens`, `revoke_api_token` (Admin only; a call authenticated **by** an API token gets the route's 403 fence — §4) |
@@ -702,7 +706,7 @@ historical status transitions, so exposing a generic batch commit would reopen t
 excluded-loader path. File correction and credential input stay in Import Center.
 
 On the commit that shipped API tokens: 706 operations, 689 secured, 680 candidates, 16 shadowed
-(§8), 2 excluded → **662 generated tools**. On 2026-11-15, with nine excluded: **747 generated
+(§8), 2 excluded → **662 generated tools**. On 2026-11-15, with nine excluded: **751 generated
 tools** (`--print-catalog` `counts`).
 
 ### 6.2 Naming and the collision policy (`app/mcp/naming.py`)
@@ -816,7 +820,7 @@ with a 422 that names it, never accepted-and-ignored.
 | `list_work_centers` | `GET /work-centers/` | `name` (case-insensitive substring over name **and** code), `active_only` (default `true`) | Fetches with `limit=5000` and filters client-side; returns `id`, `code`, `name`, `type`, `is_active` |
 | `create_work_order` | `POST /work-orders/` | `part_id`, `quantity_ordered` (required); `work_order_type`, `parent_work_order_id`, `priority`, `due_date`, `customer_name`, `customer_po`, `unit_number`, `notes`, `special_instructions`, `sequential_operations`, `serial_numbers`, `auto_routing` (query, default `true`). **No `status` argument** — passing one is a 422 | See [DRAFT guarantees](#9-draft-guarantees). Refuses `work_order_type: "laser_cutting"` **before** calling, with the API's own wording |
 | `add_operation` | `POST /work-orders/{id}/operations` | `work_order_id`, `name`, `work_center` (required; **int id or name/code string**); `sequence` (10–990, multiple of 10); passthrough `operation_number`, `description`, `setup_instructions`, `run_instructions`, `setup_time_hours`, `run_time_hours`, `run_time_per_piece`, `requires_inspection`, `inspection_type`, `component_part_id`, `component_quantity`, `operation_group`. `quantity` is accepted by the schema only to be **refused 422 with an explanation** | **Name guard** (below). Work center by name: exact match on name or code → substring → refuses **404** on none, **409** naming the candidates on more than one ("Pass the id"). `sequence` omitted → `GET /work-orders/{id}` and use the next multiple of 10 after the current maximum (10 on an empty plan). **An operation has no quantity of its own** — it runs the work order's `quantity_ordered`; `component_quantity` is the BOM component demand for the step (the per-operation piece target on a batch job), not an operation quantity, so the spec's `quantity` is not aliased to it. Not for laser WOs (the route refuses 400) |
-| `get_work_order` | `GET /work-orders/{id}` or `/work-orders/by-number/{n}` | `work_order_id` **or** `work_order_number` (percent-encoded into the path, so `../` or `?` cannot steer the call onto another route) | Full `WorkOrderResponse`: operations, nests (`operations[].laser_nest`), status, `version` |
+| `get_work_order` | `GET /work-orders/{id}` or `/work-orders/by-number/{n}` | `work_order_id` **or** `work_order_number` (percent-encoded into the path, so `../` or `?` cannot steer the call onto another route) | Full `WorkOrderResponse`: operations, nests (`operations[].laser_nest`), status, `version`; cost by element (`job_cost_actuals`, null without a JobCost) and `issued_material_cost`; per operation `hours_source` / `recorded_setup_hours` / `recorded_run_hours` / `hours_include_backfill`. Both branches return the same body (by number does not reconcile on read) |
 | `update_work_order` | `PUT /work-orders/{id}` | `work_order_id`, `version` (required); `quantity_ordered`, `priority`, `status`, `sequential_operations`, `due_date`, `customer_name`, `customer_po`, `unit_number`, `notes`, `special_instructions`, `quantity_complete`, `quantity_scrapped`, `scrap_reason` — every `WorkOrderUpdate` field, pinned to the route's own schema by a catalog test | The header edit verb, version-gated (409 when stale). **`status` accepts `draft` / `on_hold` / `cancelled` only** (and `on_hold` only on a released or in-progress job — the route refuses a draft **409**, it has nothing on the floor to hold): `released` and `in_progress` are refused **422** naming the real verbs (`release_work_order`, `work_orders_start_work_order`; both refusals also name `work_orders_resume_work_order`, because the release verb takes draft jobs only, the start verb takes released jobs only, and a hold is lifted by the resume tool) — the route's blind `setattr` would accept them with no `released_at` / `released_by` and no operation promotion; `complete` / `closed` are refused by the route itself. `status: "draft"` is how a released-but-unstarted job is put back (the nest tools use the same PUT); the route then returns every un-worked READY operation to PENDING itself, one required audit row each (**503**, nothing changed, when those rows cannot be written). With an API token, a `quantity_scrapped` above the header's recorded scrap is refused **403** by the route (owner decision 2026-11-07 — a person reports scrap); so are, as this PR's extension, a changed `scrap_reason`, any other change to the header's `quantity_complete` / `quantity_scrapped` (either direction) and lowering `quantity_ordered` once work is recorded. Omitting those fields or re-sending the recorded values works |
 | `duplicate_work_order` | `POST /work-orders/{id}/duplicate` | `work_order_id`, `quantity_ordered` (both required — the route requires the quantity; a laser job ignores it and derives its own from the copied nests), `due_date` | Copies the *plan* onto a new DRAFT (`WORK_ORDER_TEMPLATES.md` / duplicate service); post-checks DRAFT |
 | `release_work_order` | `POST /work-orders/{id}/release` | `work_order_id` | Explicit only; the route refuses anything not DRAFT. The **only** tool that releases work |

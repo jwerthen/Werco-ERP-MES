@@ -26,7 +26,7 @@ import { useScrollRestoration } from '../hooks/useScrollRestoration';
 import { usePageTitle } from '../hooks/usePageTitle';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
 import { isKioskMode } from '../utils/kiosk';
-import { getCurrentShift } from '../utils/shifts';
+import HudShift from './HudShift';
 import { formatTabTitle, getRouteTitle } from '../utils/routeMeta';
 import { formatCentralTime } from '../utils/centralTime';
 import {
@@ -432,25 +432,6 @@ const HudClock = React.memo(function HudClock() {
     return () => clearInterval(id);
   }, []);
   return <span className="text-fd-ink tabular-nums">{t}</span>;
-});
-
-const HudShift = React.memo(function HudShift() {
-  const [shift, setShift] = useState(() => getCurrentShift());
-  useEffect(() => {
-    const tick = () => setShift(getCurrentShift());
-    tick();
-    // Re-evaluate each minute so the badge flips at shift-change boundaries.
-    const id = setInterval(tick, 30000);
-    return () => clearInterval(id);
-  }, []);
-  return (
-    <span
-      className="text-fd-ink"
-      title={shift ? `${shift.label} · ${shift.hours}` : 'No active shift (2:00 AM – 5:30 AM)'}
-    >
-      {shift ? shift.code : '—'}
-    </span>
-  );
 });
 
 export default function Layout({ children }: LayoutProps) {

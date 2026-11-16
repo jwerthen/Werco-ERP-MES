@@ -2290,6 +2290,13 @@ Deletion and recalculation retain removed entry evidence in the audit log. Same-
 part labels remain readable. No new financial approval workflow is introduced, and automatic
 work-order completion retains its existing business path. See [API: Job costing](API.md#job-costing).
 
+**Job-cost figures on the work-order read (2026-11-13).** `GET /work-orders/{id}` and
+`GET /work-orders/by-number/{wo_number}` now carry `job_cost_actuals` (the JobCost's material /
+labor / burden / subcontract / total) and `issued_material_cost`. No gate changed: job-cost reads were
+already open to every role, and the work-order reads keep their own gate (any authenticated user in
+the active company). The JobCost is read with its own `company_id` scope, never through the work
+order's relationship, so a foreign-tenant row is never shown.
+
 ### Documents
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
@@ -2737,6 +2744,34 @@ and writes an `EXPORT` audit row through `AuditService`:
 > **Audit coverage (2026-06-09).** The OEE write endpoints now also write a tamper-evident `audit_log`
 > row on every record/target create/update/delete (and the auto-calc upsert), so OEE mutations are on
 > the hash chain alongside the role gate. No role change — audit-trail coverage only.
+
+### Production calendar
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| View the calendar / resolve an instant (`GET /production-calendar`, `GET /production-calendar/resolve`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Edit the calendar (`PUT /production-calendar`) | ✓ | | | | | | |
+| Sync working calendars from the shifts (`POST /production-calendar/working-calendars/sync`) | ✓ | ✓ | ✓ | | | | |
+
+> **Edit is Admin only** (`CALENDAR_EDIT_ROLES` in `app/api/endpoints/production_calendar.py`): the
+> production-day start and the shifts decide how every OEE, wallboard, report, downtime and job-cost
+> figure is bucketed, so changing them is a configuration decision, not a floor one. Every save writes a
+> **required** `production_calendar` audit row (503, nothing saved, on failure). The **sync** carries the
+> roles of `PUT /scheduling/work-centers/{id}/calendar` (`WORKING_CALENDAR_SYNC_ROLES`), whose rows it
+> writes — one required `working_calendar` audit row per work center; its dry run (the default) writes
+> nothing. Reads are open to every authenticated role in the tenant (the top-bar shift badge reads
+> them). Tenant-scoped through `get_current_company_id`; a work center or shift of another company is
+> 404 / 422. Superuser / Platform Admin bypass role checks, as elsewhere. See `docs/API.md` →
+> Production calendar & shifts.
+>
+> **In the app** the editor and the sync both live on Admin Settings → **Production Calendar**
+> (`/admin/settings?tab=calendar`), and `/admin/settings` is `AdminRoute`-gated. So a Manager or
+> Supervisor, who may run the sync, reaches it through the API or the MCP tool
+> `sync_working_calendars_from_shifts`, not the UI. The page's own gates mirror the server's
+> (`canEditProductionCalendar` / `canSyncWorkingCalendars` in `frontend/src/utils/recordWriteAccess.ts`).
+>
+> **OEE shift references.** OEE writes (`OEE_WRITE_ROLES`) name a defined shift by `shift_id`; the
+> role gate is unchanged.
 
 ### Downtime
 

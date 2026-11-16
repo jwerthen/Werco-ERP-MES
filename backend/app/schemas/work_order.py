@@ -639,6 +639,23 @@ class WorkOrderOperationResponse(WorkOrderOperationBase):
     has_labor_evidence: Optional[bool] = None
     quantity_recorded_good: Optional[float] = None
 
+    # P1.4 -- where ``actual_setup_hours`` / ``actual_run_hours`` come from, derived at READ
+    # time by ``_enrich_work_order_operations`` from the same batched TimeEntry read (never
+    # stored; null outside that enrichment). ``time_entries``: closed TimeEntries measured
+    # them (server wall clock, clock-out minus clock-in); ``manual``: stored hours with no
+    # TimeEntry hours behind them (no API writes them today -- legacy / out-of-band data);
+    # ``none``: nothing recorded. ``standard`` is reserved and never emitted: routing
+    # standards are never copied into actual hours. ``recorded_*`` are the measured sums of
+    # CLOSED entries split as clock-out credits them (SETUP -> setup, every other type ->
+    # run); they can EXCEED the stored actuals, because an operation hold and, with
+    # LABOR_COST_ROLLUP_ENABLED off, a completion's auto clock-out close entries without
+    # crediting the operation. ``hours_include_backfill``: some of those closed entries are
+    # paper back-entries or imports, whose duration is the keying session, not the labor.
+    hours_source: Optional[Literal["time_entries", "manual", "standard", "none"]] = None
+    recorded_setup_hours: Optional[float] = None
+    recorded_run_hours: Optional[float] = None
+    hours_include_backfill: Optional[bool] = None
+
     # WHY this operation is held, WHO held it and WHEN -- so the Work Order page can disclose the
     # reason BEFORE anyone clicks Clear Hold. NOT an ORM column: injected as an in-memory attr by
     # ``work_orders._enrich_work_order_operations`` (like ``work_center_name`` above), and only for
@@ -880,6 +897,29 @@ class WorkOrderDuplicateRequest(BaseModel):
     )
 
 
+class WorkOrderJobCostActuals(UTCModel):
+    """A work order's ``JobCost`` actuals by element (P1.3), on the single-work-order read.
+
+    Read tenant-scoped from ``job_costs`` -- never through ``WorkOrder.job_cost``, which is
+    an unscoped backref LIST, and which is why this block is not called ``job_cost``. The
+    figures are the JobCost's own denormalized totals of its cost entries: labor is rebuilt
+    from closed TimeEntries at the work-center rate (``/job-costs/{id}/calculate``, or the
+    completion sync when LABOR_COST_ROLLUP_ENABLED is on); material, burden and subcontract
+    come only from manually added entries. Nothing posts inventory issues into a JobCost --
+    see ``WorkOrderResponse.issued_material_cost`` for the ledger figure. Plain floats, not
+    ``Money``: a manual entry may be negative.
+    """
+
+    job_cost_id: int
+    status: str = Field(description="in_progress | completed | reviewed")
+    actual_material_cost: float
+    actual_labor_cost: float
+    actual_burden_cost: float = Field(description="JobCost.actual_overhead_cost: OVERHEAD plus OTHER entries.")
+    actual_subcontract_cost: float = Field(description="SUBCONTRACT (outside processing) entries.")
+    actual_total_cost: float
+    updated_at: Optional[datetime] = None
+
+
 class WorkOrderResponse(WorkOrderBase):
     id: int
     # READ-side relaxation: standalone laser-cutting nest WOs carry no part, so
@@ -912,6 +952,13 @@ class WorkOrderResponse(WorkOrderBase):
     # max(this, work-order scrap)).
     quantity_deliverable: Optional[float] = None
     quantity_accounted_loss: Optional[float] = None
+    # P1.3, set ONLY by the single-work-order reads (``GET /work-orders/{id}`` and
+    # ``/by-number/{n}``); null on every other route. ``job_cost_actuals`` is null when the
+    # work order has no JobCost -- nothing creates one automatically. ``issued_material_cost``
+    # is a DIFFERENT basis: net ISSUE minus RETURN cost from the inventory ledger (the
+    # material leg of ``actual_cost``), present whether or not a JobCost exists.
+    job_cost_actuals: Optional[WorkOrderJobCostActuals] = None
+    issued_material_cost: Optional[float] = None
     created_at: datetime
     updated_at: datetime
     operations: List[WorkOrderOperationResponse] = Field(default_factory=list)

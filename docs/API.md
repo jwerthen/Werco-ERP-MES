@@ -1540,7 +1540,8 @@ company-scoped.
 | GET | `/work-orders/` | List all work orders (`skip` ≥ 0, `limit` 1–5000 default 100 — the standard list tier, see [Pagination](#pagination)). `deleted_only=true` returns **only** this company's soft-deleted work orders — the restore view, **Admin / Manager**, and the only read in the API that can see one; see "Seeing a deleted work order" below | Yes (`deleted_only=true`: Admin / Manager) |
 | GET | `/work-orders/browse` | **The bounded, server-filtered page behind the Work Orders list screen.** Returns an **envelope**, not a bare array. Query: `skip` ≥ 0 (default 0; a `skip` past the last page is clamped to that page's start, and the response's `skip` reports the clamped value), `limit` **1–100** (default 50); `status` (one `WorkOrderStatus`; omitted = every status except complete / closed / cancelled); `search` (≤ 200 chars, a **literal** case-insensitive substring — `%` / `_` are not wildcards — over WO number, customer name, customer PO, lot, unit #, part number and part name); `customer` (≤ 255, exact customer name); `hide_cots` (default `true`: hides work orders whose part is purchased / hardware / raw material; part-less ones stay); `scope` (`overdue` \| `due_today`, open work orders against the **Central** date); `work_order_type` (`production` \| `laser_cutting`, unknown → **422**; `laser_cutting` = nest packages — standalone laser work orders and the laser children a nest import hangs off a production job); `sort` (`work_order_number` \| `part` \| `customer` \| `due_date` \| `priority` (default) \| `status`, nulls last, ID tiebreaker) with `direction` (`asc` default \| `desc`); `group` (`none` default \| `customer` \| `part` \| `status`, rows ordered by group first). Response: `items` (`WorkOrderSummary` rows with operation progress), `total` (the full filtered count), `skip`, `limit`, `has_next`, `stats` (`overdue` / `in_progress` / `due_today` over the filtered set), `customers` (distinct customer names under every filter **except** `customer` — it honors `work_order_type` — capped at 1000, with `customers_truncated`), `group_totals` (full counts for only the groups on this page; `{}` when `group=none`), and `type_counts` (`{production, laser_cutting}`, both always present, zero-filled: rows per type under every **other** filter, `customer` included, deliberately **ignoring** `work_order_type` so each type chip shows its own count). A pure read sent `Cache-Control: no-store`: it **never reconciles on read** — no completion evidence, READY promotion or inventory effect — so loading the list does not heal a stranded work order the way `GET /work-orders/{id}` does (see "A read heals a stranded work order" below) | Effective `work_orders:view` in the active company (every role by default; **403** when a company role override removes it) |
 | POST | `/work-orders/` | Create work order. `work_order_type` is validated against the `WorkOrderType` vocabulary (**422** on an unknown value), and `'laser_cutting'` is **refused on create** (422) — nest-dispatch WOs are minted only by the laser nest import paths (see note below). Body accepts `sequential_operations` (**default `true`** — a sequenced routing; see "READY promotion" below) and the optional `unit_number` (≤ 50 chars — see "Unit #" below) | Yes |
-| GET | `/work-orders/{id}` | Get work order by ID | Yes |
+| GET | `/work-orders/{id}` | Get work order by ID. Also carries the job's cost by element (`job_cost_actuals`), the inventory-ledger material figure (`issued_material_cost`) and, per operation, where its actual hours come from (`hours_source`, `recorded_setup_hours`, `recorded_run_hours`, `hours_include_backfill`) — see "Cost and actual hours on the work-order read" below | Yes |
+| GET | `/work-orders/by-number/{wo_number}` | Get work order by number: the **same body** as by ID (every computed field included). A soft-deleted work order is **404**, as by ID. Unlike the read by ID it does **not** reconcile on read — it writes nothing | Yes |
 | GET | `/work-orders/{id}/timeline` | Chronological job history with category, actor and time filters; opaque cursor, `limit` 1–100 (default 30). Returns business events and source links, not raw audit payloads. Each item a single operation owns (its start / finish, production receipts, process-step evidence, labor, a blocker filed against it) carries `operation_id`; the job's own items carry `null` | Yes |
 | PUT | `/work-orders/{id}` | Update work order (body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status, **or sets `status` to COMPLETE/CLOSED from any status other than COMPLETE/CLOSED** — see "Terminal-state lock" below). **`due_date` is the one non-`status` field that IS status-gated: changing it on a COMPLETE/CLOSED/CANCELLED work order returns 409** (see "Due date on a finished job" below). Other non-`status` fields such as `notes` / `special_instructions` / `unit_number` carry **no status gate**: they are editable at any status, including terminal ones (send `unit_number: null` — or `""`, which is trimmed to NULL — to clear it). **The flip verb for `sequential_operations`** — turning it *on* returns **409** on a laser nest WO, and **409 naming the operations** when work is already under way out of sequence; otherwise it demotes un-worked blocked operations READY → PENDING, one audit row each (see "READY promotion" below). **`status: on_hold` on a DRAFT work order returns 409** (a draft has nothing on the floor to hold — release it first); this `PUT` is the "Hold Work Order" write for a released / in-progress job, and the door that puts a held job back on the floor is `POST /work-orders/{id}/resume` (this `PUT` can still move a held job to `draft` or `cancelled`, which keeps it off the floor; its blind move to `released` / `in_progress` is a known gap — see "Draft and on-hold work orders refuse every start" below). **Any move to `draft`** (from released / in progress / on hold) returns every un-worked READY operation — laser nests included — to PENDING with one **required** audit row each; **503**, nothing changed, when those rows cannot be written (see "Returning a job to draft" below). **Lowering `quantity_ordered` below what a whole-order operation has already accounted for (its good + scrap) returns 409** naming the operation, before any field is written — lower the order only by units no operation has started; **raising** it once a whole-order or component operation has completed returns 409 too; whole-order targets restated as `component_quantity` move with the order (audited); an API token lowering it once work is recorded gets 403, as does an API token raising the header's `quantity_scrapped` (only a person declares scrap — owner decision 2026-11-07), changing `scrap_reason`, or changing the header's `quantity_complete` / `quantity_scrapped` in either direction (this PR's extension); and a `sequential_operations` flip that would re-interpret a declared short returns 409 (see "Short count at completion" below) | Admin / Manager / Supervisor |
 | DELETE | `/work-orders/{id}` | Delete work order (soft by default; `hard_delete=true` only for draft/cancelled, and refused **409** when ledger-backed ties or saved templates reference it) | Admin / Manager |
@@ -2393,6 +2394,51 @@ company-scoped.
 > writer three ways (ORM writes, request schemas, MCP tools), so a new one fails CI until it is
 > guarded or listed as exempt with a reason.
 >
+> **Cost and actual hours on the work-order read** (P1.3 / P1.4, 2026-11-13). The two
+> single-work-order reads — `GET /work-orders/{id}` and `GET /work-orders/by-number/{wo_number}` —
+> carry two cost figures, on two different bases. Every other route that returns a
+> `WorkOrderResponse` (create, `PUT`, release, duplicate, template use, nest imports) leaves both
+> `null`.
+>
+> - **`job_cost_actuals`** — the work order's `JobCost` by element, or `null` when it has none.
+>   **Nothing creates a `JobCost` automatically** (the completion sync only updates an existing
+>   one), so expect `null` on most jobs. Fields: `job_cost_id`, `status` (`in_progress` /
+>   `completed` / `reviewed`), `actual_material_cost`, `actual_labor_cost`, `actual_burden_cost`
+>   (the JobCost's `actual_overhead_cost`: OVERHEAD **plus OTHER** entries),
+>   `actual_subcontract_cost` (SUBCONTRACT entries), `actual_total_cost` (all five types) and
+>   `updated_at`. These are the JobCost's own totals of its cost entries: labor is rebuilt from
+>   closed time entries at the work-center rate (`POST /job-costs/{id}/calculate`, or the
+>   completion sync when `LABOR_COST_ROLLUP_ENABLED` is on); material, burden and subcontract come
+>   **only** from manually added entries. Read with its own `company_id` scope — a legacy row of
+>   another company holding this work order's id on the global `job_costs.work_order_id` key is
+>   never disclosed. Plain numbers, which may be negative (a manual entry can be).
+> - **`issued_material_cost`** — net `ISSUE` minus `RETURN` cost from the inventory ledger, over
+>   all three work-order reference shapes (`work_order_ledger_filter`): the material leg of
+>   `actual_cost`. Present whether or not a JobCost exists and whatever
+>   `LABOR_COST_ROLLUP_ENABLED` says. It is **not** `job_cost_actuals.actual_material_cost`, which
+>   counts manual MATERIAL entries only; a job can show real issued material here and `0` there.
+>
+> **Where actual hours come from.** An operation's `actual_setup_hours` / `actual_run_hours` are
+> never copied from routing standards (`setup_time_hours` / `run_time_hours` are the estimate
+> only), and no API writes them by hand. Every non-zero value is a sum of time-entry
+> `duration_hours`, which is the **server's wall clock** from clock-in to clock-out. `SETUP`
+> entries credit setup hours; every other type — `RUN`, `REWORK`, `INSPECTION`, `DOWNTIME`,
+> `BREAK` — credits run hours. Clock-out credits the operation at once. Some paths close entries
+> **without** crediting it: an operation hold (`PUT /shop-floor/operations/{id}/hold`, and the
+> process-sheet OOT quality hold) always, and the auto clock-out when an operation or work order
+> completes while `LABOR_COST_ROLLUP_ENABLED` is off. A paper back-entry (`source` `backfill`)
+> records the clerk's keying session, not the labor. So each operation on the two reads above
+> also carries, derived at read time from the same batched time-entry read (never stored):
+>
+> | Field | Meaning |
+> |---|---|
+> | `hours_source` | `time_entries` — closed time entries measured hours on this operation (a closed zero-duration entry with no stored hours also reads `time_entries`: it is still a measurement). `manual` — stored hours with no time-entry hours behind them (legacy or out-of-band data; no API writes them). `none` — nothing recorded; an open entry counts for nothing until clock-out. `standard` is **reserved and never returned**. |
+> | `recorded_setup_hours` / `recorded_run_hours` | The measured sums of **closed** entries, split as clock-out splits them. They can be **higher** than `actual_setup_hours` / `actual_run_hours` after a hold or a flag-off auto clock-out. |
+> | `hours_include_backfill` | `true` when any closed entry behind those sums is a paper back-entry or an import, whose duration is keying time. |
+>
+> All four are `null` on responses not built through `_enrich_work_order_operations`. A foreign
+> company's entry on a colliding operation id never counts.
+>
 > **Read models.** `WorkOrderOperationResponse` (every response built through
 > `_enrich_work_order_operations` — `GET /work-orders/{id}`, by-number, create, duplicate, both
 > nest-package imports, template use) carries `quantity_short_declared` (the column) and, computed in
@@ -2685,11 +2731,15 @@ company-scoped.
 >   > `ISSUE` on the same work order is still refused **409** — see the error table below — but that
 >   > refusal is now a legacy-only fence and is **unreachable** in practice.
 >
-> **Tied material counts as job-cost material.** `WorkOrder.actual_cost`, the synced `JobCost`, and
-> the analytics cost variance sum `abs(total_cost)` over the work order's `ISSUE` rows under **all
-> three** reference shapes (`work_order`, `work_order_backflush` and `work_order_operation`) — one
-> shared predicate (`work_order_ledger_filter`), so the stored
-> rollup and the analytics leg cannot drift. A nest that burned six $80 sheets contributes $480.
+> **Tied material counts as work-order material cost.** `WorkOrder.actual_cost`, the work-order
+> read's `issued_material_cost` and the analytics cost variance sum `abs(total_cost)` over the work
+> order's `ISSUE` rows (less `RETURN` credits) under **all three** reference shapes (`work_order`,
+> `work_order_backflush` and `work_order_operation`) — one shared predicate
+> (`work_order_ledger_filter`), so the stored rollup and the analytics leg cannot drift. A nest that
+> burned six $80 sheets contributes $480. **A `JobCost` does not**: its sync on completion only
+> rebuilds labor from time entries, and its `actual_material_cost` is the total of manually added
+> MATERIAL entries. (This paragraph said "the synced `JobCost`" did until 2026-11-13; it never
+> did.)
 >
 > **Scrap consumes**, and posts as `ISSUE` (not `SCRAP`): lot genealogy filters on `ISSUE`, so a
 > `SCRAP` row would erase audited scrap material from the as-built record. The good/scrap split is
@@ -6181,7 +6231,7 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 |--------|----------|-------------|---------------|
 | GET | `/shop-floor/dashboard` | Shop floor dashboard | Yes |
 | GET | `/shop-floor/my-active-job` | Get current user's active job, incl. the job's written guidance (WO notes/special instructions + the operation's description/setup/run text). Top-level **`dispatch_notices`** (always present, `[]` when not clocked in): the newest planner dispatch notice per work center where the caller holds an open **labor** entry — see "Floor dispatch notices" below | Yes |
-| GET | `/shop-floor/operations` | List not-complete/cancelled operations for the desktop shop-floor pages (paginated, max 200/page; filters `work_center_id` / `status` / `search` / `due_today`) — rows in the **canonical dispatch order**, each carrying the advisory `run_order` display rank (see "Desktop parity" under the Dispatch run order note below). An **`ON_HOLD` row additionally carries `hold`** — `{ held_at, held_by_user_id, held_by_name, blocker }`, from the same batched pure-read `operation_hold_view` the kiosk `held` list uses, so the desk page and the floor cannot tell two stories about one hold. The key is **absent on every other row** (unheld payloads stay byte-identical), every field inside is nullable, and `blocker: null` covers ordinary nest holds (including a category or note saved on the hold event) and bare holds, which still carries `held_by_name` / `held_at`: reason and attribution are INDEPENDENT. **Free text (`title` / `note`) rides this response** — every caller is an identified `get_current_user` session, never a crew-station principal, so the station withholding rule does not apply and `free_text_withheld` is `false`. **Only when filtered to one `work_center_id`**, the envelope also carries `dispatch_notices` (0- or 1-item list, that machine's newest dispatch notice) and `server_time` (UTC `Z`); an unfiltered list carries neither key — see "Floor dispatch notices" below. Every row also carries **`start_blocked_reason`** (the work-order start refusal text for a draft / on-hold / terminal work order, else `null`) and **`work_order_status`**; `can_check_in` is `false` whenever `start_blocked_reason` is set, and `blocked_by_previous_operations` is unchanged. `null` is not a "startable" claim — the write verb decides at the moment of the action. `GET /shop-floor/operations/{id}` carries the same two keys on `operation` and on each `all_operations[]` entry (see Work Orders → "Draft and on-hold work orders refuse every start") | Yes |
+| GET | `/shop-floor/operations` | List not-complete/cancelled operations for the desktop shop-floor pages (paginated, max 200/page; filters `work_center_id` / `status` / `search` / `due_today` — work orders due on the **company's calendar date**, not the server's UTC date, since 2026-11-13) — rows in the **canonical dispatch order**, each carrying the advisory `run_order` display rank (see "Desktop parity" under the Dispatch run order note below). An **`ON_HOLD` row additionally carries `hold`** — `{ held_at, held_by_user_id, held_by_name, blocker }`, from the same batched pure-read `operation_hold_view` the kiosk `held` list uses, so the desk page and the floor cannot tell two stories about one hold. The key is **absent on every other row** (unheld payloads stay byte-identical), every field inside is nullable, and `blocker: null` covers ordinary nest holds (including a category or note saved on the hold event) and bare holds, which still carries `held_by_name` / `held_at`: reason and attribution are INDEPENDENT. **Free text (`title` / `note`) rides this response** — every caller is an identified `get_current_user` session, never a crew-station principal, so the station withholding rule does not apply and `free_text_withheld` is `false`. **Only when filtered to one `work_center_id`**, the envelope also carries `dispatch_notices` (0- or 1-item list, that machine's newest dispatch notice) and `server_time` (UTC `Z`); an unfiltered list carries neither key — see "Floor dispatch notices" below. Every row also carries **`start_blocked_reason`** (the work-order start refusal text for a draft / on-hold / terminal work order, else `null`) and **`work_order_status`**; `can_check_in` is `false` whenever `start_blocked_reason` is set, and `blocked_by_previous_operations` is unchanged. `null` is not a "startable" claim — the write verb decides at the moment of the action. `GET /shop-floor/operations/{id}` carries the same two keys on `operation` and on each `all_operations[]` entry (see Work Orders → "Draft and on-hold work orders refuse every start") | Yes |
 | GET | `/shop-floor/operations/{id}/documents` | Kiosk doc-viewer discovery: the operation's controlled part drawing, live nest reference PDF, nest material, and critical SPC characteristics (see note below) | Yes |
 | GET | `/shop-floor/documents/{id}/inline` | Serve a kiosk-viewable document PDF inline — DRAWING-type or live-nest-referenced only, tenant-scoped, uniform **404** on any miss (see note below) | Yes |
 | POST | `/shop-floor/clock-in` | Clock in to operation (starts a PENDING / READY one). Refusal order, all before any write: **400** already clocked in, **404** operation, **400** operation not on that work order, **400** wrong work center, **404** work order missing or soft-deleted, **409** draft / on-hold / terminal work order, **400** `Operation is not ready to start` (incl. an operation-level hold), **400** predecessors. A back-entry (`source = "backfill"`) is refused exactly like a live clock-in | Yes |
@@ -8185,16 +8235,16 @@ those two fields is what the check is worth.
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| GET | `/job-costs/` | List tenant job costs | Yes |
+| GET | `/job-costs/` | List tenant job costs (`status`, `work_order_id`; `date_from` / `date_to` filter `created_at` by inclusive calendar date in the company time zone — see [Timestamps](#timestamps); a reversed range is **422**) | Yes |
 | GET | `/job-costs/summary` | Summarize tenant costs | Yes |
 | GET | `/job-costs/{id}` | Read one job cost | Yes |
 | GET | `/job-costs/{id}/entries` | Read its tenant-owned entries | Yes |
 | GET | `/job-costs/{id}/variance-report` | Read its variance report | Yes |
 | POST | `/job-costs/` | Create for an undeleted tenant work order | Admin / Manager |
 | PUT | `/job-costs/{id}` | Update estimates/status | Admin / Manager |
-| POST | `/job-costs/{id}/entries` | Add a manual cost entry | Admin / Manager |
+| POST | `/job-costs/{id}/entries` | Add a manual cost entry (`entry_type` `material` / `labor` / `overhead` / `other` / `subcontract`) | Admin / Manager |
 | DELETE | `/job-costs/{id}/entries/{entry_id}` | Remove a cost entry, retaining its prior contents in the audit trail | Admin / Manager |
-| POST | `/job-costs/{id}/calculate` | Regenerate TimeEntry labor entries and recompute totals, preserving other entries | Admin / Manager |
+| POST | `/job-costs/{id}/calculate` | Regenerate TimeEntry labor entries and recompute totals, preserving other entries. Each regenerated labor entry's `entry_date` is the **production day** its time entry is attributed to (see [Production calendar & shifts](#production-calendar--shifts)); before 2026-11-13 it was the UTC date of the clock-in | Admin / Manager |
 
 All reads and writes resolve the job cost through a work order in the active company; writes
 require it to be undeleted, while reads preserve historical costs after work-order soft deletion.
@@ -8205,6 +8255,17 @@ operation/user references are rendered `null`. Same-company historical part labe
 platform-actor attribution remain readable. A second job cost for an already-costed work order
 returns **400**; a conflicting legacy row outside the tenant returns **409** without exposing it.
 Explicit `null` estimates/status and invalid enum values return **422**.
+
+**Cost elements (2026-11-13, migration 121).** A job cost totals its entries by type:
+`actual_material_cost` (MATERIAL), `actual_labor_cost` (LABOR), `actual_overhead_cost`
+(OVERHEAD **and** OTHER — its stored meaning, unchanged), and `actual_subcontract_cost`
+(SUBCONTRACT: outside processing such as plating or heat treat). `actual_total_cost` is all five
+types; subcontract is never folded into overhead. There is no subcontract **estimate**, so
+subcontract reaches `total_variance` but no per-element variance; the variance report lists a
+`subcontract` line (estimated `0`) so its lines add up to the total. Subcontract entries are
+manual: no purchase-order line or receipt carries a work-order link, so nothing posts one
+automatically. The work-order read reports these totals as `job_cost_actuals` (burden =
+`actual_overhead_cost`) — see Work Orders → "Cost and actual hours on the work-order read".
 
 Every manual write requires **Admin / Manager**, including recalculation (**403** otherwise).
 Cost entries, parent totals, and required audit rows commit atomically; audit failure returns
@@ -8512,10 +8573,6 @@ Admin / Manager / Quality (see [RBAC](RBAC_PERMISSIONS.md#customer-complaints--r
 > so gaps left by the shared sequence remain. A complaint's `received_by` is the caller, and
 > `date_received` defaults to the server's current date. Before this fix,
 > `POST /complaints/complaints/` returned **500** on every call.
->
-> **Timestamp exception.** These response schemas still extend `BaseModel` rather than
-> `UTCModel`, so `created_at` / `updated_at` are not normalized to a trailing `Z` (see
-> [Timestamps](#timestamps)).
 
 ### Engineering Change Orders (ECO)
 
@@ -10278,11 +10335,38 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| GET | `/reports/work-orders` | Work order report | Yes |
-| GET | `/reports/production` | Production report | Yes |
-| GET | `/reports/quality` | Quality report | Yes |
+| GET | `/reports/production-summary` | Work orders by status, completions and on-time count, hours, produced / scrapped quantity and scrap rate over a rolling `days` window (1–365, default 30, counted back from now) | Yes |
+| GET | `/reports/quality-metrics` | NCR counts by status and source, receiving reject rate, over a rolling `days` window (default 30) | Yes |
+| GET | `/reports/inventory-value` | On-hand value at standard cost, total quantity, distinct parts | Yes |
+| GET | `/reports/vendor-performance` | Per vendor: ordered / received quantity, fill and reject rates, PO count, over a rolling `days` window (default 90; `skip`, `limit` ≤ 500) | Yes |
+| GET | `/reports/work-center-utilization` | Per-work-center utilization over a rolling `days` window (default 30; `skip`, `limit` ≤ 500) | Yes |
+| GET | `/reports/daily-output` | Operations completed and quantity scrapped per **production day** for the last `days` (1–365, default 14) production days, the current one included; an operation counts on the production day its `actual_end` falls in (see "Production days in reports" below) | Yes |
+| GET | `/reports/work-order-costing` | Per work order: estimated vs actual hours and cost (`work_order_id`, else work orders created in a rolling `days` window, default 90) | Yes |
+| GET | `/reports/employee-time` | Time entries and operation completions per employee over an inclusive range of **production days** (`start_date`, default 7 days before the current production day; `end_date`, default the current one; `user_id`). Each entry carries `date` (its production day) and `shift_code` (see below) | Yes |
 | GET | `/reports/ship-otd` | Ship-based OTD/OTIF detail report (`period` today/7d/30d/90d/ytd/custom + `start_date`/`end_date`) | Yes |
-| POST | `/reports/custom` | Generate custom report | Yes |
+
+> **Production days in reports (P1.2, 2026-11-13).** `daily-output` and `employee-time` read
+> production days on the company's production calendar (see [Production calendar &
+> shifts](#production-calendar--shifts)): local midnight to local midnight when none is configured.
+> Until 2026-11-13 both read **UTC** dates. `employee-time` includes a time entry when the production
+> day it is **attributed** to (greatest shift overlap, ties to the outgoing shift; else the production
+> day of its clock-in) lies in `start_date`..`end_date`, so every entry counts on **exactly one**
+> production day; an open entry runs to now for attribution. A reversed range is **422**. A time-entry
+> row's `date` is that production day and its `shift_code` that shift's code, `null` when it overlaps
+> no defined shift. So a 01:30 Wednesday weld entry reads as Tuesday, `W2`, and a 04:55–15:30 Wednesday
+> one as Wednesday, `W1` — in Wednesday's report only. **Changed 2026-11-13 (review fix):** the first
+> P1 cut included an entry that clocked in **or out** inside the window, which put that 04:55 entry in
+> Tuesday's report too (dated Wednesday, hours added to Tuesday's total); the pre-P1 report did the
+> same across UTC midnight. An entry that crosses midnight with no calendar configured now counts on
+> the local day it clocked in, and the operation it completed after midnight still shows in the next
+> day's report as a completion row. A completion row's `date` is the production day of its
+> `actual_end`, and its `shift_code` is the shift running at that instant. The rolling-`days` reports
+> (`production-summary`, `quality-metrics`, `vendor-performance`, `work-center-utilization`,
+> `work-order-costing`) count back from the current instant and have no day boundary.
+>
+> **Corrected 2026-11-13:** this table used to list `GET /reports/work-orders`, `/reports/production`,
+> `/reports/quality` and `POST /reports/custom`, none of which exist. The custom-report runner is
+> `POST /analytics/custom-report`.
 
 > **`GET /reports/ship-otd` (Lean Phase 1).** The customer-experienced delivery report: measures
 > `Shipment.ship_date` against the **promise** (`must_ship_by`, falling back to `due_date`), counting
@@ -10317,6 +10401,31 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 | POST | `/analytics/custom-report` | Run a custom-report query (returns rows) | Admin / Manager |
 | GET | `/analytics/custom-report/export` | Export a saved report template (csv / xlsx / pdf) | Admin / Manager |
 
+> **Days in analytics (P1, 2026-11-13).** Every analytics range is a set of **company-local calendar
+> days** (`Company.timezone`), and a point or bucket is dated in that same zone:
+> `/analytics/production-trends` dates a RUN entry by the local date of its clock-in and a
+> simplified-workflow completion by the local date of its `actual_end` (it used `func.date(...)`, the
+> UTC date, until 2026-11-13, so evening work landed on the next day and a one-day range could return a
+> point dated after its own end); `/analytics/adoption` puts a row in the ISO week of its local date.
+> **Two bases share the KPI dashboard:** the OEE figures (headline, sparkline, `/analytics/oee`) read
+> **production days** — the company's configured day start — while every other KPI (OTD, FPY, scrap,
+> quotes, NCRs, turnover, flow, adoption) reads local **calendar** days. With no production calendar
+> configured the two are identical. With Werco's 05:00 start they differ for 00:00–05:00: at 03:00 on a
+> Wednesday, `period=today` is Tuesday's production day, so OEE counts Tuesday's 2nd shift through
+> 05:00 Wednesday while the calendar-day KPIs count Tuesday 00:00–24:00. Completion-based **OTD** and
+> the production-summary on-time count compare the company-local date of `actual_end` with `due_date`
+> (a job finished at 19:00 CDT on its due date was counted late until 2026-11-13), and ship OTD,
+> `/analytics/wip-aging`'s days-to-due and the shop-floor `due_today` filter use the company's calendar
+> date, not the server's.
+>
+> **OEE inputs changed with the production days (2026-11-13), not only the day boundary.** The KPI
+> sparkline is now exactly the per-day headline value, computed on the same inputs: (1) its ideal
+> hours count **produced + scrapped** pieces (it counted produced only, so it read lower than the
+> headline whenever there was scrap); (2) it honors `REQUIRE_APPROVED_LABOR_FOR_COST` (it ignored it);
+> (3) the headline's ideal hours count **closed** entries only, like its staffed and run hours (open
+> entries used to add ideal hours with no run time behind them). All three agree with the persisted
+> `OEERecord` (`POST /oee/calculate`).
+>
 > **Flow & quality metrics (Lean Phase 1).** Five read-only, role-gated, tenant-scoped analytics
 > endpoints. All but `/wip-aging` (a point-in-time snapshot) take the same window parameters as
 > `/analytics/kpis`: `period` (`today` / `7d` / `30d` / `90d` / `ytd` / `custom`) plus
@@ -10484,6 +10593,174 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 > entries regardless of the flag and is **tenant-scoped** (a job cost is looked up by id **and**
 > company, closing a prior cross-tenant lookup).
 
+### Production calendar & shifts
+
+`app/api/endpoints/production_calendar.py`, mounted at `/production-calendar` (P1.2, migration
+`120_production_calendar`). A **production day** is the shop's working day, not the calendar date: it
+starts at the company's configured **production-day start** on the local clock (`Company.timezone`,
+default America/Chicago) and runs to the same wall-clock time the next day; **a shift that runs past
+midnight belongs to the day it started**. So with Werco's 05:00 start a weld entry at **01:30 Wednesday
+is Tuesday's production day and Tuesday's 2nd shift**. A production day is 23 h / 25 h long across the
+DST changes (boundaries are wall-clock times).
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/production-calendar` | The calendar: `configured`, `version`, `timezone`, `production_day_start`, `patterns[]` (each with `work_center_ids` and `shifts[]`: `code`, `name`, `start`/`end` HH:MM, `start_minute`/`end_minute`, `ends_next_day`, `days` 0=Mon..6=Sun, `planned_minutes`, `is_active`), and `today` — the current production day's UTC window and every active shift on it as UTC instants (`Z`) | Yes |
+| PUT | `/production-calendar` | Replace the **whole** calendar after a version check | **Admin** |
+| GET | `/production-calendar/resolve` | Which production day and shift an instant (`at`, ISO-8601; offset-less = UTC; default now) belongs to at a `work_center_id` (omitted = the default pattern; another company's work center is **404**). Returns `production_day` with its UTC window, `shift` (the outgoing one in an overlap), `overlapping`, `pattern_id`, `configured` and `calendar_version`. An instant within a day of the ends of the datetime range is **422** `The instant is outside the supported range` | Yes |
+| POST | `/production-calendar/working-calendars/sync` | Set each work center's weekly working hours from its shifts (`dry_run`, default `true`; `expected_version`) | Admin / Manager / Supervisor |
+
+**API tokens.** Both reads are open to every API token, read-only and AI-external ones included: they
+are on the AI-external allowlist as reference data with no customer linkage, always served in full and
+never ledgered (`resolve` takes `at` and `work_center_id` from such a token; see
+[EXPORT_CONTROL_AI_EGRESS.md → The AI-external allowlist](EXPORT_CONTROL_AI_EGRESS.md#5-the-ai-external-allowlist)).
+The `PUT` and the sync `POST`, a dry run included, refuse every read-only token **403** `Read-only API
+token cannot modify data.`
+
+**Unconfigured company (no calendar saved).** The production day is the **company-local calendar day**
+(day start 00:00) and there are no shifts. This replaced the old **UTC-date** day boundaries of OEE,
+the OEE cron, reports, downtime filters, job-cost labor dates and analytics on **2026-11-13** — for every
+tenant, configured or not, a "day" is now a local day (or a production day), never a UTC date.
+Historical `auto` OEE rows computed before that date stay as computed (UTC days); a re-run computes the
+production day.
+
+**Attribution rules.** An **instant** belongs to the production day it falls in; inside two
+overlapping shifts (the rest-of-shop 15:30–16:00 hand-off) it belongs to the **outgoing** (earlier-start)
+shift — `resolve` returns it as `shift` and lists both in `overlapping`. An **interval** (a time entry,
+a downtime event) belongs to the shift it overlaps **most** (a tie goes to the outgoing shift) and to
+that shift's production day; one that overlaps no shift belongs to the production day of its start. So
+an early **04:55 weld clock-in** that runs into the 05:00 1st shift counts on that day's 1st shift, not
+the previous production day. A work center belongs to at most one **pattern**; one in no pattern (and an
+entry with no work center) uses the company's **default** pattern — at most one, and possibly none, in
+which case such a work center has no shifts.
+
+**However long it runs, an interval counts on exactly one production day.** Greatest overlap can put a
+long interval on a later production day than the one it started on — a weld clock-in at 16:00 Monday that
+is not clocked out until 16:00 Tuesday overlaps Tuesday's W1 (10.5 h) more than Monday's W2 (10 h), so it
+is **Tuesday's**; a rest-of-shop breakdown from 16:00 Monday to 10:00 Wednesday is Tuesday's S1. Every
+reader that attributes — OEE and its cron, the analytics OEE figures, the wallboard, the employee-time
+report — reads every interval that **overlaps** the requested days, back as far as attribution can
+reach (two production days before the first one), so such an interval is counted on its attributed day,
+including in a single-day report or a range that starts on that day. Until 2026-11-15 these reads only
+looked 12 hours before the day start, and an interval like those two was counted on **no** day at all;
+before 2026-11-13 it counted on the UTC date it started.
+
+**Boundaries across DST.** The production day of an instant is the day whose window contains it, so
+the attribution and every SQL day filter always agree. A day start that names a wall time a DST change
+skips (02:00–02:59 on the spring-forward Sunday in a US zone) resolves with the pre-change offset, and
+one that repeats (01:00–01:59 on the fall-back Sunday) at its first occurrence. Werco's 05:00 start is
+unaffected.
+
+**History is re-read under the current calendar.** Persisted `OEERecord`s keep the values they were
+computed with, but every read that attributes on the fly — the analytics OEE figures, the wallboard,
+the employee-time report, the downtime filters, job-cost recompute — buckets past data under the
+calendar as it is **now**. So changing the day start, or a shift's times, days or planned minutes,
+re-buckets history on those reads, and a past day's `/analytics/oee` can stop matching its stored
+`/oee` record. Only a referenced shift's removal and `code` change are refused; the required audit row
+(the whole before/after document) is the record of what the calendar was. To keep a referenced
+shift's history unambiguous, retire it and add a new shift rather than re-timing it.
+
+**Who reads production days.** OEE records and `POST /oee/calculate` (`record_date` is a production
+day), the nightly OEE cron, the wallboard **today** pulse, the shop-floor dashboard `completed_today`
+(its ETag folds in the production day and calendar version), `GET /reports/daily-output` and
+`GET /reports/employee-time` (each entry's `date` is its production day, plus `shift_code`), the
+downtime `date_from`/`date_to` filters, job-cost labor `entry_date`, the analytics OEE figures, and
+every analytics `period`'s "today". **Due-today / overdue / lateness stay on the company calendar
+date** — they compare calendar due dates.
+
+**The ERP's own OEE convention is unchanged.** Availability stays productive run ÷ **staffed (clocked)**
+time; BREAK entries are not newly excluded and a shift's `planned_minutes` is **not** the availability
+denominator. `planned_minutes` (planned production time, breaks and lunch excluded) is exposed so a
+consumer can compute planned-time availability itself.
+
+**`PUT /production-calendar`** (Admin only). Send the whole document with `expected_version` as read
+(`0` before the first save) — a stale version is **409** (`This production calendar changed. Reload it
+before saving.`). It is validated as a set before anything is written (**422**): `production_day_start`
+and every `start`/`end` are `HH:MM`; an `end` at or before its `start` ends the next day; every shift
+must start at or after the production-day start and end by the next day's start (so it belongs to the
+day it starts on); `planned_minutes` ≤ the shift's length; the **active** shifts of one pattern that
+start on one weekday plan at most **1440 minutes** together (shifts may overlap — parallel crews — but the
+sync writes that sum as the work center's hours for the day, and a working calendar holds 0–24 h; added
+2026-11-15); at most one `is_default` pattern (none is allowed: then a work center in no pattern has no
+shifts); a work center in at most one pattern (listed twice in the same pattern it is one membership); unique pattern names and shift codes (case-insensitive); work centers
+must be this company's; an `id` that names no existing pattern or shift is 422 (omit it to create one);
+a pattern name or shift code may not start with `~` (reserved for the save's own temporary renames).
+Limits: 20 patterns, 12 shifts per pattern, 500 work centers per pattern, `planned_minutes` 1–1440.
+Existing patterns and shifts keep their `id`; **anything omitted is removed —
+except a shift an OEE record references**, which must be retired with `is_active: false` (removing it
+is 422) and whose `code` can never change (422). Retired shifts stay in the document and on historical
+records but are no longer attributed. An identical document is a no-op (no version bump). A save writes
+one **required** `audit_log` row (`resource_type` `production_calendar`, the whole before/after
+document) in the same transaction — **503**, nothing saved, when it cannot. A save that collides with a
+concurrent write to a row it changes (an OEE record that started using a shift this save removes) is
+**409** `The production calendar could not be saved because a record it changes was changed at the same
+time …` — the version-check text is reserved for a real version race. Every successful save (a no-op
+included) broadcasts `dashboard_update` with `event: "production_calendar_updated"` to the company's
+sockets; a sync commit broadcasts `event: "working_calendar_updated"` once per written work center.
+Saving does **not** change working calendars; run the sync.
+
+**Werco's configuration (worked example).** Not seeded by the migration — an Admin applies it once
+(replace the `work_center_ids` with the ids of WLD-01 … WLD-06), then runs the sync dry run and commit:
+
+```json
+PUT /api/v1/production-calendar
+{
+  "expected_version": 0,
+  "production_day_start": "05:00",
+  "patterns": [
+    {
+      "name": "Weld shop",
+      "is_default": false,
+      "work_center_ids": [101, 102, 103, 104, 105, 106],
+      "shifts": [
+        {"code": "W1", "name": "Weld 1st", "start": "05:00", "end": "15:30", "days": [0, 1, 2, 3, 4], "planned_minutes": 600},
+        {"code": "W2", "name": "Weld 2nd", "start": "15:30", "end": "02:00", "days": [0, 1, 2, 3, 4], "planned_minutes": 600}
+      ]
+    },
+    {
+      "name": "Rest of shop",
+      "is_default": true,
+      "work_center_ids": [],
+      "shifts": [
+        {"code": "S1", "name": "1st shift", "start": "07:30", "end": "16:00", "days": [0, 1, 2, 3, 4], "planned_minutes": 480},
+        {"code": "S2", "name": "2nd shift", "start": "15:30", "end": "00:00", "days": [0, 1, 2, 3, 4], "planned_minutes": 480}
+      ]
+    }
+  ]
+}
+```
+
+**`POST /production-calendar/working-calendars/sync`** (Admin / Manager / Supervisor — the roles of
+`PUT /scheduling/work-centers/{id}/calendar`). For every **active** work center covered by a pattern
+(its own, or the default), the new Mon..Sun `weekly_hours` are the sum of `planned_minutes` ÷ 60 of the
+active shifts **starting** each weekday — Werco weld `[20, 20, 20, 20, 20, 0, 0]`, rest of shop
+`[16, 16, 16, 16, 16, 0, 0]`. `dry_run=true` (the default) writes nothing and returns, per work center,
+`current_version`, `current_weekly_hours`, `new_weekly_hours`, `overrides_kept` and `changed` (a work
+center with no saved calendar, `current_version` 0, is always a change) plus the production calendar's
+`calendar_version`. A work center whose pattern has **no active shift** (an empty pattern, or one whose
+shifts are all retired) is not covered — it is left out of the rows and never written, so a pattern
+cannot zero a work center's scheduling capacity. A derived day of more than **24 hours** — only possible
+for a calendar saved before the 1440-minute rule above, or written around it — is **422** on the dry run
+and the commit alike, naming the work centers and their patterns, and nothing is written; the shared
+writer refuses any weekly hours outside 0–24 for every caller, so the sync can never store a calendar
+the scheduling editor's own `PUT` would refuse. `dry_run=false` (pass that `calendar_version` back as
+`expected_version`: a different calendar version is **409**; omitting it skips the check) takes the
+production calendar's own lock first — a concurrent `PUT /production-calendar` waits, so the hours and
+the audit rows' `production_calendar_version` come from one calendar version — and writes every
+changed work center
+through the scheduling calendar's own writer (`working_calendar_service.save_working_calendar`): dated
+overrides are **kept**, `version` is bumped, and one **required** `working_calendar` audit row is written
+per work center (`extra_data.source` = `production_calendar_sync`; **503**, nothing saved, when one
+cannot). **This moves every scheduling projection, capacity heat map and delivery prediction** for
+those work centers (a center with no saved calendar was planned at its `capacity_hours_per_day`, 8 h
+when unset, every day, weekends included) — review the dry run first. In the app the editor and the
+sync are on Admin Settings → **Production Calendar** (`/admin/settings?tab=calendar`, Admin only; a
+pattern the Admin adds there starts **not** default, and its **Default pattern** checkbox makes it the
+one default or, unchecked, leaves the calendar with none — so configuring the weld shop first never
+hands its shifts to every other work center); a
+Manager or Supervisor runs the sync through this route or the MCP tool
+`sync_working_calendars_from_shifts`.
+
 ### OEE Tracking
 
 OEE = **Availability × Performance × Quality** per work center. **Reads** (dashboards/trends) are open
@@ -10495,9 +10772,9 @@ records, targets) require **Admin / Manager / Supervisor**.
 | GET | `/oee/dashboard` | OEE per work center, plant-wide OEE, targets (`period` 7d/30d/90d/365d, or explicit `date_from`/`date_to` which take precedence) | Yes |
 | GET | `/oee/trends` | OEE time-series for charts (`work_center_id`, `period`, or explicit `date_from`/`date_to`) | Yes |
 | GET | `/oee/six-big-losses/{work_center_id}` | Six-big-losses breakdown | Yes |
-| GET | `/oee/records` | List OEE records (filters: WC, date range, shift) | Yes |
+| GET | `/oee/records` | List OEE records (filters: WC, date range, `shift` label, `shift_id`) | Yes |
 | GET | `/oee/records/{record_id}` | Get one OEE record | Yes |
-| POST | `/oee/calculate/{work_center_id}` | Auto-calculate the day/shift OEE record from data | Admin / Manager / Supervisor |
+| POST | `/oee/calculate/{work_center_id}` | Auto-calculate the production-day (or `shift_id`) OEE record from data | Admin / Manager / Supervisor |
 | POST | `/oee/records` | Create an OEE record (manual inputs) | Admin / Manager / Supervisor |
 | PUT | `/oee/records/{record_id}` | Update + recalculate an OEE record | Admin / Manager / Supervisor |
 | DELETE | `/oee/records/{record_id}` | Delete an OEE record | Admin / Manager / Supervisor |
@@ -10520,9 +10797,15 @@ records, targets) require **Admin / Manager / Supervisor**.
 > call. (These were RBAC-gated but unaudited prior to 2026-06-09.)
 
 > **`POST /oee/calculate/{work_center_id}` (auto-calculate).** Builds (or upserts, per work center +
-> date + shift) a real `OEERecord` for `record_date` (default today) from the day's **closed**
-> `TimeEntry` rows, the routing standard cycle time, and reported `DowntimeEvent` rows — on the
-> **staffed-time** convention so it agrees with the `/analytics/kpis` headline:
+> date + shift) a real `OEERecord` for `record_date` — a **production day** (default: the current one;
+> see Production calendar & shifts) — from the **closed** `TimeEntry` rows and reported `DowntimeEvent`
+> rows **attributed** to that production day (greatest shift overlap, ties to the outgoing shift), plus
+> the routing standard cycle time — on the **staffed-time** convention so it agrees with the
+> `/analytics/kpis` headline. With `shift_id` only what is attributed to that shift counts, and the
+> record carries `shift_id` and `shift` = the shift's code. Every entry a shift-scoped record counts is
+> also in that day's whole-day record; an entry that overlaps no defined shift counts only in the
+> whole-day record, so the shift records can add up to less than it. A legacy `shift` text resolves only when it equals a defined code (see "Shifts
+> are defined shifts" below). The metric is unchanged:
 > - **Availability** = productive-run minutes ÷ **staffed (clocked)** minutes at the WC; productive run
 >   = (RUN+SETUP) minutes − **UNPLANNED** `DowntimeEvent` minutes. (Returns/stores 0 availability when
 >   there is no staffed time for that WC/day.)
@@ -10538,6 +10821,19 @@ records, targets) require **Admin / Manager / Supervisor**.
 > `app/services/oee_service.py` (`compute_oee_for_work_center`) — the nightly auto-calc cron runs the
 > **same code** (below), so a manual trigger and the cron can never disagree on the math.
 
+> **Shifts are defined shifts (migration 120).** `OEERecord.shift_id` references a shift of the
+> production calendar; `shift` stays as the **label snapshot** (the code). Writes (`POST`/`PUT
+> /oee/records`, `POST /oee/calculate`) take `shift_id` — a shift that is not this company's is **404**,
+> one that is retired or not in the work center's pattern **422** (a record may keep its own retired
+> shift). The legacy `shift` text is accepted only when it equals a defined code (it resolves to that
+> shift); **any other text is 422**; blank means no shift. Pre-120 free-text labels (`1st`, `Day`) were
+> **not** backfilled and stay readable as labels with `shift_id: null`; a `PUT` that sends a record's
+> own legacy label back unchanged (with no `shift_id`) is not a shift change and is accepted, leaving
+> the label as it is, so a client can echo the record to edit its other fields. A `record_date` at the
+> ends of the date range (`9999-12-31`) is **422** on `POST /oee/calculate`. Responses add `shift_id` and
+> `shift_name`. `GET /oee/dashboard`, `/oee/trends` and `/oee/six-big-losses` periods count back from the
+> current production day.
+>
 > **One OEE record per (work center, date, shift) — duplicates are 409 (Lean Phase 1).** A unique
 > index (`uq_oee_company_wc_date_shift`, migration `063`) enforces at most one `OEERecord` per
 > company + work center + `record_date` + shift, where a **`null` shift and an empty-string shift are
@@ -10551,8 +10847,11 @@ records, targets) require **Admin / Manager / Supervisor**.
 > `calculation_source`: **`manual`** (hand-entered via `POST /oee/records`, or the on-demand
 > `POST /oee/calculate/{work_center_id}` trigger — a human asked for it; all pre-existing rows
 > backfill to it) or **`auto`** (minted only by the nightly ARQ cron, `run_oee_auto_calc_job` at
-> **02:30 UTC**, which computes **yesterday's** whole-day record per active company + active work
-> center). The cron **never overwrites a `manual` record** — a hand-entered record for that WC/day
+> **02:30 UTC**, which computes each company's **previous production day** — `current_production_day
+> − 1` on that company's calendar, never the container's `date.today()` — as a whole-day record per
+> active work center; with a 05:00 day start, Monday's production day closes Tuesday 05:00 and is
+> computed Tuesday ~20:30 Central). The cron writes whole-day records only; per-shift records come from
+> `POST /oee/calculate/{work_center_id}?shift_id=`. The cron **never overwrites a `manual` record** — a hand-entered record for that WC/day
 > (any shift) is authoritative and the cron skips the WC; `auto` records **are** recomputed by
 > re-runs (idempotent refresh). Idle work centers (no closed clocked entry and no unplanned downtime
 > that day) are skipped entirely — no staffed time is uncomputable, not an all-zero measurement.
@@ -10563,7 +10862,14 @@ records, targets) require **Admin / Manager / Supervisor**.
 
 `app/api/endpoints/downtime.py`, mounted at `/downtime`. An event is reported against a work center
 (optionally a work order) and resolved when the machine runs again; **UNPLANNED** event minutes are
-the availability input to `POST /oee/calculate/{work_center_id}` above.
+the availability input to `POST /oee/calculate/{work_center_id}` above. The `date_from` / `date_to`
+filters on the list, `/summary` and `/by-work-center` are inclusive **production days** (events that
+started from the production-day start of `date_from` to the start of the production day after
+`date_to`; local midnights when no production calendar is configured); a reversed range is **422**.
+These lists put an event on the production day it **started**, while OEE attributes it like a time
+entry — to the shift it overlaps most — so an event that straddles the day start (a weld stop from
+04:50 to 06:50) is listed under the earlier day's `/downtime/summary` but counts against the later
+day's OEE.
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
@@ -12327,12 +12633,46 @@ A platform admin can hold sockets in several companies at once. Nothing in `app/
 
 ### Timestamps
 
-All `datetime` fields in responses are serialized as **UTC ISO-8601 with a trailing `Z`**
-(e.g. `"2026-07-01T19:17:00Z"`) — the store-UTC / serve-UTC contract, applied uniformly across
-every endpoint (response schemas inherit `UTCModel`; hand-built dicts use
-`app.core.time_utils.to_utc_iso(...)`). `date`-only fields (e.g. `due_date`) are unaffected and
-stay `YYYY-MM-DD` with no time or zone. Clients should treat `Z` timestamps as UTC and convert for
-display; the web UI renders them in shop-local Central time.
+All `datetime` fields in JSON responses are serialized as **UTC ISO-8601 with a trailing `Z`**
+(e.g. `"2026-07-01T19:17:00Z"`) — the store-UTC / serve-UTC contract. Response schemas inherit
+`UTCModel` (nested models too: its encoder does not reach a nested bare `BaseModel`); hand-built
+dicts use `app.core.time_utils.to_utc_iso(...)`. `date`-only fields (e.g. `due_date`) are
+unaffected and stay `YYYY-MM-DD` with no time or zone. Clients should treat `Z` timestamps as UTC
+and convert for display; the web UI renders them in shop-local Central time.
+
+> **Changed 2026-11 (P1.1).** Until then the contract was not uniform: 30 response models (downtime
+> events and reason codes, OEE records and targets, quotes, job costs and cost entries, lot trace,
+> supplier scorecards / audits / ASL, customer complaints and RMAs, ECOs, SPC, calibration,
+> documents, notification log, CoCs, the audit log, workspaces) and five hand-built receiving /
+> serial-trace payloads emitted naive strings with **no offset** (`"2026-07-01T19:17:00"`). They now
+> carry the `Z`. The instant is unchanged — the value was always UTC — so a client that already read
+> zone-less strings as UTC (the web UI's `toDate` does) renders exactly as before.
+> `backend/tests/test_response_datetime_offset_guard.py` walks every route's response model and
+> fails CI on a datetime field without the UTC encoder.
+
+**Calendar-date query parameters are company-local days.** A `date` filter on a timestamp column
+(`start_date` / `end_date`, `date_from` / `date_to`, and an analytics `period` resolved to dates)
+names an inclusive calendar day in the **company time zone** (`Company.timezone`, default
+`America/Chicago`; a blank or unknown value falls back to Chicago, never UTC). The filter runs from
+local midnight on the start date to the **exclusive** next local midnight after the end date,
+converted to UTC — so a Central "January 15" is `2026-01-15T06:00:00Z` up to (not including)
+`2026-01-16T06:00:00Z` in winter and `05:00Z`–`05:00Z` in summer, and the DST days are 23 and 25
+hours long. Analytics "today" / `7d` / `30d` / `90d` / `ytd` count back from the company's
+current **production day** (its wall-clock date when no production calendar is configured), not the
+server's date. A reversed range (`start > end`) is **422** `"Start date must be
+on or before end date"`; `9999-12-31` as an end date is **422** `"End date is outside the supported
+range"`. Applies to `/exports/work-orders/export`, `/exports/inventory/transactions/export`,
+`GET /job-costs/`, `/reports/ship-otd` and every `/analytics/*` period. **Production-day filters**
+(P1.2): `/downtime/` + `/downtime/summary` + `/downtime/by-work-center`, `/reports/employee-time` and
+`/reports/daily-output` read the same dates as **production days** — from the company's configured
+production-day start, which is local midnight when no production calendar is configured (so they read
+exactly as above until one is) — see Production calendar & shifts. Filters on a `Date` column (PO
+`order_date`, `Quote.quote_date`, OEE `record_date`) compare dates directly and are unchanged.
+
+> **Changed 2026-11 (P1.1).** These filters used to compare the date against **UTC** midnight, so a
+> Central day ran from 6 PM (CST) / 7 PM (CDT) the evening before to 5:59 / 6:59 PM, and every
+> second-shift row landed in the next day. `backend/tests/test_date_filter_combine_guard.py` keeps the
+> old `datetime.combine(d, datetime.min/max.time())` shape out of `app/`.
 
 ### Success Response
 ```json
@@ -12837,6 +13177,36 @@ the legacy best-effort exporters above. Its separate 10,000-row cap returns
 rather than a dataset) keep their existing, stricter gates. Single-record document downloads — CoC
 PDFs, quote PDFs, nest drawings, kiosk document views — are **not** bulk exports and are unchanged.
 
+### Date filters and datetime cells
+
+`start_date` / `end_date` on `/exports/work-orders/export` (`created_at`) and
+`/exports/inventory/transactions/export` (`created_at`) are **inclusive calendar dates in the
+company time zone** — local midnight to the exclusive next local midnight, converted to UTC (see
+[Timestamps](#timestamps)). The purchase-order, PO-line and quote exports filter a `Date` column
+(`order_date`, `quote_date`) and compare dates directly. On every export a reversed range is
+**422** `"Start date must be on or before end date"`, and `end_date=9999-12-31` on the two
+timestamp filters is **422** `"End date is outside the supported range"` (it was a 500). The audit
+row's `filters` still records the dates as requested (`"2026-01-15"`), never the converted instants.
+
+Every **datetime** cell, in CSV and XLSX, is ISO-8601 **in the company time zone with its UTC
+offset**, to the second — `2026-01-15T17:30:00-06:00` for 23:30Z on a January day,
+`2026-07-15T18:30:00-05:00` in July — so a row reads on the same local day the filter selected it
+by. That covers `created_at` on every dataset that has one, the work-order `scheduled_start` /
+`actual_start` / `actual_end`, and inventory `received_date` (a timestamp despite its name). XLSX
+datetime cells stay **text**: a spreadsheet date cannot carry an offset. **Date** cells (`due_date`,
+`order_date`, `quote_date`, `valid_until`, …) stay `YYYY-MM-DD`. Header keys are unchanged — they
+are the `columns` contract. File names are stamped on the company's wall clock.
+
+> **API consumers: the datetime cell bytes changed (2026-11, P1.1).** Datetime cells used to be
+> `2026-01-15 23:30:00` — naive **UTC** wall time, no `T`, no offset. They are now
+> `2026-01-15T17:30:00-06:00`: the same instant, shown 5–6 hours earlier on the local clock and
+> carrying the offset that says so. A parser that expected the old shape must read ISO-8601 with an
+> offset (Python `datetime.fromisoformat` does). A script that converted the old UTC wall time to
+> local by hand must stop. The two date filters also
+> moved their day boundary from UTC midnight to local midnight, so the same `start_date` /
+> `end_date` now returns that local day's rows — including the evening rows that used to fall into
+> the next day's file.
+
 ### Formula-injection neutralization (CWE-1236)
 
 Every endpoint that returns a spreadsheet artifact neutralizes formula-initiating cell text before
@@ -13026,7 +13396,7 @@ What matters from this file's point of view:
   routers with the caller's own bearer token. The router is the boundary: the same `require_role`
   gates, tenant scoping, audit rows, optimistic-locking 409s and per-endpoint size caps apply, and a
   401/403/409/422 comes back verbatim as an `is_error` tool result carrying the server's `detail`.
-- **The catalog is this API.** 747 tools are generated from `app.openapi()` at startup — every
+- **The catalog is this API.** 751 tools are generated from `app.openapi()` at startup — every
   secured operation except the `Authentication`, `Carrier Webhooks`, `Error Logging` (and its router-level `errors` twin) and `WebSocket` tags, the
   unauthenticated health/station-login routes (named one by one in `catalog.PUBLIC_OPERATIONS`) and
   the nine operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders

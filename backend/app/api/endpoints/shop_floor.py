@@ -97,6 +97,7 @@ from app.services import (
     process_sheet_service,
 )
 from app.services.audit_service import AuditService, AuditWriteError
+from app.services.company_time import company_today
 from app.services.completion_cost_service import (
     apply_completion_cost_rollup,
     rollup_labor_hours_for_closed_entries,
@@ -151,6 +152,8 @@ from app.services.operation_action_gates import (
 from app.services.operation_hold_view import HoldBlockerView, HoldContext
 from app.services.operational_event_service import OperationalEventService
 from app.services.operator_qualification_service import evaluate_and_record_operator_qualification
+from app.services.production_calendar import ProductionCalendar, current_production_day, production_day_window_utc
+from app.services.production_calendar_service import load_production_calendar
 from app.services.production_receipt_service import find_production_replay
 from app.services.production_reduction_service import (
     approved_produced_total,
@@ -1260,8 +1263,9 @@ def _operation_downtime_minutes(db: Session, operation_id: int, company_id: int)
     Sum over the operation's WorkOrderBlockers of ``(resolved_at or now) -
     reported_at``: resolved/dismissed blockers contribute their closed span
     (the service always stamps resolved_at on both), open ones accrue to now.
-    Simple and per-operation -- deliberately no shift math (no shift model
-    exists).
+    Simple and per-operation -- deliberately no shift math: blocker downtime is
+    wall-clock elapsed time, not planned time, so the production calendar's
+    shifts (``services/production_calendar``) do not apply here.
     """
     rows = (
         db.query(WorkOrderBlocker.reported_at, WorkOrderBlocker.resolved_at)
@@ -3304,6 +3308,7 @@ def _dashboard_state_fingerprint(
     company_id: int,
     connected_user_ids: set[int],
     connected_since_by_id: dict[int, Optional[str]],
+    production_calendar: Optional[ProductionCalendar] = None,
 ) -> str:
     """Cheap state fingerprint for the dashboard ETag (PERF-2).
 
@@ -3328,8 +3333,16 @@ def _dashboard_state_fingerprint(
     serve a stale 304. ``presence`` mirrors the (company-scoped) websocket presence the
     payload's ``signed_in_users`` depends on, so the fingerprint moves when presence does
     even though it is not a DB row. Tenant-scoped via ``company_id`` on every aggregate.
+
+    ``production_day`` + ``production_calendar_version`` (P1.2): ``completed_today`` is
+    a PRODUCTION-day window (the configured day start, e.g. 05:00, not Central midnight),
+    so the fingerprint must move at the production-day rollover -- with no row change --
+    and when an Admin edits the calendar; otherwise a cached 304 would serve yesterday's
+    ``completed_today`` past 05:00.
     """
     from app.models.part import Part
+
+    calendar = production_calendar or load_production_calendar(db, company_id)
 
     wo_count, wo_max = (
         db.query(func.count(WorkOrder.id), func.max(WorkOrder.updated_at))
@@ -3367,6 +3380,8 @@ def _dashboard_state_fingerprint(
     fingerprint = {
         "today": date.today().isoformat(),
         "central_today": datetime.now(CENTRAL_TIME_ZONE).date().isoformat(),
+        "production_day": current_production_day(calendar).isoformat(),
+        "production_calendar_version": calendar.version,
         "work_orders": (int(wo_count or 0), wo_max.isoformat() if wo_max else None),
         "operations": (int(op_count or 0), op_max.isoformat() if op_max else None),
         "time_entries": (int(te_count or 0), te_max.isoformat() if te_max else None),
@@ -3430,7 +3445,8 @@ def shop_floor_dashboard(
 
     # PERF-2: cheap pre-reconcile fingerprint -> fast 304 short-circuit. An unchanged
     # dashboard returns here WITHOUT running the reconcile or building the payload.
-    etag = _dashboard_state_fingerprint(db, company_id, connected_user_ids, connected_since_by_id)
+    production_calendar = load_production_calendar(db, company_id)
+    etag = _dashboard_state_fingerprint(db, company_id, connected_user_ids, connected_since_by_id, production_calendar)
     if if_none_match and if_none_match.strip('"') == etag:
         return Response(status_code=304)
 
@@ -3480,7 +3496,7 @@ def shop_floor_dashboard(
     # fingerprint differ -> a 200 that re-serves the fresh body. The reconcile (the only
     # in-request mutator) has already committed, so this fingerprint is stable for the
     # next poll's fast-304 match.
-    etag = _dashboard_state_fingerprint(db, company_id, connected_user_ids, connected_since_by_id)
+    etag = _dashboard_state_fingerprint(db, company_id, connected_user_ids, connected_since_by_id, production_calendar)
 
     # Match the list's nondeleted, nonterminal population on the shop's Central day.
     # UTC date.today() and omitted soft-delete predicates made overview clicks disagree.
@@ -3737,10 +3753,13 @@ def shop_floor_dashboard(
         }
 
     checked_in_user_ids = {entry.user_id for entry in active_entries if entry.user_id}
-    central_now = datetime.now(CENTRAL_TIME_ZONE)
-    central_day_start = central_now.replace(hour=0, minute=0, second=0, microsecond=0)
-    completed_today_start = central_day_start.astimezone(timezone.utc).replace(tzinfo=None)
-    completed_today_end = central_now.astimezone(timezone.utc).replace(tzinfo=None)
+    # The current PRODUCTION day -> now (the configured day start, local midnight when no
+    # production calendar is configured); due_today / overdue above stay on the calendar date.
+    completed_today_now = datetime.utcnow()
+    completed_today_start, _ = production_day_window_utc(
+        current_production_day(production_calendar, completed_today_now), production_calendar
+    )
+    completed_today_end = completed_today_now
     completed_today = (
         db.query(WorkOrderOperation)
         .filter(
@@ -3981,7 +4000,9 @@ def get_all_operations(
         )
 
     if due_today:
-        query = query.filter(WorkOrder.due_date == date.today())
+        # Due today on the company's calendar date, not the server's (a UTC container's
+        # date.today() turns over at 6 PM CST / 7 PM CDT).
+        query = query.filter(WorkOrder.due_date == company_today(db, company_id))
 
     # Canonical dispatch order (owner decision: the manager-dictated run order is
     # the order operators see EVERYWHERE work is listed). Across work centers:

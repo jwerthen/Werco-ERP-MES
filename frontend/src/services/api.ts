@@ -15,6 +15,7 @@ import type {
 } from '../types/exportControl';
 import axios, { AxiosInstance, AxiosError, AxiosRequestConfig } from 'axios';
 import { normalizeAxiosErrorDetail } from '../utils/apiError';
+import { parseProductionCalendar } from '../utils/productionCalendar';
 import {
   LoginResponse,
   UserCreate,
@@ -312,6 +313,33 @@ class ApiService {
 
   async updateWorkingCalendar(workCenterId: number, data: import('../types/workingCalendar').WorkingCalendarUpdate): Promise<import('../types/workingCalendar').WorkingCalendar> {
     return (await this.api.put(`/scheduling/work-centers/${workCenterId}/calendar`, data)).data;
+  }
+
+  /**
+   * The production calendar: day start, shift patterns and today's shifts as UTC instants.
+   * A body of any other shape rejects (`parseProductionCalendar`), so every caller's
+   * existing failure path handles it instead of a render throwing on a missing field.
+   */
+  async getProductionCalendar(): Promise<import('../types/productionCalendar').ProductionCalendar> {
+    return parseProductionCalendar((await this.api.get('/production-calendar')).data);
+  }
+
+  /** Replace the WHOLE production calendar (Admin). A stale `expected_version` is 409. */
+  async updateProductionCalendar(data: import('../types/productionCalendar').ProductionCalendarUpdate): Promise<import('../types/productionCalendar').ProductionCalendar> {
+    return (await this.api.put('/production-calendar', data)).data;
+  }
+
+  /** Which production day and shift an instant (default now) belongs to at a work center. */
+  async resolveProductionMoment(params?: { at?: string; work_center_id?: number }): Promise<import('../types/productionCalendar').ProductionMoment> {
+    return (await this.api.get('/production-calendar/resolve', { params })).data;
+  }
+
+  /**
+   * Set work centers' weekly working hours from their shifts. `dry_run: true` writes
+   * nothing; a commit (`dry_run: false`) must pass the dry run's calendar version.
+   */
+  async syncWorkingCalendarsFromShifts(params: { dry_run: boolean; expected_version?: number }): Promise<import('../types/productionCalendar').WorkingCalendarSyncResult> {
+    return (await this.api.post('/production-calendar/working-calendars/sync', null, { params })).data;
   }
 
   async previewSchedulingImpact(data: import('../types/schedulingImpact').SchedulingImpactRequest): Promise<import('../types/schedulingImpact').SchedulingImpactResponse> {
@@ -4624,7 +4652,7 @@ class ApiService {
   }
 
   // OEE Tracking
-  async getOEERecords(params?: { work_center_id?: number; date_from?: string; date_to?: string; shift?: string; skip?: number; limit?: number }) {
+  async getOEERecords(params?: { work_center_id?: number; date_from?: string; date_to?: string; shift?: string; shift_id?: number; skip?: number; limit?: number }) {
     const response = await this.api.get('/oee/records', { params });
     return response.data;
   }
@@ -4649,7 +4677,7 @@ class ApiService {
     return response.data;
   }
 
-  async autoCalculateOEE(workCenterId: number, params?: { record_date?: string; shift?: string }) {
+  async autoCalculateOEE(workCenterId: number, params?: { record_date?: string; shift_id?: number; shift?: string }) {
     const response = await this.api.post(`/oee/calculate/${workCenterId}`, null, { params });
     return response.data;
   }

@@ -18,7 +18,8 @@ Two passes:
 
    Inside a controlled object a KEEP-allowlist applies -- ids, statuses, priority /
    sequence / version, dates and times, booleans, nulls, the business identifiers in
-   :data:`KEPT_IDENTIFIER_KEYS`, and numbers -- JSON numbers and numeric strings alike --
+   :data:`KEPT_IDENTIFIER_KEYS`, the closed-vocabulary values in :data:`KEPT_ENUM_VALUES`,
+   and numbers -- JSON numbers and numeric strings alike --
    ONLY under a key naming an id, count, quantity, duration, money amount, rate, percentage
    or sequence (:func:`kept_numeric_key`) and never under one naming a dimension or
    measurement of the article (:data:`DIMENSION_KEY_FRAGMENTS`: a nominal, tolerance,
@@ -413,8 +414,22 @@ NUMERIC_KEEP_KEYS = frozenset(
         "in_progress",
         "overdue",
         "due_today",
+        # The production calendar (P1.2): a wall time as minutes after local midnight -- a
+        # time-of-day position, not a dimension ("minutes" is a fragment, "minute" is not).
+        "start_minute",
+        "end_minute",
+        "production_day_start_minute",
     }
 )
+# Inside a withheld object, a STRING under one of these keys stays only when it is one of the
+# key's closed-vocabulary values: the value is a server-derived category the response schema
+# types as a ``Literal``, so it cannot carry the record's text. Any other value under the key
+# is withheld like every other string. ``hours_source`` (P1.4): where an operation's actual
+# hours come from -- ``tests/test_export_control_redaction.py`` pins this set to the schema's
+# ``Literal`` so the two cannot drift.
+KEPT_ENUM_VALUES: Mapping[str, FrozenSet[str]] = {
+    "hours_source": frozenset({"time_entries", "manual", "standard", "none"}),
+}
 # A key naming a dimension or measurement of the article: its number is technical data and is
 # withheld even when the key ALSO names a count / total (``total_length``,
 # ``tolerance_percent``). "value", "limit" and "target" are not here: on their own they keep
@@ -524,6 +539,8 @@ def _kept_string(key: Optional[str], value: str) -> bool:
     if key is None:
         return False
     if key in KEPT_IDENTIFIER_KEYS:
+        return True
+    if value in KEPT_ENUM_VALUES.get(key, frozenset()):
         return True
     if _is_id_key(key):
         return bool(_ID_VALUE.match(value))
