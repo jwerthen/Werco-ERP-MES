@@ -241,8 +241,12 @@ the normal API boot migration path. No environment variable, secret, cron or wor
 - **Locks.** Both revisions run `SET LOCAL lock_timeout = '5s'`. They take ACCESS EXCLUSIVE locks on
   `vendors`, `parts`, the three maintenance tables and `downtime_events`, held until the boot
   transaction commits; the CHECKs validate and the indexes build inside it. A long transaction holding
-  any of those tables fails the boot after 5 seconds; the old deployment keeps serving and redeploying
-  is safe.
+  any of those tables fails the boot after 5 seconds. When that boot started at 121 or later, the
+  database is back where it started, the old deployment keeps serving and redeploying is safe. When
+  the same boot also ran **121** (a stacked release deployed in one go), it is not: 121's autocommit
+  step had already committed 119 and 120, so the database is left at `120_production_calendar` and an
+  older image cannot start until it is stamped back. Stamp before that image restarts (see
+  [One boot, two transactions](#job-cost-subcontract-element-migration-121) under 121).
 - **Order.** The migration ships with the API or ahead of it: the old API ignores the new columns and
   always writes a work center on maintenance rows. Deploy the API before the frontend (the normal CI
   order): the new Supplier Scorecards ASL tab, the Create PO check, the Maintenance Assets tab and both

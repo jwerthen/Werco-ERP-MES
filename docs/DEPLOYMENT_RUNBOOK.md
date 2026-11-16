@@ -336,9 +336,11 @@ on the ASL" until the ASL import or **Update approval** records a status). 124 c
 `maintenance_assets` (RLS, revokes from `PUBLIC` / `anon` / `authenticated` as in model bootstrap),
 adds `asset_id` with a one-target CHECK to the three maintenance tables (making `work_center_id`
 nullable), and adds `downtime_events.maintenance_work_order_id` and `maintenance_adopted` (NOT NULL
-DEFAULT false). Both run `SET LOCAL lock_timeout =
-'5s'` and lock those tables until the boot transaction commits. No environment variable, secret, cron
-or worker job is added. Ship the migration with or ahead of the API, and the API before the frontend.
+DEFAULT false). Both run `SET LOCAL lock_timeout = '5s'` and lock those tables until the boot
+transaction commits; a timeout fails the boot, and in a boot that also ran 121 the database is left
+at `120_production_calendar` rather than where it started (121's autocommit step committed 119 and
+120 first), so stamp back before an older image restarts (see 121 below). No environment variable,
+secret, cron or worker job is added. Ship the migration with or ahead of the API, and the API before the frontend.
 On an application rollback keep both migrations: before redeploying a pre-123 image, from a checkout
 of this release run `railway run --service werco-api alembic stamp 122_car_form_quote_rev`, or its boot
 cannot find `124` and fails `/health`. Old code cannot start or complete an
