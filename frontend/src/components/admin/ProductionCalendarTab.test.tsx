@@ -167,6 +167,31 @@ test('Save PUTs the whole document with the version it was read at', async () =>
   expect(screen.queryByText('Unsaved changes')).toBeNull();
 });
 
+test.each([
+  ['an empty object', {}],
+  ['an HTML page', '<!doctype html><html></html>'],
+])(
+  'a saved calendar whose reply is not a calendar (%s) reports the save and re-reads, never crashes',
+  async (_label, body) => {
+    // The PUT succeeded (2xx), so the save must not be reported as failed, and the reply
+    // must not reach the editor state, where the render-time baseline would throw on it.
+    const reread = wercoCalendar({ version: 4 });
+    reread.patterns[0].shifts[0].planned_minutes = 570;
+    mockApi.updateProductionCalendar.mockResolvedValue(body as unknown as ReturnType<typeof wercoCalendar>);
+    await loaded();
+    mockApi.getProductionCalendar.mockResolvedValue(reread);
+
+    fireEvent.change(screen.getByRole('spinbutton', { name: /planned minutes for W1/i }), { target: { value: '570' } });
+    fireEvent.click(screen.getByRole('button', { name: /save calendar/i }));
+
+    expect(await screen.findByText(/^Production calendar saved\. Run the working-calendar sync/)).toBeInTheDocument();
+    await waitFor(() => expect(mockApi.getProductionCalendar).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByTestId('calendar-version')).toHaveTextContent('v4'));
+    expect(screen.queryByText('Unsaved changes')).toBeNull();
+    expect(screen.getByRole('button', { name: /save calendar/i })).toBeDisabled();
+  }
+);
+
 test('a new shift is sent without an id', async () => {
   mockApi.updateProductionCalendar.mockResolvedValue(wercoCalendar({ version: 4 }));
   await loaded();

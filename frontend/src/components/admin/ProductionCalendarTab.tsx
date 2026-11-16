@@ -43,6 +43,7 @@ import {
   draftFromCalendar,
   draftIssues,
   formatHours,
+  isProductionCalendar,
   formatShiftDays,
   MINUTES_PER_DAY,
   newDraftKey,
@@ -119,8 +120,11 @@ export default function ProductionCalendarTab() {
   const [committing, setCommitting] = useState(false);
 
   const applyCalendar = useCallback((next: ProductionCalendar) => {
+    // Build the draft first: if it throws, no half-applied calendar is left in state for
+    // the render-time baseline memo to throw on again.
+    const nextDraft = draftFromCalendar(next);
     setCalendar(next);
-    setDraft(draftFromCalendar(next));
+    setDraft(nextDraft);
     setSaveError(null);
   }, []);
 
@@ -274,13 +278,20 @@ export default function ProductionCalendarTab() {
     setSaveError(null);
     try {
       const saved = await api.updateProductionCalendar(buildCalendarUpdate(draft, calendar.version));
-      applyCalendar(saved);
       setSyncResult(null);
       setSyncError(null);
-      showToast(
-        'success',
-        `Production calendar saved (version ${saved.version}). Run the working-calendar sync to update scheduling hours.`
-      );
+      if (isProductionCalendar(saved)) {
+        applyCalendar(saved);
+        showToast(
+          'success',
+          `Production calendar saved (version ${saved.version}). Run the working-calendar sync to update scheduling hours.`
+        );
+      } else {
+        // The server accepted the save (a 2xx) but its reply is not a calendar: never report
+        // that as a failure. Re-read the saved calendar through the validated GET instead.
+        showToast('success', 'Production calendar saved. Run the working-calendar sync to update scheduling hours.');
+        void load();
+      }
     } catch (err) {
       const detail = apiErrorDetail(err, 'Failed to save the production calendar');
       if (apiErrorStatus(err) === 409) {

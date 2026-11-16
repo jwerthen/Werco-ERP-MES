@@ -15,6 +15,7 @@ import type {
 } from '../types/exportControl';
 import axios, { AxiosInstance, AxiosError, AxiosRequestConfig } from 'axios';
 import { normalizeAxiosErrorDetail } from '../utils/apiError';
+import { parseProductionCalendar } from '../utils/productionCalendar';
 import {
   LoginResponse,
   UserCreate,
@@ -314,9 +315,13 @@ class ApiService {
     return (await this.api.put(`/scheduling/work-centers/${workCenterId}/calendar`, data)).data;
   }
 
-  /** The production calendar: day start, shift patterns and today's shifts as UTC instants. */
+  /**
+   * The production calendar: day start, shift patterns and today's shifts as UTC instants.
+   * A body of any other shape rejects (`parseProductionCalendar`), so every caller's
+   * existing failure path handles it instead of a render throwing on a missing field.
+   */
   async getProductionCalendar(): Promise<import('../types/productionCalendar').ProductionCalendar> {
-    return (await this.api.get('/production-calendar')).data;
+    return parseProductionCalendar((await this.api.get('/production-calendar')).data);
   }
 
   /** Replace the WHOLE production calendar (Admin). A stale `expected_version` is 409. */

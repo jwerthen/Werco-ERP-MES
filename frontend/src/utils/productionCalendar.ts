@@ -21,6 +21,42 @@ import type {
 
 export const MINUTES_PER_DAY = 24 * 60;
 
+const isObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/**
+ * Whether a `/production-calendar` body has the structure the helpers here walk: the
+ * `configured` flag, the `patterns` / `shifts` / `work_center_ids` arrays, and `today`
+ * with its `end_utc` and `occurrences`. (It does not type-check every scalar field.)
+ *
+ * The header HUD reads the calendar on every page of the app, so a body of any other
+ * shape -- an empty object from a stub, an HTML page from a proxy, a body from an older
+ * or newer API -- must degrade to "calendar unavailable", never throw during a render:
+ * one throw in the header puts the whole app behind the global error boundary.
+ */
+export function isProductionCalendar(value: unknown): value is ProductionCalendar {
+  if (!isObject(value) || typeof value.configured !== 'boolean' || !Array.isArray(value.patterns)) return false;
+  const today = value.today;
+  if (!isObject(today) || typeof today.end_utc !== 'string' || !Array.isArray(today.occurrences)) return false;
+  return (
+    value.patterns.every(
+      pattern =>
+        isObject(pattern) &&
+        Array.isArray(pattern.work_center_ids) &&
+        Array.isArray(pattern.shifts) &&
+        pattern.shifts.every(isObject)
+    ) && today.occurrences.every(isObject)
+  );
+}
+
+/** The calendar a response body holds; throws when the body is not one (see `isProductionCalendar`). */
+export function parseProductionCalendar(value: unknown): ProductionCalendar {
+  if (!isProductionCalendar(value)) {
+    throw new Error('The production calendar response was not in the expected format.');
+  }
+  return value;
+}
+
 /** Day labels indexed by the server's weekday (0 = Monday ... 6 = Sunday). */
 export const WEEKDAY_SHORT = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] as const;
 
@@ -81,7 +117,8 @@ export function formatShiftDays(days: readonly number[]): string {
 
 /** The company's single default pattern, or `null`. */
 export function defaultPattern(calendar: ProductionCalendar | null | undefined): ShiftPattern | null {
-  return calendar?.patterns.find(pattern => pattern.is_default) ?? null;
+  if (!isProductionCalendar(calendar)) return null;
+  return calendar.patterns.find(pattern => pattern.is_default) ?? null;
 }
 
 /**
@@ -92,7 +129,7 @@ export function patternForWorkCenter(
   calendar: ProductionCalendar | null | undefined,
   workCenterId: number | null | undefined
 ): ShiftPattern | null {
-  if (!calendar) return null;
+  if (!isProductionCalendar(calendar)) return null;
   if (workCenterId != null) {
     const member = calendar.patterns.find(pattern => pattern.work_center_ids.includes(workCenterId));
     if (member) return member;
@@ -106,7 +143,7 @@ export function runningOccurrences(
   nowMs: number,
   patternId: number | null | undefined
 ): ShiftOccurrence[] {
-  if (!calendar || patternId == null) return [];
+  if (!isProductionCalendar(calendar) || patternId == null) return [];
   return (
     calendar.today.occurrences
       .filter(occ => occ.pattern_id === patternId)
@@ -136,7 +173,7 @@ export function currentDefaultShift(
 
 /** Whether the calendar's `today` has ended (time to refetch for the next production day). */
 export function productionDayEnded(calendar: ProductionCalendar | null | undefined, nowMs: number): boolean {
-  if (!calendar) return true;
+  if (!isProductionCalendar(calendar)) return true;
   const end = Date.parse(calendar.today.end_utc);
   return !Number.isFinite(end) || nowMs >= end;
 }
