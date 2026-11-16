@@ -207,6 +207,14 @@ describe('Maintenance — Start PM from a schedule', () => {
     expect(screen.queryByRole('button', { name: /Start PM work order/ })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Edit schedule/ })).not.toBeInTheDocument();
   });
+
+  it('offers no Start PM on the Upcoming cards to an operator', async () => {
+    mockRole = 'operator';
+    mockedApi.getMaintenanceWorkOrders.mockResolvedValue([]);
+    renderPage('/maintenance?tab=dashboard');
+    expect(await screen.findByText('Mill 1 Monthly PM')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Start PM work order/ })).not.toBeInTheDocument();
+  });
 });
 
 describe('Maintenance — completing a PM work order', () => {
@@ -325,5 +333,110 @@ describe('Maintenance — KPI tiles count PMs nobody has started', () => {
     expect(overdue).toHaveTextContent('1 work order · 30 PMs not started');
     const due = screen.getByText('Due This Week').closest('div')?.parentElement as HTMLElement;
     expect(due).toHaveTextContent('2 work orders · 0 PMs not started');
+  });
+});
+
+/*
+ * Each of the three forms this change touched decides "dirty" against what it OPENED with, not
+ * against a blank form: a Start PM form is pre-filled, a completion checklist arrives from the
+ * work order, and the schedule dialog starts from the schedule. Closing an untouched one must
+ * not ask; closing an edited one must ask (`useUnsavedChanges` → `window.confirm`), and saying
+ * no must keep the edits on screen and send nothing.
+ */
+describe('Maintenance — unsaved-changes guards', () => {
+  let confirmSpy: jest.SpyInstance<boolean, [message?: string]>;
+  beforeEach(() => {
+    confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(false);
+  });
+  afterEach(() => {
+    confirmSpy.mockRestore();
+  });
+
+  it('Start PM: the pre-filled form closes without asking; an edit to it asks first', async () => {
+    renderPage('/maintenance?tab=schedules');
+    const row = await scheduleRow('Mill 1 Monthly PM');
+    const startPm = () =>
+      fireEvent.click(within(row).getByRole('button', { name: 'Start PM work order for Mill 1 Monthly PM' }));
+
+    startPm();
+    let dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(confirmSpy).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+
+    startPm();
+    dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText(/^Title/), { target: { value: 'Mill 1 Monthly PM + spindle' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('dialog')).toHaveTextContent('Start PM: Mill 1 Monthly PM');
+    expect(within(dialog).getByLabelText(/^Title/)).toHaveValue('Mill 1 Monthly PM + spindle');
+
+    confirmSpy.mockReturnValue(true);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(mockedApi.createMaintenanceWorkOrder).not.toHaveBeenCalled();
+
+    // The abandoned Start PM leaves nothing behind: New Work Order is a blank, targeted form.
+    fireEvent.click(screen.getByRole('button', { name: 'New Work Order' }));
+    dialog = await screen.findByRole('dialog');
+    expect(dialog).toHaveTextContent('New Maintenance Work Order');
+    expect(within(dialog).getByLabelText(/^Title/)).toHaveValue('');
+    expect(within(dialog).queryByRole('region', { name: 'PM schedule' })).not.toBeInTheDocument();
+    expect(within(dialog).getByRole('radio', { name: 'Work center' })).toBeInTheDocument();
+  });
+
+  it('Complete: ticking a checklist item alone is an unsaved change, and reopening starts over', async () => {
+    renderPage('/maintenance?tab=work_orders');
+    const table = await screen.findByTestId('data-table');
+    const openComplete = async () => {
+      fireEvent.click(await within(table).findByRole('button', { name: 'Complete work order MWO-2026-0041' }));
+      return screen.findByRole('dialog');
+    };
+
+    let dialog = await openComplete();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(confirmSpy).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+
+    dialog = await openComplete();
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Drain tank' }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    expect(within(dialog).getByRole('checkbox', { name: 'Drain tank' })).toBeChecked();
+
+    confirmSpy.mockReturnValue(true);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(mockedApi.completeMaintenanceWorkOrder).not.toHaveBeenCalled();
+
+    dialog = await openComplete();
+    expect(dialog).toHaveTextContent('Checklist (0 of 2 done)');
+    expect(within(dialog).getByRole('checkbox', { name: 'Drain tank' })).not.toBeChecked();
+  });
+
+  it('Edit schedule: an untouched dialog closes without asking; an edited one asks and keeps the edit', async () => {
+    renderPage('/maintenance?tab=schedules');
+    const row = await scheduleRow('Mill 1 Monthly PM');
+    const openEdit = () => {
+      fireEvent.click(within(row).getByRole('button', { name: 'Edit schedule Mill 1 Monthly PM' }));
+      return screen.findByRole('dialog');
+    };
+
+    let dialog = await openEdit();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(confirmSpy).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+
+    dialog = await openEdit();
+    fireEvent.change(within(dialog).getByLabelText('Priority'), { target: { value: 'low' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close dialog' }));
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    expect(within(dialog).getByLabelText('Priority')).toHaveValue('low');
+
+    confirmSpy.mockReturnValue(true);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(mockedApi.updateMaintenanceSchedule).not.toHaveBeenCalled();
   });
 });

@@ -143,6 +143,12 @@ class TestScheduleToWorkOrderToCompletion:
         assert len(rows) == 1
         assert "advanced by completing maintenance work order" in rows[0].description
         assert rows[0].extra_data and rows[0].extra_data.get("maintenance_work_order_id") == wo["id"]
+        # The row records the move itself: from the imported due date to one interval past today.
+        assert rows[0].old_values == {"last_completed_date": None, "next_due_date": overdue_since.isoformat()}
+        assert rows[0].new_values == {
+            "last_completed_date": today.isoformat(),
+            "next_due_date": expected_next.isoformat(),
+        }
 
     @pytest.mark.parametrize(
         "frequency,frequency_days,interval",
@@ -300,3 +306,109 @@ class TestDashboardScheduleCounts:
         db_session.expire_all()
         assert db_session.get(MaintenanceWorkOrder, wo["id"]).status == MaintenanceStatus.CANCELLED
         assert dashboard(client, planner_headers)["schedules_overdue"] == 1
+
+
+def make_raw_wo(
+    db: Session,
+    *,
+    company_id: int,
+    schedule_id: int = None,
+    status: MaintenanceStatus = MaintenanceStatus.SCHEDULED,
+    due: date = None,
+) -> MaintenanceWorkOrder:
+    """A work order written straight to the table, on the company's own machine.
+
+    The only way to build a MIS-TENANTED row -- one carrying another company's ``schedule_id``.
+    ``create_work_order`` refuses that now, but rows written before the fix still carry one
+    (``company_id`` is part of no FK), so the readers have to survive it."""
+    wo = MaintenanceWorkOrder(
+        company_id=company_id,
+        work_center_id=make_wc(db, company_id=company_id).id,
+        schedule_id=schedule_id,
+        wo_number=f"MWO-PMRF-{_next():05d}",
+        title="Synthetic maintenance",
+        status=status,
+        due_date=due,
+        requires_shutdown=False,
+    )
+    db.add(wo)
+    db.commit()
+    db.refresh(wo)
+    return wo
+
+
+class TestDashboardScheduleCountsStayInTenant:
+    def test_another_companys_open_work_order_never_hides_this_companys_due_schedule(
+        self, client, db_session, planner_headers
+    ):
+        """The open-work-order subquery is company-scoped as well as the outer count. Without that,
+        company 2's (legacy, mis-tenanted) open work order naming company 1's schedule would make
+        company 1's overdue PM vanish from company 1's dashboard -- a PM nobody is working, shown
+        as one somebody is."""
+        today = date.today()
+        overdue = make_schedule(db_session, next_due=today - timedelta(days=4))
+        due_soon = make_schedule(db_session, next_due=today + timedelta(days=2))
+        make_raw_wo(
+            db_session,
+            company_id=2,
+            schedule_id=overdue.id,
+            status=MaintenanceStatus.IN_PROGRESS,
+            due=today - timedelta(days=4),
+        )
+        make_raw_wo(db_session, company_id=2, schedule_id=due_soon.id, due=today + timedelta(days=2))
+
+        body = dashboard(client, planner_headers)
+        assert (body["schedules_overdue"], body["schedules_due_this_week"]) == (1, 1)
+        # Company 2's work orders count on neither of company 1's work-order tiles.
+        assert (body["overdue_count"], body["due_this_week"]) == (0, 0)
+
+        # And from company 2's side: its own work order counts, company 1's schedules never do.
+        other = dashboard(client, headers_for(make_user(db_session, role=UserRole.SUPERVISOR, company_id=2)))
+        assert (other["schedules_overdue"], other["schedules_due_this_week"]) == (0, 0)
+        assert other["due_this_week"] == 1
+
+    def test_an_open_work_order_with_no_schedule_leaves_the_counts_intact(self, client, db_session, planner_headers):
+        """``id NOT IN (subquery)`` is NULL -- not true -- for every row once the subquery yields a
+        single NULL, so one open corrective work order (no ``schedule_id``) would zero both schedule
+        counts. The subquery drops NULL schedule ids; this pins it."""
+        today = date.today()
+        make_schedule(db_session, next_due=today - timedelta(days=1))
+        make_schedule(db_session, next_due=today + timedelta(days=1))
+        wc = make_wc(db_session)
+        created = client.post(
+            WORK_ORDERS, headers=planner_headers, json={"work_center_id": wc.id, "title": "Corrective"}
+        )
+        assert created.status_code == 200, created.text
+        assert created.json()["schedule_id"] is None and created.json()["status"] == "scheduled"
+
+        body = dashboard(client, planner_headers)
+        assert (body["schedules_overdue"], body["schedules_due_this_week"]) == (1, 1)
+
+
+class TestRollForwardStaysInTenant:
+    def test_completing_against_a_foreign_schedule_discloses_and_audits_nothing(
+        self, client, db_session, planner_headers
+    ):
+        """The two outputs this change added -- the response's ``schedule_next_due_date`` and the
+        schedule's own audit row -- may come only from the company-scoped schedule read. A legacy
+        work order naming another company's schedule must neither hand back that schedule's due
+        date nor write a row about it. (That the foreign schedule itself stays put is pinned in
+        ``test_maintenance_tenant_isolation``.)"""
+        foreign = make_schedule(db_session, company_id=2, next_due=date.today() - timedelta(days=1))
+        wo = make_raw_wo(db_session, company_id=1, schedule_id=foreign.id, status=MaintenanceStatus.IN_PROGRESS)
+
+        done = client.post(f"{WORK_ORDERS}/{wo.id}/complete", headers=planner_headers, json={})
+        assert done.status_code == 200, done.text
+        assert done.json()["schedule_next_due_date"] is None
+
+        assert schedule_audit_rows(db_session, foreign.id) == []
+        completion = (
+            db_session.query(AuditLog)
+            .filter(
+                AuditLog.resource_type == "maintenance_work_order",
+                AuditLog.resource_id == wo.id,
+                AuditLog.action == "STATUS_CHANGE",
+            )
+            .one()
+        )
+        assert completion.extra_data["schedule_next_due_date"] is None

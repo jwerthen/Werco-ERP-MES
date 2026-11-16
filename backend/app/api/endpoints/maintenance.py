@@ -1110,12 +1110,17 @@ def complete_work_order(
     # Update schedule if linked. Scoped: pre-fix rows may still carry a foreign
     # schedule_id (create_work_order accepted one until this change), and this
     # is the write that would advance another tenant's PM due date.
+    # Row-locked (a no-op on SQLite) so a concurrent schedule edit cannot slip between this read and
+    # the write, which keeps the roll-forward's audit ``old_values`` exact.
     advanced: Optional[MaintenanceSchedule] = None
+    advanced_due: Optional[str] = None
     schedule_old_values: Dict[str, Any] = {}
     if wo.schedule_id:
         schedule = (
             db.query(MaintenanceSchedule)
             .filter(MaintenanceSchedule.id == wo.schedule_id, MaintenanceSchedule.company_id == company_id)
+            .with_for_update()
+            .populate_existing()
             .first()
         )
         if schedule:
@@ -1126,6 +1131,9 @@ def complete_work_order(
             schedule.last_completed_date = now.date()
             schedule.next_due_date = _calc_next_due(schedule.frequency, schedule.frequency_days, now.date())
             advanced = schedule
+            # Computed once, before the commit: the response must report the date THIS completion
+            # wrote, not whatever a re-read after commit finds.
+            advanced_due = schedule.next_due_date.isoformat()
 
     # Log the event. Same NOT NULL omission as start_work_order: the insert
     # raised IntegrityError and the endpoint 500'd after the completion had
@@ -1154,7 +1162,7 @@ def complete_work_order(
             "downtime_minutes": wo.downtime_minutes,
             "actual_duration_hours": wo.actual_duration_hours,
             "schedule_id": wo.schedule_id,
-            "schedule_next_due_date": advanced.next_due_date.isoformat() if advanced else None,
+            "schedule_next_due_date": advanced_due,
             "resolved_downtime_event_ids": [event.id for event in resolved],
         },
     )
@@ -1177,7 +1185,7 @@ def complete_work_order(
     db.refresh(wo)
 
     body = _serialize_wo(wo)
-    body["schedule_next_due_date"] = advanced.next_due_date.isoformat() if advanced else None
+    body["schedule_next_due_date"] = advanced_due
     return body
 
 

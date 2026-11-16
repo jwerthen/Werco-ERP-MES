@@ -1261,11 +1261,13 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > page for its intended audience.
 >
 > **The client now matches the server gate.** `Maintenance.tsx` shows the planning controls (New
-> Schedule, New Work Order, Import PM Schedules, the Assets tab's add / edit / retire / reactivate)
-> only to `canPlanMaintenance` (Admin / Manager / Supervisor, or a superuser) and Start / Complete
-> only to `canPerformMaintenance` (those plus Operator) — `frontend/src/utils/maintenance.ts`; every
-> other role gets the read-only page. Neither helper names Platform Admin, so a platform admin who is
-> not a superuser sees the read-only page although the server would accept the write.
+> Schedule, New Work Order, Import PM Schedules, a schedule's **Start PM** — which creates a
+> maintenance WO — **Edit** and Deactivate, the Assets tab's add / edit / retire / reactivate) only
+> to `canPlanMaintenance` (Admin / Manager / Supervisor / Platform Admin, or a superuser) and a
+> work order's Start / Complete only to `canPerformMaintenance` (those plus Operator) —
+> `frontend/src/utils/maintenance.ts`; every other role gets the read-only page. Completing a WO that
+> carries a `schedule_id` advances that schedule's next due date under the performing gate (audited
+> as a `maintenance_schedule` UPDATE) — the only way an Operator moves a schedule.
 >
 > **Assets and the PM import follow the planning tier.** Equipment-asset writes and both PM import
 > routes are `_PLANNING_ROLES` (Admin / Manager / Supervisor), like schedules; asset reads are open to

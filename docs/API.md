@@ -5860,9 +5860,9 @@ uploads go through text extraction + LLM. See
 | POST | `/maintenance/work-orders` | Create maintenance work order on a work center **or** an asset (or neither, with a `schedule_id`, to inherit the schedule's target) | Admin / Manager / Supervisor |
 | PUT | `/maintenance/work-orders/{id}` | Update maintenance work order; `status` among `scheduled`, `overdue`, `on_hold`, `cancelled` only (**409** for `in_progress` / `completed` — use the verbs — for returning a started work order to `scheduled` / `overdue`, and for changing `requires_shutdown` once started). Moving it to `cancelled` settles any downtime event it holds | Admin / Manager / Supervisor |
 | POST | `/maintenance/work-orders/{id}/start` | Start (→ `in_progress`). A work-center work order with `requires_shutdown` opens, adopts or shares a downtime event — never a second open one on the machine | Admin / Manager / Supervisor / Operator |
-| POST | `/maintenance/work-orders/{id}/complete` | Complete (→ `completed`, advances the linked schedule) and resolve the work order's open downtime event | Admin / Manager / Supervisor / Operator |
+| POST | `/maintenance/work-orders/{id}/complete` | Complete (→ `completed`, advances the linked schedule — the response adds `schedule_next_due_date`) and resolve the work order's open downtime event. `checklist_results` omitted keeps the work order's checklist | Admin / Manager / Supervisor / Operator |
 | GET | `/maintenance/calendar` | Work orders in a date window (**capped at 366 days**) | Yes |
-| GET | `/maintenance/dashboard` | Counts, cost, per-machine MTBF/MTTR (work centers only) | Yes |
+| GET | `/maintenance/dashboard` | Counts, cost, per-machine MTBF/MTTR (work centers only). `overdue_count` / `due_this_week` count work orders; `schedules_overdue` / `schedules_due_this_week` count due PM schedules with no open work order (see *The PM loop* below) | Yes |
 | GET | `/maintenance/history/{work_center_id}` | Event log for one machine (`limit` 1…5000, default 100) | Yes |
 | GET | `/maintenance/assets` | List equipment assets (`include_inactive` default false, `search` on tag / name / type), each with `active_schedule_count` and `open_work_order_count` | Yes |
 | GET | `/maintenance/assets/{id}` | Equipment asset detail | Yes |
@@ -5925,9 +5925,10 @@ uploads go through text extraction + LLM. See
 > previously wrote none at all). Resource types: `maintenance_schedule` (`CREATE` / `UPDATE`, with
 > the deactivation logged as the `is_active` flip), `maintenance_work_order` (`CREATE` / `UPDATE`,
 > plus `STATUS_CHANGE` on start and complete — the complete row carries `total_cost`,
-> `downtime_minutes`, `actual_duration_hours` and `schedule_id` in `extra_data`), and
-> `maintenance_log` (`CREATE`). Rows are logged **before** the terminal commit so they commit
-> atomically with the change.
+> `downtime_minutes`, `actual_duration_hours`, `schedule_id` and `schedule_next_due_date` in
+> `extra_data`), and `maintenance_log` (`CREATE`). A completion that advances a PM schedule also
+> writes that schedule's own `maintenance_schedule` `UPDATE` row. Rows are logged **before** the
+> terminal commit so they commit atomically with the change.
 
 > **`GET /maintenance/calendar` refuses a window wider than 366 days (400)**, and refuses
 > `end_date < start_date` (400). It was the one unbounded read left in the file — `start_date` and
@@ -6074,7 +6075,44 @@ uploads go through text extraction + LLM. See
 >   **503** with nothing saved if one cannot be written. Re-running the same sheet changes nothing and
 >   writes no audit row. File-level problems are **400**.
 > - Importing a schedule creates no work order. Nothing generates due PM work orders automatically
->   today.
+>   today; a planner opens one with **Start PM** (next note).
+
+> **The PM loop: a due schedule, its work order, and the roll-forward.**
+>
+> - **Dashboard.** `overdue_count` / `due_this_week` are unchanged: maintenance **work orders**
+>   (`scheduled` or `overdue`) by `due_date`. `schedules_overdue` / `schedules_due_this_week` count
+>   **active** PM schedules by `next_due_date` (before today; today through today + 7) with **no open
+>   work order** (`scheduled` / `overdue` / `in_progress` / `on_hold`) carrying their `schedule_id`.
+>   A schedule with an open work order is counted through that work order, so the two pairs never
+>   count one PM twice. The Maintenance page's Overdue / Due This Week tiles and the dashboard's
+>   **Maintenance Due** widget show the sum, the page with a *"N work orders · M PMs not started"*
+>   split. "Today" is the server's `date.today()` (UTC on the deployed server), as for the work-order
+>   counts, and a schedule on a retired asset still counts until the schedule itself is deactivated.
+> - **Start PM** (Schedules tab rows and the Dashboard tab's Upcoming cards; planning roles) opens the
+>   work-order form pre-filled from the schedule — title = schedule name, type, priority,
+>   `requires_shutdown`, description, checklist, due date = the schedule's `next_due_date`, scheduled
+>   date = today (Central) — and sends `schedule_id` with **no** target, so the server inherits the
+>   schedule's (an explicit different one is **409**, *Schedule target* above). A schedule that
+>   already has an open work order shows that work order's number instead. The checklist is stored in
+>   the work order's `checklist_results` as a JSON array of `{"item": …, "done": false}`; the Complete
+>   dialog ticks each item and sends the array back.
+> - **Complete** on a work order with a `schedule_id` sets the schedule's `last_completed_date` to the
+>   completion date (UTC) and `next_due_date` to that date plus the interval, in fixed days: daily 1,
+>   weekly 7, biweekly 14, monthly 30, quarterly 90, semi_annual 182, annual 365, custom
+>   `frequency_days`. The response's `schedule_next_due_date` is the new date (`null` when no schedule
+>   was advanced); the schedule's `UPDATE` audit row reads *"… advanced by completing maintenance work
+>   order MWO-…"* with `extra_data.maintenance_work_order_id`. `checklist_results` omitted keeps the
+>   checklist the work order carries; a value, or an explicit `null`, replaces it.
+> - **Edit** (Schedules tab; planning roles) → `PUT /maintenance/schedules/{id}`: next due date,
+>   frequency (`frequency_days` for custom), priority, estimated duration, requires shutdown,
+>   checklist. A schedule has no `version` column, so this `PUT` has no compare-and-swap; the dialog
+>   sends **only the fields changed**, so a dialog left open while someone completes the PM cannot put
+>   the old due date back unless the planner changed it. Name and target are not editable there: the
+>   `PUT` never moves a target, and the PM import matches schedules by target + name, so a rename would
+>   make the next import create a duplicate.
+> - **Known gaps:** the `maintenance.due` / `maintenance.overdue` notification catalog entries still
+>   have no emitter, and *monthly* is a fixed 30 days from the completion date, not a calendar month,
+>   so a schedule completed on its due date drifts earlier each month.
 
 ### Tool & Fixture Management (tool crib)
 
