@@ -322,9 +322,12 @@ def create_vendor(
 ):
     """Create a vendor. `code` must be unique within the company (400 "Vendor code already exists").
     Writes a tamper-evident audit_log CREATE row for the new vendor. An API token may not create
-    one with `is_approved: true` (403): approving a supplier is a person's decision."""
+    one with `is_approved: true` (403): approving a supplier is a person's decision. A name that
+    normalizes to a live vendor's that is Disqualified on the Approved Supplier List is refused
+    409 before anything is written: re-evaluate the existing vendor instead of minting a twin."""
     if vendor_in.is_approved and is_api_token_credential(current_user):
         raise HTTPException(status_code=403, detail=API_TOKEN_VENDOR_APPROVAL_REFUSAL)
+    asl.assert_no_disqualified_namesake(db, company_id, vendor_in.name)
     # DELIBERATELY sees soft-deleted vendors -- do not add ``is_deleted == False``, for two
     # independent reasons. (1) ``uq_vendors_company_code`` has no partial predicate, so it
     # spans deleted rows: filtering here would push a clean 400 down into the IntegrityError
@@ -365,7 +368,11 @@ async def import_vendors_csv(
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Import vendor master records from CSV or XLSX with row-level errors."""
+    """Import vendor master records from CSV or XLSX with row-level errors.
+
+    A row whose name normalizes to a live vendor's that is Disqualified on the Approved Supplier
+    List is a row error carrying the same text ``POST /purchasing/vendors`` answers 409 with, and
+    no vendor is created for it (dry run included); the other rows are unaffected."""
     content = await file.read()
     # Parse + import are CPU/DB-bound sync work; run them in the threadpool so a
     # large upload can't stall the event loop (the request-scoped Session/audit
@@ -388,6 +395,9 @@ async def import_vendors_csv(
             for (value,) in db.query(Vendor.code).filter(Vendor.company_id == company_id).all()
         }
 
+        # Lead decision L1: a live Disqualified vendor's name is not available to a new row.
+        disqualified_names = asl.disqualified_name_index(db, company_id)
+
         audit = AuditService(db, current_user, request)
         errors: List[VendorCsvImportError] = []
         created_ids: List[int] = []
@@ -403,6 +413,9 @@ async def import_vendors_csv(
             try:
                 if not name:
                     raise ValueError("name is required")
+                namesake = asl.disqualified_namesake(db, company_id, name, index=disqualified_names)
+                if namesake is not None:
+                    raise ValueError(asl.disqualified_twin_refusal(namesake))
                 if not code:
                     code = _generate_vendor_code(db, name, company_id)
                 if code in existing_codes:

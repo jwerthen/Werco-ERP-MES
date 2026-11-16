@@ -50,7 +50,12 @@ const routeAccessRequirements: RouteAccessRequirement[] = [
   { prefix: '/spc', permission: 'quality:view' },
   { prefix: '/customer-complaints', permission: 'quality:view' },
   { prefix: '/qms-standards', permission: 'quality:view' },
-  { prefix: '/supplier-scorecards', permission: 'purchasing:view' },
+  // The Approved Supplier List tab lives here, and its owner is Purchasing / Quality: the
+  // server lets ADMIN / MANAGER / QUALITY write the ASL and every read the page makes is open
+  // to any signed-in user. The quality permission set has no purchasing:view, so the screen is
+  // also reachable on quality:approve -- held by exactly {platform_admin, admin, manager,
+  // quality}, the ASL approval roles -- and not on quality:view, which would add operators.
+  { prefix: '/supplier-scorecards', anyOf: ['purchasing:view', 'quality:approve'] },
   { prefix: '/quotes', permission: 'purchasing:view' },
   { prefix: '/fabrication-quotes', permission: 'purchasing:view' },
   { prefix: '/nest', permission: 'purchasing:view' },
@@ -99,4 +104,3 @@ export function canAccessPath(path: string, can: (permission: Permission) => boo
       (!requirement.allOf || requirement.allOf.every(can)))
   );
 }
-

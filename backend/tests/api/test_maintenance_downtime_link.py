@@ -23,6 +23,8 @@ from app.models.maintenance import MaintenanceStatus, MaintenanceWorkOrder
 from app.models.operational_event import OperationalEvent
 from app.models.user import UserRole
 from app.services.oee_service import work_center_has_activity
+from app.services.production_calendar import current_production_day
+from app.services.production_calendar_service import load_production_calendar
 from tests.api.test_maintenance_assets import make_asset, make_wc
 from tests.api.test_receiving_compliance import headers_for, make_user
 
@@ -489,7 +491,9 @@ class TestOeeTreatment:
         breakdown = create_wo(client, headers, work_center_id=broken_wc.id, maintenance_type="corrective")
         for wo in (pm, breakdown):
             client.post(f"{WORK_ORDERS}/{wo['id']}/start", headers=headers)
-        today = datetime.utcnow().date()
+        # The OEE activity window is the company's PRODUCTION day (P1.2), never the UTC date: a
+        # stoppage opened at 23:50 Central sits on the Central day, which UTC has already left.
+        today = current_production_day(load_production_calendar(db_session, 1))
         assert work_center_has_activity(db_session, 1, pm_wc.id, today) is False
         assert work_center_has_activity(db_session, 1, broken_wc.id, today) is True
         summary_dates = {"date_from": (today - timedelta(days=1)).isoformat(), "date_to": today.isoformat()}

@@ -538,10 +538,10 @@ three more rules:
    extraction and the connector: turn it on only once the empowered official has cleared it.
    Only an Admin signed in to the app flips it: `PUT /companies/me/ai-egress` refuses every API
    token **403** and is not a tool (§6.1), so no agent can open — or close — its own connector.
-2. **Only the allowlisted reads.** The token may call only the 47 `GET` routes in
+2. **Only the allowlisted reads.** The token may call only the 48 `GET` routes in
    `app/core/export_control.py` → `AI_EXTERNAL_ALLOWED_ROUTES`. Any other route answers **403**
    `"This resource is not available to an AI-external API token."` at the API, and the same text
-   at the door when a tool is called by name. Its `tools/list` holds exactly these 47 tools.
+   at the door when a tool is called by name. Its `tools/list` holds exactly these 48 tools.
    Convenience tools are included only when every route they can call is allowlisted, so
    `search`, `get_shop_floor_dashboard` and `list_inventory` are out:
 
@@ -555,11 +555,11 @@ three more rules:
    | Parts and routings | `list_parts`★, `get_part`, `get_part_by_number`, `list_routings`, `get_routing`, `get_routing_by_part` |
    | Quality | `list_quality_ncrs`★, `get_ncr`, `list_cars`, `get_car`, `list_fais`, `get_fai`, `list_fai_log` (each log row judged like the FAI it names; not `get_car_pdf`: file bytes) |
    | Quotes | `quotes_list_quotes`, `quotes_get_quote` |
-   | Purchasing and receiving | `list_purchase_orders`★, `get_purchase_order`, `list_vendors`, `get_vendor`, `get_receiving_history`, `get_receipt_detail` |
+   | Purchasing and receiving | `list_purchase_orders`★, `get_purchase_order`, `list_vendors`, `list_vendors_reevaluation_due`, `get_vendor`, `get_receiving_history`, `get_receipt_detail` (a withheld order's `supplier_approval_warnings` are withheld with it; `check_supplier_approval` is a `POST`, so not here) |
    | Maintenance work orders | `preventive_maintenance_list_work_orders`, `get_overdue_work_orders`, `preventive_maintenance_get_work_order` |
    | Production calendar | `get_production_calendar`, `resolve_production_moment` (reference data: always served in full) |
 
-   (★ = convenience tool; 5 convenience + 42 generated.) Adding a route needs a canary conformance
+   (★ = convenience tool; 5 convenience + 43 generated.) Adding a route needs a canary conformance
    test, and CI fails without one. **Filters are narrowed too:** each route accepts only the query
    parameters in `AI_EXTERNAL_QUERY_PARAMS` — free-text `search`, the `customer` filter and
    `sort` / `group` by part or customer are refused **403** `"This query parameter is not

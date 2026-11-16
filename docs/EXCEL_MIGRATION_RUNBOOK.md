@@ -88,6 +88,10 @@ For steps 1–6 and 10–11, the current Import Center uses `/api/v1/import/batc
 - **Required column:** `name`.
 - **Optional columns:** `code` (generated when blank), `contact_name`, `email`, `phone`, `payment_terms`, `lead_time_days` (default 14), `is_approved`, `is_as9100_certified`, `is_iso9001_certified`.
 - **Why now:** the open-PO import (step 10) requires each row's `vendor_code` to already exist.
+- **Row error:** a row whose name matches (ignoring case, extra spaces and dashes, the Approved
+  Supplier List's matching rule) a vendor that is **Disqualified** on the Approved Supplier List.
+  A new record under that name would take the purchase orders the Disqualified one refuses;
+  re-evaluate the existing vendor instead. The other rows still import.
 - **Tip:** if you let the system generate vendor codes, download/print the vendor list afterward — you'll need the exact codes for the open-PO spreadsheet.
 
 ### Step 5 — Parts

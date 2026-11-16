@@ -43,7 +43,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from app.core.time_utils import CENTRAL_TIME_ZONE
+from app.core.time_utils import central_today
 from app.db.locks import acquire_generator_lock
 from app.models.maintenance import (
     MaintenanceAsset,
@@ -143,10 +143,6 @@ class AsNeededFrequency(ValueError):
 
 def source_hash(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
-
-
-def central_today() -> date:
-    return datetime.now(CENTRAL_TIME_ZONE).date()
 
 
 def _collapse(text: Any) -> str:

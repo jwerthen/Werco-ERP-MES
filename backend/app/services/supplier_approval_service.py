@@ -30,8 +30,10 @@ from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Sequence, Set
 
 from fastapi import HTTPException
 from sqlalchemy import or_
+from sqlalchemy.orm import Session
 
-from app.core.time_utils import CENTRAL_TIME_ZONE
+from app.core.time_utils import central_today
+from app.db.tenant_filter import tenant_query
 from app.models.purchasing import VENDOR_APPROVAL_STATUS_VALUES, Vendor
 
 # ---------------------------------------------------------------------------
@@ -176,8 +178,18 @@ DISQUALIFIED_PO_TEMPLATE = (
     "Cancel it, or record a new approval decision for the supplier first."
 )
 
+# Lead decision L1 (Claude-plugin brief build, 2026-11-15): a Disqualified supplier must not be
+# reachable by minting a same-name twin -- a new vendor row carries no ASL status, so it would
+# take purchase orders the Disqualified one refuses. Every door that CREATES a vendor refuses it.
+DISQUALIFIED_TWIN_TEMPLATE = (
+    "{name} is Disqualified on the Approved Supplier List; a new vendor record cannot be created under "
+    "that name. Re-evaluate the existing vendor instead."
+)
+
 _NON_ALNUM = re.compile(r"[^0-9a-z]+")
 _MULTI_VALUE_SPLIT = re.compile(r"[;\n,]+")
+_NAME_WHITESPACE = re.compile(r"\s+")
+_NAME_SPACE_AROUND_PUNCT = re.compile(r"\s*([-.])\s*")
 
 
 def label_key(value: Any) -> str:
@@ -281,10 +293,6 @@ def derived_is_approved(status: Optional[str]) -> Optional[bool]:
     if status is None:
         return None
     return status in APPROVED_STATUSES
-
-
-def central_today() -> date:
-    return datetime.now(CENTRAL_TIME_ZONE).date()
 
 
 # ---------------------------------------------------------------------------
@@ -424,6 +432,76 @@ def assert_purchase_order_vendor_not_disqualified(po: Any, consequence: str) -> 
             status_code=409,
             detail=DISQUALIFIED_PO_TEMPLATE.format(name=vendor.name, po_number=po.po_number, consequence=consequence),
         )
+
+
+# ---------------------------------------------------------------------------
+# Supplier names: one normalization for "is this the same supplier?"
+# ---------------------------------------------------------------------------
+
+
+def vendor_name_key(name: Any) -> str:
+    """The exact-normalized supplier name: casefold, whitespace collapsed, en/em dashes read as
+    '-', spaces beside '-' and '.' removed ("Cinder- Forge" == "Cinder-Forge", "R.T.Hollis" ==
+    "R.T. Hollis"). Nothing fuzzier: two names that differ in a word are two suppliers.
+
+    The ASL import binds a sheet row to a vendor by it, and the Disqualified-twin refusal
+    (:func:`assert_no_disqualified_namesake`) compares a new vendor's name by it -- the same
+    rule, so a name the import would bind to the Disqualified vendor is the name no door may
+    create again."""
+    text = str(name or "").replace("\u2013", "-").replace("\u2014", "-").casefold().strip()
+    text = _NAME_WHITESPACE.sub(" ", text)
+    return _NAME_SPACE_AROUND_PUNCT.sub(r"\1", text)
+
+
+def disqualified_name_index(db: Session, company_id: int) -> Dict[str, Vendor]:
+    """``vendor_name_key(name) -> vendor`` for every LIVE (not soft-deleted) vendor of
+    ``company_id`` that is Disqualified on the ASL, inactive ones included (switching a vendor off
+    does not lift its disqualification). The lowest id wins a tie. Disqualified vendors are few,
+    and the key is not expressible in portable SQL, so the match runs here."""
+    rows = (
+        tenant_query(db, Vendor, company_id)
+        .filter(
+            Vendor.is_deleted == False,  # noqa: E712
+            Vendor.approval_status == ApprovalStatus.DISQUALIFIED.value,
+        )
+        .order_by(Vendor.id)
+        .all()
+    )
+    index: Dict[str, Vendor] = {}
+    for vendor in rows:
+        key = vendor_name_key(vendor.name)
+        if key and key not in index:
+            index[key] = vendor
+    return index
+
+
+def disqualified_twin_refusal(vendor: Any) -> str:
+    return DISQUALIFIED_TWIN_TEMPLATE.format(name=vendor.name)
+
+
+def disqualified_namesake(
+    db: Session, company_id: int, name: Any, *, index: Optional[Dict[str, Vendor]] = None
+) -> Optional[Vendor]:
+    """The live Disqualified vendor whose normalized name equals ``name``'s, or None."""
+    key = vendor_name_key(name)
+    if not key:
+        return None
+    if index is None:
+        index = disqualified_name_index(db, company_id)
+    return index.get(key)
+
+
+def assert_no_disqualified_namesake(db: Session, company_id: int, name: Any) -> None:
+    """Refuse 409 creating a vendor named like a live Disqualified one (lead decision L1).
+
+    Called by every door that CREATES a vendor -- ``POST /purchasing/vendors``, the PO upload's
+    create-new-vendor path -- before it writes anything; the vendor CSV import (and the Import
+    Center vendor batch, which runs it) reports the same text as that row's error. Renaming an
+    existing vendor and restoring a deleted one are not creations and are not refused here.
+    """
+    namesake = disqualified_namesake(db, company_id, name)
+    if namesake is not None:
+        raise HTTPException(status_code=409, detail=disqualified_twin_refusal(namesake))
 
 
 def _warning(code: str, message: str, part: Any = None) -> Dict[str, Any]:

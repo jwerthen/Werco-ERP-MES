@@ -77,7 +77,7 @@ CLASSIFICATION_UNKNOWN = "unknown"
 # (METHOD, path template RELATIVE to ``settings.API_V1_PREFIX``) an AI-external token may
 # call -- the brief's read set and nothing else: work orders, shop-floor operations,
 # downtime, work centers, OEE, parts, routings, NCR / CAR / FAI (and the FAI log of record,
-# P2.5), quotes, vendors, purchase
+# P2.5), quotes, vendors (and the overdue supplier re-evaluation list, P2.2), purchase
 # orders, receiving history, maintenance work orders -- plus the production calendar (P1.2:
 # the production-day start and the shifts, so the plugin buckets its own figures by the
 # shop's production day). GET only. There is no time-entry GET route; time entries reach the
@@ -141,6 +141,9 @@ AI_EXTERNAL_ALLOWED_ROUTES: FrozenSet[Tuple[str, str]] = frozenset(
         ("GET", "/quotes/{quote_id}"),
         # Purchasing and receiving
         ("GET", "/purchasing/vendors"),
+        # The overdue supplier re-evaluation list (P2.2, AS9100D 8.4): vendor reference data
+        # like the two vendor reads beside it -- a vendor names no customer, part or job.
+        ("GET", "/purchasing/vendors/reevaluation-due"),
         ("GET", "/purchasing/vendors/{vendor_id}"),
         ("GET", "/purchasing/purchase-orders"),
         ("GET", "/purchasing/purchase-orders/{po_id}"),
@@ -298,6 +301,8 @@ AI_EXTERNAL_QUERY_PARAMS: Mapping[str, Mapping[str, Optional[FrozenSet[str]]]] =
     "/quotes/": {"status": _ANY, "limit": _ANY, "offset": _ANY},
     "/quotes/{quote_id}": {},
     "/purchasing/vendors": {"active_only": _ANY, "approved_only": _ANY, "deleted_only": _ANY},
+    # A day count and a boolean: neither filters withheld text.
+    "/purchasing/vendors/reevaluation-due": {"within_days": _ANY, "include_inactive": _ANY},
     "/purchasing/vendors/{vendor_id}": {},
     "/purchasing/purchase-orders": {
         "status": _ANY,
@@ -312,6 +317,8 @@ AI_EXTERNAL_QUERY_PARAMS: Mapping[str, Mapping[str, Optional[FrozenSet[str]]]] =
     "/maintenance/work-orders": {
         "status": _ANY,
         "work_center_id": _ANY,
+        # An equipment asset's id (P2.3): a filter over a kept id.
+        "asset_id": _ANY,
         "maintenance_type": _ANY,
         "start_date": _ANY,
         "end_date": _ANY,

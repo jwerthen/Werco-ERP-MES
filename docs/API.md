@@ -726,8 +726,9 @@ tokens" below), never wider.
 >    (`READ_ONLY_DENY_TAG_FLOOR`), so an empty or truncated value still denies them.
 > 4. **AI-external, `(method, route)` not on the allowlist** (a fixed set of `GET` routes in
 >    `app/core/export_control.py`: work orders, shop-floor operations, downtime, work centers, OEE,
->    parts, routings, NCR / CAR / FAI and the FAI log of record, quotes, vendors, purchase orders,
->    receiving, maintenance work orders, the production calendar) → **403** `"This resource is not available to an AI-external API token."`. Then every
+>    parts, routings, NCR / CAR / FAI and the FAI log of record, quotes, vendors and the overdue
+>    supplier re-evaluation list, purchase orders, receiving, maintenance work orders, the production
+>    calendar) → **403** `"This resource is not available to an AI-external API token."`. Then every
 >    query parameter (and value) must be on that route's list in `AI_EXTERNAL_QUERY_PARAMS`:
 >    free-text `search`, the `customer` filter and `sort` / `group` by part or customer are refused
 >    **403** `"This query parameter is not available to an AI-external API token: free-text search,
@@ -9117,7 +9118,7 @@ when an estimate is approved and handed off in Fabrication Quoting (`/fabricatio
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
 | GET | `/purchasing/vendors` | List vendors (`active_only` default true; `approved_only` default false; `deleted_only` default false). `deleted_only=true` returns **only** soft-deleted vendors — the restore view, and it **suppresses `active_only`**; see note below | Yes |
-| POST | `/purchasing/vendors` | Create vendor | Admin / Manager |
+| POST | `/purchasing/vendors` | Create vendor. **409** when the name normalizes to a live vendor's that is Disqualified on the Approved Supplier List (no same-name twin; see *Approved Supplier List on the vendor record* below) | Admin / Manager |
 | GET | `/purchasing/vendors/reevaluation-due` | Vendors whose Approved Supplier List re-evaluation is overdue (`within_days` 0–3650, default 0; `include_inactive` default false). See *Approved Supplier List on the vendor record* below | Yes |
 | POST | `/purchasing/vendors/asl-import/preview` | Dry run of an **update-only** Approved Supplier List load (multipart `file`). Writes nothing | Admin / Manager / Quality; **403** for an API token |
 | POST | `/purchasing/vendors/asl-import/commit` | Apply a previewed ASL file (multipart `file` + form fields `expected_source_hash` and `expected_plan_hash`). All-or-nothing | Admin / Manager / Quality; **403** for an API token |
@@ -9636,7 +9637,13 @@ The warnings are returned as `supplier_approval_warnings` on the `POResponse` fr
 from `POST /po-upload/create-from-upload`. They are computed when the response is built, from the
 vendor's **current** ASL entry and the lines' parts — never stored on the PO, so they change when the
 ASL does. The PO detail view shows a `vendor_disqualified` entry red, as the stop on sending,
-approving or adding lines to that order (below), never among the amber advisories. The list read (`GET /purchasing/purchase-orders`) does not carry them. The create **audit
+approving or adding lines to that order (below), never among the amber advisories. The list read (`GET /purchasing/purchase-orders`) does not carry them. To an **AI-external API token** a
+warning is part of its purchase order: inside an order withheld for export control, each warning
+(code, message and part number) is withheld with it, while a cleared order's warnings are served in
+full. The vendor's own ASL fields and `GET /purchasing/vendors/reevaluation-due` are vendor reference
+data and are served in full (that list is on the AI-external allowlist), with the residual text pass
+removing any controlled part number typed into `approval_notes`. `POST
+/purchasing/supplier-approval-check` is a `POST`, so no read-only or AI-external token reaches it. The create **audit
 row** records the warnings shown at creation in `extra_data.supplier_approval_warnings` (only when
 there are any) on every create through `create_purchase_order_command` (this route, the Hank
 purchase-order task and the AI action applier's draft PO), on the PO-upload create, and on the doors
@@ -9673,6 +9680,23 @@ decision for the supplier first."* on `POST .../send`, a `PUT` to `approved` / `
 `PUT` carrying `lines`, `POST .../lines`, and the document-delivery preview / send of the PO email.
 Cancelling or closing it, editing its other fields, receiving what was already ordered and
 `POST .../restore` (undoing a mistaken delete of a record) stay open.
+
+**No same-name twin of a Disqualified supplier (lead decision L1, 2026-11-15).** A new vendor row
+carries no ASL status, so a twin would take the orders the Disqualified record refuses. Every door
+that **creates** a vendor therefore refuses a name that normalizes — by the ASL import's own rule
+(casefold, whitespace collapsed, en / em dashes read as `-`, spaces beside `-` and `.` removed;
+`supplier_approval_service.vendor_name_key`) — to a **live** (not soft-deleted) vendor whose
+`approval_status` is `disqualified`, switched off or not: **409** *"{Vendor} is Disqualified on the
+Approved Supplier List; a new vendor record cannot be created under that name. Re-evaluate the
+existing vendor instead."*, naming the existing vendor, before anything is written:
+
+- `POST /purchasing/vendors`;
+- `POST /po-upload/create-from-upload` with `create_vendor` (no vendor and no purchase order);
+- `POST /purchasing/vendors/import-csv`, and the Import Center vendor batch that runs it, as that
+  row's error with the same text (dry run included; the other rows are unaffected).
+
+Hank, the AI action applier and the open-PO loader never create vendors. Not refused: renaming an
+existing vendor, restoring a deleted one, and a name that differs in a word.
 
 Conditional, overdue and out-of-scope purchases are allowed with their warnings. The Purchasing
 **Create PO** vendor picker offers vendors with `is_approved = true` **plus Conditional vendors**
@@ -12935,7 +12959,7 @@ every created row):
 | POST | `/parts/import-csv` | `part_number`, `name`, `part_type` | Admin / Manager / Supervisor |
 | POST | `/materials/import-csv` | `part_number`, `name`, `part_type` | Admin / Manager / Supervisor |
 | POST | `/customers/import-csv` | `name` | Admin / Manager |
-| POST | `/purchasing/vendors/import-csv` | `name` | Admin / Manager |
+| POST | `/purchasing/vendors/import-csv` | `name` (a row named like a live Disqualified vendor is a row error; see Purchasing → *Approved Supplier List on the vendor record*) | Admin / Manager |
 | POST | `/work-centers/import-csv` | `code`, `name`, `work_center_type` | Admin / Manager |
 
 **Open-document migration imports** (new):

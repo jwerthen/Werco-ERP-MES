@@ -43,7 +43,11 @@ from app.services.pdf_service import (
     move_pdf_to_po,
     save_uploaded_document,
 )
-from app.services.supplier_approval_service import approval_warnings, assert_vendor_not_disqualified
+from app.services.supplier_approval_service import (
+    approval_warnings,
+    assert_no_disqualified_namesake,
+    assert_vendor_not_disqualified,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -378,6 +382,10 @@ def create_po_from_upload(
 
     # Create vendor if needed
     if data.create_vendor and data.new_vendor_name:
+        # Lead decision L1: never mint a same-name twin of a Disqualified supplier (409, before
+        # any write) -- the new row would carry no ASL status and so take the order the
+        # Disqualified vendor refuses.
+        assert_no_disqualified_namesake(db, company_id, data.new_vendor_name)
         # Generate vendor code if not provided
         vendor_code = data.new_vendor_code
         if not vendor_code:

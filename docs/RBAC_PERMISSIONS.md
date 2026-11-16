@@ -1364,6 +1364,7 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 | Create / edit supplier audit | ✓ | ✓ | | | | | |
 | Create / edit **legacy** ASL entry (`/supplier-scorecards/approved-suppliers`) | ✓ | ✓ | | | | | |
 | Record a supplier-approval decision / import the ASL **on the vendor record** — see [Purchasing](#purchasing) | ✓ | ✓ | | | ✓ | | |
+| Open the **Supplier Scorecards** screen (route + nav: `purchasing:view` or `quality:approve`) | ✓ | ✓ | ✓ | | ✓ | | ✓ |
 
 > **The Approved Supplier List moved to the vendor record (migration `123`).** The page's
 > **Approved Supplier List** tab now reads vendors and writes through `PUT
@@ -1672,11 +1673,25 @@ Follow-up owners must be active users in the same company with purchasing access
 > - **UI.** The **Update approval** and **Import ASL** controls on Supplier Scorecards → Approved
 >   Supplier List render only for `canWriteAsl` (Admin / Manager / Quality, or a superuser;
 >   `frontend/src/utils/supplierApproval.ts`). It omits Platform Admin, matching the other purchasing
->   write controls. ⚠️ **The default Quality role cannot open that page.** `/supplier-scorecards` is
->   route-gated on `purchasing:view` (`frontend/src/utils/routeAccess.ts`), which the shipped Quality
->   permission set does not include (`frontend/src/utils/permissions.ts`). So a Quality user is
->   granted these writes by the server but has no screen to make them from, unless the company's role
->   permissions give Quality `purchasing:view`. That is an open follow-up, not a decision.
+>   write controls. **The Quality role opens that page** (lead decision L2, 2026-11-15: the ASL's
+>   owner is Purchasing / Quality). `/supplier-scorecards` is route- and nav-gated on
+>   `anyOf: ['purchasing:view', 'quality:approve']` (`frontend/src/utils/routeAccess.ts`; the sidebar
+>   reads the same requirement through `canAccessPath`, so the two cannot disagree). The shipped
+>   Quality set has no `purchasing:view`, and `quality:approve` is held by exactly Platform Admin /
+>   Admin / Manager / Quality — the ASL approval roles — so the change adds Quality and nobody else
+>   (`quality:view` would also have admitted Operator). No server gate moved: every read the page
+>   makes (`GET /supplier-scorecards/supplier-scorecards/dashboard`, `/supplier-scorecards/`,
+>   `/supplier-audits/`, `GET /purchasing/vendors`, `/purchasing/vendors/reevaluation-due`) was
+>   already open to any signed-in user of the tenant, and no purchasing write was widened. Because
+>   scorecard and supplier-audit writes stay Admin / Manager, the page hides **New Scorecard** /
+>   **New Audit** from every other role (`canManageSupplierScorecards`,
+>   `frontend/src/utils/recordWriteAccess.ts`) rather than offer a guaranteed 403.
+> - **No same-name twin of a Disqualified supplier** (lead decision L1, 2026-11-15). A state rule
+>   on every door that creates a vendor, for every role: a name that normalizes (the ASL import's
+>   own rule) to a live vendor Disqualified on the ASL is refused **409** by `POST
+>   /purchasing/vendors` and the PO upload's create-new-vendor path, and is a row error in the vendor
+>   CSV import and the Import Center vendor batch (`docs/API.md` → Purchasing → *Approved Supplier
+>   List on the vendor record*).
 
 > **PO status edits: a state rule landed, and the Approve row is still not enforced on `PUT`
 > (2026-11-05).** `PUT /purchasing/purchase-orders/{id}` is `require_role([ADMIN, MANAGER,

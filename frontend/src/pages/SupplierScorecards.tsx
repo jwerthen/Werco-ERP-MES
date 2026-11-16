@@ -33,6 +33,8 @@ import { FormField } from '../components/ui/FormField';
 import { useToast, DataTable, DataTableColumn, MobileDataCard } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { ApprovedSupplierListPanel, ASL_FILTERS, AslFilter } from '../components/suppliers/ApprovedSupplierListPanel';
+import { useAuth } from '../context/AuthContext';
+import { canManageSupplierScorecards } from '../utils/recordWriteAccess';
 
 interface DashboardStats {
   total_rated: number;
@@ -195,6 +197,10 @@ const SupplierScorecards = () => {
   const [expandedRow, setExpandedRow] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
+  const { user } = useAuth();
+  // Scorecard / audit writes are Admin / Manager server-side; Quality reaches this page for the
+  // ASL tab and gets no button that is a guaranteed 403.
+  const canManage = canManageSupplierScorecards(user);
   const [showScorecardModal, setShowScorecardModal] = useState(false);
   const [showAuditModal, setShowAuditModal] = useState(false);
 
@@ -555,7 +561,7 @@ const SupplierScorecards = () => {
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold text-white">Supplier Scorecards</h1>
         <div className="flex gap-2">
-          {activeTab === 'Scorecards' && (
+          {activeTab === 'Scorecards' && canManage && (
             <button
               onClick={() => setShowScorecardModal(true)}
               className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium"
@@ -563,7 +569,7 @@ const SupplierScorecards = () => {
               <PlusIcon className="w-4 h-4" /> New Scorecard
             </button>
           )}
-          {activeTab === 'Audits' && (
+          {activeTab === 'Audits' && canManage && (
             <button
               onClick={() => setShowAuditModal(true)}
               className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium"
@@ -636,7 +642,10 @@ const SupplierScorecards = () => {
               description: search
                 ? 'No scorecards match your search.'
                 : 'Rated suppliers will appear here once you create a scorecard.',
-              action: search ? undefined : { label: 'New Scorecard', onClick: () => setShowScorecardModal(true) },
+              action:
+                search || !canManage
+                  ? undefined
+                  : { label: 'New Scorecard', onClick: () => setShowScorecardModal(true) },
             }}
           />
           {/* Expanded score breakdown (desktop) — preserves the click-to-expand charts. */}
@@ -683,7 +692,7 @@ const SupplierScorecards = () => {
             icon: CalendarDaysIcon,
             title: 'No audits found',
             description: search ? 'No audits match your search.' : 'Supplier audits will appear here once you log one.',
-            action: search ? undefined : { label: 'New Audit', onClick: () => setShowAuditModal(true) },
+            action: search || !canManage ? undefined : { label: 'New Audit', onClick: () => setShowAuditModal(true) },
           }}
         />
       )}

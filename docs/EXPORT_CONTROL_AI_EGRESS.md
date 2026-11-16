@@ -293,7 +293,8 @@ true.
 ## 5. The AI-external allowlist
 
 `app/core/export_control.py` → `AI_EXTERNAL_ALLOWED_ROUTES` (GET only, relative to `/api/v1`).
-This is the brief's read set, plus the production calendar (P1.2), and nothing else:
+This is the brief's read set, plus the production calendar (P1.2) and the overdue supplier
+re-evaluation list (P2.2), and nothing else:
 
 | Area | Routes |
 |---|---|
@@ -305,11 +306,11 @@ This is the brief's read set, plus the production calendar (P1.2), and nothing e
 | Parts and routings | `/parts/`, `/parts/{part_id}`, `/parts/by-number/{part_number}`, `/routing/`, `/routing/{routing_id}`, `/routing/by-part/{part_id}` |
 | Quality | `/quality/ncr`, `/quality/ncr/{ncr_id}`, `/quality/car`, `/quality/car/{car_id}`, `/quality/fai`, `/quality/fai/{fai_id}`, `/quality/fai/log` (the FAI log of record) |
 | Quotes | `/quotes/`, `/quotes/{quote_id}` |
-| Purchasing and receiving | `/purchasing/vendors`, `/purchasing/vendors/{vendor_id}`, `/purchasing/purchase-orders`, `/purchasing/purchase-orders/{po_id}`, `/receiving/history`, `/receiving/receipt/{receipt_id}` |
+| Purchasing and receiving | `/purchasing/vendors`, `/purchasing/vendors/reevaluation-due`, `/purchasing/vendors/{vendor_id}`, `/purchasing/purchase-orders`, `/purchasing/purchase-orders/{po_id}`, `/receiving/history`, `/receiving/receipt/{receipt_id}` |
 | Maintenance work orders | `/maintenance/work-orders`, `/maintenance/work-orders/overdue`, `/maintenance/work-orders/{wo_id}` |
 | Production calendar | `/production-calendar`, `/production-calendar/resolve` |
 
-That is 47 routes. The MCP tool names they map to (5 convenience + 42 generated) are listed in
+That is 48 routes. The MCP tool names they map to (5 convenience + 43 generated) are listed in
 [MCP.md → 4.2](MCP.md#42-ai-external-tokens-and-export-control). Every other route, global search
 and the shop-floor dashboard included, is refused by gate 4.
 
@@ -325,6 +326,18 @@ part or customer, so both are served in full and ledger nothing. They let the pl
 figures by the shop's production day and shift. The calendar's two writes, `PUT
 /production-calendar` and the working-calendar sync `POST` (a dry run included), are refused to
 every read-only token like any other write.
+
+The **Approved Supplier List** (P2.2) is vendor reference data. A vendor names no customer, part or
+job, so the vendor reads and the overdue re-evaluation list (`/purchasing/vendors/reevaluation-due`,
+`within_days` and `include_inactive` allowed) are served cleared, ASL fields included; the residual
+text pass still removes a controlled part number someone typed into `approval_notes`. A purchase
+order's `supplier_approval_warnings` are part of that order: each names a part, so inside an order
+withheld for export control every warning is withheld with it (code, message and part number), while
+a cleared order's warnings go out in full. `POST /purchasing/supplier-approval-check` is a `POST`
+and stays refused to every read-only token. A part's `supply_scope` is withheld inside a withheld part
+like its other text. A maintenance work order's equipment-asset fields (`asset_id`, `asset_tag`,
+`asset_name`, `target_*`; P2.3) are equipment, not customer data, and pass with the rest of that
+record; `/maintenance/work-orders` also takes `asset_id`, a filter over a kept id.
 
 ### 5.1 Query parameters
 

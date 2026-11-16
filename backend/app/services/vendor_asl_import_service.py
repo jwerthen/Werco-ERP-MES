@@ -69,8 +69,6 @@ PERFORMANCE_COLUMNS = ("performance_evaluation_date", "last_performance_evaluati
 NOTES_COLUMNS = ("notes", "approval_notes")
 ADDRESS_COLUMNS = ("supplier_address", "address")
 
-_WHITESPACE = re.compile(r"\s+")
-_SPACE_AROUND_PUNCT = re.compile(r"\s*([-.])\s*")
 _ADDRESS_KEY = re.compile(r"[^0-9a-z]+")
 
 
@@ -78,11 +76,10 @@ def source_hash(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
-def vendor_name_key(name: Any) -> str:
-    """The exact-normalized supplier name used for matching (see the module docstring)."""
-    text = str(name or "").replace("–", "-").replace("—", "-").casefold().strip()
-    text = _WHITESPACE.sub(" ", text)
-    return _SPACE_AROUND_PUNCT.sub(r"\1", text)
+# The exact-normalized supplier name used for matching (see the module docstring). It lives in
+# the ASL service because the Disqualified-twin refusal on every vendor-create door compares
+# names by the same rule.
+vendor_name_key = asl.vendor_name_key
 
 
 def _address_key(text: Any) -> str:
