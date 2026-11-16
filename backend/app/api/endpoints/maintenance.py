@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy import func
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
@@ -52,6 +52,13 @@ _PERFORMING_ROLES = [UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR, User
 
 # A maintenance work order in one of these is over: any downtime it holds open is settled.
 _TERMINAL_STATUSES = (MaintenanceStatus.COMPLETED, MaintenanceStatus.CANCELLED)
+# ...and in one of these it is still open (its PM schedule is being worked, not waiting).
+_OPEN_STATUSES = (
+    MaintenanceStatus.SCHEDULED,
+    MaintenanceStatus.OVERDUE,
+    MaintenanceStatus.IN_PROGRESS,
+    MaintenanceStatus.ON_HOLD,
+)
 
 # Widest calendar window a single request may ask for. Unbounded, the endpoint
 # was one query-string edit away from serializing every maintenance work order
@@ -196,6 +203,9 @@ class WorkOrderUpdate(BaseModel):
 
 
 class WorkOrderComplete(BaseModel):
+    # Omitted keeps the checklist the work order already carries (a PM work order opened from a
+    # schedule is created with the schedule's checklist); a value -- or an explicit null --
+    # replaces it.
     checklist_results: Optional[str] = None
     findings: Optional[str] = None
     notes: Optional[str] = None
@@ -1051,7 +1061,12 @@ def complete_work_order(
     """Complete a maintenance work order.
 
     Resolves the downtime event the work order holds open (see ``/start``) at completion,
-    and -- when ``downtime_minutes`` is left at 0 -- records the linked events' minutes."""
+    and -- when ``downtime_minutes`` is left at 0 -- records the linked events' minutes.
+
+    A work order carrying a ``schedule_id`` advances that PM schedule: ``last_completed_date``
+    becomes today and ``next_due_date`` today plus the schedule's interval. The response then
+    carries the schedule's new ``schedule_next_due_date`` (``null`` when nothing was advanced).
+    ``checklist_results`` omitted keeps the checklist the work order already carries."""
     wo = _wo_or_404(db, wo_id, company_id, for_update=True)
     if wo.status not in (MaintenanceStatus.IN_PROGRESS, MaintenanceStatus.SCHEDULED, MaintenanceStatus.OVERDUE):
         raise HTTPException(status_code=400, detail=f"Cannot complete work order in status '{wo.status.value}'")
@@ -1061,7 +1076,8 @@ def complete_work_order(
     wo.status = MaintenanceStatus.COMPLETED
     wo.completed_at = now
     wo.completed_by = current_user.id
-    wo.checklist_results = data.checklist_results
+    if "checklist_results" in data.model_fields_set:
+        wo.checklist_results = data.checklist_results
     wo.findings = data.findings
     wo.notes = data.notes
     wo.parts_used = data.parts_used
@@ -1094,6 +1110,8 @@ def complete_work_order(
     # Update schedule if linked. Scoped: pre-fix rows may still carry a foreign
     # schedule_id (create_work_order accepted one until this change), and this
     # is the write that would advance another tenant's PM due date.
+    advanced: Optional[MaintenanceSchedule] = None
+    schedule_old_values: Dict[str, Any] = {}
     if wo.schedule_id:
         schedule = (
             db.query(MaintenanceSchedule)
@@ -1101,8 +1119,13 @@ def complete_work_order(
             .first()
         )
         if schedule:
+            schedule_old_values = {
+                "last_completed_date": schedule.last_completed_date,
+                "next_due_date": schedule.next_due_date,
+            }
             schedule.last_completed_date = now.date()
             schedule.next_due_date = _calc_next_due(schedule.frequency, schedule.frequency_days, now.date())
+            advanced = schedule
 
     # Log the event. Same NOT NULL omission as start_work_order: the insert
     # raised IntegrityError and the endpoint 500'd after the completion had
@@ -1131,13 +1154,31 @@ def complete_work_order(
             "downtime_minutes": wo.downtime_minutes,
             "actual_duration_hours": wo.actual_duration_hours,
             "schedule_id": wo.schedule_id,
+            "schedule_next_due_date": advanced.next_due_date.isoformat() if advanced else None,
             "resolved_downtime_event_ids": [event.id for event in resolved],
         },
     )
+    if advanced is not None:
+        # The roll-forward is a change to the SCHEDULE, so it gets the schedule's own row too:
+        # its history then shows every due-date move, by completion or by an edit.
+        audit.log_update(
+            resource_type="maintenance_schedule",
+            resource_id=advanced.id,
+            resource_identifier=advanced.name,
+            old_values=schedule_old_values,
+            new_values={
+                "last_completed_date": advanced.last_completed_date,
+                "next_due_date": advanced.next_due_date,
+            },
+            description=f"PM schedule {advanced.name} advanced by completing maintenance work order {wo.wo_number}",
+            extra_data={"maintenance_work_order_id": wo.id},
+        )
     db.commit()
     db.refresh(wo)
 
-    return _serialize_wo(wo)
+    body = _serialize_wo(wo)
+    body["schedule_next_due_date"] = advanced.next_due_date.isoformat() if advanced else None
+    return body
 
 
 # ── Calendar ──────────────────────────────────────────────────────────────
@@ -1186,10 +1227,37 @@ def get_dashboard(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Dashboard metrics for maintenance management"""
+    """Dashboard metrics for maintenance management.
+
+    ``overdue_count`` / ``due_this_week`` count maintenance WORK ORDERS (scheduled or overdue,
+    by ``due_date``) -- unchanged. A PM schedule that has come due but has no work order open
+    yet is invisible to them, so ``schedules_overdue`` / ``schedules_due_this_week`` count
+    those: ACTIVE schedules by ``next_due_date`` (before today; today through today + 7) that
+    have no open work order (scheduled / overdue / in progress / on hold) carrying their
+    ``schedule_id``. A schedule with an open work order is represented by that work order, so
+    the two pairs never count the same PM twice and add up to "everything overdue / due"."""
     today = date.today()
     week_end = today + timedelta(days=7)
     month_start = today.replace(day=1)
+
+    open_schedule_ids = select(MaintenanceWorkOrder.schedule_id).where(
+        MaintenanceWorkOrder.company_id == company_id,
+        MaintenanceWorkOrder.schedule_id.isnot(None),
+        MaintenanceWorkOrder.status.in_(_OPEN_STATUSES),
+    )
+    unstarted_schedules = db.query(func.count(MaintenanceSchedule.id)).filter(
+        MaintenanceSchedule.company_id == company_id,
+        MaintenanceSchedule.is_active.is_(True),
+        MaintenanceSchedule.next_due_date.isnot(None),
+        MaintenanceSchedule.id.notin_(open_schedule_ids),
+    )
+    schedules_overdue = unstarted_schedules.filter(MaintenanceSchedule.next_due_date < today).scalar() or 0
+    schedules_due_this_week = (
+        unstarted_schedules.filter(
+            MaintenanceSchedule.next_due_date >= today, MaintenanceSchedule.next_due_date <= week_end
+        ).scalar()
+        or 0
+    )
 
     # Overdue count
     overdue_count = (
@@ -1324,6 +1392,8 @@ def get_dashboard(
     return {
         "overdue_count": overdue_count,
         "due_this_week": due_this_week,
+        "schedules_overdue": schedules_overdue,
+        "schedules_due_this_week": schedules_due_this_week,
         "completed_this_month": completed_this_month,
         "completion_rate": completion_rate,
         "total_cost_month": round(total_cost_month, 2),
