@@ -36,7 +36,7 @@ from fastapi import Depends
 from fastapi.responses import PlainTextResponse, RedirectResponse
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
-from sqlalchemy import event
+from sqlalchemy import event, func
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -72,6 +72,7 @@ from app.models.governance import ControlledAccessEvent, CustomerContract
 from app.models.inventory import InventoryTransaction
 from app.models.operational_event import OperationalEvent
 from app.models.part import Part
+from app.models.quality import NonConformanceReport
 from app.models.rfq_quote import QuoteEstimate, QuoteLineSummary, RfqPackage
 from app.models.user import User, UserRole
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
@@ -644,6 +645,147 @@ class TestCarFormQuoteRevisionAndFaiLog:
             quote_pdf = client.post(f"{API}/quotes/{world.clear_quote.id}/generate-pdf", headers=bearer(token))
             assert quote_pdf.status_code == 403
             assert quote_pdf.json() == {"detail": READ_ONLY_ROUTE_WRITES_DETAIL}
+
+
+MOVE_LEAK = "MOVEDLINKLEAK"
+
+
+class TestCarLinksThatMove:
+    """Red-team finding (2026-11-16): a CAR raised from an ITAR record copies its title and
+    description, but the link that placed it MOVES -- the CAR is voided and the record
+    escalated again, or the NCR's ``car_id`` is re-pointed or cleared. Judged by its CURRENT
+    referrers plus its own generic-stock part (or cleared customer), the first CAR was then
+    served in full to an AI-external token. Each case below is the ITAR job's record with a
+    generic-stock part (a raw-material sheet, blank customer), so only the work order
+    controls it; the CAR must stay withheld AS ITAR (not merely as unlinkable) once the link
+    has moved, while a person still reads it in full."""
+
+    @staticmethod
+    def _itar_job_ncr(client: TestClient, admin_headers: dict, world: World) -> int:
+        response = client.post(
+            f"{API}/quality/ncr",
+            json={
+                "part_id": world.material_part.id,
+                "work_order_id": world.itar_wo.id,
+                "source": "in_process",
+                "title": f"{MOVE_LEAK} cracked sheet on the controlled bracket",
+                "description": f"{MOVE_LEAK} program detail typed by the inspector",
+            },
+            headers=admin_headers,
+        )
+        assert response.status_code in (200, 201), response.text
+        return response.json()["id"]
+
+    @staticmethod
+    def _escalate(client: TestClient, admin_headers: dict, ncr_id: int) -> int:
+        response = client.post(f"{API}/quality/ncr/{ncr_id}/create-car", headers=admin_headers)
+        assert response.status_code == 200, response.text
+        return response.json()["id"]
+
+    @staticmethod
+    def _void(client: TestClient, admin_headers: dict, car_id: int) -> None:
+        response = client.post(
+            f"{API}/quality/car/{car_id}/void", json={"reason": "raised in error"}, headers=admin_headers
+        )
+        assert response.status_code == 200, response.text
+
+    @staticmethod
+    def _assert_withheld_as_itar(
+        client: TestClient, db_session: Session, token: str, admin_headers: dict, car_id: int
+    ) -> None:
+        url = f"{API}/quality/car/{car_id}"
+        person = client.get(url, headers=admin_headers)
+        assert person.status_code == 200 and MOVE_LEAK.encode() in person.content, "vacuous: no leak text"
+        db_session.expire_all()
+        before = db_session.query(func.max(ControlledAccessEvent.id)).scalar() or 0
+        for path in (url, f"{API}/quality/car"):
+            response = client.get(path, headers=bearer(token))
+            assert response.status_code == 200, path
+            assert MOVE_LEAK.encode() not in response.content, f"{path} leaked: {response.text[:800]}"
+        body = client.get(url, headers=bearer(token)).json()
+        assert body["export_controlled"] is True and body["id"] == car_id
+        assert body["title"] == REDACTED_VALUE and body["problem_description"] == REDACTED_VALUE
+        events = [event for event in _events(db_session, record_type="car", record_id=car_id) if event.id > before]
+        assert events, "no ledger row for the withheld CAR"
+        # ITAR, not "unknown": the CAR is placed by the ITAR record it came from, not merely
+        # withheld because nothing else ties it to a customer.
+        assert {event.data_classification for event in events} == {"itar_export_controlled"}
+        assert {event.denial_reason for event in events} == {"export_controlled_customer"}
+
+    def test_a_voided_car_stays_withheld_after_the_ncr_is_escalated_again(
+        self, client: TestClient, db_session: Session, world: World, ai_token, admin_headers: dict
+    ):
+        _id, token = ai_token
+        ncr_id = self._itar_job_ncr(client, admin_headers, world)
+        first = self._escalate(client, admin_headers, ncr_id)
+        self._assert_withheld_as_itar(client, db_session, token, admin_headers, first)
+
+        self._void(client, admin_headers, first)
+        second = self._escalate(client, admin_headers, ncr_id)
+        assert second != first
+        for car_id in (first, second):
+            self._assert_withheld_as_itar(client, db_session, token, admin_headers, car_id)
+
+    def test_a_car_stays_withheld_after_the_ncr_is_re_pointed_or_unlinked(
+        self, client: TestClient, db_session: Session, world: World, ai_token, admin_headers: dict
+    ):
+        _id, token = ai_token
+        ncr_id = self._itar_job_ncr(client, admin_headers, world)
+        first = self._escalate(client, admin_headers, ncr_id)
+        # Consolidate under another (open) CAR: the first CAR is open and has no referrer now.
+        moved = client.put(
+            f"{API}/quality/ncr/{ncr_id}", json={"version": 0, "car_id": world.orphan_car.id}, headers=admin_headers
+        )
+        assert moved.status_code == 200, moved.text
+        self._assert_withheld_as_itar(client, db_session, token, admin_headers, first)
+
+        # Type ITAR detail into the CAR the NCR now names, then unlink the NCR from it too.
+        typed = client.put(
+            f"{API}/quality/car/{world.orphan_car.id}",
+            json={"management_action": f"{MOVE_LEAK} action typed while linked", "version": 0},
+            headers=admin_headers,
+        )
+        assert typed.status_code == 200, typed.text
+        cleared = client.put(f"{API}/quality/ncr/{ncr_id}", json={"version": 0, "car_id": None}, headers=admin_headers)
+        assert cleared.status_code == 200, cleared.text
+        db_session.expire_all()
+        assert db_session.get(NonConformanceReport, ncr_id).car_id is None
+        for car_id in (first, world.orphan_car.id):
+            self._assert_withheld_as_itar(client, db_session, token, admin_headers, car_id)
+
+    def test_a_voided_car_stays_withheld_after_the_complaint_raises_another(
+        self, client: TestClient, db_session: Session, world: World, ai_token, admin_headers: dict
+    ):
+        """The complaint names the CLEARED customer, so the CAR's own customer and snapshot
+        clear: only the complaint's ITAR work order ever placed it."""
+        _id, token = ai_token
+        created = client.post(
+            f"{API}/complaints/complaints/",
+            json={
+                "customer_id": world.clear_customer.id,
+                "customer_name": world.clear_customer.name,
+                "part_id": world.material_part.id,
+                "work_order_id": world.itar_wo.id,
+                "title": f"{MOVE_LEAK} returned brackets",
+                "description": f"{MOVE_LEAK} customer report naming the program",
+            },
+            headers=admin_headers,
+        )
+        assert created.status_code == 200, created.text
+        complaint_id = created.json()["id"]
+
+        def raise_car() -> int:
+            response = client.post(f"{API}/complaints/complaints/{complaint_id}/create-car", headers=admin_headers)
+            assert response.status_code == 200, response.text
+            return response.json()["car_id"]
+
+        first = raise_car()
+        self._assert_withheld_as_itar(client, db_session, token, admin_headers, first)
+        self._void(client, admin_headers, first)
+        second = raise_car()
+        assert second != first
+        for car_id in (first, second):
+            self._assert_withheld_as_itar(client, db_session, token, admin_headers, car_id)
 
 
 # --------------------------------------------------------------------------- positive clearance
