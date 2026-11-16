@@ -235,8 +235,8 @@ FROM cost_entries WHERE entry_type = 'SUBCONTRACT'`) and re-key them to `other` 
 
 ### Production calendar (migration 120)
 
-Apply additive **120_production_calendar** through the normal API boot migration path (it follows
-**118_dashboard_layouts** in this branch; the release re-chains it after 119). It creates four empty
+Apply additive **120_production_calendar** after **119_api_token_scope** through the normal API boot
+migration path. It creates four empty
 tenant tables — `production_calendar_settings`, `shift_patterns`, `shift_pattern_work_centers`,
 `shift_definitions` — and adds the nullable `oee_records.shift_id` FK + index with **no backfill**
 (legacy free-text OEE `shift` labels stay). No calendar is seeded: until an Admin saves one, every

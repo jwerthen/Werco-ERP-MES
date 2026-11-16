@@ -123,7 +123,7 @@ def _shift(**changes):
 def test_revision_chain_is_the_assigned_one():
     migration = module()
     assert migration.revision == "120_production_calendar"
-    assert migration.down_revision == "118_dashboard_layouts"
+    assert migration.down_revision == "119_api_token_scope"
     assert len(migration.revision) <= 32
 
 

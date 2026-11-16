@@ -336,8 +336,8 @@ backfill, no environment variable, no worker job. Before rolling back to a pre-1
 `SUBCONTRACT` cost entries to `other` through the API — older code cannot load them (see
 `DEPLOYMENT.md` → Job cost subcontract element).
 
-**Production calendar (P1.2).** Apply additive **120_production_calendar** (after
-**118_dashboard_layouts** here; re-chained after 119 at release) through the normal API boot
+**Production calendar (P1.2).** Apply additive **120_production_calendar** after
+**119_api_token_scope** through the normal API boot
 migration path: four empty tenant tables plus the nullable `oee_records.shift_id` FK + index, no
 backfill, no seeded calendar, RLS/revokes as for every new table. Deploy-time behavior change: every
 tenant's day boundaries for OEE, the OEE cron, reports, downtime filters, job-cost labor dates and

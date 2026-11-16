@@ -1,7 +1,7 @@
 """Production calendar: the production-day start, shift patterns and shift definitions.
 
 Revision ID: 120_production_calendar
-Revises: 118_dashboard_layouts
+Revises: 119_api_token_scope
 
 Additive configuration, no data:
 
@@ -38,7 +38,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "120_production_calendar"
-down_revision = "118_dashboard_layouts"
+down_revision = "119_api_token_scope"
 branch_labels = None
 depends_on = None
 
