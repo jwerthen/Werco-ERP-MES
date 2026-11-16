@@ -34,6 +34,15 @@ type Row = AslVendor & { days_overdue?: number };
 
 const dateText = (value?: string | null) => (value ? formatCentralDate(value) : '—');
 
+/** A vendor switched off (is_active = false): still on the ASL record, not buyable. */
+function InactiveTag() {
+  return (
+    <span className="ml-2 rounded-sm border border-slate-600 px-1.5 py-0.5 align-middle text-[10px] font-medium uppercase tracking-wide text-slate-400">
+      Inactive
+    </span>
+  );
+}
+
 /** Re-evaluation due date, red once past. Overdue rows carry the server's day count. */
 function reevalCell(row: Row) {
   if (!row.reevaluation_due) return <span className="text-slate-500">—</span>;
@@ -55,6 +64,11 @@ function reevalCell(row: Row) {
  * "Re-evaluation overdue" is backed by GET /purchasing/vendors/reevaluation-due, so the
  * chip's count and its rows are the server's own answer (Central today, statuses that owe
  * a re-evaluation), never a client-side guess.
+ *
+ * Both reads include vendors switched off (`is_active = false`), marked Inactive: the ASL
+ * import and Update approval both write to them, and a Disqualified supplier is often also
+ * switched off -- hiding them would make the controlled list silently incomplete and leave
+ * their approval decisions with no screen to make them on.
  */
 export function ApprovedSupplierListPanel({ search, filter, onFilterChange }: Props) {
   const { user } = useAuth();
@@ -70,7 +84,10 @@ export function ApprovedSupplierListPanel({ search, filter, onFilterChange }: Pr
     setLoading(true);
     setLoadError(false);
     try {
-      const [vendorRows, overdueRows] = await Promise.all([api.getVendors(), api.getVendorsReevaluationDue()]);
+      const [vendorRows, overdueRows] = await Promise.all([
+        api.getVendors({ active_only: false }),
+        api.getVendorsReevaluationDue({ include_inactive: true }),
+      ]);
       setVendors(Array.isArray(vendorRows) ? vendorRows : []);
       setOverdue(Array.isArray(overdueRows) ? overdueRows : []);
     } catch {
@@ -116,7 +133,7 @@ export function ApprovedSupplierListPanel({ search, filter, onFilterChange }: Pr
     // follows the status and due date that just changed).
     setVendors(prev => prev.map(vendor => (vendor.id === saved.id ? { ...vendor, ...saved } : vendor)));
     void api
-      .getVendorsReevaluationDue()
+      .getVendorsReevaluationDue({ include_inactive: true })
       .then(next => setOverdue(Array.isArray(next) ? next : []))
       .catch(() => undefined);
   };
@@ -130,11 +147,14 @@ export function ApprovedSupplierListPanel({ search, filter, onFilterChange }: Pr
         accessor: row => row.name,
         render: row => (
           <div>
-            <div className="font-medium text-white">{row.name}</div>
+            <div className="font-medium text-white">
+              {row.name}
+              {row.is_active === false && <InactiveTag />}
+            </div>
             <div className="font-mono text-xs text-slate-400">{row.code}</div>
           </div>
         ),
-        csv: row => `${row.code} ${row.name}`,
+        csv: row => `${row.code} ${row.name}${row.is_active === false ? ' (inactive)' : ''}`,
       },
       {
         key: 'approval_status',
@@ -207,7 +227,7 @@ export function ApprovedSupplierListPanel({ search, filter, onFilterChange }: Pr
   const mobileCard = (row: Row) => (
     <MobileDataCard
       title={row.name}
-      subtitle={row.code}
+      subtitle={row.is_active === false ? `${row.code} · Inactive` : row.code}
       badge={<AslStatusPill status={row.approval_status} />}
       fields={[
         { label: 'Scope', value: scopeLabels(row.approved_scopes) || '—', fullWidth: true },

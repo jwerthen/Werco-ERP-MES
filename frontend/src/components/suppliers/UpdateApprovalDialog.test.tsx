@@ -43,7 +43,8 @@ describe('buildApprovalPayload', () => {
       blankForm,
       { ...blankForm, approval_status: 'approved', approved_scopes: ['hardware', 'adhesives_bonding'] },
       '  QL 7.4 review  ',
-      '2026-11-01T15:00:00Z'
+      '2026-11-01T15:00:00Z',
+      false
     );
     expect(payload).toEqual({
       approval_status: 'approved',
@@ -58,8 +59,41 @@ describe('buildApprovalPayload', () => {
 
   it('sends an explicit null to clear a field the person emptied, and null status for off-the-ASL', () => {
     const initial = { ...blankForm, approval_status: 'conditional' as const, reevaluation_due: '2024-12-10' };
-    const payload = buildApprovalPayload(initial, { ...initial, approval_status: '', reevaluation_due: '' }, 'r', null);
+    const payload = buildApprovalPayload(
+      initial,
+      { ...initial, approval_status: '', reevaluation_due: '' },
+      'r',
+      null,
+      false
+    );
     expect(payload).toEqual({ approval_status: null, reason: 'r', expected_updated_at: null, reevaluation_due: null });
+  });
+
+  it('always sends the shown approval date when the save makes a not-approved vendor approved', () => {
+    // A Conditional vendor carrying a date from the ASL import. Left out, the server would
+    // record TODAY for this approval; so a date the field shows is sent even when it equals
+    // the one on file, and only a blank field is left for the server to date.
+    const initial = { ...blankForm, approval_status: 'conditional' as const, approval_date: '2021-03-01' };
+    const kept = buildApprovalPayload(initial, { ...initial, approval_status: 'approved' }, 'r', null, false);
+    expect(kept.approval_date).toBe('2021-03-01');
+    const blank = buildApprovalPayload(
+      initial,
+      { ...initial, approval_status: 'approved', approval_date: '' },
+      'r',
+      null,
+      false
+    );
+    expect('approval_date' in blank).toBe(false);
+    // An already-approved vendor is not BECOMING approved: an untouched date stays unsent.
+    const listed = { ...initial, approval_status: 'approved' as const };
+    const resaved = buildApprovalPayload(
+      listed,
+      { ...listed, approval_status: 'approved_customer_directed' },
+      'r',
+      null,
+      true
+    );
+    expect('approval_date' in resaved).toBe(false);
   });
 });
 
@@ -121,6 +155,66 @@ describe('UpdateApprovalDialog', () => {
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('This vendor changed since you opened it');
     expect(onSaved).not.toHaveBeenCalled();
     expect(screen.getByRole('dialog')).toBeInTheDocument();
+  });
+
+  it('never silently replaces the date on file when approving a Conditional vendor', async () => {
+    // The ASL import put an APPROVED DATE on a Conditional vendor. Approving it records a new
+    // approval: the old date must not sit in the field while the server stores today.
+    const conditional = {
+      ...vendor,
+      approval_status: 'conditional' as const,
+      is_approved: false,
+      approval_date: '2021-03-01',
+    };
+    mockedApi.updateVendorApproval.mockResolvedValue({
+      ...conditional,
+      approval_status: 'approved',
+      is_approved: true,
+    });
+    render(<UpdateApprovalDialog vendor={conditional} onClose={jest.fn()} onSaved={jest.fn()} />);
+    const dialog = screen.getByRole('dialog');
+    const date = within(dialog).getByLabelText('Approved date') as HTMLInputElement;
+    expect(date.value).toBe('2021-03-01');
+
+    fireEvent.change(within(dialog).getByLabelText('ASL status'), { target: { value: 'approved' } });
+    expect(date.value).toBe('');
+    expect(within(dialog).getByText(/Approving records today, not the Mar 1, 2021 on file/)).toBeInTheDocument();
+
+    // Back to a non-approving status: the date on file comes back.
+    fireEvent.change(within(dialog).getByLabelText('ASL status'), { target: { value: 'conditional' } });
+    expect(date.value).toBe('2021-03-01');
+
+    // Approve, and keep the old date on purpose by typing it: it is SENT, so it is stored.
+    fireEvent.change(within(dialog).getByLabelText('ASL status'), { target: { value: 'approved' } });
+    fireEvent.change(date, { target: { value: '2021-03-01' } });
+    expect(within(dialog).getByText('Approving records this date.')).toBeInTheDocument();
+    fireEvent.change(within(dialog).getByLabelText(/Reason for this change/), { target: { value: 'Upgraded' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save approval' }));
+    await waitFor(() => expect(mockedApi.updateVendorApproval).toHaveBeenCalled());
+    expect(mockedApi.updateVendorApproval.mock.calls[0][1]).toEqual(
+      expect.objectContaining({ approval_status: 'approved', approval_date: '2021-03-01' })
+    );
+  });
+
+  it('leaves a cleared date out, so the server records today as the field says', async () => {
+    const conditional = {
+      ...vendor,
+      approval_status: 'conditional' as const,
+      is_approved: false,
+      approval_date: '2021-03-01',
+    };
+    mockedApi.updateVendorApproval.mockResolvedValue({
+      ...conditional,
+      approval_status: 'approved',
+      is_approved: true,
+    });
+    render(<UpdateApprovalDialog vendor={conditional} onClose={jest.fn()} onSaved={jest.fn()} />);
+    const dialog = screen.getByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText('ASL status'), { target: { value: 'approved' } });
+    fireEvent.change(within(dialog).getByLabelText(/Reason for this change/), { target: { value: 'Upgraded' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save approval' }));
+    await waitFor(() => expect(mockedApi.updateVendorApproval).toHaveBeenCalled());
+    expect('approval_date' in mockedApi.updateVendorApproval.mock.calls[0][1]).toBe(false);
   });
 
   it('renders nothing without a vendor', () => {

@@ -861,7 +861,13 @@ def _assert_wo_edit_allowed(wo: MaintenanceWorkOrder, update_data: Dict[str, Any
     ``started_at``, no log and no downtime event; ``completed`` closed one without advancing its
     PM schedule or recording its downtime minutes; and a started work order could be returned
     to ``scheduled`` with its downtime event still open, or have ``requires_shutdown`` flipped
-    so the event it opened was never closed (or one it should have opened never was)."""
+    so the event it opened was never closed (or one it should have opened never was).
+
+    A COMPLETED or CANCELLED work order is a final record: no status change leaves it. A reopened
+    one carried its ``started_at`` (and ``completed_at``) into on hold, where it looked like a
+    work order still holding the machine down and took over another work order's downtime event
+    -- which then never closed -- and a second ``/complete`` overwrote the maintenance record and
+    advanced the PM schedule again. A new work order is the correction."""
     current = MaintenanceStatus(wo.status)
     # Started: in progress, or on hold after a start (a work order can also be held before one).
     started = current == MaintenanceStatus.IN_PROGRESS or (
@@ -870,6 +876,14 @@ def _assert_wo_edit_allowed(wo: MaintenanceWorkOrder, update_data: Dict[str, Any
     target = update_data.get("status")
     if target is not None and MaintenanceStatus(target) != current:
         target = MaintenanceStatus(target)
+        if current in _TERMINAL_STATUSES:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Maintenance work order {wo.wo_number} is {current.value}, a final record; it cannot be "
+                    f"moved to {target.value}. Open a new maintenance work order instead."
+                ),
+            )
         if target == MaintenanceStatus.IN_PROGRESS:
             raise HTTPException(
                 status_code=409,
@@ -926,8 +940,9 @@ def update_work_order(
     machine downtime), for ``status: completed`` (use ``POST .../complete`` -- findings, costs,
     downtime minutes and the PM schedule's next due date), for returning a STARTED work order
     (in progress / on hold) to scheduled or overdue, and for changing ``requires_shutdown`` on
-    a started work order (its downtime is already being recorded, or not). Re-sending the
-    current value is accepted. Moving to ``cancelled`` settles any downtime the work order
+    a started work order (its downtime is already being recorded, or not), and for ANY status
+    change on a completed or cancelled work order (a final record -- open a new one instead).
+    Re-sending the current value is accepted. Moving to ``cancelled`` settles any downtime the work order
     holds: resolved, handed to another shutdown work order still holding the machine down, or
     -- for an operator's event the work order adopted -- handed back to the machine, still
     open. ``on_hold`` keeps the machine down (the downtime runs on until the work order ends)."""

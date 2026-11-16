@@ -5794,8 +5794,9 @@ uploads go through text extraction + LLM. See
 > - Asset writes are audited (`maintenance_asset` CREATE / UPDATE; a retire is the `is_active` flip,
 >   logged as an UPDATE). `PUT` takes the asset's current `version` (**409** *"This asset was changed by
 >   someone else…"* when stale) and rejects unknown fields; retiring keeps the asset's schedules, work
->   orders and history (deactivate its schedules separately if they should stop coming due), and `PUT`
->   with `is_active: true` brings it back.
+>   orders and history (deactivate its schedules separately if they should stop coming due — the
+>   Maintenance → Schedules tab's **Deactivate** row action, `DELETE /maintenance/schedules/{id}`,
+>   planning roles), and `PUT` with `is_active: true` brings it back.
 
 > **Typed fields: `usage_based` is now 422, not 500.** `frequency`, `maintenance_type`, `priority` and
 > (on `PUT /maintenance/work-orders/{id}`) `status` are typed against the model enums, so an unknown
@@ -5823,12 +5824,14 @@ uploads go through text extraction + LLM. See
 >   an open event (restarted from hold) opens none. The start audit row carries
 >   `extra_data.downtime_event_id` and `downtime_link` (`opened` / `adopted` / `shared` / `owned`),
 >   plus `downtime_shared_with` (the holding work order's number) when shared.
-> - **Ending a work order** (`/complete`, or `PUT` to `cancelled`) settles each open event it owns: if
->   another shutdown work order still holds the machine down (in progress, or on hold after a start),
->   the event is **handed over** to it, still open, so the stoppage resolves once — when the last work
->   order ends; a **cancelled** work order hands an **adopted** operator's event back to the machine,
->   unlinked and still **open** (cancelling did not fix the breakdown; the next work order adopts it);
->   otherwise the event is **resolved**. Each hand-over / hand-back is a `downtime_event` UPDATE audit
+> - **Ending a work order** (`/complete`, or `PUT` to `cancelled`) settles each open event it owns, in
+>   this order: if another shutdown work order still holds the machine down (in progress, or on hold
+>   after a start, and never completed), the event is **handed over** to it, still open, so the
+>   stoppage resolves once — when the last work order ends — however this one ended (a cancelled
+>   adopter's hand-over keeps the event's `maintenance_adopted` mark, so if that work order is cancelled
+>   too the breakdown still goes back to the machine); otherwise a **cancelled** work order hands an
+>   **adopted** operator's event back to the machine, unlinked and still **open** (cancelling did not
+>   fix the breakdown; the next work order adopts it); otherwise the event is **resolved**. Each hand-over / hand-back is a `downtime_event` UPDATE audit
 >   row. On complete, when the request leaves `downtime_minutes` at 0, the work order records the total
 >   minutes of the events it resolved (a positive value from the technician is kept; a work order that
 >   handed its event on records 0, so the stoppage's minutes land once, on the last one). The complete
@@ -5836,8 +5839,18 @@ uploads go through text extraction + LLM. See
 > - **`PUT` cannot bypass the verbs** (it is also an MCP tool): `status: in_progress` is **409** (use
 >   `/start`), `status: completed` is **409** (use `/complete` — findings, costs, downtime minutes and the
 >   PM schedule's next due date), a started work order (in progress, or on hold after a start) cannot go
->   back to `scheduled` / `overdue` (**409**), and `requires_shutdown` cannot change once it has
->   started (**409**). Re-sending the current value is accepted. `on_hold` keeps the machine down.
+>   back to `scheduled` / `overdue` (**409**), `requires_shutdown` cannot change once it has
+>   started (**409**), and a **completed or cancelled** work order is a final record — any status
+>   change out of either is **409** (*"… is completed, a final record; it cannot be moved to …"*;
+>   open a new work order instead). Reopening one used to let a completed work order on hold take over
+>   the next work order's downtime event, which then never closed, and a second `/complete` overwrite
+>   the maintenance record and advance its PM schedule again. Re-sending the current value is accepted.
+>   `on_hold` keeps the machine down.
+> - **An operator report cannot double it either.** `POST /downtime/` on a machine a maintenance work
+>   order already holds down (its event is open, the work order in progress or on hold after a start)
+>   is **409** naming the work order and the open event: the stoppage is already being recorded, and
+>   it ends when that work order is completed or cancelled. An operator's report filed *before* the
+>   start is adopted, as above.
 > - An **asset** work order never records downtime, and neither does a legacy work order whose
 >   `work_center_id` points at another company's machine. Each opened / resolved event writes its usual
 >   `downtime_event` audit row and emits the same `downtime_started` / `downtime_resolved`
@@ -9104,7 +9117,12 @@ dry run included). A token may still create and edit vendors and withdraw an app
   (`Vendor` has no `version` column, so this is the compare-and-swap); otherwise **409** *"This vendor
   changed since you opened it. Reload it before saving the approval."*
 - **Approval date:** when the request makes a vendor approved that was not, and sends no
-  `approval_date`, today's date (Central) is recorded.
+  `approval_date`, today's date (Central) is recorded — even over a date the vendor already carries
+  (a Conditional row's APPROVED DATE from the ASL import, or the date of an approval it has since
+  lost): the new approval is today's. Send the date to record another. The **Update approval** dialog
+  is built on this: choosing a status that approves a not-approved vendor blanks the date on file and
+  says today will be recorded, and any date it then shows is sent, so what it displays is what is
+  stored.
 - **Result:** the updated `VendorResponse`. The vendor row is locked for the write. One **required**
   audit row (`vendor` UPDATE carrying only the fields that changed, `is_approved` included,
   `extra_data.source = "approval"` and the `reason`); if it cannot be written nothing is saved
@@ -9149,7 +9167,8 @@ The warnings are returned as `supplier_approval_warnings` on the `POResponse` fr
 /purchasing/purchase-orders/{po_id}` and `PUT .../supplier-confirmation`, and on the `POUploadResponse`
 from `POST /po-upload/create-from-upload`. They are computed when the response is built, from the
 vendor's **current** ASL entry and the lines' parts — never stored on the PO, so they change when the
-ASL does. The list read (`GET /purchasing/purchase-orders`) does not carry them. The create **audit
+ASL does. The PO detail view shows a `vendor_disqualified` entry red, as the stop on sending,
+approving or adding lines to that order (below), never among the amber advisories. The list read (`GET /purchasing/purchase-orders`) does not carry them. The create **audit
 row** records the warnings shown at creation in `extra_data.supplier_approval_warnings` (only when
 there are any) on every create through `create_purchase_order_command` (this route, the Hank
 purchase-order task and the AI action applier's draft PO), on the PO-upload create, and on the doors
@@ -9168,7 +9187,13 @@ that creates a PO:
 - `POST /po-upload/create-from-upload`, before any part is created.
 - `POST /mrp/actions/{action_id}/supply-draft` (purchase) and `POST /mrp/purchase-batch/drafts`. The
   MRP supply review's supplier list, and the MRP auto-PO vendor picker (`AUTO_DRAFT` / `AUTO_SUBMIT`),
-  never offer or choose a Disqualified vendor.
+  never offer or choose a Disqualified vendor. The picker does not **re-route** either: a part whose
+  only supplier on record (supplier-part mapping or purchase history) is Disqualified is not handed to
+  the "first active vendor" fallback, which would draft it to an unrelated supplier. The auto-PO job
+  writes no purchase order for it and records the reason on the MRP action (*"{Vendor} is Disqualified
+  on the Approved Supplier List and is the only supplier this part is sourced from …; MRP does not pick
+  another supplier for it. Choose one on the MRP supply review."*). The fallback stays for a part with
+  no sourcing at all.
 - The open-PO Excel loader (`POST /purchasing/purchase-orders/import`), as that purchase order's row
   error with the same text.
 
@@ -9254,7 +9279,11 @@ their rows are unchanged for people (next section), except that the two **write*
 **API token** (**403**, the approval verb's text) and are not MCP tools — an agent's "approved" entry
 there would contradict the vendor's own status. Nothing reads them for the ASL any more: the Supplier
 Scorecards page's **Approved Supplier List** tab is built on the vendor fields above, and the
-scorecard dashboard's `reviews_due` counts vendor re-evaluations. The QMS auto-evidence supplier
+scorecard dashboard's `reviews_due` counts vendor re-evaluations (due within 30 days of the Central
+day). The tab reads **every live vendor, switched-off ones included** (`GET
+/purchasing/vendors?active_only=false`, and the re-evaluation list with `include_inactive=true`),
+marking those *Inactive*: the ASL import and **Update approval** both write to them, and a
+Disqualified supplier is often also switched off. The QMS auto-evidence supplier
 card's "approved" count now means approved **on the ASL** (see QMS Standards).
 
 ### Supplier Scorecards, Audits & Approved Supplier List
@@ -10814,7 +10843,7 @@ the availability input to `POST /oee/calculate/{work_center_id}` above.
 | GET | `/downtime/by-work-center` | Resolved-event hours per work center | Yes |
 | GET | `/downtime/reason-codes` | Reason-code vocabulary (`category`, `active_only`) | Yes |
 | GET | `/downtime/{id}` | One event | Yes |
-| POST | `/downtime/` | Report (start) an event | Any role except Viewer |
+| POST | `/downtime/` | Report (start) an event. **409** when a maintenance work order already holds the machine down (its downtime event is open) — see the note below | Any role except Viewer |
 | POST | `/downtime/{id}/resolve` | Resolve: sets `end_time` (default now) and `duration_minutes` | Any role except Viewer |
 | PUT | `/downtime/{id}` | Correct an event after the fact | Admin / Manager / Supervisor |
 | POST | `/downtime/reason-codes` | Create a reason code | Admin / Manager / Supervisor |
@@ -10879,8 +10908,10 @@ There is no delete endpoint.
 > `DowntimeEventResponse` (`null` on every other event); `PUT /downtime/{id}` cannot change it (it is
 > not in the allowlist). It can still be resolved here like any other event; the maintenance work
 > order then has nothing left to resolve and, on complete, records the resolved minutes. Create and
-> resolve here now run through the same `app/services/downtime_service.py` helpers, with unchanged
-> behavior.
+> resolve here run through the same `app/services/downtime_service.py` helpers. One create rule is new:
+> `POST /downtime/` refuses **409** a report on a machine a maintenance work order is holding down
+> (*"{machine} is already down for maintenance work order {MWO} (downtime event DT-{id} is open), so
+> this stoppage is already being recorded. …"*) — a second open event would count the stoppage twice.
 
 ### Users (Admin)
 

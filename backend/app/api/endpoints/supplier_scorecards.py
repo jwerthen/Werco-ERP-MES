@@ -13,7 +13,7 @@ from app.models.quality import NonConformanceReport
 from app.models.supplier_scorecard import ApprovedSupplierList, ScorecardPeriod, SupplierAudit, SupplierScorecard
 from app.models.user import User, UserRole
 from app.services.audit_service import AuditService
-from app.services.supplier_approval_service import API_TOKEN_ASL_REFUSAL, REEVALUATION_STATUSES
+from app.services.supplier_approval_service import API_TOKEN_ASL_REFUSAL, REEVALUATION_STATUSES, central_today
 
 router = APIRouter()
 
@@ -501,8 +501,9 @@ def scorecard_dashboard(
     probationary_count = sum(1 for s in latest if s.rating == "Probationary")
     disqualified_count = sum(1 for s in latest if s.rating == "Disqualified")
 
-    # Audits due within 30 days
-    thirty_days = date.today() + timedelta(days=30)
+    # Audits / re-evaluations due within 30 days, counted from the shop's day (Central), the
+    # same "today" the ASL re-evaluation list uses -- not the server's local date.
+    thirty_days = central_today() + timedelta(days=30)
     audits_due = (
         db.query(SupplierAudit)
         .filter(

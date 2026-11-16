@@ -602,6 +602,21 @@ def test_scorecard_reviews_due_counts_the_vendor_reevaluation_dates(client, db_s
     assert body["reviews_due_30_days"] == 2
 
 
+def test_scorecard_reviews_due_window_is_counted_from_the_central_day(client, db_session, monkeypatch):
+    """The 30-day window starts from the shop's day (Central), as the re-evaluation list's does --
+    not the server's local ``date.today()``, which runs ahead of Central every evening on a UTC
+    host. Pinned by moving "Central today" far from the host date: only a window computed from
+    it counts this vendor."""
+    from app.api.endpoints import supplier_scorecards
+
+    user = make_user(db_session, role=UserRole.VIEWER, company_id=1)
+    shop_day = date.today() + timedelta(days=400)
+    monkeypatch.setattr(supplier_scorecards, "central_today", lambda: shop_day, raising=False)
+    make_vendor(db_session, approval_status="approved", reevaluation_due=shop_day + timedelta(days=20))
+    body = client.get("/api/v1/supplier-scorecards/supplier-scorecards/dashboard", headers=headers_for(user)).json()
+    assert body["reviews_due_30_days"] == 1
+
+
 # =========================================================================== approval-verb field semantics
 
 
@@ -629,6 +644,33 @@ def test_an_explicit_approval_date_is_kept_and_a_reapproval_never_restamps_it(cl
     assert resaved.json()["approval_date"] == "2020-01-15" and resaved.json()["reevaluation_due"] == "2028-01-15"
     (audit,) = vendor_audit_rows(db_session, approved.id)
     assert set(audit.new_values) == {"reevaluation_due"}
+
+
+@pytest.mark.parametrize("start", ["conditional", "disqualified"])
+def test_approving_a_not_approved_vendor_records_a_new_date_unless_one_is_sent(client, db_session, start):
+    """The contract the Update approval dialog is built on: making a NOT-approved vendor approved
+    is a new approval, so with no ``approval_date`` sent the server records today even over a
+    date already on file (a Conditional row's APPROVED DATE from the ASL import). The dialog
+    therefore blanks that date when an approving status is chosen and sends any date it shows,
+    so what it displays is what is stored. A date that IS sent -- even the old one -- is kept."""
+    quality = make_user(db_session, role=UserRole.QUALITY, company_id=1)
+    restamped = make_vendor(db_session, approval_status=start, is_approved=False, approval_date=date(2021, 3, 1))
+    response = client.put(
+        f"{VENDORS}/{restamped.id}/approval", headers=headers_for(quality), json=approval_body(restamped)
+    )
+    assert response.status_code == status.HTTP_200_OK, response.text
+    assert response.json()["approval_date"] == central_today().isoformat()
+    (audit,) = vendor_audit_rows(db_session, restamped.id)
+    assert audit.old_values["approval_date"] == "2021-03-01"
+
+    kept = make_vendor(db_session, approval_status=start, is_approved=False, approval_date=date(2021, 3, 1))
+    response = client.put(
+        f"{VENDORS}/{kept.id}/approval",
+        headers=headers_for(quality),
+        json=approval_body(kept, approval_date="2021-03-01"),
+    )
+    assert response.status_code == status.HTTP_200_OK, response.text
+    assert response.json()["approval_date"] == "2021-03-01" and response.json()["is_approved"] is True
 
 
 def test_an_explicit_null_clears_a_field_and_an_omitted_one_is_kept(client, db_session):

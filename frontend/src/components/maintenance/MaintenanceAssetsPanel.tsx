@@ -397,7 +397,7 @@ export function MaintenanceAssetsPanel({ canEdit, onChanged }: Props) {
         title="Retire equipment asset"
         message={
           retireTarget
-            ? `Retire ${retireTarget.asset_tag} (${retireTarget.name})? It leaves the target pickers; its ${retireTarget.active_schedule_count} active schedule(s), work orders and history are kept — deactivate its schedules separately if they should stop coming due.`
+            ? `Retire ${retireTarget.asset_tag} (${retireTarget.name})? It leaves the target pickers; its ${retireTarget.active_schedule_count} active schedule(s), work orders and history are kept. Deactivate its schedules on the Schedules tab if they should stop coming due.`
             : ''
         }
         confirmLabel="Retire"

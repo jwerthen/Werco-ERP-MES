@@ -2770,7 +2770,9 @@ and writes an `EXPORT` audit row through `AuditService`:
 > **Maintenance work orders also open and resolve events (migration `124`)**, under the maintenance
 > verbs' own gates rather than the table above: starting a work-center maintenance WO that requires
 > shutdown (Admin / Manager / Supervisor / Operator) opens or adopts an event, and completing it (the
-> same roles) or a `PUT` to `cancelled` / `completed` (Admin / Manager / Supervisor) resolves it. See
+> same roles) or a `PUT` to `cancelled` (Admin / Manager / Supervisor) resolves it; `completed` is only
+> reachable through `POST .../complete`, and a completed or cancelled work order cannot be reopened
+> (`PUT` 409). An operator's `POST /downtime/` on a machine a maintenance work order holds down is 409. See
 > [Maintenance](#maintenance-pm-schedules-maintenance-work-orders-event-log).
 
 > **Before deploying, check for legacy cross-tenant rows.** The write guards stop *new* mis-tenanted

@@ -212,8 +212,9 @@ but **only entries whose source is wired today actually fire**; the rest are **d
 > **`downtime.started` / `downtime.resolved` have a second source since migration `124`.** Besides
 > an operator report on `/downtime`, starting a work-center maintenance work order with
 > `requires_shutdown` emits `downtime_started` (unless it adopts an event already open on that
-> machine, which emits nothing new), and ending it — `/complete`, or a `PUT` to `cancelled` /
-> `completed` — emits `downtime_resolved`. See
+> machine, which emits nothing new), and ending it — `/complete`, or a `PUT` to `cancelled` (a `PUT`
+> to `completed` is refused 409; `completed` is only reachable through `/complete`) — emits
+> `downtime_resolved`. See
 > [API.md → Maintenance](API.md#maintenance-pm-schedules-maintenance-work-orders-event-log). The
 > catalog entry is unchanged, so a **planned** preventive-maintenance shutdown raises the same
 > `critical` `downtime.started` notification (and SMS, for users who opted in) as a breakdown.

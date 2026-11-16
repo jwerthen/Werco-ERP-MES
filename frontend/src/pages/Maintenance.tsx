@@ -176,6 +176,8 @@ export default function Maintenance() {
   const [showImport, setShowImport] = useState(false);
   const [selectedWO, setSelectedWO] = useState<MaintenanceWorkOrder | null>(null);
   const [cancelTarget, setCancelTarget] = useState<MaintenanceWorkOrder | null>(null);
+  const [deactivateTarget, setDeactivateTarget] = useState<MaintenanceSchedule | null>(null);
+  const [deactivating, setDeactivating] = useState(false);
 
   const [scheduleForm, setScheduleForm] = useState(BLANK_SCHEDULE);
   const [scheduleTarget, setScheduleTarget] = useState<MaintenanceTarget>(BLANK_TARGET);
@@ -393,6 +395,41 @@ export default function Maintenance() {
       }
     },
     [actionBusy, loadData, showToast]
+  );
+
+  // Deactivating a PM schedule (DELETE /maintenance/schedules/{id} flips is_active; history and
+  // work orders are kept). Server-gated, so not optimistic: the row leaves only on success.
+  const confirmDeactivate = async () => {
+    if (!deactivateTarget || deactivating) return;
+    setDeactivating(true);
+    try {
+      await api.deleteMaintenanceSchedule(deactivateTarget.id);
+      showToast('success', `${deactivateTarget.name} deactivated`);
+      setDeactivateTarget(null);
+      void loadData();
+    } catch (err: any) {
+      showToast('error', errorText(err, 'Failed to deactivate the schedule'));
+    } finally {
+      setDeactivating(false);
+    }
+  };
+
+  const scheduleRowActions = useCallback(
+    (s: MaintenanceSchedule) =>
+      canPlan && s.is_active ? (
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={e => {
+            e.stopPropagation();
+            setDeactivateTarget(s);
+          }}
+          aria-label={`Deactivate schedule ${s.name}`}
+        >
+          Deactivate
+        </Button>
+      ) : null,
+    [canPlan]
   );
 
   const confirmCancel = async () => {
@@ -701,8 +738,9 @@ export default function Maintenance() {
             <XMarkIcon className="w-5 h-5 text-slate-400" aria-label="Inactive" />
           ),
       },
+      ...(canPlan ? [{ key: 'actions', header: 'Actions', render: scheduleRowActions }] : []),
     ],
-    []
+    [canPlan, scheduleRowActions]
   );
 
   const renderScheduleCard = useCallback(
@@ -732,9 +770,10 @@ export default function Maintenance() {
             ? [{ label: 'Checklist', value: (s.checklist_items ?? []).join('; '), fullWidth: true }]
             : []),
         ]}
+        actions={scheduleRowActions(s) ?? undefined}
       />
     ),
-    []
+    [scheduleRowActions]
   );
 
   if (loading && !dashboard) {
@@ -1381,6 +1420,22 @@ export default function Maintenance() {
           </LoadingButton>
         </div>
       </Modal>
+
+      <ConfirmDialog
+        open={!!deactivateTarget}
+        title="Deactivate PM schedule"
+        message={
+          deactivateTarget
+            ? `Deactivate ${deactivateTarget.name}? It stops coming due and leaves the upcoming maintenance list; its completed work orders and history are kept.`
+            : ''
+        }
+        confirmLabel="Deactivate"
+        cancelLabel="Keep it"
+        variant="warning"
+        pending={deactivating}
+        onConfirm={() => void confirmDeactivate()}
+        onCancel={() => setDeactivateTarget(null)}
+      />
 
       {/* Complete Work Order Modal */}
       <ConfirmDialog

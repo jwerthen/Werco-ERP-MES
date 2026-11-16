@@ -148,9 +148,10 @@ export default function PurchaseOrderDetail({
               Print purchase order
             </Button>
           </div>
-          {/* Advisory Approved Supplier List findings the server computed for this vendor and
-              these lines (never stored on the PO; re-read with it). */}
-          <SupplierApprovalWarnings warnings={record.supplier_approval_warnings} />
+          {/* Approved Supplier List findings the server computed for this vendor's CURRENT entry
+              and these lines (never stored on the PO; re-read with it). A Disqualified vendor is
+              the red stop on sending / approving this order, the rest are advisory. */}
+          <SupplierApprovalWarnings warnings={record.supplier_approval_warnings} existingOrder />
           {['sent', 'partial'].includes(record.status) && (
             <SupplierFollowup
               key={record.id}

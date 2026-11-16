@@ -507,8 +507,8 @@ IMPORT_TEMPLATES: Dict[str, ImportTemplateSpec] = {
             columns=(
                 _col(
                     "supplier_name",
-                    "REQUIRED. Must match ONE existing vendor's name exactly (case, spaces and dashes "
-                    "ignored), unless vendor_code is filled.",
+                    "REQUIRED on every row. Must match ONE existing vendor's name exactly (case, spaces and "
+                    "dashes ignored).",
                     "Apex Metals",
                     "Bolt Bin Supply",
                     "Crest Finishing",
@@ -523,7 +523,7 @@ IMPORT_TEMPLATES: Dict[str, ImportTemplateSpec] = {
                 ),
                 _col(
                     "approved_scope_of_supply",
-                    "QL 7.4 scope label(s); separate several with ';'.",
+                    "QL 7.4 scope label(s); separate several with ';', ',' or a new line.",
                     "Raw Material - Metallics",
                     "Hardware",
                     "Special Process - Plating / Coating",
@@ -532,7 +532,7 @@ IMPORT_TEMPLATES: Dict[str, ImportTemplateSpec] = {
                 _col(
                     "approval_basis",
                     "AS9100 Cert, AS9120 Cert, ISO 9001 Cert, ISO 17025 Cert, NADCAP Cert, Questionnaire or "
-                    "Customer Requirement.",
+                    "Customer Requirement; separate several with ';', ',' or a new line.",
                     "AS9100 Cert",
                     "Questionnaire",
                     "Customer Requirement",
@@ -542,7 +542,8 @@ IMPORT_TEMPLATES: Dict[str, ImportTemplateSpec] = {
                 _col("notes", "Optional. Stored as the vendor's ASL notes; blank never clears.", "", "", ""),
                 _col(
                     "vendor_code",
-                    "Optional. When filled, matches the vendor by code instead of by name.",
+                    "Optional. Chooses between vendors that share a name; the row's supplier_name must still "
+                    "be that vendor's name.",
                     "VND-001",
                     "",
                     "",

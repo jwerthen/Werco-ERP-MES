@@ -29,6 +29,7 @@ jest.mock('../services/api', () => ({
     createMaintenanceWorkOrder: jest.fn(),
     startMaintenanceWorkOrder: jest.fn(),
     updateMaintenanceWorkOrder: jest.fn(),
+    deleteMaintenanceSchedule: jest.fn(),
   },
 }));
 let mockRole = 'supervisor';
@@ -90,6 +91,7 @@ beforeEach(() => {
   mockedApi.createMaintenanceWorkOrder.mockResolvedValue({});
   mockedApi.startMaintenanceWorkOrder.mockResolvedValue({ ...scheduledWO, status: 'in_progress' });
   mockedApi.updateMaintenanceWorkOrder.mockResolvedValue({ ...scheduledWO, status: 'cancelled' });
+  mockedApi.deleteMaintenanceSchedule.mockResolvedValue({ message: 'Schedule deactivated' });
 });
 
 async function openScheduleForm() {
@@ -222,6 +224,60 @@ describe('Maintenance — work-order actions and roles', () => {
       expect(mockedApi.updateMaintenanceWorkOrder).toHaveBeenLastCalledWith(31, { status: 'cancelled' })
     );
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+
+  it('deactivates a PM schedule from the Schedules tab, confirming first (what retiring an asset points to)', async () => {
+    const forkliftPm = {
+      id: 12,
+      name: 'FL-01 Monthly PM',
+      maintenance_type: 'preventive',
+      frequency: 'monthly',
+      estimated_duration_hours: 1,
+      priority: 'medium',
+      requires_shutdown: false,
+      is_active: true,
+      asset_id: 4,
+      work_center_id: null,
+      target_type: 'asset',
+      target_code: 'FL-01',
+      target_name: 'Forklift 1',
+      next_due_date: '2026-11-01',
+    };
+    mockedApi.getMaintenanceSchedules.mockResolvedValue([forkliftPm] as any);
+    renderPage('/maintenance?tab=schedules');
+    const table = await screen.findByTestId('data-table');
+    await waitFor(() => expect(within(table).getByText('FL-01 Monthly PM')).toBeInTheDocument());
+    const row = within(table).getByText('FL-01 Monthly PM').closest('tr') as HTMLElement;
+
+    fireEvent.click(within(row).getByRole('button', { name: 'Deactivate schedule FL-01 Monthly PM' }));
+    const confirm = await screen.findByRole('dialog');
+    expect(confirm).toHaveTextContent('It stops coming due');
+    expect(mockedApi.deleteMaintenanceSchedule).not.toHaveBeenCalled();
+    mockedApi.getMaintenanceSchedules.mockResolvedValue([]);
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Deactivate' }));
+    await waitFor(() => expect(mockedApi.deleteMaintenanceSchedule).toHaveBeenCalledWith(12));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    await waitFor(() => expect(mockedApi.getMaintenanceSchedules).toHaveBeenCalledTimes(2)); // re-read, not optimistic
+  });
+
+  it('offers no schedule Deactivate to a role the server refuses', async () => {
+    mockRole = 'operator';
+    mockedApi.getMaintenanceSchedules.mockResolvedValue([
+      {
+        id: 12,
+        name: 'FL-01 Monthly PM',
+        maintenance_type: 'preventive',
+        frequency: 'monthly',
+        estimated_duration_hours: 1,
+        priority: 'medium',
+        requires_shutdown: false,
+        is_active: true,
+      },
+    ] as any);
+    renderPage('/maintenance?tab=schedules');
+    const table = await screen.findByTestId('data-table');
+    await waitFor(() => expect(within(table).getByText('FL-01 Monthly PM')).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: /Deactivate schedule/ })).not.toBeInTheDocument();
   });
 
   it('shows planning controls to a platform admin, whom the server admits', async () => {

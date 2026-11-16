@@ -237,32 +237,39 @@ def _po_history(db: Session, vendor: Vendor, part) -> None:
     db.commit()
 
 
+def _map(db: Session, part, vendor: Vendor) -> None:
+    db.add(
+        SupplierPartMapping(
+            company_id=1,
+            part_id=part.id,
+            vendor_id=vendor.id,
+            supplier_part_number=f"SPN-{_next():05d}",
+            is_active=True,
+        )
+    )
+    db.commit()
+
+
 def test_mrp_auto_picker_skips_a_disqualified_vendor_at_every_priority(db_session):
     """The 6 AM auto-draft job picks a supplier with nobody looking: by supplier-part mapping,
     then by PO history, then the first active vendor. None of the three may land on a
     Disqualified vendor; a Conditional one stays pickable (a warning on the PO, not a gate)."""
     service = MRPAutoService(db_session, company_id=1)
 
-    # Priority 3 (the fallback) -- a disqualified vendor created first is still skipped.
+    # Priority 3 (the fallback, a part with no sourcing) -- a disqualified vendor created
+    # first is still skipped.
     disqualified = make_vendor(db_session, approval_status="disqualified")
     fresh_part = make_part(db_session)
     assert service._get_preferred_vendor(fresh_part.id) is None
     conditional = make_vendor(db_session, approval_status="conditional")
     assert service._get_preferred_vendor(fresh_part.id).id == conditional.id
 
-    # Priority 1 -- a supplier-part mapping to the disqualified vendor is passed over.
+    # Priority 1 -- a mapping to the disqualified vendor is passed over for another MAPPED one.
     mapped = make_part(db_session)
-    db_session.add(
-        SupplierPartMapping(
-            company_id=1,
-            part_id=mapped.id,
-            vendor_id=disqualified.id,
-            supplier_part_number=f"SPN-{_next():05d}",
-            is_active=True,
-        )
-    )
-    db_session.commit()
-    assert service._get_preferred_vendor(mapped.id).id == conditional.id
+    _map(db_session, mapped, disqualified)
+    mapped_alternate = make_vendor(db_session, approval_status="approved", is_approved=True)
+    _map(db_session, mapped, mapped_alternate)
+    assert service._get_preferred_vendor(mapped.id).id == mapped_alternate.id
 
     # Priority 2 -- years of PO history with the disqualified vendor is passed over too.
     bought = make_part(db_session)
@@ -271,6 +278,53 @@ def test_mrp_auto_picker_skips_a_disqualified_vendor_at_every_priority(db_sessio
     history_vendor = make_vendor(db_session, approval_status="approved", is_approved=True)
     _po_history(db_session, history_vendor, bought)
     assert service._get_preferred_vendor(bought.id).id == history_vendor.id
+
+
+@pytest.mark.parametrize("sourcing", ["mapping", "history"])
+def test_mrp_auto_draft_never_reroutes_a_part_whose_only_supplier_is_disqualified(db_session, sourcing):
+    """Priority 3's "first active vendor" has no ORDER BY and no scope or approval filter. A part
+    whose only supplier on record was Disqualified must NOT fall through to it -- that drafts the
+    part to an unrelated supplier (a calibration lab, say) as a normal-looking PO, silently. The
+    action records why instead, and no purchase order is written; a buyer picks the supplier."""
+    from app.models.mrp import MRPRun, PlanningAction
+    from app.services.mrp_auto_service import DisqualifiedSourcingError, MRPAutoMode
+
+    make_vendor(db_session, name="Acme Calibration Lab", approval_status="approved", is_approved=True)
+    disqualified = make_vendor(db_session, name="Former Plater", approval_status="disqualified")
+    part = make_part(db_session)
+    if sourcing == "mapping":
+        _map(db_session, part, disqualified)
+    else:
+        _po_history(db_session, disqualified, part)
+    before = po_count(db_session)
+
+    service = MRPAutoService(db_session, company_id=1)
+    with pytest.raises(DisqualifiedSourcingError):
+        service._get_preferred_vendor(part.id)
+
+    run = MRPRun(run_number=f"MRP-ASL-{_next():05d}", company_id=1)
+    db_session.add(run)
+    db_session.commit()
+    action = MRPAction(
+        mrp_run_id=run.id,
+        part_id=part.id,
+        action_type=PlanningAction.ORDER,
+        priority=3,
+        quantity=4,
+        required_date=date.today() + timedelta(days=14),
+        suggested_order_date=date.today(),
+        company_id=1,
+    )
+    db_session.add(action)
+    db_session.commit()
+
+    results = service.process_actions([action], MRPAutoMode.AUTO_DRAFT)
+    assert results["pos_created"] == 0 and results["errors"] == 1
+    db_session.refresh(action)
+    assert action.result_po_id is None and not action.processed
+    assert action.error_message.startswith("Former Plater is Disqualified on the Approved Supplier List")
+    assert "MRP supply review" in action.error_message
+    assert po_count(db_session) == before
 
 
 # =========================================================================== auto evidence

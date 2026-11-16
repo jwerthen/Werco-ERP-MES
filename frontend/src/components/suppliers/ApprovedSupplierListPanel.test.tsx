@@ -87,7 +87,30 @@ describe('ApprovedSupplierListPanel', () => {
     const plannedRow = within(table).getByText('Planned Supplier').closest('tr') as HTMLElement;
     expect(within(plannedRow).getByText('Not on the ASL')).toBeInTheDocument();
     // The legacy approved_supplier_list table is no longer read.
-    expect(mockedApi.getVendors).toHaveBeenCalledWith();
+    expect(mockedApi.getVendors).toHaveBeenCalledTimes(1);
+  });
+
+  it('includes vendors switched off, marked Inactive, so every vendor the ASL writes to can be decided on', async () => {
+    // A Disqualified supplier is often also switched off; the ASL import and Update approval
+    // both still write to it. The default reads (active only) used to hide it from this tab.
+    const switchedOff: AslVendor = {
+      id: 4,
+      code: 'VND-042',
+      name: 'Former Plater',
+      is_approved: false,
+      is_active: false,
+      approval_status: 'disqualified',
+    };
+    mockedApi.getVendors.mockResolvedValue([bramble, switchedOff]);
+    renderPanel();
+    const table = await desktopTable('Former Plater');
+    expect(mockedApi.getVendors).toHaveBeenCalledWith({ active_only: false });
+    expect(mockedApi.getVendorsReevaluationDue).toHaveBeenCalledWith({ include_inactive: true });
+    const row = within(table).getByText('Former Plater').closest('tr') as HTMLElement;
+    expect(within(row).getByText('Inactive')).toBeInTheDocument();
+    expect(within(row).getByRole('button', { name: 'Update approval for Former Plater' })).toBeInTheDocument();
+    const brambleRow = within(table).getByText('Bramble Metals').closest('tr') as HTMLElement;
+    expect(within(brambleRow).queryByText('Inactive')).not.toBeInTheDocument();
   });
 
   it('counts the overdue chip from the re-evaluation endpoint and switches the filter', async () => {
@@ -136,5 +159,6 @@ describe('ApprovedSupplierListPanel', () => {
     await waitFor(() => expect(within(row).getByText('Approved')).toBeInTheDocument());
     // The overdue list is re-read after a decision (its membership follows the status).
     expect(mockedApi.getVendorsReevaluationDue).toHaveBeenCalledTimes(2);
+    expect(mockedApi.getVendorsReevaluationDue).toHaveBeenLastCalledWith({ include_inactive: true });
   });
 });

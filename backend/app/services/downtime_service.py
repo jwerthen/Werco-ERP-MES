@@ -20,9 +20,14 @@ Maintenance work order -> downtime (P2.3, owner decision 2026-11-13) lives here 
   has no open event: an operator's open event is ADOPTED (``maintenance_adopted``), and an
   event another started shutdown WO already holds is SHARED (this WO opens nothing).
 * When a WO ends, each open event it owns is handed over to another shutdown WO still holding
-  the machine down, else resolved -- except that a CANCELLED WO hands an adopted operator's
-  event back to the machine, still open. Complete also fills the WO's ``downtime_minutes``
-  from the events it resolved when the request left it at 0.
+  the machine down; failing that, a CANCELLED WO hands an adopted operator's event back to the
+  machine, still open; anything else is resolved. Complete also fills the WO's
+  ``downtime_minutes`` from the events it resolved when the request left it at 0.
+* The other direction is closed too: ``POST /downtime/`` refuses (409) an operator's report on a
+  machine a maintenance WO already holds down (``maintenance_hold_on_machine``) -- the
+  stoppage is already being recorded, and a second open event would count it twice.
+* A completed or cancelled maintenance WO is final (``PUT`` refuses any status change out of
+  either), and a WO that was ever completed is never taken as holding a machine down.
 * Start and end take a row lock on the work center first, so concurrent starts / ends on one
   machine are serialized (PostgreSQL).
 """
@@ -31,7 +36,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
@@ -266,6 +271,9 @@ def _holding_work_order(
             MaintenanceWorkOrder.company_id == company_id,
             MaintenanceWorkOrder.status.in_(_HOLDING_STATUSES),
             MaintenanceWorkOrder.started_at.isnot(None),
+            # A work order that was ever completed has ended, whatever its status says now (a
+            # pre-guard PUT could reopen one): it must never be taken as holding the machine.
+            MaintenanceWorkOrder.completed_at.is_(None),
         )
         .first()
     )
@@ -284,6 +292,7 @@ def _successor(
             MaintenanceWorkOrder.requires_shutdown == True,  # noqa: E712
             MaintenanceWorkOrder.status.in_(_HOLDING_STATUSES),
             MaintenanceWorkOrder.started_at.isnot(None),
+            MaintenanceWorkOrder.completed_at.is_(None),  # see _holding_work_order
         )
         .order_by(MaintenanceWorkOrder.started_at, MaintenanceWorkOrder.id)
         .first()
@@ -315,6 +324,35 @@ def _relink(
         description=description,
         extra_data={"source": source, "maintenance_wo_number": to.wo_number if to is not None else None},
     )
+
+
+def maintenance_hold_on_machine(
+    db: Session, company_id: int, work_center_id: int
+) -> Optional[Tuple[DowntimeEvent, MaintenanceWorkOrder]]:
+    """The open downtime event a maintenance WO is holding ``work_center_id`` down under, and
+    that WO -- or None. For ``POST /downtime/``, which must not open a second event for a
+    stoppage the maintenance WO is already recording (a machine never carries two open events
+    for one stoppage; every downtime total sums ``duration_minutes`` without merging overlaps).
+
+    Takes the machine lock first -- the lock maintenance start and end take -- so a report
+    racing a start cannot each see the other's absence. Writes nothing."""
+    _lock_machine(db, company_id, work_center_id)
+    open_on_machine = (
+        db.query(DowntimeEvent)
+        .filter(
+            DowntimeEvent.company_id == company_id,
+            DowntimeEvent.work_center_id == work_center_id,
+            DowntimeEvent.end_time.is_(None),
+            DowntimeEvent.maintenance_work_order_id.isnot(None),
+        )
+        .order_by(DowntimeEvent.start_time, DowntimeEvent.id)
+        .all()
+    )
+    for event in open_on_machine:
+        holder = _holding_work_order(db, company_id, event.maintenance_work_order_id)
+        if holder is not None:
+            return event, holder
+    return None
 
 
 def open_or_link_maintenance_downtime(
@@ -429,14 +467,17 @@ def end_maintenance_downtime(
     """When a maintenance WO ends (complete, or ``cancelled``): settle every open event it owns.
 
     Runs whatever the WO's current ``requires_shutdown`` / target say: an event it opened while
-    it did shut the machine down must still settle when it ends. For each owned open event:
+    it did shut the machine down must still settle when it ends. For each owned open event, in
+    this order:
 
+    * another shutdown WO still holds the machine down (it shared this event at its start) ->
+      HANDED OVER to it, still open, so the stoppage runs on, once, until the last WO ends --
+      however this one ended. A completed WO's hand-over clears the adopted mark (the original
+      cause has been worked); a cancelled WO's keeps it, so a later cancel of the successor
+      still hands the operator's breakdown back to the machine.
     * CANCELLED and the event was ADOPTED from an operator -> handed back to the machine:
       unlinked and left OPEN. The breakdown predates the work order and cancelling the work
       order did not fix it; resolving it would show a broken machine as running.
-    * another shutdown WO still holds the machine down (it shared this event at its start) ->
-      HANDED OVER to it, still open, so the stoppage runs on, once, until the last WO ends. A
-      completed WO's hand-over clears the adopted mark: the original cause has been worked.
     * otherwise -> RESOLVED at ``ended_at``.
 
     Returns the events this call RESOLVED (what the WO's ``downtime_minutes`` may count).
@@ -450,6 +491,26 @@ def end_maintenance_downtime(
 
     resolved: List[DowntimeEvent] = []
     for event in owned:
+        # The successor FIRST: while another shutdown WO still has the machine down, the
+        # stoppage goes on under it whichever way this one ended. Handing an adopted operator's
+        # event back to the machine instead would leave it owned by nobody, so the sharer's
+        # completion -- the repair -- would never resolve it.
+        successor = _successor(db, company_id, wo, event.work_center_id)
+        if successor is not None:
+            _relink(
+                event,
+                to=successor,
+                # A cancel did not work the operator's breakdown, so the adopted mark goes with
+                # it: if the successor is cancelled too, the event is handed back to the machine.
+                adopted=bool(event.maintenance_adopted) and cancelled,
+                audit=audit,
+                description=(
+                    f"Maintenance work order {wo.wo_number} ended; downtime event {event_identifier(event)} "
+                    f"stays open under {successor.wo_number}, which still has the machine shut down"
+                ),
+                source="maintenance_work_order_handover",
+            )
+            continue
         if cancelled and event.maintenance_adopted:
             _relink(
                 event,
@@ -461,20 +522,6 @@ def end_maintenance_downtime(
                     f"{event_identifier(event)} stays open on the machine (it was logged before the work order)"
                 ),
                 source="maintenance_work_order_cancel",
-            )
-            continue
-        successor = _successor(db, company_id, wo, event.work_center_id)
-        if successor is not None:
-            _relink(
-                event,
-                to=successor,
-                adopted=bool(event.maintenance_adopted) and cancelled,
-                audit=audit,
-                description=(
-                    f"Maintenance work order {wo.wo_number} ended; downtime event {event_identifier(event)} "
-                    f"stays open under {successor.wo_number}, which still has the machine shut down"
-                ),
-                source="maintenance_work_order_handover",
             )
             continue
         resolve_downtime_event(

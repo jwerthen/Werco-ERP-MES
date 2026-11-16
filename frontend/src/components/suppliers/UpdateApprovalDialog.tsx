@@ -6,6 +6,7 @@ import { Button } from '../ui/Button';
 import { LoadingButton } from '../ui/LoadingButton';
 import useUnsavedChanges from '../../hooks/useUnsavedChanges';
 import { toDisplayString } from '../../utils/apiError';
+import { formatCentralDate } from '../../utils/centralTime';
 import type { AslStatus, AslVendor, VendorApprovalUpdate } from '../../types/supplierApproval';
 import {
   ASL_BASES,
@@ -51,16 +52,33 @@ const sameList = (a: string[], b: string[]) =>
 const ordered = (values: string[], order: string[]) => order.filter(value => values.includes(value));
 
 /**
+ * Whether saving `status` makes this vendor approved when it is not approved now. That is
+ * the server's trigger for recording an approval date: a request that makes a not-approved
+ * vendor approved and sends no `approval_date` gets Central today, WHATEVER date the vendor
+ * already carries (a Conditional vendor's date from the ASL import, or the date of an
+ * approval it has since lost) — the new approval decision is today's.
+ */
+export const becomesApproved = (status: AslStatus | '' | null, vendorIsApproved: boolean): boolean =>
+  derivedIsApproved(status || null) === true && !vendorIsApproved;
+
+/**
  * The payload carries `approval_status`, `reason` and the CAS stamp always, and every
- * other field ONLY when the person changed it. That matters: the server applies a field
- * only when it is sent, and it records Central today as the approval date when a vendor
- * becomes approved WITHOUT one — re-sending an untouched blank date would suppress that.
+ * other field ONLY when the person changed it: the server applies a field only when it is
+ * sent.
+ *
+ * The approval date is the exception, so that the date the dialog SHOWS is the date the
+ * server STORES. When the save makes a not-approved vendor approved, a date in the field is
+ * always sent (even one equal to the date on file — leaving it out would have the server
+ * replace it with today), and a blank field is left out so the server records today, which
+ * is what the field's help text says. The dialog blanks the date on file when the status is
+ * changed to an approving one, so an untouched old date is never silently replaced.
  */
 export function buildApprovalPayload(
   initial: ApprovalForm,
   form: ApprovalForm,
   reason: string,
-  expectedUpdatedAt: string | null
+  expectedUpdatedAt: string | null,
+  vendorIsApproved: boolean
 ): VendorApprovalUpdate {
   const payload: VendorApprovalUpdate = {
     approval_status: form.approval_status || null,
@@ -73,8 +91,13 @@ export function buildApprovalPayload(
   if (!sameList(initial.approval_bases, form.approval_bases)) {
     payload.approval_bases = form.approval_bases.length ? ordered(form.approval_bases, ASL_BASES) : null;
   }
-  for (const key of ['approval_date', 'reevaluation_due', 'last_performance_evaluation'] as const) {
+  for (const key of ['reevaluation_due', 'last_performance_evaluation'] as const) {
     if (initial[key] !== form[key]) payload[key] = form[key] || null;
+  }
+  if (becomesApproved(form.approval_status, vendorIsApproved)) {
+    if (form.approval_date) payload.approval_date = form.approval_date;
+  } else if (initial.approval_date !== form.approval_date) {
+    payload.approval_date = form.approval_date || null;
   }
   if (initial.approval_notes.trim() !== form.approval_notes.trim()) {
     payload.approval_notes = form.approval_notes.trim() || null;
@@ -95,6 +118,9 @@ export function UpdateApprovalDialog({ vendor, onClose, onSaved }: Props) {
   const [reason, setReason] = useState('');
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
+  // True while the approval date is blank only because choosing an approving status cleared
+  // the date on file; choosing a non-approving status again puts that date back.
+  const [dateCleared, setDateCleared] = useState(false);
 
   useEffect(() => {
     const next = vendor ? formFor(vendor) : null;
@@ -102,6 +128,7 @@ export function UpdateApprovalDialog({ vendor, onClose, onSaved }: Props) {
     setInitial(next);
     setReason('');
     setError('');
+    setDateCleared(false);
   }, [vendor]);
 
   const dirty = useMemo(
@@ -114,6 +141,26 @@ export function UpdateApprovalDialog({ vendor, onClose, onSaved }: Props) {
 
   const status = form.approval_status || null;
   const derived = derivedIsApproved(status);
+  const approving = becomesApproved(form.approval_status, vendor.is_approved);
+
+  // Choosing a status that makes a not-approved vendor approved records a NEW approval, so
+  // the date on file (a Conditional vendor's, or one from an approval it has since lost) is
+  // not the approval date any more: blank it, and the help text says today is recorded. A
+  // date the person typed is theirs and is kept.
+  const changeStatus = (next: AslStatus | '') => {
+    const willApprove = becomesApproved(next, vendor.is_approved);
+    let approvalDate = form.approval_date;
+    let cleared = dateCleared;
+    if (willApprove && !cleared && approvalDate && approvalDate === initial.approval_date) {
+      approvalDate = '';
+      cleared = true;
+    } else if (!willApprove && cleared && approvalDate === '') {
+      approvalDate = initial.approval_date;
+      cleared = false;
+    }
+    setForm({ ...form, approval_status: next, approval_date: approvalDate });
+    setDateCleared(cleared);
+  };
   const toggle = (key: 'approved_scopes' | 'approval_bases', value: string) =>
     setForm(prev =>
       prev
@@ -137,7 +184,7 @@ export function UpdateApprovalDialog({ vendor, onClose, onSaved }: Props) {
     try {
       const saved = await api.updateVendorApproval(
         vendor.id,
-        buildApprovalPayload(initial, form, reason, vendor.updated_at ?? null)
+        buildApprovalPayload(initial, form, reason, vendor.updated_at ?? null, vendor.is_approved)
       );
       markSaved();
       onSaved(saved);
@@ -160,7 +207,10 @@ export function UpdateApprovalDialog({ vendor, onClose, onSaved }: Props) {
           type="date"
           className="input"
           value={form[key]}
-          onChange={e => setForm(prev => (prev ? { ...prev, [key]: e.target.value } : prev))}
+          onChange={e => {
+            if (key === 'approval_date') setDateCleared(false);
+            setForm(prev => (prev ? { ...prev, [key]: e.target.value } : prev));
+          }}
         />
       )}
     </FormField>
@@ -197,9 +247,7 @@ export function UpdateApprovalDialog({ vendor, onClose, onSaved }: Props) {
                 {...field}
                 className="input"
                 value={form.approval_status}
-                onChange={e =>
-                  setForm(prev => (prev ? { ...prev, approval_status: e.target.value as AslStatus | '' } : prev))
-                }
+                onChange={e => changeStatus(e.target.value as AslStatus | '')}
               >
                 <option value="">{NOT_ON_ASL_LABEL}</option>
                 {ASL_STATUSES.map(value => (
@@ -261,7 +309,15 @@ export function UpdateApprovalDialog({ vendor, onClose, onSaved }: Props) {
           {dateField(
             'approval_date',
             'Approved date',
-            initial.approval_date ? undefined : 'Left blank, approving records today.'
+            approving
+              ? form.approval_date
+                ? 'Approving records this date.'
+                : dateCleared
+                  ? `Approving records today, not the ${formatCentralDate(initial.approval_date)} on file. Enter a date to record another.`
+                  : 'Left blank, approving records today.'
+              : !form.approval_date && !vendor.is_approved
+                ? 'Left blank, approving records today.'
+                : undefined
           )}
           {dateField('reevaluation_due', 'Re-evaluation due')}
           {dateField('last_performance_evaluation', 'Last performance evaluation')}

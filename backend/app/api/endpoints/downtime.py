@@ -570,9 +570,24 @@ def create_downtime_event(
 ):
     """Start a new downtime event. **Role: any tenant role except VIEWER.**
 
-    ``work_center_id`` and ``work_order_id`` must belong to the active company (404).
+    ``work_center_id`` and ``work_order_id`` must belong to the active company (404). **409**
+    when a maintenance work order already has the machine shut down: its downtime event is
+    open and records this stoppage, and a second open event would count it twice in every
+    downtime total. It ends when that work order is completed or cancelled.
     """
     _assert_event_refs_in_company(db, company_id, work_center_id=data.work_center_id, work_order_id=data.work_order_id)
+    held = downtime_service.maintenance_hold_on_machine(db, company_id, data.work_center_id)
+    if held is not None:
+        held_event, holder = held
+        machine = holder.work_center.code if holder.work_center is not None else "This machine"
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{machine} is already down for maintenance work order {holder.wo_number} (downtime event "
+                f"{_event_identifier(held_event)} is open), so this stoppage is already being recorded. It ends "
+                "when that work order is completed or cancelled."
+            ),
+        )
     event = downtime_service.open_downtime_event(
         db,
         company_id=company_id,
