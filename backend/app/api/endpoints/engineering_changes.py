@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import and_, func
 from sqlalchemy.orm import Session, joinedload
 
+from app.api.audit_guard import required_audit
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
 from app.models.engineering_change import (
@@ -22,6 +23,13 @@ from app.schemas.base import UTCModel
 from app.services.audit_service import AuditService
 
 router = APIRouter()
+
+ECO_UPDATE_AUDIT_UNAVAILABLE_DETAIL = (
+    "The audit record for this engineering change edit could not be saved; nothing was changed. Retry."
+)
+ECO_TASK_UPDATE_AUDIT_UNAVAILABLE_DETAIL = (
+    "The audit record for this implementation task edit could not be saved; nothing was changed. Retry."
+)
 
 
 # ============== Pydantic Schemas ==============
@@ -482,7 +490,13 @@ def update_eco(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Update an ECO"""
+    """Update an ECO. Only the supplied fields change; an affected-id list replaces the stored one.
+
+    Refused 400 on a completed, rejected or cancelled ECO. Every affected id must be a live row of
+    the active company (else 422). An edit that changes a stored value is saved only with its
+    audit_log UPDATE row (old and new values): if that row cannot be written, nothing is saved and
+    the answer is 503, so retrying is safe. An edit that changes nothing writes nothing (200).
+    """
     eco = get_eco_or_404(db, eco_id, company_id)
 
     if eco.status in [ECOStatus.COMPLETED, ECOStatus.REJECTED, ECOStatus.CANCELLED]:
@@ -509,13 +523,21 @@ def update_eco(
         eco.affected_documents = json.dumps(eco_in.affected_documents)
 
     db.flush()
-    audit.log_update(
-        resource_type="engineering_change_order",
-        resource_id=eco.id,
-        resource_identifier=eco.eco_number,
-        old_values=old_values,
-        new_values=eco,
-    )
+    # Required evidence for every real edit, not just the affected-id lists. The ECO body is the
+    # change record (AS9100D 8.5.6): scope, effectivity, reason and risk assessment are all
+    # overwritten in place, so this row is the only trace of the value it replaced. That matters
+    # most for affected_documents, which DELETE /documents/{id} tells the user to edit here: a
+    # lost row would let a document leave the change record unseen. log_update returns None for
+    # an edit that changed nothing, which is not a failure.
+    with required_audit(db, ECO_UPDATE_AUDIT_UNAVAILABLE_DETAIL):
+        audit.log_update(
+            resource_type="engineering_change_order",
+            resource_id=eco.id,
+            resource_identifier=eco.eco_number,
+            old_values=old_values,
+            new_values=eco,
+            required=True,
+        )
 
     db.commit()
     db.refresh(eco)
@@ -848,7 +870,12 @@ def update_task(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Update an implementation task"""
+    """Update an implementation task. Only the supplied fields change.
+
+    An edit that changes a stored value is saved only with its audit_log UPDATE row: if that row
+    cannot be written, nothing is saved and the answer is 503, so retrying is safe. An edit that
+    changes nothing writes nothing (200).
+    """
     # G4-Fix1: verify the parent ECO belongs to the active company (404 otherwise),
     # then scope the task query by company too -- previously this query filtered only
     # on id + eco_id, making any tenant's task mutable by id.
@@ -882,13 +909,18 @@ def update_task(
         setattr(task, field, value)
 
     db.flush()
-    audit.log_update(
-        resource_type="eco_implementation_task",
-        resource_id=task.id,
-        resource_identifier=f"ECO {eco_id} task #{task.task_number}",
-        old_values=old_values,
-        new_values=task,
-    )
+    # Required for the same reason as the ECO edit: the task's description, notes, owner and
+    # status are overwritten in place, and a task set to "skipped" is what lets complete_eco close
+    # the change with that work undone. The row is the only record of who did that.
+    with required_audit(db, ECO_TASK_UPDATE_AUDIT_UNAVAILABLE_DETAIL):
+        audit.log_update(
+            resource_type="eco_implementation_task",
+            resource_id=task.id,
+            resource_identifier=f"ECO {eco_id} task #{task.task_number}",
+            old_values=old_values,
+            new_values=task,
+            required=True,
+        )
     db.commit()
     db.refresh(task)
     return (

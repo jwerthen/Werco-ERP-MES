@@ -777,8 +777,17 @@ class AuditService:
         description: Optional[str] = None,
         extra_data: Optional[Dict] = None,
         action: str = None,
+        *,
+        required: bool = False,
     ) -> AuditLog:
-        """Log an UPDATE action with change tracking."""
+        """Log an UPDATE action with change tracking.
+
+        Returns ``None`` without writing when nothing changed (unless ``action="restore"``).
+        With ``required=True`` a row that IS due goes through :meth:`log_required`, so a failure
+        raises ``AuditWriteError`` instead of returning ``None``; the caller rolls back (on an
+        HTTP route, ``app.api.audit_guard.required_audit``). "Nothing changed" stays ``None``
+        and is not a failure, so a save that changes nothing is never refused.
+        """
         old_dict = self._model_to_dict(old_values) if old_values else {}
         new_dict = self._model_to_dict(new_values) if new_values else {}
 
@@ -793,7 +802,8 @@ class AuditService:
         action_verb = action.title() if action else "Updated"
         desc = description or f"{action_verb} {resource_type}: {resource_identifier}"
 
-        return self.log(
+        write = self.log_required if required else self.log
+        return write(
             action=action.upper() if action else self.ACTIONS["UPDATE"],
             resource_type=resource_type,
             resource_id=resource_id,
