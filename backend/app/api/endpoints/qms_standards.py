@@ -1086,7 +1086,7 @@ def auto_link_standard(
                 "qms_clause_evidence",
                 resource_id=entry["evidence_id"],
                 # audit_log.resource_identifier is String(255); an evidence title may be 500.
-                resource_identifier=entry["title"][:255],
+                resource_identifier=entry["title"][:_AUDIT_IDENTIFIER_MAX],
                 description=(
                     f"Auto-link retired evidence '{entry['title']}' from clause {entry['clause_number']}: "
                     f"its rule '{entry['rule_id']}' no longer matches the clause"
@@ -1165,10 +1165,11 @@ def _retire_unmatched_auto_links(
     The candidate rows are read ``FOR UPDATE`` (a no-op on SQLite), so a second auto-link run on
     the same standard, or a Verify that COMMITTED before this run took the lock, is decided
     against the row as it then stands: a just-retired row is not retired twice, a just-verified
-    row is kept. A Verify that read the row before this run committed is not covered: the
-    evidence ``PUT`` reads without a lock, so it can still land on a row this run retired. These
-    row locks come before the audit-chain lock, which ``auto_link_standard`` takes only after
-    its flush.
+    row is kept. A Verify or Remove that reaches the row while this run holds it waits: the
+    evidence ``PUT`` and ``DELETE`` lock the row too (``_lock_live_evidence_or_404``) and judge
+    ``is_deleted`` after the lock, so a row this run retired is a 404 for them, never a row left
+    verified and deleted. These row locks come before the audit-chain lock, which
+    ``auto_link_standard`` takes only after its flush -- the same order as those two routes.
 
     Returns ``(retired, kept_reviewed)``. Each retired entry carries a JSON-ready pre-delete
     ``snapshot`` for the caller's required audit DELETE row.
@@ -1208,24 +1209,6 @@ def _retire_unmatched_auto_links(
         evidence.soft_delete(user_id)
         retired.append({**ref, "title": evidence.title, "snapshot": snapshot})
     return retired, kept_reviewed
-
-
-def _evidence_audit_snapshot(evidence: QMSClauseEvidence) -> Dict[str, Any]:
-    """Every column of the evidence row, JSON-ready (``log_required`` stores values as given).
-
-    Dates and datetimes become ISO strings and any other non-JSON value its ``str()``, so a
-    column type added later cannot make every retirement fail its required audit row.
-    """
-    snapshot: Dict[str, Any] = {}
-    for attr in sa_inspect(evidence).mapper.column_attrs:
-        value = getattr(evidence, attr.key)
-        if value is None or isinstance(value, (bool, int, float, str)):
-            snapshot[attr.key] = value
-        elif hasattr(value, "isoformat"):
-            snapshot[attr.key] = value.isoformat()
-        else:
-            snapshot[attr.key] = str(value)
-    return snapshot
 
 
 # ============== Evidence Links ==============
@@ -1298,9 +1281,9 @@ def _evidence_audit_snapshot(evidence: QMSClauseEvidence) -> Dict[str, Any]:
     """Every column of the evidence row, JSON-ready (``log_required`` stores values as given).
 
     Dates and datetimes become ISO strings and any other non-JSON value its ``str()``, so a
-    column type added later cannot make every evidence edit or removal fail its required audit
-    row (``json.dumps`` of a raw value would fail inside ``AuditService.log``, which a required
-    row turns into a 503).
+    column type added later cannot make every evidence link, edit, removal or auto-link
+    retirement fail its required audit row (``json.dumps`` of a raw value would fail inside
+    ``AuditService.log``, which a required row turns into a 503).
     """
     snapshot: Dict[str, Any] = {}
     for attr in sa_inspect(evidence).mapper.column_attrs:

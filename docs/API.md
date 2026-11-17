@@ -9044,9 +9044,10 @@ in `RBAC_PERMISSIONS.md`.
 > `{evidence_id, clause_id, clause_number, rule_id}`) and `extra_data.evidence_kept_reviewed` (the
 > same, plus `reason`), each only when non-empty. Candidate rows are locked (`FOR UPDATE`) for the
 > run, so a second run on the same standard never retires a row twice, and a **Verify** committed
-> before the run reached the row is honored. A Verify still in flight while the run commits is not
-> covered (the evidence `PUT` reads without a lock), so it can land on a row the run retired. The
-> SPA's *Auto-Link Evidence Complete* dialog does not show the new fields yet.
+> before the run reached the row is honored. A Verify or Remove that reaches a row while the run
+> holds it waits for the run to finish; if the run retired that row, the answer is **404 `Evidence
+> not found`** and nothing is written (see "Editing or removing an evidence link locks it first"
+> above). The SPA's *Auto-Link Evidence Complete* dialog does not show the new fields yet.
 >
 > **What operators see:** a 9.2 or 9.3 clause already linked to the audit-trail row loses that link
 > on the next **Auto-Link Evidence** run, unless someone verified or annotated it. That link still
