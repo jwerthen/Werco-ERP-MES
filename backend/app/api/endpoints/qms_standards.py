@@ -624,8 +624,10 @@ def get_clause_auto_evidence(
     """Discover live ERP/MES evidence for a single clause.
 
     An evidence rule whose query fails is listed as a placeholder row (``health_status``
-    ``no_data``, ``suggested_compliance`` ``not_assessed``, zero placeholder counts), so the
+    ``not_computed``, ``suggested_compliance`` ``not_assessed``, zero placeholder counts), so the
     clause never rolls up ``compliant`` while part of its evidence could not be computed.
+    ``not_computed`` means nothing is known about that module from this call; ``no_data`` means
+    the query ran and found no records. Do not report a ``not_computed`` row's counts.
     """
     clause = (
         db.query(QMSClause)
@@ -643,7 +645,7 @@ def get_clause_auto_evidence(
     overall = compute_overall_compliance(results)
 
     # Strip internal keys (_rule_id, _evaluation_failed) before returning. A rule whose query
-    # failed is still listed, as its no_data / not_assessed placeholder row.
+    # failed is still listed, as its not_computed / not_assessed placeholder row.
     clean_results = [{k: v for k, v in r.items() if not k.startswith("_")} for r in results]
 
     return ClauseAutoEvidenceResponse(

@@ -10,7 +10,7 @@ Before this fix a rule whose ``query_fn`` raised was logged and its row dropped,
   rule failed (and was dropped) too.
 
 Now each rule runs in its own savepoint; a raise rolls back to that savepoint and the
-rule's row becomes the ``no_data`` / ``not_assessed`` placeholder from
+rule's row becomes the ``not_computed`` / ``not_assessed`` placeholder from
 ``_evaluation_failed_result``. ``compute_overall_compliance`` then rolls such a clause up
 ``not_assessed`` -- unless a computed row says ``non_compliant`` or ``partial``, which still
 wins -- never ``compliant`` and never ``partial`` from the failure alone.
@@ -46,6 +46,7 @@ from app.schemas.qms_standard import AutoEvidenceResult
 from app.services.auto_evidence_service import (
     EVALUATION_FAILED_DESCRIPTION,
     EVALUATION_FAILED_DETAIL,
+    EVALUATION_FAILED_HEALTH_STATUS,
     EVALUATION_FAILED_KEY,
     EVIDENCE_MAPPING_RULES,
     _evaluation_failed_result,
@@ -62,6 +63,10 @@ COMPANY_ID = 1
 EMPTY_COMPANY_ID = 4242
 
 INTERNAL_KEYS = {"_rule_id", EVALUATION_FAILED_KEY}
+
+# What a query function may report. ``not_computed`` is NOT in it: that value is reserved for
+# the placeholder of a rule whose query raised.
+COMPUTED_HEALTH_STATUSES = {"healthy", "warning", "critical", "no_data"}
 
 # Matches exactly [calibration, maintenance] -- asserted in every test that uses it.
 #   "monitoring and measuring"  -> calibration
@@ -181,7 +186,7 @@ def _public_keys(row: dict) -> set:
 
 
 def test_failed_rule_reported_as_not_assessed_placeholder(db_session: Session, monkeypatch):
-    """The raising rule keeps a row: ``_rule_id``, flagged failed, no_data / not_assessed,
+    """The raising rule keeps a row: ``_rule_id``, flagged failed, not_computed / not_assessed,
     and the same public key set as a computed row."""
     _seed_compliant_calibration(db_session)
     clause = _cal_maint_clause(db_session)
@@ -202,7 +207,10 @@ def test_failed_rule_reported_as_not_assessed_placeholder(db_session: Session, m
     assert placeholder["title"] == rule["title"]
     assert placeholder["module_reference"] == rule["module_reference"]
     assert placeholder["description"] == EVALUATION_FAILED_DESCRIPTION
-    assert placeholder["health_status"] == "no_data"
+    # Not no_data: a module with no records reports the same zero counts, and the SPA must be
+    # able to tell "query failed" from "nothing on file" (it hides the count for this one).
+    assert placeholder["health_status"] == "not_computed"
+    assert placeholder["health_status"] == EVALUATION_FAILED_HEALTH_STATUS
     assert placeholder["health_detail"] == EVALUATION_FAILED_DETAIL
     assert placeholder["suggested_compliance"] == "not_assessed"
     assert placeholder["total_count"] == 0
@@ -607,7 +615,11 @@ def test_rule_ids_are_unique():
 @pytest.mark.parametrize("rule", EVIDENCE_MAPPING_RULES, ids=[r["id"] for r in EVIDENCE_MAPPING_RULES])
 def test_rule_placeholder_metadata_matches_its_query(db_session: Session, rule: dict):
     """Every rule carries ``evidence_type`` / ``title`` / ``module_reference`` equal to what its
-    ``query_fn`` returns, and its placeholder row has exactly the computed row's key set."""
+    ``query_fn`` returns, and its placeholder row has exactly the computed row's key set.
+
+    It also holds ``not_computed`` reserved for the placeholder: a query that ran reports one of
+    the computed statuses, so a reader can tell the placeholder's zero counts from the zero
+    counts of a module that genuinely has no records (``no_data``)."""
     for key in ("evidence_type", "title", "module_reference"):
         assert isinstance(rule.get(key), str) and rule[key], f"rule {rule['id']!r} lacks {key!r}"
 
@@ -618,6 +630,10 @@ def test_rule_placeholder_metadata_matches_its_query(db_session: Session, rule: 
     assert computed["title"] == rule["title"]
     assert computed["module_reference"] == rule["module_reference"]
 
+    assert computed["health_status"] in COMPUTED_HEALTH_STATUSES
+    assert computed["health_status"] != EVALUATION_FAILED_HEALTH_STATUS
+
     placeholder = _evaluation_failed_result(rule)
     assert placeholder["_rule_id"] == rule["id"]
+    assert placeholder["health_status"] == EVALUATION_FAILED_HEALTH_STATUS
     assert _public_keys(placeholder) == set(computed)

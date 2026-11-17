@@ -206,7 +206,9 @@ class AutoEvidenceResult(BaseModel):
     module_reference: str  # e.g. "/quality/ncr"
     total_count: int
     recent_count: int  # Last 12 months
-    health_status: str  # healthy, warning, critical, no_data
+    # healthy, warning, critical, no_data -- or not_computed: the placeholder for a rule whose
+    # query failed (zero counts are placeholders, not measurements; never produced by a query).
+    health_status: str
     health_detail: str  # e.g. "All NCRs resolved within SLA"
     examples: List[AutoEvidenceExample] = Field(default_factory=list)
     suggested_compliance: str  # compliant, partial, non_compliant, not_assessed

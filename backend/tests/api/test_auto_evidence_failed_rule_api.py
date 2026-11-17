@@ -3,7 +3,7 @@
 Companion to ``tests/services/test_auto_evidence_failed_rule.py``. Two routes:
 
 * ``GET /api/v1/qms-standards/clauses/{clause_id}/auto-evidence`` -- the failed rule is
-  listed as its ``no_data`` / ``not_assessed`` placeholder row, with every internal
+  listed as its ``not_computed`` / ``not_assessed`` placeholder row, with every internal
   ``_``-prefixed key stripped, and the clause no longer rolls up ``compliant``.
 * ``POST /api/v1/qms-standards/{standard_id}/auto-link`` -- the failed rule counts in the
   roll-up and in ``total_evidence_failed`` but persists NOTHING: an existing auto-linked
@@ -294,7 +294,10 @@ def test_get_auto_evidence_lists_failed_rule_and_withholds_compliant(
     assert placeholder["evidence_type"] == "module"
     assert placeholder["title"] == "Preventive Maintenance & Infrastructure"
     assert placeholder["description"] == EVALUATION_FAILED_DESCRIPTION
-    assert placeholder["health_status"] == "no_data"
+    # The wire value the SPA keys on to hide the "0 records" badge -- distinct from the
+    # no_data an empty module reports with the same zero counts.
+    assert placeholder["health_status"] == "not_computed"
+    assert computed["health_status"] != "not_computed"
     assert placeholder["health_detail"] == EVALUATION_FAILED_DETAIL
     assert placeholder["suggested_compliance"] == "not_assessed"
     assert placeholder["total_count"] == 0

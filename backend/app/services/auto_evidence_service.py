@@ -1276,6 +1276,12 @@ def _match_rules(clause: QMSClause) -> List[dict]:
 # to leave that rule's stored evidence untouched.
 EVALUATION_FAILED_KEY = "_evaluation_failed"
 
+# The placeholder's ``health_status``. Reserved for it: no query function returns it, so a
+# client can tell "the query failed" from a module that genuinely has no records (``no_data``,
+# with the same zero counts). The SPA hides the record count for it and MCP agents read it
+# from the same GET.
+EVALUATION_FAILED_HEALTH_STATUS = "not_computed"
+
 EVALUATION_FAILED_DESCRIPTION = "Evidence could not be computed from live records"
 EVALUATION_FAILED_DETAIL = (
     "Evidence could not be computed: the query for this module failed. "
@@ -1287,10 +1293,12 @@ def _evaluation_failed_result(rule: dict) -> dict:
     """The row that stands in for a rule whose query raised.
 
     Same keys as a computed row, so ``ClauseAutoEvidenceResponse`` keeps its shape. It says
-    ``no_data`` / ``not_assessed``: an unknown is never evidence of compliance, and
+    ``not_computed`` / ``not_assessed``: an unknown is never evidence of compliance, and
     ``compute_overall_compliance`` rolls a clause carrying this row up to ``not_assessed``
     (unless a computed row is ``non_compliant`` / ``partial``), never ``compliant``.
-    The zero counts are placeholders required by the schema, not measurements.
+    The zero counts are placeholders required by the schema, not measurements -- which is
+    why ``health_status`` is ``not_computed`` rather than ``no_data``: a genuinely empty
+    module reports the same zeros, and a reader must not show this row as "0 records".
     """
     return {
         "evidence_type": rule["evidence_type"],
@@ -1299,7 +1307,7 @@ def _evaluation_failed_result(rule: dict) -> dict:
         "module_reference": rule["module_reference"],
         "total_count": 0,
         "recent_count": 0,
-        "health_status": "no_data",
+        "health_status": EVALUATION_FAILED_HEALTH_STATUS,
         "health_detail": EVALUATION_FAILED_DETAIL,
         "examples": [],
         "suggested_compliance": "not_assessed",
@@ -1321,7 +1329,7 @@ def discover_evidence_for_clause(db: Session, clause: QMSClause, company_id: int
 
     A RULE THAT RAISES IS REPORTED, NEVER DROPPED. Each query runs in its own savepoint
     (``db.begin_nested()``); on any exception the savepoint is rolled back and the rule's
-    row becomes ``_evaluation_failed_result`` (``no_data`` / ``not_assessed``). Two things
+    row becomes ``_evaluation_failed_result`` (``not_computed`` / ``not_assessed``). Two things
     depend on that:
 
     * The roll-up. Dropping the row let a clause matching, say, calibration + maintenance
