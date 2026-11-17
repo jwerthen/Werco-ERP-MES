@@ -742,7 +742,7 @@ minus two further, named sets:
     is an app action — the Work Orders list's draft-row selection. `release_work_order` stays the
     agent's **only** release door (§9), one job per call, because release is the authorization step
     and the record of who put work on the floor. It is excluded rather than shadowed: no convenience
-    tool calls this route. Unlike the rows above, the route has no API-token refusal of its own — a full
+    tool calls this route. Like the two Excel-cutover loaders (and unlike the AI apply, export-control, egress-switch and ASL rows above), the route has no API-token refusal of its own — a full
     API token whose user holds Admin / Manager / Supervisor can still call it directly on `/api/v1` —
     so the exclusion is what keeps it off an agent's tool list. See
     [API.md → Work Orders](API.md#work-orders) → *Releasing several work orders at once*.

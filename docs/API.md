@@ -1549,7 +1549,7 @@ company-scoped.
 | DELETE | `/work-orders/{id}` | Delete work order (soft by default; `hard_delete=true` only for draft/cancelled, and refused **409** when ledger-backed ties or saved templates reference it) | Admin / Manager |
 | POST | `/work-orders/{id}/restore` | Restore a soft-deleted work order (**400** if it is not deleted). Re-opens the ties the delete cancelled — **except** any whose part has since been reclassified into one the shop produces. Returns an **envelope** (`message` + `skipped_material_allocations`), not a bare message; see "Restoring a work order" below. Reached from Work Orders → **Deleted** (`deleted_only=true` above) | Admin / Manager |
 | POST | `/work-orders/{id}/release` | Release to production. **400** `Only draft work orders can be released` when not DRAFT, **400** `Work order must have at least one operation` when it has none — the only two checks; there is no material, blocker or readiness gate (see "Releasing work orders" below). **404** when missing or soft-deleted | Admin / Manager / Supervisor |
-| POST | `/work-orders/bulk-release` | **Release several DRAFT work orders in one call.** Body `{"work_order_ids": [...]}`: 1–50 positive ids (repeats count toward the 50 and are de-duplicated, first occurrence kept); any other key → **422**. Each id is judged and released exactly as `POST /work-orders/{id}/release` would, all in **one** commit. Always **200** once the body validates — even when every item was refused — with `{results, released_count, error_count}`, one result per distinct id in request order. Not an MCP tool. See "Releasing several work orders at once" below | Admin / Manager / Supervisor |
+| POST | `/work-orders/bulk-release` | **Release several DRAFT work orders in one call.** Body `{"work_order_ids": [...]}`: 1–50 positive ids (repeats count toward the 50 and are de-duplicated, first occurrence kept); any other key → **422**. Each id is judged and released exactly as `POST /work-orders/{id}/release` would, all in **one** commit. **200** once the body validates — even when every item was refused — with `{results, released_count, error_count}`, one result per distinct id in request order, unless the whole request fails after the per-item phase (the audit rows or the commit: **409** on a lost lock race, otherwise 5xx, nothing saved). Not an MCP tool. See "Releasing several work orders at once" below | Admin / Manager / Supervisor |
 | POST | `/work-orders/{id}/start` | Start production: a **RELEASED** work order → IN_PROGRESS. **409** on a DRAFT (release first) or ON_HOLD (resume it — this verb no longer lifts a hold) work order, **400** on any other non-released status, **404** when missing or soft-deleted, **409** on a concurrent write | Admin / Manager / Supervisor |
 | POST | `/work-orders/{id}/resume` | **Resume Work Order** — lift a *work-order* hold. Never releases: the target comes from the release record (`released_at` / `released_by`) — IN_PROGRESS when released and worked, RELEASED when released and unworked, **DRAFT** when no release is on record (un-worked READY operations, laser nests included, return to PENDING). **400** when not on hold, **404** when missing or soft-deleted, **503** (nothing changed) when the required audit rows cannot be written. Operation-level holds are untouched. See "Draft and on-hold work orders refuse every start" below | Admin / Manager / Supervisor |
 | POST | `/work-orders/{id}/complete` | Force-complete a work order (privileged override), booking `quantity_complete` as its finished count — the header is **set** to it. **409** if the WO is CANCELLED or an open operation is on hold. **403** for an API token sending a `quantity_scrapped` above the header's recorded scrap (owner decision 2026-11-07: only a person declares scrap), and first among the quantity refusals for an API token completing short or above what the floor recorded. **409** when `quantity_complete` exceeds what the floor recorded (naming the binding operation) unless `quantity_override_reason` is sent, and **400** above what can still exist once declared shorts and covered scrap are out, even with a reason; **409** when the shortfall below the order is not covered by floor-reported scrap or `quantity_scrapped` (with a reason); **503** (nothing saved) when the required audit row cannot be written. See "Short count at completion" below | Admin / Manager / Supervisor / Quality |
@@ -1910,9 +1910,9 @@ company-scoped.
 > **Releasing several work orders at once — `POST /work-orders/bulk-release`.** Body
 > `{"work_order_ids": [41, 57, 41]}`: 1–50 positive ids, `extra="forbid"` (a misspelled key is **422**,
 > never a silently empty request). Repeats count toward the 50 and are de-duplicated server-side, the
-> first occurrence kept. Once the body validates the answer is always **200** — a role outside the three
+> first occurrence kept. Once the body validates the answer is **200** — a role outside the three
 > is **403** and a malformed body **422**, as usual — with one result per distinct id, in the
-> de-duplicated request order:
+> de-duplicated request order, unless the whole request fails after the per-item phase (see below):
 >
 > ```json
 > {
@@ -1934,7 +1934,10 @@ company-scoped.
 > someone else. Refresh and try again.`), the text the single route answers for the same race as a
 > whole-request 409, and any other per-item database failure gets `Work order could not be released.
 > Refresh and try again.` (never the driver's message). Those two are bulk-only retry texts. One item's
-> refusal or failure never undoes another's release.
+> refusal or failure never undoes another's release. A failure **after** the per-item phase — writing
+> the deferred audit rows, or the single commit — fails the **whole** request (**409** on a lost lock
+> race, otherwise 5xx) and saves nothing, so no release can land without its audit row; retry the
+> batch.
 >
 > - **One transaction, per-item savepoints.** Each id is released inside its own savepoint and the
 >   route commits once. Every released work order gets exactly what the single route writes: the same

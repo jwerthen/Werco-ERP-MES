@@ -1236,8 +1236,9 @@ class WorkOrderBulkReleaseResult(UTCModel):
 class WorkOrderBulkReleaseResponse(UTCModel):
     """Response for ``POST /work-orders/bulk-release``: one result per distinct requested id.
 
-    Always HTTP 200 once the request validates, even when every item errored -- read
-    ``error_count`` / each result's ``status``. ``results`` follow the request order
+    HTTP 200 once the request validates, even when every item errored -- read
+    ``error_count`` / each result's ``status`` -- unless the whole request fails after the
+    per-item phase (the deferred audit rows or the commit), which saves nothing. ``results`` follow the request order
     (after de-duplication).
     """
 

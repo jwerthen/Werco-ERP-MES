@@ -5161,11 +5161,13 @@ def bulk_release_work_orders(
     Takes 1-50 work order ids (duplicates ignored after the first) and releases each one
     exactly as ``POST /work-orders/{id}/release`` would -- same rule, same refusal texts,
     same audit row and ``work_order_released`` event per work order -- in ONE transaction,
-    each item in its own savepoint. Always answers **200** with one result per distinct id,
+    each item in its own savepoint. Answers **200** with one result per distinct id,
     in request order: ``released``, or ``error`` with the reason ("Only draft work orders can
     be released", "Work order must have at least one operation", "Work order not found" for
     an id that is another company's, deleted or absent). One item's failure never undoes
-    another's release. Scheduling runs once over every released job after the commit.
+    another's release; a failure after the per-item phase (the audit rows or the commit) fails
+    the whole request (409 on a lost lock race) and saves nothing. Scheduling runs once over
+    every released job after the commit.
     """
     outcome = work_order_release_service.bulk_release_work_orders(
         db,
@@ -5200,6 +5202,8 @@ def bulk_release_work_orders(
                 context={"company_id": company_id, "released_work_order_ids": released_ids},
             )
 
+        # Deliberately no is_deleted filter (invariant 3 exception): these are the ids this
+        # request just released and committed live; the read only feeds same-tenant broadcasts.
         current_statuses = dict(
             tenant_filter(db.query(WorkOrder.id, WorkOrder.status), WorkOrder, company_id)
             .filter(WorkOrder.id.in_(released_ids))
