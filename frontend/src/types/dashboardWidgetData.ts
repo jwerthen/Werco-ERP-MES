@@ -57,8 +57,12 @@ export interface ActiveDowntimeEvent {
  * The dashboard widget deliberately renders none of the cost fields.
  */
 export interface MaintenanceDashboardResponse {
+  /** Maintenance work orders only. */
   overdue_count: number;
   due_this_week: number;
+  /** PM schedules due with no open work order — absent from an API that predates them. */
+  schedules_overdue?: number;
+  schedules_due_this_week?: number;
   completed_this_month: number;
   completion_rate: number;
   total_cost_month: number;
