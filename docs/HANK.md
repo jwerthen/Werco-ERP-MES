@@ -47,7 +47,7 @@ release controls. It never releases a WO or dispatches engineering model tools.
 See [Hank Drawing Engineering](HANK_ENGINEERING.md) for supported drawings,
 review gates, revision conflicts, partial-save recovery and verification.
 
-**Tasks** provides six reviewed workflows:
+**Tasks** provides eight reviewed workflows:
 
 - **Repeat a job:** choose the source job, quantity and optional due date; review
   the plan summary, then create a draft using the existing duplication workflow.
@@ -76,6 +76,24 @@ review gates, revision conflicts, partial-save recovery and verification.
 - **Prepare a shipment:** reserve completed quantity in a pending shipment and
   link its packing slip. This does not dispatch goods, issue a CoC, purchase a
   carrier label or schedule a pickup.
+- **Change a due date:** choose a work order, the new due date and a reason
+  (1–500 characters). The review shows the old and new dates and the reason. Only
+  `due_date` moves: the **must-ship-by** promise date never does, and the review
+  says so when one is set, because it takes precedence over the due date for
+  on-time delivery. A date earlier than today (shop-local) is flagged as already in
+  the past. Scheduled dates, priority and the dispatch plan are not edited. A date
+  equal to the current one, or a complete, closed or cancelled job, is refused (409).
+  Admin, Manager and Supervisor only.
+- **Add a note to a job:** choose a work order, write the note (1–5,000
+  characters) and optionally @mention up to 20 people. The note is posted as a
+  **comment** in the job's Comments panel under the employee's own name — never
+  into the work order's own notes field — and everyone who can see the job can read
+  it. Mentioned people get an in-app notice and, by default, an email; watchers
+  get an in-app notice. **The note text is never emailed** or put in any
+  notification. Every role with work-order view access, Viewer included, can post
+  a note — the first reviewed task open to a Viewer. Only a person posts one: a
+  standing API token cannot, and no agent can through MCP, even on a person's own
+  sign-in.
 
 The employee explicitly submits each reviewed action. Hank can also prepare a
 proposal from an explicit chat request using `prepare_hank_task`; the review link
@@ -319,7 +337,7 @@ The original five accepted priorities were implemented first, in this order:
 | Priority | Employee experience | Implementation status / next work |
 | --- | --- | --- |
 | 1 — Shift briefings | “Here’s what needs your attention today,” tailored to the employee's role and recorded ownership. | Implemented: live, permission-scoped sections, personal open-clock jobs, shop/quality/material/purchasing exceptions, shipping due-date review, freshness and partial-coverage labels. No inferred next-job assignment or background polling. |
-| 2 — Complete task workflows | “Prepare a repeat job,” “Draft this PO,” or “File this material cert.” Hank previews exact changes, executes the authorized submission, and links the result. | Implemented and expanded: six reviewed task kinds plus separate PDF intake/filing. Chat may prepare audited task proposals but cannot execute them. Includes caller/credential identity, source-freshness checks, required audits, atomic receipts and safe retry/recovery. |
+| 2 — Complete task workflows | “Prepare a repeat job,” “Draft this PO,” or “File this material cert.” Hank previews exact changes, executes the authorized submission, and links the result. | Implemented and expanded: eight reviewed task kinds plus separate PDF intake/filing. Chat may prepare audited task proposals but cannot execute them. Includes caller/credential identity, source-freshness checks, required audits, atomic receipts and safe retry/recovery. |
 | 3 — Follow-through inbox | See what needs employee input and what finished; reopen saved proposals and result receipts. | Implemented: persistent personal task inbox, server-side status filtering and pagination, refresh/recovery, current-permission checks, and source/result links. No background execution is implied by a saved proposal. |
 | 4 — Useful alerts | Hear when blockers clear or a new matching PDF arrives. | Implemented: explicit personal work-order watches, periodic/manual checks, one-shot owner-only in-app receipts, current-permission checks, and snooze/resume/stop controls. Deployment must enable the Hank-only worker schedule. No blanket job readiness or certificate approval claim. |
 | 5 — Remembered preferences | Hank remembers preferred briefings, work areas, handoff formats and alert choices. | Implemented: explicit personal/company preferences, save/reset/reload controls, version checks and required audits. Choices change presentation and in-app alerts only; they do not grant access or alter production policy. Company learning does not become an employee's personal instruction. |
@@ -343,7 +361,10 @@ confirms it.
 - The existing MCP gateway already describes and dispatches broad authenticated
   ERP operations. It is a useful foundation for future actions, but it is not
   connected to Hank's chat tool registry. MCP read/write annotations are hints;
-  they do not supply an employee-intent or approval workflow.
+  they do not supply an employee-intent or approval workflow. An agent can reach
+  the task routes through the generated `prepare_task` / `execute_task` tools,
+  except for a note: the gateway refuses `add_note` to an agent on every
+  credential ([MCP §4.3](MCP.md#43-people-only-hank-tasks-every-credential)).
 - The ERP already has separate Action Inbox sensors, a morning brief, contextual
   recommendations, and an allowlisted Accept & apply (a person's click; no
   automation). Company snapshot context can already include tenant-level learned
@@ -362,7 +383,7 @@ confirms it.
   deployment procedure.
 - `/api/v1/copilot/chat`, `Copilot*` contracts, the OpenAPI tag, `COPILOT_*` tuning
   variables, and `copilot_chat`/`copilot_panel` telemetry keys retain their names.
-  Prompt `copilot_chat` is version 1.7.0. Task workflows require additive migration
+  Prompt `copilot_chat` is version 1.8.0. Task workflows require additive migration
   108 for `hank_tasks`, with matching PostgreSQL RLS/grant guards in migration
   and model bootstrap. No new role or environment setting is introduced; see
   [deployment ordering](DEPLOYMENT.md#hank-task-storage).
@@ -381,7 +402,7 @@ confirms it.
   handoffs, routines and runs. It seeds no approved procedures or work. The
   request-driven `process_hank_intake_file_job` needs a matching worker and shared
   storage but no new cron/environment variable. Document analysis uses versioned
-  `hank_document_intake` prompt 1.2.0 through the shared model router, company
+  `hank_document_intake` prompt 1.2.1 through the shared model router, company
   AI-egress gate and usage telemetry. Direct reports, forms, handoffs, routines
   and queue reads do not require an LLM. See [deployment](DEPLOYMENT.md#hank-workflows-and-document-intake).
 - Document chat, receiving and PO import reuse those tables without a new migration. Deploy the
@@ -392,6 +413,27 @@ confirms it.
   bounded native text in one model request. Source previews and receiving/PO matching
   need no LLM call, and database read transactions close before model calls. Actual cache
   reads, writes, tokens and estimated costs remain visible in AI Usage & Cost.
+- The due-date and note tasks reuse the migration 108 task store; a note also needs
+  the work-order comment tables (migration 125, shipped with work-order comments).
+  They add no environment variable, cron or deployment step.
+  - `change_due_date` judges the move with the same rule as `PUT /work-orders/{id}`
+    (one helper, `services/work_order_due_date.py`), at review and again under the
+    row lock on submission. Its source check covers only the job's due date,
+    must-ship-by, status and version: any edit of the job requires a fresh review,
+    while a dispatch-plan rank write, which bumps no version, does not. The work-order
+    audit row is **required** (a lost row rolls everything back with 503) and carries
+    the reason and `via: hank`. A best-effort `work_order_updated` event is written
+    without the reason. There is no realtime broadcast: open screens show the new
+    date on their next read.
+  - `add_note` checks the note with the comment service's own rules at review,
+    writing nothing, and again on submission, which posts through the same service
+    as the Comments panel (comment, mention rows, auto-watches, notifications) with a
+    **required** create audit carrying `via: hank`. Its source check is the job and
+    the mention ids, so later edits of the job do not invalidate it; a deleted job
+    or a person who can no longer be mentioned refuses the submission.
+  - Every kind has its own review and submission branch. A kind without one is
+    refused (400 `Hank cannot run this kind of task.`) rather than run through the
+    PDF-attach branch, which used to be the fall-through for both.
 
 See [API](API.md#hank-ai-shop-teammate),
 [permissions](RBAC_PERMISSIONS.md#hank-ai-chat-and-pdf-filing),

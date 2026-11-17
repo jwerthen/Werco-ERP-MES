@@ -681,18 +681,25 @@ tokens" below), never wider.
 >   watching or unwatching a record answer **403** to every API token, whatever its role or scope: a
 >   comment is a person's own words. The reads stay open to a token the read gates admit. See
 >   [Comments and watchers](#comments-and-watchers).
+> - **Hank notes (owner decision 2026-11-16).** Hank's `add_note` task posts a work-order comment,
+>   so every API token is refused **403** at `POST /hank/tasks` and `POST /hank/tasks/{id}/execute`
+>   with the comment routes' text, whatever its role or scope. See Hank → "Reviewed task contract".
 > - **Left open.** **Resume Work Order** (`POST /work-orders/{id}/resume`): a token whose user holds
 >   Admin / Manager / Supervisor may lift a work-order hold, audited as that user with
 >   `extra_data.credential` (owner decision 2026-11-07). Dismiss, snooze and feedback on a
 >   recommendation stay open to every credential — a design decision of the AI governance change,
->   confirmed by the owner 2026-11-07 for Dismiss on an action card.
+>   confirmed by the owner 2026-11-07 for Dismiss on an action card. Hank's `change_due_date` task is
+>   open to a full token whose user holds Admin / Manager / Supervisor, in parity with
+>   `PUT /work-orders/{id}` (owner decision 2026-11-16; whether agents may move due dates is an open
+>   owner follow-up).
 >
 > A crew-station badge token is a person and passes the scrap, short-close and count rules (for scrap
 > and short closes that is the owner's decision, which names the crew badge; for the count rules it is
 > this PR's reading). An
 > interactive JWT, including one an MCP client carries, is the person's own session and is not
 > refused by any of them — that is current behavior, not part of the 2026-11-07 decision, which
-> covered standing API tokens only.
+> covered standing API tokens only. Separately, the MCP door refuses a Hank `add_note` to an agent
+> even on a person's own JWT (see [MCP door](#mcp-door-mcp)).
 >
 > **The row wins over the claims.** The `api_tokens` row — never the JWT — says who and which
 > company: the JWT's `user_id` / `company_id` must equal the row's or the token is refused, the active
@@ -1549,7 +1556,7 @@ company-scoped.
 | GET | `/work-orders/{id}` | Get work order by ID. Also carries the job's cost by element (`job_cost_actuals`), the inventory-ledger material figure (`issued_material_cost`) and, per operation, where its actual hours come from (`hours_source`, `recorded_setup_hours`, `recorded_run_hours`, `hours_include_backfill`) — see "Cost and actual hours on the work-order read" below | Yes |
 | GET | `/work-orders/by-number/{wo_number}` | Get work order by number: the **same body** as by ID (every computed field included). A soft-deleted work order is **404**, as by ID. Unlike the read by ID it does **not** reconcile on read — it writes nothing | Yes |
 | GET | `/work-orders/{id}/timeline` | Chronological job history with category, actor and time filters; opaque cursor, `limit` 1–100 (default 30). Returns business events and source links, not raw audit payloads. Each item a single operation owns (its start / finish, production receipts, process-step evidence, labor, a blocker filed against it) carries `operation_id`; the job's own items carry `null` | Yes |
-| PUT | `/work-orders/{id}` | Update work order (body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status, **or sets `status` to COMPLETE/CLOSED from any status other than COMPLETE/CLOSED** — see "Terminal-state lock" below). **`due_date` is the one non-`status` field that IS status-gated: changing it on a COMPLETE/CLOSED/CANCELLED work order returns 409** (see "Due date on a finished job" below). Other non-`status` fields such as `notes` / `special_instructions` / `unit_number` carry **no status gate**: they are editable at any status, including terminal ones (send `unit_number: null` — or `""`, which is trimmed to NULL — to clear it). **The flip verb for `sequential_operations`** — turning it *on* returns **409** on a laser nest WO, and **409 naming the operations** when work is already under way out of sequence; otherwise it demotes un-worked blocked operations READY → PENDING, one audit row each (see "READY promotion" below). **`status: on_hold` on a DRAFT work order returns 409** (a draft has nothing on the floor to hold — release it first); this `PUT` is the "Hold Work Order" write for a released / in-progress job, and the door that puts a held job back on the floor is `POST /work-orders/{id}/resume` (this `PUT` can still move a held job to `draft` or `cancelled`, which keeps it off the floor; its blind move to `released` / `in_progress` is a known gap — see "Draft and on-hold work orders refuse every start" below). **Any move to `draft`** (from released / in progress / on hold) returns every un-worked READY operation — laser nests included — to PENDING with one **required** audit row each; **503**, nothing changed, when those rows cannot be written (see "Returning a job to draft" below). **Lowering `quantity_ordered` below what a whole-order operation has already accounted for (its good + scrap) returns 409** naming the operation, before any field is written — lower the order only by units no operation has started; **raising** it once a whole-order or component operation has completed returns 409 too; whole-order targets restated as `component_quantity` move with the order (audited); an API token lowering it once work is recorded gets 403, as does an API token raising the header's `quantity_scrapped` (only a person declares scrap — owner decision 2026-11-07), changing `scrap_reason`, or changing the header's `quantity_complete` / `quantity_scrapped` in either direction (this PR's extension); and a `sequential_operations` flip that would re-interpret a declared short returns 409 (see "Short count at completion" below) | Admin / Manager / Supervisor |
+| PUT | `/work-orders/{id}` | Update work order (an absent, other-company **or soft-deleted** work order is **404** `Work order not found` — restore is its own verb; body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status, **or sets `status` to COMPLETE/CLOSED from any status other than COMPLETE/CLOSED** — see "Terminal-state lock" below). **`due_date` is the one non-`status` field that IS status-gated: changing it on a COMPLETE/CLOSED/CANCELLED work order returns 409** (see "Due date on a finished job" below). Other non-`status` fields such as `notes` / `special_instructions` / `unit_number` carry **no status gate**: they are editable at any status, including terminal ones (send `unit_number: null` — or `""`, which is trimmed to NULL — to clear it). **The flip verb for `sequential_operations`** — turning it *on* returns **409** on a laser nest WO, and **409 naming the operations** when work is already under way out of sequence; otherwise it demotes un-worked blocked operations READY → PENDING, one audit row each (see "READY promotion" below). **`status: on_hold` on a DRAFT work order returns 409** (a draft has nothing on the floor to hold — release it first); this `PUT` is the "Hold Work Order" write for a released / in-progress job, and the door that puts a held job back on the floor is `POST /work-orders/{id}/resume` (this `PUT` can still move a held job to `draft` or `cancelled`, which keeps it off the floor; its blind move to `released` / `in_progress` is a known gap — see "Draft and on-hold work orders refuse every start" below). **Any move to `draft`** (from released / in progress / on hold) returns every un-worked READY operation — laser nests included — to PENDING with one **required** audit row each; **503**, nothing changed, when those rows cannot be written (see "Returning a job to draft" below). **Lowering `quantity_ordered` below what a whole-order operation has already accounted for (its good + scrap) returns 409** naming the operation, before any field is written — lower the order only by units no operation has started; **raising** it once a whole-order or component operation has completed returns 409 too; whole-order targets restated as `component_quantity` move with the order (audited); an API token lowering it once work is recorded gets 403, as does an API token raising the header's `quantity_scrapped` (only a person declares scrap — owner decision 2026-11-07), changing `scrap_reason`, or changing the header's `quantity_complete` / `quantity_scrapped` in either direction (this PR's extension); and a `sequential_operations` flip that would re-interpret a declared short returns 409 (see "Short count at completion" below) | Admin / Manager / Supervisor |
 | DELETE | `/work-orders/{id}` | Delete work order (soft by default; `hard_delete=true` only for draft/cancelled, and refused **409** when ledger-backed ties or saved templates reference it, or when it has comments) | Admin / Manager |
 | POST | `/work-orders/{id}/restore` | Restore a soft-deleted work order (**400** if it is not deleted). Re-opens the ties the delete cancelled — **except** any whose part has since been reclassified into one the shop produces. Returns an **envelope** (`message` + `skipped_material_allocations`), not a bare message; see "Restoring a work order" below. Reached from Work Orders → **Deleted** (`deleted_only=true` above) | Admin / Manager |
 | POST | `/work-orders/{id}/release` | Release to production. **400** `Only draft work orders can be released` when not DRAFT, **400** `Work order must have at least one operation` when it has none — the only two checks; there is no material, blocker or readiness gate (see "Releasing work orders" below). **404** when missing or soft-deleted | Admin / Manager / Supervisor |
@@ -1640,6 +1647,11 @@ company-scoped.
 > work-order list hid the control while the detail page and the API permitted the same edit, which made
 > the audit trail look like a restriction was holding when two other doors were open. Both UI surfaces
 > now hide the due-date pencil on a terminal WO to match, but the 409 is what enforces it.
+>
+> The rule is **one implementation**, `services/work_order_due_date.py`
+> (`assert_due_date_change_allowed`), shared by this `PUT` and Hank's `change_due_date` task (Hank →
+> "Reviewed task contract"), so the two doors cannot drift apart. The `PUT` only judges the change
+> there; its own `setattr` loop still writes the value.
 >
 > **READY promotion: a sequenced ROUTING or a DISPATCH POOL, chosen per work order.** Which of the two
 > a work order is, is its own setting — `sequential_operations`, added by migration `081` and carried on
@@ -2041,7 +2053,8 @@ company-scoped.
 >   terminal work order.
 > - **A soft-deleted work order is 404** on clock-in, both start verbs, `POST /work-orders/{id}/start`,
 >   `POST /work-orders/{id}/release` and the generic `PUT /work-orders/operations/{id}` (the whole verb:
->   no field of a deleted job's operation is editable through it).
+>   no field of a deleted job's operation is editable through it) — and, since 2026-11-16, the header
+>   `PUT /work-orders/{id}` too (restore is its own verb).
 > - **A laser child does not inherit its assembly parent's draft or hold** — the gate reads the
 >   operation's own work order. Hold the laser work order itself to stop its nests.
 > - **List membership does not change.** Draft and held jobs stay on the kiosk queue, the crew station,
@@ -12585,7 +12598,7 @@ hidden spreadsheet content and external workbook links are unsupported.
 Formulas are never evaluated, and cached formula values remain uncertain.
 Upload request keys are company-scoped and bound to actor plus exact
 filename/hash inputs. Extraction uses the shared, company-egress-gated model
-client with `hank_document_intake` prompt 1.2.0. A request-driven ARQ job claims
+client with `hank_document_intake` prompt 1.2.1. A request-driven ARQ job claims
 and commits before parsing/model work, then reloads current authority and saves
 its result with required audit. Parsing runs in a resource-bounded subprocess;
 no database transaction stays open during file or model I/O.
@@ -12686,7 +12699,7 @@ or scheduled cron. Intake requires a matching enqueue-driven worker.
 
 **Reviewed task contract.** `POST /hank/tasks` accepts
 `{ expected_company_id, request_key, kind, input }`. `request_key` is normalized to a canonical
-UUID. The six `kind` values are listed below; each input is
+UUID. The eight `kind` values are listed below; each input is
 validated against its specific schema and undeclared fields are rejected. The task stores
 immutable input/preview evidence and fingerprints of the source plan. There is a cap of 100
 proposals awaiting review per actor/credential. Creating a proposal requires the same
@@ -12700,6 +12713,8 @@ authority as its eventual action:
 | `receive_delivery` | `purchase_order_id`, 1–50 receipt lines; each requires `po_line_id`, positive actual `quantity_received` and explicit `requires_inspection`; optional lot/heat/serial/certificate/location/over-receipt details | Admin/Manager/Supervisor plus `receiving:view` + `receiving:create`; canonical atomic delivery/stock posting, with no automatic printing |
 | `report_production` | `operation_id`, nonnegative good/scrap deltas (at least one positive), scrap reason/code when reporting scrap; optional NCR details and reasoned hold | Admin/Manager/Supervisor/Operator/Quality plus `work_orders:view` + `work_orders:complete`; caller must have an open clock on the operation; no implicit job/operation completion. A standing API token may report good only: a scrap delta is refused **403** in the preview, so at preparation (no task saved) and again at execution (the task stays `awaiting_review`, nothing written) — owner decision 2026-11-07, only a person declares scrap |
 | `draft_shipment` | `work_order_id`, positive `quantity_shipped`, optional destination/carrier/package details; `cert_of_conformance` must be false | Admin/Manager/Supervisor/Shipping plus `shipping:view` + `shipping:create` + `work_orders:view`; reserves available completed units in a pending shipment, without dispatch/CoC/carrier purchase |
+| `change_due_date` | `work_order_id`, `new_due_date` (`YYYY-MM-DD`; required, a due date is never cleared), `reason` (stripped, 1–500 characters, no NUL) | Admin/Manager/Supervisor plus `work_orders:view` + `work_orders:edit` (the role set of `PUT /work-orders/{id}`); moves `due_date` only, **never `must_ship_by`**. API tokens are treated like any other credential (a full token may run it) — see below |
+| `add_note` | `work_order_id`, `body` (stripped, 1–5000 characters, no NUL), optional `mentioned_user_ids` (at most 20 distinct positive integers) | All seven tenant roles, Viewer included, plus `work_orders:view`; posts a **work-order comment** under the employee's name, never `WorkOrder.notes`. **People only:** every API token is refused **403** at preparation and at execution, and the MCP door refuses it to an agent on any credential — see below |
 
 Existing Superuser/Platform Admin bypass, active-company and token fences remain. A read-only
 company context cannot create or execute proposals. A task is scoped to company, actor,
@@ -12742,6 +12757,69 @@ from copied runs, and skipped operations/material ties appear in the receipt. Ex
 work-order/revision-history document bindings cannot be reassigned. Schema migration108
 adds the task store; no new environment variable or LLM call is needed for direct tasks.
 
+Every kind has its own preview and execution branch. An unregistered `kind` is **422** at
+validation; a registered kind that lacks a branch (a programming error) is **400**
+`Hank cannot run this kind of task.` rather than being run as another kind — before 2026-11-16
+both the preview and the execution fell through to `attach_document`.
+
+**`change_due_date`.** The rule is the generic `PUT /work-orders/{id}`'s, from one shared helper
+(`services/work_order_due_date.py`, `assert_due_date_change_allowed`), judged at preparation and
+again under the work-order row lock at execution:
+
+- **409** `<WO number> is already due <date>. There is nothing to change.` when the new date equals
+  the stored one (checked first);
+- **409** `cannot change the due date of a work order in terminal status '<status>': its due date is
+  the promise date its delivery performance was scored against.` on a COMPLETE, CLOSED or CANCELLED
+  work order — the `PUT`'s own text (see Work Orders → "Due date on a finished job");
+- **404** `Work order not found` for an absent, other-company or soft-deleted work order.
+
+The preview's `changes` are `Due date: <old, or "not set"> → <new>.` and `Reason: <reason>`. Its
+`warnings` always say that only the due date changes (scheduled dates, priority and the dispatch
+plan are not edited); add `The promise date does not move: must ship by <date> stays as it is, and it
+takes precedence over the due date for on-time delivery.` when `must_ship_by` is set; and add
+`The new due date is already in the past.` when the new date is before today's Central date (a past
+date is allowed, only flagged). The source fingerprint is deliberately narrow — the work order's
+`due_date`, `must_ship_by`, `status` and `version` — so any edit of the work order between review and
+execution is the 409 `The source records changed. Prepare and review a fresh task.`, while a
+dispatch-plan rank write (which bumps no `version`) is not. Execution writes `due_date` only and
+flushes, so a concurrent stale write is refused 409 (the `version` lock) rather than lost; then a **required** `UPDATE` audit
+row on `work_order` (old and new `due_date`, `extra_data: {"reason": …, "via": "hank"}`; failure →
+**503**, nothing saved) and a best-effort `work_order_updated` operational event in the `PUT`'s shape
+(`updated_fields: ["due_date"]`) that deliberately omits the reason, which stays on the audit row. No
+realtime broadcast is sent; open views pick up the date on their next read. Receipt:
+`Moved the due date of <WO number> from <old> to <new>.`, with the warning
+`Must ship by <date> was not changed.` when one is set. **Credentials:** parity with the
+`update_work_order` agent door, which already sets `due_date` — a **full** API token whose user holds
+the role and permissions may prepare and execute it; a read-only or AI-external token is refused by
+its own gates, as on every write (owner decision 2026-11-16; whether agents may move due dates at all
+is an open owner follow-up).
+
+**`add_note`.** A note is a **work-order comment** — the same record the work-order Comments panel
+shows ([Comments and watchers](#comments-and-watchers)) — and never writes `WorkOrder.notes`. At
+preparation the comment service judges it without writing anything (`comment_service.validate_comment`:
+the work order is live in the active company, the body, and every mention — an inactive, other-company
+or not-permitted id is **422** naming ids only). Execution posts it through `create_comment` as the
+submitting employee, so it gets exactly a typed comment's rules, mention rows, auto-watch of the author
+and the mentioned people, and `comment.mention` / `comment.added` notifications — **none of which
+carries the note text**. The comment's create audit is **required** here (**503**, nothing saved) and
+carries `extra_data.via: "hank"`. The preview's `changes` are `Note: <text>` and, with mentions,
+`Mentions: <names>.`; its `warnings` say that everyone who can see the job can read the note under your
+name, that mentioned people are notified in the app and by email without the note text, and that
+watchers get an in-app notice without the note text. The source fingerprint is the work-order id, its
+deleted flag and the mention ids, so later edits of the job do not invalidate a reviewed note; a
+deleted job is **404** and a person who can no longer be mentioned is **422** at execution. Receipt:
+`Added a note to <WO number>.`
+
+**`add_note` is people-only (owner decision 2026-11-16: a comment is a person's own words).** Any API
+token — whatever its role or scope — is refused **403** `A comment is a person's own words: an API
+token cannot post, edit or delete comments or change who is watching a record. Sign in to the app.`
+(`API_TOKEN_COMMENT_WRITE`, the comment routes' own text) at preparation and at execution, before the
+generic role check, with nothing written; `GET /hank/capabilities` leaves `add_note` out of a token's
+`allowed_kinds`. A read-only or AI-external token meets its own gate's 403 first, and an invalid input
+is still 422 before any of these. Through MCP the door also refuses an **agent** on any credential, a
+person's own JWT included ([MCP door](#mcp-door-mcp)). Because commenting is open to every role, a
+**Viewer** now has a reviewed task kind: `can_write: true`, `allowed_kinds: ["add_note"]`.
+
 **Personal follow-ups.** `POST /hank/watches` accepts
 `{ expected_company_id, request_key, work_order_id, condition, document_type? }`.
 The UUID request key is canonicalized and bound to the company, employee and exact input;
@@ -12760,7 +12838,7 @@ There are at most 50 active (`watching`/`snoozed`) watches per owner/company and
 interactive-only: API-token and kiosk credentials cannot create, control, or read watches.
 Effective `work_orders:view`, an active owner/company, and membership or existing elevated
 company access are required. Read-only company contexts may read saved watches but cannot
-control them. These gates are separate from the role fences for the six reviewed actions.
+control them. These gates are separate from the role fences for the eight reviewed actions.
 
 Commands accept `{ expected_company_id, expected_version }`. `check` evaluates a watching
 task now. `snooze` pauses it for one hour; `resume` retains its original baseline and makes
@@ -12888,7 +12966,7 @@ already gathered.
   external model latency never holds its audit-chain lock. If later narration fails or is
   stopped, the saved proposal remains recoverable through the task APIs; it remains unexecuted.
   Terminal SSE success is emitted only after the final chat transaction commits.
-- Prompt `copilot_chat` is version **1.7.0**. Saved intake extraction can be read
+- Prompt `copilot_chat` is version **1.8.0**. Saved intake extraction can be read
   through `hank_saved_work` with its source evidence; the general document-search
   tool still returns metadata only. Chat does not create handoffs, approve
   routines, advance steps or execute filing/actions.
@@ -14680,6 +14758,17 @@ What matters from this file's point of view:
   `tools/list`. What its tools return is redacted by the same response middleware as a direct
   call. See [docs/MCP.md](MCP.md) §4.1 / §4.2 and
   [docs/EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md).
+- **A Hank note is never posted through an agent, on any credential** (owner decision 2026-11-16: a
+  comment is a person's own words). The door, not the route, refuses it, because a person's own JWT
+  would otherwise let an agent write in that person's name: `prepare_task` with `kind: "add_note"`
+  answers **403** `"A note is a person's own words: post it from the app, not through an agent."`
+  before dispatch; `execute_task` first reads the task as the caller (`GET /hank/tasks/{task_id}`, the
+  `get_task` route) and answers the same 403 for an `add_note` task without dispatching the execute.
+  When that read is refused 401 / 403 / 404 / 422 the call proceeds, and the execute route refuses it
+  the same way; any other failure (5xx, 429, transport, no `kind`) is **503** `"Could not confirm what kind
+  of Hank task this is before executing it, so nothing was executed. Try again."`. Both tools stay
+  listed, every other kind (`change_due_date` included) is unaffected, and the routes still serve a
+  person in the app. See [docs/MCP.md](MCP.md) §4.3.
 
 Settings: [ENVIRONMENT_VARIABLES.md → MCP](ENVIRONMENT_VARIABLES.md#mcp-model-context-protocol-door-and-bridge).
 Access model: [RBAC_PERMISSIONS.md → MCP / agent access](RBAC_PERMISSIONS.md#mcp--agent-access).

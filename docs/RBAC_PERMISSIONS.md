@@ -128,7 +128,11 @@ from the route is returned verbatim rather than worked around. Kiosk-scoped badg
 display tokens and station tokens are refused at the door because they are not user credentials;
 an API token is accepted, as the one user it is bound to. What
 the MCP layer *adds* is stricter, not looser. A narrowed token's listing and by-name refusals
-mirror the API's own gates (above). Its hand-written tools force new and duplicated work
+mirror the API's own gates (above). One refusal is the door's own and applies to every caller, a
+person's own JWT included: a Hank note (`prepare_task` with kind `add_note`, or `execute_task` on
+an `add_note` task) is **403** before dispatch, because a note is a person's own words (owner
+decision 2026-11-16; [MCP.md §4.3](MCP.md#43-people-only-hank-tasks-every-credential)). The
+layer's hand-written tools force new and duplicated work
 orders to land DRAFT, keep release an explicit separate call (the header-update tool refuses
 `status: released` / `in_progress`, which the raw `PUT` would have accepted with no release stamp),
 set an imported or hand-keyed nest package back to DRAFT with its operations pending (a job on hold
@@ -224,6 +228,7 @@ Recommendations):
 | **Taking items off a maintenance work order's checklist** — `PUT /maintenance/work-orders/{id}` whose `checklist_results` drops, renames or clears an item the work order carries (ticking, unticking or adding is unchanged). Refused before the first write | `is_api_token_credential`, through `maintenance_checklist.removed_checklist_items` | **403** `API_TOKEN_CHECKLIST_REMOVAL` (`Removing items from a maintenance work order's checklist must be done by a person signed in to the app, not an API token.`) | **This PR's extension** of the owner's 2026-11-17 decision: without it a token reaches the refused completion in two steps (PUT the unticked items away, then complete) |
 | **Taking items off a PM schedule's checklist while it has an open work order** — `PUT /maintenance/schedules/{id}` whose `checklist` drops, renames or clears a step while a scheduled / overdue / in-progress / on-hold work order carries the schedule's id (completion judges the schedule's steps too). Adding steps, and editing a schedule with no open work order, are unchanged | `is_api_token_credential`, inline in `update_schedule` | **403** `API_TOKEN_SCHEDULE_CHECKLIST_REMOVAL` (`Removing items from the checklist of a PM schedule that has an open work order must be done by a person signed in to the app, not an API token.`) | **This PR's extension**, for the same reason: the third route to the same skip |
 | **Posting, editing or deleting a comment, or watching / unwatching a record** — `POST /comments`, `PATCH /comments/{comment_id}`, `DELETE /comments/{comment_id}`, `POST /watchers`, `DELETE /watchers`. Refused in the route's first dependency, before the body is validated or anything is read or written. None of the five is an MCP tool (`catalog.COMMENT_WRITE_OPERATIONS`, part of `EXCLUDED_OPERATIONS`), so a person's own JWT cannot reach them through an agent either. The reads (`GET /comments`, `GET /watchers`, `GET /users/mention-search`) stay open to a token the read gates admit | `is_api_token_credential`, in the `comment_writer` dependency (`app/api/endpoints/comments.py`) | **403** `API_TOKEN_COMMENT_WRITE` (`A comment is a person's own words: an API token cannot post, edit or delete comments or change who is watching a record. Sign in to the app.`) — any token, whatever its role or scope (a read-only or AI-external token meets its own gate's 403 first) | Owner decision 2026-11-16 (work-order comments): a comment is a person's own words, and a watch a person's own preference |
+| **Posting a note through Hank** — the `add_note` task, a work-order comment, at `POST /hank/tasks` (prepare) and `POST /hank/tasks/{id}/execute`. Refused before the generic role check and before anything is written, and `GET /hank/capabilities` never offers the kind to a token. **At the MCP door the rule looks past the credential**: `prepare_task` with kind `add_note`, and `execute_task` on an `add_note` task (read first as the caller), answer **403** `"A note is a person's own words: post it from the app, not through an agent."` to an agent on **any** credential, a person's own JWT included (a pre-read that cannot complete is **503**, nothing executed) — `app/mcp/people_only.py` | `is_api_token_credential`, in `hank_task_service._refuse_api_token_for_people_only` over `credentials.PEOPLE_ONLY_HANK_TASK_KINDS` (the MCP package reads the same set) | **403** `API_TOKEN_COMMENT_WRITE` (`A comment is a person's own words: an API token cannot post, edit or delete comments or change who is watching a record. Sign in to the app.`) — any token, whatever its role or scope | Owner decision 2026-11-16 (work-order comments): a comment is a person's own words, so Hank's note takes the comment routes' rule |
 
 Deliberately **not** refused:
 
@@ -236,7 +241,9 @@ Deliberately **not** refused:
   person) is that person's session to both predicates and is not refused — current behavior, not an
   owner decision. The 2026-11-07 decision
   covered standing API tokens only; whether an agent on a person's JWT may make these writes was
-  not part of it.
+  not part of it. The exception is the Hank note row above: the MCP door refuses `add_note` to an
+  agent on any credential (owner decision 2026-11-16), and writes that are not MCP tools at all
+  (`catalog.EXCLUDED_OPERATIONS`) are out of an agent's reach whatever it carries.
 - **Not yet decided (owner question):** a CAR status move through `PUT /quality/car/{id}` to
   `verification` or `closed` stamps `verified_by` / `closed_by` with the token's user, and is not
   refused for a standing API token today. It is the same kind of write as the rows above; whether
@@ -268,6 +275,7 @@ route's own fences still do):
 | **Resume Work Order** — `POST /work-orders/{id}/resume` (lifts a work-order hold) | Any credential of a user holding Admin / Manager / Supervisor, a standing **API token** included (the MCP tool `work_orders_resume_work_order`); kiosk badge and station tokens are refused by their path fence, as on every `/work-orders` route. Each call's required audit rows are written as the token's user with `extra_data.credential` | Owner decision 2026-11-07: an agent may lift a work-order hold |
 | **Release** — `POST /work-orders/{id}/release` and `POST /work-orders/bulk-release` (puts DRAFT work on the floor) | Any credential of a user holding Admin / Manager / Supervisor, a standing **API token** included; read-only and AI-external tokens are refused by the global gates, kiosk badge and station tokens by their path fence. Each release's audit row carries `extra_data.credential` | Existing behavior, not an owner ruling: the MCP tool `release_work_order` is an agent's release door, one job per call; bulk release is kept off the MCP catalog only. Whether a standing token should bulk-release is an open owner question |
 | **Dismiss**, snooze and feedback on a recommendation, action cards included | Every authenticated user and every credential | A design decision of the AI governance change; for Dismiss on an action card, confirmed by the owner 2026-11-07 (it does not take the Mark handled gate) — see [AI recommendations (Action Inbox)](#ai-recommendations-action-inbox) |
+| **Moving a work order's due date through Hank** — the `change_due_date` task (`POST /hank/tasks`, `POST /hank/tasks/{id}/execute`; the MCP tools `prepare_task` / `execute_task`) | Any credential of a user holding Admin / Manager / Supervisor with `work_orders:view` + `work_orders:edit`, a **full** API token included; read-only and AI-external tokens are refused by their own gates, as on every write. Each execution's required audit row carries the reason and `via: hank` (and `extra_data.credential` under a token) | Owner decision 2026-11-16: parity with `update_work_order` / `PUT /work-orders/{id}`, which already moves `due_date` for a token. **Open owner follow-up:** may agents move due dates at all? |
 
 ## Permission Matrix
 
@@ -3159,6 +3167,8 @@ and writes an `EXPORT` audit row through `AuditService`:
 | Receive-delivery task (`receiving:view` + `receiving:create`) | ✓ | ✓ | ✓ | | | | |
 | Report-production task (`work_orders:view` + `work_orders:complete`; own active clock required) | ✓ | ✓ | ✓ | ✓ | ✓ | | |
 | Pending-shipment task (`shipping:view` + `shipping:create` + `work_orders:view`) | ✓ | ✓ | ✓ | | | ✓ | |
+| Change-due-date task (`work_orders:view` + `work_orders:edit`; moves `due_date` only, never `must_ship_by`) | ✓ | ✓ | ✓ | | | | |
+| Add-note task (`work_orders:view`; posts a work-order comment; a person only — never an API token, never through MCP) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Handoffs and own routine runs (interactive `work_orders:view`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Draft/edit/archive a routine (interactive `work_orders:view`) | ✓ | ✓ | ✓ | | | | |
 | Approve a routine (interactive `work_orders:view`) | ✓ | ✓ | | | | | |
@@ -3177,6 +3187,21 @@ and writes an `EXPORT` audit row through `AuditService`:
 > current view-access predicates on every page. A filter cannot reveal another employee's
 > task or recover records whose source access was removed. Shared handoffs are a separate
 > participant-scoped resource; they do not expose another employee's private tasks.
+>
+> **Due-date and note tasks (2026-11-16).** `change_due_date` takes the role set of
+> `PUT /work-orders/{id}`, the other door that moves a due date — Admin / Manager / Supervisor,
+> the roles that hold `work_orders:edit` by default — and that route's terminal-status 409 through
+> one shared helper. `add_note` follows the comment rule: commenting mirrors work-order read access,
+> so all seven tenant roles hold it, and a **Viewer**'s capabilities now report `can_write: true`
+> with `allowed_kinds: ["add_note"]` — the first reviewed task open to a Viewer (follow-ups,
+> preferences and handoffs were already open; they are not task kinds). Credentials (owner
+> decision 2026-11-16): `add_note` is **people-only** — every API token is refused **403** at
+> preparation and execution and is never offered the kind, and the MCP door refuses it to an agent
+> even on a person's own JWT; `change_due_date` stays open to a **full** API token, in parity with
+> the `update_work_order` agent door, while read-only and AI-external tokens are refused by their
+> own gates. Both are in
+> [Credential policy for judgment writes](#credential-policy-for-judgment-writes), the second as an
+> open owner follow-up. See [API → Hank](API.md#hank-ai-shop-teammate).
 >
 > **Intake has document-publication authority.** Upload/analysis/review/file/retry/cancel
 > are restricted to interactive Admin/Manager/Quality (or existing elevated authority).

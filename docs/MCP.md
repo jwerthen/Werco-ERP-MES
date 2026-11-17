@@ -132,6 +132,7 @@ backend/app/mcp/
                   (an access JWT by signature, an API token by its api_tokens row)
   executor.py     InProcessExecutor (httpx.ASGITransport into app) / RemoteExecutor (HTTPS)
   convenience.py  the 15 hand-written tools + SHADOWED_OPERATIONS (16 raw routes they replace)
+  people_only.py  people_only_refusal(): Hank task kinds an agent never runs, on any credential (§4.3)
   server.py       build_server(): registry, per-call auth, jsonschema validation, dispatch
   http.py         McpDoor + mount_mcp(app): the Streamable HTTP door at WERCO_MCP_HTTP_PATH
   __main__.py     python -m app.mcp: stdio bridge, dev HTTP server, --print-catalog
@@ -409,15 +410,27 @@ list):
   approval box answers **403** `"A standing API token cannot record or change a CAR's vendor or
   customer approval. …"`. The reads beside them (`get_car_pdf`, `list_fai_log`) stay open; a
   read-only token is still refused `get_car_pdf`'s PDF bytes (§4.1).
+- **Nor post a Hank note** (owner decision 2026-11-16 — a note is a work-order comment, and a
+  comment is a person's own words): the API refuses an API token **403** `"A comment is a person's
+  own words: an API token cannot post, edit or delete comments or change who is watching a record.
+  Sign in to the app."` at `POST /hank/tasks` and its execute route (the routes behind
+  `prepare_task` / `execute_task`) for an `add_note` task, and never lists the kind in a token's
+  capabilities. Through MCP the door's own refusal (§4.3) answers before either route is reached, and
+  on **every** credential.
 - **Deliberately left open.** `work_orders_resume_work_order` lifts a work-order hold for a token
   whose user holds Admin / Manager / Supervisor, audited as that user (owner decision 2026-11-07).
   `dismiss_ai_recommendation`, snooze and feedback stay open to every credential — a design decision
   of the AI governance change, which the owner confirmed 2026-11-07 for Dismiss on an action card.
+  `prepare_task` / `execute_task` for a Hank `change_due_date` task stay open to a full token whose
+  user holds Admin / Manager / Supervisor, in parity with `update_work_order`, which already sets
+  `due_date` (owner decision 2026-11-16; whether agents may move due dates at all is an open owner
+  follow-up).
 
 An interactive access JWT —
 the person's own session, which the MCP client approves call by call — is not refused by any of
 these: current behavior, not part of the 2026-11-07 decision, which covered standing API tokens
-only. No token is ever bound to a superuser / `platform_admin` (409 at mint, refused at use),
+only. The one exception among them is the Hank note: the door refuses it to an agent on a person's
+JWT too (§4.3). No token is ever bound to a superuser / `platform_admin` (409 at mint, refused at use),
 deactivating a token's user revokes it, and every audit row a token writes carries
 `extra_data.credential` naming the token. The one full list of these credential rules — what
 refuses a token, what is deliberately left open and who decided each — is
@@ -600,6 +613,40 @@ three more rules:
 The rules for which customers and records are controlled, how an Admin marks a customer, the
 ledger, and the steps to connect Claude are in
 [EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md).
+
+### 4.3 People-only Hank tasks (every credential)
+
+§4.1 and §4.2 narrow a **token**. This narrowing is about the **agent**, so it applies to every
+caller, a person's own access JWT included (owner decision 2026-11-16 for work-order comments: a
+comment is a person's own words). Hank's `add_note` task posts a work-order comment, and the comment
+write routes are not tools at all (§6.1), because a person's JWT — the stdio bridge's email /
+password, or the HTTP door — would otherwise let an agent write in that person's name. `add_note`
+travels through two generated tools that must stay tools for every other kind, so the door closes it
+there:
+
+- **`prepare_task`** with `kind: "add_note"` answers **403** `"A note is a person's own words: post it
+  from the app, not through an agent."`. The kind is read from the JSON body the call would send.
+- **`execute_task`** first reads the task through the same router, as the same caller
+  (`GET /api/v1/hank/tasks/{task_id}`, the route behind `get_task`). An `add_note` task answers the
+  same **403**, and the execute is never dispatched. A read refused **401 / 403 / 404 / 422** (absent,
+  another credential's task, a role that may not see it) lets the call proceed, and the execute route
+  answers it the same way, so the check tells a caller nothing `get_task` would not. Any other outcome
+  — a 5xx, a 429, a transport failure, a body with no `kind` — answers **503** `"Could not confirm
+  what kind of Hank task this is before executing it, so nothing was executed. Try again."`: it fails
+  closed rather than let a transient read failure post a note. The read is a second inner request,
+  so it counts against the inner per-IP rate limit like any other.
+
+The check runs after argument validation (a malformed call is still a **422**) and before dispatch,
+in one code path, `app.mcp.people_only.people_only_refusal`, called from `server.on_call_tool`. It
+matches by route (method and path template), never by tool name, and reads its kind set
+(`app.core.credentials.PEOPLE_ONLY_HANK_TASK_KINDS`) and refusal text from the import-free
+`credentials` module, so the package still imports no service. Both tools stay listed and the tool
+count is unchanged. Every other kind — `change_due_date` included — is prepared and executed as
+before, and the routes still serve a person in the app. The server instructions tell the agent to ask
+the person to post the note from the app. A read-only or AI-external token never gets this far:
+`prepare_task` and `execute_task` are writes, refused by §4.1 first. On a direct API call (not
+through MCP) an API token gets the route's own **403** (§4, "Nor post a Hank note"), while a person's
+own JWT is served exactly as in the app.
 
 ---
 
@@ -1246,6 +1293,8 @@ count, in which case there is nothing left to close.
 | `{"status": 403, "detail": "Closing work short must be done by a person signed in to the app, not an API token."}` | An API token tried to close an operation or a work order short | A person closes it in the app; nothing an API token holds changes this |
 | `{"status": 403, "detail": "Recording more good than the floor counted, editing an operation's counts, or lowering the order after work was recorded…"}` | An API token tried to book good above the floor's record, edit an operation's or a work order header's counts, correct a count through a reduce-production tool, or lower an order (or a laser nest's `planned_runs` through `update_laser_nest`) once work was recorded | A person makes that correction in the app; nothing an API token holds changes this |
 | `{"status": 403, "detail": "Re-importing a nest package replaces nests that already have recorded work…"}` | An API token called `import_laser_nest_package` with a `work_order_id` on a laser job whose nest operations have recorded work, or whose header already carries good or scrap | A person re-imports in the app; nothing an API token holds changes this |
+| `{"status": 403, "detail": "A note is a person's own words: post it from the app, not through an agent."}` from `prepare_task` or `execute_task` | The call would prepare or execute a Hank `add_note` task. The door refuses it on every credential, a person's own JWT included; nothing was dispatched (§4.3) | Ask the person to post the note from the app (Hank → Tasks, or the work order's Comments panel). Nothing any credential holds changes this |
+| `{"status": 503, "detail": "Could not confirm what kind of Hank task this is before executing it, so nothing was executed. Try again."}` from `execute_task` | The door's read of the task (`GET /hank/tasks/{task_id}`) failed with a 5xx, a 429 or a transport error, or returned no `kind`; the execute was not dispatched (§4.3) | Retry; on a 429 slow down first |
 | `{"status": 409, "detail": "… is complete; its counts are the completion record…"}` from `work_orders_update_operation` | A count or status edit on a COMPLETE operation | Corrections go through `reduce_operation_production_office` (Admin / Manager / Supervisor), which can reopen the operation — a person's decision |
 | `{"status": 409, "detail": "Op N is complete with … so only n more can be recorded as scrap…"}` from `work_orders_update_operation` | Scrap added to a COMPLETE operation past what is still unaccounted — good + scrap would exceed what reached it | On a live work order, pieces counted good and later found bad are a person's correction: `reduce_operation_production_office` with `reopen_operation`, then a re-close with the scrap (an API token is refused both). When the message says the work order is complete / closed / cancelled, no operation-level correction exists: tell the user the bad pieces are recorded as a nonconformance (NCR), and do not retry |
 | `{"status": 409, "detail": "Nest N is already complete at … runs; raising its planned runs…"}` or `"This laser work order is …; Nest N's planned runs can no longer be raised…"` from `update_laser_nest` | `planned_runs` raised on a COMPLETE nest, or on a COMPLETE / CLOSED / CANCELLED laser work order — a completed operation is never short | Do what the message says: add a nest for the extra runs, or open a new work order when the job is finished. Every other field still works, and so does lowering `planned_runs` — except that an API token lowering it once work is recorded on the nest gets the 403 above |
@@ -1353,6 +1402,12 @@ count, in which case there is nothing left to close.
     per allowlisted route and the ledger are in `tests/api/test_ai_external_token.py`, with
     `tests/test_export_control_index.py` and `tests/test_export_control_redaction.py` for the pure
     rules ([EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md#10-code-and-tests)).
+  - `backend/tests/test_mcp_people_only.py` — §4.3 end to end on a person's own JWT: `prepare_task`
+    with kind `add_note` refused with no task row, `execute_task` on an `add_note` task refused after
+    one read with no comment, an unreadable task answering the route's own 404, a failed read failing
+    closed (503), `change_due_date` prepared and executed as before, matching by route, and the
+    catalog unchanged. The API side (an API token refused at prepare and execute) is in
+    `tests/api/test_hank_due_date_and_note.py`.
 - API tokens (server side): `app/api/endpoints/api_tokens.py`,
   `app/services/api_token_service.py` (`check_api_token` is the one row check the door and
   `get_current_user` share), `app/models/api_token.py`, migrations `088_api_tokens` and
@@ -1360,7 +1415,8 @@ count, in which case there is nothing left to close.
   predicates in `app/core/credentials.py`, the AI-external allowlist in `app/core/export_control.py`
   and the response side in `app/middleware/export_control.py`. The door half is `app/mcp/auth.py`
   (`live_api_token_principal`, `live_api_token_grant`, `ErpTokenVerifier`), `app/mcp/http.py`
-  (`AiEgressDoorGuard`) and `app/mcp/server.py` (the per-caller listings).
+  (`AiEgressDoorGuard`) and `app/mcp/server.py` (the per-caller listings). The people-only Hank
+  refusal (§4.3), which narrows every caller rather than a token, is `app/mcp/people_only.py`.
 - Related: [API.md → MCP door](API.md#mcp-door-mcp), [API.md → API tokens](API.md#api-tokens-bots-and-mcp-clients),
   [EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md),
   [RBAC_PERMISSIONS.md → MCP / agent access](RBAC_PERMISSIONS.md#mcp--agent-access),
