@@ -956,3 +956,119 @@ describe('DataTable — isRowSelectable', () => {
     expect(screen.queryByLabelText('Select row 2')).not.toBeInTheDocument();
   });
 });
+
+// ---- isRowSelectable with paging: select-all covers the selectable rows on the
+// CURRENT page only, and a page change neither drops the keys the caller already
+// holds from another page nor counts them toward this page's header state. ----
+describe('DataTable — isRowSelectable with paging', () => {
+  const page1: Row[] = [
+    { id: 1, name: 'Charlie', qty: 30 },
+    { id: 2, name: 'Alpha', qty: 10 }, // not selectable
+  ];
+  const page2: Row[] = [
+    { id: 3, name: 'Bravo', qty: 20 },
+    { id: 4, name: 'Delta', qty: 5 }, // not selectable
+    { id: 5, name: 'Echo', qty: 50 },
+  ];
+  const selectableRow = (r: Row) => r.qty >= 20;
+  const selectAll = () => screen.getByLabelText('Select all rows') as HTMLInputElement;
+
+  function ServerHarness({ onChange }: { onChange: (keys: Set<string | number>) => void }) {
+    const [page, setPage] = React.useState(1);
+    const [keys, setKeys] = React.useState<Set<string | number>>(new Set());
+    return (
+      <DataTable
+        columns={columns}
+        data={page === 1 ? page1 : page2}
+        rowKey={(r) => r.id}
+        isRowSelectable={selectableRow}
+        serverPagination={{ page, pageSize: 3, hasNext: page === 1, onPageChange: setPage }}
+        selection={{
+          selectedKeys: keys,
+          onChange: (next) => {
+            onChange(next);
+            setKeys(next);
+          },
+        }}
+      />
+    );
+  }
+
+  it('server pagination: select-all takes the selectable rows of the loaded page and keeps other pages\' keys', () => {
+    const onChange = jest.fn();
+    render(<ServerHarness onChange={onChange} />);
+
+    fireEvent.click(selectAll());
+    expect(onChange).toHaveBeenLastCalledWith(new Set([1]));
+    expect(selectAll().checked).toBe(true);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    // Page 2's header reflects page 2's selectable rows only: none selected yet, even
+    // though the caller still holds key 1 from page 1.
+    expect(selectAll().checked).toBe(false);
+    expect(selectAll().indeterminate).toBe(false);
+    expect(screen.queryByLabelText('Select row 4')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Select row 3')).toBeInTheDocument();
+
+    fireEvent.click(selectAll());
+    expect(onChange).toHaveBeenLastCalledWith(new Set([1, 3, 5]));
+    expect(selectAll().checked).toBe(true);
+
+    // Clearing page 2 leaves page 1's key with the caller.
+    fireEvent.click(selectAll());
+    expect(onChange).toHaveBeenLastCalledWith(new Set([1]));
+    expect(selectAll().checked).toBe(false);
+  });
+
+  it('server pagination: a page with no selectable row disables select-all', () => {
+    function NoneSelectable() {
+      const [keys, setKeys] = React.useState<Set<string | number>>(new Set([1]));
+      return (
+        <DataTable
+          columns={columns}
+          data={[{ id: 4, name: 'Delta', qty: 5 }]}
+          rowKey={(r) => r.id}
+          isRowSelectable={selectableRow}
+          serverPagination={{ page: 2, pageSize: 3, hasNext: false, onPageChange: () => {} }}
+          selection={{ selectedKeys: keys, onChange: setKeys }}
+        />
+      );
+    }
+    render(<NoneSelectable />);
+    expect(selectAll()).toBeDisabled();
+    expect(selectAll().checked).toBe(false);
+    expect(screen.queryByLabelText(/^Select row/)).not.toBeInTheDocument();
+  });
+
+  it('client pagination: select-all covers only the selectable rows on the visible page', () => {
+    const onChange = jest.fn();
+    function ClientHarness() {
+      const [keys, setKeys] = React.useState<Set<string | number>>(new Set());
+      return (
+        <DataTable
+          columns={columns}
+          data={[...page1, ...page2]}
+          rowKey={(r) => r.id}
+          pageSize={2}
+          isRowSelectable={selectableRow}
+          selection={{
+            selectedKeys: keys,
+            onChange: (next) => {
+              onChange(next);
+              setKeys(next);
+            },
+          }}
+        />
+      );
+    }
+    render(<ClientHarness />);
+    fireEvent.click(selectAll());
+    // Page 1 is Charlie + Alpha; only Charlie is selectable.
+    expect(onChange).toHaveBeenLastCalledWith(new Set([1]));
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    expect(selectAll().checked).toBe(false);
+    fireEvent.click(selectAll());
+    // Page 2 is Bravo + Delta; Delta is not selectable, Echo is on page 3.
+    expect(onChange).toHaveBeenLastCalledWith(new Set([1, 3]));
+  });
+});

@@ -476,3 +476,75 @@ describe('WorkOrders bulk release — permissions', () => {
     expect(screen.queryAllByRole('checkbox', { name: /^Select / })).toHaveLength(0);
   });
 });
+
+describe('WorkOrders bulk release — QA gaps', () => {
+  it('disables the row Release of every work order in the batch while it is in flight, and only those', async () => {
+    let resolveRelease: (value: WorkOrderBulkReleaseResponse) => void = () => {};
+    mockedApi.bulkReleaseWorkOrders.mockReturnValue(
+      new Promise<WorkOrderBulkReleaseResponse>((resolve) => {
+        resolveRelease = resolve;
+      })
+    );
+    renderAt();
+    await waitForTable();
+    const rowRelease = (number: string) => screen.queryByRole('button', { name: `Release ${number}`, hidden: true });
+    fireEvent.click(rowCheckbox('WO-2001')!);
+    fireEvent.click(rowCheckbox('WO-2004')!);
+    const dialog = await openBulkDialog(2);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Release 2' }));
+    expect(mockedApi.bulkReleaseWorkOrders).toHaveBeenCalledWith([1, 4]);
+
+    // A single release of a work order already on the wire would only race the bulk one.
+    await waitFor(() => expect(rowRelease('WO-2001')).toBeDisabled());
+    expect(rowRelease('WO-2004')).toBeDisabled();
+    // A draft that was not sent stays releasable on its own.
+    expect(rowRelease('WO-2002')).toBeEnabled();
+    expect(mockedApi.releaseWorkOrder).not.toHaveBeenCalled();
+
+    rows = rows.map((row) => (row.id === 1 || row.id === 4 ? { ...row, status: 'released' } : row));
+    await act(async () => {
+      resolveRelease(okResponse([1, 4]));
+    });
+    await screen.findByText('Released 2 work orders');
+    await waitFor(() => expect(rowRelease('WO-2001')).not.toBeInTheDocument());
+    expect(rowRelease('WO-2004')).not.toBeInTheDocument();
+    expect(rowRelease('WO-2002')).toBeEnabled();
+  });
+
+  it.each([
+    ['a superuser holding a floor role', { id: 7, role: 'viewer', is_superuser: true }],
+    ['a platform admin', { id: 8, role: 'platform_admin', is_superuser: false }],
+  ])('offers %s the selection and row Release (require_role waves both through)', async (_label, user) => {
+    mockUser = user;
+    mockedApi.bulkReleaseWorkOrders.mockResolvedValue(okResponse([1, 2, 4]));
+    renderAt();
+    await waitForTable();
+    expect(screen.getByRole('button', { name: 'Release WO-2001' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select all draft work orders on this page' }));
+    const dialog = await openBulkDialog(3);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Release 3' }));
+    await screen.findByText('Released 3 work orders');
+    expect(mockedApi.bulkReleaseWorkOrders).toHaveBeenCalledWith([1, 2, 4]);
+  });
+
+  it('gives the mobile card list no selection but keeps one Release per draft card for a releasing role', async () => {
+    window.innerWidth = 390;
+    renderAt();
+    await screen.findByText('Panel 1');
+    expect(screen.queryAllByRole('checkbox', { name: /^Select / })).toHaveLength(0);
+    expect(screen.queryByTestId('bulk-release-bar')).not.toBeInTheDocument();
+    // Drafts WO-2001, WO-2002 and WO-2004 each carry their own card Release.
+    expect(screen.getAllByRole('button', { name: /^Release$/ })).toHaveLength(3);
+  });
+
+  it.each(['operator', 'quality', 'shipping', 'viewer'])(
+    'gives %s no card Release on the mobile list either (the server would 403)',
+    async (role) => {
+      mockUser = { id: 9, role, is_superuser: false };
+      window.innerWidth = 390;
+      renderAt();
+      await screen.findByText('Panel 1');
+      expect(screen.queryAllByRole('button', { name: /^Release$/ })).toHaveLength(0);
+    }
+  );
+});
