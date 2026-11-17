@@ -116,10 +116,22 @@ export function CommentsPanel({ entityType, entityId, className }: CommentsPanel
         editing.mentions.map(person => person.id),
         editing.originalMentionIds
       ));
-  const { markSaved, confirmDiscard } = useUnsavedChanges(
+  // No markSaved() after a post or an edit save: nothing navigates
+  // programmatically afterwards, and the hook drops its guard by itself once
+  // BOTH halves are clean. A markSaved() in a save handler would have to read
+  // the other half's dirtiness from that handler's closure — stale by the time
+  // the request lands (the user may have typed into the other half while it
+  // was in flight) — and could switch the guard off while a draft is still dirty.
+  const { confirmDiscard } = useUnsavedChanges(
     composerDirty || editDirty,
     'You have an unsent comment. Discard it?'
   );
+  // The comment whose editor is open NOW, for an edit save that resolves after
+  // the editor may have changed (read in an async handler, so a ref, not state).
+  const editingIdRef = useRef<number | null>(null);
+  useEffect(() => {
+    editingIdRef.current = editing?.id ?? null;
+  }, [editing]);
 
   const load = useCallback(
     async (mode: 'initial' | 'refresh') => {
@@ -227,7 +239,6 @@ export function CommentsPanel({ entityType, entityId, className }: CommentsPanel
       setComments(previous => upsertComment(previous ?? [], created));
       setDraft('');
       setDraftMentions([]);
-      if (!editDirty) markSaved();
       showToast('success', 'Comment posted');
       // Ready for the next comment (the Post button just went disabled).
       composerRef.current?.focus();
@@ -265,24 +276,29 @@ export function CommentsPanel({ entityType, entityId, className }: CommentsPanel
 
   const handleSaveEdit = async () => {
     if (!editing || savingEdit || !editSavable) return;
+    const savedId = editing.id;
     setSavingEdit(true);
     setEditError(null);
     try {
       // PATCH carries the FULL new state: both fields, every time.
-      const updated = await api.updateComment(editing.id, {
+      const updated = await api.updateComment(savedId, {
         body: editBody,
         mentioned_user_ids: editing.mentions.map(person => person.id),
       });
       seqRef.current += 1;
       setComments(previous => upsertComment(previous ?? [], updated));
-      focusEditButtonRef.current = updated.id;
-      setEditing(null);
-      if (!composerDirty) markSaved();
+      // Close the editor this save belongs to — never one opened since (the
+      // other Edit buttons are disabled while saving; this holds regardless).
+      if (editingIdRef.current === savedId) {
+        focusEditButtonRef.current = savedId;
+        setEditing(current => (current?.id === savedId ? null : current));
+      }
       showToast('success', 'Comment updated');
       void refreshWatch();
     } catch (err) {
       const detail = apiErrorDetail(err, 'The comment could not be saved.');
-      setEditError(detail);
+      // The field error belongs to the editor that was saved; the toast says it either way.
+      if (editingIdRef.current === savedId) setEditError(detail);
       showToast('error', detail);
     } finally {
       setSavingEdit(false);
@@ -403,6 +419,9 @@ export function CommentsPanel({ entityType, entityId, className }: CommentsPanel
                     </span>
                   )}
                 </p>
+                {/* While an edit save is in flight the other Edit buttons are
+                    disabled: one editor at a time, never swapped out from
+                    under a save that has not answered yet. */}
                 {!isEditing && (comment.can_edit || comment.can_delete) && (
                   <div className="flex flex-shrink-0 items-center gap-1">
                     {comment.can_edit && (
@@ -414,7 +433,8 @@ export function CommentsPanel({ entityType, entityId, className }: CommentsPanel
                         variant="ghost"
                         size="sm"
                         aria-label={`Edit comment from ${postedAt}`}
-                        title="Edit"
+                        title={savingEdit ? 'Wait for the comment being saved to finish' : 'Edit'}
+                        disabled={savingEdit}
                         onClick={() => startEdit(comment)}
                         className="!px-1.5"
                       >

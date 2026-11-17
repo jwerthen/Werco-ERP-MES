@@ -285,6 +285,76 @@ describe('unsaved-changes guard', () => {
     fireEvent.change(screen.getByRole('combobox', { name: /edit comment/i }), { target: { value: 'Changed' } });
     expect(unloadBlocked()).toBe(true);
   });
+
+  it('stays on when an edit turns dirty while a post is in flight', async () => {
+    // The post handler's closure saw a CLEAN edit when it started; the edit is
+    // dirty by the time the server answers. The guard must follow the edit.
+    const created = deferred<CommentResponse>();
+    mockedApi.createComment.mockReturnValueOnce(created.promise);
+    renderPanel();
+    await screen.findByText('Material is staged at the brake.');
+
+    fireEvent.change(composer(), { target: { value: 'Posting this' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Post comment' }));
+    expect(mockedApi.createComment).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(within(commentItem('Material is staged')).getByRole('button', { name: /^Edit comment/ }));
+    fireEvent.change(screen.getByRole('combobox', { name: /edit comment/i }), {
+      target: { value: 'Edited while the post was in flight' },
+    });
+
+    await act(async () => created.resolve(makeComment({ id: 4, body: 'Posting this' })));
+    expect(within(thread()).getByText('Posting this')).toBeInTheDocument();
+    expect(composer().value).toBe('');
+    expect((screen.getByRole('combobox', { name: /edit comment/i }) as HTMLTextAreaElement).value).toBe(
+      'Edited while the post was in flight'
+    );
+    expect(unloadBlocked()).toBe(true);
+  });
+
+  it('stays on when the composer turns dirty while an edit save is in flight', async () => {
+    const saving = deferred<CommentResponse>();
+    mockedApi.updateComment.mockReturnValueOnce(saving.promise);
+    renderPanel();
+    await screen.findByText('Material is staged at the brake.');
+
+    fireEvent.click(within(commentItem('Material is staged')).getByRole('button', { name: /^Edit comment/ }));
+    fireEvent.change(screen.getByRole('combobox', { name: /edit comment/i }), { target: { value: 'Staged at brake 2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save comment' }));
+    expect(mockedApi.updateComment).toHaveBeenCalledTimes(1);
+
+    fireEvent.change(composer(), { target: { value: 'typed while the edit was saving' } });
+
+    await act(async () =>
+      saving.resolve({ ...OWN, body: 'Staged at brake 2', edited_at: '2026-11-16T18:00:00Z' })
+    );
+    expect(within(thread()).getByText('Staged at brake 2')).toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: /edit comment/i })).not.toBeInTheDocument();
+    expect(composer().value).toBe('typed while the edit was saving');
+    expect(unloadBlocked()).toBe(true);
+  });
+
+  it('releases once both halves are clean, whichever save lands last', async () => {
+    const created = deferred<CommentResponse>();
+    mockedApi.createComment.mockReturnValueOnce(created.promise);
+    mockedApi.updateComment.mockResolvedValueOnce({ ...OWN, body: 'Edit saved', edited_at: '2026-11-16T18:00:00Z' });
+    renderPanel();
+    await screen.findByText('Material is staged at the brake.');
+
+    fireEvent.change(composer(), { target: { value: 'Posting this' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Post comment' }));
+    fireEvent.click(within(commentItem('Material is staged')).getByRole('button', { name: /^Edit comment/ }));
+    fireEvent.change(screen.getByRole('combobox', { name: /edit comment/i }), { target: { value: 'Edit saved' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save comment' }));
+    await waitFor(() => expect(mockedApi.updateComment).toHaveBeenCalledTimes(1));
+    expect(await within(thread()).findByText('Edit saved')).toBeInTheDocument();
+    // The post is still in flight: its draft is still unsent.
+    expect(unloadBlocked()).toBe(true);
+
+    await act(async () => created.resolve(makeComment({ id: 4, body: 'Posting this' })));
+    expect(within(thread()).getByText('Posting this')).toBeInTheDocument();
+    expect(unloadBlocked()).toBe(false);
+  });
 });
 
 describe('editing and deleting', () => {
@@ -319,6 +389,51 @@ describe('editing and deleting', () => {
     expect(within(thread()).getByText(/\(edited/)).toBeInTheDocument();
     // Focus goes back to the comment's Edit button rather than <body>.
     expect(screen.getByRole('button', { name: /^Edit comment/ })).toHaveFocus();
+  });
+
+  it('locks the other Edit buttons while a save is in flight, then closes only the saved editor', async () => {
+    const user = userEvent.setup();
+    const second = makeComment({ id: 3, body: 'Second note of mine', created_at: '2026-11-16T17:30:00Z' });
+    mockedApi.listComments.mockResolvedValue([OWN, second]);
+    const saving = deferred<CommentResponse>();
+    mockedApi.updateComment.mockReturnValueOnce(saving.promise);
+    renderPanel();
+    await screen.findByText('Second note of mine');
+
+    await user.click(within(commentItem('Material is staged')).getByRole('button', { name: /^Edit comment/ }));
+    fireEvent.change(screen.getByRole('combobox', { name: /edit comment/i }), { target: { value: 'Staged at brake 2' } });
+    await user.click(screen.getByRole('button', { name: 'Save comment' }));
+
+    // The save has not answered: no other editor can be opened in its place.
+    const otherEdit = within(commentItem('Second note of mine')).getByRole('button', { name: /^Edit comment/ });
+    expect(otherEdit).toBeDisabled();
+    fireEvent.click(otherEdit);
+    const editors = screen.getAllByRole('combobox', { name: /edit comment/i }) as HTMLTextAreaElement[];
+    expect(editors).toHaveLength(1);
+    expect(editors[0].value).toBe('Staged at brake 2');
+
+    await act(async () => saving.resolve({ ...OWN, body: 'Staged at brake 2', edited_at: '2026-11-16T18:00:00Z' }));
+    expect(within(thread()).getByText('Staged at brake 2')).toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: /edit comment/i })).not.toBeInTheDocument();
+    expect(within(commentItem('Second note of mine')).getByRole('button', { name: /^Edit comment/ })).toBeEnabled();
+    expect(within(commentItem('Staged at brake 2')).getByRole('button', { name: /^Edit comment/ })).toHaveFocus();
+  });
+
+  it('a refused edit save keeps that editor open with the server’s detail', async () => {
+    const user = userEvent.setup();
+    const detail = 'These people cannot be mentioned on this work order: 5';
+    mockedApi.updateComment.mockRejectedValueOnce({ response: { status: 422, data: { detail } } });
+    renderPanel();
+    await screen.findByText('Material is staged at the brake.');
+
+    await user.click(within(commentItem('Material is staged')).getByRole('button', { name: /^Edit comment/ }));
+    const editor = screen.getByRole('combobox', { name: /edit comment/i }) as HTMLTextAreaElement;
+    fireEvent.change(editor, { target: { value: 'My edit' } });
+    await user.click(screen.getByRole('button', { name: 'Save comment' }));
+
+    // Toast and the editor's own field error both carry it; the edit is kept.
+    await waitFor(() => expect(screen.getAllByText(detail)).toHaveLength(2));
+    expect((screen.getByRole('combobox', { name: /edit comment/i }) as HTMLTextAreaElement).value).toBe('My edit');
   });
 
   it('removing a mention chip while editing sends the reduced list', async () => {

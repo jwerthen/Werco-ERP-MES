@@ -43,25 +43,47 @@ interface HarnessProps {
   maxMentions?: number;
   onSubmitShortcut?: () => void;
   onMentions?: (mentions: CommentPerson[]) => void;
+  /** Render a button that clears the field from OUTSIDE, as a successful post does. */
+  withReset?: boolean;
 }
 
 /** Controlled wrapper — the component is controlled, like its callers. */
-function Harness({ initialValue = '', initialMentions = [], maxMentions, onSubmitShortcut, onMentions }: HarnessProps) {
+function Harness({
+  initialValue = '',
+  initialMentions = [],
+  maxMentions,
+  onSubmitShortcut,
+  onMentions,
+  withReset = false,
+}: HarnessProps) {
   const [value, setValue] = useState(initialValue);
   const [mentions, setMentions] = useState<CommentPerson[]>(initialMentions);
   return (
-    <MentionTextarea
-      label="Add a comment"
-      value={value}
-      onChange={setValue}
-      mentions={mentions}
-      onMentionsChange={next => {
-        setMentions(next);
-        onMentions?.(next);
-      }}
-      maxMentions={maxMentions}
-      onSubmitShortcut={onSubmitShortcut}
-    />
+    <>
+      <MentionTextarea
+        label="Add a comment"
+        value={value}
+        onChange={setValue}
+        mentions={mentions}
+        onMentionsChange={next => {
+          setMentions(next);
+          onMentions?.(next);
+        }}
+        maxMentions={maxMentions}
+        onSubmitShortcut={onSubmitShortcut}
+      />
+      {withReset && (
+        <button
+          type="button"
+          onClick={() => {
+            setValue('');
+            setMentions([]);
+          }}
+        >
+          Reset field
+        </button>
+      )}
+    </>
   );
 }
 
@@ -264,6 +286,24 @@ describe('MentionTextarea', () => {
     expect(input.value).toBe('@ja');
     expect(screen.getAllByRole('button', { name: /Remove mention of/ })).toHaveLength(1);
     expect(screen.getByRole('alert')).toHaveTextContent('You can mention at most 1 people in one comment.');
+  });
+
+  it('drops a refused-mention error when the caller resets the field (a successful post)', async () => {
+    const user = userEvent.setup();
+    render(<Harness initialMentions={[{ id: 99, display_name: 'Rory Castellan' }]} maxMentions={1} withReset />);
+    const input = field();
+    await user.type(input, '@ja');
+    await waitFor(() => expect(input).toHaveAttribute('aria-expanded', 'true'));
+    await user.keyboard('{Enter}');
+    expect(screen.getByRole('alert')).toHaveTextContent('You can mention at most 1 people in one comment.');
+    expect(field()).toHaveAttribute('aria-invalid', 'true');
+
+    // The caller clears value AND mentions without the field's own onChange.
+    await user.click(screen.getByRole('button', { name: 'Reset field' }));
+    expect(field().value).toBe('');
+    expect(screen.queryByRole('list', { name: 'Mentioned people' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(field()).not.toHaveAttribute('aria-invalid');
   });
 
   it('shows a counter against the 5000 limit', () => {

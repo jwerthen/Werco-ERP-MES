@@ -175,7 +175,11 @@ export const MentionTextarea = forwardRef<HTMLTextAreaElement, MentionTextareaPr
   const [activeIndex, setActiveIndex] = useState(0);
   const [search, setSearch] = useState<SearchState>({ status: 'idle' });
   const [announcement, setAnnouncement] = useState('');
-  const [limitError, setLimitError] = useState<string | null>(null);
+  // A refused pick (mention cap / length cap), pinned to the value + mention
+  // list it was refused against. It shows only while both are unchanged, so a
+  // CALLER resetting the field (a successful post clears the composer) drops it
+  // too — not just the user's own typing or chip removal below.
+  const [limitError, setLimitError] = useState<{ message: string; snapshot: string } | null>(null);
   const [rect, setRect] = useState<{ top: number; left: number; width: number; flip: boolean } | null>(null);
 
   const locked = disabled || readOnly;
@@ -245,6 +249,10 @@ export const MentionTextarea = forwardRef<HTMLTextAreaElement, MentionTextareaPr
   const showEmpty = open && search.status === 'ok' && people.length === 0 && !query.includes(' ');
   const showList = open && (people.length > 0 || showEmpty || search.status === 'error');
   const mentionedIds = useMemo(() => new Set(mentions.map(person => person.id)), [mentions]);
+  // What a limit error was raised against: the text and the people, by id (the
+  // caller may hand over a new array for the same people).
+  const fieldSnapshot = `${mentions.map(person => person.id).join(',')}\u0000${value}`;
+  const limitMessage = limitError && limitError.snapshot === fieldSnapshot ? limitError.message : null;
 
   // The live region. While the list is open it reports the search; otherwise
   // it carries the last action (a pick or a chip removal).
@@ -340,14 +348,14 @@ export const MentionTextarea = forwardRef<HTMLTextAreaElement, MentionTextareaPr
 
     if (!alreadyMentioned && mentions.length >= maxMentions) {
       const message = `You can mention at most ${maxMentions} people in one comment.`;
-      setLimitError(message);
+      setLimitError({ message, snapshot: fieldSnapshot });
       setAnnouncement(message);
       setDismissedStart(token.start);
       return;
     }
     if (nextValue.length > maxLength) {
       const message = `No room for this mention: a comment can be at most ${maxLength} characters.`;
-      setLimitError(message);
+      setLimitError({ message, snapshot: fieldSnapshot });
       setAnnouncement(message);
       setDismissedStart(token.start);
       return;
@@ -418,7 +426,7 @@ export const MentionTextarea = forwardRef<HTMLTextAreaElement, MentionTextareaPr
 
   const trimmedLength = value.trim().length;
   const overLimit = trimmedLength > maxLength;
-  const fieldError = error || limitError || (overLimit ? `A comment can be at most ${maxLength} characters.` : null);
+  const fieldError = error || limitMessage || (overLimit ? `A comment can be at most ${maxLength} characters.` : null);
 
   const popup =
     showList && rect ? (
