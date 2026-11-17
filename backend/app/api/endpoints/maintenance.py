@@ -1,4 +1,5 @@
 from datetime import date, datetime, timedelta
+from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
@@ -957,6 +958,17 @@ def create_work_order(
     return _serialize_wo(wo)
 
 
+def _same_as_record(field: str, current: Any, sent: Any) -> bool:
+    """Whether a ``PUT`` value repeats what the work order already holds. Enum members compare by
+    value; ``requires_shutdown`` by truth, as its started-WO rule below reads it (a legacy NULL is
+    "no shutdown"). Anything else must be equal as stored -- text is not normalized."""
+    if field == "requires_shutdown":
+        return bool(current) == bool(sent)
+    current = current.value if isinstance(current, Enum) else current
+    sent = sent.value if isinstance(sent, Enum) else sent
+    return current == sent
+
+
 def _assert_wo_edit_allowed(wo: MaintenanceWorkOrder, update_data: Dict[str, Any]) -> None:
     """Refuse (409), before the first ``setattr``, the edits only a verb may make.
 
@@ -970,7 +982,15 @@ def _assert_wo_edit_allowed(wo: MaintenanceWorkOrder, update_data: Dict[str, Any
     one carried its ``started_at`` (and ``completed_at``) into on hold, where it looked like a
     work order still holding the machine down and took over another work order's downtime event
     -- which then never closed -- and a second ``/complete`` overwrote the maintenance record and
-    advanced the PM schedule again. A new work order is the correction."""
+    advanced the PM schedule again. A new work order is the correction.
+
+    Nor does any other field change on one. Its checklist, notes, findings, dates and assignee are
+    the record of what was done (or why it was not), and a ``PUT`` could re-tick a completed PM's
+    checklist after the fact -- the very steps ``/complete`` demanded a written reason to leave
+    unticked. ``notes`` included: ``/complete`` writes them as part of the completion, and a later
+    note belongs in a maintenance log entry on the work order (``POST /maintenance/log``), which is
+    dated and signed instead of rewriting the record. A value identical to the record's is an echo,
+    not a change, and is accepted."""
     current = MaintenanceStatus(wo.status)
     # Started: in progress, or on hold after a start (a work order can also be held before one).
     started = current == MaintenanceStatus.IN_PROGRESS or (
@@ -1011,6 +1031,19 @@ def _assert_wo_edit_allowed(wo: MaintenanceWorkOrder, update_data: Dict[str, Any
                     f"or cancelled, not returned to {target.value}."
                 ),
             )
+    if current in _TERMINAL_STATUSES:
+        changed = [
+            field for field, value in update_data.items() if not _same_as_record(field, getattr(wo, field), value)
+        ]
+        if changed:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Maintenance work order {wo.wo_number} is {current.value}, a final record; its "
+                    f"{', '.join(changed)} can no longer change. Add a later note as a maintenance log entry on "
+                    "the work order, or open a new maintenance work order for further work."
+                ),
+            )
     if (
         "requires_shutdown" in update_data
         and bool(update_data["requires_shutdown"]) != bool(wo.requires_shutdown)
@@ -1035,17 +1068,20 @@ def update_work_order(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Update a maintenance work order: its details, and ``status`` among scheduled, overdue,
-    on hold and cancelled.
+    """Update an open maintenance work order: its details, and ``status`` among scheduled,
+    overdue, on hold and cancelled. A completed or cancelled work order is a final record: changing
+    any field of it is 409 (add a later note as a maintenance log entry instead).
 
     The verbs own the rest of the lifecycle, because they own its records: **409** for
     ``status: in_progress`` (use ``POST .../start`` -- it stamps the start and records the
     machine downtime), for ``status: completed`` (use ``POST .../complete`` -- findings, costs,
     downtime minutes and the PM schedule's next due date), for returning a STARTED work order
     (in progress / on hold) to scheduled or overdue, and for changing ``requires_shutdown`` on
-    a started work order (its downtime is already being recorded, or not), and for ANY status
-    change on a completed or cancelled work order (a final record -- open a new one instead).
-    Re-sending the current value is accepted. A standing API token that takes items off
+    a started work order (its downtime is already being recorded, or not), and for ANY change to
+    a completed or cancelled work order -- its status, checklist, notes, title, description, dates,
+    priority, assignee or ``requires_shutdown`` (a final record: a later note is a maintenance log
+    entry, ``POST /maintenance/log``, and further work a new work order). Re-sending the current
+    value is accepted; on a completed or cancelled work order such a request writes nothing. A standing API token that takes items off
     ``checklist_results`` (dropping, renaming or clearing them) is **403**; ticking or adding is
     allowed. Moving to ``cancelled`` settles any downtime the work order
     holds: resolved, handed to another shutdown work order still holding the machine down, or
@@ -1055,6 +1091,10 @@ def update_work_order(
 
     update_data = data.model_dump(exclude_unset=True)
     _assert_wo_edit_allowed(wo, update_data)
+    if wo.status in _TERMINAL_STATUSES:
+        # A final record: everything the guard let through repeats it, so there is nothing to
+        # write -- not even the legacy NULL ``requires_shutdown`` an echoed ``false`` would replace.
+        return _serialize_wo(wo)
     if (
         "checklist_results" in update_data
         and is_api_token_credential(current_user)
@@ -1063,12 +1103,12 @@ def update_work_order(
         # Else a token could PUT the unticked steps away and then complete without a person's reason.
         raise HTTPException(status_code=403, detail=API_TOKEN_CHECKLIST_REMOVAL)
     old_values = {c.key: getattr(wo, c.key) for c in wo.__table__.columns}
-    was_terminal = wo.status in _TERMINAL_STATUSES
 
     for field, value in update_data.items():
         setattr(wo, field, value)
 
-    if not was_terminal and wo.status in _TERMINAL_STATUSES:
+    # Open until now (a final record returned above): a move to cancelled settles its downtime.
+    if wo.status in _TERMINAL_STATUSES:
         downtime_service.end_maintenance_downtime(
             db,
             wo,
