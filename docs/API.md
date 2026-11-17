@@ -8756,7 +8756,10 @@ in `RBAC_PERMISSIONS.md`.
 > disabled`. `health_detail` ends with the trigger finding: "Database triggers refuse UPDATE and DELETE
 > statements on audit entries." when both are in force, the missing/disabled sentence when not, and
 > "Database UPDATE/DELETE trigger status could not be checked." off PostgreSQL (dev/test SQLite) or if
-> the catalog read fails (it runs in its own savepoint, so a failure cannot abort the request). The
+> the catalog read fails (it runs in its own savepoint, so a failure cannot abort the request). A failed
+> read **on PostgreSQL** also caps the row at `warning` / `partial` and appends `; database UPDATE/DELETE
+> trigger status could not be checked` to `description`; off PostgreSQL there is nothing to read, so it
+> does not cap. The
 > warning rows' `health_detail` also says the paused entries carry no integrity hash and can never be
 > cryptographically verified, with the split `K of N (J in the last 12 months)`. The healthy text says
 > the chain is **enabled**, not verified — chain integrity is checked by the platform-admin
@@ -8764,7 +8767,7 @@ in `RBAC_PERMISSIONS.md`.
 >
 > A clause backed by this row therefore gets a suggested roll-up (`overall_suggested_compliance`,
 > auto-link's `compliance_summary`) of `partial` at best, never `compliant`, once the company has any
-> paused entry, while the chain is paused, or while the triggers are missing. That is a suggestion
+> paused entry, while the chain is paused, or while the triggers are missing or unreadable. That is a suggestion
 > only: neither endpoint writes the clause's `compliance_status`. Of the fields that change, auto-link
 > (`POST /qms-standards/{standard_id}/auto-link`) stores only `description` (`health_status`,
 > `health_detail` and `suggested_compliance` are computed per call and never persisted), so stored

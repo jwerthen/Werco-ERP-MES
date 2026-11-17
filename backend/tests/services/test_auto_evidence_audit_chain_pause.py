@@ -383,11 +383,15 @@ def test_trigger_state_is_not_checked_off_postgresql(db_session: Session):
     assert _audit_triggers_in_force(db_session) is None
 
 
-def test_failed_trigger_read_is_unchecked_and_leaves_the_transaction_usable(db_session: Session, monkeypatch):
+def test_failed_trigger_read_on_postgresql_caps_the_row_and_leaves_the_transaction_usable(
+    db_session: Session, monkeypatch
+):
     """Pretend the bind is PostgreSQL: the ``pg_trigger`` read then really fails on SQLite.
 
-    The failure must answer ``None`` ("could not be checked", never a claim either way) and be
-    contained by the check's own savepoint, so the evidence query after it still runs.
+    The failure must answer ``None`` ("could not be checked", never a claim either way), be
+    contained by the check's own savepoint so the evidence query after it still runs, and -- on
+    PostgreSQL, where the read should have worked -- cap the row: an unknown about the last
+    tamper control is not evidence of compliance.
     """
     _set_chain(monkeypatch, True)
     _write(db_session, _writer(db_session, COMPANY_A), 2)
@@ -397,7 +401,12 @@ def test_failed_trigger_read_is_unchecked_and_leaves_the_transaction_usable(db_s
     result = _query_audit_log(db_session, COMPANY_A)
 
     assert result["total_count"] == 2
-    assert result["health_status"] == "healthy"
+    assert result["health_status"] == "warning"
+    assert result["suggested_compliance"] == "partial"
+    assert result["description"] == (
+        "2 audit log entries (2 in last 12 months), SHA-256 integrity chain; "
+        "database UPDATE/DELETE trigger status could not be checked"
+    )
     assert result["health_detail"].endswith(AUDIT_TRIGGERS_UNCHECKED_SENTENCE)
 
 

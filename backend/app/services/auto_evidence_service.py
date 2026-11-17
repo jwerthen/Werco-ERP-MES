@@ -857,9 +857,10 @@ def _query_audit_log(db: Session, company_id: int) -> dict:
       company's rows -- the same scan the total already needed;
     * whether the 008/060 UPDATE/DELETE triggers exist and fire (``_audit_triggers_in_force``).
 
-    Chain paused now, any paused entry, or triggers missing caps the row at ``warning`` /
-    ``partial``, and the reason goes into ``description`` and ``health_detail``. Only chain
-    on, no paused entry and triggers not reported missing is ``healthy`` / ``compliant``.
+    Chain paused now, any paused entry, or triggers missing -- or unreadable on PostgreSQL --
+    caps the row at ``warning`` / ``partial``, and the reason goes into ``description`` and
+    ``health_detail``. Only chain on, no paused entry and triggers in force (or, off PostgreSQL,
+    not checkable at all) is ``healthy`` / ``compliant``.
     The chain being ENABLED is all this row knows about it: chain integrity is verified by the
     platform-admin integrity endpoints, not here, and the text says so rather than "active".
     """
@@ -884,6 +885,10 @@ def _query_audit_log(db: Session, company_id: int) -> dict:
         int(paused_recent or 0),
     )
     triggers = _audit_triggers_in_force(db)
+    # On PostgreSQL an unreadable catalog is an unknown about the one control that stands behind a
+    # paused span, so it caps the row like a missing trigger. Off PostgreSQL (SQLite in dev/test)
+    # there is nothing to read, and the text says "could not be checked" without capping.
+    triggers_unknown = triggers is None and _dialect_name(db) == "postgresql"
 
     counts = f"{total} audit log {'entry' if total == 1 else 'entries'} ({recent} in last 12 months)"
     paused_split = f"{paused_total} of {total} ({paused_recent} in the last 12 months)"
@@ -931,8 +936,10 @@ def _query_audit_log(db: Session, company_id: int) -> dict:
             ]
         if triggers is False:
             description += "; database UPDATE/DELETE triggers missing or disabled"
+        elif triggers_unknown:
+            description += "; database UPDATE/DELETE trigger status could not be checked"
 
-        problem = (not chain_enabled) or paused_total > 0 or triggers is False
+        problem = (not chain_enabled) or paused_total > 0 or triggers is False or triggers_unknown
         health = "warning" if problem else "healthy"
         suggested = "partial" if problem else "compliant"
 
