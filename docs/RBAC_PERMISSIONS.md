@@ -2885,7 +2885,7 @@ and writes an `EXPORT` audit row through `AuditService`:
 | `GET /api/v1/exports/quotes/export` | `quote` | **customer contact + email (PII)**, subtotal / total |
 | `GET /api/v1/exports/inventory/transactions/export` | `inventory_transaction` | the whole valuation ledger incl. free-text `notes` |
 | `GET /api/v1/exports/fai/export` | `fai` | the FAI log of record: every first article with its customer, customer PO, job, result and customer approval |
-| `GET /api/v1/analytics/custom-report/export` | `custom_report` | a tenant-authored query over a whole data source — unbounded by construction |
+| `GET /api/v1/analytics/custom-report/export` | `custom_report` | a tenant-authored query over a whole data source — every matching row, capped at 10,000 (refused **400** over it, never truncated); only a template the caller owns, a shared one, or any for an Admin ([Analytics](#analytics)) |
 | `GET /api/v1/consumables/checkouts/export.csv` | `consumable_checkout` | employee names/departments, quantities, issuer and free-text notes |
 
 > **Two surfaces sit at a stricter tier and stay there.** `GET /visitor-logs/export.csv` is
@@ -2942,7 +2942,11 @@ and writes an `EXPORT` audit row through `AuditService`:
 | Flow / WIP-aging / adoption (Lean Phase 1) | ✓ | ✓ | ✓ | | | | |
 | FPY / scrap Pareto (Lean Phase 1) | ✓ | ✓ | ✓ | | ✓ | | |
 | Predictive forecasts (delivery / capacity / inventory demand) | ✓ | ✓ | ✓ | | | | |
-| Export (`GET /custom-report/export`, audits an `EXPORT` action) | ✓ | ✓ | | | | | |
+| Custom reports — data-source catalog, ad-hoc run, save a template (`GET /data-sources`, `POST /custom-report`, `POST /custom-report/templates`) | ✓ | ✓ | | | | | |
+| Custom reports — list saved templates, own + shared (`GET /custom-report/templates`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Custom reports — open / run a saved template: own or shared, or any for an Admin (`GET /custom-report/templates/{id}`, `POST …/{id}/run`) | ✓ | ✓ | | | | | |
+| Custom reports — change / delete a saved template, author or Admin only (`PATCH` / `DELETE /custom-report/templates/{id}`) | ✓ | ✓ | | | | | |
+| Export (`GET /custom-report/export`, own or shared template or any for an Admin, audits an `EXPORT` action) | ✓ | ✓ | | | | | |
 
 > **Lean Phase 1 analytics reads are role-gated in code.** `GET /api/v1/analytics/flow`,
 > `GET /analytics/wip-aging`, and `GET /analytics/adoption` require
@@ -2985,6 +2989,48 @@ and writes an `EXPORT` audit row through `AuditService`:
 > customer-name delivery rollups (per-customer OTD %, late counts) to every role in the tenant,
 > including Operator/Viewer, under that pre-existing posture. If reports are later role-tiered,
 > this endpoint should be revisited with the rest of `/reports/*`.
+
+> **Custom reports: Admin / Manager on every verb but the list, plus an ownership rule on saved
+> templates (2026-11-16).** Every route under `/api/v1/analytics/custom-report*` and
+> `GET /analytics/data-sources` is `require_role([ADMIN, MANAGER])` and tenant-scoped, except
+> `GET /analytics/custom-report/templates`, which stays any-authenticated as it always has. On top
+> of the role gate, `app/services/report_template_service.py` applies one ownership rule:
+> - **Read, run or export a template** (`require_readable`). Allowed when it is the caller's own,
+>   `is_shared`, or the caller is an Admin; otherwise **403** `Access denied to this report`.
+> - **Change or delete a template** (`require_modifiable`). Allowed for the template's author or an
+>   Admin; otherwise **403** `Only the template's author or an admin can change or delete it`.
+> - In both rules a superuser or Platform Admin counts as an Admin, as `require_role` already treats
+>   them everywhere else. So a Manager can run a colleague's shared template but cannot open a
+>   private one, edit or delete it, while an Admin can do all of these. The two rules used to
+>   disagree: an Admin was refused a colleague's private template on read yet could `PATCH` it and
+>   get the whole definition back, so the read refusal protected nothing (2026-11-16).
+> - **A template in another company** is **404** `Report template not found` on every verb,
+>   byte-identical to an id that does not exist, and is never listed.
+>
+> The list returns the caller's own templates plus every shared one, for every role (an Admin
+> included, who opens a colleague's private template by id). A Supervisor, Operator, Quality,
+> Shipping or Viewer user can therefore list shared templates but not open, run or export them.
+> `GET` and `PATCH /analytics/custom-report/templates/{id}` and
+> `POST /analytics/custom-report/templates/{id}/run` are new in this change. Template create, change
+> and delete write `report_template` audit rows (the delete's is required: no row, no delete — 503);
+> running a report writes nothing, and the export writes its `EXPORT` row only on success. API
+> tokens are not refused on any of these routes (none is a judgment write), so an Admin- or
+> Manager-bound token can build and run reports. A read-only token can read the catalog and the
+> templates, but cannot run a report (both run verbs are `POST`) or download the CSV: the export
+> refuses a read-only or AI-external token **403** before it reads the template or runs the query
+> (`refuse_file_export_to_narrowed_token`), so neither the row-cap nor the empty-result 400 can
+> answer it. See [API.md → Custom report builder](API.md#custom-report-builder).
+>
+> **The Custom Reports screen is gated to match (2026-11-16).** The Analytics → **Custom Reports**
+> tab (`frontend/src/pages/Analytics.tsx`, `can('analytics:export')`) and the `/analytics/reports`
+> route (`frontend/src/utils/routeAccess.ts`, `{ prefix: '/analytics/reports', permission:
+> 'analytics:export' }`, which wins over `/analytics` → `analytics:view` by longest prefix) both
+> require `analytics:export`. In the shipped role sets that permission is held by Platform Admin,
+> Admin and Manager, the same set as the endpoints. Before this change every role saw the tab and
+> then got a screen of 403s. A deep link from any other role is now refused at the route instead.
+> The frontend gate reads the *effective* permission, so a company role override that grants
+> `analytics:export` to another role shows that role the tab, but the server role gate still answers
+> 403. As everywhere in this document, the server gate is the enforcement.
 
 ### OEE
 

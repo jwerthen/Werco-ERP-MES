@@ -11465,8 +11465,15 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 | GET | `/analytics/predict/delivery/{work_order_id}` | Predicted completion date + per-operation forecast for one work order | Admin / Manager / Supervisor |
 | GET | `/analytics/predict/capacity` | Capacity utilization forecast by work center, by week | Admin / Manager / Supervisor |
 | GET | `/analytics/predict/inventory-demand` | Predicted stockout dates / reorder urgency by part | Admin / Manager / Supervisor |
-| POST | `/analytics/custom-report` | Run a custom-report query (returns rows) | Admin / Manager |
-| GET | `/analytics/custom-report/export` | Export a saved report template (csv / xlsx / pdf) | Admin / Manager |
+| GET | `/analytics/data-sources` | Custom-report catalog: every data source and field (name, label, type, enum `options`) | Admin / Manager |
+| POST | `/analytics/custom-report` | Run an ad-hoc report (returns `columns` / `rows` / `row_count` / `truncated` / `notes`) | Admin / Manager |
+| GET | `/analytics/custom-report/templates` | List saved report templates: the caller's own plus every shared one | Yes |
+| POST | `/analytics/custom-report/templates` | Save a report definition as a named template (validated, audited) | Admin / Manager |
+| GET | `/analytics/custom-report/templates/{template_id}` | Get one saved template, with its `definition_errors` | Admin / Manager — own or shared (any for an Admin) |
+| PATCH | `/analytics/custom-report/templates/{template_id}` | Change a template's name / description / sharing / definition (audited) | Admin / Manager — author or Admin |
+| DELETE | `/analytics/custom-report/templates/{template_id}` | Delete a template (required audit row with a snapshot; 503 and nothing deleted if it cannot be saved) | Admin / Manager — author or Admin |
+| POST | `/analytics/custom-report/templates/{template_id}/run` | Run a saved template (`?limit=`, 1–10,000, default 1,000) | Admin / Manager — own or shared (any for an Admin) |
+| GET | `/analytics/custom-report/export` | Export a saved template's full result as CSV (`?template_id=`; csv only; audited; read-only / AI-external token 403) | Admin / Manager — own or shared (any for an Admin) |
 
 > **Days in analytics (P1, 2026-11-13).** Every analytics range is a set of **company-local calendar
 > days** (`Company.timezone`), and a point or bucket is dated in that same zone:
@@ -11604,33 +11611,256 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 > suppresses a real stockout warning; and retired (`is_deleted`) parts were still being forecast and
 > reordered. All are now excluded, so these figures can move on a single-company install as well.
 
-> **Custom reports are tenant-scoped.** Both `POST /analytics/custom-report` and
-> `GET /analytics/custom-report/export` run the report through the shared `ReportBuilderService`, which
-> now **always restricts the query to the caller's active company** (`company_id`) before applying any
-> user-supplied filters/group-by/sort. Every supported data source (work orders, parts, inventory, NCRs,
-> purchase orders, quotes) carries `company_id`, so a report can never return another tenant's rows. This
-> is a scoping-only fix — the request/response shape is unchanged.
+<a id="custom-report-builder"></a>
+> **Custom report builder (2026-11-16).** An ad-hoc query over **one** data source, run live or
+> saved as a named template. One catalog in `app/services/report_builder.py` (`REPORT_SOURCES`)
+> declares every data source and field: its column, label, type, enum options and any join it
+> needs. The `GET /analytics/data-sources` body, validation (`definition_problems`) and execution are
+> all derived from it, so the fields a client is shown and the fields the engine accepts cannot
+> disagree. Template access and writes are in `app/services/report_template_service.py`. Every route
+> is Admin / Manager except the template list (any signed-in role). The screen is Analytics →
+> **Custom Reports** (below).
 >
-> **The exported CSV is formula-neutralized, header row included** — the header comes from the
-> tenant-authored template's column list, not a fixed allowlist. Affected cells gain a leading `'`;
-> see [Spreadsheet Exports](#spreadsheet-exports-csv--xlsx).
+> **Catalog: `GET /analytics/data-sources`.** Keyed by `data_source` value; each entry is
+> `{label, fields: [{name, label, type, options?}]}`. `type` is `string`, `number`, `date`, `datetime`
+> or `enum`. It is derived from the column's SQLAlchemy type and decides the allowed operators and
+> aggregates. `options` appears on enum fields only: the values a filter takes and a row shows. The
+> list is complete (a field not in it is refused) and the same for every company. The sources are
+> `work_orders`, `parts`, `inventory`, `quality` (NCRs), `purchasing` (purchase orders) and `quotes`.
+> - **`production` is gone.** It never had a backing model, so every report on it answered 500. A
+>   request naming it is now **422**, and the catalog leaves it out. The enum member stays so a stored
+>   template that names it still lists.
+> - **The old hand-written catalog was wrong in both directions.** It advertised two fields the
+>   engine silently dropped and hid sixteen it supported. The two now work: `inventory.part_number`
+>   and `purchasing.vendor_name`. Each is a LEFT OUTER JOIN to `parts` / `vendors` with the
+>   active company in the ON clause, so a foreign row with a colliding id is never joined. The joined
+>   row is deliberately **not** tombstone-filtered: a lot's part and a PO's vendor are historical
+>   records that keep naming who they named (invariant 3). The sixteen are now listed:
+>   `quantity_scrapped`, `customer_po` and `created_at` (work orders); `material_cost`, `labor_cost`,
+>   `safety_stock` and `reorder_point` (parts); `quantity_available` and `status` (inventory);
+>   `quantity_rejected`, `closed_date` and `actual_cost` (NCRs); `required_date` and `subtotal` (POs);
+>   `subtotal` and `lead_time_days` (quotes).
+> - **`estimated_hours` is not a work-order field.** It has no writer anywhere (structurally 0 in
+>   every tenant), so it was dropped from the catalog (G3-content). Naming it is now a 422; before
+>   this change it silently dropped out of the report.
 >
-> **Custom-report labor honesty (G3-content).** Two changes make labor columns read truthfully when
-> labor cost is not being tracked:
-> - **`estimated_hours` is no longer a selectable WORK_ORDERS column.** It has no writer anywhere in
->   the system (it is structurally 0 in every tenant), so it has been dropped from
->   `GET /analytics/data-sources` and from the report builder's field map. Selecting it is no longer
->   possible (it silently dropped out before).
-> - **Labor-not-tracked response headers on `POST /analytics/custom-report`.** When
->   `LABOR_COST_ROLLUP_ENABLED` is **off** (the default) **and** the report selects any labor-derived
->   WORK_ORDERS column (`actual_hours`, `actual_cost`, `estimated_cost`) — which then render a literal
->   `0` meaning "not tracked", not a measured zero — the response sets two headers so a consumer can
->   tell the two apart: `X-Report-Labor-Not-Tracked` (a JSON array of the affected column names) and
->   `X-Report-Labor-Note` (a human-readable explanation). The **response body is unchanged** (the
->   bare-list contract the export + clients rely on); the headers are set only when applicable. When
->   the flag is on, the data source isn't WORK_ORDERS, or no labor-derived column is selected, no
->   headers are set.
+> **The definition** is the body of `POST /analytics/custom-report` and the stored part of a template:
+> `data_source`, `columns` (1–40), `filters` (at most 20), `group_by` (at most 10) and `sort` (at most
+> 10). A run adds `limit`: 1–10,000, default 1,000. `null` is refused; it used to mean "no limit".
+> **Unknown keys are refused at every level**, so a misspelled `agregate` is a 422, not a silently
+> ignored key.
+> - **Column** `{field, alias?, aggregate?}`. The output key is the alias, else the field; two columns
+>   producing the same key are refused, and an alias is at most 100 characters and may contain neither
+>   a NUL character nor an unpaired UTF-16 surrogate (see below). `sum` and `avg` take
+>   number fields; `min` and `max` take number, date, datetime and string fields; `count` takes any.
+>   Once any column aggregates or `group_by` is set, every non-aggregated column must be in
+>   `group_by`.
+> - **Filter** `{field, operator, value, value2?}`. Operators by type: string `eq` / `ne` / `in` /
+>   `like`; number `eq` / `ne` / `gt` / `gte` / `lt` / `lte` / `in` / `between`; date and datetime `eq` /
+>   `ne` / `gt` / `gte` / `lt` / `lte` / `between`; enum `eq` / `ne` / `in`. Values are typed:
+>   - a number is a JSON number (not a boolean, not a numeric string, finite); an integer must fit in
+>     64 bits (−2^63 to 2^63−1);
+>   - text is at most 500 characters, and no value (of any type, `in` items included) may contain a
+>     NUL character or an unpaired UTF-16 surrogate. JSON allows a lone `"\ud800"` escape, but no
+>     response can carry it: a template that stored one answered 500 on every later read, the
+>     company's whole template list included. The problem message says `a value cannot contain
+>     characters that cannot be stored (an unpaired UTF-16 surrogate)` and does not quote the value;
+>     the 422 entry's `input` still echoes the request body, with U+FFFD in place of each such
+>     character;
+>   - a date is `YYYY-MM-DD`;
+>   - a datetime is ISO-8601 with at least hours and minutes. No zone means UTC, and a zone is
+>     converted to UTC; an instant whose zone pushes it outside years 1-9999 in UTC is a 422 (`… is
+>     outside the supported range of dates and times`);
+>   - an enum value is one of the field's `options` — the lowercase value (`in_progress`), never the
+>     member name (`IN_PROGRESS`).
 >
+>   `value: null` is allowed only with `eq` / `ne` and means IS NULL / IS NOT NULL. `in` takes a
+>   non-empty list of at most 500 values, none of them null. `between` needs `value2`, is inclusive at
+>   both ends, and treats `value2: 0` as a real bound. `like` is a case-insensitive "contains" in which
+>   `%`, `_` and `\` match literally.
+>
+>   **`value2` must be `null` or one scalar** — text, a finite number or `true` / `false` — for
+>   **every** operator, including those that never read it, because it is stored with the filter.
+>   A list or object is a 422 (`value2 must be null or a single value (text, a number or
+>   true/false), not a list or an object`). Text in it follows the text rules above (no NUL, no
+>   unpaired surrogate, at most 500 characters), and `NaN` / `Infinity` is refused. It used to take any
+>   JSON at all, so a deeply nested one could be saved and then fail every later read of the
+>   template list. An unread scalar `value2`, such as a bound left behind when a filter is switched
+>   from `between` to `eq`, is still accepted and ignored.
+> - **Group by** `{field}`. `granularity` is not supported yet; setting it is a 422.
+> - **Sort** `{field, direction}`. `field` is a catalog field or the output key of a selected column.
+>   `direction` is `asc` or `desc` in any case, stored lowercase. A grouped report sorts by a
+>   group-by field or one of its own columns.
+>
+> **One 422 lists every problem.** Every semantic rule runs in `definition_problems`, and a broken
+> definition comes back as a single `detail` entry with `type: "report_definition"`. Its `msg` joins
+> every problem with `; ` and `ctx.problems` carries the same problems as a list, for example
+> `Column 1: "nope" is not a Work Orders field; Filter 1 (Status): operator "gt" does not apply to an
+> enum field; use one of: eq, ne, in`. Shape errors — an unknown key, a list over its cap, a `limit`
+> out of range, an unknown `data_source` — are FastAPI's ordinary per-field entries.
+>
+> **The result** of `POST /analytics/custom-report` and `POST /analytics/custom-report/templates/{template_id}/run`:
+>
+> ```json
+> {
+>   "columns": [
+>     {"key": "status", "label": "Status", "type": "enum"},
+>     {"key": "quantity_ordered", "label": "Sum of Qty Ordered", "type": "number"}
+>   ],
+>   "rows": [{"status": "in_progress", "quantity_ordered": 140}],
+>   "row_count": 1,
+>   "truncated": false,
+>   "notes": []
+> }
+> ```
+>
+> - `columns[]` follows the selected columns in order. `key` is the row key (alias, else field).
+>   `label` is the alias, else the catalog label, prefixed `Sum of` / `Average of` / `Count of` /
+>   `Minimum of` / `Maximum of` when aggregated. `type` is the field's type, except that `sum`, `avg`
+>   and `count` are always `number`.
+> - `rows[]` are keyed by column key. An enum cell is its value, a datetime is UTC ISO-8601 with `Z`,
+>   a date is `YYYY-MM-DD`, and floats and Postgres decimals are rounded to 2 places.
+> - `row_count` is the number of rows returned. `truncated` is true exactly when more than `limit`
+>   rows matched (the query fetches one extra row). An ungrouped report adds the base record's id as a
+>   final sort key, so the first `limit` rows are deterministic.
+> - `notes[]` entries are `{code, message, fields}`. There is one code today, `labor_not_tracked`.
+>   When `LABOR_COST_ROLLUP_ENABLED` is off (the default) and a `work_orders` report selects
+>   `actual_hours`, `actual_cost` or `estimated_cost`, those columns read a literal `0` that means
+>   "not tracked", not a measured $0. The note names them in `fields`.
+>
+> **Scoping.** The base query is always restricted to the caller's active company before any
+> caller-supplied filter, group-by or sort (G3-scope), and every join is company-scoped in its ON
+> clause, so a report can never return another tenant's rows. **Soft-deleted base records are
+> excluded** — work orders, parts, NCRs (voided ones included) and purchase orders. Inventory items
+> and quotes have no soft delete. Running a report writes nothing.
+>
+> **Saved templates.** A template is a named definition, private to its author unless `is_shared`.
+> - **Create** (`POST /analytics/custom-report/templates`). The body is the definition fields at the
+>   top level plus `name` (1–255 characters, trimmed), `description` (optional, at most 2,000) and
+>   `is_shared` (default `false`). It is validated by the same rules, with the same single 422. A
+>   `name` or `description` holding a NUL or an unpaired surrogate is a 422 (`unstorable_text` /
+>   `string_unicode`); it used to be a 500.
+> - **Change** (`PATCH /analytics/custom-report/templates/{template_id}`). Send any of `name`,
+>   `description` (`null` clears it), `is_shared` and `definition`. `definition` is the whole
+>   `{data_source, columns, filters, group_by, sort}` object nested under that key; it replaces the
+>   stored one and is validated like a new one. `name`, `is_shared` and `definition` may not be
+>   `null`, and an empty body or an unknown key is a 422.
+> - **Response** (`ReportTemplateResponse`, on every template verb but delete): `id`, `name`,
+>   `description`, `data_source`, `columns`, `filters`, `group_by`, `sort`, `is_shared`, `created_by`,
+>   `created_at`, plus two new fields, `updated_at` and `definition_errors`. The stored definition is
+>   normalized: plain JSON, sort directions lowercased.
+> - **Run** (`POST /analytics/custom-report/templates/{template_id}/run?limit=`). `limit` is 1–10,000,
+>   default 1,000. It returns the same result shape as an ad-hoc run.
+> - **Delete** (`DELETE /analytics/custom-report/templates/{template_id}`) answers
+>   `{"message": "Template deleted"}`. It stays a physical delete: `ReportTemplate` is not
+>   soft-deletable, and the audit row keeps a snapshot of what was removed. That audit row is
+>   **required**: if it cannot be written the delete is rolled back and the answer is **503**
+>   `The audit record for this delete could not be saved; the template was not deleted. Retry.` The
+>   row is deleted (tenant-scoped) before the audit row is written, the same row-then-audit-chain
+>   lock order as create and update; a delete that finds no row (a concurrent delete won) is the
+>   same **404** as a missing template and writes no audit row.
+>
+> **Template access rule** (`report_template_service`):
+>
+> | Verb | Who | Otherwise |
+> |---|---|---|
+> | List | Any signed-in role; returns the caller's own templates plus every shared one, by name | — |
+> | Get, run, export | Admin / Manager, and the template is the caller's own, shared, or the caller is an Admin (a superuser or Platform Admin counts as an Admin) | **403** `Access denied to this report` |
+> | Change, delete | Admin / Manager, and the caller is the author or an Admin (a superuser or Platform Admin counts as an Admin) | **403** `Only the template's author or an admin can change or delete it` |
+>
+> A template in another company is **404** `Report template not found` on every verb, byte-identical
+> to an id that does not exist, and never appears in the list. So a shared template can be run by
+> every Admin / Manager in the company but changed only by its author or an Admin, and an Admin can
+> open, run and export any template in the company. The read and change rules name the same Admin:
+> until 2026-11-16 an Admin was refused a colleague's private template on read, yet could `PATCH` it
+> and receive the whole definition back, so the refusal protected nothing. The list is unchanged —
+> the caller's own plus every shared template, for every role — so an Admin opens a colleague's
+> private template by id.
+>
+> **Stored templates are judged, never trusted.** Before this change templates were saved with type
+> checks only, so a stored one can break a rule added since. Such a template still lists and opens,
+> with `definition_errors` naming each problem. Running or exporting it answers **409**
+> `Saved report "<name>" can no longer run: <problems>. Edit it and save it again.`, and a `PATCH` with
+> a valid `definition` repairs it. `definition_errors` and the 409 come from the same validation, so
+> they cannot disagree. Judging a stored definition never raises: an unexpected error while checking
+> one is logged and reported as the single problem `The saved definition could not be checked; edit
+> the report and save it again`, so one bad row can never fail the template list for the company.
+> A stored definition holding an unpaired surrogate (saved before the refusal above existed) is
+> rendered with U+FFFD in place of each such character, wherever it sits (a value, an alias, a key),
+> and lists and opens with `The saved definition contains characters that cannot be stored (shown
+> here as �); edit the report and save it again` first in `definition_errors`; running or exporting
+> it is the **409**, since the definition that would run is not the one that was saved. A stored
+> definition nested more than 32 levels deep (only an old `value2` could be; pydantic's serializer
+> fails near 255, which 500'd the list) is treated the same way: everything past the bound is shown
+> as `�`, and `The saved definition contains a value nested too deeply to show (shown here as �);
+> edit the report and save it again` comes first in `definition_errors`. Every serialization of a
+> stored definition goes through that rendering, the audit snapshots included, so a repair or
+> delete never writes an audit row no audit-log read could render. The rendering walks are
+> iterative, so no depth of stored JSON can make them fail.
+>
+> **Audit.** Create, change and delete each write a `report_template` audit row: `log_create`,
+> `log_update` with old and new values, and a `DELETE` row with a snapshot of the deleted definition.
+> Create and change are best-effort (the repo-wide `AuditService.log` contract), because a template
+> is a saved query, not a quality record. **Delete is required** (`log_required`, the same fields
+> `log_delete` writes): the delete is physical, so its snapshot is the only trace of the template,
+> and a delete whose audit row cannot be saved is rolled back (**503**, above). Before this change,
+> template create and delete wrote no audit row (and there was no update verb).
+>
+> **Export: `GET /analytics/custom-report/export?template_id=&format=csv`.** The caller must be able
+> to read the template (own, shared, or any for an Admin).
+> - **A read-only or AI-external API token is refused 403** `Read-only API token cannot download
+>   files.` before anything is read — the template, the query, the row cap. It could never receive
+>   the file, and the over-cap and empty-result 400s, which used to answer first, told it how many
+>   rows a template matched.
+> - **Every matching row is exported**, up to the shared bulk-export cap `MAX_EXPORT_ROWS` (10,000,
+>   imported from `exports.py`). Over it the export is refused **400** `This export matches more than
+>   10,000 rows. Add a filter, then export again.` rather than cut short — see
+>   [Row cap on `/exports/*`](#row-cap-on-exports--refuses-at-10000-400). Before this change the export
+>   ran with the run default and so stopped at 1,000 rows, with nothing in the file to say so.
+> - An empty result is **400** `No data to export`; a template that can no longer run is **409**.
+> - **`format` takes only `csv`** (OpenAPI `const: "csv"`). `xlsx` and `pdf` are a **422** at
+>   validation. They used to be advertised in the parameter description and then answered 400
+>   `Format … not yet supported`.
+> - The header row is the column keys in column order. Cells and header are formula-neutralized; see
+>   [Spreadsheet Exports](#spreadsheet-exports-csv--xlsx).
+> - The file name is the template name, sent per RFC 6266 by
+>   `export_safety.attachment_content_disposition`:
+>   `attachment; filename="<ascii fallback>.csv"; filename*=UTF-8''<percent-encoded name>.csv`. The
+>   fallback replaces non-ASCII, `"`, `/`, `\` and control characters with `_`. It used to be a bare
+>   `filename=<name>.csv`, which broke on a space, a quote or a non-Latin-1 character.
+> - A refusal (403, 404, 409, 422, the row cap, an empty result) writes no audit row. A successful
+>   export still writes its `EXPORT` row (`resource_type` `custom_report`, the template as
+>   `resource_id`, the stored columns and filters, never the rows) before the file streams.
+>
+> **Screen.** Analytics → **Custom Reports** (`/analytics/reports`) is a full builder. You pick a
+> source, then columns and aggregates, typed filters, group by, sort and limit, and Run. The result
+> renders as a table, plus a chart when the report is grouped. Saved templates open through
+> `?template=<id>` (a reload or a shared link reopens the same one) and can be run, exported as CSV,
+> edited, shared and deleted from the panel. The tab and the route require `analytics:export`
+> (Admin, Manager and Platform Admin by default), which is the role set of the endpoints. Before
+> this change every role saw the tab and then got 403s. See
+> [RBAC_PERMISSIONS.md → Analytics](RBAC_PERMISSIONS.md#analytics).
+>
+> **⚠️ Contract change for API and MCP clients (2026-11-16).**
+> - **`POST /analytics/custom-report` returns an object, not a bare array of row dicts.** A client
+>   that read the array now reads `rows`. Through MCP, `run_custom_report`'s `structured_content` is
+>   this object; before, the bare list arrived wrapped as `{"result": [...]}`
+>   ([MCP.md §11](MCP.md#11-result-shapes-and-caps)).
+> - **The `X-Report-Labor-Not-Tracked` and `X-Report-Labor-Note` response headers are gone.** The same
+>   information is the `labor_not_tracked` entry in `notes`. Browsers could never read those headers:
+>   they were not in `Access-Control-Expose-Headers` (see [CORS](#cors)).
+> - **Definitions that used to run with parts silently ignored are now 422s.** That covers an
+>   unknown column, filter, group-by or sort field (an unknown filter field was dropped, so the
+>   report returned unfiltered rows), an unknown operator, a wrongly typed value, `between` without
+>   `value2`, `granularity`, an unknown key, a `limit` of `null` or above 10,000, and
+>   `data_source: "production"`, which used to answer 500.
+> - **Some filters now match what they say.** An enum filter binds the enum member, where the bare
+>   string used to match nothing on most enum columns. `like` matches `%` and `_` literally.
+>   `between` with `value2: 0` is applied instead of dropped.
+> - **Soft-deleted work orders, parts, NCRs and purchase orders no longer appear.**
+> - **The export takes csv only (422 otherwise)** and refuses over 10,000 rows (400) where it used to
+>   stop at 1,000.
+
 > **KPI values can be `null` ("n/a").** Each KPI on `GET /analytics/kpis` is a `KPIValue` whose
 > **`value` (and `prior_value` / `change_pct`) are nullable**. A genuinely-uncomputable metric returns
 > `null` rather than a misleading 0/100, and the frontend renders **"n/a"**:
@@ -14024,6 +14254,13 @@ rendered with replacement characters (`U+FFFD`). Until 2026-11-05 such a body ma
 itself fail, so the caller got a **500** instead of the **422**, on any JSON route and without
 authentication.
 
+Two parsed-JSON values no response can encode are rewritten in the echo the same way (2026-11-16):
+an unpaired UTF-16 surrogate (`"\ud800"`) anywhere in `input`, `loc` or `ctx`, dict keys included,
+becomes `U+FFFD`, and a `NaN` / `Infinity` / `-Infinity` literal (Python's JSON parser accepts them)
+becomes the string `"NaN"` / `"Infinity"` / `"-Infinity"`. Either used to make the 422 a **500** on
+any route, e.g. a `NaN` in `POST /parts/`. The rewrite walks the echo iteratively, so a deeply nested
+body cannot make it fail, and an error with nothing to rewrite is echoed unchanged.
+
 ### Not Found error (404)
 ```json
 {
@@ -14461,7 +14698,8 @@ Each successful export writes one audit row (`app/services/export_audit.py`, via
 
 The row is committed **before** the file streams, so an abandoned download is still recorded. A
 **403 writes no row**, and neither does a refusal (the 10,000-row cap below, an oversized filter
-value, an unsupported `format`, or an empty custom-report result) — nothing was disclosed.
+value, an unsupported `format`, an empty custom-report result, or a saved report template that can
+no longer run) — nothing was disclosed.
 
 Because an `audit_log` row is immutable and undeletable, everything the request contributes to it is
 bounded first. `columns` is filtered to the names the endpoint recognizes; free-text filters are
@@ -14597,9 +14835,16 @@ whole workbook in memory before streaming, so the cap also bounds peak memory.
 > other six endpoints of that time had no limit at all and returned everything, so for them the 400 replaces an
 > unbounded read, not a silent truncation.
 
-**Not covered by this cap:** `GET /analytics/custom-report/export`, `GET /visitor-logs/export.csv`
-and `GET /estimate-workbench/{estimate_id}/export/audit.xlsx` live on their own routers and keep
-their existing behaviour — `MAX_EXPORT_ROWS` applies to the `/exports/*` router only.
+**`GET /analytics/custom-report/export` shares this cap (2026-11-16).** It imports the same
+`MAX_EXPORT_ROWS` and refuses the same way, before writing any bytes or an audit row, with its own
+text: `"This export matches more than 10,000 rows. Add a filter, then export again."` (a report
+template has no date range to narrow). Before that it ran the template with the ad-hoc run's
+1,000-row default, so a larger result was cut at 1,000 rows with nothing in the file to say so.
+See [Custom report builder](#custom-report-builder).
+
+**Not covered by this cap:** `GET /visitor-logs/export.csv` and
+`GET /estimate-workbench/{estimate_id}/export/audit.xlsx` live on their own routers and keep their
+existing behaviour.
 
 ## CORS
 
@@ -14686,7 +14931,7 @@ log. `unconfigured` means every enqueue will fail and no background job or cron 
 | 200 | Success |
 | 201 | Created |
 | 204 | No Content |
-| 400 | Bad Request (also returned for a `Host` header not on the `ALLOWED_HOSTS` allowlist, and for an `/exports/*` request matching more than `MAX_EXPORT_ROWS` — see [Row cap on `/exports/*`](#row-cap-on-exports--refuses-at-10000-400)) |
+| 400 | Bad Request (also returned for a `Host` header not on the `ALLOWED_HOSTS` allowlist, and for an `/exports/*` or `GET /analytics/custom-report/export` request matching more than `MAX_EXPORT_ROWS` — see [Row cap on `/exports/*`](#row-cap-on-exports--refuses-at-10000-400)) |
 | 401 | Unauthorized |
 | 403 | Forbidden (also returned to a caller below `ADMIN` / `MANAGER` on any bulk-export endpoint — see [Access: bulk export is `ADMIN` / `MANAGER`](#access-bulk-export-is-admin--manager-and-every-export-is-audited)) |
 | 404 | Not Found |
@@ -14712,7 +14957,7 @@ What matters from this file's point of view:
   routers with the caller's own bearer token. The router is the boundary: the same `require_role`
   gates, tenant scoping, audit rows, optimistic-locking 409s and per-endpoint size caps apply, and a
   401/403/409/422 comes back verbatim as an `is_error` tool result carrying the server's `detail`.
-- **The catalog is this API.** 767 tools are generated from `app.openapi()` at startup — every
+- **The catalog is this API.** 770 tools are generated from `app.openapi()` at startup — every
   secured operation except the `Authentication`, `Carrier Webhooks`, `Error Logging` (and its router-level `errors` twin) and `WebSocket` tags, the
   unauthenticated health/station-login routes (named one by one in `catalog.PUBLIC_OPERATIONS`) and
   the twenty operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders

@@ -2,6 +2,14 @@ import type { BOMExploded } from '../types/engineering';
 import type { MaterialPriceHistoryParams, MaterialPriceHistoryResponse, MaterialPriceHistoryDetailParams, MaterialPriceHistoryDetail } from '../types/materialPriceHistory';
 import type { EmailRecipientsSettings } from '../types/emailRecipients';
 import type {
+  CustomReportRequest,
+  CustomReportResult,
+  ReportDataSourceCatalog,
+  ReportTemplate,
+  ReportTemplateCreate,
+  ReportTemplateUpdate,
+} from '../types/reportBuilder';
+import type {
   ApiToken,
   ApiTokenCreateInput,
   ApiTokenIssued,
@@ -14,7 +22,8 @@ import type {
   CustomerExportControl,
 } from '../types/exportControl';
 import axios, { AxiosInstance, AxiosError, AxiosRequestConfig } from 'axios';
-import { normalizeAxiosErrorDetail } from '../utils/apiError';
+import { normalizeAxiosErrorDetail, parseBlobErrorBody } from '../utils/apiError';
+import { downloadFilename } from '../utils/contentDisposition';
 import { parseProductionCalendar } from '../utils/productionCalendar';
 import {
   LoginResponse,
@@ -4737,24 +4746,83 @@ class ApiService {
     return response.data;
   }
 
-  async getReportTemplates() {
-    const response = await this.api.get('/analytics/custom-report/templates');
+  // Custom report builder (types/reportBuilder.ts). Every route is ADMIN / MANAGER except
+  // listing templates (any role); the screen is gated on analytics:export, the same set.
+  // A 422 / 409 `detail` is a readable string (the interceptor flattens 422 arrays).
+
+  /** The report catalog: every data source and its typed, filterable fields. */
+  async getDataSources(): Promise<ReportDataSourceCatalog> {
+    const response = await this.api.get<ReportDataSourceCatalog>('/analytics/data-sources');
     return response.data;
   }
 
-  async createReportTemplate(template: any) {
-    const response = await this.api.post('/analytics/custom-report/templates', template);
+  /** Own and shared templates; each carries `definition_errors` when it no longer runs. */
+  async listReportTemplates(): Promise<ReportTemplate[]> {
+    const response = await this.api.get<ReportTemplate[]>('/analytics/custom-report/templates');
     return response.data;
   }
 
-  async runCustomReport(request: any) {
-    const response = await this.api.post('/analytics/custom-report', request);
+  /** One template (403 unless it is the caller's own, shared, or the caller is an admin). */
+  async getReportTemplate(templateId: number): Promise<ReportTemplate> {
+    const response = await this.api.get<ReportTemplate>(`/analytics/custom-report/templates/${templateId}`);
     return response.data;
   }
 
-  async getDataSources() {
-    const response = await this.api.get('/analytics/data-sources');
+  async createReportTemplate(template: ReportTemplateCreate): Promise<ReportTemplate> {
+    const response = await this.api.post<ReportTemplate>('/analytics/custom-report/templates', template);
     return response.data;
+  }
+
+  /** Change a template's name / description / sharing / definition (the author or an Admin). */
+  async updateReportTemplate(templateId: number, changes: ReportTemplateUpdate): Promise<ReportTemplate> {
+    const response = await this.api.patch<ReportTemplate>(
+      `/analytics/custom-report/templates/${templateId}`,
+      changes
+    );
+    return response.data;
+  }
+
+  /** Delete a template (the author or an Admin). */
+  async deleteReportTemplate(templateId: number): Promise<{ message: string }> {
+    const response = await this.api.delete<{ message: string }>(`/analytics/custom-report/templates/${templateId}`);
+    return response.data;
+  }
+
+  /** Run an ad-hoc report. Bad input is a 422 whose `detail` names the problem. */
+  async runCustomReport(request: CustomReportRequest): Promise<CustomReportResult> {
+    const response = await this.api.post<CustomReportResult>('/analytics/custom-report', request);
+    return response.data;
+  }
+
+  /** Run a saved template; 409 when its stored definition no longer runs. */
+  async runReportTemplate(templateId: number, limit?: number): Promise<CustomReportResult> {
+    const response = await this.api.post<CustomReportResult>(
+      `/analytics/custom-report/templates/${templateId}/run`,
+      undefined,
+      limit === undefined ? undefined : { params: { limit } }
+    );
+    return response.data;
+  }
+
+  /**
+   * A template's rows as CSV. 400 past 10,000 rows or with no rows, 409 when the stored
+   * definition no longer runs. The filename comes from Content-Disposition, preferring
+   * the RFC 5987 `filename*` (a non-ASCII template name) over the ASCII `filename`.
+   * A blob request's error body arrives as a Blob, so it is parsed back into JSON here:
+   * callers read `error.response.data.detail` exactly as for any other call.
+   */
+  async exportReportTemplateCsv(templateId: number): Promise<{ blob: Blob; filename: string }> {
+    try {
+      const response = await this.api.get<Blob>('/analytics/custom-report/export', {
+        params: { template_id: templateId, format: 'csv' },
+        responseType: 'blob',
+      });
+      const disposition: string | undefined = response.headers?.['content-disposition'];
+      return { blob: response.data, filename: downloadFilename(disposition, 'custom_report.csv') };
+    } catch (error) {
+      await parseBlobErrorBody(error);
+      throw error;
+    }
   }
 
   // Lean Phase 1 (issue #88) — flow / yield / adoption analytics + ship OTD.
