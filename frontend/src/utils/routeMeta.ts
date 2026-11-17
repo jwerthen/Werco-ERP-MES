@@ -89,7 +89,7 @@ export const routeTitles: Record<string, string> = {
   '/analytics/forecasting': 'Forecasting',
   '/analytics/costs': 'Cost Analytics',
   '/analytics/flow': 'Flow Analytics',
-  '/analytics/reports': 'Analytics Reports',
+  '/analytics/reports': 'Custom Reports',
   '/reports': 'Reports',
 
   // Administration

@@ -80,6 +80,12 @@ const routeAccessRequirements: RouteAccessRequirement[] = [
   // backend read endpoints (operator_certifications.py) use get_current_user and only
   // skill-matrix WRITES require SUPERVISOR. No routeAccessRequirements entry → falls
   // through to auth-only, so it must NOT depend on users:view (which is admin+manager).
+  // Custom Reports: every report-builder endpoint (catalog, runs, template writes,
+  // export) is ADMIN / MANAGER server-side, which is exactly the analytics:export set.
+  // Longest prefix wins, so this beats `/analytics` and a Supervisor / Operator / Viewer
+  // deep link is refused here instead of landing on a screen of 403s. The Custom Reports
+  // tab in Analytics.tsx is hidden on the same permission.
+  { prefix: '/analytics/reports', permission: 'analytics:export' },
   { prefix: '/analytics', permission: 'analytics:view' },
   { prefix: '/reports', permission: 'analytics:view' },
   { prefix: '/job-costing', permission: 'analytics:view' },
