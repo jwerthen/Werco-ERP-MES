@@ -8870,10 +8870,11 @@ The standard and evidence `PUT`s flush their change before writing the audit row
 the delete takes them in. A link made concurrently with a delete either commits first, and the
 delete sees it and refuses, or waits for the delete and then fails its own foreign-key check.
 
-Only the active company's QMS rows are read. A link from another company's QMS row (the QMS
-create / update routes have accepted any existing document id, another company's included) is not
+Only the active company's QMS rows are read. A link from another company's QMS row is not
 named, since that would disclose the other tenant's record; on Postgres that delete still fails at
-the foreign key until the link is cleared.
+the foreign key until the link is cleared. The QMS create / update routes now refuse another
+company's document (see QMS Standards → *A linked document must be your company's*), so such a link
+can only be one written before that check existed, when they accepted any existing document id.
 
 Every other table with a foreign key to `documents.id` is checked the same way: before the audit
 write and before any change, so a refusal (**409**) writes nothing and keeps the bytes. None of these
@@ -9051,6 +9052,18 @@ in `RBAC_PERMISSIONS.md`.
 | POST | `/qms-standards/clauses/{clause_id}/evidence` | Link evidence to a clause. The audit `CREATE` row is required evidence: **503** and nothing linked if it cannot be written (see below) | Admin / Manager / Quality |
 | PUT | `/qms-standards/evidence/{evidence_id}` | Update evidence, incl. verification. The audit `UPDATE` row is required evidence: **503** and nothing saved if it cannot be written (see below) | Admin / Manager / Quality |
 | DELETE | `/qms-standards/evidence/{evidence_id}` | Remove an evidence link. The audit `DELETE` row is required evidence: **503** and the link stays if it cannot be written (see below) | Admin / Manager / Quality |
+
+> **A linked document must be your company's:** the four routes that take a `document_id` in the
+> body (`POST /qms-standards/`, `PUT /qms-standards/{standard_id}`, `POST
+> /qms-standards/clauses/{clause_id}/evidence` and `PUT /qms-standards/evidence/{evidence_id}`)
+> check it against the active company's documents before they write anything. An id that does not
+> exist and an id that belongs to another company both get the same **404 `Document not found`**,
+> with nothing saved and no audit entry, so the answer says nothing about other companies'
+> documents. `document_id: null` on a `PUT` still clears the link, and a `PUT` that does not send
+> `document_id` is not judged on the value already stored (the QMS Standards page's Verify sends
+> `is_verified` only, and the page never sends `document_id`). The document's control status
+> (draft, obsolete, ...) is not checked. Before this, a nonexistent id failed with a 500, while any
+> existing id, another company's included, was accepted and linked.
 
 > **PDF clause extraction:** `POST /qms-standards/{standard_id}/upload-pdf` requires a text-based
 > PDF (≤ 20 MB; scanned/image-only PDFs are rejected) and a configured `ANTHROPIC_API_KEY` — it

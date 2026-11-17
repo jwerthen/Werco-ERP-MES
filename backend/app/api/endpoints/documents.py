@@ -105,10 +105,11 @@ def _qms_link_blockers(db: Session, company_id: int, document_id: int) -> Tuple[
     row lock is granted, and these reads see its link. A writer that comes later waits
     for the delete and then fails its own foreign-key check.
 
-    Scoped to the active company. A link held by another company's QMS row (the QMS
-    create / update routes have accepted any existing document id, another company's
-    included) is not reported, since naming it would disclose the other tenant's record.
-    On Postgres that delete still fails at the foreign key.
+    Scoped to the active company. A link held by another company's QMS row is not
+    reported, since naming it would disclose the other tenant's record. On Postgres that
+    delete still fails at the foreign key. The QMS create / update routes now refuse another
+    company's document (``qms_standards._assert_company_document``), so such a link can only
+    be one written before that check, when they accepted any existing document id.
     """
     standards = (
         db.query(QMSStandard.name, QMSStandard.is_deleted)

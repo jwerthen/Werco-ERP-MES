@@ -1,7 +1,7 @@
 import json
 import logging
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy import inspect as sa_inspect
@@ -11,6 +11,8 @@ from app.api.audit_guard import required_audit
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
 from app.db.locks import acquire_generator_lock
+from app.db.tenant_filter import tenant_query
+from app.models.document import Document
 from app.models.qms_standard import QMSClause, QMSClauseEvidence, QMSStandard
 from app.models.user import User, UserRole
 from app.schemas.qms_standard import (
@@ -40,6 +42,33 @@ from app.services.qms_extraction_service import extract_clauses_with_llm
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _assert_company_document(db: Session, document_id: Optional[int], company_id: int) -> None:
+    """Refuse a ``document_id`` that is not one of the active company's documents.
+
+    ``QMSStandard.document_id`` and ``QMSClauseEvidence.document_id`` are plain foreign keys to
+    ``documents``, a table every tenant shares, so the database alone accepts another company's
+    document. Called before the write (and, on the edits, after the row is resolved) by the four
+    routes that take the field from a request body: standard create / update and evidence
+    create / update.
+
+    The refusal is the same 404 ``Document not found`` for an id that does not exist and for an
+    id that belongs to another company, one indexed primary-key read either way, so the answer
+    says nothing about another tenant's documents. Before this, a missing id failed the FK at
+    flush (a 500 on Postgres) while any existing id, another company's included, answered 200
+    and was linked.
+
+    ``None`` is not checked: clearing the link stays allowed. Documents are deleted physically
+    (``DELETE /documents/{id}``, no tombstone), so a row that exists in the caller's company is a
+    live one; its control status (draft, obsolete, ...) is a quality judgment this check does
+    not make.
+    """
+    if document_id is None:
+        return
+    found = tenant_query(db, Document, company_id).filter(Document.id == document_id).with_entities(Document.id).first()
+    if found is None:
+        raise HTTPException(status_code=404, detail="Document not found")
 
 
 # ============== QMS Standards ==============
@@ -97,7 +126,12 @@ def create_standard(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Create a new QMS standard."""
+    """Create a new QMS standard.
+
+    A ``document_id`` must name one of your company's documents. Any other id, including one that
+    does not exist, is refused 404 ``Document not found`` and nothing is written.
+    """
+    _assert_company_document(db, data.document_id, company_id)
     standard = QMSStandard(
         **data.model_dump(),
         created_by=current_user.id,
@@ -392,7 +426,12 @@ def update_standard(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Update a QMS standard."""
+    """Update a QMS standard.
+
+    A non-null ``document_id`` must name one of your company's documents. Any other id, including
+    one that does not exist, is refused 404 ``Document not found`` and nothing is written.
+    ``null`` clears the link.
+    """
     standard = (
         db.query(QMSStandard)
         .filter(
@@ -405,9 +444,13 @@ def update_standard(
     if not standard:
         raise HTTPException(status_code=404, detail="QMS standard not found")
 
+    update_data = data.model_dump(exclude_unset=True)
+    # A supplied document must be the active company's; ``null`` clears the link.
+    _assert_company_document(db, update_data.get("document_id"), company_id)
+
     old_values = {c.key: getattr(standard, c.key) for c in standard.__table__.columns}
 
-    for key, value in data.model_dump(exclude_unset=True).items():
+    for key, value in update_data.items():
         setattr(standard, key, value)
 
     # Write the row change before the audit row: ``AuditService.log`` takes the global
@@ -1094,10 +1137,16 @@ def add_evidence(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Link evidence to a clause."""
+    """Link evidence to a clause.
+
+    A ``document_id`` must name one of your company's documents. Any other id, including one that
+    does not exist, is refused 404 ``Document not found`` and nothing is written.
+    """
     # A clause of a removed standard is not found: evidence linked there could never be edited or
     # cleared (``_lock_live_evidence_or_404`` refuses it), so its document could never be deleted.
     _live_clause_or_404(db, clause_id, company_id)
+
+    _assert_company_document(db, data.document_id, company_id)
 
     evidence = QMSClauseEvidence(
         clause_id=clause_id,
@@ -1138,6 +1187,10 @@ def update_evidence(
 ):
     """Update evidence, including verification.
 
+    A non-null ``document_id`` must name one of your company's documents. Any other id, including
+    one that does not exist, is refused 404 ``Document not found`` and nothing is written, the
+    other fields in the same request included. ``null`` clears the link.
+
     The row is locked before it is read and the change is flushed before the audit row is
     written, so this takes its row lock ahead of the global audit-chain lock. See
     ``_lock_live_evidence_or_404``.
@@ -1154,6 +1207,8 @@ def update_evidence(
     old_values = _evidence_audit_snapshot(evidence)
 
     update_data = data.model_dump(exclude_unset=True)
+    # Before any attribute is set, so a refusal leaves the row and the audit log untouched.
+    _assert_company_document(db, update_data.get("document_id"), company_id)
 
     # Track who verified
     if "is_verified" in update_data and update_data["is_verified"]:
