@@ -116,7 +116,10 @@ def no_downstream_work(monkeypatch) -> None:
         (bom_endpoint, "save_uploaded_document"),
         (bom_endpoint, "extract_text_from_document"),
         (bom_endpoint, "extract_bom_data_with_llm"),
-        (qms_endpoint, "run_llm_task"),
+        # Since #9-0 the QMS model call lives behind extract_clauses_with_llm; since #9-3a its text
+        # layer is read by read_pdf_pages. Neither may run on a refused upload.
+        (qms_endpoint, "read_pdf_pages"),
+        (qms_endpoint, "extract_clauses_with_llm"),
         (laser_nests_endpoint, "extract_nest_fields_from_pdf"),
         # routing imports its extractor at call time from the module, after writing the drawing.
         (pdf_service, "extract_text_from_pdf"),
