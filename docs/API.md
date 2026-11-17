@@ -5940,7 +5940,7 @@ uploads go through text extraction + LLM. See
 | GET | `/maintenance/work-orders/overdue` | Overdue maintenance work orders (**pure read**; `due_date` before the company's day) | Yes |
 | GET | `/maintenance/work-orders/{id}` | Maintenance work order detail | Yes |
 | POST | `/maintenance/work-orders` | Create maintenance work order on a work center **or** an asset (or neither, with a `schedule_id`, to inherit the schedule's target). A `schedule_id` that already has an open work order (`scheduled` / `overdue` / `in_progress` / `on_hold`) is **409** naming it. `scheduled_date` / `due_date` left blank are the company's day | Admin / Manager / Supervisor |
-| PUT | `/maintenance/work-orders/{id}` | Update maintenance work order; `status` among `scheduled`, `overdue`, `on_hold`, `cancelled` only (**409** for `in_progress` / `completed` — use the verbs — for returning a started work order to `scheduled` / `overdue`, and for changing `requires_shutdown` once started). Moving it to `cancelled` settles any downtime event it holds | Admin / Manager / Supervisor |
+| PUT | `/maintenance/work-orders/{id}` | Update an open maintenance work order; `status` among `scheduled`, `overdue`, `on_hold`, `cancelled` only (**409** for `in_progress` / `completed` — use the verbs — for returning a started work order to `scheduled` / `overdue`, for changing `requires_shutdown` once started, and for changing **any** field of a `completed` or `cancelled` work order, a final record; see below). Moving it to `cancelled` settles any downtime event it holds | Admin / Manager / Supervisor |
 | POST | `/maintenance/work-orders/{id}/start` | Start (→ `in_progress`). A work-center work order with `requires_shutdown` opens, adopts or shares a downtime event — never a second open one on the machine | Admin / Manager / Supervisor / Operator |
 | POST | `/maintenance/work-orders/{id}/complete` | Complete (→ `completed`, advances the linked schedule from the company's day — the response adds `schedule_next_due_date`) and resolve the work order's open downtime event. `checklist_results` omitted keeps the work order's checklist. Any checklist item left unticked needs `incomplete_checklist_reason` (**409** without one) and a person: an API token is **403** (see *Checklist at completion* below) | Admin / Manager / Supervisor / Operator |
 | GET | `/maintenance/calendar` | Work orders in a date window (**capped at 366 days**) | Yes |
@@ -6097,13 +6097,31 @@ uploads go through text extraction + LLM. See
 > - **`PUT` cannot bypass the verbs** (it is also an MCP tool): `status: in_progress` is **409** (use
 >   `/start`), `status: completed` is **409** (use `/complete` — findings, costs, downtime minutes and the
 >   PM schedule's next due date), a started work order (in progress, or on hold after a start) cannot go
->   back to `scheduled` / `overdue` (**409**), `requires_shutdown` cannot change once it has
->   started (**409**), and a **completed or cancelled** work order is a final record — any status
+>   back to `scheduled` / `overdue` (**409**), and `requires_shutdown` cannot change once it has
+>   started (**409**). Re-sending the current value is accepted. `on_hold` keeps the machine down.
+> - **A completed or cancelled work order is a final record; `PUT` changes nothing on it.** Any status
 >   change out of either is **409** (*"… is completed, a final record; it cannot be moved to …"*;
 >   open a new work order instead). Reopening one used to let a completed work order on hold take over
 >   the next work order's downtime event, which then never closed, and a second `/complete` overwrite
->   the maintenance record and advance its PM schedule again. Re-sending the current value is accepted.
->   `on_hold` keeps the machine down.
+>   the maintenance record and advance its PM schedule again. Every other field is held the same way
+>   (2026-11-17): a `PUT` that would change `checklist_results`, `notes`, `title`, `description`,
+>   `scheduled_date`, `due_date`, `priority`, `assigned_to` or `requires_shutdown` is **409**, a plain
+>   string naming the fields — *"Maintenance work order MWO-… is completed, a final record; its
+>   checklist_results, notes can no longer change. Add a later note as a maintenance log entry on the
+>   work order, or open a new maintenance work order for further work."* — raised before any write.
+>   Until then only the status was held, so a planning role or a token could re-tick a completed PM's
+>   checklist after the fact: the very steps `/complete` demands a written reason to leave unticked
+>   (*Checklist at completion* below). `notes` is refused too, because `/complete` writes them as part
+>   of the completion record; a later note is `POST /maintenance/log` naming the work order's machine
+>   or asset and its `maintenance_wo_id` — a dated `maintenance_logs` row signed by its author
+>   (`performed_by`), with its own audit row — not an edit of the record. (The server does not yet
+>   check that the log's machine or asset is the work order's, and the Maintenance page has no
+>   log-entry form; both are open follow-ups.) A value identical to the record's is an echo, not a
+>   change, and is accepted (enums by value, `requires_shutdown` by truth — a legacy `null` reads as
+>   `false` — `title` trimmed, as the request's is, and everything else exactly as stored, other text
+>   not normalized); on a completed or cancelled work order such a request writes nothing (no update,
+>   no audit row) and returns the work order unchanged. Open work orders are unaffected, and the
+>   Maintenance page offers no edit on a completed or cancelled row.
 > - **An operator report cannot double it either.** `POST /downtime/` on a machine a maintenance work
 >   order already holds down (its event is open, the work order in progress or on hold after a start)
 >   is **409** naming the work order and the open event: the stoppage is already being recorded, and
@@ -6255,7 +6273,10 @@ uploads go through text extraction + LLM. See
 >     unticked and keeps **Complete** disabled until it is filled; the reason is sent only then.
 >   - `PUT /maintenance/work-orders/{id}` (planning roles) can still rewrite `checklist_results`
 >     before completion; a person's edit is its own audited `maintenance_work_order` `UPDATE` row,
->     and on a PM work order it cannot take a schedule step off the judged list. A standing API token
+>     and on a PM work order it cannot take a schedule step off the judged list. **After** completion
+>     (or cancellation) it cannot rewrite the checklist at all, for any role or credential: the work
+>     order is a final record and any change is **409** (*A completed or cancelled work order is a
+>     final record* above), so the ticks the completion recorded stay as recorded. A standing API token
 >     whose `PUT` takes items off the checklist (drops, renames or clears them) is **403**
 >     `API_TOKEN_CHECKLIST_REMOVAL` *"Removing items from a maintenance work order's checklist must be
 >     done by a person signed in to the app, not an API token."* — otherwise a token could reach the
