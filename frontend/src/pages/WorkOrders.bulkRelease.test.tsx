@@ -8,6 +8,9 @@
  *   - Only DRAFT rows get a checkbox, join select-all, or are sent.
  *   - Release is server-GATED, so it is NON-optimistic: a ConfirmDialog holds
  *     `pending` (double submit is inert) and the list moves only after the answer.
+ *   - The pending dialog names the batch it SENT, frozen at the confirm click, so a
+ *     background reload that empties the selection mid-request cannot re-word it to
+ *     "Release 0"; an idle dialog whose selection is drained closes instead.
  *   - all released -> success toast; some refused -> warning naming each refused
  *     work order with the server's text; none released -> error toast; a thrown
  *     error -> error toast, dialog closes, selection kept.
@@ -203,6 +206,66 @@ describe('WorkOrders bulk release — flat view', () => {
     await waitFor(() => expect(rowCheckbox('WO-2001')).not.toBeInTheDocument());
     expect(rowCheckbox('WO-2002')).not.toBeChecked();
     expect(screen.queryByTestId('bulk-release-bar')).not.toBeInTheDocument();
+  });
+
+  it('keeps naming the batch it sent while a reload empties the selection mid-request', async () => {
+    let resolveRelease: (value: WorkOrderBulkReleaseResponse) => void = () => {};
+    mockedApi.bulkReleaseWorkOrders.mockReturnValue(
+      new Promise<WorkOrderBulkReleaseResponse>((resolve) => {
+        resolveRelease = resolve;
+      })
+    );
+    renderAt();
+    await waitForTable();
+    fireEvent.click(rowCheckbox('WO-2001')!);
+    fireEvent.click(rowCheckbox('WO-2004')!);
+    const dialog = await openBulkDialog(2);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Release 2' }));
+    expect(mockedApi.bulkReleaseWorkOrders).toHaveBeenCalledWith([1, 4]);
+
+    // The server has already released both; a background reload (here a focus refresh)
+    // lands BEFORE its answer and prunes the live selection to nothing.
+    rows = rows.map((row) => (row.id === 1 || row.id === 4 ? { ...row, status: 'released' } : row));
+    const loadsBefore = mockedApi.browseWorkOrders.mock.calls.length;
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+    });
+    await waitFor(() => expect(mockedApi.browseWorkOrders.mock.calls.length).toBeGreaterThan(loadsBefore));
+    await waitFor(() => expect(rowCheckbox('WO-2001')).not.toBeInTheDocument());
+    expect(rowCheckbox('WO-2004')).not.toBeInTheDocument();
+    // The live selection really is empty: the bar it drives is gone...
+    expect(screen.queryByTestId('bulk-release-bar')).not.toBeInTheDocument();
+
+    // ...yet the pending dialog still names the batch on the wire, not "Release 0".
+    const pending = screen.getByRole('dialog');
+    expect(within(pending).getByText(/Release 2 draft work orders to production\?/)).toBeInTheDocument();
+    expect(within(pending).getByText(/WO-2001, WO-2004/)).toBeInTheDocument();
+    const confirm = within(pending).getByRole('button', { name: /Release 2$/ });
+    expect(confirm).toBeDisabled();
+    expect(within(pending).queryByText(/Release 0/)).not.toBeInTheDocument();
+    expect(within(pending).getByRole('button', { name: 'Cancel' })).toBeDisabled();
+
+    await act(async () => {
+      resolveRelease(okResponse([1, 4]));
+    });
+    await screen.findByText('Released 2 work orders');
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(mockedApi.bulkReleaseWorkOrders).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes an idle dialog when a reload drains the selection, sending nothing', async () => {
+    renderAt();
+    await waitForTable();
+    fireEvent.click(rowCheckbox('WO-2001')!);
+    await openBulkDialog(1);
+
+    // Someone else releases the only ticked draft while the dialog sits unconfirmed.
+    rows = rows.map((row) => (row.id === 1 ? { ...row, status: 'released' } : row));
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+    });
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(mockedApi.bulkReleaseWorkOrders).not.toHaveBeenCalled();
   });
 
   it('names each refused work order with the server detail in a warning on a partial release', async () => {

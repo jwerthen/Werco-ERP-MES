@@ -12,7 +12,7 @@ import { WorkOrderSummary, WorkOrderStatus, WorkOrderBulkReleaseResponse } from 
 import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
 import { useAuth } from '../context/AuthContext';
-import { hasPermission } from '../utils/permissions';
+import { hasPermission, userCanReleaseWorkOrders } from '../utils/permissions';
 import {
   formatCentralDate,
   formatCentralDateTime,
@@ -560,9 +560,10 @@ export default function WorkOrders() {
   const canEditDueDate = canEditWorkOrders;
   // Release — single AND bulk — is require_role([ADMIN, MANAGER, SUPERVISOR]) on the
   // backend (plus superuser / platform admin via require_role itself), exactly the
-  // population `work_orders:release` maps to. One gate for both, so the row Release
-  // button, the bulk selection and a refused call all agree.
-  const canReleaseWorkOrders = hasPermission(user?.role, 'work_orders:release') || !!user?.is_superuser;
+  // population `work_orders:release` maps to. One shared gate (the detail page's
+  // Release button reads it too), so the row Release button, the bulk selection and
+  // a refused call all agree.
+  const canReleaseWorkOrders = userCanReleaseWorkOrders(user);
   const [nestWizardOpen, setNestWizardOpen] = useState(false);
   const [operationsTarget, setOperationsTarget] = useState<WorkOrderSummary | null>(null);
   const [browseSort, setBrowseSort] = useState<{ key: string; dir: 'asc' | 'desc' } | null>({ key: 'priority', dir: 'asc' });
@@ -962,10 +963,21 @@ export default function WorkOrders() {
   const [bulkReleaseOpen, setBulkReleaseOpen] = useState(false);
   const [bulkReleasePending, setBulkReleasePending] = useState(false);
   const bulkReleasePendingRef = useRef(false);
+  // The batch actually on the wire, frozen at the confirm click and held until the
+  // request settles. A background reload (poll / focus / websocket) keeps pruning the
+  // LIVE selection while the call is in flight — the server releasing them is itself
+  // enough to do it — so a dialog read from the live selection would re-word itself
+  // mid-request, down to "Release 0". The pending dialog names this batch instead:
+  // exactly what was sent, until the answer lands.
+  const [bulkReleaseBatch, setBulkReleaseBatch] = useState<WorkOrderSummary[] | null>(null);
+  // Idle, the dialog follows the live selection, so a row released elsewhere drops out
+  // before it can be sent (the same "only drafts are sent" rule as the prune above).
+  const bulkReleaseDialogTargets = bulkReleaseBatch ?? selectedDraftWorkOrders;
 
-  // A background reload (poll / focus / websocket) can drain the selection while the
-  // dialog is open — every ticked draft released elsewhere. Confirming would then send
-  // nothing, so close instead of offering "Release 0".
+  // A background reload can also drain the selection while the dialog is open and
+  // IDLE — every ticked draft released elsewhere. Confirming would then send nothing,
+  // so close instead of offering "Release 0". A pending dialog is never closed here:
+  // it names its frozen batch and closes on the server's answer.
   useEffect(() => {
     if (bulkReleaseOpen && !bulkReleasePending && selectedDraftWorkOrders.length === 0) {
       setBulkReleaseOpen(false);
@@ -986,6 +998,7 @@ export default function WorkOrders() {
   const handleConfirmBulkRelease = useCallback(async () => {
     if (bulkReleasePendingRef.current) return;
     // The Release button is disabled above BULK_RELEASE_MAX, so this never truncates.
+    // This one array is both the request and what the pending dialog names.
     const targets = selectedDraftWorkOrders;
     if (targets.length === 0) {
       setBulkReleaseOpen(false);
@@ -994,6 +1007,7 @@ export default function WorkOrders() {
     const targetIds = targets.map((wo) => wo.id);
     const numberById = new Map(targets.map((wo) => [wo.id, wo.work_order_number]));
     bulkReleasePendingRef.current = true;
+    setBulkReleaseBatch(targets);
     setBulkReleasePending(true);
     // Disable the row Release buttons of the batch until the re-read lands, so a
     // single release cannot race the bulk one.
@@ -1036,6 +1050,9 @@ export default function WorkOrders() {
       await loadWorkOrders();
     } finally {
       bulkReleasePendingRef.current = false;
+      // Every path above has already closed the dialog, so dropping the frozen batch
+      // cannot re-word an open one.
+      setBulkReleaseBatch(null);
       setBulkReleasePending(false);
       setReleasingIds((prev) => {
         const next = new Set(prev);
@@ -2266,12 +2283,13 @@ export default function WorkOrders() {
 
       {/* Bulk release confirm. Server-GATED, so `pending` holds the dialog (no
           backdrop / Escape / Cancel) while the call is in flight; it closes on the
-          server's answer, never before. */}
+          server's answer, never before. While pending it names the frozen batch that
+          was sent, not the live selection a reload may be emptying. */}
       <ConfirmDialog
         open={bulkReleaseOpen}
         title="Release Work Orders"
-        message={bulkReleaseMessage(selectedDraftWorkOrders)}
-        confirmLabel={`Release ${selectedDraftWorkOrders.length}`}
+        message={bulkReleaseMessage(bulkReleaseDialogTargets)}
+        confirmLabel={`Release ${bulkReleaseDialogTargets.length}`}
         pending={bulkReleasePending}
         variant="info"
         onConfirm={handleConfirmBulkRelease}
