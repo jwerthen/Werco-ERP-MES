@@ -38,7 +38,7 @@ from app.models.company import Company
 from app.models.part import Part
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder, WorkOrderStatus
-from app.services.report_builder import UNENCODABLE_TEXT_PROBLEM
+from app.services.report_builder import UNENCODABLE_TEXT_PROBLEM, VALUE2_NOT_SCALAR_PROBLEM
 from app.services.report_template_service import UNENCODABLE_DEFINITION_PROBLEM
 from tests.api.export_audit_helpers import committed_export_rows, fresh_session
 
@@ -199,10 +199,11 @@ REFUSED = [
         {"filters": [_f("quantity_ordered", "eq", 1, LONE)]},
         f"value2 {UNENCODABLE_TEXT_PROBLEM}",
     ),
+    # A list or object value2 is refused by its type alone (it must be null or a scalar).
     (
         "value2 nested key",
         {"filters": [_f("quantity_ordered", "eq", 1, {LONE: ["a"]})]},
-        f"value2 {UNENCODABLE_TEXT_PROBLEM}",
+        VALUE2_NOT_SCALAR_PROBLEM,
     ),
     (
         "alias",
@@ -327,6 +328,7 @@ def test_legacy_row_with_unencodable_text_lists_opens_and_refuses_to_run(client:
     mixed_errors = by_name["Mixed"]["definition_errors"]
     assert mixed_errors[0] == UNENCODABLE_DEFINITION_PROBLEM
     assert any("estimated_hours" in problem for problem in mixed_errors[1:]), mixed_errors
+    assert any(VALUE2_NOT_SCALAR_PROBLEM in problem for problem in mixed_errors[1:]), mixed_errors
     assert by_name["Mixed"]["filters"][0]["value2"] == {"k": [FFFD]}
     assert by_name["Key"]["definition_errors"][0] == UNENCODABLE_DEFINITION_PROBLEM
     assert any(f"columns.0.{FFFD}" in problem for problem in by_name["Key"]["definition_errors"])

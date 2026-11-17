@@ -11613,10 +11613,10 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 >   - text is at most 500 characters, and no value (of any type, `in` items included) may contain a
 >     NUL character or an unpaired UTF-16 surrogate. JSON allows a lone `"\ud800"` escape, but no
 >     response can carry it: a template that stored one answered 500 on every later read, the
->     company's whole template list included. The 422 says `a value cannot contain characters that
->     cannot be stored (an unpaired UTF-16 surrogate)` and never echoes the value. `value2` is
->     checked the same way even when the operator does not read it, because it is stored with the
->     filter;
+>     company's whole template list included. The problem message says `a value cannot contain
+>     characters that cannot be stored (an unpaired UTF-16 surrogate)` and does not quote the value;
+>     the 422 entry's `input` still echoes the request body, with U+FFFD in place of each such
+>     character;
 >   - a date is `YYYY-MM-DD`;
 >   - a datetime is ISO-8601 with at least hours and minutes. No zone means UTC, and a zone is
 >     converted to UTC; an instant whose zone pushes it outside years 1-9999 in UTC is a 422 (`… is
@@ -11628,6 +11628,15 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 >   non-empty list of at most 500 values, none of them null. `between` needs `value2`, is inclusive at
 >   both ends, and treats `value2: 0` as a real bound. `like` is a case-insensitive "contains" in which
 >   `%`, `_` and `\` match literally.
+>
+>   **`value2` must be `null` or one scalar** — text, a finite number or `true` / `false` — for
+>   **every** operator, including those that never read it, because it is stored with the filter.
+>   A list or object is a 422 (`value2 must be null or a single value (text, a number or
+>   true/false), not a list or an object`). Text in it follows the text rules above (no NUL, no
+>   unpaired surrogate, at most 500 characters), and `NaN` / `Infinity` is refused. It used to take any
+>   JSON at all, so a deeply nested one could be saved and then fail every later read of the
+>   template list. An unread scalar `value2`, such as a bound left behind when a filter is switched
+>   from `between` to `eq`, is still accepted and ignored.
 > - **Group by** `{field}`. `granularity` is not supported yet; setting it is a 422.
 > - **Sort** `{field, direction}`. `field` is a catalog field or the output key of a selected column.
 >   `direction` is `asc` or `desc` in any case, stored lowercase. A grouped report sorts by a
@@ -11730,9 +11739,14 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 > rendered with U+FFFD in place of each such character, wherever it sits (a value, an alias, a key),
 > and lists and opens with `The saved definition contains characters that cannot be stored (shown
 > here as �); edit the report and save it again` first in `definition_errors`; running or exporting
-> it is the **409**, since the definition that would run is not the one that was saved. Every
-> serialization of a stored definition goes through that rendering, the audit snapshots included,
-> so a repair or delete never writes an audit row no audit-log read could render.
+> it is the **409**, since the definition that would run is not the one that was saved. A stored
+> definition nested more than 32 levels deep (only an old `value2` could be; pydantic's serializer
+> fails near 255, which 500'd the list) is treated the same way: everything past the bound is shown
+> as `�`, and `The saved definition contains a value nested too deeply to show (shown here as �);
+> edit the report and save it again` comes first in `definition_errors`. Every serialization of a
+> stored definition goes through that rendering, the audit snapshots included, so a repair or
+> delete never writes an audit row no audit-log read could render. The rendering walks are
+> iterative, so no depth of stored JSON can make them fail.
 >
 > **Audit.** Create, change and delete each write a `report_template` audit row: `log_create`,
 > `log_update` with old and new values, and a `DELETE` row with a snapshot of the deleted definition.
@@ -13967,6 +13981,13 @@ under a non-JSON `Content-Type`), `input` is the raw body as text. Bytes that ar
 rendered with replacement characters (`U+FFFD`). Until 2026-11-05 such a body made the 422 handler
 itself fail, so the caller got a **500** instead of the **422**, on any JSON route and without
 authentication.
+
+Two parsed-JSON values no response can encode are rewritten in the echo the same way (2026-11-16):
+an unpaired UTF-16 surrogate (`"\ud800"`) anywhere in `input`, `loc` or `ctx`, dict keys included,
+becomes `U+FFFD`, and a `NaN` / `Infinity` / `-Infinity` literal (Python's JSON parser accepts them)
+becomes the string `"NaN"` / `"Infinity"` / `"-Infinity"`. Either used to make the 422 a **500** on
+any route, e.g. a `NaN` in `POST /parts/`. The rewrite walks the echo iteratively, so a deeply nested
+body cannot make it fail, and an error with nothing to rewrite is echoed unchanged.
 
 ### Not Found error (404)
 ```json

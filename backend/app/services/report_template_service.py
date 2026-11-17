@@ -26,14 +26,17 @@ stored JSON (``_judge_stored``, behind ``request_from_template`` / ``stored_defi
 value in one may 500 the list, so anything unexpected the rules raise on it is logged and
 reported as a definition error like any other.
 
-That includes text no response can carry. A legacy row can hold a string with an unpaired
+That includes values no response can carry. A legacy row can hold a string with an unpaired
 UTF-16 surrogate (JSON ``"\\ud800"``: the API accepted it in any filter value, and the JSON
-column stores it), and rendering one raises ``UnicodeEncodeError`` after the route ran -- a
+column stores it), or a value nested deeper than pydantic's serializer goes (about 255
+levels: ``value2`` took any JSON at all). Rendering either raises after the route ran -- a
 500 for the company's whole template list. Every serialization of a stored definition
 (``template_response``, the audit ``_snapshot``) goes through ``_renderable_definition``,
-which replaces such characters with U+FFFD; ``_judge_stored`` then reports
+which cuts anything nested past ``MAX_STORED_DEFINITION_DEPTH`` and replaces unencodable
+characters, both with U+FFFD; ``_judge_stored`` then reports ``TOO_DEEP_DEFINITION_PROBLEM`` /
 ``UNENCODABLE_DEFINITION_PROBLEM`` so list/get answer 200 and run/export 409. New ones are
-refused at the door (``report_builder.coerce_value`` / ``definition_problems``).
+refused at the door (``report_builder.coerce_value`` / ``coerce_filter`` /
+``definition_problems``: ``value2`` must be null or a scalar).
 
 Create and update are audited best-effort (``AuditService.log_create`` / ``log_update``,
 resource type ``report_template``): a template is a saved query, not a quality record.
@@ -52,7 +55,13 @@ from fastapi import HTTPException, status
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.orm import Session
 
-from app.core.unicode_text import contains_unencodable_text, replace_unencodable, scrub_unencodable_text
+from app.core.unicode_text import (
+    contains_unencodable_text,
+    cut_below_depth,
+    exceeds_depth,
+    replace_unencodable,
+    scrub_unencodable_text,
+)
 from app.db.tenant_filter import tenant_query
 from app.models.analytics import ReportTemplate
 from app.models.user import User, UserRole
@@ -80,6 +89,15 @@ UNENCODABLE_DEFINITION_PROBLEM = (
     "The saved definition contains characters that cannot be stored (shown here as \ufffd); "
     "edit the report and save it again"
 )
+# The problem a stored definition carries when a value in it is nested too deeply to render.
+TOO_DEEP_DEFINITION_PROBLEM = (
+    "The saved definition contains a value nested too deeply to show (shown here as \ufffd); "
+    "edit the report and save it again"
+)
+# How deeply a stored definition may nest before it is cut for rendering. A valid one never
+# passes 5 (definition > filters > filter > ``in`` list > value); pydantic's serializer stops
+# near 255. Anything between was stored by the old, type-checks-only API.
+MAX_STORED_DEFINITION_DEPTH = 32
 
 _Judged = TypeVar("_Judged", bound=BaseModel)
 
@@ -111,17 +129,25 @@ def _stored_definition(template: ReportTemplate) -> Dict[str, Any]:
     }
 
 
-def _renderable_definition(template: ReportTemplate) -> Tuple[Dict[str, Any], bool]:
-    """The stored definition, safe to serialize: ``(definition, replaced)``.
+def _renderable_definition(template: ReportTemplate) -> Tuple[Dict[str, Any], List[str]]:
+    """The stored definition, safe to serialize: ``(definition, problems)``.
 
-    Every string that cannot be encoded as UTF-8 (an unpaired surrogate) is replaced with
-    U+FFFD, and ``replaced`` says whether any was. EVERY serialization of a stored
-    definition goes through here; one that did not would 500 the moment it met such a row.
+    Anything nested past ``MAX_STORED_DEFINITION_DEPTH`` is replaced with U+FFFD, then every
+    string that cannot be encoded as UTF-8 (an unpaired surrogate) has those characters
+    replaced with U+FFFD. ``problems`` names each kind of replacement made (empty when the
+    definition renders as stored). EVERY serialization of a stored definition goes through
+    here; one that did not would 500 the moment it met such a row. Both walks are iterative,
+    so no depth of stored JSON can make this raise.
     """
     definition = _stored_definition(template)
-    if not contains_unencodable_text(definition):
-        return definition, False
-    return scrub_unencodable_text(definition), True
+    problems: List[str] = []
+    if exceeds_depth(definition, MAX_STORED_DEFINITION_DEPTH):
+        definition = cut_below_depth(definition, MAX_STORED_DEFINITION_DEPTH)
+        problems.append(TOO_DEEP_DEFINITION_PROBLEM)
+    if contains_unencodable_text(definition):
+        definition = scrub_unencodable_text(definition)
+        problems.append(UNENCODABLE_DEFINITION_PROBLEM)
+    return definition, problems
 
 
 def _renderable_text(text: Optional[str]) -> Optional[str]:
@@ -139,11 +165,11 @@ def _judge_stored(
     row was saved before that defect could be refused, so it is logged and reported as one
     problem instead of escaping: one bad row must never 500 the company's template list.
 
-    A definition holding unencodable text is judged as rendered (U+FFFD in place of each bad
-    character), so its other problems are still reported, and it is NEVER runnable: the
-    definition that would run is not the one that was saved.
+    A definition holding unencodable text or a value nested too deeply is judged as rendered
+    (U+FFFD in place of each), so its other problems are still reported, and it is NEVER
+    runnable: the definition that would run is not the one that was saved.
     """
-    definition, replaced = _renderable_definition(template)
+    definition, render_problems = _renderable_definition(template)
     request: Optional[_Judged] = None
     try:
         request, problems = model.model_validate({**definition, **extra}), []
@@ -152,8 +178,8 @@ def _judge_stored(
     except Exception:  # deliberately broad -- see the docstring
         logger.exception("Could not judge the stored definition of report template %s", template.id)
         problems = [UNCHECKABLE_DEFINITION_PROBLEM]
-    if replaced:
-        request, problems = None, [UNENCODABLE_DEFINITION_PROBLEM, *problems]
+    if render_problems:
+        request, problems = None, [*render_problems, *problems]
     # A problem may quote a stored key back; it is rendered too, so it must encode.
     return request, [replace_unencodable(problem) for problem in problems]
 
@@ -179,10 +205,11 @@ def template_response(template: ReportTemplate) -> ReportTemplateResponse:
     """Render a stored template, including its ``definition_errors``.
 
     The definition is rendered through ``_renderable_definition``, so a legacy row holding
-    unencodable text still answers 200 (with U+FFFD in its place and
-    ``UNENCODABLE_DEFINITION_PROBLEM`` among its ``definition_errors``).
+    unencodable text or a value nested too deeply still answers 200 (with U+FFFD in its
+    place and ``UNENCODABLE_DEFINITION_PROBLEM`` / ``TOO_DEEP_DEFINITION_PROBLEM`` among its
+    ``definition_errors``).
     """
-    definition, _replaced = _renderable_definition(template)
+    definition, _render_problems = _renderable_definition(template)
     return ReportTemplateResponse(
         id=template.id,
         name=_renderable_text(template.name),
@@ -258,8 +285,8 @@ def _snapshot(template: ReportTemplate) -> Dict[str, Any]:
     """What the audit row records: the template's identity, sharing and full definition.
 
     Rendered like a response (``_renderable_definition``): an audit row is immutable, so a
-    snapshot carrying unencodable text from a legacy row would leave an audit entry no
-    audit-log read could ever render. U+FFFD stands in for each such character.
+    snapshot carrying unencodable text, or a value nested too deeply, from a legacy row would
+    leave an audit entry no audit-log read could ever render. U+FFFD stands in for each.
     """
     return {
         "name": _renderable_text(template.name),

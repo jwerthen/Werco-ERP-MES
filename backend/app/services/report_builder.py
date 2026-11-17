@@ -30,7 +30,7 @@ from sqlalchemy import Float, Integer, Numeric, String, and_, asc, desc, func
 from sqlalchemy.orm import Session
 
 from app.core.time_utils import to_utc_iso
-from app.core.unicode_text import contains_unencodable_text, is_utf8_encodable
+from app.core.unicode_text import is_utf8_encodable
 from app.db.mixins import SoftDeleteMixin
 from app.db.tenant_filter import tenant_filter
 from app.models.inventory import InventoryItem
@@ -112,11 +112,17 @@ MIN_INTEGER_VALUE = -(2**63)
 MAX_INTEGER_VALUE = 2**63 - 1
 
 # The refusal for text a value or alias carries that UTF-8 cannot encode (an unpaired UTF-16
-# surrogate such as JSON's ``"\\ud800"``). It never echoes the value: rendering it is the failure.
-# Such text is accepted by ``json.loads``, ``Any`` and ``str`` alike and stored by a JSON
-# column, and then every response that renders the template raises -- so ONE saved template
-# carrying it 500'd the company's whole template list.
+# surrogate such as JSON's ``"\\ud800"``). The problem message never quotes the value (the
+# 422's ``input`` still echoes the request body, with U+FFFD in place of each such
+# character). Such text is accepted by ``json.loads``, ``Any`` and ``str`` alike and stored by
+# a JSON column, and then every response that renders the template raises -- so ONE saved
+# template carrying it 500'd the company's whole template list.
 UNENCODABLE_TEXT_PROBLEM = "cannot contain characters that cannot be stored (an unpaired UTF-16 surrogate)"
+# ``value2`` is one bound. A list or object there was never meaningful, and it was stored
+# whatever the operator: nested deeply enough it 500'd every later render of the template.
+VALUE2_NOT_SCALAR_PROBLEM = (
+    "value2 must be null or a single value (text, a number or true/false), not a list or an object"
+)
 
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 # An instant: a date, then a time of at least hours and minutes; zone optional (none = UTC).
@@ -438,16 +444,39 @@ def coerce_value(spec: ReportField, value: Any) -> Any:
     raise ReportValueError(f"unsupported field type {spec.type}")  # pragma: no cover - catalog fails at import
 
 
+def _check_value2_storable(value2: Any) -> None:
+    """Refuse a ``value2`` no template should store, whichever operator reads it (or none).
+
+    Checked without walking it: a list or object is refused by its type alone, so a body
+    nested hundreds of levels deep costs nothing here (a recursive walk was a 500).
+    """
+    if value2 is None:
+        return
+    if not isinstance(value2, (str, int, float, bool)):
+        raise ReportValueError(VALUE2_NOT_SCALAR_PROBLEM)
+    if isinstance(value2, float) and not math.isfinite(value2):
+        # Stored even where unread, and no JSON column or response can carry NaN / Infinity.
+        raise ReportValueError(f"value2: {_show(value2)} is not a finite number")
+    if isinstance(value2, str):
+        if "\x00" in value2:
+            raise ReportValueError("value2 cannot contain a NUL (0x00) character")
+        if not is_utf8_encodable(value2):
+            raise ReportValueError(f"value2 {UNENCODABLE_TEXT_PROBLEM}")
+        if len(value2) > MAX_TEXT_VALUE_LENGTH:
+            raise ReportValueError(f"value2 may be at most {MAX_TEXT_VALUE_LENGTH} characters")
+
+
 def coerce_filter(spec: ReportField, operator: Any, value: Any, value2: Any) -> Tuple[Any, Any]:
     """Validate one filter and return its bound ``(value, value2)``.
 
     ``value`` null means IS NULL / IS NOT NULL and is accepted only with ``eq`` / ``ne``.
     ``value2`` is read only by ``between``, and a ``value2`` of 0 is a real bound (the old
     engine's truthiness check dropped it). An unread ``value2`` is still STORED with the
-    filter, so text in it that cannot be stored is refused whatever the operator.
+    filter, so whatever the operator it must be null or one scalar, and text in it obeys the
+    storage rules every text value does (no NUL, nothing unencodable, at most
+    ``MAX_TEXT_VALUE_LENGTH`` characters). Nothing nested can be stored that way.
     """
-    if contains_unencodable_text(value2):
-        raise ReportValueError(f"value2 {UNENCODABLE_TEXT_PROBLEM}")
+    _check_value2_storable(value2)
     allowed = OPERATORS_BY_TYPE[spec.type]
     if operator not in OPERATORS:
         raise ReportValueError(f"unknown operator {_show(operator)}; use one of: {', '.join(allowed)}")
