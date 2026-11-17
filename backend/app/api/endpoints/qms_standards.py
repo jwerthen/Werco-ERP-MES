@@ -832,10 +832,13 @@ def _lock_live_evidence_or_404(db: Session, evidence_id: int, company_id: int) -
       request waited is a 404. Before, a Verify that read the row before a retirement committed
       could still mark it verified, leaving it verified and deleted, and answer 200.
     * No edit under a removed clause or standard. Removing a standard or clause soft-deletes only
-      that row; its evidence keeps ``is_deleted = false`` and is hidden by every QMS read, and
+      that row; its evidence keeps ``is_deleted = false``, the standard, clause-tree and
+      audit-readiness reads hide it with its parent (``GET /{standard_id}/clauses`` does not yet
+      check its standard, so it still lists a removed standard's clauses), and
       ``DELETE /documents/{id}`` counts it as removed (it keeps its document). Such a row is a
       frozen record, so it answers the same 404 as a removed row, and nothing is written. Before,
       ``PUT`` could clear its ``document_id`` and so let that document be deleted.
+      ``add_evidence`` refuses a clause of a removed standard for the same reason.
 
     The ``WHERE`` keeps the tenant filter, so another company's row is never locked. The clause
     and standard are read after the lock, also inside the tenant (a clause or standard that does
@@ -894,10 +897,16 @@ def add_evidence(
     """Link evidence to a clause."""
     clause = (
         db.query(QMSClause)
+        # A clause whose standard was removed is removed with it. Evidence linked there could
+        # never be edited or cleared (``_lock_live_evidence_or_404`` refuses it), so its document
+        # could never be deleted: refuse the link instead, with the same 404.
+        .join(QMSStandard, QMSStandard.id == QMSClause.standard_id)
         .filter(
             QMSClause.id == clause_id,
             QMSClause.company_id == company_id,
             QMSClause.is_deleted == False,
+            QMSStandard.company_id == company_id,
+            QMSStandard.is_deleted == False,
         )
         .first()
     )

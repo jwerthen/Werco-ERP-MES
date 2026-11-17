@@ -17,7 +17,10 @@ lock and inside the active company, and answers the same 404 for a removed one. 
 3. the parent flags are read from the database, not from a stale copy in the session;
 4. a clause or standard that is not the active company's is not found;
 5. the parent read comes after the row lock, is not itself a lock, and is tenant-scoped;
-6. a live clause and standard are still editable (the check does not over-refuse).
+6. a live clause and standard are still editable (the check does not over-refuse);
+7. ``POST /clauses/{id}/evidence`` refuses a clause whose standard was removed (it used to answer
+   201, and with 1-6 in place the new link could then never be edited or cleared, so its document
+   could never be deleted).
 """
 
 from typing import Any, Dict, List
@@ -300,3 +303,72 @@ def test_parent_read_follows_the_row_lock_and_takes_no_lock(
     assert not parent_locks, "the clause and standard must not be locked (see the helper's docstring)"
     assert "qms_clauses.company_id = " in parent_sql
     assert "qms_standards.company_id = " in parent_sql
+
+
+# ---------------------------------------------------------------------------
+# 7. Adding evidence: a clause of a removed standard is not found
+# ---------------------------------------------------------------------------
+
+
+def _add(client: TestClient, clause_id: int, headers: dict):
+    return client.post(
+        f"{BASE}/clauses/{clause_id}/evidence",
+        json={"evidence_type": "document", "title": "Late link"},
+        headers=headers,
+    )
+
+
+def _evidence_count(db: Session, clause_id: int) -> int:
+    return db.query(QMSClauseEvidence).filter(QMSClauseEvidence.clause_id == clause_id).count()
+
+
+def _create_audit_count(db: Session) -> int:
+    return (
+        db.query(AuditLog).filter(AuditLog.resource_type == "qms_clause_evidence", AuditLog.action == "CREATE").count()
+    )
+
+
+@pytest.mark.parametrize("parent", ["clause", "standard"])
+def test_add_evidence_under_a_removed_parent_is_404_and_links_nothing(
+    parent: str, client: TestClient, db_session: Session, admin_headers: dict
+):
+    evidence = _chain(db_session)
+    clause_id = evidence.clause_id
+    _remove_parent(client, admin_headers, evidence, parent)
+    links_before = _evidence_count(db_session, clause_id)
+    audits_before = _create_audit_count(db_session)
+
+    response = _add(client, clause_id, admin_headers)
+
+    assert response.status_code == status.HTTP_404_NOT_FOUND, response.text
+    assert response.json()["detail"] == "Clause not found"
+    db_session.rollback()
+    assert _evidence_count(db_session, clause_id) == links_before
+    assert _create_audit_count(db_session) == audits_before
+
+
+def test_add_evidence_to_a_clause_of_another_companys_standard_is_404(
+    client: TestClient, db_session: Session, admin_headers: dict
+):
+    evidence = _chain(db_session, standard_company=COMPANY_B)  # clause is company A's, its standard B's
+    clause_id = evidence.clause_id
+    links_before = _evidence_count(db_session, clause_id)
+
+    response = _add(client, clause_id, admin_headers)
+
+    assert response.status_code == status.HTTP_404_NOT_FOUND, response.text
+    assert response.json()["detail"] == "Clause not found"
+    db_session.rollback()
+    assert _evidence_count(db_session, clause_id) == links_before
+
+
+def test_add_evidence_under_a_live_clause_and_standard_is_201(
+    client: TestClient, db_session: Session, admin_headers: dict
+):
+    evidence = _chain(db_session)
+
+    response = _add(client, evidence.clause_id, admin_headers)
+
+    assert response.status_code == status.HTTP_201_CREATED, response.text
+    assert response.json()["clause_id"] == evidence.clause_id
+    assert _evidence_count(db_session, evidence.clause_id) == 2
