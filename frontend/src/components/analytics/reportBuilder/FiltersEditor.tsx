@@ -6,8 +6,11 @@ import {
   MAX_FILTERS,
   MAX_TEXT_VALUE_LENGTH,
   draftOperatorsFor,
+  enumOptions,
   isNullTest,
   operatorLabel,
+  retargetFilter,
+  staleEnumValues,
   type DraftFilter,
   type DraftOperator,
 } from './reportDefinition';
@@ -37,18 +40,28 @@ function inputType(field: ReportField | undefined): string {
   }
 }
 
+/** A control's description: its own help (from FormField), then the filter's error when one is shown. */
+function describedBy(own: string | undefined, errorId: string | undefined): string | undefined {
+  return [own, errorId].filter(Boolean).join(' ') || undefined;
+}
+
+/** How a value that is no longer one of the field's options is labelled, so it can be seen and removed. */
+const staleLabel = (value: string) => `${value} (not a current value)`;
+
 interface ScalarInputProps {
   label: string;
   field: ReportField | undefined;
   value: string;
   disabled?: boolean;
-  invalid: boolean;
+  /** The id of the filter's error text while one is shown, else undefined. */
+  errorId: string | undefined;
   onChange: (value: string) => void;
 }
 
 /** One typed value: a select of the options for an enum, else a number / date / datetime / text input. */
-function ScalarInput({ label, field, value, disabled, invalid, onChange }: ScalarInputProps) {
+function ScalarInput({ label, field, value, disabled, errorId, onChange }: ScalarInputProps) {
   const help = field?.type === 'datetime' ? 'Central time' : undefined;
+  const invalid = errorId !== undefined;
   return (
     <FormField label={label} labelClassName="text-xs" help={help} className="min-w-0 flex-1">
       {props =>
@@ -56,13 +69,20 @@ function ScalarInput({ label, field, value, disabled, invalid, onChange }: Scala
           <select
             {...props}
             aria-invalid={invalid || undefined}
+            aria-describedby={describedBy(props['aria-describedby'], errorId)}
             className={COMPACT_INPUT}
             value={value}
             disabled={disabled}
             onChange={event => onChange(event.target.value)}
           >
             <option value="">Choose…</option>
-            {(field.options ?? []).map(option => (
+            {/* A stored value that is no longer an option stays visible (and is refused at Run). */}
+            {staleEnumValues(field, [value]).map(stale => (
+              <option key={`stale-${stale}`} value={stale} disabled>
+                {staleLabel(stale)}
+              </option>
+            ))}
+            {enumOptions(field).map(option => (
               <option key={option} value={option}>
                 {option}
               </option>
@@ -72,6 +92,7 @@ function ScalarInput({ label, field, value, disabled, invalid, onChange }: Scala
           <input
             {...props}
             aria-invalid={invalid || undefined}
+            aria-describedby={describedBy(props['aria-describedby'], errorId)}
             type={inputType(field)}
             step={field?.type === 'number' ? 'any' : undefined}
             maxLength={field?.type === 'string' ? MAX_TEXT_VALUE_LENGTH : undefined}
@@ -109,7 +130,14 @@ export function FiltersEditor({ fields, filters, errors, onChange, onAdd, disabl
             const operators = allowed.includes(filter.operator) ? allowed : [filter.operator, ...allowed];
             const n = index + 1;
             const error = errors[filter.uid];
-            const errorId = `report-filter-${filter.uid}-error`;
+            // Linked to the value controls only while the error text is on screen.
+            const errorId = error ? `report-filter-${filter.uid}-error` : undefined;
+            const options = enumOptions(field);
+            const staleValues = staleEnumValues(field, filter.values);
+            const toggleValue = (value: string, checked: boolean) =>
+              update(filter.uid, {
+                values: checked ? [...filter.values, value] : filter.values.filter(candidate => candidate !== value),
+              });
             return (
               <li key={filter.uid}>
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-12 sm:items-start">
@@ -120,19 +148,15 @@ export function FiltersEditor({ fields, filters, errors, onChange, onAdd, disabl
                         className={COMPACT_INPUT}
                         value={filter.field}
                         disabled={disabled}
-                        onChange={event => {
-                          const next = fields.find(candidate => candidate.name === event.target.value);
-                          const nextAllowed = next ? draftOperatorsFor(next.type) : [];
-                          const sameType = next?.type === field?.type;
-                          update(filter.uid, {
-                            field: event.target.value,
-                            operator: nextAllowed.includes(filter.operator)
-                              ? filter.operator
-                              : (nextAllowed[0] ?? 'eq'),
-                            // A value typed for another type means nothing to this one.
-                            ...(sameType ? {} : { value: '', value2: '', values: [] }),
-                          });
-                        }}
+                        onChange={event =>
+                          onChange(
+                            filters.map(candidate =>
+                              candidate.uid === filter.uid
+                                ? retargetFilter(candidate, fields, event.target.value)
+                                : candidate
+                            )
+                          )
+                        }
                       >
                         {fieldOptions(fields, filter.field).map(option => (
                           <option key={option.value} value={option.value}>
@@ -165,25 +189,37 @@ export function FiltersEditor({ fields, filters, errors, onChange, onAdd, disabl
                     {isNullTest(filter.operator) ? (
                       <p className="self-end pb-2 text-xs text-fd-mute">No value needed.</p>
                     ) : filter.operator === 'in' && field?.type === 'enum' ? (
-                      <fieldset className="min-w-0 flex-1">
+                      <fieldset className="min-w-0 flex-1" aria-describedby={errorId}>
                         <legend className="label text-xs">{`Filter ${n} values`}</legend>
                         <div className="flex flex-wrap gap-x-4 gap-y-1">
-                          {(field.options ?? []).map(option => (
+                          {options.map(option => (
                             <label key={option} className="inline-flex items-center gap-1.5 text-sm text-fd-body">
                               <input
                                 type="checkbox"
                                 className="checkbox h-4 w-4"
+                                aria-invalid={Boolean(error) || undefined}
                                 checked={filter.values.includes(option)}
                                 disabled={disabled}
-                                onChange={event =>
-                                  update(filter.uid, {
-                                    values: event.target.checked
-                                      ? [...filter.values, option]
-                                      : filter.values.filter(value => value !== option),
-                                  })
-                                }
+                                onChange={event => toggleValue(option, event.target.checked)}
                               />
                               {option}
+                            </label>
+                          ))}
+                          {/* Ticked in a stored template but no longer an option: shown so it can be unticked. */}
+                          {staleValues.map(value => (
+                            <label
+                              key={`stale-${value}`}
+                              className="inline-flex items-center gap-1.5 text-sm text-amber-300"
+                            >
+                              <input
+                                type="checkbox"
+                                className="checkbox h-4 w-4"
+                                aria-invalid={Boolean(error) || undefined}
+                                checked
+                                disabled={disabled}
+                                onChange={event => toggleValue(value, event.target.checked)}
+                              />
+                              {staleLabel(value)}
                             </label>
                           ))}
                         </div>
@@ -199,6 +235,7 @@ export function FiltersEditor({ fields, filters, errors, onChange, onAdd, disabl
                           <textarea
                             {...props}
                             aria-invalid={Boolean(error) || undefined}
+                            aria-describedby={describedBy(props['aria-describedby'], errorId)}
                             className={`${COMPACT_INPUT} min-h-[72px]`}
                             rows={3}
                             value={filter.value}
@@ -214,7 +251,7 @@ export function FiltersEditor({ fields, filters, errors, onChange, onAdd, disabl
                           field={field}
                           value={filter.value}
                           disabled={disabled}
-                          invalid={Boolean(error)}
+                          errorId={errorId}
                           onChange={value => update(filter.uid, { value })}
                         />
                         <ScalarInput
@@ -222,7 +259,7 @@ export function FiltersEditor({ fields, filters, errors, onChange, onAdd, disabl
                           field={field}
                           value={filter.value2}
                           disabled={disabled}
-                          invalid={Boolean(error)}
+                          errorId={errorId}
                           onChange={value2 => update(filter.uid, { value2 })}
                         />
                       </>
@@ -232,7 +269,7 @@ export function FiltersEditor({ fields, filters, errors, onChange, onAdd, disabl
                         field={field}
                         value={filter.value}
                         disabled={disabled}
-                        invalid={Boolean(error)}
+                        errorId={errorId}
                         onChange={value => update(filter.uid, { value })}
                       />
                     )}
@@ -250,7 +287,7 @@ export function FiltersEditor({ fields, filters, errors, onChange, onAdd, disabl
                     </button>
                   </div>
                 </div>
-                {error && (
+                {errorId && (
                   <p id={errorId} role="alert" className="mt-1 text-xs text-fd-red">
                     {`Filter ${n}: ${error}`}
                   </p>

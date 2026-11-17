@@ -171,7 +171,14 @@ export default function ReportBuilder() {
       }
       return undefined;
     }
-    if (openTemplateRef.current?.id === templateParam) return undefined;
+    if (openTemplateRef.current?.id === templateParam) {
+      // Back on the template already in the builder (say from another one still loading, or
+      // one that failed to open): nothing to fetch, so clear that other load's spinner or
+      // error — its Retry would only land here again.
+      setTemplateLoadError(null);
+      setTemplateLoading(false);
+      return undefined;
+    }
     let cancelled = false;
     setTemplateLoading(true);
     setTemplateLoadError(null);

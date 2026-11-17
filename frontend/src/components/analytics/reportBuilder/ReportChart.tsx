@@ -35,6 +35,12 @@ export interface ChartSpec {
  * What to chart, or null: only a GROUPED result with at least one number column
  * besides the first group-by field. The first group-by field is the category axis;
  * a date / datetime one makes it a line chart over time, anything else a bar chart.
+ *
+ * The axis must be that field's own VALUES — a column showing it without a summary.
+ * When the report has none (it groups by a field it shows only summarized, or not at
+ * all), there is no chart: guessing by key would put a SUMMARY on the axis, since an
+ * unlabelled summary is keyed by its field's name (`Count of Status` is key `status`).
+ * The table still renders.
  */
 export function chartSpec(
   result: CustomReportResult,
@@ -44,7 +50,8 @@ export function chartSpec(
   const firstGroup = definition.group_by[0]?.field;
   if (!firstGroup) return null;
   const groupColumn = definition.columns.find(column => column.field === firstGroup && !column.aggregate);
-  const categoryKey = groupColumn ? groupColumn.alias?.trim() || groupColumn.field : firstGroup;
+  if (!groupColumn) return null;
+  const categoryKey = groupColumn.alias?.trim() || groupColumn.field;
   const category = result.columns.find(column => column.key === categoryKey);
   if (!category) return null;
   const series = result.columns.filter(column => column.type === 'number' && column.key !== category.key);

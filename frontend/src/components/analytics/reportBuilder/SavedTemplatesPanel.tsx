@@ -1,11 +1,39 @@
 import React, { useMemo } from 'react';
 import { DocumentChartBarIcon, ExclamationTriangleIcon } from '@heroicons/react/24/outline';
-import { Button, DataTable, LoadingButton } from '../../ui';
-import type { DataTableColumn } from '../../ui';
+import { Button, DataTable, Spinner } from '../../ui';
+import type { ButtonProps, DataTableColumn } from '../../ui';
 import type { ReportDataSourceCatalog, ReportTemplate } from '../../../types/reportBuilder';
 import { formatCentralDate } from '../../../utils/centralTime';
 
 export type TemplateAction = 'run' | 'export';
+
+interface RowActionProps extends Omit<ButtonProps, 'size'> {
+  /** This row's request is in flight: a spinner, and no second click. */
+  loading?: boolean;
+}
+
+/**
+ * One saved-template row action. Every action in the row is the shared `<Button size="sm">`
+ * (`.btn-sm`), so Open / Run / Export CSV / Edit / Delete share one height, padding and type
+ * size. `<LoadingButton size="sm">` is deliberately not used for Run / Export: it applies its
+ * own utility padding and `text-sm` (and a slate background for `secondary`), which out-rank
+ * `.btn-sm` and drew those two visibly larger than their neighbors. The in-flight state is
+ * LoadingButton's: a spinner inside a natively disabled button.
+ */
+function RowAction({ loading = false, disabled, className = '', children, ...rest }: RowActionProps) {
+  return (
+    <Button
+      {...rest}
+      size="sm"
+      disabled={disabled || loading}
+      aria-busy={loading || undefined}
+      className={`whitespace-nowrap ${className}`.trim()}
+    >
+      {loading && <Spinner size="sm" />}
+      {children}
+    </Button>
+  );
+}
 
 interface SavedTemplatesPanelProps {
   templates: ReportTemplate[];
@@ -111,58 +139,49 @@ export function SavedTemplatesPanel({
           const isBusy = busy?.id === template.id;
           const manage = canManage(template);
           const brokenHint = broken ? 'Open it in the builder and fix it first' : undefined;
+          // Two clusters that each stay on one line: when the cell is narrow the row wraps
+          // between them (use | manage), never through the middle of a cluster.
           return (
-            <div className="flex flex-wrap justify-end gap-1.5">
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => onOpen(template)}
-                aria-label={`Open ${template.name}`}
-              >
-                Open
-              </Button>
-              <LoadingButton
-                variant="secondary"
-                size="sm"
-                loading={isBusy && busy?.action === 'run'}
-                disabled={broken || isBusy}
-                title={brokenHint}
-                onClick={() => onRun(template)}
-                aria-label={`Run ${template.name}`}
-              >
-                Run
-              </LoadingButton>
-              <LoadingButton
-                variant="secondary"
-                size="sm"
-                loading={isBusy && busy?.action === 'export'}
-                disabled={broken || isBusy}
-                title={brokenHint}
-                onClick={() => onExport(template)}
-                aria-label={`Export ${template.name} as CSV`}
-              >
-                Export CSV
-              </LoadingButton>
+            <div className="flex flex-wrap items-center justify-end gap-1.5">
+              <div className="flex items-center gap-1.5">
+                <RowAction variant="secondary" onClick={() => onOpen(template)} aria-label={`Open ${template.name}`}>
+                  Open
+                </RowAction>
+                <RowAction
+                  variant="secondary"
+                  loading={isBusy && busy?.action === 'run'}
+                  disabled={broken || isBusy}
+                  title={brokenHint}
+                  onClick={() => onRun(template)}
+                  aria-label={`Run ${template.name}`}
+                >
+                  Run
+                </RowAction>
+                <RowAction
+                  variant="secondary"
+                  loading={isBusy && busy?.action === 'export'}
+                  disabled={broken || isBusy}
+                  title={brokenHint}
+                  onClick={() => onExport(template)}
+                  aria-label={`Export CSV for ${template.name}`}
+                >
+                  Export CSV
+                </RowAction>
+              </div>
               {manage && (
-                <>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => onEdit(template)}
-                    aria-label={`Edit ${template.name}`}
-                  >
+                <div className="flex items-center gap-1.5">
+                  <RowAction variant="ghost" onClick={() => onEdit(template)} aria-label={`Edit ${template.name}`}>
                     Edit
-                  </Button>
-                  <Button
+                  </RowAction>
+                  <RowAction
                     variant="ghost"
-                    size="sm"
                     className="text-fd-red"
                     onClick={() => onDelete(template)}
                     aria-label={`Delete ${template.name}`}
                   >
                     Delete
-                  </Button>
-                </>
+                  </RowAction>
+                </div>
               )}
             </div>
           );

@@ -10,7 +10,9 @@ import {
   emptyDraft,
   newColumn,
   newFilter,
+  retargetFilter,
   sortFieldOptions,
+  staleEnumValues,
   ungroupedColumns,
   type BuilderDraft,
   type DraftFilter,
@@ -27,6 +29,7 @@ const catalog: ReportDataSourceCatalog = {
       { name: 'quantity_ordered', label: 'Qty Ordered', type: 'number' },
       { name: 'due_date', label: 'Due Date', type: 'date' },
       { name: 'created_at', label: 'Created', type: 'datetime' },
+      { name: 'stage', label: 'Stage', type: 'enum', options: ['queued', 'released', 'shipped'] },
     ],
   },
 };
@@ -273,6 +276,61 @@ describe('draftFromDefinition', () => {
   });
 });
 
+describe('retargetFilter', () => {
+  const fields = catalog.work_orders.fields;
+
+  it('keeps an enum value only when it is an option of the new enum field', () => {
+    const moved = retargetFilter(
+      filterOn('status', { operator: 'in', values: ['draft', 'released'] }),
+      fields,
+      'stage'
+    );
+    expect(moved).toMatchObject({ field: 'stage', operator: 'in', values: ['released'] });
+    expect(retargetFilter(filterOn('status', { operator: 'eq', value: 'complete' }), fields, 'stage')).toMatchObject({
+      field: 'stage',
+      operator: 'eq',
+      value: '',
+    });
+    expect(retargetFilter(filterOn('status', { operator: 'ne', value: 'released' }), fields, 'stage')).toMatchObject({
+      operator: 'ne',
+      value: 'released',
+    });
+  });
+
+  it('keeps a value between fields of one non-enum type, and clears it across types', () => {
+    const typed = filterOn('due_date', { operator: 'between', value: '2026-01-01', value2: '2026-02-01' });
+    const withShipDate = [...fields, { name: 'ship_date', label: 'Ship Date', type: 'date' as const }];
+    expect(retargetFilter(typed, withShipDate, 'ship_date')).toMatchObject({
+      field: 'ship_date',
+      operator: 'between',
+      value: '2026-01-01',
+      value2: '2026-02-01',
+    });
+    // date -> number: the comparison is allowed there, the typed dates are not numbers.
+    expect(retargetFilter(typed, fields, 'quantity_ordered')).toMatchObject({
+      field: 'quantity_ordered',
+      operator: 'between',
+      value: '',
+      value2: '',
+      values: [],
+    });
+    // number -> enum: `between` is not an enum comparison; fall back to the first one.
+    expect(retargetFilter(filterOn('quantity_ordered', { operator: 'between' }), fields, 'status')).toMatchObject({
+      operator: 'eq',
+    });
+  });
+});
+
+describe('staleEnumValues', () => {
+  it('names the values that are not current options, once each and never the empty choice', () => {
+    expect(staleEnumValues(field('status'), ['IN_PROGRESS', 'released', 'IN_PROGRESS', '', 'ON_HOLD'])).toEqual([
+      'IN_PROGRESS',
+      'ON_HOLD',
+    ]);
+    expect(staleEnumValues(field('status'), ['draft'])).toEqual([]);
+  });
+});
+
 describe('grouping helpers', () => {
   const grouped: BuilderDraft = {
     ...emptyDraft(),
@@ -313,6 +371,7 @@ describe('grouping helpers', () => {
       'quantity_ordered',
       'due_date',
       'created_at',
+      'stage',
     ]);
   });
 });
@@ -349,6 +408,34 @@ describe('chartSpec', () => {
   it('does not chart an ungrouped result or one without a number column', () => {
     expect(chartSpec(result, { ...definition, group_by: [] }, catalog)).toBeNull();
     expect(chartSpec({ ...result, columns: result.columns.slice(0, 1) }, definition, catalog)).toBeNull();
+  });
+
+  it('never puts a summarized column on the category axis', () => {
+    // Grouped by due date, but due date is shown only as a count — keyed `due_date`, like the field.
+    const summarizedOnly: ReportDefinition = {
+      ...definition,
+      columns: [
+        { field: 'due_date', aggregate: 'count' },
+        { field: 'quantity_ordered', aggregate: 'sum', alias: 'total_qty' },
+      ],
+    };
+    const summarizedResult = {
+      ...result,
+      columns: [
+        { key: 'due_date', label: 'Count of Due Date', type: 'number' as const },
+        { key: 'total_qty', label: 'Total qty', type: 'number' as const },
+      ],
+      rows: [{ due_date: 3, total_qty: 4 }],
+    };
+    expect(chartSpec(summarizedResult, summarizedOnly, catalog)).toBeNull();
+    // Grouped by a field the report does not show at all: no axis either.
+    expect(
+      chartSpec(
+        { ...result, columns: result.columns.slice(1) },
+        { ...definition, columns: definition.columns.slice(1) },
+        catalog
+      )
+    ).toBeNull();
   });
 });
 

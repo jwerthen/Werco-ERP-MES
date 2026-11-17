@@ -184,6 +184,51 @@ export function newSort(field: string): DraftSort {
   return { uid: nextUid('s'), field, direction: 'asc' };
 }
 
+/** The values an enum field offers today (none for any other type, or an enum without options). */
+export function enumOptions(field: ReportField | undefined): string[] {
+  return field?.type === 'enum' ? (field.options ?? []) : [];
+}
+
+/**
+ * Ticked / chosen enum values that are not among the field's current options, in order and
+ * without repeats. They come from a stored template whose values have since changed (a legacy
+ * member name such as `IN_PROGRESS`); the editor shows them so they can be removed, since
+ * Run refuses them.
+ */
+export function staleEnumValues(field: ReportField | undefined, values: string[]): string[] {
+  const options = enumOptions(field);
+  return values.filter((value, index) => value !== '' && !options.includes(value) && values.indexOf(value) === index);
+}
+
+/**
+ * The filter moved onto another field. The comparison survives when the new field allows it.
+ * A value survives only where it still means something: the same type, and for an enum only
+ * the values that are options of the NEW field — a Status value is not a Disposition value,
+ * and one carried across would sit invisible in the new field's checkbox list yet be refused
+ * at Run.
+ */
+export function retargetFilter(filter: DraftFilter, fields: ReportField[], fieldName: string): DraftFilter {
+  const previous = fields.find(candidate => candidate.name === filter.field);
+  const next = fields.find(candidate => candidate.name === fieldName);
+  const allowed = next ? draftOperatorsFor(next.type) : [];
+  const moved: DraftFilter = {
+    ...filter,
+    field: fieldName,
+    operator: allowed.includes(filter.operator) ? filter.operator : (allowed[0] ?? 'eq'),
+  };
+  // A value typed for another type means nothing to this one.
+  if (next?.type !== previous?.type) return { ...moved, value: '', value2: '', values: [] };
+  if (next?.type === 'enum') {
+    const options = enumOptions(next);
+    return {
+      ...moved,
+      value: options.includes(filter.value) ? filter.value : '',
+      values: filter.values.filter(value => options.includes(value)),
+    };
+  }
+  return moved;
+}
+
 /**
  * The sort fields to offer. Ungrouped: every catalog field plus every selected
  * column's output key (an aggregate is sorted by its key). Grouped: only the

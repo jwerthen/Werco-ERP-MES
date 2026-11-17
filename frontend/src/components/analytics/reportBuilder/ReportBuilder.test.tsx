@@ -53,6 +53,8 @@ const catalog: ReportDataSourceCatalog = {
       { name: 'quantity_ordered', label: 'Qty Ordered', type: 'number' },
       { name: 'due_date', label: 'Due Date', type: 'date' },
       { name: 'created_at', label: 'Created', type: 'datetime' },
+      // A second enum, sharing one option ('released') with Status.
+      { name: 'stage', label: 'Stage', type: 'enum', options: ['queued', 'released', 'shipped'] },
     ],
   },
   parts: {
@@ -347,6 +349,124 @@ describe('building and running a report', () => {
   });
 });
 
+describe('filter values', () => {
+  it('keeps only the values the new enum field offers when a filter moves between enums', async () => {
+    await startWorkOrderReport();
+    fireEvent.click(screen.getByRole('button', { name: /Add filter/ }));
+    fireEvent.change(screen.getByLabelText('Filter 1 field'), { target: { value: 'status' } });
+    fireEvent.change(screen.getByLabelText('Filter 1 comparison'), { target: { value: 'in' } });
+    const statusValues = screen.getByRole('group', { name: 'Filter 1 values' });
+    fireEvent.click(within(statusValues).getByRole('checkbox', { name: 'draft' }));
+    fireEvent.click(within(statusValues).getByRole('checkbox', { name: 'released' }));
+
+    fireEvent.click(screen.getByRole('button', { name: /Add filter/ }));
+    fireEvent.change(screen.getByLabelText('Filter 2 field'), { target: { value: 'status' } });
+    fireEvent.change(screen.getByLabelText('Filter 2 value'), { target: { value: 'complete' } });
+
+    fireEvent.change(screen.getByLabelText('Filter 1 field'), { target: { value: 'stage' } });
+    fireEvent.change(screen.getByLabelText('Filter 2 field'), { target: { value: 'stage' } });
+
+    // 'released' is a Stage value too, so it stays ticked; 'draft' is not, so it is gone —
+    // not hidden behind the new field's checkbox list.
+    const stageValues = screen.getByRole('group', { name: 'Filter 1 values' });
+    expect(
+      within(stageValues)
+        .getAllByRole('checkbox')
+        .map(box => (box as HTMLInputElement).checked)
+    ).toEqual([false, true, false]);
+    expect(screen.queryByText(/not a current value/)).not.toBeInTheDocument();
+    // 'complete' is not a Stage value: the scalar choice is cleared, not kept invisibly.
+    expect(screen.getByLabelText('Filter 2 value')).toHaveValue('');
+
+    fireEvent.change(screen.getByLabelText('Filter 2 value'), { target: { value: 'shipped' } });
+    mockedApi.runCustomReport.mockResolvedValue(flatResult);
+    fireEvent.click(screen.getByRole('button', { name: /Run report/ }));
+    await waitFor(() => expect(mockedApi.runCustomReport).toHaveBeenCalledTimes(1));
+    expect(mockedApi.runCustomReport.mock.calls[0][0].filters).toEqual([
+      { field: 'stage', operator: 'in', value: ['released'] },
+      { field: 'stage', operator: 'eq', value: 'shipped' },
+    ]);
+  });
+
+  it('shows stored values that are no longer options, so they can be removed', async () => {
+    mockedApi.getReportTemplate.mockResolvedValue({
+      ...groupedTemplate,
+      filters: [
+        { field: 'status', operator: 'in', value: ['IN_PROGRESS', 'released'] },
+        { field: 'status', operator: 'eq', value: 'ON_HOLD' },
+      ],
+    });
+    renderBuilder('/analytics/reports?template=12');
+    const values = await screen.findByRole('group', { name: 'Filter 1 values' });
+    const legacy = within(values).getByRole('checkbox', { name: 'IN_PROGRESS (not a current value)' });
+    expect(legacy).toBeChecked();
+    expect(within(values).getByRole('checkbox', { name: 'released' })).toBeChecked();
+    const scalar = screen.getByLabelText('Filter 2 value');
+    expect(scalar).toHaveValue('ON_HOLD');
+    expect(within(scalar).getByRole('option', { name: 'ON_HOLD (not a current value)' })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', { name: /Run report/ }));
+    expect(
+      await screen.findByText(`Filter 1: "IN_PROGRESS": "IN_PROGRESS" is not one of this field's values.`)
+    ).toBeInTheDocument();
+    expect(mockedApi.runCustomReport).not.toHaveBeenCalled();
+
+    fireEvent.click(legacy);
+    expect(screen.queryByRole('checkbox', { name: /IN_PROGRESS/ })).not.toBeInTheDocument();
+    fireEvent.change(scalar, { target: { value: 'draft' } });
+    expect(within(scalar).queryByRole('option', { name: /not a current value/ })).not.toBeInTheDocument();
+
+    mockedApi.runCustomReport.mockResolvedValue(groupedResult);
+    fireEvent.click(screen.getByRole('button', { name: /Run report/ }));
+    await waitFor(() => expect(mockedApi.runCustomReport).toHaveBeenCalledTimes(1));
+    expect(mockedApi.runCustomReport.mock.calls[0][0].filters).toEqual([
+      { field: 'status', operator: 'in', value: ['released'] },
+      { field: 'status', operator: 'eq', value: 'draft' },
+    ]);
+  });
+
+  it('makes each filter error the accessible description of its value controls', async () => {
+    await startWorkOrderReport();
+    const addFilter = (field: string, operator?: string) => {
+      fireEvent.click(screen.getByRole('button', { name: /Add filter/ }));
+      const n = screen.getAllByLabelText(/^Filter \d+ field$/).length;
+      fireEvent.change(screen.getByLabelText(`Filter ${n} field`), { target: { value: field } });
+      if (operator) fireEvent.change(screen.getByLabelText(`Filter ${n} comparison`), { target: { value: operator } });
+    };
+    addFilter('quantity_ordered');
+    addFilter('due_date', 'between');
+    fireEvent.change(screen.getByLabelText('Filter 2 from'), { target: { value: '2026-01-01' } });
+    addFilter('work_order_number', 'in');
+    addFilter('status', 'in');
+    addFilter('created_at');
+
+    // No error yet: nothing to describe beyond the controls' own help.
+    expect(screen.getByLabelText('Filter 1 value')).not.toHaveAttribute('aria-describedby');
+    expect(screen.getByRole('group', { name: 'Filter 4 values' })).not.toHaveAttribute('aria-describedby');
+
+    fireEvent.click(screen.getByRole('button', { name: /Run report/ }));
+    await screen.findByText('Filter 1: Enter a number.');
+
+    const value1 = screen.getByLabelText('Filter 1 value');
+    expect(value1).toHaveAccessibleDescription('Filter 1: Enter a number.');
+    expect(value1).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getByLabelText('Filter 2 from')).toHaveAccessibleDescription('Filter 2: To: Pick a date.');
+    expect(screen.getByLabelText('Filter 2 to')).toHaveAccessibleDescription('Filter 2: To: Pick a date.');
+    expect(screen.getByLabelText(/Filter 3 values/)).toHaveAccessibleDescription(
+      'One value per line Filter 3: Enter at least one value.'
+    );
+    const group = screen.getByRole('group', { name: 'Filter 4 values' });
+    expect(group).toHaveAccessibleDescription('Filter 4: Enter at least one value.');
+    within(group)
+      .getAllByRole('checkbox')
+      .forEach(box => expect(box).toHaveAttribute('aria-invalid', 'true'));
+    expect(screen.getByLabelText('Filter 5 value')).toHaveAccessibleDescription(
+      'Central time Filter 5: Pick a date and time.'
+    );
+    expect(mockedApi.runCustomReport).not.toHaveBeenCalled();
+  });
+});
+
 describe('saved templates', () => {
   it('lists templates with Shared and a "needs editing" flag carrying the reasons', async () => {
     renderBuilder();
@@ -356,7 +476,7 @@ describe('saved templates', () => {
     const reasons = screen.getByRole('list', { name: 'Why Legacy hours needs editing' });
     expect(reasons).toHaveTextContent('Unknown field estimated_hours for data source work_orders');
     expect(screen.getByRole('button', { name: 'Run Legacy hours' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Export Legacy hours as CSV' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Export CSV for Legacy hours' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Run Open work by status' })).toBeEnabled();
   });
 
@@ -388,6 +508,71 @@ describe('saved templates', () => {
     expect(screen.getByText('140')).toBeInTheDocument();
   });
 
+  it('does not chart a report whose group-by field appears only summarized, but still shows the table', async () => {
+    const countByStatus: ReportTemplate = {
+      ...groupedTemplate,
+      id: 14,
+      name: 'Count by status',
+      // No plain Status column: the unlabelled count is keyed `status` by the server.
+      columns: [
+        { field: 'status', aggregate: 'count' },
+        { field: 'quantity_ordered', aggregate: 'sum', alias: 'total_qty' },
+      ],
+      sort: [],
+    };
+    mockedApi.listReportTemplates.mockResolvedValue([countByStatus]);
+    mockedApi.runReportTemplate.mockResolvedValue({
+      ...groupedResult,
+      columns: [
+        { key: 'status', label: 'Count of Status', type: 'number' },
+        { key: 'total_qty', label: 'Total qty', type: 'number' },
+      ],
+      rows: [
+        { status: 3, total_qty: 140 },
+        { status: 1, total_qty: 35 },
+      ],
+    });
+    renderBuilder();
+    fireEvent.click(await screen.findByRole('button', { name: 'Run Count by status' }));
+
+    expect(await screen.findByRole('columnheader', { name: /Count of Status/ })).toBeInTheDocument();
+    expect(screen.getByText('140')).toBeInTheDocument();
+    expect(screen.queryByRole('figure')).not.toBeInTheDocument();
+  });
+
+  it('draws every row action at the one small button size, and holds a running one busy', async () => {
+    let finishRun: (result: CustomReportResult) => void = () => undefined;
+    mockedApi.runReportTemplate.mockImplementation(
+      () =>
+        new Promise(resolve => {
+          finishRun = resolve;
+        })
+    );
+    renderBuilder();
+    const run = await screen.findByRole('button', { name: 'Run Open work by status' });
+    const row = run.closest('tr') as HTMLElement;
+    const actions = ['Open', 'Run', 'Export CSV for', 'Edit', 'Delete'].map(verb =>
+      within(row).getByRole('button', { name: `${verb} Open work by status` })
+    );
+    actions.forEach(button => {
+      expect(button).toHaveClass('btn-sm');
+      // LoadingButton's own `text-sm` / padding utilities out-rank `.btn-sm`; none may leak in.
+      expect(button).not.toHaveClass('text-sm');
+      expect(button).not.toHaveClass('px-3');
+    });
+
+    fireEvent.click(run);
+    await waitFor(() => expect(run).toBeDisabled());
+    expect(run).toHaveAttribute('aria-busy', 'true');
+    expect(within(row).getByRole('button', { name: 'Export CSV for Open work by status' })).toBeDisabled();
+
+    await act(async () => {
+      finishRun(groupedResult);
+    });
+    await waitFor(() => expect(run).toBeEnabled());
+    expect(run).not.toHaveAttribute('aria-busy');
+  });
+
   it('shows a 409 from a template run verbatim and refreshes the list', async () => {
     mockedApi.runReportTemplate.mockRejectedValue(
       httpError(409, 'Report template "Open work by status" no longer runs: unknown field status')
@@ -412,7 +597,7 @@ describe('saved templates', () => {
       filename: 'Rückstand "by" status.csv',
     });
     renderBuilder();
-    fireEvent.click(await screen.findByRole('button', { name: 'Export Open work by status as CSV' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Export CSV for Open work by status' }));
 
     expect(await screen.findByText('Exported Rückstand "by" status.csv.')).toBeInTheDocument();
     expect(mockedApi.exportReportTemplateCsv).toHaveBeenCalledWith(12);
@@ -423,7 +608,7 @@ describe('saved templates', () => {
   it('toasts an export refusal verbatim', async () => {
     mockedApi.exportReportTemplateCsv.mockRejectedValue(httpError(400, 'No data to export'));
     renderBuilder();
-    fireEvent.click(await screen.findByRole('button', { name: 'Export Open work by status as CSV' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Export CSV for Open work by status' }));
     expect(await screen.findByText('No data to export')).toBeInTheDocument();
   });
 
@@ -451,6 +636,43 @@ describe('saved templates', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Start a new report instead' }));
     await waitFor(() => expect(screen.getByTestId('location').textContent).toBe(''));
     expect(await screen.findByLabelText(/Data source/)).toBeInTheDocument();
+  });
+
+  it('drops a failed open when the user goes back to the template already in the builder', async () => {
+    mockedApi.getReportTemplate.mockImplementation(id =>
+      id === 12 ? Promise.resolve(groupedTemplate) : Promise.reject(httpError(500, 'Template store offline'))
+    );
+    renderBuilder('/analytics/reports?template=12');
+    await screen.findByText('Editing template');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open Legacy hours' }));
+    expect(await screen.findByText('Template store offline')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open Open work by status' }));
+    await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent('?template=12'));
+    expect(screen.queryByText('Template store offline')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Retry/ })).not.toBeInTheDocument();
+    expect(screen.getByText('Editing template')).toBeInTheDocument();
+    expect(screen.getByLabelText(/Data source/)).toHaveValue('work_orders');
+    // Template 12 was already in the builder: nothing re-fetched.
+    expect(mockedApi.getReportTemplate.mock.calls.map(([id]) => id)).toEqual([12, 13]);
+  });
+
+  it('drops a pending open when the user goes back to the template already in the builder', async () => {
+    mockedApi.getReportTemplate.mockImplementation(id =>
+      id === 12 ? Promise.resolve(groupedTemplate) : new Promise<ReportTemplate>(() => undefined)
+    );
+    renderBuilder('/analytics/reports?template=12');
+    await screen.findByText('Editing template');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open Legacy hours' }));
+    expect(await screen.findByText('Opening template…')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open Open work by status' }));
+    await waitFor(() => expect(screen.queryByText('Opening template…')).not.toBeInTheDocument());
+    expect(screen.getByTestId('location')).toHaveTextContent('?template=12');
+    expect(screen.getByText('Editing template')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Run report/ })).toBeEnabled();
   });
 
   it('saves the builder as a new template and opens it without re-fetching', async () => {
