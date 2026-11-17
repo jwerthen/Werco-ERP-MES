@@ -8723,6 +8723,34 @@ in `RBAC_PERMISSIONS.md`.
 > returns **500** if the key is missing. Claude extracts the numbered clauses and persists them
 > against the standard.
 
+> **An evidence rule that fails is reported as not assessed, never dropped.** Each evidence rule a
+> clause matches runs its query in its own savepoint. A rule whose query raises is rolled back to that
+> savepoint, logged with its traceback, and listed in the `auto-evidence` response as a placeholder
+> row: that rule's `evidence_type` / `title` / `module_reference`, `description` *"Evidence could not
+> be computed from live records"*, `health_status` `not_computed`, `examples` `[]` and
+> `suggested_compliance` `not_assessed` (its `total_count` / `recent_count` of 0 are placeholders, not
+> measurements). `not_computed` is reserved for this placeholder and no evidence query returns it, so a
+> client can tell it from `no_data` — a query that ran and found no records, with the same zero counts.
+> Don't report a `not_computed` row's counts: the QMS Standards page shows it as *Not computed* with its
+> `health_detail`, never as "0 records". The clause therefore cannot roll up to `compliant`: a finding from a rule that did
+> compute (`non_compliant`, then `partial`) still decides the clause, and otherwise a clause with a
+> failed rule is `not_assessed` — even when every other row is compliant, so a query failure is never
+> presented as a compliance gap. The rules after it still run. The rule used to be silently dropped: a clause matching calibration and
+> maintenance whose maintenance query failed showed `compliant` from calibration alone, and on
+> PostgreSQL the aborted transaction failed, and dropped, every later rule too. The response shape is
+> unchanged.
+>
+> `auto-link` persists **nothing** for a failed rule: no evidence link is created, and an existing
+> auto-linked one keeps the `live_count`, description and `last_refreshed` of the last run that
+> computed it. The failed rule still counts toward its clause's `compliance_summary` bucket, and a
+> clause whose matched rules all failed counts under `clauses_without_evidence`. The `auto-link`
+> response adds `total_evidence_failed` (int, default `0`: rule evaluations that failed this run). When
+> N > 0 the audit row's description gains *", N not computed (left unchanged)"* and its `extra_data`
+> carries `evidence_not_computed`, one `{clause_id, clause_number, rule_id}` per skipped rule, which is
+> what explains the older `last_refreshed` on those links. The QMS Standards page shows that count on
+> the auto-link result card (*Evidence Not Computed*) and as a warning toast, saying the links were
+> left as last refreshed.
+
 > **Auto-evidence supplier counts now exclude removed suppliers — expect the number to drop.** The
 > *Supplier Management & Evaluation* evidence row (`GET /qms-standards/clauses/{clause_id}/auto-evidence`,
 > and what `POST /qms-standards/{standard_id}/auto-link` persists) counted **soft-deleted** vendors in
@@ -8869,6 +8897,10 @@ in `RBAC_PERMISSIONS.md`.
   "overall_suggested_compliance": "compliant"
 }
 ```
+
+`health_status` is `healthy`, `warning`, `critical` or `no_data` (the query ran and found no records),
+or `not_computed` for the placeholder row of a rule whose query failed — its zero counts are not
+measurements (see *An evidence rule that fails is reported as not assessed, never dropped* above).
 
 ### Customer Complaints & RMA
 
