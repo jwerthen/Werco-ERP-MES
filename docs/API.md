@@ -1548,7 +1548,8 @@ company-scoped.
 | PUT | `/work-orders/{id}` | Update work order (body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status, **or sets `status` to COMPLETE/CLOSED from any status other than COMPLETE/CLOSED** — see "Terminal-state lock" below). **`due_date` is the one non-`status` field that IS status-gated: changing it on a COMPLETE/CLOSED/CANCELLED work order returns 409** (see "Due date on a finished job" below). Other non-`status` fields such as `notes` / `special_instructions` / `unit_number` carry **no status gate**: they are editable at any status, including terminal ones (send `unit_number: null` — or `""`, which is trimmed to NULL — to clear it). **The flip verb for `sequential_operations`** — turning it *on* returns **409** on a laser nest WO, and **409 naming the operations** when work is already under way out of sequence; otherwise it demotes un-worked blocked operations READY → PENDING, one audit row each (see "READY promotion" below). **`status: on_hold` on a DRAFT work order returns 409** (a draft has nothing on the floor to hold — release it first); this `PUT` is the "Hold Work Order" write for a released / in-progress job, and the door that puts a held job back on the floor is `POST /work-orders/{id}/resume` (this `PUT` can still move a held job to `draft` or `cancelled`, which keeps it off the floor; its blind move to `released` / `in_progress` is a known gap — see "Draft and on-hold work orders refuse every start" below). **Any move to `draft`** (from released / in progress / on hold) returns every un-worked READY operation — laser nests included — to PENDING with one **required** audit row each; **503**, nothing changed, when those rows cannot be written (see "Returning a job to draft" below). **Lowering `quantity_ordered` below what a whole-order operation has already accounted for (its good + scrap) returns 409** naming the operation, before any field is written — lower the order only by units no operation has started; **raising** it once a whole-order or component operation has completed returns 409 too; whole-order targets restated as `component_quantity` move with the order (audited); an API token lowering it once work is recorded gets 403, as does an API token raising the header's `quantity_scrapped` (only a person declares scrap — owner decision 2026-11-07), changing `scrap_reason`, or changing the header's `quantity_complete` / `quantity_scrapped` in either direction (this PR's extension); and a `sequential_operations` flip that would re-interpret a declared short returns 409 (see "Short count at completion" below) | Admin / Manager / Supervisor |
 | DELETE | `/work-orders/{id}` | Delete work order (soft by default; `hard_delete=true` only for draft/cancelled, and refused **409** when ledger-backed ties or saved templates reference it) | Admin / Manager |
 | POST | `/work-orders/{id}/restore` | Restore a soft-deleted work order (**400** if it is not deleted). Re-opens the ties the delete cancelled — **except** any whose part has since been reclassified into one the shop produces. Returns an **envelope** (`message` + `skipped_material_allocations`), not a bare message; see "Restoring a work order" below. Reached from Work Orders → **Deleted** (`deleted_only=true` above) | Admin / Manager |
-| POST | `/work-orders/{id}/release` | Release to production (**404** when missing or soft-deleted) | Admin / Manager / Supervisor |
+| POST | `/work-orders/{id}/release` | Release to production. **400** `Only draft work orders can be released` when not DRAFT, **400** `Work order must have at least one operation` when it has none — the only two checks; there is no material, blocker or readiness gate (see "Releasing work orders" below). **404** when missing or soft-deleted | Admin / Manager / Supervisor |
+| POST | `/work-orders/bulk-release` | **Release several DRAFT work orders in one call.** Body `{"work_order_ids": [...]}`: 1–50 positive ids (repeats count toward the 50 and are de-duplicated, first occurrence kept); any other key → **422**. Each id is judged and released exactly as `POST /work-orders/{id}/release` would, all in **one** commit. **200** once the body validates — even when every item was refused — with `{results, released_count, error_count}`, one result per distinct id in request order, unless the whole request fails after the per-item phase (the audit rows or the commit: **409** on a lost lock race, otherwise 5xx, nothing saved). Not an MCP tool. See "Releasing several work orders at once" below | Admin / Manager / Supervisor |
 | POST | `/work-orders/{id}/start` | Start production: a **RELEASED** work order → IN_PROGRESS. **409** on a DRAFT (release first) or ON_HOLD (resume it — this verb no longer lifts a hold) work order, **400** on any other non-released status, **404** when missing or soft-deleted, **409** on a concurrent write | Admin / Manager / Supervisor |
 | POST | `/work-orders/{id}/resume` | **Resume Work Order** — lift a *work-order* hold. Never releases: the target comes from the release record (`released_at` / `released_by`) — IN_PROGRESS when released and worked, RELEASED when released and unworked, **DRAFT** when no release is on record (un-worked READY operations, laser nests included, return to PENDING). **400** when not on hold, **404** when missing or soft-deleted, **503** (nothing changed) when the required audit rows cannot be written. Operation-level holds are untouched. See "Draft and on-hold work orders refuse every start" below | Admin / Manager / Supervisor |
 | POST | `/work-orders/{id}/complete` | Force-complete a work order (privileged override), booking `quantity_complete` as its finished count — the header is **set** to it. **409** if the WO is CANCELLED or an open operation is on hold. **403** for an API token sending a `quantity_scrapped` above the header's recorded scrap (owner decision 2026-11-07: only a person declares scrap), and first among the quantity refusals for an API token completing short or above what the floor recorded. **409** when `quantity_complete` exceeds what the floor recorded (naming the binding operation) unless `quantity_override_reason` is sent, and **400** above what can still exist once declared shorts and covered scrap are out, even with a reason; **409** when the shortfall below the order is not covered by floor-reported scrap or `quantity_scrapped` (with a reason); **503** (nothing saved) when the required audit row cannot be written. See "Short count at completion" below | Admin / Manager / Supervisor / Quality |
@@ -1890,6 +1891,87 @@ company-scoped.
 > unaffected in practice — the shop-floor `PUT /shop-floor/operations/{id}/start` and the kiosk stay
 > open to operators by design (since P0.4, 2026-11-13, the shop-floor verb refuses Viewer and
 > Shipping). See `docs/RBAC_PERMISSIONS.md` → Work Orders.
+>
+> **Releasing work orders.** `POST /work-orders/{id}/release` and `POST /work-orders/bulk-release` are
+> both **Admin / Manager / Supervisor** (superuser and Platform Admin pass `require_role` as everywhere)
+> and run one implementation, `services/work_order_release_service.py`, so the two cannot disagree
+> about what a release is. A release checks exactly two things, before any write: the work order is
+> **DRAFT** (`Only draft work orders can be released`) and it has **at least one operation**
+> (`Work order must have at least one operation`), both **400** on the single route. **Nothing else
+> gates it** — no material, blocker or readiness check. The part readiness read
+> (`GET /setup/readiness/part/{part_id}`) and `GET /work-orders/{id}/material-requirements` are
+> advisory; release does not consult them. A release sets RELEASED with `released_by` /
+> `released_at`, runs the opt-in estimated-cost rollup (best-effort — it never blocks a release),
+> promotes every startable PENDING operation to READY (each emitting `operation_ready`), emits
+> `work_order_released` (best-effort; it fans out the `wo.released` notification) and writes one
+> `work_order` `STATUS_CHANGE` audit row (`draft` → `released`) in the same transaction as the status
+> change. After the commit it runs scheduling and the realtime broadcasts.
+>
+> **Releasing several work orders at once — `POST /work-orders/bulk-release`.** Body
+> `{"work_order_ids": [41, 57, 41]}`: 1–50 positive ids, `extra="forbid"` (a misspelled key is **422**,
+> never a silently empty request). Repeats count toward the 50 and are de-duplicated server-side, the
+> first occurrence kept. Once the body validates the answer is **200** — a role outside the three
+> is **403** and a malformed body **422**, as usual — with one result per distinct id, in the
+> de-duplicated request order, unless the whole request fails after the per-item phase (see below):
+>
+> ```json
+> {
+>   "results": [
+>     {"work_order_id": 41, "work_order_number": "WO-10001", "status": "released", "detail": null},
+>     {"work_order_id": 57, "work_order_number": null, "status": "error", "detail": "Work order not found"}
+>   ],
+>   "released_count": 1,
+>   "error_count": 1
+> }
+> ```
+>
+> Read `released_count` / `error_count` and each `status`, never the HTTP code. An item's `detail` is
+> the single route's own text: `Only draft work orders can be released`,
+> `Work order must have at least one operation`, or `Work order not found` — the **same** result, with
+> `work_order_number: null`, for an id that is another company's, soft-deleted or absent, so the batch
+> is no existence oracle. A per-item concurrent write — a stale version, or a lost lock race (deadlock
+> 40P01 / serialization 40001) — gets the app-wide optimistic-lock text (`This record was modified by
+> someone else. Refresh and try again.`), the text the single route answers for the same race as a
+> whole-request 409, and any other per-item database failure gets `Work order could not be released.
+> Refresh and try again.` (never the driver's message). Those two are bulk-only retry texts. One item's
+> refusal or failure never undoes another's release. A failure **after** the per-item phase — writing
+> the deferred audit rows, or the single commit — fails the **whole** request (**409** on a lost lock
+> race, otherwise 5xx) and saves nothing, so no release can land without its audit row; retry the
+> batch.
+>
+> - **One transaction, per-item savepoints.** Each id is released inside its own savepoint and the
+>   route commits once. Every released work order gets exactly what the single route writes: the same
+>   `STATUS_CHANGE` audit row and the same `work_order_released` event. **The `wo.released`
+>   notification therefore fans out once per released work order** — releasing 50 sends 50, not one
+>   summary. A refused item's events are dropped with its savepoint (the notification outbox enqueues
+>   only at the outermost commit), so it notifies nobody.
+> - **Lock order.** The route reads which ids are live (unlocked, tenant-scoped, soft-delete filtered),
+>   then releases the live targets in ascending work-order id order. Inside each item's savepoint it
+>   row-locks that job's operations (ascending id) and then the work order, both `FOR NO KEY UPDATE`
+>   (the strength the release's own updates take, so an insert's foreign-key check on the job does not
+>   queue behind it), before writing anything. The audit rows are written only after the last release,
+>   so the global audit hash-chain lock is the last lock the request takes. Two overlapping bulk
+>   releases lock in the same order. A writer that locks the work order first (the single release,
+>   `PUT /work-orders/{id}`, force-complete, scheduling) can still deadlock with **one** item; Postgres
+>   rolls that item back to its savepoint, it fails alone with the retry text above, and every other
+>   item is unaffected.
+> - **After the commit**, one tenant-scoped scheduling run covers the union of the released work
+>   orders and their work centers. Broadcasts go out per released work order on the work-order and
+>   dashboard channels (`work_order_released`), plus **one shop-floor push per distinct work center**
+>   carrying `work_order_ids` (a list), where the single route sends one per work center carrying
+>   `work_order_id`. A scheduling failure at this point is logged and reported and the route still
+>   answers **200**: the releases are already committed.
+> - **Not an MCP tool.** The route is in `catalog.EXCLUDED_OPERATIONS`, so `release_work_order`
+>   stays an agent's only release door, one job per call (see [MCP door](#mcp-door-mcp)). The route
+>   itself has no API-token refusal: a full API token whose user holds one of the three roles can call it
+>   on `/api/v1` like the single route, and a read-only token is refused as for every write.
+>
+> In the app this is the Work Orders list: on the desktop table a user who can release gets a checkbox
+> on each **draft** row (select-all covers the drafts loaded on the current page; the grouped view
+> shares one selection across its group tables), and **Release N** asks for confirmation, then reports
+> a success, a warning naming each refused work order with its `detail`, or an error, and reloads the
+> list. The client sends at most 50 and stays non-optimistic. The mobile card list has no bulk
+> selection. See `docs/RBAC_PERMISSIONS.md` → Work Orders.
 >
 > **Draft and on-hold work orders refuse every start (owner ruling 2026-11-05).** The floor cannot
 > start work on a job a supervisor has not released, or on one a supervisor has put on hold. One pure
@@ -5849,20 +5931,20 @@ uploads go through text extraction + LLM. See
 |--------|----------|-------------|---------------|
 | GET | `/maintenance/schedules` | List PM schedules (`is_active` default true; `work_center_id` or `asset_id` narrows to one target) | Yes |
 | GET | `/maintenance/schedules/{id}` | PM schedule detail | Yes |
-| POST | `/maintenance/schedules` | Create PM schedule on a work center **or** an equipment asset | Admin / Manager / Supervisor |
+| POST | `/maintenance/schedules` | Create PM schedule on a work center **or** an equipment asset (`next_due_date` left blank is the company's day) | Admin / Manager / Supervisor |
 | PUT | `/maintenance/schedules/{id}` | Update PM schedule (the target is not changed here) | Admin / Manager / Supervisor |
 | DELETE | `/maintenance/schedules/{id}` | Deactivate PM schedule (`is_active` → `false`; no soft-delete mixin) | Admin / Manager / Supervisor |
 | POST | `/maintenance/schedules/import/preview` | Dry run of a PM schedule sheet (multipart `file`; template `maintenance-schedules`). Writes nothing | Admin / Manager / Supervisor |
 | POST | `/maintenance/schedules/import/commit` | Apply a previewed PM sheet (multipart `file` + form field `expected_source_hash`). All-or-nothing | Admin / Manager / Supervisor |
-| GET | `/maintenance/work-orders` | List maintenance work orders (**pure read**, see below; `asset_id` filter beside `work_center_id`) | Yes |
-| GET | `/maintenance/work-orders/overdue` | Overdue maintenance work orders (**pure read**) | Yes |
+| GET | `/maintenance/work-orders` | List maintenance work orders (**pure read**, see below; `asset_id` filter beside `work_center_id`). The derived `overdue` label compares `due_date` with the company's day | Yes |
+| GET | `/maintenance/work-orders/overdue` | Overdue maintenance work orders (**pure read**; `due_date` before the company's day) | Yes |
 | GET | `/maintenance/work-orders/{id}` | Maintenance work order detail | Yes |
-| POST | `/maintenance/work-orders` | Create maintenance work order on a work center **or** an asset (or neither, with a `schedule_id`, to inherit the schedule's target) | Admin / Manager / Supervisor |
+| POST | `/maintenance/work-orders` | Create maintenance work order on a work center **or** an asset (or neither, with a `schedule_id`, to inherit the schedule's target). A `schedule_id` that already has an open work order (`scheduled` / `overdue` / `in_progress` / `on_hold`) is **409** naming it. `scheduled_date` / `due_date` left blank are the company's day | Admin / Manager / Supervisor |
 | PUT | `/maintenance/work-orders/{id}` | Update maintenance work order; `status` among `scheduled`, `overdue`, `on_hold`, `cancelled` only (**409** for `in_progress` / `completed` — use the verbs — for returning a started work order to `scheduled` / `overdue`, and for changing `requires_shutdown` once started). Moving it to `cancelled` settles any downtime event it holds | Admin / Manager / Supervisor |
 | POST | `/maintenance/work-orders/{id}/start` | Start (→ `in_progress`). A work-center work order with `requires_shutdown` opens, adopts or shares a downtime event — never a second open one on the machine | Admin / Manager / Supervisor / Operator |
-| POST | `/maintenance/work-orders/{id}/complete` | Complete (→ `completed`, advances the linked schedule) and resolve the work order's open downtime event | Admin / Manager / Supervisor / Operator |
+| POST | `/maintenance/work-orders/{id}/complete` | Complete (→ `completed`, advances the linked schedule from the company's day — the response adds `schedule_next_due_date`) and resolve the work order's open downtime event. `checklist_results` omitted keeps the work order's checklist. Any checklist item left unticked needs `incomplete_checklist_reason` (**409** without one) and a person: an API token is **403** (see *Checklist at completion* below) | Admin / Manager / Supervisor / Operator |
 | GET | `/maintenance/calendar` | Work orders in a date window (**capped at 366 days**) | Yes |
-| GET | `/maintenance/dashboard` | Counts, cost, per-machine MTBF/MTTR (work centers only) | Yes |
+| GET | `/maintenance/dashboard` | Counts, cost, per-machine MTBF/MTTR (work centers only). `overdue_count` / `due_this_week` count work orders; `schedules_overdue` / `schedules_due_this_week` count due PM schedules no scheduled / overdue / in-progress work order covers, so a PM whose work order is on hold still counts. "Today" is the company's day (see *The PM loop* below) | Yes |
 | GET | `/maintenance/history/{work_center_id}` | Event log for one machine (`limit` 1…5000, default 100) | Yes |
 | GET | `/maintenance/assets` | List equipment assets (`include_inactive` default false, `search` on tag / name / type), each with `active_schedule_count` and `open_work_order_count` | Yes |
 | GET | `/maintenance/assets/{id}` | Equipment asset detail | Yes |
@@ -5911,7 +5993,12 @@ uploads go through text extraction + LLM. See
 > `due_date`), so responses are unchanged. Both consumers of the signal — `GET
 > /maintenance/dashboard` and the AS9100D evidence card in `auto_evidence_service` — now derive it
 > from `due_date` too, which is strictly more accurate: the overdue count no longer depends on
-> whether a human loaded the Maintenance page today.
+> whether a human loaded the Maintenance page today. Both compare against the **company's local
+> date** (the dashboard and the two list reads used to read the server's UTC date). The two
+> figures are still not identical: the evidence card also counts every **active PM schedule** whose
+> `next_due_date` has passed (see QMS Standards → *the PM evidence row now judges the PM
+> schedules*), while the dashboard's `overdue_count` counts maintenance work orders only (its sibling
+> `schedules_overdue` counts the due schedules no work order is being worked on — see *The PM loop*).
 
 > **RBAC was added; there was none.** Every endpoint was a bare `get_current_user`, so a **viewer
 > could create, start and complete maintenance work orders**. Reads stay open to any authenticated
@@ -5925,9 +6012,12 @@ uploads go through text extraction + LLM. See
 > previously wrote none at all). Resource types: `maintenance_schedule` (`CREATE` / `UPDATE`, with
 > the deactivation logged as the `is_active` flip), `maintenance_work_order` (`CREATE` / `UPDATE`,
 > plus `STATUS_CHANGE` on start and complete — the complete row carries `total_cost`,
-> `downtime_minutes`, `actual_duration_hours` and `schedule_id` in `extra_data`), and
-> `maintenance_log` (`CREATE`). Rows are logged **before** the terminal commit so they commit
-> atomically with the change.
+> `downtime_minutes`, `actual_duration_hours`, `schedule_id`, `schedule_next_due_date` and
+> `resolved_downtime_event_ids` in `extra_data`, plus the unticked-checklist fields when the work
+> order closes with part of its checklist undone, and that row is then **required** evidence — see
+> *Checklist at completion* under *The PM loop*), and `maintenance_log` (`CREATE`). A completion
+> that advances a PM schedule also writes that schedule's own `maintenance_schedule` `UPDATE` row. Rows are logged **before** the
+> terminal commit so they commit atomically with the change.
 
 > **`GET /maintenance/calendar` refuses a window wider than 366 days (400)**, and refuses
 > `end_date < start_date` (400). It was the one unbounded read left in the file — `start_date` and
@@ -6074,7 +6164,112 @@ uploads go through text extraction + LLM. See
 >   **503** with nothing saved if one cannot be written. Re-running the same sheet changes nothing and
 >   writes no audit row. File-level problems are **400**.
 > - Importing a schedule creates no work order. Nothing generates due PM work orders automatically
->   today.
+>   today; a planner opens one with **Start PM** (next note).
+
+> **The PM loop: a due schedule, its work order, and the roll-forward.**
+>
+> - **"Today" is the company's calendar day.** What each of these reads as today — the dashboard's
+>   counts, the `overdue` label on `GET /maintenance/work-orders` and `/work-orders/overdue`, the
+>   blank-field defaults on `POST /maintenance/schedules` and `POST /maintenance/work-orders`, and the
+>   date a completion stamps on its PM schedule — is the day on the company's wall clock
+>   (`Company.timezone`, America/Chicago when unset or unrecognized), the same day the QMS PM evidence
+>   row reads. It used to be the server's `date.today()`, which on the UTC deployment turns over at
+>   6 PM (CST) / 7 PM (CDT): an evening completion was stamped with tomorrow's date and pushed the next
+>   due date a day late.
+> - **Dashboard.** `overdue_count` / `due_this_week` are unchanged: maintenance **work orders**
+>   (`scheduled` or `overdue`) by `due_date`. `schedules_overdue` / `schedules_due_this_week` count
+>   **active** PM schedules by `next_due_date` (before today; today through today + 7) that no
+>   `scheduled` / `overdue` / `in_progress` work order carrying their `schedule_id` covers. A covered
+>   schedule is counted through that work order (by its `due_date`, or on the **In progress** tile),
+>   so the two pairs never count one PM twice. A PM whose open work order is **`on_hold`** has not
+>   been done, so its schedule still counts here, by the schedule's own `next_due_date` (owner
+>   decision 2026-11-17); the held work order itself is on no work-order count. A held work order
+>   with **no** `schedule_id` (a corrective job) is still on no tile — find it on the Work Orders
+>   tab's On Hold filter. `completed_this_month` and `total_cost_month` count completions since the
+>   company-local first of the month (its local midnight, compared with the UTC `completed_at`). The
+>   Maintenance page's Overdue / Due This Week tiles and the dashboard's **Maintenance Due** widget
+>   show the sum, the page with a *"N work orders · M PMs not started or on hold"* split. A schedule
+>   on a retired asset still counts until the schedule itself is deactivated.
+> - **Start PM** (Schedules tab rows and the Dashboard tab's Upcoming cards; planning roles) opens the
+>   work-order form pre-filled from the schedule — title = schedule name, type, priority,
+>   `requires_shutdown`, description, checklist, due date = the schedule's `next_due_date`, scheduled
+>   date = today (Central) — and sends `schedule_id` with **no** target, so the server inherits the
+>   schedule's (an explicit different one is **409**, *Schedule target* above). A schedule that
+>   already has an open work order shows that work order's number instead. The checklist is stored in
+>   the work order's `checklist_results` as a JSON array of `{"item": …, "done": false}`; the Complete
+>   dialog ticks each item and sends the array back.
+> - **One open work order per schedule.** The server holds the same rule as the Start PM button:
+>   `POST /maintenance/work-orders` with a `schedule_id` that already has a `scheduled` / `overdue` /
+>   `in_progress` / `on_hold` work order is **409** *"PM schedule '…' already has an open maintenance
+>   work order, MWO-… (on hold). Complete or cancel it before opening another."* — completing either of
+>   two would advance the schedule and leave the other working to a due date it no longer has. A
+>   `completed` or `cancelled` work order does not count. The check runs under a row lock on the
+>   schedule, so two simultaneous Start PMs serialize and the second gets the 409. Data that already
+>   holds two open work orders on one schedule is not repaired; the 409 names the oldest.
+> - **Complete** on a work order with a `schedule_id` sets the schedule's `last_completed_date` to the
+>   company's calendar day at the moment of completion and `next_due_date` to that date plus the
+>   interval, in fixed days: daily 1, weekly 7, biweekly 14, monthly 30, quarterly 90, semi_annual
+>   182, annual 365, custom `frequency_days`. The response's `schedule_next_due_date` is the new date (`null` when no schedule
+>   was advanced); the schedule's `UPDATE` audit row reads *"… advanced by completing maintenance work
+>   order MWO-…"* with `extra_data.maintenance_work_order_id`. `checklist_results` omitted keeps the
+>   checklist the work order carries; a value, or an explicit `null`, replaces it.
+> - **Checklist at completion (owner decision 2026-11-17).** `POST
+>   /maintenance/work-orders/{id}/complete` takes `incomplete_checklist_reason` (string, at most 2000
+>   characters). Completing with **any** checklist item unticked and no non-blank reason is **409**
+>   *"N of M checklist items on maintenance work order MWO-… are not ticked (item; item). Tick them, or
+>   give a reason for completing without them."* (the first ten items are named), judged before the first write, so nothing is saved (a work order
+>   in a status that cannot complete gets its **400** first). A standing API token is refused **403**
+>   `API_TOKEN_INCOMPLETE_CHECKLIST` *"Completing a maintenance work order with checklist items
+>   unticked must be done by a person signed in to the app, not an API token."* whenever any item is
+>   unticked, whatever reason it sends — checked before the reason, so the 409's invitation to give
+>   one never reaches an agent (owner decision 2026-11-17; a token's fully ticked completion is
+>   unchanged; see `docs/RBAC_PERMISSIONS.md` → Credential policy for judgment writes).
+>   - The items judged are those the work order carried plus any in the body's `checklist_results`,
+>     plus — for a PM work order — every item of its **schedule's** checklist, matched by text. A
+>     schedule step left off the work order (at Start PM, by a create through the API that sent no
+>     checklist, or by a later `PUT`) is still a step of the PM: it needs a tick or a reason. Every
+>     maintenance work-order response carries those steps as `schedule_checklist_items` (`[]` without
+>     a schedule; read whether or not the schedule is still active, exactly as completion reads it),
+>     and the Complete dialog lists any it lacks, unticked, after the work order's own items. A
+>     standing API token's `PUT /maintenance/schedules/{id}` that takes items off `checklist` while
+>     the schedule has an open work order is **403** `API_TOKEN_SCHEDULE_CHECKLIST_REMOVAL` *"Removing
+>     items from the checklist of a PM schedule that has an open work order must be done by a person
+>     signed in to the app, not an API token."* (adding steps, or editing a schedule with no open work
+>     order, is unchanged). An item is ticked only when the checklist the work order completes with marks
+>     it `"done": true`; a plain-string item, or a line of a one-item-per-line checklist (split on
+>     `\r?\n`, as the page splits it), is unticked. Items count as a **multiset**: a checklist that
+>     names one step twice needs both copies ticked, and the audit row lists a text once per unticked
+>     copy.
+>     An item the work order carried that `checklist_results` leaves out — or an explicit `null` that
+>     clears the checklist — counts as **unticked**: dropping a line is not a way to close without
+>     doing it.
+>   - With a reason, the completion's `maintenance_work_order` `STATUS_CHANGE` audit row adds
+>     `checklist_item_count`, `checklist_unticked_items` (the item texts) and
+>     `incomplete_checklist_reason` to `extra_data`, and is **required** evidence: if it cannot be
+>     written the request is **503** *"The audit record for completing maintenance work order MWO-…
+>     could not be saved; nothing was changed. Retry."* and nothing is saved. The `completed` log
+>     entry's description adds *"Checklist: N of M items not ticked (…). Reason: …"*.
+>   - With every item ticked (or no checklist) no reason is needed, one sent is ignored and not
+>     recorded, and the audit row stays the ordinary best-effort status-change row.
+>   - The Maintenance page's Complete dialog shows a required reason field whenever an item is
+>     unticked and keeps **Complete** disabled until it is filled; the reason is sent only then.
+>   - `PUT /maintenance/work-orders/{id}` (planning roles) can still rewrite `checklist_results`
+>     before completion; a person's edit is its own audited `maintenance_work_order` `UPDATE` row,
+>     and on a PM work order it cannot take a schedule step off the judged list. A standing API token
+>     whose `PUT` takes items off the checklist (drops, renames or clears them) is **403**
+>     `API_TOKEN_CHECKLIST_REMOVAL` *"Removing items from a maintenance work order's checklist must be
+>     done by a person signed in to the app, not an API token."* — otherwise a token could reach the
+>     refused completion in two steps. Ticking or adding items is allowed.
+> - **Edit** (Schedules tab; planning roles) → `PUT /maintenance/schedules/{id}`: next due date,
+>   frequency (`frequency_days` for custom), priority, estimated duration, requires shutdown,
+>   checklist. A schedule has no `version` column, so this `PUT` has no compare-and-swap; the dialog
+>   sends **only the fields changed**, so a dialog left open while someone completes the PM cannot put
+>   the old due date back unless the planner changed it. Name and target are not editable there: the
+>   `PUT` never moves a target, and the PM import matches schedules by target + name, so a rename would
+>   make the next import create a duplicate.
+> - **Known gaps:** the `maintenance.due` / `maintenance.overdue` notification catalog entries still
+>   have no emitter, and *monthly* is a fixed 30 days from the completion date, not a calendar month,
+>   so a schedule completed on its due date drifts earlier each month.
 
 ### Tool & Fixture Management (tool crib)
 
@@ -8719,6 +8914,34 @@ in `RBAC_PERMISSIONS.md`.
 > returns **500** if the key is missing. Claude extracts the numbered clauses and persists them
 > against the standard.
 
+> **An evidence rule that fails is reported as not assessed, never dropped.** Each evidence rule a
+> clause matches runs its query in its own savepoint. A rule whose query raises is rolled back to that
+> savepoint, logged with its traceback, and listed in the `auto-evidence` response as a placeholder
+> row: that rule's `evidence_type` / `title` / `module_reference`, `description` *"Evidence could not
+> be computed from live records"*, `health_status` `not_computed`, `examples` `[]` and
+> `suggested_compliance` `not_assessed` (its `total_count` / `recent_count` of 0 are placeholders, not
+> measurements). `not_computed` is reserved for this placeholder and no evidence query returns it, so a
+> client can tell it from `no_data` — a query that ran and found no records, with the same zero counts.
+> Don't report a `not_computed` row's counts: the QMS Standards page shows it as *Not computed* with its
+> `health_detail`, never as "0 records". The clause therefore cannot roll up to `compliant`: a finding from a rule that did
+> compute (`non_compliant`, then `partial`) still decides the clause, and otherwise a clause with a
+> failed rule is `not_assessed` — even when every other row is compliant, so a query failure is never
+> presented as a compliance gap. The rules after it still run. The rule used to be silently dropped: a clause matching calibration and
+> maintenance whose maintenance query failed showed `compliant` from calibration alone, and on
+> PostgreSQL the aborted transaction failed, and dropped, every later rule too. The response shape is
+> unchanged.
+>
+> `auto-link` persists **nothing** for a failed rule: no evidence link is created, and an existing
+> auto-linked one keeps the `live_count`, description and `last_refreshed` of the last run that
+> computed it. The failed rule still counts toward its clause's `compliance_summary` bucket, and a
+> clause whose matched rules all failed counts under `clauses_without_evidence`. The `auto-link`
+> response adds `total_evidence_failed` (int, default `0`: rule evaluations that failed this run). When
+> N > 0 the audit row's description gains *", N not computed (left unchanged)"* and its `extra_data`
+> carries `evidence_not_computed`, one `{clause_id, clause_number, rule_id}` per skipped rule, which is
+> what explains the older `last_refreshed` on those links. The QMS Standards page shows that count on
+> the auto-link result card (*Evidence Not Computed*) and as a warning toast, saying the links were
+> left as last refreshed.
+
 > **Auto-evidence supplier counts now exclude removed suppliers — expect the number to drop.** The
 > *Supplier Management & Evaluation* evidence row (`GET /qms-standards/clauses/{clause_id}/auto-evidence`,
 > and what `POST /qms-standards/{standard_id}/auto-link` persists) counted **soft-deleted** vendors in
@@ -8752,41 +8975,95 @@ in `RBAC_PERMISSIONS.md`.
 > | paused | K ≥ 0 (the company has entries) | `warning` / `partial` | `…; SHA-256 integrity chain paused (K entries written without it, J in last 12 months)` — or `(no entries written without it yet)` |
 > | either | no entries at all | `no_data` / `not_assessed` | unchanged when on; `…; SHA-256 integrity chain paused` when paused |
 >
-> If the trigger check finds either trigger missing or disabled, the row is `warning` / `partial`
-> whatever the chain state, and `description` ends `; database UPDATE/DELETE triggers missing or
-> disabled`. `health_detail` ends with the trigger finding: "Database triggers refuse UPDATE and DELETE
-> statements on audit entries." when both are in force, the missing/disabled sentence when not, and
-> "Database UPDATE/DELETE trigger status could not be checked." off PostgreSQL (dev/test SQLite) or if
-> the catalog read fails (it runs in its own savepoint, so a failure cannot abort the request). A failed
-> read **on PostgreSQL** also caps the row at `warning` / `partial` and appends `; database UPDATE/DELETE
-> trigger status could not be checked` to `description`; off PostgreSQL there is nothing to read, so it
-> does not cap. The
-> warning rows' `health_detail` also says the paused entries carry no integrity hash and can never be
-> cryptographically verified, with the split `K of N (J in the last 12 months)`. The healthy text says
-> the chain is **enabled**, not verified — chain integrity is checked by the platform-admin
-> `/audit/integrity/*` endpoints, not by this row.
+> Once the company has at least one audit entry, the trigger check can cap the row too. If it finds
+> either trigger missing or disabled, the row is `warning` / `partial` whatever the chain state, and
+> `description` ends `; database UPDATE/DELETE triggers missing or disabled`. A failed catalog read
+> **on PostgreSQL** (it runs in its own savepoint, so a failure cannot abort the request) caps the row
+> the same way, with `description` ending `; database UPDATE/DELETE trigger status could not be
+> checked`; off PostgreSQL (dev/test SQLite) there is no catalog to read, so the status is reported as
+> unchecked without capping. `health_detail` then ends with the trigger finding: "Database triggers
+> refuse UPDATE and DELETE statements on audit entries." when both are in force, "The database triggers
+> that refuse UPDATE and DELETE statements on audit entries are missing or disabled." when not, and
+> "Database UPDATE/DELETE trigger status could not be checked." when the read failed or there is no
+> catalog to read.
 >
-> A clause backed by this row therefore gets a suggested roll-up (`overall_suggested_compliance`,
-> auto-link's `compliance_summary`) of `partial` at best, never `compliant`, once the company has any
-> paused entry, while the chain is paused, or while the triggers are missing or unreadable. That is a suggestion
-> only: neither endpoint writes the clause's `compliance_status`. Of the fields that change, auto-link
+> With **no** audit entries the trigger state never caps the row: it stays `no_data` /
+> `not_assessed` and `description` carries no trigger suffix. While the chain is on, `health_detail` is
+> just "No audit log entries found"; while it is paused, it adds that entries written now will not be
+> hash-chained, followed by the trigger finding.
+>
+> When the warning comes from the chain — paused now, or paused entries on record — `health_detail`
+> also says the paused entries carry no integrity hash and can never be cryptographically verified,
+> with the split `K of N (J in the last 12 months)` (K can be 0 while the chain is paused, until one of
+> the company's entries is written without it). A warning from the triggers alone keeps the healthy
+> chain text and adds the trigger finding. The healthy text says the chain is **enabled**, not
+> verified: this row does not check chain integrity. `GET /audit/integrity/verify` and
+> `/audit/integrity/verify-recent` do (platform-admin only, like the `/audit/integrity/status`
+> statistics), and `GET /audit/integrity/record/{sequence_number}` verifies one of the company's own
+> entries for a tenant Admin (see [Audit Log](#audit-log)).
+>
+> For a company with audit entries, a clause backed by this row therefore never gets a suggested
+> roll-up (`overall_suggested_compliance`, auto-link's `compliance_summary`) of `compliant` once the
+> company has any paused entry, while the chain is paused, or while the triggers are missing, disabled
+> or (on PostgreSQL) unreadable: `partial` at best. Nor does a company with no audit entries, whose
+> `not_assessed` row never rolls up `compliant`. That is a suggestion only: neither endpoint writes the
+> clause's `compliance_status`. Of the fields that change, auto-link
 > (`POST /qms-standards/{standard_id}/auto-link`) stores only `description` (`health_status`,
 > `health_detail` and `suggested_compliance` are computed per call and never persisted), so stored
-> evidence picks up the new wording on the next auto-link run. The QMS page's linked-evidence list
-> shows each stored link's `description` under its title. For an auto-linked row that is the text the
-> last auto-link run wrote, dated by the row's "Refreshed" stamp; an edit through
-> `PUT /qms-standards/evidence/{evidence_id}` replaces it without moving that stamp, until the next run
-> overwrites it. An auto-linked description is always shown in full, never clamped, because the
-> paused-chain and trigger disclosures sit at the end of the text. A manual description is clamped to
-> three lines behind **Show more** only while it needs more than three lines on screen, so clamped text
-> always has that control. `health_status`, `health_detail` and `suggested_compliance` are not stored:
-> the live auto-evidence preview (**Auto-Discover**) shows each row's `health_detail` and its
-> `health_status` as a coloured dot, and only the clause-level roll-up of `suggested_compliance`
-> (`overall_suggested_compliance`). The title was renamed because "Immutable Hash-Chain" was untrue for
-> every paused entry, and until the list showed `description` the title was the one claim it showed;
-> the title now names what the row reports and asserts nothing. Existing auto-linked evidence picks up
-> the new title on its next auto-link run (matched by rule id; no migration). The row's `title`,
-> `module_reference` and `evidence_type` do not change with the chain or trigger state.
+> evidence picks up the new wording on the next auto-link run in which the audit rule computes (a run
+> where it fails leaves the stored link unchanged; see `evidence_not_computed`). The QMS page's
+> linked-evidence list shows each stored link's `description` under its title. For an auto-linked row
+> that is the text written by the last auto-link run in which its rule computed, dated by the row's
+> "Refreshed" stamp; an edit through `PUT /qms-standards/evidence/{evidence_id}` replaces it without
+> moving that stamp, until the next auto-link run in which the rule computes overwrites it (a run where
+> it fails leaves the stored link unchanged; see `evidence_not_computed`). An auto-linked description
+> is always shown in full, never clamped, because the paused-chain and trigger disclosures sit at the
+> end of the text. A manual description is clamped to three lines behind **Show more** only while it
+> needs more than three lines on screen, so clamped text always has that control. `health_status`,
+> `health_detail` and `suggested_compliance` are not stored: the live auto-evidence preview
+> (**Auto-Discover**) shows each row's `health_detail` and its `health_status` as a coloured dot (a
+> failed rule's row also reads *Not computed*), and only the clause-level roll-up of
+> `suggested_compliance` (`overall_suggested_compliance`). The title was renamed because "Immutable
+> Hash-Chain" was untrue for every paused entry, and until the list showed `description` the title was
+> the one claim it showed; the title now names what the row reports and asserts nothing. Existing
+> auto-linked evidence picks up the new title on the next auto-link run in which the audit rule
+> computes (a run where it fails leaves the stored link unchanged; see `evidence_not_computed`),
+> matched by rule id; no migration. The row's `title`, `module_reference` and `evidence_type` do not
+> change with the chain or trigger state.
+
+> **The PM evidence row now judges the PM schedules, not just maintenance work orders — expect the
+> verdict to drop.** The *Preventive Maintenance & Infrastructure* row (clauses matched on maintenance
+> / infrastructure keywords, e.g. 7.1.3) counted every `MaintenanceSchedule`, active or not, and took
+> "overdue" from maintenance work orders alone. A shop holding thirty PM schedules that had never been
+> performed (first due date still ahead, no maintenance work orders) read **healthy / compliant** —
+> and kept reading it with every schedule deactivated. Now only **active** schedules count (the same
+> set `GET /maintenance/schedules` lists by default), "today" is the company's local date
+> (America/Chicago unless the company sets another zone), and the first matching rung decides:
+>
+> | # | Condition | `health_status` / `suggested_compliance` |
+> |---|---|---|
+> | 1 | No active schedule and no maintenance work order | `no_data` / `not_assessed` |
+> | 2 | An active schedule's `next_due_date` is before today, or a `scheduled` / `overdue` maintenance work order is past its `due_date` | `critical` / `non_compliant` |
+> | 3 | No active schedule, but maintenance work orders exist (no PM plan) | `warning` / `partial` |
+> | 4 | No active schedule has performance evidence | `warning` / `not_assessed` |
+> | 5 | Some active schedules never performed, or some with no next due date | `warning` / `partial` |
+> | 6 | Every active schedule current, dated and performed at least once | `healthy` / `compliant` |
+>
+> *Performance evidence* is a `last_completed_date` on the schedule, or a **completed** maintenance
+> work order of the same company linked to it; completing a schedule-linked maintenance work order
+> (`POST /maintenance/work-orders/{id}/complete`) is what clears "never performed". An overdue
+> maintenance work order used to give `warning` / `partial`; it now gives `critical` /
+> `non_compliant`, the calibration row's verdict for an overdue gauge. The response shape is
+> unchanged: `total_count` is still the maintenance work-order count (the figure auto-link stores as
+> the evidence's live count), and `recent_count` is now the **active** schedule count (it was every
+> schedule). The description reads *"N active PM schedules (X past due, Y never performed), M
+> maintenance WOs (C completed, O overdue)"*. Because `overall_suggested_compliance` is `partial`
+> whenever a clause's rows disagree, a clause whose other rows are all `compliant` now rolls up to
+> `partial`, not `compliant`, while this row is `not_assessed`. A shop that loaded its PM schedules
+> before performing any PM will see the row at `not_assessed` until the first schedule-linked
+> maintenance work order is completed — intended: a false "compliant" in front of a registrar is worse
+> than "not assessed". Auto-link persists the counts and description as evidence; it never sets a
+> clause's `compliance_status`.
 
 > **Deletes are soft (records retained):** the three `DELETE` endpoints above return **204** but
 > do not physically remove rows — the standard / clause / evidence is marked deleted and disappears
@@ -8837,6 +9114,10 @@ in `RBAC_PERMISSIONS.md`.
   "overall_suggested_compliance": "compliant"
 }
 ```
+
+`health_status` is `healthy`, `warning`, `critical` or `no_data` (the query ran and found no records),
+or `not_computed` for the placeholder row of a rule whose query failed — its zero counts are not
+measurements (see *An evidence rule that fails is reported as not assessed, never dropped* above).
 
 ### Customer Complaints & RMA
 
@@ -14188,7 +14469,7 @@ What matters from this file's point of view:
 - **The catalog is this API.** 764 tools are generated from `app.openapi()` at startup — every
   secured operation except the `Authentication`, `Carrier Webhooks`, `Error Logging` (and its router-level `errors` twin) and `WebSocket` tags, the
   unauthenticated health/station-login routes (named one by one in `catalog.PUBLIC_OPERATIONS`) and
-  the fourteen operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders
+  the fifteen operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders
   (`POST /work-orders/import`, `POST /purchasing/purchase-orders/import` — they mint work orders
   RELEASED / IN_PROGRESS and POs SENT, a record of a past system rather than a user action),
   AI Accept & apply (`POST /ai/recommendations/{recommendation_id}/apply` — owner ruling 3: only a
@@ -14200,8 +14481,10 @@ What matters from this file's point of view:
   — an egress switch is a person's judgment; the routes also refuse API tokens), the three Approved
   Supplier List writes (`PUT /purchasing/vendors/{vendor_id}/approval`,
   `POST /purchasing/vendors/asl-import/preview` and `/commit` — a supplier-approval decision is a
-  person's judgment; the routes also refuse API tokens) and the two legacy `approved_supplier_list`
-  writes (`POST /supplier-scorecards/approved-suppliers/`, `PUT .../approved-suppliers/{asl_id}`) — plus 15 fixed-name convenience tools that shadow 16
+  person's judgment; the routes also refuse API tokens), the two legacy `approved_supplier_list`
+  writes (`POST /supplier-scorecards/approved-suppliers/`, `PUT .../approved-suppliers/{asl_id}`) and
+  bulk release (`POST /work-orders/bulk-release` — `release_work_order` stays an agent's only release
+  door, one job per call; this route does not refuse API tokens) — plus 15 fixed-name convenience tools that shadow 16
   raw routes (`POST /work-orders/`, `PUT /work-orders/{id}`, `POST /work-orders/{id}/release`, the two
   nest-package imports, the manual nest add, `GET /search/`, …) to enforce agent rules the routes do
   not: create/duplicate always land DRAFT, release is a separate explicit tool and the generic update

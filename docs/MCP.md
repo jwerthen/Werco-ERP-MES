@@ -39,6 +39,9 @@ shifted: 15 convenience + **764** generated, 16 shadowed. The read-only catalog 
 **298** generated (the four new reads: `list_maintenance_assets`, `get_maintenance_asset`,
 `get_maintenance_asset_history`, `list_vendors_reevaluation_due`; `check_supplier_approval` is a
 `POST`, so it is not among them).
+**Re-checked again on 2026-11-16 after bulk release** (`POST /work-orders/bulk-release`) was added and
+joined `EXCLUDED_OPERATIONS` in the same change (§6.1): counts unchanged at 15 convenience + **764**
+generated, 16 shadowed, and the read-only catalog at 8 convenience + **298** generated.
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
 `backend/tests/test_mcp_docs_names.py` checks every tool name this file, `CLAUDE.md` and `API.md`
@@ -604,7 +607,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `Notifications` (`/notifications`) | Notifications | `list_notifications`, `get_unread_count`, `mark_notification_read`, `mark_all_read` |
 | `MySettings` (`/settings`) | Users (self-service) | `get_current_user_info`, `get_my_notification_preferences`, `update_my_notification_preferences`, `update_my_phone`, `send_test_sms`, `change_own_password` |
 | `SetupWizard` (`/setup`) | Setup & Readiness | `get_setup_health`, `get_part_readiness` |
-| `WorkOrders` (`/work-orders`) | Work Orders, Work Order Templates | `work_orders_list_work_orders`, `get_work_order_by_number`, `update_work_order_priority`, `work_orders_delete_work_order`, `work_orders_restore_work_order`, `list_work_order_templates`, `use_work_order_template` |
+| `WorkOrders` (`/work-orders`) | Work Orders, Work Order Templates | `work_orders_list_work_orders`, `get_work_order_by_number`, `update_work_order_priority`, `work_orders_delete_work_order`, `work_orders_restore_work_order`, `list_work_order_templates`, `use_work_order_template`, `release_work_order`★ — **bulk release is not a tool**: `POST /work-orders/bulk-release` is in `EXCLUDED_OPERATIONS` (§6.1), so release one job per call |
 | `WorkOrderNew` (`/work-orders/new`) | Work Orders, Parts, Bill of Materials, Routing, Customers, Setup & Readiness, Work Centers | `create_work_order`★, `preview_work_order_operations`, `get_routing_by_part`, `list_customer_names`, `get_part_readiness`, `list_work_centers`★ |
 | `WorkOrderDetail` (`/work-orders/:id`) | Work Orders, Work Order Materials, Laser Nests, Work Order Blockers, Documents, Shop Floor | `get_work_order`★, `add_operation`★, `update_work_order`★, `release_work_order`★, `duplicate_work_order`★, `add_laser_nest`★, `work_orders_start_work_order`, `work_orders_resume_work_order`, `work_orders_complete_work_order`, `work_orders_complete_operation`, `work_orders_update_operation`, `update_laser_nest`, `delete_laser_nest`, `list_material_allocations`, `create_work_order_blocker`, `attach_document_to_work_order` |
 | `ShopFloor` (`/shop-floor`) | Shop Floor, Work Order Blockers, Work Centers, Work Orders | `get_shop_floor_dashboard`★, `get_all_operations`, `get_active_shop_users`, `list_work_order_blockers`, `resolve_work_order_blocker` |
@@ -691,7 +694,7 @@ minus two further, named sets:
   They are listed **by name** rather than skipped silently, so a new route that forgets its
   `security` dependency — even under a tag that already has tools — fails the coverage guard
   (`catalog.unaccounted_operations`, §14) until it is either secured or named there.
-- **`EXCLUDED_OPERATIONS`** — fourteen operations, none with a convenience twin:
+- **`EXCLUDED_OPERATIONS`** — fifteen operations, none with a convenience twin:
   - The two Excel-cutover loaders, `POST /work-orders/import` and
     `POST /purchasing/purchase-orders/import` (`migration_import_service`). They record a *past*
     system's state rather than perform a user action: the work-order loader mints work orders
@@ -735,6 +738,14 @@ minus two further, named sets:
     migration 123, and an approval an agent recorded there would contradict the vendor's own status;
     both routes refuse API tokens too, and `list_approved_suppliers` / `get_approved_supplier` stay. See
     [API.md → Purchasing](API.md#purchasing) → *Approved Supplier List on the vendor record*.
+  - **Bulk release**, `POST /work-orders/bulk-release` (up to 50 DRAFT work orders in one call). It
+    is an app action — the Work Orders list's draft-row selection. `release_work_order` stays the
+    agent's **only** release door (§9), one job per call, because release is the authorization step
+    and the record of who put work on the floor. It is excluded rather than shadowed: no convenience
+    tool calls this route. Like the two Excel-cutover loaders (and unlike the AI apply, export-control, egress-switch and ASL rows above), the route has no API-token refusal of its own — a full
+    API token whose user holds Admin / Manager / Supervisor can still call it directly on `/api/v1` —
+    so the exclusion is what keeps it off an agent's tool list. See
+    [API.md → Work Orders](API.md#work-orders) → *Releasing several work orders at once*.
 
 The `Import Batches` tag also excludes the recoverable Import Center review, receipt,
 correction and commit routes. These wrap the same cutover loaders, including their
@@ -744,7 +755,8 @@ excluded-loader path. File correction and credential input stay in Import Center
 On the commit that shipped API tokens: 706 operations, 689 secured, 680 candidates, 16 shadowed
 (§8), 2 excluded → **662 generated tools**. On 2026-11-15, with fourteen excluded and the CAR form /
 FAI log, Approved Supplier List and equipment-asset / PM-import routes added: **764 generated tools**
-(`--print-catalog` `counts`).
+(`--print-catalog` `counts`). On 2026-11-16 bulk release added one secured route and its exclusion
+together, so fifteen are excluded and the count stays **764**.
 
 ### 6.2 Naming and the collision policy (`app/mcp/naming.py`)
 
@@ -906,7 +918,7 @@ Every other operation stays generated — including the neighbours of the shadow
 `get_work_order_by_number`, `update_laser_nest`, `get_inventory_summary`, `get_purchase_order`, …) —
 except the operations in `EXCLUDED_OPERATIONS` (§6.1) — the two cutover loaders, AI Accept &
 apply, the two customer export-control writes, the four egress kill-switch writes, the three Approved Supplier
-List writes and the two legacy ASL-table writes — which have no tool and no replacement. Adding a convenience tool whose route is *not* in the shadow set is a build error
+List writes, the two legacy ASL-table writes and bulk release — which have no tool and no replacement. Adding a convenience tool whose route is *not* in the shadow set is a build error
 (`build_registry` refuses a duplicate name) rather than a silent win.
 
 ---
@@ -932,7 +944,9 @@ List writes and the two legacy ASL-table writes — which have no tool and no re
   both also `work_orders_resume_work_order`) because
   the route's blind `setattr` would accept them with no `released_at` / `released_by` and no
   operation promotion — a release the audit trail could not attribute. The two Excel-cutover
-  loaders that mint work orders RELEASED / IN_PROGRESS outright are not tools (§6.1). The nest
+  loaders that mint work orders RELEASED / IN_PROGRESS outright are not tools (§6.1), and neither
+  is the app's bulk release (`POST /work-orders/bulk-release`, §6.1), so an agent releases one job
+  per call. The nest
   routes are the ones *born* RELEASED, and §10 is how the tools handle them.
 
 ---
@@ -1220,7 +1234,8 @@ count, in which case there is nothing left to close.
 | `{"status": 422, ...}` `"Additional properties are not allowed ('serach' was unexpected)"` | A misspelled argument — every schema is strict (§6.3) | Fix the argument name; nothing was dispatched |
 | `{"status": 409, ...}` from `add_operation` naming several work centers | Ambiguous `work_center` string | Pass the `id` (from `list_work_centers`) or a more specific name |
 | `{"status": 409, ...}` from `import_laser_nest_package` naming nests | Target already carries manually entered nests | Import into a fresh standalone WO (omit `work_order_id`) |
-| `{"status": 409, ...}` from `release_work_order` | The WO is not DRAFT | Nothing to do — it is already released or is terminal |
+| `{"status": 400, "detail": "Only draft work orders can be released"}` from `release_work_order` | The WO is not DRAFT | Nothing to do — it is already released or is terminal |
+| `{"status": 400, "detail": "Work order must have at least one operation"}` from `release_work_order` | The DRAFT has no operation — the only other release check (there is no material or blocker gate) | Add one with `add_operation`, then release |
 | HTTP **413** from `/mcp` | The JSON-RPC envelope (a base64 file inside it) is over `WERCO_MCP_MAX_UPLOAD_BYTES` (25 MB) | Smaller file, or raise the setting on the server |
 | Tool result `{"status": 413, "detail": "File … exceeds the …-byte MCP upload cap."}` | Same cap, decoded on the bridge side | As above |
 | `{"status": 413, ...}` with the route's own message | The inner route's cap (50 MB `LASER_UPLOAD_MAX_BYTES`, 20 MB QMS PDFs) or, for a plain JSON tool, `MAX_JSON_BODY_BYTES` (256 KB) on the inner request | Split the payload — [API.md → Request Size Limits](API.md#request-size-limits) |
@@ -1252,7 +1267,8 @@ count, in which case there is nothing left to close.
     secured, unshadowed, unexcluded operation is exactly one tool; `PUBLIC_OPERATIONS` names exactly
     the unsecured routes; `EXCLUDED_OPERATIONS` are exactly the two loaders, the AI apply route,
     the two customer export-control writes, the four egress kill-switch writes, the three Approved
-    Supplier List writes and the two legacy ASL-table writes, and the record-only accept stays a tool),
+    Supplier List writes, the two legacy ASL-table writes and bulk release, and the record-only
+    accept stays a tool),
     names (unique, wire-valid,
     ≤ 64, collisions prefixed, the numeric-suffix fallback proven on synthetic input and unused on
     the live catalog), schemas (`$ref`-free, `additionalProperties: false`, every JSON body's

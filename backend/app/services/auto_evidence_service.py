@@ -6,7 +6,7 @@ Uses keyword-based matching rules so it works across AS9100D, ISO 9001, IATF 169
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import List, Optional
 
 from sqlalchemy import and_, case, func, text
@@ -34,6 +34,7 @@ from app.models.spc import SPCCharacteristic
 from app.models.supplier_scorecard import SupplierScorecard
 from app.models.work_order import WorkOrder
 from app.services.audit_service import PAUSED_CHAIN_PLACEHOLDER
+from app.services.company_time import company_today
 from app.services.supplier_approval_service import APPROVED_STATUSES
 
 logger = logging.getLogger(__name__)
@@ -808,6 +809,16 @@ AUDIT_TRIGGERS_MISSING_SENTENCE = (
 )
 AUDIT_TRIGGERS_UNCHECKED_SENTENCE = "Database UPDATE/DELETE trigger status could not be checked."
 
+AUDIT_TRIGGER_READ_FAILED_LOG = "Could not read audit-log trigger state from pg_trigger"
+
+# Whether the current run of failed pg_trigger reads has already been logged at WARNING. A
+# persistent failure (a revoked catalog grant, say) would otherwise put a full traceback in the
+# log on every auto-evidence GET and on every audit-matching clause of every auto-link run. The
+# first failure of a run logs at WARNING with its traceback, the repeats at DEBUG; a successful
+# read ends the run, so the next failure after it warns again. Per process and unlocked: two
+# threads failing at the same moment may each warn once, which is harmless.
+_trigger_read_failure_reported = False
+
 
 def _dialect_name(db: Session) -> str:
     bind = db.get_bind()
@@ -823,7 +834,11 @@ def _audit_triggers_in_force(db: Session) -> Optional[bool]:
     sits outside the ``try`` because a flush failure there is the caller's, not this check's.
     Not detectable here: a session that sets ``session_replication_role = replica``, or a
     TRUNCATE, neither of which fires a row trigger.
+
+    A failed read is logged at WARNING once per run of consecutive failures and at DEBUG after
+    that (``_trigger_read_failure_reported``); the answer is ``None`` either way.
     """
+    global _trigger_read_failure_reported
     if _dialect_name(db) != "postgresql":
         return None
     savepoint = db.begin_nested()
@@ -831,9 +846,16 @@ def _audit_triggers_in_force(db: Session) -> Optional[bool]:
         found = db.execute(text(_AUDIT_LOG_TRIGGER_CHECK_SQL)).scalar_one()
     except Exception:  # noqa: BLE001 - an unreadable catalog is "not checked", never a false claim
         savepoint.rollback()
-        logger.warning("Could not read audit-log trigger state from pg_trigger", exc_info=True)
+        if _trigger_read_failure_reported:
+            logger.debug("%s (repeated failure)", AUDIT_TRIGGER_READ_FAILED_LOG, exc_info=True)
+        else:
+            _trigger_read_failure_reported = True
+            logger.warning(
+                "%s; repeats log at DEBUG until a read succeeds", AUDIT_TRIGGER_READ_FAILED_LOG, exc_info=True
+            )
         return None
     savepoint.commit()
+    _trigger_read_failure_reported = False
     return int(found) == len(AUDIT_LOG_TRIGGER_NAMES)
 
 
@@ -969,11 +991,70 @@ def _query_audit_log(db: Session, company_id: int) -> dict:
     )
 
 
-def _query_maintenance(db: Session, company_id: int) -> dict:
-    total_schedules = (
-        db.query(func.count(MaintenanceSchedule.id)).filter(MaintenanceSchedule.company_id == company_id).scalar() or 0
+def _plural(n: int, singular: str, plural: str) -> str:
+    return f"{n} {singular if n == 1 else plural}"
+
+
+def _query_maintenance(db: Session, company_id: int, today: Optional[date] = None) -> dict:
+    """Preventive-maintenance evidence (AS9100D / ISO 9001 7.1.3 infrastructure).
+
+    The verdict is built from the PM *schedules*, not just maintenance work orders, because a
+    schedule is where a PM comes due: a shop can hold thirty schedules and zero work orders, and
+    the old rule (every schedule counted, overdue read off work orders only) called exactly that
+    "healthy / compliant" before a single PM had been performed -- and kept saying so with every
+    schedule deactivated. It errs restrictive on purpose; a false "compliant" in front of a
+    registrar is worse than "not assessed":
+
+    * only ``is_active`` schedules count -- the same definition the Maintenance page lists by;
+    * a schedule whose ``next_due_date`` is before the company's today is overdue, as is an open
+      maintenance work order past its ``due_date``; any overdue item -> critical / non_compliant
+      (the calibration rule's verdict for an overdue gauge);
+    * a schedule has performance evidence only with a ``last_completed_date`` or a COMPLETED
+      work order of this company linked to it. None of the active schedules performed ->
+      not_assessed; some unperformed, or some with no due date -> partial;
+    * "compliant" needs every active schedule current, dated and performed at least once.
+
+    ``today`` is injectable for tests; it defaults to the company's local date (America/Chicago
+    unless the company says otherwise). Response shape is unchanged: ``total_count`` is still
+    the maintenance work-order count and ``recent_count`` the (now active-only) schedule count.
+    """
+    if today is None:
+        today = company_today(db, company_id)
+
+    schedules = (
+        db.query(
+            MaintenanceSchedule.id,
+            MaintenanceSchedule.next_due_date,
+            MaintenanceSchedule.last_completed_date,
+        )
+        .filter(
+            MaintenanceSchedule.company_id == company_id,
+            MaintenanceSchedule.is_active == True,  # noqa: E712
+        )
+        .all()
     )
-    _recent_cutoff()
+    # Schedules this company has closed a work order against. Scoped on the WORK ORDER's
+    # company: a pre-fix row owned by another tenant can still carry this tenant's schedule_id
+    # (see create_work_order in api/endpoints/maintenance.py), and it must not count as our PM.
+    performed_schedule_ids = {
+        schedule_id
+        for (schedule_id,) in db.query(MaintenanceWorkOrder.schedule_id)
+        .filter(
+            MaintenanceWorkOrder.company_id == company_id,
+            MaintenanceWorkOrder.status == MaintenanceStatus.COMPLETED,
+            MaintenanceWorkOrder.schedule_id.isnot(None),
+        )
+        .distinct()
+        .all()
+    }
+
+    active_schedules = len(schedules)
+    overdue_schedules = sum(1 for s in schedules if s.next_due_date is not None and s.next_due_date < today)
+    undated_schedules = sum(1 for s in schedules if s.next_due_date is None)
+    unperformed_schedules = sum(
+        1 for s in schedules if s.last_completed_date is None and s.id not in performed_schedule_ids
+    )
+
     total_wos = (
         db.query(func.count(MaintenanceWorkOrder.id)).filter(MaintenanceWorkOrder.company_id == company_id).scalar()
         or 0
@@ -992,14 +1073,14 @@ def _query_maintenance(db: Session, company_id: int) -> dict:
     # api/endpoints/maintenance.py that used to persist SCHEDULED -> OVERDUE were
     # unaudited status changes committed from a poll, and were removed. Counting
     # the stored value here would leave an AS9100D evidence health verdict
-    # depending on whether a human had loaded the Maintenance page today. This
-    # predicate matches the one GET /maintenance/dashboard uses.
-    overdue = (
+    # depending on whether a human had loaded the Maintenance page today. Same
+    # status set as GET /maintenance/dashboard, against the company's local today.
+    overdue_wos = (
         db.query(func.count(MaintenanceWorkOrder.id))
         .filter(
             MaintenanceWorkOrder.company_id == company_id,
             MaintenanceWorkOrder.status.in_([MaintenanceStatus.SCHEDULED, MaintenanceStatus.OVERDUE]),
-            MaintenanceWorkOrder.due_date < datetime.utcnow().date(),
+            MaintenanceWorkOrder.due_date < today,
         )
         .scalar()
         or 0
@@ -1013,26 +1094,63 @@ def _query_maintenance(db: Session, company_id: int) -> dict:
         .all()
     )
 
-    if total_schedules == 0 and total_wos == 0:
+    if active_schedules == 0 and total_wos == 0:
         health = "no_data"
-        health_detail = "No maintenance schedules or records found"
+        health_detail = "No active PM schedules or maintenance records found"
         suggested = "not_assessed"
-    elif overdue > 0:
+    elif overdue_schedules or overdue_wos:
+        overdue_parts = []
+        if overdue_schedules:
+            overdue_parts.append(f"{_plural(overdue_schedules, 'active PM schedule', 'active PM schedules')} past due")
+        if overdue_wos:
+            overdue_parts.append(f"{_plural(overdue_wos, 'maintenance work order', 'maintenance work orders')} overdue")
+        health = "critical"
+        health_detail = "; ".join(overdue_parts)
+        suggested = "non_compliant"
+    elif active_schedules == 0:
         health = "warning"
-        health_detail = f"{overdue} maintenance tasks overdue"
+        health_detail = (
+            f"No active PM schedules: {_plural(total_wos, 'maintenance work order', 'maintenance work orders')} "
+            "on record but no preventive maintenance plan"
+        )
+        suggested = "partial"
+    elif unperformed_schedules == active_schedules:
+        health = "warning"
+        health_detail = (
+            f"No PM performed yet: {_plural(active_schedules, 'active PM schedule', 'active PM schedules')}, "
+            "none with a completion on record"
+        )
+        suggested = "not_assessed"
+    elif unperformed_schedules or undated_schedules:
+        gap_parts = []
+        if unperformed_schedules:
+            gap_parts.append(f"{unperformed_schedules} of {active_schedules} active PM schedules never performed")
+        if undated_schedules:
+            gap_parts.append(
+                f"{_plural(undated_schedules, 'active PM schedule has', 'active PM schedules have')} no next due date"
+            )
+        health = "warning"
+        health_detail = "; ".join(gap_parts)
         suggested = "partial"
     else:
         health = "healthy"
-        health_detail = f"{total_schedules} PM schedules, {completed}/{total_wos} work orders completed"
+        health_detail = (
+            f"All {_plural(active_schedules, 'active PM schedule', 'active PM schedules')} current and performed; "
+            f"{completed}/{total_wos} maintenance work orders completed"
+        )
         suggested = "compliant"
 
     return dict(
         evidence_type="module",
         title="Preventive Maintenance & Infrastructure",
-        description=f"{total_schedules} PM schedules, {total_wos} maintenance WOs ({completed} completed, {overdue} overdue)",
+        description=(
+            f"{active_schedules} active PM schedules ({overdue_schedules} past due, "
+            f"{unperformed_schedules} never performed), "
+            f"{total_wos} maintenance WOs ({completed} completed, {overdue_wos} overdue)"
+        ),
         module_reference="/maintenance",
         total_count=total_wos,
-        recent_count=total_schedules,
+        recent_count=active_schedules,
         health_status=health,
         health_detail=health_detail,
         examples=[
@@ -1208,11 +1326,20 @@ def _query_suppliers(db: Session, company_id: int) -> dict:
 
 # ---------------------------------------------------------------------------
 # Mapping rules: keyword patterns → query functions
+#
+# ``evidence_type`` / ``title`` / ``module_reference`` repeat what each rule's
+# ``query_fn`` returns. They exist for the one row the query function cannot
+# build: the placeholder ``discover_evidence_for_clause`` substitutes when the
+# query raises (see ``_evaluation_failed_result``). A test holds every rule's
+# copy equal to its query function's, so the two cannot drift.
 # ---------------------------------------------------------------------------
 
 EVIDENCE_MAPPING_RULES: List[dict] = [
     {
         "id": "ncr",
+        "evidence_type": "ncr",
+        "title": "Non-Conformance Reports (NCR)",
+        "module_reference": "/quality/ncr",
         "keywords": [
             "nonconform",
             "control of nonconforming",
@@ -1226,6 +1353,9 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
     },
     {
         "id": "car",
+        "evidence_type": "car",
+        "title": "Corrective/Preventive Action Reports (CAR)",
+        "module_reference": "/quality/car",
         "keywords": [
             "corrective action",
             "preventive action",
@@ -1238,6 +1368,9 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
     },
     {
         "id": "fai",
+        "evidence_type": "fai",
+        "title": "First Article Inspections (FAI / AS9102)",
+        "module_reference": "/quality/fai",
         "keywords": [
             "first article",
             "production process verification",
@@ -1249,6 +1382,9 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
     },
     {
         "id": "calibration",
+        "evidence_type": "calibration",
+        "title": "Calibration & Measurement Equipment",
+        "module_reference": "/calibration",
         "keywords": [
             "calibration",
             "monitoring and measuring",
@@ -1262,6 +1398,9 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
     },
     {
         "id": "document_control",
+        "evidence_type": "document",
+        "title": "Document Control (Procedures & Work Instructions)",
+        "module_reference": "/documents",
         "keywords": [
             "document control",
             "documented information",
@@ -1276,6 +1415,9 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
     },
     {
         "id": "complaints",
+        "evidence_type": "other",
+        "title": "Customer Complaints & Satisfaction",
+        "module_reference": "/customer-complaints",
         "keywords": [
             "customer satisfaction",
             "customer complaint",
@@ -1287,11 +1429,17 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
     },
     {
         "id": "training",
+        "evidence_type": "training",
+        "title": "Training & Operator Certifications",
+        "module_reference": "/operator-certifications",
         "keywords": ["training", "competence", "awareness", "qualification", "personnel", "human resource", "skill"],
         "query_fn": _query_training,
     },
     {
         "id": "traceability",
+        "evidence_type": "module",
+        "title": "Work Order Traceability (Lot/Serial Tracking)",
+        "module_reference": "/work-orders",
         "keywords": [
             "traceability",
             "identification and traceability",
@@ -1304,6 +1452,9 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
     },
     {
         "id": "spc",
+        "evidence_type": "spc",
+        "title": "Statistical Process Control (SPC)",
+        "module_reference": "/spc",
         "keywords": [
             "statistical",
             "spc",
@@ -1316,11 +1467,17 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
     },
     {
         "id": "audit",
+        "evidence_type": "module",
+        "title": "Audit Trail (Audit Log & Hash-Chain Status)",
+        "module_reference": "/audit",
         "keywords": ["internal audit", "audit program", "audit trail", "management review", "audit log"],
         "query_fn": _query_audit_log,
     },
     {
         "id": "maintenance",
+        "evidence_type": "module",
+        "title": "Preventive Maintenance & Infrastructure",
+        "module_reference": "/maintenance",
         "keywords": [
             "maintenance",
             "infrastructure",
@@ -1333,6 +1490,9 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
     },
     {
         "id": "eco",
+        "evidence_type": "module",
+        "title": "Engineering Change Orders (ECO)",
+        "module_reference": "/engineering-changes",
         "keywords": [
             "engineering change",
             "design change",
@@ -1345,6 +1505,9 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
     },
     {
         "id": "suppliers",
+        "evidence_type": "module",
+        "title": "Supplier Management & Evaluation",
+        "module_reference": "/purchasing/vendors",
         "keywords": [
             "purchasing",
             "external provider",
@@ -1378,11 +1541,82 @@ def _match_rules(clause: QMSClause) -> List[dict]:
     return matched
 
 
+# Internal key on a result row whose rule raised instead of computing evidence. Like
+# ``_rule_id`` it is never serialized; ``POST /qms-standards/{id}/auto-link`` reads it
+# to leave that rule's stored evidence untouched.
+EVALUATION_FAILED_KEY = "_evaluation_failed"
+
+# The placeholder's ``health_status``. Reserved for it: no query function returns it, so a
+# client can tell "the query failed" from a module that genuinely has no records (``no_data``,
+# with the same zero counts). The SPA hides the record count for it and MCP agents read it
+# from the same GET.
+EVALUATION_FAILED_HEALTH_STATUS = "not_computed"
+
+EVALUATION_FAILED_DESCRIPTION = "Evidence could not be computed from live records"
+EVALUATION_FAILED_DETAIL = (
+    "Evidence could not be computed: the query for this module failed. "
+    "Nothing is known about it from this run, so it is not assessed."
+)
+
+
+def _evaluation_failed_result(rule: dict) -> dict:
+    """The row that stands in for a rule whose query raised.
+
+    Same keys as a computed row, so ``ClauseAutoEvidenceResponse`` keeps its shape. It says
+    ``not_computed`` / ``not_assessed``: an unknown is never evidence of compliance, and
+    ``compute_overall_compliance`` rolls a clause carrying this row up to ``not_assessed``
+    (unless a computed row is ``non_compliant`` / ``partial``), never ``compliant``.
+    The zero counts are placeholders required by the schema, not measurements -- which is
+    why ``health_status`` is ``not_computed`` rather than ``no_data``: a genuinely empty
+    module reports the same zeros, and a reader must not show this row as "0 records".
+    """
+    return {
+        "evidence_type": rule["evidence_type"],
+        "title": rule["title"],
+        "description": EVALUATION_FAILED_DESCRIPTION,
+        "module_reference": rule["module_reference"],
+        "total_count": 0,
+        "recent_count": 0,
+        "health_status": EVALUATION_FAILED_HEALTH_STATUS,
+        "health_detail": EVALUATION_FAILED_DETAIL,
+        "examples": [],
+        "suggested_compliance": "not_assessed",
+        "_rule_id": rule["id"],
+        EVALUATION_FAILED_KEY: True,
+    }
+
+
+def is_evaluation_failed(result: dict) -> bool:
+    """True for the placeholder row of a rule whose query raised."""
+    return bool(result.get(EVALUATION_FAILED_KEY))
+
+
 def discover_evidence_for_clause(db: Session, clause: QMSClause, company_id: int) -> List[dict]:
     """
     Discover live ERP/MES evidence for a single QMS clause.
-    Returns a list of AutoEvidenceResult-compatible dicts.
+    Returns a list of AutoEvidenceResult-compatible dicts, one per matched rule.
     All evidence counts and examples are scoped to the given company.
+
+    A RULE THAT RAISES IS REPORTED, NEVER DROPPED. Each query runs in its own savepoint
+    (``db.begin_nested()``); on any exception the savepoint is rolled back and the rule's
+    row becomes ``_evaluation_failed_result`` (``not_computed`` / ``not_assessed``). Two things
+    depend on that:
+
+    * The roll-up. Dropping the row let a clause matching, say, calibration + maintenance
+      roll up ``compliant`` from calibration alone while its maintenance query was failing --
+      a false "compliant" in an auditor-facing view, which is worse than "not assessed".
+    * The rules after it. On PostgreSQL a failed statement aborts the whole transaction, so
+      without the savepoint every later rule failed too (and was dropped too). Rolling back
+      to the savepoint restores the transaction and the next rule runs normally.
+
+    The savepoint is opened OUTSIDE the ``try``: ``begin_nested()`` first flushes the
+    caller's pending writes (auto-link's evidence rows from earlier clauses), and a failure
+    there is the caller's, not this rule's -- it must propagate rather than be recorded as a
+    failed rule. A failed savepoint rollback propagates for the same reason.
+
+    SQLAlchemy emits the ``SAVEPOINT`` lazily, just before the rule's first statement, so a
+    rule that raises before running any SQL leaves no savepoint SQL in a trace. That is not a
+    bug: nothing ran, so there is nothing to roll back.
     """
     matched_rules = _match_rules(clause)
     results = []
@@ -1393,18 +1627,37 @@ def discover_evidence_for_clause(db: Session, clause: QMSClause, company_id: int
         if rule["id"] in seen_ids:
             continue
         seen_ids.add(rule["id"])
+        savepoint = db.begin_nested()
         try:
             result = rule["query_fn"](db, company_id)
-            result["_rule_id"] = rule["id"]
-            results.append(result)
-        except Exception as e:
-            logger.error(f"Error querying {rule['id']} for clause {clause.clause_number}: {e}")
+        except Exception:  # noqa: BLE001 - one rule's failure must become a visible row, not a 500
+            savepoint.rollback()
+            logger.error(
+                "Auto-evidence rule %s failed for clause %s (company %s); reported as not assessed",
+                rule["id"],
+                clause.clause_number,
+                company_id,
+                exc_info=True,
+            )
+            results.append(_evaluation_failed_result(rule))
+            continue
+        savepoint.commit()
+        result["_rule_id"] = rule["id"]
+        results.append(result)
 
     return results
 
 
 def compute_overall_compliance(evidence_results: List[dict]) -> str:
-    """Compute overall suggested compliance from multiple evidence results."""
+    """Compute overall suggested compliance from multiple evidence results.
+
+    A finding from a row that WAS computed (``non_compliant``, then ``partial``) still wins.
+    Otherwise a clause with any rule that could not be computed is ``not_assessed``: its
+    other rows may all be compliant, but reporting ``partial`` would present a query failure
+    as a compliance gap, and ``compliant`` would claim evidence nobody computed. Call this
+    with the rows as ``discover_evidence_for_clause`` returned them, before internal keys
+    are stripped, or the failure flag is lost.
+    """
     if not evidence_results:
         return "not_assessed"
 
@@ -1414,6 +1667,8 @@ def compute_overall_compliance(evidence_results: List[dict]) -> str:
         return "non_compliant"
     if "partial" in statuses:
         return "partial"
+    if any(is_evaluation_failed(r) for r in evidence_results):
+        return "not_assessed"
     if all(s == "compliant" for s in statuses):
         return "compliant"
     if all(s == "not_assessed" for s in statuses):

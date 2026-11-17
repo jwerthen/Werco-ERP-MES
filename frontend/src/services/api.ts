@@ -64,6 +64,8 @@ import {
   WorkOrderDuplicateResult,
   WorkOrderRestoreResponse,
   WorkOrderResumeResponse,
+  WorkOrderBulkReleaseRequest,
+  WorkOrderBulkReleaseResponse,
   WorkOrderTemplate,
   WorkOrderTemplateCreatePayload,
   WorkOrderTemplateListResult,
@@ -94,6 +96,9 @@ import type {
   MaintenanceAsset,
   MaintenanceAssetInput,
   MaintenanceAssetUpdate,
+  MaintenanceSchedule,
+  MaintenanceScheduleUpdate,
+  MaintenanceWorkOrderCompleted,
   PmImportResponse,
 } from '../types/maintenance';
 import {
@@ -1418,6 +1423,19 @@ class ApiService {
 
   async releaseWorkOrder(id: number) {
     const response = await this.api.post(`/work-orders/${id}/release`);
+    this.invalidateDashboardCache();
+    return response.data;
+  }
+
+  // Release several DRAFT work orders in one call (Admin/Manager/Supervisor, the
+  // single-release roles; 1-50 ids, deduped server-side). Each id is released on its
+  // own and the answer is HTTP 200 even when some or all were refused, so callers
+  // must read `released_count` / `error_count` / per-item `results` — never treat a
+  // resolved promise as "all released". Server-gated, so callers stay
+  // NON-optimistic.
+  async bulkReleaseWorkOrders(ids: number[]): Promise<WorkOrderBulkReleaseResponse> {
+    const body: WorkOrderBulkReleaseRequest = { work_order_ids: ids };
+    const response = await this.api.post<WorkOrderBulkReleaseResponse>('/work-orders/bulk-release', body);
     this.invalidateDashboardCache();
     return response.data;
   }
@@ -5058,8 +5076,9 @@ class ApiService {
     return response.data;
   }
 
-  async updateMaintenanceSchedule(id: number, data: any) {
-    const response = await this.api.put(`/maintenance/schedules/${id}`, data);
+  /** Only the fields sent change; the target never does. Admin / Manager / Supervisor. */
+  async updateMaintenanceSchedule(id: number, data: MaintenanceScheduleUpdate): Promise<MaintenanceSchedule> {
+    const response = await this.api.put<MaintenanceSchedule>(`/maintenance/schedules/${id}`, data);
     return response.data;
   }
 
@@ -5093,8 +5112,9 @@ class ApiService {
     return response.data;
   }
 
-  async completeMaintenanceWorkOrder(id: number, data: any) {
-    const response = await this.api.post(`/maintenance/work-orders/${id}/complete`, data);
+  /** Completing a work order with a `schedule_id` advances that PM schedule (`schedule_next_due_date`). */
+  async completeMaintenanceWorkOrder(id: number, data: any): Promise<MaintenanceWorkOrderCompleted> {
+    const response = await this.api.post<MaintenanceWorkOrderCompleted>(`/maintenance/work-orders/${id}/complete`, data);
     return response.data;
   }
 

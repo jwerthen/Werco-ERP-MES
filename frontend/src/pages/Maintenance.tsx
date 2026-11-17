@@ -27,10 +27,15 @@ import {
   MAINTENANCE_TYPE_LABELS,
   CANCELLABLE_STATUSES,
   STARTABLE_STATUSES,
+  ChecklistResultItem,
   canPerformMaintenance,
   canPlanMaintenance,
   checklistPayload,
+  checklistResultsPayload,
+  completionChecklist,
   frequencyText,
+  openWorkOrdersBySchedule,
+  parseChecklistResults,
   targetText,
 } from '../utils/maintenance';
 import type {
@@ -39,6 +44,7 @@ import type {
   MaintenanceSchedule,
   MaintenanceWorkOrder,
 } from '../types/maintenance';
+import { EditScheduleDialog } from '../components/maintenance/EditScheduleDialog';
 import {
   BLANK_TARGET,
   MaintenanceTarget,
@@ -59,6 +65,8 @@ import {
   PlayIcon,
   PauseIcon,
   NoSymbolIcon,
+  PencilSquareIcon,
+  WrenchScrewdriverIcon,
 } from '@heroicons/react/24/outline';
 
 type Tab = 'dashboard' | 'schedules' | 'work_orders' | 'assets';
@@ -110,7 +118,26 @@ const BLANK_WO = {
   due_date: '',
   requires_shutdown: false,
   description: '',
+  checklist: '',
 };
+type WOForm = typeof BLANK_WO;
+
+const MAINTENANCE_TYPES = new Set(Object.keys(MAINTENANCE_TYPE_LABELS));
+const MAINTENANCE_PRIORITIES = new Set(Object.keys(MAINTENANCE_PRIORITY_LABELS));
+
+/** The work-order form pre-filled from a PM schedule ("Start PM"). */
+const woFormFromSchedule = (schedule: MaintenanceSchedule): WOForm => ({
+  title: schedule.name,
+  maintenance_type: MAINTENANCE_TYPES.has(String(schedule.maintenance_type))
+    ? String(schedule.maintenance_type)
+    : 'preventive',
+  priority: MAINTENANCE_PRIORITIES.has(String(schedule.priority)) ? String(schedule.priority) : 'medium',
+  scheduled_date: getCentralTodayISODate(),
+  due_date: schedule.next_due_date ?? '',
+  requires_shutdown: !!schedule.requires_shutdown,
+  description: schedule.description ?? '',
+  checklist: (schedule.checklist_items ?? []).join('\n'),
+});
 const BLANK_COMPLETE = {
   notes: '',
   findings: '',
@@ -119,6 +146,8 @@ const BLANK_COMPLETE = {
   parts_cost: '',
   downtime_minutes: '',
   actual_duration_hours: '',
+  // Required by the server when any checklist item is left unticked (sent only then).
+  incomplete_checklist_reason: '',
 };
 
 /** `iso` (YYYY-MM-DD) plus `days`, as YYYY-MM-DD. Noon UTC keeps it off any DST edge. */
@@ -181,15 +210,30 @@ export default function Maintenance() {
 
   const [scheduleForm, setScheduleForm] = useState(BLANK_SCHEDULE);
   const [scheduleTarget, setScheduleTarget] = useState<MaintenanceTarget>(BLANK_TARGET);
-  const [woForm, setWoForm] = useState(BLANK_WO);
+  const [woForm, setWoForm] = useState<WOForm>(BLANK_WO);
+  // The form as it opened: blank, or pre-filled from the PM schedule it is started from.
+  const [woBaseline, setWoBaseline] = useState<WOForm>(BLANK_WO);
   const [woTarget, setWoTarget] = useState<MaintenanceTarget>(BLANK_TARGET);
+  // "Start PM": the schedule this work order is opened from. It carries the schedule_id (so
+  // completing it advances the schedule) and inherits the schedule's target.
+  const [woSchedule, setWoSchedule] = useState<MaintenanceSchedule | null>(null);
+  const [editSchedule, setEditSchedule] = useState<MaintenanceSchedule | null>(null);
   const [completeForm, setCompleteForm] = useState(BLANK_COMPLETE);
+  const [completeChecklist, setCompleteChecklist] = useState<ChecklistResultItem[]>([]);
+  const [completeChecklistBaseline, setCompleteChecklistBaseline] = useState<ChecklistResultItem[]>([]);
+  // Completing with any checklist item unticked needs a written reason (the server refuses 409
+  // without one), so Complete waits for it.
+  const uncheckedCount = completeChecklist.filter(entry => !entry.done).length;
+  const completeReady = uncheckedCount === 0 || !!completeForm.incomplete_checklist_reason.trim();
 
   const formDirty =
     (showCreateScheduleModal &&
       (JSON.stringify(scheduleForm) !== JSON.stringify(BLANK_SCHEDULE) || hasTarget(scheduleTarget))) ||
-    (showCreateWOModal && (JSON.stringify(woForm) !== JSON.stringify(BLANK_WO) || hasTarget(woTarget))) ||
-    (showCompleteModal && JSON.stringify(completeForm) !== JSON.stringify(BLANK_COMPLETE));
+    (showCreateWOModal &&
+      (JSON.stringify(woForm) !== JSON.stringify(woBaseline) || (!woSchedule && hasTarget(woTarget)))) ||
+    (showCompleteModal &&
+      (JSON.stringify(completeForm) !== JSON.stringify(BLANK_COMPLETE) ||
+        JSON.stringify(completeChecklist) !== JSON.stringify(completeChecklistBaseline)));
   const { confirmDiscard, markSaved } = useUnsavedChanges(formDirty);
 
   // Equipment assets feed the target pickers only, so a failure here (an older API during
@@ -241,6 +285,10 @@ export default function Maintenance() {
       .slice(0, 9);
   }, [schedules]);
 
+  // Which PM schedules already have a work order open (Start PM shows that work order instead).
+  const openWOBySchedule = useMemo(() => openWorkOrdersBySchedule(workOrders), [workOrders]);
+  const schedulesById = useMemo(() => new Map(schedules.map(schedule => [schedule.id, schedule])), [schedules]);
+
   const filteredWOs = useMemo(() => {
     return workOrders.filter(wo => {
       if (statusFilter && wo.status !== statusFilter) return false;
@@ -260,24 +308,65 @@ export default function Maintenance() {
   };
   const openWOModal = () => {
     setActionError('');
+    setWoSchedule(null);
+    setWoForm(BLANK_WO);
+    setWoBaseline(BLANK_WO);
+    setWoTarget(BLANK_TARGET);
     setShowCreateWOModal(true);
   };
+  // "Start PM": the work-order form pre-filled from the schedule. The target is the schedule's
+  // (the server inherits it from schedule_id), so it is shown, not picked.
+  const openWOFromSchedule = useCallback((schedule: MaintenanceSchedule) => {
+    const prefilled = woFormFromSchedule(schedule);
+    setActionError('');
+    setWoSchedule(schedule);
+    setWoForm(prefilled);
+    setWoBaseline(prefilled);
+    setWoTarget(BLANK_TARGET);
+    setShowCreateWOModal(true);
+  }, []);
   const closeScheduleModal = () => {
     if (actionBusy || !confirmDiscard()) return;
     setShowCreateScheduleModal(false);
     setScheduleForm(BLANK_SCHEDULE);
     setScheduleTarget(BLANK_TARGET);
   };
-  const closeWOModal = () => {
-    if (actionBusy || !confirmDiscard()) return;
+  const resetWOModal = () => {
     setShowCreateWOModal(false);
     setWoForm(BLANK_WO);
+    setWoBaseline(BLANK_WO);
     setWoTarget(BLANK_TARGET);
+    setWoSchedule(null);
   };
+  const closeWOModal = () => {
+    if (actionBusy || !confirmDiscard()) return;
+    resetWOModal();
+  };
+  const openCompleteModal = useCallback(
+    (wo: MaintenanceWorkOrder) => {
+      // A PM work order answers for its schedule's checklist too (the server judges both). The
+      // work order carries the list the server will judge; an older API leaves it to the page's
+      // (active) schedules.
+      const schedule = wo.schedule_id != null ? schedulesById.get(wo.schedule_id) : undefined;
+      const checklist = completionChecklist(
+        parseChecklistResults(wo.checklist_results),
+        wo.schedule_checklist_items ?? schedule?.checklist_items
+      );
+      setSelectedWO(wo);
+      setActionError('');
+      setCompleteForm(BLANK_COMPLETE);
+      setCompleteChecklist(checklist);
+      setCompleteChecklistBaseline(checklist);
+      setShowCompleteModal(true);
+    },
+    [schedulesById]
+  );
   const closeCompleteModal = () => {
     if (actionBusy || !confirmDiscard()) return;
     setShowCompleteModal(false);
     setCompleteForm(BLANK_COMPLETE);
+    setCompleteChecklist([]);
+    setCompleteChecklistBaseline([]);
   };
 
   const isCustom = scheduleForm.frequency === 'custom';
@@ -322,15 +411,17 @@ export default function Maintenance() {
     }
   };
 
-  const woReady = !!woForm.title.trim() && hasTarget(woTarget);
+  const woReady = !!woForm.title.trim() && (!!woSchedule || hasTarget(woTarget));
 
   const handleCreateWO = async () => {
     if (actionBusy || !woReady) return;
     setActionBusy(true);
     setActionError('');
     try {
-      await api.createMaintenanceWorkOrder({
-        ...targetPayload(woTarget),
+      const created: MaintenanceWorkOrder | undefined = await api.createMaintenanceWorkOrder({
+        // From a schedule: schedule_id and NO target — the server inherits the schedule's (and
+        // refuses a different one), and completing the work order advances the schedule.
+        ...(woSchedule ? { schedule_id: woSchedule.id } : targetPayload(woTarget)),
         title: woForm.title.trim(),
         maintenance_type: woForm.maintenance_type,
         priority: woForm.priority,
@@ -338,12 +429,18 @@ export default function Maintenance() {
         due_date: woForm.due_date || undefined,
         requires_shutdown: woForm.requires_shutdown,
         description: woForm.description.trim() || undefined,
+        // Unticked at creation; the technician ticks each item when completing it.
+        checklist_results: checklistResultsPayload(woForm.checklist) ?? undefined,
       });
       markSaved();
-      setShowCreateWOModal(false);
-      setWoForm(BLANK_WO);
-      setWoTarget(BLANK_TARGET);
-      showToast('success', 'Maintenance work order created');
+      const fromSchedule = woSchedule;
+      resetWOModal();
+      showToast(
+        'success',
+        fromSchedule
+          ? `${created?.wo_number ?? 'Work order'} opened for ${fromSchedule.name} — completing it moves the schedule's next due date forward`
+          : 'Maintenance work order created'
+      );
       void loadData();
     } catch (err: any) {
       const message = errorText(err, 'Unable to save. Check your entries and try again.');
@@ -414,22 +511,71 @@ export default function Maintenance() {
     }
   };
 
-  const scheduleRowActions = useCallback(
-    (s: MaintenanceSchedule) =>
-      canPlan && s.is_active ? (
+  // "Start PM" opens the work-order form from the schedule — unless a work order is already open
+  // for it, which is then named instead (one PM, one work order).
+  const startPmControl = useCallback(
+    (s: MaintenanceSchedule) => {
+      const open = openWOBySchedule.get(s.id);
+      if (open) {
+        return (
+          <span
+            className="inline-flex items-center px-2 py-1 text-xs font-mono text-slate-300 border border-slate-600 rounded-sm"
+            title={`Work order ${open.wo_number} is open for this schedule (${open.status.replace(/_/g, ' ')})`}
+          >
+            {open.wo_number} open
+          </span>
+        );
+      }
+      return (
         <Button
-          variant="secondary"
           size="sm"
           onClick={e => {
             e.stopPropagation();
-            setDeactivateTarget(s);
+            openWOFromSchedule(s);
           }}
-          aria-label={`Deactivate schedule ${s.name}`}
+          className="inline-flex items-center"
+          aria-label={`Start PM work order for ${s.name}`}
         >
-          Deactivate
+          <WrenchScrewdriverIcon className="w-4 h-4 mr-1" aria-hidden="true" />
+          Start PM
         </Button>
+      );
+    },
+    [openWOBySchedule, openWOFromSchedule]
+  );
+
+  const scheduleRowActions = useCallback(
+    (s: MaintenanceSchedule) =>
+      canPlan && s.is_active ? (
+        <div className="flex flex-wrap gap-1">
+          {startPmControl(s)}
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={e => {
+              e.stopPropagation();
+              setEditSchedule(s);
+            }}
+            className="inline-flex items-center"
+            aria-label={`Edit schedule ${s.name}`}
+          >
+            <PencilSquareIcon className="w-4 h-4 mr-1" aria-hidden="true" />
+            Edit
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={e => {
+              e.stopPropagation();
+              setDeactivateTarget(s);
+            }}
+            aria-label={`Deactivate schedule ${s.name}`}
+          >
+            Deactivate
+          </Button>
+        </div>
       ) : null,
-    [canPlan]
+    [canPlan, startPmControl]
   );
 
   const confirmCancel = async () => {
@@ -438,7 +584,7 @@ export default function Maintenance() {
   };
 
   const handleComplete = async () => {
-    if (!selectedWO || actionBusy) return;
+    if (!selectedWO || actionBusy || !completeReady) return;
     setActionBusy(true);
     setActionError('');
     const number = (value: string) => {
@@ -446,7 +592,9 @@ export default function Maintenance() {
       return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
     };
     try {
-      await api.completeMaintenanceWorkOrder(selectedWO.id, {
+      const completed = await api.completeMaintenanceWorkOrder(selectedWO.id, {
+        // Sent only for a work order that carries a checklist; omitted, the server keeps it.
+        ...(completeChecklist.length ? { checklist_results: JSON.stringify(completeChecklist) } : {}),
         notes: completeForm.notes.trim() || undefined,
         findings: completeForm.findings.trim() || undefined,
         parts_used: completeForm.parts_used.trim() || undefined,
@@ -455,11 +603,21 @@ export default function Maintenance() {
         // Left blank (0), the server fills it from the downtime this work order recorded.
         downtime_minutes: number(completeForm.downtime_minutes),
         actual_duration_hours: number(completeForm.actual_duration_hours),
+        ...(uncheckedCount > 0 ? { incomplete_checklist_reason: completeForm.incomplete_checklist_reason.trim() } : {}),
       });
       markSaved();
       setShowCompleteModal(false);
       setCompleteForm(BLANK_COMPLETE);
-      showToast('success', `${selectedWO.wo_number} completed`);
+      setCompleteChecklist([]);
+      setCompleteChecklistBaseline([]);
+      const nextDue = completed?.schedule_next_due_date;
+      const schedule = selectedWO.schedule_id != null ? schedulesById.get(selectedWO.schedule_id) : undefined;
+      showToast(
+        'success',
+        nextDue
+          ? `${selectedWO.wo_number} completed — ${schedule?.name ?? 'its PM schedule'} is next due ${formatCentralDate(nextDue)}`
+          : `${selectedWO.wo_number} completed`
+      );
       void loadData();
     } catch (err: any) {
       const message = errorText(err, 'Unable to save. Check your entries and try again.');
@@ -494,9 +652,7 @@ export default function Maintenance() {
               type="button"
               onClick={e => {
                 e.stopPropagation();
-                setSelectedWO(wo);
-                setActionError('');
-                setShowCompleteModal(true);
+                openCompleteModal(wo);
               }}
               className="text-xs px-2 py-1 bg-green-600 text-white rounded-sm hover:bg-green-700"
               title="Complete"
@@ -537,7 +693,7 @@ export default function Maintenance() {
           )}
         </div>
       ) : null,
-    [actionBusy, canPerform, canPlan, handleSetStatus, handleStart]
+    [actionBusy, canPerform, canPlan, handleSetStatus, handleStart, openCompleteModal]
   );
 
   // ---- Work Orders tab columns ----
@@ -556,14 +712,22 @@ export default function Maintenance() {
         sortable: true,
         className: 'font-medium',
         accessor: wo => wo.title,
-        render: wo => (
-          <div>
-            <div>{wo.title}</div>
-            {wo.requires_shutdown && (
-              <div className="text-[10px] uppercase tracking-wide text-amber-300">Requires shutdown</div>
-            )}
-          </div>
-        ),
+        render: wo => {
+          const schedule = wo.schedule_id != null ? schedulesById.get(wo.schedule_id) : undefined;
+          return (
+            <div>
+              <div>{wo.title}</div>
+              {wo.schedule_id != null && (
+                <div className="text-[10px] uppercase tracking-wide text-blue-300">
+                  PM{schedule ? `: ${schedule.name}` : ' schedule'}
+                </div>
+              )}
+              {wo.requires_shutdown && (
+                <div className="text-[10px] uppercase tracking-wide text-amber-300">Requires shutdown</div>
+              )}
+            </div>
+          );
+        },
       },
       {
         key: 'target',
@@ -618,7 +782,7 @@ export default function Maintenance() {
       },
       ...(canPerform ? [{ key: 'actions', header: 'Actions', render: woRowActions }] : []),
     ],
-    [canPerform, woRowActions]
+    [canPerform, schedulesById, woRowActions]
   );
 
   const renderWOCard = useCallback(
@@ -809,6 +973,22 @@ export default function Maintenance() {
     </div>
   );
 
+  // The Overdue / Due This Week tiles count work orders AND the PM schedules that have come due
+  // with no work order being worked — none opened yet, or its work order on hold (a held PM is not
+  // done). The server never counts one PM twice. An older API without the schedule keys leaves
+  // them work orders only, with no split shown.
+  const pmSplit = (workOrderCount: number, scheduleCount?: number) =>
+    scheduleCount == null
+      ? undefined
+      : `${workOrderCount} work order${workOrderCount === 1 ? '' : 's'} · ${scheduleCount} PM${scheduleCount === 1 ? '' : 's'} not started or on hold`;
+  const overdueWOs = dashboard?.overdue_count ?? 0;
+  const overdueTotal = overdueWOs + (dashboard?.schedules_overdue ?? 0);
+  const dueWeekWOs = dashboard?.due_this_week ?? 0;
+  const dueWeekTotal = dueWeekWOs + (dashboard?.schedules_due_this_week ?? 0);
+
+  const completingSchedule =
+    selectedWO?.schedule_id != null ? (schedulesById.get(selectedWO.schedule_id) ?? null) : null;
+
   const actionErrorBanner = actionError ? (
     <p role="alert" className="text-red-300 p-3">
       {actionError}
@@ -840,15 +1020,17 @@ export default function Maintenance() {
           iconBg="bg-blue-500/20"
           iconColor="text-blue-400"
           label="Due This Week"
-          value={dashboard?.due_this_week ?? 0}
+          value={dueWeekTotal}
+          subtitle={pmSplit(dueWeekWOs, dashboard?.schedules_due_this_week)}
         />
         <MiniStat
           icon={ExclamationTriangleIcon}
-          iconBg={dashboard?.overdue_count ? 'bg-red-500/20' : 'bg-fd-green/15'}
-          iconColor={dashboard?.overdue_count ? 'text-red-400' : 'text-fd-green'}
+          iconBg={overdueTotal ? 'bg-red-500/20' : 'bg-fd-green/15'}
+          iconColor={overdueTotal ? 'text-red-400' : 'text-fd-green'}
           label="Overdue"
-          value={dashboard?.overdue_count ?? 0}
-          valueColor={dashboard?.overdue_count ? 'text-red-400' : undefined}
+          value={overdueTotal}
+          valueColor={overdueTotal ? 'text-red-400' : undefined}
+          subtitle={pmSplit(overdueWOs, dashboard?.schedules_overdue)}
         />
         <MiniStat
           icon={PlayIcon}
@@ -911,6 +1093,7 @@ export default function Maintenance() {
                       {frequencyText(schedule.frequency, schedule.frequency_days)}
                     </span>
                   </div>
+                  {canPlan && <div className="mt-3">{startPmControl(schedule)}</div>}
                 </div>
               ))}
             </div>
@@ -1307,7 +1490,9 @@ export default function Maintenance() {
       >
         {actionErrorBanner}
         <div className="flex justify-between items-center p-4 border-b border-slate-700">
-          <h3 className="text-lg font-semibold">New Maintenance Work Order</h3>
+          <h3 className="text-lg font-semibold">
+            {woSchedule ? `Start PM: ${woSchedule.name}` : 'New Maintenance Work Order'}
+          </h3>
           <button type="button" onClick={closeWOModal} aria-label="Close dialog">
             <XMarkIcon className="w-5 h-5" aria-hidden="true" />
           </button>
@@ -1326,7 +1511,34 @@ export default function Maintenance() {
               />
             )}
           </FormField>
-          <MaintenanceTargetField name="wo-target" value={woTarget} onChange={setWoTarget} assets={assets} />
+          {woSchedule ? (
+            <section
+              aria-label="PM schedule"
+              className="rounded-sm border border-slate-700 bg-slate-800/40 p-3 text-sm space-y-1"
+            >
+              <div className="text-xs uppercase tracking-wide text-slate-400">From PM schedule</div>
+              <div className="font-medium">{woSchedule.name}</div>
+              <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-slate-300">
+                <dt className="text-slate-500">Maintains</dt>
+                <dd>
+                  {targetText(woSchedule)}
+                  {woSchedule.target_type === 'asset' ? ' (asset)' : ''}
+                </dd>
+                <dt className="text-slate-500">Frequency</dt>
+                <dd>{frequencyText(woSchedule.frequency, woSchedule.frequency_days)}</dd>
+                <dt className="text-slate-500">Est. duration</dt>
+                <dd>{woSchedule.estimated_duration_hours}h</dd>
+                <dt className="text-slate-500">Next due</dt>
+                <dd>{woSchedule.next_due_date ? formatCentralDate(woSchedule.next_due_date) : '—'}</dd>
+              </dl>
+              <p className="text-xs text-slate-400 pt-1">
+                The work order maintains the schedule’s target. Completing it moves the schedule’s next due date forward
+                one interval from the day it is completed.
+              </p>
+            </section>
+          ) : (
+            <MaintenanceTargetField name="wo-target" value={woTarget} onChange={setWoTarget} assets={assets} />
+          )}
           <div className="grid grid-cols-2 gap-3">
             <FormField label="Type" labelClassName="block text-sm font-medium text-slate-300 mb-1">
               {field => (
@@ -1394,7 +1606,7 @@ export default function Maintenance() {
               <span>Requires machine shutdown</span>
             </label>
             <p id="wo-shutdown-help" className="mt-1 text-xs text-slate-500">
-              {woTarget.targetType === 'asset'
+              {(woSchedule ? woSchedule.target_type : woTarget.targetType) === 'asset'
                 ? 'Equipment assets never record machine downtime.'
                 : 'Starting it records downtime on the work center until it is completed or cancelled — planned for preventive / predictive work, unplanned (an OEE loss) for corrective / emergency.'}
             </p>
@@ -1410,6 +1622,21 @@ export default function Maintenance() {
               />
             )}
           </FormField>
+          <FormField
+            label="Checklist"
+            help="One item per line. The technician ticks each one when completing the work order."
+            labelClassName="block text-sm font-medium text-slate-300 mb-1"
+          >
+            {field => (
+              <textarea
+                {...field}
+                value={woForm.checklist}
+                onChange={e => setWoForm(f => ({ ...f, checklist: e.target.value }))}
+                rows={4}
+                className="w-full px-3 py-2 border rounded-sm"
+              />
+            )}
+          </FormField>
         </div>
         <div className="flex justify-end gap-2 p-4 border-t border-slate-700">
           <Button variant="secondary" onClick={closeWOModal} disabled={actionBusy}>
@@ -1420,6 +1647,17 @@ export default function Maintenance() {
           </LoadingButton>
         </div>
       </Modal>
+
+      {editSchedule && (
+        <EditScheduleDialog
+          schedule={editSchedule}
+          onClose={() => setEditSchedule(null)}
+          onSaved={() => {
+            setEditSchedule(null);
+            void loadData();
+          }}
+        />
+      )}
 
       <ConfirmDialog
         open={!!deactivateTarget}
@@ -1470,6 +1708,60 @@ export default function Maintenance() {
           </button>
         </div>
         <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
+          {completingSchedule && (
+            <p className="text-sm text-blue-200 border border-blue-500/30 bg-blue-500/10 rounded-sm p-2">
+              Completing this work order moves PM schedule{' '}
+              <span className="font-medium">{completingSchedule.name}</span> forward: its next due date becomes one
+              interval ({frequencyText(completingSchedule.frequency, completingSchedule.frequency_days).toLowerCase()})
+              from today.
+            </p>
+          )}
+          {selectedWO?.schedule_id != null && !completingSchedule && (
+            <p className="text-sm text-blue-200 border border-blue-500/30 bg-blue-500/10 rounded-sm p-2">
+              Completing this work order moves its PM schedule’s next due date forward.
+            </p>
+          )}
+          {completeChecklist.length > 0 && (
+            <fieldset className="space-y-1">
+              <legend className="block text-sm font-medium text-slate-300 mb-1">
+                Checklist ({completeChecklist.filter(entry => entry.done).length} of {completeChecklist.length} done)
+              </legend>
+              {completeChecklist.map((entry, index) => (
+                <label key={`${index}-${entry.item}`} className="flex items-start gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={entry.done}
+                    onChange={e =>
+                      setCompleteChecklist(items =>
+                        items.map((item, i) => (i === index ? { ...item, done: e.target.checked } : item))
+                      )
+                    }
+                  />
+                  <span>{entry.item}</span>
+                </label>
+              ))}
+            </fieldset>
+          )}
+          {uncheckedCount > 0 && (
+            <FormField
+              label={`Reason for completing with ${uncheckedCount} item${uncheckedCount === 1 ? '' : 's'} unticked`}
+              required
+              help="Recorded in the audit trail with the unticked items. Tick every item to complete without one."
+              labelClassName="block text-sm font-medium text-slate-300 mb-1"
+            >
+              {field => (
+                <textarea
+                  {...field}
+                  value={completeForm.incomplete_checklist_reason}
+                  onChange={e => setCompleteForm(f => ({ ...f, incomplete_checklist_reason: e.target.value }))}
+                  rows={2}
+                  maxLength={2000}
+                  className="w-full px-3 py-2 border rounded-sm"
+                />
+              )}
+            </FormField>
+          )}
           <FormField label="Completion Notes" labelClassName="block text-sm font-medium text-slate-300 mb-1">
             {field => (
               <textarea
@@ -1553,7 +1845,11 @@ export default function Maintenance() {
             </FormField>
             <FormField
               label="Actual Hours"
-              help="Leave blank to use the time since it was started."
+              help={
+                completingSchedule
+                  ? `Planned: ${completingSchedule.estimated_duration_hours}h. Leave blank to use the time since it was started.`
+                  : 'Leave blank to use the time since it was started.'
+              }
               labelClassName="block text-sm font-medium text-slate-300 mb-1"
             >
               {field => (
@@ -1574,7 +1870,13 @@ export default function Maintenance() {
           <Button variant="secondary" onClick={closeCompleteModal} disabled={actionBusy}>
             Cancel
           </Button>
-          <LoadingButton onClick={handleComplete} loading={actionBusy} loadingText="Saving…">
+          <LoadingButton
+            onClick={handleComplete}
+            loading={actionBusy}
+            loadingText="Saving…"
+            disabled={!completeReady}
+            title={completeReady ? undefined : 'Give a reason for the unticked checklist items, or tick them'}
+          >
             Complete
           </LoadingButton>
         </div>

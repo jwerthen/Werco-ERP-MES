@@ -37,6 +37,32 @@ describe('MaintenanceDueWidget', () => {
     expect(screen.getByRole('link', { name: 'Open maintenance' })).toHaveAttribute('href', '/maintenance');
   });
 
+  it('adds the PM schedules nobody has started to the overdue and due-soon counts', () => {
+    renderWithDashboardContext(<MaintenanceDueWidget />, {
+      sources: { maintenance: readySource({ ...DASHBOARD, schedules_overdue: 30, schedules_due_this_week: 4 }) },
+    });
+    expect(screen.getByText('Overdue').nextSibling).toHaveTextContent('32');
+    expect(screen.getByText('Due in 7 days').nextSibling).toHaveTextContent('9');
+    expect(screen.getByText('In progress').nextSibling).toHaveTextContent('1');
+  });
+
+  it('is not empty when only PM schedules are due (no work orders opened yet)', () => {
+    renderWithDashboardContext(<MaintenanceDueWidget />, {
+      sources: {
+        maintenance: readySource({
+          ...DASHBOARD,
+          overdue_count: 0,
+          due_this_week: 0,
+          in_progress: 0,
+          schedules_overdue: 30,
+          schedules_due_this_week: 0,
+        }),
+      },
+    });
+    expect(screen.queryByText('No maintenance due')).not.toBeInTheDocument();
+    expect(screen.getByText('Overdue').nextSibling).toHaveTextContent('30');
+  });
+
   it('renders the empty state when nothing is due', () => {
     renderWithDashboardContext(<MaintenanceDueWidget />, {
       sources: { maintenance: readySource({ ...DASHBOARD, overdue_count: 0, due_this_week: 0, in_progress: 0 }) },

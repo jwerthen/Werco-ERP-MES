@@ -8,11 +8,11 @@ import { customerPoDashboardUrl } from '../utils/customerPurchaseOrders';
 import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import api from '../services/api';
-import { WorkOrderSummary, WorkOrderStatus } from '../types';
+import { WorkOrderSummary, WorkOrderStatus, WorkOrderBulkReleaseResponse } from '../types';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
 import { useAuth } from '../context/AuthContext';
-import { hasPermission } from '../utils/permissions';
+import { hasPermission, userCanReleaseWorkOrders } from '../utils/permissions';
 import {
   formatCentralDate,
   formatCentralDateTime,
@@ -74,6 +74,16 @@ import { extractStepsBypassed, stepsBypassedMessage } from '../utils/processShee
 // reject. Also the list the overdue badge and the overdue stat suppress on.
 const TERMINAL_WO_STATUSES = ['complete', 'closed', 'cancelled'];
 const CURRENT_WORK_ORDER_STATUSES = ['released', 'in_progress', 'on_hold'];
+
+// Bulk release: only a DRAFT can be released (the server refuses anything else), so
+// only a draft row gets a checkbox, joins a select-all, or is sent.
+const isDraftWorkOrder = (wo: WorkOrderSummary) => wo.status === 'draft';
+// `POST /work-orders/bulk-release` takes 1-50 ids — one desktop page of this list.
+const BULK_RELEASE_MAX = 50;
+// How many work order numbers the confirm dialog names before summarizing the rest.
+const BULK_RELEASE_LIST_LIMIT = 10;
+// Never mutated: the selection read when the stored one belongs to another view.
+const EMPTY_ID_SET: Set<number> = new Set();
 
 type GroupBy = 'none' | 'customer' | 'part' | 'status';
 
@@ -548,6 +558,12 @@ export default function WorkOrders() {
   const canCompleteWorkOrders = canEditWorkOrders || user?.role === 'quality';
   const canDuplicateWorkOrders = canEditWorkOrders;
   const canEditDueDate = canEditWorkOrders;
+  // Release — single AND bulk — is require_role([ADMIN, MANAGER, SUPERVISOR]) on the
+  // backend (plus superuser / platform admin via require_role itself), exactly the
+  // population `work_orders:release` maps to. One shared gate (the detail page's
+  // Release button reads it too), so the row Release button, the bulk selection and
+  // a refused call all agree.
+  const canReleaseWorkOrders = userCanReleaseWorkOrders(user);
   const [nestWizardOpen, setNestWizardOpen] = useState(false);
   const [operationsTarget, setOperationsTarget] = useState<WorkOrderSummary | null>(null);
   const [browseSort, setBrowseSort] = useState<{ key: string; dir: 'asc' | 'desc' } | null>({ key: 'priority', dir: 'asc' });
@@ -737,7 +753,9 @@ export default function WorkOrders() {
   // per-call target (which row + where it sat) is threaded through run(ctx), so each
   // delete's rollback restores the row IT removed even if two rows are deleted in
   // quick succession (one hook instance serves every row's Delete control). (WO
-  // *release* stays non-optimistic below — it is server-gated by readiness checks.)
+  // *release* — single and bulk — stays non-optimistic below, because the server may
+  // refuse it. Its only checks are that the work order is still DRAFT and has at
+  // least one operation; there is no material or blocker readiness gate.)
   // Mirror the latest list so handleDelete can read the row's current index
   // without depending on (and re-creating) the callback on every list change.
   const deletionScope = `${browse.scope}:${browse.skip}`;
@@ -886,6 +904,174 @@ export default function WorkOrders() {
       });
     }
   }, [loadWorkOrders, showToast]);
+
+  // --- Bulk release -----------------------------------------------------------
+  // Selection exists only where the desktop DataTables render it (flat and grouped);
+  // the mobile card list is not a DataTable and keeps the per-row Release button only.
+  //
+  // The selection is KEYED to the view it was made in: the orders tab plus the browse
+  // scope (identity, every filter, sort, grouping) and the loaded page. Any change of
+  // filter, page, tab, sort or grouping reads as an empty selection without an effect
+  // having to notice — so a select-all on page 1 can never ride along to page 2.
+  const selectionScope = `${activeTab}|${deletionScope}`;
+  const [bulkSelection, setBulkSelection] = useState<{ scope: string; ids: Set<number> }>(() => ({
+    scope: selectionScope,
+    ids: new Set(),
+  }));
+  const selectedIds = bulkSelection.scope === selectionScope ? bulkSelection.ids : EMPTY_ID_SET;
+
+  // Drop keys that are no longer a loaded DRAFT after every reload (released by
+  // someone else, deleted, filtered out), so a later return to draft cannot bring a
+  // stale tick back.
+  useEffect(() => {
+    setBulkSelection((prev) => {
+      if (prev.ids.size === 0) return prev;
+      const drafts = new Set(workOrders.filter(isDraftWorkOrder).map((wo) => wo.id));
+      const kept = new Set(Array.from(prev.ids).filter((id) => drafts.has(id)));
+      return kept.size === prev.ids.size ? prev : { ...prev, ids: kept };
+    });
+  }, [workOrders]);
+
+  // Only DRAFT rows ever count, are shown as ticked, or are sent — whatever the
+  // stored set holds between a reload and the prune above.
+  const selectedDraftWorkOrders = useMemo(
+    () => workOrders.filter((wo) => isDraftWorkOrder(wo) && selectedIds.has(wo.id)),
+    [workOrders, selectedIds]
+  );
+  const selectedDraftIdSet = useMemo(
+    () => new Set<string | number>(selectedDraftWorkOrders.map((wo) => wo.id)),
+    [selectedDraftWorkOrders]
+  );
+  const bulkSelectionEnabled = canReleaseWorkOrders && activeTab === 'orders';
+
+  // DataTable copies the set it was handed and adds/removes only its OWN rows, so
+  // every group table can share this one selection.
+  const handleBulkSelectionChange = useCallback(
+    (keys: Set<string | number>) => {
+      const ids = new Set<number>();
+      keys.forEach((key) => {
+        if (typeof key === 'number') ids.add(key);
+      });
+      setBulkSelection({ scope: selectionScope, ids });
+    },
+    [selectionScope]
+  );
+  const clearBulkSelection = useCallback(() => {
+    setBulkSelection({ scope: selectionScope, ids: new Set() });
+  }, [selectionScope]);
+
+  const [bulkReleaseOpen, setBulkReleaseOpen] = useState(false);
+  const [bulkReleasePending, setBulkReleasePending] = useState(false);
+  const bulkReleasePendingRef = useRef(false);
+  // The batch actually on the wire, frozen at the confirm click and held until the
+  // request settles. A background reload (poll / focus / websocket) keeps pruning the
+  // LIVE selection while the call is in flight — the server releasing them is itself
+  // enough to do it — so a dialog read from the live selection would re-word itself
+  // mid-request, down to "Release 0". The pending dialog names this batch instead:
+  // exactly what was sent, until the answer lands.
+  const [bulkReleaseBatch, setBulkReleaseBatch] = useState<WorkOrderSummary[] | null>(null);
+  // Idle, the dialog follows the live selection, so a row released elsewhere drops out
+  // before it can be sent (the same "only drafts are sent" rule as the prune above).
+  const bulkReleaseDialogTargets = bulkReleaseBatch ?? selectedDraftWorkOrders;
+
+  // A background reload can also drain the selection while the dialog is open and
+  // IDLE — every ticked draft released elsewhere. Confirming would then send nothing,
+  // so close instead of offering "Release 0". A pending dialog is never closed here:
+  // it names its frozen batch and closes on the server's answer.
+  useEffect(() => {
+    if (bulkReleaseOpen && !bulkReleasePending && selectedDraftWorkOrders.length === 0) {
+      setBulkReleaseOpen(false);
+    }
+  }, [bulkReleaseOpen, bulkReleasePending, selectedDraftWorkOrders.length]);
+
+  /**
+   * Release every ticked DRAFT in one call. Server-GATED, so NON-optimistic: nothing
+   * on the list moves until the server answers, and the list is re-read afterwards
+   * rather than patched. The answer is HTTP 200 even when some or all were refused
+   * (each id is released on its own), so the counts decide the toast:
+   *   - all released  -> success
+   *   - some refused  -> warning naming each refused work order with the server's text
+   *   - none released -> error with the same per-work-order text
+   * A thrown error (network / 403 / 422) released nothing we can know of: error toast,
+   * dialog closes, selection kept so a retry is one click.
+   */
+  const handleConfirmBulkRelease = useCallback(async () => {
+    if (bulkReleasePendingRef.current) return;
+    // The Release button is disabled above BULK_RELEASE_MAX, so this never truncates.
+    // This one array is both the request and what the pending dialog names.
+    const targets = selectedDraftWorkOrders;
+    if (targets.length === 0) {
+      setBulkReleaseOpen(false);
+      return;
+    }
+    const targetIds = targets.map((wo) => wo.id);
+    const numberById = new Map(targets.map((wo) => [wo.id, wo.work_order_number]));
+    bulkReleasePendingRef.current = true;
+    setBulkReleaseBatch(targets);
+    setBulkReleasePending(true);
+    // Disable the row Release buttons of the batch until the re-read lands, so a
+    // single release cannot race the bulk one.
+    setReleasingIds((prev) => {
+      const next = new Set(prev);
+      targetIds.forEach((id) => next.add(id));
+      return next;
+    });
+    try {
+      let response: WorkOrderBulkReleaseResponse;
+      try {
+        response = await api.bulkReleaseWorkOrders(targetIds);
+      } catch (err: any) {
+        const detail = err?.response?.data?.detail;
+        showToast('error', typeof detail === 'string' && detail ? detail : 'Failed to release work orders');
+        setBulkReleaseOpen(false);
+        return;
+      }
+      const released = response.released_count;
+      const failures = response.results
+        .filter((result) => result.status === 'error')
+        .map(
+          (result) =>
+            `${result.work_order_number || numberById.get(result.work_order_id) || `Work order #${result.work_order_id}`}: ` +
+            `${result.detail || 'Not released'}`
+        );
+      const plural = (n: number) => `${n} work order${n === 1 ? '' : 's'}`;
+      if (response.error_count === 0) {
+        showToast('success', `Released ${plural(released)}`);
+      } else if (released > 0) {
+        showToast(
+          'warning',
+          `Released ${plural(released)}; ${plural(response.error_count)} not released:\n${failures.join('\n')}`
+        );
+      } else {
+        showToast('error', `No work orders released:\n${failures.join('\n')}`);
+      }
+      setBulkReleaseOpen(false);
+      clearBulkSelection();
+      await loadWorkOrders();
+    } finally {
+      bulkReleasePendingRef.current = false;
+      // Every path above has already closed the dialog, so dropping the frozen batch
+      // cannot re-word an open one.
+      setBulkReleaseBatch(null);
+      setBulkReleasePending(false);
+      setReleasingIds((prev) => {
+        const next = new Set(prev);
+        targetIds.forEach((id) => next.delete(id));
+        return next;
+      });
+    }
+  }, [selectedDraftWorkOrders, showToast, clearBulkSelection, loadWorkOrders]);
+
+  /** Selection props for one desktop DataTable, or none when bulk release is off for it. */
+  const bulkSelectionPropsFor = (rows: WorkOrderSummary[], selectAllLabel: string) =>
+    bulkSelectionEnabled && rows.some(isDraftWorkOrder)
+      ? {
+          selection: { selectedKeys: selectedDraftIdSet, onChange: handleBulkSelectionChange },
+          isRowSelectable: isDraftWorkOrder,
+          rowSelectionLabel: (wo: WorkOrderSummary) => `Select ${wo.work_order_number}`,
+          selectAllLabel,
+        }
+      : {};
 
   // --- Deleted view: load, restore -----------------------------------------
   /**
@@ -1344,7 +1530,7 @@ export default function WorkOrders() {
         onDelete: canDeleteWorkOrders ? handleDelete : undefined,
         onDuplicate: canDuplicateWorkOrders ? handleDuplicate : undefined,
         onSaveTemplate: canEditWorkOrders ? handleSaveTemplate : undefined,
-        onRelease: handleRelease,
+        onRelease: canReleaseWorkOrders ? handleRelease : undefined,
         onComplete: canCompleteWorkOrders ? handleQuickComplete : undefined,
         releasingIds,
         deletePending,
@@ -1355,6 +1541,7 @@ export default function WorkOrders() {
       canDuplicateWorkOrders,
       canEditWorkOrders,
       canCompleteWorkOrders,
+      canReleaseWorkOrders,
       handleQuickComplete,
       handleDelete,
       handleDuplicate,
@@ -1834,6 +2021,56 @@ export default function WorkOrders() {
       </div>
       <TableWorkspaceControls workspace={workspace} />
 
+      {/* Bulk release bar. One bar for the whole list — not DataTable's per-table
+          `bulkActions` slot, which the grouped view would repeat once per group.
+          Desktop only, like the selection itself.
+
+          The count's live region is always mounted while selection is possible, so
+          each change is announced. A bare aria-live region, not role="status": that
+          role belongs to the toast stack, where "no status on screen" means "no
+          success toast was shown". */}
+      {bulkSelectionEnabled && (
+        <p className="sr-only" aria-live="polite" aria-atomic="true">
+          {selectedDraftWorkOrders.length > 0
+            ? `${selectedDraftWorkOrders.length} draft work order${selectedDraftWorkOrders.length === 1 ? '' : 's'} selected for release`
+            : ''}
+        </p>
+      )}
+      {bulkSelectionEnabled && selectedDraftWorkOrders.length > 0 && (
+        <div
+          className="hidden lg:flex flex-wrap items-center gap-x-3 gap-y-2 rounded-sm border border-fd-line bg-fd-panel px-3 py-2"
+          role="group"
+          aria-label="Bulk release"
+          data-testid="bulk-release-bar"
+        >
+          <span className="text-xs font-mono uppercase tracking-wider text-slate-200 tabular-nums whitespace-nowrap">
+            {selectedDraftWorkOrders.length} selected
+          </span>
+          <span className="text-xs text-fd-mute">
+            Drafts only · select all covers the work orders loaded on this page
+          </span>
+          <div className="ml-auto flex items-center gap-2">
+            {selectedDraftWorkOrders.length > BULK_RELEASE_MAX && (
+              <span className="text-xs text-fd-amber">Release at most {BULK_RELEASE_MAX} at a time</span>
+            )}
+            <Button size="sm" variant="ghost" onClick={clearBulkSelection} disabled={bulkReleasePending}>
+              Clear selection
+            </Button>
+            <LoadingButton
+              size="sm"
+              variant="primary"
+              loading={bulkReleasePending}
+              loadingText="Releasing…"
+              disabled={selectedDraftWorkOrders.length > BULK_RELEASE_MAX}
+              onClick={() => setBulkReleaseOpen(true)}
+            >
+              <CheckCircleIcon className="h-4 w-4 mr-1.5" aria-hidden="true" />
+              Release {selectedDraftWorkOrders.length}
+            </LoadingButton>
+          </div>
+        </div>
+      )}
+
       {/* Work Orders List */}
       {loading ? <div aria-label="Loading work orders"><SkeletonTable rows={6} columns={8} /></div> : loadError && workOrders.length === 0 ? (
         <ErrorState
@@ -1865,7 +2102,7 @@ export default function WorkOrders() {
                     onDelete: canDeleteWorkOrders ? handleDelete : undefined,
                     onDuplicate: canDuplicateWorkOrders ? handleDuplicate : undefined,
                     onSaveTemplate: canEditWorkOrders ? handleSaveTemplate : undefined,
-                    onRelease: handleRelease,
+                    onRelease: canReleaseWorkOrders ? handleRelease : undefined,
                     onComplete: canCompleteWorkOrders ? handleQuickComplete : undefined,
                     releasingIds,
                     deletePending,
@@ -1876,19 +2113,28 @@ export default function WorkOrders() {
                   manualSorting
                   rowKey={(wo) => wo.id}
                   onRowClick={setOperationsTarget}
+                  // ONE selection shared by every group table: each table adds or
+                  // removes only its own rows, so a tick in one group survives a
+                  // select-all in another.
+                  {...bulkSelectionPropsFor(
+                    orders,
+                    `Select all draft work orders in ${groupBy === 'status' ? formatStatusLabel(groupName) : groupName}`
+                  )}
                   className="border-0"
                   csvExport={{ filename: `work-orders-${groupCsvSlug(groupName)}`, label: 'Export loaded rows' }}
                 />
               </div>
                 }
                 mobile={
+              // No bulk selection on mobile: the card list is not a DataTable, so
+              // a draft is released one card at a time with its own Release button.
               <WorkOrderMobileList
                 workOrders={orders}
                 onOpen={setOperationsTarget}
                 onDelete={canDeleteWorkOrders ? handleDelete : undefined}
                 onDuplicate={canDuplicateWorkOrders ? handleDuplicate : undefined}
                 onSaveTemplate={canEditWorkOrders ? handleSaveTemplate : undefined}
-                onRelease={handleRelease}
+                onRelease={canReleaseWorkOrders ? handleRelease : undefined}
                 onComplete={canCompleteWorkOrders ? handleQuickComplete : undefined}
                 releasingIds={releasingIds}
                 deletePending={deletePending}
@@ -1916,6 +2162,9 @@ export default function WorkOrders() {
                   data={filteredWorkOrders}
                   rowKey={(wo) => wo.id}
                   onRowClick={setOperationsTarget}
+                  // Select-all covers the drafts on THIS loaded page only (the list
+                  // is server-paginated) — the label and the bulk bar both say so.
+                  {...bulkSelectionPropsFor(filteredWorkOrders, 'Select all draft work orders on this page')}
                   defaultSort={{ key: 'priority', dir: 'asc' }}
                   serverPagination={{ page: browse.page, pageSize: 50, hasNext: browse.has_next, onPageChange: browse.setPage, loading: browse.refreshing }}
                   csvExport={{ filename: 'work-orders' }}
@@ -1923,13 +2172,14 @@ export default function WorkOrders() {
               </div>
                 }
                 mobile={
+              // No bulk selection on mobile (see the grouped view above).
               <WorkOrderMobileList
                 workOrders={filteredWorkOrders}
                 onOpen={setOperationsTarget}
                 onDelete={canDeleteWorkOrders ? handleDelete : undefined}
                 onDuplicate={canDuplicateWorkOrders ? handleDuplicate : undefined}
                 onSaveTemplate={canEditWorkOrders ? handleSaveTemplate : undefined}
-                onRelease={handleRelease}
+                onRelease={canReleaseWorkOrders ? handleRelease : undefined}
                 onComplete={canCompleteWorkOrders ? handleQuickComplete : undefined}
                 releasingIds={releasingIds}
                 deletePending={deletePending}
@@ -2031,6 +2281,23 @@ export default function WorkOrders() {
         />
       )}
 
+      {/* Bulk release confirm. Server-GATED, so `pending` holds the dialog (no
+          backdrop / Escape / Cancel) while the call is in flight; it closes on the
+          server's answer, never before. While pending it names the frozen batch that
+          was sent, not the live selection a reload may be emptying. */}
+      <ConfirmDialog
+        open={bulkReleaseOpen}
+        title="Release Work Orders"
+        message={bulkReleaseMessage(bulkReleaseDialogTargets)}
+        confirmLabel={`Release ${bulkReleaseDialogTargets.length}`}
+        pending={bulkReleasePending}
+        variant="info"
+        onConfirm={handleConfirmBulkRelease}
+        onCancel={() => {
+          if (!bulkReleasePending) setBulkReleaseOpen(false);
+        }}
+      />
+
       {/* Delete work order confirm (soft delete; optimistic removal fires on confirm) */}
       <ConfirmDialog
         open={deleteTarget !== null}
@@ -2093,6 +2360,24 @@ function WorkOrdersEmptyState() {
         </Link>
       }
     />
+  );
+}
+
+/**
+ * The bulk-release confirm text: how many, the one thing the server checks, and the
+ * first few work order numbers so the planner can see what the click covers.
+ */
+function bulkReleaseMessage(targets: WorkOrderSummary[]): string {
+  const count = targets.length;
+  const noun = `draft work order${count === 1 ? '' : 's'}`;
+  const named = targets.slice(0, BULK_RELEASE_LIST_LIMIT).map((wo) => wo.work_order_number);
+  const more = count - named.length;
+  return (
+    `Release ${count} ${noun} to production?\n\n` +
+    'Each one is released on its own and must have at least one operation. Any the server refuses ' +
+    'stay drafts and are listed afterwards.\n\n' +
+    named.join(', ') +
+    (more > 0 ? `, and ${more} more` : '')
   );
 }
 

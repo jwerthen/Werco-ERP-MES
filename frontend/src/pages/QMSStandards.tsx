@@ -8,7 +8,7 @@ import {
   QuestionMarkCircleIcon,
 } from '@heroicons/react/24/outline';
 import api from '../services/api';
-import { Button, ConfirmDialog, statusColor } from '../components/ui';
+import { Button, ConfirmDialog, statusColor, useToast } from '../components/ui';
 import { FormField } from '../components/ui/FormField';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { formatCentralDate } from '../utils/centralTime';
@@ -44,7 +44,19 @@ const EVIDENCE_TYPES = [
   { value: 'other', label: 'Other' },
 ];
 
+/**
+ * What an auto-link run that could not compute some evidence rules says about
+ * them. Nothing was saved for a failed rule, so its existing evidence link (if
+ * any) still shows the counts and refresh date of the last run that computed it.
+ */
+function evidenceNotComputedMessage(failed: number): string {
+  const rules = failed === 1 ? 'evidence rule' : 'evidence rules';
+  const links = failed === 1 ? 'Its evidence link was' : 'Their evidence links were';
+  return `${failed} ${rules} could not be computed this run. ${links} left as last refreshed, not updated.`;
+}
+
 export default function QMSStandards() {
+  const { showToast } = useToast();
   const [standards, setStandards] = useState<QMSStandardListResponse[]>([]);
   const [selectedStandard, setSelectedStandard] = useState<QMSStandardResponse | null>(null);
   const [auditSummary, setAuditSummary] = useState<QMSAuditReadinessSummary | null>(null);
@@ -233,6 +245,12 @@ export default function QMSStandards() {
       const result = await api.autoLinkStandard(selectedStandard.id);
       setAutoLinkResult(result);
       setShowAutoLinkResult(true);
+      // The run succeeded but did not compute everything it was asked to: a
+      // warning, not a success (which would hide it) or an error (nothing failed
+      // to save).
+      if (result.total_evidence_failed > 0) {
+        showToast('warning', `Auto-link finished with gaps. ${evidenceNotComputedMessage(result.total_evidence_failed)}`);
+      }
       // Refresh the standard detail to show new evidence
       loadStandardDetail(selectedStandard.id);
       fetchData();
@@ -729,8 +747,23 @@ export default function QMSStandards() {
 
       {/* Auto-Link Result Modal */}
       {showAutoLinkResult && autoLinkResult && (
-        <Modal title="Auto-Link Evidence Complete" onClose={() => setShowAutoLinkResult(false)}>
+        <Modal
+          title={autoLinkResult.total_evidence_failed > 0 ? 'Auto-Link Evidence Finished With Gaps' : 'Auto-Link Evidence Complete'}
+          onClose={() => setShowAutoLinkResult(false)}
+        >
           <div className="space-y-4">
+            {autoLinkResult.total_evidence_failed > 0 && (
+              <div className="bg-red-500/10 border border-red-500/30 rounded-sm p-3" data-testid="auto-link-not-computed">
+                <div className="flex items-baseline gap-3">
+                  <p className="text-2xl font-bold text-red-400 tabular-nums">{autoLinkResult.total_evidence_failed}</p>
+                  <p className="text-xs font-semibold text-red-300">Evidence Not Computed</p>
+                </div>
+                <p className="text-xs text-slate-300 mt-1">
+                  {evidenceNotComputedMessage(autoLinkResult.total_evidence_failed)}{' '}
+                  A clause with an uncomputed rule is not counted as compliant. Run Auto-Link again to retry.
+                </p>
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-3">
               <div className="bg-green-500/10 rounded-sm p-3 text-center">
                 <p className="text-2xl font-bold text-emerald-400 tabular-nums">{autoLinkResult.clauses_with_evidence}</p>
@@ -738,7 +771,8 @@ export default function QMSStandards() {
               </div>
               <div className="bg-fd-raised rounded-sm p-3 text-center">
                 <p className="text-2xl font-bold text-slate-400 tabular-nums">{autoLinkResult.clauses_without_evidence}</p>
-                <p className="text-xs text-slate-400">Clauses without Match</p>
+                {/* Includes a clause whose matched rules all failed: it matched, but nothing was computed. */}
+                <p className="text-xs text-slate-400">Clauses without Evidence</p>
               </div>
               <div className="bg-blue-500/10 rounded-sm p-3 text-center">
                 <p className="text-2xl font-bold text-blue-400 tabular-nums">{autoLinkResult.total_evidence_created}</p>
@@ -1020,34 +1054,48 @@ function ClauseRow({
                 {'\u26A1'} Discovered Evidence (Live Preview)
               </h4>
               <div className="space-y-2">
-                {autoEvidence.discovered_evidence.map((ev, idx) => (
-                  <div key={idx} className="bg-amber-500/10 border border-amber-500/30 rounded-sm p-3">
-                    <div className="flex items-center gap-2 mb-1">
-                      <HealthDot status={ev.health_status} />
-                      <span className="font-medium text-sm">{ev.title}</span>
-                      <span className="badge badge-sm badge-warning">{ev.total_count} records</span>
-                    </div>
-                    <p className="text-xs text-slate-400 mb-2">{ev.description}</p>
-                    <p className="text-xs text-slate-400 italic">{ev.health_detail}</p>
-                    {ev.examples.length > 0 && (
-                      <div className="mt-2 space-y-1">
-                        {ev.examples.slice(0, 3).map((ex, exIdx) => (
-                          <a
-                            key={exIdx}
-                            href={ex.module_link}
-                            className="flex items-center gap-2 text-xs text-fd-blue hover:text-fd-cyan hover:underline"
-                          >
-                            <span className="font-mono">{ex.record_identifier}</span>
-                            <span className="text-slate-400">{ex.summary}</span>
-                            <span className={`badge badge-xs ${ex.status === 'closed' ? 'badge-success' : 'badge-ghost'}`}>
-                              {ex.status}
-                            </span>
-                          </a>
-                        ))}
+                {autoEvidence.discovered_evidence.map((ev, idx) => {
+                  // A rule whose query failed comes back as a placeholder with zero
+                  // counts. Those zeros are not measurements: showing "0 records" would
+                  // read exactly like a module with nothing on file (no_data).
+                  const notComputed = ev.health_status === 'not_computed';
+                  return (
+                    <div
+                      key={idx}
+                      data-testid="discovered-evidence-row"
+                      className={`rounded-sm p-3 border ${notComputed ? 'bg-red-500/10 border-red-500/30' : 'bg-amber-500/10 border-amber-500/30'}`}
+                    >
+                      <div className="flex items-center gap-2 mb-1">
+                        <HealthDot status={ev.health_status} />
+                        <span className="font-medium text-sm">{ev.title}</span>
+                        {notComputed ? (
+                          <span className="badge badge-sm badge-error badge-outline">Not computed</span>
+                        ) : (
+                          <span className="badge badge-sm badge-warning">{ev.total_count} records</span>
+                        )}
                       </div>
-                    )}
-                  </div>
-                ))}
+                      <p className="text-xs text-slate-400 mb-2">{ev.description}</p>
+                      <p className="text-xs text-slate-400 italic">{ev.health_detail}</p>
+                      {ev.examples.length > 0 && (
+                        <div className="mt-2 space-y-1">
+                          {ev.examples.slice(0, 3).map((ex, exIdx) => (
+                            <a
+                              key={exIdx}
+                              href={ex.module_link}
+                              className="flex items-center gap-2 text-xs text-fd-blue hover:text-fd-cyan hover:underline"
+                            >
+                              <span className="font-mono">{ex.record_identifier}</span>
+                              <span className="text-slate-400">{ex.summary}</span>
+                              <span className={`badge badge-xs ${ex.status === 'closed' ? 'badge-success' : 'badge-ghost'}`}>
+                                {ex.status}
+                              </span>
+                            </a>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
               <p className="text-xs text-slate-400 mt-2">
                 Suggested compliance: <span className={`font-medium ${statusColor(autoEvidence.overall_suggested_compliance)}`}>
@@ -1172,11 +1220,14 @@ function HealthDot({ status }: { status: string }) {
     warning: 'bg-fd-amber',
     critical: 'bg-fd-red',
     no_data: 'bg-fd-line-bright',
+    // Hollow: nothing was measured, which is not the same as nothing on file.
+    not_computed: 'border-2 border-fd-red bg-transparent',
   };
+  const titles: Record<string, string> = { not_computed: 'Not computed' };
   return (
     <span
       className={`inline-block w-2.5 h-2.5 rounded-full ${colors[status] || colors.no_data}`}
-      title={status}
+      title={titles[status] || status}
     />
   );
 }

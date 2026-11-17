@@ -95,6 +95,12 @@ EXCLUDED_OPERATIONS: FrozenSet[Tuple[str, str]] = (
             # the vendor's own status, and nothing reads it. The two reads stay tools.
             ("POST", "/api/v1/supplier-scorecards/approved-suppliers/"),
             ("PUT", "/api/v1/supplier-scorecards/approved-suppliers/{asl_id}"),
+            # Bulk release (up to 50 DRAFT work orders in one call) is an app action. The
+            # convenience tool ``release_work_order`` stays the agent's ONLY release door: one
+            # job per call, release being the authorization step and the record of who put
+            # work on the floor. Excluded rather than shadowed, because no convenience tool
+            # calls this route.
+            ("POST", "/api/v1/work-orders/bulk-release"),
         }
     )
     | EGRESS_SWITCH_OPERATIONS
@@ -597,7 +603,7 @@ def build_catalog(
     their generated twins are dropped so the convenience tool is the only door to
     that route (it is where the DRAFT / demote / name-guard rules live).
     ``excluded_operations`` are dropped with NO replacement (the cutover loaders, AI Accept & apply,
-    the export-control and egress kill-switch writes).
+    the export-control and egress kill-switch writes, the Approved Supplier List writes, bulk release).
 
     Names are assigned over EVERY secured operation BEFORE the shadowed and excluded
     pairs are dropped, so neither ever renames a neighbour: the Routing router's

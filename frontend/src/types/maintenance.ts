@@ -66,6 +66,8 @@ export interface MaintenanceWorkOrder extends MaintenanceTargetFields {
   title: string;
   description?: string | null;
   checklist_results?: string | null;
+  /** The PM schedule's checklist steps, which completion also judges (absent from an older API). */
+  schedule_checklist_items?: string[];
   scheduled_date?: string | null;
   due_date?: string | null;
   started_at?: string | null;
@@ -96,10 +98,35 @@ export interface MaintenanceWorkCenterMetric {
   total_cost: number;
 }
 
+/**
+ * POST /maintenance/work-orders/{id}/complete: the completed work order, plus the PM schedule's
+ * new next due date when completing it advanced one (`null` otherwise; absent from an older API).
+ */
+export interface MaintenanceWorkOrderCompleted extends MaintenanceWorkOrder {
+  schedule_next_due_date?: string | null;
+}
+
+/** PUT /maintenance/schedules/{id}: only the fields sent change. The target never does. */
+export interface MaintenanceScheduleUpdate {
+  next_due_date?: string;
+  frequency?: MaintenanceFrequency;
+  frequency_days?: number | null;
+  priority?: MaintenancePriority;
+  estimated_duration_hours?: number;
+  requires_shutdown?: boolean;
+  checklist?: string | null;
+}
+
 /** GET /maintenance/dashboard. MTBF / MTTR are work centers only (assets never count). */
 export interface MaintenanceDashboard {
+  /** Maintenance WORK ORDERS (scheduled / overdue) whose due date has passed. */
   overdue_count: number;
+  /** Maintenance WORK ORDERS (scheduled / overdue) due today through today + 7. */
   due_this_week: number;
+  /** Active PM SCHEDULES past their next due date with no open work order (absent from an older API). */
+  schedules_overdue?: number;
+  /** Active PM SCHEDULES due today through today + 7 with no open work order (absent from an older API). */
+  schedules_due_this_week?: number;
   completed_this_month: number;
   completion_rate: number;
   total_cost_month: number;
