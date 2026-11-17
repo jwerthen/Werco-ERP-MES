@@ -1,5 +1,18 @@
 # Prompt Registry Changelog
 
+## 2026-11-16 — Hank change_due_date and add_note
+
+- `copilot_chat` 1.7.1 → **1.8.0** — two new reviewed task kinds for `prepare_hank_task`.
+  `change_due_date` moves a work order's due date only (never `must_ship_by`, the promise
+  date), needs the employee's reason, and is refused on a complete, closed or cancelled job.
+  `add_note` posts a work-order comment under the employee's name, visible to everyone who can
+  see the job; mentioned people are notified and the note text is never emailed. The prompt
+  names both actions, says a note never edits the job's own notes field, and forbids guessing a
+  mention's user id. Request layout: the tool's description gained both kinds and
+  `TASK_INPUT_SCHEMA` (generated from `INPUT_SCHEMAS`) gained the `ChangeDueDateInput` and
+  `AddNoteInput` variants, so the cached tool prefix changes once. Prompt id, model routing and
+  telemetry keys are unchanged; chat still cannot execute a task.
+
 ## 2026-11-09 — qms_clause_extraction text moved out of the router (#9-0)
 
 - `qms_clause_extraction` 1.0.0 — **no version change**, because neither the text

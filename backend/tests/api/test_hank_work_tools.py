@@ -18,7 +18,7 @@ from .test_hank_teamwork import create, handoff_body
 pytestmark = [pytest.mark.api]
 
 
-def test_all_six_reviewed_schemas_are_deterministic_and_no_execute_tool_exists(db_session, test_user):
+def test_all_eight_reviewed_schemas_are_deterministic_and_no_execute_tool_exists(db_session, test_user):
     service = CopilotService(db_session, company_id=1, user=test_user)
     assert set(TASK_INPUT_SCHEMA['properties']['kind']['enum']) == {
         'repeat_job',
@@ -27,8 +27,10 @@ def test_all_six_reviewed_schemas_are_deterministic_and_no_execute_tool_exists(d
         'receive_delivery',
         'report_production',
         'draft_shipment',
+        'change_due_date',
+        'add_note',
     }
-    assert len(TASK_INPUT_SCHEMA['properties']['input']['anyOf']) == 6
+    assert len(TASK_INPUT_SCHEMA['properties']['input']['anyOf']) == 8
     assert 'expected_company_id' not in json.dumps(TASK_INPUT_SCHEMA)
     assert 'request_key' not in json.dumps(TASK_INPUT_SCHEMA)
     assert {tool.name for tool in service.tool_specs_for_user()} >= {
@@ -38,7 +40,7 @@ def test_all_six_reviewed_schemas_are_deterministic_and_no_execute_tool_exists(d
         'prepare_hank_task',
     }
     assert not any(tool.name.startswith('execute') for tool in service.tool_specs_for_user())
-    assert COPILOT_CHAT_PROMPT.version == '1.7.1'
+    assert COPILOT_CHAT_PROMPT.version == '1.8.0'
     assert PROMPT_REGISTRY[HANK_INTAKE_PROMPT.id] is HANK_INTAKE_PROMPT
 
 

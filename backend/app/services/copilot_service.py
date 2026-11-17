@@ -567,6 +567,11 @@ TOOL_REGISTRY: List[CopilotToolSpec] = [
             'receive_delivery requires exact PO lines, received quantities and explicit per-line inspection choice. '
             'report_production requires active operation, explicit good/scrap deltas and optional reviewed hold; '
             'draft_shipment requires work order, quantity and shipping details, never purchases postage or issues a CoC. '
+            'change_due_date requires work_order_id, new_due_date and the employee\'s reason; it moves the due date '
+            'only, never the must-ship-by promise date, and is refused on a complete, closed or cancelled job. '
+            'add_note requires work_order_id and the note text, optional mentioned_user_ids; it posts a comment on '
+            'the job under the employee\'s name, visible to everyone who can see the job; mentioned people are '
+            'notified and the note text is never emailed. '
             'Look up exact records first and ask for missing quantities/prices. Return the review link.'
         ),
         input_schema=TASK_INPUT_SCHEMA,

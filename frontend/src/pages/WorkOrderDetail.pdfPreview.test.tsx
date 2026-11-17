@@ -14,6 +14,9 @@ jest.mock('../services/api', () => ({
     getActiveUsers: jest.fn(),
     getUsers: jest.fn(),
     getDocuments: jest.fn(),
+    // CommentsPanel (mounted on the page) loads its own thread and watch state.
+    listComments: jest.fn().mockResolvedValue([]),
+    getWatchState: jest.fn().mockResolvedValue({ watching: false, watcher_count: 0 }),
     getMaterialAllocations: jest.fn(),
     getWorkCenters: jest.fn(),
     downloadDocument: jest.fn(),
@@ -111,6 +114,9 @@ beforeEach(() => {
   mockedApi.getUsers.mockResolvedValue([]);
   mockedApi.getMaterialAllocations.mockResolvedValue([]);
   mockedApi.getWorkCenters.mockResolvedValue([]);
+  // resetAllMocks wiped the factory defaults; CommentsPanel loads on mount.
+  mockedApi.listComments.mockResolvedValue([]);
+  mockedApi.getWatchState.mockResolvedValue({ watching: false, watcher_count: 0 });
   mockedApi.getDocuments.mockImplementation(async params => (params?.work_order_id ? documents : []));
   mockedApi.downloadDocument.mockResolvedValue(new Blob(['pdf'], { type: 'application/pdf' }));
   mockedApi.fetchLaserNestDocument.mockResolvedValue('blob:nest');

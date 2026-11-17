@@ -329,6 +329,21 @@ statement, writes no row, and adds no environment variable, secret, cron or work
   under, and the migration will not pick which company's record to change.
   See [API.md → Customer Complaints & RMA](API.md#customer-complaints--rma).
 
+**Work-order comments, mentions and watchers.** Apply **125_work_order_comments** after
+**124_maintenance_assets** through the normal API boot migration path. It is purely additive: three
+new tenant tables (`comments`, `comment_mentions`, `entity_watchers`) with RLS enabled and revokes
+from `PUBLIC` / `anon` / `authenticated` as in model bootstrap, no change to any existing table and
+no backfill. Under `SET LOCAL lock_timeout = '5s'` the new foreign keys briefly take a SHARE ROW
+EXCLUSIVE lock on `users` and `companies` until the boot transaction commits; a timeout fails the
+boot (in a boot that also ran 121, see 121 below). No environment variable, secret, cron or worker
+job is added. Deploy the worker with the API — an older worker marks the two comment notification
+events handled without notifying anyone — and the API before the frontend. On an application
+rollback keep the migration: before redeploying a pre-125 image, from a checkout of this release run
+`railway run --service werco-api alembic stamp 124_maintenance_assets`. The **downgrade is lossy**
+and not a rollback step: it drops every comment thread and watch list (their audit rows remain).
+Verification steps and the full notes are in
+[Work-order comments, mentions and watchers](DEPLOYMENT.md#work-order-comments-mentions-and-watchers-migration-125).
+
 **Approved Supplier List, equipment assets and maintenance downtime.** Apply **123_vendor_asl** after
 **122_car_form_quote_rev**, then **124_maintenance_assets**, through the normal API boot migration
 path. 123 adds nullable ASL columns, a CHECK and an index to `vendors` and `parts.supply_scope`, with no backfill (every vendor reads "not

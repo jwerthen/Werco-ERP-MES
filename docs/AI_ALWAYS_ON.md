@@ -22,7 +22,7 @@ company policy. Muting alerts preserves completed receipts and required evidence
 not disable ambient sensors or change who may apply their recommendations.
 
 Smart PDF intake is another explicit, request-driven workflow: a saved upload
-queues bounded extraction through `hank_document_intake` prompt 1.0.0, the shared
+queues bounded extraction through `hank_document_intake` prompt 1.2.1, the shared
 model router, company AI-egress gate and usage telemetry. Employees review source
 pages and a filing plan before a separate command creates the document/receipt
 linkage. The worker never approves or files extracted evidence automatically.

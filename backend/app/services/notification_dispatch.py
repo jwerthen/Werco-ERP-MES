@@ -164,6 +164,13 @@ _DETAIL_KEYS = (
     ("source", "Source"),
     ("inspection_method", "Inspection"),
     ("reason", "Reason"),
+    # LAST on purpose (work-order comments, 2026-11-16): the author's name on a comment.mention /
+    # comment.added email ("By: Jane Doe") -- the "who" of a notification whose comment TEXT is
+    # deliberately never sent. Appended after every existing key so no existing email changes
+    # (no other emitted payload carries it). Never in _SMS_DETAIL_KEYS: a person's name does not
+    # go on a lock screen. Deliberately not ``actor_display``, which section 11.1 keeps out of
+    # email.
+    ("comment_author", "By"),
 )
 
 # Detail values are truncated so a long operator-typed reason cannot turn an email

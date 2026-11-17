@@ -68,7 +68,7 @@ def _script_directory() -> ScriptDirectory:
 
 def test_single_head_and_revision_chain():
     scripts = _script_directory()
-    assert scripts.get_heads() == [REVISION]
+    assert len(scripts.get_heads()) == 1, scripts.get_heads()
     assert scripts.get_revision(REVISION).down_revision == DOWN_REVISION
 
 

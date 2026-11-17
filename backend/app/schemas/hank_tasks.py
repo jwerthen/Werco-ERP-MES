@@ -1,18 +1,31 @@
-"""Explicit, bounded proposals and durable receipts for Hank's first three actions."""
+"""Explicit, bounded proposals and durable receipts for Hank's reviewed actions."""
 
 from datetime import date, datetime
 from typing import Any, Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
 
 from app.schemas.base import UTCModel
+from app.schemas.comment import (
+    COMMENT_BODY_MAX_LENGTH,
+    MAX_MENTIONS_PER_COMMENT,
+    normalize_comment_body,
+    normalize_mention_ids,
+)
 from app.schemas.hank_operations import DraftShipmentInput, ReceiveDeliveryInput, ReportProductionInput
 from app.schemas.purchasing import POCreate, POLineCreate
 from app.schemas.work_order import WorkOrderDuplicateRequest
 
 HankActionKind = Literal[
-    'repeat_job', 'draft_purchase_order', 'attach_document', 'receive_delivery', 'report_production', 'draft_shipment'
+    'repeat_job',
+    'draft_purchase_order',
+    'attach_document',
+    'receive_delivery',
+    'report_production',
+    'draft_shipment',
+    'change_due_date',
+    'add_note',
 ]
 HankTaskKind = Literal[
     'repeat_job',
@@ -22,6 +35,8 @@ HankTaskKind = Literal[
     'receive_delivery',
     'report_production',
     'draft_shipment',
+    'change_due_date',
+    'add_note',
 ]
 HankTaskStatus = Literal['awaiting_review', 'completed', 'cancelled', 'needs_attention', 'watching', 'snoozed']
 
@@ -77,6 +92,63 @@ class AttachDocumentInput(BaseModel):
     work_order_id: int = Field(gt=0)
 
 
+CHANGE_DUE_DATE_REASON_MAX_LENGTH = 500
+
+
+# The docstrings of the two input models below are model-facing: they become the JSON-schema
+# descriptions of Hank's prepare_hank_task chat tool (hank_copilot_tools.TASK_INPUT_SCHEMA).
+class ChangeDueDateInput(BaseModel):
+    """Move a work order's due date with a reason. The must-ship-by promise date never moves."""
+
+    model_config = ConfigDict(extra='forbid')
+    work_order_id: int = Field(gt=0)
+    new_due_date: date = Field(description='The new due date (YYYY-MM-DD). Required; a due date is never cleared.')
+    reason: str = Field(
+        description='Why the date moves, 1-500 characters. Recorded on the work order audit trail.',
+        json_schema_extra={'minLength': 1, 'maxLength': CHANGE_DUE_DATE_REASON_MAX_LENGTH},
+    )
+
+    @field_validator('reason')
+    @classmethod
+    def clean_reason(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError('Give a reason for moving the due date.')
+        if len(text) > CHANGE_DUE_DATE_REASON_MAX_LENGTH:
+            raise ValueError(f'The reason can be at most {CHANGE_DUE_DATE_REASON_MAX_LENGTH} characters.')
+        if '\x00' in text:
+            raise ValueError("The reason can't contain a NUL character.")
+        return text
+
+
+# A note is a work-order COMMENT, never ``WorkOrder.notes``. Its limits are the comment schema's own
+# normalizers, so a Hank note and a typed comment are judged by one implementation.
+class AddNoteInput(BaseModel):
+    """Post a note on a work order as a comment under the employee's own name."""
+
+    model_config = ConfigDict(extra='forbid')
+    work_order_id: int = Field(gt=0)
+    body: str = Field(
+        description='The note text, 1-5000 characters. Everyone who can see the job can read it.',
+        json_schema_extra={'minLength': 1, 'maxLength': COMMENT_BODY_MAX_LENGTH},
+    )
+    mentioned_user_ids: list[StrictInt] = Field(
+        default_factory=list,
+        description='User ids to @mention; each is notified. Use only ids the employee supplied; never guess one.',
+        json_schema_extra={'maxItems': MAX_MENTIONS_PER_COMMENT},
+    )
+
+    @field_validator('body')
+    @classmethod
+    def clean_body(cls, value: str) -> str:
+        return normalize_comment_body(value)
+
+    @field_validator('mentioned_user_ids')
+    @classmethod
+    def clean_mentions(cls, value: list[int]) -> list[int]:
+        return normalize_mention_ids(value)
+
+
 INPUT_SCHEMAS: dict[str, type[BaseModel]] = {
     'repeat_job': RepeatJobInput,
     'draft_purchase_order': DraftPurchaseOrderInput,
@@ -84,6 +156,8 @@ INPUT_SCHEMAS: dict[str, type[BaseModel]] = {
     'receive_delivery': ReceiveDeliveryInput,
     'report_production': ReportProductionInput,
     'draft_shipment': DraftShipmentInput,
+    'change_due_date': ChangeDueDateInput,
+    'add_note': AddNoteInput,
 }
 
 
