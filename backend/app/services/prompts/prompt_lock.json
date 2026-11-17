@@ -30,6 +30,14 @@
           "first_call": "fcb0f2b35f6ec5d099d52e92879950c7bfcf2ada0823d35e3c9a88e03c90f29f",
           "forced_final": "ba5aedc9e0ba0ca8dc534203ec7f99a24a653645c3073381d27f32f70f2bd7d2"
         }
+      },
+      {
+        "version": "1.8.0",
+        "sha256": "f73549e236698243ab2f5b70fa522d579cf82fe9525573d9b230a5014db5fb05",
+        "variants": {
+          "first_call": "c2c7443055ce61cf4509c7b46a1e9973c5c33f0a96a0142252c63e32e5d13fdb",
+          "forced_final": "ecbc309d2d33d37320d4c8cd28d835dc62dcffc26c50e06b7dcb52ed6a6f8128"
+        }
       }
     ],
     "hank_document_intake": [
