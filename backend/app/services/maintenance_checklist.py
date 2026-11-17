@@ -14,6 +14,14 @@ import re
 from collections import Counter
 from typing import Any, List, NamedTuple, Optional, Tuple
 
+# Owner decision 2026-11-17, under the 2026-11-07 scrap principle (``API_TOKEN_SHORT_CLOSE``): why a
+# PM step was skipped is a person's judgment, so a standing API token may complete a maintenance
+# work order only with every checklist item ticked.
+API_TOKEN_INCOMPLETE_CHECKLIST = (
+    "Completing a maintenance work order with checklist items unticked must be done by a person signed in "
+    "to the app, not an API token."
+)
+
 
 class ChecklistEntry(NamedTuple):
     item: str

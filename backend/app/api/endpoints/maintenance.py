@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.api.audit_guard import required_audit
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
+from app.core.credentials import is_api_token_credential
 from app.core.time_utils import local_today, to_utc_iso
 from app.db.database import get_db
 from app.models.maintenance import (
@@ -34,7 +35,7 @@ from app.services import downtime_service
 from app.services.audit_service import AuditService
 from app.services.company_time import company_today, company_window, company_zone
 from app.services.import_service import MAX_IMPORT_FILE_BYTES, ImportFileError
-from app.services.maintenance_checklist import unticked_checklist_items
+from app.services.maintenance_checklist import API_TOKEN_INCOMPLETE_CHECKLIST, unticked_checklist_items
 from app.services.maintenance_schedule_import_service import commit_pm_import, parse_checklist, preview_pm_import
 
 router = APIRouter()
@@ -234,7 +235,9 @@ class WorkOrderComplete(BaseModel):
         max_length=2000,
         description=(
             "Why the work order is completed with checklist items unticked. Required when any item is "
-            "unticked (409 without it); ignored when every item is ticked. Recorded in the audit trail."
+            "unticked (409 without it); ignored when every item is ticked. Recorded in the audit trail. "
+            "Only a person signed in to the app may give one: an API token is refused (403) while any "
+            "item is unticked."
         ),
     )
 
@@ -1120,8 +1123,9 @@ def complete_work_order(
     audit: AuditService = Depends(get_audit_service),
 ):
     """Complete a maintenance work order. Completing with any checklist item unticked needs
-    ``incomplete_checklist_reason`` (409 without it), which the audit trail records; a PM work
-    order rolls its schedule forward from the company's calendar day.
+    ``incomplete_checklist_reason`` (409 without it), which the audit trail records, and a person
+    signed in to the app (an API token is refused 403); a PM work order rolls its schedule forward
+    from the company's calendar day.
 
     Resolves the downtime event the work order holds open (see ``/start``) at completion,
     and -- when ``downtime_minutes`` is left at 0 -- records the linked events' minutes.
@@ -1135,7 +1139,8 @@ def complete_work_order(
     ``checklist_results`` omitted keeps the checklist the work order already carries. Completing
     with ANY checklist item unticked needs ``incomplete_checklist_reason`` (**409** without one,
     nothing saved); an item the work order carried that ``checklist_results`` leaves out counts as
-    unticked. The reason and the unticked items are recorded in the completion's audit row (then
+    unticked. A standing API token may complete only with every item ticked: with any unticked it is
+    **403**, whatever reason it sends (owner decision 2026-11-17). The reason and the unticked items are recorded in the completion's audit row (then
     required evidence: **503**, nothing saved, if it cannot be written) and its log entry."""
     wo = _wo_or_404(db, wo_id, company_id, for_update=True)
     if wo.status not in (MaintenanceStatus.IN_PROGRESS, MaintenanceStatus.SCHEDULED, MaintenanceStatus.OVERDUE):
@@ -1165,6 +1170,9 @@ def complete_work_order(
     )
     unticked, checklist_total = unticked_checklist_items(wo.checklist_results, completed_checklist)
     checklist_reason = (data.incomplete_checklist_reason or "").strip()
+    if unticked and is_api_token_credential(current_user):
+        # Whatever reason it sends: only a person records why PM steps were skipped.
+        raise HTTPException(status_code=403, detail=API_TOKEN_INCOMPLETE_CHECKLIST)
     if unticked and not checklist_reason:
         raise HTTPException(
             status_code=409,
