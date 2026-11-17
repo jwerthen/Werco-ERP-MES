@@ -6,8 +6,8 @@ Uses keyword-based matching rules so it works across AS9100D, ISO 9001, IATF 169
 """
 
 import logging
-from datetime import datetime, timedelta
-from typing import List
+from datetime import date, datetime, timedelta
+from typing import List, Optional
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -32,6 +32,7 @@ from app.models.quality import (
 from app.models.spc import SPCCharacteristic
 from app.models.supplier_scorecard import SupplierScorecard
 from app.models.work_order import WorkOrder
+from app.services.company_time import company_today
 from app.services.supplier_approval_service import APPROVED_STATUSES
 
 logger = logging.getLogger(__name__)
@@ -817,11 +818,70 @@ def _query_audit_log(db: Session, company_id: int) -> dict:
     )
 
 
-def _query_maintenance(db: Session, company_id: int) -> dict:
-    total_schedules = (
-        db.query(func.count(MaintenanceSchedule.id)).filter(MaintenanceSchedule.company_id == company_id).scalar() or 0
+def _plural(n: int, singular: str, plural: str) -> str:
+    return f"{n} {singular if n == 1 else plural}"
+
+
+def _query_maintenance(db: Session, company_id: int, today: Optional[date] = None) -> dict:
+    """Preventive-maintenance evidence (AS9100D / ISO 9001 7.1.3 infrastructure).
+
+    The verdict is built from the PM *schedules*, not just maintenance work orders, because a
+    schedule is where a PM comes due: a shop can hold thirty schedules and zero work orders, and
+    the old rule (every schedule counted, overdue read off work orders only) called exactly that
+    "healthy / compliant" before a single PM had been performed -- and kept saying so with every
+    schedule deactivated. It errs restrictive on purpose; a false "compliant" in front of a
+    registrar is worse than "not assessed":
+
+    * only ``is_active`` schedules count -- the same definition the Maintenance page lists by;
+    * a schedule whose ``next_due_date`` is before the company's today is overdue, as is an open
+      maintenance work order past its ``due_date``; any overdue item -> critical / non_compliant
+      (the calibration rule's verdict for an overdue gauge);
+    * a schedule has performance evidence only with a ``last_completed_date`` or a COMPLETED
+      work order of this company linked to it. None of the active schedules performed ->
+      not_assessed; some unperformed, or some with no due date -> partial;
+    * "compliant" needs every active schedule current, dated and performed at least once.
+
+    ``today`` is injectable for tests; it defaults to the company's local date (America/Chicago
+    unless the company says otherwise). Response shape is unchanged: ``total_count`` is still
+    the maintenance work-order count and ``recent_count`` the (now active-only) schedule count.
+    """
+    if today is None:
+        today = company_today(db, company_id)
+
+    schedules = (
+        db.query(
+            MaintenanceSchedule.id,
+            MaintenanceSchedule.next_due_date,
+            MaintenanceSchedule.last_completed_date,
+        )
+        .filter(
+            MaintenanceSchedule.company_id == company_id,
+            MaintenanceSchedule.is_active == True,  # noqa: E712
+        )
+        .all()
     )
-    _recent_cutoff()
+    # Schedules this company has closed a work order against. Scoped on the WORK ORDER's
+    # company: a pre-fix row owned by another tenant can still carry this tenant's schedule_id
+    # (see create_work_order in api/endpoints/maintenance.py), and it must not count as our PM.
+    performed_schedule_ids = {
+        schedule_id
+        for (schedule_id,) in db.query(MaintenanceWorkOrder.schedule_id)
+        .filter(
+            MaintenanceWorkOrder.company_id == company_id,
+            MaintenanceWorkOrder.status == MaintenanceStatus.COMPLETED,
+            MaintenanceWorkOrder.schedule_id.isnot(None),
+        )
+        .distinct()
+        .all()
+    }
+
+    active_schedules = len(schedules)
+    overdue_schedules = sum(1 for s in schedules if s.next_due_date is not None and s.next_due_date < today)
+    undated_schedules = sum(1 for s in schedules if s.next_due_date is None)
+    unperformed_schedules = sum(
+        1 for s in schedules if s.last_completed_date is None and s.id not in performed_schedule_ids
+    )
+
     total_wos = (
         db.query(func.count(MaintenanceWorkOrder.id)).filter(MaintenanceWorkOrder.company_id == company_id).scalar()
         or 0
@@ -840,14 +900,14 @@ def _query_maintenance(db: Session, company_id: int) -> dict:
     # api/endpoints/maintenance.py that used to persist SCHEDULED -> OVERDUE were
     # unaudited status changes committed from a poll, and were removed. Counting
     # the stored value here would leave an AS9100D evidence health verdict
-    # depending on whether a human had loaded the Maintenance page today. This
-    # predicate matches the one GET /maintenance/dashboard uses.
-    overdue = (
+    # depending on whether a human had loaded the Maintenance page today. Same
+    # status set as GET /maintenance/dashboard, against the company's local today.
+    overdue_wos = (
         db.query(func.count(MaintenanceWorkOrder.id))
         .filter(
             MaintenanceWorkOrder.company_id == company_id,
             MaintenanceWorkOrder.status.in_([MaintenanceStatus.SCHEDULED, MaintenanceStatus.OVERDUE]),
-            MaintenanceWorkOrder.due_date < datetime.utcnow().date(),
+            MaintenanceWorkOrder.due_date < today,
         )
         .scalar()
         or 0
@@ -861,26 +921,63 @@ def _query_maintenance(db: Session, company_id: int) -> dict:
         .all()
     )
 
-    if total_schedules == 0 and total_wos == 0:
+    if active_schedules == 0 and total_wos == 0:
         health = "no_data"
-        health_detail = "No maintenance schedules or records found"
+        health_detail = "No active PM schedules or maintenance records found"
         suggested = "not_assessed"
-    elif overdue > 0:
+    elif overdue_schedules or overdue_wos:
+        overdue_parts = []
+        if overdue_schedules:
+            overdue_parts.append(f"{_plural(overdue_schedules, 'active PM schedule', 'active PM schedules')} past due")
+        if overdue_wos:
+            overdue_parts.append(f"{_plural(overdue_wos, 'maintenance work order', 'maintenance work orders')} overdue")
+        health = "critical"
+        health_detail = "; ".join(overdue_parts)
+        suggested = "non_compliant"
+    elif active_schedules == 0:
         health = "warning"
-        health_detail = f"{overdue} maintenance tasks overdue"
+        health_detail = (
+            f"No active PM schedules: {_plural(total_wos, 'maintenance work order', 'maintenance work orders')} "
+            "on record but no preventive maintenance plan"
+        )
+        suggested = "partial"
+    elif unperformed_schedules == active_schedules:
+        health = "warning"
+        health_detail = (
+            f"No PM performed yet: {_plural(active_schedules, 'active PM schedule', 'active PM schedules')}, "
+            "none with a completion on record"
+        )
+        suggested = "not_assessed"
+    elif unperformed_schedules or undated_schedules:
+        gap_parts = []
+        if unperformed_schedules:
+            gap_parts.append(f"{unperformed_schedules} of {active_schedules} active PM schedules never performed")
+        if undated_schedules:
+            gap_parts.append(
+                f"{_plural(undated_schedules, 'active PM schedule has', 'active PM schedules have')} no next due date"
+            )
+        health = "warning"
+        health_detail = "; ".join(gap_parts)
         suggested = "partial"
     else:
         health = "healthy"
-        health_detail = f"{total_schedules} PM schedules, {completed}/{total_wos} work orders completed"
+        health_detail = (
+            f"All {_plural(active_schedules, 'active PM schedule', 'active PM schedules')} current and performed; "
+            f"{completed}/{total_wos} maintenance work orders completed"
+        )
         suggested = "compliant"
 
     return dict(
         evidence_type="module",
         title="Preventive Maintenance & Infrastructure",
-        description=f"{total_schedules} PM schedules, {total_wos} maintenance WOs ({completed} completed, {overdue} overdue)",
+        description=(
+            f"{active_schedules} active PM schedules ({overdue_schedules} past due, "
+            f"{unperformed_schedules} never performed), "
+            f"{total_wos} maintenance WOs ({completed} completed, {overdue_wos} overdue)"
+        ),
         module_reference="/maintenance",
         total_count=total_wos,
-        recent_count=total_schedules,
+        recent_count=active_schedules,
         health_status=health,
         health_detail=health_detail,
         examples=[

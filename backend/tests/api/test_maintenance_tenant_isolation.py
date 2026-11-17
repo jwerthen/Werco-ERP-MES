@@ -713,8 +713,11 @@ def test_overdue_evidence_no_longer_depends_on_a_page_load(db_session: Session):
 
     evidence = _query_maintenance(db_session, COMPANY_B)
 
-    assert evidence["health_status"] == "warning"
-    assert "1 maintenance tasks overdue" in evidence["health_detail"]
+    # An overdue maintenance work order is critical / non_compliant (the calibration rule's
+    # verdict for an overdue gauge); it was warning / partial before the PM-schedule fix.
+    assert evidence["health_status"] == "critical"
+    assert evidence["suggested_compliance"] == "non_compliant"
+    assert "1 maintenance work order overdue" in evidence["health_detail"]
 
 
 # ===========================================================================
