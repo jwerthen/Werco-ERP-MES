@@ -4,7 +4,7 @@ import mimetypes
 import os
 import uuid
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel
@@ -29,6 +29,7 @@ from app.schemas.base import UTCModel
 from app.services.audit_service import AuditService, AuditWriteError
 from app.services.document_numbering import generate_document_number as generate_shared_document_number
 from app.services.erp_draft_commands import _audit_document, _audit_values, attach_document_command
+from app.services.operation_action_gates import operation_has_recorded_work
 from app.services.storage_service import (
     delete_ref,
     get_storage,
@@ -71,8 +72,13 @@ def _commit_audited_document(db, audit, document, *, action, old_values=None, ex
         raise
 
 
-def _qms_link_refusal(db: Session, company_id: int, document_id: int) -> Optional[str]:
-    """Say why the active company's QMS records keep this document, or return None.
+def _qms_link_blockers(db: Session, company_id: int, document_id: int) -> Tuple[Optional[str], Optional[str]]:
+    """Say why the active company's QMS records keep this document, as ``(permanent, release)``.
+
+    ``permanent`` is set when a removed QMS row names the document: no verb releases it.
+    ``release`` is set when a live link names it, and says how to unlink it. Both can be
+    set; the route reports ``permanent`` first, so nobody unlinks a live row only to be
+    refused again for a removed one.
 
     ``qms_standards.document_id`` and ``qms_clause_evidence.document_id`` are plain
     foreign keys with no ``ON DELETE``. On Postgres a physical delete of a referenced
@@ -125,7 +131,7 @@ def _qms_link_refusal(db: Session, company_id: int, document_id: int) -> Optiona
         .all()
     )
     if not standards and not evidence:
-        return None
+        return None, None
 
     live_links = [f"to QMS standard {row.name}" for row in standards if not row.is_deleted]
     live_links += [
@@ -137,17 +143,22 @@ def _qms_link_refusal(db: Session, company_id: int, document_id: int) -> Optiona
             flag is not None and not flag for flag in (row.evidence_deleted, row.clause_deleted, row.standard_deleted)
         )
     ]
-    if not live_links:
-        return (
+    permanent = None
+    if len(standards) + len(evidence) > len(live_links):
+        permanent = (
             "This document is named by a removed QMS standard, clause or evidence link, which keeps the record "
             "of what was assessed. It must remain available and cannot be deleted."
         )
-    others = len(live_links) - 1
-    also = f" and {others} other QMS link{'s' if others > 1 else ''}" if others else ""
-    return (
-        f"This document is linked {live_links[0]}{also}. Unlink it first by setting document_id to null on that "
-        "QMS standard or evidence link. Removing the link instead keeps it on record, and the document with it."
-    )
+    release = None
+    if live_links:
+        others = len(live_links) - 1
+        also = f" and {others} other QMS link{'s' if others > 1 else ''}" if others else ""
+        release = (
+            f"This document is linked {live_links[0]}{also}. Unlink it first by setting document_id to null on "
+            "that QMS standard or evidence link. Removing the link instead keeps it on record, and the document "
+            "with it."
+        )
+    return permanent, release
 
 
 def _retained_record_refusal(db: Session, company_id: int, document_id: int) -> Optional[str]:
@@ -243,25 +254,37 @@ def _retained_record_refusal(db: Session, company_id: int, document_id: int) -> 
     return None
 
 
-def _laser_nest_refusal(db: Session, company_id: int, document_id: int) -> Optional[str]:
-    """Say which of the active company's laser nests carries this document as its PDF, or return None.
+def _laser_nest_blockers(db: Session, company_id: int, document_id: int) -> Tuple[Optional[str], Optional[str]]:
+    """Say which of the active company's laser nests keep this document as their PDF, as ``(permanent, release)``.
 
     ``laser_nests.document_id`` is a plain foreign key with no ``ON DELETE`` (the same
-    500 at flush as the referrers above). Unlike them, a live nest's PDF is a
-    reference drawing with an audited way to let go of it: ``DELETE
-    /laser-nests/{id}/document`` (the Detach button on the work order's nest row), so
-    the refusal sends the user there. A duplicated work order copies the reference,
-    not the file, so one document can sit on several nests.
+    500 at flush as the referrers above). A nest's PDF is a reference drawing with an
+    audited way to let go of it, ``DELETE /laser-nests/{id}/document`` (the Detach
+    button on the work order's nest row), and ``release`` sends the user there for each
+    live nest that has nothing recorded against its operation. A duplicated work order
+    copies the reference, not the file, so one document can sit on several nests.
 
-    A removed (soft-deleted) nest keeps its PDF: ``POST /laser-nests/{id}/restore``
-    brings the nest back with it, and Detach answers 404 for a removed nest, so there
-    is nothing to send the user to.
+    ``permanent`` is set, and the route reports it ahead of any ``release``, when:
+
+    - a live nest's operation has recorded work (``operation_has_recorded_work``: good,
+      scrap, a start or labor). The PDF is then the layout the sheet was cut from, the
+      record of which parts came off it, so the refusal does not suggest Detach. (Detach
+      itself is not gated on recorded work; that is a separate owner decision.)
+    - a removed (soft-deleted) nest names it. ``POST /laser-nests/{id}/restore`` brings
+      the nest back with its PDF, and Detach answers 404 for a removed nest.
 
     Scoped to the active company, like every read here. The attach verb accepts only
     the company's own document.
     """
     nests = (
-        db.query(LaserNest.cnc_number, LaserNest.nest_name, LaserNest.is_deleted, WorkOrder.work_order_number)
+        db.query(
+            LaserNest.id,
+            LaserNest.cnc_number,
+            LaserNest.nest_name,
+            LaserNest.is_deleted,
+            LaserNest.work_order_operation_id,
+            WorkOrder.work_order_number,
+        )
         .select_from(LaserNest)
         .outerjoin(
             WorkOrderOperation,
@@ -278,22 +301,50 @@ def _laser_nest_refusal(db: Session, company_id: int, document_id: int) -> Optio
         .all()
     )
     if not nests:
-        return None
+        return None, None
+
     live = [nest for nest in nests if not nest.is_deleted]
-    if not live:
-        return (
+    operation_ids = [nest.work_order_operation_id for nest in live if nest.work_order_operation_id is not None]
+    operations = {
+        operation.id: operation
+        for operation in (
+            tenant_query(db, WorkOrderOperation, company_id).filter(WorkOrderOperation.id.in_(operation_ids)).all()
+            if operation_ids
+            else []
+        )
+    }
+    worked = [
+        nest
+        for nest in live
+        if operation_has_recorded_work(db, operations.get(nest.work_order_operation_id), company_id)
+    ]
+    worked_ids = {nest.id for nest in worked}
+    releasable = [nest for nest in live if nest.id not in worked_ids]
+
+    def _named(nest) -> str:
+        where = f" on work order {nest.work_order_number}" if nest.work_order_number else ""
+        return f"laser nest {nest.cnc_number or nest.nest_name}{where}"
+
+    permanent = None
+    if worked:
+        permanent = (
+            f"This document is the PDF of {_named(worked[0])}, which has recorded work, so it is the record of "
+            "what was cut. It must remain available and cannot be deleted."
+        )
+    elif len(live) < len(nests):
+        permanent = (
             "This document is the PDF of a removed laser nest, which keeps it so that restoring the nest brings its "
             "drawing back. It must remain available and cannot be deleted."
         )
-    first = live[0]
-    where = f" on work order {first.work_order_number}" if first.work_order_number else ""
-    others = len(live) - 1
-    also = f" and {others} other laser nest{'s' if others > 1 else ''}" if others else ""
-    return (
-        f"This document is the PDF attached to laser nest {first.cnc_number or first.nest_name}{where}{also}. "
-        "Detach it from the nest first (Detach on the work order's laser nest row). Removing the nest instead "
-        "keeps the PDF with it."
-    )
+    release = None
+    if releasable:
+        others = len(releasable) - 1
+        also = f" and {others} other laser nest{'s' if others > 1 else ''}" if others else ""
+        release = (
+            f"This document is the PDF attached to {_named(releasable[0])}{also}. Detach it from the nest first "
+            "(Detach on the work order's laser nest row). Removing the nest instead keeps the PDF with it."
+        )
+    return permanent, release
 
 
 class DocumentPartResponse(BaseModel):
@@ -674,7 +725,8 @@ def delete_document(
     retained: part of a revision history, a receipt's certificate or receiving label, a
     shipment's carrier label or bill of lading, captured process-sheet step evidence, a
     governed file record, Hank intake evidence, or linked from a QMS standard, QMS clause
-    evidence or a laser nest (a removed QMS link or nest keeps it too). Every table that
+    evidence or a laser nest (a removed QMS link or nest, or a nest with recorded work,
+    keeps it too; permanent reasons are reported before any unlink instruction). Every table that
     holds a foreign key to ``documents.id`` is checked here: on Postgres none of them has
     an ``ON DELETE``, so an unchecked one fails at flush as a 500 that gives no reason.
     """
@@ -720,15 +772,21 @@ def delete_document(
             409, 'This document is retained intake evidence. Its metadata and source file must remain available.'
         )
 
-    # Records that keep the document for good come first, so the user is never sent to
-    # unlink a QMS row or detach a nest only to be refused again for a label.
-    refusal = (
-        _retained_record_refusal(db, company_id, document.id)
-        or _qms_link_refusal(db, company_id, document.id)
-        or _laser_nest_refusal(db, company_id, document.id)
-    )
-    if refusal:
-        raise HTTPException(409, refusal)
+    # Every reason that keeps the document for good is reported before any instruction
+    # to unlink a QMS row or detach a nest, so nobody follows an instruction (an audited
+    # change, and a nest losing its drawing on the floor) only to be refused again. The
+    # instructions themselves are given together, so one round of unlinking is enough.
+    retained = _retained_record_refusal(db, company_id, document.id)
+    if retained:
+        raise HTTPException(409, retained)
+    qms_permanent, qms_release = _qms_link_blockers(db, company_id, document.id)
+    nest_permanent, nest_release = _laser_nest_blockers(db, company_id, document.id)
+    permanent = qms_permanent or nest_permanent
+    if permanent:
+        raise HTTPException(409, permanent)
+    release = " ".join(text for text in (qms_release, nest_release) if text)
+    if release:
+        raise HTTPException(409, release)
 
     file_path = document.file_path
     _commit_audited_document(db, audit, document, action="DELETE", old_values=_audit_values(document))

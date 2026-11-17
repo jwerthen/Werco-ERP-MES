@@ -8703,8 +8703,8 @@ before any change, so a refusal writes nothing and keeps the bytes. The message 
   `PUT /qms-standards/{standard_id}` or `PUT /qms-standards/evidence/{evidence_id}` with
   `{"document_id": null}` (both audited). The QMS Standards page has no document field, so this is
   an API / MCP step.
-- **Only removed links** (a soft-deleted standard, clause or evidence link, including evidence
-  under a removed clause or standard): *"This document is named by a removed QMS standard, clause or
+- **Any removed link** (a soft-deleted standard, clause or evidence link, including evidence
+  under a removed clause or standard), reported ahead of any live link: *"This document is named by a removed QMS standard, clause or
   evidence link, which keeps the record of what was assessed. It must remain available and cannot be
   deleted."* A removed QMS row still records which document a clause was assessed against, and
   clearing its link would rewrite that record, so the document is retained the way a voided
@@ -8743,13 +8743,25 @@ A **laser nest's PDF** (`laser_nests.document_id`) is a reference drawing with i
 release: *"This document is the PDF attached to laser nest CNC-… on work order WO-… [and N other
 laser nests]. Detach it from the nest first (Detach on the work order's laser nest row)."* That is
 `DELETE /laser-nests/{id}/document` (Admin / Manager / Supervisor), once per nest; a duplicated work
-order copies the reference, so one PDF can sit on several nests. A **removed** nest keeps its PDF
-(*"…the PDF of a removed laser nest, which keeps it so that restoring the nest brings its drawing
-back"*): `POST /laser-nests/{id}/restore` brings the nest back with it, and Detach answers **404** for
-a removed nest. Removing a nest therefore does not release its PDF; detach it first.
+order copies the reference, so one PDF can sit on several nests. Two cases keep the PDF instead, with
+no mention of Detach:
 
-The retained records are checked before the QMS and nest links, so a user is never sent to unlink
-or detach something only to be refused again for a label or evidence. The nest attach verb
+- **A nest whose operation has recorded work** (good, scrap, a start or labor: the
+  `operation_has_recorded_work` predicate): *"This document is the PDF of laser nest CNC-… on work
+  order WO-…, which has recorded work, so it is the record of what was cut."* The PDF is the layout
+  the sheet was cut from. Known gap: Detach itself is not gated on recorded work, so the API still
+  lets a person detach such a PDF and then delete it.
+- **A removed nest** (*"…the PDF of a removed laser nest, which keeps it so that restoring the nest
+  brings its drawing back"*): `POST /laser-nests/{id}/restore` brings the nest back with it, and
+  Detach answers **404** for a removed nest. Removing a nest therefore does not release its PDF;
+  detach it first.
+
+**Order of reasons.** Every reason that keeps the document for good is reported before any
+instruction: the retained records above, then a removed QMS link, then a worked or removed nest.
+Only when every blocker can be released does the refusal give instructions, and then it gives the
+QMS unlink and the nest Detach together in one message. Nobody is sent to unlink or detach
+something (an audited change, and on the floor a nest losing its drawing) only to be refused
+again. The nest attach verb
 (`POST /laser-nests/{id}/attach-document`) flushes the link before its audit row, like the QMS
 `PUT`s, so it takes its lock on the document row before the audit-chain lock. Every other writer of
 these columns creates the document in the same transaction or already flushes first. Only the active

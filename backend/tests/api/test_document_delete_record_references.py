@@ -31,8 +31,10 @@ from app.models.laser_nest import LaserNest, LaserNestPackage
 from app.models.part import Part
 from app.models.process_sheet import OperationStepRecord, ProcessSheet, WOOperationStep
 from app.models.purchasing import POReceipt, POStatus, PurchaseOrder, PurchaseOrderLine, ReceiptStatus, Vendor
+from app.models.qms_standard import QMSStandard
 from app.models.shipping import Shipment, ShipmentStatus
 from app.models.user import UserRole
+from app.models.work_order import OperationStatus
 from app.services.audit_service import AuditService
 from app.services.storage_service import LocalStorageBackend
 from tests.api.kiosk_test_helpers import _next, ensure_company, make_user, make_wo_with_operation, make_work_center
@@ -71,8 +73,10 @@ def _assert_untouched(db, document_id, audit_before, local_files):
     assert len(list(local_files.iterdir())) == 1
 
 
-def _work_order(db, company_id):
-    return make_wo_with_operation(db, company_id=company_id, work_center=make_work_center(db, company_id=company_id))
+def _work_order(db, company_id, op_status=OperationStatus.READY):
+    return make_wo_with_operation(
+        db, company_id=company_id, work_center=make_work_center(db, company_id=company_id), op_status=op_status
+    )
 
 
 def _shipment(db, document_id, *, company_id, field, removed):
@@ -291,7 +295,6 @@ def test_live_laser_nest_points_at_detach_and_counts_the_others(client, db_sessi
     first = _laser_nest(db_session, document_id, company_id=1, operation=operation)
     _laser_nest(db_session, document_id, company_id=1)
     _laser_nest(db_session, document_id, company_id=1)
-    _laser_nest(db_session, document_id, company_id=1, removed=True)
 
     response = _delete(client, admin_headers, document_id)
 
@@ -302,6 +305,87 @@ def test_live_laser_nest_points_at_detach_and_counts_the_others(client, db_sessi
         "and 2 other laser nests." in detail
     )
     assert "Detach it from the nest first" in detail
+
+
+@pytest.mark.parametrize("worked_by", ["status", "actual_start"])
+def test_a_nest_with_recorded_work_keeps_its_pdf(client, db_session, admin_headers, local_files, worked_by):
+    """Once its operation has recorded work, the PDF is the layout the sheet was cut from:
+    the refusal does not send the user to Detach it."""
+    document_id = _upload(client, admin_headers)
+    status = OperationStatus.COMPLETE if worked_by == "status" else OperationStatus.PENDING
+    work_order, operation = _work_order(db_session, 1, op_status=status)
+    if worked_by == "actual_start":
+        operation.actual_start = datetime.utcnow()
+        db_session.commit()
+    nest = _laser_nest(db_session, document_id, company_id=1, operation=operation)
+    _laser_nest(db_session, document_id, company_id=1)  # an un-worked nest sharing the PDF
+    audit_before = db_session.query(AuditLog).count()
+
+    response = _delete(client, admin_headers, document_id)
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert f"the PDF of laser nest {nest.cnc_number} on work order {work_order.work_order_number}" in detail
+    assert "has recorded work" in detail
+    assert "Detach" not in detail
+    _assert_untouched(db_session, document_id, audit_before, local_files)
+
+
+def test_a_removed_nest_is_reported_before_a_live_nest_to_detach(client, db_session, admin_headers, local_files):
+    """Detaching the live nest would not free a PDF a removed nest keeps, so the user hears that first."""
+    document_id = _upload(client, admin_headers)
+    _laser_nest(db_session, document_id, company_id=1)
+    _laser_nest(db_session, document_id, company_id=1, removed=True)
+
+    response = _delete(client, admin_headers, document_id)
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert "a removed laser nest" in detail
+    assert "Detach" not in detail
+
+
+def test_a_removed_nest_is_reported_before_a_live_qms_link_to_unlink(client, db_session, admin_headers, local_files):
+    document_id = _upload(client, admin_headers)
+    db_session.add(QMSStandard(name="AS9100D", company_id=1, document_id=document_id))
+    db_session.commit()
+    _laser_nest(db_session, document_id, company_id=1, removed=True)
+
+    response = _delete(client, admin_headers, document_id)
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert "a removed laser nest" in detail
+    assert "Unlink it first" not in detail
+
+
+def test_a_removed_qms_link_is_reported_before_a_live_nest_to_detach(client, db_session, admin_headers, local_files):
+    document_id = _upload(client, admin_headers)
+    db_session.add(QMSStandard(name="Retired manual", company_id=1, document_id=document_id, is_deleted=True))
+    db_session.commit()
+    _laser_nest(db_session, document_id, company_id=1)
+
+    response = _delete(client, admin_headers, document_id)
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert "removed QMS standard, clause or evidence link" in detail
+    assert "Detach" not in detail
+
+
+def test_qms_and_nest_instructions_are_given_together(client, db_session, admin_headers, local_files):
+    """When every blocker can be released, one refusal names them all, so one round of unlinking frees it."""
+    document_id = _upload(client, admin_headers)
+    db_session.add(QMSStandard(name="AS9100D", company_id=1, document_id=document_id))
+    db_session.commit()
+    nest = _laser_nest(db_session, document_id, company_id=1)
+
+    response = _delete(client, admin_headers, document_id)
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert "linked to QMS standard AS9100D" in detail and "Unlink it first" in detail
+    assert f"laser nest {nest.cnc_number}" in detail and "Detach it from the nest first" in detail
 
 
 def test_detaching_the_nest_pdf_releases_the_document(client, db_session, admin_headers, local_files):
