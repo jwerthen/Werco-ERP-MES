@@ -4245,7 +4245,7 @@ mixed**:
 | POST | `/work-orders/{id}/laser-nests/manual` | Manually add **one** nest to a work order (child laser WO of an assembly, or the addressed `laser_cutting` WO directly). Creates a clock-in-able `LASER` operation; sets the laser WO RELEASED the same way the import does (release recorded when it was a draft or unstamped; an **on-hold** laser WO stays on hold, so the new nest cannot be started until the hold is lifted) | Admin / Manager / Supervisor |
 | PATCH | `/laser-nests/{id}` | Edit a manual nest (all fields optional). Raising `planned_runs` on a COMPLETE nest or a finished laser work order is **409**; a standing API token lowering it once work is recorded on the nest is **403** | Admin / Manager / Supervisor |
 | POST | `/laser-nests/{id}/attach-document` | Attach an already-uploaded PDF Document to the nest (PDF-only) | Admin / Manager / Supervisor |
-| DELETE | `/laser-nests/{id}/document` | Detach the PDF (clears the FK; the Document row is left intact) | Admin / Manager / Supervisor |
+| DELETE | `/laser-nests/{id}/document` | Detach the PDF (clears the FK; the Document row is left intact). The only way to release a live nest's PDF for `DELETE /documents/{id}`, which refuses **409** while any nest, removed ones included, carries it | Admin / Manager / Supervisor |
 | GET | `/laser-nests/{id}/document` | Serve the attached PDF **inline** for operator preview | Yes (any authenticated user) |
 | DELETE | `/laser-nests/{id}` | Soft-delete the nest; its operation goes `ON_HOLD` | Admin / Manager / Supervisor |
 | POST | `/laser-nests/{id}/restore` | Restore a cancelled nest and its planned runs, retaining the original operation and drawing | Admin / Manager / Supervisor |
@@ -5940,7 +5940,7 @@ uploads go through text extraction + LLM. See
 | GET | `/maintenance/work-orders/overdue` | Overdue maintenance work orders (**pure read**; `due_date` before the company's day) | Yes |
 | GET | `/maintenance/work-orders/{id}` | Maintenance work order detail | Yes |
 | POST | `/maintenance/work-orders` | Create maintenance work order on a work center **or** an asset (or neither, with a `schedule_id`, to inherit the schedule's target). A `schedule_id` that already has an open work order (`scheduled` / `overdue` / `in_progress` / `on_hold`) is **409** naming it. `scheduled_date` / `due_date` left blank are the company's day | Admin / Manager / Supervisor |
-| PUT | `/maintenance/work-orders/{id}` | Update maintenance work order; `status` among `scheduled`, `overdue`, `on_hold`, `cancelled` only (**409** for `in_progress` / `completed` — use the verbs — for returning a started work order to `scheduled` / `overdue`, and for changing `requires_shutdown` once started). Moving it to `cancelled` settles any downtime event it holds | Admin / Manager / Supervisor |
+| PUT | `/maintenance/work-orders/{id}` | Update an open maintenance work order; `status` among `scheduled`, `overdue`, `on_hold`, `cancelled` only (**409** for `in_progress` / `completed` — use the verbs — for returning a started work order to `scheduled` / `overdue`, for changing `requires_shutdown` once started, and for changing **any** field of a `completed` or `cancelled` work order, a final record; see below). Moving it to `cancelled` settles any downtime event it holds | Admin / Manager / Supervisor |
 | POST | `/maintenance/work-orders/{id}/start` | Start (→ `in_progress`). A work-center work order with `requires_shutdown` opens, adopts or shares a downtime event — never a second open one on the machine | Admin / Manager / Supervisor / Operator |
 | POST | `/maintenance/work-orders/{id}/complete` | Complete (→ `completed`, advances the linked schedule from the company's day — the response adds `schedule_next_due_date`) and resolve the work order's open downtime event. `checklist_results` omitted keeps the work order's checklist. Any checklist item left unticked needs `incomplete_checklist_reason` (**409** without one) and a person: an API token is **403** (see *Checklist at completion* below) | Admin / Manager / Supervisor / Operator |
 | GET | `/maintenance/calendar` | Work orders in a date window (**capped at 366 days**) | Yes |
@@ -6097,13 +6097,31 @@ uploads go through text extraction + LLM. See
 > - **`PUT` cannot bypass the verbs** (it is also an MCP tool): `status: in_progress` is **409** (use
 >   `/start`), `status: completed` is **409** (use `/complete` — findings, costs, downtime minutes and the
 >   PM schedule's next due date), a started work order (in progress, or on hold after a start) cannot go
->   back to `scheduled` / `overdue` (**409**), `requires_shutdown` cannot change once it has
->   started (**409**), and a **completed or cancelled** work order is a final record — any status
+>   back to `scheduled` / `overdue` (**409**), and `requires_shutdown` cannot change once it has
+>   started (**409**). Re-sending the current value is accepted. `on_hold` keeps the machine down.
+> - **A completed or cancelled work order is a final record; `PUT` changes nothing on it.** Any status
 >   change out of either is **409** (*"… is completed, a final record; it cannot be moved to …"*;
 >   open a new work order instead). Reopening one used to let a completed work order on hold take over
 >   the next work order's downtime event, which then never closed, and a second `/complete` overwrite
->   the maintenance record and advance its PM schedule again. Re-sending the current value is accepted.
->   `on_hold` keeps the machine down.
+>   the maintenance record and advance its PM schedule again. Every other field is held the same way
+>   (2026-11-17): a `PUT` that would change `checklist_results`, `notes`, `title`, `description`,
+>   `scheduled_date`, `due_date`, `priority`, `assigned_to` or `requires_shutdown` is **409**, a plain
+>   string naming the fields — *"Maintenance work order MWO-… is completed, a final record; its
+>   checklist_results, notes can no longer change. Add a later note as a maintenance log entry on the
+>   work order, or open a new maintenance work order for further work."* — raised before any write.
+>   Until then only the status was held, so a planning role or a token could re-tick a completed PM's
+>   checklist after the fact: the very steps `/complete` demands a written reason to leave unticked
+>   (*Checklist at completion* below). `notes` is refused too, because `/complete` writes them as part
+>   of the completion record; a later note is `POST /maintenance/log` naming the work order's machine
+>   or asset and its `maintenance_wo_id` — a dated `maintenance_logs` row signed by its author
+>   (`performed_by`), with its own audit row — not an edit of the record. (The server does not yet
+>   check that the log's machine or asset is the work order's, and the Maintenance page has no
+>   log-entry form; both are open follow-ups.) A value identical to the record's is an echo, not a
+>   change, and is accepted (enums by value, `requires_shutdown` by truth — a legacy `null` reads as
+>   `false` — `title` trimmed, as the request's is, and everything else exactly as stored, other text
+>   not normalized); on a completed or cancelled work order such a request writes nothing (no update,
+>   no audit row) and returns the work order unchanged. Open work orders are unaffected, and the
+>   Maintenance page offers no edit on a completed or cancelled row.
 > - **An operator report cannot double it either.** `POST /downtime/` on a machine a maintenance work
 >   order already holds down (its event is open, the work order in progress or on hold after a start)
 >   is **409** naming the work order and the open event: the stoppage is already being recorded, and
@@ -6255,7 +6273,10 @@ uploads go through text extraction + LLM. See
 >     unticked and keeps **Complete** disabled until it is filled; the reason is sent only then.
 >   - `PUT /maintenance/work-orders/{id}` (planning roles) can still rewrite `checklist_results`
 >     before completion; a person's edit is its own audited `maintenance_work_order` `UPDATE` row,
->     and on a PM work order it cannot take a schedule step off the judged list. A standing API token
+>     and on a PM work order it cannot take a schedule step off the judged list. **After** completion
+>     (or cancellation) it cannot rewrite the checklist at all, for any role or credential: the work
+>     order is a final record and any change is **409** (*A completed or cancelled work order is a
+>     final record* above), so the ticks the completion recorded stay as recorded. A standing API token
 >     whose `PUT` takes items off the checklist (drops, renames or clears them) is **403**
 >     `API_TOKEN_CHECKLIST_REMOVAL` *"Removing items from a maintenance work order's checklist must be
 >     done by a person signed in to the app, not an API token."* — otherwise a token could reach the
@@ -8838,6 +8859,121 @@ or sharing its retained source storage reference. This preserves the reviewed
 PDF, completed intake receipt and source-page recovery together with existing
 receipt-certificate and revision-history retention.
 
+Deletion also refuses (**409**) a document that a same-company QMS standard or QMS clause
+evidence link names through its `document_id`. Both columns are plain foreign keys with no
+`ON DELETE`, so on Postgres the unguarded delete failed at flush, after the document row lock and
+the audit-chain lock were taken: a **500**, or a deadlock (40P01, answered **409** or **503**
+depending on where the delete lost) against an evidence edit holding the referencing row, and
+neither said why. The check runs before the audit write and
+before any change, so a refusal writes nothing and keeps the bytes. The message depends on the link:
+
+- **A live link** (the standard, or the evidence with its clause and standard, not removed):
+  *"This document is linked to QMS standard AS9100D"* or *"…linked as QMS evidence on AS9100D
+  clause 7.5.3"*, plus *"and N other QMS links"* when there are more, then *"Unlink it first by
+  setting document_id to null on that QMS standard or evidence link."* That means
+  `PUT /qms-standards/{standard_id}` or `PUT /qms-standards/evidence/{evidence_id}` with
+  `{"document_id": null}` (both audited). The QMS Standards page has no document field, so this is
+  an API / MCP step.
+- **Any removed link** (a soft-deleted standard, clause or evidence link, including evidence
+  under a removed clause or standard), reported ahead of any live link: *"This document is named by a removed QMS standard, clause or
+  evidence link, which keeps the record of what was assessed. It must remain available and cannot be
+  deleted."* A removed QMS row still records which document a clause was assessed against, and
+  clearing its link would rewrite that record, so the document is retained the way a voided
+  receipt's certificate is. Removing an evidence link (`DELETE /qms-standards/evidence/{id}`)
+  therefore does **not** release its document; clear `document_id` first if the document is meant
+  to go. The same goes for removing a clause or standard: clear its evidence links' `document_id`
+  first, because once the clause or standard is removed, the evidence `PUT` answers **404** for
+  the links under it. There is no restore for a removed QMS standard, clause or evidence link, so a
+  document still linked when its QMS row is removed stays permanently.
+
+The standard and evidence `PUT`s flush their change before writing the audit row, so a new
+`document_id` takes its lock on the document row before the global audit-chain lock, the order
+the delete takes them in. A link made concurrently with a delete either commits first, and the
+delete sees it and refuses, or waits for the delete and then fails its own foreign-key check.
+
+Only the active company's QMS rows are read. A link from another company's QMS row is not
+named, since that would disclose the other tenant's record; on Postgres that delete still fails at
+the foreign key until the link is cleared. The QMS create / update routes now refuse another
+company's document (see QMS Standards → *A linked document must be your company's*), so such a link
+can only be one written before that check existed, when they accepted any existing document id.
+
+Every other table with a foreign key to `documents.id` is checked the same way: before the audit
+write and before any change, so a refusal (**409**) writes nothing and keeps the bytes. None of these
+columns has an `ON DELETE` either, so each used to fail at flush on Postgres with a **500** that gave
+no reason. The records below keep their document for as long as they exist, removed or voided
+included, and there is no verb that lets go of it:
+
+| Referencing column | Refusal says | Kept after |
+|---|---|---|
+| `shipments.label_document_id` / `bol_document_id` | *"This document is the carrier label (or bill of lading) for shipment SHP-…"* | the label is voided or the shipment is removed |
+| `po_receipts.label_document_id` | *"This document is the receiving label for receipt RCV-…"* | the receipt is voided |
+| `operation_step_records.attachment_document_id` | *"This document is evidence captured at a process-sheet step on work order WO-…"* | the step record is superseded |
+| `document_files.document_id` | *"This document is held by a governed file record…"* (retention policy / legal hold) | — |
+
+A receipt reprint stores a new label document and points the receipt at it, so only the label the
+receipt currently names is protected by this check; an earlier print is no longer referenced.
+
+A **laser nest's PDF** (`laser_nests.document_id`) is a reference drawing with its own audited
+release: *"This document is the PDF attached to laser nest CNC-… on work order WO-… [and N other
+laser nests]. Detach it from the nest first (Detach on the work order's laser nest row)."* That is
+`DELETE /laser-nests/{id}/document` (Admin / Manager / Supervisor), once per nest; a duplicated work
+order copies the reference, so one PDF can sit on several nests. Two cases keep the PDF instead, with
+no mention of Detach:
+
+- **A nest whose operation has recorded work** (good, scrap, a start or labor: the
+  `operation_has_recorded_work` predicate): *"This document is the PDF of laser nest CNC-… on work
+  order WO-…, which has recorded work, so it is the record of what was cut."* The PDF is the layout
+  the sheet was cut from. Known gap: Detach itself is not gated on recorded work, so the API still
+  lets a person detach such a PDF and then delete it.
+- **A removed nest** (*"…the PDF of a removed laser nest, which keeps it so that restoring the nest
+  brings its drawing back"*): `POST /laser-nests/{id}/restore` brings the nest back with it, and
+  Detach answers **404** for a removed nest. Removing a nest therefore does not release its PDF;
+  detach it first.
+
+An **engineering change order's affected documents** (`engineering_change_orders.affected_documents`)
+are a JSON id list, not a foreign key, so here Postgres would *not* stop the delete. Before this
+check the document was deleted and `GET /eco/eco/affected-items/{id}` silently dropped it from the
+change record (AS9100D 8.5.6). ECOs have no delete verb, so the reference lasts. The check depends
+on the ECO's status:
+
+- **No approver has decided yet** (draft, submitted): *"This document is listed as affected by
+  engineering change ECO-… (PUT /eco/eco/41). Take it out of that change's affected_documents
+  first, while no approver has decided on it yet."* Every such ECO is named with its own edit
+  path (*"engineering changes ECO-… (PUT /eco/eco/41), ECO-… (PUT /eco/eco/43) and …"*), because
+  the Engineering Changes page has no document field and the ECO list can't be searched by
+  document. The edit is `PUT /eco/eco/{id}` with the list minus this id (Admin / Manager,
+  audited), an API / MCP step.
+- **Under review, approved or later, rejected or cancelled**: *"This document is listed as affected
+  by engineering change ECO-… (under review), which keeps the record of what the change covered.
+  It must remain available and cannot be deleted."* Under review means at least one approver has
+  already signed the scope, so editing it would leave sign-offs on a scope those people never saw.
+  From approval on the list is the authorized change scope, and a rejected or cancelled change
+  records what was decided. Known gap: `PUT /eco/eco/{id}` still accepts edits to an under-review,
+  approved or in-implementation ECO (it refuses only completed, rejected and cancelled ones), so the
+  API still lets a person take the document off such an ECO and then delete it.
+
+The id is matched exactly: the text column is only narrowed by substring, then each candidate's
+JSON is parsed, so an ECO listing document 12 never blocks deleting document 1. A string id
+(`"12"`) counts; a value that is not a JSON list is skipped, as the affected-items read skips it.
+Because there is no foreign key, ECO create and update lock each document they name (`FOR KEY
+SHARE`, the lock a foreign key takes) before their audit row. A list written at the same time as a
+delete is therefore either seen by the delete, or fails its own validation with **422** once the
+delete commits. (This relies on Postgres's default READ COMMITTED isolation, which the app does not
+change.)
+
+**Order of reasons.** Every reason that keeps the document for good is reported before any
+instruction: the retained records above, then a removed QMS link, then a worked or removed nest,
+then an ECO under review, approved or closed. Only when every blocker can be released does the refusal give
+instructions, and then it gives the QMS unlink, the nest Detach and the ECO edit together in one
+message. Nobody is sent to unlink or detach
+something (an audited change, and on the floor a nest losing its drawing) only to be refused
+again. The nest attach verb
+(`POST /laser-nests/{id}/attach-document`) flushes the link before its audit row, like the QMS
+`PUT`s, so it takes its lock on the document row before the audit-chain lock. Every other writer of
+these columns creates the document in the same transaction or already flushes first. Only the active
+company's rows are read; no writer accepts another company's document, and a row of another company
+is never named.
+
 Manual upload is a release action: the persisted Document stores `status="released"`, the actual
 `released_by` actor, and UTC `released_at`. Returned metadata exposes the released status;
 the audit details retain release actor/time, which are not fields of `DocumentResponse`.
@@ -8884,6 +9020,12 @@ in `RBAC_PERMISSIONS.md`.
 | PUT | `/qms-standards/{standard_id}` | Update standard | Admin / Manager / Quality |
 | DELETE | `/qms-standards/{standard_id}` | Delete standard and all its clauses/evidence | Admin |
 
+> **A document a standard or evidence link names cannot be deleted.** `DELETE /documents/{id}`
+> answers **409** while a standard's or an evidence link's `document_id` points at it, and removed
+> standards, clauses and evidence links keep it too. To release a document, set `document_id` to
+> `null` on the standard or evidence link first; removing the link does not. See
+> [Documents](#documents).
+
 **Clauses**
 
 | Method | Endpoint | Description | Auth Required |
@@ -8893,6 +9035,29 @@ in `RBAC_PERMISSIONS.md`.
 | POST | `/qms-standards/{standard_id}/clauses/bulk` | Bulk-import clauses (e.g. from a parsed document) | Admin / Manager / Quality |
 | PUT | `/qms-standards/clauses/{clause_id}` | Update clause, incl. compliance-status assessment | Admin / Manager / Quality |
 | DELETE | `/qms-standards/clauses/{clause_id}` | Delete a clause and its evidence links | Admin / Manager |
+
+> **A parent clause must be a live clause of your company in the same standard:** the three routes
+> that take a `parent_clause_id` in the body (`POST /qms-standards/{standard_id}/clauses`, `POST
+> /qms-standards/{standard_id}/clauses/bulk` and `PUT /qms-standards/clauses/{clause_id}`) check it
+> before they write anything. An id that does not exist, another company's clause, a deleted clause
+> and a clause of another standard all get the same **404 `Parent clause not found`**, with nothing
+> saved and no audit entry, so the answer says nothing about other companies' clauses. The bulk
+> import is all-or-nothing: one bad parent refuses every clause in the request (clauses in the same
+> request cannot name each other; they have no id yet). On a `PUT`, the clause itself (**422** `A
+> clause cannot be its own parent clause`) or any of its own sub-clauses at any depth (**422** `A
+> clause cannot be placed under one of its own sub-clauses`) is refused, so no new cycle can be
+> stored. The descendant check follows stored links through deleted clauses too, and re-parenting is
+> serialized per company (a Postgres advisory lock), so two opposite moves sent at the same moment
+> cannot both pass. `parent_clause_id: null` still clears the parent, and a `PUT` that does not send
+> `parent_clause_id` is not judged on the value already stored. Every response that carries a clause
+> tree renders `clauses`, `sub_clauses` and their evidence from your own company's live rows only
+> (`GET /qms-standards/{standard_id}`, `GET /qms-standards/{standard_id}/clauses`, and the `PUT
+> /qms-standards/{standard_id}` and `PUT /qms-standards/clauses/{clause_id}` responses), so a link
+> written before this check existed no longer shows another company's clause.
+> Before this, any existing clause id, another company's included, was accepted, while a
+> nonexistent one failed with a 500, and a self- or descendant parent stored a cycle that made every
+> read of that standard fail with a 500. To clear such a stored link, `PUT {"parent_clause_id":
+> null}` on the child clause.
 
 **Auto-evidence discovery**
 
@@ -8905,9 +9070,21 @@ in `RBAC_PERMISSIONS.md`.
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| POST | `/qms-standards/clauses/{clause_id}/evidence` | Link evidence to a clause | Admin / Manager / Quality |
-| PUT | `/qms-standards/evidence/{evidence_id}` | Update evidence, incl. verification | Admin / Manager / Quality |
-| DELETE | `/qms-standards/evidence/{evidence_id}` | Remove an evidence link | Admin / Manager / Quality |
+| POST | `/qms-standards/clauses/{clause_id}/evidence` | Link evidence to a clause. The audit `CREATE` row is required evidence: **503** and nothing linked if it cannot be written (see below) | Admin / Manager / Quality |
+| PUT | `/qms-standards/evidence/{evidence_id}` | Update evidence, incl. verification. The audit `UPDATE` row is required evidence: **503** and nothing saved if it cannot be written (see below) | Admin / Manager / Quality |
+| DELETE | `/qms-standards/evidence/{evidence_id}` | Remove an evidence link. The audit `DELETE` row is required evidence: **503** and the link stays if it cannot be written (see below) | Admin / Manager / Quality |
+
+> **A linked document must be your company's:** the four routes that take a `document_id` in the
+> body (`POST /qms-standards/`, `PUT /qms-standards/{standard_id}`, `POST
+> /qms-standards/clauses/{clause_id}/evidence` and `PUT /qms-standards/evidence/{evidence_id}`)
+> check it against the active company's documents before they write anything. An id that does not
+> exist and an id that belongs to another company both get the same **404 `Document not found`**,
+> with nothing saved and no audit entry, so the answer says nothing about other companies'
+> documents. `document_id: null` on a `PUT` still clears the link, and a `PUT` that does not send
+> `document_id` is not judged on the value already stored (the QMS Standards page's Verify sends
+> `is_verified` only, and the page never sends `document_id`). The document's control status
+> (draft, obsolete, ...) is not checked. Before this, a nonexistent id failed with a 500, while any
+> existing id, another company's included, was accepted and linked.
 
 > **PDF clause extraction:** `POST /qms-standards/{standard_id}/upload-pdf` requires a text-based
 > PDF (≤ 20 MB; scanned/image-only PDFs are rejected) and a configured `ANTHROPIC_API_KEY` — it
@@ -9061,6 +9238,72 @@ in `RBAC_PERMISSIONS.md`.
 > the record is retained for AS9100D traceability. All QMS create / update / delete operations — plus
 > a status-change entry when a clause's `compliance_status` changes — are captured in the tamper-evident
 > audit trail (`GET /api/v1/audit/`).
+
+> **A clause of a removed standard is removed with it.** Removing a standard marks only the
+> standard row deleted; its clauses keep their own flag. Every route that takes a clause id treats
+> a clause whose standard is removed (or is not your company's) as removed: `PUT` and `DELETE
+> /qms-standards/clauses/{clause_id}`, `GET /qms-standards/clauses/{clause_id}/auto-evidence` and
+> `POST /qms-standards/clauses/{clause_id}/evidence` answer **404 `Clause not found`**, the same as
+> for a removed clause, and write nothing. `GET /qms-standards/{standard_id}/clauses` answers **404
+> `QMS standard not found`** for a removed standard, as `GET /qms-standards/{standard_id}` does; a
+> missing id or another company's gets the same 404 (it used to be an empty list). Before this,
+> all of them still answered for a removed standard's clauses: a `PUT` could change a clause's
+> `compliance_status` on a standard that had left the record, the list still showed its clauses
+> and their evidence links, and adding evidence created a link no screen would show. Nor does such a
+> clause render as a sub-clause of a live standard's clause (a cross-standard `parent_clause_id`
+> could be written before the parent check above existed): the standard and clause-list reads, and
+> both `PUT` responses, leave it and its evidence out. The standard is checked when the request
+> reads the clause; a removal that commits between that read and the request's own commit is not
+> seen.
+
+> **Evidence under a removed clause or standard is frozen.** Removing a standard or a clause marks
+> only that row deleted; the evidence links under it keep their own flag but disappear with their
+> parent from every QMS read. `PUT` and `DELETE /qms-standards/evidence/{evidence_id}` treat such a
+> link as removed: **404 `Evidence not found`** (the same answer as for a removed link, judged after
+> the row lock) and nothing is written. Before this, both accepted it, so an API caller could edit,
+> verify or clear the `document_id` of a link that had left the record, and a cleared link let its
+> document be deleted. The clause and standard are checked when the request reads them; a removal
+> that commits between that read and the request's own commit is not seen.
+
+> **Editing or removing an evidence link locks it first:** `PUT` and `DELETE
+> /qms-standards/evidence/{evidence_id}` lock the evidence row before they read it, and write the
+> change before the audit entry. So a Verify or Remove that runs at the same time as auto-link (or
+> as another person's edit) waits for the other write to finish and is then judged against the row
+> as it stands. If the link was removed while the request waited (auto-link retired it, or someone
+> else removed it), the answer is **404 `Evidence not found`** and nothing is written. Before this,
+> a Verify could mark a link that auto-link had just retired as verified and still answer 200, and
+> a Verify or Remove racing auto-link could fail with the app-wide 409. A 404 here means the link
+> is gone; if it should still exist, link it again. The `UPDATE` audit entry's `changes` now also
+> lists the row's new `updated_at`.
+
+> **Linking, editing (incl. Verify) and removing an evidence link are required audit evidence:**
+> `POST /qms-standards/clauses/{clause_id}/evidence`, `PUT /qms-standards/evidence/{evidence_id}`
+> and `DELETE /qms-standards/evidence/{evidence_id}` write their audit entry in the same
+> transaction as the change, and the change is saved only if the entry is. A Verify is a quality
+> judgment and the evidence row keeps only the latest one (`verified_by` / `verified_date` are
+> overwritten by the next Verify), so the audit entries are its only history. If the entry cannot
+> be written the change is rolled back and the answer is **503**:
+>
+> - `POST`: `"The audit record for linking this evidence could not be saved; the evidence was not linked. Retry."`
+> - `PUT`: `"The audit record for this evidence change could not be saved; nothing was changed. Retry."`
+> - `DELETE`: `"The audit record for removing this evidence could not be saved; the evidence was not removed. Retry."`
+>
+> Nothing was saved, so retrying the same request is safe (a retried `POST` links the evidence
+> once). An audit write that loses a PostgreSQL lock race (deadlock / serialization failure) also
+> answers this 503 rather than the app-wide 409; either way nothing was saved. Before this, an audit write that failed without a database error (a retry-exhausted
+> sequence collision, a value the audit row could not serialize) was skipped and the route still
+> answered 201 / 200 / 204 with the change saved. Unchanged: a `PUT` that changes nothing (an empty
+> body, or values equal to the stored ones) writes no entry and answers 200; the `CREATE` entry
+> carries the row as created in `new_values`; the `UPDATE` entry carries the full before / after
+> row in `old_values` / `new_values` and the field-level diff in `extra_data.changes`; the `DELETE`
+> entry carries the row as it stood before the removal in `old_values` and
+> `extra_data.soft_delete: true`. Auto-link (`POST /qms-standards/{standard_id}/auto-link`) keeps
+> its own audit rules and is not changed by this.
+>
+> Each entry's `resource_identifier` is the evidence title cut to 255 characters (the audit
+> column's length; a title may be 500), and its `description` keeps the whole title. Before the
+> cut, linking evidence whose title was longer than 255 characters failed with a 500 on PostgreSQL
+> (the uncut identifier failed the audit INSERT).
 
 #### Audit-Readiness Summary Schema (`GET /qms-standards/audit-readiness`)
 
@@ -9274,7 +9517,7 @@ the public paths are `/eco/eco/…`.
 | GET | `/eco/eco/` | List ECOs | Yes |
 | GET | `/eco/eco/{id}` | Get an ECO | Yes |
 | POST | `/eco/eco/` | Create an ECO | Admin / Manager |
-| PUT | `/eco/eco/{id}` | Update an ECO | Admin / Manager |
+| PUT | `/eco/eco/{id}` | Update an ECO. **400** on a completed, rejected or cancelled ECO. An edit that changes a stored value is saved only with its audit row (**503**, nothing saved, otherwise) | Admin / Manager |
 | POST | `/eco/eco/{id}/submit` | Submit a draft ECO for review | Admin / Manager |
 | POST | `/eco/eco/{id}/approve` | Record an approval decision | Admin / Manager |
 | POST | `/eco/eco/{id}/reject` | Reject an ECO | Admin / Manager |
@@ -9283,7 +9526,7 @@ the public paths are `/eco/eco/…`.
 | GET | `/eco/eco/{id}/approvals` | List an ECO's approvals | Yes |
 | POST | `/eco/eco/{id}/approvals` | Add an approval requirement | Admin / Manager |
 | POST | `/eco/eco/{id}/tasks` | Add an implementation task | Admin / Manager |
-| PUT | `/eco/eco/{id}/tasks/{task_id}` | Update an implementation task | Admin / Manager |
+| PUT | `/eco/eco/{id}/tasks/{task_id}` | Update an implementation task. An edit that changes a stored value is saved only with its audit row (**503**, nothing saved, otherwise) | Admin / Manager |
 | GET | `/eco/eco/affected-items/{id}` | Resolve the ECO's affected parts / work orders / documents | Yes |
 
 > **Tenant isolation (all ECO endpoints).** Every ECO lookup is scoped to the caller's **active
@@ -9296,7 +9539,14 @@ the public paths are `/eco/eco/…`.
 > **Cross-tenant affected ids are rejected with 422.** `affected_parts`, `affected_work_orders`, and
 > `affected_documents` are id lists. On create and update, every referenced id must resolve to a live row
 > **in the active company**; the first unknown or cross-tenant id returns **422 Unprocessable Entity**
-> (`{"detail": "Unknown or cross-tenant <part|work order|document> id(s): [...]"}`).
+> (`{"detail": "Unknown or cross-tenant <part|work order|document> id(s): [...]"}`). Each named
+> document is locked `FOR KEY SHARE` during that check, so it can't be deleted between validation
+> and commit.
+>
+> **A listed document can't be deleted.** `DELETE /documents/{id}` refuses **409** while an ECO of
+> the active company lists the document in `affected_documents`. While the ECO is draft or
+> submitted, take it out of the list with `PUT /eco/eco/{id}` first. From under review on (and for
+> a rejected or cancelled ECO) the document is kept. See [Documents](#documents).
 >
 > **Mutations require Admin / Manager.** All state-changing ECO endpoints (create, update, submit,
 > approve, reject, implement, complete, add/update task, add approval) require role **ADMIN or
@@ -9304,9 +9554,33 @@ the public paths are `/eco/eco/…`.
 > list approvals, affected items) remain available to any authenticated user. Adding an approval also
 > verifies the named approver belongs to the active company (else **404**).
 >
-> **ECO state changes are audited.** Create, update, submit, approve, reject, implement, and complete —
-> plus task create/update and approval create — write to the tamper-evident `audit_log` (`GET /audit/`),
-> so the engineering-change lifecycle is fully traceable for AS9100D.
+> **ECO state changes are audited.** Create, update, submit, reject, implement, and complete — plus
+> task create/update and approval create — write to the tamper-evident `audit_log` (`GET /audit/`).
+> Approve writes a row only when the decision moves the ECO's status (the first decision, a rejection,
+> or the last approval); each decision itself (approver, approved / rejected, comments, date) is kept
+> on its approval row, which nothing changes afterwards.
+>
+> **An ECO edit's audit row is required.** `PUT /eco/eco/{id}` overwrites the change record in
+> place (scope, effectivity, reason, risk assessment), so its `UPDATE` row, with the old and new
+> value of every changed field, is the only trace of what was replaced. That row is written in the
+> same transaction as the edit: if it cannot be written, the edit is rolled back and the answer is
+> **503** *"The audit record for this engineering change edit could not be saved; nothing was
+> changed. Retry."* This holds for every field, not only `affected_parts`, `affected_work_orders`
+> and `affected_documents`, because effectivity and the risk assessment are as much the authorized
+> change as the scope is. It matters most for `affected_documents`: `DELETE /documents/{id}` refuses a
+> document that a draft or submitted ECO lists and tells the user to take it out through this `PUT`,
+> so a lost row would let a document leave the change record with nothing to show it was there.
+> `PUT /eco/eco/{id}/tasks/{task_id}` follows the same rule (503 *"The audit record for this
+> implementation task edit could not be saved; nothing was changed. Retry."*): it overwrites a task's
+> description, notes, owner and status in place, and a task set to `skipped` is what lets
+> `complete` close the change with that work undone.
+>
+> An edit that changes no stored value (the same values sent back) writes no row and answers
+> **200**, even while the audit store is down. Note that create stores an empty affected list as
+> null while update stores it as `[]`, so sending `[]` for a list that was created empty is a change
+> and is audited. The other ECO writes (create, the status verbs, approval create, task create) still
+> audit best-effort: an audit failure that leaves the transaction usable is logged and the change is
+> saved.
 
 ### Quotes
 
@@ -10263,7 +10537,7 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 | GET | `/receiving/open-pos` | List POs available for receiving (sent/partial); each PO carries `order_date` / `required_date` / `expected_date` plus its open lines | Yes |
 | GET | `/receiving/po/{po_id}` | Get full PO detail for receiving | Yes |
 | POST | `/receiving/receive` | Receive material against a PO line (`lot_number` optional — auto-assigned when blank, see below) | Admin / Manager / Supervisor |
-| POST | `/receiving/deliveries` | Atomically receive multiple lines with a stable request ID; identical retry returns the durable receipt, changed payload is refused. Certificate document IDs are validated against the PO line | Admin / Manager / Supervisor, plus receiving view/create permission |
+| POST | `/receiving/deliveries` | Atomically receive multiple lines with a stable request ID; identical retry returns the durable receipt, changed payload is refused. Certificate document IDs are validated against the PO line — every line's before the first line is received, so a bad certificate on any line is refused **422** `Delivery line N: …` with nothing posted. At that point the delivery takes its locks in the order a single receipt does (the receipt-number lock, the PO row, then the certificates in ascending id order), before it inserts anything and before the first audit row takes the audit-chain lock, so it holds no document lock that a document writer (row first, chain lock second) could deadlock against | Admin / Manager / Supervisor, plus receiving view/create permission |
 | POST | `/receiving/certificates` | Upload a real PDF/PNG/JPEG (20 MB maximum), bound to `po_line_id`; optional `receipt_id` attaches it to an existing receipt. Linked certificate bytes cannot be deleted through the document endpoint | Admin / Manager / Supervisor, plus receiving view/create permission |
 | GET | `/receiving/inspection-queue` | List receipts pending inspection (`days_back` optional, bounded 1–3650; **no date cutoff by default** — pending receipts never age out, so the list matches the `/stats` `pending_inspection` count) | Yes |
 | GET | `/receiving/receipt/{receipt_id}` | Get receipt detail | Yes |

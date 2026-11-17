@@ -1,29 +1,37 @@
 import hashlib
+import json
 import logging
 import mimetypes
 import os
 import uuid
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Set, Tuple
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel
-from sqlalchemy import or_
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session, joinedload, with_loader_criteria
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
 from app.db.tenant_filter import tenant_query
 from app.models.document import Document, DocumentType
+from app.models.engineering_change import ECOStatus, EngineeringChangeOrder
+from app.models.governance import DocumentFile
 from app.models.hank_intake import HankIntakeFile
+from app.models.laser_nest import LaserNest
 from app.models.part import Part
+from app.models.process_sheet import OperationStepRecord
 from app.models.purchasing import POReceipt, Vendor
+from app.models.qms_standard import QMSClause, QMSClauseEvidence, QMSStandard
+from app.models.shipping import Shipment
 from app.models.user import User, UserRole
-from app.models.work_order import WorkOrder
+from app.models.work_order import WorkOrder, WorkOrderOperation
 from app.schemas.base import UTCModel
 from app.services.audit_service import AuditService, AuditWriteError
 from app.services.document_numbering import generate_document_number as generate_shared_document_number
 from app.services.erp_draft_commands import _audit_document, _audit_values, attach_document_command
+from app.services.operation_action_gates import operation_has_recorded_work
 from app.services.storage_service import (
     delete_ref,
     get_storage,
@@ -64,6 +72,387 @@ def _commit_audited_document(db, audit, document, *, action, old_values=None, ex
     except Exception:
         db.rollback()
         raise
+
+
+def _qms_link_blockers(db: Session, company_id: int, document_id: int) -> Tuple[Optional[str], Optional[str]]:
+    """Say why the active company's QMS records keep this document, as ``(permanent, release)``.
+
+    ``permanent`` is set when a removed QMS row names the document: no verb releases it.
+    ``release`` is set when a live link names it, and says how to unlink it. Both can be
+    set; the route reports ``permanent`` first, so nobody unlinks a live row only to be
+    refused again for a removed one.
+
+    ``qms_standards.document_id`` and ``qms_clause_evidence.document_id`` are plain
+    foreign keys with no ``ON DELETE``. On Postgres a physical delete of a referenced
+    document fails at flush, after the document row lock and the global audit-chain
+    lock are already held: a 500, or a deadlock (40P01, answered 409 or 503 depending
+    on where the delete loses) against an evidence edit that has locked the referencing
+    row. Neither says why, so the delete route refuses here, before the audit write and
+    before any mutation.
+
+    Removed rows count. A soft-deleted standard, clause or evidence link is still the
+    record of which document a clause was assessed against, and nulling its link would
+    rewrite that record. Its document stays retained, as a voided receipt's certificate
+    does. Evidence under a removed clause or standard counts as removed even when its
+    own flag is clear, because every QMS read hides it with its parent, and the evidence
+    ``PUT`` / ``DELETE`` refuse it (404) as they refuse a removed link
+    (``qms_standards._lock_live_evidence_or_404``), so its link cannot be cleared either.
+
+    The document row lock the caller already holds orders this against a concurrent
+    link. Every QMS write that sets ``document_id`` flushes it before its audit row, so
+    it takes its key-share lock on the document row before the global audit-chain lock,
+    the order this route takes them in. A writer that got there first commits before the
+    row lock is granted, and these reads see its link. A writer that comes later waits
+    for the delete and then fails its own foreign-key check.
+
+    Scoped to the active company. A link held by another company's QMS row is not
+    reported, since naming it would disclose the other tenant's record. On Postgres that
+    delete still fails at the foreign key. The QMS create / update routes now refuse another
+    company's document (``qms_standards._assert_company_document``), so such a link can only
+    be one written before that check, when they accepted any existing document id.
+    """
+    standards = (
+        db.query(QMSStandard.name, QMSStandard.is_deleted)
+        .filter(QMSStandard.company_id == company_id, QMSStandard.document_id == document_id)
+        .order_by(QMSStandard.id)
+        .all()
+    )
+    evidence = (
+        db.query(
+            QMSClauseEvidence.is_deleted.label("evidence_deleted"),
+            QMSClause.clause_number,
+            QMSClause.is_deleted.label("clause_deleted"),
+            QMSStandard.name.label("standard_name"),
+            QMSStandard.is_deleted.label("standard_deleted"),
+        )
+        .select_from(QMSClauseEvidence)
+        .outerjoin(QMSClause, and_(QMSClause.id == QMSClauseEvidence.clause_id, QMSClause.company_id == company_id))
+        .outerjoin(QMSStandard, and_(QMSStandard.id == QMSClause.standard_id, QMSStandard.company_id == company_id))
+        .filter(QMSClauseEvidence.company_id == company_id, QMSClauseEvidence.document_id == document_id)
+        .order_by(QMSClauseEvidence.id)
+        .all()
+    )
+    if not standards and not evidence:
+        return None, None
+
+    live_links = [f"to QMS standard {row.name}" for row in standards if not row.is_deleted]
+    live_links += [
+        f"as QMS evidence on {row.standard_name} clause {row.clause_number}"
+        for row in evidence
+        # A NULL flag means the clause or standard did not join (it is not this
+        # company's), so there is nothing the user can open: not a live link.
+        if all(
+            flag is not None and not flag for flag in (row.evidence_deleted, row.clause_deleted, row.standard_deleted)
+        )
+    ]
+    permanent = None
+    if len(standards) + len(evidence) > len(live_links):
+        permanent = (
+            "This document is named by a removed QMS standard, clause or evidence link, which keeps the record "
+            "of what was assessed. It must remain available and cannot be deleted."
+        )
+    release = None
+    if live_links:
+        others = len(live_links) - 1
+        also = f" and {others} other QMS link{'s' if others > 1 else ''}" if others else ""
+        release = (
+            f"This document is linked {live_links[0]}{also}. Unlink it first by setting document_id to null on "
+            "that QMS standard or evidence link. Removing the link instead keeps it on record, and the document "
+            "with it."
+        )
+    return permanent, release
+
+
+def _retained_record_refusal(db: Session, company_id: int, document_id: int) -> Optional[str]:
+    """Say which of the active company's records keeps this document for good, or return None.
+
+    Each column below is a plain foreign key to ``documents.id`` with no ``ON DELETE``,
+    so on Postgres a physical delete of a referenced document fails at flush, after the
+    document row lock and the global audit-chain lock are held: a 500 that says nothing.
+    None of these records has a verb that lets go of its document, and each is evidence
+    in its own right, so the document stays for as long as the record does, removed or
+    voided included (the stance a receipt's certificate already takes):
+
+    - ``shipments.label_document_id`` / ``bol_document_id``: the purchased carrier
+      label and bill of lading. A voided label keeps its document, as does a removed
+      shipment.
+    - ``po_receipts.label_document_id``: the receiving label last printed for the
+      receipt. A reprint stores a new document and points the receipt at it.
+    - ``operation_step_records.attachment_document_id``: the photo or file an operator
+      captured at a process-sheet step. Step records are append-only, and a superseded
+      record keeps its evidence.
+    - ``document_files.document_id``: a governed file record, which can carry a
+      retention policy or a legal hold.
+
+    Every writer of these columns either creates the document in the same transaction
+    or flushes the link before its audit row, so it takes its key-share lock on the
+    document row before the audit-chain lock, the order this route takes them in.
+
+    Scoped to the active company. Every writer checks that the document is the
+    company's own, and another company's row is never read, so nothing is disclosed.
+    """
+    shipment = (
+        db.query(Shipment.shipment_number, Shipment.label_document_id)
+        .filter(
+            Shipment.company_id == company_id,
+            or_(Shipment.label_document_id == document_id, Shipment.bol_document_id == document_id),
+        )
+        .order_by(Shipment.id)
+        .first()
+    )
+    if shipment:
+        artifact = "carrier label" if shipment.label_document_id == document_id else "bill of lading"
+        return (
+            f"This document is the {artifact} for shipment {shipment.shipment_number}. Carrier labels and bills of "
+            "lading are retained shipping records and must remain available, including after a label is voided or "
+            "the shipment is removed."
+        )
+
+    receipt = (
+        db.query(POReceipt.receipt_number)
+        .filter(POReceipt.company_id == company_id, POReceipt.label_document_id == document_id)
+        .order_by(POReceipt.id)
+        .first()
+    )
+    if receipt:
+        return (
+            f"This document is the receiving label for receipt {receipt.receipt_number} and must remain available, "
+            "including after the receipt is voided."
+        )
+
+    step_record = (
+        db.query(OperationStepRecord.id, WorkOrder.work_order_number)
+        .select_from(OperationStepRecord)
+        .outerjoin(
+            WorkOrderOperation,
+            and_(
+                WorkOrderOperation.id == OperationStepRecord.work_order_operation_id,
+                WorkOrderOperation.company_id == company_id,
+            ),
+        )
+        .outerjoin(
+            WorkOrder, and_(WorkOrder.id == WorkOrderOperation.work_order_id, WorkOrder.company_id == company_id)
+        )
+        .filter(OperationStepRecord.company_id == company_id, OperationStepRecord.attachment_document_id == document_id)
+        .order_by(OperationStepRecord.id)
+        .first()
+    )
+    if step_record:
+        where = f" on work order {step_record.work_order_number}" if step_record.work_order_number else ""
+        return (
+            f"This document is evidence captured at a process-sheet step{where}. Step records are append-only "
+            "quality evidence, so it must remain available, including after the record is superseded."
+        )
+
+    if (
+        db.query(DocumentFile.id)
+        .filter(DocumentFile.company_id == company_id, DocumentFile.document_id == document_id)
+        .first()
+    ):
+        return (
+            "This document is held by a governed file record, which can carry a retention policy or a legal hold. "
+            "It must remain available and cannot be deleted."
+        )
+    return None
+
+
+def _laser_nest_blockers(db: Session, company_id: int, document_id: int) -> Tuple[Optional[str], Optional[str]]:
+    """Say which of the active company's laser nests keep this document as their PDF, as ``(permanent, release)``.
+
+    ``laser_nests.document_id`` is a plain foreign key with no ``ON DELETE`` (the same
+    500 at flush as the referrers above). A nest's PDF is a reference drawing with an
+    audited way to let go of it, ``DELETE /laser-nests/{id}/document`` (the Detach
+    button on the work order's nest row), and ``release`` sends the user there for each
+    live nest that has nothing recorded against its operation. A duplicated work order
+    copies the reference, not the file, so one document can sit on several nests.
+
+    ``permanent`` is set, and the route reports it ahead of any ``release``, when:
+
+    - a live nest's operation has recorded work (``operation_has_recorded_work``: good,
+      scrap, a start or labor). The PDF is then the layout the sheet was cut from, the
+      record of which parts came off it, so the refusal does not suggest Detach. (Detach
+      itself is not gated on recorded work; that is a separate owner decision.)
+    - a removed (soft-deleted) nest names it. ``POST /laser-nests/{id}/restore`` brings
+      the nest back with its PDF, and Detach answers 404 for a removed nest.
+
+    Scoped to the active company, like every read here. The attach verb accepts only
+    the company's own document.
+    """
+    nests = (
+        db.query(
+            LaserNest.id,
+            LaserNest.cnc_number,
+            LaserNest.nest_name,
+            LaserNest.is_deleted,
+            LaserNest.work_order_operation_id,
+            WorkOrder.work_order_number,
+        )
+        .select_from(LaserNest)
+        .outerjoin(
+            WorkOrderOperation,
+            and_(
+                WorkOrderOperation.id == LaserNest.work_order_operation_id,
+                WorkOrderOperation.company_id == company_id,
+            ),
+        )
+        .outerjoin(
+            WorkOrder, and_(WorkOrder.id == WorkOrderOperation.work_order_id, WorkOrder.company_id == company_id)
+        )
+        .filter(LaserNest.company_id == company_id, LaserNest.document_id == document_id)
+        .order_by(LaserNest.id)
+        .all()
+    )
+    if not nests:
+        return None, None
+
+    live = [nest for nest in nests if not nest.is_deleted]
+    operation_ids = [nest.work_order_operation_id for nest in live if nest.work_order_operation_id is not None]
+    operations = {
+        operation.id: operation
+        for operation in (
+            tenant_query(db, WorkOrderOperation, company_id).filter(WorkOrderOperation.id.in_(operation_ids)).all()
+            if operation_ids
+            else []
+        )
+    }
+    worked = [
+        nest
+        for nest in live
+        if operation_has_recorded_work(db, operations.get(nest.work_order_operation_id), company_id)
+    ]
+    worked_ids = {nest.id for nest in worked}
+    releasable = [nest for nest in live if nest.id not in worked_ids]
+
+    def _named(nest) -> str:
+        where = f" on work order {nest.work_order_number}" if nest.work_order_number else ""
+        return f"laser nest {nest.cnc_number or nest.nest_name}{where}"
+
+    permanent = None
+    if worked:
+        permanent = (
+            f"This document is the PDF of {_named(worked[0])}, which has recorded work, so it is the record of "
+            "what was cut. It must remain available and cannot be deleted."
+        )
+    elif len(live) < len(nests):
+        permanent = (
+            "This document is the PDF of a removed laser nest, which keeps it so that restoring the nest brings its "
+            "drawing back. It must remain available and cannot be deleted."
+        )
+    release = None
+    if releasable:
+        others = len(releasable) - 1
+        also = f" and {others} other laser nest{'s' if others > 1 else ''}" if others else ""
+        release = (
+            f"This document is the PDF attached to {_named(releasable[0])}{also}. Detach it from the nest first "
+            "(Detach on the work order's laser nest row). Removing the nest instead keeps the PDF with it."
+        )
+    return permanent, release
+
+
+# An ECO's affected items are the scope of the change. Until anyone has decided on it the
+# scope is still a proposal its owner may edit. From the first approval decision on (under
+# review means at least one approver has signed and others are pending), and for a rejected
+# or cancelled change, it is the record of what was authorized or decided.
+_ECO_SCOPE_EDITABLE_STATUSES = (ECOStatus.DRAFT, ECOStatus.SUBMITTED)
+
+
+def _eco_document_ids(raw: Optional[str]) -> Set[int]:
+    """The document ids an ECO's ``affected_documents`` JSON names; empty when unreadable.
+
+    ``GET /eco/eco/affected-items/{id}`` skips a value it cannot parse, so it names no
+    document there either, and one malformed row must not block every delete.
+    """
+    try:
+        values = json.loads(raw) if raw else []
+    except (json.JSONDecodeError, TypeError):
+        return set()
+    if not isinstance(values, list):
+        return set()
+    ids: Set[int] = set()
+    for value in values:
+        try:
+            ids.add(int(value))
+        except (TypeError, ValueError):
+            continue
+    return ids
+
+
+def _eco_blockers(db: Session, company_id: int, document_id: int) -> Tuple[Optional[str], Optional[str]]:
+    """Say which of the active company's engineering changes list this document as affected,
+    as ``(permanent, release)``.
+
+    ``engineering_change_orders.affected_documents`` is a JSON list of ids, not a foreign
+    key, so nothing stops the physical delete; ``GET /eco/eco/affected-items/{id}`` then drops
+    the id it can no longer resolve, and the change record loses an affected item with no
+    trace on it (AS9100D 8.5.6). ECOs have no delete verb, so the reference lasts as long
+    as the company does.
+
+    - ``release``: an ECO no approver has decided on yet (draft, submitted). Its owner may
+      still edit its scope, so the refusal lists each one with its edit path and says to take
+      the document out of
+      ``affected_documents`` with ``PUT /eco/eco/{id}`` (Admin / Manager, audited).
+    - ``permanent``: an ECO under review (an approver has already signed its scope),
+      approved or later, rejected or cancelled. The list is then the record of what the
+      change covered, so the refusal does not suggest editing it. (``PUT /eco/eco/{id}``
+      still accepts an under-review, approved or in-implementation ECO; that is a separate
+      owner decision.) A status outside the known ones also counts as permanent.
+
+    The text column is narrowed with a substring match on the id's digits, a superset of
+    the rows that name it, and each candidate's JSON is then parsed, so id 1 never matches
+    12. ``ECO create / update`` take a key-share lock on every document they name before
+    their audit row, the lock a foreign key would take, so a list written concurrently
+    with this delete is either seen here or fails its own validation afterwards. That
+    relies on READ COMMITTED (the Postgres default, which the app does not change): this read
+    starts after the document row lock is granted and so sees an ECO that committed while
+    the delete waited. Under REPEATABLE READ it would not.
+
+    Scoped to the active company. ECO validation accepts only the company's own document
+    ids, and another company's ECO is never read.
+    """
+    candidates = (
+        db.query(
+            EngineeringChangeOrder.id,
+            EngineeringChangeOrder.eco_number,
+            EngineeringChangeOrder.status,
+            EngineeringChangeOrder.affected_documents,
+        )
+        .filter(
+            EngineeringChangeOrder.company_id == company_id,
+            EngineeringChangeOrder.affected_documents.isnot(None),
+            EngineeringChangeOrder.affected_documents.contains(str(document_id)),
+        )
+        .order_by(EngineeringChangeOrder.id)
+        .all()
+    )
+    listing = [eco for eco in candidates if document_id in _eco_document_ids(eco.affected_documents)]
+    if not listing:
+        return None, None
+
+    editable = [eco for eco in listing if eco.status in _ECO_SCOPE_EDITABLE_STATUSES]
+    recorded = [eco for eco in listing if eco.status not in _ECO_SCOPE_EDITABLE_STATUSES]
+    permanent = None
+    if recorded:
+        status = recorded[0].status.value.replace("_", " ") if recorded[0].status else "unknown status"
+        permanent = (
+            f"This document is listed as affected by engineering change {recorded[0].eco_number} ({status}), which "
+            "keeps the record of what the change covered. It must remain available and cannot be deleted."
+        )
+    release = None
+    if editable:
+        # Every one is named with its edit path: the Engineering Changes page has no document
+        # field and the ECO list cannot be searched by document, so "and N others" would leave
+        # the user no way to find them.
+        named = [f"{eco.eco_number} (PUT /eco/eco/{eco.id})" for eco in editable]
+        if len(named) == 1:
+            which, scope = f"engineering change {named[0]}", "that change's"
+        else:
+            which = f"engineering changes {', '.join(named[:-1])} and {named[-1]}"
+            scope = "each of those changes'"
+        release = (
+            f"This document is listed as affected by {which}. Take it out of {scope} affected_documents first, "
+            "while no approver has decided on it yet."
+        )
+    return permanent, release
 
 
 class DocumentPartResponse(BaseModel):
@@ -438,7 +827,18 @@ def delete_document(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Delete an unretained document as Admin/Manager, preserving audited metadata."""
+    """Delete an unretained document as Admin/Manager, preserving audited metadata.
+
+    Refused 409, before the audit write and before any mutation, while the document is
+    retained: part of a revision history, a receipt's certificate or receiving label, a
+    shipment's carrier label or bill of lading, captured process-sheet step evidence, a
+    governed file record, Hank intake evidence, or linked from a QMS standard, QMS clause
+    evidence, a laser nest or an engineering change's affected documents (a removed QMS
+    link or nest, a nest with recorded work, or an ECO approved or later keeps it too;
+    permanent reasons are reported before any unlink instruction). Every table that
+    holds a foreign key to ``documents.id`` is checked here: on Postgres none of them has
+    an ``ON DELETE``, so an unchecked one fails at flush as a 500 that gives no reason.
+    """
     document = (
         db.query(Document)
         .filter(Document.id == document_id, Document.company_id == company_id)
@@ -480,6 +880,23 @@ def delete_document(
         raise HTTPException(
             409, 'This document is retained intake evidence. Its metadata and source file must remain available.'
         )
+
+    # Every reason that keeps the document for good is reported before any instruction
+    # to unlink a QMS row or detach a nest, so nobody follows an instruction (an audited
+    # change, and a nest losing its drawing on the floor) only to be refused again. The
+    # instructions themselves are given together, so one round of unlinking is enough.
+    retained = _retained_record_refusal(db, company_id, document.id)
+    if retained:
+        raise HTTPException(409, retained)
+    qms_permanent, qms_release = _qms_link_blockers(db, company_id, document.id)
+    nest_permanent, nest_release = _laser_nest_blockers(db, company_id, document.id)
+    eco_permanent, eco_release = _eco_blockers(db, company_id, document.id)
+    permanent = qms_permanent or nest_permanent or eco_permanent
+    if permanent:
+        raise HTTPException(409, permanent)
+    release = " ".join(text for text in (qms_release, nest_release, eco_release) if text)
+    if release:
+        raise HTTPException(409, release)
 
     file_path = document.file_path
     _commit_audited_document(db, audit, document, action="DELETE", old_values=_audit_values(document))

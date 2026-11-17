@@ -218,7 +218,7 @@ Recommendations):
 | **Writing the legacy `approved_supplier_list` table** — `POST /supplier-scorecards/approved-suppliers/` and `PUT /supplier-scorecards/approved-suppliers/{asl_id}` (read-only history since migration 123) | `is_api_token_credential` | **403**, the same text; also not MCP tools (`catalog.EXCLUDED_OPERATIONS`) | Review follow-up of the same change: an agent's "approved" entry there would contradict the vendor's own ASL status. People's use of the two routes is unchanged |
 | **Granting vendor approval by the checkbox** — `POST /purchasing/vendors` with `is_approved: true`, `PUT /purchasing/vendors/{id}` raising `is_approved` from `false` to `true`, and `POST /purchasing/vendors/import-csv` when any row asks for `is_approved` (refused before any row is written, dry run included). A token may still create and edit vendors, re-send `true` on an approved one, and withdraw approval | `is_api_token_credential` | **403** (`Approving a supplier is a person's decision: an API token cannot mark a vendor approved. Sign in to the app to do this.`) | Review follow-up of the same change: the checkbox is the approval that puts a vendor not on the ASL into the Create PO picker. Not an owner ruling |
 | **Completing a maintenance work order with checklist items unticked** — `POST /maintenance/work-orders/{id}/complete` when any checklist item the work order carries (or the body sends) is left unticked, whatever `incomplete_checklist_reason` it sends. Refused before the reason check and before any write. A token's completion with every item ticked (or no checklist) is unchanged, and so is a person's completion with a reason | `is_api_token_credential`, inline in `complete_work_order` | **403** `API_TOKEN_INCOMPLETE_CHECKLIST` (`Completing a maintenance work order with checklist items unticked must be done by a person signed in to the app, not an API token.`; text in `app/services/maintenance_checklist.py`) | Owner decision 2026-11-17, under the 2026-11-07 principle: why a PM step was skipped is a person's judgment, and a completion resets the machine's PM clock for a full interval |
-| **Taking items off a maintenance work order's checklist** — `PUT /maintenance/work-orders/{id}` whose `checklist_results` drops, renames or clears an item the work order carries (ticking, unticking or adding is unchanged). Refused before the first write | `is_api_token_credential`, through `maintenance_checklist.removed_checklist_items` | **403** `API_TOKEN_CHECKLIST_REMOVAL` (`Removing items from a maintenance work order's checklist must be done by a person signed in to the app, not an API token.`) | **This PR's extension** of the owner's 2026-11-17 decision: without it a token reaches the refused completion in two steps (PUT the unticked items away, then complete) |
+| **Taking items off a maintenance work order's checklist** — `PUT /maintenance/work-orders/{id}` whose `checklist_results` drops, renames or clears an item an **open** work order carries (ticking, unticking or adding is unchanged; on a completed or cancelled work order every change is already **409**, for every credential, before this check). Refused before the first write | `is_api_token_credential`, through `maintenance_checklist.removed_checklist_items` | **403** `API_TOKEN_CHECKLIST_REMOVAL` (`Removing items from a maintenance work order's checklist must be done by a person signed in to the app, not an API token.`) | **This PR's extension** of the owner's 2026-11-17 decision: without it a token reaches the refused completion in two steps (PUT the unticked items away, then complete) |
 | **Taking items off a PM schedule's checklist while it has an open work order** — `PUT /maintenance/schedules/{id}` whose `checklist` drops, renames or clears a step while a scheduled / overdue / in-progress / on-hold work order carries the schedule's id (completion judges the schedule's steps too). Adding steps, and editing a schedule with no open work order, are unchanged | `is_api_token_credential`, inline in `update_schedule` | **403** `API_TOKEN_SCHEDULE_CHECKLIST_REMOVAL` (`Removing items from the checklist of a PM schedule that has an open work order must be done by a person signed in to the app, not an API token.`) | **This PR's extension**, for the same reason: the third route to the same skip |
 
 Deliberately **not** refused:
@@ -1321,11 +1321,12 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > Adopting, handing over or handing back sets only the event's `maintenance_work_order_id` /
 > `maintenance_adopted` link (fields `PUT /downtime/{id}` cannot write). Holding and cancelling go
 > through `PUT /maintenance/work-orders/{id}` (planning roles, so the Maintenance page shows Hold /
-> Cancel to Admin / Manager / Supervisor / Platform Admin); that `PUT` refuses `in_progress` and
-> `completed` (**409**, the Start / Complete verbs own them), un-starting a started WO, and changing
-> `requires_shutdown` once started.
+> Cancel to Admin / Manager / Supervisor / Platform Admin, on open rows only); that `PUT` refuses
+> `in_progress` and `completed` (**409**, the Start / Complete verbs own them), un-starting a started
+> WO, changing `requires_shutdown` once started, and any change at all to a completed or cancelled WO
+> (below).
 >
-> **Two state refusals on the same gates (2026-11-17; no role changed).** Creating a maintenance WO
+> **Three state refusals on the same gates (2026-11-17; no role changed).** Creating a maintenance WO
 > with a `schedule_id` that already has an open one (scheduled, overdue, in progress or on hold) is
 > **409** naming it, for every role — one open work order per PM schedule. Completing a WO with any
 > checklist item unticked needs a written `incomplete_checklist_reason` (**409** without one, nothing
@@ -1334,8 +1335,18 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > written). It is a reason on the record, not an approval, so the performing gate is unchanged: an
 > Operator who may complete the WO may record it. A standing API token may not: with any item
 > unticked its completion is **403** `API_TOKEN_INCOMPLETE_CHECKLIST` whatever reason it sends (owner
-> decision 2026-11-17) — see [Credential policy for judgment writes](#credential-policy-for-judgment-writes). Details in
-> `docs/API.md` → Maintenance → *The PM loop*.
+> decision 2026-11-17) — see [Credential policy for judgment writes](#credential-policy-for-judgment-writes). And a
+> completed or cancelled maintenance WO is a final record: a `PUT` that would change **any** of its
+> fields is **409** before any write — its status as before, and now also `checklist_results`,
+> `notes`, title, description, dates, priority, assignee and `requires_shutdown` (the detail names
+> the fields) — for every role and every credential: a person's session, a Platform Admin and an API
+> token alike. Before, only the status was held, so a planning-role `PUT` could re-tick a completed
+> PM's checklist after the fact. Re-sending the record's own value is accepted and writes nothing
+> (no audit row). A later note goes on the record as a `POST /maintenance/log` entry with
+> `maintenance_wo_id` (performing roles, as in the table; dated, signed, audited), never as an edit
+> of the WO. This is a state rule, not a credential policy, so it has no row in the credential table.
+> Details in `docs/API.md` → Maintenance → *A completed or cancelled work order is a final record*
+> and *The PM loop*.
 
 > **Tenancy: ten of the sixteen handlers took no company argument.** `start` and `complete`
 > resolved the work order by bare id, and `dashboard` / `calendar` / `history` / `overdue`
@@ -2501,7 +2512,19 @@ upload/revision and attachment require Admin / Manager / Quality. Delete retains
 Generated artifacts use their existing receipt/shipping business-route gates. Foreign document
 or linked-record ids return **404**; role refusals return **403**. Revision histories cannot be
 rebound or deleted, and receipt certificates remain protected even after a receipt is voided
-(**409**). New revisions retain prior files, type and links. Required audit loss returns **503**
+(**409**). A document that a same-company QMS standard or QMS clause evidence link names is
+refused too (**409**), including through a removed standard, clause or evidence link; clearing
+the link's `document_id` (Admin / Manager / Quality, audited) releases it. So is a document that
+a same-company shipment carrier label or bill of lading, receipt receiving label, process-sheet
+step record attachment or governed file record names (**409**), voided, removed and superseded
+records included: none has a verb that releases it. A laser nest's PDF is refused too. A removed
+nest, or a live nest whose operation has recorded work, keeps it. Otherwise Detach
+(`DELETE /laser-nests/{id}/document`, Admin / Manager / Supervisor, audited) releases it once it is
+cleared from every nest. A document an engineering change order lists in `affected_documents` is
+refused too: while the ECO is draft or submitted, taking it out of the list (`PUT /eco/eco/{id}`,
+Admin / Manager, audited) releases it; from under review on, and for a rejected or cancelled ECO,
+it is kept. A refusal reports every permanent reason before any unlink, Detach or ECO-edit
+instruction. New revisions retain prior files, type and links. Required audit loss returns **503**
 and rolls back metadata changes; bytes are removed only by the corresponding failure cleanup
 or after an audited deletion commits. Same-company historical part labels remain available.
 The Documents, Quality and Job Costing UI write controls reflect the fixed role gates and FAI
