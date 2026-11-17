@@ -866,8 +866,9 @@ def _evidence_audit_snapshot(evidence: QMSClauseEvidence) -> Dict[str, Any]:
 
 
 # ``audit_log.resource_identifier`` is String(255); an evidence title may be 500 (the schemas allow
-# it). On PostgreSQL a longer identifier fails the audit INSERT, which a required audit row turns
-# into a 503 on every edit of that row, so the identifier is cut to fit. The description keeps the
+# it). On PostgreSQL a longer identifier fails the audit INSERT, which ``AuditService.log`` re-raises
+# (so adding the evidence answered 500) and a required audit row turns into a 503 on every edit of
+# that row. So the identifier is cut to fit on all three evidence routes; the description keeps the
 # whole title.
 _AUDIT_IDENTIFIER_MAX = 255
 
@@ -903,7 +904,13 @@ def add_evidence(
     db.add(evidence)
     db.flush()  # assign PK without committing so the audit row carries resource_id
 
-    audit.log_create("qms_clause_evidence", evidence.id, evidence.title, new_values=evidence)
+    audit.log_create(
+        "qms_clause_evidence",
+        evidence.id,
+        evidence.title[:_AUDIT_IDENTIFIER_MAX],
+        new_values=evidence,
+        description=f"Created qms_clause_evidence: {evidence.title}",
+    )
     db.commit()
     db.refresh(evidence)
     return evidence

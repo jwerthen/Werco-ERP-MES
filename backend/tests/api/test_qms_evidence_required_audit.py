@@ -18,7 +18,8 @@ Pinned here:
 3. a failed audit write (``log`` returns ``None``, or raises a database error) answers 503 and
    leaves the evidence exactly as it was, with no audit row;
 4. an evidence title longer than ``audit_log.resource_identifier`` (String(255)) is cut to fit
-   in the identifier, so a long title cannot make every edit of its row a 503 on PostgreSQL.
+   in the identifier, so a long title cannot make every edit of its row a 503 on PostgreSQL, nor
+   adding the evidence (``POST /clauses/{id}/evidence``, best-effort ``log_create``) a 500.
 
 Every read of the outcome rolls back first: the ``client`` fixture shares one session with the
 routes, so a flushed-but-uncommitted row (or change) would otherwise look saved.
@@ -445,3 +446,33 @@ def test_title_longer_than_the_audit_identifier_is_cut_to_fit(verb: str, client:
     # The description and the before image keep the whole title.
     assert long_title in rows[0].description
     assert rows[0].old_values["title"] == long_title
+
+
+@pytest.mark.parametrize("extra", [300, 0], ids=["long-title", "short-title"])
+def test_add_evidence_cuts_the_audit_identifier_and_keeps_the_whole_title(
+    extra: int, client: TestClient, db_session: Session
+):
+    """``POST /clauses/{id}/evidence`` takes a 500-char title; its CREATE row's identifier fits 255.
+
+    On PostgreSQL an uncut identifier fails the audit INSERT, which ``AuditService.log``
+    re-raises, so adding a valid long-titled link answered 500. SQLite does not enforce the
+    length, so this pins the cut; the short-title case pins that nothing else moved.
+    """
+    user = _make_user(db_session)
+    clause_id = _make_evidence(db_session).clause_id
+    title = ("A" * extra) + f" new link {_next()}"
+
+    resp = client.post(
+        f"/api/v1/qms-standards/clauses/{clause_id}/evidence",
+        json={"evidence_type": "module", "title": title},
+        headers=_headers_for(user),
+    )
+    assert resp.status_code == status.HTTP_201_CREATED, resp.text
+    evidence_id = resp.json()["id"]
+    assert resp.json()["title"] == title
+
+    rows = _committed_audit_rows(db_session, evidence_id, "CREATE")
+    assert len(rows) == 1
+    assert rows[0].resource_identifier == title[:255]
+    assert rows[0].description == f"Created qms_clause_evidence: {title}"
+    assert rows[0].new_values["title"] == title

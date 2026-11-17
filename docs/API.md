@@ -8923,7 +8923,9 @@ in `RBAC_PERMISSIONS.md`.
 > `extra_data.changes`; the `DELETE` entry carries the row as it stood before the removal in
 > `old_values` and `extra_data.soft_delete: true`. The entry's `resource_identifier` is the
 > evidence title cut to 255 characters (the audit column's length; a title may be 500), and its
-> `description` keeps the whole title.
+> `description` keeps the whole title. The same cut applies to the `CREATE` entry of `POST
+> /qms-standards/clauses/{clause_id}/evidence`: before it, adding a link whose title was longer than
+> 255 characters failed with a 500 on PostgreSQL (the uncut identifier failed the audit INSERT).
 
 #### Audit-Readiness Summary Schema (`GET /qms-standards/audit-readiness`)
 
