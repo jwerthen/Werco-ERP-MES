@@ -8691,8 +8691,9 @@ receipt-certificate and revision-history retention.
 Deletion also refuses (**409**) a document that a same-company QMS standard or QMS clause
 evidence link names through its `document_id`. Both columns are plain foreign keys with no
 `ON DELETE`, so on Postgres the unguarded delete failed at flush, after the document row lock and
-the audit-chain lock were taken: a **500**, or a deadlock (the app-wide **409**) against an evidence
-edit holding the referencing row, and neither said why. The check runs before the audit write and
+the audit-chain lock were taken: a **500**, or a deadlock (40P01, answered **409** or **503**
+depending on where the delete lost) against an evidence edit holding the referencing row, and
+neither said why. The check runs before the audit write and
 before any change, so a refusal writes nothing and keeps the bytes. The message depends on the link:
 
 - **A live link** (the standard, or the evidence with its clause and standard, not removed):
@@ -8705,15 +8706,22 @@ before any change, so a refusal writes nothing and keeps the bytes. The message 
 - **Only removed links** (a soft-deleted standard, clause or evidence link, including evidence
   under a removed clause or standard): *"This document is named by a removed QMS standard, clause or
   evidence link, which keeps the record of what was assessed. It must remain available and cannot be
-  deleted."* A removed QMS row still records which document a clause was assessed against, and no
-  route edits a removed row, so the document is retained the way a voided receipt's certificate is.
-  Removing an evidence link (`DELETE /qms-standards/evidence/{id}`) therefore does **not** release
-  its document; clear `document_id` first if the document is meant to go.
+  deleted."* A removed QMS row still records which document a clause was assessed against, and
+  clearing its link would rewrite that record, so the document is retained the way a voided
+  receipt's certificate is. Removing an evidence link (`DELETE /qms-standards/evidence/{id}`)
+  therefore does **not** release its document; clear `document_id` first if the document is meant
+  to go. Known gap: the evidence `PUT` / `DELETE` check only the evidence row's own flag, so they
+  still accept evidence whose clause or standard was removed.
 
-Only the active company's QMS rows are read. A link from another company's QMS row (possible only
-through the cross-company `document_id` writes the QMS routes accepted before they checked document
-ownership) is not named, since that would disclose the other tenant's record; on Postgres that
-delete still fails at the foreign key.
+The standard and evidence `PUT`s flush their change before writing the audit row, so a new
+`document_id` takes its lock on the document row before the global audit-chain lock, the order
+the delete takes them in. A link made concurrently with a delete either commits first, and the
+delete sees it and refuses, or waits for the delete and then fails its own foreign-key check.
+
+Only the active company's QMS rows are read. A link from another company's QMS row (the QMS
+create / update routes have accepted any existing document id, another company's included) is not
+named, since that would disclose the other tenant's record; on Postgres that delete still fails at
+the foreign key until the link is cleared.
 
 Manual upload is a release action: the persisted Document stores `status="released"`, the actual
 `released_by` actor, and UTC `released_at`. Returned metadata exposes the released status;

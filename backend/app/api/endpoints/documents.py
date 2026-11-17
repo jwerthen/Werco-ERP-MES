@@ -73,26 +73,31 @@ def _qms_link_refusal(db: Session, company_id: int, document_id: int) -> Optiona
     ``qms_standards.document_id`` and ``qms_clause_evidence.document_id`` are plain
     foreign keys with no ``ON DELETE``. On Postgres a physical delete of a referenced
     document fails at flush, after the document row lock and the global audit-chain
-    lock are already held: a 500, or a deadlock (40P01, the app-wide 409) against an
-    evidence edit that has locked the referencing row. Neither says why, so the delete
-    route refuses here, before the audit write and before any mutation.
+    lock are already held: a 500, or a deadlock (40P01, answered 409 or 503 depending
+    on where the delete loses) against an evidence edit that has locked the referencing
+    row. Neither says why, so the delete route refuses here, before the audit write and
+    before any mutation.
 
     Removed rows count. A soft-deleted standard, clause or evidence link is still the
-    record of which document a clause was assessed against; nulling its link would
-    rewrite that record, and no route edits a removed row, so the only way to clear it
-    would be an out-of-band write. Its document stays retained, as a voided receipt's
-    certificate does. Evidence under a removed clause or standard counts as removed even
-    when its own flag is clear, because no screen shows it any more.
+    record of which document a clause was assessed against, and nulling its link would
+    rewrite that record. Its document stays retained, as a voided receipt's certificate
+    does. Evidence under a removed clause or standard counts as removed even when its
+    own flag is clear, because every QMS read hides it with its parent. (The evidence
+    ``PUT`` / ``DELETE`` check only the evidence row's own flag, so an API caller can
+    still edit such a row. That is a gap in those routes, not a reason to call the row
+    live here.)
 
     The document row lock the caller already holds orders this against a concurrent
-    link. A writer that set ``document_id`` first holds a key-share lock on the document
-    row, so it commits before that lock is granted and these reads see it. A writer that
-    comes later waits for the delete and then fails its own foreign-key check.
+    link. Every QMS write that sets ``document_id`` flushes it before its audit row, so
+    it takes its key-share lock on the document row before the global audit-chain lock,
+    the order this route takes them in. A writer that got there first commits before the
+    row lock is granted, and these reads see its link. A writer that comes later waits
+    for the delete and then fails its own foreign-key check.
 
-    Scoped to the active company. A link held by another company's QMS row (possible
-    only through the cross-company ``document_id`` writes the QMS routes accepted before
-    they checked document ownership) is not reported, since naming it would disclose the
-    other tenant's record. On Postgres that delete still fails at the foreign key.
+    Scoped to the active company. A link held by another company's QMS row (the QMS
+    create / update routes have accepted any existing document id, another company's
+    included) is not reported, since naming it would disclose the other tenant's record.
+    On Postgres that delete still fails at the foreign key.
     """
     standards = (
         db.query(QMSStandard.name, QMSStandard.is_deleted)

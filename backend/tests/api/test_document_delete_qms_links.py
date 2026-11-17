@@ -9,14 +9,17 @@ case here would answer 200 and orphan the QMS row. That is what they catch.
 """
 
 import pytest
+from sqlalchemy import Update, event
 
 from app.api.endpoints import documents
+from app.core.config import settings
 from app.core.security import create_access_token
 from app.models.audit_log import AuditLog
 from app.models.company import Company
 from app.models.document import Document
 from app.models.qms_standard import QMSClause, QMSClauseEvidence, QMSStandard
 from app.models.user import User, UserRole
+from app.services.audit_service import AuditService
 from app.services.storage_service import LocalStorageBackend
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
@@ -246,3 +249,51 @@ def test_quality_role_still_cannot_delete_a_linked_document(client, db_session, 
 
     assert response.status_code == 403
     assert "QMS" not in response.text
+
+
+@pytest.mark.parametrize("target", ["standard", "evidence"])
+def test_link_write_reaches_the_document_before_the_audit_chain_lock(
+    client, db_session, admin_headers, local_files, monkeypatch, target
+):
+    """A new ``document_id`` is flushed before the audit row, so its key-share lock on the
+    document row comes before the global audit-chain lock: the order the delete takes them in.
+
+    ``AuditService.log`` takes the chain lock with a raw statement that does not autoflush, so
+    an unflushed link would reach the database only after the chain lock, and a link racing a
+    delete of the same document could deadlock against it on Postgres.
+    """
+    document_id = _upload(client, admin_headers)
+    standard = _standard(db_session)
+    evidence = _evidence(db_session, None, standard=standard)
+    table = "qms_standards" if target == "standard" else "qms_clause_evidence"
+    url = (
+        f"/api/v1/qms-standards/{standard.id}"
+        if target == "standard"
+        else f"/api/v1/qms-standards/evidence/{evidence.id}"
+    )
+
+    events = []
+
+    def before_execute(conn, clauseelement, multiparams, params, execution_options):  # noqa: ARG001
+        if isinstance(clauseelement, Update) and clauseelement.table.name == table:
+            events.append("link_update")
+
+    monkeypatch.setattr(settings, "AUDIT_HASH_CHAIN_ENABLED", True)
+    original_chain_lock = AuditService._acquire_chain_lock
+
+    def spy_chain_lock(self):
+        events.append("chain_lock")
+        original_chain_lock(self)
+
+    monkeypatch.setattr(AuditService, "_acquire_chain_lock", spy_chain_lock)
+    engine = db_session.get_bind()
+    event.listen(engine, "before_execute", before_execute)
+    try:
+        response = client.put(url, headers=admin_headers, json={"document_id": document_id})
+    finally:
+        event.remove(engine, "before_execute", before_execute)
+
+    assert response.status_code == 200, response.text
+    assert "link_update" in events and "chain_lock" in events, events
+    assert events.index("link_update") < events.index("chain_lock"), events
+    assert "link_update" not in events[events.index("chain_lock") :], events
