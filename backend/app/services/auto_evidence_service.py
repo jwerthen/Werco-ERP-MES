@@ -809,6 +809,16 @@ AUDIT_TRIGGERS_MISSING_SENTENCE = (
 )
 AUDIT_TRIGGERS_UNCHECKED_SENTENCE = "Database UPDATE/DELETE trigger status could not be checked."
 
+AUDIT_TRIGGER_READ_FAILED_LOG = "Could not read audit-log trigger state from pg_trigger"
+
+# Whether the current run of failed pg_trigger reads has already been logged at WARNING. A
+# persistent failure (a revoked catalog grant, say) would otherwise put a full traceback in the
+# log on every auto-evidence GET and on every audit-matching clause of every auto-link run. The
+# first failure of a run logs at WARNING with its traceback, the repeats at DEBUG; a successful
+# read ends the run, so the next failure after it warns again. Per process and unlocked: two
+# threads failing at the same moment may each warn once, which is harmless.
+_trigger_read_failure_reported = False
+
 
 def _dialect_name(db: Session) -> str:
     bind = db.get_bind()
@@ -824,7 +834,11 @@ def _audit_triggers_in_force(db: Session) -> Optional[bool]:
     sits outside the ``try`` because a flush failure there is the caller's, not this check's.
     Not detectable here: a session that sets ``session_replication_role = replica``, or a
     TRUNCATE, neither of which fires a row trigger.
+
+    A failed read is logged at WARNING once per run of consecutive failures and at DEBUG after
+    that (``_trigger_read_failure_reported``); the answer is ``None`` either way.
     """
+    global _trigger_read_failure_reported
     if _dialect_name(db) != "postgresql":
         return None
     savepoint = db.begin_nested()
@@ -832,9 +846,16 @@ def _audit_triggers_in_force(db: Session) -> Optional[bool]:
         found = db.execute(text(_AUDIT_LOG_TRIGGER_CHECK_SQL)).scalar_one()
     except Exception:  # noqa: BLE001 - an unreadable catalog is "not checked", never a false claim
         savepoint.rollback()
-        logger.warning("Could not read audit-log trigger state from pg_trigger", exc_info=True)
+        if _trigger_read_failure_reported:
+            logger.debug("%s (repeated failure)", AUDIT_TRIGGER_READ_FAILED_LOG, exc_info=True)
+        else:
+            _trigger_read_failure_reported = True
+            logger.warning(
+                "%s; repeats log at DEBUG until a read succeeds", AUDIT_TRIGGER_READ_FAILED_LOG, exc_info=True
+            )
         return None
     savepoint.commit()
+    _trigger_read_failure_reported = False
     return int(found) == len(AUDIT_LOG_TRIGGER_NAMES)
 
 

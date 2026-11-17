@@ -11,12 +11,15 @@ auditor carry the pause through:
 * ``POST /api/v1/qms-standards/{standard_id}/auto-link`` -- the persisted view. The stored
   ``QMSClauseEvidence`` row has no health fields, so its ``description`` is the only place a
   pause shows on the record of evidence; a re-run must overwrite a stale unqualified "chain"
-  claim rather than keep it.
+  claim rather than keep it -- and a run in which the audit rule FAILS must leave the stored
+  link exactly as the last run that computed it wrote it, pre-rename title included.
 
 The paused rows are written by the app's own request-scoped writer (``get_audit_service``)
 through real API calls with the setting flipped, so the reader is held to the placeholder the
 production writer actually stamps.
 """
+
+from datetime import datetime
 
 import pytest
 from fastapi import status
@@ -29,6 +32,7 @@ from app.models.audit_log import AuditLog
 from app.models.company import Company
 from app.models.qms_standard import QMSClause, QMSClauseEvidence, QMSStandard
 from app.models.user import User, UserRole
+from app.services import auto_evidence_service
 from app.services.audit_service import PAUSED_CHAIN_PLACEHOLDER
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
@@ -38,6 +42,11 @@ pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 COMPANY = 941
 
 AUDIT_TITLE = "Audit Trail (Audit Log & Hash-Chain Status)"
+# What every link auto-linked before the rename still carries.
+PRE_RENAME_AUDIT_TITLE = "Audit Trail (Immutable Hash-Chain Log)"
+
+STALE_LAST_REFRESHED = datetime(2026, 1, 2, 3, 4, 5)
+STALE_UPDATED_AT = datetime(2026, 1, 2, 3, 4, 6)
 
 _seq = {"n": 0}
 
@@ -312,3 +321,118 @@ def test_auto_link_rerun_replaces_a_stale_chain_claim_on_the_same_row(
         .count()
     )
     assert evidence_rows == 1
+
+
+class _TriggerReadBoom(RuntimeError):
+    pass
+
+
+def _stale_pre_rename_audit_link(db: Session, clause: QMSClause) -> QMSClauseEvidence:
+    """An audit link as a run before the rename stored it: old title, old wording, stale stamps."""
+    evidence = QMSClauseEvidence(
+        company_id=COMPANY,
+        clause_id=clause.id,
+        evidence_type="module",
+        title=PRE_RENAME_AUDIT_TITLE,
+        description="5 audit log entries (5 in last 12 months), SHA-256 integrity chain",
+        module_reference="/audit",
+        record_type="module",
+        is_auto_linked=True,
+        auto_link_query="audit",
+        live_count=5,
+        last_refreshed=STALE_LAST_REFRESHED,
+        updated_at=STALE_UPDATED_AT,
+    )
+    db.add(evidence)
+    db.commit()
+    db.refresh(evidence)
+    return evidence
+
+
+def _evidence_snapshot(db: Session, evidence_id: int) -> dict:
+    db.expire_all()
+    row = db.query(QMSClauseEvidence).filter(QMSClauseEvidence.id == evidence_id).one()
+    return {
+        "title": row.title,
+        "description": row.description,
+        "module_reference": row.module_reference,
+        "live_count": row.live_count,
+        "last_refreshed": row.last_refreshed,
+        "updated_at": row.updated_at,
+        "is_deleted": row.is_deleted,
+    }
+
+
+def _auto_link_audit_rows(db: Session, standard_id: int) -> list:
+    db.expire_all()
+    return (
+        db.query(AuditLog)
+        .filter(
+            AuditLog.company_id == COMPANY,
+            AuditLog.resource_type == "qms_standard",
+            AuditLog.resource_id == standard_id,
+            AuditLog.description.like("Auto-linked evidence:%"),
+        )
+        .order_by(AuditLog.id)
+        .all()
+    )
+
+
+def test_auto_link_leaves_the_stored_audit_link_alone_when_the_audit_rule_fails(
+    client: TestClient, db_session: Session, monkeypatch
+):
+    """The docs promise stored links keep the pre-rename title "until the next auto-link run in
+    which the audit rule computes". A run where it fails rewrites nothing -- not the title, the
+    description, the count or the stamps -- and names the skipped (clause, rule) on its audit row.
+
+    The failure is raised from inside the real ``_query_audit_log``, after its aggregate query has
+    run, by making the trigger helper it calls raise. A control run on the same row then proves
+    the lookup really matched it: once the rule computes, title and wording are rewritten.
+    """
+    headers = _headers_for(_make_user(db_session))
+    _set_chain(monkeypatch, True)
+    standard, clause = _seed_standard_with_audit_clause(db_session)
+    stale = _stale_pre_rename_audit_link(db_session, clause)
+    before = _evidence_snapshot(db_session, stale.id)
+
+    def _boom(db):
+        raise _TriggerReadBoom("audit rule exploded mid-query")
+
+    with monkeypatch.context() as failing:
+        failing.setattr(auto_evidence_service, "_audit_triggers_in_force", _boom)
+        failed = _auto_link(client, headers, standard.id)
+
+    assert failed["total_evidence_failed"] == 1
+    assert (failed["total_evidence_created"], failed["total_evidence_updated"]) == (0, 0)
+    assert failed["clauses_with_evidence"] == 0
+    assert failed["compliance_summary"] == {"not_assessed": 1}
+    assert _evidence_snapshot(db_session, stale.id) == before
+    stored = _stored_audit_evidence(client, headers, standard.id, clause.id)
+    assert stored["id"] == stale.id
+    assert stored["title"] == PRE_RENAME_AUDIT_TITLE
+    assert stored["description"] == "5 audit log entries (5 in last 12 months), SHA-256 integrity chain"
+    audit_rows = _auto_link_audit_rows(db_session, standard.id)
+    assert len(audit_rows) == 1
+    assert audit_rows[0].description == "Auto-linked evidence: 0 created, 0 updated, 1 not computed (left unchanged)"
+    assert audit_rows[0].extra_data == {
+        "evidence_not_computed": [
+            {"clause_id": clause.id, "clause_number": clause.clause_number, "rule_id": "audit"},
+        ]
+    }
+
+    # Control: the rule computes, and the same row picks up the new title and wording. The one
+    # entry it counts is the failed run's own audit row.
+    computed = _auto_link(client, headers, standard.id)
+
+    assert computed["total_evidence_failed"] == 0
+    assert (computed["total_evidence_created"], computed["total_evidence_updated"]) == (0, 1)
+    assert computed["compliance_summary"] == {"compliant": 1}
+    refreshed = _stored_audit_evidence(client, headers, standard.id, clause.id)
+    assert refreshed["id"] == stale.id
+    assert refreshed["title"] == AUDIT_TITLE
+    assert refreshed["description"] == "1 audit log entry (1 in last 12 months), SHA-256 integrity chain"
+    assert refreshed["live_count"] == 1
+    assert _evidence_snapshot(db_session, stale.id)["last_refreshed"] > STALE_LAST_REFRESHED
+    audit_rows = _auto_link_audit_rows(db_session, standard.id)
+    assert len(audit_rows) == 2
+    assert audit_rows[1].extra_data is None
