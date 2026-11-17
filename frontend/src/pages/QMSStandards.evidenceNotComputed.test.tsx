@@ -194,6 +194,10 @@ describe('auto-link result: evidence rules that could not be computed', () => {
     expect(tile).toHaveTextContent('A clause with an uncomputed rule is not counted as compliant.');
     expect(screen.getByText('Auto-Link Evidence Finished With Gaps')).toBeInTheDocument();
     expect(screen.queryByText('Auto-Link Evidence Complete')).not.toBeInTheDocument();
+    // A clause whose matched rules all failed DID match, so the tile counting it must not
+    // say "without Match".
+    expect(screen.getByText('Clauses without Evidence')).toBeInTheDocument();
+    expect(screen.queryByText('Clauses without Match')).not.toBeInTheDocument();
 
     // The toast is a warning (role="alert", amber), not a success that hides the gap.
     const alert = await screen.findByRole('alert');

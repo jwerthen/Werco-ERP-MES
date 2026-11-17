@@ -29,6 +29,8 @@ caller's earlier flushed write survives, which only a SAVEPOINT (not a full roll
 and not no rollback at all) produces.
 """
 
+import ast
+import inspect
 import re
 from datetime import datetime
 
@@ -43,6 +45,7 @@ from app.models.maintenance import MaintenanceAsset, MaintenanceSchedule
 from app.models.qms_standard import QMSClause, QMSStandard
 from app.models.quality import NCRSource, NCRStatus, NonConformanceReport
 from app.schemas.qms_standard import AutoEvidenceResult
+from app.services import auto_evidence_service
 from app.services.auto_evidence_service import (
     EVALUATION_FAILED_DESCRIPTION,
     EVALUATION_FAILED_DETAIL,
@@ -637,3 +640,42 @@ def test_rule_placeholder_metadata_matches_its_query(db_session: Session, rule: 
     assert placeholder["_rule_id"] == rule["id"]
     assert placeholder["health_status"] == EVALUATION_FAILED_HEALTH_STATUS
     assert _public_keys(placeholder) == set(computed)
+
+
+def test_not_computed_is_reserved_for_the_placeholder_in_every_branch():
+    """``not_computed`` stays reserved for the placeholder in EVERY branch of every query, not
+    only the empty-company branch the per-rule test above executes.
+
+    Static, because the branches that run only with records on file (a backlog, overdue
+    items) cannot be reached from an empty company. The literal appears exactly once in
+    ``auto_evidence_service`` -- the ``EVALUATION_FAILED_HEALTH_STATUS`` assignment -- and that
+    constant is read only by ``_evaluation_failed_result``. A query reporting it for a module
+    WITH records would have the SPA hide a real count behind "Not computed".
+    """
+    constant_name = "EVALUATION_FAILED_HEALTH_STATUS"
+    tree = ast.parse(inspect.getsource(auto_evidence_service))
+
+    literal_lines = sorted(
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and node.value == EVALUATION_FAILED_HEALTH_STATUS
+    )
+    assignment_lines = [
+        stmt.value.lineno
+        for stmt in tree.body
+        if isinstance(stmt, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == constant_name for target in stmt.targets)
+    ]
+    assert len(assignment_lines) == 1, f"expected one module-level {constant_name} assignment"
+    assert literal_lines == assignment_lines, (
+        f"{EVALUATION_FAILED_HEALTH_STATUS!r} is written outside {constant_name} at lines "
+        f"{sorted(set(literal_lines) - set(assignment_lines))}"
+    )
+
+    readers = set()
+    for stmt in tree.body:
+        for node in ast.walk(stmt):
+            if isinstance(node, ast.Name) and node.id == constant_name and isinstance(node.ctx, ast.Load):
+                is_function = isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
+                readers.add(stmt.name if is_function else f"<module line {stmt.lineno}>")
+    assert readers == {"_evaluation_failed_result"}
