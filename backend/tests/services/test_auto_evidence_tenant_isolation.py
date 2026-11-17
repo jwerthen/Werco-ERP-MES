@@ -259,9 +259,14 @@ def test_audit_helper_counts_only_own_company(db_session: Session):
 
 def test_audit_evidence_via_discover_excludes_other_company(db_session: Session):
     """The public entry point routes an 'audit trail' clause to the audit
-    helper and still reports only company A's count."""
+    helper and still reports only company A's count.
+
+    The clause names only the system change log. A clause about internal audit or
+    management review no longer reaches the audit helper at all (it routes to the
+    not-tracked ``internal_audit_review`` row); that routing is pinned in
+    ``tests/services/test_auto_evidence_internal_audit_routing.py``."""
     seeded = _seed_audit_rows(db_session)
-    clause = _make_clause(db_session, title="Audit trail and management review", description="internal audit program")
+    clause = _make_clause(db_session, title="Audit trail", description="system audit log retention")
 
     results = discover_evidence_for_clause(db_session, clause, COMPANY_A)
 

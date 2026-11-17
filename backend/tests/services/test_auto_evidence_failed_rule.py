@@ -52,6 +52,7 @@ from app.services.auto_evidence_service import (
     EVALUATION_FAILED_HEALTH_STATUS,
     EVALUATION_FAILED_KEY,
     EVIDENCE_MAPPING_RULES,
+    NOT_TRACKED_KEY,
     _evaluation_failed_result,
     _match_rules,
     compute_overall_compliance,
@@ -65,7 +66,7 @@ COMPANY_ID = 1
 # A company with no domain rows at all, for the drift guard.
 EMPTY_COMPANY_ID = 4242
 
-INTERNAL_KEYS = {"_rule_id", EVALUATION_FAILED_KEY}
+INTERNAL_KEYS = {"_rule_id", EVALUATION_FAILED_KEY, NOT_TRACKED_KEY}
 
 # What a query function may report. ``not_computed`` is NOT in it: that value is reserved for
 # the placeholder of a rule whose query raised.
@@ -651,7 +652,10 @@ def test_rule_placeholder_metadata_matches_its_query(db_session: Session, rule: 
     placeholder = _evaluation_failed_result(rule)
     assert placeholder["_rule_id"] == rule["id"]
     assert placeholder["health_status"] == EVALUATION_FAILED_HEALTH_STATUS
-    assert _public_keys(placeholder) == set(computed)
+    # Public keys only: internal ``_``-prefixed markers differ by design (the placeholder's
+    # ``_evaluation_failed``, the not-tracked row's ``_not_tracked``) and are never serialized.
+    assert _public_keys(placeholder) == _public_keys(computed)
+    assert not {k for k in _public_keys(computed) if k.startswith("_")}, "an unlisted internal key"
 
 
 def test_not_computed_is_reserved_for_the_placeholder_in_every_branch():
