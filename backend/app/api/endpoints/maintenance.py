@@ -1081,10 +1081,10 @@ def update_work_order(
     a completed or cancelled work order -- its status, checklist, notes, title, description, dates,
     priority, assignee or ``requires_shutdown`` (a final record: a later note is a maintenance log
     entry, ``POST /maintenance/log``, and further work a new work order). Re-sending the current
-    value is accepted; on a completed or cancelled work order such a request writes nothing. A standing API token that takes items off
-    ``checklist_results`` (dropping, renaming or clearing them) is **403**; ticking or adding is
-    allowed. Moving to ``cancelled`` settles any downtime the work order
-    holds: resolved, handed to another shutdown work order still holding the machine down, or
+    value is accepted; on a completed or cancelled work order such a request writes nothing. A
+    standing API token that takes items off ``checklist_results`` (dropping, renaming or clearing
+    them) is **403**; ticking or adding is allowed. Moving to ``cancelled`` settles any downtime
+    the work order holds: resolved, handed to another shutdown work order still holding the machine down, or
     -- for an operator's event the work order adopted -- handed back to the machine, still
     open. ``on_hold`` keeps the machine down (the downtime runs on until the work order ends)."""
     wo = _wo_or_404(db, wo_id, company_id, for_update=True)

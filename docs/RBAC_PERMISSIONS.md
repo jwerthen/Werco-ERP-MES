@@ -1290,11 +1290,12 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > Adopting, handing over or handing back sets only the event's `maintenance_work_order_id` /
 > `maintenance_adopted` link (fields `PUT /downtime/{id}` cannot write). Holding and cancelling go
 > through `PUT /maintenance/work-orders/{id}` (planning roles, so the Maintenance page shows Hold /
-> Cancel to Admin / Manager / Supervisor / Platform Admin); that `PUT` refuses `in_progress` and
-> `completed` (**409**, the Start / Complete verbs own them), un-starting a started WO, and changing
-> `requires_shutdown` once started.
+> Cancel to Admin / Manager / Supervisor / Platform Admin, on open rows only); that `PUT` refuses
+> `in_progress` and `completed` (**409**, the Start / Complete verbs own them), un-starting a started
+> WO, changing `requires_shutdown` once started, and any change at all to a completed or cancelled WO
+> (below).
 >
-> **Two state refusals on the same gates (2026-11-17; no role changed).** Creating a maintenance WO
+> **Three state refusals on the same gates (2026-11-17; no role changed).** Creating a maintenance WO
 > with a `schedule_id` that already has an open one (scheduled, overdue, in progress or on hold) is
 > **409** naming it, for every role — one open work order per PM schedule. Completing a WO with any
 > checklist item unticked needs a written `incomplete_checklist_reason` (**409** without one, nothing
@@ -1303,8 +1304,18 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > written). It is a reason on the record, not an approval, so the performing gate is unchanged: an
 > Operator who may complete the WO may record it. A standing API token may not: with any item
 > unticked its completion is **403** `API_TOKEN_INCOMPLETE_CHECKLIST` whatever reason it sends (owner
-> decision 2026-11-17) — see [Credential policy for judgment writes](#credential-policy-for-judgment-writes). Details in
-> `docs/API.md` → Maintenance → *The PM loop*.
+> decision 2026-11-17) — see [Credential policy for judgment writes](#credential-policy-for-judgment-writes). And a
+> completed or cancelled maintenance WO is a final record: a `PUT` that would change **any** of its
+> fields is **409** before any write — its status as before, and now also `checklist_results`,
+> `notes`, title, description, dates, priority, assignee and `requires_shutdown` (the detail names
+> the fields) — for every role and every credential: a person's session, a Platform Admin and an API
+> token alike. Before, only the status was held, so a planning-role `PUT` could re-tick a completed
+> PM's checklist after the fact. Re-sending the record's own value is accepted and writes nothing
+> (no audit row). A later note goes on the record as a `POST /maintenance/log` entry with
+> `maintenance_wo_id` (performing roles, as in the table; dated, signed, audited), never as an edit
+> of the WO. This is a state rule, not a credential policy, so it has no row in the credential table.
+> Details in `docs/API.md` → Maintenance → *A completed or cancelled work order is a final record*
+> and *The PM loop*.
 
 > **Tenancy: ten of the sixteen handlers took no company argument.** `start` and `complete`
 > resolved the work order by bare id, and `dashboard` / `calendar` / `history` / `overdue`
