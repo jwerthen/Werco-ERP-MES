@@ -8756,10 +8756,38 @@ no mention of Detach:
   Detach answers **404** for a removed nest. Removing a nest therefore does not release its PDF;
   detach it first.
 
+An **engineering change order's affected documents** (`engineering_change_orders.affected_documents`)
+are a JSON id list, not a foreign key, so here Postgres would *not* stop the delete. Before this
+check the document was deleted and `GET /eco/eco/affected-items/{id}` silently dropped it from the
+change record (AS9100D 8.5.6). ECOs have no delete verb, so the reference lasts. The check depends
+on the ECO's status:
+
+- **Not yet approved** (draft, submitted, under review): *"This document is listed as affected by
+  engineering change ECO-… [and N other engineering changes]. Take it out of that change's
+  affected_documents first (PUT /eco/eco/{id}), while the change is not yet approved."* That is
+  `PUT /eco/eco/{id}` with the list minus this id (Admin / Manager, audited). The Engineering
+  Changes page has no document field, so this is an API / MCP step.
+- **Approved or later, rejected or cancelled included**: *"This document is listed as affected by
+  engineering change ECO-… (approved), which keeps the record of what the change covered. It must
+  remain available and cannot be deleted."* From approval on, the list is the authorized change
+  scope; a rejected or cancelled change records what was decided. Known gap: `PUT /eco/eco/{id}`
+  still accepts edits to an approved or in-implementation ECO (it refuses only completed, rejected
+  and cancelled ones), so the API still lets a person take the document off such an ECO and then
+  delete it.
+
+The id is matched exactly: the text column is only narrowed by substring, then each candidate's
+JSON is parsed, so an ECO listing document 12 never blocks deleting document 1. A string id
+(`"12"`) counts; a value that is not a JSON list is skipped, as the affected-items read skips it.
+Because there is no foreign key, ECO create and update lock each document they name (`FOR KEY
+SHARE`, the lock a foreign key takes) before their audit row. A list written at the same time as a
+delete is therefore either seen by the delete, or fails its own validation with **422** once the
+delete commits.
+
 **Order of reasons.** Every reason that keeps the document for good is reported before any
-instruction: the retained records above, then a removed QMS link, then a worked or removed nest.
-Only when every blocker can be released does the refusal give instructions, and then it gives the
-QMS unlink and the nest Detach together in one message. Nobody is sent to unlink or detach
+instruction: the retained records above, then a removed QMS link, then a worked or removed nest,
+then an approved or closed ECO. Only when every blocker can be released does the refusal give
+instructions, and then it gives the QMS unlink, the nest Detach and the ECO edit together in one
+message. Nobody is sent to unlink or detach
 something (an audited change, and on the floor a nest losing its drawing) only to be refused
 again. The nest attach verb
 (`POST /laser-nests/{id}/attach-document`) flushes the link before its audit row, like the QMS
@@ -9216,7 +9244,14 @@ the public paths are `/eco/eco/…`.
 > **Cross-tenant affected ids are rejected with 422.** `affected_parts`, `affected_work_orders`, and
 > `affected_documents` are id lists. On create and update, every referenced id must resolve to a live row
 > **in the active company**; the first unknown or cross-tenant id returns **422 Unprocessable Entity**
-> (`{"detail": "Unknown or cross-tenant <part|work order|document> id(s): [...]"}`).
+> (`{"detail": "Unknown or cross-tenant <part|work order|document> id(s): [...]"}`). Each named
+> document is locked `FOR KEY SHARE` during that check, so it can't be deleted between validation
+> and commit.
+>
+> **A listed document can't be deleted.** `DELETE /documents/{id}` refuses **409** while an ECO of
+> the active company lists the document in `affected_documents`. Before approval, take it out of
+> the list with `PUT /eco/eco/{id}` first; from approval on (and for a rejected or cancelled ECO)
+> the document is kept. See [Documents](#documents).
 >
 > **Mutations require Admin / Manager.** All state-changing ECO endpoints (create, update, submit,
 > approve, reject, implement, complete, add/update task, add approval) require role **ADMIN or

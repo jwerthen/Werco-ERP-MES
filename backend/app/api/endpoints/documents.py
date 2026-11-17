@@ -1,4 +1,5 @@
 import hashlib
+import json
 import logging
 import mimetypes
 import os
@@ -15,6 +16,7 @@ from app.api.deps import get_audit_service, get_current_company_id, get_current_
 from app.db.database import get_db
 from app.db.tenant_filter import tenant_query
 from app.models.document import Document, DocumentType
+from app.models.engineering_change import ECOStatus, EngineeringChangeOrder
 from app.models.governance import DocumentFile
 from app.models.hank_intake import HankIntakeFile
 from app.models.laser_nest import LaserNest
@@ -343,6 +345,96 @@ def _laser_nest_blockers(db: Session, company_id: int, document_id: int) -> Tupl
         release = (
             f"This document is the PDF attached to {_named(releasable[0])}{also}. Detach it from the nest first "
             "(Detach on the work order's laser nest row). Removing the nest instead keeps the PDF with it."
+        )
+    return permanent, release
+
+
+# An ECO's affected items are the scope of the change. Until it is approved the scope
+# is still a proposal that its owner may edit; from approval on (and for a rejected or
+# cancelled change) it is the record of what was authorized or decided.
+_ECO_SCOPE_EDITABLE_STATUSES = (ECOStatus.DRAFT, ECOStatus.SUBMITTED, ECOStatus.UNDER_REVIEW)
+
+
+def _eco_document_ids(raw: Optional[str]) -> set:
+    """The document ids an ECO's ``affected_documents`` JSON names; empty when unreadable.
+
+    ``GET /eco/eco/affected-items/{id}`` skips a value it cannot parse, so it names no
+    document there either, and one malformed row must not block every delete.
+    """
+    try:
+        values = json.loads(raw) if raw else []
+    except (json.JSONDecodeError, TypeError):
+        return set()
+    if not isinstance(values, list):
+        return set()
+    ids = set()
+    for value in values:
+        try:
+            ids.add(int(value))
+        except (TypeError, ValueError):
+            continue
+    return ids
+
+
+def _eco_blockers(db: Session, company_id: int, document_id: int) -> Tuple[Optional[str], Optional[str]]:
+    """Say which of the active company's engineering changes list this document as affected,
+    as ``(permanent, release)``.
+
+    ``engineering_change_orders.affected_documents`` is a JSON list of ids, not a foreign
+    key, so nothing stops the physical delete; ``GET /eco/eco/affected-items/{id}`` then drops
+    the id it can no longer resolve, and the change record loses an affected item with no
+    trace on it (AS9100D 8.5.6). ECOs have no delete verb, so the reference lasts as long
+    as the company does.
+
+    - ``release``: an ECO not yet approved (draft, submitted, under review). Its owner may
+      still edit its scope, so the refusal says to take the document out of
+      ``affected_documents`` with ``PUT /eco/eco/{id}`` (Admin / Manager, audited).
+    - ``permanent``: an ECO approved or later, rejected or cancelled included. The list is
+      then the record of what the change covered, so the refusal does not suggest editing
+      it. (``PUT /eco/eco/{id}`` still accepts an approved or in-implementation ECO; that is a
+      separate owner decision.) A status outside the known ones also counts as permanent.
+
+    The text column is narrowed with a substring match on the id's digits, a superset of
+    the rows that name it, and each candidate's JSON is then parsed, so id 1 never matches
+    12. ``ECO create / update`` take a key-share lock on every document they name before
+    their audit row, the lock a foreign key would take, so a list written concurrently
+    with this delete is either seen here or fails its own validation afterwards.
+
+    Scoped to the active company. ECO validation accepts only the company's own document
+    ids, and another company's ECO is never read.
+    """
+    candidates = (
+        db.query(
+            EngineeringChangeOrder.eco_number, EngineeringChangeOrder.status, EngineeringChangeOrder.affected_documents
+        )
+        .filter(
+            EngineeringChangeOrder.company_id == company_id,
+            EngineeringChangeOrder.affected_documents.isnot(None),
+            EngineeringChangeOrder.affected_documents.contains(str(document_id)),
+        )
+        .order_by(EngineeringChangeOrder.id)
+        .all()
+    )
+    listing = [eco for eco in candidates if document_id in _eco_document_ids(eco.affected_documents)]
+    if not listing:
+        return None, None
+
+    editable = [eco for eco in listing if eco.status in _ECO_SCOPE_EDITABLE_STATUSES]
+    recorded = [eco for eco in listing if eco.status not in _ECO_SCOPE_EDITABLE_STATUSES]
+    permanent = None
+    if recorded:
+        status = recorded[0].status.value.replace("_", " ") if recorded[0].status else "unknown status"
+        permanent = (
+            f"This document is listed as affected by engineering change {recorded[0].eco_number} ({status}), which "
+            "keeps the record of what the change covered. It must remain available and cannot be deleted."
+        )
+    release = None
+    if editable:
+        others = len(editable) - 1
+        also = f" and {others} other engineering change{'s' if others > 1 else ''}" if others else ""
+        release = (
+            f"This document is listed as affected by engineering change {editable[0].eco_number}{also}. Take it out "
+            "of that change's affected_documents first (PUT /eco/eco/{id}), while the change is not yet approved."
         )
     return permanent, release
 
@@ -725,8 +817,9 @@ def delete_document(
     retained: part of a revision history, a receipt's certificate or receiving label, a
     shipment's carrier label or bill of lading, captured process-sheet step evidence, a
     governed file record, Hank intake evidence, or linked from a QMS standard, QMS clause
-    evidence or a laser nest (a removed QMS link or nest, or a nest with recorded work,
-    keeps it too; permanent reasons are reported before any unlink instruction). Every table that
+    evidence, a laser nest or an engineering change's affected documents (a removed QMS
+    link or nest, a nest with recorded work, or an ECO approved or later keeps it too;
+    permanent reasons are reported before any unlink instruction). Every table that
     holds a foreign key to ``documents.id`` is checked here: on Postgres none of them has
     an ``ON DELETE``, so an unchecked one fails at flush as a 500 that gives no reason.
     """
@@ -781,10 +874,11 @@ def delete_document(
         raise HTTPException(409, retained)
     qms_permanent, qms_release = _qms_link_blockers(db, company_id, document.id)
     nest_permanent, nest_release = _laser_nest_blockers(db, company_id, document.id)
-    permanent = qms_permanent or nest_permanent
+    eco_permanent, eco_release = _eco_blockers(db, company_id, document.id)
+    permanent = qms_permanent or nest_permanent or eco_permanent
     if permanent:
         raise HTTPException(409, permanent)
-    release = " ".join(text for text in (qms_release, nest_release) if text)
+    release = " ".join(text for text in (qms_release, nest_release, eco_release) if text)
     if release:
         raise HTTPException(409, release)
 

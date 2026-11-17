@@ -2460,8 +2460,10 @@ step record attachment or governed file record names (**409**), voided, removed 
 records included: none has a verb that releases it. A laser nest's PDF is refused too. A removed
 nest, or a live nest whose operation has recorded work, keeps it. Otherwise Detach
 (`DELETE /laser-nests/{id}/document`, Admin / Manager / Supervisor, audited) releases it once it is
-cleared from every nest. A refusal reports every permanent reason before any unlink or Detach
-instruction. New revisions retain prior files, type and links. Required audit loss returns **503**
+cleared from every nest. A document an engineering change order lists in `affected_documents` is
+refused too: before approval, taking it out of the list (`PUT /eco/eco/{id}`, Admin / Manager,
+audited) releases it; from approval on, and for a rejected or cancelled ECO, it is kept. A refusal
+reports every permanent reason before any unlink, Detach or ECO-edit instruction. New revisions retain prior files, type and links. Required audit loss returns **503**
 and rolls back metadata changes; bytes are removed only by the corresponding failure cleanup
 or after an audited deletion commits. Same-company historical part labels remain available.
 The Documents, Quality and Job Costing UI write controls reflect the fixed role gates and FAI

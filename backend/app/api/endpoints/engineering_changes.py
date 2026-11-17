@@ -248,13 +248,15 @@ def _validate_affected_ids_in_company(db: Session, company_id: int, eco_in) -> N
     from app.models.part import Part
     from app.models.work_order import WorkOrder
 
-    def _check(model, ids, label, soft_delete):
+    def _check(model, ids, label, soft_delete, key_share_lock=False):
         if not ids:
             return
         unique_ids = list({int(i) for i in ids})
         query = db.query(model.id).filter(model.id.in_(unique_ids), model.company_id == company_id)
         if soft_delete:
             query = query.filter(model.is_deleted == False)  # noqa: E712
+        if key_share_lock:
+            query = query.order_by(model.id).with_for_update(read=True, key_share=True)
         found = {row[0] for row in query.all()}
         missing = [i for i in unique_ids if i not in found]
         if missing:
@@ -265,7 +267,13 @@ def _validate_affected_ids_in_company(db: Session, company_id: int, eco_in) -> N
 
     _check(Part, eco_in.affected_parts, "part", soft_delete=True)
     _check(WorkOrder, eco_in.affected_work_orders, "work order", soft_delete=True)
-    _check(Document, eco_in.affected_documents, "document", soft_delete=False)
+    # Documents are physically deleted, and ``affected_documents`` is JSON, not a foreign
+    # key. Lock the named rows the way a foreign key would (FOR KEY SHARE, in id order)
+    # before the caller's audit row takes the audit-chain lock: the order DELETE
+    # /documents/{id} takes them in. A delete that got there first has committed by the
+    # time the lock is granted, so the row is gone and this answers 422; a delete that
+    # comes later waits for this ECO to commit, then sees the id and refuses.
+    _check(Document, eco_in.affected_documents, "document", soft_delete=False, key_share_lock=True)
 
 
 # ============== CRUD Endpoints ==============

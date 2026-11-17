@@ -12,6 +12,9 @@ refused case here answers 200 and orphans the referencing row. That is what they
 - ``document_files.document_id``: retained.
 - ``laser_nests.document_id``: a live nest sends the user to Detach; a removed nest
   keeps its PDF so a restore brings it back.
+- ``engineering_change_orders.affected_documents`` (a JSON id list, not a foreign key, so
+  even Postgres would let the delete through and the ECO would silently lose the item):
+  an ECO not yet approved sends the user to edit it; from approval on it is the record.
 
 The QMS links are covered by ``test_document_delete_qms_links.py``.
 """
@@ -19,13 +22,15 @@ The QMS links are covered by ``test_document_delete_qms_links.py``.
 from datetime import date, datetime
 
 import pytest
-from sqlalchemy import Update, event
+from sqlalchemy import Select, Update, event
+from sqlalchemy.dialects import postgresql
 
 from app.api.endpoints import documents
 from app.core.config import settings
 from app.core.security import create_access_token
 from app.models.audit_log import AuditLog
 from app.models.document import Document
+from app.models.engineering_change import ECOStatus, ECOType, EngineeringChangeOrder
 from app.models.governance import DocumentFile
 from app.models.laser_nest import LaserNest, LaserNestPackage
 from app.models.part import Part
@@ -509,3 +514,209 @@ def test_nest_attach_reaches_the_document_before_the_audit_chain_lock(
     assert "link_update" in events and "chain_lock" in events, events
     assert events.index("link_update") < events.index("chain_lock"), events
     assert "link_update" not in events[events.index("chain_lock") :], events
+
+
+# --------------------------------------------------------------------------- ECOs
+
+ECO_EDITABLE = ["draft", "submitted", "under_review"]
+ECO_RECORDED = ["approved", "in_implementation", "completed", "rejected", "cancelled"]
+
+
+def _eco(db, affected_documents, *, company_id=1, status="draft"):
+    requester = make_user(db, company_id=company_id, role=UserRole.MANAGER)
+    eco = EngineeringChangeOrder(
+        eco_number=f"ECO-DOCREF-{_next():05d}",
+        title="Revise weld procedure",
+        description="Document change",
+        eco_type=ECOType.DOCUMENTATION,
+        status=ECOStatus(status),
+        reason_for_change="Customer requirement",
+        requested_by=requester.id,
+        affected_documents=affected_documents,
+        company_id=company_id,
+    )
+    db.add(eco)
+    db.commit()
+    return eco
+
+
+@pytest.mark.parametrize("status", ECO_EDITABLE)
+def test_an_eco_not_yet_approved_sends_the_user_to_edit_it(client, db_session, admin_headers, local_files, status):
+    document_id = _upload(client, admin_headers)
+    eco = _eco(db_session, f"[{document_id}]", status=status)
+    _eco(db_session, f"[{document_id}]", status="draft")
+    audit_before = db_session.query(AuditLog).count()
+
+    response = _delete(client, admin_headers, document_id)
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert f"listed as affected by engineering change {eco.eco_number} and 1 other engineering change." in detail
+    assert "Take it out of that change's affected_documents first (PUT /eco/eco/{id})" in detail
+    _assert_untouched(db_session, document_id, audit_before, local_files)
+
+
+@pytest.mark.parametrize("status", ECO_RECORDED)
+def test_an_approved_or_closed_eco_keeps_the_document(client, db_session, admin_headers, local_files, status):
+    """From approval on, the affected list is the record of what the change covered (and a
+    rejected or cancelled change records what was decided), so the refusal does not suggest editing it."""
+    document_id = _upload(client, admin_headers)
+    _eco(db_session, f"[{document_id}]", status="draft")
+    eco = _eco(db_session, f"[{document_id}]", status=status)
+    audit_before = db_session.query(AuditLog).count()
+
+    response = _delete(client, admin_headers, document_id)
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert f"engineering change {eco.eco_number} ({status.replace('_', ' ')})" in detail
+    assert "keeps the record of what the change covered" in detail
+    assert "Take it out" not in detail
+    _assert_untouched(db_session, document_id, audit_before, local_files)
+
+
+def test_taking_the_document_off_the_eco_releases_it(client, db_session, admin_headers, local_files):
+    document_id = _upload(client, admin_headers)
+    eco = _eco(db_session, f"[{document_id}]")
+    assert _delete(client, admin_headers, document_id).status_code == 409
+
+    edited = client.put(f"/api/v1/eco/eco/{eco.id}", headers=admin_headers, json={"affected_documents": []})
+    assert edited.status_code == 200, edited.text
+
+    response = _delete(client, admin_headers, document_id)
+    assert response.status_code == 200, response.text
+    db_session.rollback()
+    assert db_session.get(Document, document_id) is None
+
+
+def test_an_eco_naming_a_different_id_with_the_same_digits_does_not_block(
+    client, db_session, admin_headers, local_files
+):
+    """The text column is only a prefilter: ids 1 and 12 are different documents."""
+    document_id = _upload(client, admin_headers)
+    _eco(db_session, f"[{document_id}1, 1{document_id}]")
+    _eco(db_session, f'["{document_id}0"]')
+
+    response = _delete(client, admin_headers, document_id)
+
+    assert response.status_code == 200, response.text
+
+
+def test_an_unreadable_affected_documents_value_does_not_block(client, db_session, admin_headers, local_files):
+    """``GET /eco/eco/affected-items`` skips a value it cannot parse; one bad row must not block every delete."""
+    document_id = _upload(client, admin_headers)
+    _eco(db_session, f"not json {document_id}")
+    _eco(db_session, f'{{"id": {document_id}}}')
+
+    response = _delete(client, admin_headers, document_id)
+
+    assert response.status_code == 200, response.text
+
+
+def test_a_string_id_in_the_list_still_counts(client, db_session, admin_headers, local_files):
+    document_id = _upload(client, admin_headers)
+    eco = _eco(db_session, f'["{document_id}"]')
+
+    response = _delete(client, admin_headers, document_id)
+
+    assert response.status_code == 409
+    assert eco.eco_number in response.json()["detail"]
+
+
+def test_an_approved_eco_is_reported_before_a_nest_to_detach(client, db_session, admin_headers, local_files):
+    document_id = _upload(client, admin_headers)
+    _laser_nest(db_session, document_id, company_id=1)
+    eco = _eco(db_session, f"[{document_id}]", status="approved")
+
+    response = _delete(client, admin_headers, document_id)
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert eco.eco_number in detail
+    assert "Detach" not in detail
+
+
+def test_eco_qms_and_nest_instructions_are_given_together(client, db_session, admin_headers, local_files):
+    document_id = _upload(client, admin_headers)
+    db_session.add(QMSStandard(name="AS9100D", company_id=1, document_id=document_id))
+    db_session.commit()
+    nest = _laser_nest(db_session, document_id, company_id=1)
+    eco = _eco(db_session, f"[{document_id}]", status="submitted")
+
+    response = _delete(client, admin_headers, document_id)
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert "Unlink it first" in detail
+    assert f"laser nest {nest.cnc_number}" in detail
+    assert f"engineering change {eco.eco_number}" in detail
+
+
+def test_another_companys_eco_is_not_read(client, db_session, admin_headers, local_files):
+    """ECO validation accepts only the company's own document ids, so such a list can only come from
+    outside the app. It is not named, and since there is no foreign key the delete goes through."""
+    ensure_company(db_session, 2)
+    document_id = _upload(client, admin_headers)
+    eco = _eco(db_session, f"[{document_id}]", company_id=2, status="approved")
+
+    response = _delete(client, admin_headers, document_id)
+
+    assert response.status_code == 200, response.text
+    assert eco.eco_number not in response.text
+
+
+@pytest.mark.parametrize("verb", ["create", "update"])
+def test_eco_write_locks_the_named_documents_before_the_audit_chain_lock(
+    client, db_session, admin_headers, local_files, monkeypatch, verb
+):
+    """With no foreign key, ECO create / update take the lock one would: FOR KEY SHARE on each
+    named document, before the audit row takes the global chain lock, the order the delete takes
+    them in. A concurrent delete is then either seen by the delete's ECO read or makes this
+    write's validation fail. (SQLite ignores the clause; the statement is compiled for Postgres.)"""
+    document_id = _upload(client, admin_headers)
+    eco = _eco(db_session, None)
+    events = []
+
+    def before_execute(conn, clauseelement, multiparams, params, execution_options):  # noqa: ARG001
+        if isinstance(clauseelement, Select) and "documents" in {
+            getattr(table, "name", None) for table in clauseelement.get_final_froms()
+        }:
+            compiled = str(clauseelement.compile(dialect=postgresql.dialect()))
+            if "FOR KEY SHARE" in compiled:
+                events.append("document_key_share")
+
+    monkeypatch.setattr(settings, "AUDIT_HASH_CHAIN_ENABLED", True)
+    original_chain_lock = AuditService._acquire_chain_lock
+
+    def spy_chain_lock(self):
+        events.append("chain_lock")
+        original_chain_lock(self)
+
+    monkeypatch.setattr(AuditService, "_acquire_chain_lock", spy_chain_lock)
+    engine = db_session.get_bind()
+    event.listen(engine, "before_execute", before_execute)
+    try:
+        if verb == "create":
+            response = client.post(
+                "/api/v1/eco/eco/",
+                headers=admin_headers,
+                json={
+                    "title": "Revise weld procedure",
+                    "description": "Document change",
+                    "eco_type": "documentation",
+                    "reason_for_change": "Customer requirement",
+                    "affected_documents": [document_id],
+                },
+            )
+        else:
+            response = client.put(
+                f"/api/v1/eco/eco/{eco.id}",
+                headers=admin_headers,
+                json={"affected_documents": [document_id]},
+            )
+    finally:
+        event.remove(engine, "before_execute", before_execute)
+
+    assert response.status_code == 200, response.text
+    assert "document_key_share" in events and "chain_lock" in events, events
+    assert events.index("document_key_share") < events.index("chain_lock"), events
