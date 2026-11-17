@@ -5942,9 +5942,9 @@ uploads go through text extraction + LLM. See
 | POST | `/maintenance/work-orders` | Create maintenance work order on a work center **or** an asset (or neither, with a `schedule_id`, to inherit the schedule's target) | Admin / Manager / Supervisor |
 | PUT | `/maintenance/work-orders/{id}` | Update maintenance work order; `status` among `scheduled`, `overdue`, `on_hold`, `cancelled` only (**409** for `in_progress` / `completed` — use the verbs — for returning a started work order to `scheduled` / `overdue`, and for changing `requires_shutdown` once started). Moving it to `cancelled` settles any downtime event it holds | Admin / Manager / Supervisor |
 | POST | `/maintenance/work-orders/{id}/start` | Start (→ `in_progress`). A work-center work order with `requires_shutdown` opens, adopts or shares a downtime event — never a second open one on the machine | Admin / Manager / Supervisor / Operator |
-| POST | `/maintenance/work-orders/{id}/complete` | Complete (→ `completed`, advances the linked schedule) and resolve the work order's open downtime event | Admin / Manager / Supervisor / Operator |
+| POST | `/maintenance/work-orders/{id}/complete` | Complete (→ `completed`, advances the linked schedule — the response adds `schedule_next_due_date`) and resolve the work order's open downtime event. `checklist_results` omitted keeps the work order's checklist | Admin / Manager / Supervisor / Operator |
 | GET | `/maintenance/calendar` | Work orders in a date window (**capped at 366 days**) | Yes |
-| GET | `/maintenance/dashboard` | Counts, cost, per-machine MTBF/MTTR (work centers only) | Yes |
+| GET | `/maintenance/dashboard` | Counts, cost, per-machine MTBF/MTTR (work centers only). `overdue_count` / `due_this_week` count work orders; `schedules_overdue` / `schedules_due_this_week` count due PM schedules with no open work order (see *The PM loop* below) | Yes |
 | GET | `/maintenance/history/{work_center_id}` | Event log for one machine (`limit` 1…5000, default 100) | Yes |
 | GET | `/maintenance/assets` | List equipment assets (`include_inactive` default false, `search` on tag / name / type), each with `active_schedule_count` and `open_work_order_count` | Yes |
 | GET | `/maintenance/assets/{id}` | Equipment asset detail | Yes |
@@ -6011,9 +6011,10 @@ uploads go through text extraction + LLM. See
 > previously wrote none at all). Resource types: `maintenance_schedule` (`CREATE` / `UPDATE`, with
 > the deactivation logged as the `is_active` flip), `maintenance_work_order` (`CREATE` / `UPDATE`,
 > plus `STATUS_CHANGE` on start and complete — the complete row carries `total_cost`,
-> `downtime_minutes`, `actual_duration_hours` and `schedule_id` in `extra_data`), and
-> `maintenance_log` (`CREATE`). Rows are logged **before** the terminal commit so they commit
-> atomically with the change.
+> `downtime_minutes`, `actual_duration_hours`, `schedule_id` and `schedule_next_due_date` in
+> `extra_data`), and `maintenance_log` (`CREATE`). A completion that advances a PM schedule also
+> writes that schedule's own `maintenance_schedule` `UPDATE` row. Rows are logged **before** the
+> terminal commit so they commit atomically with the change.
 
 > **`GET /maintenance/calendar` refuses a window wider than 366 days (400)**, and refuses
 > `end_date < start_date` (400). It was the one unbounded read left in the file — `start_date` and
@@ -6160,7 +6161,47 @@ uploads go through text extraction + LLM. See
 >   **503** with nothing saved if one cannot be written. Re-running the same sheet changes nothing and
 >   writes no audit row. File-level problems are **400**.
 > - Importing a schedule creates no work order. Nothing generates due PM work orders automatically
->   today.
+>   today; a planner opens one with **Start PM** (next note).
+
+> **The PM loop: a due schedule, its work order, and the roll-forward.**
+>
+> - **Dashboard.** `overdue_count` / `due_this_week` are unchanged: maintenance **work orders**
+>   (`scheduled` or `overdue`) by `due_date`. `schedules_overdue` / `schedules_due_this_week` count
+>   **active** PM schedules by `next_due_date` (before today; today through today + 7) with **no open
+>   work order** (`scheduled` / `overdue` / `in_progress` / `on_hold`) carrying their `schedule_id`.
+>   A schedule with an open work order is counted through that work order, so the two pairs never
+>   count one PM twice — but only as far as the work-order counts reach: a PM whose work order is
+>   `in_progress` shows only on the **In progress** tile, and one `on_hold` is on **no** tile (an
+>   on-hold maintenance work order never was; find it on the Work Orders tab's On Hold filter). The
+>   Maintenance page's Overdue / Due This Week tiles and the dashboard's
+>   **Maintenance Due** widget show the sum, the page with a *"N work orders · M PMs not started"*
+>   split. "Today" is the server's `date.today()` (UTC on the deployed server), as for the work-order
+>   counts, and a schedule on a retired asset still counts until the schedule itself is deactivated.
+> - **Start PM** (Schedules tab rows and the Dashboard tab's Upcoming cards; planning roles) opens the
+>   work-order form pre-filled from the schedule — title = schedule name, type, priority,
+>   `requires_shutdown`, description, checklist, due date = the schedule's `next_due_date`, scheduled
+>   date = today (Central) — and sends `schedule_id` with **no** target, so the server inherits the
+>   schedule's (an explicit different one is **409**, *Schedule target* above). A schedule that
+>   already has an open work order shows that work order's number instead. The checklist is stored in
+>   the work order's `checklist_results` as a JSON array of `{"item": …, "done": false}`; the Complete
+>   dialog ticks each item and sends the array back.
+> - **Complete** on a work order with a `schedule_id` sets the schedule's `last_completed_date` to the
+>   completion date (UTC) and `next_due_date` to that date plus the interval, in fixed days: daily 1,
+>   weekly 7, biweekly 14, monthly 30, quarterly 90, semi_annual 182, annual 365, custom
+>   `frequency_days`. The response's `schedule_next_due_date` is the new date (`null` when no schedule
+>   was advanced); the schedule's `UPDATE` audit row reads *"… advanced by completing maintenance work
+>   order MWO-…"* with `extra_data.maintenance_work_order_id`. `checklist_results` omitted keeps the
+>   checklist the work order carries; a value, or an explicit `null`, replaces it.
+> - **Edit** (Schedules tab; planning roles) → `PUT /maintenance/schedules/{id}`: next due date,
+>   frequency (`frequency_days` for custom), priority, estimated duration, requires shutdown,
+>   checklist. A schedule has no `version` column, so this `PUT` has no compare-and-swap; the dialog
+>   sends **only the fields changed**, so a dialog left open while someone completes the PM cannot put
+>   the old due date back unless the planner changed it. Name and target are not editable there: the
+>   `PUT` never moves a target, and the PM import matches schedules by target + name, so a rename would
+>   make the next import create a duplicate.
+> - **Known gaps:** the `maintenance.due` / `maintenance.overdue` notification catalog entries still
+>   have no emitter, and *monthly* is a fixed 30 days from the completion date, not a calendar month,
+>   so a schedule completed on its due date drifts earlier each month.
 
 ### Tool & Fixture Management (tool crib)
 
@@ -8846,6 +8887,55 @@ in `RBAC_PERMISSIONS.md`.
 > active vendors whose `approval_status` is Approved or Approved - Customer Directed (migration
 > `123`; see Purchasing → *Approved Supplier List on the vendor record*). Until the ASL is loaded, K is
 > 0. The "no performance scorecards" warning still quotes the active count.
+
+> **The Audit Trail evidence row reports a paused hash chain, and missing triggers, instead of
+> claiming them.** The *Audit Trail (Audit Log & Hash-Chain Status)* row — titled *Audit Trail
+> (Immutable Hash-Chain Log)* until this change — used to say "integrity hash chain active" and
+> suggest `compliant` whenever the company had any audit entries — even with the chain paused
+> (`AUDIT_HASH_CHAIN_ENABLED=false`; see
+> [Pausing the hash chain](AUDIT_LOG_RETENTION_RUNBOOK.md#pausing-the-hash-chain-audit_hash_chain_enabled)),
+> when new entries carry the `LEGACY_CHAIN_PAUSED` placeholder and can never be verified. It now reads
+> three things on every call: the setting; how many of the company's entries carry that placeholder,
+> over its **whole history** (a paused span never becomes verifiable by ageing; the last-12-months
+> figure is shown alongside); and, on PostgreSQL, whether the `tr_audit_log_no_update` /
+> `tr_audit_log_no_delete` triggers exist and fire (`pg_trigger`, enabled `O`/`A`).
+>
+> | Chain now | Paused entries (any age) | `health_status` / `suggested_compliance` | `description` says |
+> |-----------|--------------------------|------------------------------------------|--------------------|
+> | on | 0 | `healthy` / `compliant` | `…, SHA-256 integrity chain` |
+> | on | K > 0 | `warning` / `partial` | `…; SHA-256 integrity chain enabled, but K entries were written while it was paused (J in last 12 months)` |
+> | paused | K ≥ 0 (the company has entries) | `warning` / `partial` | `…; SHA-256 integrity chain paused (K entries written without it, J in last 12 months)` — or `(no entries written without it yet)` |
+> | either | no entries at all | `no_data` / `not_assessed` | unchanged when on; `…; SHA-256 integrity chain paused` when paused |
+>
+> If the trigger check finds either trigger missing or disabled, the row is `warning` / `partial`
+> whatever the chain state, and `description` ends `; database UPDATE/DELETE triggers missing or
+> disabled`. `health_detail` ends with the trigger finding: "Database triggers refuse UPDATE and DELETE
+> statements on audit entries." when both are in force, the missing/disabled sentence when not, and
+> "Database UPDATE/DELETE trigger status could not be checked." off PostgreSQL (dev/test SQLite) or if
+> the catalog read fails (it runs in its own savepoint, so a failure cannot abort the request). A failed
+> read **on PostgreSQL** also caps the row at `warning` / `partial` and appends `; database UPDATE/DELETE
+> trigger status could not be checked` to `description`; off PostgreSQL there is nothing to read, so it
+> does not cap. The warning rows' `health_detail` also says the paused entries carry no integrity hash and can never be
+> cryptographically verified, with the split `K of N (J in the last 12 months)`. The healthy text says
+> the chain is **enabled**, not verified — chain integrity is checked by the platform-admin
+> `/audit/integrity/*` endpoints, not by this row.
+>
+> A clause backed by this row therefore gets a suggested roll-up (`overall_suggested_compliance`,
+> auto-link's `compliance_summary`) of `partial` at best, never `compliant`, once the company has any
+> paused entry, while the chain is paused, or while the triggers are missing or unreadable. That is a
+> suggestion only: neither endpoint writes the clause's `compliance_status`. Of the fields that
+> change, auto-link (`POST /qms-standards/{standard_id}/auto-link`) stores only `description`
+> (`health_status`, `health_detail` and `suggested_compliance` are computed per call and never
+> persisted), so stored evidence picks up the new wording on the next auto-link run in which the audit
+> rule computes (a run where it fails leaves the stored link unchanged; see `evidence_not_computed`).
+> The QMS page's linked-evidence list shows a stored link's `title` and count, not its `description`;
+> the live auto-evidence preview shows `description` and `health_detail`. That is why the title was
+> renamed: "Immutable Hash-Chain" was untrue for every paused entry and is the one claim the list
+> shows, so the title now names what the row reports and asserts nothing. Existing auto-linked
+> evidence picks up the new title on the next auto-link run in which the audit rule computes (a run
+> where it fails leaves the stored link unchanged; see `evidence_not_computed`), matched by rule id;
+> no migration. The row's `title`, `module_reference` and `evidence_type` do not change with the chain
+> or trigger state.
 
 > **The PM evidence row now judges the PM schedules, not just maintenance work orders — expect the
 > verdict to drop.** The *Preventive Maintenance & Infrastructure* row (clauses matched on maintenance

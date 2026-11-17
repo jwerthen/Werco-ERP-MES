@@ -96,6 +96,9 @@ import type {
   MaintenanceAsset,
   MaintenanceAssetInput,
   MaintenanceAssetUpdate,
+  MaintenanceSchedule,
+  MaintenanceScheduleUpdate,
+  MaintenanceWorkOrderCompleted,
   PmImportResponse,
 } from '../types/maintenance';
 import {
@@ -5073,8 +5076,9 @@ class ApiService {
     return response.data;
   }
 
-  async updateMaintenanceSchedule(id: number, data: any) {
-    const response = await this.api.put(`/maintenance/schedules/${id}`, data);
+  /** Only the fields sent change; the target never does. Admin / Manager / Supervisor. */
+  async updateMaintenanceSchedule(id: number, data: MaintenanceScheduleUpdate): Promise<MaintenanceSchedule> {
+    const response = await this.api.put<MaintenanceSchedule>(`/maintenance/schedules/${id}`, data);
     return response.data;
   }
 
@@ -5108,8 +5112,9 @@ class ApiService {
     return response.data;
   }
 
-  async completeMaintenanceWorkOrder(id: number, data: any) {
-    const response = await this.api.post(`/maintenance/work-orders/${id}/complete`, data);
+  /** Completing a work order with a `schedule_id` advances that PM schedule (`schedule_next_due_date`). */
+  async completeMaintenanceWorkOrder(id: number, data: any): Promise<MaintenanceWorkOrderCompleted> {
+    const response = await this.api.post<MaintenanceWorkOrderCompleted>(`/maintenance/work-orders/${id}/complete`, data);
     return response.data;
   }
 

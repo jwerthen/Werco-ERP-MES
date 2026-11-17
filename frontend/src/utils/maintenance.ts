@@ -77,3 +77,66 @@ export const STARTABLE_STATUSES = new Set(['scheduled', 'overdue', 'on_hold']);
 
 /** Statuses a work order can still be cancelled from (anything not already over). */
 export const CANCELLABLE_STATUSES = new Set(['scheduled', 'overdue', 'in_progress', 'on_hold']);
+
+/** Statuses in which a maintenance work order is still open (mirrors the server's `_OPEN_STATUSES`). */
+export const OPEN_WO_STATUSES = new Set(['scheduled', 'overdue', 'in_progress', 'on_hold']);
+
+/** One line of a work order's checklist, ticked off at completion. */
+export interface ChecklistResultItem {
+  item: string;
+  done: boolean;
+}
+
+/**
+ * A work order's `checklist_results`, read tolerantly: the `[{item, done}]` array this page
+ * writes, a plain JSON array of strings (a schedule-style checklist), or one item per line.
+ */
+export const parseChecklistResults = (raw?: string | null): ChecklistResultItem[] => {
+  const text = (raw ?? '').trim();
+  if (!text) return [];
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (Array.isArray(parsed)) {
+      return parsed
+        .map(entry => {
+          if (typeof entry === 'string') return { item: entry.trim(), done: false };
+          if (entry && typeof entry === 'object') {
+            const record = entry as Record<string, unknown>;
+            const item = typeof record.item === 'string' ? record.item : String(record.item ?? '');
+            return { item: item.trim(), done: record.done === true };
+          }
+          return { item: String(entry ?? '').trim(), done: false };
+        })
+        .filter(entry => entry.item);
+    }
+  } catch {
+    // Not JSON: one item per line, below.
+  }
+  return text
+    .split(/\r?\n/)
+    .map(item => item.trim())
+    .filter(Boolean)
+    .map(item => ({ item, done: false }));
+};
+
+/** The `checklist_results` a work order is opened with: one unticked item per non-blank line. */
+export const checklistResultsPayload = (text: string): string | null => {
+  const items = text
+    .split(/\r?\n/)
+    .map(item => item.trim())
+    .filter(Boolean);
+  return items.length ? JSON.stringify(items.map(item => ({ item, done: false }))) : null;
+};
+
+/** The open work order (if any) each PM schedule is being worked under, keyed by schedule id. */
+export const openWorkOrdersBySchedule = <T extends { schedule_id?: number | null; status: string }>(
+  workOrders: T[]
+): Map<number, T> => {
+  const bySchedule = new Map<number, T>();
+  for (const wo of workOrders) {
+    if (wo.schedule_id != null && OPEN_WO_STATUSES.has(wo.status) && !bySchedule.has(wo.schedule_id)) {
+      bySchedule.set(wo.schedule_id, wo);
+    }
+  }
+  return bySchedule;
+};

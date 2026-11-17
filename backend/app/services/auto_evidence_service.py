@@ -9,9 +9,10 @@ import logging
 from datetime import date, datetime, timedelta
 from typing import List, Optional
 
-from sqlalchemy import func
+from sqlalchemy import and_, case, func, text
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.audit_log import AuditLog
 from app.models.calibration import CalibrationRecord, CalibrationStatus, Equipment
 from app.models.customer_complaint import ComplaintStatus, CustomerComplaint
@@ -32,6 +33,7 @@ from app.models.quality import (
 from app.models.spc import SPCCharacteristic
 from app.models.supplier_scorecard import SupplierScorecard
 from app.models.work_order import WorkOrder
+from app.services.audit_service import PAUSED_CHAIN_PLACEHOLDER
 from app.services.company_time import company_today
 from app.services.supplier_approval_service import APPROVED_STATUSES
 
@@ -785,34 +787,184 @@ def _query_spc(db: Session, company_id: int) -> dict:
     )
 
 
+# The two row-level triggers migrations 008/060 put on public.audit_logs. They are what keeps
+# an entry from being altered or removed through SQL, and the only such control left while the
+# hash chain is paused -- but prod has run without them before (lost at the 2026-07-07
+# bootstrap, restored by 060), so the evidence row reads the catalog rather than assuming them.
+AUDIT_LOG_TRIGGER_NAMES = ("tr_audit_log_no_update", "tr_audit_log_no_delete")
+
+# tgenabled 'O' (origin) and 'A' (always) fire in a normal session; 'D' is disabled and 'R'
+# fires only under session_replication_role = replica. A literal, not an f-string over
+# AUDIT_LOG_TRIGGER_NAMES, so bandit B608 has nothing to flag; a test holds the two together.
+_AUDIT_LOG_TRIGGER_CHECK_SQL = (
+    "SELECT count(*) FROM pg_trigger "
+    "WHERE tgrelid = to_regclass('public.audit_logs') "
+    "AND tgname IN ('tr_audit_log_no_update', 'tr_audit_log_no_delete') "
+    "AND tgenabled IN ('O', 'A')"
+)
+
+AUDIT_TRIGGERS_IN_FORCE_SENTENCE = "Database triggers refuse UPDATE and DELETE statements on audit entries."
+AUDIT_TRIGGERS_MISSING_SENTENCE = (
+    "The database triggers that refuse UPDATE and DELETE statements on audit entries are missing or disabled."
+)
+AUDIT_TRIGGERS_UNCHECKED_SENTENCE = "Database UPDATE/DELETE trigger status could not be checked."
+
+
+def _dialect_name(db: Session) -> str:
+    bind = db.get_bind()
+    return bind.dialect.name if bind is not None else ""
+
+
+def _audit_triggers_in_force(db: Session) -> Optional[bool]:
+    """Whether both audit-log triggers exist and fire, read from ``pg_trigger``.
+
+    ``True`` / ``False`` on PostgreSQL; ``None`` when it cannot be told -- another dialect
+    (SQLite in dev and tests has no triggers to read) or a failed catalog read. The read runs
+    in its own savepoint so a failure cannot abort the caller's transaction; ``begin_nested()``
+    sits outside the ``try`` because a flush failure there is the caller's, not this check's.
+    Not detectable here: a session that sets ``session_replication_role = replica``, or a
+    TRUNCATE, neither of which fires a row trigger.
+    """
+    if _dialect_name(db) != "postgresql":
+        return None
+    savepoint = db.begin_nested()
+    try:
+        found = db.execute(text(_AUDIT_LOG_TRIGGER_CHECK_SQL)).scalar_one()
+    except Exception:  # noqa: BLE001 - an unreadable catalog is "not checked", never a false claim
+        savepoint.rollback()
+        logger.warning("Could not read audit-log trigger state from pg_trigger", exc_info=True)
+        return None
+    savepoint.commit()
+    return int(found) == len(AUDIT_LOG_TRIGGER_NAMES)
+
+
+def _entries(n: int) -> str:
+    return f"{n} entry" if n == 1 else f"{n} entries"
+
+
 def _query_audit_log(db: Session, company_id: int) -> dict:
+    """Evidence row for the audit trail. It must not claim protection the system lacks.
+
+    Three facts decide it, each read rather than assumed:
+
+    * whether the SHA-256 hash chain is on NOW -- ``settings.AUDIT_HASH_CHAIN_ENABLED``, read
+      per call (CLAUDE.md invariant 2; docs/AUDIT_LOG_RETENTION_RUNBOOK.md -> Pausing the hash
+      chain);
+    * how many of the company's entries, over its WHOLE history, carry
+      ``PAUSED_CHAIN_PLACEHOLDER`` -- written while the chain was paused, so they can never be
+      verified. Whole history, not a window: the row speaks for every entry it counts, and a
+      paused span never becomes verifiable by ageing. (The figure for the last 12 months is
+      reported alongside it.) All four counts come from one conditional aggregate over the
+      company's rows -- the same scan the total already needed;
+    * whether the 008/060 UPDATE/DELETE triggers exist and fire (``_audit_triggers_in_force``).
+
+    Chain paused now, any paused entry, or triggers missing -- or unreadable on PostgreSQL --
+    caps the row at ``warning`` / ``partial``, and the reason goes into ``description`` and
+    ``health_detail``. Only chain on, no paused entry and triggers in force (or, off PostgreSQL,
+    not checkable at all) is ``healthy`` / ``compliant``.
+    The chain being ENABLED is all this row knows about it: chain integrity is verified by the
+    platform-admin integrity endpoints, not here, and the text says so rather than "active".
+    """
     cutoff = _recent_cutoff()
-    total = db.query(func.count(AuditLog.id)).filter(AuditLog.company_id == company_id).scalar() or 0
-    recent = (
-        db.query(func.count(AuditLog.id))
-        .filter(AuditLog.company_id == company_id, AuditLog.timestamp >= cutoff)
-        .scalar()
-        or 0
+    chain_enabled = settings.AUDIT_HASH_CHAIN_ENABLED
+    is_paused = AuditLog.integrity_hash == PAUSED_CHAIN_PLACEHOLDER
+    is_recent = AuditLog.timestamp >= cutoff
+    total, recent, paused_total, paused_recent = (
+        db.query(
+            func.count(AuditLog.id),
+            func.coalesce(func.sum(case((is_recent, 1), else_=0)), 0),
+            func.coalesce(func.sum(case((is_paused, 1), else_=0)), 0),
+            func.coalesce(func.sum(case((and_(is_paused, is_recent), 1), else_=0)), 0),
+        )
+        .filter(AuditLog.company_id == company_id)
+        .one()
     )
+    total, recent, paused_total, paused_recent = (
+        int(total or 0),
+        int(recent or 0),
+        int(paused_total or 0),
+        int(paused_recent or 0),
+    )
+    triggers = _audit_triggers_in_force(db)
+    # On PostgreSQL an unreadable catalog is an unknown about the one control that stands behind a
+    # paused span, so it caps the row like a missing trigger. Off PostgreSQL (SQLite in dev/test)
+    # there is nothing to read, and the text says "could not be checked" without capping.
+    triggers_unknown = triggers is None and _dialect_name(db) == "postgresql"
+
+    counts = f"{total} audit log {'entry' if total == 1 else 'entries'} ({recent} in last 12 months)"
+    paused_split = f"{paused_total} of {total} ({paused_recent} in the last 12 months)"
 
     if total == 0:
         health = "no_data"
-        health_detail = "No audit log entries found"
         suggested = "not_assessed"
+        if chain_enabled:
+            description = f"{counts}, SHA-256 integrity chain"
+            detail = ["No audit log entries found"]
+        else:
+            description = f"{counts}; SHA-256 integrity chain paused"
+            detail = [
+                "No audit log entries found. The integrity hash chain is paused, "
+                "so entries written now will not be hash-chained."
+            ]
     else:
-        health = "healthy"
-        health_detail = f"Immutable audit trail with {total} entries, integrity hash chain active"
-        suggested = "compliant"
+        if not chain_enabled:
+            written_without = (
+                f"{_entries(paused_total)} written without it, {paused_recent} in last 12 months"
+                if paused_total
+                else "no entries written without it yet"
+            )
+            description = f"{counts}; SHA-256 integrity chain paused ({written_without})"
+            detail = [
+                "The integrity hash chain is paused (AUDIT_HASH_CHAIN_ENABLED is off): entries written "
+                "while it is paused carry no integrity hash and can never be cryptographically verified.",
+                f"Entries written while paused: {paused_split}.",
+            ]
+        elif paused_total:
+            description = (
+                f"{counts}; SHA-256 integrity chain enabled, but {_entries(paused_total)} "
+                f"{'was' if paused_total == 1 else 'were'} written while it was paused "
+                f"({paused_recent} in last 12 months)"
+            )
+            detail = [
+                f"Entries written while the integrity hash chain was paused: {paused_split}. They carry no "
+                "integrity hash and can never be cryptographically verified. The chain setting is on again.",
+            ]
+        else:
+            description = f"{counts}, SHA-256 integrity chain"
+            detail = [
+                f"Audit trail with {_entries(total)}. Integrity hash chain enabled and no entry was written "
+                "while it was paused (chain integrity is not re-verified by this check).",
+            ]
+        if triggers is False:
+            description += "; database UPDATE/DELETE triggers missing or disabled"
+        elif triggers_unknown:
+            description += "; database UPDATE/DELETE trigger status could not be checked"
+
+        problem = (not chain_enabled) or paused_total > 0 or triggers is False or triggers_unknown
+        health = "warning" if problem else "healthy"
+        suggested = "partial" if problem else "compliant"
+
+    if total or not chain_enabled:
+        if triggers is True:
+            detail.append(AUDIT_TRIGGERS_IN_FORCE_SENTENCE)
+        elif triggers is False:
+            detail.append(AUDIT_TRIGGERS_MISSING_SENTENCE)
+        else:
+            detail.append(AUDIT_TRIGGERS_UNCHECKED_SENTENCE)
 
     return dict(
         evidence_type="module",
-        title="Audit Trail (Immutable Hash-Chain Log)",
-        description=f"{total} audit log entries ({recent} in last 12 months), SHA-256 integrity chain",
+        # Names what the row reports and asserts nothing: it is the only text the QMS page's
+        # linked-evidence list shows for a stored link, and it cannot vary with the state (auto-link
+        # rewrites stored titles by rule id). Formerly "Audit Trail (Immutable Hash-Chain Log)", untrue for
+        # every entry written while the chain was paused.
+        title="Audit Trail (Audit Log & Hash-Chain Status)",
+        description=description,
         module_reference="/audit",
         total_count=total,
         recent_count=recent,
         health_status=health,
-        health_detail=health_detail,
+        health_detail=" ".join(detail),
         examples=[],
         suggested_compliance=suggested,
     )
@@ -1295,7 +1447,7 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
     {
         "id": "audit",
         "evidence_type": "module",
-        "title": "Audit Trail (Immutable Hash-Chain Log)",
+        "title": "Audit Trail (Audit Log & Hash-Chain Status)",
         "module_reference": "/audit",
         "keywords": ["internal audit", "audit program", "audit trail", "management review", "audit log"],
         "query_fn": _query_audit_log,
