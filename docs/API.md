@@ -677,18 +677,29 @@ tokens" below), never wider.
 >   order, or a laser nest's planned runs, once work is recorded; re-importing a nest package onto a
 >   laser job with recorded work (its own refusal text) — **403**. See Work Orders → "Short count at
 >   completion" → "API tokens may not declare scrap or make count judgments".
+> - **Comments and watchers (owner decision 2026-11-16).** Posting, editing or deleting a comment and
+>   watching or unwatching a record answer **403** to every API token, whatever its role or scope: a
+>   comment is a person's own words. The reads stay open to a token the read gates admit. See
+>   [Comments and watchers](#comments-and-watchers).
+> - **Hank notes (owner decision 2026-11-16).** Hank's `add_note` task posts a work-order comment,
+>   so every API token is refused **403** at `POST /hank/tasks` and `POST /hank/tasks/{id}/execute`
+>   with the comment routes' text, whatever its role or scope. See Hank → "Reviewed task contract".
 > - **Left open.** **Resume Work Order** (`POST /work-orders/{id}/resume`): a token whose user holds
 >   Admin / Manager / Supervisor may lift a work-order hold, audited as that user with
 >   `extra_data.credential` (owner decision 2026-11-07). Dismiss, snooze and feedback on a
 >   recommendation stay open to every credential — a design decision of the AI governance change,
->   confirmed by the owner 2026-11-07 for Dismiss on an action card.
+>   confirmed by the owner 2026-11-07 for Dismiss on an action card. Hank's `change_due_date` task is
+>   open to a full token whose user holds Admin / Manager / Supervisor, in parity with
+>   `PUT /work-orders/{id}` (owner decision 2026-11-16; whether agents may move due dates is an open
+>   owner follow-up).
 >
 > A crew-station badge token is a person and passes the scrap, short-close and count rules (for scrap
 > and short closes that is the owner's decision, which names the crew badge; for the count rules it is
 > this PR's reading). An
 > interactive JWT, including one an MCP client carries, is the person's own session and is not
 > refused by any of them — that is current behavior, not part of the 2026-11-07 decision, which
-> covered standing API tokens only.
+> covered standing API tokens only. Separately, the MCP door refuses a Hank `add_note` to an agent
+> even on a person's own JWT (see [MCP door](#mcp-door-mcp)).
 >
 > **The row wins over the claims.** The `api_tokens` row — never the JWT — says who and which
 > company: the JWT's `user_id` / `company_id` must equal the row's or the token is refused, the active
@@ -1545,8 +1556,8 @@ company-scoped.
 | GET | `/work-orders/{id}` | Get work order by ID. Also carries the job's cost by element (`job_cost_actuals`), the inventory-ledger material figure (`issued_material_cost`) and, per operation, where its actual hours come from (`hours_source`, `recorded_setup_hours`, `recorded_run_hours`, `hours_include_backfill`) — see "Cost and actual hours on the work-order read" below | Yes |
 | GET | `/work-orders/by-number/{wo_number}` | Get work order by number: the **same body** as by ID (every computed field included). A soft-deleted work order is **404**, as by ID. Unlike the read by ID it does **not** reconcile on read — it writes nothing | Yes |
 | GET | `/work-orders/{id}/timeline` | Chronological job history with category, actor and time filters; opaque cursor, `limit` 1–100 (default 30). Returns business events and source links, not raw audit payloads. Each item a single operation owns (its start / finish, production receipts, process-step evidence, labor, a blocker filed against it) carries `operation_id`; the job's own items carry `null` | Yes |
-| PUT | `/work-orders/{id}` | Update work order (body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status, **or sets `status` to COMPLETE/CLOSED from any status other than COMPLETE/CLOSED** — see "Terminal-state lock" below). **`due_date` is the one non-`status` field that IS status-gated: changing it on a COMPLETE/CLOSED/CANCELLED work order returns 409** (see "Due date on a finished job" below). Other non-`status` fields such as `notes` / `special_instructions` / `unit_number` carry **no status gate**: they are editable at any status, including terminal ones (send `unit_number: null` — or `""`, which is trimmed to NULL — to clear it). **The flip verb for `sequential_operations`** — turning it *on* returns **409** on a laser nest WO, and **409 naming the operations** when work is already under way out of sequence; otherwise it demotes un-worked blocked operations READY → PENDING, one audit row each (see "READY promotion" below). **`status: on_hold` on a DRAFT work order returns 409** (a draft has nothing on the floor to hold — release it first); this `PUT` is the "Hold Work Order" write for a released / in-progress job, and the door that puts a held job back on the floor is `POST /work-orders/{id}/resume` (this `PUT` can still move a held job to `draft` or `cancelled`, which keeps it off the floor; its blind move to `released` / `in_progress` is a known gap — see "Draft and on-hold work orders refuse every start" below). **Any move to `draft`** (from released / in progress / on hold) returns every un-worked READY operation — laser nests included — to PENDING with one **required** audit row each; **503**, nothing changed, when those rows cannot be written (see "Returning a job to draft" below). **Lowering `quantity_ordered` below what a whole-order operation has already accounted for (its good + scrap) returns 409** naming the operation, before any field is written — lower the order only by units no operation has started; **raising** it once a whole-order or component operation has completed returns 409 too; whole-order targets restated as `component_quantity` move with the order (audited); an API token lowering it once work is recorded gets 403, as does an API token raising the header's `quantity_scrapped` (only a person declares scrap — owner decision 2026-11-07), changing `scrap_reason`, or changing the header's `quantity_complete` / `quantity_scrapped` in either direction (this PR's extension); and a `sequential_operations` flip that would re-interpret a declared short returns 409 (see "Short count at completion" below) | Admin / Manager / Supervisor |
-| DELETE | `/work-orders/{id}` | Delete work order (soft by default; `hard_delete=true` only for draft/cancelled, and refused **409** when ledger-backed ties or saved templates reference it) | Admin / Manager |
+| PUT | `/work-orders/{id}` | Update work order (an absent, other-company **or soft-deleted** work order is **404** `Work order not found` — restore is its own verb; body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status, **or sets `status` to COMPLETE/CLOSED from any status other than COMPLETE/CLOSED** — see "Terminal-state lock" below). **`due_date` is the one non-`status` field that IS status-gated: changing it on a COMPLETE/CLOSED/CANCELLED work order returns 409** (see "Due date on a finished job" below). Other non-`status` fields such as `notes` / `special_instructions` / `unit_number` carry **no status gate**: they are editable at any status, including terminal ones (send `unit_number: null` — or `""`, which is trimmed to NULL — to clear it). **The flip verb for `sequential_operations`** — turning it *on* returns **409** on a laser nest WO, and **409 naming the operations** when work is already under way out of sequence; otherwise it demotes un-worked blocked operations READY → PENDING, one audit row each (see "READY promotion" below). **`status: on_hold` on a DRAFT work order returns 409** (a draft has nothing on the floor to hold — release it first); this `PUT` is the "Hold Work Order" write for a released / in-progress job, and the door that puts a held job back on the floor is `POST /work-orders/{id}/resume` (this `PUT` can still move a held job to `draft` or `cancelled`, which keeps it off the floor; its blind move to `released` / `in_progress` is a known gap — see "Draft and on-hold work orders refuse every start" below). **Any move to `draft`** (from released / in progress / on hold) returns every un-worked READY operation — laser nests included — to PENDING with one **required** audit row each; **503**, nothing changed, when those rows cannot be written (see "Returning a job to draft" below). **Lowering `quantity_ordered` below what a whole-order operation has already accounted for (its good + scrap) returns 409** naming the operation, before any field is written — lower the order only by units no operation has started; **raising** it once a whole-order or component operation has completed returns 409 too; whole-order targets restated as `component_quantity` move with the order (audited); an API token lowering it once work is recorded gets 403, as does an API token raising the header's `quantity_scrapped` (only a person declares scrap — owner decision 2026-11-07), changing `scrap_reason`, or changing the header's `quantity_complete` / `quantity_scrapped` in either direction (this PR's extension); and a `sequential_operations` flip that would re-interpret a declared short returns 409 (see "Short count at completion" below) | Admin / Manager / Supervisor |
+| DELETE | `/work-orders/{id}` | Delete work order (soft by default; `hard_delete=true` only for draft/cancelled, and refused **409** when ledger-backed ties or saved templates reference it, or when it has comments) | Admin / Manager |
 | POST | `/work-orders/{id}/restore` | Restore a soft-deleted work order (**400** if it is not deleted). Re-opens the ties the delete cancelled — **except** any whose part has since been reclassified into one the shop produces. Returns an **envelope** (`message` + `skipped_material_allocations`), not a bare message; see "Restoring a work order" below. Reached from Work Orders → **Deleted** (`deleted_only=true` above) | Admin / Manager |
 | POST | `/work-orders/{id}/release` | Release to production. **400** `Only draft work orders can be released` when not DRAFT, **400** `Work order must have at least one operation` when it has none — the only two checks; there is no material, blocker or readiness gate (see "Releasing work orders" below). **404** when missing or soft-deleted | Admin / Manager / Supervisor |
 | POST | `/work-orders/bulk-release` | **Release several DRAFT work orders in one call.** Body `{"work_order_ids": [...]}`: 1–50 positive ids (repeats count toward the 50 and are de-duplicated, first occurrence kept); any other key → **422**. Each id is judged and released exactly as `POST /work-orders/{id}/release` would, all in **one** commit. **200** once the body validates — even when every item was refused — with `{results, released_count, error_count}`, one result per distinct id in request order, unless the whole request fails after the per-item phase (the audit rows or the commit: **409** on a lost lock race, otherwise 5xx, nothing saved). Not an MCP tool. See "Releasing several work orders at once" below | Admin / Manager / Supervisor |
@@ -1566,6 +1577,10 @@ company-scoped.
 | GET | `/work-orders/{id}/material-allocations/{allocation_id}/consumption` | Per-source-lot ledger position of a tie (`issued` / `returned` / `net`) — the pre-confirm read behind the return dialog | Yes |
 | POST | `/work-orders/{id}/material-allocations/{allocation_id}/return` | **Return consumed material to its source lots** — reasoned, audited, compensating. The only verb on this router that posts inventory | Admin / Manager / Supervisor |
 | GET | `/work-orders/{id}/backflush-preview` | **Dry run (PR 4.5)** — what completing this work order would consume, per component and per lot, before anything moves. Pure read: no ledger row, no audit row, no event | Yes |
+
+> **Comments on a work order** (the detail page's Comments panel, with @mentions and a Watch
+> toggle) are their own routes, `/comments` and `/watchers` with `entity_type=work_order` — see
+> [Comments and watchers](#comments-and-watchers).
 
 > **Tenant isolation on operation/completion endpoints.** The operation- and completion-level
 > endpoints above (`/start`, `/complete`, `/operations/{id}`, `/operations/{id}/start`,
@@ -1632,6 +1647,11 @@ company-scoped.
 > work-order list hid the control while the detail page and the API permitted the same edit, which made
 > the audit trail look like a restriction was holding when two other doors were open. Both UI surfaces
 > now hide the due-date pencil on a terminal WO to match, but the 409 is what enforces it.
+>
+> The rule is **one implementation**, `services/work_order_due_date.py`
+> (`assert_due_date_change_allowed`), shared by this `PUT` and Hank's `change_due_date` task (Hank →
+> "Reviewed task contract"), so the two doors cannot drift apart. The `PUT` only judges the change
+> there; its own `setattr` loop still writes the value.
 >
 > **READY promotion: a sequenced ROUTING or a DISPATCH POOL, chosen per work order.** Which of the two
 > a work order is, is its own setting — `sequential_operations`, added by migration `081` and carried on
@@ -2033,7 +2053,8 @@ company-scoped.
 >   terminal work order.
 > - **A soft-deleted work order is 404** on clock-in, both start verbs, `POST /work-orders/{id}/start`,
 >   `POST /work-orders/{id}/release` and the generic `PUT /work-orders/operations/{id}` (the whole verb:
->   no field of a deleted job's operation is editable through it).
+>   no field of a deleted job's operation is editable through it) — and, since 2026-11-16, the header
+>   `PUT /work-orders/{id}` too (restore is its own verb).
 > - **A laser child does not inherit its assembly parent's draft or hold** — the gate reads the
 >   operation's own work order. Hold the laser work order itself to stop its nests.
 > - **List membership does not change.** Draft and held jobs stay on the kiosk queue, the crew station,
@@ -4018,6 +4039,19 @@ company-scoped.
 > FK enforcement is off there). **Only live templates are named**, since a tombstone has no name the
 > planner can act on. And **soft delete is untouched** — it is the point: a soft-deleted work order
 > keeps every template working. See Work Orders → "Work order templates".
+
+> **Hard delete is also refused 409 when the work order has comments** (2026-11-16). Comments and
+> watchers name the work order with no foreign key, but every comment's `comment_added` /
+> `comment_mentioned` notification event carries `operational_events.work_order_id`, a plain FK with
+> no `ON DELETE`, so an unguarded hard delete was a `ForeignKeyViolation` **500** on Postgres (and,
+> had the best-effort emit failed, a silent orphaning of the thread). The refusal is raised **before
+> the first mutation**, after the ledger and template probes: *"This work order has N comment(s), so
+> it cannot be permanently deleted. Soft delete instead — the work order and its comment thread stay
+> intact."* For the template guard's reason, **deleted comments count too** — their events stay and
+> Postgres does not read `is_deleted` — so a work order whose comments were all deleted is refused
+> with *"This work order has deleted comments that are kept as records with their notifications,
+> …"*. The probe is tenant-scoped (`comment_service.comment_counts_for_record`). Soft delete is
+> untouched and keeps the thread. See [Comments and watchers](#comments-and-watchers).
 
 > **Seeing a deleted work order: `GET /work-orders/?deleted_only=true` (the restore view).**
 > The work-order twin of the vendor and PO restore views documented under Purchasing, and it exists
@@ -11705,8 +11739,15 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 | GET | `/analytics/predict/delivery/{work_order_id}` | Predicted completion date + per-operation forecast for one work order | Admin / Manager / Supervisor |
 | GET | `/analytics/predict/capacity` | Capacity utilization forecast by work center, by week | Admin / Manager / Supervisor |
 | GET | `/analytics/predict/inventory-demand` | Predicted stockout dates / reorder urgency by part | Admin / Manager / Supervisor |
-| POST | `/analytics/custom-report` | Run a custom-report query (returns rows) | Admin / Manager |
-| GET | `/analytics/custom-report/export` | Export a saved report template (csv / xlsx / pdf) | Admin / Manager |
+| GET | `/analytics/data-sources` | Custom-report catalog: every data source and field (name, label, type, enum `options`) | Admin / Manager |
+| POST | `/analytics/custom-report` | Run an ad-hoc report (returns `columns` / `rows` / `row_count` / `truncated` / `notes`) | Admin / Manager |
+| GET | `/analytics/custom-report/templates` | List saved report templates: the caller's own plus every shared one | Yes |
+| POST | `/analytics/custom-report/templates` | Save a report definition as a named template (validated, audited) | Admin / Manager |
+| GET | `/analytics/custom-report/templates/{template_id}` | Get one saved template, with its `definition_errors` | Admin / Manager — own or shared (any for an Admin) |
+| PATCH | `/analytics/custom-report/templates/{template_id}` | Change a template's name / description / sharing / definition (audited) | Admin / Manager — author or Admin |
+| DELETE | `/analytics/custom-report/templates/{template_id}` | Delete a template (required audit row with a snapshot; 503 and nothing deleted if it cannot be saved) | Admin / Manager — author or Admin |
+| POST | `/analytics/custom-report/templates/{template_id}/run` | Run a saved template (`?limit=`, 1–10,000, default 1,000) | Admin / Manager — own or shared (any for an Admin) |
+| GET | `/analytics/custom-report/export` | Export a saved template's full result as CSV (`?template_id=`; csv only; audited; read-only / AI-external token 403) | Admin / Manager — own or shared (any for an Admin) |
 
 > **Days in analytics (P1, 2026-11-13).** Every analytics range is a set of **company-local calendar
 > days** (`Company.timezone`), and a point or bucket is dated in that same zone:
@@ -11844,33 +11885,256 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 > suppresses a real stockout warning; and retired (`is_deleted`) parts were still being forecast and
 > reordered. All are now excluded, so these figures can move on a single-company install as well.
 
-> **Custom reports are tenant-scoped.** Both `POST /analytics/custom-report` and
-> `GET /analytics/custom-report/export` run the report through the shared `ReportBuilderService`, which
-> now **always restricts the query to the caller's active company** (`company_id`) before applying any
-> user-supplied filters/group-by/sort. Every supported data source (work orders, parts, inventory, NCRs,
-> purchase orders, quotes) carries `company_id`, so a report can never return another tenant's rows. This
-> is a scoping-only fix — the request/response shape is unchanged.
+<a id="custom-report-builder"></a>
+> **Custom report builder (2026-11-16).** An ad-hoc query over **one** data source, run live or
+> saved as a named template. One catalog in `app/services/report_builder.py` (`REPORT_SOURCES`)
+> declares every data source and field: its column, label, type, enum options and any join it
+> needs. The `GET /analytics/data-sources` body, validation (`definition_problems`) and execution are
+> all derived from it, so the fields a client is shown and the fields the engine accepts cannot
+> disagree. Template access and writes are in `app/services/report_template_service.py`. Every route
+> is Admin / Manager except the template list (any signed-in role). The screen is Analytics →
+> **Custom Reports** (below).
 >
-> **The exported CSV is formula-neutralized, header row included** — the header comes from the
-> tenant-authored template's column list, not a fixed allowlist. Affected cells gain a leading `'`;
-> see [Spreadsheet Exports](#spreadsheet-exports-csv--xlsx).
+> **Catalog: `GET /analytics/data-sources`.** Keyed by `data_source` value; each entry is
+> `{label, fields: [{name, label, type, options?}]}`. `type` is `string`, `number`, `date`, `datetime`
+> or `enum`. It is derived from the column's SQLAlchemy type and decides the allowed operators and
+> aggregates. `options` appears on enum fields only: the values a filter takes and a row shows. The
+> list is complete (a field not in it is refused) and the same for every company. The sources are
+> `work_orders`, `parts`, `inventory`, `quality` (NCRs), `purchasing` (purchase orders) and `quotes`.
+> - **`production` is gone.** It never had a backing model, so every report on it answered 500. A
+>   request naming it is now **422**, and the catalog leaves it out. The enum member stays so a stored
+>   template that names it still lists.
+> - **The old hand-written catalog was wrong in both directions.** It advertised two fields the
+>   engine silently dropped and hid sixteen it supported. The two now work: `inventory.part_number`
+>   and `purchasing.vendor_name`. Each is a LEFT OUTER JOIN to `parts` / `vendors` with the
+>   active company in the ON clause, so a foreign row with a colliding id is never joined. The joined
+>   row is deliberately **not** tombstone-filtered: a lot's part and a PO's vendor are historical
+>   records that keep naming who they named (invariant 3). The sixteen are now listed:
+>   `quantity_scrapped`, `customer_po` and `created_at` (work orders); `material_cost`, `labor_cost`,
+>   `safety_stock` and `reorder_point` (parts); `quantity_available` and `status` (inventory);
+>   `quantity_rejected`, `closed_date` and `actual_cost` (NCRs); `required_date` and `subtotal` (POs);
+>   `subtotal` and `lead_time_days` (quotes).
+> - **`estimated_hours` is not a work-order field.** It has no writer anywhere (structurally 0 in
+>   every tenant), so it was dropped from the catalog (G3-content). Naming it is now a 422; before
+>   this change it silently dropped out of the report.
 >
-> **Custom-report labor honesty (G3-content).** Two changes make labor columns read truthfully when
-> labor cost is not being tracked:
-> - **`estimated_hours` is no longer a selectable WORK_ORDERS column.** It has no writer anywhere in
->   the system (it is structurally 0 in every tenant), so it has been dropped from
->   `GET /analytics/data-sources` and from the report builder's field map. Selecting it is no longer
->   possible (it silently dropped out before).
-> - **Labor-not-tracked response headers on `POST /analytics/custom-report`.** When
->   `LABOR_COST_ROLLUP_ENABLED` is **off** (the default) **and** the report selects any labor-derived
->   WORK_ORDERS column (`actual_hours`, `actual_cost`, `estimated_cost`) — which then render a literal
->   `0` meaning "not tracked", not a measured zero — the response sets two headers so a consumer can
->   tell the two apart: `X-Report-Labor-Not-Tracked` (a JSON array of the affected column names) and
->   `X-Report-Labor-Note` (a human-readable explanation). The **response body is unchanged** (the
->   bare-list contract the export + clients rely on); the headers are set only when applicable. When
->   the flag is on, the data source isn't WORK_ORDERS, or no labor-derived column is selected, no
->   headers are set.
+> **The definition** is the body of `POST /analytics/custom-report` and the stored part of a template:
+> `data_source`, `columns` (1–40), `filters` (at most 20), `group_by` (at most 10) and `sort` (at most
+> 10). A run adds `limit`: 1–10,000, default 1,000. `null` is refused; it used to mean "no limit".
+> **Unknown keys are refused at every level**, so a misspelled `agregate` is a 422, not a silently
+> ignored key.
+> - **Column** `{field, alias?, aggregate?}`. The output key is the alias, else the field; two columns
+>   producing the same key are refused, and an alias is at most 100 characters and may contain neither
+>   a NUL character nor an unpaired UTF-16 surrogate (see below). `sum` and `avg` take
+>   number fields; `min` and `max` take number, date, datetime and string fields; `count` takes any.
+>   Once any column aggregates or `group_by` is set, every non-aggregated column must be in
+>   `group_by`.
+> - **Filter** `{field, operator, value, value2?}`. Operators by type: string `eq` / `ne` / `in` /
+>   `like`; number `eq` / `ne` / `gt` / `gte` / `lt` / `lte` / `in` / `between`; date and datetime `eq` /
+>   `ne` / `gt` / `gte` / `lt` / `lte` / `between`; enum `eq` / `ne` / `in`. Values are typed:
+>   - a number is a JSON number (not a boolean, not a numeric string, finite); an integer must fit in
+>     64 bits (−2^63 to 2^63−1);
+>   - text is at most 500 characters, and no value (of any type, `in` items included) may contain a
+>     NUL character or an unpaired UTF-16 surrogate. JSON allows a lone `"\ud800"` escape, but no
+>     response can carry it: a template that stored one answered 500 on every later read, the
+>     company's whole template list included. The problem message says `a value cannot contain
+>     characters that cannot be stored (an unpaired UTF-16 surrogate)` and does not quote the value;
+>     the 422 entry's `input` still echoes the request body, with U+FFFD in place of each such
+>     character;
+>   - a date is `YYYY-MM-DD`;
+>   - a datetime is ISO-8601 with at least hours and minutes. No zone means UTC, and a zone is
+>     converted to UTC; an instant whose zone pushes it outside years 1-9999 in UTC is a 422 (`… is
+>     outside the supported range of dates and times`);
+>   - an enum value is one of the field's `options` — the lowercase value (`in_progress`), never the
+>     member name (`IN_PROGRESS`).
 >
+>   `value: null` is allowed only with `eq` / `ne` and means IS NULL / IS NOT NULL. `in` takes a
+>   non-empty list of at most 500 values, none of them null. `between` needs `value2`, is inclusive at
+>   both ends, and treats `value2: 0` as a real bound. `like` is a case-insensitive "contains" in which
+>   `%`, `_` and `\` match literally.
+>
+>   **`value2` must be `null` or one scalar** — text, a finite number or `true` / `false` — for
+>   **every** operator, including those that never read it, because it is stored with the filter.
+>   A list or object is a 422 (`value2 must be null or a single value (text, a number or
+>   true/false), not a list or an object`). Text in it follows the text rules above (no NUL, no
+>   unpaired surrogate, at most 500 characters), and `NaN` / `Infinity` is refused. It used to take any
+>   JSON at all, so a deeply nested one could be saved and then fail every later read of the
+>   template list. An unread scalar `value2`, such as a bound left behind when a filter is switched
+>   from `between` to `eq`, is still accepted and ignored.
+> - **Group by** `{field}`. `granularity` is not supported yet; setting it is a 422.
+> - **Sort** `{field, direction}`. `field` is a catalog field or the output key of a selected column.
+>   `direction` is `asc` or `desc` in any case, stored lowercase. A grouped report sorts by a
+>   group-by field or one of its own columns.
+>
+> **One 422 lists every problem.** Every semantic rule runs in `definition_problems`, and a broken
+> definition comes back as a single `detail` entry with `type: "report_definition"`. Its `msg` joins
+> every problem with `; ` and `ctx.problems` carries the same problems as a list, for example
+> `Column 1: "nope" is not a Work Orders field; Filter 1 (Status): operator "gt" does not apply to an
+> enum field; use one of: eq, ne, in`. Shape errors — an unknown key, a list over its cap, a `limit`
+> out of range, an unknown `data_source` — are FastAPI's ordinary per-field entries.
+>
+> **The result** of `POST /analytics/custom-report` and `POST /analytics/custom-report/templates/{template_id}/run`:
+>
+> ```json
+> {
+>   "columns": [
+>     {"key": "status", "label": "Status", "type": "enum"},
+>     {"key": "quantity_ordered", "label": "Sum of Qty Ordered", "type": "number"}
+>   ],
+>   "rows": [{"status": "in_progress", "quantity_ordered": 140}],
+>   "row_count": 1,
+>   "truncated": false,
+>   "notes": []
+> }
+> ```
+>
+> - `columns[]` follows the selected columns in order. `key` is the row key (alias, else field).
+>   `label` is the alias, else the catalog label, prefixed `Sum of` / `Average of` / `Count of` /
+>   `Minimum of` / `Maximum of` when aggregated. `type` is the field's type, except that `sum`, `avg`
+>   and `count` are always `number`.
+> - `rows[]` are keyed by column key. An enum cell is its value, a datetime is UTC ISO-8601 with `Z`,
+>   a date is `YYYY-MM-DD`, and floats and Postgres decimals are rounded to 2 places.
+> - `row_count` is the number of rows returned. `truncated` is true exactly when more than `limit`
+>   rows matched (the query fetches one extra row). An ungrouped report adds the base record's id as a
+>   final sort key, so the first `limit` rows are deterministic.
+> - `notes[]` entries are `{code, message, fields}`. There is one code today, `labor_not_tracked`.
+>   When `LABOR_COST_ROLLUP_ENABLED` is off (the default) and a `work_orders` report selects
+>   `actual_hours`, `actual_cost` or `estimated_cost`, those columns read a literal `0` that means
+>   "not tracked", not a measured $0. The note names them in `fields`.
+>
+> **Scoping.** The base query is always restricted to the caller's active company before any
+> caller-supplied filter, group-by or sort (G3-scope), and every join is company-scoped in its ON
+> clause, so a report can never return another tenant's rows. **Soft-deleted base records are
+> excluded** — work orders, parts, NCRs (voided ones included) and purchase orders. Inventory items
+> and quotes have no soft delete. Running a report writes nothing.
+>
+> **Saved templates.** A template is a named definition, private to its author unless `is_shared`.
+> - **Create** (`POST /analytics/custom-report/templates`). The body is the definition fields at the
+>   top level plus `name` (1–255 characters, trimmed), `description` (optional, at most 2,000) and
+>   `is_shared` (default `false`). It is validated by the same rules, with the same single 422. A
+>   `name` or `description` holding a NUL or an unpaired surrogate is a 422 (`unstorable_text` /
+>   `string_unicode`); it used to be a 500.
+> - **Change** (`PATCH /analytics/custom-report/templates/{template_id}`). Send any of `name`,
+>   `description` (`null` clears it), `is_shared` and `definition`. `definition` is the whole
+>   `{data_source, columns, filters, group_by, sort}` object nested under that key; it replaces the
+>   stored one and is validated like a new one. `name`, `is_shared` and `definition` may not be
+>   `null`, and an empty body or an unknown key is a 422.
+> - **Response** (`ReportTemplateResponse`, on every template verb but delete): `id`, `name`,
+>   `description`, `data_source`, `columns`, `filters`, `group_by`, `sort`, `is_shared`, `created_by`,
+>   `created_at`, plus two new fields, `updated_at` and `definition_errors`. The stored definition is
+>   normalized: plain JSON, sort directions lowercased.
+> - **Run** (`POST /analytics/custom-report/templates/{template_id}/run?limit=`). `limit` is 1–10,000,
+>   default 1,000. It returns the same result shape as an ad-hoc run.
+> - **Delete** (`DELETE /analytics/custom-report/templates/{template_id}`) answers
+>   `{"message": "Template deleted"}`. It stays a physical delete: `ReportTemplate` is not
+>   soft-deletable, and the audit row keeps a snapshot of what was removed. That audit row is
+>   **required**: if it cannot be written the delete is rolled back and the answer is **503**
+>   `The audit record for this delete could not be saved; the template was not deleted. Retry.` The
+>   row is deleted (tenant-scoped) before the audit row is written, the same row-then-audit-chain
+>   lock order as create and update; a delete that finds no row (a concurrent delete won) is the
+>   same **404** as a missing template and writes no audit row.
+>
+> **Template access rule** (`report_template_service`):
+>
+> | Verb | Who | Otherwise |
+> |---|---|---|
+> | List | Any signed-in role; returns the caller's own templates plus every shared one, by name | — |
+> | Get, run, export | Admin / Manager, and the template is the caller's own, shared, or the caller is an Admin (a superuser or Platform Admin counts as an Admin) | **403** `Access denied to this report` |
+> | Change, delete | Admin / Manager, and the caller is the author or an Admin (a superuser or Platform Admin counts as an Admin) | **403** `Only the template's author or an admin can change or delete it` |
+>
+> A template in another company is **404** `Report template not found` on every verb, byte-identical
+> to an id that does not exist, and never appears in the list. So a shared template can be run by
+> every Admin / Manager in the company but changed only by its author or an Admin, and an Admin can
+> open, run and export any template in the company. The read and change rules name the same Admin:
+> until 2026-11-16 an Admin was refused a colleague's private template on read, yet could `PATCH` it
+> and receive the whole definition back, so the refusal protected nothing. The list is unchanged —
+> the caller's own plus every shared template, for every role — so an Admin opens a colleague's
+> private template by id.
+>
+> **Stored templates are judged, never trusted.** Before this change templates were saved with type
+> checks only, so a stored one can break a rule added since. Such a template still lists and opens,
+> with `definition_errors` naming each problem. Running or exporting it answers **409**
+> `Saved report "<name>" can no longer run: <problems>. Edit it and save it again.`, and a `PATCH` with
+> a valid `definition` repairs it. `definition_errors` and the 409 come from the same validation, so
+> they cannot disagree. Judging a stored definition never raises: an unexpected error while checking
+> one is logged and reported as the single problem `The saved definition could not be checked; edit
+> the report and save it again`, so one bad row can never fail the template list for the company.
+> A stored definition holding an unpaired surrogate (saved before the refusal above existed) is
+> rendered with U+FFFD in place of each such character, wherever it sits (a value, an alias, a key),
+> and lists and opens with `The saved definition contains characters that cannot be stored (shown
+> here as �); edit the report and save it again` first in `definition_errors`; running or exporting
+> it is the **409**, since the definition that would run is not the one that was saved. A stored
+> definition nested more than 32 levels deep (only an old `value2` could be; pydantic's serializer
+> fails near 255, which 500'd the list) is treated the same way: everything past the bound is shown
+> as `�`, and `The saved definition contains a value nested too deeply to show (shown here as �);
+> edit the report and save it again` comes first in `definition_errors`. Every serialization of a
+> stored definition goes through that rendering, the audit snapshots included, so a repair or
+> delete never writes an audit row no audit-log read could render. The rendering walks are
+> iterative, so no depth of stored JSON can make them fail.
+>
+> **Audit.** Create, change and delete each write a `report_template` audit row: `log_create`,
+> `log_update` with old and new values, and a `DELETE` row with a snapshot of the deleted definition.
+> Create and change are best-effort (the repo-wide `AuditService.log` contract), because a template
+> is a saved query, not a quality record. **Delete is required** (`log_required`, the same fields
+> `log_delete` writes): the delete is physical, so its snapshot is the only trace of the template,
+> and a delete whose audit row cannot be saved is rolled back (**503**, above). Before this change,
+> template create and delete wrote no audit row (and there was no update verb).
+>
+> **Export: `GET /analytics/custom-report/export?template_id=&format=csv`.** The caller must be able
+> to read the template (own, shared, or any for an Admin).
+> - **A read-only or AI-external API token is refused 403** `Read-only API token cannot download
+>   files.` before anything is read — the template, the query, the row cap. It could never receive
+>   the file, and the over-cap and empty-result 400s, which used to answer first, told it how many
+>   rows a template matched.
+> - **Every matching row is exported**, up to the shared bulk-export cap `MAX_EXPORT_ROWS` (10,000,
+>   imported from `exports.py`). Over it the export is refused **400** `This export matches more than
+>   10,000 rows. Add a filter, then export again.` rather than cut short — see
+>   [Row cap on `/exports/*`](#row-cap-on-exports--refuses-at-10000-400). Before this change the export
+>   ran with the run default and so stopped at 1,000 rows, with nothing in the file to say so.
+> - An empty result is **400** `No data to export`; a template that can no longer run is **409**.
+> - **`format` takes only `csv`** (OpenAPI `const: "csv"`). `xlsx` and `pdf` are a **422** at
+>   validation. They used to be advertised in the parameter description and then answered 400
+>   `Format … not yet supported`.
+> - The header row is the column keys in column order. Cells and header are formula-neutralized; see
+>   [Spreadsheet Exports](#spreadsheet-exports-csv--xlsx).
+> - The file name is the template name, sent per RFC 6266 by
+>   `export_safety.attachment_content_disposition`:
+>   `attachment; filename="<ascii fallback>.csv"; filename*=UTF-8''<percent-encoded name>.csv`. The
+>   fallback replaces non-ASCII, `"`, `/`, `\` and control characters with `_`. It used to be a bare
+>   `filename=<name>.csv`, which broke on a space, a quote or a non-Latin-1 character.
+> - A refusal (403, 404, 409, 422, the row cap, an empty result) writes no audit row. A successful
+>   export still writes its `EXPORT` row (`resource_type` `custom_report`, the template as
+>   `resource_id`, the stored columns and filters, never the rows) before the file streams.
+>
+> **Screen.** Analytics → **Custom Reports** (`/analytics/reports`) is a full builder. You pick a
+> source, then columns and aggregates, typed filters, group by, sort and limit, and Run. The result
+> renders as a table, plus a chart when the report is grouped. Saved templates open through
+> `?template=<id>` (a reload or a shared link reopens the same one) and can be run, exported as CSV,
+> edited, shared and deleted from the panel. The tab and the route require `analytics:export`
+> (Admin, Manager and Platform Admin by default), which is the role set of the endpoints. Before
+> this change every role saw the tab and then got 403s. See
+> [RBAC_PERMISSIONS.md → Analytics](RBAC_PERMISSIONS.md#analytics).
+>
+> **⚠️ Contract change for API and MCP clients (2026-11-16).**
+> - **`POST /analytics/custom-report` returns an object, not a bare array of row dicts.** A client
+>   that read the array now reads `rows`. Through MCP, `run_custom_report`'s `structured_content` is
+>   this object; before, the bare list arrived wrapped as `{"result": [...]}`
+>   ([MCP.md §11](MCP.md#11-result-shapes-and-caps)).
+> - **The `X-Report-Labor-Not-Tracked` and `X-Report-Labor-Note` response headers are gone.** The same
+>   information is the `labor_not_tracked` entry in `notes`. Browsers could never read those headers:
+>   they were not in `Access-Control-Expose-Headers` (see [CORS](#cors)).
+> - **Definitions that used to run with parts silently ignored are now 422s.** That covers an
+>   unknown column, filter, group-by or sort field (an unknown filter field was dropped, so the
+>   report returned unfiltered rows), an unknown operator, a wrongly typed value, `between` without
+>   `value2`, `granularity`, an unknown key, a `limit` of `null` or above 10,000, and
+>   `data_source: "production"`, which used to answer 500.
+> - **Some filters now match what they say.** An enum filter binds the enum member, where the bare
+>   string used to match nothing on most enum columns. `like` matches `%` and `_` literally.
+>   `between` with `value2: 0` is applied instead of dropped.
+> - **Soft-deleted work orders, parts, NCRs and purchase orders no longer appear.**
+> - **The export takes csv only (422 otherwise)** and refuses over 10,000 rows (400) where it used to
+>   stop at 1,000.
+
 > **KPI values can be `null` ("n/a").** Each KPI on `GET /analytics/kpis` is a `KPIValue` whose
 > **`value` (and `prior_value` / `change_pct`) are nullable**. A genuinely-uncomputable metric returns
 > `null` rather than a misleading 0/100, and the frontend renders **"n/a"**:
@@ -12270,6 +12534,7 @@ There is no delete endpoint.
 | POST | `/users/{id}/activate` | Reactivate an account, without restoring revoked API tokens | Admin |
 | DELETE | `/users/{id}` | Deactivate user (sets `is_active=false`; cannot deactivate yourself). Revokes every live API token the user holds in the same transaction (reason `user deactivated`, one `API_TOKEN_REVOKED` audit trail each); the response carries `api_tokens_revoked`. Reactivation (`POST /users/{id}/activate`) restores the account, never a token | Admin |
 | POST | `/users/{id}/unlock` | Clear failed-login lockout | Admin |
+| GET | `/users/mention-search` | People to @mention in a comment: active members of the active company by name, `{id, display_name}` only (never email, role or phone). Documented under [Comments and watchers](#comments-and-watchers) | Any signed-in member of the company (a read-only API token is **403**: `Users` tag) |
 
 > **User writes are Admin-only; the list read is Admin / Manager.** `GET /users/` (and
 > `GET /users/{id}`) are `require_role([ADMIN, MANAGER])`; `POST` / `PUT` / `DELETE` are
@@ -12853,7 +13118,7 @@ hidden spreadsheet content and external workbook links are unsupported.
 Formulas are never evaluated, and cached formula values remain uncertain.
 Upload request keys are company-scoped and bound to actor plus exact
 filename/hash inputs. Extraction uses the shared, company-egress-gated model
-client with `hank_document_intake` prompt 1.2.0. A request-driven ARQ job claims
+client with `hank_document_intake` prompt 1.2.1. A request-driven ARQ job claims
 and commits before parsing/model work, then reloads current authority and saves
 its result with required audit. Parsing runs in a resource-bounded subprocess;
 no database transaction stays open during file or model I/O.
@@ -12954,7 +13219,7 @@ or scheduled cron. Intake requires a matching enqueue-driven worker.
 
 **Reviewed task contract.** `POST /hank/tasks` accepts
 `{ expected_company_id, request_key, kind, input }`. `request_key` is normalized to a canonical
-UUID. The six `kind` values are listed below; each input is
+UUID. The eight `kind` values are listed below; each input is
 validated against its specific schema and undeclared fields are rejected. The task stores
 immutable input/preview evidence and fingerprints of the source plan. There is a cap of 100
 proposals awaiting review per actor/credential. Creating a proposal requires the same
@@ -12968,6 +13233,8 @@ authority as its eventual action:
 | `receive_delivery` | `purchase_order_id`, 1–50 receipt lines; each requires `po_line_id`, positive actual `quantity_received` and explicit `requires_inspection`; optional lot/heat/serial/certificate/location/over-receipt details | Admin/Manager/Supervisor plus `receiving:view` + `receiving:create`; canonical atomic delivery/stock posting, with no automatic printing |
 | `report_production` | `operation_id`, nonnegative good/scrap deltas (at least one positive), scrap reason/code when reporting scrap; optional NCR details and reasoned hold | Admin/Manager/Supervisor/Operator/Quality plus `work_orders:view` + `work_orders:complete`; caller must have an open clock on the operation; no implicit job/operation completion. A standing API token may report good only: a scrap delta is refused **403** in the preview, so at preparation (no task saved) and again at execution (the task stays `awaiting_review`, nothing written) — owner decision 2026-11-07, only a person declares scrap |
 | `draft_shipment` | `work_order_id`, positive `quantity_shipped`, optional destination/carrier/package details; `cert_of_conformance` must be false | Admin/Manager/Supervisor/Shipping plus `shipping:view` + `shipping:create` + `work_orders:view`; reserves available completed units in a pending shipment, without dispatch/CoC/carrier purchase |
+| `change_due_date` | `work_order_id`, `new_due_date` (`YYYY-MM-DD`; required, a due date is never cleared), `reason` (stripped, 1–500 characters, no NUL) | Admin/Manager/Supervisor plus `work_orders:view` + `work_orders:edit` (the role set of `PUT /work-orders/{id}`); moves `due_date` only, **never `must_ship_by`**. API tokens are treated like any other credential (a full token may run it) — see below |
+| `add_note` | `work_order_id`, `body` (stripped, 1–5000 characters, no NUL), optional `mentioned_user_ids` (at most 20 distinct positive integers) | All seven tenant roles, Viewer included, plus `work_orders:view`; posts a **work-order comment** under the employee's name, never `WorkOrder.notes`. **People only:** every API token is refused **403** at preparation and at execution, and the MCP door refuses it to an agent on any credential — see below |
 
 Existing Superuser/Platform Admin bypass, active-company and token fences remain. A read-only
 company context cannot create or execute proposals. A task is scoped to company, actor,
@@ -13010,6 +13277,71 @@ from copied runs, and skipped operations/material ties appear in the receipt. Ex
 work-order/revision-history document bindings cannot be reassigned. Schema migration108
 adds the task store; no new environment variable or LLM call is needed for direct tasks.
 
+Every kind has its own preview and execution branch. An unregistered `kind` is **422** at
+validation; a registered kind that lacks a branch (a programming error) is **400**
+`Hank cannot run this kind of task.` rather than being run as another kind — before 2026-11-16
+both the preview and the execution fell through to `attach_document`.
+
+**`change_due_date`.** The rule is the generic `PUT /work-orders/{id}`'s, from one shared helper
+(`services/work_order_due_date.py`, `assert_due_date_change_allowed`), judged at preparation and
+again under the work-order row lock at execution:
+
+- **409** `<WO number> is already due <date>. There is nothing to change.` when the new date equals
+  the stored one (checked first);
+- **409** `cannot change the due date of a work order in terminal status '<status>': its due date is
+  the promise date its delivery performance was scored against.` on a COMPLETE, CLOSED or CANCELLED
+  work order — the `PUT`'s own text (see Work Orders → "Due date on a finished job");
+- **404** `Work order not found` for an absent, other-company or soft-deleted work order.
+
+The preview's `changes` are `Due date: <old, or "not set"> → <new>.` and `Reason: <reason>`. Its
+`warnings` always say that only the due date changes (scheduled dates, priority and the dispatch
+plan are not edited); add `The promise date does not move: must ship by <date> stays as it is, and it
+takes precedence over the due date for on-time delivery.` when `must_ship_by` is set; and add
+`The new due date is already in the past.` when the new date is before today's Central date (a past
+date is allowed, only flagged). The source fingerprint is deliberately narrow — the work order's
+`due_date`, `must_ship_by`, `status` and `version` — so any edit of the work order between review and
+execution is the 409 `The source records changed. Prepare and review a fresh task.`, while a
+dispatch-plan rank write (which bumps no `version`) is not. Execution writes `due_date` only and
+flushes, so a concurrent stale write is refused 409 (the `version` lock) rather than lost; then a
+best-effort `work_order_updated` operational event in the `PUT`'s shape (`updated_fields: ["due_date"]`)
+that deliberately omits the reason, and **last** a **required** `UPDATE` audit row on `work_order` (old and
+new `due_date`, `extra_data: {"reason": …, "via": "hank"}`; failure → **503**, nothing saved, the event
+rolled back with it). The event comes first because the audit row takes the global audit-chain lock,
+which no row lock (the event insert's foreign-key checks) may follow. No
+realtime broadcast is sent; open views pick up the date on their next read. Receipt:
+`Moved the due date of <WO number> from <old> to <new>.`, with the warning
+`Must ship by <date> was not changed.` when one is set. **Credentials:** parity with the
+`update_work_order` agent door, which already sets `due_date` — a **full** API token whose user holds
+the role and permissions may prepare and execute it; a read-only or AI-external token is refused by
+its own gates, as on every write (owner decision 2026-11-16; whether agents may move due dates at all
+is an open owner follow-up).
+
+**`add_note`.** A note is a **work-order comment** — the same record the work-order Comments panel
+shows ([Comments and watchers](#comments-and-watchers)) — and never writes `WorkOrder.notes`. At
+preparation the comment service judges it without writing anything (`comment_service.validate_comment`:
+the work order is live in the active company, the body, and every mention — an inactive, other-company
+or not-permitted id is **422** naming ids only). Execution posts it through `create_comment` as the
+submitting employee, so it gets exactly a typed comment's rules, mention rows, auto-watch of the author
+and the mentioned people, and `comment.mention` / `comment.added` notifications — **none of which
+carries the note text**. The comment's create audit is **required** here (**503**, nothing saved) and
+carries `extra_data.via: "hank"`. The preview's `changes` are `Note: <text>` and, with mentions,
+`Mentions: <names>.`; its `warnings` say that everyone who can see the job can read the note under your
+name, that mentioned people are notified in the app and by email without the note text, and that
+watchers get an in-app notice without the note text. The source fingerprint is the work-order id, its
+deleted flag and the mention ids, so later edits of the job do not invalidate a reviewed note; a
+deleted job is **404** and a person who can no longer be mentioned is **422** at execution. Receipt:
+`Added a note to <WO number>.`
+
+**`add_note` is people-only (owner decision 2026-11-16: a comment is a person's own words).** Any API
+token — whatever its role or scope — is refused **403** `A comment is a person's own words: an API
+token cannot post, edit or delete comments or change who is watching a record. Sign in to the app.`
+(`API_TOKEN_COMMENT_WRITE`, the comment routes' own text) at preparation and at execution, before the
+generic role check, with nothing written; `GET /hank/capabilities` leaves `add_note` out of a token's
+`allowed_kinds`. A read-only or AI-external token meets its own gate's 403 first, and an invalid input
+is still 422 before any of these. Through MCP the door also refuses an **agent** on any credential, a
+person's own JWT included ([MCP door](#mcp-door-mcp)). Because commenting is open to every role, a
+**Viewer** now has a reviewed task kind: `can_write: true`, `allowed_kinds: ["add_note"]`.
+
 **Personal follow-ups.** `POST /hank/watches` accepts
 `{ expected_company_id, request_key, work_order_id, condition, document_type? }`.
 The UUID request key is canonicalized and bound to the company, employee and exact input;
@@ -13028,7 +13360,7 @@ There are at most 50 active (`watching`/`snoozed`) watches per owner/company and
 interactive-only: API-token and kiosk credentials cannot create, control, or read watches.
 Effective `work_orders:view`, an active owner/company, and membership or existing elevated
 company access are required. Read-only company contexts may read saved watches but cannot
-control them. These gates are separate from the role fences for the six reviewed actions.
+control them. These gates are separate from the role fences for the eight reviewed actions.
 
 Commands accept `{ expected_company_id, expected_version }`. `check` evaluates a watching
 task now. `snooze` pauses it for one hour; `resume` retains its original baseline and makes
@@ -13156,7 +13488,7 @@ already gathered.
   external model latency never holds its audit-chain lock. If later narration fails or is
   stopped, the saved proposal remains recoverable through the task APIs; it remains unexecuted.
   Terminal SSE success is emitted only after the final chat transaction commits.
-- Prompt `copilot_chat` is version **1.7.0**. Saved intake extraction can be read
+- Prompt `copilot_chat` is version **1.8.0**. Saved intake extraction can be read
   through `hank_saved_work` with its source evidence; the general document-search
   tool still returns metadata only. Chat does not create handoffs, approve
   routines, advance steps or execute filing/actions.
@@ -13391,6 +13723,158 @@ quote statuses (accepted / rejected / converted / expired) auto-record `quote_re
 > default (operators keep the kiosk station screen; deep links are unaffected). The page shows a
 > "Top 3 today" hero — the three highest-scoring pending recommendations.
 
+### Comments and watchers
+
+A discussion thread on a record, with @mentions that notify the person named and watchers who hear
+about new comments. **v1 is work orders only, in the office app only** (owner decision 2026-11-16):
+the **Comments** panel on the work-order detail page. Not in v1: other record types, the kiosk,
+attachments, reactions. Service `app/services/comment_service.py`, migration `125_work_order_comments`;
+the two notification events are in [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#what-actually-fires-in-pr-1).
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/comments?entity_type=work_order&entity_id={id}` | The work order's live comments, **oldest first**: the newest 500, with no pagination (an older comment past that is not returned) | Any signed-in member of the company |
+| POST | `/comments` | Post a comment, optionally @mentioning people by user id. **201** with the comment | Any signed-in member of the company; **API tokens 403** |
+| PATCH | `/comments/{comment_id}` | Edit a comment: the full new `body` and `mentioned_user_ids` | The author only; **API tokens 403** |
+| DELETE | `/comments/{comment_id}` | Soft-delete a comment (it stops being listed). **204**, no body | The author, an Admin or a Manager; **API tokens 403** |
+| GET | `/watchers?entity_type=work_order&entity_id={id}` | Whether the caller watches the work order, and how many people do | Any signed-in member of the company |
+| POST | `/watchers` | Start watching (idempotent); returns the watch state. **409** for a caller who is not a member of the active company (a Platform Admin viewing another company), writing nothing | Any signed-in member of the company; **API tokens 403** |
+| DELETE | `/watchers?entity_type=work_order&entity_id={id}` | Stop watching (idempotent); returns the watch state | Any signed-in member of the company; **API tokens 403** |
+| GET | `/users/mention-search?q={text}&limit={n}` | People to @mention: active members of the active company by name, `{id, display_name}` only | Any signed-in member of the company |
+
+**Requests.** All three bodies refuse unknown fields (**422**).
+
+```json
+POST /comments
+{"entity_type": "work_order", "entity_id": 1042, "body": "Can this run before the 14th?", "mentioned_user_ids": [17]}
+
+PATCH /comments/{comment_id}          (both fields required)
+{"body": "Can this run before the 12th?", "mentioned_user_ids": [17, 23]}
+
+POST /watchers
+{"entity_type": "work_order", "entity_id": 1042}
+```
+
+**Responses.** A comment (the list returns an array of these):
+
+```json
+{
+  "id": 311,
+  "entity_type": "work_order",
+  "entity_id": 1042,
+  "author": {"id": 9, "display_name": "Avery Quill"},
+  "body": "Can this run before the 14th?",
+  "created_at": "2026-11-16T15:04:11Z",
+  "edited_at": null,
+  "mentions": [{"id": 17, "display_name": "Jane Doe"}],
+  "can_edit": true,
+  "can_delete": true
+}
+```
+
+`can_edit` / `can_delete` are **the caller's** rights on that comment. A person is
+`{id, display_name}` only, never an email, role or phone; mention-search returns the same shape.
+The watch routes return `{"watching": true, "watcher_count": 3}`.
+
+> **Validation.**
+> - **`entity_type`** must be exactly `work_order` (case-sensitive; 1–40 characters) on every route,
+>   or **422** `Comments are not available on this kind of record. Enabled entity_type values:
+>   work_order.` `entity_id` is a strict integer above 0.
+> - **`body`** is stripped, then must be 1–5000 characters. Whitespace-only, over 5000, or
+>   containing a NUL character is **422**. Nothing else is rewritten: the text is stored verbatim
+>   (no markup is stripped) and the app renders it as text.
+> - **`mentioned_user_ids`**: at most 20, distinct, positive integers (a JSON `true` is refused);
+>   otherwise **422**. Mentions are **structured**: the client sends ids chosen from mention-search,
+>   and the server never parses names out of the text. Each id must be an **active** person of the
+>   **active company** who can read the work order, or the request is **422**
+>   `These people can't be mentioned on this work order: user 41, user 52.` The refusal names
+>   **ids only**, never a name, so a foreign or inactive id cannot be used to learn whose it is.
+>   Mentioning yourself is allowed.
+>
+> **404s.** The work order is resolved in the active company and must be live: an absent id,
+> another company's work order and a soft-deleted one all answer **404** `Work order not found`,
+> on every comment and watcher route. A comment id that is absent, another company's or already
+> deleted is **404** `Comment not found`, and a comment whose work order has since been deleted is
+> the work order's 404.
+>
+> **Who can do what** (see [RBAC_PERMISSIONS.md → Comments and watchers](RBAC_PERMISSIONS.md#comments-and-watchers)).
+> Reading, posting and watching follow work-order read access: every signed-in member of the
+> company, all seven tenant roles, Viewer included. **Editing is the author's alone**: anyone
+> else, an Admin included, gets **403** `Only the person who wrote a comment can edit it.` An
+> Admin or Manager can remove a comment but never rewrite one. **Deleting** is the author, an
+> Admin or a Manager (a superuser or Platform Admin passes, as with `require_role`); anyone else
+> gets **403** `Only the person who wrote a comment, an Admin or a Manager can delete it.`
+>
+> **Edits.** `PATCH` replaces the text and the mention set. Only people the edit **newly** adds
+> are validated, notified and auto-watched; a mention kept from before is not re-checked, so a
+> person deactivated since does not block an edit of the text. `edited_at` is stamped. An edit
+> that changes neither the text nor the mention set writes nothing: no `edited_at`, no audit row,
+> no notification.
+>
+> **Auto-watch.** Posting a comment makes the author and everyone it mentions watchers of the work
+> order (idempotent). Creating a work order does not watch it, and nothing is backfilled.
+> `watching` is whether the caller has a watch row; **`watcher_count`** counts **active** members
+> of the company watching (a deactivated person's row persists but is neither counted nor
+> notified).
+>
+> **Watching is for members of the company.** Notifications go only to members of the work order's
+> company, so a caller whose own company is not the active one — a Platform Admin viewing another
+> company — may read and comment there but never watches: their comment does not auto-watch them,
+> `POST /watchers` is **409** `You can only watch records of your own company: notifications go to
+> its members.` (nothing written), and `GET /watchers` reports `watching: false` for them.
+> `DELETE /watchers` stays open to them, so a row they hold can still be cleared. Watch rows survive a work order's soft delete, so a restore keeps them, but every
+> route answers 404 while it is deleted.
+>
+> **Notifications.** A new comment emits `comment.mention` (to the people it mentions) and
+> `comment.added` (to the other watchers, never the author); an edit emits `comment.mention` for the
+> people it newly adds and nothing else. **Neither carries the comment text**: the title is the
+> label plus the work-order number, the body says who wrote it ("By: …"), and the link is
+> `/work-orders/{id}` (owner decision 2026-11-16). Recipients are re-checked when the worker
+> dispatches — and so are the work order and the **comment**: a comment deleted before the worker
+> runs (an author who deletes it seconds after posting) notifies nobody. The events are
+> best-effort: a failed notification never fails the comment. See
+> [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#content-rules-compliance).
+>
+> **Not in the copilot's context.** The AI work-order context (`AIContextService.work_order_context`,
+> the newest 20 events on the work order) leaves `comment_added` / `comment_mentioned` out, so a busy
+> thread cannot push the production events out of that window and no commenter's name
+> (`comment_author`) is sent to the model.
+>
+> **A work order with comments cannot be hard-deleted** (**409**, deleted comments included; soft
+> delete keeps the thread). See Work Orders → the hard-delete refusals.
+>
+> **Audit.** Create, edit and delete write `CREATE` / `UPDATE` / `DELETE` rows on resource type
+> `comment`: the create row records the body, the mentioned ids and
+> `extra_data.auto_watched_user_ids`; the edit row keeps the old and new text and mention sets; the
+> delete row snapshots the body, author, mentions and timestamps, with `extra_data.moderated: true`
+> when someone other than the author deleted it. Watch and unwatch write `CREATE` / `DELETE` on
+> `entity_watcher`; a watch or unwatch that changes nothing writes nothing. These are ordinary
+> best-effort audit writes, not the required-audit 503 path. A comment is **soft-deleted** and never
+> physically removed; an unwatch physically removes the watch row (a preference, not a record), and
+> an edit that drops a mention removes that mention row (its audit row keeps both sets).
+>
+> **Mention search.** `q` is 1–100 characters (whitespace collapsed) and matches a first name, last
+> name or "first last", case-insensitively, as a substring; `%` and `_` are literal, not wildcards.
+> Ordered by first name, then last name, then id. `limit` 1–25, default 10. Active members of the
+> active company only.
+>
+> **API tokens and agents (owner decision 2026-11-16).** A comment is a person's own words and a
+> watch a person's own preference, so every write — `POST` / `PATCH` / `DELETE /comments` and
+> `POST` / `DELETE /watchers` — refuses **any** API token, whatever its role or scope, **403**
+> `A comment is a person's own words: an API token cannot post, edit or delete comments or change
+> who is watching a record. Sign in to the app.` (`API_TOKEN_COMMENT_WRITE`). It answers in the
+> route's first dependency, before the body is validated or anything is read or written; a
+> read-only or AI-external token meets its own gate's 403 first. None of the five writes is an MCP
+> tool, so a person's own JWT cannot reach them through an agent either. The reads are generated
+> tools (`list_record_comments`, `get_record_watch_state`, `search_mentionable_users`):
+> - a **full** token reads all three;
+> - a **read-only** token reads the thread and the watch state, but mention-search is **403**: it
+>   sits under the `Users` tag, which `READ_ONLY_DENY_TAG_FLOOR` denies every read-only token;
+> - an **AI-external** token is **403** on all three: none is on the AI-external allowlist, because
+>   comment bodies are free text the export-control redaction cannot vouch for.
+>
+> A crew-station badge (kiosk) token is refused **403** on every route here by its path fence.
+
 ### Notifications (in-app inbox)
 
 Per-user notification inbox for the bell / popover / `/notifications` page — PR 1 (Foundation +
@@ -13457,9 +13941,11 @@ their own inbox).
 > **Content (revised 2026-07-29, after CMMC L2 was descoped):** `title` is the catalog label plus
 > the record identifier. `body` is the catalog description, then a blank line, then a detail line
 > composed from a curated payload allowlist — statuses and transitions, the `quantity_*` family,
-> priorities, day counts, disposition/category/source/inspection method, and `reason` — pipe-joined,
+> priorities, day counts, disposition/category/source/inspection method, `reason`, and (since
+> 2026-11-16, on the two comment events only) `comment_author` as "By" — pipe-joined,
 > each value truncated at 120 chars. When the payload carries none of those keys the body is the
-> description alone. **Part numbers and customer names are still absent**: the dispatcher reads the
+> description alone. The comment events never carry the comment text (see
+> [Comments and watchers](#comments-and-watchers)). **Part numbers and customer names are still absent**: the dispatcher reads the
 > event payload only and never re-queries to resolve `part_id` into a part number (a scope/N+1
 > decision, not a security boundary). See
 > [docs/NOTIFICATIONS.md → Content rules](NOTIFICATIONS.md#content-rules-compliance) for the
@@ -14042,6 +14528,13 @@ rendered with replacement characters (`U+FFFD`). Until 2026-11-05 such a body ma
 itself fail, so the caller got a **500** instead of the **422**, on any JSON route and without
 authentication.
 
+Two parsed-JSON values no response can encode are rewritten in the echo the same way (2026-11-16):
+an unpaired UTF-16 surrogate (`"\ud800"`) anywhere in `input`, `loc` or `ctx`, dict keys included,
+becomes `U+FFFD`, and a `NaN` / `Infinity` / `-Infinity` literal (Python's JSON parser accepts them)
+becomes the string `"NaN"` / `"Infinity"` / `"-Infinity"`. Either used to make the 422 a **500** on
+any route, e.g. a `NaN` in `POST /parts/`. The rewrite walks the echo iteratively, so a deeply nested
+body cannot make it fail, and an error with nothing to rewrite is echoed unchanged.
+
 ### Not Found error (404)
 ```json
 {
@@ -14479,7 +14972,8 @@ Each successful export writes one audit row (`app/services/export_audit.py`, via
 
 The row is committed **before** the file streams, so an abandoned download is still recorded. A
 **403 writes no row**, and neither does a refusal (the 10,000-row cap below, an oversized filter
-value, an unsupported `format`, or an empty custom-report result) — nothing was disclosed.
+value, an unsupported `format`, an empty custom-report result, or a saved report template that can
+no longer run) — nothing was disclosed.
 
 Because an `audit_log` row is immutable and undeletable, everything the request contributes to it is
 bounded first. `columns` is filtered to the names the endpoint recognizes; free-text filters are
@@ -14615,9 +15109,16 @@ whole workbook in memory before streaming, so the cap also bounds peak memory.
 > other six endpoints of that time had no limit at all and returned everything, so for them the 400 replaces an
 > unbounded read, not a silent truncation.
 
-**Not covered by this cap:** `GET /analytics/custom-report/export`, `GET /visitor-logs/export.csv`
-and `GET /estimate-workbench/{estimate_id}/export/audit.xlsx` live on their own routers and keep
-their existing behaviour — `MAX_EXPORT_ROWS` applies to the `/exports/*` router only.
+**`GET /analytics/custom-report/export` shares this cap (2026-11-16).** It imports the same
+`MAX_EXPORT_ROWS` and refuses the same way, before writing any bytes or an audit row, with its own
+text: `"This export matches more than 10,000 rows. Add a filter, then export again."` (a report
+template has no date range to narrow). Before that it ran the template with the ad-hoc run's
+1,000-row default, so a larger result was cut at 1,000 rows with nothing in the file to say so.
+See [Custom report builder](#custom-report-builder).
+
+**Not covered by this cap:** `GET /visitor-logs/export.csv` and
+`GET /estimate-workbench/{estimate_id}/export/audit.xlsx` live on their own routers and keep their
+existing behaviour.
 
 ## CORS
 
@@ -14704,7 +15205,7 @@ log. `unconfigured` means every enqueue will fail and no background job or cron 
 | 200 | Success |
 | 201 | Created |
 | 204 | No Content |
-| 400 | Bad Request (also returned for a `Host` header not on the `ALLOWED_HOSTS` allowlist, and for an `/exports/*` request matching more than `MAX_EXPORT_ROWS` — see [Row cap on `/exports/*`](#row-cap-on-exports--refuses-at-10000-400)) |
+| 400 | Bad Request (also returned for a `Host` header not on the `ALLOWED_HOSTS` allowlist, and for an `/exports/*` or `GET /analytics/custom-report/export` request matching more than `MAX_EXPORT_ROWS` — see [Row cap on `/exports/*`](#row-cap-on-exports--refuses-at-10000-400)) |
 | 401 | Unauthorized |
 | 403 | Forbidden (also returned to a caller below `ADMIN` / `MANAGER` on any bulk-export endpoint — see [Access: bulk export is `ADMIN` / `MANAGER`](#access-bulk-export-is-admin--manager-and-every-export-is-audited)) |
 | 404 | Not Found |
@@ -14730,10 +15231,10 @@ What matters from this file's point of view:
   routers with the caller's own bearer token. The router is the boundary: the same `require_role`
   gates, tenant scoping, audit rows, optimistic-locking 409s and per-endpoint size caps apply, and a
   401/403/409/422 comes back verbatim as an `is_error` tool result carrying the server's `detail`.
-- **The catalog is this API.** 764 tools are generated from `app.openapi()` at startup — every
+- **The catalog is this API.** 770 tools are generated from `app.openapi()` at startup — every
   secured operation except the `Authentication`, `Carrier Webhooks`, `Error Logging` (and its router-level `errors` twin) and `WebSocket` tags, the
   unauthenticated health/station-login routes (named one by one in `catalog.PUBLIC_OPERATIONS`) and
-  the fifteen operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders
+  the twenty operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders
   (`POST /work-orders/import`, `POST /purchasing/purchase-orders/import` — they mint work orders
   RELEASED / IN_PROGRESS and POs SENT, a record of a past system rather than a user action),
   AI Accept & apply (`POST /ai/recommendations/{recommendation_id}/apply` — owner ruling 3: only a
@@ -14746,9 +15247,12 @@ What matters from this file's point of view:
   Supplier List writes (`PUT /purchasing/vendors/{vendor_id}/approval`,
   `POST /purchasing/vendors/asl-import/preview` and `/commit` — a supplier-approval decision is a
   person's judgment; the routes also refuse API tokens), the two legacy `approved_supplier_list`
-  writes (`POST /supplier-scorecards/approved-suppliers/`, `PUT .../approved-suppliers/{asl_id}`) and
+  writes (`POST /supplier-scorecards/approved-suppliers/`, `PUT .../approved-suppliers/{asl_id}`),
   bulk release (`POST /work-orders/bulk-release` — `release_work_order` stays an agent's only release
-  door, one job per call; this route does not refuse API tokens) — plus 15 fixed-name convenience tools that shadow 16
+  door, one job per call; this route does not refuse API tokens) and
+  the five comment / watcher writes (`POST /comments`, `PATCH` / `DELETE /comments/{comment_id}`,
+  `POST` / `DELETE /watchers` — owner decision 2026-11-16: a comment is a person's own words; the
+  routes also refuse API tokens, and the three reads stay tools) — plus 15 fixed-name convenience tools that shadow 16
   raw routes (`POST /work-orders/`, `PUT /work-orders/{id}`, `POST /work-orders/{id}/release`, the two
   nest-package imports, the manual nest add, `GET /search/`, …) to enforce agent rules the routes do
   not: create/duplicate always land DRAFT, release is a separate explicit tool and the generic update
@@ -14791,6 +15295,18 @@ What matters from this file's point of view:
   `tools/list`. What its tools return is redacted by the same response middleware as a direct
   call. See [docs/MCP.md](MCP.md) §4.1 / §4.2 and
   [docs/EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md).
+- **A Hank note is never posted through an agent, on any credential** (owner decision 2026-11-16: a
+  comment is a person's own words). The door, not the route, refuses it, because a person's own JWT
+  would otherwise let an agent write in that person's name: `prepare_task` with `kind: "add_note"`
+  answers **403** `"A note is a person's own words: post it from the app, not through an agent."`
+  before dispatch; `execute_task` first reads the task as the caller (`GET /hank/tasks/{task_id}`, the
+  `get_task` route) and answers the same 403 for an `add_note` task without dispatching the execute.
+  When that read is refused 401 / 403 / 404 / 422, that refusal (its status and detail) is the tool's
+  answer and the execute is not dispatched — the answer the execute route would have given; any other
+  failure (5xx, 429, transport, no `kind`) is **503** `"Could not confirm what kind
+  of Hank task this is before executing it, so nothing was executed. Try again."`. Both tools stay
+  listed, every other kind (`change_due_date` included) is unaffected, and the routes still serve a
+  person in the app. See [docs/MCP.md](MCP.md) §4.3.
 
 Settings: [ENVIRONMENT_VARIABLES.md → MCP](ENVIRONMENT_VARIABLES.md#mcp-model-context-protocol-door-and-bridge).
 Access model: [RBAC_PERMISSIONS.md → MCP / agent access](RBAC_PERMISSIONS.md#mcp--agent-access).

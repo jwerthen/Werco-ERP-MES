@@ -2,6 +2,14 @@ import type { BOMExploded } from '../types/engineering';
 import type { MaterialPriceHistoryParams, MaterialPriceHistoryResponse, MaterialPriceHistoryDetailParams, MaterialPriceHistoryDetail } from '../types/materialPriceHistory';
 import type { EmailRecipientsSettings } from '../types/emailRecipients';
 import type {
+  CustomReportRequest,
+  CustomReportResult,
+  ReportDataSourceCatalog,
+  ReportTemplate,
+  ReportTemplateCreate,
+  ReportTemplateUpdate,
+} from '../types/reportBuilder';
+import type {
   ApiToken,
   ApiTokenCreateInput,
   ApiTokenIssued,
@@ -14,7 +22,8 @@ import type {
   CustomerExportControl,
 } from '../types/exportControl';
 import axios, { AxiosInstance, AxiosError, AxiosRequestConfig } from 'axios';
-import { normalizeAxiosErrorDetail } from '../utils/apiError';
+import { normalizeAxiosErrorDetail, parseBlobErrorBody } from '../utils/apiError';
+import { downloadFilename } from '../utils/contentDisposition';
 import { parseProductionCalendar } from '../utils/productionCalendar';
 import {
   LoginResponse,
@@ -85,6 +94,14 @@ import {
   OfficeOperationCompleteResult,
 } from '../types';
 import { ScanResolveRequest, ScanResolveResult } from '../types/scan';
+import type {
+  CommentCreateInput,
+  CommentEntityType,
+  CommentResponse,
+  CommentUpdateInput,
+  MentionableUser,
+  WatchState,
+} from '../types/comments';
 import type {
   AslImportResponse,
   AslVendor,
@@ -1931,6 +1948,64 @@ class ApiService {
     const response = await this.api.post<WorkOrderBlockerWriteResult>(`/work-order-blockers/${blockerId}/resolve`, {
       resolution_note: resolutionNote,
     });
+    return response.data;
+  }
+
+  // Comments with @mentions, and record watchers (v1: work orders only).
+  // Plain GETs on purpose, not `fetchWithCache`: its stale-cache fallback would
+  // answer a failed poll (e.g. a 404 once the work order is deleted) with the
+  // last thread instead of letting the panel show the failure.
+
+  /** The record's comments, oldest first (the newest 500). */
+  async listComments(entityType: CommentEntityType, entityId: number): Promise<CommentResponse[]> {
+    const response = await this.api.get<CommentResponse[]>('/comments', {
+      params: { entity_type: entityType, entity_id: entityId },
+    });
+    return response.data;
+  }
+
+  /** Post a comment. 422 names any mentioned user id the server refused. */
+  async createComment(data: CommentCreateInput): Promise<CommentResponse> {
+    const response = await this.api.post<CommentResponse>('/comments', data);
+    return response.data;
+  }
+
+  /** Edit your own comment: send the FULL new body and mention list. */
+  async updateComment(commentId: number, data: CommentUpdateInput): Promise<CommentResponse> {
+    const response = await this.api.patch<CommentResponse>(`/comments/${commentId}`, data);
+    return response.data;
+  }
+
+  /** Delete a comment (soft delete server-side). 204, no body. */
+  async deleteComment(commentId: number): Promise<void> {
+    await this.api.delete(`/comments/${commentId}`);
+  }
+
+  /** Whether the caller watches the record, and how many active people do. */
+  async getWatchState(entityType: CommentEntityType, entityId: number): Promise<WatchState> {
+    const response = await this.api.get<WatchState>('/watchers', {
+      params: { entity_type: entityType, entity_id: entityId },
+    });
+    return response.data;
+  }
+
+  /** Start watching a record (idempotent). */
+  async watchRecord(entityType: CommentEntityType, entityId: number): Promise<WatchState> {
+    const response = await this.api.post<WatchState>('/watchers', { entity_type: entityType, entity_id: entityId });
+    return response.data;
+  }
+
+  /** Stop watching a record (idempotent). */
+  async unwatchRecord(entityType: CommentEntityType, entityId: number): Promise<WatchState> {
+    const response = await this.api.delete<WatchState>('/watchers', {
+      params: { entity_type: entityType, entity_id: entityId },
+    });
+    return response.data;
+  }
+
+  /** Active people of the active company to @mention, by name (`q` 1-100 chars, `limit` 1-25). */
+  async searchMentionableUsers(q: string, limit = 10): Promise<MentionableUser[]> {
+    const response = await this.api.get<MentionableUser[]>('/users/mention-search', { params: { q, limit } });
     return response.data;
   }
 
@@ -4671,24 +4746,83 @@ class ApiService {
     return response.data;
   }
 
-  async getReportTemplates() {
-    const response = await this.api.get('/analytics/custom-report/templates');
+  // Custom report builder (types/reportBuilder.ts). Every route is ADMIN / MANAGER except
+  // listing templates (any role); the screen is gated on analytics:export, the same set.
+  // A 422 / 409 `detail` is a readable string (the interceptor flattens 422 arrays).
+
+  /** The report catalog: every data source and its typed, filterable fields. */
+  async getDataSources(): Promise<ReportDataSourceCatalog> {
+    const response = await this.api.get<ReportDataSourceCatalog>('/analytics/data-sources');
     return response.data;
   }
 
-  async createReportTemplate(template: any) {
-    const response = await this.api.post('/analytics/custom-report/templates', template);
+  /** Own and shared templates; each carries `definition_errors` when it no longer runs. */
+  async listReportTemplates(): Promise<ReportTemplate[]> {
+    const response = await this.api.get<ReportTemplate[]>('/analytics/custom-report/templates');
     return response.data;
   }
 
-  async runCustomReport(request: any) {
-    const response = await this.api.post('/analytics/custom-report', request);
+  /** One template (403 unless it is the caller's own, shared, or the caller is an admin). */
+  async getReportTemplate(templateId: number): Promise<ReportTemplate> {
+    const response = await this.api.get<ReportTemplate>(`/analytics/custom-report/templates/${templateId}`);
     return response.data;
   }
 
-  async getDataSources() {
-    const response = await this.api.get('/analytics/data-sources');
+  async createReportTemplate(template: ReportTemplateCreate): Promise<ReportTemplate> {
+    const response = await this.api.post<ReportTemplate>('/analytics/custom-report/templates', template);
     return response.data;
+  }
+
+  /** Change a template's name / description / sharing / definition (the author or an Admin). */
+  async updateReportTemplate(templateId: number, changes: ReportTemplateUpdate): Promise<ReportTemplate> {
+    const response = await this.api.patch<ReportTemplate>(
+      `/analytics/custom-report/templates/${templateId}`,
+      changes
+    );
+    return response.data;
+  }
+
+  /** Delete a template (the author or an Admin). */
+  async deleteReportTemplate(templateId: number): Promise<{ message: string }> {
+    const response = await this.api.delete<{ message: string }>(`/analytics/custom-report/templates/${templateId}`);
+    return response.data;
+  }
+
+  /** Run an ad-hoc report. Bad input is a 422 whose `detail` names the problem. */
+  async runCustomReport(request: CustomReportRequest): Promise<CustomReportResult> {
+    const response = await this.api.post<CustomReportResult>('/analytics/custom-report', request);
+    return response.data;
+  }
+
+  /** Run a saved template; 409 when its stored definition no longer runs. */
+  async runReportTemplate(templateId: number, limit?: number): Promise<CustomReportResult> {
+    const response = await this.api.post<CustomReportResult>(
+      `/analytics/custom-report/templates/${templateId}/run`,
+      undefined,
+      limit === undefined ? undefined : { params: { limit } }
+    );
+    return response.data;
+  }
+
+  /**
+   * A template's rows as CSV. 400 past 10,000 rows or with no rows, 409 when the stored
+   * definition no longer runs. The filename comes from Content-Disposition, preferring
+   * the RFC 5987 `filename*` (a non-ASCII template name) over the ASCII `filename`.
+   * A blob request's error body arrives as a Blob, so it is parsed back into JSON here:
+   * callers read `error.response.data.detail` exactly as for any other call.
+   */
+  async exportReportTemplateCsv(templateId: number): Promise<{ blob: Blob; filename: string }> {
+    try {
+      const response = await this.api.get<Blob>('/analytics/custom-report/export', {
+        params: { template_id: templateId, format: 'csv' },
+        responseType: 'blob',
+      });
+      const disposition: string | undefined = response.headers?.['content-disposition'];
+      return { blob: response.data, filename: downloadFilename(disposition, 'custom_report.csv') };
+    } catch (error) {
+      await parseBlobErrorBody(error);
+      throw error;
+    }
   }
 
   // Lean Phase 1 (issue #88) — flow / yield / adoption analytics + ship OTD.

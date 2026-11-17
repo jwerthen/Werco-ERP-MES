@@ -4,24 +4,30 @@ Analytics & Business Intelligence API Endpoints
 
 import csv
 import io
-import json
 from datetime import date
-from typing import List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+from app.api.audit_guard import required_audit
 from app.api.date_window import company_period
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
+
+# The custom-report export shares the bulk-export row cap with /exports/* (one number for
+# "too big to hand over as one file"). Imported as a module global so tests can patch it here.
+from app.api.endpoints.exports import MAX_EXPORT_ROWS
 from app.db.database import get_db
-from app.models.analytics import ReportTemplate
 from app.models.user import User, UserRole
 from app.schemas.analytics import (
+    REPORT_DEFAULT_LIMIT,
+    REPORT_MAX_LIMIT,
     AdoptionMetricsResponse,
     CapacityForecastResponse,
     CostAnalysisResponse,
     CustomReportRequest,
+    CustomReportResult,
     DateGranularity,
     DeliveryPrediction,
     FlowMetricsResponse,
@@ -32,19 +38,23 @@ from app.schemas.analytics import (
     OEEResponse,
     ProductionTrendsResponse,
     QualityMetricsResponse,
+    ReportDataSourceInfo,
     ReportTemplateCreate,
     ReportTemplateResponse,
+    ReportTemplateUpdate,
     ScrapParetoResponse,
     WIPAgingResponse,
 )
+from app.services import report_template_service
 from app.services.adoption_metrics_service import get_adoption_metrics
 from app.services.analytics_service import AnalyticsService
 from app.services.audit_service import AuditService
-from app.services.export_audit import log_export
-from app.services.export_safety import sanitize_csv_mapping, sanitize_csv_row
+from app.services.export_audit import log_export, refuse_file_export_to_narrowed_token
+from app.services.export_safety import attachment_content_disposition, sanitize_csv_mapping, sanitize_csv_row
 from app.services.flow_metrics_service import get_flow_metrics, get_wip_aging
 from app.services.prediction_service import PredictionService
 from app.services.quality_yield_service import get_fpy_rty, get_scrap_pareto
+from app.services.report_builder import ReportBuilderService, data_source_catalog
 
 router = APIRouter()
 
@@ -250,80 +260,83 @@ def get_inventory_analytics(
 
 
 # ============ CUSTOM REPORT BUILDER ============
+#
+# Access rule for templates (enforced in ``report_template_service``): reading, running or
+# exporting one is ADMIN/MANAGER and only the caller's own, a shared one, or any for an
+# ADMIN; changing or deleting one is ADMIN/MANAGER and only its author or an ADMIN (a
+# superuser or Platform Admin counts as an ADMIN in both). Listing stays open to any role,
+# as it always has. A template in another company is the same 404 as a missing one.
 
 
-@router.post("/custom-report")
+@router.post("/custom-report", response_model=CustomReportResult)
 def run_custom_report(
     request: CustomReportRequest,
-    response: Response,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Execute a custom report query."""
-    # Build dynamic query based on data source
-    from app.services.report_builder import ReportBuilderService
+    """Run an ad-hoc report over one data source and return its rows.
 
-    service = ReportBuilderService(db)
-    # G3-content: when the labor-cost rollup is OFF (default), the labor-derived columns
-    # render literal 0 = "not tracked", not a measured zero. Surface that distinction on a
-    # response header so a consumer can tell them apart, WITHOUT changing the bare-list
-    # body contract the export + clients rely on. Header only set when applicable.
-    note = service.labor_tracking_note(request, company_id)
-    if note is not None:
-        response.headers["X-Report-Labor-Not-Tracked"] = json.dumps(note["not_tracked_fields"])
-        response.headers["X-Report-Labor-Note"] = note["note"]
-    # G3-scope: pass the active company so the report is tenant-isolated; without it
-    # the builder queried across all tenants.
-    return service.execute_report(request, company_id)
+    Read GET /analytics/data-sources first: it lists every data source and, per field, its
+    name, label, type and (for enum fields) the allowed values. A definition names fields
+    from one source only. Columns may aggregate (sum/avg on number fields, min/max on
+    number/date/datetime/string fields, count on any); once any column aggregates or
+    ``group_by`` is set, every other column must appear in ``group_by``. Filter operators
+    by type: string eq/ne/in/like, number eq/ne/gt/gte/lt/lte/in/between, date and datetime
+    eq/ne/gt/gte/lt/lte/between, enum eq/ne/in; dates are YYYY-MM-DD, datetimes ISO-8601
+    (no zone = UTC). A sort names a field or a selected column's output key (alias, else
+    field). Anything the definition gets wrong is one 422 listing every problem.
+
+    Returns ``columns`` (key, label, type), ``rows`` keyed by column key, ``row_count``,
+    ``truncated`` (true when more than ``limit`` rows matched -- add a filter or raise
+    ``limit``, max 10,000) and ``notes`` (e.g. ``labor_not_tracked``: labor-derived work
+    order columns read 0 because labor costing is off, which means "not tracked", not $0).
+    Deleted records are never included. ADMIN or MANAGER only.
+    """
+    return ReportBuilderService(db).execute_report(request, company_id)
 
 
 @router.get("/custom-report/export")
 def export_custom_report(
     template_id: int,
-    format: str = Query("csv", description="Export format: csv, xlsx, pdf"),
+    format: Literal["csv"] = Query("csv", description="Export file format. Only csv is supported."),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Export a custom report to file (ADMIN/MANAGER). The export is audited."""
-    template = (
-        db.query(ReportTemplate)
-        .filter(ReportTemplate.id == template_id, ReportTemplate.company_id == company_id)
-        .first()
-    )
-    if not template:
-        raise HTTPException(status_code=404, detail="Report template not found")
+    """Download a saved report template's full result as a CSV file.
 
-    # Check access
-    if not template.is_shared and template.created_by != current_user.id:
-        raise HTTPException(status_code=403, detail="Access denied to this report")
+    The caller must own the template or it must be shared (an ADMIN may export any). Every
+    matching row is exported (no 1,000-row default); a result over 10,000 rows is refused
+    with 400 rather than cut short -- add a filter to the template and export again. A
+    template whose saved definition no longer passes validation is refused with 409 (its
+    ``definition_errors`` in GET /analytics/custom-report/templates say why). An empty
+    result is a 400. The export is recorded in the audit log. A read-only or AI-external
+    API token is refused 403 before anything is read. ADMIN or MANAGER only.
+    """
+    # First, before the template read and the up-to-10,001-row query: a narrowed token can
+    # never receive the file (the response middleware would replace it), so running the
+    # query for one only costs a full read -- and the over-cap / empty 400s it could reach
+    # first would tell it how many rows the template matches.
+    refuse_file_export_to_narrowed_token(current_user)
+    template = report_template_service.require_readable(db, template_id, company_id, current_user)
+    request = report_template_service.request_from_template(template)
 
-    from app.services.report_builder import ReportBuilderService
-
-    service = ReportBuilderService(db)
-
-    # Build request from template
-    request = CustomReportRequest(
-        data_source=template.data_source,
-        columns=template.columns,
-        filters=template.filters,
-        group_by=template.group_by,
-        sort=template.sort,
-    )
-
-    # G3-scope: scope the report data to the active company. The template fetch above
-    # was already company-scoped, but the data query was not -- export returned every
-    # tenant's rows.
-    data = service.execute_report(request, company_id)
-
-    if format != "csv":
-        raise HTTPException(status_code=400, detail=f"Format {format} not yet supported")
+    # G3-scope: the data query is scoped to the active company (the template fetch above
+    # already was). The export reads up to the shared export cap, never ``request.limit``.
+    result = ReportBuilderService(db).execute_report(request, company_id, limit=MAX_EXPORT_ROWS)
+    if result.truncated:
+        # Refuse rather than truncate (``exports.fetch_export_rows``): a CSV has no channel
+        # to say "this is partial". Nothing was disclosed, so nothing is audited.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"This export matches more than {MAX_EXPORT_ROWS:,} rows. Add a filter, then export again.",
+        )
 
     # Build the file first: ``_export_csv`` refuses an empty result set with 400,
     # and a refusal disclosed nothing, so it must not leave an EXPORT row behind.
-    response = _export_csv(data, template.name)
+    response = _export_csv(result.rows, [column.key for column in result.columns], template.name)
     # This is the most general bulk export in the system -- a tenant-authored
     # template over a whole data source -- so the row records the template and the
     # query shape it ran, never the rows. ``columns`` comes from the stored
@@ -333,8 +346,8 @@ def export_custom_report(
         audit,
         dataset="custom_report",
         label="custom report",
-        row_count=len(data),
-        export_format="csv",
+        row_count=result.row_count,
+        export_format=format,
         columns=template.columns or [],
         filters={"data_source": template.data_source, "template_filters": template.filters},
         resource_id=template.id,
@@ -343,24 +356,23 @@ def export_custom_report(
     return response
 
 
-def _export_csv(data: List[dict], filename: str) -> StreamingResponse:
-    """Export data to CSV."""
-    if not data:
-        raise HTTPException(status_code=400, detail="No data to export")
+def _export_csv(rows: List[Dict[str, Any]], fieldnames: List[str], name: str) -> StreamingResponse:
+    """Render report rows as a CSV download (header row = the output keys)."""
+    if not rows:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No data to export")
 
-    fieldnames = list(data[0].keys())
     output = io.StringIO()
     writer = csv.DictWriter(output, fieldnames=fieldnames)
     # Neutralize spreadsheet formulas (CWE-1236). Header included: the column
     # list comes from a tenant-authored report template, not a fixed allowlist.
     writer.writerow(dict(zip(fieldnames, sanitize_csv_row(fieldnames))))
-    writer.writerows(sanitize_csv_mapping(row) for row in data)
+    writer.writerows(sanitize_csv_mapping(row) for row in rows)
 
     output.seek(0)
     return StreamingResponse(
         iter([output.getvalue()]),
         media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={filename}.csv"},
+        headers={"Content-Disposition": attachment_content_disposition(f"{name}.csv")},
     )
 
 
@@ -370,19 +382,14 @@ def list_report_templates(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """List available report templates."""
-    # User's own templates + shared templates
-    templates = (
-        db.query(ReportTemplate)
-        .filter(
-            ReportTemplate.company_id == company_id,
-            (ReportTemplate.created_by == current_user.id) | (ReportTemplate.is_shared == True),
-        )
-        .order_by(ReportTemplate.name)
-        .all()
-    )
+    """List the saved report templates the caller can see: their own plus every shared one.
 
-    return templates
+    Each template carries its full definition and ``definition_errors``: a non-empty list
+    means the saved definition no longer passes validation, so running or exporting it
+    answers 409 until it is edited (PATCH its ``definition``). Any signed-in role may list.
+    """
+    templates = report_template_service.list_templates(db, company_id, current_user)
+    return [report_template_service.template_response(t) for t in templates]
 
 
 @router.post("/custom-report/templates", response_model=ReportTemplateResponse)
@@ -391,24 +398,57 @@ def create_report_template(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Save a custom report template."""
-    db_template = ReportTemplate(
-        name=template.name,
-        description=template.description,
-        data_source=template.data_source.value,
-        columns=[c.model_dump() for c in template.columns],
-        filters=[f.model_dump() for f in template.filters],
-        group_by=[g.model_dump() for g in template.group_by],
-        sort=[s.model_dump() for s in template.sort],
-        is_shared=template.is_shared,
-        created_by=current_user.id,
-    )
-    db_template.company_id = company_id
-    db.add(db_template)
-    db.commit()
-    db.refresh(db_template)
-    return db_template
+    """Save a report definition as a named template (private unless ``is_shared`` is true).
+
+    The definition (data_source, columns, filters, group_by, sort) follows the same rules
+    as POST /analytics/custom-report and is validated the same way (one 422 listing every
+    problem). ``name`` is 1-255 characters; ``description`` at most 2,000. The creation is
+    recorded in the audit log. ADMIN or MANAGER only.
+    """
+    created = report_template_service.create_template(db, template, company_id, current_user, audit)
+    return report_template_service.template_response(created)
+
+
+@router.get("/custom-report/templates/{template_id}", response_model=ReportTemplateResponse)
+def get_report_template(
+    template_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Get one saved report template, with its definition and ``definition_errors``.
+
+    The caller must own the template or it must be shared (403 otherwise; an ADMIN may open
+    any); an unknown id is 404. ADMIN or MANAGER only.
+    """
+    template = report_template_service.require_readable(db, template_id, company_id, current_user)
+    return report_template_service.template_response(template)
+
+
+@router.patch("/custom-report/templates/{template_id}", response_model=ReportTemplateResponse)
+def update_report_template(
+    template_id: int,
+    changes: ReportTemplateUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Change a saved report template's name, description, sharing or definition.
+
+    Send only the keys that change. ``definition`` replaces the whole definition
+    (data_source, columns, filters, group_by, sort) and is validated like a new one --
+    this is how a template with ``definition_errors`` is repaired. ``description`` may be
+    null to clear it; ``name``, ``is_shared`` and ``definition`` may not be null, and an
+    empty body is a 422. Only the template's author or an ADMIN may change it (403
+    otherwise). The change is recorded in the audit log with old and new values. ADMIN or
+    MANAGER only.
+    """
+    template = report_template_service.require_modifiable(db, template_id, company_id, current_user)
+    updated = report_template_service.update_template(db, template, changes, audit)
+    return report_template_service.template_response(updated)
 
 
 @router.delete("/custom-report/templates/{template_id}")
@@ -417,22 +457,41 @@ def delete_report_template(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Delete a report template."""
-    template = (
-        db.query(ReportTemplate)
-        .filter(ReportTemplate.id == template_id, ReportTemplate.company_id == company_id)
-        .first()
-    )
-    if not template:
-        raise HTTPException(status_code=404, detail="Template not found")
+    """Delete a saved report template.
 
-    if template.created_by != current_user.id and current_user.role != UserRole.ADMIN:
-        raise HTTPException(status_code=403, detail="Cannot delete another user's template")
-
-    db.delete(template)
-    db.commit()
+    Only the template's author or an ADMIN may delete it (403 otherwise). The audit log
+    keeps a snapshot of the deleted definition; that audit row is required, so if it cannot
+    be saved nothing is deleted (503). ADMIN or MANAGER only.
+    """
+    template = report_template_service.require_modifiable(db, template_id, company_id, current_user)
+    with required_audit(
+        db, "The audit record for this delete could not be saved; the template was not deleted. Retry."
+    ):
+        report_template_service.delete_template(db, template, company_id, audit)
     return {"message": "Template deleted"}
+
+
+@router.post("/custom-report/templates/{template_id}/run", response_model=CustomReportResult)
+def run_report_template(
+    template_id: int,
+    limit: int = Query(REPORT_DEFAULT_LIMIT, ge=1, le=REPORT_MAX_LIMIT, description="Most rows to return (1-10,000)."),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Run a saved report template and return its rows (same result shape as
+    POST /analytics/custom-report).
+
+    The caller must own the template or it must be shared (403 otherwise; an ADMIN may run
+    any). A template whose saved definition no longer passes validation answers 409 naming
+    the template and its problems; fix it with PATCH. ``truncated`` is true when more than
+    ``limit`` rows matched. ADMIN or MANAGER only.
+    """
+    template = report_template_service.require_readable(db, template_id, company_id, current_user)
+    request = report_template_service.request_from_template(template, limit=limit)
+    return ReportBuilderService(db).execute_report(request, company_id)
 
 
 # ============ PREDICTIVE ANALYTICS ============
@@ -484,80 +543,20 @@ def get_inventory_demand_prediction(
 # ============ DATA SOURCES ============
 
 
-@router.get("/data-sources")
+@router.get(
+    "/data-sources",
+    response_model=Dict[str, ReportDataSourceInfo],
+    response_model_exclude_none=True,
+)
 def get_available_data_sources(current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))):
-    """Get available data sources and their fields for report builder."""
-    return {
-        "work_orders": {
-            "label": "Work Orders",
-            "fields": [
-                {"name": "work_order_number", "type": "string", "label": "WO Number"},
-                {"name": "status", "type": "enum", "label": "Status"},
-                {"name": "quantity_ordered", "type": "number", "label": "Qty Ordered"},
-                {"name": "quantity_complete", "type": "number", "label": "Qty Complete"},
-                {"name": "due_date", "type": "date", "label": "Due Date"},
-                {"name": "actual_start", "type": "datetime", "label": "Start Date"},
-                {"name": "actual_end", "type": "datetime", "label": "End Date"},
-                {"name": "customer_name", "type": "string", "label": "Customer"},
-                # G3-content: ``estimated_hours`` removed from the selectable catalog -- it
-                # has no writer (always 0) and is no longer in report_builder FIELD_MAPPINGS,
-                # so offering it would render a phantom column that silently drops out.
-                {"name": "actual_hours", "type": "number", "label": "Actual Hours"},
-                {"name": "estimated_cost", "type": "number", "label": "Est. Cost"},
-                {"name": "actual_cost", "type": "number", "label": "Actual Cost"},
-            ],
-        },
-        "parts": {
-            "label": "Parts",
-            "fields": [
-                {"name": "part_number", "type": "string", "label": "Part Number"},
-                {"name": "name", "type": "string", "label": "Name"},
-                {"name": "part_type", "type": "enum", "label": "Type"},
-                {"name": "standard_cost", "type": "number", "label": "Std Cost"},
-                {"name": "lead_time_days", "type": "number", "label": "Lead Time"},
-            ],
-        },
-        "inventory": {
-            "label": "Inventory",
-            "fields": [
-                {"name": "part_number", "type": "string", "label": "Part Number"},
-                {"name": "quantity_on_hand", "type": "number", "label": "Qty On Hand"},
-                {"name": "quantity_allocated", "type": "number", "label": "Qty Allocated"},
-                {"name": "location", "type": "string", "label": "Location"},
-                {"name": "lot_number", "type": "string", "label": "Lot Number"},
-                {"name": "unit_cost", "type": "number", "label": "Unit Cost"},
-            ],
-        },
-        "quality": {
-            "label": "Quality (NCRs)",
-            "fields": [
-                {"name": "ncr_number", "type": "string", "label": "NCR Number"},
-                {"name": "status", "type": "enum", "label": "Status"},
-                {"name": "source", "type": "enum", "label": "Source"},
-                {"name": "disposition", "type": "enum", "label": "Disposition"},
-                {"name": "quantity_affected", "type": "number", "label": "Qty Affected"},
-                {"name": "detected_date", "type": "date", "label": "Detected Date"},
-                {"name": "estimated_cost", "type": "number", "label": "Est. Cost"},
-            ],
-        },
-        "purchasing": {
-            "label": "Purchase Orders",
-            "fields": [
-                {"name": "po_number", "type": "string", "label": "PO Number"},
-                {"name": "vendor_name", "type": "string", "label": "Vendor"},
-                {"name": "status", "type": "enum", "label": "Status"},
-                {"name": "order_date", "type": "date", "label": "Order Date"},
-                {"name": "total", "type": "number", "label": "Total"},
-            ],
-        },
-        "quotes": {
-            "label": "Quotes",
-            "fields": [
-                {"name": "quote_number", "type": "string", "label": "Quote Number"},
-                {"name": "customer_name", "type": "string", "label": "Customer"},
-                {"name": "status", "type": "enum", "label": "Status"},
-                {"name": "quote_date", "type": "date", "label": "Quote Date"},
-                {"name": "total", "type": "number", "label": "Total"},
-            ],
-        },
-    }
+    """List the custom-report data sources and every field each one offers.
+
+    Keyed by data source (the ``data_source`` value a report definition uses); each entry
+    has a ``label`` and ``fields``, each with ``name`` (what a column, filter, group_by or
+    sort names), ``label``, ``type`` (string, number, date, datetime or enum; it decides
+    the allowed operators and aggregates) and, on enum fields only, ``options`` (the
+    values a filter on that field takes). This is the complete list: a field not listed
+    here is refused. The catalog is static (the same for every company). ADMIN or MANAGER
+    only.
+    """
+    return data_source_catalog()

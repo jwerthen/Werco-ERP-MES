@@ -148,7 +148,7 @@ def test_execute_report_returns_only_passed_company_rows(db_session: Session):
     wo_b = make_work_order(db_session, company_id=COMPANY_B, wo_number="CRPT-B-0001")
 
     service = ReportBuilderService(db_session)
-    rows = service.execute_report(_wo_report_request(), COMPANY_A)
+    rows = service.execute_report(_wo_report_request(), COMPANY_A).rows
 
     numbers = {r["work_order_number"] for r in rows}
     assert wo_a.work_order_number in numbers, "company A's WO must appear in its own report"
@@ -162,7 +162,7 @@ def test_execute_report_is_symmetric_per_company(db_session: Session):
     wo_b = make_work_order(db_session, company_id=COMPANY_B, wo_number="CRPT-B-0002")
 
     service = ReportBuilderService(db_session)
-    rows_b = service.execute_report(_wo_report_request(), COMPANY_B)
+    rows_b = service.execute_report(_wo_report_request(), COMPANY_B).rows
 
     numbers = {r["work_order_number"] for r in rows_b}
     assert wo_b.work_order_number in numbers
@@ -188,7 +188,7 @@ def test_custom_report_endpoint_excludes_other_tenant_work_orders(client: TestCl
         },
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
-    numbers = {row["work_order_number"] for row in resp.json()}
+    numbers = {row["work_order_number"] for row in resp.json()["rows"]}
     assert wo_a.work_order_number in numbers, "caller's own WO must be present"
     assert wo_b.work_order_number not in numbers, "another tenant's WO must NOT be in the report"
 
@@ -207,7 +207,7 @@ def test_custom_report_endpoint_excludes_other_tenant_parts(client: TestClient, 
         },
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
-    part_numbers = {row["part_number"] for row in resp.json()}
+    part_numbers = {row["part_number"] for row in resp.json()["rows"]}
     assert part_a.part_number in part_numbers
     assert part_b.part_number not in part_numbers
 
@@ -227,7 +227,7 @@ def test_custom_report_endpoint_symmetric_for_second_tenant(client: TestClient, 
         },
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
-    numbers = {row["work_order_number"] for row in resp.json()}
+    numbers = {row["work_order_number"] for row in resp.json()["rows"]}
     assert wo_b.work_order_number in numbers
     assert wo_a.work_order_number not in numbers
 
@@ -379,16 +379,19 @@ def test_custom_report_export_refusal_writes_no_audit_row(client: TestClient, db
     assert committed_export_rows() == []
 
 
-def test_custom_report_export_unsupported_format_writes_no_audit_row(client: TestClient, db_session: Session):
+@pytest.mark.parametrize("fmt", ["pdf", "xlsx"])
+def test_custom_report_export_unsupported_format_writes_no_audit_row(client: TestClient, db_session: Session, fmt: str):
+    """``format`` is ``Literal["csv"]``: anything else is refused at validation (422),
+    before the handler runs, so nothing is queried and nothing is logged."""
     a_user = make_user(db_session, company_id=COMPANY_A)
-    make_work_order(db_session, company_id=COMPANY_A, wo_number="CRPT-A-0009")
+    make_work_order(db_session, company_id=COMPANY_A, wo_number=f"CRPT-A-0009-{fmt}")
     template = _make_wo_template(db_session, company_id=COMPANY_A, created_by=a_user.id)
 
     resp = client.get(
-        f"/api/v1/analytics/custom-report/export?template_id={template.id}&format=pdf",
+        f"/api/v1/analytics/custom-report/export?template_id={template.id}&format={fmt}",
         headers=headers_for(a_user),
     )
-    assert resp.status_code == status.HTTP_400_BAD_REQUEST, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
     assert committed_export_rows() == []
 
 

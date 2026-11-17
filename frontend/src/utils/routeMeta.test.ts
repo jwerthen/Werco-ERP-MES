@@ -176,6 +176,11 @@ describe('getBreadcrumbParent', () => {
     expect(getBreadcrumbParent('/analytics/nope')).toBeNull();
   });
 
+  it('titles the report builder "Custom Reports", matching its Analytics tab, with or without an open template', () => {
+    expect(getRouteTitle(loc('/analytics/reports'))).toBe('Custom Reports');
+    expect(getRouteTitle(loc('/analytics/reports', '?template=12'))).toBe('Custom Reports');
+  });
+
   it('crumbs the inventory sub-views back to Inventory', () => {
     expect(getBreadcrumbParent('/inventory/parts')).toEqual({
       label: 'Inventory',

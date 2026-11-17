@@ -1072,7 +1072,10 @@ two **EXCLUDED** XL items (deferred to their own initiatives, not part of Batch 
 >   apart. The **response body is unchanged** (the bare-list contract the export + clients rely on);
 >   headers are set only when applicable. Resolved via the same flag chokepoint
 >   (`labor_cost_service.is_labor_cost_rollup_enabled`) — mirroring the documented flag-OFF stance of
->   `get_cost_analysis`.
+>   `get_cost_analysis`. *(Superseded 2026-11-16, `feat/report-builder-screen`: the headers are gone
+>   — browsers could not read them, since they were not in the CORS expose list — and the body is no
+>   longer a bare list. The same information is now the `labor_not_tracked` entry in the result's
+>   `notes`. See [API.md → Custom report builder](API.md#custom-report-builder).)*
 >
 > **Compliance note.** G2's FG decrement + over-ship/missing-lot recording *strengthens* the AS9100D
 > material-traceability and CMMC audit-trail posture (outbound stock movements now leave a

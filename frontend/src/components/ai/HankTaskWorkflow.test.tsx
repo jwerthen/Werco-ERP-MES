@@ -1,8 +1,9 @@
 import React from 'react';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import api from '../../services/api';
-import type { HankTask } from '../../types/hankTasks';
+import type { HankCapabilities, HankTask } from '../../types/hankTasks';
 import type EntityPicker from '../operations/EntityPicker';
 import { HankTaskWorkflow } from './HankTaskWorkflow';
 
@@ -15,6 +16,7 @@ jest.mock('../../services/api', () => ({
     cancelHankTask: jest.fn(),
     getHankTask: jest.fn(),
     getDocuments: jest.fn(),
+    searchMentionableUsers: jest.fn(),
   },
 }));
 jest.mock('../operations/EntityPicker', () => ({
@@ -29,6 +31,21 @@ jest.mock('../operations/EntityPicker', () => ({
 }));
 const mockedApi = jest.mocked(api);
 const UUID = '11111111-1111-4111-8111-111111111111';
+// What an Admin / Manager / Supervisor is offered (plus attach_document for Admin / Manager).
+const ALL_BASIC_KINDS = [
+  'repeat_job',
+  'draft_purchase_order',
+  'attach_document',
+  'change_due_date',
+  'add_note',
+] as const;
+// A VIEWER (and an OPERATOR or SHIPPING user, for the basic form): a note is their one write.
+const NOTE_ONLY_CAPABILITIES = {
+  company_id: 4,
+  can_write: true,
+  can_watch: false,
+  allowed_kinds: ['add_note' as const],
+};
 const proposal: HankTask = {
   id: 41,
   company_id: 4,
@@ -117,7 +134,7 @@ beforeEach(() => {
     company_id: 4,
     can_write: true,
     can_watch: true,
-    allowed_kinds: ['repeat_job', 'draft_purchase_order', 'attach_document'],
+    allowed_kinds: [...ALL_BASIC_KINDS],
   });
   mockedApi.createHankTask.mockResolvedValue(proposal);
   mockedApi.executeHankTask.mockResolvedValue(completed);
@@ -134,6 +151,10 @@ beforeEach(() => {
       mime_type: 'application/pdf',
     },
   ]);
+  mockedApi.searchMentionableUsers.mockResolvedValue([
+    { id: 5, display_name: 'Jamie Okafor' },
+    { id: 6, display_name: 'Jana Whitfield' },
+  ]);
 });
 
 describe('HankTaskWorkflow', () => {
@@ -148,6 +169,8 @@ describe('HankTaskWorkflow', () => {
     await screen.findByRole('option', { name: 'Attach a PDF to a job' });
     expect(screen.queryByRole('option', { name: 'Repeat a job' })).not.toBeInTheDocument();
     expect(screen.queryByRole('option', { name: 'Draft a purchase order' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'Change a due date' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'Add a note to a job' })).not.toBeInTheDocument();
     expect(screen.getByRole('combobox', { name: /^Task/ })).toHaveValue('attach_document');
     first.unmount();
     mockedApi.getHankCapabilities.mockResolvedValue({
@@ -392,6 +415,400 @@ describe('HankTaskWorkflow', () => {
     renderWorkflow({ initialTask: { ...proposal, company_id: 5 } });
     expect(await screen.findByRole('alert')).toHaveTextContent('different company');
     expect(screen.queryByText(proposal.preview.summary)).not.toBeInTheDocument();
+    expect(mockedApi.executeHankTask).not.toHaveBeenCalled();
+  });
+});
+
+const dueDateTask: HankTask = {
+  ...proposal,
+  id: 52,
+  kind: 'change_due_date',
+  title: 'Move due date of WO-1008',
+  input: { work_order_id: 8, new_due_date: '2026-12-01', reason: 'Customer pulled the order in' },
+  preview: {
+    summary: 'Change the due date of WO-1008 to 2026-12-01.',
+    changes: ['Due date: 2026-11-20 → 2026-12-01.', 'Reason: Customer pulled the order in'],
+    warnings: [
+      'Only the due date changes. Scheduled dates, priority and the dispatch plan are not edited.',
+      'The promise date does not move: must ship by 2026-11-25 stays as it is, and it takes precedence over the due date for on-time delivery.',
+    ],
+    references: [{ type: 'work_order', id: 8, label: 'WO-1008', url: '/work-orders/8' }],
+  },
+};
+const noteTask: HankTask = {
+  ...proposal,
+  id: 53,
+  kind: 'add_note',
+  title: 'Add a note to WO-1008',
+  input: { work_order_id: 8, body: 'Check the weld\nbefore paint @Jamie Okafor', mentioned_user_ids: [5] },
+  preview: {
+    summary: 'Add a note to WO-1008.',
+    changes: ['Note: Check the weld\nbefore paint @Jamie Okafor', 'Mentions: Jamie Okafor.'],
+    warnings: [
+      'Everyone who can see this job can read the note. It is posted under your name.',
+      'Mentioned people are notified in the app and by email; the email does not include the note text.',
+    ],
+    references: [{ type: 'work_order', id: 8, label: 'WO-1008', url: '/work-orders/8' }],
+  },
+};
+
+const optionNames = (select: HTMLElement) =>
+  within(select)
+    .getAllByRole('option')
+    .map(option => option.textContent);
+async function chooseKind(name: string, value: string) {
+  const select = await screen.findByRole('combobox', { name: /^Task/ });
+  expect(within(select).getByRole('option', { name })).toBeInTheDocument();
+  fireEvent.change(select, { target: { value } });
+}
+
+describe('HankTaskWorkflow — change a due date and add a note', () => {
+  it('offers both kinds when the server allows them, with no quantity on either form', async () => {
+    renderWorkflow();
+    const select = await screen.findByRole('combobox', { name: /^Task/ });
+    expect(optionNames(select)).toEqual([
+      'Repeat a job',
+      'Draft a purchase order',
+      'Attach a PDF to a job',
+      'Change a due date',
+      'Add a note to a job',
+    ]);
+    fireEvent.change(select, { target: { value: 'change_due_date' } });
+    expect(screen.getByLabelText(/New due date/)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/Quantity/)).not.toBeInTheDocument();
+    fireEvent.change(select, { target: { value: 'add_note' } });
+    expect(screen.getByRole('combobox', { name: /^Note/ })).toBeInTheDocument();
+    expect(screen.queryByLabelText(/Quantity/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/New due date/)).not.toBeInTheDocument();
+  });
+
+  it('shows a note-only user exactly one task: the note form', async () => {
+    mockedApi.getHankCapabilities.mockResolvedValue(NOTE_ONLY_CAPABILITIES);
+    renderWorkflow();
+    const select = await screen.findByRole('combobox', { name: /^Task/ });
+    expect(optionNames(select)).toEqual(['Add a note to a job']);
+    expect(select).toHaveValue('add_note');
+    expect(screen.getByRole('combobox', { name: /^Note/ })).toBeInTheDocument();
+    expect(screen.getByLabelText(/^Work order/)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/Quantity/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Job to repeat/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/New due date/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/No basic task templates/)).not.toBeInTheDocument();
+  });
+
+  it('requires a work order, a new due date and a non-blank reason before saving a due-date change', async () => {
+    renderWorkflow();
+    await chooseKind('Change a due date', 'change_due_date');
+    fireEvent.change(screen.getByLabelText(/Reason/), { target: { value: '   ' } });
+    prepare();
+    await screen.findByText('Give a reason for moving the due date.');
+    expect(screen.getByText('Select a record from the available choices.')).toBeInTheDocument();
+    expect(screen.getByText('Choose the new due date.')).toBeInTheDocument();
+    expect(screen.queryByText('Enter a quantity greater than zero.')).not.toBeInTheDocument();
+    expect(mockedApi.createHankTask).not.toHaveBeenCalled();
+  });
+
+  it('builds the exact due-date input: due_date only, reason trimmed, no quantity and no must_ship_by', async () => {
+    renderWorkflow();
+    await chooseKind('Change a due date', 'change_due_date');
+    fireEvent.change(screen.getByLabelText(/^Work order/), { target: { value: '8' } });
+    fireEvent.change(screen.getByLabelText(/New due date/), { target: { value: '2026-12-01' } });
+    fireEvent.change(screen.getByLabelText(/Reason/), { target: { value: '  Customer pulled the order in  ' } });
+    prepare();
+    await waitFor(() => expect(mockedApi.createHankTask).toHaveBeenCalledTimes(1));
+    const body = mockedApi.createHankTask.mock.calls[0][0];
+    expect(body).toEqual({
+      expected_company_id: 4,
+      request_key: UUID,
+      kind: 'change_due_date',
+      input: { work_order_id: 8, new_due_date: '2026-12-01', reason: 'Customer pulled the order in' },
+    });
+    expect(body.input).not.toHaveProperty('must_ship_by');
+    expect(body.input).not.toHaveProperty('quantity_ordered');
+    expect(mockedApi.executeHankTask).not.toHaveBeenCalled();
+  });
+
+  it('refuses a blank note without saving anything', async () => {
+    mockedApi.getHankCapabilities.mockResolvedValue(NOTE_ONLY_CAPABILITIES);
+    renderWorkflow();
+    await screen.findByRole('combobox', { name: /^Note/ });
+    fireEvent.change(screen.getByLabelText(/^Work order/), { target: { value: '8' } });
+    fireEvent.change(screen.getByRole('combobox', { name: /^Note/ }), { target: { value: '  \n  ' } });
+    prepare();
+    await screen.findByText('Write the note.');
+    expect(mockedApi.createHankTask).not.toHaveBeenCalled();
+  });
+
+  it('turns the @mention chips into mentioned_user_ids and sends the trimmed note', async () => {
+    const user = userEvent.setup();
+    mockedApi.getHankCapabilities.mockResolvedValue(NOTE_ONLY_CAPABILITIES);
+    renderWorkflow();
+    const note = await screen.findByRole('combobox', { name: /^Note/ });
+    fireEvent.change(screen.getByLabelText(/^Work order/), { target: { value: '8' } });
+    await user.type(note, 'Check the weld before paint @ja');
+    await waitFor(() => expect(note).toHaveAttribute('aria-expanded', 'true'));
+    expect(mockedApi.searchMentionableUsers).toHaveBeenCalledWith('ja', 8);
+    await user.keyboard('{Enter}');
+    expect(note).toHaveValue('Check the weld before paint @Jamie Okafor ');
+    expect(screen.getByRole('button', { name: 'Remove mention of Jamie Okafor' })).toBeInTheDocument();
+    prepare();
+    await waitFor(() =>
+      expect(mockedApi.createHankTask).toHaveBeenCalledWith(
+        {
+          expected_company_id: 4,
+          request_key: UUID,
+          kind: 'add_note',
+          input: { work_order_id: 8, body: 'Check the weld before paint @Jamie Okafor', mentioned_user_ids: [5] },
+        },
+        expect.any(AbortSignal)
+      )
+    );
+  });
+
+  it('sends no mention for a removed chip, even though the @Name text stays in the note', async () => {
+    const user = userEvent.setup();
+    renderWorkflow();
+    await chooseKind('Add a note to a job', 'add_note');
+    const note = screen.getByRole('combobox', { name: /^Note/ });
+    fireEvent.change(screen.getByLabelText(/^Work order/), { target: { value: '7' } });
+    await user.type(note, '@ja');
+    await waitFor(() => expect(note).toHaveAttribute('aria-expanded', 'true'));
+    await user.keyboard('{Enter}');
+    await user.click(screen.getByRole('button', { name: 'Remove mention of Jamie Okafor' }));
+    prepare();
+    await waitFor(() => expect(mockedApi.createHankTask).toHaveBeenCalledTimes(1));
+    expect(mockedApi.createHankTask.mock.calls[0][0]).toMatchObject({
+      kind: 'add_note',
+      input: { work_order_id: 7, body: '@Jamie Okafor', mentioned_user_ids: [] },
+    });
+  });
+
+  it('still builds a bare attach_document input after due-date fields were filled (no fall-through)', async () => {
+    renderWorkflow();
+    await chooseKind('Change a due date', 'change_due_date');
+    fireEvent.change(screen.getByLabelText(/^Work order/), { target: { value: '8' } });
+    fireEvent.change(screen.getByLabelText(/New due date/), { target: { value: '2026-12-01' } });
+    fireEvent.change(screen.getByLabelText(/Reason/), { target: { value: 'Customer pulled the order in' } });
+    fireEvent.change(screen.getByRole('combobox', { name: /^Task/ }), { target: { value: 'attach_document' } });
+    await waitFor(() => expect(screen.getByLabelText(/PDF to attach/)).toBeEnabled());
+    fireEvent.change(screen.getByLabelText(/PDF to attach/), { target: { value: '12' } });
+    prepare();
+    await waitFor(() =>
+      expect(mockedApi.createHankTask).toHaveBeenCalledWith(
+        {
+          expected_company_id: 4,
+          request_key: UUID,
+          kind: 'attach_document',
+          input: { document_id: 12, work_order_id: 8 },
+        },
+        expect.any(AbortSignal)
+      )
+    );
+  });
+
+  it('renders the due-date preview (old → new, must-ship-by warning) and executes only on confirm', async () => {
+    mockedApi.executeHankTask.mockResolvedValue({
+      ...dueDateTask,
+      status: 'completed',
+      version: 2,
+      result: {
+        summary: 'Moved the due date of WO-1008 from 2026-11-20 to 2026-12-01.',
+        warnings: ['Must ship by 2026-11-25 was not changed.'],
+        references: dueDateTask.preview.references,
+      },
+    });
+    renderWorkflow({ initialTask: dueDateTask });
+    await screen.findByText('Change the due date of WO-1008 to 2026-12-01.');
+    expect(screen.getByText('Due date: 2026-11-20 → 2026-12-01.')).toBeInTheDocument();
+    expect(screen.getByText('Reason: Customer pulled the order in')).toBeInTheDocument();
+    expect(screen.getByText(/must ship by 2026-11-25 stays as it is/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'WO-1008' })).toHaveAttribute('href', '/work-orders/8');
+    expect(mockedApi.executeHankTask).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Change due date' }));
+    expect(mockedApi.executeHankTask).toHaveBeenCalledWith(
+      52,
+      { expected_company_id: 4, expected_version: 1 },
+      expect.any(AbortSignal)
+    );
+    await screen.findByText('Moved the due date of WO-1008 from 2026-11-20 to 2026-12-01.');
+    expect(screen.getByText('Must ship by 2026-11-25 was not changed.')).toBeInTheDocument();
+  });
+
+  it('renders the note preview verbatim with its mentions, and lets a note-only user post it', async () => {
+    mockedApi.getHankCapabilities.mockResolvedValue(NOTE_ONLY_CAPABILITIES);
+    mockedApi.executeHankTask.mockResolvedValue({
+      ...noteTask,
+      status: 'completed',
+      version: 2,
+      result: { summary: 'Added a note to WO-1008.', warnings: [], references: noteTask.preview.references },
+    });
+    renderWorkflow({ initialTask: noteTask });
+    await screen.findByText('Add a note to WO-1008.');
+    const noteLine = screen.getByText('Note: Check the weld before paint @Jamie Okafor');
+    // Verbatim: the line break the author typed reaches the reviewer.
+    expect(noteLine.textContent).toBe('Note: Check the weld\nbefore paint @Jamie Okafor');
+    expect(screen.getByText('Mentions: Jamie Okafor.')).toBeInTheDocument();
+    expect(screen.getByText(/the email does not include the note text/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Post note' }));
+    expect(mockedApi.executeHankTask).toHaveBeenCalledWith(
+      53,
+      { expected_company_id: 4, expected_version: 1 },
+      expect.any(AbortSignal)
+    );
+    await screen.findByText('Added a note to WO-1008.');
+  });
+
+  it('lets a note-only user review a due-date change but not execute it', async () => {
+    mockedApi.getHankCapabilities.mockResolvedValue(NOTE_ONLY_CAPABILITIES);
+    renderWorkflow({ initialTask: dueDateTask });
+    await screen.findByText('Change the due date of WO-1008 to 2026-12-01.');
+    expect(screen.queryByRole('button', { name: 'Change due date' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Cancel proposal' })).not.toBeInTheDocument();
+    expect(screen.getByText(/They do not allow you to execute it/)).toBeInTheDocument();
+  });
+});
+
+// The allowed_kinds lists the server actually answers per role (hank_task_service.ACTION_ROLES, in
+// its order). The operational kinds (receive / report / ship) have their own screens and must never
+// leak into this form's choices, whatever their position in the list.
+const ROLE_CASES: Array<{
+  role: string;
+  allowed: HankCapabilities['allowed_kinds'];
+  options: string[];
+  initial: string;
+}> = [
+  {
+    role: 'supervisor',
+    allowed: [
+      'repeat_job',
+      'draft_purchase_order',
+      'receive_delivery',
+      'report_production',
+      'draft_shipment',
+      'change_due_date',
+      'add_note',
+    ],
+    options: ['Repeat a job', 'Draft a purchase order', 'Change a due date', 'Add a note to a job'],
+    initial: 'repeat_job',
+  },
+  {
+    role: 'quality',
+    allowed: ['attach_document', 'report_production', 'add_note'],
+    options: ['Attach a PDF to a job', 'Add a note to a job'],
+    initial: 'attach_document',
+  },
+  {
+    role: 'operator',
+    allowed: ['report_production', 'add_note'],
+    options: ['Add a note to a job'],
+    initial: 'add_note',
+  },
+  {
+    role: 'shipping',
+    allowed: ['draft_shipment', 'add_note'],
+    options: ['Add a note to a job'],
+    initial: 'add_note',
+  },
+];
+
+describe('HankTaskWorkflow — the basic form per role', () => {
+  it.each(ROLE_CASES)(
+    'offers a $role exactly the basic kinds the server allows',
+    async ({ allowed, options, initial }) => {
+      mockedApi.getHankCapabilities.mockResolvedValue({
+        company_id: 4,
+        can_write: true,
+        can_watch: true,
+        allowed_kinds: allowed,
+      });
+      renderWorkflow();
+      const select = await screen.findByRole('combobox', { name: /^Task/ });
+      expect(optionNames(select)).toEqual(options);
+      expect(select).toHaveValue(initial);
+      expect(screen.queryByText(/No basic task templates/)).not.toBeInTheDocument();
+    }
+  );
+
+  it('lets an operator post a note but never offers or submits a due-date change', async () => {
+    mockedApi.getHankCapabilities.mockResolvedValue({
+      company_id: 4,
+      can_write: true,
+      can_watch: true,
+      allowed_kinds: ['report_production', 'add_note'],
+    });
+    renderWorkflow();
+    const select = await screen.findByRole('combobox', { name: /^Task/ });
+    expect(within(select).queryByRole('option', { name: 'Change a due date' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/New due date/)).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/^Work order/), { target: { value: '8' } });
+    fireEvent.change(screen.getByRole('combobox', { name: /^Note/ }), { target: { value: 'Fixture is loose' } });
+    prepare();
+    await waitFor(() => expect(mockedApi.createHankTask).toHaveBeenCalledTimes(1));
+    expect(mockedApi.createHankTask.mock.calls[0][0]).toEqual({
+      expected_company_id: 4,
+      request_key: UUID,
+      kind: 'add_note',
+      input: { work_order_id: 8, body: 'Fixture is loose', mentioned_user_ids: [] },
+    });
+  });
+
+  it('returns an operator to the note form, not a form they cannot use, after a completed note', async () => {
+    mockedApi.getHankCapabilities.mockResolvedValue({
+      company_id: 4,
+      can_write: true,
+      can_watch: true,
+      allowed_kinds: ['report_production', 'add_note'],
+    });
+    renderWorkflow({
+      initialTask: {
+        ...noteTask,
+        status: 'completed',
+        version: 2,
+        result: { summary: 'Added a note to WO-1008.', warnings: [], references: noteTask.preview.references },
+      },
+    });
+    await screen.findByText('Added a note to WO-1008.');
+    fireEvent.click(screen.getByRole('button', { name: 'Start another task' }));
+    const select = await screen.findByRole('combobox', { name: /^Task/ });
+    expect(select).toHaveValue('add_note');
+    expect(screen.getByRole('combobox', { name: /^Note/ })).toHaveValue('');
+    expect(screen.queryByLabelText(/Job to repeat/)).not.toBeInTheDocument();
+  });
+
+  it('refuses an over-long reason or note on the client and sends nothing', async () => {
+    renderWorkflow();
+    await chooseKind('Change a due date', 'change_due_date');
+    fireEvent.change(screen.getByLabelText(/^Work order/), { target: { value: '8' } });
+    fireEvent.change(screen.getByLabelText(/New due date/), { target: { value: '2026-12-01' } });
+    fireEvent.change(screen.getByLabelText(/Reason/), { target: { value: 'r'.repeat(501) } });
+    prepare();
+    await screen.findByText('The reason can be at most 500 characters.');
+    expect(mockedApi.createHankTask).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByRole('combobox', { name: /^Task/ }), { target: { value: 'add_note' } });
+    fireEvent.change(screen.getByRole('combobox', { name: /^Note/ }), { target: { value: 'n'.repeat(5001) } });
+    prepare();
+    expect(await screen.findAllByText(/at most 5000 characters/)).not.toHaveLength(0);
+    expect(mockedApi.createHankTask).not.toHaveBeenCalled();
+  });
+
+  it('shows the server’s terminal-status refusal verbatim and lets the planner pick another date', async () => {
+    const terminal =
+      "cannot change the due date of a work order in terminal status 'complete': its due date is the promise date its delivery performance was scored against.";
+    mockedApi.createHankTask.mockRejectedValueOnce(responseError(409, terminal)).mockResolvedValueOnce(dueDateTask);
+    renderWorkflow();
+    await chooseKind('Change a due date', 'change_due_date');
+    fireEvent.change(screen.getByLabelText(/^Work order/), { target: { value: '8' } });
+    fireEvent.change(screen.getByLabelText(/New due date/), { target: { value: '2026-12-01' } });
+    fireEvent.change(screen.getByLabelText(/Reason/), { target: { value: 'Customer pulled the order in' } });
+    prepare();
+    expect(await screen.findByRole('alert')).toHaveTextContent(terminal);
+    // A confirmed refusal: the typed reason stays, the form is usable, nothing was executed.
+    expect(screen.getByLabelText(/Reason/)).toHaveValue('Customer pulled the order in');
+    expect(screen.getByLabelText(/Reason/)).toBeEnabled();
+    prepare();
+    await screen.findByText('Change the due date of WO-1008 to 2026-12-01.');
+    expect(mockedApi.createHankTask).toHaveBeenCalledTimes(2);
     expect(mockedApi.executeHankTask).not.toHaveBeenCalled();
   });
 });

@@ -30,6 +30,9 @@ jest.mock('../services/api', () => ({
     getActiveUsers: jest.fn(),
     getUsers: jest.fn(),
     getDocuments: jest.fn(),
+    // CommentsPanel (mounted on the page) loads its own thread and watch state.
+    listComments: jest.fn().mockResolvedValue([]),
+    getWatchState: jest.fn().mockResolvedValue({ watching: false, watcher_count: 0 }),
     // MaterialTiesPanel loads on mount; an unmocked method is `undefined` and
     // surfaces as a silent <ErrorState role="alert"> instead of a red test.
     getMaterialAllocations: jest.fn(),

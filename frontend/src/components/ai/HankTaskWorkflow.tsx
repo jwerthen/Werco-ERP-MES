@@ -14,9 +14,11 @@ import type {
   HankTaskReference,
 } from '../../types/hankTasks';
 import EntityPicker from '../operations/EntityPicker';
+import MentionTextarea from '../comments/MentionTextarea';
 import { FormField } from '../ui/FormField';
 import { LoadingButton } from '../ui/LoadingButton';
 import { formatCentralDateTime } from '../../utils/centralTime';
+import { COMMENT_BODY_MAX_LENGTH, MAX_MENTIONS_PER_COMMENT } from '../../types/comments';
 import { getHankSessionScope, subscribeHankSession } from './hankSession';
 
 const ACTIONS: Record<HankActionKind, { title: string; description: string; execute: string }> = {
@@ -50,13 +52,36 @@ const ACTIONS: Record<HankActionKind, { title: string; description: string; exec
     description: 'Review the shipment draft before creating it.',
     execute: 'Create draft shipment',
   },
+  change_due_date: {
+    title: 'Change a due date',
+    description:
+      'Move a work order’s due date and say why. The must-ship-by promise date does not move. Review the old and new dates before saving.',
+    execute: 'Change due date',
+  },
+  add_note: {
+    title: 'Add a note to a job',
+    description:
+      'Post a note in a work order’s comments under your name. Everyone who can see the job can read it. Mentioned people are notified without the note text.',
+    execute: 'Post note',
+  },
 };
+// The kinds this form builds itself. The operational kinds have their own screens (Work).
+const BASIC_ACTIONS = [
+  'repeat_job',
+  'draft_purchase_order',
+  'attach_document',
+  'change_due_date',
+  'add_note',
+] as const satisfies readonly HankBasicActionKind[];
 const basicAction = (kind: HankActionKind): kind is HankBasicActionKind =>
-  ['repeat_job', 'draft_purchase_order', 'attach_document'].includes(kind);
+  (BASIC_ACTIONS as readonly HankActionKind[]).includes(kind);
+
+/** The server's cap on a due-date change reason (`CHANGE_DUE_DATE_REASON_MAX_LENGTH`). */
+const DUE_DATE_REASON_MAX_LENGTH = 500;
 
 const formSchema = z
   .object({
-    kind: z.enum(['repeat_job', 'draft_purchase_order', 'attach_document']),
+    kind: z.enum(BASIC_ACTIONS),
     source_work_order_id: z.string(),
     work_order_id: z.string(),
     vendor_id: z.string(),
@@ -66,6 +91,11 @@ const formSchema = z
     unit_price: z.string().trim(),
     due_date: z.string(),
     required_date: z.string(),
+    new_due_date: z.string(),
+    reason: z.string().trim(),
+    note_body: z.string().trim(),
+    // The people the note @mentions. The chips, not the `@Name` text, decide who is notified.
+    note_mentions: z.array(z.object({ id: z.number().int().positive(), display_name: z.string() })),
   })
   .superRefine((value, ctx) => {
     const issue = (field: keyof typeof value, message: string) =>
@@ -75,7 +105,7 @@ const formSchema = z
         issue(field, 'Select a record from the available choices.');
       }
     };
-    const date = (field: 'due_date' | 'required_date') => {
+    const date = (field: 'due_date' | 'required_date' | 'new_due_date') => {
       const raw = value[field];
       if (!raw) return;
       const parsed = new Date(`${raw}T00:00:00Z`);
@@ -87,23 +117,54 @@ const formSchema = z
         issue(field, 'Enter a valid date.');
       }
     };
-    if (value.kind === 'attach_document') {
-      identifier('document_id');
-      identifier('work_order_id');
-    } else {
+    const quantity = () => {
       if (!value.quantity || !Number.isFinite(Number(value.quantity)) || Number(value.quantity) <= 0) {
         issue('quantity', 'Enter a quantity greater than zero.');
       }
-      if (value.kind === 'repeat_job') {
+    };
+    // Every kind has its OWN branch. Nothing falls through to another kind's checks: a quantity
+    // means nothing to a due-date change or a note, and neither carries any purchase-order field.
+    switch (value.kind) {
+      case 'repeat_job':
+        quantity();
         identifier('source_work_order_id');
         date('due_date');
-      } else {
+        break;
+      case 'draft_purchase_order':
+        quantity();
         identifier('vendor_id');
         identifier('part_id');
         if (!value.unit_price || !Number.isFinite(Number(value.unit_price)) || Number(value.unit_price) < 0) {
           issue('unit_price', 'Enter a unit price of zero or more.');
         }
         date('required_date');
+        break;
+      case 'attach_document':
+        identifier('document_id');
+        identifier('work_order_id');
+        break;
+      case 'change_due_date':
+        identifier('work_order_id');
+        if (!value.new_due_date) issue('new_due_date', 'Choose the new due date.');
+        else date('new_due_date');
+        if (!value.reason) issue('reason', 'Give a reason for moving the due date.');
+        else if (value.reason.length > DUE_DATE_REASON_MAX_LENGTH) {
+          issue('reason', `The reason can be at most ${DUE_DATE_REASON_MAX_LENGTH} characters.`);
+        }
+        break;
+      case 'add_note':
+        identifier('work_order_id');
+        if (!value.note_body) issue('note_body', 'Write the note.');
+        else if (value.note_body.length > COMMENT_BODY_MAX_LENGTH) {
+          issue('note_body', `A note can be at most ${COMMENT_BODY_MAX_LENGTH} characters.`);
+        }
+        if (value.note_mentions.length > MAX_MENTIONS_PER_COMMENT) {
+          issue('note_mentions', `You can mention at most ${MAX_MENTIONS_PER_COMMENT} people in one note.`);
+        }
+        break;
+      default: {
+        const unhandled: never = value.kind;
+        throw new Error(`Unhandled Hank task kind: ${String(unhandled)}`);
       }
     }
   });
@@ -120,7 +181,78 @@ const DEFAULT_FIELDS: TaskForm = {
   unit_price: '',
   due_date: '',
   required_date: '',
+  new_due_date: '',
+  reason: '',
+  note_body: '',
+  note_mentions: [],
 };
+
+/**
+ * The proposal body for one kind. Every kind builds its OWN input: an unrecognized kind is a
+ * programming error, never another kind's input (the same fall-through the server refuses).
+ */
+function buildProposal(values: TaskForm, base: { expected_company_id: number; request_key: string }): HankTaskCreate {
+  switch (values.kind) {
+    case 'repeat_job':
+      return {
+        ...base,
+        kind: values.kind,
+        input: {
+          source_work_order_id: Number(values.source_work_order_id),
+          quantity_ordered: Number(values.quantity),
+          due_date: values.due_date || null,
+        },
+      };
+    case 'draft_purchase_order':
+      return {
+        ...base,
+        kind: values.kind,
+        input: {
+          vendor_id: Number(values.vendor_id),
+          required_date: values.required_date || null,
+          lines: [
+            {
+              part_id: Number(values.part_id),
+              quantity_ordered: Number(values.quantity),
+              unit_price: Number(values.unit_price),
+              required_date: values.required_date || null,
+            },
+          ],
+        },
+      };
+    case 'attach_document':
+      return {
+        ...base,
+        kind: values.kind,
+        input: { document_id: Number(values.document_id), work_order_id: Number(values.work_order_id) },
+      };
+    case 'change_due_date':
+      // `due_date` only: `must_ship_by` is never part of this input.
+      return {
+        ...base,
+        kind: values.kind,
+        input: {
+          work_order_id: Number(values.work_order_id),
+          new_due_date: values.new_due_date,
+          reason: values.reason,
+        },
+      };
+    case 'add_note':
+      return {
+        ...base,
+        kind: values.kind,
+        input: {
+          work_order_id: Number(values.work_order_id),
+          body: values.note_body,
+          mentioned_user_ids: values.note_mentions.map(person => person.id),
+        },
+      };
+    default: {
+      const unhandled: never = values.kind;
+      throw new Error(`Unhandled Hank task kind: ${String(unhandled)}`);
+    }
+  }
+}
 
 interface DocumentChoice {
   id: number;
@@ -430,40 +562,9 @@ export function HankTaskWorkflow({
       void run('create', pendingCreate);
       return;
     }
+    if (!capabilities.allowed_kinds.includes(values.kind)) return;
     const base = { expected_company_id: capabilities.company_id, request_key: crypto.randomUUID() };
-    const proposal: HankTaskCreate =
-      values.kind === 'repeat_job'
-        ? {
-            ...base,
-            kind: values.kind,
-            input: {
-              source_work_order_id: Number(values.source_work_order_id),
-              quantity_ordered: Number(values.quantity),
-              due_date: values.due_date || null,
-            },
-          }
-        : values.kind === 'draft_purchase_order'
-          ? {
-              ...base,
-              kind: values.kind,
-              input: {
-                vendor_id: Number(values.vendor_id),
-                required_date: values.required_date || null,
-                lines: [
-                  {
-                    part_id: Number(values.part_id),
-                    quantity_ordered: Number(values.quantity),
-                    unit_price: Number(values.unit_price),
-                    required_date: values.required_date || null,
-                  },
-                ],
-              },
-            }
-          : {
-              ...base,
-              kind: values.kind,
-              input: { document_id: Number(values.document_id), work_order_id: Number(values.work_order_id) },
-            };
+    const proposal = buildProposal(values, base);
     setPendingCreate(proposal);
     void run('create', proposal);
   });
@@ -513,6 +614,25 @@ export function HankTaskWorkflow({
     capabilities.can_write &&
     (!task || (task.kind !== 'watch_work_order' && capabilities.allowed_kinds.includes(task.kind)));
   const formDisabled = busy || !!pendingCreate;
+  const workOrderField = (label: string) => (
+    <FormField label={label} required error={errors.work_order_id?.message}>
+      {field => (
+        <Controller
+          name="work_order_id"
+          control={control}
+          render={({ field: input }) => (
+            <EntityPicker
+              {...field}
+              kind="workOrder"
+              value={input.value}
+              onChange={input.onChange}
+              disabled={formDisabled}
+            />
+          )}
+        />
+      )}
+    </FormField>
+  );
   return (
     <section aria-label="Tasks with Hank" className="space-y-4" aria-busy={busy}>
       {error && (
@@ -552,7 +672,10 @@ export function HankTaskWorkflow({
               <p className="text-sm text-fd-body">{task.preview.summary}</p>
               <ul className="list-disc pl-4 space-y-1 text-xs text-fd-body">
                 {task.preview.changes.map((change, index) => (
-                  <li key={index}>{change}</li>
+                  // pre-wrap: a note's line breaks are part of what is being reviewed.
+                  <li key={index} className="whitespace-pre-wrap break-words">
+                    {change}
+                  </li>
                 ))}
               </ul>
               {task.preview.warnings.map((warning, index) => (
@@ -711,7 +834,7 @@ export function HankTaskWorkflow({
                 </FormField>
               </>
             )}
-            {kind !== 'attach_document' && (
+            {(kind === 'repeat_job' || kind === 'draft_purchase_order') && (
               <FormField label="Quantity" required error={errors.quantity?.message}>
                 {field => (
                   <input
@@ -763,23 +886,66 @@ export function HankTaskWorkflow({
                     />
                   )}
                 />
-                <FormField label="Target work order" required error={errors.work_order_id?.message}>
+                {workOrderField('Target work order')}
+              </>
+            )}
+            {kind === 'change_due_date' && (
+              <>
+                {workOrderField('Work order')}
+                <FormField
+                  label="New due date"
+                  required
+                  help="Only the due date moves. The must-ship-by promise date stays as it is."
+                  error={errors.new_due_date?.message}
+                >
+                  {field => <input {...field} {...register('new_due_date')} type="date" className="input w-full" />}
+                </FormField>
+                <FormField
+                  label="Reason"
+                  required
+                  help={`Recorded on the work order’s audit trail. Up to ${DUE_DATE_REASON_MAX_LENGTH} characters.`}
+                  error={errors.reason?.message}
+                >
                   {field => (
+                    <textarea
+                      {...field}
+                      {...register('reason')}
+                      rows={2}
+                      maxLength={DUE_DATE_REASON_MAX_LENGTH}
+                      className="input w-full resize-y"
+                    />
+                  )}
+                </FormField>
+              </>
+            )}
+            {kind === 'add_note' && (
+              <>
+                {workOrderField('Work order')}
+                <Controller
+                  name="note_mentions"
+                  control={control}
+                  render={({ field: mentions }) => (
                     <Controller
-                      name="work_order_id"
+                      name="note_body"
                       control={control}
-                      render={({ field: input }) => (
-                        <EntityPicker
-                          {...field}
-                          kind="workOrder"
-                          value={input.value}
-                          onChange={input.onChange}
+                      render={({ field: body }) => (
+                        <MentionTextarea
+                          ref={body.ref}
+                          label="Note"
+                          required
+                          value={body.value}
+                          onChange={body.onChange}
+                          mentions={mentions.value}
+                          onMentionsChange={mentions.onChange}
                           disabled={formDisabled}
+                          rows={4}
+                          placeholder="Write the note…"
+                          error={errors.note_body?.message ?? errors.note_mentions?.message}
                         />
                       )}
                     />
                   )}
-                </FormField>
+                />
               </>
             )}
           </fieldset>

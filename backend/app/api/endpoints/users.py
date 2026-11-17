@@ -28,13 +28,14 @@ from app.models.company import Company
 from app.models.notification import NotificationLog, NotificationPreference
 from app.models.user import User, UserRole
 from app.schemas.base import UTCModel
+from app.schemas.comment import MentionableUser
 from app.schemas.notification import (
     NotificationPreferencesResponse,
     NotificationPreferencesUpdate,
     TestSMSResponse,
 )
 from app.schemas.user import validate_password_strength
-from app.services import api_token_service
+from app.services import api_token_service, comment_service
 from app.services.audit_service import AuditService
 from app.services.hank_preference_service import get_hank_preference_values
 from app.services.import_service import ImportFileError, parse_import_file
@@ -345,6 +346,25 @@ def pending_approval_summary(
 ):
     """Return the number of self-registered accounts awaiting approval."""
     return PendingApprovalSummary(count=_pending_approval_query(db, company_id).count())
+
+
+@router.get("/mention-search", response_model=List[MentionableUser])
+def search_mentionable_users(
+    q: str = Query(..., min_length=1, max_length=100, description="Part of a first, last or full name."),
+    limit: int = Query(10, ge=1, le=25),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Find people to @mention in a comment: active people of the active company by name.
+
+    Case-insensitive match on first name, last name or full name. Returns ``{id, display_name}``
+    only -- never an email, role or phone. Any signed-in member of the company may call it.
+
+    Declared ABOVE ``GET /{user_id}`` on purpose (like ``/me``): the path converter there would
+    otherwise capture ``mention-search`` and answer 403 / 422 instead of this route.
+    """
+    return comment_service.search_mentionable_users(db, company_id=company_id, q=q, limit=limit)
 
 
 @router.get("/me", response_model=UserResponse)

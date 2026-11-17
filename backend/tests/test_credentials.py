@@ -155,3 +155,10 @@ def test_the_egress_switch_refusal_text_is_the_documented_one():
         "A company egress kill switch (AI, SMS, carrier or label-print egress) is turned on or off by an Admin "
         "signed in to the app, not an API token: opening or closing data egress is a person's judgment."
     )
+
+
+def test_the_comment_write_refusal_text_is_the_documented_one():
+    assert credentials.API_TOKEN_COMMENT_WRITE == (
+        "A comment is a person's own words: an API token cannot post, edit or delete comments or change who is "
+        "watching a record. Sign in to the app."
+    )

@@ -149,3 +149,35 @@ export function apiErrorStatus(err: unknown): number | undefined {
   const status = (err as { response?: { status?: unknown } } | null | undefined)?.response?.status;
   return typeof status === 'number' ? status : undefined;
 }
+
+function readBlobText(blob: Blob): Promise<string> {
+  if (typeof blob.text === 'function') return blob.text();
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ''));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsText(blob);
+  });
+}
+
+/**
+ * A `responseType: 'blob'` request's ERROR body arrives as a Blob, so the interceptor
+ * never sees its `detail`. Parse it back IN PLACE: when the body is JSON, replace
+ * `response.data` with the parsed object (then normalize a 422 array), so callers read
+ * `error.response.data.detail` exactly as for any other call. Never throws; a body that
+ * is not JSON is left as it was.
+ */
+export async function parseBlobErrorBody(error: unknown): Promise<void> {
+  const response = (error as { response?: { data?: unknown } } | null | undefined)?.response;
+  const data = response?.data;
+  if (!response || typeof Blob === 'undefined' || !(data instanceof Blob)) return;
+  try {
+    const parsed: unknown = JSON.parse(await readBlobText(data));
+    if (parsed && typeof parsed === 'object') {
+      response.data = parsed;
+      normalizeAxiosErrorDetail(error);
+    }
+  } catch {
+    // Not JSON (or unreadable): leave the Blob for the caller's fallback message.
+  }
+}

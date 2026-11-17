@@ -194,6 +194,24 @@ def resolve_clocked_in_operators(db, event, company_id: int) -> List:
     )
 
 
+def resolve_comment_mentioned_users(db, event, company_id: int) -> List:
+    """``comment.mention``: the people the comment newly @mentions (the payload's
+    ``mentioned_user_ids``), re-checked at dispatch -- same company, active, may view the record,
+    and the record and the comment still live. See ``comment_service.mention_recipients``."""
+    from app.services.comment_service import mention_recipients
+
+    return mention_recipients(db, event, company_id)
+
+
+def resolve_comment_watchers(db, event, company_id: int) -> List:
+    """``comment.added``: the record's watchers minus everyone mentioned in the comment minus the
+    author; nobody once the record or the comment is soft-deleted. See
+    ``comment_service.watcher_recipients``."""
+    from app.services.comment_service import watcher_recipients
+
+    return watcher_recipients(db, event, company_id)
+
+
 # ---------------------------------------------------------------------------
 # Transition gates (some emits fire on a broad action; only notify on the
 # specific transition the catalog event means). Return True to FIRE.
@@ -1006,7 +1024,12 @@ _ENTRIES: List[CatalogEntry] = [
         severity="info",
         default_channels=frozenset({CHANNEL_IN_APP, CHANNEL_EMAIL}),
         mandatory_channel=CHANNEL_IN_APP,
-        source_event_types=(),  # PR 5 comments
+        # Emitted by comment_service on create (everyone mentioned) and on edit (only people
+        # newly added). Person-addressed: deliberately NOT under Admin Settings -> Email
+        # Recipients (notification_email_recipients.EMAIL_RECIPIENT_EXCLUDED_EVENTS). The
+        # payload never carries the comment text.
+        source_event_types=("comment_mentioned",),
+        resolver=resolve_comment_mentioned_users,
     ),
     CatalogEntry(
         event_key="comment.added",
@@ -1015,7 +1038,9 @@ _ENTRIES: List[CatalogEntry] = [
         category=Category.SYSTEM,
         severity="info",
         default_channels=frozenset({CHANNEL_IN_APP}),
-        source_event_types=(),  # PR 5 comments
+        # Emitted by comment_service on create only (an edit notifies new mentions, not watchers).
+        source_event_types=("comment_added",),
+        resolver=resolve_comment_watchers,
     ),
     CatalogEntry(
         event_key="account.locked",
