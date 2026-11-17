@@ -397,6 +397,12 @@ def update_standard(
     for key, value in data.model_dump(exclude_unset=True).items():
         setattr(standard, key, value)
 
+    # Write the row change before the audit row: ``AuditService.log`` takes the global
+    # audit-chain lock as its first statement, so an unflushed change would reach the database
+    # only after it, while this request held the chain lock (the opposite of the codebase order).
+    # A new ``document_id`` takes its key-share lock on the document row here, ahead of the chain
+    # lock, which is the order ``DELETE /documents/{id}`` takes them in.
+    db.flush()
     audit.log_update("qms_standard", standard.id, standard.name, old_values=old_values, new_values=standard)
     db.commit()
     db.refresh(standard)

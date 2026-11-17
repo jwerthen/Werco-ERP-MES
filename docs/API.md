@@ -8688,6 +8688,41 @@ or sharing its retained source storage reference. This preserves the reviewed
 PDF, completed intake receipt and source-page recovery together with existing
 receipt-certificate and revision-history retention.
 
+Deletion also refuses (**409**) a document that a same-company QMS standard or QMS clause
+evidence link names through its `document_id`. Both columns are plain foreign keys with no
+`ON DELETE`, so on Postgres the unguarded delete failed at flush, after the document row lock and
+the audit-chain lock were taken: a **500**, or a deadlock (40P01, answered **409** or **503**
+depending on where the delete lost) against an evidence edit holding the referencing row, and
+neither said why. The check runs before the audit write and
+before any change, so a refusal writes nothing and keeps the bytes. The message depends on the link:
+
+- **A live link** (the standard, or the evidence with its clause and standard, not removed):
+  *"This document is linked to QMS standard AS9100D"* or *"…linked as QMS evidence on AS9100D
+  clause 7.5.3"*, plus *"and N other QMS links"* when there are more, then *"Unlink it first by
+  setting document_id to null on that QMS standard or evidence link."* That means
+  `PUT /qms-standards/{standard_id}` or `PUT /qms-standards/evidence/{evidence_id}` with
+  `{"document_id": null}` (both audited). The QMS Standards page has no document field, so this is
+  an API / MCP step.
+- **Only removed links** (a soft-deleted standard, clause or evidence link, including evidence
+  under a removed clause or standard): *"This document is named by a removed QMS standard, clause or
+  evidence link, which keeps the record of what was assessed. It must remain available and cannot be
+  deleted."* A removed QMS row still records which document a clause was assessed against, and
+  clearing its link would rewrite that record, so the document is retained the way a voided
+  receipt's certificate is. Removing an evidence link (`DELETE /qms-standards/evidence/{id}`)
+  therefore does **not** release its document; clear `document_id` first if the document is meant
+  to go. Known gap: the evidence `PUT` / `DELETE` check only the evidence row's own flag, so they
+  still accept evidence whose clause or standard was removed.
+
+The standard and evidence `PUT`s flush their change before writing the audit row, so a new
+`document_id` takes its lock on the document row before the global audit-chain lock, the order
+the delete takes them in. A link made concurrently with a delete either commits first, and the
+delete sees it and refuses, or waits for the delete and then fails its own foreign-key check.
+
+Only the active company's QMS rows are read. A link from another company's QMS row (the QMS
+create / update routes have accepted any existing document id, another company's included) is not
+named, since that would disclose the other tenant's record; on Postgres that delete still fails at
+the foreign key until the link is cleared.
+
 Manual upload is a release action: the persisted Document stores `status="released"`, the actual
 `released_by` actor, and UTC `released_at`. Returned metadata exposes the released status;
 the audit details retain release actor/time, which are not fields of `DocumentResponse`.
@@ -8733,6 +8768,12 @@ in `RBAC_PERMISSIONS.md`.
 | GET | `/qms-standards/{standard_id}` | Get standard with all clauses and evidence | Yes |
 | PUT | `/qms-standards/{standard_id}` | Update standard | Admin / Manager / Quality |
 | DELETE | `/qms-standards/{standard_id}` | Delete standard and all its clauses/evidence | Admin |
+
+> **A document a standard or evidence link names cannot be deleted.** `DELETE /documents/{id}`
+> answers **409** while a standard's or an evidence link's `document_id` points at it, and removed
+> standards, clauses and evidence links keep it too. To release a document, set `document_id` to
+> `null` on the standard or evidence link first; removing the link does not. See
+> [Documents](#documents).
 
 **Clauses**
 
