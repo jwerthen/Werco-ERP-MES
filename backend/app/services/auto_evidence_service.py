@@ -1447,7 +1447,7 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
     {
         "id": "audit",
         "evidence_type": "module",
-        "title": "Audit Trail (Immutable Hash-Chain Log)",
+        "title": "Audit Trail (Audit Log & Hash-Chain Status)",
         "module_reference": "/audit",
         "keywords": ["internal audit", "audit program", "audit trail", "management review", "audit log"],
         "query_fn": _query_audit_log,
