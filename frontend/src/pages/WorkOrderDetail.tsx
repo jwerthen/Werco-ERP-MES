@@ -1,5 +1,6 @@
 import JobTimelinePanel from '../components/workorders/JobTimelinePanel';
 import JobForecastPanel from '../components/workorders/JobForecastPanel';
+import CommentsPanel from '../components/comments/CommentsPanel';
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
@@ -2989,6 +2990,11 @@ export default function WorkOrderDetail() {
           </>
         )}
       </CockpitPanel>
+
+      {/* Comments — the people side of the job (questions, hand-offs, @mentions),
+          kept beside the planning notes. Keyed on the work order so navigating
+          between work orders starts a fresh thread and composer. */}
+      <CommentsPanel key={`comments-${workOrder.id}`} entityType="work_order" entityId={workOrder.id} />
 
       <div className="card card-compact">
         <div className="flex flex-col xl:flex-row xl:items-start xl:justify-between gap-3 mb-3">

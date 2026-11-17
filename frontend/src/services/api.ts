@@ -86,6 +86,14 @@ import {
 } from '../types';
 import { ScanResolveRequest, ScanResolveResult } from '../types/scan';
 import type {
+  CommentCreateInput,
+  CommentEntityType,
+  CommentResponse,
+  CommentUpdateInput,
+  MentionableUser,
+  WatchState,
+} from '../types/comments';
+import type {
   AslImportResponse,
   AslVendor,
   SupplierApprovalCheck,
@@ -1931,6 +1939,64 @@ class ApiService {
     const response = await this.api.post<WorkOrderBlockerWriteResult>(`/work-order-blockers/${blockerId}/resolve`, {
       resolution_note: resolutionNote,
     });
+    return response.data;
+  }
+
+  // Comments with @mentions, and record watchers (v1: work orders only).
+  // Plain GETs on purpose, not `fetchWithCache`: its stale-cache fallback would
+  // answer a failed poll (e.g. a 404 once the work order is deleted) with the
+  // last thread instead of letting the panel show the failure.
+
+  /** The record's comments, oldest first (the newest 500). */
+  async listComments(entityType: CommentEntityType, entityId: number): Promise<CommentResponse[]> {
+    const response = await this.api.get<CommentResponse[]>('/comments', {
+      params: { entity_type: entityType, entity_id: entityId },
+    });
+    return response.data;
+  }
+
+  /** Post a comment. 422 names any mentioned user id the server refused. */
+  async createComment(data: CommentCreateInput): Promise<CommentResponse> {
+    const response = await this.api.post<CommentResponse>('/comments', data);
+    return response.data;
+  }
+
+  /** Edit your own comment: send the FULL new body and mention list. */
+  async updateComment(commentId: number, data: CommentUpdateInput): Promise<CommentResponse> {
+    const response = await this.api.patch<CommentResponse>(`/comments/${commentId}`, data);
+    return response.data;
+  }
+
+  /** Delete a comment (soft delete server-side). 204, no body. */
+  async deleteComment(commentId: number): Promise<void> {
+    await this.api.delete(`/comments/${commentId}`);
+  }
+
+  /** Whether the caller watches the record, and how many active people do. */
+  async getWatchState(entityType: CommentEntityType, entityId: number): Promise<WatchState> {
+    const response = await this.api.get<WatchState>('/watchers', {
+      params: { entity_type: entityType, entity_id: entityId },
+    });
+    return response.data;
+  }
+
+  /** Start watching a record (idempotent). */
+  async watchRecord(entityType: CommentEntityType, entityId: number): Promise<WatchState> {
+    const response = await this.api.post<WatchState>('/watchers', { entity_type: entityType, entity_id: entityId });
+    return response.data;
+  }
+
+  /** Stop watching a record (idempotent). */
+  async unwatchRecord(entityType: CommentEntityType, entityId: number): Promise<WatchState> {
+    const response = await this.api.delete<WatchState>('/watchers', {
+      params: { entity_type: entityType, entity_id: entityId },
+    });
+    return response.data;
+  }
+
+  /** Active people of the active company to @mention, by name (`q` 1-100 chars, `limit` 1-25). */
+  async searchMentionableUsers(q: string, limit = 10): Promise<MentionableUser[]> {
+    const response = await this.api.get<MentionableUser[]>('/users/mention-search', { params: { q, limit } });
     return response.data;
   }
 
