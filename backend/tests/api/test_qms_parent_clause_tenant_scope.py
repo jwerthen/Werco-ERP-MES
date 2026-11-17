@@ -21,7 +21,9 @@ Proved here:
 * ``parent_clause_id: null`` clears the parent, and an update that does not send it is not judged on
   the value already stored;
 * a foreign graft stored before this check existed no longer renders in the other company's reads
-  (GET standard, GET clauses, and the PUT response);
+  (GET standard, GET clauses, and the PUT clause and PUT standard responses);
+* a re-parent takes the company's advisory lock before it reads the parent, so two opposite moves in
+  flight at once cannot both pass the descendant walk (the lock is a no-op on SQLite: recorded here);
 * the check uses the ACTIVE company, never the user's home one.
 
 "No audit row" is counted with no rollback first: the ``client`` fixture shares this one open session
@@ -658,3 +660,120 @@ def test_put_response_no_longer_renders_a_deleted_sub_clause(client: TestClient,
 
     assert resp.status_code == status.HTTP_200_OK, resp.text
     assert _sub_clause_ids(resp.json()) == [live_child.id]
+
+
+def test_put_standard_response_does_not_render_a_stored_foreign_graft(client: TestClient, db_session: Session):
+    """``PUT /qms-standards/{id}`` returns the whole clause tree too. It used to ``db.refresh`` the
+    standard, which lazy-loaded clauses, sub_clauses and evidence with no filter at all, so B's own
+    rename showed A's grafted clause (and a deleted B clause) in its response."""
+    standard_b = _make_standard(db_session, company_id=COMPANY_B)
+    clause_b = _make_clause(db_session, standard=standard_b)
+    own_child_b = _make_clause(db_session, standard=standard_b, parent=clause_b)
+    deleted_b = _make_clause(db_session, standard=standard_b, parent=clause_b)
+    deleted_b.soft_delete(None)
+    db_session.commit()
+    grafted_a = _make_clause(db_session, standard=_make_standard(db_session, company_id=COMPANY_A), parent=clause_b)
+    db_session.add(
+        QMSClauseEvidence(
+            company_id=COMPANY_A, clause_id=grafted_a.id, evidence_type="document", title="A-only evidence"
+        )
+    )
+    db_session.commit()
+    user_b = _make_user(db_session, company_id=COMPANY_B)
+
+    resp = client.put(
+        f"/api/v1/qms-standards/{standard_b.id}",
+        headers=_headers_for(user_b),
+        json={"description": "Renamed by B"},
+    )
+
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    assert resp.json()["description"] == "Renamed by B"
+    by_id = {c["id"]: c for c in resp.json()["clauses"]}
+    assert set(by_id) == {clause_b.id, own_child_b.id}, "no deleted clause at the top level either"
+    assert _sub_clause_ids(by_id[clause_b.id]) == [own_child_b.id]
+    assert "A-only evidence" not in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Re-parenting is serialized per company
+# ---------------------------------------------------------------------------
+
+
+def _record_lock_and_check(monkeypatch) -> list:
+    """Record, in order, each re-parent lock the update takes and each parent read it makes."""
+    import app.api.endpoints.qms_standards as qms
+
+    calls: list = []
+    real_check = qms._assert_parent_clauses
+
+    def fake_lock(db, namespace, company_id=None):
+        calls.append(("lock", namespace, company_id))
+
+    def spy_check(*args, **kwargs):
+        calls.append(("check",))
+        return real_check(*args, **kwargs)
+
+    monkeypatch.setattr(qms, "acquire_generator_lock", fake_lock)
+    monkeypatch.setattr(qms, "_assert_parent_clauses", spy_check)
+    return calls
+
+
+def test_reparent_takes_the_company_lock_before_reading_the_parent(
+    client: TestClient, db_session: Session, monkeypatch
+):
+    """Two opposite moves in flight at once (C under P, P under C) could each pass the descendant
+    walk before the other committed and store a cycle. The update takes the company's re-parent
+    advisory lock (a no-op on SQLite, so recorded here) before it reads the parent or walks."""
+    standard = _make_standard(db_session, company_id=COMPANY_B)
+    parent = _make_clause(db_session, standard=standard)
+    clause = _make_clause(db_session, standard=standard)
+    user = _make_user(db_session, company_id=COMPANY_B)
+    calls = _record_lock_and_check(monkeypatch)
+
+    resp = client.put(
+        f"/api/v1/qms-standards/clauses/{clause.id}",
+        headers=_headers_for(user),
+        json={"parent_clause_id": parent.id},
+    )
+
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    assert calls == [("lock", "qms_clause_parent", COMPANY_B), ("check",)]
+
+
+@pytest.mark.parametrize("body", [{"parent_clause_id": None}, {"compliance_notes": "reviewed"}])
+def test_update_without_a_new_parent_takes_no_lock(client: TestClient, db_session: Session, monkeypatch, body: dict):
+    """Clearing the parent, or an edit that does not send it, cannot make a cycle: no lock, no check."""
+    standard = _make_standard(db_session)
+    parent = _make_clause(db_session, standard=standard)
+    clause = _make_clause(db_session, standard=standard, parent=parent)
+    user = _make_user(db_session)
+    calls = _record_lock_and_check(monkeypatch)
+
+    resp = client.put(f"/api/v1/qms-standards/clauses/{clause.id}", headers=_headers_for(user), json=body)
+
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    assert calls == []
+
+
+def test_update_clause_judges_the_active_company_not_the_home_one(client: TestClient, db_session: Session):
+    """The update twin of the create test: a platform admin (home A) switched into B moves B's clause.
+    A's clause is refused as a parent, B's is accepted."""
+    standard_b = _make_standard(db_session, company_id=COMPANY_B)
+    parent_b = _make_clause(db_session, standard=standard_b)
+    clause_b = _make_clause(db_session, standard=standard_b)
+    parent_a = _make_clause(db_session, standard=_make_standard(db_session, company_id=COMPANY_A))
+    platform_admin = _make_user(db_session, company_id=COMPANY_A, role=UserRole.PLATFORM_ADMIN)
+    headers = _headers_for(platform_admin, active_company_id=COMPANY_B)
+
+    refused = client.put(
+        f"/api/v1/qms-standards/clauses/{clause_b.id}", headers=headers, json={"parent_clause_id": parent_a.id}
+    )
+    accepted = client.put(
+        f"/api/v1/qms-standards/clauses/{clause_b.id}", headers=headers, json={"parent_clause_id": parent_b.id}
+    )
+
+    assert refused.status_code == status.HTTP_404_NOT_FOUND, refused.text
+    assert refused.json() == NOT_FOUND
+    assert accepted.status_code == status.HTTP_200_OK, accepted.text
+    assert accepted.json()["parent_clause_id"] == parent_b.id

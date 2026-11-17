@@ -8753,12 +8753,15 @@ in `RBAC_PERMISSIONS.md`.
 > import is all-or-nothing: one bad parent refuses every clause in the request (clauses in the same
 > request cannot name each other; they have no id yet). On a `PUT`, the clause itself (**422** `A
 > clause cannot be its own parent clause`) or any of its own sub-clauses at any depth (**422** `A
-> clause cannot be placed under one of its own sub-clauses`) is refused, so no cycle can be stored;
-> the descendant check follows stored links through deleted clauses too. `parent_clause_id: null`
-> still clears the parent, and a `PUT` that does not send `parent_clause_id` is not judged on the
-> value already stored. Reads render a clause's `sub_clauses` from your own company's live clauses
-> only (`GET /qms-standards/{standard_id}`, `GET /qms-standards/{standard_id}/clauses` and the `PUT`
-> response), so a link written before this check existed no longer shows another company's clause.
+> clause cannot be placed under one of its own sub-clauses`) is refused, so no new cycle can be
+> stored. The descendant check follows stored links through deleted clauses too, and re-parenting is
+> serialized per company (a Postgres advisory lock), so two opposite moves sent at the same moment
+> cannot both pass. `parent_clause_id: null` still clears the parent, and a `PUT` that does not send
+> `parent_clause_id` is not judged on the value already stored. Every response that carries a clause
+> tree renders `clauses`, `sub_clauses` and their evidence from your own company's live rows only
+> (`GET /qms-standards/{standard_id}`, `GET /qms-standards/{standard_id}/clauses`, and the `PUT
+> /qms-standards/{standard_id}` and `PUT /qms-standards/clauses/{clause_id}` responses), so a link
+> written before this check existed no longer shows another company's clause.
 > Before this, any existing clause id, another company's included, was accepted, while a
 > nonexistent one failed with a 500, and a self- or descendant parent stored a cycle that made every
 > read of that standard fail with a 500. To clear such a stored link, `PUT {"parent_clause_id":

@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, joinedload, with_loader_criteria
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
+from app.db.locks import acquire_generator_lock
 from app.models.qms_standard import QMSClause, QMSClauseEvidence, QMSStandard
 from app.models.user import User, UserRole
 from app.schemas.qms_standard import (
@@ -342,15 +343,14 @@ def get_audit_readiness(
     )
 
 
-@router.get("/{standard_id}", response_model=QMSStandardResponse)
-def get_standard(
-    standard_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id),
-):
-    """Get a QMS standard with all its clauses and evidence."""
-    standard = (
+def _standard_with_clause_tree(db: Session, standard_id: int, company_id: int) -> QMSStandard | None:
+    """The live standard of the active company, loaded for a ``QMSStandardResponse``.
+
+    Every response that serializes a standard's clause tree goes through here (``GET`` and the
+    ``PUT`` response), so its clauses, their ``sub_clauses`` and their evidence are the active
+    company's live rows only. A plain ``db.refresh`` would lazy-load all three unfiltered.
+    """
+    return (
         db.query(QMSStandard)
         .options(
             joinedload(QMSStandard.clauses).joinedload(QMSClause.evidence_links),
@@ -365,6 +365,17 @@ def get_standard(
         .populate_existing()  # see _clause_tree_criteria
         .first()
     )
+
+
+@router.get("/{standard_id}", response_model=QMSStandardResponse)
+def get_standard(
+    standard_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Get a QMS standard with all its clauses and evidence."""
+    standard = _standard_with_clause_tree(db, standard_id, company_id)
     if not standard:
         raise HTTPException(status_code=404, detail="QMS standard not found")
     return standard
@@ -399,8 +410,7 @@ def update_standard(
 
     audit.log_update("qms_standard", standard.id, standard.name, old_values=old_values, new_values=standard)
     db.commit()
-    db.refresh(standard)
-    return standard
+    return _standard_with_clause_tree(db, standard.id, company_id)
 
 
 @router.delete("/{standard_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -437,6 +447,7 @@ def delete_standard(
 PARENT_CLAUSE_NOT_FOUND = "Parent clause not found"
 PARENT_CLAUSE_IS_SELF = "A clause cannot be its own parent clause"
 PARENT_CLAUSE_IS_DESCENDANT = "A clause cannot be placed under one of its own sub-clauses"
+QMS_CLAUSE_PARENT_LOCK = "qms_clause_parent"
 
 
 def _clause_tree_criteria(company_id: int) -> list:
@@ -502,7 +513,8 @@ def _assert_not_own_descendant(db: Session, clause_id: int, parent_clause_id: in
     filtered on ``is_deleted``: a deleted clause's link is still stored, and a cycle through it
     would come back if the clause were ever restored. ``seen`` bounds the walk on a chain that is
     already cyclic from before this check. One primary-key read per level; clause trees are a
-    handful deep.
+    handful deep. The caller holds the company's ``QMS_CLAUSE_PARENT_LOCK``, so the links it reads
+    cannot be changed by another re-parent before this transaction commits.
     """
     if parent_clause_id == clause_id:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=PARENT_CLAUSE_IS_SELF)
@@ -676,6 +688,13 @@ def update_clause(
     update_data = data.model_dump(exclude_unset=True)
     # Before any attribute is set, so a refusal leaves the row and the audit log untouched.
     if update_data.get("parent_clause_id") is not None:
+        # Serializes re-parenting within the company, so two opposite moves in flight at once
+        # (C under P, P under C) cannot both pass the descendant walk: the second waits, then its
+        # walk reads the first one's committed link. This is the only place that takes it, before
+        # the request writes anything or reaches the audit chain lock, so it adds no lock-order
+        # edge (the chain lock is the single-bigint advisory form; this is the two-int form, a
+        # separate key space). No-op on SQLite.
+        acquire_generator_lock(db, QMS_CLAUSE_PARENT_LOCK, company_id)
         _assert_parent_clauses(
             db, [update_data["parent_clause_id"]], company_id=company_id, standard_id=clause.standard_id
         )
