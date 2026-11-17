@@ -9,6 +9,7 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
+from app.core.upload_limits import ensure_upload_within_limit, read_upload_within_limit
 from app.db.database import get_db
 from app.db.tenant_filter import tenant_query
 from app.models.bom import BOM, BOMItem
@@ -203,6 +204,8 @@ TIME_STANDARD_FIELDS = {
 
 
 ALLOWED_DRAWING_EXTENSIONS = {".pdf", ".dxf", ".step", ".stp"}
+# Drawing upload cap for ``generate-from-drawing`` (413 over it, checked before the body is read;
+# see ``app.core.upload_limits``). Resolved at call time, so this constant is the one tunable.
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 
 
@@ -236,6 +239,7 @@ async def generate_routing_from_drawing(
     """
     Upload a drawing (PDF, DXF, STEP) and get a proposed draft routing.
     Returns the proposed routing for user review -- does NOT create it yet.
+    Drawings over 10 MB are refused with 413 before any work runs.
     """
     # Live parts only, matching ``create-from-generation`` (a proposal for a soft-deleted part
     # could never be accepted, so don't spend a model call on one).
@@ -249,10 +253,10 @@ async def generate_routing_from_drawing(
             detail=f"Unsupported file type '{ext}'. Allowed: {', '.join(ALLOWED_DRAWING_EXTENSIONS)}",
         )
 
-    # Read file content
-    file_content = await file.read()
-    if len(file_content) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=400, detail="File too large (max 10MB)")
+    # Size first (413 without reading a byte when Starlette already counted too many), then a
+    # read bounded at MAX_FILE_SIZE + 1 -- the whole body is never buffered just to measure it.
+    ensure_upload_within_limit(file, MAX_FILE_SIZE)
+    file_content = await read_upload_within_limit(file, MAX_FILE_SIZE)
 
     # Save to temp location
     upload_dir = Path("uploads/routing_generation")

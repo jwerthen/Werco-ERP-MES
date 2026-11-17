@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Iterable, Optional
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
+from app.core.upload_limits import format_byte_limit
 from app.models.document import Document, DocumentType
 from app.models.laser_nest import LaserNest, LaserNestPackage
 from app.models.part import Part
@@ -55,6 +56,26 @@ CNC_EXTENSIONS = {
 # one LLM call, so a runaway ZIP is both a latency and a cost concern -- the
 # preview/import endpoints reject anything over this with a 400.
 LASER_PDF_PACKAGE_MAX = 50
+
+# Zip-bomb caps for an uploaded laser package, checked against the archive's central directory
+# BEFORE a single member is extracted (``check_laser_zip_limits``). The 50 MB upload cap bounds the
+# COMPRESSED bytes only; a deflated run of zeros expands about 1000:1, so without these a 50 MB
+# upload could unpack to tens of GB on the API container's disk. 200 MB is 4x the upload cap
+# (nest-report PDFs are already-compressed streams and barely shrink in a ZIP, so a real package
+# unpacks to roughly its upload size), and 200 members is 4x the 50-PDF cap, which leaves room for
+# folder entries. Both are resolved at call time, so these constants are the one tunable.
+# Shared on purpose: the preview enforces them today; the package IMPORT adopts them in #9-6.
+LASER_ZIP_MAX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
+LASER_ZIP_MAX_MEMBERS = 200
+
+
+class LaserZipLimitError(ValueError):
+    """An uploaded laser-package ZIP is over ``LASER_ZIP_MAX_MEMBERS`` or ``LASER_ZIP_MAX_UNCOMPRESSED_BYTES``.
+
+    Endpoints map it to **413** (the message is plain language, safe to show). It subclasses
+    ``ValueError`` so a caller that has not mapped it yet still answers the existing 400 for a bad
+    package rather than a 500.
+    """
 
 
 @dataclass(frozen=True)
@@ -321,11 +342,61 @@ def copy_laser_nest_folder(source_path: str, destination: str) -> None:
 
 
 def extract_laser_nest_zip(zip_path: str, destination: str) -> None:
+    """Extract a laser package with NO size or member cap -- the package IMPORT's path until #9-6.
+
+    New callers use ``extract_laser_nest_zip_within_limits``.
+    """
     dest = Path(destination).resolve()
     if dest.exists():
         shutil.rmtree(dest)
     dest.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(zip_path) as archive:
+        _safe_extract_zip(archive, dest)
+
+
+def check_laser_zip_limits(archive: zipfile.ZipFile) -> None:
+    """Refuse a package whose central directory declares too many members or too many bytes.
+
+    Raises ``LaserZipLimitError``; reads only the central directory and writes nothing.
+
+    Summing the DECLARED ``ZipInfo.file_size`` is a sound bound, not a hopeful one, because of two
+    facts the extraction side must keep true:
+
+    * CPython's extractor never yields more than a member's declared ``file_size`` (``ZipExtFile``
+      truncates its output to that count, then fails the CRC check), so a header that under-declares
+      a member cannot write past what was counted here.
+    * ``_safe_extract_zip`` extracts each central-directory ENTRY exactly once (``members=`` the
+      ``infolist()``). A name that repeats is counted once per entry here and written once per entry
+      there. Extracting by NAME instead (``extractall()``'s default) would re-resolve every repeat to
+      the last, largest entry and write it once per repeat, so the sum would bound nothing.
+    """
+    members = archive.infolist()
+    max_members = LASER_ZIP_MAX_MEMBERS
+    if len(members) > max_members:
+        raise LaserZipLimitError(
+            f"The ZIP package contains {len(members)} files and folders; the limit is {max_members}. "
+            "Split the package into smaller batches."
+        )
+    max_bytes = LASER_ZIP_MAX_UNCOMPRESSED_BYTES
+    if sum(member.file_size for member in members) > max_bytes:
+        raise LaserZipLimitError(
+            f"The ZIP package is too large once unpacked (over the {format_byte_limit(max_bytes)} limit). "
+            "Split the package into smaller batches."
+        )
+
+
+def extract_laser_nest_zip_within_limits(zip_path: str, destination: str) -> None:
+    """``extract_laser_nest_zip`` with the zip-bomb caps checked first (``check_laser_zip_limits``).
+
+    The check runs before ``destination`` is touched, so a refused package writes nothing.
+    Synchronous file I/O and decompression: call it from a worker thread, never on the event loop.
+    """
+    with zipfile.ZipFile(zip_path) as archive:
+        check_laser_zip_limits(archive)
+        dest = Path(destination).resolve()
+        if dest.exists():
+            shutil.rmtree(dest)
+        dest.mkdir(parents=True, exist_ok=True)
         _safe_extract_zip(archive, dest)
 
 
@@ -1209,10 +1280,17 @@ def _laser_operation_description(nest: ParsedLaserNest) -> str:
 
 def _safe_extract_zip(archive: zipfile.ZipFile, destination: Path) -> None:
     destination = destination.resolve()
-    for member in archive.infolist():
+    members = archive.infolist()
+    for member in members:
         target = (destination / member.filename).resolve()
         try:
             target.relative_to(destination)
         except ValueError as exc:
             raise ValueError("Zip package contains an unsafe path") from exc
-    archive.extractall(destination)
+    # ``members=`` the central-directory ENTRIES, never the default ``namelist()``. Given names,
+    # ``extractall`` looks each one up again and always gets the LAST entry with that name, so a
+    # name repeated N times inflates and writes its largest entry N times -- 200 x the zip cap
+    # from a ~200 KB upload, past ``check_laser_zip_limits``'s declared-size sum. By entry, each
+    # is written once and truncated to its own declared size. Later duplicates still overwrite
+    # earlier ones, so what ends up on disk is unchanged.
+    archive.extractall(destination, members=members)

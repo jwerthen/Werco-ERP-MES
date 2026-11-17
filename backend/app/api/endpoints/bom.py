@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, aliased, joinedload, selectinload
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.core.parse_limits import holds_parse_slot
 from app.core.time_utils import to_utc_iso
+from app.core.upload_limits import ensure_upload_within_limit, read_upload_within_limit
 from app.db.database import get_db
 from app.models.bom import BOM, BOMItem, BOMItemType, BOMLineType
 from app.models.part import Part, PartType, UnitOfMeasure, uom_disagrees, uom_label
@@ -66,6 +67,10 @@ from app.services.pdf_service import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Document upload cap for ``/import/preview`` and ``/import`` (413 over it, checked before the body
+# is read; see ``app.core.upload_limits``). Resolved at call time, so this constant is the one tunable.
+BOM_IMPORT_MAX_BYTES = 20 * 1024 * 1024  # 20MB
 
 
 def parts_with_active_bom(db: Session, part_ids: Iterable[int], company_id: int) -> Set[int]:
@@ -1219,6 +1224,7 @@ async def import_bom_preview(
 ):
     """
     Upload a BOM or single-part document (PDF/DOC/DOCX/XLSX/XLS) and return a preview for review.
+    Files over 20 MB are refused with 413 before any work runs.
 
     Excel uploads are parsed directly into a raw table plus a suggested column mapping (no LLM
     call) with a bounded scan: all sheets are read, at most 256 columns per row, more than
@@ -1234,7 +1240,10 @@ async def import_bom_preview(
     if ext not in SUPPORTED_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Unsupported file type. Use PDF, Word, or Excel documents.")
 
-    content = await file.read()
+    # Size first (413 without reading a byte when Starlette already counted too many), then a
+    # read bounded at BOM_IMPORT_MAX_BYTES + 1 -- the whole body is never buffered just to measure it.
+    ensure_upload_within_limit(file, BOM_IMPORT_MAX_BYTES)
+    content = await read_upload_within_limit(file, BOM_IMPORT_MAX_BYTES)
     if not content:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
@@ -1337,6 +1346,7 @@ async def import_bom_or_part(
 ):
     """
     Upload a BOM or single-part document (PDF/DOC/DOCX/XLSX/XLS) and create parts/BOM items.
+    Files over 20 MB are refused with 413 before any work runs.
 
     The document is text-extracted and parsed by the LLM in one shot (no review step — prefer
     /bom/import/preview + /bom/import/commit for a reviewable flow). Excel text extraction is
@@ -1354,7 +1364,10 @@ async def import_bom_or_part(
     if ext not in SUPPORTED_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Unsupported file type. Use PDF, Word, or Excel documents.")
 
-    content = await file.read()
+    # Size first (413 without reading a byte when Starlette already counted too many), then a
+    # read bounded at BOM_IMPORT_MAX_BYTES + 1 -- the whole body is never buffered just to measure it.
+    ensure_upload_within_limit(file, BOM_IMPORT_MAX_BYTES)
+    content = await read_upload_within_limit(file, BOM_IMPORT_MAX_BYTES)
     if not content:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
