@@ -9047,7 +9047,9 @@ in `RBAC_PERMISSIONS.md`.
 > before the run reached the row is honored. A Verify or Remove that reaches a row while the run
 > holds it waits for the run to finish; if the run retired that row, the answer is **404 `Evidence
 > not found`** and nothing is written (see "Editing or removing an evidence link locks it first"
-> above). The SPA's *Auto-Link Evidence Complete* dialog does not show the new fields yet.
+> above). The QMS Standards page's auto-link result dialog shows `total_evidence_retired` as *Stale
+> Links Retired* (only when the API sends it), lists each `evidence_kept_reviewed` link under *Kept
+> for Review* with its clause number, reason and rule, and raises a warning toast when any were kept.
 >
 > **What operators see:** a 9.2 or 9.3 clause already linked to the audit-trail row loses that link
 > on the next **Auto-Link Evidence** run, unless someone verified or annotated it. That link still
