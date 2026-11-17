@@ -4,7 +4,8 @@ docs/NOTIFICATIONS_PLAN.md section 3.6; the service is ``app/services/comment_se
 
 The two normalizers below are the ONE implementation of the body and mention-list rules: the
 request schemas run them as field validators (a 422 with the field's location), and the
-service runs them again for callers that never pass through a schema (Hank's ``add_note``).
+service runs them again for callers that never pass through a schema (such as the planned Hank
+``add_note`` task, which would call the service directly).
 
 Mentions are STRUCTURED: the client sends user ids, chosen from ``GET /users/mention-search``.
 The server never parses names out of the comment text, and it re-checks every id itself.

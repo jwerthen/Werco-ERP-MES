@@ -9,7 +9,11 @@ Pinned here:
   comment id is a 404, and a foreign / inactive person cannot be mentioned -- the 422 names ids,
   never names.
 * Audit rows for create / edit / delete (soft) and watch / unwatch, and the caller's
-  ``audit_extra`` (Hank's ``{"via": "hank"}``) merged in under the service's own keys.
+  ``audit_extra`` (e.g. a direct caller's ``{"via": "hank"}``) merged in under the service's own
+  keys.
+* Lock order: every write verb takes its row locks (the work order ``FOR KEY SHARE`` first on
+  create / edit) and does all of its writes BEFORE its audit row, which takes the global
+  audit-chain lock; auto-watch rows are inserted in ascending user id.
 * People only: every write refuses every API token 403 (full, read-only, AI-external) and writes
   nothing; the reads stay open to the tokens the read gates admit; a kiosk badge token is fenced.
 * Mention search returns ``{id, display_name}`` only, is reachable by a non-admin (route order
@@ -23,11 +27,16 @@ Notification delivery (recipients, dedup, content, email recipients) is pinned i
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
-from typing import Dict, List
+import re
+from contextlib import contextmanager
+from typing import Any, Callable, Dict, Iterator, List, Tuple
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import event
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Session
 
 from app.core.credentials import API_TOKEN_COMMENT_WRITE, READ_ONLY_ROUTE_WRITES_DETAIL
@@ -568,8 +577,9 @@ class TestAudit:
         assert row.extra_data["entity_id"] == wo.id
 
     def test_create_comment_calls_log_create_exactly_once(self, db_session, people):
-        """Hank's PR 4 hands in a wrapper that makes ``log_create`` a REQUIRED write; the service
-        must route its only audit call through that method."""
+        """A caller that needs a required audit (the planned Hank ``add_note`` task) can hand in a
+        wrapper whose ``log_create`` is REQUIRED; that only works while the service routes its only
+        audit call through that method."""
         wo = make_wo(db_session)
         calls = []
 
@@ -593,6 +603,244 @@ class TestAudit:
         )
         assert [name for name, _ in calls] == ["log_create"]
         assert calls[0][1]["resource_type"] == "comment"
+
+
+# ---------------------------------------------------------------------------
+# Lock order: every row lock, then the audit chain
+# ---------------------------------------------------------------------------
+
+_WRITE_SQL = re.compile(r"^\s*(INSERT|UPDATE|DELETE)\b", re.IGNORECASE)
+
+
+@contextmanager
+def trace_writes(db: Session, trace: List[Tuple[str, Any]]) -> Iterator[None]:
+    """Append ``("sql", statement)`` for every INSERT / UPDATE / DELETE the session sends."""
+    engine = db.get_bind()
+
+    def record(conn, cursor, statement, parameters, context, executemany):
+        if _WRITE_SQL.match(statement):
+            trace.append(("sql", " ".join(statement.split())))
+
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        yield
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+
+
+class TraceAudit:
+    """An ``audit`` that records where in the statement stream each audit call lands. In
+    production that call is where the global audit-chain lock is taken."""
+
+    def __init__(self, trace: List[Tuple[str, Any]]):
+        self.trace = trace
+
+    def _record(self, name: str) -> Callable[..., object]:
+        def call(**kwargs):
+            self.trace.append(("audit", name))
+            return object()
+
+        return call
+
+    def __getattr__(self, name: str):
+        if name.startswith("log_"):
+            return self._record(name)
+        raise AttributeError(name)
+
+
+@pytest.fixture
+def traced_resolver(monkeypatch) -> List[Tuple[str, Any]]:
+    """Wrap the work-order resolver so the trace shows each record read and whether it locked."""
+    trace: List[Tuple[str, Any]] = []
+    spec = comment_service.COMMENTABLE_TYPES["work_order"]
+    real = spec.resolve
+
+    def resolve(db, company_id, entity_id, *, lock=False):
+        trace.append(("resolve", lock))
+        return real(db, company_id, entity_id, lock=lock)
+
+    monkeypatch.setitem(comment_service.COMMENTABLE_TYPES, "work_order", dataclasses.replace(spec, resolve=resolve))
+    return trace
+
+
+def _after_audit(trace: List[Tuple[str, Any]]) -> List[Tuple[str, Any]]:
+    audit_at = [i for i, (kind, _) in enumerate(trace) if kind == "audit"]
+    assert len(audit_at) == 1, trace
+    return trace[audit_at[0] + 1 :]
+
+
+def _event_inserts(trace: List[Tuple[str, Any]]) -> List[int]:
+    return [
+        i for i, (kind, sql) in enumerate(trace) if kind == "sql" and sql.startswith("INSERT INTO operational_events")
+    ]
+
+
+class TestLockOrder:
+    """The audit row takes the GLOBAL audit-chain lock (``pg_advisory_xact_lock``, held to
+    commit). A row lock taken after it -- the events' ``work_order_id`` foreign-key check took one
+    on the work order -- can deadlock against a work-order-first writer that then audits (an
+    office operation completion) and stalls every audited write in every tenant meanwhile. So each
+    verb locks first and audits last. SQLite renders no lock clause, so the lock itself is pinned
+    by dialect-compiling the query and the ORDER by tracing the statement stream."""
+
+    def test_the_write_lock_on_the_work_order_is_for_key_share(self, db_session):
+        locked = comment_service._live_work_order_query(db_session, COMPANY_A, 42, lock=True)
+        sql = str(locked.statement.compile(dialect=postgresql.dialect()))
+        assert sql.rstrip().endswith("FOR KEY SHARE"), sql
+        # key_share alone would be FOR NO KEY UPDATE: a comment queued behind every header save.
+        assert "NO KEY UPDATE" not in sql
+
+        plain = comment_service._live_work_order_query(db_session, COMPANY_A, 42)
+        assert " FOR " not in str(plain.statement.compile(dialect=postgresql.dialect()))
+
+    def test_create_locks_the_work_order_first_and_audits_after_the_events(self, db_session, people, traced_resolver):
+        wo = make_wo(db_session)
+        trace = traced_resolver
+        with trace_writes(db_session, trace):
+            comment_service.create_comment(
+                db_session,
+                company_id=COMPANY_A,
+                actor=people["author"],
+                entity_type="work_order",
+                entity_id=wo.id,
+                body="lock order",
+                mentioned_user_ids=[people["colleague"].id],
+                audit=TraceAudit(trace),
+            )
+
+        assert trace[0] == ("resolve", True), trace  # the work order's KEY SHARE is the first lock
+        assert [entry for entry in trace if entry[0] == "resolve"] == [("resolve", True)]
+        events = _event_inserts(trace)
+        assert len(events) == 2  # comment_mentioned + comment_added
+        assert trace[-1] == ("audit", "log_create"), trace  # nothing at all after the audit row
+        assert _after_audit(trace) == []
+
+    def test_an_edit_locks_the_comment_then_the_work_order_and_audits_after_the_event(
+        self, db_session, people, traced_resolver
+    ):
+        wo = make_wo(db_session)
+        author = people["author"]
+        comment = comment_service.create_comment(
+            db_session,
+            company_id=COMPANY_A,
+            actor=author,
+            entity_type="work_order",
+            entity_id=wo.id,
+            body="v1",
+            mentioned_user_ids=[],
+            audit=AuditService(db_session, author),
+        )
+        db_session.commit()
+        trace = traced_resolver
+        trace.clear()
+
+        with trace_writes(db_session, trace):
+            comment_service.update_comment(
+                db_session,
+                company_id=COMPANY_A,
+                actor=author,
+                comment_id=comment.id,
+                body="v2",
+                mentioned_user_ids=[people["viewer"].id],
+                audit=TraceAudit(trace),
+            )
+
+        assert trace[0] == ("resolve", True), trace  # before any write
+        assert len(_event_inserts(trace)) == 1  # comment_mentioned for the new person
+        assert trace[-1] == ("audit", "log_update"), trace
+        assert _after_audit(trace) == []
+
+    def test_delete_does_not_lock_the_work_order_and_audits_last(self, db_session, people, traced_resolver):
+        wo = make_wo(db_session)
+        author = people["author"]
+        comment = comment_service.create_comment(
+            db_session,
+            company_id=COMPANY_A,
+            actor=author,
+            entity_type="work_order",
+            entity_id=wo.id,
+            body="to delete",
+            mentioned_user_ids=[],
+            audit=AuditService(db_session, author),
+        )
+        db_session.commit()
+        trace = traced_resolver
+        trace.clear()
+
+        with trace_writes(db_session, trace):
+            comment_service.delete_comment(
+                db_session, company_id=COMPANY_A, actor=author, comment_id=comment.id, audit=TraceAudit(trace)
+            )
+
+        # Delete inserts nothing referencing the work order, so it takes no lock on it.
+        assert [entry for entry in trace if entry[0] == "resolve"] == [("resolve", False)]
+        assert any(kind == "sql" and sql.startswith("UPDATE comments") for kind, sql in trace)
+        assert trace[-1] == ("audit", "log_delete"), trace
+
+    @pytest.mark.parametrize("verb", ["watch", "unwatch"])
+    def test_watch_and_unwatch_write_before_they_audit(self, db_session, people, verb):
+        wo = make_wo(db_session)
+        actor = people["viewer"]
+        if verb == "unwatch":
+            comment_service.watch(
+                db_session,
+                company_id=COMPANY_A,
+                actor=actor,
+                entity_type="work_order",
+                entity_id=wo.id,
+                audit=AuditService(db_session, actor),
+            )
+            db_session.commit()
+        trace: List[Tuple[str, Any]] = []
+
+        with trace_writes(db_session, trace):
+            getattr(comment_service, verb)(
+                db_session,
+                company_id=COMPANY_A,
+                actor=actor,
+                entity_type="work_order",
+                entity_id=wo.id,
+                audit=TraceAudit(trace),
+            )
+
+        expected = "INSERT INTO entity_watchers" if verb == "watch" else "DELETE FROM entity_watchers"
+        writes = [sql for kind, sql in trace if kind == "sql"]
+        assert any(sql.startswith(expected) for sql in writes), trace
+        assert _after_audit(trace) == []  # the watch-state read after it writes nothing
+
+    def test_auto_watch_rows_are_inserted_in_ascending_user_id(self, db_session, people, monkeypatch):
+        """Two first comments that auto-watch the same people (X mentions Y while Y mentions X)
+        must take the unique-index entries in ONE order, or they deadlock (a 40P01 the insert's
+        savepoint does not catch). The audit row still lists them in the request's order."""
+        wo = make_wo(db_session)
+        author = people["other_operator"]
+        mentioned = [people["manager"].id, people["colleague"].id]  # descending: created in that order
+        assert author.id > mentioned[0] > mentioned[1]
+        inserted: List[int] = []
+        real_insert = comment_service._insert_watcher
+
+        def spy(db, company_id, entity_type, entity_id, user_id):
+            inserted.append(user_id)
+            return real_insert(db, company_id, entity_type, entity_id, user_id)
+
+        monkeypatch.setattr(comment_service, "_insert_watcher", spy)
+
+        comment = comment_service.create_comment(
+            db_session,
+            company_id=COMPANY_A,
+            actor=author,
+            entity_type="work_order",
+            entity_id=wo.id,
+            body="crossing",
+            mentioned_user_ids=mentioned,
+            audit=AuditService(db_session, author),
+        )
+        db_session.commit()
+
+        assert inserted == sorted([author.id, *mentioned])
+        (row,) = audit_rows(db_session, "comment", comment.id)
+        assert row.extra_data["auto_watched_user_ids"] == [author.id, *mentioned]
+        assert watcher_ids(db_session, wo) == sorted([author.id, *mentioned])
 
 
 # ---------------------------------------------------------------------------

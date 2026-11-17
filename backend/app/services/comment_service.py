@@ -15,19 +15,53 @@ The rules every verb here holds:
   resolved the same way and then RE-RESOLVES its record, so a comment on a since-deleted work
   order is a 404 on every verb.
 * **People only.** The routes refuse every API token before calling in here
-  (``app.core.credentials.API_TOKEN_COMMENT_WRITE``); Hank's ``add_note`` reaches
-  :func:`create_comment` directly on a person's behalf and passes ``audit_extra={"via": "hank"}``.
+  (``app.core.credentials.API_TOKEN_COMMENT_WRITE``). The service functions are also the contract
+  for a caller that acts on a person's behalf without the routes (the planned Hank ``add_note``
+  task, not on this branch): such a caller would call :func:`create_comment` directly and could
+  tag its evidence with ``audit_extra`` (e.g. ``{"via": "hank"}``).
 * **Mentions are structured.** The caller sends user ids; each is re-checked here (same company,
   active, may view the record). A refusal names the ids only -- never a name, so a foreign id
   cannot be used to learn who it belongs to. Names are never parsed out of the text.
 * **Audit.** Create / edit / delete write ``log_create`` / ``log_update`` / ``log_delete
   (soft_delete=True)`` on resource type ``comment``; watch / unwatch write ``log_create`` /
   ``log_delete`` on ``entity_watcher``. All are best-effort through the caller's
-  ``AuditService`` -- except that :func:`create_comment` calls ``audit.log_create`` exactly once
-  and nothing else, so a caller can hand in a wrapper that upgrades that one call to a REQUIRED
-  write (``hank_task_service._RequiredCreateAudit``). Auto-watches made by a comment are recorded
-  on the comment's own audit row (``extra_data.auto_watched_user_ids``), not as rows of their own.
+  ``AuditService``. :func:`create_comment` makes exactly ONE audit call, ``audit.log_create``, and
+  nothing else: a caller that needs a required audit (the planned Hank ``add_note`` task) can
+  pass a wrapper whose ``log_create`` is required (the ``hank_task_service._RequiredCreateAudit``
+  shape), and that one call then decides the whole write. Auto-watches made by a comment are
+  recorded on the comment's own audit row (``extra_data.auto_watched_user_ids``), not as rows of
+  their own.
 * **Flush, never commit.** Callers commit (one commit per request).
+* **Every row lock, THEN the audit chain.** ``AuditService`` takes the GLOBAL audit-chain lock
+  (``pg_advisory_xact_lock``, every tenant, held to commit) at a transaction's first audit row, so
+  each write verb here takes all of its row locks first and writes its audit row LAST -- the order
+  the floor's SFI-1 verbs hold (operations -> work order -> audit chain). A verb that waited on a
+  row while holding the chain would stall every audited write in every company, and against a
+  work-order-first writer about to write its own audit row it is a deadlock (40P01). Per verb:
+
+  - create: the record row ``FOR KEY SHARE`` (``resolve_target(lock=True)``) -> the comment and
+    mention inserts -> the auto-watch inserts (ascending user id) -> the notification events ->
+    ``audit.log_create``;
+  - edit: the comment row ``FOR UPDATE`` -> the record row ``FOR KEY SHARE`` -> the mention
+    deletes / inserts and the comment ``UPDATE`` -> the auto-watch inserts (ascending user id) ->
+    the events -> ``audit.log_update``;
+  - delete: the comment row ``FOR UPDATE`` -> its soft-delete ``UPDATE`` -> ``audit.log_delete``
+    (it inserts nothing that references the record, so it does not lock it);
+  - watch: the watcher insert -> ``audit.log_create``; unwatch: the watcher ``DELETE`` ->
+    ``audit.log_delete``.
+
+  ``FOR KEY SHARE`` is exactly the lock the events' ``work_order_id`` foreign-key check takes;
+  taking it up front makes it the verb's first lock on the work order instead of one taken
+  mid-transaction (``comments`` has no foreign key to the record, so nothing else would). It
+  conflicts only with ``FOR UPDATE``, a delete or a key change -- never with an ordinary header
+  ``UPDATE`` -- so a comment queues only behind a work-order-first writer that holds ``FOR UPDATE``
+  (an office operation completion, say), and it queues there holding nothing that writer needs.
+  Comment rows are locked only by these verbs, always before the record, so the edit's
+  comment -> record order meets no reverse order. Auto-watch inserts go in ascending user id so
+  two first comments that auto-watch the same two people (X mentions Y while Y mentions X) take
+  the unique-index entries in the same order: the later one waits and then loses cleanly
+  (``_insert_watcher``'s ``IntegrityError``) instead of the two deadlocking -- a 40P01 is an
+  ``OperationalError`` that savepoint does not catch, which would lose the comment with a 409.
 * **Soft delete.** A comment is soft-deleted (``Comment.soft_delete``), never removed. Mention
   rows and watcher rows are not ``SoftDeleteMixin``: an edit that drops a mention PHYSICALLY
   deletes that mention row (the edit's audit row keeps the old and new mention sets, so nothing
@@ -43,12 +77,12 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, Tuple
 
 from fastapi import HTTPException, status
 from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Query, Session, selectinload
 
 from app.db.tenant_filter import tenant_query
 from app.models.comment import Comment, CommentMention, EntityWatcher
@@ -104,33 +138,48 @@ def _utcnow() -> datetime:
 # ---------------------------------------------------------------------------
 
 
+class RecordResolver(Protocol):
+    """``resolve(db, company_id, entity_id, *, lock=False)`` -- see :class:`CommentableType`."""
+
+    def __call__(self, db: Session, company_id: int, entity_id: int, *, lock: bool = False) -> Optional[Any]: ...
+
+
 @dataclass(frozen=True)
 class CommentableType:
     """One record type that carries a comment thread.
 
-    ``resolve(db, company_id, entity_id)`` returns the LIVE record in that company or ``None``
-    (absent, foreign and soft-deleted alike). ``can_view(user)`` mirrors the domain's READ RBAC
-    for a user already known to be an active member of the company; it gates the caller, every
-    mention, and every notification recipient. ``notification_fields(record)`` returns the
-    ``work_order_id`` for the event (the deep link) and the identifier payload keys that title the
-    notification (``notification_dispatch._IDENTIFIER_KEYS``).
+    ``resolve(db, company_id, entity_id, *, lock=False)`` returns the LIVE record in that company
+    or ``None`` (absent, foreign and soft-deleted alike); ``lock=True`` reads it ``FOR KEY SHARE``,
+    the lock a row referencing it (a notification event's foreign key) takes, so a write verb takes
+    that lock FIRST rather than mid-transaction (see the module docstring's lock order).
+    ``can_view(user)`` mirrors the domain's READ RBAC for a user already known to be an active
+    member of the company; it gates the caller, every mention, and every notification recipient.
+    ``notification_fields(record)`` returns the ``work_order_id`` for the event (the deep link) and
+    the identifier payload keys that title the notification (``notification_dispatch._IDENTIFIER_KEYS``).
     """
 
     entity_type: str
     label: str
     not_found_detail: str
-    resolve: Callable[[Session, int, int], Optional[Any]]
+    resolve: RecordResolver
     can_view: Callable[[User], bool]
     identifier: Callable[[Any], str]
     notification_fields: Callable[[Any], Tuple[Optional[int], Dict[str, Any]]]
 
 
-def _resolve_live_work_order(db: Session, company_id: int, entity_id: int) -> Optional[WorkOrder]:
-    return (
-        tenant_query(db, WorkOrder, company_id)
-        .filter(WorkOrder.id == entity_id, WorkOrder.is_deleted.is_(False))
-        .first()
-    )
+def _live_work_order_query(db: Session, company_id: int, entity_id: int, *, lock: bool = False) -> Query:
+    query = tenant_query(db, WorkOrder, company_id).filter(WorkOrder.id == entity_id, WorkOrder.is_deleted.is_(False))
+    if lock:
+        # FOR KEY SHARE needs BOTH flags: ``key_share=True`` alone renders FOR NO KEY UPDATE, which
+        # would queue a comment behind every work-order header save. SQLite renders no lock clause.
+        query = query.with_for_update(read=True, key_share=True)
+    return query
+
+
+def _resolve_live_work_order(
+    db: Session, company_id: int, entity_id: int, *, lock: bool = False
+) -> Optional[WorkOrder]:
+    return _live_work_order_query(db, company_id, entity_id, lock=lock).first()
 
 
 def _work_order_viewable(user: User) -> bool:
@@ -184,25 +233,31 @@ def _assert_can_view(spec: CommentableType, actor: User) -> None:
 
 
 def resolve_target(
-    db: Session, *, company_id: int, actor: User, entity_type: str, entity_id: int
+    db: Session, *, company_id: int, actor: User, entity_type: str, entity_id: int, lock: bool = False
 ) -> Tuple[CommentableType, Any]:
-    """The enabled type and the LIVE record, tenant-scoped; 422 / 403 / 404."""
+    """The enabled type and the LIVE record, tenant-scoped; 422 / 403 / 404.
+
+    ``lock=True`` (a write that will insert a row referencing the record) reads the record
+    ``FOR KEY SHARE`` -- call it before any other write, so it is the verb's first lock.
+    """
     spec = commentable_type(entity_type)
     _assert_can_view(spec, actor)
-    record = spec.resolve(db, company_id, entity_id)
+    record = spec.resolve(db, company_id, entity_id, lock=lock)
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=spec.not_found_detail)
     return spec, record
 
 
 def _live_comment_or_404(
-    db: Session, company_id: int, comment_id: int, *, lock: bool = False
+    db: Session, company_id: int, comment_id: int, *, lock: bool = False, lock_record: bool = False
 ) -> Tuple[Comment, CommentableType, Any]:
     """A live comment of this company AND its live record.
 
     Deliberate non-users of the ``is_deleted`` filter: none -- a deleted comment has no verb in
     v1 (no restore), so every by-id read goes through here. The row lock (edit / delete) keeps
-    two concurrent edits of one comment from racing on its mention set.
+    two concurrent edits of one comment from racing on its mention set. ``lock_record`` (the edit,
+    which may emit an event referencing the record) then reads the record ``FOR KEY SHARE``:
+    comment row first, record second, both before any write (module docstring, lock order).
     """
     query = tenant_query(db, Comment, company_id).filter(Comment.id == comment_id, Comment.is_deleted.is_(False))
     if lock:
@@ -213,7 +268,7 @@ def _live_comment_or_404(
     spec = COMMENTABLE_TYPES.get(comment.entity_type)
     if spec is None:  # a type that was enabled once and is not now: nothing may act on it
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=COMMENT_NOT_FOUND_DETAIL)
-    record = spec.resolve(db, company_id, comment.entity_id)
+    record = spec.resolve(db, company_id, comment.entity_id, lock=lock_record)
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=spec.not_found_detail)
     return comment, spec, record
@@ -302,19 +357,24 @@ def _insert_watcher(
 def _ensure_watching(
     db: Session, company_id: int, entity_type: str, entity_id: int, user_ids: Sequence[int]
 ) -> List[EntityWatcher]:
-    """Make each user a watcher of the record (idempotent); return the rows newly created."""
+    """Make each user a watcher of the record (idempotent); return the rows newly created.
+
+    The rows are INSERTED in ascending user id, whatever order ``user_ids`` names them in: two
+    transactions auto-watching the same people then take the unique-index entries in the same
+    order, so one waits for the other and loses cleanly (``_insert_watcher``) instead of the two
+    deadlocking. The rows are RETURNED in ``user_ids``' order (first occurrence), which is the
+    order the audit row's ``auto_watched_user_ids`` lists them in.
+    """
     wanted = list(dict.fromkeys(user_ids))
     if not wanted:
         return []
     existing = _watcher_rows(db, company_id, entity_type, entity_id, wanted)
-    created = []
-    for user_id in wanted:
-        if user_id in existing:
-            continue
+    created: Dict[int, EntityWatcher] = {}
+    for user_id in sorted(user_id for user_id in wanted if user_id not in existing):
         row = _insert_watcher(db, company_id, entity_type, entity_id, user_id)
         if row is not None:
-            created.append(row)
-    return created
+            created[user_id] = row
+    return [created[user_id] for user_id in wanted if user_id in created]
 
 
 def _watch_state(db: Session, company_id: int, entity_type: str, entity_id: int, user_id: int) -> WatchStateResponse:
@@ -407,8 +467,8 @@ def _comment_identifier(comment: Comment, identifier: str) -> str:
 def _audit_extra(
     spec: CommentableType, record: Any, identifier: str, audit_extra: Optional[Dict[str, Any]], **fields: Any
 ) -> Dict[str, Any]:
-    """The caller's ``audit_extra`` (e.g. ``{"via": "hank"}``) merged UNDER the service's own
-    keys: a caller can add context to the evidence, never overwrite it."""
+    """The caller's ``audit_extra`` (e.g. a direct caller's ``{"via": "hank"}``) merged UNDER the
+    service's own keys: a caller can add context to the evidence, never overwrite it."""
     extra: Dict[str, Any] = dict(audit_extra or {})
     extra.update({"entity_type": spec.entity_type, "entity_id": record.id, "entity_identifier": identifier})
     extra.update(fields)
@@ -429,17 +489,23 @@ def create_comment(
 ) -> Comment:
     """Post a comment on a live record of the active company. Flushes, never commits.
 
-    Validates the record (422 type / 403 / 404), the body (422) and every mention (422 naming
-    refused ids); inserts the comment and its mention rows; auto-watches the author and each
-    mentioned person (idempotent, no backfill of older records); writes ONE ``audit.log_create``
-    (resource type ``comment``; ``extra_data`` carries the record, the mentioned and the newly
-    auto-watched ids, with ``audit_extra`` merged in under them); then emits the
-    ``comment_mentioned`` / ``comment_added`` notification events, best-effort.
+    Validates the record (422 type / 403 / 404; read ``FOR KEY SHARE``, this verb's first lock),
+    the body (422) and every mention (422 naming refused ids); inserts the comment and its mention
+    rows; auto-watches the author and each mentioned person (idempotent, no backfill of older
+    records); emits the ``comment_mentioned`` / ``comment_added`` notification events,
+    best-effort; and LAST writes ONE ``audit.log_create`` (resource type ``comment``;
+    ``extra_data`` carries the record, the mentioned and the newly auto-watched ids, with
+    ``audit_extra`` merged in under them). The audit row comes last because it takes the global
+    audit-chain lock, which no row lock may follow (module docstring, lock order).
 
-    ``audit`` is anything with ``AuditService.log_create``'s signature; Hank hands in a wrapper
-    that makes that one call a required write. ``actor`` is the author -- always a person.
+    ``audit`` is anything with ``AuditService.log_create``'s signature. That is the only audit
+    call made, so a caller that needs a required audit can pass a wrapper whose ``log_create`` is
+    required; if it raises, the caller rolls back and the events go with the comment. ``actor``
+    is the author -- always a person.
     """
-    spec, record = resolve_target(db, company_id=company_id, actor=actor, entity_type=entity_type, entity_id=entity_id)
+    spec, record = resolve_target(
+        db, company_id=company_id, actor=actor, entity_type=entity_type, entity_id=entity_id, lock=True
+    )
     text = _clean_body(body)
     mention_ids = _clean_mention_ids(mentioned_user_ids)
     mentioned = _mentionable_users(db, company_id, spec, mention_ids)
@@ -463,6 +529,21 @@ def create_comment(
     )
     auto_watched_ids = [row.user_id for row in auto_watched]
 
+    # The events BEFORE the audit row: the audit row takes the global audit-chain lock, and no row
+    # lock may come after it (module docstring, lock order). The events need ``comment.id``, so the
+    # comment and its mentions are flushed above.
+    _emit_comment_events(
+        db,
+        company_id=company_id,
+        actor=actor,
+        spec=spec,
+        record=record,
+        comment=comment,
+        notify_mention_ids=mention_ids,
+        all_mention_ids=mention_ids,
+        include_added=True,
+    )
+
     identifier = spec.identifier(record)
     audit.log_create(
         resource_type=COMMENT_RESOURCE_TYPE,
@@ -484,18 +565,6 @@ def create_comment(
             mentioned_user_ids=mention_ids,
             auto_watched_user_ids=auto_watched_ids,
         ),
-    )
-
-    _emit_comment_events(
-        db,
-        company_id=company_id,
-        actor=actor,
-        spec=spec,
-        record=record,
-        comment=comment,
-        notify_mention_ids=mention_ids,
-        all_mention_ids=mention_ids,
-        include_added=True,
     )
     return comment
 
@@ -519,9 +588,11 @@ def update_comment(
     physically deleted (mention rows are not ``SoftDeleteMixin``; the ``log_update`` row keeps the
     old and new sets). Stamps ``edited_at``. Only NEWLY added people are notified, and each is
     auto-watched. An edit that changes neither the text nor the mention SET writes nothing (no
-    ``edited_at``, no audit row). Flushes, never commits.
+    ``edited_at``, no audit row). Locks the comment row, then the record ``FOR KEY SHARE``, before
+    any write; emits the events and only then writes the ``log_update`` row (module docstring,
+    lock order). Flushes, never commits.
     """
-    comment, spec, record = _live_comment_or_404(db, company_id, comment_id, lock=True)
+    comment, spec, record = _live_comment_or_404(db, company_id, comment_id, lock=True, lock_record=True)
     _assert_can_view(spec, actor)
     if comment.author_id != actor.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=EDIT_FORBIDDEN_DETAIL)
@@ -551,6 +622,20 @@ def update_comment(
     new_ids = [user_id for user_id in old_ids if user_id in requested_set] + added_ids
 
     auto_watched = _ensure_watching(db, company_id, spec.entity_type, record.id, added_ids)
+
+    # The events BEFORE the audit row, as in ``create_comment`` (module docstring, lock order).
+    _emit_comment_events(
+        db,
+        company_id=company_id,
+        actor=actor,
+        spec=spec,
+        record=record,
+        comment=comment,
+        notify_mention_ids=added_ids,
+        all_mention_ids=new_ids,
+        include_added=False,
+    )
+
     identifier = spec.identifier(record)
     audit.log_update(
         resource_type=COMMENT_RESOURCE_TYPE,
@@ -569,18 +654,6 @@ def update_comment(
             auto_watched_user_ids=[row.user_id for row in auto_watched],
         ),
     )
-
-    _emit_comment_events(
-        db,
-        company_id=company_id,
-        actor=actor,
-        spec=spec,
-        record=record,
-        comment=comment,
-        notify_mention_ids=added_ids,
-        all_mention_ids=new_ids,
-        include_added=False,
-    )
     return comment
 
 
@@ -598,7 +671,8 @@ def delete_comment(
     audit_extra: Optional[Dict[str, Any]] = None,
 ) -> Comment:
     """Soft-delete a comment: its author, or an Admin / Manager (403 otherwise). The audit row
-    snapshots the body, author, record and mentions. Flushes, never commits."""
+    snapshots the body, author, record and mentions, and is written after the comment row's lock
+    and ``UPDATE`` (module docstring, lock order). Flushes, never commits."""
     comment, spec, record = _live_comment_or_404(db, company_id, comment_id, lock=True)
     _assert_can_view(spec, actor)
     if not _can_delete(comment, actor):
