@@ -4696,7 +4696,7 @@ class ApiService {
     return response.data;
   }
 
-  /** One template (403 unless it is the caller's own or shared). */
+  /** One template (403 unless it is the caller's own, shared, or the caller is an admin). */
   async getReportTemplate(templateId: number): Promise<ReportTemplate> {
     const response = await this.api.get<ReportTemplate>(`/analytics/custom-report/templates/${templateId}`);
     return response.data;
