@@ -8962,20 +8962,28 @@ in `RBAC_PERMISSIONS.md`.
 > a status-change entry when a clause's `compliance_status` changes — are captured in the tamper-evident
 > audit trail (`GET /api/v1/audit/`).
 
+> **A clause of a removed standard is removed with it.** Removing a standard marks only the
+> standard row deleted; its clauses keep their own flag. Every route that takes a clause id treats
+> a clause whose standard is removed (or is not your company's) as removed: `PUT` and `DELETE
+> /qms-standards/clauses/{clause_id}`, `GET /qms-standards/clauses/{clause_id}/auto-evidence` and
+> `POST /qms-standards/clauses/{clause_id}/evidence` answer **404 `Clause not found`**, the same as
+> for a removed clause, and write nothing. `GET /qms-standards/{standard_id}/clauses` answers **404
+> `QMS standard not found`** for a removed standard, as `GET /qms-standards/{standard_id}` does; a
+> missing id or another company's gets the same 404 (it used to be an empty list). Before this,
+> all of them still answered for a removed standard's clauses: a `PUT` could change a clause's
+> `compliance_status` on a standard that had left the record, the list still showed its clauses
+> and their evidence links, and adding evidence created a link no screen would show. The standard
+> is checked when the request reads the clause; a removal that commits between that read and the
+> request's own commit is not seen.
+
 > **Evidence under a removed clause or standard is frozen.** Removing a standard or a clause marks
 > only that row deleted; the evidence links under it keep their own flag but disappear with their
-> parent from the standard, clause-tree and audit-readiness views. `PUT` and `DELETE
-> /qms-standards/evidence/{evidence_id}` treat such a link as removed: **404 `Evidence not found`**
-> (the same answer as for a removed link, judged after the row lock) and nothing is written.
-> `POST /qms-standards/clauses/{clause_id}/evidence` likewise refuses a clause whose standard was
-> removed (**404 `Clause not found`**, as for a removed clause). Before this, all three accepted
-> them, so an API caller could edit, verify or clear the `document_id` of a link that had left the
-> record (a cleared link let its document be deleted), or add a link no screen would ever show. The
-> clause and standard are checked when the request reads them; a removal that commits between that
-> read and the request's own commit is not seen. Known gap: `GET
-> /qms-standards/{standard_id}/clauses` does not check the standard, so it still lists a removed
-> standard's clauses and their evidence; the clause `PUT` / `DELETE` and `auto-evidence` routes
-> likewise check only the clause's own flag.
+> parent from every QMS read. `PUT` and `DELETE /qms-standards/evidence/{evidence_id}` treat such a
+> link as removed: **404 `Evidence not found`** (the same answer as for a removed link, judged after
+> the row lock) and nothing is written. Before this, both accepted it, so an API caller could edit,
+> verify or clear the `document_id` of a link that had left the record, and a cleared link let its
+> document be deleted. The clause and standard are checked when the request reads them; a removal
+> that commits between that read and the request's own commit is not seen.
 
 > **Editing or removing an evidence link locks it first:** `PUT` and `DELETE
 > /qms-standards/evidence/{evidence_id}` lock the evidence row before they read it, and write the

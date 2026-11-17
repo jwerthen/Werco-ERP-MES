@@ -540,6 +540,42 @@ def _assert_not_own_descendant(db: Session, clause_id: int, parent_clause_id: in
         )
 
 
+def _live_clause_or_404(db: Session, clause_id: int, company_id: int) -> QMSClause:
+    """The active company's clause, or 404 ``Clause not found`` if it or its standard is removed.
+
+    Removing a standard soft-deletes only the standard row. Its clauses keep ``is_deleted = false``
+    but leave every read with it (the standard, clause-list and audit-readiness reads all require
+    a live standard), so a clause of a removed standard is removed too. Every route that resolves
+    a clause from a request goes through here, so none of them edits, removes, links evidence to
+    or reports on such a clause. Before, ``PUT`` could still change its ``compliance_status`` and
+    ``POST .../evidence`` could link evidence no screen would show.
+
+    The standard is joined inside the active company, so a clause whose standard is not the
+    company's (bad data) is not found either. The 404 is the same in every case. Both flags are
+    judged in the ``WHERE``, by the database, whatever copy of either row the session holds.
+
+    A plain read: the standard row is not locked. ``delete_standard`` writes its audit row, taking
+    the global audit-chain lock, before its own row change, so a share lock held here while a
+    write route waits for the chain lock would deadlock against it. A standard removed between
+    this read and the caller's commit is not seen.
+    """
+    clause = (
+        db.query(QMSClause)
+        .join(QMSStandard, QMSStandard.id == QMSClause.standard_id)
+        .filter(
+            QMSClause.id == clause_id,
+            QMSClause.company_id == company_id,
+            QMSClause.is_deleted == False,
+            QMSStandard.company_id == company_id,
+            QMSStandard.is_deleted == False,
+        )
+        .first()
+    )
+    if clause is None:
+        raise HTTPException(status_code=404, detail="Clause not found")
+    return clause
+
+
 @router.get("/{standard_id}/clauses", response_model=List[QMSClauseResponse])
 def list_clauses(
     standard_id: int,
@@ -547,7 +583,24 @@ def list_clauses(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """List all clauses for a standard (flat list, use parent_clause_id for tree)."""
+    """List all clauses for a standard (flat list, use parent_clause_id for tree).
+
+    404 ``QMS standard not found`` unless the standard is a live one of the active company, as for
+    ``GET /{standard_id}``. Removing a standard leaves its clauses' own flags clear, so without
+    this a removed standard's clauses and evidence links were still listed here. A missing or
+    another company's id answers the same 404 (it used to answer an empty list).
+    """
+    standard_live = (
+        db.query(QMSStandard.id)
+        .filter(
+            QMSStandard.id == standard_id,
+            QMSStandard.company_id == company_id,
+            QMSStandard.is_deleted == False,
+        )
+        .first()
+    )
+    if standard_live is None:
+        raise HTTPException(status_code=404, detail="QMS standard not found")
     clauses = (
         db.query(QMSClause)
         .options(
@@ -682,17 +735,7 @@ def update_clause(
     the other fields in the same request included. ``null`` clears the parent. A request that
     does not send ``parent_clause_id`` is not judged on the value already stored.
     """
-    clause = (
-        db.query(QMSClause)
-        .filter(
-            QMSClause.id == clause_id,
-            QMSClause.company_id == company_id,
-            QMSClause.is_deleted == False,
-        )
-        .first()
-    )
-    if not clause:
-        raise HTTPException(status_code=404, detail="Clause not found")
+    clause = _live_clause_or_404(db, clause_id, company_id)
 
     update_data = data.model_dump(exclude_unset=True)
     # Before any attribute is set, so a refusal leaves the row and the audit log untouched.
@@ -745,17 +788,7 @@ def delete_clause(
     audit: AuditService = Depends(get_audit_service),
 ):
     """Delete a clause and its evidence links."""
-    clause = (
-        db.query(QMSClause)
-        .filter(
-            QMSClause.id == clause_id,
-            QMSClause.company_id == company_id,
-            QMSClause.is_deleted == False,
-        )
-        .first()
-    )
-    if not clause:
-        raise HTTPException(status_code=404, detail="Clause not found")
+    clause = _live_clause_or_404(db, clause_id, company_id)
 
     audit.log_delete("qms_clause", clause.id, clause.clause_number, old_values=clause, soft_delete=True)
     clause.soft_delete(current_user.id)
@@ -780,17 +813,7 @@ def get_clause_auto_evidence(
     ``not_computed`` means nothing is known about that module from this call; ``no_data`` means
     the query ran and found no records. Do not report a ``not_computed`` row's counts.
     """
-    clause = (
-        db.query(QMSClause)
-        .filter(
-            QMSClause.id == clause_id,
-            QMSClause.company_id == company_id,
-            QMSClause.is_deleted == False,
-        )
-        .first()
-    )
-    if not clause:
-        raise HTTPException(status_code=404, detail="Clause not found")
+    clause = _live_clause_or_404(db, clause_id, company_id)
 
     results = discover_evidence_for_clause(db, clause, company_id)
     overall = compute_overall_compliance(results)
@@ -977,13 +1000,12 @@ def _lock_live_evidence_or_404(db: Session, evidence_id: int, company_id: int) -
       request waited is a 404. Before, a Verify that read the row before a retirement committed
       could still mark it verified, leaving it verified and deleted, and answer 200.
     * No edit under a removed clause or standard. Removing a standard or clause soft-deletes only
-      that row; its evidence keeps ``is_deleted = false``, the standard, clause-tree and
-      audit-readiness reads hide it with its parent (``GET /{standard_id}/clauses`` does not yet
-      check its standard, so it still lists a removed standard's clauses), and
-      ``DELETE /documents/{id}`` counts it as removed (it keeps its document). Such a row is a
-      frozen record, so it answers the same 404 as a removed row, and nothing is written. Before,
-      ``PUT`` could clear its ``document_id`` and so let that document be deleted.
-      ``add_evidence`` refuses a clause of a removed standard for the same reason.
+      that row; its evidence keeps ``is_deleted = false``, every QMS read hides it with its
+      parent, and ``DELETE /documents/{id}`` counts it as removed (it keeps its document). Such a
+      row is a frozen record, so it answers the same 404 as a removed row, and nothing is written.
+      Before, ``PUT`` could clear its ``document_id`` and so let that document be deleted. The
+      clause routes refuse a clause of a removed standard for the same reason
+      (``_live_clause_or_404``).
 
     The ``WHERE`` keeps the tenant filter, so another company's row is never locked. The clause
     and standard are read after the lock, also inside the tenant (a clause or standard that does
@@ -1040,23 +1062,9 @@ def add_evidence(
     audit: AuditService = Depends(get_audit_service),
 ):
     """Link evidence to a clause."""
-    clause = (
-        db.query(QMSClause)
-        # A clause whose standard was removed is removed with it. Evidence linked there could
-        # never be edited or cleared (``_lock_live_evidence_or_404`` refuses it), so its document
-        # could never be deleted: refuse the link instead, with the same 404.
-        .join(QMSStandard, QMSStandard.id == QMSClause.standard_id)
-        .filter(
-            QMSClause.id == clause_id,
-            QMSClause.company_id == company_id,
-            QMSClause.is_deleted == False,
-            QMSStandard.company_id == company_id,
-            QMSStandard.is_deleted == False,
-        )
-        .first()
-    )
-    if not clause:
-        raise HTTPException(status_code=404, detail="Clause not found")
+    # A clause of a removed standard is not found: evidence linked there could never be edited or
+    # cleared (``_lock_live_evidence_or_404`` refuses it), so its document could never be deleted.
+    _live_clause_or_404(db, clause_id, company_id)
 
     evidence = QMSClauseEvidence(
         clause_id=clause_id,
