@@ -8896,6 +8896,17 @@ in `RBAC_PERMISSIONS.md`.
 > a status-change entry when a clause's `compliance_status` changes — are captured in the tamper-evident
 > audit trail (`GET /api/v1/audit/`).
 
+> **Editing or removing an evidence link locks it first:** `PUT` and `DELETE
+> /qms-standards/evidence/{evidence_id}` lock the evidence row before they read it, and write the
+> change before the audit entry. So a Verify or Remove that runs at the same time as auto-link (or
+> as another person's edit) waits for the other write to finish and is then judged against the row
+> as it stands. If the link was removed while the request waited (auto-link retired it, or someone
+> else removed it), the answer is **404 `Evidence not found`** and nothing is written. Before this,
+> a Verify could mark a link that auto-link had just retired as verified and still answer 200, and
+> a Verify or Remove racing auto-link could fail with the app-wide 409. A 404 here means the link
+> is gone; if it should still exist, link it again. The `UPDATE` audit entry's `changes` now also
+> lists the row's new `updated_at`.
+
 #### Audit-Readiness Summary Schema (`GET /qms-standards/audit-readiness`)
 
 ```json

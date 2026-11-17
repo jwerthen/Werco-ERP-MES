@@ -1,7 +1,7 @@
 import json
 import logging
 from datetime import datetime
-from typing import List
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session, joinedload, with_loader_criteria
@@ -806,6 +806,52 @@ def auto_link_standard(
 # ============== Evidence Links ==============
 
 
+def _lock_live_evidence_or_404(db: Session, evidence_id: int, company_id: int) -> QMSClauseEvidence:
+    """Lock the caller's evidence row and return it, or 404 if it is missing or deleted.
+
+    For the evidence ``PUT`` and ``DELETE``. The row is read ``FOR UPDATE`` (a no-op on SQLite),
+    so this request is serialized on the row with any other writer of it, including an auto-link
+    run (``POST /{standard_id}/auto-link``), which writes the clause's auto-linked rows before
+    its audit rows:
+
+    * Lock order. The caller flushes its change before it writes its audit row, so it holds this
+      row lock before the global audit-chain lock, the order auto-link and the rest of the
+      codebase use. Before this, these routes read the row without a lock and let the audit row
+      take the chain lock first, then waited for the row while holding it: a deadlock against
+      auto-link (40P01, the app-wide 409), and a stall of every tenant's audited writes while
+      the request waited.
+    * No edit of a removed row. ``is_deleted`` is tested after the lock, on the row as it stands
+      once the lock is held (``populate_existing`` re-reads a row already in the session), not
+      in the ``WHERE``: a row that auto-link retired, or another person removed, while this
+      request waited is a 404. Before, a Verify that read the row before a retirement committed
+      could still mark it verified, leaving it verified and deleted, and answer 200.
+
+    The ``WHERE`` keeps the tenant filter, so another company's row is never locked.
+    """
+    evidence = (
+        db.query(QMSClauseEvidence)
+        .filter(
+            QMSClauseEvidence.id == evidence_id,
+            QMSClauseEvidence.company_id == company_id,
+        )
+        .with_for_update()
+        .populate_existing()
+        .first()
+    )
+    if evidence is None or evidence.is_deleted:
+        raise HTTPException(status_code=404, detail="Evidence not found")
+    return evidence
+
+
+def _evidence_column_values(evidence: QMSClauseEvidence) -> Dict[str, Any]:
+    """Every column of the evidence row as it stands now, for ``log_update`` / ``log_delete``'s ``old_values``.
+
+    Raw values (datetimes included): those helpers serialize them. ``log_required`` stores
+    ``old_values`` as given, so it needs JSON-ready values instead.
+    """
+    return {c.key: getattr(evidence, c.key) for c in evidence.__table__.columns}
+
+
 @router.post("/clauses/{clause_id}/evidence", response_model=QMSEvidenceResponse, status_code=status.HTTP_201_CREATED)
 def add_evidence(
     clause_id: int,
@@ -852,20 +898,15 @@ def update_evidence(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Update evidence, including verification."""
-    evidence = (
-        db.query(QMSClauseEvidence)
-        .filter(
-            QMSClauseEvidence.id == evidence_id,
-            QMSClauseEvidence.company_id == company_id,
-            QMSClauseEvidence.is_deleted == False,
-        )
-        .first()
-    )
-    if not evidence:
-        raise HTTPException(status_code=404, detail="Evidence not found")
+    """Update evidence, including verification.
 
-    old_values = {c.key: getattr(evidence, c.key) for c in evidence.__table__.columns}
+    The row is locked before it is read and the change is flushed before the audit row is
+    written, so this takes its row lock ahead of the global audit-chain lock. See
+    ``_lock_live_evidence_or_404``.
+    """
+    evidence = _lock_live_evidence_or_404(db, evidence_id, company_id)
+
+    old_values = _evidence_column_values(evidence)
 
     update_data = data.model_dump(exclude_unset=True)
 
@@ -877,6 +918,10 @@ def update_evidence(
     for key, value in update_data.items():
         setattr(evidence, key, value)
 
+    # Write the row change before the audit row: ``AuditService.log`` takes the global
+    # audit-chain lock as its first statement, so an unflushed change would reach the database
+    # only after it, while this request held the chain lock (the opposite of the codebase order).
+    db.flush()
     audit.log_update("qms_clause_evidence", evidence.id, evidence.title, old_values=old_values, new_values=evidence)
     db.commit()
     db.refresh(evidence)
@@ -891,19 +936,16 @@ def delete_evidence(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Remove an evidence link."""
-    evidence = (
-        db.query(QMSClauseEvidence)
-        .filter(
-            QMSClauseEvidence.id == evidence_id,
-            QMSClauseEvidence.company_id == company_id,
-            QMSClauseEvidence.is_deleted == False,
-        )
-        .first()
-    )
-    if not evidence:
-        raise HTTPException(status_code=404, detail="Evidence not found")
+    """Remove an evidence link.
 
-    audit.log_delete("qms_clause_evidence", evidence.id, evidence.title, old_values=evidence, soft_delete=True)
+    Locks the row, soft-deletes it and flushes that before the audit row is written, so the row
+    lock comes before the global audit-chain lock. See ``_lock_live_evidence_or_404``.
+    """
+    evidence = _lock_live_evidence_or_404(db, evidence_id, company_id)
+
+    # The audit row records the row as it was before the delete, so take its values first.
+    old_values = _evidence_column_values(evidence)
     evidence.soft_delete(current_user.id)
+    db.flush()
+    audit.log_delete("qms_clause_evidence", evidence.id, evidence.title, old_values=old_values, soft_delete=True)
     db.commit()
