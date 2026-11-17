@@ -221,6 +221,16 @@ class ClauseAutoEvidenceResponse(BaseModel):
     overall_suggested_compliance: str
 
 
+class AutoLinkKeptEvidence(BaseModel):
+    """An auto-linked evidence row auto-link would have retired, kept because a person reviewed it."""
+
+    evidence_id: int
+    clause_id: int
+    clause_number: str
+    rule_id: Optional[str] = Field(None, description="The mapping rule that once linked it (auto_link_query).")
+    reason: str = Field(..., description="verified, or annotated (a document or notes are attached)")
+
+
 class AutoLinkSummary(BaseModel):
     """Summary of auto-link operation across all clauses in a standard"""
 
@@ -231,10 +241,18 @@ class AutoLinkSummary(BaseModel):
     clauses_without_evidence: int
     total_evidence_created: int
     total_evidence_updated: int
-    # Auto-linked evidence rows soft-deleted this run because their rule no longer matches
-    # their clause (one audit DELETE row each).
-    total_evidence_retired: int = 0
-    # Auto-linked rows whose rule no longer matches but that a person verified: never retired,
-    # left in place and listed in the run's audit row.
-    total_evidence_kept_verified: int = 0
+    total_evidence_retired: int = Field(
+        0,
+        description=(
+            "Auto-linked evidence rows soft-deleted this run because their rule no longer matches "
+            "their clause (one audit DELETE row each)."
+        ),
+    )
+    evidence_kept_reviewed: List[AutoLinkKeptEvidence] = Field(
+        default_factory=list,
+        description=(
+            "Auto-linked rows whose rule no longer matches their clause but that a person reviewed "
+            "(verified, or attached a document or notes). Never retired; check whether each still belongs."
+        ),
+    )
     compliance_summary: dict = Field(default_factory=dict)  # {"compliant": 38, "partial": 5, ...}

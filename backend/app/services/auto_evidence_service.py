@@ -825,14 +825,18 @@ def _query_audit_log(db: Session, company_id: int) -> dict:
 # clause with evidence.
 NOT_TRACKED_KEY = "_not_tracked"
 
-INTERNAL_AUDIT_REVIEW_TITLE = "Internal Audit & Management Review (Not Recorded in the ERP)"
+# The text says only what auto-evidence can see. A person may well have linked an audit report
+# or review minutes to the clause, and a CAR may cite an internal audit, so the row must not
+# claim the ERP holds nothing about either -- only that it has no record type to count.
+INTERNAL_AUDIT_REVIEW_TITLE = "Internal Audit & Management Review (Not Assessed Automatically)"
 INTERNAL_AUDIT_REVIEW_DESCRIPTION = (
-    "The ERP does not record internal audits, the audit program or management reviews. "
-    "Assess this clause from those records directly."
+    "Auto-evidence cannot assess this clause: the ERP has no internal-audit, audit-program or "
+    "management-review record to count. Assess it from the audit program, audit reports and "
+    "management review records, and link those to this clause as evidence."
 )
 INTERNAL_AUDIT_REVIEW_DETAIL = (
-    "Not assessed: nothing in the ERP shows whether internal audits were run or management reviews held. "
-    "The audit log is a record of system changes, not of either."
+    "Not assessed automatically. The ERP's change log records system changes; it is not evidence "
+    "that an internal audit was run or a management review held."
 )
 
 
@@ -847,8 +851,8 @@ def _query_internal_audit_review(db: Session, company_id: int) -> dict:
     management review are deliberately NOT counted here: they show a finding was raised, not
     that the program ran, and their absence would say nothing at all.
 
-    Runs no query (the signature matches the other rules). Its zero counts are true -- the
-    ERP holds no such records -- and ``no_data`` says the same.
+    Runs no query (the signature matches the other rules). Its zero counts mean "no record of
+    this kind exists to count", which is true; ``no_data`` says the same.
     """
     return {
         "evidence_type": "other",
@@ -1320,13 +1324,26 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
         "query_fn": _query_audit_log,
     },
     {
-        # Nothing in the ERP records these; the row always says so (not_assessed). "audit
-        # program" also matches the standards' "audit programme".
+        # The ERP has no record of these; the row always says so (not_assessed), which keeps
+        # the clause from ever rolling up compliant. "audit program" also matches the
+        # standards' "audit programme". The phrases after the first three catch common
+        # paraphrases (a company quality manual's "Internal Quality Audits", "review by top
+        # management") and are kept specific on purpose: a bare "quality audit" or "audit plan"
+        # would also hit supplier-audit clauses.
         "id": "internal_audit_review",
         "evidence_type": "other",
         "title": INTERNAL_AUDIT_REVIEW_TITLE,
         "module_reference": "/qms-standards",
-        "keywords": ["internal audit", "audit program", "management review"],
+        "keywords": [
+            "internal audit",
+            "audit program",
+            "management review",
+            "internal quality audit",
+            "audits at planned intervals",
+            "audit at planned intervals",
+            "top management shall review",
+            "review by top management",
+        ],
         "query_fn": _query_internal_audit_review,
     },
     {

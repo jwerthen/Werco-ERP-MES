@@ -102,6 +102,12 @@ def _ids(clause: QMSClause) -> set:
         ("Management Review Outputs", ""),
         ("Audit planning", "Keep an audit programme covering each department."),  # British spelling
         ("Audit planning", "Maintain the audit program for the year."),
+        # Paraphrases a company quality manual uses instead of the standard's wording.
+        ("Internal Quality Audits", ""),
+        ("Audits", "The quality team conducts audits at planned intervals."),
+        ("Audit", "Each department gets an audit at planned intervals."),
+        ("QMS review", "Top management shall review the quality system twice a year."),
+        ("QMS review", "A review by top management covers the system's results."),
     ],
 )
 def test_internal_audit_and_management_review_text_routes_to_not_tracked_rule(title, description):
@@ -137,6 +143,33 @@ def test_text_naming_both_reaches_both_rules():
     assert {AUDIT, IAR} <= ids
 
 
+def test_quality_manual_internal_audit_with_paper_audit_log_reaches_not_tracked_rule():
+    """A manual's "Internal Quality Audits" clause that mentions a (paper) audit log reaches the
+    change-log rule through "audit log" -- and, since the paraphrase keywords, the not-tracked
+    rule too, so its change-log row can never lift it to ``compliant`` on its own."""
+    ids = _ids(
+        _transient_clause(
+            "Internal Quality Audits",
+            "The Quality Manager keeps an audit log of scheduled and completed audits.",
+        )
+    )
+    assert {AUDIT, IAR} <= ids
+
+
+@pytest.mark.parametrize(
+    "title,description",
+    [
+        ("Supplier quality audit", "Critical suppliers receive an on-site quality audit."),
+        ("Supplier audits", "An audit plan and audit schedule are kept for each supplier."),
+        ("Audit results", ""),
+    ],
+)
+def test_supplier_and_generic_audit_text_does_not_reach_not_tracked_rule(title, description):
+    """The paraphrase keywords are specific on purpose: supplier-audit wording must not get an
+    internal-audit row."""
+    assert IAR not in _ids(_transient_clause(title, description))
+
+
 def test_audit_results_alone_reaches_neither_rule():
     """The bare word "audit" belongs to no rule: "Audit results" is neither the change log nor
     an internal-audit / management-review clause."""
@@ -148,7 +181,16 @@ def test_audit_results_alone_reaches_neither_rule():
 
 def test_rule_keywords_are_split_as_decided():
     assert {kw.lower() for kw in _rule(AUDIT)["keywords"]} == {"audit trail", "audit log"}
-    assert {kw.lower() for kw in _rule(IAR)["keywords"]} == {"internal audit", "audit program", "management review"}
+    assert {kw.lower() for kw in _rule(IAR)["keywords"]} == {
+        "internal audit",
+        "audit program",
+        "management review",
+        "internal quality audit",
+        "audits at planned intervals",
+        "audit at planned intervals",
+        "top management shall review",
+        "review by top management",
+    }
     assert _rule(IAR)["query_fn"] is _query_internal_audit_review
     assert _rule(AUDIT)["query_fn"] is _query_audit_log
 
@@ -184,6 +226,12 @@ def test_internal_audit_review_row_is_not_assessed_no_data_and_not_tracked():
     assert row["recent_count"] == 0
     assert row["examples"] == []
     assert is_not_tracked(row) is True
+    # The text claims only what auto-evidence can see: it cannot assess the clause. It must not
+    # say the ERP holds nothing about audits -- a person may have linked an audit report.
+    assert "Not Assessed Automatically" in row["title"]
+    assert "cannot assess" in row["description"]
+    for false_claim in ("nothing in the ERP", "does not record", "Not Recorded"):
+        assert false_claim not in row["title"] + row["description"] + row["health_detail"]
 
     # It serializes as an ordinary result once the internal keys are stripped.
     public = AutoEvidenceResult(**{k: v for k, v in row.items() if not k.startswith("_")})

@@ -7,11 +7,13 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import Session, joinedload, with_loader_criteria
 
+from app.api.audit_guard import required_audit
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
 from app.models.qms_standard import QMSClause, QMSClauseEvidence, QMSStandard
 from app.models.user import User, UserRole
 from app.schemas.qms_standard import (
+    AutoLinkKeptEvidence,
     AutoLinkSummary,
     ClauseAutoEvidenceResponse,
     QMSAuditReadinessSummary,
@@ -623,7 +625,12 @@ def get_clause_auto_evidence(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Discover live ERP/MES evidence for a single clause."""
+    """Discover live ERP/MES evidence for a single clause.
+
+    A clause about internal audit or management review also lists a row titled
+    "Internal Audit & Management Review (Not Assessed Automatically)": the ERP has no record of
+    either, so that row suggests ``not_assessed`` and the clause never rolls up ``compliant``.
+    """
     clause = (
         db.query(QMSClause)
         .filter(
@@ -668,9 +675,9 @@ def auto_link_standard(
     and does not make its clause count as a clause with evidence.
 
     Auto-linked evidence whose rule no longer matches its clause is retired (soft-deleted, one
-    audit DELETE row each) and counted in ``total_evidence_retired``. A row a person has
-    verified is never retired: it is left in place and counted in
-    ``total_evidence_kept_verified``. See ``_retire_unmatched_auto_links``.
+    required audit DELETE row each) and counted in ``total_evidence_retired``. A row a person
+    has reviewed (verified it, attached a document or wrote notes) is never retired: it is left
+    in place and listed in ``evidence_kept_reviewed``. See ``_retire_unmatched_auto_links``.
     """
     standard = (
         db.query(QMSStandard)
@@ -700,7 +707,7 @@ def auto_link_standard(
     clauses_with_evidence = 0
     compliance_counts = {}
     retired: List[Dict[str, Any]] = []
-    kept_verified: List[Dict[str, Any]] = []
+    kept_reviewed: List[Dict[str, Any]] = []
 
     for clause in clauses:
         results = discover_evidence_for_clause(db, clause, company_id)
@@ -716,7 +723,7 @@ def auto_link_standard(
 
         clause_retired, clause_kept = _retire_unmatched_auto_links(db, clause, company_id, current_user.id)
         retired.extend(clause_retired)
-        kept_verified.extend(clause_kept)
+        kept_reviewed.extend(clause_kept)
 
         for result in evidence_rows:
             rule_id = result.get("_rule_id", result.get("evidence_type", "unknown"))
@@ -763,28 +770,35 @@ def auto_link_standard(
 
     db.flush()  # assign any new evidence PKs without committing
 
-    # Audit rows are written only now, after every evidence row write has been flushed: the
-    # audit chain lock is global, so taking it before the row locks could deadlock against a
-    # concurrent evidence edit, which takes its row lock first.
-    for entry in retired:
-        audit.log_delete(
-            "qms_clause_evidence",
-            entry["evidence_id"],
-            entry["title"],
-            old_values=entry["snapshot"],
-            soft_delete=True,
-            description=(
-                f"Auto-link retired evidence '{entry['title']}' from clause {entry['clause_number']}: "
-                f"its rule '{entry['rule_id']}' no longer matches the clause"
-            ),
-            extra_data={"retired_by": "auto_link", **_retirement_ref(entry)},
-        )
+    # Audit rows are written only now, after every evidence write has been flushed, so this run
+    # takes its evidence row locks before the global audit-chain lock (the codebase's order).
+    #
+    # Each retirement's DELETE row is REQUIRED evidence: it is the only record that auto-link,
+    # not the person who clicked it, decided to remove the link, and why. Without it the
+    # tombstone's ``deleted_by`` would blame that person for a removal they never saw. So if
+    # one cannot be written the whole run rolls back and answers 503; it is safe to retry.
+    with required_audit(
+        db, "The audit record for retiring stale auto-linked evidence could not be saved; nothing was changed. Retry."
+    ):
+        for entry in retired:
+            audit.log_required(
+                audit.ACTIONS["DELETE"],
+                "qms_clause_evidence",
+                resource_id=entry["evidence_id"],
+                resource_identifier=entry["title"],
+                description=(
+                    f"Auto-link retired evidence '{entry['title']}' from clause {entry['clause_number']}: "
+                    f"its rule '{entry['rule_id']}' no longer matches the clause"
+                ),
+                old_values=entry["snapshot"],
+                extra_data={"soft_delete": True, "retired_by": "auto_link", **_retirement_ref(entry)},
+            )
 
     summary_extra: Dict[str, Any] = {}
     if retired:
         summary_extra["evidence_retired"] = [_retirement_ref(entry) for entry in retired]
-    if kept_verified:
-        summary_extra["evidence_kept_verified"] = kept_verified
+    if kept_reviewed:
+        summary_extra["evidence_kept_reviewed"] = kept_reviewed
     audit.log_create(
         "qms_standard",
         standard.id,
@@ -792,7 +806,7 @@ def auto_link_standard(
         description=(
             f"Auto-linked evidence: {total_created} created, {total_updated} updated"
             + (f", {len(retired)} retired (rule no longer matches)" if retired else "")
-            + (f", {len(kept_verified)} kept because verified" if kept_verified else "")
+            + (f", {len(kept_reviewed)} stale but kept because a person reviewed them" if kept_reviewed else "")
         ),
         extra_data=summary_extra or None,
     )
@@ -814,7 +828,7 @@ def auto_link_standard(
         total_evidence_created=total_created,
         total_evidence_updated=total_updated,
         total_evidence_retired=len(retired),
-        total_evidence_kept_verified=len(kept_verified),
+        evidence_kept_reviewed=[AutoLinkKeptEvidence(**entry) for entry in kept_reviewed],
         compliance_summary=compliance_counts,
     )
 
@@ -836,14 +850,20 @@ def _retire_unmatched_auto_links(
 
     * A rule is "matched" by its keywords (``matched_rule_ids``), not by having produced a row
       this run: a rule whose query failed this run still matches, and its stored row stays.
-    * A row a person has verified (``is_verified``) is never retired; it is returned in the
-      second list and left as it is. The verification was a person's judgment, which an
-      automated keyword change does not overrule.
+    * A row a person has reviewed is never retired: verified (``is_verified``), or carrying a
+      document or notes only a person sets (``document_id``, ``verification_notes`` -- auto-link
+      writes neither). It is returned in the second list, with the reason, and left as it is.
+      A person's judgment is not overruled by an automated keyword change.
     * Manually linked rows (``is_auto_linked`` false) are never touched.
 
-    Returns ``(retired, kept_verified)``. Each retired entry carries a pre-delete ``snapshot``
-    for the caller's audit DELETE row, which the caller writes after all evidence writes are
-    flushed (see ``auto_link_standard``).
+    The candidate rows are read ``FOR UPDATE`` (a no-op on SQLite), so a concurrent Verify or a
+    second auto-link run on the same standard is decided against the row as it stands once this
+    run holds it: a just-verified row is kept, a just-retired row is not retired twice. These
+    row locks come before the audit-chain lock, which ``auto_link_standard`` takes only after
+    its flush.
+
+    Returns ``(retired, kept_reviewed)``. Each retired entry carries a JSON-ready pre-delete
+    ``snapshot`` for the caller's required audit DELETE row.
     """
     matched = matched_rule_ids(clause)
     auto_linked = (
@@ -855,11 +875,12 @@ def _retire_unmatched_auto_links(
             QMSClauseEvidence.is_auto_linked == True,
         )
         .order_by(QMSClauseEvidence.id)
+        .with_for_update()
         .all()
     )
 
     retired: List[Dict[str, Any]] = []
-    kept_verified: List[Dict[str, Any]] = []
+    kept_reviewed: List[Dict[str, Any]] = []
     for evidence in auto_linked:
         if evidence.auto_link_query in matched:
             continue
@@ -870,12 +891,24 @@ def _retire_unmatched_auto_links(
             "rule_id": evidence.auto_link_query,
         }
         if evidence.is_verified:
-            kept_verified.append(ref)
+            kept_reviewed.append({**ref, "reason": "verified"})
             continue
-        snapshot = {attr.key: getattr(evidence, attr.key) for attr in sa_inspect(evidence).mapper.column_attrs}
+        if evidence.document_id is not None or (evidence.verification_notes or "").strip():
+            kept_reviewed.append({**ref, "reason": "annotated"})
+            continue
+        snapshot = _evidence_audit_snapshot(evidence)
         evidence.soft_delete(user_id)
         retired.append({**ref, "title": evidence.title, "snapshot": snapshot})
-    return retired, kept_verified
+    return retired, kept_reviewed
+
+
+def _evidence_audit_snapshot(evidence: QMSClauseEvidence) -> Dict[str, Any]:
+    """Every column of the evidence row, JSON-ready (``log_required`` stores values as given)."""
+    snapshot: Dict[str, Any] = {}
+    for attr in sa_inspect(evidence).mapper.column_attrs:
+        value = getattr(evidence, attr.key)
+        snapshot[attr.key] = value.isoformat() if isinstance(value, datetime) else value
+    return snapshot
 
 
 # ============== Evidence Links ==============

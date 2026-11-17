@@ -14,10 +14,11 @@ loosened to pass extra keys through.)
 
 Auto-link:
 * never persists a not-tracked row, and does not count its clause as a clause with evidence;
-* retires (soft-deletes, one audit DELETE row each, written by the endpoint) its own
+* retires (soft-deletes, one REQUIRED audit DELETE row each, written by the endpoint) its own
   unverified evidence rows whose rule no longer matches the clause -- e.g. the change-log
   ("audit") link it used to make on 9.2 / 9.3;
-* keeps a verified stale row and lists it on the run's summary audit row;
+* keeps a stale row a person reviewed (verified, or annotated with notes) and lists it in the
+  response and on the run's summary audit row;
 * never touches a manual row, a row whose rule still matches, a row whose matched rule's
   query failed this run, or another company's rows.
 
@@ -145,6 +146,7 @@ def _make_evidence(
     rule_id: Optional[str] = "audit",
     verified: bool = False,
     title: str = AUDIT_LOG_TITLE,
+    verification_notes: Optional[str] = None,
 ) -> QMSClauseEvidence:
     """An evidence row as an earlier auto-link run (or a person, when ``auto_linked`` is False)
     left it. The defaults are the change-log link auto-link made on 9.2 / 9.3 before the fix."""
@@ -162,6 +164,7 @@ def _make_evidence(
         last_refreshed=STALE_TIME if auto_linked else None,
         is_verified=verified,
         verified_date=STALE_TIME if verified else None,
+        verification_notes=verification_notes,
     )
     db.add(evidence)
     db.commit()
@@ -273,7 +276,7 @@ def test_auto_link_persists_no_not_tracked_row(client: TestClient, db_session: S
     assert body["total_evidence_created"] == 1
     assert body["total_evidence_updated"] == 0
     assert body["total_evidence_retired"] == 0
-    assert body["total_evidence_kept_verified"] == 0
+    assert body["evidence_kept_reviewed"] == []
     # Before the fix: {"compliant": 3}, with a change-log row persisted on 9.2 and 9.3.
     assert body["compliance_summary"] == {"compliant": 1, "not_assessed": 2}
 
@@ -311,7 +314,7 @@ def test_auto_link_retires_stale_unverified_change_log_link(
     body = _auto_link(client, standard_id, user)
 
     assert body["total_evidence_retired"] == 1
-    assert body["total_evidence_kept_verified"] == 0
+    assert body["evidence_kept_reviewed"] == []
     assert body["total_evidence_created"] == 0
     assert body["total_evidence_updated"] == 0
     assert body["clauses_without_evidence"] == 1
@@ -343,7 +346,7 @@ def test_auto_link_retires_stale_unverified_change_log_link(
     assert summary.user_id == user.id
     assert summary.company_id == COMPANY_A
     assert summary.extra_data["evidence_retired"] == [ref]
-    assert "evidence_kept_verified" not in summary.extra_data
+    assert "evidence_kept_reviewed" not in summary.extra_data
 
     # The retired row drops out of the standard's nested evidence links.
     listed = client.get(f"/api/v1/qms-standards/{standard_id}/clauses", headers=_headers_for(user))
@@ -362,7 +365,8 @@ def test_auto_link_keeps_verified_stale_link(client: TestClient, db_session: Ses
 
     body = _auto_link(client, standard_id, user)
 
-    assert body["total_evidence_kept_verified"] == 1
+    kept = {"evidence_id": verified_id, "clause_id": clause_id, "clause_number": "9.2", "rule_id": "audit"}
+    assert body["evidence_kept_reviewed"] == [{**kept, "reason": "verified"}]
     assert body["total_evidence_retired"] == 0
 
     row = _assert_live(db_session, verified_id)
@@ -376,10 +380,74 @@ def test_auto_link_keeps_verified_stale_link(client: TestClient, db_session: Ses
         == []
     )
     summary = _run_summary_row(db_session, standard_id)
-    assert summary.extra_data["evidence_kept_verified"] == [
-        {"evidence_id": verified_id, "clause_id": clause_id, "clause_number": "9.2", "rule_id": "audit"}
-    ]
+    assert summary.extra_data["evidence_kept_reviewed"] == [{**kept, "reason": "verified"}]
     assert "evidence_retired" not in summary.extra_data
+
+
+def test_auto_link_keeps_annotated_unverified_stale_link(client: TestClient, db_session: Session):
+    """(c2) Notes on an auto-linked row are only ever written by a person, so a stale row that
+    carries them is kept like a verified one (reason "annotated"). Whitespace-only notes are
+    not an annotation: that row is retired."""
+    standard = _make_standard(db_session)
+    clause = _make_clause(db_session, standard=standard, clause_number="9.2", title="Internal audit")
+    annotated = _make_evidence(db_session, clause=clause, verification_notes="See the 2026 internal audit report")
+    blank = _make_evidence(db_session, clause=clause, verification_notes="   ")
+    annotated_id, blank_id, clause_id, standard_id = annotated.id, blank.id, clause.id, standard.id
+    user = _make_user(db_session)
+
+    body = _auto_link(client, standard_id, user)
+
+    assert body["evidence_kept_reviewed"] == [
+        {
+            "evidence_id": annotated_id,
+            "clause_id": clause_id,
+            "clause_number": "9.2",
+            "rule_id": "audit",
+            "reason": "annotated",
+        }
+    ]
+    assert body["total_evidence_retired"] == 1
+    row = _assert_live(db_session, annotated_id)
+    assert row.verification_notes == "See the 2026 internal audit report"
+    assert _evidence(db_session, blank_id).is_deleted is True
+
+
+def test_auto_link_rolls_back_when_a_retirement_audit_row_cannot_be_written(
+    client: TestClient, db_session: Session, monkeypatch: pytest.MonkeyPatch
+):
+    """Each retirement's DELETE row is required evidence: when it cannot be written the whole
+    run answers 503 and nothing is saved -- the stale row stays live, no new evidence row is
+    created, and no audit row of the run is committed."""
+    _seed_change_log(db_session, count=2)
+    standard = _make_standard(db_session)
+    clause = _make_clause(db_session, standard=standard, clause_number="9.2", title="Internal audit")
+    trail = _make_clause(db_session, standard=standard, clause_number="7.5.3", title="Audit trail")
+    stale = _make_evidence(db_session, clause=clause)
+    stale_id, trail_id, standard_id = stale.id, trail.id, standard.id
+    user = _make_user(db_session)
+
+    real_log = AuditService.log
+
+    def _log_unless_retirement(self, action, resource_type, *args, **kwargs):
+        if action == "DELETE" and resource_type == "qms_clause_evidence":
+            return None  # how ``log`` reports a write it swallowed
+        return real_log(self, action, resource_type, *args, **kwargs)
+
+    monkeypatch.setattr(AuditService, "log", _log_unless_retirement)
+
+    resp = client.post(f"/api/v1/qms-standards/{standard_id}/auto-link", headers=_headers_for(user))
+
+    assert resp.status_code == status.HTTP_503_SERVICE_UNAVAILABLE, resp.text
+    assert "nothing was changed" in resp.json()["detail"]
+    _assert_live(db_session, stale_id)
+    assert db_session.query(QMSClauseEvidence).filter(QMSClauseEvidence.clause_id == trail_id).count() == 0
+    assert (
+        _committed_audit_rows(db_session, resource_type="qms_clause_evidence", resource_id=stale_id, action="DELETE")
+        == []
+    )
+    assert (
+        _committed_audit_rows(db_session, resource_type="qms_standard", resource_id=standard_id, action="CREATE") == []
+    )
 
 
 def test_auto_link_never_touches_manual_evidence(client: TestClient, db_session: Session):
@@ -423,7 +491,7 @@ def test_auto_link_refreshes_change_log_link_on_audit_trail_clause(client: TestC
     assert body["total_evidence_updated"] == 1
     assert body["total_evidence_created"] == 0
     assert body["total_evidence_retired"] == 0
-    assert body["total_evidence_kept_verified"] == 0
+    assert body["evidence_kept_reviewed"] == []
     assert body["compliance_summary"] == {"compliant": 1}
 
     row = _assert_live(db_session, stored_id)
@@ -481,7 +549,7 @@ def test_auto_link_second_run_retires_nothing_more(client: TestClient, db_sessio
     second = _auto_link(client, standard_id, user)
 
     assert second["total_evidence_retired"] == 0
-    assert second["total_evidence_kept_verified"] == 0
+    assert second["evidence_kept_reviewed"] == []
     assert second["total_evidence_created"] == 0
     assert second["total_evidence_updated"] == 0
     row = _evidence(db_session, stale_id)

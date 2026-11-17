@@ -8786,14 +8786,19 @@ in `RBAC_PERMISSIONS.md`.
 > 9.2 *Internal audit* and 9.3 *Management review* rolled up `compliant` with no evidence that an
 > audit was run or a review held. The change-log row now matches only "audit trail" and "audit
 > log". "internal audit", "audit program" (which also matches "audit programme") and "management
-> review" go to a separate rule, `internal_audit_review`, whose row is always the same:
-> `title` *Internal Audit & Management Review (Not Recorded in the ERP)*, `evidence_type` `other`,
-> `total_count` and `recent_count` `0`, `health_status` `no_data`, `suggested_compliance`
-> `not_assessed`. The zeros are true: the ERP holds no internal-audit, audit-program or
-> management-review records. The row's description tells the reader to assess the clause from those
-> records directly. NCRs with `source` `internal_audit` and CARs with `initiation_reason`
-> `internal_audit` or `management_review` are deliberately not counted: they show a finding was
-> raised, not that the program ran.
+> review" go to a separate rule, `internal_audit_review`. So do a few common paraphrases a company
+> quality manual uses: "internal quality audit", "audits at planned intervals" / "audit at planned
+> intervals", "top management shall review" and "review by top management". These are kept
+> specific on purpose: a bare "quality audit" or "audit plan" would also hit supplier-audit clauses.
+> The rule's row is always the same: `title` *Internal Audit & Management Review (Not Assessed
+> Automatically)*, `evidence_type` `other`, `total_count` and `recent_count` `0`, `health_status`
+> `no_data`, `suggested_compliance` `not_assessed`. The zeros mean the ERP has no internal-audit,
+> audit-program or management-review record type to count. The row says only that auto-evidence
+> cannot assess the clause, not that the ERP holds nothing about audits: a person may have linked
+> an audit report or review minutes to the clause, and the description asks for exactly that. NCRs
+> with `source` `internal_audit` and CARs with `initiation_reason` `internal_audit` or
+> `management_review` are deliberately not counted: they show a finding was raised, not that the
+> program ran.
 >
 > `GET /qms-standards/clauses/{clause_id}/auto-evidence` lists the row like any other; internal
 > `_`-prefixed keys are stripped from every row. The roll-up rule is unchanged: on its own the row
@@ -8803,14 +8808,19 @@ in `RBAC_PERMISSIONS.md`.
 > **Auto-link retires its own stale links — expect 9.2 / 9.3 clauses to lose the change-log link.**
 > An auto-linked evidence row exists only because a rule matched its clause. Each run of
 > `POST /qms-standards/{standard_id}/auto-link` now goes through every clause of the standard and
-> soft-deletes its auto-linked (`is_auto_linked` true), unverified evidence rows whose rule
-> (`auto_link_query`) no longer matches the clause's text. Each retired row gets one audit `DELETE`
-> row: `resource_type` `qms_clause_evidence`, `extra_data.soft_delete` `true`,
+> soft-deletes its auto-linked (`is_auto_linked` true) evidence rows whose rule (`auto_link_query`)
+> no longer matches the clause's text, unless a person reviewed them (below). Each retired row gets
+> one audit `DELETE` row: `resource_type` `qms_clause_evidence`, `extra_data.soft_delete` `true`,
 > `extra_data.retired_by` `auto_link`, plus `rule_id`, `clause_id`, `clause_number` and
-> `evidence_id`.
+> `evidence_id`, with the pre-delete row in `old_values`. That row is **required**: it is the only
+> record that auto-link, not the person who clicked it, removed the link. If it cannot be written,
+> the whole run rolls back and answers **503** (*The audit record for retiring stale auto-linked
+> evidence could not be saved; nothing was changed. Retry.*). A retry is safe.
 >
-> - A row a person verified (`is_verified` true) is never retired. It is kept and listed in the run's
->   summary audit row.
+> - A row a person reviewed is never retired: verified (`is_verified` true), or carrying a document
+>   (`document_id`) or non-blank `verification_notes`, which auto-link never writes. It is kept and
+>   listed, with `reason` `verified` or `annotated`, in the response's `evidence_kept_reviewed` and
+>   in the run's summary audit row.
 > - Manually linked rows (`is_auto_linked` false) are never touched.
 > - A rule is "matched" by its keywords, not by producing a row this run. A rule whose query failed
 >   this run still counts as matched, so its stored row stays.
@@ -8818,16 +8828,19 @@ in `RBAC_PERMISSIONS.md`.
 >   one counts in `clauses_without_evidence`, not `clauses_with_evidence`. Its `not_assessed` still
 >   counts in `compliance_summary`.
 >
-> The response gains `total_evidence_retired` and `total_evidence_kept_verified` (both `0` when
-> nothing applied; see the schema below). The run's summary audit row (`resource_type`
-> `qms_standard`) carries `extra_data.evidence_retired` and `extra_data.evidence_kept_verified`, each
-> a list of `{evidence_id, clause_id, clause_number, rule_id}`, only when non-empty. The SPA's
-> *Auto-Link Evidence Complete* dialog does not show the two new counts yet.
+> The response gains `total_evidence_retired` (`0` when nothing was retired) and
+> `evidence_kept_reviewed` (empty when nothing was kept); see the schema below. The run's summary
+> audit row (`resource_type` `qms_standard`) carries `extra_data.evidence_retired` (a list of
+> `{evidence_id, clause_id, clause_number, rule_id}`) and `extra_data.evidence_kept_reviewed` (the
+> same, plus `reason`), each only when non-empty. Candidate rows are locked (`FOR UPDATE`) for the
+> run, so a concurrent **Verify** is decided against the row as it then stands. The SPA's
+> *Auto-Link Evidence Complete* dialog does not show the new fields yet.
 >
 > **What operators see:** a 9.2 or 9.3 clause already linked to the
 > *Audit Trail (Immutable Hash-Chain Log)* row loses that link on the next **Auto-Link Evidence**
-> run, unless someone verified it. A verified link is kept: review it and, if it is wrong, remove it
-> by hand (`DELETE /qms-standards/evidence/{evidence_id}`). Retirement never changes a clause's
+> run, unless someone verified or annotated it. Such a link is kept and listed in
+> `evidence_kept_reviewed`: review it and, if it is wrong, remove it by hand
+> (`DELETE /qms-standards/evidence/{evidence_id}`). Retirement never changes a clause's
 > `compliance_status`, so a clause someone already set to `compliant` keeps that status until a
 > person reassesses it. Retired rows drop out of `total_evidence_links` and `unverified_evidence` on
 > `GET /qms-standards/audit-readiness`.
@@ -8887,13 +8900,15 @@ in `RBAC_PERMISSIONS.md`.
   "total_evidence_created": 4,
   "total_evidence_updated": 52,
   "total_evidence_retired": 2,
-  "total_evidence_kept_verified": 1,
+  "evidence_kept_reviewed": [
+    {"evidence_id": 311, "clause_id": 87, "clause_number": "9.2", "rule_id": "audit", "reason": "verified"}
+  ],
   "compliance_summary": {"compliant": 20, "partial": 9, "non_compliant": 1, "not_assessed": 18}
 }
 ```
 
 `compliance_summary` counts each clause's `overall_suggested_compliance` and sums to
-`total_clauses`. `total_evidence_retired` and `total_evidence_kept_verified` are described in the
+`total_clauses`. `total_evidence_retired` and `evidence_kept_reviewed` are described in the
 auto-link retirement note above.
 
 ### Customer Complaints & RMA
