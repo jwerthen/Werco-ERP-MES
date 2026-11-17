@@ -140,7 +140,9 @@ owner ruling 3 only a person signed in to the app runs an AI recommendation's ac
 `catalog.EXCLUDED_OPERATIONS`, and the route refuses API tokens besides. The three Approved Supplier
 List writes (recording a supplier-approval decision and the ASL import preview / commit) and the two
 legacy `approved_supplier_list` writes are excluded the same way, and refuse API tokens too — see
-[Purchasing](#purchasing). An agent on an API token
+[Purchasing](#purchasing). Bulk release (`POST /work-orders/bulk-release`) is excluded as well, so an
+agent releases one job per call; unlike those, the route itself has no API-token refusal — see
+[Work Orders](#work-orders). An agent on an API token
 also gets a 403 the same person would not get in the UI when it tries to mark an AI action card
 handled — see [Credential policy for judgment writes](#credential-policy-for-judgment-writes)
 and [AI recommendations (Action Inbox)](#ai-recommendations-action-inbox).
@@ -254,6 +256,7 @@ route's own fences still do):
 | Write | Open to | Decision |
 |---|---|---|
 | **Resume Work Order** — `POST /work-orders/{id}/resume` (lifts a work-order hold) | Any credential of a user holding Admin / Manager / Supervisor, a standing **API token** included (the MCP tool `work_orders_resume_work_order`); kiosk badge and station tokens are refused by their path fence, as on every `/work-orders` route. Each call's required audit rows are written as the token's user with `extra_data.credential` | Owner decision 2026-11-07: an agent may lift a work-order hold |
+| **Release** — `POST /work-orders/{id}/release` and `POST /work-orders/bulk-release` (puts DRAFT work on the floor) | Any credential of a user holding Admin / Manager / Supervisor, a standing **API token** included; read-only and AI-external tokens are refused by the global gates, kiosk badge and station tokens by their path fence. Each release's audit row carries `extra_data.credential` | Existing behavior, not an owner ruling: the MCP tool `release_work_order` is an agent's release door, one job per call; bulk release is kept off the MCP catalog only. Whether a standing token should bulk-release is an open owner question |
 | **Dismiss**, snooze and feedback on a recommendation, action cards included | Every authenticated user and every credential | A design decision of the AI governance change; for Dismiss on an action card, confirmed by the owner 2026-11-07 (it does not take the Mark handled gate) — see [AI recommendations (Action Inbox)](#ai-recommendations-action-inbox) |
 
 ## Permission Matrix
@@ -283,6 +286,7 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 | View deleted work orders (the restore view) | ✓ | ✓ | | | | | |
 | Restore a deleted work order | ✓ | ✓ | | | | | |
 | Release | ✓ | ✓ | ✓ | | | | |
+| Release several drafts at once (`POST /work-orders/bulk-release`, 1–50 per call) | ✓ | ✓ | ✓ | | | | |
 | Start work order (released only) | ✓ | ✓ | ✓ | | | | |
 | Hold work order (`PUT` `status: on_hold`; released / in-progress only) | ✓ | ✓ | ✓ | | | | |
 | Resume work order (lift a work-order hold) | ✓ | ✓ | ✓ | | | | |
@@ -423,6 +427,33 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > can still diverge at runtime, and the server stays authoritative (a mismatch surfaces as the
 > verbatim 403). Superuser and Platform Admin pass through `require_role` as everywhere else. See
 > `docs/API.md` → Work Orders → "Draft and on-hold work orders refuse every start".
+
+> **Release — one work order or several, and the Work Orders list (endpoint mapping).**
+> `POST /api/v1/work-orders/{id}/release` and `POST /api/v1/work-orders/bulk-release` are both
+> `require_role([ADMIN, MANAGER, SUPERVISOR])` (`require_role` itself admits superuser and Platform
+> Admin), so the **Release** row and the bulk row above are one gate. Bulk release grants nothing the
+> single route did not: each id is judged and released exactly as the single route would (DRAFT and at
+> least one operation — there is no material or blocker gate), scoped to the active company (another
+> company's id is the same `Work order not found` result as a deleted or absent one, with no number),
+> and each released work order gets its own audit row attributed to the caller. No role gained or lost
+> a capability: the bulk route does nothing a run of single releases by the same user could not.
+>
+> **The Work Orders list and the Work Order detail page now hide Release from roles that cannot
+> release.** The list's row **Release** button (desktop table and mobile cards), the bulk-release
+> checkboxes and the detail page's **Release** button render only for a user whose role holds
+> `work_orders:release` (Admin, Manager, Supervisor, Platform Admin) or a superuser — the set the
+> endpoints admit — through one shared check, `userCanReleaseWorkOrders` in
+> `frontend/src/utils/permissions.ts`. Before this, both buttons rendered for **every** role, and an
+> Operator, Quality, Shipping or Viewer user who clicked one got the 403. Checkboxes appear on
+> **draft** rows only, on the desktop table only (none on the mobile card list), and select-all covers
+> the drafts loaded on the current page. As above, `customPermissions` can still diverge at runtime
+> and the server stays authoritative.
+>
+> **Not an MCP tool.** Bulk release is in `catalog.EXCLUDED_OPERATIONS`, so an agent releases one job
+> per call through `release_work_order`. That is an exclusion from the agent catalog, not a credential
+> refusal: the route has no API-token refusal of its own, so a full API token whose user holds one of the three roles
+> can call it directly on `/api/v1`, as it can the single release (a read-only token is refused as for
+> every write). See `docs/API.md` → Work Orders → "Releasing several work orders at once".
 
 > **The shop-floor verbs stay open to operators (clock-in to any authenticated user; the start verb
 > to the floor roles since P0.4), but now refuse draft and on-hold work orders.**

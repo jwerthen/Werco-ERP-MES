@@ -294,6 +294,20 @@ export function canApprove(userRole: UserRole | undefined): boolean {
 }
 
 /**
+ * Can this user release work orders? Release — single (`POST /work-orders/{id}/release`)
+ * and bulk (`POST /work-orders/bulk-release`) — is require_role([ADMIN, MANAGER,
+ * SUPERVISOR]) on the backend, plus superuser / platform admin via require_role itself:
+ * exactly the population `work_orders:release` maps to. The work-order list (row Release
+ * and bulk selection) and the work-order detail page's Release button both read this one
+ * gate, so a hidden button and a refused call agree on every screen.
+ */
+export function userCanReleaseWorkOrders(
+  user: { role?: UserRole; is_superuser?: boolean } | null | undefined
+): boolean {
+  return hasPermission(user?.role, 'work_orders:release') || user?.is_superuser === true;
+}
+
+/**
  * Get all permissions for a role
  */
 export function getPermissionsForRole(role: UserRole): Permission[] {
