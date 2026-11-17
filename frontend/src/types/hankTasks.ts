@@ -1,6 +1,11 @@
 import type { HankReceiveInput, HankProductionInput, HankShipmentInput } from './hankWork';
 
-export type HankBasicActionKind = 'repeat_job' | 'draft_purchase_order' | 'attach_document';
+export type HankBasicActionKind =
+  | 'repeat_job'
+  | 'draft_purchase_order'
+  | 'attach_document'
+  | 'change_due_date'
+  | 'add_note';
 export type HankOperationalActionKind = 'receive_delivery' | 'report_production' | 'draft_shipment';
 export type HankActionKind = HankBasicActionKind | HankOperationalActionKind;
 export type HankTaskKind = HankActionKind | 'watch_work_order';
@@ -83,6 +88,20 @@ export type HankTaskCreate = HankTaskCreateBase &
         };
       }
     | { kind: 'attach_document'; input: { document_id: number; work_order_id: number } }
+    | {
+        /** Moves `due_date` only; `must_ship_by` never moves. `reason` is 1-500 characters, trimmed. */
+        kind: 'change_due_date';
+        input: { work_order_id: number; new_due_date: string; reason: string };
+      }
+    | {
+        /**
+         * Posts a work-order COMMENT (never the job's notes field). `body` is 1-5000 characters,
+         * trimmed; `mentioned_user_ids` holds at most 20 distinct ids. People only: the server
+         * refuses an API token.
+         */
+        kind: 'add_note';
+        input: { work_order_id: number; body: string; mentioned_user_ids: number[] };
+      }
     | { kind: 'receive_delivery'; input: HankReceiveInput }
     | { kind: 'report_production'; input: HankProductionInput }
     | { kind: 'draft_shipment'; input: HankShipmentInput }
