@@ -7,7 +7,7 @@ Uses keyword-based matching rules so it works across AS9100D, ISO 9001, IATF 169
 
 import logging
 from datetime import date, datetime, timedelta
-from typing import List, Optional
+from typing import List, Optional, Set
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -818,6 +818,58 @@ def _query_audit_log(db: Session, company_id: int) -> dict:
     )
 
 
+# Internal key on a result row that reports the ERP holds NO record of what its clause asks
+# for. Like ``_rule_id`` it is never serialized. The row is listed and rolls up (its
+# ``not_assessed`` keeps the clause from ever reaching ``compliant``), but it is not evidence:
+# ``POST /qms-standards/{id}/auto-link`` never persists it and does not count its clause as a
+# clause with evidence.
+NOT_TRACKED_KEY = "_not_tracked"
+
+INTERNAL_AUDIT_REVIEW_TITLE = "Internal Audit & Management Review (Not Recorded in the ERP)"
+INTERNAL_AUDIT_REVIEW_DESCRIPTION = (
+    "The ERP does not record internal audits, the audit program or management reviews. "
+    "Assess this clause from those records directly."
+)
+INTERNAL_AUDIT_REVIEW_DETAIL = (
+    "Not assessed: nothing in the ERP shows whether internal audits were run or management reviews held. "
+    "The audit log is a record of system changes, not of either."
+)
+
+
+def _query_internal_audit_review(db: Session, company_id: int) -> dict:
+    """The row for a clause about internal audit (AS9100D / ISO 9001 9.2) or management review (9.3).
+
+    The ERP has no internal-audit, audit-program or management-review record, so there is
+    nothing to count and the honest answer is ``not_assessed``. This replaced routing those
+    clauses to ``_query_audit_log``: the ERP's change log has entries on any working system,
+    so it rolled 9.2 / 9.3 up ``compliant`` with no evidence that an audit was run or a review
+    held. NCRs with source ``internal_audit`` and CARs initiated by an internal audit or a
+    management review are deliberately NOT counted here: they show a finding was raised, not
+    that the program ran, and their absence would say nothing at all.
+
+    Runs no query (the signature matches the other rules). Its zero counts are true -- the
+    ERP holds no such records -- and ``no_data`` says the same.
+    """
+    return {
+        "evidence_type": "other",
+        "title": INTERNAL_AUDIT_REVIEW_TITLE,
+        "description": INTERNAL_AUDIT_REVIEW_DESCRIPTION,
+        "module_reference": "/qms-standards",
+        "total_count": 0,
+        "recent_count": 0,
+        "health_status": "no_data",
+        "health_detail": INTERNAL_AUDIT_REVIEW_DETAIL,
+        "examples": [],
+        "suggested_compliance": "not_assessed",
+        NOT_TRACKED_KEY: True,
+    }
+
+
+def is_not_tracked(result: dict) -> bool:
+    """True for a row reporting that the ERP holds no record of what its clause asks for."""
+    return bool(result.get(NOT_TRACKED_KEY))
+
+
 def _plural(n: int, singular: str, plural: str) -> str:
     return f"{n} {singular if n == 1 else plural}"
 
@@ -1260,9 +1312,22 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
         "query_fn": _query_spc,
     },
     {
+        # The ERP's own change log. Only for a clause that names it: a clause about internal
+        # audit or management review goes to "internal_audit_review" below, because change-log
+        # entries exist on any working system and are no evidence that an audit was run.
         "id": "audit",
-        "keywords": ["internal audit", "audit program", "audit trail", "management review", "audit log"],
+        "keywords": ["audit trail", "audit log"],
         "query_fn": _query_audit_log,
+    },
+    {
+        # Nothing in the ERP records these; the row always says so (not_assessed). "audit
+        # program" also matches the standards' "audit programme".
+        "id": "internal_audit_review",
+        "evidence_type": "other",
+        "title": INTERNAL_AUDIT_REVIEW_TITLE,
+        "module_reference": "/qms-standards",
+        "keywords": ["internal audit", "audit program", "management review"],
+        "query_fn": _query_internal_audit_review,
     },
     {
         "id": "maintenance",
@@ -1321,6 +1386,17 @@ def _match_rules(clause: QMSClause) -> List[dict]:
                 matched.append(rule)
                 break
     return matched
+
+
+def matched_rule_ids(clause: QMSClause) -> Set[str]:
+    """Ids of every rule whose keywords match the clause's current text.
+
+    Taken from the keywords, not from ``discover_evidence_for_clause``'s result rows, so a rule
+    that matched but whose query failed this run still counts as matched: auto-link retires an
+    auto-linked evidence row only when its rule no longer matches, never because of a
+    transient query failure.
+    """
+    return {rule["id"] for rule in _match_rules(clause)}
 
 
 def discover_evidence_for_clause(db: Session, clause: QMSClause, company_id: int) -> List[dict]:

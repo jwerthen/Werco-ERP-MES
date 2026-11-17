@@ -231,4 +231,10 @@ class AutoLinkSummary(BaseModel):
     clauses_without_evidence: int
     total_evidence_created: int
     total_evidence_updated: int
+    # Auto-linked evidence rows soft-deleted this run because their rule no longer matches
+    # their clause (one audit DELETE row each).
+    total_evidence_retired: int = 0
+    # Auto-linked rows whose rule no longer matches but that a person verified: never retired,
+    # left in place and listed in the run's audit row.
+    total_evidence_kept_verified: int = 0
     compliance_summary: dict = Field(default_factory=dict)  # {"compliant": 38, "partial": 5, ...}
