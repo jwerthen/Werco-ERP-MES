@@ -1929,9 +1929,11 @@ company-scoped.
 > the single route's own text: `Only draft work orders can be released`,
 > `Work order must have at least one operation`, or `Work order not found` — the **same** result, with
 > `work_order_number: null`, for an id that is another company's, soft-deleted or absent, so the batch
-> is no existence oracle. A per-item concurrent write gets the app-wide optimistic-lock text (`This
-> record was modified by someone else. Refresh and try again.`) and any other per-item database failure
-> `Work order could not be released. Refresh and try again.` (never the driver's message). One item's
+> is no existence oracle. A per-item concurrent write — a stale version, or a lost lock race (deadlock
+> 40P01 / serialization 40001) — gets the app-wide optimistic-lock text (`This record was modified by
+> someone else. Refresh and try again.`), the text the single route answers for the same race as a
+> whole-request 409, and any other per-item database failure gets `Work order could not be released.
+> Refresh and try again.` (never the driver's message). Those two are bulk-only retry texts. One item's
 > refusal or failure never undoes another's release.
 >
 > - **One transaction, per-item savepoints.** Each id is released inside its own savepoint and the
@@ -1940,12 +1942,16 @@ company-scoped.
 >   notification therefore fans out once per released work order** — releasing 50 sends 50, not one
 >   summary. A refused item's events are dropped with its savepoint (the notification outbox enqueues
 >   only at the outermost commit), so it notifies nobody.
-> - **Lock order.** Before the first write the route row-locks (`SELECT … FOR UPDATE`, tenant-scoped,
->   soft-delete filtered) every operation of every live target in ascending id, then the work orders in
->   ascending id, and releases them in ascending id order. The audit rows are written only after the
->   last release, so the global audit hash-chain lock is the last lock the request takes — the same
->   operations → work order → audit chain order every floor and office writer uses. Two overlapping
->   bulk releases lock in the same order.
+> - **Lock order.** The route reads which ids are live (unlocked, tenant-scoped, soft-delete filtered),
+>   then releases the live targets in ascending work-order id order. Inside each item's savepoint it
+>   row-locks that job's operations (ascending id) and then the work order, both `FOR NO KEY UPDATE`
+>   (the strength the release's own updates take, so an insert's foreign-key check on the job does not
+>   queue behind it), before writing anything. The audit rows are written only after the last release,
+>   so the global audit hash-chain lock is the last lock the request takes. Two overlapping bulk
+>   releases lock in the same order. A writer that locks the work order first (the single release,
+>   `PUT /work-orders/{id}`, force-complete, scheduling) can still deadlock with **one** item; Postgres
+>   rolls that item back to its savepoint, it fails alone with the retry text above, and every other
+>   item is unaffected.
 > - **After the commit**, one tenant-scoped scheduling run covers the union of the released work
 >   orders and their work centers. Broadcasts go out per released work order on the work-order and
 >   dashboard channels (`work_order_released`), plus **one shop-floor push per distinct work center**
