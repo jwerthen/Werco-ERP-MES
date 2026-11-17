@@ -1,7 +1,7 @@
 import json
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Dict, List, Literal, Optional
+from typing import Annotated, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
@@ -1191,6 +1191,54 @@ class WorkOrderResumeResponse(UTCModel):
     operations_returned_to_pending: int = Field(
         ..., ge=0, description="Un-worked READY operations returned to PENDING (non-zero only for a draft result)."
     )
+
+
+class WorkOrderBulkReleaseRequest(BaseModel):
+    """Body of ``POST /work-orders/bulk-release``: the DRAFT work orders to release.
+
+    1-50 positive ids. Repeats are allowed and de-duplicated server-side (first occurrence
+    wins), but count toward the 50. ``extra="forbid"``: a misspelled key is a 422, never a
+    silently empty request.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    work_order_ids: List[Annotated[int, Field(gt=0)]] = Field(
+        ...,
+        min_length=1,
+        max_length=50,
+        description="Work order ids to release, 1-50. Duplicates are ignored after the first.",
+    )
+
+
+class WorkOrderBulkReleaseResult(UTCModel):
+    """One requested id's outcome on ``POST /work-orders/bulk-release``."""
+
+    work_order_id: int
+    work_order_number: Optional[str] = Field(
+        None,
+        description="The work order's number; null when it was not found (another company's, deleted, or absent "
+        "-- deliberately indistinguishable).",
+    )
+    status: Literal["released", "error"]
+    detail: Optional[str] = Field(
+        None,
+        description="Why it was not released (the single release route's own text, e.g. 'Only draft work orders "
+        "can be released'); null when released.",
+    )
+
+
+class WorkOrderBulkReleaseResponse(UTCModel):
+    """Response for ``POST /work-orders/bulk-release``: one result per distinct requested id.
+
+    Always HTTP 200 once the request validates, even when every item errored -- read
+    ``error_count`` / each result's ``status``. ``results`` follow the request order
+    (after de-duplication).
+    """
+
+    results: List[WorkOrderBulkReleaseResult]
+    released_count: int = Field(..., ge=0)
+    error_count: int = Field(..., ge=0)
 
 
 class WorkOrderSummary(UTCModel):
