@@ -8,7 +8,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel
-from sqlalchemy import or_
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session, joinedload, with_loader_criteria
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
@@ -18,6 +18,7 @@ from app.models.document import Document, DocumentType
 from app.models.hank_intake import HankIntakeFile
 from app.models.part import Part
 from app.models.purchasing import POReceipt, Vendor
+from app.models.qms_standard import QMSClause, QMSClauseEvidence, QMSStandard
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder
 from app.schemas.base import UTCModel
@@ -64,6 +65,80 @@ def _commit_audited_document(db, audit, document, *, action, old_values=None, ex
     except Exception:
         db.rollback()
         raise
+
+
+def _qms_link_refusal(db: Session, company_id: int, document_id: int) -> Optional[str]:
+    """Say why the active company's QMS records keep this document, or return None.
+
+    ``qms_standards.document_id`` and ``qms_clause_evidence.document_id`` are plain
+    foreign keys with no ``ON DELETE``. On Postgres a physical delete of a referenced
+    document fails at flush, after the document row lock and the global audit-chain
+    lock are already held: a 500, or a deadlock (40P01, the app-wide 409) against an
+    evidence edit that has locked the referencing row. Neither says why, so the delete
+    route refuses here, before the audit write and before any mutation.
+
+    Removed rows count. A soft-deleted standard, clause or evidence link is still the
+    record of which document a clause was assessed against; nulling its link would
+    rewrite that record, and no route edits a removed row, so the only way to clear it
+    would be an out-of-band write. Its document stays retained, as a voided receipt's
+    certificate does. Evidence under a removed clause or standard counts as removed even
+    when its own flag is clear, because no screen shows it any more.
+
+    The document row lock the caller already holds orders this against a concurrent
+    link. A writer that set ``document_id`` first holds a key-share lock on the document
+    row, so it commits before that lock is granted and these reads see it. A writer that
+    comes later waits for the delete and then fails its own foreign-key check.
+
+    Scoped to the active company. A link held by another company's QMS row (possible
+    only through the cross-company ``document_id`` writes the QMS routes accepted before
+    they checked document ownership) is not reported, since naming it would disclose the
+    other tenant's record. On Postgres that delete still fails at the foreign key.
+    """
+    standards = (
+        db.query(QMSStandard.name, QMSStandard.is_deleted)
+        .filter(QMSStandard.company_id == company_id, QMSStandard.document_id == document_id)
+        .order_by(QMSStandard.id)
+        .all()
+    )
+    evidence = (
+        db.query(
+            QMSClauseEvidence.is_deleted.label("evidence_deleted"),
+            QMSClause.clause_number,
+            QMSClause.is_deleted.label("clause_deleted"),
+            QMSStandard.name.label("standard_name"),
+            QMSStandard.is_deleted.label("standard_deleted"),
+        )
+        .select_from(QMSClauseEvidence)
+        .outerjoin(QMSClause, and_(QMSClause.id == QMSClauseEvidence.clause_id, QMSClause.company_id == company_id))
+        .outerjoin(QMSStandard, and_(QMSStandard.id == QMSClause.standard_id, QMSStandard.company_id == company_id))
+        .filter(QMSClauseEvidence.company_id == company_id, QMSClauseEvidence.document_id == document_id)
+        .order_by(QMSClauseEvidence.id)
+        .all()
+    )
+    if not standards and not evidence:
+        return None
+
+    live_links = [f"to QMS standard {row.name}" for row in standards if not row.is_deleted]
+    live_links += [
+        f"as QMS evidence on {row.standard_name} clause {row.clause_number}"
+        for row in evidence
+        # A NULL flag means the clause or standard did not join (it is not this
+        # company's), so there is nothing the user can open: not a live link.
+        if all(
+            flag is not None and not flag for flag in (row.evidence_deleted, row.clause_deleted, row.standard_deleted)
+        )
+    ]
+    if not live_links:
+        return (
+            "This document is named by a removed QMS standard, clause or evidence link, which keeps the record "
+            "of what was assessed. It must remain available and cannot be deleted."
+        )
+    others = len(live_links) - 1
+    also = f" and {others} other QMS link{'s' if others > 1 else ''}" if others else ""
+    return (
+        f"This document is linked {live_links[0]}{also}. Unlink it first by setting document_id to null on that "
+        "QMS standard or evidence link. Removing the link instead keeps it on record, and the document with it."
+    )
 
 
 class DocumentPartResponse(BaseModel):
@@ -438,7 +513,12 @@ def delete_document(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Delete an unretained document as Admin/Manager, preserving audited metadata."""
+    """Delete an unretained document as Admin/Manager, preserving audited metadata.
+
+    Refused 409 while the document is retained: part of a revision history, a receipt's
+    certificate, Hank intake evidence, or linked from a QMS standard or QMS clause
+    evidence (a removed QMS link keeps it too).
+    """
     document = (
         db.query(Document)
         .filter(Document.id == document_id, Document.company_id == company_id)
@@ -480,6 +560,10 @@ def delete_document(
         raise HTTPException(
             409, 'This document is retained intake evidence. Its metadata and source file must remain available.'
         )
+
+    qms_refusal = _qms_link_refusal(db, company_id, document.id)
+    if qms_refusal:
+        raise HTTPException(409, qms_refusal)
 
     file_path = document.file_path
     _commit_audited_document(db, audit, document, action="DELETE", old_values=_audit_values(document))

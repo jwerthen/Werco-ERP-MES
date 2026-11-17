@@ -2452,7 +2452,9 @@ upload/revision and attachment require Admin / Manager / Quality. Delete retains
 Generated artifacts use their existing receipt/shipping business-route gates. Foreign document
 or linked-record ids return **404**; role refusals return **403**. Revision histories cannot be
 rebound or deleted, and receipt certificates remain protected even after a receipt is voided
-(**409**). New revisions retain prior files, type and links. Required audit loss returns **503**
+(**409**). A document that a same-company QMS standard or QMS clause evidence link names is
+refused too (**409**), including through a removed standard, clause or evidence link; clearing
+the link's `document_id` (Admin / Manager / Quality, audited) releases it. New revisions retain prior files, type and links. Required audit loss returns **503**
 and rolls back metadata changes; bytes are removed only by the corresponding failure cleanup
 or after an audited deletion commits. Same-company historical part labels remain available.
 The Documents, Quality and Job Costing UI write controls reflect the fixed role gates and FAI
