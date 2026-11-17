@@ -1548,7 +1548,8 @@ company-scoped.
 | PUT | `/work-orders/{id}` | Update work order (body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status, **or sets `status` to COMPLETE/CLOSED from any status other than COMPLETE/CLOSED** — see "Terminal-state lock" below). **`due_date` is the one non-`status` field that IS status-gated: changing it on a COMPLETE/CLOSED/CANCELLED work order returns 409** (see "Due date on a finished job" below). Other non-`status` fields such as `notes` / `special_instructions` / `unit_number` carry **no status gate**: they are editable at any status, including terminal ones (send `unit_number: null` — or `""`, which is trimmed to NULL — to clear it). **The flip verb for `sequential_operations`** — turning it *on* returns **409** on a laser nest WO, and **409 naming the operations** when work is already under way out of sequence; otherwise it demotes un-worked blocked operations READY → PENDING, one audit row each (see "READY promotion" below). **`status: on_hold` on a DRAFT work order returns 409** (a draft has nothing on the floor to hold — release it first); this `PUT` is the "Hold Work Order" write for a released / in-progress job, and the door that puts a held job back on the floor is `POST /work-orders/{id}/resume` (this `PUT` can still move a held job to `draft` or `cancelled`, which keeps it off the floor; its blind move to `released` / `in_progress` is a known gap — see "Draft and on-hold work orders refuse every start" below). **Any move to `draft`** (from released / in progress / on hold) returns every un-worked READY operation — laser nests included — to PENDING with one **required** audit row each; **503**, nothing changed, when those rows cannot be written (see "Returning a job to draft" below). **Lowering `quantity_ordered` below what a whole-order operation has already accounted for (its good + scrap) returns 409** naming the operation, before any field is written — lower the order only by units no operation has started; **raising** it once a whole-order or component operation has completed returns 409 too; whole-order targets restated as `component_quantity` move with the order (audited); an API token lowering it once work is recorded gets 403, as does an API token raising the header's `quantity_scrapped` (only a person declares scrap — owner decision 2026-11-07), changing `scrap_reason`, or changing the header's `quantity_complete` / `quantity_scrapped` in either direction (this PR's extension); and a `sequential_operations` flip that would re-interpret a declared short returns 409 (see "Short count at completion" below) | Admin / Manager / Supervisor |
 | DELETE | `/work-orders/{id}` | Delete work order (soft by default; `hard_delete=true` only for draft/cancelled, and refused **409** when ledger-backed ties or saved templates reference it) | Admin / Manager |
 | POST | `/work-orders/{id}/restore` | Restore a soft-deleted work order (**400** if it is not deleted). Re-opens the ties the delete cancelled — **except** any whose part has since been reclassified into one the shop produces. Returns an **envelope** (`message` + `skipped_material_allocations`), not a bare message; see "Restoring a work order" below. Reached from Work Orders → **Deleted** (`deleted_only=true` above) | Admin / Manager |
-| POST | `/work-orders/{id}/release` | Release to production (**404** when missing or soft-deleted) | Admin / Manager / Supervisor |
+| POST | `/work-orders/{id}/release` | Release to production. **400** `Only draft work orders can be released` when not DRAFT, **400** `Work order must have at least one operation` when it has none — the only two checks; there is no material, blocker or readiness gate (see "Releasing work orders" below). **404** when missing or soft-deleted | Admin / Manager / Supervisor |
+| POST | `/work-orders/bulk-release` | **Release several DRAFT work orders in one call.** Body `{"work_order_ids": [...]}`: 1–50 positive ids (repeats count toward the 50 and are de-duplicated, first occurrence kept); any other key → **422**. Each id is judged and released exactly as `POST /work-orders/{id}/release` would, all in **one** commit. Always **200** once the body validates — even when every item was refused — with `{results, released_count, error_count}`, one result per distinct id in request order. Not an MCP tool. See "Releasing several work orders at once" below | Admin / Manager / Supervisor |
 | POST | `/work-orders/{id}/start` | Start production: a **RELEASED** work order → IN_PROGRESS. **409** on a DRAFT (release first) or ON_HOLD (resume it — this verb no longer lifts a hold) work order, **400** on any other non-released status, **404** when missing or soft-deleted, **409** on a concurrent write | Admin / Manager / Supervisor |
 | POST | `/work-orders/{id}/resume` | **Resume Work Order** — lift a *work-order* hold. Never releases: the target comes from the release record (`released_at` / `released_by`) — IN_PROGRESS when released and worked, RELEASED when released and unworked, **DRAFT** when no release is on record (un-worked READY operations, laser nests included, return to PENDING). **400** when not on hold, **404** when missing or soft-deleted, **503** (nothing changed) when the required audit rows cannot be written. Operation-level holds are untouched. See "Draft and on-hold work orders refuse every start" below | Admin / Manager / Supervisor |
 | POST | `/work-orders/{id}/complete` | Force-complete a work order (privileged override), booking `quantity_complete` as its finished count — the header is **set** to it. **409** if the WO is CANCELLED or an open operation is on hold. **403** for an API token sending a `quantity_scrapped` above the header's recorded scrap (owner decision 2026-11-07: only a person declares scrap), and first among the quantity refusals for an API token completing short or above what the floor recorded. **409** when `quantity_complete` exceeds what the floor recorded (naming the binding operation) unless `quantity_override_reason` is sent, and **400** above what can still exist once declared shorts and covered scrap are out, even with a reason; **409** when the shortfall below the order is not covered by floor-reported scrap or `quantity_scrapped` (with a reason); **503** (nothing saved) when the required audit row cannot be written. See "Short count at completion" below | Admin / Manager / Supervisor / Quality |
@@ -1890,6 +1891,78 @@ company-scoped.
 > unaffected in practice — the shop-floor `PUT /shop-floor/operations/{id}/start` and the kiosk stay
 > open to operators by design (since P0.4, 2026-11-13, the shop-floor verb refuses Viewer and
 > Shipping). See `docs/RBAC_PERMISSIONS.md` → Work Orders.
+>
+> **Releasing work orders.** `POST /work-orders/{id}/release` and `POST /work-orders/bulk-release` are
+> both **Admin / Manager / Supervisor** (superuser and Platform Admin pass `require_role` as everywhere)
+> and run one implementation, `services/work_order_release_service.py`, so the two cannot disagree
+> about what a release is. A release checks exactly two things, before any write: the work order is
+> **DRAFT** (`Only draft work orders can be released`) and it has **at least one operation**
+> (`Work order must have at least one operation`), both **400** on the single route. **Nothing else
+> gates it** — no material, blocker or readiness check. The part readiness read
+> (`GET /setup/readiness/part/{part_id}`) and `GET /work-orders/{id}/material-requirements` are
+> advisory; release does not consult them. A release sets RELEASED with `released_by` /
+> `released_at`, runs the opt-in estimated-cost rollup (best-effort — it never blocks a release),
+> promotes every startable PENDING operation to READY (each emitting `operation_ready`), emits
+> `work_order_released` (best-effort; it fans out the `wo.released` notification) and writes one
+> `work_order` `STATUS_CHANGE` audit row (`draft` → `released`) in the same transaction as the status
+> change. After the commit it runs scheduling and the realtime broadcasts.
+>
+> **Releasing several work orders at once — `POST /work-orders/bulk-release`.** Body
+> `{"work_order_ids": [41, 57, 41]}`: 1–50 positive ids, `extra="forbid"` (a misspelled key is **422**,
+> never a silently empty request). Repeats count toward the 50 and are de-duplicated server-side, the
+> first occurrence kept. Once the body validates the answer is always **200** — a role outside the three
+> is **403** and a malformed body **422**, as usual — with one result per distinct id, in the
+> de-duplicated request order:
+>
+> ```json
+> {
+>   "results": [
+>     {"work_order_id": 41, "work_order_number": "WO-10001", "status": "released", "detail": null},
+>     {"work_order_id": 57, "work_order_number": null, "status": "error", "detail": "Work order not found"}
+>   ],
+>   "released_count": 1,
+>   "error_count": 1
+> }
+> ```
+>
+> Read `released_count` / `error_count` and each `status`, never the HTTP code. An item's `detail` is
+> the single route's own text: `Only draft work orders can be released`,
+> `Work order must have at least one operation`, or `Work order not found` — the **same** result, with
+> `work_order_number: null`, for an id that is another company's, soft-deleted or absent, so the batch
+> is no existence oracle. A per-item concurrent write gets the app-wide optimistic-lock text (`This
+> record was modified by someone else. Refresh and try again.`) and any other per-item database failure
+> `Work order could not be released. Refresh and try again.` (never the driver's message). One item's
+> refusal or failure never undoes another's release.
+>
+> - **One transaction, per-item savepoints.** Each id is released inside its own savepoint and the
+>   route commits once. Every released work order gets exactly what the single route writes: the same
+>   `STATUS_CHANGE` audit row and the same `work_order_released` event. **The `wo.released`
+>   notification therefore fans out once per released work order** — releasing 50 sends 50, not one
+>   summary. A refused item's events are dropped with its savepoint (the notification outbox enqueues
+>   only at the outermost commit), so it notifies nobody.
+> - **Lock order.** Before the first write the route row-locks (`SELECT … FOR UPDATE`, tenant-scoped,
+>   soft-delete filtered) every operation of every live target in ascending id, then the work orders in
+>   ascending id, and releases them in ascending id order. The audit rows are written only after the
+>   last release, so the global audit hash-chain lock is the last lock the request takes — the same
+>   operations → work order → audit chain order every floor and office writer uses. Two overlapping
+>   bulk releases lock in the same order.
+> - **After the commit**, one tenant-scoped scheduling run covers the union of the released work
+>   orders and their work centers. Broadcasts go out per released work order on the work-order and
+>   dashboard channels (`work_order_released`), plus **one shop-floor push per distinct work center**
+>   carrying `work_order_ids` (a list), where the single route sends one per work center carrying
+>   `work_order_id`. A scheduling failure at this point is logged and reported and the route still
+>   answers **200**: the releases are already committed.
+> - **Not an MCP tool.** The route is in `catalog.EXCLUDED_OPERATIONS`, so `release_work_order`
+>   stays an agent's only release door, one job per call (see [MCP door](#mcp-door-mcp)). The route
+>   itself has no API-token refusal: a full API token whose user holds one of the three roles can call it
+>   on `/api/v1` like the single route, and a read-only token is refused as for every write.
+>
+> In the app this is the Work Orders list: on the desktop table a user who can release gets a checkbox
+> on each **draft** row (select-all covers the drafts loaded on the current page; the grouped view
+> shares one selection across its group tables), and **Release N** asks for confirmation, then reports
+> a success, a warning naming each refused work order with its `detail`, or an error, and reloads the
+> list. The client sends at most 50 and stays non-optimistic. The mobile card list has no bulk
+> selection. See `docs/RBAC_PERMISSIONS.md` → Work Orders.
 >
 > **Draft and on-hold work orders refuse every start (owner ruling 2026-11-05).** The floor cannot
 > start work on a job a supervisor has not released, or on one a supervisor has put on hold. One pure
@@ -14203,7 +14276,7 @@ What matters from this file's point of view:
 - **The catalog is this API.** 764 tools are generated from `app.openapi()` at startup — every
   secured operation except the `Authentication`, `Carrier Webhooks`, `Error Logging` (and its router-level `errors` twin) and `WebSocket` tags, the
   unauthenticated health/station-login routes (named one by one in `catalog.PUBLIC_OPERATIONS`) and
-  the fourteen operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders
+  the fifteen operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders
   (`POST /work-orders/import`, `POST /purchasing/purchase-orders/import` — they mint work orders
   RELEASED / IN_PROGRESS and POs SENT, a record of a past system rather than a user action),
   AI Accept & apply (`POST /ai/recommendations/{recommendation_id}/apply` — owner ruling 3: only a
@@ -14215,8 +14288,10 @@ What matters from this file's point of view:
   — an egress switch is a person's judgment; the routes also refuse API tokens), the three Approved
   Supplier List writes (`PUT /purchasing/vendors/{vendor_id}/approval`,
   `POST /purchasing/vendors/asl-import/preview` and `/commit` — a supplier-approval decision is a
-  person's judgment; the routes also refuse API tokens) and the two legacy `approved_supplier_list`
-  writes (`POST /supplier-scorecards/approved-suppliers/`, `PUT .../approved-suppliers/{asl_id}`) — plus 15 fixed-name convenience tools that shadow 16
+  person's judgment; the routes also refuse API tokens), the two legacy `approved_supplier_list`
+  writes (`POST /supplier-scorecards/approved-suppliers/`, `PUT .../approved-suppliers/{asl_id}`) and
+  bulk release (`POST /work-orders/bulk-release` — `release_work_order` stays an agent's only release
+  door, one job per call; this route does not refuse API tokens) — plus 15 fixed-name convenience tools that shadow 16
   raw routes (`POST /work-orders/`, `PUT /work-orders/{id}`, `POST /work-orders/{id}/release`, the two
   nest-package imports, the manual nest add, `GET /search/`, …) to enforce agent rules the routes do
   not: create/duplicate always land DRAFT, release is a separate explicit tool and the generic update
