@@ -34,6 +34,7 @@ from app.services.laser_nest_extraction_service import extract_nest_fields_from_
 from app.services.laser_nest_restore_service import restore_laser_nest
 from app.services.laser_nest_service import (
     manual_nest_response_dict,
+    read_extracted_planned_runs,
     soft_delete_laser_nest,
     sync_laser_nest_to_operation,
 )
@@ -78,6 +79,10 @@ async def extract_laser_nest_from_pdf(
     PDFs over 50 MB are refused with 413 before any work runs; a PDF over the
     extractor's ~20 MB native-document cap is still read, via the text fallback.
 
+    ``planned_runs`` is null, and ``confidence`` "low", whenever the run count was
+    not cleanly read as a whole number from 1 to 9,999; a count above 9,999 also
+    adds a ``warning``.
+
     Declared as a static literal ``/extract`` POST so it is matched ahead of the
     dynamic ``/{laser_nest_id}`` routes.
     """
@@ -108,15 +113,23 @@ async def extract_laser_nest_from_pdf(
         if temp_path and os.path.exists(temp_path):
             os.remove(temp_path)
 
+    # The run count is AI output and never reaches the response raw. Handed over
+    # as-is, "N/A", "3 sheets" or 2.5 failed the response model's int check (a
+    # 500 the manual modal swallowed, losing every other pre-filled field), and an
+    # 11-digit misread pre-filled the form with a count the manual-create route
+    # refuses. The package preview's own rule decides (``read_extracted_planned_runs``);
+    # this door only turns its floored, not-read 1 into a real null.
+    runs = read_extracted_planned_runs(result)
+
     return LaserNestPdfExtractionResponse(
         cnc_number=result.get("cnc_number"),
         material=result.get("material"),
         thickness=result.get("thickness"),
         sheet_size=result.get("sheet_size"),
-        planned_runs=result.get("planned_runs"),
-        confidence=result.get("extraction_confidence"),
+        planned_runs=runs.count if runs.was_read else None,
+        confidence=runs.confidence,
         source=result.get("source", "none"),
-        warning=result.get("warning"),
+        warning=runs.warning,
         passes=result.get("passes"),
     )
 
