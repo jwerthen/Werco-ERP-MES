@@ -410,7 +410,10 @@ def update_standard(
 
     audit.log_update("qms_standard", standard.id, standard.name, old_values=old_values, new_values=standard)
     db.commit()
-    return _standard_with_clause_tree(db, standard.id, company_id)
+    updated = _standard_with_clause_tree(db, standard.id, company_id)
+    if updated is None:  # deleted by a concurrent request between the commit and this reload
+        raise HTTPException(status_code=404, detail="QMS standard not found")
+    return updated
 
 
 @router.delete("/{standard_id}", status_code=status.HTTP_204_NO_CONTENT)
