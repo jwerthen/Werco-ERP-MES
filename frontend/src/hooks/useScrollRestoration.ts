@@ -4,9 +4,12 @@ import { useLocation } from 'react-router-dom';
 /**
  * useScrollRestoration — manual window-scroll restoration for the app shell.
  *
- * react-router's <ScrollRestoration> only works under a data router; this app
- * mounts a plain <BrowserRouter>, so we restore scroll ourselves. Call this hook
- * exactly ONCE, high in the tree (the Layout shell). It is a no-op-safe singleton:
+ * This hook was written when the app mounted a plain <BrowserRouter>, where
+ * react-router's <ScrollRestoration> (data-router only) was unavailable. The app
+ * is now a data router (`createBrowserRouter` + `RouterProvider` in App.tsx), so
+ * <ScrollRestoration> is available, but it has not been adopted: this hook still
+ * owns window-scroll restoration. Call it exactly ONCE, high in the tree (the
+ * Layout shell). It is a no-op-safe singleton:
  *
  *  - On every route change it first SAVES the *previous* route's window.scrollY to
  *    sessionStorage, keyed by that route's pathname+search.

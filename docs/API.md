@@ -959,437 +959,24 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 
 ## Core Endpoints
 
-### Buyer material plan PDF
+### Retired quote-nesting endpoints
 
-`POST /api/v1/quote-nesting/buyer-pdf` formats explicitly selected local planning
-layouts into a PDF attachment. Company/preparer identity comes from the authenticated
-active context. It does not retrieve or certify a saved nest, recalculate geometry,
-submit an order, or write business/audit/inventory records. The supplied input SHA-256
-identifies client planning input, not server approval or original DXF bytes.
+Every `/api/v1/quote-nesting/*` route was removed with the Material Nesting estimator in
+commit `3e17456e` (2026-09-16): the buyer material-plan PDF, catalog material resolution,
+team drafts and their revisions, saved server calculations (including runtime readiness,
+checkpoints and reports), spacing policies, and the original-DXF `/sources` attachments on
+saved revisions. No router mounts that prefix any more, so a request to any of them returns
+**404** (`backend/tests/api/test_quoting_cutover.py` pins it for the drafts, runs and
+buyer-PDF paths). New estimates, including their
+nesting, use `/fabrication-quotes` — see [FABRICATION_QUOTING.md](FABRICATION_QUOTING.md).
 
-Authentication and effective `purchasing:view` are checked before multipart parsing.
-Any conditional group or recorded-piece sheet additionally requires effective
-`inventory:view`. Company role overrides and existing platform exemptions apply.
-Disabled users, kiosk credentials and read-only switched-company POST restrictions
-retain their existing fences; this POST has no read-only-context exemption.
-
-Send exactly two multipart fields, without duplicates:
-
-| Field | Contract |
-|-------|----------|
-| `report` | UTF-8 JSON file, at most 8 MiB. Strict version1, `units: "in"`, `solverVersion: "werco-contour-v7"`, `expectedCompanyId`, project reference/notes, input SHA-256 and selected material groups. Unknown/duplicate JSON keys and nonfinite values are refused. |
-| `expected_company_id` | Positive 32-bit integer; both this field and the report's company ID must match the authenticated active company. A stale/mismatched company returns 409. |
-
-Groups contain material/description/thickness, part requirements, sequential sheets,
-actual outlines/holes, unavailable zones and placed contours. Every requested original
-instance must appear exactly once. A conditional plan includes its replacement
-full-sheet purchase fallback; one recorded piece can be used in one group. Limits
-are 300 original instances, 300 sheets, 200,000 aggregate vertices, 8 MiB JSON and
-20 MiB output. Positive dimensions/radii/thickness are bounded to 1e-9–100,000
-inches. A raw request cap of 8 MiB plus 64 KiB multipart overhead checks
-declared and streamed bytes before file spooling. Parsing/formatting runs off the
-event loop. Structural extent checks are not a second topology or approval engine.
-
-Success returns `application/pdf`, an attachment filename, `Cache-Control:
-private, no-store`, and `X-Content-Type-Options: nosniff`. The PDF separates selected
-purchase counts from conditional existing-piece use and its fallback. Part quantities,
-revisions and fitted vector layouts use inches; prices, quote totals, NC output and
-material credit are absent. Text is escaped; unsupported font characters remain
-visible as code-point markers. Rendering accepts no external images, SVG, URLs or
-filesystem paths. Errors include 401/403 for access, 409 for company drift, 413 for
-size, 415 for media type, and 400/422 for malformed multipart/report data.
-
-No migration, environment variable, runtime profile or permission key is added.
-See [the user workflow](MATERIAL_NESTING.md#buyer-pdf-for-the-selected-material-plan).
-
-### Quote nesting material provenance
-
-These endpoints support `/nest` with read-only selection of existing active
-`QuoteMaterial` catalog rows. Both require the active company's effective
-`purchasing:view` permission, including its role overrides and the existing
-Platform Admin/superuser exemptions. Existing authentication, kiosk/API-token,
-and read-only switched-company restrictions still apply; the POST has no
-read-only-context exemption. See [Material Nesting permissions](RBAC_PERMISSIONS.md#material-nesting).
-Paths below are relative to `/api/v1`.
-
-| Method | Endpoint | Contract |
-|--------|----------|----------|
-| GET | `/quote-nesting/materials` | Active-company catalog; `offset` ≥ 0 (default 0), `limit` 1–500 (default 200). Returns `schema_version: 1`, `items`, `total`, `offset`, `limit`. An empty catalog stays empty; this read never seeds defaults. |
-| POST | `/quote-nesting/material-resolution` | Resolve one explicitly selected catalog record and price basis against estimator-supplied stock dimensions. Does not save, approve, reserve, or mutate any record. |
-
-Example resolution request:
-
-```json
-{
-  "catalog_material_id": 42,
-  "thickness_in": "0.125",
-  "stock_options": [{"id": "48x96", "width_in": "48", "length_in": "96"}],
-  "price_basis": "per_lb"
-}
-```
-
-Use an ID returned by the current company's catalog. Optionally supply
-`expected_catalog_hash` with that row's 64-character lowercase SHA-256 digest;
-a changed snapshot returns **409**, requiring reload. The frontend supplies it.
-Inactive, foreign-company, and missing IDs return the same **404** response.
-Invalid request shapes return **422**: IDs must be positive JSON integers;
-dimensions must be positive decimal **strings**, with at most 12 digits before
-and 12 after the decimal point. Fractions, scientific notation, JSON numbers,
-non-finite values, and unknown fields are rejected. Stock options require 1–20
-unique nonblank IDs (≤100 characters each).
-
-| Explicit `price_basis` | Source field | Sheet-cost formula |
-|------------------------|--------------|--------------------|
-| `per_lb` | `stock_price_per_pound` | width × length × thickness × catalog density × price |
-| `per_cubic_inch` | `stock_price_per_cubic_inch` | width × length × thickness × price |
-| `per_square_foot` | `sheet_pricing[price_key]` | width × length × price ÷ 144 |
-
-All input dimensions are inches and density is lb/in³. `per_square_foot`
-requires the exact catalog `price_key` (1–100 characters); other bases forbid
-it. No nearest-thickness, name, first-price, alternate-basis, or typical-density
-fallback is applied. A sheet-price key's relationship to the entered thickness
-remains unverified even when the selected price is calculable. Invalid or
-nonpositive source prices are unavailable, not zero-cost stock. Without valid
-density, weight is null and per-pound pricing is unresolved; the other two
-bases may still calculate with the density warning retained.
-
-Catalog items return identity/name/category, nullable `source_updated_at`,
-`catalog_hash`, nullable decimal-string density, `price_options` with exact
-source fields/keys and nullable decimal-string unit prices, and `missing_metadata`.
-Resolution responses add `company_id`, the selected catalog snapshot and basis,
-canonical `thickness_in`, `stocks`, `issues`, and `content_hash`. Each stock
-returns decimal strings for dimensions, square-inch/square-foot area and
-cubic-inch volume, plus nullable `weight_lb` and `sheet_cost`. Money uses
-decimal arithmetic and half-up rounding to two places; the displayed
-square-foot area is rounded to 12 places without affecting cost arithmetic.
-
-Every result has `confirmed: false` and `currency: null`. `status` is
-`review_required` when numerically `calculable`, otherwise `unresolved`.
-The legacy catalog does not establish currency, structured grade/coating,
-certification, inventory mapping, price effectivity/expiry, approved revision,
-or authoritative thickness. These gaps always appear as issues; its update
-timestamp is not a price effective date. Canonical hashes include company and
-source identity, normalize equivalent decimal representations, and sort stock
-rows by ID. They detect changed inputs; they are not signed approvals or
-persisted audit events. CAD geometry is not submitted to these endpoints.
-
-### Quote nesting draft revisions
-
-Explicit Save/Open of **unapproved client inputs**, separate from operational
-quotes, laser nests, and inventory. All paths are relative to `/api/v1` and
-require the active company's effective `purchasing:view`; POST also requires
-`purchasing:create`. Existing role overrides, platform/superuser behavior, and
-read-only company/kiosk/API-token fences still apply. Read handlers make no
-business or audit writes; API-token authentication may retain its normal usage telemetry.
-
-| Method | Endpoint | Contract |
-|--------|----------|----------|
-| GET | `/quote-nesting/drafts` | Latest revision summaries, newest first with stable ID tie-break. `page` 1–100000 (default 1), `per_page` 1–100 (default 20). |
-| GET | `/quote-nesting/drafts/{id}/revisions` | Paginated immutable revision summaries with the same paging fields. |
-| GET | `/quote-nesting/drafts/{id}/revisions/{number}` | Exact revision plus its imperial `estimate` input object. Its `draft_version` is that revision's version, not today's latest. |
-| POST | `/quote-nesting/drafts` | Multipart JSON file `estimate`, UUID `request_key`, positive integer `expected_company_id`; create a new draft. |
-| POST | `/quote-nesting/drafts/{id}/revisions` | The same fields plus positive `expected_version`; append only when that version is current. |
-
-POST returns **200** for both a new save and an identical idempotent replay.
-The file limit is 5 MiB; a route-specific ASGI cap limits the entire upload to
-5 MiB + 16 KiB before multipart parsing. The global 256 KiB JSON-body cap is
-unchanged. Only the documented, nonduplicated fields are accepted. Current
-project formats 4/5/6/10/12/15 must explicitly use inches and USD, with bounded metadata,
-300 total part instances, 20,000 source geometry vertices, and 12 stock options per group.
-Duplicate JSON keys, non-finite values, unknown fields, original CAD blobs,
-approval flags, and solver/placement output are refused. This is structural
-validation of an input draft, not authoritative geometric acceptance.
-
-Stock exclusions require quote **11** or **14** inside project **12** or **15**, respectively; project 12 may also
-contain earlier quote 3/7/9 groups. Quote 11 retains orientation and spacing-policy
-fields from quote 7/9. A stock option's optional `exclusions` array contains
-`{id,label,reason,outline,clearance}`: a 1–64 character `[A-Za-z0-9_-]` ID,
-trimmed nonblank label (up to 120 characters), trimmed reason (up to 1,000), one
-closed polygon or analytical circle using the existing saved loop representation,
-and additional clearance 0–100 inches. All coordinates and clearance are inches.
-Each option allows 16 regions and 2,000 source vertices; a circle counts as one.
-The 20,000 project cap includes parts, reference paths and exclusions on every
-option, including disabled options. IDs are unique per option. Raw outlines must
-lie inside the gross sheet; overlap is permitted, and clearance may extend beyond
-the sheet. The server never crops or renormalizes them. Explicit `null` is invalid;
-an explicitly present empty array still requires the new file versions.
-
-Current geometry rules use quote **14** inside project **15**, with required
-`geometryProfile: {id: "werco-compensated-v1", sha256: <registered digest>}`.
-The exact two-field reference identifies a fixed engineering configuration;
-missing/null/extra fields or an unknown ID/digest reject. Quote 14 retains the
-orientation, policy, catalog and exclusion fields from prior formats. Earlier
-quote versions reject any profile-field presence. Project 15 can preserve mixed
-quote 3/7/9/11/14 groups. Saving and opening an earlier estimate never adds a
-profile, changes its source numbers or rewrites its canonical hash. Explicit
-upgrade is an input edit and requires a new saved revision for a new server run.
-Profile-bearing saves include `geometry_profile_not_shop_approval` review evidence;
-this configuration is not approval of physical allowances, material or pricing.
-
-These are estimator-reported, scenario-wide unavailable areas repeated on each
-hypothetical sheet, with no physical stock identity or machine-control meaning.
-Saving retains the exact source JSON and adds `unverified_stock_exclusions` review
-evidence per affected group. Python checks bounded primitives, metadata and raw
-sheet bounds; the shared calculation kernel checks polygon topology, numerical
-representability and guarded placement constraints before a checkpoint can be
-accepted. An unapproved draft save is not proof that its geometry can be calculated.
-
-Revision summaries contain `draft_id`, `company_id`, `revision_number`,
-`draft_version`, `name`, `status: DRAFT`, `content_sha256`, `payload_schema_version`,
-`payload_bytes`, `created_by`, `created_at`, and `review_issues` (code/message,
-optional group ID). Pages add `schema_version: 1`, `items`, `total`, `page`,
-`per_page`; exact-revision/save responses add `schema_version: 1` and `estimate`.
-The content hash covers server canonical JSON (sorted keys, compact separators,
-UTF-8, no non-finite numbers), not authenticated original DXF bytes. Geometry,
-pricing, and imported CAD hashes remain unapproved client assertions.
-
-Catalog bindings must reference this company's existing IDs. Changed/inactive
-sources are preserved with explicit review notes; missing/foreign IDs are
-refused without saving. Open clears catalog-price acknowledgment in the UI.
-Applied spacing-policy claims additionally require current immutable publication
-verification; see the spacing-policy contract below. Legacy inputs have no policy
-conformance claim and keep their original canonical payload/hash.
-Every successful first write adds one immutable revision and its required audit
-event in one transaction; failed audit evidence rolls back all draft changes.
-No quote totals, material allocation, remnant reservation, or operational records
-are modified. PostgreSQL rejects revision UPDATE/DELETE/TRUNCATE. There is no
-revision mutation/deletion or approval endpoint.
-
-- **403**: effective permission or existing session/company restriction.
-- **404**: inaccessible or missing draft/revision.
-- **409**: stale version, changed intended company, reused request key with a
-  different actor/payload/target, or a concurrent unique-key conflict.
-- **413**: file or whole-upload limit; **415**: wrong media type; **422**: invalid input.
-- **503**: required audit evidence failed; the transaction was rolled back.
-
-Retries must reuse the same UUID, intended company, target/version and exact
-input snapshot. An identical same-actor retry returns the original result before
-checking today's draft version. It never appends a second revision or audit event.
-See [Material Nesting](MATERIAL_NESTING.md#team-drafts-and-revision-history).
-
-### Quote nesting saved server calculations
-
-These routes calculate **unapproved quote layouts** from an exact immutable team
-draft revision. They do not accept arbitrary geometry/programs at execution time,
-approve a quote, control a laser, reserve material, or write operational costs.
-All reads require effective `purchasing:view`; start and cancel additionally require
-`purchasing:create`, using the draft routes' existing session/company restrictions.
-
-| Method | Endpoint | Contract |
-|--------|----------|----------|
-| GET | `/quote-nesting/runs/runtime` | Fresh, matching worker readiness: `schema_version`, `available`, `reason`, nullable `identity`. No geometry or credentials. |
-| POST | `/quote-nesting/runs` | Strict JSON: positive `draft_id`, `revision_number`, `expected_company_id`, lowercase SHA256 `input_sha256`, UUID `request_key`. Returns `RunDetail` (200); queues IDs after commit. |
-| GET | `/quote-nesting/runs` | Summary page with optional `draft_id`/`revision_number`; `page` 1–100000 and `per_page` 1–100. No geometry. |
-| GET | `/quote-nesting/runs/{run_id}` | Exact run status/settings/warnings and checkpoint metadata. |
-| GET | `/quote-nesting/runs/{run_id}/checkpoints/{sequence}` | One immutable option result and content hash; sequence 1–36. |
-| POST | `/quote-nesting/runs/{run_id}/cancel` | Strict JSON `expected_company_id`, `expected_version`; audited cancellation request, returns `RunDetail`. |
-| GET | `/quote-nesting/runs/{run_id}/report` | Exact saved inputs, run detail and available checkpoint payloads with a report digest; always `status: UNAPPROVED`. Read-only evidence, not an approved quote export. |
-
-The caller may explicitly calculate an older saved revision carrying the current
-geometry profile on every populated material group. Its ID/number/hash
-must match; the service never substitutes the latest revision. New runs require
-a live worker heartbeat matching the API release, pinned bundle, solver and Node
-runtime. A same-actor/key/request replay returns its original run even if current
-readiness is unavailable; a queued replay retries ID-only dispatch without creating
-a second run or audit event. Changed key meaning, active-company intent or input hash
-is rejected. Only one QUEUED/RUNNING calculation is permitted per company; a
-completed run can be recalculated only by an explicit new request.
-
-Every populated group is checked before creating a new run; empty legacy groups
-may remain untouched. An older populated group without the explicit current
-profile produces **422** with no run, checkpoint, dispatch or run-audit write.
-Same-key recovery precedes current-profile/runtime checks, so retrying an existing
-v4/v5 run does not require rewriting its input. At worker claim, a queued run
-whose frozen settings/runtime differ from the installed release fails with the
-existing audited `runtime_mismatch` outcome before the new profile check. It is
-never upgraded or silently recalculated. Historical report reads remain read-only
-and preserve their recorded settings, solver identity, placements and hashes.
-
-`RunSummary` identifies `id`, company/draft/revision IDs, revision number, input
-hash, actor, status/version/cancellation flag, timestamps, release/solver/bundle/
-Node identity, evaluated/complete-option counts, checkpoint bytes and bounded
-error code/message. `RunDetail` adds `schema_version: 1`, frozen `settings`, nullable
-`summary`, `warnings` and checkpoint metadata. Metadata contains sequence, group
-and stock-option IDs, content hash/bytes/time, complete flag, sheets, placed and
-unplaced counts. Pages use `items`, `total`, `page`, `per_page`, `schema_version: 1`.
-
-The checkpoint response adds `schema_version: 1` and `result`, the exact protocol-1
-Node option envelope for ordinary inputs, or protocol-2 stage envelope for a source-bound
-recorded-piece project. Historical payloads retain their original protocol and solver. Original saved inputs use inches; this internal geometry
-envelope explicitly declares millimeters. The application converts all displayed
-dimensions/areas to imperial. Report `content_sha256` hashes the server's canonical
-JSON excluding the hash field itself. Checkpoint hashes cover the entire option
-envelope. These are stored-result identities, not signatures authenticating original
-CAD bytes, material certification or approved pricing. A report fetched during an
-active run is a snapshot of currently retained work; later reports may contain
-additional checkpoints. Reports do not create immutable quote-export records.
-
-The fixed `standard-v1` technical profile limits the whole project to 120 seconds,
-36 enabled stock options, 5 MiB saved input, an 8 MiB result line including newline,
-24 MiB total retained checkpoint content and a 512 MiB Node heap. There is one
-nesting child per worker process; other ARQ functions retain their existing limits.
-Source groups/options are evaluated in their saved order. The shared kernel uses
-code-unit tie-breaking (`werco-contour-v7`), with `seed: null` because it is not
-random. Replaying identical saved inputs/build/runtime and completed work is
-deterministic; a wall-time cutoff is not a deterministic work budget.
-
-QUEUED → RUNNING → COMPLETED/PARTIAL/CANCELLED/FAILED are separate from quote
-approval. **COMPLETED means all planned stock options were evaluated**, not that
-every part fits. `completed_count` counts feasible stock alternatives for their
-individual material groups, not a combined purchased-sheet order. Each emitted
-nest is checked against original contours, spacing, margins, grain, quantities
-and the compensated part/part, part/exclusion and full-envelope sheet-edge constraints
-before its checkpoint is accepted. Time/work/output limits retain earlier checked
-results and explicitly identify unfinished work. They never establish infeasibility.
-All predicted leftovers remain review-only with zero credit.
-
-Checkpoint framing binds exclusion field presence, array order, IDs, labels,
-reasons, clearance and every source coordinate in both `stock` and `result.option`
-to the immutable imperial input converted to millimeters. No numerical tolerance
-permits a reduced clearance or changed outline. Current stock dimensions, gap and
-margin also retain exact imperial-to-metric source identity. Solver v6's build
-manifest, child `hello.geometry_profile` and immutable `settings.geometry_profile`
-bind the same registered profile reference; each checkpoint `stock.geometryProfile`
-matches its source quote. A stock option itself does not duplicate that group setting.
-
-Every new calculation uses `werco-leftovers-v3` with the exact normative profile
-payload, fixed reservation explanation and a required `excludedArea` ledger in
-square millimeters, including zero for absent/empty exclusions. This is the union of guarded
-exclusions intersected with the inward usable sheet, excluding margin overlap.
-The gross ledger reconciles edge margin + excluded area + nominal parts + reserved
-internal cutouts + clearance/numerical protection + remaining area + bounded
-roundoff residual. The software profile reserves half-gap plus imported tolerance
-and numerical protection around each part, with square-tangent corners. The entire
-envelope must stay within the inward-protected usable sheet outside the selected
-margin; it cannot be clipped to make a placement valid. Original nominal minimum
-distance checks remain independent. Historical v4/v5 records retain their v1/v2
-leftover objects and prior rules rather than being reinterpreted as v3.
-
-The profile's normative JSON is packaged under
-`app/data/nesting_profiles/werco-compensated-v1.json`. Its SHA-256 covers recursively
-key-sorted compact ASCII JSON `{id,profile}`, excluding the digest itself and any
-trailing newline. Nonintegral constants are decimal strings. Python checks that
-source on load; generated frontend data and the bundled child are checked against
-the same payload. This hash convention does not change older estimate/report hashes.
-
-Run creation/cancellation and worker lifecycle/checkpoint changes use required
-audit writes in the same database transaction. Background lifecycle evidence
-retains the submitting API-token credential attribution, including when revocation
-or expiry stops execution; this attribution does not grant execution rights.
-Heartbeats renew a 45-second lease
-every 10 seconds; cancellation/actor eligibility is checked while the child runs.
-The narrow relay requeues committed pending IDs and marks expired leases failed;
-it does not rerun a terminal result. Input/settings references and completed
-checkpoints are immutable; SQL guards enforce tenant/lease/input relationships,
-version increments, legal transitions and terminal immutability. No database
-transaction spans a geometry calculation; only short lifecycle/poll transactions
-run while the child works. Failed required audit evidence
-rolls back the associated change.
-
-Readiness identity contains release, protocol, solver version, bundle SHA, Node
-version, instance ID, observation time and nullable Railway deployment ID. Its
-Redis heartbeat expires after 90 seconds and is refreshed every 30 seconds. The
-worker publishes readiness only when its nesting relay cron is selected; disabling
-that relay leaves new server calculations unavailable.
-`reason` may be `ready`, `missing`, `stale`, `release_mismatch`, `queue_unavailable`
-or `invalid_identity`. No private drawing information is published in this key.
-
-- **403:** permission/session/company restriction; **404:** inaccessible run/input.
-- **409:** active run, stale cancellation version, input/request conflict or concurrent write.
-- **422:** invalid request; existing global JSON-body cap still applies.
-- **503:** matching runtime unavailable for a new request or required audit failure.
-
-### Quote nesting spacing policies
-
-`/quote-nesting/spacing-policies` governs **family-level quoting allowances** for
-Carbon steel, Stainless steel and Aluminum. It does not approve a quote, a laser
-process, a material grade or remnant eligibility. Reads and resolution require
-effective `purchasing:view`. Creating revisions, publishing and withdrawing also
-require Admin authority and effective `purchasing:create`, with the existing
-active-company, API-token, kiosk and read-only-context fences. An Admin may
-explicitly approve their own revision; this is the initial workflow assumption,
-not a claim of independent approval or compliance certification.
-
-| Method | Relative endpoint | Contract |
-|--------|-------------------|----------|
-| GET | (base) | Current header/selection plus separately counted revision and publication history; `page` 1–100000 and `per_page` 1–100 apply to both history lists. |
-| GET | `/revisions/{number}` | Immutable revision content, author/time, canonical content hash and size. |
-| POST | `/revisions` | Append a draft from `content`, `reason`, UUID `request_key`, `expected_company_id`, and `expected_version` (0 only for the initial company policy). |
-| POST | `/publications` | Explicit approval of `revision_number` and `content_sha256`, with the common command fields and `effective_at`: null for server-now, or a future UTC timestamp. |
-| POST | `/publications/{id}/withdraw` | Append a reasoned withdrawal using the common command fields. No history is edited or deleted. |
-| POST | `/resolve` | Read-only `{material, thickness_in}`; returns `{schema_version:1,status:resolved\|unmatched\|unavailable,policy:null\|snapshot,explanation}`. Application to workspace inputs remains explicit. |
-
-There is one company policy header and immutable content revisions. A shared
-append-only command ledger records revision creation, publication and withdrawal.
-The company version advances for every command; the revision number advances only
-when content is appended. Company locks, expected-version checks and database
-constraints protect races. A UUID is unique across all three commands in the
-company and binds the submitting actor/credential and exact command. Same-key
-retries recover that event before checking the current version; they create no
-second decision or audit row. Command receipts return `schema_version`, original
-`policy_version`, `event_id`, revision summary and nullable publication detail.
-Publication detail includes its current scheduled/current/superseded/withdrawn
-status, so its status may change when the original command is retrieved later.
-
-Content is `{schema_version:1,units:"in",name,bands}`. Each band contains `id`,
-`material`, `thickness_min_in`, `thickness_max_in`, `minimum_gap_in`,
-`gap_thickness_multiplier`, `minimum_margin_in`, and `margin_thickness_multiplier`.
-Band IDs are unique ASCII letters/digits/underscore/hyphen, 1–64 characters.
-The interval includes its lower bound and excludes its upper bound. Bands for
-one family cannot overlap; gaps are allowed and return `unmatched`.
-
-Policy values are canonical unsigned decimal strings with at most nine fractional
-digits, no exponent notation and no unnecessary leading/trailing zeros.
-Resolution accepts a thickness string with up to 18 fractional digits. Thickness
-is normalized **half-up to 0.000000001 inch**; a value rounded to zero is refused.
-For each allowance, compute the maximum of its minimum and normalized thickness
-times its multiplier, then round **up** to that same inch quantum. Python uses a
-fresh fixed Decimal context and the shared TypeScript implementation uses integer
-arithmetic. Policy-bearing saved quotes store numeric gap/margin from the exact
-canonical resolved strings; the backend checks those IEEE numeric values exactly,
-instead of accepting a tolerance that could understate the allowance.
-
-Structural limits are 128 bands, thickness bounds between 0 and 4 inches, minima
-and multipliers between 0 and 100, and 64 KiB canonical policy content. Each gap
-and margin formula must have a positive minimum or multiplier. These limits are
-technical bounds, not recommended manufacturing settings. No policy or approval
-is seeded by migration or created by a read. Copying the estimator's existing
-starting allowances into a policy draft requires explicit action.
-
-Publications cannot be retroactive or share an effective instant. Selection first
-finds the latest publication effective at the server's current time, then checks
-withdrawal. A withdrawn publication never reactivates an earlier one. Withdrawing
-a future publication leaves the prior current publication applicable until the
-future effective instant; thereafter that withdrawn publication makes resolution
-unavailable until a later effective publication replaces it. All API timestamps
-are complete UTC date/times ending in `Z`; the UI displays Central time.
-
-Saved quote version **9** and project version **10** (also exclusion-bearing
-quote 11/project 12) carry `spacingPolicy` or
-`spacingOverride`. Omit unused fields; explicit null is invalid. Older discriminants reject these fields. A policy snapshot
-contains schema/company/policy/publication/revision identity, content hash, exact
-matched band, canonical thickness/gap/margin and `resolved_at`; it requires
-`spacingMode:"policy"`. A custom override contains `{schema_version:1,reason,
-changed_at}`, requires manual mode and cannot coexist with a policy claim.
-Absent metadata remains visibly unreviewed. Legacy revisions and their hashes
-are not rewritten.
-
-New draft saves and new server runs verify policy claims against immutable source
-records and the currently effective, unwithdrawn publication under the same company
-policy lock. Material/thickness/spacing changes, forged source fields and stale
-approvals cannot pass as conforming. The estimator must resolve/apply the current
-policy or explicitly choose unapproved custom spacing with a reason. Already
-queued runs retain their exact accepted input snapshot; claim/replay never applies
-a newer policy or withdraws previously accepted work retroactively. Historical
-reports remain unchanged, and same-key run retries recover their original run.
-
-Policy commands use required audit evidence in the same transaction; an audit
-failure rolls back the header, content and command. Failure responses are 403 for
-authority/context restrictions, 404 for inaccessible policy records, 409 for
-version/request/currentness conflicts, 422 for invalid content/snapshot/schedule,
-and 503 when required audit evidence fails. Existing global JSON-body limits remain
-in force. All quote outputs remain unapproved and predicted leftovers retain zero
-credit; no inventory, reservation, quote total or machine-control record changes.
+The tables those routes wrote (migrations `101`, `102`, `103` and `105`) are kept as
+historical records; no route, service or job reads or writes them. Their database guards
+are described in [SUPABASE_SECURITY.md](SUPABASE_SECURITY.md). Production laser nests
+([Laser Nests](#laser-nests)) and the recorded-piece routes under `/inventory`
+([Advisory physical-piece observations](#advisory-physical-piece-observations),
+[Recorded-piece planning snapshot](#recorded-piece-planning-snapshot)) are separate and
+unaffected.
 
 ### Global search and customer edits
 
@@ -4276,8 +3863,8 @@ mixed**:
 | POST | `/work-orders/laser-nest-packages/standalone/preview` | Same preview with **no work order in the path** — used before a standalone import (same `sheet_suggestion` on every row) | Admin / Manager / Supervisor |
 | POST | `/work-orders/laser-nest-packages/standalone/import` | Import a package into a **fresh standalone laser WO** — creates a released, part-less `laser_cutting` work order with the release recorded as the importer's (`released_by` / `released_at`) (no parent; quantity = total planned sheet runs; optional `due_date`, optional `sheet_match_provenance`) | Admin / Manager / Supervisor |
 | POST | `/laser-nests/extract` | Auto-extract nest fields (CNC #, material, size) from a single uploaded nest PDF. Stateless — no DB write, no audit | Admin / Manager / Supervisor |
-| POST | `/work-orders/{id}/laser-nests/manual` | Manually add **one** nest to a work order (child laser WO of an assembly, or the addressed `laser_cutting` WO directly). Creates a clock-in-able `LASER` operation; sets the laser WO RELEASED the same way the import does (release recorded when it was a draft or unstamped; an **on-hold** laser WO stays on hold, so the new nest cannot be started until the hold is lifted) | Admin / Manager / Supervisor |
-| PATCH | `/laser-nests/{id}` | Edit a manual nest (all fields optional). Raising `planned_runs` on a COMPLETE nest or a finished laser work order is **409**; a standing API token lowering it once work is recorded on the nest is **403** | Admin / Manager / Supervisor |
+| POST | `/work-orders/{id}/laser-nests/manual` | Manually add **one** nest to a work order (child laser WO of an assembly, or the addressed `laser_cutting` WO directly). Creates a clock-in-able `LASER` operation; sets the laser WO RELEASED the same way the import does (release recorded when it was a draft or unstamped; an **on-hold** laser WO stays on hold, so the new nest cannot be started until the hold is lifted). `planned_runs` must be 1–9,999 (**422** otherwise) | Admin / Manager / Supervisor |
+| PATCH | `/laser-nests/{id}` | Edit a manual nest (all fields optional). `planned_runs` outside 1–9,999 is **422**. Raising `planned_runs` on a COMPLETE nest or a finished laser work order is **409**; a standing API token lowering it once work is recorded on the nest is **403** | Admin / Manager / Supervisor |
 | POST | `/laser-nests/{id}/attach-document` | Attach an already-uploaded PDF Document to the nest (PDF-only) | Admin / Manager / Supervisor |
 | DELETE | `/laser-nests/{id}/document` | Detach the PDF (clears the FK; the Document row is left intact). The only way to release a live nest's PDF for `DELETE /documents/{id}`, which refuses **409** while any nest, removed ones included, carries it | Admin / Manager / Supervisor |
 | GET | `/laser-nests/{id}/document` | Serve the attached PDF **inline** for operator preview | Yes (any authenticated user) |
@@ -4583,12 +4170,19 @@ environment variable or deployment configuration change is needed.
 > shared `run_llm_task` pipeline (one tenant-scoped `ai_usage_events` row per pass — telemetry,
 > not audit):
 >
-> - **Single-PDF (`POST /laser-nests/extract`).** Multipart `file` (PDF; non-PDF → **400**).
+> - **Single-PDF (`POST /laser-nests/extract`).** Multipart `file` (PDF; non-PDF → **400**; over
+>   **50 MB** → **413** before any work, see [AI document uploads](#ai-document-uploads); a PDF
+>   over the ~20 MB native cap is still read, through the flattened-text fallback).
 >   **Stateless — no DB write, no audit**; `company_id` flows through only for usage telemetry.
 >   Used by the manual-create modal to auto-fill fields from a dropped PDF. Returns
 >   `{ cnc_number, material, thickness, sheet_size, planned_runs, confidence, source, warning, passes }`
 >   where `source` ∈ `{ai, filename}`, `confidence` ∈ `{high, medium, low}` (overall — the
->   per-field minimum when both passes ran), and `passes` ∈ `{1, 2}`.
+>   per-field minimum when both passes ran), and `passes` ∈ `{1, 2}`. `planned_runs` is a real
+>   **`null`** whenever the run count was not cleanly read — missing, not a whole number, below 1,
+>   or above 9,999 — and `confidence` is then **`low`**; a count above 9,999 also adds a `warning`
+>   (joined with `; ` to any existing one). The response never carries the model's raw value, so the
+>   manual form is never pre-filled with a count the create route would refuse (and a non-numeric
+>   value such as `"N/A"` or `2.5` is no longer a **500**).
 >   Declared as a static `/extract` route so it matches ahead of the dynamic `/{laser_nest_id}` routes.
 >
 > - **Batch ZIP (`…/laser-nest-packages/preview` → `…/import`).** A package is treated as a **PDF
@@ -4611,7 +4205,10 @@ environment variable or deployment configuration change is needed.
 >   supplies PDF bytes). When `rows` is absent, the legacy CNC-file import is unchanged.
 >
 >   `rows` is **strictly validated** before anything is persisted (`LaserNestImportRow`):
->   `source_file` required (1–1000 chars), `planned_runs` required and **≥ 1**,
+>   `source_file` required (1–1000 chars), `planned_runs` required and **1–9,999** (before the
+>   bound, a count from 10,000 up to int4's 2,147,483,647 was stored without complaint and only a
+>   larger one failed as a **500** on Postgres; both are now a failing row like any other — the
+>   import wizard refuses an over-the-limit count itself before it sends the rows),
 >   `source_pages` optional (required on the bare-PDF path — see below): non-empty, entries
 >   **≥ 1**, ascending and consecutive,
 >   `work_center_id` optional and **> 0** (per-nest override; must resolve to an **active**,
@@ -4657,8 +4254,15 @@ environment variable or deployment configuration change is needed.
 > - **50-PDF cap (`LASER_PDF_PACKAGE_MAX`).** A package (or `rows` array) with more than **50**
 >   PDFs — or a bare PDF with more than **50 pages** — is rejected with **400**.
 > - **Upload size + abuse guards.** The upload body (ZIP or bare PDF) is capped at **50 MB**
->   (`LASER_UPLOAD_MAX_BYTES`), enforced while the body streams to disk → **413**. The local page
->   split refuses pathological amplification (pages sharing huge embedded resources that would
+>   (`LASER_UPLOAD_MAX_BYTES`), enforced while the body streams to disk → **413**. On **preview**
+>   the counted upload size is checked first (413 before a byte is copied), and a ZIP is refused
+>   with **413** before anything is unpacked when its central directory lists more than **200**
+>   files and folders (`LASER_ZIP_MAX_MEMBERS`) or more than **200 MB** unpacked
+>   (`LASER_ZIP_MAX_UNCOMPRESSED_BYTES`) — the zip-bomb guard, since the 50 MB cap counts
+>   compressed bytes only. Preview copies and unpacks on a worker thread, not the event loop.
+>   **Import** does not yet check the counted size or the two ZIP caps — only the streaming 50 MB
+>   cap applies there, and it still copies and unpacks on the event loop. The local page split
+>   refuses pathological amplification (pages sharing huge embedded resources that would
 >   multiply on split) → **400**. The per-request AI fan-out shares one **process-global**
 >   concurrency cap (5), and the two standalone routes carry a **10/minute** per-path rate limit.
 > - **Graceful degrade.** A PDF the model can't read falls back to the **filename stem** as the
@@ -4674,20 +4278,31 @@ environment variable or deployment configuration change is needed.
 >   segmentation defaults to one nest per page — the page split itself is local `pypdf` and keeps
 >   working.
 > - **`planned_runs` reads differently on the two entry points, and the difference is load-bearing.**
->   The stateless single-PDF `POST /laser-nests/extract` passes the model's value straight through, so
->   it returns **`null`** when no run count was found. **Preview rows do not**: `LaserNestPreviewRow`
->   types `planned_runs` as a non-optional `int` and `_coerce_planned_runs` **floors it at 1**, so a
->   nest that genuinely runs once and a nest whose count neither pass could find are the **same `1`**
->   in the response. `field_confidence["planned_runs"] == "low"` is the **only** signal that separates
->   them — read the confidence, never the number, and the import wizard accordingly counts and labels
->   those rows rather than presenting them as read values. Accepted coercion shapes (widened
->   2026-08-05, since a model asked for one integer emits all of these): `3`, `3.0`, `"3"`, `"x3"`,
->   `"3 sheets"`, `"3 of 5"` — a **leading** integer is required for the free-text case, so `"sheet 4"`
->   reads as 1 rather than mistaking a label for a count. Anything else (a fractional float, junk,
->   missing) falls back to 1 rather than raising and 400-ing the whole preview batch.
+>   Both read the model's value through the same `read_planned_runs` (`laser_nest_service.py`), which
+>   accepts a whole count from 1 to 9,999 (`MAX_PLANNED_RUNS`) and treats everything else as **not
+>   read**. The stateless single-PDF `POST /laser-nests/extract` returns a not-read count as **`null`**
+>   at `low` confidence (above). **Preview rows do not**: `LaserNestPreviewRow` types `planned_runs` as
+>   a non-optional `int`, so a not-read count is **floored at 1**, and a nest that genuinely runs once
+>   and a nest whose count neither pass could read are the **same `1`** in the response.
+>   `field_confidence["planned_runs"] == "low"` is the **only** signal that separates them — read the
+>   confidence, never the number, and the import wizard accordingly counts and labels those rows
+>   rather than presenting them as read values. **Every floor now carries that `low`, and so does the
+>   row's overall `confidence`** (it is the minimum across fields), whatever the two-pass merge
+>   scored: the merge scores *agreement*, so before this rule two passes that both answered `"N/A"`
+>   came out a **high** `1`, and two that misread the same 11-digit number passed it through **high**
+>   into the import. A count above 9,999 is not clamped to the limit: it reads as `1`, `low`, and adds
+>   the row `warning` `Run count '…' looked wrong — enter it by hand (the limit is 9,999 runs per
+>   nest).` Accepted shapes (widened 2026-08-05, since a model asked for one integer emits all of
+>   these): `3`, `3.0`, `"3"`, `"x3"`, `"3 sheets"`, `"3 of 5"` — a **leading** integer is required for
+>   the free-text case, so `"sheet 4"` is not read rather than mistaking a label for a count. Anything
+>   else (a fractional value such as `2.5` or `"2.5"`, 0 or a negative, junk, missing) is not read; it
+>   never raises and 400s the whole preview batch. The 9,999 limit is a design default (2026-11-09)
+>   the owner can still change: one constant, `MAX_PLANNED_RUNS` in `app/models/laser_nest.py`, behind
+>   every bound in this section; the MCP `add_laser_nest` schema repeats it as a literal `maximum`
+>   that a catalog test holds equal to the route's.
 >
 > **Manual nest create (`POST /work-orders/{id}/laser-nests/manual`).** Body: `cnc_number`
-> (required, 1–100 chars), `planned_runs` (required, **≥ 1**), and optional `nest_name`,
+> (required, 1–100 chars), `planned_runs` (required, **1–9,999**, **422** otherwise), and optional `nest_name`,
 > `material`, `thickness`, `sheet_size`, plus the same optional **material tie** the import rows take
 > (`material_part_id` **> 0**, `qty_per_run` **> 0** — see "Nest material ties" below), and an
 > optional **`work_center_id`** (**> 0**) naming the laser this nest runs on. Resolves the target
@@ -4902,7 +4517,11 @@ environment variable or deployment configuration change is needed.
 > `planned_runs`, `material`, `thickness`, `sheet_size`). A `planned_runs` change **reverse-syncs**
 > the operation's `component_quantity` and re-derives the laser WO's `quantity_ordered` over
 > its non-deleted nests. Lowering `planned_runs` below `completed_runs` is allowed (over-run is
-> acceptable); only the schema's `ge=1` floor applies. **Raising** it is refused **409** before any
+> acceptable); only the schema's bounds apply (1–9,999, **422** outside them). A nest stored with more
+> than 9,999 runs before the bound existed (2026-11-09) keeps that value — no migration touches it — but
+> any PATCH that **sends** `planned_runs` must bring it within 1–9,999. The manual modal's edit always
+> sends it, so editing such a nest through the modal (to fix its material, say) means correcting its
+> run count too; the modal flags the count field before sending anything. **Raising** it is refused **409** before any
 > write when the nest's operation is COMPLETE (`Nest N is already complete at {runs} runs; raising its
 > planned runs would leave a completed operation short. Add a nest for the extra runs.`) or the laser
 > work order is COMPLETE / CLOSED / CANCELLED (`This laser work order is {status}; Nest N's planned
@@ -5813,6 +5432,10 @@ uploads go through text extraction + LLM. See
 | POST | `/bom/import/commit` | Commit a reviewed preview payload — creates parts, the BOM, and BOM items | Admin / Manager / Supervisor |
 | POST | `/bom/import` | One-shot upload → LLM extraction → create parts/BOM items (`create_missing_parts` form flag, default `true`) | Admin / Manager / Supervisor |
 
+> **Upload cap.** `POST /bom/import/preview` and `POST /bom/import` refuse a file over **20 MB**
+> with **413** before any work runs (see [AI document uploads](#ai-document-uploads)); an empty file
+> is **400**.
+
 > **Excel scanning is bounded** with the same caps as the shared Bulk Imports parser: at most
 > **256 columns** are read per row, more than **10,000 collected data rows** refuses the file
 > (**400**), and scanning more than **100,000 raw rows** workbook-wide refuses the file (**400**).
@@ -5826,6 +5449,14 @@ uploads go through text extraction + LLM. See
 > standard Excel workbook."`. On `POST /bom/import` (the LLM path), Excel **text extraction
 > degrades gracefully** at the scan cap — partial text at `"medium"` confidence — rather than
 > refusing the file.
+
+> **A partly read PDF is reported (2026-11-09).** On a PDF upload to `POST /bom/import/preview` or
+> `POST /bom/import`, each page the extractor skipped or cut short (see
+> [Document Text Extraction Limits](#document-text-extraction-limits)) adds a sentence to the start of
+> the response's `warnings`. When too little text came back to send to the AI, the **400** detail
+> `"Could not extract text from document"` becomes `"Could not extract text from document."` followed
+> by those sentences, so the user sees the reason (for example, that the 90-second OCR limit ran out).
+> Word and Excel uploads never produce these warnings.
 
 > **The assembly promotion is refused when live material ties stand** (2026-08-18). Both importers
 > resolve an existing part by part number and set `part_type = assembly` whenever the document is a
@@ -6422,7 +6053,7 @@ uploads go through text extraction + LLM. See
 | POST | `/routing/{id}/operations/reorder` | Reorder operations (**400** on a released routing, **422** on a malformed body). **Also rewrites each listed operation's `operation_number` from its new `sequence`** — see the `operation_number` note below | Admin / Manager / Supervisor |
 | POST | `/routing/import/preview` | Upload a routing CSV/XLSX (multipart `file`), preview it WITHOUT writing (dry-run, fully rolled back) | Admin / Manager / Supervisor |
 | POST | `/routing/import/commit` | Commit a routing CSV/XLSX import — one draft routing per part, with one `audit_log` CREATE per routing | Admin / Manager / Supervisor |
-| POST | `/routing/generate-from-drawing` | AI step 1: upload a drawing (multipart `file` + `part_id`) and get a **proposed** routing for review — creates no routing. **404** on a soft-deleted part | Admin / Manager / Supervisor |
+| POST | `/routing/generate-from-drawing` | AI step 1: upload a drawing (multipart `file` + `part_id`) and get a **proposed** routing for review — creates no routing. **404** on a soft-deleted part; **413** for a drawing over 10 MB. If a PDF was only partly read, each gap adds a line to `warnings` (see [Document Text Extraction Limits](#document-text-extraction-limits)) | Admin / Manager / Supervisor |
 | POST | `/routing/create-from-generation` | AI step 2: create the reviewed/edited proposal as a **draft** routing, writing one tamper-evident `audit_log` CREATE (see note). **404** on a soft-deleted part or an unknown generation session | Admin / Manager / Supervisor |
 
 > **AI routing generation — the accept step is the audited record (2026-11-05).**
@@ -9121,9 +8752,27 @@ in `RBAC_PERMISSIONS.md`.
 > existing id, another company's included, was accepted and linked.
 
 > **PDF clause extraction:** `POST /qms-standards/{standard_id}/upload-pdf` requires a text-based
-> PDF (≤ 20 MB; scanned/image-only PDFs are rejected) and a configured `ANTHROPIC_API_KEY` — it
-> returns **500** if the key is missing. Claude extracts the numbered clauses and persists them
-> against the standard.
+> PDF (≤ 20 MB, else **413** before any work; scanned/image-only PDFs are rejected) and a
+> configured `ANTHROPIC_API_KEY` — it returns **500** if the key is missing. Claude extracts the
+> numbered clauses and persists them against the standard.
+>
+> The text layer is read in the resource-limited reader process, with the QMS limits listed in
+> [Document Text Extraction Limits](#document-text-extraction-limits): 2,000 pages, 2,000,000
+> characters, 90 seconds. That read can refuse the upload with a **400** in two ways, both before
+> the AI call, so nothing is saved:
+> - `"Failed to read PDF: …"` when nothing could be read at all. Since 2026-11-09 the rest of the
+>   detail is a plain sentence, for example "The PDF could not be read. It may be damaged or not a
+>   PDF." or "Reading the PDF took longer than 90 seconds, so its text was not read.". It used to be
+>   the parser's exception text.
+> - (new 2026-11-09) `"Only part of this PDF could be read: … Split it into smaller PDFs and upload each one."` when
+>   the read stopped part-way **and** the text it got is shorter than the 100,000 characters the AI
+>   is sent. This response has no place for a warning, so the upload is refused rather than saving a
+>   clause list that silently misses the unread pages. If a partial read already covers the first
+>   100,000 characters, the upload goes ahead unchanged, because the AI never reads past that point.
+>   When the read stopped because a page could not be parsed (rather than at a limit), the advice
+>   ends `"The PDF may be damaged. Save or export it again as a new PDF and upload that copy."`
+>   instead, since splitting the file would not get past a damaged page. Before 2026-11-09 such a
+>   PDF was refused whatever was read before the damaged page, with the parser's exception text.
 
 > **An evidence rule that fails is reported as not assessed, never dropped.** Each evidence rule a
 > clause matches runs its query in its own savepoint. A rule whose query raises is rolled back to that
@@ -10554,13 +10203,24 @@ call per file (at most 2 concurrent) and one `create-from-upload` call per revie
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| POST | `/po-upload/upload-po` | Upload a PO document (`.pdf`/`.doc`/`.docx`, 10 MB cap; else **400**) — AI-extracts data for review before commit | Yes |
-| POST | `/po-upload/upload-quote` | Upload a vendor quote document — AI-extracts data to build a PO | Yes |
+| POST | `/po-upload/upload-po` | Upload a PO document (`.pdf`/`.doc`/`.docx`, 10 MB cap; over it **413** before any work — this was a **400** before 2026-11-09) — AI-extracts data for review before commit | Yes |
+| POST | `/po-upload/upload-quote` | Upload a vendor quote document (same types and 10 MB / **413** cap) — AI-extracts data to build a PO | Yes |
 | POST | `/po-upload/upload-invoice` | Legacy alias of `upload-quote` (same extraction behavior) | Yes |
 | POST | `/po-upload/create-from-upload` | Create the PO from the reviewed extraction — can create the vendor and missing parts. Part-number matching is **case-insensitive** and ignores surrounding whitespace: the same number repeated across lines / `create_parts` creates the part **once** (stored as the first occurrence's stripped form) and attaches every matching line to it; an active part already holding the number is reused, and a line with no `part_id` resolves by part number to an existing active part even when it isn't in `create_parts`. **400** if `line_items` is empty, the PO number already exists, a supplied `vendor_id` / line `part_id` doesn't exist in the active company **or is soft-deleted**, a line's part number matches no active part and isn't in `create_parts`, or a new part's number belongs to a **soft-deleted** part (restore it via `POST /parts/{id}/restore` or use a different number). **409** when the vendor is Disqualified on the Approved Supplier List, checked before any part is created; otherwise the response's `supplier_approval_warnings` lists the advisory ASL warnings, which the create audit row also records (see Purchasing → *Approved Supplier List on the vendor record*) | Admin / Manager / Supervisor |
 | GET | `/po-upload/pdf/{path}` | Serve the uploaded source document for preview (`s3://` refs and local paths) | Yes |
 | GET | `/po-upload/search-parts` | Part typeahead for extraction-review matching. `q` matches **part number, name, description, and customer part number** — every whitespace-separated term must appear, then results are ranked by similar-word score so a query like `raw material` surfaces `A36 Raw Material Sheet`. `limit` **1–50**, default 10 | Yes |
 | GET | `/po-upload/search-vendors` | Vendor typeahead for extraction-review matching (`q`, `limit` **1–50**, default 10) — active, **non-soft-deleted** vendors only | Yes |
+
+> **A partly read PDF is flagged in `validation_issues` (2026-11-09).** When the extractor read only
+> part of an uploaded PDF (see [Document Text Extraction Limits](#document-text-extraction-limits)), each
+> gap becomes an entry such as
+> `{"field": "document_content", "severity": "warning", "code": "OCR_PARTIAL", "message": "Only the first 30 of 120 scanned pages were read."}`.
+> `code` is `OCR_PARTIAL` when scanned pages were skipped or cut short, and `TEXT_PARTIAL` when the
+> text layer was cut short. On a normal extraction these entries come before the field checks; only
+> the "PO number already exists" warning is listed ahead of them. The two low-confidence responses
+> (no usable text, and an AI extraction error) list them after their `error` entry. Today these are
+> the only `validation_issues` entries that carry a `code`; every other entry has just `field`,
+> `severity` and `message`.
 
 ### Receiving & Inspection
 
@@ -14933,8 +14593,8 @@ parses `text/plain` as JSON (it is the label the SPA's `navigator.sendBeacon` bo
 unauthenticated JSON parse. Both gates apply to it. On every other path `text/plain` is neither
 parsed as JSON nor capped by this middleware.
 
-**Not affected:** `multipart/form-data` uploads, which keep their own per-endpoint caps (20 MB
-for QMS standard uploads, 50 MB `LASER_UPLOAD_MAX_BYTES` for laser-nest ZIP/PDF — those also
+**Not affected:** `multipart/form-data` uploads, which keep their own per-endpoint caps (the AI
+document routes are listed under [AI document uploads](#ai-document-uploads) below; all of them
 return **413**), and inbound carrier tracking webhooks, which bypass this middleware entirely so
 their HMAC verifies against raw bytes.
 
@@ -14947,6 +14607,124 @@ create ~201 KB. A BOM create above roughly **1300 line items** exceeds the cap; 
 data — as of 2026-07-30 the middleware only measures size. Angle brackets in a note field (ASME
 Y14.5 notation such as `2.500 <REF>`, or `<` meaning "less than") round-trip byte-for-byte
 through create/read/update. Server-rendered PDFs escape at render.
+
+### AI document uploads
+
+These routes hand an uploaded document to the AI. Each refuses an oversized file with **413**
+before it does any work — no document saved, no text extraction, no model call. (Hank's document
+intake keeps its own per-file and per-batch caps, also **413**; see
+[Hank (AI shop teammate)](#hank-ai-shop-teammate).)
+
+| Route | Cap | Constant |
+|---|---|---|
+| `POST /po-upload/upload-po`, `/upload-quote`, `/upload-invoice` | 10 MB | `po_upload.MAX_FILE_SIZE` |
+| `POST /routing/generate-from-drawing` | 10 MB | `routing.MAX_FILE_SIZE` |
+| `POST /qms-standards/{standard_id}/upload-pdf` | 20 MB | `qms_standards.QMS_PDF_MAX_BYTES` |
+| `POST /bom/import/preview`, `POST /bom/import` | 20 MB | `bom.BOM_IMPORT_MAX_BYTES` |
+| `POST /laser-nests/extract` | 50 MB, the same as the laser package upload (a PDF over the extractor's ~20 MB native cap is read through the text fallback, not refused) | `laser_nests.LASER_NEST_EXTRACT_MAX_BYTES` |
+| `POST /work-orders/{work_order_id}/laser-nest-packages/preview`, `POST /work-orders/laser-nest-packages/standalone/preview` | 50 MB upload; a ZIP also ≤ 200 files and folders and ≤ 200 MB unpacked | `work_orders.LASER_UPLOAD_MAX_BYTES`, `laser_nest_service.LASER_ZIP_MAX_MEMBERS` / `LASER_ZIP_MAX_UNCOMPRESSED_BYTES` |
+
+The check runs in two steps (`app/core/upload_limits.py`). First the size the server counted while
+receiving the multipart body: over the cap, the request is refused without the file being read into
+memory. Then the file is read up to the cap plus one byte, and refused if more arrived, so the bound
+holds even when the counted size is missing or wrong. The laser package previews take the same
+first step, then stream the upload to a temporary file and refuse once more than 50 MB has arrived;
+a ZIP's member count and unpacked size are then read from its central directory and refused before
+anything is unpacked. Unpacking writes each central-directory entry exactly once, so a file name
+repeated many times inside the ZIP cannot unpack its largest copy once per repeat; what ends up on
+disk is the last copy, as before. Any temporary file is removed on refusal.
+
+The `detail` is a plain string such as `"File too large (max 10 MB)."`; the laser package routes
+say `"Upload exceeds the 50 MB limit. Split the package into smaller batches."`, and a ZIP over the
+member or unpacked-size cap names that cap. Before 2026-11-09 the PO, routing-drawing and QMS routes
+answered an oversized file with **400**, and the BOM routes and `/laser-nests/extract` had no cap.
+The PO upload, routing drawing, QMS, BOM import and laser package screens show `detail` for any
+status, so the message reaches the user the same way. The one exception is the manual-nest modal,
+the only caller of `/laser-nests/extract`: auto-fill there is best-effort and it drops every error
+silently, a 413 included, so a PDF over 50 MB just gets no auto-fill (the PDF itself still
+attaches through the document upload).
+
+## Document Text Extraction Limits
+
+Several AI document uploads read an uploaded PDF's text before calling the model: PO upload
+(`/po-upload/upload-po`, `/upload-quote`, `/upload-invoice`), BOM import (`/bom/import/preview`,
+`/bom/import`), `/routing/generate-from-drawing`, the laser-nest flattened-text fallback, and the QMS
+standard upload (`/qms-standards/{standard_id}/upload-pdf`). Since 2026-11-09 that read runs under the
+fixed limits below. They are code constants, not environment variables (`app/services/pdf_service.py`,
+`app/api/endpoints/qms_standards.py`, `app/core/parse_limits.py`).
+
+**Text layer.** pypdf runs in a separate, resource-limited child process
+(`app/services/pdf_text_reader.py`), not inside the API process. For a document within the limits
+the text is exactly what the old in-process read returned, and a test holds the two equal.
+
+| Limit | Document uploads (`pdf_service`) | QMS standard upload |
+|---|---|---|
+| File size | 64 MiB | 20 MB (the route's own upload cap) |
+| Pages read | the first 500 | the first 2,000 |
+| Characters per page | 100,000 | 100,000 |
+| Characters in total | 1,000,000 | 2,000,000 |
+| CPU time | 30 s | 60 s |
+| Wall clock | 45 s | 90 s |
+| Memory (Linux only) | 512 MiB address space | 512 MiB address space |
+
+When the page-count, total-character, CPU, memory or time limit is reached part-way through, the
+read stops there, the pages already read are kept, and a plain-language warning says so, for example
+"Only the first 500 of 812 pages were read." or "Reading the PDF's text stopped after 45 seconds
+(pages 1–14 of 120 read).". A page longer than the per-page limit is cut at 100,000 characters and
+reading carries on with the next page, with a warning naming the cut page. A file over the size limit
+is not read at all. A PDF that cannot be opened still yields no text, and the document uploads then
+try OCR. A parser error part-way through (a damaged page) is handled as before: the document uploads
+treat the text layer as unreadable and OCR the whole document, and only the QMS upload keeps the
+pages read before the error (see [QMS Standards](#qms-standards--audit-readiness)).
+
+**OCR (scanned PDFs).** When the text layer yields 100 characters or fewer, the document uploads fall
+back to OCR (pdf2image + tesseract). It is bounded per document:
+
+- only the first **30 pages** are read ("Only the first 30 of 120 scanned pages were read.");
+- the whole pass gets **90 seconds**, including the wait for an OCR slot. When the time runs out, one
+  warning names every page not read, those past the 30-page cap included ("Text recognition stopped
+  after 90 seconds, so pages 5–120 of 120 were not read."), in place of the 30-page sentence;
+- counting the pages (poppler's `pdfinfo`) gets **10 seconds**. A scan that cannot be opened in that
+  time is skipped with a warning ("Text recognition was skipped: the scanned document could not be
+  opened within 10 seconds.");
+- rendering a page and recognizing it each get **30 seconds**. A page that times out or cannot be
+  processed is **skipped with a warning**, and the remaining pages are still read. Before, one failure
+  threw away all OCR text;
+- pages are rendered one at a time at 300 dpi. A page that would be larger than **25 megapixels** at
+  300 dpi, such as a large-format drawing, is rendered at a lower dpi;
+- (changed 2026-11-09) each page is rendered from its **crop box**, the area a PDF viewer shows.
+  Before, it was rendered from the media box (poppler's default), so text printed outside a page's
+  crop box, which a viewer does not show either, is no longer recognized. On the usual page, where
+  the two boxes are the same, nothing changes.
+
+If tesseract or poppler is not installed, OCR yields no text and no warning, as before.
+
+**Concurrency, per process.** At most **2** CPU-heavy parses run at once: PDF text-layer reads, the
+Excel parsing in BOM import and in document text extraction, and PO line-item matching. At most **2**
+OCR passes run at once. Other requests wait for a slot. A parse waits as long as it takes; an OCR pass
+waits only within its 90-second budget, and if no slot frees up it is skipped with a warning to try
+again in a minute.
+
+> **Interim, until the AI routes move off the event loop (roadmap #9-2a).** PO upload, routing
+> generation and the QMS upload still parse on the server's event loop, while BOM import and
+> `/laser-nests/extract` parse in worker threads. A parse on the event loop takes no slot and never
+> waits, because waiting there would stall every request the process is serving, kiosk polls
+> included, for as long as the worker-thread parse ran (up to 45 s for a text-layer read, 90 s for
+> OCR). So each process can run one parse and one OCR pass beyond the caps above. Each PDF read on
+> those three routes also starts a reader process first, which adds roughly 0.1–0.25 s during which
+> the process serves nothing else. Both go away when #9-2a moves those parses into worker threads.
+
+**Where the warnings appear.** They describe the read that produced the returned text: text-layer
+warnings when the text layer was used, OCR warnings when OCR was, and both when neither produced
+usable text.
+
+| Endpoint | Where |
+|---|---|
+| `POST /po-upload/upload-po`, `/upload-quote`, `/upload-invoice` | `validation_issues` entries with `severity: "warning"` and `code` `OCR_PARTIAL` or `TEXT_PARTIAL` (see [PO Upload](#po-upload-ai-document-extraction)) |
+| `POST /routing/generate-from-drawing` | lines in `warnings` |
+| `POST /bom/import/preview`, `POST /bom/import` | lines at the start of `warnings`, and appended to the no-text **400** detail |
+| `POST /qms-standards/{standard_id}/upload-pdf` | a **400** when the text read is shorter than the 100,000 characters the AI is sent (see [QMS Standards](#qms-standards--audit-readiness)) |
+| Laser-nest flattened-text fallback | not surfaced yet: the limits apply, but no warning reaches the preview row or the `/laser-nests/extract` result |
 
 ## Spreadsheet Exports (CSV / XLSX)
 
@@ -15328,7 +15106,7 @@ For more details on specific endpoints, use the interactive documentation above.
 
 ## Advisory physical-piece observations
 
-These authenticated `/api/v1/inventory` endpoints record explicitly reported physical measurements. Each source and observation record carries **“Recorded observation — availability and eligibility unverified.”** They create no inventory quantity, transaction, reservation, operational quote, remnant credit or solver supply. Existing stock writers and negative-on-hand behavior are unchanged. There is no production seeding, automatic remnant generation or adoption of existing inventory.
+These authenticated `/api/v1/inventory` endpoints record explicitly reported physical measurements. Each source and observation record carries **“Recorded observation — availability and eligibility unverified.”** They create no inventory quantity, transaction, reservation, operational quote or remnant credit. Existing stock writers and negative-on-hand behavior are unchanged. There is no production seeding, automatic remnant generation or adoption of existing inventory.
 
 | Method and path | Contract |
 |---|---|
@@ -15347,42 +15125,11 @@ Every command contains `expected_company_id`, a canonical UUID `request_key`, re
 
 Supported reported shapes are `{kind:"unknown"}`, `{kind:"rectangle",width,height}`, `{kind:"circle",cx,cy,r}`, or `{kind:"polygon",outer:[{x,y},...],holes:[[{x,y},...],...]}`. The measured polygon is retained; its bounding rectangle is never substituted. Each unavailable zone has `{id,label,reason,outline}` where `outline` is a circle or `{kind:"polygon",pts:[{x,y},...]}`. Zone IDs are unique and use 1–64 ASCII letters/digits/underscore/hyphen. Budgets are 16 zones, 16 interior rings, 2,000 total source vertices across shape/holes/zones (circle counts 1, rectangle 4), and 128 KiB canonical measurement payload. The existing 256 KiB global JSON receive limit applies before route handling. Unknown geometry cannot carry positioned unavailable zones. Duplicate JSON keys, unknown fields, explicit null required geometry, malformed/nonfinite values and over-budget input fail without saving.
 
-Geometry validation here is deliberately structural and bounded. The shared server calculation kernel has **not** checked topology, hole containment or usable regions for these observations. Neither reported geometry nor a matching source hash verifies actual presence, material specification, grain, damage, ownership or certification. Free-text evidence does not establish an approved material mapping. Structured PO/document revision and solver-origin lineage links are deferred; no implicit relationships are created.
+Geometry validation here is deliberately structural and bounded. No calculation kernel checks topology, hole containment or usable regions for these observations. Neither reported geometry nor a matching source hash verifies actual presence, material specification, grain, damage, ownership or certification. Free-text evidence does not establish an approved material mapping. Structured PO/document revision and solver-origin lineage links are deferred; no implicit relationships are created.
 
 Each source item includes its exact tenant-scoped Item/Part relationship, historical lot/heat/cert/UOM/status/location/cost metadata and a movement watermark. One SQL statement captures Item, Part and watermark together. Coverage is explicitly `direct_item_and_unattributed_same_part`: directly attributed item transactions plus same-Part transactions whose inventory item ID is null. Thus consume/receive turnover is visible even when on-hand returns to the same number; unattributed movements may conservatively flag another lot. Legacy finite floating values are reported as decimal text, nonfinite values as unknown, and no currency or piece valuation is inferred. Source IDs are immutable historical evidence locators without operational foreign keys; new recorded observations validate their current tenant relationship in both API and database guards.
 
 Read-time `source_status` is `unchanged`, `changed` or `missing`, accompanied by `current_source_sha256`. It is a staleness warning, never a lock or availability result. GETs do not reconcile or mutate stock/history. New recorded commands must present the current source fingerprint or receive 409. Same-key recovery runs before source-currentness and version checks, returning the original immutable observation (with a fresh read-time drift warning). Conflicting UUID payload/actor/credential, stale versions and duplicate labels receive 409; cross-company/unknown source relationships receive 404; malformed inputs receive 422; size limits receive 413. Required audit failure returns 503 and rolls back header, observation and audit as one transaction. Database RLS/revokes and immutable UPDATE/DELETE/TRUNCATE guards are supplied by migration 104 and matching model bootstrap DDL; they do not certify physical material.
-
-## Original DXF evidence for saved nesting revisions
-
-These endpoints retain original bytes against an **exact immutable saved input revision**. The existing `quote-nesting` namespace is reused; this feature adds part/source traceability, not quotation totals, pricing, quote approval, reservations or inventory availability. A receipt means `server_hash_verified_unapproved`: the server read back the recorded byte count and SHA-256 at `verified_at`. It does not prove that the importer derived the geometry correctly, that a customer approved the revision, or that the storage provider will retain bytes indefinitely.
-
-All paths below are relative to `/api/v1/quote-nesting/drafts/{draft_id}/revisions/{number}/sources`. IDs and revision numbers are positive 32-bit integers. Read access requires effective `purchasing:view`; mutations also require `purchasing:create`, current active-company authority and a writable context. Normal token expiry/revocation and kiosk fences apply. No new role or permission is introduced.
-
-| Method/path suffix | Contract |
-|---|---|
-| `GET /` | List intents and any completed receipts for this exact revision. `page` defaults to 1 (maximum 100,000), `per_page` defaults to and cannot exceed 10. No storage access, reconciliation or writes. |
-| `POST /` | JSON intent: `{expected_company_id,request_key,expected_input_sha256,source_sha256,byte_count,source_name,mime_type,targets:[{group_id,part_id}]}`. Creates the immutable intent and required audit atomically; exact actor/credential/command replay returns the prior result. |
-| `POST /{intent_id}/content?expected_company_id=...` | One raw `application/octet-stream` original DXF. The server verifies bytes against the intent, tries recovery from previous tracked attempts, then may allocate one audited fresh storage attempt. Successful read-back completes the receipt and all selected bindings atomically with required audit. |
-| `POST /{intent_id}/finalize` | JSON `{expected_company_id}`. Recover an already readable matching attempt without uploading or repairing anything. Return an existing receipt unchanged when the operation already completed. |
-| `GET /{intent_id}/download` | Require a completed receipt and read/verify the entire bounded object before responding with an authenticated attachment. Headers include `Cache-Control: private, no-store` and `X-Content-Type-Options: nosniff`. No public URL or inline CAD execution. |
-
-Intent UUIDs are canonical lowercase UUID strings. All hashes are lowercase 64-character SHA-256 values. `source_name` is a trimmed DXF basename without path separators or control characters, at most 1,024 characters; MIME is bounded descriptive input, not a file-type approval. The byte count must be greater than zero and **strictly less than 5,000,000**, matching the browser importer. Uploaded BOMs, encodings and line endings are retained unchanged; there is no text normalization, ZIP extraction, remote fetch or AI egress.
-
-Select at most 1,000 unique exact `(group_id,part_id)` targets. Every selected part must already have matching `original-bytes` source provenance in the named saved revision. Matching filenames alone are insufficient. `utf8-text`, absent provenance or another source hash returns 409; reimporting and saving a new revision are separate explicit actions. The binding stores the saved provenance plus `reportedRevision` only when the saved part contains a revision field; this text is not an approved ERP/customer revision. One original may bind multiple profiles, but a completed saved-part binding cannot be replaced by a different intent.
-
-Raw content is capped before handler execution, including chunked/no-Content-Length uploads. Intent/finalize JSON is capped at 256 KiB by the new route-specific middleware and remains subject to the existing global JSON limit if it is configured lower. Canonical selected-target evidence is capped at 512 KiB before intent creation. Select fewer profiles when that limit is exceeded. Lists contain at most ten full target-evidence summaries per page. Storage writes are capped at **eight tracked attempts per intent**; recovery can still inspect those attempts after the cap. No automatic body retries, deletion, purge, rename or overwrite path exists. The browser sends an explicitly selected batch sequentially and retains the same intent for recovery.
-
-CAD storage uses an independent S3 client with a 3-second connect timeout, an 8-second socket read timeout and one SDK attempt per operation. The shared document-storage client is unchanged. Each content, finalize or download service operation has a shared 60-second monotonic budget, checked between recorded attempts, before and after streamed chunks, and before new attempt allocation/write. Expiry returns 503 without starting another storage operation; already committed attempts and bytes remain recoverable. This is a cooperative limit, not a hard request deadline: an in-flight SDK call/read, DNS, local filesystem, database work and body reception are not forcibly interrupted. No background cancellation thread or automatic provider retry is introduced. CAD-owned clients and streaming bodies are closed on success and failure.
-
-The page response is `{company_id,draft_id,revision_number,input_sha256,can_attach,items,total,page,per_page}`. Each item contains exact revision/source identities, request UUID, name/MIME/count, target evidence and its digest, actor/credential/time, `attempt_count`, `can_resume`, and nullable `receipt`. State `PENDING` means no completion receipt exists. `ATTACHED` means verification was recorded at the receipt timestamp; listing does not check current object availability. The receipt includes its ID, source hash/count, verifier/credential/time and the fixed unapproved claim. Neither object paths, provider details nor attempt IDs are returned to browsers.
-
-Only the original actor and exact API-token identity (or the same interactive actor) can resume the intent. An authorized colleague may read/download completed evidence but cannot take over an uncertain command. Required authority is rechecked after storage I/O before committing completion. A switched company, revoked token, disabled user or revoked write permission cannot complete a staged upload. Previously committed staging/audit history remains.
-
-The intent, each fresh attempt and its audit commit **before** the corresponding object write. Each attempt freezes a generated company-scoped key and nonsecret provider identity; a retry never reuses an uncertain attempt for another write. Storage I/O occurs outside DB transactions/connections. Partial, late and unsuccessful objects remain accounted for by immutable attempts. A unique receipt and complete binding set commit with required audit in a separate transaction. Failed completion/audit may be retried through finalize without another upload. Completed command recovery returns historical receipt metadata without requiring the provider to be online. Download separately fails closed if bytes are missing, changed, oversized or unavailable.
-
-Success and exact replay return 200. Unknown/cross-company revisions or intents return 404; changed company, mismatched bytes/targets/UUID, occupied bindings and attempt exhaustion return 409; ownership/permission failures return 403; malformed/duplicate fields return 422; size limits return 413; incorrect content type returns 415. Storage uncertainty, incomplete finalize and required audit failure return 503 with recovery guidance. A 503 does not authorize an automatic fresh upload: check completion, then let the user explicitly resend the original file if needed. No storage error may silently rewrite a receipt or the saved input JSON.
-
 
 ## Recorded-piece planning snapshot
 
@@ -15403,8 +15150,8 @@ response requires the latest RECORDED observation, a still-present and unchanged
 source, active Item/Part, source status `available`, known geometry kind, known
 positive thickness within the planning range and known reported grade. This does
 not establish physical availability or material suitability. Geometrically invalid
-evidence is never repaired here; bounded structural evidence is retained, and the
-calculation kernel must separately validate topology before accepting placements.
+evidence is never repaired here; bounded structural evidence is retained, and no
+topology validation is performed.
 
 `snapshot` preserves exact observation identity, observer/reason/timestamps, canonical
 inch measurement evidence and its existing payload hash/count, source IDs/hash, and
@@ -15422,74 +15169,7 @@ specification return 409. Existing permission/token/read-only restrictions retur
 the existing global JSON receive cap returns 413. No fallback mapping from catalog,
 Part name, grade aliases, gauge, UOM or inventory quantity is inferred.
 
-The resolver itself makes no calculation or write. An explicit source-bound selection
-can be saved in project18 and calculated through the existing authenticated saved-run routes.
-
-### Source-bound recorded-piece projects and worker stages
-
-Project18 adds optional `remnantPlan`; explicit null is rejected and older project
-versions reject the field. A project18 without the field uses ordinary protocol1;
-normal writers emit project15 when no piece is selected. One project may select one
-recorded physical piece, assigned to exactly one populated quote14 group. The selection
-contains the exact observation snapshot and typed snapshot SHA, current remnant-domain
-profile identity, canonical-inch zone clearance, and an explicit family/grade/thickness
-assignment with reason and a typed hash over `{groupId, requiredGrade, quote}`. That hash
-uses the original saved imperial quote before defaults or unit conversion. Grade is
-trimmed case-sensitive text and thickness must be known and equal; no catalog-to-inventory
-mapping is inferred. `capacity: 1`, `planningOnly: true`, `eligibilityVerified: false`,
-and `availabilityVerified: false` are mandatory.
-
-New saves and new starts require the same-company latest RECORDED observation, its exact
-payload/source hashes, an unchanged active/available Item+Part source, and known compatible
-reported shape/specification. The check holds the observation header FOR SHARE until the
-save/start transaction commits, after existing draft/run and policy locks. It does not lock
-inventory, reserve a piece or promise that another planner will not select it. Later source
-movement is possible. Exact same-key retries first check current authorization, then return
-the original record without applying current-source checks again. Queued claims similarly
-retain their frozen source and only recheck actor/token permissions, input integrity and
-exact runtime/profile identity. Historical reads never rewrite or silently refresh evidence.
-
-Remnant-bearing evidence additionally requires effective `inventory:view` on draft lists,
-history/detail/save and retries; run lists/detail/checkpoints/reports/start/cancel and retries;
-all original-CAD source routes, including completion and download recovery; and worker
-claim/live checkpoint checks. A purchasing grant alone does not expose recorded stock.
-Omitted remnant fields preserve ordinary nesting access. No new role or inventory mutation
-authority is introduced.
-
-The v7 manifest declares base `protocol: 1`, exact `supported_protocols: [1,2]` and the
-packaged `remnant_domain_profile`. The readiness heartbeat remains its existing eight-field
-protocol1 identity. For a remnant-bearing project, frozen run settings select protocol2
-and add the remnant profile; their runtime identity remains protocol1. Protocol2 hello
-also binds the exact remnant profile, base geometry profile, bundle and Node version.
-
-Protocol2 stages are ordered: every full-sheet baseline, one recorded-piece evaluation,
-then every enabled full-sheet option for that group's remaining instances. The total
-`B + 1 + K` must be at most 36 before save/start and shares the existing 120-second, heap,
-frame and retained-checkpoint budgets. No timeout or missing work proves infeasibility.
-Each stage has an input-derived `stage-01`…`stage-36` identity, sequence, kind, group,
-original `option_id` (null for the piece), dependency (piece stage for residuals), requested
-count, exact source stock, result and instance map. Source stock is independently rebuilt
-from canonical nanoinches; bounding extents are never treated as available material.
-
-The recorded-piece result has only `nest`, `error`, `complete`, `area` and optional leftover
-status—no price, cost or financial option. It uses zero or one physical piece. If geometry
-cannot be prepared, an explicit error with null stock/nest preserves all requested instances.
-Residual maps enumerate each remaining original instance exactly once in original part order;
-compact residual quantities cannot erase, duplicate or substitute originals. All-fit cases
-still emit planned residual stages with zero requested instances, an empty map and null
-stock/result. Those are complete alternatives requiring zero full sheets.
-
-Public checkpoint `option_id` holds the stage identity. Protocol2 metadata additionally has
-`stage_kind`, `source_option_id` and `depends_on`; these three keys remain absent from legacy
-metadata. The canonical checkpoint hash covers the exact decoded JSON frame, not its NDJSON
-whitespace. `completed_count` counts complete baseline/residual alternatives, including empty
-residuals, and excludes the recorded-piece stage. COMPLETED means evaluations finished.
-
-Recorded-piece leftover evidence is v4, always unapproved and zero-credit. Per-sheet
-`grossArea` is analytical reported material minus physical holes; `protectedArea` is actual
-inward-protected material before zones; `usableArea` is final vector material after zones.
-`edgeMarginArea = grossArea - protectedArea` and `excludedArea = protectedArea - usableArea`.
-The complete ledger also includes nominal parts, reserved part cutouts, clearance/protection,
-remaining regions and bounded reconciliation residual. Exact profile/area definitions and
-source identity accompany the report. These are conditional planning results, not physical
-availability, reservation, consumption, valuation or automatic child-remnant records.
+The resolver itself makes no calculation or write. Its only in-app consumer was the
+retired Material Nesting estimator, whose project18 saves and saved-run calculations were
+removed with every `/quote-nesting/*` route in `3e17456e` (2026-09-16); the route remains
+live as a read-only evidence resolver, and no current screen calls it.

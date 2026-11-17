@@ -72,13 +72,12 @@ docker compose --env-file .env.prod -f docker-compose.prod.yml logs -f
 | redis | Cache and job queue | 6379 | - |
 
 Both Compose worker definitions build from the repository root with
-`backend/Dockerfile.worker`. Its separate build stage compiles the shared nesting
-kernel and supplies pinned Node 22.23.2 only to the worker; API images remain
-Python-only. Do not bind the entire backend directory over `/app` in this image,
-because that hides `/app/nesting-runtime`. Rebuild the worker after source changes.
-No environment or cron selection is changed by this packaging. Server calculations
-require a fresh published runtime identity and the selected nesting relay schedule;
-see [WORKER_SERVICE.md](WORKER_SERVICE.md#saved-nesting-calculation-runtime).
+`backend/Dockerfile.worker`, a single-stage Python image that copies only `backend/`
+and runs `arq app.worker.WorkerSettings`. It has no Node runtime: the quote-nesting
+solver stage it used to build was removed with the Material Nesting estimator in
+`3e17456e` (2026-09-16). Rebuild the worker after source changes. A release is verified
+by the worker's runtime heartbeat, which does not depend on any cron selection; see
+[WORKER_SERVICE.md](WORKER_SERVICE.md#shared-worker-release-verification).
 
 ### Build contexts and runtime secrets
 
@@ -87,8 +86,8 @@ uses the repository root. Each context has its own `.dockerignore` because Docke
 does not inherit parent ignore rules or use `.gitignore` for local builds. The rules
 exclude local `.env` variants, package-manager and cloud credentials, private keys,
 virtual environments, SQLite files, uploads, logs and backups. `.env.example` and
-`.env.*.example` templates remain available, along with dependency lockfiles, release
-stamps and the worker's frontend source/build inputs. There is no landing Docker
+`.env.*.example` templates remain available, along with dependency lockfiles and release
+stamps. There is no landing Docker
 context in the shipped Compose configurations.
 
 Pass deployment values at runtime through Compose's `environment` entries, using

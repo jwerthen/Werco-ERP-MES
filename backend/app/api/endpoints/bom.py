@@ -9,7 +9,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased, joinedload, selectinload
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
+from app.core.parse_limits import holds_parse_slot
 from app.core.time_utils import to_utc_iso
+from app.core.upload_limits import ensure_upload_within_limit, read_upload_within_limit
 from app.db.database import get_db
 from app.models.bom import BOM, BOMItem, BOMItemType, BOMLineType
 from app.models.part import Part, PartType, UnitOfMeasure, uom_disagrees, uom_label
@@ -55,11 +57,20 @@ from app.services.llm_service import extract_bom_data_with_llm
 from app.services.material_tie_part_gate import part_type_change_refusal
 from app.services.part_number_resolver import resolve_part_by_number
 from app.services.part_number_service import generate_werco_part_number
-from app.services.pdf_service import SUPPORTED_EXTENSIONS, extract_text_from_document, save_uploaded_document
+from app.services.pdf_service import (
+    SUPPORTED_EXTENSIONS,
+    extract_text_from_document,
+    extraction_warnings,
+    save_uploaded_document,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Document upload cap for ``/import/preview`` and ``/import`` (413 over it, checked before the body
+# is read; see ``app.core.upload_limits``). Resolved at call time, so this constant is the one tunable.
+BOM_IMPORT_MAX_BYTES = 20 * 1024 * 1024  # 20MB
 
 
 def parts_with_active_bom(db: Session, part_ids: Iterable[int], company_id: int) -> Set[int]:
@@ -831,8 +842,11 @@ def _normalize_header(value: str) -> str:
     return "".join(ch for ch in value.strip().lower() if ch.isalnum() or ch.isspace()).replace(" ", "")
 
 
+@holds_parse_slot
 def _extract_excel_table(file_path: str, ext: str) -> Tuple[List[str], List[List[str]]]:
     """Extract ``(columns, data rows)`` from an uploaded Excel BOM with a bounded scan.
+
+    Holds a process-wide parse slot (``app.core.parse_limits``) for the whole scan.
 
     Semantics are unchanged from the original implementation: the first
     non-empty row found anywhere in the workbook becomes ``columns``; every
@@ -1189,6 +1203,18 @@ def _create_from_import_payload(
     )
 
 
+def _partial_read_messages(extraction_result: Any) -> List[str]:
+    """Pages skipped or cut short by the extractor (OCR page cap, time budgets), as warning lines."""
+    return [warning.message for warning in extraction_warnings(extraction_result)]
+
+
+def _no_text_detail(read_warnings: List[str]) -> str:
+    """The 400 detail for an upload with no usable text, naming any partial read that explains it."""
+    if not read_warnings:
+        return "Could not extract text from document"
+    return " ".join(["Could not extract text from document.", *read_warnings])
+
+
 @router.post("/import/preview", response_model=BOMImportPreviewResponse)
 async def import_bom_preview(
     file: UploadFile = File(...),
@@ -1198,6 +1224,7 @@ async def import_bom_preview(
 ):
     """
     Upload a BOM or single-part document (PDF/DOC/DOCX/XLSX/XLS) and return a preview for review.
+    Files over 20 MB are refused with 413 before any work runs.
 
     Excel uploads are parsed directly into a raw table plus a suggested column mapping (no LLM
     call) with a bounded scan: all sheets are read, at most 256 columns per row, more than
@@ -1213,7 +1240,10 @@ async def import_bom_preview(
     if ext not in SUPPORTED_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Unsupported file type. Use PDF, Word, or Excel documents.")
 
-    content = await file.read()
+    # Size first (413 without reading a byte when Starlette already counted too many), then a
+    # read bounded at BOM_IMPORT_MAX_BYTES + 1 -- the whole body is never buffered just to measure it.
+    ensure_upload_within_limit(file, BOM_IMPORT_MAX_BYTES)
+    content = await read_upload_within_limit(file, BOM_IMPORT_MAX_BYTES)
     if not content:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
@@ -1254,8 +1284,9 @@ async def import_bom_preview(
             )
 
         extraction_result = extract_text_from_document(doc_path)
+        read_warnings = _partial_read_messages(extraction_result)
         if not extraction_result.text or len(extraction_result.text.strip()) < 50:
-            raise HTTPException(status_code=400, detail="Could not extract text from document")
+            raise HTTPException(status_code=400, detail=_no_text_detail(read_warnings))
 
         extracted = extract_bom_data_with_llm(
             extraction_result.text, is_ocr=extraction_result.is_ocr, company_id=company_id
@@ -1264,6 +1295,7 @@ async def import_bom_preview(
             raise HTTPException(status_code=400, detail=extracted.get("_error"))
 
         llm_assembly, llm_items, llm_warnings, confidence = _build_preview(extracted)
+        llm_warnings = read_warnings + llm_warnings
         doc_type = (extracted.get("document_type") or ("bom" if llm_items else "part")).lower()
         if llm_items and doc_type != "bom":
             doc_type = "bom"
@@ -1314,6 +1346,7 @@ async def import_bom_or_part(
 ):
     """
     Upload a BOM or single-part document (PDF/DOC/DOCX/XLSX/XLS) and create parts/BOM items.
+    Files over 20 MB are refused with 413 before any work runs.
 
     The document is text-extracted and parsed by the LLM in one shot (no review step — prefer
     /bom/import/preview + /bom/import/commit for a reviewable flow). Excel text extraction is
@@ -1331,7 +1364,10 @@ async def import_bom_or_part(
     if ext not in SUPPORTED_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Unsupported file type. Use PDF, Word, or Excel documents.")
 
-    content = await file.read()
+    # Size first (413 without reading a byte when Starlette already counted too many), then a
+    # read bounded at BOM_IMPORT_MAX_BYTES + 1 -- the whole body is never buffered just to measure it.
+    ensure_upload_within_limit(file, BOM_IMPORT_MAX_BYTES)
+    content = await read_upload_within_limit(file, BOM_IMPORT_MAX_BYTES)
     if not content:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
@@ -1344,8 +1380,9 @@ async def import_bom_or_part(
     def _run_import() -> BOMImportResponse:
         doc_path = save_uploaded_document(content, filename)
         extraction_result = extract_text_from_document(doc_path)
+        read_warnings = _partial_read_messages(extraction_result)
         if not extraction_result.text or len(extraction_result.text.strip()) < 50:
-            raise HTTPException(status_code=400, detail="Could not extract text from document")
+            raise HTTPException(status_code=400, detail=_no_text_detail(read_warnings))
 
         extracted = extract_bom_data_with_llm(
             extraction_result.text, is_ocr=extraction_result.is_ocr, company_id=company_id
@@ -1359,7 +1396,7 @@ async def import_bom_or_part(
         if items and doc_type != "bom":
             doc_type = "bom"
 
-        warnings: List[str] = []
+        warnings: List[str] = list(read_warnings)
         missing_parts: List[str] = []
 
         assembly_number = _safe_part_number(assembly.get("part_number")) or _safe_part_number(

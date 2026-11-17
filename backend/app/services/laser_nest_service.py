@@ -15,8 +15,9 @@ from typing import TYPE_CHECKING, Iterable, Optional
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
+from app.core.upload_limits import format_byte_limit
 from app.models.document import Document, DocumentType
-from app.models.laser_nest import LaserNest, LaserNestPackage
+from app.models.laser_nest import MAX_PLANNED_RUNS, LaserNest, LaserNestPackage
 from app.models.part import Part
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderType
@@ -55,6 +56,26 @@ CNC_EXTENSIONS = {
 # one LLM call, so a runaway ZIP is both a latency and a cost concern -- the
 # preview/import endpoints reject anything over this with a 400.
 LASER_PDF_PACKAGE_MAX = 50
+
+# Zip-bomb caps for an uploaded laser package, checked against the archive's central directory
+# BEFORE a single member is extracted (``check_laser_zip_limits``). The 50 MB upload cap bounds the
+# COMPRESSED bytes only; a deflated run of zeros expands about 1000:1, so without these a 50 MB
+# upload could unpack to tens of GB on the API container's disk. 200 MB is 4x the upload cap
+# (nest-report PDFs are already-compressed streams and barely shrink in a ZIP, so a real package
+# unpacks to roughly its upload size), and 200 members is 4x the 50-PDF cap, which leaves room for
+# folder entries. Both are resolved at call time, so these constants are the one tunable.
+# Shared on purpose: the preview enforces them today; the package IMPORT adopts them in #9-6.
+LASER_ZIP_MAX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
+LASER_ZIP_MAX_MEMBERS = 200
+
+
+class LaserZipLimitError(ValueError):
+    """An uploaded laser-package ZIP is over ``LASER_ZIP_MAX_MEMBERS`` or ``LASER_ZIP_MAX_UNCOMPRESSED_BYTES``.
+
+    Endpoints map it to **413** (the message is plain language, safe to show). It subclasses
+    ``ValueError`` so a caller that has not mapped it yet still answers the existing 400 for a bad
+    package rather than a 500.
+    """
 
 
 @dataclass(frozen=True)
@@ -191,20 +212,14 @@ def parse_laser_nest_pdf_package(folder: str, company_id: int) -> list[ParsedLas
     return nests
 
 
-def _coerce_planned_runs(value: object) -> int:
-    """Coerce a model-supplied ``planned_runs`` to a sane int, flooring at 1.
+def _parse_planned_runs(value: object) -> Optional[int]:
+    """The run count a model-supplied ``planned_runs`` STATES, or None if it states none.
 
-    Defensive: the extraction result is AI output, so ``planned_runs`` may be a
-    non-numeric string, a float-ish string, or junk. Anything unreadable falls
-    back to 1 so a bad model value can never ``ValueError`` -> 400 the whole
-    preview batch.
-
-    THE FLOOR IS NOT A READ. ``planned_runs`` is a non-optional ``int`` on the
-    wire, so a nest whose run count could not be found and a nest that genuinely
-    runs once are the SAME 1 in the preview response. Only
-    ``field_confidence["planned_runs"]`` tells them apart, which is why the
-    wizard counts the low-confidence ones out loud rather than presenting 40
-    identical-looking 1s as read values. Do not "simplify" that signal away.
+    No floor and no ceiling -- that is ``read_planned_runs``' job. This only
+    decides what number, if any, the value says. It never raises: the extraction
+    result is AI output, so the value may be a non-numeric string, a float-ish
+    string, or junk, and a raise here would sink a whole 50-nest preview batch
+    over one odd row.
 
     Accepted shapes, widened deliberately: the previous rule was int-or-digit-
     string ONLY, so every near-miss a model actually emits for this field --
@@ -212,21 +227,21 @@ def _coerce_planned_runs(value: object) -> int:
     sheets"``, ``"x3"`` -- landed on the same silent 1 as genuine junk. Each of
     those is an unambiguous 3, and reading it is strictly better than defaulting
     it. A LEADING integer is required for the free-text case: ``"3 of 5"`` is 3,
-    while ``"sheet 4"`` stays 1 rather than reading a label as a count.
+    while ``"sheet 4"`` states no count rather than reading a label as one.
 
     A FRACTIONAL count is refused on BOTH the number and the string path, and
     the two must not drift apart: half a run is not a sheet count, and rounding
     one would invent a quantity nobody wrote. ``2.5`` and ``"2.5"`` therefore
-    both fall back to 1 -- reading the string form as 2 would make the answer
+    both state no count -- reading the string form as 2 would make the answer
     depend on whether the model happened to quote its JSON number, which is the
     one thing a caller can neither see nor control.
     """
     if isinstance(value, bool):
-        return 1
+        return None
     if isinstance(value, int):
-        return max(1, value)
+        return value
     if isinstance(value, float):
-        return max(1, int(value)) if value.is_integer() else 1
+        return int(value) if value.is_integer() else None
     if isinstance(value, str):
         text = value.strip()
         # NOTE: there is deliberately no `text.isdigit()` fast path here, and
@@ -247,9 +262,71 @@ def _coerce_planned_runs(value: object) -> int:
         if match:
             fraction = match.group(2)
             if fraction and float(fraction) != 0:
-                return 1
-            return max(1, int(match.group(1)))
-    return 1
+                return None
+            digits = match.group(1).lstrip("0") or "0"
+            if len(digits) > len(str(MAX_PLANNED_RUNS)):
+                # Longer than any count the bound admits, so the exact value no
+                # longer matters -- only that it is over. Skipping int() here also
+                # keeps the never-raise promise: int() refuses a digit string past
+                # Python's 4,300-digit conversion limit.
+                return MAX_PLANNED_RUNS + 1
+            return int(digits)
+    return None
+
+
+def read_planned_runs(value: object) -> tuple[int, bool]:
+    """Read a model-supplied ``planned_runs``: ``(count, was_read)``.
+
+    ``was_read`` is True only when the value states a whole count from 1 to
+    ``MAX_PLANNED_RUNS``. Everything else -- missing, junk, a fraction, 0 or a
+    negative, or a count above the bound -- is ``(1, False)``: the preview's
+    non-optional field gets its floor of 1, and the caller MUST mark it low
+    confidence. ``read_extracted_planned_runs`` does that for both doors that show
+    an extracted count (the preview row and ``POST /laser-nests/extract``); reach
+    for it rather than calling this directly from a new one.
+
+    THE FLOOR IS NOT A READ. ``planned_runs`` is a non-optional ``int`` on the
+    preview wire, so a nest whose run count could not be found and a nest that
+    genuinely runs once are the SAME 1 in the response. Only
+    ``field_confidence["planned_runs"]`` tells them apart, which is why the
+    wizard counts the low-confidence ones out loud rather than presenting 40
+    identical-looking 1s as read values. ``was_read`` exists because the two-pass
+    merge cannot supply that signal on its own: it scores AGREEMENT, so two
+    passes that both answered "N/A", or both misread the same 11-digit number,
+    come out "high". Do not "simplify" ``was_read`` away.
+
+    A count above ``MAX_PLANNED_RUNS`` is not clamped to the bound: 9,999 is no
+    more a reading of "99999999999" than 1 is, and the floor is the one value
+    every consumer already treats as "not read" once it carries ``low``.
+    """
+    count = _parse_planned_runs(value)
+    if count is None or count < 1 or count > MAX_PLANNED_RUNS:
+        return 1, False
+    return count, True
+
+
+def planned_runs_bound_warning(value: object) -> Optional[str]:
+    """The planner-facing warning for a run count over ``MAX_PLANNED_RUNS``, else None.
+
+    Only an over-the-bound count gets words: a missing or unreadable one is
+    already flagged by its low confidence, while a huge one is a number the AI
+    did read and the planner should know it was thrown away, not just doubted.
+    """
+    count = _parse_planned_runs(value)
+    if count is None or count <= MAX_PLANNED_RUNS:
+        return None
+    try:
+        shown = str(value).strip()
+    except ValueError:  # an int past Python's 4,300-digit str() limit
+        shown = "a very long number"
+    if len(shown) > 40:
+        shown = shown[:40] + "…"
+    return f"Run count '{shown}' looked wrong — enter it by hand (the limit is {MAX_PLANNED_RUNS:,} runs per nest)."
+
+
+def _join_warnings(*warnings: Optional[str]) -> Optional[str]:
+    joined = "; ".join(warning for warning in warnings if warning)
+    return joined or None
 
 
 def _coerce_field_confidence(value: object) -> Optional[dict]:
@@ -266,15 +343,68 @@ def _coerce_field_confidence(value: object) -> Optional[dict]:
     return coerced or None
 
 
+@dataclass(frozen=True)
+class PlannedRunsReading:
+    """One extraction result's run count, with the not-read rule already applied.
+
+    ``count`` is floored at 1 (the preview row's non-optional field); ``was_read`` is
+    the only thing that says whether that 1 is real. When the count was NOT read,
+    ``field_confidence["planned_runs"]`` and the overall ``confidence`` are both
+    ``"low"`` and ``warning`` carries the over-the-bound sentence, if any, after the
+    result's own warning. When it WAS read, all three are the result's own values.
+    """
+
+    count: int
+    was_read: bool
+    confidence: Optional[str]
+    field_confidence: Optional[dict]
+    warning: Optional[str]
+
+
+def read_extracted_planned_runs(result: dict) -> PlannedRunsReading:
+    """Apply the not-read rule to an ``extract_nest_fields_from_pdf`` result.
+
+    THE ONE COPY of the rule. Both doors that show an AI-extracted run count to a
+    planner call it -- ``build_parsed_nest_from_extraction`` (the package preview
+    row, which keeps the floored ``count``) and ``POST /laser-nests/extract`` (the
+    manual modal's auto-fill, which turns a not-read count into a real null) -- so
+    the two can never disagree about what was read, how sure it is, or what the
+    planner is told. Keep it here; a second copy in a router is how they drift.
+
+    The merge scores agreement, not readability, so whatever it said about this
+    field, a count that was not cleanly read is LOW -- and so is the whole result,
+    because the overall confidence is the minimum across its fields. Without this,
+    two passes that both answered "N/A" floor to a "high" 1, and two that both
+    misread one 11-digit number pass it through "high" into the import, where it
+    overflowed the int4 column.
+    """
+    raw_runs = result.get("planned_runs")
+    count, was_read = read_planned_runs(raw_runs)
+    warning = result.get("warning")
+    own_warning = warning if isinstance(warning, str) else None
+    field_confidence = _coerce_field_confidence(result.get("confidence"))
+    confidence = result.get("extraction_confidence")
+    if was_read:
+        return PlannedRunsReading(count, True, confidence, field_confidence, own_warning)
+    return PlannedRunsReading(
+        count=count,
+        was_read=False,
+        confidence="low",
+        field_confidence={**(field_confidence or {}), "planned_runs": "low"},
+        warning=_join_warnings(own_warning, planned_runs_bound_warning(raw_runs)),
+    )
+
+
 def build_parsed_nest_from_extraction(result: dict, *, abs_path: str, rel_path: str) -> ParsedLaserNest:
     """Map an ``extract_nest_fields_from_pdf`` result dict to a ``ParsedLaserNest``.
 
     Shared by the sync package parser and the async (parallelized) preview path
-    so both assemble rows identically. ``planned_runs`` floors at 1.
+    so both assemble rows identically. ``planned_runs`` floors at 1, and a floor
+    is never presented as a read: the count, both confidences and the warning come
+    from ``read_extracted_planned_runs``.
     """
     cnc_number = result.get("cnc_number")
     file_name = Path(abs_path).name
-    warning = result.get("warning")
     passes = result.get("passes")
     # Canonicalize the sheet descriptors HERE, at the earliest point they exist,
     # rather than only at the DB write: the wizard shows this row to the planner
@@ -283,19 +413,20 @@ def build_parsed_nest_from_extraction(result: dict, *, abs_path: str, rel_path: 
     material, thickness, sheet_size = normalize_nest_descriptors(
         result.get("material"), result.get("thickness"), result.get("sheet_size")
     )
+    runs = read_extracted_planned_runs(result)
     return ParsedLaserNest(
         nest_name=cnc_number or Path(file_name).stem,
         cnc_file_name=file_name,
         cnc_file_path=rel_path,
-        planned_runs=_coerce_planned_runs(result.get("planned_runs")),
+        planned_runs=runs.count,
         material=material,
         thickness=thickness,
         sheet_size=sheet_size,
         cnc_number=cnc_number,
         pdf_source_path=abs_path,
-        confidence=result.get("extraction_confidence"),
-        field_confidence=_coerce_field_confidence(result.get("confidence")),
-        warning=warning if isinstance(warning, str) else None,
+        confidence=runs.confidence,
+        field_confidence=runs.field_confidence,
+        warning=runs.warning,
         passes=passes if isinstance(passes, int) and not isinstance(passes, bool) else None,
     )
 
@@ -321,11 +452,61 @@ def copy_laser_nest_folder(source_path: str, destination: str) -> None:
 
 
 def extract_laser_nest_zip(zip_path: str, destination: str) -> None:
+    """Extract a laser package with NO size or member cap -- the package IMPORT's path until #9-6.
+
+    New callers use ``extract_laser_nest_zip_within_limits``.
+    """
     dest = Path(destination).resolve()
     if dest.exists():
         shutil.rmtree(dest)
     dest.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(zip_path) as archive:
+        _safe_extract_zip(archive, dest)
+
+
+def check_laser_zip_limits(archive: zipfile.ZipFile) -> None:
+    """Refuse a package whose central directory declares too many members or too many bytes.
+
+    Raises ``LaserZipLimitError``; reads only the central directory and writes nothing.
+
+    Summing the DECLARED ``ZipInfo.file_size`` is a sound bound, not a hopeful one, because of two
+    facts the extraction side must keep true:
+
+    * CPython's extractor never yields more than a member's declared ``file_size`` (``ZipExtFile``
+      truncates its output to that count, then fails the CRC check), so a header that under-declares
+      a member cannot write past what was counted here.
+    * ``_safe_extract_zip`` extracts each central-directory ENTRY exactly once (``members=`` the
+      ``infolist()``). A name that repeats is counted once per entry here and written once per entry
+      there. Extracting by NAME instead (``extractall()``'s default) would re-resolve every repeat to
+      the last, largest entry and write it once per repeat, so the sum would bound nothing.
+    """
+    members = archive.infolist()
+    max_members = LASER_ZIP_MAX_MEMBERS
+    if len(members) > max_members:
+        raise LaserZipLimitError(
+            f"The ZIP package contains {len(members)} files and folders; the limit is {max_members}. "
+            "Split the package into smaller batches."
+        )
+    max_bytes = LASER_ZIP_MAX_UNCOMPRESSED_BYTES
+    if sum(member.file_size for member in members) > max_bytes:
+        raise LaserZipLimitError(
+            f"The ZIP package is too large once unpacked (over the {format_byte_limit(max_bytes)} limit). "
+            "Split the package into smaller batches."
+        )
+
+
+def extract_laser_nest_zip_within_limits(zip_path: str, destination: str) -> None:
+    """``extract_laser_nest_zip`` with the zip-bomb caps checked first (``check_laser_zip_limits``).
+
+    The check runs before ``destination`` is touched, so a refused package writes nothing.
+    Synchronous file I/O and decompression: call it from a worker thread, never on the event loop.
+    """
+    with zipfile.ZipFile(zip_path) as archive:
+        check_laser_zip_limits(archive)
+        dest = Path(destination).resolve()
+        if dest.exists():
+            shutil.rmtree(dest)
+        dest.mkdir(parents=True, exist_ok=True)
         _safe_extract_zip(archive, dest)
 
 
@@ -1209,10 +1390,17 @@ def _laser_operation_description(nest: ParsedLaserNest) -> str:
 
 def _safe_extract_zip(archive: zipfile.ZipFile, destination: Path) -> None:
     destination = destination.resolve()
-    for member in archive.infolist():
+    members = archive.infolist()
+    for member in members:
         target = (destination / member.filename).resolve()
         try:
             target.relative_to(destination)
         except ValueError as exc:
             raise ValueError("Zip package contains an unsafe path") from exc
-    archive.extractall(destination)
+    # ``members=`` the central-directory ENTRIES, never the default ``namelist()``. Given names,
+    # ``extractall`` looks each one up again and always gets the LAST entry with that name, so a
+    # name repeated N times inflates and writes its largest entry N times -- 200 x the zip cap
+    # from a ~200 KB upload, past ``check_laser_zip_limits``'s declared-size sum. By entry, each
+    # is written once and truncated to its own declared size. Later duplicates still overwrite
+    # earlier ones, so what ends up on disk is unchanged.
+    archive.extractall(destination, members=members)

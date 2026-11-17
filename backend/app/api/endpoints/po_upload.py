@@ -4,7 +4,7 @@ Purchase Order PDF Upload and Extraction API
 
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_company_id, get_current_user, require_role
 from app.core.config import settings
+from app.core.upload_limits import ensure_upload_within_limit, read_upload_within_limit
 from app.db.database import get_db
 from app.db.tenant_filter import tenant_query
 from app.models.part import Part, PartType
@@ -40,6 +41,7 @@ from app.services.part_number_service import generate_werco_part_number, normali
 from app.services.pdf_service import (
     SUPPORTED_EXTENSIONS,
     extract_text_from_document,
+    extraction_warnings,
     move_pdf_to_po,
     save_uploaded_document,
 )
@@ -52,6 +54,8 @@ from app.services.supplier_approval_service import (
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+# Document upload cap for upload-po / upload-quote / upload-invoice (413 over it, checked before the
+# body is read; see ``app.core.upload_limits``). Resolved at call time, so this constant is the one tunable.
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 ALLOWED_MIME_TYPES = [
     'application/pdf',
@@ -116,6 +120,19 @@ def _find_existing_part_number_by_description(
     return None
 
 
+def _partial_read_issues(extraction_result: Any) -> List[Dict[str, str]]:
+    """The extractor's partial-read warnings as ``validation_issues`` entries (``severity: warning``).
+
+    Each carries the extractor's ``code`` (``OCR_PARTIAL`` for scanned pages skipped or cut short,
+    ``TEXT_PARTIAL`` for a text layer cut short), so the review screen shows the user that only
+    part of the document reached the AI, and an MCP agent can branch on the code.
+    """
+    return [
+        {"field": "document_content", "severity": "warning", "code": warning.code, "message": warning.message}
+        for warning in extraction_warnings(extraction_result)
+    ]
+
+
 async def _upload_and_extract_document(
     document_type: str, file: UploadFile, db: Session, current_user: User, company_id: int
 ) -> POExtractionResult:
@@ -129,12 +146,11 @@ async def _upload_and_extract_document(
     if file_ext not in SUPPORTED_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Unsupported file type. Allowed: PDF, DOC, DOCX")
 
-    # Read file content
-    content = await file.read()
-
-    # Validate file size
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB")
+    # Size first (413 without reading a byte when Starlette already counted too many), then a read
+    # bounded at MAX_FILE_SIZE + 1 -- the whole body is never buffered just to measure it. Both raise
+    # BEFORE the broad ``except Exception`` below, so the 413 reaches the client as a 413.
+    ensure_upload_within_limit(file, MAX_FILE_SIZE)
+    content = await read_upload_within_limit(file, MAX_FILE_SIZE)
 
     # Save document (durable storage; tenant-prefixed key on remote backends)
     doc_path = save_uploaded_document(content, file.filename, company_id=company_id)
@@ -163,7 +179,8 @@ async def _upload_and_extract_document(
                 pdf_was_ocr=extraction_result.is_ocr,
                 pdf_page_count=extraction_result.page_count,
                 pdf_path=doc_path,
-                validation_issues=[{"field": "document_content", "severity": "error", "message": error_msg}],
+                validation_issues=[{"field": "document_content", "severity": "error", "message": error_msg}]
+                + _partial_read_issues(extraction_result),
             )
 
         # Extract structured data using LLM
@@ -181,7 +198,8 @@ async def _upload_and_extract_document(
                 pdf_was_ocr=extraction_result.is_ocr,
                 pdf_page_count=extraction_result.page_count,
                 pdf_path=doc_path,
-                validation_issues=[{"field": "extraction", "severity": "error", "message": llm_result["_error"]}],
+                validation_issues=[{"field": "extraction", "severity": "error", "message": llm_result["_error"]}]
+                + _partial_read_issues(extraction_result),
             )
 
         # Normalize document type
@@ -208,8 +226,8 @@ async def _upload_and_extract_document(
         po_number = llm_result.get("po_number", "")
         po_exists = check_po_number_exists(po_number, db, company_id) if po_number else False
 
-        # Validate extracted data
-        validation_issues = validate_extracted_data(llm_result)
+        # Validate extracted data. Partial-read warnings lead: they qualify everything below them.
+        validation_issues = _partial_read_issues(extraction_result) + validate_extracted_data(llm_result)
 
         # Add PO exists warning
         if po_exists:
@@ -321,7 +339,7 @@ async def upload_and_extract_po(
 ):
     """
     Upload a purchase order PDF or Word document and extract data using AI.
-    Supports: .pdf, .doc, .docx
+    Supports: .pdf, .doc, .docx (10 MB maximum; larger files are refused with 413 before any work runs)
     Returns extracted data for user review before committing.
     """
     return await _upload_and_extract_document("po", file, db, current_user, company_id)
@@ -336,7 +354,7 @@ async def upload_and_extract_quote(
 ):
     """
     Upload a vendor quote PDF or Word document and extract data to create a PO.
-    Supports: .pdf, .doc, .docx
+    Supports: .pdf, .doc, .docx (10 MB maximum; larger files are refused with 413 before any work runs)
     """
     return await _upload_and_extract_document("quote", file, db, current_user, company_id)
 
@@ -349,7 +367,7 @@ async def upload_and_extract_invoice(
     company_id: int = Depends(get_current_company_id),
 ):
     """
-    Legacy endpoint. Uploads vendor quotes for PO creation.
+    Legacy endpoint. Uploads vendor quotes for PO creation (10 MB maximum; 413 over it).
     """
     return await _upload_and_extract_document("quote", file, db, current_user, company_id)
 

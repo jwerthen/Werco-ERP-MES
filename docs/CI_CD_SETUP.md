@@ -302,6 +302,15 @@ npm run audit:ci
    - Missing environment variables
    - In-memory SQLite fixture/bootstrap errors (the separate E2E workflow uses PostgreSQL)
    - Missing dependencies
+   - `tests/test_prompt_drift_guard.py` fails in one of two ways:
+     - a prompt, tool schema, request layout or default model changed without a version
+       bump, a prompt `CHANGELOG.md` line and an **appended** `prompt_lock.json` entry;
+     - an existing lock entry was edited.
+
+     The job checks out with `fetch-depth: 2` and exports `PROMPT_LOCK_BASE_REF=HEAD^1`, the
+     first parent of the tested commit (on a pull request, the base-branch commit the PR was
+     merged onto). If that ref does not resolve, the append-only check fails in CI rather
+     than skipping. See [DEVELOPMENT.md](DEVELOPMENT.md) → Testing → Prompt-drift guard.
 
 ### Pipeline Failed: Frontend Build
 

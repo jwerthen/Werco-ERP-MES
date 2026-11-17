@@ -1,7 +1,9 @@
 # Advisory stock-piece observations
 
-This is the first physical-stock foundation for quote nesting. It records what a
-person reports measuring, against an as-of inventory source snapshot. A record
+This register was built as the first physical-stock foundation for quote nesting.
+That consumer, the Material Nesting estimator and its `/quote-nesting/*` API, was retired
+in `3e17456e` (2026-09-16); the register and its `/inventory/stock-piece*` routes remain
+live. It records what a person reports measuring, against an as-of inventory source snapshot. A record
 does not establish available material, certification, ownership, a remnant price,
 or an exclusive allocation. The displayed status is **Recorded observation —
 availability and eligibility unverified.**

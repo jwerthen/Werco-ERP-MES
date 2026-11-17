@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, joinedload, with_loader_criteria
 
 from app.api.audit_guard import required_audit
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
+from app.core.upload_limits import ensure_upload_within_limit, read_upload_within_limit
 from app.db.database import get_db
 from app.db.locks import acquire_generator_lock
 from app.db.tenant_filter import tenant_query
@@ -38,10 +39,40 @@ from app.services.auto_evidence_service import (
     is_evaluation_failed,
 )
 from app.services.llm_client import LLMEgressDisabledError, LLMNotConfiguredError
-from app.services.qms_extraction_service import extract_clauses_with_llm
+from app.services.pdf_text_reader import MIB, PdfReadError, PdfReadLimits, read_pdf_pages
+from app.services.qms_extraction_service import QMS_DOCUMENT_TEXT_MAX_CHARS, extract_clauses_with_llm
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Text-layer read limits for an uploaded standard. Standards and quality manuals run to hundreds of
+# pages, so these are wider than pdf_service's. The prompt sends only the first
+# QMS_PROMPT_TEXT_CHARS characters (qms_extraction_service slices ``pdf_text`` with
+# QMS_DOCUMENT_TEXT_MAX_CHARS; QMS_PROMPT_TEXT_CHARS is that constant, so the two cannot drift) and
+# the model router only distinguishes input sizes up to 85,000, so the total-character cap can never
+# change what the AI sees or which model reads it.
+#
+# QMS_PDF_MAX_BYTES is both the upload cap for ``upload-pdf`` (413 over it, checked before the body
+# is read; see ``app.core.upload_limits``) and the reader's byte limit. Both read it at call time, so
+# this constant is the one tunable.
+QMS_PDF_MAX_BYTES = 20 * MIB  # 20MB
+QMS_PDF_MAX_PAGES = 2000
+QMS_PDF_MAX_PAGE_CHARS = 100_000
+QMS_PDF_MAX_TOTAL_CHARS = 2_000_000
+QMS_PDF_CPU_SECONDS = 60
+QMS_PDF_WALL_SECONDS = 90.0
+QMS_PROMPT_TEXT_CHARS = QMS_DOCUMENT_TEXT_MAX_CHARS
+
+
+def _qms_pdf_read_limits() -> PdfReadLimits:
+    return PdfReadLimits(
+        max_bytes=QMS_PDF_MAX_BYTES,
+        max_pages=QMS_PDF_MAX_PAGES,
+        max_page_chars=QMS_PDF_MAX_PAGE_CHARS,
+        max_total_chars=QMS_PDF_MAX_TOTAL_CHARS,
+        cpu_seconds=QMS_PDF_CPU_SECONDS,
+        wall_seconds=QMS_PDF_WALL_SECONDS,
+    )
 
 
 def _assert_company_document(db: Session, document_id: Optional[int], company_id: int) -> None:
@@ -157,7 +188,8 @@ async def upload_pdf_and_extract_clauses(
 ):
     """
     Upload a QMS standard PDF (quality manual, AS9100D, ISO 9001, etc.)
-    and automatically extract all clauses using AI.
+    and automatically extract all clauses using AI. PDFs over 20 MB are refused with 413
+    before any work runs.
     """
     standard = (
         db.query(QMSStandard)
@@ -175,26 +207,33 @@ async def upload_pdf_and_extract_clauses(
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
 
-    content = await file.read()
-    if len(content) > 20 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="File too large. Maximum 20MB.")
+    # Size first (413 without reading a byte when Starlette already counted too many), then a
+    # read bounded at QMS_PDF_MAX_BYTES + 1 -- the whole body is never buffered just to measure it.
+    ensure_upload_within_limit(file, QMS_PDF_MAX_BYTES)
+    content = await read_upload_within_limit(file, QMS_PDF_MAX_BYTES)
 
-    # Extract text from PDF
+    # Extract text from PDF, in the resource-limited reader process (same text as in-process pypdf).
     try:
-        import io
-
-        from pypdf import PdfReader
-
-        reader = PdfReader(io.BytesIO(content))
-        pages_text = []
-        for page in reader.pages:
-            text = page.extract_text()
-            if text:
-                pages_text.append(text)
-        pdf_text = "\n\n".join(pages_text)
-    except Exception as e:
+        read = read_pdf_pages(content, _qms_pdf_read_limits())
+    except PdfReadError as e:
         logger.error(f"PDF parsing failed: {e}")
-        raise HTTPException(status_code=400, detail=f"Failed to read PDF: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Failed to read PDF: {e}")
+    pages_text = [text for text in read.pages if text]
+    pdf_text = "\n\n".join(pages_text)
+    if read.warnings and len(pdf_text) < QMS_PROMPT_TEXT_CHARS:
+        # A partial read that already covers the prompt's whole text window changes nothing the
+        # AI sees. A shorter one would silently drop clauses, and this response has no place
+        # to say so, so refuse instead. A parser error means a damaged page, which splitting
+        # the file would not get past; a new copy of the PDF often does.
+        advice = (
+            " The PDF may be damaged. Save or export it again as a new PDF and upload that copy."
+            if read.stopped_on_error
+            else " Split it into smaller PDFs and upload each one."
+        )
+        raise HTTPException(
+            status_code=400,
+            detail="Only part of this PDF could be read: " + " ".join(read.warnings) + advice,
+        )
 
     if not pdf_text or len(pdf_text.strip()) < 50:
         raise HTTPException(
