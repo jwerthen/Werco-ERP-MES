@@ -49,7 +49,10 @@ pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 COMPANY_A = 1
 COMPANY_B = 2
 
-AUDIT_LOG_TITLE = "Audit Trail (Immutable Hash-Chain Log)"
+# The change-log row's current title (from the rule metadata), and the title links made before its
+# rename still carry: a link whose rule no longer matches is never refreshed, so it keeps the old one.
+AUDIT_LOG_TITLE = next(r["title"] for r in EVIDENCE_MAPPING_RULES if r["id"] == "audit")
+LEGACY_AUDIT_LOG_TITLE = "Audit Trail (Immutable Hash-Chain Log)"
 STALE_TIME = datetime(2026, 1, 5, 12, 0, 0)
 
 # Module-level counter so every fixture row gets a globally unique natural key, even across
@@ -145,7 +148,7 @@ def _make_evidence(
     auto_linked: bool = True,
     rule_id: Optional[str] = "audit",
     verified: bool = False,
-    title: str = AUDIT_LOG_TITLE,
+    title: str = LEGACY_AUDIT_LOG_TITLE,
     verification_notes: Optional[str] = None,
 ) -> QMSClauseEvidence:
     """An evidence row as an earlier auto-link run (or a person, when ``auto_linked`` is False)
@@ -241,7 +244,7 @@ def test_get_auto_evidence_internal_audit_clause_lists_not_tracked_row_only(clie
 
     rows = body["discovered_evidence"]
     assert [r["title"] for r in rows] == [INTERNAL_AUDIT_REVIEW_TITLE]
-    assert not any(r["title"] == AUDIT_LOG_TITLE for r in rows)
+    assert not any(r["title"] in (AUDIT_LOG_TITLE, LEGACY_AUDIT_LOG_TITLE) for r in rows)
 
     row = rows[0]
     assert row["suggested_compliance"] == "not_assessed"
@@ -372,7 +375,7 @@ def test_auto_link_keeps_verified_stale_link(client: TestClient, db_session: Ses
     row = _assert_live(db_session, verified_id)
     assert row.is_verified is True
     assert row.is_auto_linked is True
-    assert row.title == AUDIT_LOG_TITLE
+    assert row.title == LEGACY_AUDIT_LOG_TITLE
     assert row.live_count == 42  # not refreshed: its rule no longer matches the clause
 
     assert (
@@ -518,7 +521,7 @@ def test_auto_link_refreshes_change_log_link_on_audit_trail_clause(client: TestC
     assert body["compliance_summary"] == {"compliant": 1}
 
     row = _assert_live(db_session, stored_id)
-    assert row.title == AUDIT_LOG_TITLE
+    assert row.title == AUDIT_LOG_TITLE  # refreshed to the current title
     assert row.live_count >= 3
     assert row.last_refreshed > STALE_TIME
     assert db_session.query(QMSClauseEvidence).filter(QMSClauseEvidence.clause_id == clause_id).count() == 1

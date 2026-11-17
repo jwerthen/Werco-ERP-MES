@@ -55,7 +55,8 @@ COMPANY_A = 1
 
 IAR = "internal_audit_review"
 AUDIT = "audit"
-AUDIT_LOG_TITLE = "Audit Trail (Immutable Hash-Chain Log)"
+AUDIT_LOG_TITLE = next(r["title"] for r in EVIDENCE_MAPPING_RULES if r["id"] == "audit")
+LEGACY_AUDIT_LOG_TITLE = "Audit Trail (Immutable Hash-Chain Log)"
 
 # Module-level counter so every fixture row gets a globally unique natural key, even across
 # tests sharing a worker DB under -n auto.
@@ -345,7 +346,7 @@ def test_internal_audit_clause_rolls_up_not_assessed_despite_change_log(db_sessi
     results = discover_evidence_for_clause(db_session, clause, COMPANY_A)
 
     assert [r["_rule_id"] for r in results] == [IAR]
-    assert not any(r["title"] == AUDIT_LOG_TITLE for r in results)
+    assert not any(r["title"] in (AUDIT_LOG_TITLE, LEGACY_AUDIT_LOG_TITLE) for r in results)
     assert compute_overall_compliance(results) == "not_assessed"
 
 

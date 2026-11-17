@@ -33,6 +33,7 @@ from app.services.audit_service import AuditService
 from app.services.auto_evidence_service import (
     compute_overall_compliance,
     discover_evidence_for_clause,
+    is_evaluation_failed,
     is_not_tracked,
     matched_rule_ids,
 )
@@ -627,6 +628,12 @@ def get_clause_auto_evidence(
 ):
     """Discover live ERP/MES evidence for a single clause.
 
+    An evidence rule whose query fails is listed as a placeholder row (``health_status``
+    ``not_computed``, ``suggested_compliance`` ``not_assessed``, zero placeholder counts), so the
+    clause never rolls up ``compliant`` while part of its evidence could not be computed.
+    ``not_computed`` means nothing is known about that module from this call; ``no_data`` means
+    the query ran and found no records. Do not report a ``not_computed`` row's counts.
+
     A clause about internal audit or management review also lists a row titled
     "Internal Audit & Management Review (Not Assessed Automatically)": the ERP has no record of
     either, so that row suggests ``not_assessed`` and the clause never rolls up ``compliant``.
@@ -646,8 +653,9 @@ def get_clause_auto_evidence(
     results = discover_evidence_for_clause(db, clause, company_id)
     overall = compute_overall_compliance(results)
 
-    # Strip internal keys (_rule_id, _not_tracked) before returning. A not-tracked row is still
-    # listed: it is how the clause says the ERP holds no record of what it asks for.
+    # Strip internal keys (_rule_id, _evaluation_failed, _not_tracked) before returning. A rule
+    # whose query failed is still listed, as its not_computed / not_assessed placeholder row, and
+    # so is a not-tracked row: it is how the clause says auto-evidence cannot assess it.
     clean_results = [{k: v for k, v in r.items() if not k.startswith("_")} for r in results]
 
     return ClauseAutoEvidenceResponse(
@@ -670,8 +678,16 @@ def auto_link_standard(
     Run auto-discovery for ALL clauses in a standard and persist evidence links.
     Creates or updates QMSClauseEvidence records with is_auto_linked=True.
 
-    A not-tracked row (a clause about internal audit or management review, which the ERP does
-    not record) is counted in ``compliance_summary`` but is not evidence: it persists nothing
+    A rule whose query failed this run is counted in ``compliance_summary`` (its clause
+    rolls up ``not_assessed`` unless a computed row is ``non_compliant`` / ``partial``) and in
+    ``total_evidence_failed``, but persists nothing: its stored evidence keeps the counts and
+    ``last_refreshed`` of the last run that computed them, rather than being overwritten by a
+    transient failure. It does not make its clause count as a clause with evidence. The audit
+    row names every skipped (clause, rule) in ``extra_data.evidence_not_computed``, since the
+    stale ``last_refreshed`` on those rows is otherwise unexplained.
+
+    A not-tracked row (a clause about internal audit or management review, which auto-evidence
+    cannot assess) is counted in ``compliance_summary`` but is not evidence: it persists nothing
     and does not make its clause count as a clause with evidence.
 
     Auto-linked evidence whose rule no longer matches its clause is retired (soft-deleted, one
@@ -706,6 +722,7 @@ def auto_link_standard(
     now = datetime.utcnow()
     total_created = 0
     total_updated = 0
+    not_computed: List[dict] = []
     clauses_with_evidence = 0
     compliance_counts = {}
     retired: List[Dict[str, Any]] = []
@@ -713,13 +730,21 @@ def auto_link_standard(
 
     for clause in clauses:
         results = discover_evidence_for_clause(db, clause, company_id)
-        # A not-tracked row reports that the ERP holds no record of what the clause asks for.
-        # It rolls up (below) but is not evidence, so it is neither persisted nor counted.
-        evidence_rows = [r for r in results if not is_not_tracked(r)]
+        computed = [r for r in results if not is_evaluation_failed(r)]
+        not_computed.extend(
+            {"clause_id": clause.id, "clause_number": clause.clause_number, "rule_id": r["_rule_id"]}
+            for r in results
+            if is_evaluation_failed(r)
+        )
+        # A not-tracked row reports that auto-evidence cannot assess the clause. It rolls up
+        # (below) but is not evidence, so it is neither persisted nor counted.
+        evidence_rows = [r for r in computed if not is_not_tracked(r)]
 
         if evidence_rows:
             clauses_with_evidence += 1
 
+        # The roll-up sees the failed rules' placeholder rows, so a clause whose rule failed
+        # is summarized not_assessed (or worse), never compliant from its other rows.
         overall = compute_overall_compliance(results)
         compliance_counts[overall] = compliance_counts.get(overall, 0) + 1
 
@@ -727,6 +752,8 @@ def auto_link_standard(
         retired.extend(clause_retired)
         kept_reviewed.extend(clause_kept)
 
+        # Persistence sees only computed evidence rows: a transient failure must not overwrite the
+        # stored counts of the last run that could compute them, and a not-tracked row is not evidence.
         for result in evidence_rows:
             rule_id = result.get("_rule_id", result.get("evidence_type", "unknown"))
 
@@ -772,6 +799,8 @@ def auto_link_standard(
 
     db.flush()  # assign any new evidence PKs without committing
 
+    total_failed = len(not_computed)
+
     # Audit rows are written only now, after every evidence write has been flushed, so this run
     # takes its evidence row locks before the global audit-chain lock (the codebase's order).
     #
@@ -798,6 +827,8 @@ def auto_link_standard(
             )
 
     summary_extra: Dict[str, Any] = {}
+    if not_computed:
+        summary_extra["evidence_not_computed"] = not_computed
     if retired:
         summary_extra["evidence_retired"] = [_retirement_ref(entry) for entry in retired]
     if kept_reviewed:
@@ -808,6 +839,7 @@ def auto_link_standard(
         standard.name,
         description=(
             f"Auto-linked evidence: {total_created} created, {total_updated} updated"
+            + (f", {total_failed} not computed (left unchanged)" if total_failed else "")
             + (f", {len(retired)} retired (rule no longer matches)" if retired else "")
             + (f", {len(kept_reviewed)} stale but kept because a person reviewed them" if kept_reviewed else "")
         ),
@@ -819,7 +851,8 @@ def auto_link_standard(
     logger.info(
         f"Auto-link for standard {standard.name}: "
         f"{total_created} created, {total_updated} updated, {len(retired)} retired, "
-        f"{clauses_with_evidence}/{len(clauses)} clauses with evidence"
+        f"{clauses_with_evidence}/{len(clauses)} clauses with evidence, "
+        f"{total_failed} evidence rules not computed"
     )
 
     return AutoLinkSummary(
@@ -830,6 +863,7 @@ def auto_link_standard(
         clauses_without_evidence=len(clauses) - clauses_with_evidence,
         total_evidence_created=total_created,
         total_evidence_updated=total_updated,
+        total_evidence_failed=total_failed,
         total_evidence_retired=len(retired),
         evidence_kept_reviewed=[AutoLinkKeptEvidence(**entry) for entry in kept_reviewed],
         compliance_summary=compliance_counts,

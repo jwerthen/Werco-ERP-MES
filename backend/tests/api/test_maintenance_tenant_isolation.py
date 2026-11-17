@@ -73,6 +73,7 @@ from app.models.maintenance import (
 )
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
+from app.services.company_time import company_today
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 
@@ -193,8 +194,8 @@ def make_wo(db: Session, *, company_id: int, work_center_id: int = None, **overr
         "priority": MaintenancePriority.MEDIUM,
         "status": MaintenanceStatus.SCHEDULED,
         "title": f"Isolation maintenance {n}",
-        "scheduled_date": date.today(),
-        "due_date": date.today(),
+        "scheduled_date": company_today(db, company_id),
+        "due_date": company_today(db, company_id),
         "requires_shutdown": False,
         "downtime_minutes": 0,
         "labor_cost": 0,
@@ -480,9 +481,9 @@ def test_complete_still_advances_the_callers_own_schedule(client: TestClient, db
     )
 
     assert response.status_code == status.HTTP_200_OK, response.text
-    # The handler stamps ``datetime.utcnow().date()``; the shop is Central, so a local
-    # ``date.today()`` here is off by one for part of every day.
-    completion_day = datetime.utcnow().date()
+    # The handler stamps the COMPANY's calendar day (Central), not the server's UTC day, so a
+    # UTC ``datetime.utcnow().date()`` here would be off by one from 6 PM Central to midnight.
+    completion_day = company_today(db_session, COMPANY_B)
     stored = fresh(db_session, MaintenanceSchedule, own_schedule.id)
     assert stored.last_completed_date == completion_day
     assert stored.next_due_date == completion_day + timedelta(days=30)
@@ -629,8 +630,8 @@ def test_overdue_does_not_read_or_rewrite_another_tenants_rows(client: TestClien
         company_id=COMPANY_B,
         work_center_id=wc_b.id,
         status=MaintenanceStatus.SCHEDULED,
-        scheduled_date=date.today() - timedelta(days=10),
-        due_date=date.today() - timedelta(days=5),
+        scheduled_date=company_today(db_session, COMPANY_B) - timedelta(days=10),
+        due_date=company_today(db_session, COMPANY_B) - timedelta(days=5),
     )
     before = snapshot(db_session, MaintenanceWorkOrder, victim.id)
 
@@ -653,8 +654,8 @@ def test_overdue_derives_the_label_without_persisting_it(client: TestClient, db_
         db_session,
         company_id=COMPANY_B,
         status=MaintenanceStatus.SCHEDULED,
-        scheduled_date=date.today() - timedelta(days=10),
-        due_date=date.today() - timedelta(days=5),
+        scheduled_date=company_today(db_session, COMPANY_B) - timedelta(days=10),
+        due_date=company_today(db_session, COMPANY_B) - timedelta(days=5),
     )
 
     response = client.get(f"{WORK_ORDERS_URL}/overdue", headers=headers_for(user_b))
@@ -681,8 +682,8 @@ def test_list_work_orders_is_a_pure_read_too(client: TestClient, db_session: Ses
         db_session,
         company_id=COMPANY_B,
         status=MaintenanceStatus.SCHEDULED,
-        scheduled_date=date.today() - timedelta(days=10),
-        due_date=date.today() - timedelta(days=5),
+        scheduled_date=company_today(db_session, COMPANY_B) - timedelta(days=10),
+        due_date=company_today(db_session, COMPANY_B) - timedelta(days=5),
     )
 
     response = client.get(WORK_ORDERS_URL, headers=headers_for(user_b))
@@ -707,8 +708,8 @@ def test_overdue_evidence_no_longer_depends_on_a_page_load(db_session: Session):
         db_session,
         company_id=COMPANY_B,
         status=MaintenanceStatus.SCHEDULED,
-        scheduled_date=date.today() - timedelta(days=10),
-        due_date=date.today() - timedelta(days=5),
+        scheduled_date=company_today(db_session, COMPANY_B) - timedelta(days=10),
+        due_date=company_today(db_session, COMPANY_B) - timedelta(days=5),
     )
 
     evidence = _query_maintenance(db_session, COMPANY_B)
@@ -739,7 +740,7 @@ def test_dashboard_counts_only_the_callers_own_work_orders(client: TestClient, d
         status=MaintenanceStatus.COMPLETED,
         maintenance_type=MaintenanceType.EMERGENCY,
         completed_at=datetime.utcnow(),
-        scheduled_date=date.today(),
+        scheduled_date=company_today(db_session, COMPANY_A),
         actual_duration_hours=6.0,
         downtime_minutes=360.0,
         total_cost=48000.0,
@@ -763,8 +764,8 @@ def test_dashboard_counts_only_the_callers_own_work_orders(client: TestClient, d
         work_center_id=wc_a.id,
         title=FOREIGN_WO_TITLE,
         status=MaintenanceStatus.SCHEDULED,
-        scheduled_date=date.today() - timedelta(days=3),
-        due_date=date.today() - timedelta(days=2),
+        scheduled_date=company_today(db_session, COMPANY_A) - timedelta(days=3),
+        due_date=company_today(db_session, COMPANY_A) - timedelta(days=2),
     )
     make_wo(
         db_session,
@@ -772,8 +773,8 @@ def test_dashboard_counts_only_the_callers_own_work_orders(client: TestClient, d
         work_center_id=wc_a.id,
         title=FOREIGN_WO_TITLE,
         status=MaintenanceStatus.SCHEDULED,
-        scheduled_date=date.today(),
-        due_date=date.today() + timedelta(days=2),
+        scheduled_date=company_today(db_session, COMPANY_A),
+        due_date=company_today(db_session, COMPANY_A) + timedelta(days=2),
     )
 
     seen_by_b = client.get("/api/v1/maintenance/dashboard", headers=headers_for(user_b))
@@ -833,8 +834,8 @@ def test_calendar_returns_only_the_callers_own_work_orders(client: TestClient, d
         "/api/v1/maintenance/calendar",
         headers=headers_for(user_b),
         params={
-            "start_date": (date.today() - timedelta(days=30)).isoformat(),
-            "end_date": (date.today() + timedelta(days=30)).isoformat(),
+            "start_date": (company_today(db_session, COMPANY_B) - timedelta(days=30)).isoformat(),
+            "end_date": (company_today(db_session, COMPANY_B) + timedelta(days=30)).isoformat(),
         },
     )
 
@@ -868,8 +869,8 @@ def test_calendar_refuses_an_unbounded_window(client: TestClient, db_session: Se
         "/api/v1/maintenance/calendar",
         headers=headers_for(user_b),
         params={
-            "start_date": (date.today() - timedelta(days=366)).isoformat(),
-            "end_date": date.today().isoformat(),
+            "start_date": (company_today(db_session, COMPANY_B) - timedelta(days=366)).isoformat(),
+            "end_date": company_today(db_session, COMPANY_B).isoformat(),
         },
     )
     assert at_the_cap.status_code == status.HTTP_200_OK, at_the_cap.text
@@ -1049,14 +1050,14 @@ def test_dashboard_completion_rate_only_counts_the_callers_own_denominator(clien
             work_center_id=wc_a.id,
             title=FOREIGN_WO_TITLE,
             status=MaintenanceStatus.SCHEDULED,
-            scheduled_date=date.today(),
+            scheduled_date=company_today(db_session, COMPANY_A),
         )
     make_wo(
         db_session,
         company_id=COMPANY_B,
         status=MaintenanceStatus.COMPLETED,
         completed_at=datetime.utcnow(),
-        scheduled_date=date.today(),
+        scheduled_date=company_today(db_session, COMPANY_B),
     )
 
     response = client.get("/api/v1/maintenance/dashboard", headers=headers_for(user_b))

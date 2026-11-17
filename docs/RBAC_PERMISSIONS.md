@@ -140,7 +140,9 @@ owner ruling 3 only a person signed in to the app runs an AI recommendation's ac
 `catalog.EXCLUDED_OPERATIONS`, and the route refuses API tokens besides. The three Approved Supplier
 List writes (recording a supplier-approval decision and the ASL import preview / commit) and the two
 legacy `approved_supplier_list` writes are excluded the same way, and refuse API tokens too — see
-[Purchasing](#purchasing). An agent on an API token
+[Purchasing](#purchasing). Bulk release (`POST /work-orders/bulk-release`) is excluded as well, so an
+agent releases one job per call; unlike those, the route itself has no API-token refusal — see
+[Work Orders](#work-orders). An agent on an API token
 also gets a 403 the same person would not get in the UI when it tries to mark an AI action card
 handled — see [Credential policy for judgment writes](#credential-policy-for-judgment-writes)
 and [AI recommendations (Action Inbox)](#ai-recommendations-action-inbox).
@@ -157,7 +159,7 @@ AI-external token bound to a **Viewer** user.
 ### Credential policy for judgment writes
 
 A few writes record a **person's judgment** — not just a permitted action — and some of them are
-restricted to certain *credentials*, on top of the role gate. The restrictions have seven sources,
+restricted to certain *credentials*, on top of the role gate. The restrictions have eight sources,
 and each row below names its own: owner ruling 3 of 2026-11-05 (the two AI rows), the owner's
 decision of 2026-11-07 (a standing API token may not declare scrap or close work short), this
 PR's extensions of that decision (scrap reasons, the re-stamp short close and the other count
@@ -166,7 +168,9 @@ export-controlled), the lead's design decision of 2026-11-13 for the two quality
 Quality Manager approval, FAI customer approval) and its review follow-ups (the FAI final
 disposition and the CAR form's vendor / customer sign-off boxes), and the lead's decisions of
 2026-11-15 (an egress kill switch is a person's judgment; a narrowed token's read writes nothing),
-and the Approved Supplier List change of 2026-11-13 (the supplier-approval rows).
+the Approved Supplier List change of 2026-11-13 (the supplier-approval rows), and the owner's
+decision of 2026-11-17 (a standing API token may not complete a maintenance work order with checklist
+items unticked).
 This section is the **one list** of those credential rules — what refuses a credential,
 what is deliberately left open (and who decided each), and what is deliberately not refused —
 across the AI governance (ruling 3), floor-gates (ruling 2) and short-count (ruling 1) changes;
@@ -190,7 +194,8 @@ Writes that apply them — each refused before any write and before any audit ro
 live in `ai_action_applier.py` and `operation_action_gates.py`, for the quality judgments in
 `quality_record_service.py` and `fai_service.py`, for export control
 `app/api/endpoints/customers.py`, for the egress switches `app/core/credentials.py`, and for the supplier-approval rows
-`app/services/supplier_approval_service.py` and `app/api/endpoints/purchasing.py`; where each sits in its route's
+`app/services/supplier_approval_service.py` and `app/api/endpoints/purchasing.py`, for the maintenance
+checklist `app/services/maintenance_checklist.py`; where each sits in its route's
 check order is in `docs/API.md` → Work Orders → "Short count at completion" and → AI
 Recommendations):
 
@@ -212,6 +217,9 @@ Recommendations):
 | **Recording a supplier-approval decision or loading the Approved Supplier List** — `PUT /purchasing/vendors/{id}/approval`, `POST /purchasing/vendors/asl-import/preview` and `POST /purchasing/vendors/asl-import/commit` (the preview too: it exists only to feed a commit) | `is_api_token_credential` | **403** (`Supplier approval is a person's decision: an API token cannot change the Approved Supplier List. Sign in to the app to do this.`); also not MCP tools (`catalog.EXCLUDED_OPERATIONS`) | Design decision of the Approved Supplier List change (2026-11-13): a supplier approval on the AS9100D 8.4 list is a named person's judgment. Not an owner ruling |
 | **Writing the legacy `approved_supplier_list` table** — `POST /supplier-scorecards/approved-suppliers/` and `PUT /supplier-scorecards/approved-suppliers/{asl_id}` (read-only history since migration 123) | `is_api_token_credential` | **403**, the same text; also not MCP tools (`catalog.EXCLUDED_OPERATIONS`) | Review follow-up of the same change: an agent's "approved" entry there would contradict the vendor's own ASL status. People's use of the two routes is unchanged |
 | **Granting vendor approval by the checkbox** — `POST /purchasing/vendors` with `is_approved: true`, `PUT /purchasing/vendors/{id}` raising `is_approved` from `false` to `true`, and `POST /purchasing/vendors/import-csv` when any row asks for `is_approved` (refused before any row is written, dry run included). A token may still create and edit vendors, re-send `true` on an approved one, and withdraw approval | `is_api_token_credential` | **403** (`Approving a supplier is a person's decision: an API token cannot mark a vendor approved. Sign in to the app to do this.`) | Review follow-up of the same change: the checkbox is the approval that puts a vendor not on the ASL into the Create PO picker. Not an owner ruling |
+| **Completing a maintenance work order with checklist items unticked** — `POST /maintenance/work-orders/{id}/complete` when any checklist item the work order carries (or the body sends) is left unticked, whatever `incomplete_checklist_reason` it sends. Refused before the reason check and before any write. A token's completion with every item ticked (or no checklist) is unchanged, and so is a person's completion with a reason | `is_api_token_credential`, inline in `complete_work_order` | **403** `API_TOKEN_INCOMPLETE_CHECKLIST` (`Completing a maintenance work order with checklist items unticked must be done by a person signed in to the app, not an API token.`; text in `app/services/maintenance_checklist.py`) | Owner decision 2026-11-17, under the 2026-11-07 principle: why a PM step was skipped is a person's judgment, and a completion resets the machine's PM clock for a full interval |
+| **Taking items off a maintenance work order's checklist** — `PUT /maintenance/work-orders/{id}` whose `checklist_results` drops, renames or clears an item the work order carries (ticking, unticking or adding is unchanged). Refused before the first write | `is_api_token_credential`, through `maintenance_checklist.removed_checklist_items` | **403** `API_TOKEN_CHECKLIST_REMOVAL` (`Removing items from a maintenance work order's checklist must be done by a person signed in to the app, not an API token.`) | **This PR's extension** of the owner's 2026-11-17 decision: without it a token reaches the refused completion in two steps (PUT the unticked items away, then complete) |
+| **Taking items off a PM schedule's checklist while it has an open work order** — `PUT /maintenance/schedules/{id}` whose `checklist` drops, renames or clears a step while a scheduled / overdue / in-progress / on-hold work order carries the schedule's id (completion judges the schedule's steps too). Adding steps, and editing a schedule with no open work order, are unchanged | `is_api_token_credential`, inline in `update_schedule` | **403** `API_TOKEN_SCHEDULE_CHECKLIST_REMOVAL` (`Removing items from the checklist of a PM schedule that has an open work order must be done by a person signed in to the app, not an API token.`) | **This PR's extension**, for the same reason: the third route to the same skip |
 
 Deliberately **not** refused:
 
@@ -254,6 +262,7 @@ route's own fences still do):
 | Write | Open to | Decision |
 |---|---|---|
 | **Resume Work Order** — `POST /work-orders/{id}/resume` (lifts a work-order hold) | Any credential of a user holding Admin / Manager / Supervisor, a standing **API token** included (the MCP tool `work_orders_resume_work_order`); kiosk badge and station tokens are refused by their path fence, as on every `/work-orders` route. Each call's required audit rows are written as the token's user with `extra_data.credential` | Owner decision 2026-11-07: an agent may lift a work-order hold |
+| **Release** — `POST /work-orders/{id}/release` and `POST /work-orders/bulk-release` (puts DRAFT work on the floor) | Any credential of a user holding Admin / Manager / Supervisor, a standing **API token** included; read-only and AI-external tokens are refused by the global gates, kiosk badge and station tokens by their path fence. Each release's audit row carries `extra_data.credential` | Existing behavior, not an owner ruling: the MCP tool `release_work_order` is an agent's release door, one job per call; bulk release is kept off the MCP catalog only. Whether a standing token should bulk-release is an open owner question |
 | **Dismiss**, snooze and feedback on a recommendation, action cards included | Every authenticated user and every credential | A design decision of the AI governance change; for Dismiss on an action card, confirmed by the owner 2026-11-07 (it does not take the Mark handled gate) — see [AI recommendations (Action Inbox)](#ai-recommendations-action-inbox) |
 
 ## Permission Matrix
@@ -283,6 +292,7 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 | View deleted work orders (the restore view) | ✓ | ✓ | | | | | |
 | Restore a deleted work order | ✓ | ✓ | | | | | |
 | Release | ✓ | ✓ | ✓ | | | | |
+| Release several drafts at once (`POST /work-orders/bulk-release`, 1–50 per call) | ✓ | ✓ | ✓ | | | | |
 | Start work order (released only) | ✓ | ✓ | ✓ | | | | |
 | Hold work order (`PUT` `status: on_hold`; released / in-progress only) | ✓ | ✓ | ✓ | | | | |
 | Resume work order (lift a work-order hold) | ✓ | ✓ | ✓ | | | | |
@@ -423,6 +433,33 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > can still diverge at runtime, and the server stays authoritative (a mismatch surfaces as the
 > verbatim 403). Superuser and Platform Admin pass through `require_role` as everywhere else. See
 > `docs/API.md` → Work Orders → "Draft and on-hold work orders refuse every start".
+
+> **Release — one work order or several, and the Work Orders list (endpoint mapping).**
+> `POST /api/v1/work-orders/{id}/release` and `POST /api/v1/work-orders/bulk-release` are both
+> `require_role([ADMIN, MANAGER, SUPERVISOR])` (`require_role` itself admits superuser and Platform
+> Admin), so the **Release** row and the bulk row above are one gate. Bulk release grants nothing the
+> single route did not: each id is judged and released exactly as the single route would (DRAFT and at
+> least one operation — there is no material or blocker gate), scoped to the active company (another
+> company's id is the same `Work order not found` result as a deleted or absent one, with no number),
+> and each released work order gets its own audit row attributed to the caller. No role gained or lost
+> a capability: the bulk route does nothing a run of single releases by the same user could not.
+>
+> **The Work Orders list and the Work Order detail page now hide Release from roles that cannot
+> release.** The list's row **Release** button (desktop table and mobile cards), the bulk-release
+> checkboxes and the detail page's **Release** button render only for a user whose role holds
+> `work_orders:release` (Admin, Manager, Supervisor, Platform Admin) or a superuser — the set the
+> endpoints admit — through one shared check, `userCanReleaseWorkOrders` in
+> `frontend/src/utils/permissions.ts`. Before this, both buttons rendered for **every** role, and an
+> Operator, Quality, Shipping or Viewer user who clicked one got the 403. Checkboxes appear on
+> **draft** rows only, on the desktop table only (none on the mobile card list), and select-all covers
+> the drafts loaded on the current page. As above, `customPermissions` can still diverge at runtime
+> and the server stays authoritative.
+>
+> **Not an MCP tool.** Bulk release is in `catalog.EXCLUDED_OPERATIONS`, so an agent releases one job
+> per call through `release_work_order`. That is an exclusion from the agent catalog, not a credential
+> refusal: the route has no API-token refusal of its own, so a full API token whose user holds one of the three roles
+> can call it directly on `/api/v1`, as it can the single release (a read-only token is refused as for
+> every write). See `docs/API.md` → Work Orders → "Releasing several work orders at once".
 
 > **The shop-floor verbs stay open to operators (clock-in to any authenticated user; the start verb
 > to the floor roles since P0.4), but now refuse draft and on-hold work orders.**
@@ -1261,11 +1298,13 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > page for its intended audience.
 >
 > **The client now matches the server gate.** `Maintenance.tsx` shows the planning controls (New
-> Schedule, New Work Order, Import PM Schedules, the Assets tab's add / edit / retire / reactivate)
-> only to `canPlanMaintenance` (Admin / Manager / Supervisor, or a superuser) and Start / Complete
-> only to `canPerformMaintenance` (those plus Operator) — `frontend/src/utils/maintenance.ts`; every
-> other role gets the read-only page. Neither helper names Platform Admin, so a platform admin who is
-> not a superuser sees the read-only page although the server would accept the write.
+> Schedule, New Work Order, Import PM Schedules, a schedule's **Start PM** — which creates a
+> maintenance WO — **Edit** and Deactivate, the Assets tab's add / edit / retire / reactivate) only
+> to `canPlanMaintenance` (Admin / Manager / Supervisor / Platform Admin, or a superuser) and a
+> work order's Start / Complete only to `canPerformMaintenance` (those plus Operator) —
+> `frontend/src/utils/maintenance.ts`; every other role gets the read-only page. Completing a WO that
+> carries a `schedule_id` advances that schedule's next due date under the performing gate (audited
+> as a `maintenance_schedule` UPDATE) — the only way an Operator moves a schedule.
 >
 > **Assets and the PM import follow the planning tier.** Equipment-asset writes and both PM import
 > routes are `_PLANNING_ROLES` (Admin / Manager / Supervisor), like schedules; asset reads are open to
@@ -1285,6 +1324,18 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > Cancel to Admin / Manager / Supervisor / Platform Admin); that `PUT` refuses `in_progress` and
 > `completed` (**409**, the Start / Complete verbs own them), un-starting a started WO, and changing
 > `requires_shutdown` once started.
+>
+> **Two state refusals on the same gates (2026-11-17; no role changed).** Creating a maintenance WO
+> with a `schedule_id` that already has an open one (scheduled, overdue, in progress or on hold) is
+> **409** naming it, for every role — one open work order per PM schedule. Completing a WO with any
+> checklist item unticked needs a written `incomplete_checklist_reason` (**409** without one, nothing
+> saved; owner decision 2026-11-17); with one, the completion's `STATUS_CHANGE` audit row records the
+> unticked items and the reason and is **required** evidence (**503**, nothing saved, if it cannot be
+> written). It is a reason on the record, not an approval, so the performing gate is unchanged: an
+> Operator who may complete the WO may record it. A standing API token may not: with any item
+> unticked its completion is **403** `API_TOKEN_INCOMPLETE_CHECKLIST` whatever reason it sends (owner
+> decision 2026-11-17) — see [Credential policy for judgment writes](#credential-policy-for-judgment-writes). Details in
+> `docs/API.md` → Maintenance → *The PM loop*.
 
 > **Tenancy: ten of the sixteen handlers took no company argument.** `start` and `complete`
 > resolved the work order by bare id, and `dashboard` / `calendar` / `history` / `overdue`

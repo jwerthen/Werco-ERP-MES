@@ -65,6 +65,9 @@ from app.schemas.work_order import (
     LaserNestManualResponse,
     LaserNestPreviewRow,
     WorkOrderBrowseResponse,
+    WorkOrderBulkReleaseRequest,
+    WorkOrderBulkReleaseResponse,
+    WorkOrderBulkReleaseResult,
     WorkOrderCreate,
     WorkOrderDuplicateRequest,
     WorkOrderDuplicateResponse,
@@ -78,11 +81,10 @@ from app.schemas.work_order import (
     WorkOrderUpdate,
 )
 from app.schemas.work_order_timeline import TimelineCategory, WorkOrderTimelineResponse
-from app.services import dispatch_service, process_sheet_service
+from app.services import dispatch_service, process_sheet_service, work_order_release_service
 from app.services.audit_service import AuditService, AuditWriteError
 from app.services.completion_cost_service import (
     apply_completion_cost_rollup,
-    compute_and_store_estimated_cost,
     rollup_labor_hours_for_closed_entries,
     rollup_labor_hours_from_evidence,
 )
@@ -97,6 +99,7 @@ from app.services.completion_quality_service import (
 from app.services.completion_signal_service import (
     emit_operation_completed_event,
     emit_work_order_completed_event,
+    emit_work_order_lifecycle_event,
     enqueue_work_order_completion_signals,
     record_parent_children_complete,
 )
@@ -241,7 +244,6 @@ from app.services.work_order_state_service import (
     reconcile_work_orders_from_completion_evidence,
     record_short_declaration,
     recorded_good_from_evidence,
-    release_first_ready_operation,
     report_reconcile_leg_failure,
     rescale_restated_operation_targets,
     resolve_absolute_operation_quantity,
@@ -682,38 +684,10 @@ class LaserNestPreviewResponse(BaseModel):
     )
 
 
-def _emit_work_order_event(
-    db: Session,
-    *,
-    company_id: int,
-    current_user: User,
-    work_order: WorkOrder,
-    event_type: str,
-    severity: str = "info",
-    payload: Optional[dict] = None,
-) -> None:
-    """Emit a WO-lifecycle OperationalEvent (released/started/completed/...).
-
-    BEST-EFFORT: these events are telemetry attached to the status change, not the
-    status change itself -- an event-store failure must never fail the release/
-    start/complete that triggered it, so this routes through ``emit_best_effort``
-    (which logs the failure with event type / WO id / company id and continues).
-    """
-    OperationalEventService(db).emit_best_effort(
-        company_id=company_id,
-        event_type=event_type,
-        source_module="work_orders",
-        entity_type="work_order",
-        entity_id=work_order.id,
-        work_order_id=work_order.id,
-        user_id=current_user.id,
-        severity=severity,
-        event_payload={
-            "work_order_number": work_order.work_order_number,
-            "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
-            **(payload or {}),
-        },
-    )
+# The WO-lifecycle event emitter (released/started/completed/...) lives in the side-effects
+# module so the release service can call it without importing this router; kept under its
+# historical name here so the call sites below are unchanged.
+_emit_work_order_event = emit_work_order_lifecycle_event
 
 
 def _assert_work_center_in_company(db: Session, work_center_id: int, company_id: int) -> None:
@@ -5125,66 +5099,14 @@ def release_work_order(
     company_id: int = Depends(get_current_company_id),
 ):
     """Release a work order to production"""
-    work_order = (
-        db.query(WorkOrder)
-        .options(joinedload(WorkOrder.part))
-        .filter(
-            WorkOrder.id == work_order_id,
-            WorkOrder.company_id == company_id,
-            # Invariant 3: a soft-deleted work order is gone -- releasing one would put
-            # a tombstone's operations on the floor's board.
-            WorkOrder.is_deleted == False,  # noqa: E712
-        )
-        .first()
-    )
-    if not work_order:
-        raise HTTPException(status_code=404, detail="Work order not found")
-
-    if work_order.status != WorkOrderStatus.DRAFT:
-        raise HTTPException(status_code=400, detail="Only draft work orders can be released")
-
-    # Verify has at least one operation
-    if not work_order.operations:
-        raise HTTPException(status_code=400, detail="Work order must have at least one operation")
-
-    old_status = work_order.status.value
-    work_order.status = WorkOrderStatus.RELEASED
-    work_order.released_by = current_user.id
-    work_order.released_at = datetime.utcnow()
-
-    # COST-1/COST-5 (Batch 7): when the labor-cost rollup is enabled, populate
-    # estimated_cost at release from routing standard hours x shared WC rate + BOM
-    # material (best-effort). Gated behind the same OPT-IN flag so a flag-OFF shop sees
-    # the pre-Batch-7 behavior (estimated_cost stays at its default). Best-effort: an
-    # estimate failure must never block a release.
-    if is_labor_cost_rollup_enabled(company_id):
-        try:
-            compute_and_store_estimated_cost(db, work_order, company_id)
-        except Exception:  # pragma: no cover - an estimate must never fail a release
-            logger.exception("estimated_cost compute failed on release of WO %s", work_order.id)
-
-    # Lean Phase 1: pass db/user so the PENDING->READY flip emits operation_ready.
-    release_first_ready_operation(work_order, db=db, user_id=current_user.id)
-    _emit_work_order_event(
+    # Resolve (404), judge (400: not DRAFT / no operation), release, emit, flush and audit:
+    # the one release implementation, shared with POST /work-orders/bulk-release.
+    work_order = work_order_release_service.release_work_order(
         db,
+        work_order_id=work_order_id,
         company_id=company_id,
         current_user=current_user,
-        work_order=work_order,
-        event_type="work_order_released",
-        payload={"old_status": old_status, "new_status": WorkOrderStatus.RELEASED.value},
-    )
-
-    # Audit log for status change. Logged BEFORE the terminal commit so the audit row
-    # commits atomically with the status change — AuditService.log() only flushes and the
-    # request session never commits on teardown.
-    db.flush()
-    audit = AuditService(db, current_user, request)
-    audit.log_status_change(
-        resource_type="work_order",
-        resource_id=work_order.id,
-        resource_identifier=work_order.work_order_number,
-        old_status=old_status,
-        new_status="released",
+        request=request,
     )
 
     db.commit()
@@ -5224,6 +5146,97 @@ def release_work_order(
             company_id=company_id,
         )
     return work_order
+
+
+@router.post("/bulk-release", response_model=WorkOrderBulkReleaseResponse)
+def bulk_release_work_orders(
+    payload: WorkOrderBulkReleaseRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+) -> WorkOrderBulkReleaseResponse:
+    """Release several DRAFT work orders to production at once (Admin/Manager/Supervisor).
+
+    Takes 1-50 work order ids (duplicates ignored after the first) and releases each one
+    exactly as ``POST /work-orders/{id}/release`` would -- same rule, same refusal texts,
+    same audit row and ``work_order_released`` event per work order -- in ONE transaction,
+    each item in its own savepoint. Answers **200** with one result per distinct id,
+    in request order: ``released``, or ``error`` with the reason ("Only draft work orders can
+    be released", "Work order must have at least one operation", "Work order not found" for
+    an id that is another company's, deleted or absent). One item's failure never undoes
+    another's release; a failure after the per-item phase (the audit rows or the commit) fails
+    the whole request (409 on a lost lock race) and saves nothing. Scheduling runs once over
+    every released job after the commit.
+    """
+    outcome = work_order_release_service.bulk_release_work_orders(
+        db,
+        work_order_ids=payload.work_order_ids,
+        company_id=company_id,
+        current_user=current_user,
+        request=request,
+    )
+
+    # One commit: every released work order, its operations, its events and its audit row.
+    db.commit()
+
+    released_ids = outcome.released_work_order_ids
+    if released_ids:
+        # One scheduling run over the union, tenant-scoped (with no company and no work
+        # centers the service would initialize every tenant's work centers). The releases are
+        # already committed, so a scheduling failure is reported, not raised: answering 500 here
+        # would tell the client nothing was released when every success above is durable.
+        try:
+            SchedulingService(db, company_id).run_scheduling(
+                work_center_ids=outcome.work_center_ids or None,
+                horizon_days=90,
+                optimize_setup=False,
+                work_order_ids=released_ids,
+            )
+        except Exception as exc:
+            db.rollback()
+            report_absorbed_exception(
+                logger,
+                "Bulk release: post-commit scheduling run failed; the releases are committed",
+                exc,
+                context={"company_id": company_id, "released_work_order_ids": released_ids},
+            )
+
+        # Deliberately no is_deleted filter (invariant 3 exception): these are the ids this
+        # request just released and committed live; the read only feeds same-tenant broadcasts.
+        current_statuses = dict(
+            tenant_filter(db.query(WorkOrder.id, WorkOrder.status), WorkOrder, company_id)
+            .filter(WorkOrder.id.in_(released_ids))
+            .all()
+        )
+        for released_id in released_ids:
+            current_status = current_statuses.get(released_id)
+            status_value = current_status.value if hasattr(current_status, "value") else current_status
+            safe_broadcast(
+                broadcast_work_order_update,
+                released_id,
+                {"event": "work_order_released", "status": status_value},
+                company_id=company_id,
+            )
+            safe_broadcast(
+                broadcast_dashboard_update,
+                {"event": "work_order_released", "work_order_id": released_id, "status": status_value},
+                company_id=company_id,
+            )
+        # One shop-floor push per DISTINCT work center, naming every released job there.
+        for wc_id in outcome.work_center_ids:
+            safe_broadcast(
+                broadcast_shop_floor_update,
+                wc_id,
+                {"event": "work_order_released", "work_order_ids": outcome.work_order_ids_by_work_center[wc_id]},
+                company_id=company_id,
+            )
+
+    return WorkOrderBulkReleaseResponse(
+        results=[WorkOrderBulkReleaseResult(**dataclass_asdict(item)) for item in outcome.results],
+        released_count=outcome.released_count,
+        error_count=outcome.error_count,
+    )
 
 
 @router.post("/{work_order_id}/start")

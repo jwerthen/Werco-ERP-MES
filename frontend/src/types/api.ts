@@ -459,7 +459,12 @@ export interface AutoEvidenceResult {
   module_reference: string;
   total_count: number;
   recent_count: number;
-  health_status: 'healthy' | 'warning' | 'critical' | 'no_data';
+  /**
+   * `no_data`: the query ran and found no records. `not_computed`: the query
+   * FAILED, so the row is a placeholder and its zero counts are not
+   * measurements — never show them as "0 records".
+   */
+  health_status: 'healthy' | 'warning' | 'critical' | 'no_data' | 'not_computed';
   health_detail: string;
   examples: AutoEvidenceExample[];
   suggested_compliance: string;
@@ -480,5 +485,11 @@ export interface AutoLinkSummary {
   clauses_without_evidence: number;
   total_evidence_created: number;
   total_evidence_updated: number;
+  /**
+   * Evidence rules whose query failed this run. Nothing was saved for them: an
+   * existing auto-linked evidence row keeps the counts and `last_refreshed` of
+   * the last run that computed it, and its clause is never summarized compliant.
+   */
+  total_evidence_failed: number;
   compliance_summary: Record<string, number>;
 }

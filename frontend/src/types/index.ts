@@ -659,6 +659,39 @@ export interface WorkOrderResumeResponse {
 }
 
 /**
+ * One work order's outcome inside `POST /work-orders/bulk-release`.
+ *
+ * Each id is released on its own: one refusal does not roll the others back, so a
+ * batch can come back PARTIAL. `detail` is the single-release route's own text for
+ * a refusal ("Only draft work orders can be released", "Work order must have at
+ * least one operation", "Work order not found", or a generic retry message) and is
+ * null on success. `work_order_number` is null when the id resolved to nothing in
+ * the active company.
+ */
+export interface WorkOrderBulkReleaseResult {
+  work_order_id: number;
+  work_order_number: string | null;
+  status: 'released' | 'error';
+  detail: string | null;
+}
+
+/** `POST /work-orders/bulk-release` request: 1–50 ids, deduped server-side. */
+export interface WorkOrderBulkReleaseRequest {
+  work_order_ids: number[];
+}
+
+/**
+ * `POST /work-orders/bulk-release` (Admin/Manager/Supervisor — the single-release
+ * roles). HTTP 200 even when some or all items were refused; read the counts and
+ * the per-item `results` rather than the status code.
+ */
+export interface WorkOrderBulkReleaseResponse {
+  results: WorkOrderBulkReleaseResult[];
+  released_count: number;
+  error_count: number;
+}
+
+/**
  * What USING a work order template would produce, read LIVE off the source work
  * order on every request.
  *

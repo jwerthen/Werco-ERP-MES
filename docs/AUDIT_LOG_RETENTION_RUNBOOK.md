@@ -188,6 +188,23 @@ database-enforced immutability**, but not **cryptographic proof of non-alteratio
 triggers are what stand behind them. Do not describe a paused span as hash-chain protected, and do not
 describe the system as having no tamper controls during one either.
 
+The QMS auto-evidence *Audit Trail (Audit Log & Hash-Chain Status)* row (formerly *Audit Trail
+(Immutable Hash-Chain Log)*) follows the same framing. For a company with any audit entries: while the
+chain is paused, or once any of that company's entries carry the `LEGACY_CHAIN_PAUSED` placeholder, it
+says so, counts those entries, and suggests `partial` rather than `compliant` — **permanently** for that
+company, since a paused span never becomes verifiable; that count covers the whole history, not a
+12-month window. It states the triggers only when `pg_trigger` shows both in force, and drops to
+`partial` if either is missing or disabled, or if the `pg_trigger` read fails on PostgreSQL (off
+PostgreSQL there is no catalog to read: a row with entries says the trigger status could not be checked
+and is not capped). A company with **no** audit entries gets `no_data` / `not_assessed` whatever the
+chain and trigger state, though its row still says when the chain is paused (`docs/API.md` → QMS
+Standards & Audit Readiness). A failed `pg_trigger` read logs a WARNING with its traceback once per
+worker process (two threads failing at the same moment may each warn), then repeats at DEBUG until a
+read succeeds, so a persistent failure does not flood the log. Evidence links stored before
+that change keep the old title and wording until the next auto-link run in which the audit rule
+computes (a run where it fails leaves the stored link unchanged; see `evidence_not_computed` in
+`docs/API.md`).
+
 ---
 
 ## How the archival job works

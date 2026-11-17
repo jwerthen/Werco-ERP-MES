@@ -9,9 +9,10 @@ import logging
 from datetime import date, datetime, timedelta
 from typing import List, Optional, Set
 
-from sqlalchemy import func
+from sqlalchemy import and_, case, func, text
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.audit_log import AuditLog
 from app.models.calibration import CalibrationRecord, CalibrationStatus, Equipment
 from app.models.customer_complaint import ComplaintStatus, CustomerComplaint
@@ -32,6 +33,7 @@ from app.models.quality import (
 from app.models.spc import SPCCharacteristic
 from app.models.supplier_scorecard import SupplierScorecard
 from app.models.work_order import WorkOrder
+from app.services.audit_service import PAUSED_CHAIN_PLACEHOLDER
 from app.services.company_time import company_today
 from app.services.supplier_approval_service import APPROVED_STATUSES
 
@@ -785,34 +787,205 @@ def _query_spc(db: Session, company_id: int) -> dict:
     )
 
 
+# The two row-level triggers migrations 008/060 put on public.audit_logs. They are what keeps
+# an entry from being altered or removed through SQL, and the only such control left while the
+# hash chain is paused -- but prod has run without them before (lost at the 2026-07-07
+# bootstrap, restored by 060), so the evidence row reads the catalog rather than assuming them.
+AUDIT_LOG_TRIGGER_NAMES = ("tr_audit_log_no_update", "tr_audit_log_no_delete")
+
+# tgenabled 'O' (origin) and 'A' (always) fire in a normal session; 'D' is disabled and 'R'
+# fires only under session_replication_role = replica. A literal, not an f-string over
+# AUDIT_LOG_TRIGGER_NAMES, so bandit B608 has nothing to flag; a test holds the two together.
+_AUDIT_LOG_TRIGGER_CHECK_SQL = (
+    "SELECT count(*) FROM pg_trigger "
+    "WHERE tgrelid = to_regclass('public.audit_logs') "
+    "AND tgname IN ('tr_audit_log_no_update', 'tr_audit_log_no_delete') "
+    "AND tgenabled IN ('O', 'A')"
+)
+
+AUDIT_TRIGGERS_IN_FORCE_SENTENCE = "Database triggers refuse UPDATE and DELETE statements on audit entries."
+AUDIT_TRIGGERS_MISSING_SENTENCE = (
+    "The database triggers that refuse UPDATE and DELETE statements on audit entries are missing or disabled."
+)
+AUDIT_TRIGGERS_UNCHECKED_SENTENCE = "Database UPDATE/DELETE trigger status could not be checked."
+
+AUDIT_TRIGGER_READ_FAILED_LOG = "Could not read audit-log trigger state from pg_trigger"
+
+# Whether the current run of failed pg_trigger reads has already been logged at WARNING. A
+# persistent failure (a revoked catalog grant, say) would otherwise put a full traceback in the
+# log on every auto-evidence GET and on every audit-matching clause of every auto-link run. The
+# first failure of a run logs at WARNING with its traceback, the repeats at DEBUG; a successful
+# read ends the run, so the next failure after it warns again. Per process and unlocked: two
+# threads failing at the same moment may each warn once, which is harmless.
+_trigger_read_failure_reported = False
+
+
+def _dialect_name(db: Session) -> str:
+    bind = db.get_bind()
+    return bind.dialect.name if bind is not None else ""
+
+
+def _audit_triggers_in_force(db: Session) -> Optional[bool]:
+    """Whether both audit-log triggers exist and fire, read from ``pg_trigger``.
+
+    ``True`` / ``False`` on PostgreSQL; ``None`` when it cannot be told -- another dialect
+    (SQLite in dev and tests has no triggers to read) or a failed catalog read. The read runs
+    in its own savepoint so a failure cannot abort the caller's transaction; ``begin_nested()``
+    sits outside the ``try`` because a flush failure there is the caller's, not this check's.
+    Not detectable here: a session that sets ``session_replication_role = replica``, or a
+    TRUNCATE, neither of which fires a row trigger.
+
+    A failed read is logged at WARNING once per run of consecutive failures and at DEBUG after
+    that (``_trigger_read_failure_reported``); the answer is ``None`` either way.
+    """
+    global _trigger_read_failure_reported
+    if _dialect_name(db) != "postgresql":
+        return None
+    savepoint = db.begin_nested()
+    try:
+        found = db.execute(text(_AUDIT_LOG_TRIGGER_CHECK_SQL)).scalar_one()
+    except Exception:  # noqa: BLE001 - an unreadable catalog is "not checked", never a false claim
+        savepoint.rollback()
+        if _trigger_read_failure_reported:
+            logger.debug("%s (repeated failure)", AUDIT_TRIGGER_READ_FAILED_LOG, exc_info=True)
+        else:
+            _trigger_read_failure_reported = True
+            logger.warning(
+                "%s; repeats log at DEBUG until a read succeeds", AUDIT_TRIGGER_READ_FAILED_LOG, exc_info=True
+            )
+        return None
+    savepoint.commit()
+    _trigger_read_failure_reported = False
+    return int(found) == len(AUDIT_LOG_TRIGGER_NAMES)
+
+
+def _entries(n: int) -> str:
+    return f"{n} entry" if n == 1 else f"{n} entries"
+
+
 def _query_audit_log(db: Session, company_id: int) -> dict:
+    """Evidence row for the audit trail. It must not claim protection the system lacks.
+
+    Three facts decide it, each read rather than assumed:
+
+    * whether the SHA-256 hash chain is on NOW -- ``settings.AUDIT_HASH_CHAIN_ENABLED``, read
+      per call (CLAUDE.md invariant 2; docs/AUDIT_LOG_RETENTION_RUNBOOK.md -> Pausing the hash
+      chain);
+    * how many of the company's entries, over its WHOLE history, carry
+      ``PAUSED_CHAIN_PLACEHOLDER`` -- written while the chain was paused, so they can never be
+      verified. Whole history, not a window: the row speaks for every entry it counts, and a
+      paused span never becomes verifiable by ageing. (The figure for the last 12 months is
+      reported alongside it.) All four counts come from one conditional aggregate over the
+      company's rows -- the same scan the total already needed;
+    * whether the 008/060 UPDATE/DELETE triggers exist and fire (``_audit_triggers_in_force``).
+
+    Chain paused now, any paused entry, or triggers missing -- or unreadable on PostgreSQL --
+    caps the row at ``warning`` / ``partial``, and the reason goes into ``description`` and
+    ``health_detail``. Only chain on, no paused entry and triggers in force (or, off PostgreSQL,
+    not checkable at all) is ``healthy`` / ``compliant``.
+    The chain being ENABLED is all this row knows about it: chain integrity is verified by the
+    platform-admin integrity endpoints, not here, and the text says so rather than "active".
+    """
     cutoff = _recent_cutoff()
-    total = db.query(func.count(AuditLog.id)).filter(AuditLog.company_id == company_id).scalar() or 0
-    recent = (
-        db.query(func.count(AuditLog.id))
-        .filter(AuditLog.company_id == company_id, AuditLog.timestamp >= cutoff)
-        .scalar()
-        or 0
+    chain_enabled = settings.AUDIT_HASH_CHAIN_ENABLED
+    is_paused = AuditLog.integrity_hash == PAUSED_CHAIN_PLACEHOLDER
+    is_recent = AuditLog.timestamp >= cutoff
+    total, recent, paused_total, paused_recent = (
+        db.query(
+            func.count(AuditLog.id),
+            func.coalesce(func.sum(case((is_recent, 1), else_=0)), 0),
+            func.coalesce(func.sum(case((is_paused, 1), else_=0)), 0),
+            func.coalesce(func.sum(case((and_(is_paused, is_recent), 1), else_=0)), 0),
+        )
+        .filter(AuditLog.company_id == company_id)
+        .one()
     )
+    total, recent, paused_total, paused_recent = (
+        int(total or 0),
+        int(recent or 0),
+        int(paused_total or 0),
+        int(paused_recent or 0),
+    )
+    triggers = _audit_triggers_in_force(db)
+    # On PostgreSQL an unreadable catalog is an unknown about the one control that stands behind a
+    # paused span, so it caps the row like a missing trigger. Off PostgreSQL (SQLite in dev/test)
+    # there is nothing to read, and the text says "could not be checked" without capping.
+    triggers_unknown = triggers is None and _dialect_name(db) == "postgresql"
+
+    counts = f"{total} audit log {'entry' if total == 1 else 'entries'} ({recent} in last 12 months)"
+    paused_split = f"{paused_total} of {total} ({paused_recent} in the last 12 months)"
 
     if total == 0:
         health = "no_data"
-        health_detail = "No audit log entries found"
         suggested = "not_assessed"
+        if chain_enabled:
+            description = f"{counts}, SHA-256 integrity chain"
+            detail = ["No audit log entries found"]
+        else:
+            description = f"{counts}; SHA-256 integrity chain paused"
+            detail = [
+                "No audit log entries found. The integrity hash chain is paused, "
+                "so entries written now will not be hash-chained."
+            ]
     else:
-        health = "healthy"
-        health_detail = f"Immutable audit trail with {total} entries, integrity hash chain active"
-        suggested = "compliant"
+        if not chain_enabled:
+            written_without = (
+                f"{_entries(paused_total)} written without it, {paused_recent} in last 12 months"
+                if paused_total
+                else "no entries written without it yet"
+            )
+            description = f"{counts}; SHA-256 integrity chain paused ({written_without})"
+            detail = [
+                "The integrity hash chain is paused (AUDIT_HASH_CHAIN_ENABLED is off): entries written "
+                "while it is paused carry no integrity hash and can never be cryptographically verified.",
+                f"Entries written while paused: {paused_split}.",
+            ]
+        elif paused_total:
+            description = (
+                f"{counts}; SHA-256 integrity chain enabled, but {_entries(paused_total)} "
+                f"{'was' if paused_total == 1 else 'were'} written while it was paused "
+                f"({paused_recent} in last 12 months)"
+            )
+            detail = [
+                f"Entries written while the integrity hash chain was paused: {paused_split}. They carry no "
+                "integrity hash and can never be cryptographically verified. The chain setting is on again.",
+            ]
+        else:
+            description = f"{counts}, SHA-256 integrity chain"
+            detail = [
+                f"Audit trail with {_entries(total)}. Integrity hash chain enabled and no entry was written "
+                "while it was paused (chain integrity is not re-verified by this check).",
+            ]
+        if triggers is False:
+            description += "; database UPDATE/DELETE triggers missing or disabled"
+        elif triggers_unknown:
+            description += "; database UPDATE/DELETE trigger status could not be checked"
+
+        problem = (not chain_enabled) or paused_total > 0 or triggers is False or triggers_unknown
+        health = "warning" if problem else "healthy"
+        suggested = "partial" if problem else "compliant"
+
+    if total or not chain_enabled:
+        if triggers is True:
+            detail.append(AUDIT_TRIGGERS_IN_FORCE_SENTENCE)
+        elif triggers is False:
+            detail.append(AUDIT_TRIGGERS_MISSING_SENTENCE)
+        else:
+            detail.append(AUDIT_TRIGGERS_UNCHECKED_SENTENCE)
 
     return dict(
         evidence_type="module",
-        title="Audit Trail (Immutable Hash-Chain Log)",
-        description=f"{total} audit log entries ({recent} in last 12 months), SHA-256 integrity chain",
+        # Names what the row reports and asserts nothing: it is the only text the QMS page's
+        # linked-evidence list shows for a stored link, and it cannot vary with the state (auto-link
+        # rewrites stored titles by rule id). Formerly "Audit Trail (Immutable Hash-Chain Log)", untrue for
+        # every entry written while the chain was paused.
+        title="Audit Trail (Audit Log & Hash-Chain Status)",
+        description=description,
         module_reference="/audit",
         total_count=total,
         recent_count=recent,
         health_status=health,
-        health_detail=health_detail,
+        health_detail=" ".join(detail),
         examples=[],
         suggested_compliance=suggested,
     )
@@ -1209,11 +1382,20 @@ def _query_suppliers(db: Session, company_id: int) -> dict:
 
 # ---------------------------------------------------------------------------
 # Mapping rules: keyword patterns → query functions
+#
+# ``evidence_type`` / ``title`` / ``module_reference`` repeat what each rule's
+# ``query_fn`` returns. They exist for the one row the query function cannot
+# build: the placeholder ``discover_evidence_for_clause`` substitutes when the
+# query raises (see ``_evaluation_failed_result``). A test holds every rule's
+# copy equal to its query function's, so the two cannot drift.
 # ---------------------------------------------------------------------------
 
 EVIDENCE_MAPPING_RULES: List[dict] = [
     {
         "id": "ncr",
+        "evidence_type": "ncr",
+        "title": "Non-Conformance Reports (NCR)",
+        "module_reference": "/quality/ncr",
         "keywords": [
             "nonconform",
             "control of nonconforming",
@@ -1227,6 +1409,9 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
     },
     {
         "id": "car",
+        "evidence_type": "car",
+        "title": "Corrective/Preventive Action Reports (CAR)",
+        "module_reference": "/quality/car",
         "keywords": [
             "corrective action",
             "preventive action",
@@ -1239,6 +1424,9 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
     },
     {
         "id": "fai",
+        "evidence_type": "fai",
+        "title": "First Article Inspections (FAI / AS9102)",
+        "module_reference": "/quality/fai",
         "keywords": [
             "first article",
             "production process verification",
@@ -1250,6 +1438,9 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
     },
     {
         "id": "calibration",
+        "evidence_type": "calibration",
+        "title": "Calibration & Measurement Equipment",
+        "module_reference": "/calibration",
         "keywords": [
             "calibration",
             "monitoring and measuring",
@@ -1263,6 +1454,9 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
     },
     {
         "id": "document_control",
+        "evidence_type": "document",
+        "title": "Document Control (Procedures & Work Instructions)",
+        "module_reference": "/documents",
         "keywords": [
             "document control",
             "documented information",
@@ -1277,6 +1471,9 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
     },
     {
         "id": "complaints",
+        "evidence_type": "other",
+        "title": "Customer Complaints & Satisfaction",
+        "module_reference": "/customer-complaints",
         "keywords": [
             "customer satisfaction",
             "customer complaint",
@@ -1288,11 +1485,17 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
     },
     {
         "id": "training",
+        "evidence_type": "training",
+        "title": "Training & Operator Certifications",
+        "module_reference": "/operator-certifications",
         "keywords": ["training", "competence", "awareness", "qualification", "personnel", "human resource", "skill"],
         "query_fn": _query_training,
     },
     {
         "id": "traceability",
+        "evidence_type": "module",
+        "title": "Work Order Traceability (Lot/Serial Tracking)",
+        "module_reference": "/work-orders",
         "keywords": [
             "traceability",
             "identification and traceability",
@@ -1305,6 +1508,9 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
     },
     {
         "id": "spc",
+        "evidence_type": "spc",
+        "title": "Statistical Process Control (SPC)",
+        "module_reference": "/spc",
         "keywords": [
             "statistical",
             "spc",
@@ -1320,6 +1526,9 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
         # audit or management review goes to "internal_audit_review" below, because change-log
         # entries exist on any working system and are no evidence that an audit was run.
         "id": "audit",
+        "evidence_type": "module",
+        "title": "Audit Trail (Audit Log & Hash-Chain Status)",
+        "module_reference": "/audit",
         "keywords": ["audit trail", "audit log"],
         "query_fn": _query_audit_log,
     },
@@ -1348,6 +1557,9 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
     },
     {
         "id": "maintenance",
+        "evidence_type": "module",
+        "title": "Preventive Maintenance & Infrastructure",
+        "module_reference": "/maintenance",
         "keywords": [
             "maintenance",
             "infrastructure",
@@ -1360,6 +1572,9 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
     },
     {
         "id": "eco",
+        "evidence_type": "module",
+        "title": "Engineering Change Orders (ECO)",
+        "module_reference": "/engineering-changes",
         "keywords": [
             "engineering change",
             "design change",
@@ -1372,6 +1587,9 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
     },
     {
         "id": "suppliers",
+        "evidence_type": "module",
+        "title": "Supplier Management & Evaluation",
+        "module_reference": "/purchasing/vendors",
         "keywords": [
             "purchasing",
             "external provider",
@@ -1416,11 +1634,82 @@ def matched_rule_ids(clause: QMSClause) -> Set[str]:
     return {rule["id"] for rule in _match_rules(clause)}
 
 
+# Internal key on a result row whose rule raised instead of computing evidence. Like
+# ``_rule_id`` it is never serialized; ``POST /qms-standards/{id}/auto-link`` reads it
+# to leave that rule's stored evidence untouched.
+EVALUATION_FAILED_KEY = "_evaluation_failed"
+
+# The placeholder's ``health_status``. Reserved for it: no query function returns it, so a
+# client can tell "the query failed" from a module that genuinely has no records (``no_data``,
+# with the same zero counts). The SPA hides the record count for it and MCP agents read it
+# from the same GET.
+EVALUATION_FAILED_HEALTH_STATUS = "not_computed"
+
+EVALUATION_FAILED_DESCRIPTION = "Evidence could not be computed from live records"
+EVALUATION_FAILED_DETAIL = (
+    "Evidence could not be computed: the query for this module failed. "
+    "Nothing is known about it from this run, so it is not assessed."
+)
+
+
+def _evaluation_failed_result(rule: dict) -> dict:
+    """The row that stands in for a rule whose query raised.
+
+    Same keys as a computed row, so ``ClauseAutoEvidenceResponse`` keeps its shape. It says
+    ``not_computed`` / ``not_assessed``: an unknown is never evidence of compliance, and
+    ``compute_overall_compliance`` rolls a clause carrying this row up to ``not_assessed``
+    (unless a computed row is ``non_compliant`` / ``partial``), never ``compliant``.
+    The zero counts are placeholders required by the schema, not measurements -- which is
+    why ``health_status`` is ``not_computed`` rather than ``no_data``: a genuinely empty
+    module reports the same zeros, and a reader must not show this row as "0 records".
+    """
+    return {
+        "evidence_type": rule["evidence_type"],
+        "title": rule["title"],
+        "description": EVALUATION_FAILED_DESCRIPTION,
+        "module_reference": rule["module_reference"],
+        "total_count": 0,
+        "recent_count": 0,
+        "health_status": EVALUATION_FAILED_HEALTH_STATUS,
+        "health_detail": EVALUATION_FAILED_DETAIL,
+        "examples": [],
+        "suggested_compliance": "not_assessed",
+        "_rule_id": rule["id"],
+        EVALUATION_FAILED_KEY: True,
+    }
+
+
+def is_evaluation_failed(result: dict) -> bool:
+    """True for the placeholder row of a rule whose query raised."""
+    return bool(result.get(EVALUATION_FAILED_KEY))
+
+
 def discover_evidence_for_clause(db: Session, clause: QMSClause, company_id: int) -> List[dict]:
     """
     Discover live ERP/MES evidence for a single QMS clause.
-    Returns a list of AutoEvidenceResult-compatible dicts.
+    Returns a list of AutoEvidenceResult-compatible dicts, one per matched rule.
     All evidence counts and examples are scoped to the given company.
+
+    A RULE THAT RAISES IS REPORTED, NEVER DROPPED. Each query runs in its own savepoint
+    (``db.begin_nested()``); on any exception the savepoint is rolled back and the rule's
+    row becomes ``_evaluation_failed_result`` (``not_computed`` / ``not_assessed``). Two things
+    depend on that:
+
+    * The roll-up. Dropping the row let a clause matching, say, calibration + maintenance
+      roll up ``compliant`` from calibration alone while its maintenance query was failing --
+      a false "compliant" in an auditor-facing view, which is worse than "not assessed".
+    * The rules after it. On PostgreSQL a failed statement aborts the whole transaction, so
+      without the savepoint every later rule failed too (and was dropped too). Rolling back
+      to the savepoint restores the transaction and the next rule runs normally.
+
+    The savepoint is opened OUTSIDE the ``try``: ``begin_nested()`` first flushes the
+    caller's pending writes (auto-link's evidence rows from earlier clauses), and a failure
+    there is the caller's, not this rule's -- it must propagate rather than be recorded as a
+    failed rule. A failed savepoint rollback propagates for the same reason.
+
+    SQLAlchemy emits the ``SAVEPOINT`` lazily, just before the rule's first statement, so a
+    rule that raises before running any SQL leaves no savepoint SQL in a trace. That is not a
+    bug: nothing ran, so there is nothing to roll back.
     """
     matched_rules = _match_rules(clause)
     results = []
@@ -1431,18 +1720,37 @@ def discover_evidence_for_clause(db: Session, clause: QMSClause, company_id: int
         if rule["id"] in seen_ids:
             continue
         seen_ids.add(rule["id"])
+        savepoint = db.begin_nested()
         try:
             result = rule["query_fn"](db, company_id)
-            result["_rule_id"] = rule["id"]
-            results.append(result)
-        except Exception as e:
-            logger.error(f"Error querying {rule['id']} for clause {clause.clause_number}: {e}")
+        except Exception:  # noqa: BLE001 - one rule's failure must become a visible row, not a 500
+            savepoint.rollback()
+            logger.error(
+                "Auto-evidence rule %s failed for clause %s (company %s); reported as not assessed",
+                rule["id"],
+                clause.clause_number,
+                company_id,
+                exc_info=True,
+            )
+            results.append(_evaluation_failed_result(rule))
+            continue
+        savepoint.commit()
+        result["_rule_id"] = rule["id"]
+        results.append(result)
 
     return results
 
 
 def compute_overall_compliance(evidence_results: List[dict]) -> str:
-    """Compute overall suggested compliance from multiple evidence results."""
+    """Compute overall suggested compliance from multiple evidence results.
+
+    A finding from a row that WAS computed (``non_compliant``, then ``partial``) still wins.
+    Otherwise a clause with any rule that could not be computed is ``not_assessed``: its
+    other rows may all be compliant, but reporting ``partial`` would present a query failure
+    as a compliance gap, and ``compliant`` would claim evidence nobody computed. Call this
+    with the rows as ``discover_evidence_for_clause`` returned them, before internal keys
+    are stripped, or the failure flag is lost.
+    """
     if not evidence_results:
         return "not_assessed"
 
@@ -1452,6 +1760,8 @@ def compute_overall_compliance(evidence_results: List[dict]) -> str:
         return "non_compliant"
     if "partial" in statuses:
         return "partial"
+    if any(is_evaluation_failed(r) for r in evidence_results):
+        return "not_assessed"
     if all(s == "compliant" for s in statuses):
         return "compliant"
     if all(s == "not_assessed" for s in statuses):
