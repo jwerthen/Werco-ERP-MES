@@ -11,10 +11,12 @@ Two contracts:
    WORK_ORDERS report selects a labor-derived column (``actual_cost`` / ``actual_hours``
    / ``estimated_cost``), those columns render a literal 0 that means "not tracked", not
    a measured zero. ``ReportBuilderService.labor_tracking_note`` returns annotation
-   metadata, and ``POST /analytics/custom-report`` surfaces it on the
-   ``X-Report-Labor-Not-Tracked`` / ``X-Report-Labor-Note`` response headers WITHOUT
-   changing the bare-list body. With no labor-derived column selected (or the flag ON),
-   no such header is set and the note is ``None``.
+   metadata, and ``POST /analytics/custom-report`` surfaces it as a
+   ``{"code": "labor_not_tracked", "message", "fields"}`` entry in the result body's
+   ``notes``. (It used to ride on ``X-Report-Labor-*`` response headers, which a browser
+   could never read: they were not in CORS ``expose_headers``.) With no labor-derived
+   column selected (or the flag ON), ``notes`` carries no such entry and the note is
+   ``None``.
 """
 
 from datetime import date, timedelta
@@ -191,16 +193,19 @@ def test_labor_tracking_note_none_for_non_work_order_source(db_session: Session,
 
 
 # ===========================================================================
-# Endpoint: X-Report-Labor-* headers
+# Endpoint: the labor note rides in the result body's ``notes``
 # ===========================================================================
 
 
-def test_custom_report_sets_labor_headers_flag_off_with_labor_column(
+def _labor_notes(body: dict) -> list:
+    return [note for note in body["notes"] if note["code"] == "labor_not_tracked"]
+
+
+def test_custom_report_labor_note_in_body_flag_off_with_labor_column(
     client: TestClient, db_session: Session, monkeypatch
 ):
-    """Flag OFF + a labor-derived column -> /custom-report sets BOTH
-    ``X-Report-Labor-Not-Tracked`` (a JSON list of the not-tracked fields) and
-    ``X-Report-Labor-Note`` (human-readable), without altering the bare-list body."""
+    """Flag OFF + labor-derived columns -> one ``labor_not_tracked`` note naming them, in
+    the body; the old headers are gone."""
     monkeypatch.setattr(settings, "LABOR_COST_ROLLUP_ENABLED", False)
     manager = make_user(db_session, role=UserRole.MANAGER)
     make_work_order(db_session)
@@ -214,18 +219,18 @@ def test_custom_report_sets_labor_headers_flag_off_with_labor_column(
         },
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
-    assert "X-Report-Labor-Not-Tracked" in resp.headers, "missing not-tracked header flag-OFF"
-    assert "X-Report-Labor-Note" in resp.headers, "missing human-readable note header flag-OFF"
-    import json
+    body = resp.json()
+    notes = _labor_notes(body)
+    assert len(notes) == 1, body["notes"]
+    assert set(notes[0]["fields"]) == {"actual_cost", "actual_hours"}
+    assert "not tracked" in notes[0]["message"].lower()
+    assert "X-Report-Labor-Not-Tracked" not in resp.headers
+    assert "X-Report-Labor-Note" not in resp.headers
+    assert body["row_count"] == len(body["rows"]) >= 1
 
-    not_tracked = json.loads(resp.headers["X-Report-Labor-Not-Tracked"])
-    assert set(not_tracked) == {"actual_cost", "actual_hours"}
-    # Body is still the bare list of row dicts (header-only annotation; contract unchanged).
-    assert isinstance(resp.json(), list)
 
-
-def test_custom_report_no_labor_header_without_labor_column(client: TestClient, db_session: Session, monkeypatch):
-    """Flag OFF but NO labor-derived column -> no labor headers."""
+def test_custom_report_no_labor_note_without_labor_column(client: TestClient, db_session: Session, monkeypatch):
+    """Flag OFF but NO labor-derived column -> no labor note."""
     monkeypatch.setattr(settings, "LABOR_COST_ROLLUP_ENABLED", False)
     manager = make_user(db_session, role=UserRole.MANAGER)
     make_work_order(db_session)
@@ -239,12 +244,11 @@ def test_custom_report_no_labor_header_without_labor_column(client: TestClient, 
         },
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
-    assert "X-Report-Labor-Not-Tracked" not in resp.headers
-    assert "X-Report-Labor-Note" not in resp.headers
+    assert _labor_notes(resp.json()) == []
 
 
-def test_custom_report_no_labor_header_when_flag_on(client: TestClient, db_session: Session, monkeypatch):
-    """Flag ON -> no labor headers even with a labor-derived column."""
+def test_custom_report_no_labor_note_when_flag_on(client: TestClient, db_session: Session, monkeypatch):
+    """Flag ON -> no labor note even with a labor-derived column."""
     monkeypatch.setattr(settings, "LABOR_COST_ROLLUP_ENABLED", True)
     manager = make_user(db_session, role=UserRole.MANAGER)
     make_work_order(db_session)
@@ -258,5 +262,4 @@ def test_custom_report_no_labor_header_when_flag_on(client: TestClient, db_sessi
         },
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
-    assert "X-Report-Labor-Not-Tracked" not in resp.headers
-    assert "X-Report-Labor-Note" not in resp.headers
+    assert _labor_notes(resp.json()) == []

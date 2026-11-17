@@ -4,9 +4,10 @@ Schemas for Analytics & Business Intelligence Module
 
 from datetime import date, datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, WithJsonSchema, model_validator
+from pydantic_core import PydanticCustomError
 
 from app.schemas.base import UTCModel
 from app.schemas.material_readiness import MaterialReadiness
@@ -221,6 +222,22 @@ class InventoryAnalyticsResponse(BaseModel):
 
 
 # ============ CUSTOM REPORT BUILDER ============
+#
+# Two tiers of models, on purpose:
+#
+# * The SHARED shapes (``ReportDataSource``, ``ReportColumn``, ``ReportFilter``,
+#   ``ReportGroupBy``, ``ReportSort``) carry type checks only and NO validators.
+#   ``ReportTemplateResponse`` reuses them to render STORED templates, and stored rows
+#   were saved with type checks only (through the API and the MCP tool
+#   ``create_report_template``). A rule added to one of them would make
+#   ``GET /analytics/custom-report/templates`` answer 500 for the whole company the
+#   moment one old template broke it.
+# * The REQUEST shapes (``ReportDefinitionInput`` and the ``*Input`` subclasses below,
+#   ``CustomReportRequest``, ``ReportTemplateCreate``, ``ReportTemplateUpdate``) forbid
+#   unknown keys and run every semantic rule through ONE function,
+#   ``app.services.report_builder.definition_problems``. A stored template is judged by
+#   building the same request model from its JSON (``report_template_service``), so the
+#   list's ``definition_errors`` and the 409 a run answers can never disagree.
 
 
 class ReportDataSource(str, Enum):
@@ -228,6 +245,9 @@ class ReportDataSource(str, Enum):
     PARTS = "parts"
     INVENTORY = "inventory"
     QUALITY = "quality"
+    # Retired: it never had a backing model (every report on it answered 500). The member
+    # stays so a stored template that names it still renders; every request schema
+    # refuses it with 422 and the /data-sources catalog leaves it out.
     PRODUCTION = "production"
     PURCHASING = "purchasing"
     QUOTES = "quotes"
@@ -264,24 +284,143 @@ class ReportSort(BaseModel):
     direction: str = "asc"
 
 
-class CustomReportRequest(BaseModel):
-    data_source: ReportDataSource
-    columns: List[ReportColumn]
-    filters: List[ReportFilter] = Field(default_factory=list)
-    group_by: List[ReportGroupBy] = Field(default_factory=list)
-    sort: List[ReportSort] = Field(default_factory=list)
-    limit: Optional[int] = 1000
+# Request caps. A definition is stored verbatim in ``report_templates`` and copied into
+# immutable audit rows, so every list is bounded.
+REPORT_MAX_COLUMNS = 40
+REPORT_MAX_FILTERS = 20
+REPORT_MAX_GROUP_BY = 10
+REPORT_MAX_SORT = 10
+REPORT_DEFAULT_LIMIT = 1000
+REPORT_MAX_LIMIT = 10_000
+
+_QUERYABLE_DATA_SOURCES = [s.value for s in ReportDataSource if s is not ReportDataSource.PRODUCTION]
+
+# Request-side data source: validation still accepts every ``ReportDataSource`` member so
+# ``production`` gets a precise 422 message from ``definition_problems`` rather than a
+# generic enum error, but the published schema (OpenAPI, and the MCP tool schemas built
+# from it) advertises only the sources that can run.
+QueryableReportDataSource = Annotated[
+    ReportDataSource,
+    WithJsonSchema(
+        {
+            "type": "string",
+            "enum": _QUERYABLE_DATA_SOURCES,
+            "title": "Data Source",
+            "description": "Which records the report reads. GET /analytics/data-sources lists each one's fields.",
+        }
+    ),
+]
 
 
-class ReportTemplateCreate(BaseModel):
-    name: str
-    description: Optional[str] = None
-    data_source: ReportDataSource
-    columns: List[ReportColumn]
-    filters: List[ReportFilter] = Field(default_factory=list)
-    group_by: List[ReportGroupBy] = Field(default_factory=list)
-    sort: List[ReportSort] = Field(default_factory=list)
+# ``ValidationError`` type carrying ``definition_problems`` output; its ``ctx["problems"]``
+# is the list ``report_template_service`` reads back for a stored template.
+REPORT_DEFINITION_ERROR_TYPE = "report_definition"
+
+
+# Unknown keys are refused. ``from_attributes`` lets a Python caller pass the shared shape
+# (e.g. a ``ReportTemplateResponse``'s columns) where a request item is expected.
+_INPUT_ITEM_CONFIG = ConfigDict(extra="forbid", from_attributes=True)
+
+
+class ReportColumnInput(ReportColumn):
+    """A report column in a request. ``field`` is a field name from GET /analytics/data-sources;
+    ``alias`` renames the output key; ``aggregate`` (sum/avg on number fields, min/max on
+    number/date/datetime/string fields, count on any) makes it an aggregated column."""
+
+    model_config = _INPUT_ITEM_CONFIG
+
+
+class ReportFilterInput(ReportFilter):
+    """A report filter in a request. Operators by field type: string eq/ne/in/like; number
+    eq/ne/gt/gte/lt/lte/in/between; date and datetime eq/ne/gt/gte/lt/lte/between; enum
+    eq/ne/in. ``value`` null is allowed only with eq/ne (IS NULL / IS NOT NULL);
+    ``between`` needs ``value2``; ``in`` takes a non-empty list."""
+
+    model_config = _INPUT_ITEM_CONFIG
+
+
+class ReportGroupByInput(ReportGroupBy):
+    """A group-by field in a request. ``granularity`` is not supported yet and must be null."""
+
+    model_config = _INPUT_ITEM_CONFIG
+
+
+class ReportSortInput(ReportSort):
+    """A sort in a request. ``field`` is a catalog field or the output key (alias, else field)
+    of a selected column; ``direction`` is asc or desc."""
+
+    model_config = _INPUT_ITEM_CONFIG
+
+
+class ReportDefinitionInput(BaseModel):
+    """What a report reads and how it shapes it. Every rule lives in
+    ``app.services.report_builder.definition_problems``; a broken definition is one 422 whose
+    message lists every problem."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    data_source: QueryableReportDataSource
+    columns: List[ReportColumnInput] = Field(..., min_length=1, max_length=REPORT_MAX_COLUMNS)
+    filters: List[ReportFilterInput] = Field(default_factory=list, max_length=REPORT_MAX_FILTERS)
+    group_by: List[ReportGroupByInput] = Field(default_factory=list, max_length=REPORT_MAX_GROUP_BY)
+    sort: List[ReportSortInput] = Field(default_factory=list, max_length=REPORT_MAX_SORT)
+
+    @model_validator(mode="after")
+    def _check_definition(self) -> "ReportDefinitionInput":
+        # Lazy import: the services module imports this one for its enums.
+        from app.services.report_builder import definition_problems
+
+        problems = definition_problems(self.data_source, self.columns, self.filters, self.group_by, self.sort)
+        if problems:
+            raise PydanticCustomError(
+                REPORT_DEFINITION_ERROR_TYPE,
+                "{detail}",
+                {"detail": "; ".join(problems), "problems": problems},
+            )
+        for sort in self.sort:
+            sort.direction = sort.direction.lower()
+        return self
+
+
+class CustomReportRequest(ReportDefinitionInput):
+    """Run an ad-hoc report. ``limit`` caps the rows returned (1-10,000, default 1000);
+    the result's ``truncated`` says whether more rows matched."""
+
+    limit: int = Field(REPORT_DEFAULT_LIMIT, ge=1, le=REPORT_MAX_LIMIT)
+
+
+TemplateName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)]
+TemplateDescription = Annotated[str, StringConstraints(strip_whitespace=True, max_length=2000)]
+
+
+class ReportTemplateCreate(ReportDefinitionInput):
+    """Save a report definition as a named template (private unless ``is_shared``)."""
+
+    name: TemplateName
+    description: Optional[TemplateDescription] = None
     is_shared: bool = False
+
+
+class ReportTemplateUpdate(BaseModel):
+    """Change a saved template. Send only what changes; ``definition`` replaces the whole
+    definition and is validated like a new one. ``description`` may be null (clears it);
+    ``name``, ``is_shared`` and ``definition`` may not."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: Optional[TemplateName] = None
+    description: Optional[TemplateDescription] = None
+    is_shared: Optional[bool] = None
+    definition: Optional[ReportDefinitionInput] = None
+
+    @model_validator(mode="after")
+    def _check_fields(self) -> "ReportTemplateUpdate":
+        if not self.model_fields_set:
+            raise PydanticCustomError("empty_update", "Send at least one of name, description, is_shared or definition")
+        for key in ("name", "is_shared", "definition"):
+            if key in self.model_fields_set and getattr(self, key) is None:
+                raise PydanticCustomError("null_not_allowed", "{field} cannot be null", {"field": key})
+        return self
 
 
 class ReportTemplateResponse(UTCModel):
@@ -296,9 +435,46 @@ class ReportTemplateResponse(UTCModel):
     is_shared: bool
     created_by: int
     created_at: datetime
+    updated_at: Optional[datetime] = None
+    # Why this stored definition can no longer run (empty when it can). A template saved
+    # before a rule existed still lists and opens; running or exporting it answers 409
+    # until it is edited and saved again.
+    definition_errors: List[str] = Field(default_factory=list)
 
     class Config:
         from_attributes = True
+
+
+class CustomReportColumnInfo(UTCModel):
+    key: str
+    label: str
+    type: str
+
+
+class CustomReportNote(UTCModel):
+    code: str
+    message: str
+    fields: List[str] = Field(default_factory=list)
+
+
+class CustomReportResult(UTCModel):
+    columns: List[CustomReportColumnInfo]
+    rows: List[Dict[str, Any]]
+    row_count: int
+    truncated: bool
+    notes: List[CustomReportNote] = Field(default_factory=list)
+
+
+class ReportFieldInfo(UTCModel):
+    name: str
+    label: str
+    type: Literal["string", "number", "date", "datetime", "enum"]
+    options: Optional[List[str]] = None
+
+
+class ReportDataSourceInfo(UTCModel):
+    label: str
+    fields: List[ReportFieldInfo]
 
 
 # ============ PREDICTIVE ANALYTICS ============
