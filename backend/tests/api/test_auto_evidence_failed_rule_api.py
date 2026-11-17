@@ -24,7 +24,7 @@ Failure is injected with ``monkeypatch.setitem`` on the rule's dict in
 ``_query_maintenance`` attribute would do nothing).
 """
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 import pytest
 from fastapi import status
@@ -183,13 +183,23 @@ def _seed_compliant_calibration(db: Session) -> None:
 
 
 def _seed_compliant_maintenance(db: Session) -> None:
-    """One PM schedule and no overdue work orders: ``_query_maintenance`` answers ``compliant``
-    (with ``total_count`` -- maintenance WOs -- of 0)."""
+    """One active PM schedule, performed and not past due, and no overdue work orders:
+    ``_query_maintenance`` answers ``compliant`` (with ``total_count`` -- maintenance WOs -- of 0).
+    A never-performed schedule would be ``not_assessed``."""
     n = _next()
     asset = MaintenanceAsset(company_id=COMPANY_ID, asset_tag=f"ASSET-API-{n:04d}", name=f"Air compressor {n}")
     db.add(asset)
     db.flush()
-    db.add(MaintenanceSchedule(company_id=COMPANY_ID, asset_id=asset.id, name=f"Quarterly PM {n}"))
+    db.add(
+        MaintenanceSchedule(
+            company_id=COMPANY_ID,
+            asset_id=asset.id,
+            name=f"Quarterly PM {n}",
+            is_active=True,
+            last_completed_date=date.today() - timedelta(days=30),
+            next_due_date=date.today() + timedelta(days=60),
+        )
+    )
     db.commit()
 
 

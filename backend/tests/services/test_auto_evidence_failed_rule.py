@@ -32,7 +32,7 @@ and not no rollback at all) produces.
 import ast
 import inspect
 import re
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 import pytest
 from sqlalchemy import event, text
@@ -164,12 +164,22 @@ def _seed_compliant_calibration(db: Session, *, count: int = 2) -> None:
 
 
 def _seed_compliant_maintenance(db: Session) -> None:
-    """One PM schedule, no overdue work orders: ``_query_maintenance`` answers ``compliant``."""
+    """One active PM schedule, performed and not past due, and no overdue work orders:
+    ``_query_maintenance`` answers ``compliant`` (a never-performed schedule is ``not_assessed``)."""
     n = _next()
     asset = MaintenanceAsset(company_id=COMPANY_ID, asset_tag=f"ASSET-{n:04d}", name=f"Air compressor {n}")
     db.add(asset)
     db.flush()
-    db.add(MaintenanceSchedule(company_id=COMPANY_ID, asset_id=asset.id, name=f"Quarterly PM {n}"))
+    db.add(
+        MaintenanceSchedule(
+            company_id=COMPANY_ID,
+            asset_id=asset.id,
+            name=f"Quarterly PM {n}",
+            is_active=True,
+            last_completed_date=date.today() - timedelta(days=30),
+            next_due_date=date.today() + timedelta(days=60),
+        )
+    )
     db.commit()
 
 
@@ -544,7 +554,9 @@ def test_savepoint_sql_wraps_each_rule(db_session: Session, monkeypatch, raiser,
     rows = _by_rule(results)
     assert is_evaluation_failed(rows["calibration"])
     assert not is_evaluation_failed(rows["maintenance"])
-    assert rows["maintenance"]["health_detail"] == "No maintenance schedules or records found"
+    # Computed for real (an empty company): the rule's own no-data row, not the placeholder.
+    assert rows["maintenance"]["health_status"] == "no_data"
+    assert rows["maintenance"]["health_detail"] != EVALUATION_FAILED_DETAIL
 
     savepoint_names = [name for kind, name in trace if kind == "SAVEPOINT"]
     assert len(savepoint_names) == 2 and savepoint_names[0] != savepoint_names[1], trace
