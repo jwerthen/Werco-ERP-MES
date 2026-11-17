@@ -9190,7 +9190,7 @@ the public paths are `/eco/eco/…`.
 | GET | `/eco/eco/` | List ECOs | Yes |
 | GET | `/eco/eco/{id}` | Get an ECO | Yes |
 | POST | `/eco/eco/` | Create an ECO | Admin / Manager |
-| PUT | `/eco/eco/{id}` | Update an ECO | Admin / Manager |
+| PUT | `/eco/eco/{id}` | Update an ECO. **400** on a completed, rejected or cancelled ECO. An edit that changes a stored value is saved only with its audit row (**503**, nothing saved, otherwise) | Admin / Manager |
 | POST | `/eco/eco/{id}/submit` | Submit a draft ECO for review | Admin / Manager |
 | POST | `/eco/eco/{id}/approve` | Record an approval decision | Admin / Manager |
 | POST | `/eco/eco/{id}/reject` | Reject an ECO | Admin / Manager |
@@ -9199,7 +9199,7 @@ the public paths are `/eco/eco/…`.
 | GET | `/eco/eco/{id}/approvals` | List an ECO's approvals | Yes |
 | POST | `/eco/eco/{id}/approvals` | Add an approval requirement | Admin / Manager |
 | POST | `/eco/eco/{id}/tasks` | Add an implementation task | Admin / Manager |
-| PUT | `/eco/eco/{id}/tasks/{task_id}` | Update an implementation task | Admin / Manager |
+| PUT | `/eco/eco/{id}/tasks/{task_id}` | Update an implementation task. An edit that changes a stored value is saved only with its audit row (**503**, nothing saved, otherwise) | Admin / Manager |
 | GET | `/eco/eco/affected-items/{id}` | Resolve the ECO's affected parts / work orders / documents | Yes |
 
 > **Tenant isolation (all ECO endpoints).** Every ECO lookup is scoped to the caller's **active
@@ -9220,9 +9220,33 @@ the public paths are `/eco/eco/…`.
 > list approvals, affected items) remain available to any authenticated user. Adding an approval also
 > verifies the named approver belongs to the active company (else **404**).
 >
-> **ECO state changes are audited.** Create, update, submit, approve, reject, implement, and complete —
-> plus task create/update and approval create — write to the tamper-evident `audit_log` (`GET /audit/`),
-> so the engineering-change lifecycle is fully traceable for AS9100D.
+> **ECO state changes are audited.** Create, update, submit, reject, implement, and complete — plus
+> task create/update and approval create — write to the tamper-evident `audit_log` (`GET /audit/`).
+> Approve writes a row only when the decision moves the ECO's status (the first decision, a rejection,
+> or the last approval); each decision itself (approver, approved / rejected, comments, date) is kept
+> on its approval row, which nothing changes afterwards.
+>
+> **An ECO edit's audit row is required.** `PUT /eco/eco/{id}` overwrites the change record in
+> place (scope, effectivity, reason, risk assessment), so its `UPDATE` row, with the old and new
+> value of every changed field, is the only trace of what was replaced. That row is written in the
+> same transaction as the edit: if it cannot be written, the edit is rolled back and the answer is
+> **503** *"The audit record for this engineering change edit could not be saved; nothing was
+> changed. Retry."* This holds for every field, not only `affected_parts`, `affected_work_orders`
+> and `affected_documents`, because effectivity and the risk assessment are as much the authorized
+> change as the scope is. It matters most for `affected_documents`: `DELETE /documents/{id}` refuses a
+> document that a draft or submitted ECO lists and tells the user to take it out through this `PUT`,
+> so a lost row would let a document leave the change record with nothing to show it was there.
+> `PUT /eco/eco/{id}/tasks/{task_id}` follows the same rule (503 *"The audit record for this
+> implementation task edit could not be saved; nothing was changed. Retry."*): it overwrites a task's
+> description, notes, owner and status in place, and a task set to `skipped` is what lets
+> `complete` close the change with that work undone.
+>
+> An edit that changes no stored value (the same values sent back) writes no row and answers
+> **200**, even while the audit store is down. Note that create stores an empty affected list as
+> null while update stores it as `[]`, so sending `[]` for a list that was created empty is a change
+> and is audited. The other ECO writes (create, the status verbs, approval create, task create) still
+> audit best-effort: an audit failure that leaves the transaction usable is logged and the change is
+> saved.
 
 ### Quotes
 
