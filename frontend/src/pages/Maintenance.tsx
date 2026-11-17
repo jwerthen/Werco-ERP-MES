@@ -145,6 +145,8 @@ const BLANK_COMPLETE = {
   parts_cost: '',
   downtime_minutes: '',
   actual_duration_hours: '',
+  // Required by the server when any checklist item is left unticked (sent only then).
+  incomplete_checklist_reason: '',
 };
 
 /** `iso` (YYYY-MM-DD) plus `days`, as YYYY-MM-DD. Noon UTC keeps it off any DST edge. */
@@ -218,6 +220,10 @@ export default function Maintenance() {
   const [completeForm, setCompleteForm] = useState(BLANK_COMPLETE);
   const [completeChecklist, setCompleteChecklist] = useState<ChecklistResultItem[]>([]);
   const [completeChecklistBaseline, setCompleteChecklistBaseline] = useState<ChecklistResultItem[]>([]);
+  // Completing with any checklist item unticked needs a written reason (the server refuses 409
+  // without one), so Complete waits for it.
+  const uncheckedCount = completeChecklist.filter(entry => !entry.done).length;
+  const completeReady = uncheckedCount === 0 || !!completeForm.incomplete_checklist_reason.trim();
 
   const formDirty =
     (showCreateScheduleModal &&
@@ -567,7 +573,7 @@ export default function Maintenance() {
   };
 
   const handleComplete = async () => {
-    if (!selectedWO || actionBusy) return;
+    if (!selectedWO || actionBusy || !completeReady) return;
     setActionBusy(true);
     setActionError('');
     const number = (value: string) => {
@@ -586,6 +592,7 @@ export default function Maintenance() {
         // Left blank (0), the server fills it from the downtime this work order recorded.
         downtime_minutes: number(completeForm.downtime_minutes),
         actual_duration_hours: number(completeForm.actual_duration_hours),
+        ...(uncheckedCount > 0 ? { incomplete_checklist_reason: completeForm.incomplete_checklist_reason.trim() } : {}),
       });
       markSaved();
       setShowCompleteModal(false);
@@ -956,12 +963,13 @@ export default function Maintenance() {
   );
 
   // The Overdue / Due This Week tiles count work orders AND the PM schedules that have come due
-  // with no work order open yet (the server never counts one PM twice). An older API without the
-  // schedule keys leaves them work orders only, with no split shown.
+  // with no work order being worked — none opened yet, or its work order on hold (a held PM is not
+  // done). The server never counts one PM twice. An older API without the schedule keys leaves
+  // them work orders only, with no split shown.
   const pmSplit = (workOrderCount: number, scheduleCount?: number) =>
     scheduleCount == null
       ? undefined
-      : `${workOrderCount} work order${workOrderCount === 1 ? '' : 's'} · ${scheduleCount} PM${scheduleCount === 1 ? '' : 's'} not started`;
+      : `${workOrderCount} work order${workOrderCount === 1 ? '' : 's'} · ${scheduleCount} PM${scheduleCount === 1 ? '' : 's'} not started or on hold`;
   const overdueWOs = dashboard?.overdue_count ?? 0;
   const overdueTotal = overdueWOs + (dashboard?.schedules_overdue ?? 0);
   const dueWeekWOs = dashboard?.due_this_week ?? 0;
@@ -1724,6 +1732,25 @@ export default function Maintenance() {
               ))}
             </fieldset>
           )}
+          {uncheckedCount > 0 && (
+            <FormField
+              label={`Reason for completing with ${uncheckedCount} item${uncheckedCount === 1 ? '' : 's'} unticked`}
+              required
+              help="Recorded in the audit trail with the unticked items. Tick every item to complete without one."
+              labelClassName="block text-sm font-medium text-slate-300 mb-1"
+            >
+              {field => (
+                <textarea
+                  {...field}
+                  value={completeForm.incomplete_checklist_reason}
+                  onChange={e => setCompleteForm(f => ({ ...f, incomplete_checklist_reason: e.target.value }))}
+                  rows={2}
+                  maxLength={2000}
+                  className="w-full px-3 py-2 border rounded-sm"
+                />
+              )}
+            </FormField>
+          )}
           <FormField label="Completion Notes" labelClassName="block text-sm font-medium text-slate-300 mb-1">
             {field => (
               <textarea
@@ -1832,7 +1859,13 @@ export default function Maintenance() {
           <Button variant="secondary" onClick={closeCompleteModal} disabled={actionBusy}>
             Cancel
           </Button>
-          <LoadingButton onClick={handleComplete} loading={actionBusy} loadingText="Saving…">
+          <LoadingButton
+            onClick={handleComplete}
+            loading={actionBusy}
+            loadingText="Saving…"
+            disabled={!completeReady}
+            title={completeReady ? undefined : 'Give a reason for the unticked checklist items, or tick them'}
+          >
             Complete
           </LoadingButton>
         </div>

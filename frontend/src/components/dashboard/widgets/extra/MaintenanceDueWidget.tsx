@@ -1,10 +1,10 @@
 /**
  * Maintenance Due — `GET /maintenance/dashboard` (the `maintenance` source, cached five
  * minutes). Renders the three workload counts only. Overdue and "due in 7 days" add the PM
- * schedules that have come due with no work order open yet (`schedules_overdue` /
- * `schedules_due_this_week`) to the work-order counts — a PM nobody has started is still due;
- * the server never counts one PM in both, and an older API without those keys just leaves them
- * out. The response's cost fields
+ * schedules that have come due with no work order being worked (`schedules_overdue` /
+ * `schedules_due_this_week`) to the work-order counts — a PM nobody has started, or whose work
+ * order is on hold, is still due; the server never counts one PM in both, and an older API
+ * without those keys just leaves them out. The response's cost fields
  * (`total_cost_month`, per-work-center `total_cost`) are deliberately not shown — the
  * Maintenance page is where cost belongs. (Not rendering them is a presentation choice; the
  * payload still carries them.)
