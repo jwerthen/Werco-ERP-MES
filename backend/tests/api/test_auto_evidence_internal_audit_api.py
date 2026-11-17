@@ -450,6 +450,29 @@ def test_auto_link_rolls_back_when_a_retirement_audit_row_cannot_be_written(
     )
 
 
+def test_auto_link_retirement_audit_row_fits_a_long_title(client: TestClient, db_session: Session):
+    """An evidence title may be up to 500 characters, but ``audit_log.resource_identifier`` is
+    255. The required DELETE row truncates the identifier (Postgres would otherwise reject the
+    insert and every auto-link run on the standard would answer 503); the full title stays in
+    the row's ``old_values`` snapshot."""
+    standard = _make_standard(db_session)
+    clause = _make_clause(db_session, standard=standard, clause_number="9.2", title="Internal audit")
+    long_title = "Change log " + "x" * 400
+    stale = _make_evidence(db_session, clause=clause, title=long_title)
+    stale_id, standard_id = stale.id, standard.id
+    user = _make_user(db_session)
+
+    body = _auto_link(client, standard_id, user)
+
+    assert body["total_evidence_retired"] == 1
+    (delete,) = _committed_audit_rows(
+        db_session, resource_type="qms_clause_evidence", resource_id=stale_id, action="DELETE"
+    )
+    assert len(delete.resource_identifier) <= 255
+    assert long_title.startswith(delete.resource_identifier)
+    assert delete.old_values["title"] == long_title
+
+
 def test_auto_link_never_touches_manual_evidence(client: TestClient, db_session: Session):
     """(d) A manually linked row on the same clause stays as it is; only the stale auto row goes.
     The manual row has no rule id, so it would be "unmatched" if the auto-linked filter fell."""

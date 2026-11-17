@@ -8833,8 +8833,10 @@ in `RBAC_PERMISSIONS.md`.
 > audit row (`resource_type` `qms_standard`) carries `extra_data.evidence_retired` (a list of
 > `{evidence_id, clause_id, clause_number, rule_id}`) and `extra_data.evidence_kept_reviewed` (the
 > same, plus `reason`), each only when non-empty. Candidate rows are locked (`FOR UPDATE`) for the
-> run, so a concurrent **Verify** is decided against the row as it then stands. The SPA's
-> *Auto-Link Evidence Complete* dialog does not show the new fields yet.
+> run, so a second run on the same standard never retires a row twice, and a **Verify** committed
+> before the run reached the row is honored. A Verify still in flight while the run commits is not
+> covered (the evidence `PUT` reads without a lock), so it can land on a row the run retired. The
+> SPA's *Auto-Link Evidence Complete* dialog does not show the new fields yet.
 >
 > **What operators see:** a 9.2 or 9.3 clause already linked to the
 > *Audit Trail (Immutable Hash-Chain Log)* row loses that link on the next **Auto-Link Evidence**
