@@ -397,6 +397,20 @@ describe('Maintenance — a PM answers for its schedule’s checklist', () => {
     expect(body).not.toHaveProperty('incomplete_checklist_reason');
   });
 
+  it('takes the steps from the work order (the list the server judges), even for an inactive schedule', async () => {
+    // The page loads active schedules only; the work order carries its schedule's steps itself.
+    mockedApi.getMaintenanceSchedules.mockResolvedValue([millPm]);
+    mockedApi.getMaintenanceWorkOrders.mockResolvedValue([
+      { ...openPmWO, schedule_checklist_items: ['Drain tank', 'Check belt', 'Check oil'] },
+    ]);
+    renderPage('/maintenance?tab=work_orders');
+    const table = await screen.findByTestId('data-table');
+    fireEvent.click(await within(table).findByRole('button', { name: 'Complete work order MWO-2026-0041' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toHaveTextContent('Checklist (0 of 3 done)');
+    expect(within(dialog).getByRole('checkbox', { name: 'Check oil' })).not.toBeChecked();
+  });
+
   it('opens with nothing to save when the work order already carries every schedule step', async () => {
     mockedApi.getMaintenanceSchedules.mockResolvedValue([
       millPm,

@@ -38,7 +38,10 @@ from app.services.import_service import MAX_IMPORT_FILE_BYTES, ImportFileError
 from app.services.maintenance_checklist import (
     API_TOKEN_CHECKLIST_REMOVAL,
     API_TOKEN_INCOMPLETE_CHECKLIST,
+    API_TOKEN_SCHEDULE_CHECKLIST_REMOVAL,
+    describe_items,
     removed_checklist_items,
+    removed_items,
     unticked_checklist_items,
 )
 from app.services.maintenance_schedule_import_service import commit_pm_import, parse_checklist, preview_pm_import
@@ -435,7 +438,9 @@ def _work_orders_with_targets(db: Session):
     """A work-order query that loads each row's target with it: the serializers read
     ``work_center`` and ``asset`` on every row, one lazy load apiece otherwise."""
     return db.query(MaintenanceWorkOrder).options(
-        joinedload(MaintenanceWorkOrder.work_center), joinedload(MaintenanceWorkOrder.asset)
+        joinedload(MaintenanceWorkOrder.work_center),
+        joinedload(MaintenanceWorkOrder.asset),
+        joinedload(MaintenanceWorkOrder.schedule),
     )
 
 
@@ -463,6 +468,12 @@ def _serialize_schedule(s: MaintenanceSchedule) -> dict:
     }
 
 
+def _schedule_checklist_items(wo: MaintenanceWorkOrder) -> List[str]:
+    """The tenant-guarded PM schedule's checklist items (``[]`` without a schedule)."""
+    schedule = _same_tenant(wo, wo.schedule) if wo.schedule_id is not None else None
+    return parse_checklist(schedule.checklist) if schedule is not None else []
+
+
 def _serialize_wo(wo: MaintenanceWorkOrder) -> dict:
     return {
         "id": wo.id,
@@ -475,6 +486,10 @@ def _serialize_wo(wo: MaintenanceWorkOrder) -> dict:
         "title": wo.title,
         "description": wo.description,
         "checklist_results": wo.checklist_results,
+        # The PM schedule's checklist, which completion also judges (a step the work order no longer
+        # carries still needs a tick or a reason). Read whether or not the schedule is still active,
+        # exactly as completion reads it, so the Complete dialog lists the same steps the server will.
+        "schedule_checklist_items": _schedule_checklist_items(wo),
         "scheduled_date": wo.scheduled_date.isoformat() if wo.scheduled_date else None,
         "due_date": wo.due_date.isoformat() if wo.due_date else None,
         "started_at": to_utc_iso(wo.started_at),
@@ -695,10 +710,19 @@ def update_schedule(
     audit: AuditService = Depends(get_audit_service),
 ):
     """Update a PM schedule (enum fields 422 on an unknown value; a schedule left on
-    ``custom`` must carry ``frequency_days``). The target is not changed here."""
+    ``custom`` must carry ``frequency_days``). The target is not changed here. A standing API token
+    that takes items off ``checklist`` while the schedule has an open work order is **403**."""
     schedule = _schedule_or_404(db, schedule_id, company_id)
 
     update_data = data.model_dump(exclude_unset=True)
+    if (
+        "checklist" in update_data
+        and is_api_token_credential(current_user)
+        and removed_items(parse_checklist(schedule.checklist), parse_checklist(update_data["checklist"]))
+        and _open_work_order_for_schedule(db, company_id, schedule.id) is not None
+    ):
+        # Completion judges the schedule's steps: emptying them under an open work order is a skip.
+        raise HTTPException(status_code=403, detail=API_TOKEN_SCHEDULE_CHECKLIST_REMOVAL)
     frequency = update_data.get("frequency", schedule.frequency)
     frequency_days = update_data["frequency_days"] if "frequency_days" in update_data else schedule.frequency_days
     if frequency == MaintenanceFrequency.CUSTOM and not frequency_days:
@@ -1198,7 +1222,8 @@ def complete_work_order(
             status_code=409,
             detail=(
                 f"{len(unticked)} of {checklist_total} checklist items on maintenance work order {wo.wo_number} "
-                "are not ticked. Tick them, or give a reason for completing without them."
+                f"are not ticked ({describe_items(unticked)}). Tick them, or give a reason for completing "
+                "without them."
             ),
         )
 

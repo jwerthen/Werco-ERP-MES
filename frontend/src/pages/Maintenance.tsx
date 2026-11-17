@@ -344,9 +344,14 @@ export default function Maintenance() {
   };
   const openCompleteModal = useCallback(
     (wo: MaintenanceWorkOrder) => {
-      // A PM work order answers for its schedule's checklist too (the server judges both).
+      // A PM work order answers for its schedule's checklist too (the server judges both). The
+      // work order carries the list the server will judge; an older API leaves it to the page's
+      // (active) schedules.
       const schedule = wo.schedule_id != null ? schedulesById.get(wo.schedule_id) : undefined;
-      const checklist = completionChecklist(parseChecklistResults(wo.checklist_results), schedule?.checklist_items);
+      const checklist = completionChecklist(
+        parseChecklistResults(wo.checklist_results),
+        wo.schedule_checklist_items ?? schedule?.checklist_items
+      );
       setSelectedWO(wo);
       setActionError('');
       setCompleteForm(BLANK_COMPLETE);

@@ -13,8 +13,10 @@ import pytest
 
 from app.services.maintenance_checklist import (
     ChecklistEntry,
+    describe_items,
     parse_checklist_results,
     removed_checklist_items,
+    removed_items,
     unticked_checklist_items,
 )
 
@@ -245,3 +247,13 @@ class TestRemovedChecklistItems:
     def test_one_copy_of_a_repeated_item_removed_counts(self):
         stored = checklist(("Grease bearing", False), ("Grease bearing", False))
         assert removed_checklist_items(stored, checklist(("Grease bearing", False))) == ["Grease bearing"]
+
+
+class TestRemovedItemsAndDescribe:
+    def test_removed_items_is_a_multiset_difference(self):
+        assert removed_items(["A", "B", "B"], ["B", "C"]) == ["A", "B"]
+        assert removed_items(["A"], ["A", "A"]) == []
+
+    def test_describe_items_summarizes_a_long_list(self):
+        assert describe_items(["a", "b"]) == "a; b"
+        assert describe_items([str(n) for n in range(12)], limit=10) == "0; 1; 2; 3; 4; 5; 6; 7; 8; 9; and 2 more"

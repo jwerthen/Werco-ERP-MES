@@ -33,7 +33,11 @@ from app.models.maintenance import MaintenanceLog, MaintenanceSchedule, Maintena
 from app.models.user import UserRole
 from app.services.audit_service import AuditService, AuditWriteError
 from app.services.company_time import company_today
-from app.services.maintenance_checklist import API_TOKEN_CHECKLIST_REMOVAL, API_TOKEN_INCOMPLETE_CHECKLIST
+from app.services.maintenance_checklist import (
+    API_TOKEN_CHECKLIST_REMOVAL,
+    API_TOKEN_INCOMPLETE_CHECKLIST,
+    API_TOKEN_SCHEDULE_CHECKLIST_REMOVAL,
+)
 from tests.api.test_maintenance_assets import make_wc
 from tests.api.test_maintenance_pm_roll_forward import make_schedule
 from tests.api.test_receiving_compliance import headers_for, make_user
@@ -582,3 +586,70 @@ class TestATokenCannotPutChecklistItemsAway:
             .one()
         )
         assert row.old_values["checklist_results"] == TWO_ITEMS_OPEN
+
+
+class TestTheWorkOrderCarriesItsScheduleSteps:
+    """``schedule_checklist_items`` on every work-order read: the Complete dialog builds from it, so
+    it must be exactly what completion judges -- an inactive schedule included."""
+
+    def test_reads_carry_the_schedule_steps_even_after_the_schedule_is_deactivated(self, client, db_session, headers):
+        schedule, wo = pm_from_checklisted_schedule(
+            client, headers, db_session, checklist_results=checklist(("Lubricate ways", True))
+        )
+        assert client.delete(f"/api/v1/maintenance/schedules/{schedule.id}", headers=headers).status_code == 200
+        one = client.get(f"{WORK_ORDERS}/{wo['id']}", headers=headers).json()
+        assert one["schedule_checklist_items"] == ["Lubricate ways", "Check coolant"]
+        [listed] = [row for row in client.get(WORK_ORDERS, headers=headers).json() if row["id"] == wo["id"]]
+        assert listed["schedule_checklist_items"] == ["Lubricate ways", "Check coolant"]
+        # ...and completion judges exactly that list.
+        refused = complete(client, headers, wo["id"])
+        assert refused.status_code == status.HTTP_409_CONFLICT, refused.text
+
+    def test_a_work_order_without_a_schedule_carries_none(self, client, db_session, headers):
+        wc = make_wc(db_session)
+        created = client.post(WORK_ORDERS, headers=headers, json={"work_center_id": wc.id, "title": "Corrective"})
+        assert created.json()["schedule_checklist_items"] == []
+
+    def test_the_409_names_the_unticked_items(self, client, db_session, headers):
+        schedule, wo = pm_from_checklisted_schedule(
+            client, headers, db_session, checklist_results=checklist(("Lubricate ways", True))
+        )
+        refused = complete(client, headers, wo["id"])
+        assert "(Check coolant)" in refused.json()["detail"]
+
+
+class TestATokenCannotEmptyTheScheduleUnderAnOpenWorkOrder:
+    """Completion judges the schedule's steps, so a token emptying them while a work order is open
+    would be the same skip by a third route."""
+
+    def put_schedule(self, client, headers, schedule_id, checklist_text):
+        return client.put(
+            f"/api/v1/maintenance/schedules/{schedule_id}", headers=headers, json={"checklist": checklist_text}
+        )
+
+    @pytest.mark.parametrize("trimmed", [None, "", json.dumps(["Lubricate ways"])], ids=["null", "empty", "dropped"])
+    def test_removing_steps_with_an_open_work_order_is_403(self, client, db_session, headers, token_headers, trimmed):
+        schedule, wo = pm_from_checklisted_schedule(client, headers, db_session, checklist_results=None)
+        refused = self.put_schedule(client, token_headers, schedule.id, trimmed)
+        assert refused.status_code == status.HTTP_403_FORBIDDEN, refused.text
+        assert refused.json()["detail"] == API_TOKEN_SCHEDULE_CHECKLIST_REMOVAL
+        db_session.expire_all()
+        assert db_session.get(MaintenanceSchedule, schedule.id).checklist == SCHEDULE_CHECKLIST
+
+    def test_a_token_may_add_steps_or_edit_a_schedule_with_no_open_work_order(
+        self, client, db_session, headers, token_headers
+    ):
+        schedule, wo = pm_from_checklisted_schedule(client, headers, db_session, checklist_results=None)
+        added = self.put_schedule(
+            client, token_headers, schedule.id, json.dumps(["Lubricate ways", "Check coolant", "Wipe"])
+        )
+        assert added.status_code == 200, added.text
+
+        idle = make_schedule(db_session, next_due=company_today(db_session, 1), checklist=SCHEDULE_CHECKLIST)
+        trimmed = self.put_schedule(client, token_headers, idle.id, None)
+        assert trimmed.status_code == 200, trimmed.text
+
+    def test_a_person_may_trim_the_schedule_under_an_open_work_order(self, client, db_session, headers):
+        schedule, wo = pm_from_checklisted_schedule(client, headers, db_session, checklist_results=None)
+        trimmed = self.put_schedule(client, headers, schedule.id, json.dumps(["Lubricate ways"]))
+        assert trimmed.status_code == 200, trimmed.text

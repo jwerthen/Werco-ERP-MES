@@ -101,7 +101,7 @@ describe('schedule edit payload', () => {
 
 describe('completionChecklist', () => {
   it('appends, unticked, the schedule items the work order no longer carries', () => {
-    expect(completionChecklist([{ item: 'Grease', done: true }], ['Grease', ' Check belt ', '', 'Check oil'])).toEqual([
+    expect(completionChecklist([{ item: 'Grease', done: true }], ['Grease', 'Check belt', ' ', 'Check oil'])).toEqual([
       { item: 'Grease', done: true },
       { item: 'Check belt', done: false },
       { item: 'Check oil', done: false },

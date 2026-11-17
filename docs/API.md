@@ -6134,8 +6134,8 @@ uploads go through text extraction + LLM. See
 > - **Checklist at completion (owner decision 2026-11-17).** `POST
 >   /maintenance/work-orders/{id}/complete` takes `incomplete_checklist_reason` (string, at most 2000
 >   characters). Completing with **any** checklist item unticked and no non-blank reason is **409**
->   *"N of M checklist items on maintenance work order MWO-… are not ticked. Tick them, or give a reason
->   for completing without them."*, judged before the first write, so nothing is saved (a work order
+>   *"N of M checklist items on maintenance work order MWO-… are not ticked (item; item). Tick them, or
+>   give a reason for completing without them."* (the first ten items are named), judged before the first write, so nothing is saved (a work order
 >   in a status that cannot complete gets its **400** first). A standing API token is refused **403**
 >   `API_TOKEN_INCOMPLETE_CHECKLIST` *"Completing a maintenance work order with checklist items
 >   unticked must be done by a person signed in to the app, not an API token."* whenever any item is
@@ -6145,8 +6145,15 @@ uploads go through text extraction + LLM. See
 >   - The items judged are those the work order carried plus any in the body's `checklist_results`,
 >     plus — for a PM work order — every item of its **schedule's** checklist, matched by text. A
 >     schedule step left off the work order (at Start PM, by a create through the API that sent no
->     checklist, or by a later `PUT`) is still a step of the PM: it needs a tick or a reason. The
->     Complete dialog lists such a step, unticked, after the work order's own items. An item is ticked only when the checklist the work order completes with marks
+>     checklist, or by a later `PUT`) is still a step of the PM: it needs a tick or a reason. Every
+>     maintenance work-order response carries those steps as `schedule_checklist_items` (`[]` without
+>     a schedule; read whether or not the schedule is still active, exactly as completion reads it),
+>     and the Complete dialog lists any it lacks, unticked, after the work order's own items. A
+>     standing API token's `PUT /maintenance/schedules/{id}` that takes items off `checklist` while
+>     the schedule has an open work order is **403** `API_TOKEN_SCHEDULE_CHECKLIST_REMOVAL` *"Removing
+>     items from the checklist of a PM schedule that has an open work order must be done by a person
+>     signed in to the app, not an API token."* (adding steps, or editing a schedule with no open work
+>     order, is unchanged). An item is ticked only when the checklist the work order completes with marks
 >     it `"done": true`; a plain-string item, or a line of a one-item-per-line checklist (split on
 >     `\r?\n`, as the page splits it), is unticked. Items count as a **multiset**: a checklist that
 >     names one step twice needs both copies ticked, and the audit row lists a text once per unticked

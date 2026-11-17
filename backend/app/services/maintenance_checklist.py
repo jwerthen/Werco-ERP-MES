@@ -27,6 +27,12 @@ API_TOKEN_CHECKLIST_REMOVAL = (
     "Removing items from a maintenance work order's checklist must be done by a person signed in to the app, "
     "not an API token."
 )
+# ...including from the PM SCHEDULE's checklist while a work order is open against it: completion
+# judges the schedule's steps too, so emptying the schedule would be the same skip by a third route.
+API_TOKEN_SCHEDULE_CHECKLIST_REMOVAL = (
+    "Removing items from the checklist of a PM schedule that has an open work order must be done by a person "
+    "signed in to the app, not an API token."
+)
 
 
 class ChecklistEntry(NamedTuple):
@@ -105,14 +111,29 @@ def unticked_checklist_items(
     return unticked, total
 
 
-def removed_checklist_items(stored: Optional[str], new: Optional[str]) -> List[str]:
-    """Items ``stored`` carries that ``new`` does not (as a multiset: one copy of a repeated item
-    removed counts). Ticking, unticking or adding an item removes nothing."""
-    remaining = Counter(entry.item for entry in parse_checklist_results(new))
+def removed_items(before: Sequence[str], after: Sequence[str]) -> List[str]:
+    """Items ``before`` lists that ``after`` does not, as a multiset (one copy of a repeated item
+    removed counts)."""
+    remaining = Counter(after)
     removed: List[str] = []
-    for entry in parse_checklist_results(stored):
-        if remaining[entry.item] > 0:
-            remaining[entry.item] -= 1
+    for item in before:
+        if remaining[item] > 0:
+            remaining[item] -= 1
         else:
-            removed.append(entry.item)
+            removed.append(item)
     return removed
+
+
+def removed_checklist_items(stored: Optional[str], new: Optional[str]) -> List[str]:
+    """Work-order checklist items ``stored`` carries that ``new`` does not. Ticking, unticking or
+    adding an item removes nothing."""
+    return removed_items(
+        [entry.item for entry in parse_checklist_results(stored)],
+        [entry.item for entry in parse_checklist_results(new)],
+    )
+
+
+def describe_items(items: Sequence[str], limit: int = 10) -> str:
+    """``items`` for a message: ``a; b; c``, the tail after ``limit`` summarized."""
+    shown = "; ".join(items[:limit])
+    return shown if len(items) <= limit else f"{shown}; and {len(items) - limit} more"

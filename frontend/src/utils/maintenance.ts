@@ -132,9 +132,9 @@ export const completionChecklist = (
   const carried = new Map<string, number>();
   for (const entry of workOrderItems) carried.set(entry.item, (carried.get(entry.item) ?? 0) + 1);
   const missing: ChecklistResultItem[] = [];
-  for (const raw of scheduleItems) {
-    const item = raw.trim();
-    if (!item) continue;
+  // The server's items as it sends them: re-trimming here could make the two lists disagree.
+  for (const item of scheduleItems) {
+    if (!item.trim()) continue;
     const left = carried.get(item) ?? 0;
     if (left > 0) carried.set(item, left - 1);
     else missing.push({ item, done: false });
