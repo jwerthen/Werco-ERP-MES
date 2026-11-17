@@ -229,7 +229,14 @@ class WorkOrderComplete(BaseModel):
     actual_duration_hours: Optional[float] = None
     # Required (409 without it) when the work order completes with any checklist item unticked;
     # recorded in the completion's audit row and log entry. Ignored when every item is ticked.
-    incomplete_checklist_reason: Optional[str] = Field(None, max_length=2000)
+    incomplete_checklist_reason: Optional[str] = Field(
+        None,
+        max_length=2000,
+        description=(
+            "Why the work order is completed with checklist items unticked. Required when any item is "
+            "unticked (409 without it); ignored when every item is ticked. Recorded in the audit trail."
+        ),
+    )
 
 
 class LogCreate(BaseModel):
@@ -639,7 +646,8 @@ def create_schedule(
     """Create a new PM schedule on a work center OR an equipment asset (exactly one).
 
     ``frequency`` is one of daily, weekly, biweekly, monthly, quarterly, semi_annual, annual,
-    custom (422 otherwise); ``custom`` requires ``frequency_days``."""
+    custom (422 otherwise); ``custom`` requires ``frequency_days``. A blank ``next_due_date`` is
+    the company's calendar day."""
     _resolve_target(db, company_id, work_center_id=data.work_center_id, asset_id=data.asset_id)
 
     schedule = MaintenanceSchedule(
@@ -839,7 +847,8 @@ def create_work_order(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Create a new maintenance work order on a work center OR an equipment asset.
+    """Create a new maintenance work order on a work center OR an equipment asset. A PM schedule
+    takes one open work order at a time: a second with the same ``schedule_id`` is 409.
 
     Give exactly one of ``work_center_id`` / ``asset_id``, or neither together with a
     ``schedule_id`` to inherit that schedule's target (an explicit target that differs from the
@@ -1110,7 +1119,9 @@ def complete_work_order(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Complete a maintenance work order.
+    """Complete a maintenance work order. Completing with any checklist item unticked needs
+    ``incomplete_checklist_reason`` (409 without it), which the audit trail records; a PM work
+    order rolls its schedule forward from the company's calendar day.
 
     Resolves the downtime event the work order holds open (see ``/start``) at completion,
     and -- when ``downtime_minutes`` is left at 0 -- records the linked events' minutes.
@@ -1129,6 +1140,23 @@ def complete_work_order(
     wo = _wo_or_404(db, wo_id, company_id, for_update=True)
     if wo.status not in (MaintenanceStatus.IN_PROGRESS, MaintenanceStatus.SCHEDULED, MaintenanceStatus.OVERDUE):
         raise HTTPException(status_code=400, detail=f"Cannot complete work order in status '{wo.status.value}'")
+
+    # The PM schedule this completion advances, row-locked now (a no-op on SQLite): row locks
+    # first, the global audit-chain lock after -- the downtime resolution below writes audit rows,
+    # and a schedule edit takes the schedule's row lock before ITS audit row, so locking the
+    # schedule after them could deadlock against it. The lock also keeps the roll-forward's audit
+    # ``old_values`` exact. Scoped: pre-fix rows may still carry a foreign schedule_id
+    # (create_work_order accepted one once), and this is the write that would advance another
+    # tenant's PM due date.
+    schedule: Optional[MaintenanceSchedule] = None
+    if wo.schedule_id:
+        schedule = (
+            db.query(MaintenanceSchedule)
+            .filter(MaintenanceSchedule.id == wo.schedule_id, MaintenanceSchedule.company_id == company_id)
+            .with_for_update()
+            .populate_existing()
+            .first()
+        )
 
     # Judged before the first write. The checklist is the record of what the PM actually covered,
     # so closing with part of it undone is allowed only with a reason someone wrote down.
@@ -1184,33 +1212,21 @@ def complete_work_order(
         duration = (now - wo.started_at).total_seconds() / 3600.0
         wo.actual_duration_hours = round(duration, 2)
 
-    # Update schedule if linked. Scoped: pre-fix rows may still carry a foreign
-    # schedule_id (create_work_order accepted one until this change), and this
-    # is the write that would advance another tenant's PM due date.
-    # Row-locked (a no-op on SQLite) so a concurrent schedule edit cannot slip between this read and
-    # the write, which keeps the roll-forward's audit ``old_values`` exact.
+    # Advance the PM schedule locked above.
     advanced: Optional[MaintenanceSchedule] = None
     advanced_due: Optional[str] = None
     schedule_old_values: Dict[str, Any] = {}
-    if wo.schedule_id:
-        schedule = (
-            db.query(MaintenanceSchedule)
-            .filter(MaintenanceSchedule.id == wo.schedule_id, MaintenanceSchedule.company_id == company_id)
-            .with_for_update()
-            .populate_existing()
-            .first()
-        )
-        if schedule:
-            schedule_old_values = {
-                "last_completed_date": schedule.last_completed_date,
-                "next_due_date": schedule.next_due_date,
-            }
-            schedule.last_completed_date = today
-            schedule.next_due_date = _calc_next_due(schedule.frequency, schedule.frequency_days, today)
-            advanced = schedule
-            # Computed once, before the commit: the response must report the date THIS completion
-            # wrote, not whatever a re-read after commit finds.
-            advanced_due = schedule.next_due_date.isoformat()
+    if schedule is not None:
+        schedule_old_values = {
+            "last_completed_date": schedule.last_completed_date,
+            "next_due_date": schedule.next_due_date,
+        }
+        schedule.last_completed_date = today
+        schedule.next_due_date = _calc_next_due(schedule.frequency, schedule.frequency_days, today)
+        advanced = schedule
+        # Computed once, before the commit: the response must report the date THIS completion
+        # wrote, not whatever a re-read after commit finds.
+        advanced_due = schedule.next_due_date.isoformat()
 
     # Log the event. Same NOT NULL omission as start_work_order: the insert
     # raised IntegrityError and the endpoint 500'd after the completion had

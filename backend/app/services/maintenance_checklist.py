@@ -10,6 +10,8 @@ Pure functions: no database, no audit, no side effects.
 """
 
 import json
+import re
+from collections import Counter
 from typing import Any, List, NamedTuple, Optional, Tuple
 
 
@@ -44,7 +46,9 @@ def parse_checklist_results(raw: Optional[str]) -> List[ChecklistEntry]:
             if item:
                 entries.append(ChecklistEntry(item, done))
         return entries
-    return [ChecklistEntry(line.strip(), False) for line in text.splitlines() if line.strip()]
+    # ``\r?\n`` exactly, like the page's reader: ``str.splitlines`` also splits on a lone ``\r``
+    # and other separators, which would make the server see items the dialog does not show.
+    return [ChecklistEntry(line.strip(), False) for line in re.split(r"\r?\n", text) if line.strip()]
 
 
 def unticked_checklist_items(stored: Optional[str], completed_with: Optional[str]) -> Tuple[List[str], int]:
@@ -54,12 +58,21 @@ def unticked_checklist_items(stored: Optional[str], completed_with: Optional[str
     the one it completes with (the same text when the completion does not send one). An item is
     done only when ``completed_with`` ticks it. An item ``stored`` carried that ``completed_with``
     leaves out -- or a completion that clears the checklist -- counts as NOT done: dropping a line
-    is not a way to close without doing it. Items are matched by their text."""
-    ticked = {entry.item for entry in parse_checklist_results(completed_with) if entry.done}
-    items: List[str] = []
-    seen = set()
-    for entry in [*parse_checklist_results(completed_with), *parse_checklist_results(stored)]:
-        if entry.item not in seen:
-            seen.add(entry.item)
-            items.append(entry.item)
-    return [item for item in items if item not in ticked], len(items)
+    is not a way to close without doing it.
+
+    Items are matched by their text, as a MULTISET: a checklist may name the same step twice
+    ("Grease bearing" for each of two bearings), and ticking one copy must not tick the other.
+    Each text counts as many times as the larger of the two checklists carries it; the returned
+    list repeats a text once per unticked copy."""
+    completed = parse_checklist_results(completed_with)
+    previous = parse_checklist_results(stored)
+    ticked = Counter(entry.item for entry in completed if entry.done)
+    in_completed = Counter(entry.item for entry in completed)
+    in_previous = Counter(entry.item for entry in previous)
+    unticked: List[str] = []
+    total = 0
+    for text in dict.fromkeys(entry.item for entry in [*completed, *previous]):
+        copies = max(in_completed[text], in_previous[text])
+        total += copies
+        unticked.extend([text] * (copies - ticked[text]))
+    return unticked, total
