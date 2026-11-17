@@ -354,15 +354,15 @@ def get_standard(
         db.query(QMSStandard)
         .options(
             joinedload(QMSStandard.clauses).joinedload(QMSClause.evidence_links),
-            # Exclude soft-deleted clauses/evidence from the eager-loaded nested payload.
-            with_loader_criteria(QMSClause, QMSClause.is_deleted == False),
-            with_loader_criteria(QMSClauseEvidence, QMSClauseEvidence.is_deleted == False),
+            # Only live, own-company clauses/evidence in the nested payload, sub_clauses included.
+            *_clause_tree_criteria(company_id),
         )
         .filter(
             QMSStandard.id == standard_id,
             QMSStandard.company_id == company_id,
             QMSStandard.is_deleted == False,
         )
+        .populate_existing()  # see _clause_tree_criteria
         .first()
     )
     if not standard:
@@ -431,6 +431,93 @@ def delete_standard(
 
 # ============== QMS Clauses ==============
 
+# One refusal for every parent id that is not a live clause of the active company in the same
+# standard: an id that does not exist, another company's clause, a deleted clause and a clause of
+# another standard all get these exact bytes, so the answer says nothing about other tenants.
+PARENT_CLAUSE_NOT_FOUND = "Parent clause not found"
+PARENT_CLAUSE_IS_SELF = "A clause cannot be its own parent clause"
+PARENT_CLAUSE_IS_DESCENDANT = "A clause cannot be placed under one of its own sub-clauses"
+
+
+def _clause_tree_criteria(company_id: int) -> list:
+    """Loader criteria for every response that serializes a clause tree.
+
+    ``QMSClauseResponse`` renders the self-referential ``sub_clauses`` backref (and each
+    sub-clause's ``evidence_links``), which is loaded by ``parent_clause_id`` alone. These
+    criteria propagate to those lazy loads, so a sub-clause renders only when it is live and
+    belongs to the active company. The company half is what keeps a clause another company
+    grafted under one of ours (a ``parent_clause_id`` written before the write-side check
+    existed) out of our reads, with its evidence.
+
+    Pair them with ``populate_existing()``. The criteria ride on each instance's load options,
+    which a query sets only on an instance it loads fresh: a clause already in the session when
+    the query runs would keep lazy-loading ``sub_clauses`` without them, so the tenant filter
+    would silently depend on what the request happened to load first.
+    """
+    return [
+        with_loader_criteria(QMSClause, (QMSClause.company_id == company_id) & (QMSClause.is_deleted == False)),
+        with_loader_criteria(
+            QMSClauseEvidence,
+            (QMSClauseEvidence.company_id == company_id) & (QMSClauseEvidence.is_deleted == False),
+        ),
+    ]
+
+
+def _assert_parent_clauses(
+    db: Session, parent_clause_ids: List[int | None], *, company_id: int, standard_id: int
+) -> None:
+    """Refuse any ``parent_clause_id`` that is not a live clause of the active company in ``standard_id``.
+
+    ``qms_clauses.parent_clause_id`` is a plain self-referencing foreign key, so the database
+    alone accepts any clause row, another company's included, and the ``sub_clauses`` backref
+    then renders the child under that parent in the other company's reads. One indexed read
+    resolves every distinct id; any id it does not return refuses the whole request 404
+    ``Parent clause not found`` before anything is written. ``None`` is skipped: no parent (or,
+    on an update, clearing it) is always allowed.
+    """
+    wanted = {pid for pid in parent_clause_ids if pid is not None}
+    if not wanted:
+        return
+    found = {
+        row.id
+        for row in db.query(QMSClause.id).filter(
+            QMSClause.id.in_(wanted),
+            QMSClause.company_id == company_id,
+            QMSClause.standard_id == standard_id,
+            QMSClause.is_deleted == False,
+        )
+    }
+    if found != wanted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=PARENT_CLAUSE_NOT_FOUND)
+
+
+def _assert_not_own_descendant(db: Session, clause_id: int, parent_clause_id: int, *, company_id: int) -> None:
+    """Refuse a parent that is the clause itself or one of its descendants (422).
+
+    Called only after ``_assert_parent_clauses`` has resolved ``parent_clause_id`` as one of the
+    active company's clauses, so another company's id never reaches it. Either case would store a
+    cycle, which fails response serialization and then every read of the standard.
+
+    Walks the stored parent links up from the proposed parent, scoped to the company and NOT
+    filtered on ``is_deleted``: a deleted clause's link is still stored, and a cycle through it
+    would come back if the clause were ever restored. ``seen`` bounds the walk on a chain that is
+    already cyclic from before this check. One primary-key read per level; clause trees are a
+    handful deep.
+    """
+    if parent_clause_id == clause_id:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=PARENT_CLAUSE_IS_SELF)
+    seen: set = set()
+    current: int | None = parent_clause_id
+    while current is not None and current not in seen:
+        if current == clause_id:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=PARENT_CLAUSE_IS_DESCENDANT)
+        seen.add(current)
+        current = (
+            db.query(QMSClause.parent_clause_id)
+            .filter(QMSClause.id == current, QMSClause.company_id == company_id)
+            .scalar()
+        )
+
 
 @router.get("/{standard_id}/clauses", response_model=List[QMSClauseResponse])
 def list_clauses(
@@ -444,11 +531,9 @@ def list_clauses(
         db.query(QMSClause)
         .options(
             joinedload(QMSClause.evidence_links),
-            # Exclude soft-deleted evidence and nested sub-clauses from the payload.
-            # QMSClauseResponse serializes the self-referential `sub_clauses` backref,
-            # which would otherwise lazy-load soft-deleted child clauses unfiltered.
-            with_loader_criteria(QMSClause, QMSClause.is_deleted == False),
-            with_loader_criteria(QMSClauseEvidence, QMSClauseEvidence.is_deleted == False),
+            # QMSClauseResponse serializes the self-referential `sub_clauses` backref, which would
+            # otherwise lazy-load soft-deleted and other companies' child clauses unfiltered.
+            *_clause_tree_criteria(company_id),
         )
         .filter(
             QMSClause.standard_id == standard_id,
@@ -456,6 +541,7 @@ def list_clauses(
             QMSClause.is_deleted == False,
         )
         .order_by(QMSClause.sort_order, QMSClause.clause_number)
+        .populate_existing()  # see _clause_tree_criteria
         .all()
     )
     return clauses
@@ -470,7 +556,12 @@ def create_clause(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Add a clause to a standard."""
+    """Add a clause to a standard.
+
+    A ``parent_clause_id`` must name a live clause of your company in the same standard. Any other
+    id (one that does not exist, another company's, a deleted clause, a clause of another
+    standard) is refused 404 ``Parent clause not found`` and nothing is written.
+    """
     standard = (
         db.query(QMSStandard)
         .filter(
@@ -482,6 +573,8 @@ def create_clause(
     )
     if not standard:
         raise HTTPException(status_code=404, detail="QMS standard not found")
+
+    _assert_parent_clauses(db, [data.parent_clause_id], company_id=company_id, standard_id=standard_id)
 
     clause = QMSClause(standard_id=standard_id, company_id=company_id, **data.model_dump())
     db.add(clause)
@@ -502,7 +595,12 @@ def bulk_create_clauses(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Bulk-import clauses for a standard (e.g., from a parsed document)."""
+    """Bulk-import clauses for a standard (e.g., from a parsed document).
+
+    Every ``parent_clause_id`` must name a live clause of your company already in this standard
+    (clauses in the same request have no id yet). One that does not refuses the whole request 404
+    ``Parent clause not found``, and no clause is created.
+    """
     standard = (
         db.query(QMSStandard)
         .filter(
@@ -514,6 +612,10 @@ def bulk_create_clauses(
     )
     if not standard:
         raise HTTPException(status_code=404, detail="QMS standard not found")
+
+    _assert_parent_clauses(
+        db, [c.parent_clause_id for c in data.clauses], company_id=company_id, standard_id=standard_id
+    )
 
     clauses = []
     for i, clause_data in enumerate(data.clauses):
@@ -550,7 +652,15 @@ def update_clause(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Update a clause, including compliance status assessment."""
+    """Update a clause, including compliance status assessment.
+
+    A non-null ``parent_clause_id`` must name a live clause of your company in the clause's own
+    standard: any other id (one that does not exist, another company's, a deleted clause, a
+    clause of another standard) is refused 404 ``Parent clause not found``. The clause itself,
+    or one of its own sub-clauses at any depth, is refused 422. Either way nothing is written,
+    the other fields in the same request included. ``null`` clears the parent. A request that
+    does not send ``parent_clause_id`` is not judged on the value already stored.
+    """
     clause = (
         db.query(QMSClause)
         .filter(
@@ -563,10 +673,16 @@ def update_clause(
     if not clause:
         raise HTTPException(status_code=404, detail="Clause not found")
 
+    update_data = data.model_dump(exclude_unset=True)
+    # Before any attribute is set, so a refusal leaves the row and the audit log untouched.
+    if update_data.get("parent_clause_id") is not None:
+        _assert_parent_clauses(
+            db, [update_data["parent_clause_id"]], company_id=company_id, standard_id=clause.standard_id
+        )
+        _assert_not_own_descendant(db, clause.id, update_data["parent_clause_id"], company_id=company_id)
+
     old_values = {c.key: getattr(clause, c.key) for c in clause.__table__.columns}
     old_status = clause.compliance_status
-
-    update_data = data.model_dump(exclude_unset=True)
 
     # Track who assessed compliance
     if "compliance_status" in update_data:
@@ -581,8 +697,15 @@ def update_clause(
         audit.log_status_change("qms_clause", clause.id, clause.clause_number, old_status, clause.compliance_status)
 
     db.commit()
-    db.refresh(clause)
-    return clause
+    # Reload through the same criteria as the reads: a plain refresh would lazy-load sub_clauses
+    # unfiltered, rendering deleted children and any clause another company grafted under this one.
+    return (
+        db.query(QMSClause)
+        .options(joinedload(QMSClause.evidence_links), *_clause_tree_criteria(company_id))
+        .filter(QMSClause.id == clause.id, QMSClause.company_id == company_id)
+        .populate_existing()
+        .one()
+    )
 
 
 @router.delete("/clauses/{clause_id}", status_code=status.HTTP_204_NO_CONTENT)
