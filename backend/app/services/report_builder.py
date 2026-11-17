@@ -104,6 +104,12 @@ MAX_IN_VALUES = 500
 MAX_TEXT_VALUE_LENGTH = 500
 MAX_ALIAS_LENGTH = 100
 
+# The widest integer any engine binds: a signed 64-bit value. SQLite raises OverflowError
+# binding a larger Python int, and no column in the catalog holds a number that large, so
+# a number filter outside this range is refused rather than allowed to fail at execution.
+MIN_INTEGER_VALUE = -(2**63)
+MAX_INTEGER_VALUE = 2**63 - 1
+
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 # An instant: a date, then a time of at least hours and minutes; zone optional (none = UTC).
 _DATETIME_RE = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}")
@@ -341,8 +347,12 @@ def _show(value: Any) -> str:
     """A short, JSON-looking rendering of a caller value for an error message."""
     try:
         text = json.dumps(value, default=str)
-    except (TypeError, ValueError):
-        text = repr(value)
+    except (TypeError, ValueError, RecursionError):
+        try:
+            # repr can fail too: an int past Python's digit limit raises ValueError.
+            text = repr(value)
+        except (TypeError, ValueError, RecursionError):
+            text = f"a {type(value).__name__} value"
     return text if len(text) <= 60 else text[:57] + "..."
 
 
@@ -359,12 +369,24 @@ def coerce_value(spec: ReportField, value: Any) -> Any:
     most of these columns are non-``values_callable`` ``sqlalchemy.Enum`` types that
     store the member NAME (``IN_PROGRESS``), so binding the bare value string
     (``in_progress``) silently matched nothing.
+
+    Every way a value can fail -- here OR later, when the engine binds it -- must surface
+    as a ``ReportValueError``: anything else escapes ``definition_problems`` and the request
+    validator, so a request answers 500 instead of 422, and one stored template carrying
+    such a value would 500 the template list. Hence the integer range, the NUL refusal and
+    the guarded UTC conversion below.
     """
+    if isinstance(value, str) and "\x00" in value:
+        # Postgres text cannot hold NUL (the driver raises at bind), and CPython's
+        # ``fromisoformat`` quietly ignores a trailing one -- so it is refused for every type.
+        raise ReportValueError("a value cannot contain a NUL (0x00) character")
     if spec.type == "number":
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ReportValueError(f"{_show(value)} is not a number")
         if isinstance(value, float) and not math.isfinite(value):
             raise ReportValueError(f"{_show(value)} is not a finite number")
+        if isinstance(value, int) and not MIN_INTEGER_VALUE <= value <= MAX_INTEGER_VALUE:
+            raise ReportValueError(f"{_show(value)} is out of range for a number filter")
         return value
     if spec.type == "string":
         if not isinstance(value, str):
@@ -386,11 +408,15 @@ def coerce_value(spec: ReportField, value: Any) -> Any:
             )
         try:
             parsed = datetime.fromisoformat(value)
+            if parsed.tzinfo is not None:
+                # Timestamps are stored as naive UTC. The conversion is inside the guard:
+                # an instant at the calendar's edge (0001-01-01T00:00+05:00,
+                # 9999-12-31T23:59-01:00) has no UTC equivalent and raises OverflowError.
+                parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        except OverflowError:
+            raise ReportValueError(f"{_show(value)} is outside the supported range of dates and times")
         except ValueError:
             raise ReportValueError(f"{_show(value)} is not a valid date and time")
-        if parsed.tzinfo is not None:
-            # Timestamps are stored as naive UTC.
-            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
         return parsed
     if spec.type == "enum":
         options = spec.options or []
@@ -476,6 +502,9 @@ def definition_problems(
             problems.append(f"Column {index}: {_show(column.field)} is not {of_source}")
         if column.alias is not None and len(column.alias) > MAX_ALIAS_LENGTH:
             problems.append(f"Column {index}: an alias may be at most {MAX_ALIAS_LENGTH} characters")
+        if column.alias is not None and "\x00" in column.alias:
+            # The output key is the SELECT label, so it reaches the SQL text itself.
+            problems.append(f"Column {index}: an alias cannot contain a NUL (0x00) character")
         key = output_key(column)
         if key in output_keys:
             problems.append(

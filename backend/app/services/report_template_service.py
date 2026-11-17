@@ -14,19 +14,24 @@ type checks only (the API and the MCP tool ``create_report_template``), so a tem
 saved before a rule existed may break it. Such a template still lists and opens (its
 ``definition_errors`` say why it cannot run); running or exporting it is a 409 naming the
 template. Both judgments go through ONE path -- building the request model from the
-stored JSON (``request_from_template`` / ``stored_definition_errors``) -- so the list and
-the run can never disagree.
+stored JSON (``_judge_stored``, behind ``request_from_template`` / ``stored_definition_errors``)
+-- so the list and the run can never disagree. A stored row is data, never a request: no
+value in one may 500 the list, so anything unexpected the rules raise on it is logged and
+reported as a definition error like any other.
 
 Template writes are audited best-effort (``AuditService.log_create`` / ``log_update`` /
 ``log_delete``, resource type ``report_template``): a template is a saved query, not a
 quality record. ``ReportTemplate`` is not a ``SoftDeleteMixin`` model, so delete stays a
-physical delete; the audit row keeps a snapshot of the definition it removed.
+physical delete; the audit row keeps a snapshot of the definition it removed. Every write
+takes the template's row lock BEFORE the audit call (which takes the global audit-chain
+lock), so two writers can never wait on each other's lock in opposite order.
 """
 
-from typing import Any, Dict, List
+import logging
+from typing import Any, Dict, List, Optional, Tuple, Type, TypeVar
 
 from fastapi import HTTPException, status
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from sqlalchemy.orm import Session
 
 from app.db.tenant_filter import tenant_query
@@ -43,10 +48,16 @@ from app.schemas.analytics import (
 )
 from app.services.audit_service import AuditService
 
+logger = logging.getLogger(__name__)
+
 AUDIT_RESOURCE_TYPE = "report_template"
 NOT_FOUND_DETAIL = "Report template not found"
 READ_DENIED_DETAIL = "Access denied to this report"
 MODIFY_DENIED_DETAIL = "Only the template's author or an admin can change or delete it"
+# The one problem a stored definition carries when judging it raised something unexpected.
+UNCHECKABLE_DEFINITION_PROBLEM = "The saved definition could not be checked; edit the report and save it again"
+
+_Judged = TypeVar("_Judged", bound=BaseModel)
 
 
 def validation_problems(exc: ValidationError) -> List[str]:
@@ -76,25 +87,41 @@ def _stored_definition(template: ReportTemplate) -> Dict[str, Any]:
     }
 
 
+def _judge_stored(
+    template: ReportTemplate, model: Type[_Judged], extra: Dict[str, Any]
+) -> Tuple[Optional[_Judged], List[str]]:
+    """Build ``model`` from the template's stored JSON: ``(request, [])`` or ``(None, problems)``.
+
+    The ONE judgment of a stored definition, shared by the list/get (``definition_errors``)
+    and the run/export (409). A ``ValidationError`` names its problems. Anything else the
+    rules raise on a stored value is a defect in the rules, not in the request -- but the
+    row was saved before that defect could be refused, so it is logged and reported as one
+    problem instead of escaping: one bad row must never 500 the company's template list.
+    """
+    try:
+        return model.model_validate({**_stored_definition(template), **extra}), []
+    except ValidationError as exc:
+        return None, validation_problems(exc)
+    except Exception:  # deliberately broad -- see the docstring
+        logger.exception("Could not judge the stored definition of report template %s", template.id)
+        return None, [UNCHECKABLE_DEFINITION_PROBLEM]
+
+
 def stored_definition_errors(template: ReportTemplate) -> List[str]:
     """Why this stored template can no longer run ([] when it can)."""
-    try:
-        ReportDefinitionInput.model_validate(_stored_definition(template))
-    except ValidationError as exc:
-        return validation_problems(exc)
-    return []
+    return _judge_stored(template, ReportDefinitionInput, {})[1]
 
 
 def request_from_template(template: ReportTemplate, *, limit: int = REPORT_DEFAULT_LIMIT) -> CustomReportRequest:
     """The validated request a stored template runs as, or 409 naming the template."""
-    try:
-        return CustomReportRequest.model_validate({**_stored_definition(template), "limit": limit})
-    except ValidationError as exc:
-        problems = "; ".join(validation_problems(exc))
+    request, problems = _judge_stored(template, CustomReportRequest, {"limit": limit})
+    if request is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f'Saved report "{template.name}" can no longer run: {problems}. Edit it and save it again.',
+            detail=f'Saved report "{template.name}" can no longer run: {"; ".join(problems)}. '
+            "Edit it and save it again.",
         )
+    return request
 
 
 def template_response(template: ReportTemplate) -> ReportTemplateResponse:
@@ -215,7 +242,27 @@ def update_template(
     return template
 
 
-def delete_template(db: Session, template: ReportTemplate, audit: AuditService) -> None:
-    audit.log_delete(AUDIT_RESOURCE_TYPE, template.id, template.name, old_values=_snapshot(template))
-    db.delete(template)
+def delete_template(db: Session, template: ReportTemplate, company_id: int, audit: AuditService) -> None:
+    """Physically delete ``template`` and audit a snapshot of what it held.
+
+    Lock order matches create and update: the row first (the DELETE below takes its row
+    lock), THEN ``log_delete`` (the global audit-chain lock). Auditing first inverted the
+    order a concurrent PATCH takes -- row, then audit -- so the two could deadlock.
+
+    The DELETE is an explicit tenant-scoped statement whose rowcount is checked. If a
+    concurrent delete removed the row after ``require_modifiable`` read it, this one
+    deletes nothing: that is the same 404 as a missing template, and no audit row is
+    written for a delete that did not happen.
+    """
+    template_id = template.id
+    name = template.name
+    snapshot = _snapshot(template)
+    deleted = (
+        tenant_query(db, ReportTemplate, company_id)
+        .filter(ReportTemplate.id == template_id)
+        .delete(synchronize_session="evaluate")
+    )
+    if deleted != 1:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_FOUND_DETAIL)
+    audit.log_delete(AUDIT_RESOURCE_TYPE, template_id, name, old_values=snapshot)
     db.commit()

@@ -457,7 +457,7 @@ def delete_report_template(
     keeps a snapshot of the deleted definition. ADMIN or MANAGER only.
     """
     template = report_template_service.require_modifiable(db, template_id, company_id, current_user)
-    report_template_service.delete_template(db, template, audit)
+    report_template_service.delete_template(db, template, company_id, audit)
     return {"message": "Template deleted"}
 
 

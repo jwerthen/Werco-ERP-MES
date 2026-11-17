@@ -19,13 +19,14 @@ What this file pins, and why each piece exists:
 import csv
 import io
 from datetime import date, datetime, timedelta
+from unittest.mock import MagicMock
 
 import pytest
-from fastapi import status
+from fastapi import HTTPException, status
 from fastapi.testclient import TestClient
 from sqlalchemy import Date, DateTime
 from sqlalchemy import Enum as SAEnum
-from sqlalchemy import Float, Integer, Numeric, String
+from sqlalchemy import Float, Integer, Numeric, String, text
 from sqlalchemy.orm import Session
 
 from app.api.endpoints import analytics as analytics_endpoints
@@ -40,6 +41,8 @@ from app.models.quality import NonConformanceReport
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder, WorkOrderStatus
 from app.schemas.analytics import ReportDataSource
+from app.services import report_builder, report_template_service
+from app.services.audit_service import AuditService
 from app.services.export_safety import attachment_content_disposition
 from app.services.report_builder import FIELD_MAPPINGS, REPORT_SOURCES, data_source_catalog
 from tests.api.export_audit_helpers import committed_export_rows, fresh_session
@@ -610,6 +613,38 @@ INVALID_DEFINITIONS = {
     "bad date": {"data_source": _WO, "columns": _COL, "filters": [_f("due_date", "gt", "2026/01/01")]},
     "impossible date": {"data_source": _WO, "columns": _COL, "filters": [_f("due_date", "gt", "2026-02-30")]},
     "datetime without time": {"data_source": _WO, "columns": _COL, "filters": [_f("actual_start", "gt", "2026-01-01")]},
+    # Valid ISO-8601 with no UTC equivalent: the conversion raised OverflowError (a 500).
+    "datetime before the UTC calendar": {
+        "data_source": _WO,
+        "columns": _COL,
+        "filters": [_f("actual_start", "gte", "0001-01-01T00:00:00+05:00")],
+    },
+    "datetime after the UTC calendar": {
+        "data_source": _WO,
+        "columns": _COL,
+        "filters": [_f("actual_start", "lte", "9999-12-31T23:59:59-01:00")],
+    },
+    "datetime overflow as between value2": {
+        "data_source": _WO,
+        "columns": _COL,
+        "filters": [_f("actual_start", "between", "2026-01-01T00:00:00Z", "9999-12-31T23:59:59-01:00")],
+    },
+    "datetime with a trailing NUL": {
+        "data_source": _WO,
+        "columns": _COL,
+        "filters": [_f("actual_start", "gt", "2026-01-01T00:00:00\x00")],
+    },
+    # Past a signed 64-bit integer: SQLite raised OverflowError binding it (a 500).
+    "integer above 64 bits": {"data_source": _WO, "columns": _COL, "filters": [_f("quantity_ordered", "lt", 2**63)]},
+    "integer below 64 bits in a list": {
+        "data_source": _WO,
+        "columns": _COL,
+        "filters": [_f("quantity_ordered", "in", [1, -(2**63) - 1])],
+    },
+    # Postgres text cannot hold NUL: the driver raised at bind (a 500).
+    "NUL in a text value": {"data_source": _WO, "columns": _COL, "filters": [_f("customer_name", "eq", "a\x00b")]},
+    "NUL in a like value": {"data_source": _WO, "columns": _COL, "filters": [_f("customer_name", "like", "\x00")]},
+    "NUL in an alias": {"data_source": _WO, "columns": [{"field": "status", "alias": "st\x00atus"}]},
     "bad enum option": {"data_source": _WO, "columns": _COL, "filters": [_f("status", "eq", "IN_PROGRESS")]},
     "number for string": {"data_source": _WO, "columns": _COL, "filters": [_f("customer_name", "eq", 5)]},
     "null value with gt": {"data_source": _WO, "columns": _COL, "filters": [_f("quantity_ordered", "gt", None)]},
@@ -704,6 +739,30 @@ def test_valid_edge_inputs_are_accepted(client: TestClient, db_session: Session)
     assert resp.json()["rows"] == [{"status": "in_progress", "n": 1}]
 
 
+def test_range_edges_that_do_bind_are_accepted(client: TestClient, db_session: Session):
+    """The refusals above are exact: the 64-bit bounds themselves, and calendar-edge
+    instants whose UTC equivalent exists, still run."""
+    manager = make_user(db_session)
+    wo = make_work_order(db_session)
+    wo.actual_start = datetime(2026, 3, 1, 12, 0)
+    db_session.commit()
+    numbers = wo_numbers(
+        run(
+            client,
+            manager,
+            {
+                "data_source": _WO,
+                "columns": _COL,
+                "filters": [
+                    _f("quantity_ordered", "between", -(2**63), 2**63 - 1),
+                    _f("actual_start", "between", "0001-01-01T00:00:00-05:00", "9999-12-31T23:59:59+01:00"),
+                ],
+            },
+        )
+    )
+    assert numbers == {wo.work_order_number}
+
+
 # ===========================================================================
 # Templates: CRUD, normalization, audit, access
 # ===========================================================================
@@ -758,6 +817,8 @@ def test_create_template_validates_normalizes_and_audits(client: TestClient, db_
         {"description": "x" * 2001},
         {"columns": [{"field": "nope"}]},
         {"surprise": True},
+        {"filters": [_f("actual_start", "gte", "0001-01-01T00:00:00+05:00")]},
+        {"filters": [_f("quantity_ordered", "gt", 2**63)]},
     ],
 )
 def test_create_template_refuses_bad_input(client: TestClient, db_session: Session, bad: dict):
@@ -814,6 +875,13 @@ def test_update_template_description_null_clears_it(client: TestClient, db_sessi
         {"definition": {"data_source": "work_orders", "columns": [{"field": "nope"}]}},
         {"definition": {"data_source": "production", "columns": [{"field": "x"}]}},
         {"definition": {"data_source": "work_orders", "columns": _COL, "limit": 5}},
+        {
+            "definition": {
+                "data_source": "work_orders",
+                "columns": _COL,
+                "filters": [_f("actual_start", "lte", "9999-12-31T23:59:59-01:00")],
+            }
+        },
         {"owner": 3},
     ],
 )
@@ -843,6 +911,54 @@ def test_delete_template_audits_a_snapshot(client: TestClient, db_session: Sessi
     assert snapshot["data_source"] == "work_orders"
     assert snapshot["columns"] == [{"field": "work_order_number"}, {"field": "status"}]
     assert snapshot["filters"] == [_f("quantity_ordered", "gt", 0)]
+
+
+def test_delete_removes_the_row_before_it_audits(client: TestClient, db_session: Session, monkeypatch):
+    """Lock order: the row's DELETE runs before ``log_delete`` takes the audit-chain lock,
+    the same order create and update take, so a concurrent PATCH cannot deadlock with it."""
+    manager = make_user(db_session)
+    template = make_template(db_session, manager, name="Ordered")
+    template_id = template.id
+    real_log_delete = AuditService.log_delete
+    rows_when_audited = []
+
+    def recording_log_delete(self, resource_type, resource_id, *args, **kwargs):
+        if resource_type == "report_template":
+            rows_when_audited.append(
+                db_session.query(ReportTemplate.id).filter(ReportTemplate.id == resource_id).count()
+            )
+        return real_log_delete(self, resource_type, resource_id, *args, **kwargs)
+
+    monkeypatch.setattr(AuditService, "log_delete", recording_log_delete)
+    resp = client.delete(f"{TEMPLATES}/{template_id}", headers=headers_for(manager))
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    assert rows_when_audited == [0]
+    rows = committed_template_audit_rows("DELETE")
+    assert [(r.resource_id, r.resource_identifier, r.old_values["name"]) for r in rows] == [
+        (template_id, "Ordered", "Ordered")
+    ]
+
+
+def test_delete_that_finds_no_row_is_404_and_audits_nothing(db_session: Session):
+    """A concurrent delete removed the row after it was read: nothing is deleted, so it is
+    the same 404 as a missing template and no audit row claims a delete. The DELETE is
+    tenant-scoped too: another company's id deletes nothing."""
+    manager = make_user(db_session)
+    kept = make_template(db_session, manager, name="Kept")
+    # Made last, so it is still loaded (as ``require_modifiable`` leaves it) when its row goes.
+    raced = make_template(db_session, manager, name="Raced")
+    audit = MagicMock(spec=AuditService)
+
+    db_session.connection().execute(text("DELETE FROM report_templates WHERE id = :id"), {"id": raced.id})
+    with pytest.raises(HTTPException) as raced_exc:
+        report_template_service.delete_template(db_session, raced, COMPANY_A, audit)
+    assert raced_exc.value.status_code == status.HTTP_404_NOT_FOUND
+
+    with pytest.raises(HTTPException) as foreign_exc:
+        report_template_service.delete_template(db_session, kept, COMPANY_B, audit)
+    assert foreign_exc.value.status_code == status.HTTP_404_NOT_FOUND
+    assert db_session.query(ReportTemplate.id).filter(ReportTemplate.id == kept.id).count() == 1
+    audit.log_delete.assert_not_called()
 
 
 def test_get_and_run_template(client: TestClient, db_session: Session):
@@ -957,6 +1073,69 @@ def test_legacy_invalid_template_lists_and_opens_but_refuses_to_run(client: Test
     )
     assert fixed.status_code == status.HTTP_200_OK, fixed.text
     assert fixed.json()["definition_errors"] == []
+
+
+def test_legacy_template_with_an_out_of_range_value_does_not_500_the_list(client: TestClient, db_session: Session):
+    """Values saved before the range rules existed (type-checked only, via the API or the MCP
+    tool) used to raise OverflowError while being judged -- and the list judges every
+    visible template, so ONE such row 500'd the whole company's list."""
+    manager = make_user(db_session)
+    make_work_order(db_session)
+    overflow = make_template(
+        db_session, manager, name="Year One", filters=[_f("actual_start", "gte", "0001-01-01T00:00:00+05:00")]
+    )
+    too_big = make_template(db_session, manager, name="Too Big", filters=[_f("quantity_ordered", "lt", 2**63)])
+    good = make_template(db_session, manager, name="Good")
+
+    listed = client.get(TEMPLATES, headers=headers_for(manager))
+    assert listed.status_code == status.HTTP_200_OK, listed.text
+    by_name = {t["name"]: t for t in listed.json()}
+    assert by_name["Good"]["definition_errors"] == []
+    assert any("supported range of dates and times" in e for e in by_name["Year One"]["definition_errors"])
+    assert any("out of range" in e for e in by_name["Too Big"]["definition_errors"])
+
+    got = client.get(f"{TEMPLATES}/{overflow.id}", headers=headers_for(manager))
+    assert got.status_code == status.HTTP_200_OK, got.text
+    assert got.json()["definition_errors"] == by_name["Year One"]["definition_errors"]
+
+    for template in (overflow, too_big):
+        ran = client.post(f"{TEMPLATES}/{template.id}/run", headers=headers_for(manager))
+        assert ran.status_code == status.HTTP_409_CONFLICT, ran.text
+        assert ran.json()["detail"].startswith(f'Saved report "{template.name}" can no longer run: ')
+        exported = client.get(f"{EXPORT}?template_id={template.id}&format=csv", headers=headers_for(manager))
+        assert exported.status_code == status.HTTP_409_CONFLICT, exported.text
+    assert client.post(f"{TEMPLATES}/{good.id}/run", headers=headers_for(manager)).status_code == 200
+
+
+def test_unexpected_error_judging_a_stored_template_is_a_definition_error(
+    client: TestClient, db_session: Session, monkeypatch
+):
+    """Backstop: whatever the rules raise on a STORED value beyond a validation error is
+    logged and reported as a definition error -- list and get answer 200, run answers 409."""
+    manager = make_user(db_session)
+    make_work_order(db_session)
+    broken = make_template(db_session, manager, name="Broken", filters=[_f("customer_name", "eq", "explode")])
+    good = make_template(db_session, manager, name="Good")
+    real_definition_problems = report_builder.definition_problems
+
+    def exploding(data_source, columns, filters, group_by, sort):
+        if any(f.value == "explode" for f in filters):
+            raise RuntimeError("a defect in the rules")
+        return real_definition_problems(data_source, columns, filters, group_by, sort)
+
+    monkeypatch.setattr(report_builder, "definition_problems", exploding)
+
+    listed = client.get(TEMPLATES, headers=headers_for(manager))
+    assert listed.status_code == status.HTTP_200_OK, listed.text
+    by_name = {t["name"]: t for t in listed.json()}
+    assert by_name["Broken"]["definition_errors"] == [report_template_service.UNCHECKABLE_DEFINITION_PROBLEM]
+    assert by_name["Good"]["definition_errors"] == []
+    got = client.get(f"{TEMPLATES}/{broken.id}", headers=headers_for(manager))
+    assert got.status_code == status.HTTP_200_OK, got.text
+    ran = client.post(f"{TEMPLATES}/{broken.id}/run", headers=headers_for(manager))
+    assert ran.status_code == status.HTTP_409_CONFLICT, ran.text
+    assert report_template_service.UNCHECKABLE_DEFINITION_PROBLEM in ran.json()["detail"]
+    assert client.post(f"{TEMPLATES}/{good.id}/run", headers=headers_for(manager)).status_code == 200
 
 
 # ===========================================================================
