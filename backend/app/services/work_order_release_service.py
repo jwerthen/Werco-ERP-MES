@@ -23,21 +23,43 @@ broadcasts (they need committed rows), exactly as the single route always has.
 LOCK ORDER (bulk)
 -----------------
 Every audit row takes the ONE global audit hash-chain advisory lock and holds it until the
-outer transaction ends; a per-item savepoint does not release it. The order every floor and
-office writer takes is SFI-1's: operation rows -> work-order row -> audit chain
-(``work_orders._lock_laser_import_wipe_operations`` documents it). A naive bulk loop that
-audits work order #1 and then flushes UPDATEs to work order #2 would hold the all-tenant
-chain lock while it queues on #2's rows -- a lock cycle with any concurrent writer that took
-#2's row first and now wants the chain (Postgres breaks it with 40P01). So the bulk door:
+outer transaction ends; a per-item savepoint does not release it. A bulk loop that audited
+work order #1 and then wrote #2 would hold that all-tenant lock while it queued on #2's rows.
+So the bulk door:
 
-1. locks every target row BEFORE its first write (:func:`lock_release_targets`): every
-   operation of every live target, ascending id, then the work orders, ascending id --
-   ``SELECT ... FOR UPDATE``, tenant-scoped, ``is_deleted`` filtered, ``populate_existing()``
-   so the release judges exactly the locked rows;
-2. releases each item in ascending id order (two overlapping bulk releases then lock and
-   write in the same order), each inside its own SAVEPOINT, writing NO audit row;
+1. reads the live targets once, column-only and UNLOCKED (:func:`live_work_order_numbers`:
+   id and number, tenant-scoped, ``is_deleted`` filtered), so a foreign, deleted or absent id
+   is answered without locking anything;
+2. releases each live target in ascending work-order id order, each inside its OWN
+   SAVEPOINT, which takes that item's row locks first (:func:`lock_release_target`): its
+   operations, ascending id, then the work order -- ``SELECT ... FOR NO KEY UPDATE``,
+   tenant-scoped, ``is_deleted`` filtered, ``populate_existing()`` so the release judges
+   exactly the locked rows -- and then writes it, with NO audit row. A released item's
+   savepoint is released into the outer transaction, so its row locks are held to the commit;
 3. writes the buffered audit rows only after the loop, one ``log_status_change`` per
-   released work order -- so the chain lock is the LAST lock the request takes.
+   released work order -- so the audit chain is the LAST lock the request takes.
+
+Per item, then: operations -> work order; per request: every item, ascending -> audit chain.
+Operations before the work order is the floor's SFI-1 order (completion, production report,
+clock-out, reduce-production all lock the operation, then the work order), so an SFI-1 verb
+and a bulk item queue rather than cross; and two bulk requests lock in the same ascending
+order, so they cannot cross either.
+
+That order does NOT rule out every cycle. Some office writers take the WORK ORDER first: the
+single release route (it locks nothing explicitly; its first flush writes the work order's
+``UPDATE`` before its operations', parent before child), ``PUT /work-orders/{id}``,
+force-complete and the scheduling routes (``work_orders._lock_laser_import_rows`` lists
+them). One of those can meet a bulk item holding the job's operations and waiting for its work
+order while the writer holds the work order and waits for an operation. Postgres breaks that
+cycle by rolling one side back (40P01). When the writer loses, it answers its own 409. When the
+bulk item loses, the error is raised inside the item's savepoint: ROLLBACK TO SAVEPOINT undoes
+the item, releases the row locks it took (the writer goes on at once) and leaves the outer
+transaction usable, so THAT item alone fails with the lost-race retry text
+(:data:`~app.db.mixins.STALE_WRITE_CONFLICT_DETAIL`, the 409 text the single route answers for
+the same race) and every other item, before or after it, is released and audited as usual.
+Retrying the item is safe: nothing of it was saved. Earlier items' locks stay held to the
+commit, so a writer queued on one of them simply waits; it is no longer in a cycle once the
+losing item has stopped waiting.
 
 ``AuditService`` keeps no chain state in memory (it re-reads the chain tail from the
 database under the lock on every row), so a savepoint rolled back mid-loop could not leave
@@ -62,10 +84,10 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Query, Session, joinedload
 from sqlalchemy.orm.exc import StaleDataError
 
-from app.core.observability import report_absorbed_exception
+from app.core.observability import capture_exception_to_sentry, report_absorbed_exception
 from app.db.locks import is_lost_lock_race
 from app.db.mixins import STALE_WRITE_CONFLICT_DETAIL
-from app.db.tenant_filter import tenant_query
+from app.db.tenant_filter import tenant_filter, tenant_query
 from app.models.user import User
 from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.services.audit_service import AuditService
@@ -80,7 +102,9 @@ logger = logging.getLogger(__name__)
 WORK_ORDER_NOT_FOUND_DETAIL = "Work order not found"
 NOT_DRAFT_DETAIL = "Only draft work orders can be released"
 NO_OPERATIONS_DETAIL = "Work order must have at least one operation"
-# A per-item database failure in the bulk door. Never the driver's text: it can carry SQL.
+# A per-item database failure in the bulk door other than a lost lock race or version conflict
+# (those answer ``STALE_WRITE_CONFLICT_DETAIL``, the single route's 409 text for the same race).
+# Never the driver's text: it can carry SQL.
 BULK_RELEASE_RETRY_DETAIL = "Work order could not be released. Refresh and try again."
 
 # How many work orders one bulk request may name (before de-duplication).
@@ -248,56 +272,94 @@ def dedupe_work_order_ids(work_order_ids: Iterable[int]) -> List[int]:
     return list(dict.fromkeys(work_order_ids))
 
 
-def operation_lock_query(db: Session, *, work_order_ids: List[int], company_id: int) -> Query:
-    """``SELECT ... FOR UPDATE`` over every operation of the live targets, ascending id.
+def live_work_order_numbers(db: Session, *, work_order_ids: List[int], company_id: int) -> Dict[int, str]:
+    """The live targets' numbers by id: tenant-scoped, ``is_deleted`` filtered, column-only, UNLOCKED.
 
-    The live-target set is a sub-SELECT (tenant, id, ``is_deleted == False``), which Postgres
-    does not lock -- only the operations are locked here; the work orders come next, in their
-    own statement, so the two tables are locked in SFI-1 order rather than interleaved.
+    An id missing from the result is foreign, soft-deleted or absent -- the caller reports all
+    three the same way, without locking anything for them. Loads no entity (so it refreshes
+    nothing in the session) and takes no lock: each item locks its own rows later, inside its
+    own savepoint (:func:`lock_release_target`), which re-checks ``is_deleted`` under the lock.
     """
-    live_targets = select(WorkOrder.id).where(
-        WorkOrder.company_id == company_id,
-        WorkOrder.id.in_(work_order_ids),
-        WorkOrder.is_deleted == False,  # noqa: E712
-    )
-    return (
-        tenant_query(db, WorkOrderOperation, company_id)
-        .filter(WorkOrderOperation.work_order_id.in_(live_targets))
-        .order_by(WorkOrderOperation.id.asc())
-        .with_for_update()
-        .populate_existing()
-    )
-
-
-def work_order_lock_query(db: Session, *, work_order_ids: List[int], company_id: int) -> Query:
-    """``SELECT ... FOR UPDATE`` over the live targets themselves, ascending id.
-
-    No eager join (``joinedload(part)`` would be a LEFT OUTER JOIN, and Postgres refuses
-    ``FOR UPDATE`` on the nullable side of one -- a laser work order has no part).
-    """
-    return (
-        tenant_query(db, WorkOrder, company_id)
+    if not work_order_ids:
+        return {}
+    rows = (
+        tenant_filter(db.query(WorkOrder.id, WorkOrder.work_order_number), WorkOrder, company_id)
         .filter(
             WorkOrder.id.in_(work_order_ids),
             WorkOrder.is_deleted == False,  # noqa: E712
         )
-        .order_by(WorkOrder.id.asc())
-        .with_for_update()
+        .all()
+    )
+    return {row.id: row.work_order_number for row in rows}
+
+
+# Lock strength, both statements: FOR NO KEY UPDATE (``with_for_update(key_share=True)``), the
+# strength the release's own UPDATEs take. A release changes no key column of either row (a work
+# order's status, released_by / released_at, estimated cost and version; an operation's status),
+# so this is no stronger than the writes it guards and is never upgraded at the flush. It still
+# conflicts with every other row lock and every UPDATE or DELETE, so nobody can change the rows
+# the release judged before it commits. What it does NOT conflict with is the FOR KEY SHARE a
+# concurrent INSERT's foreign-key check takes (a time entry, event or blocker naming this job or
+# operation): a plain FOR UPDATE would queue behind those, a wait -- and a cycle -- the release
+# has no use for. It is the house choice for a write that changes no key: the package import's
+# work-order lock (``work_orders._try_lock_laser_work_order`` / ``_check_laser_header_before_audit``)
+# is NO KEY UPDATE for the same reason, and that import locks its OPERATIONS FOR UPDATE only
+# because it deletes them.
+
+
+def operation_lock_query(db: Session, *, work_order_id: int, company_id: int) -> Query:
+    """``SELECT ... FOR NO KEY UPDATE`` over one live target's operations, ascending id.
+
+    The live-target check is a sub-SELECT (tenant, id, ``is_deleted == False``), which Postgres
+    does not lock -- only the operations are locked here (a work order deleted since
+    :func:`live_work_order_numbers` read it locks nothing); the work order comes next, in its own
+    statement, so the two tables are locked in SFI-1 order rather than interleaved.
+    """
+    live_target = select(WorkOrder.id).where(
+        WorkOrder.company_id == company_id,
+        WorkOrder.id == work_order_id,
+        WorkOrder.is_deleted == False,  # noqa: E712
+    )
+    return (
+        tenant_query(db, WorkOrderOperation, company_id)
+        .filter(WorkOrderOperation.work_order_id.in_(live_target))
+        .order_by(WorkOrderOperation.id.asc())
+        .with_for_update(key_share=True)
         .populate_existing()
     )
 
 
-def lock_release_targets(db: Session, *, work_order_ids: List[int], company_id: int) -> Dict[int, WorkOrder]:
-    """Row-lock every bulk target before the first write: operations, then work orders.
+def work_order_lock_query(db: Session, *, work_order_id: int, company_id: int) -> Query:
+    """``SELECT ... FOR NO KEY UPDATE`` over one live target itself.
 
-    Returns the locked live work orders by id. An id missing from the result is foreign,
-    soft-deleted or absent -- the caller reports all three the same way. Writes nothing.
+    No eager join (``joinedload(part)`` would be a LEFT OUTER JOIN, and Postgres refuses a
+    row lock on the nullable side of one -- a laser work order has no part).
     """
-    if not work_order_ids:
-        return {}
-    operation_lock_query(db, work_order_ids=work_order_ids, company_id=company_id).all()
-    work_orders = work_order_lock_query(db, work_order_ids=work_order_ids, company_id=company_id).all()
-    return {work_order.id: work_order for work_order in work_orders}
+    return (
+        tenant_query(db, WorkOrder, company_id)
+        .filter(
+            WorkOrder.id == work_order_id,
+            WorkOrder.is_deleted == False,  # noqa: E712
+        )
+        .with_for_update(key_share=True)
+        .populate_existing()
+    )
+
+
+def lock_release_target(db: Session, *, work_order_id: int, company_id: int) -> Optional[WorkOrder]:
+    """Row-lock ONE bulk target before its first write: its operations, then the work order.
+
+    Call it inside the item's own savepoint (``db.begin_nested()``), never before the loop: a
+    lost lock race raised here must roll back with that item alone (see the module docstring).
+    Returns the locked live work order, or None when it was deleted since
+    :func:`live_work_order_numbers` read it. Writes nothing.
+    """
+    operation_lock_query(db, work_order_id=work_order_id, company_id=company_id).all()
+    return work_order_lock_query(db, work_order_id=work_order_id, company_id=company_id).one_or_none()
+
+
+class _ReleaseTargetGone(Exception):
+    """Internal to :func:`bulk_release_work_orders`: the target was soft-deleted before its lock."""
 
 
 def _error(work_order_id: int, work_order_number: Optional[str], detail: str) -> BulkReleaseItem:
@@ -316,39 +378,48 @@ def bulk_release_work_orders(
 ) -> BulkReleaseOutcome:
     """``POST /work-orders/bulk-release`` up to (not including) its commit.
 
-    De-duplicates the ids (first occurrence wins), locks every target (see the module
-    docstring for the order), then releases each live target in ascending id order inside
-    its own SAVEPOINT through :func:`apply_work_order_release` -- the single door's rule,
-    texts and side effects. A per-item refusal (not DRAFT, no operation) or database failure
-    rolls back THAT item only and is reported on its result; the others proceed. Only after
-    the loop are the audit rows written, one per released work order, in the caller's
-    transaction. The caller commits once.
+    De-duplicates the ids (first occurrence wins), resolves which are live, then releases each
+    live target in ascending id order inside its own SAVEPOINT, which first locks that item's
+    rows (see the module docstring for the order) and then applies
+    :func:`apply_work_order_release` -- the single door's rule, texts and side effects. A
+    per-item refusal (not DRAFT, no operation), lost lock race or other database failure rolls
+    back THAT item only, with its row locks, and is reported on its result; the others proceed.
+    Only after the loop are the audit rows written, one per released work order, in the
+    caller's transaction. The caller commits once.
 
     A foreign, soft-deleted and absent id are one result, ``"Work order not found"`` with no
     number -- no existence oracle. A database failure reports a fixed retry text, never the
-    driver's message.
+    driver's message: a lost lock race or version conflict the stale-write 409 text, anything
+    else :data:`BULK_RELEASE_RETRY_DETAIL`.
     """
     ordered_ids = dedupe_work_order_ids(work_order_ids)
-    locked = lock_release_targets(db, work_order_ids=ordered_ids, company_id=company_id)
+    live_numbers = live_work_order_numbers(db, work_order_ids=ordered_ids, company_id=company_id)
 
     by_id: Dict[int, BulkReleaseItem] = {}
     released: List[Tuple[WorkOrder, str]] = []
 
     for work_order_id in sorted(ordered_ids):
-        work_order = locked.get(work_order_id)
-        if work_order is None:
+        if work_order_id not in live_numbers:
             by_id[work_order_id] = _error(work_order_id, None, WORK_ORDER_NOT_FOUND_DETAIL)
             continue
-        # Read before the savepoint: a rolled-back savepoint expires what it modified.
-        work_order_number = work_order.work_order_number
+        work_order_number = live_numbers[work_order_id]
         try:
             with db.begin_nested():
+                # This item's row locks, inside its savepoint: a lost lock race (40P01 / 40001)
+                # raised by either statement rolls back to the savepoint -- which releases the
+                # locks it took and leaves the outer transaction usable -- and fails this item only.
+                work_order = lock_release_target(db, work_order_id=work_order_id, company_id=company_id)
+                if work_order is None:
+                    raise _ReleaseTargetGone()
                 old_status = apply_work_order_release(
                     db, work_order=work_order, company_id=company_id, current_user=current_user
                 )
                 # Send this item's writes inside its own savepoint, so a version conflict or a
                 # database refusal rolls back this item and nothing else.
                 db.flush()
+        except _ReleaseTargetGone:
+            by_id[work_order_id] = _error(work_order_id, None, WORK_ORDER_NOT_FOUND_DETAIL)
+            continue
         except HTTPException as exc:
             by_id[work_order_id] = _error(work_order_id, work_order_number, str(exc.detail))
             continue
@@ -358,7 +429,23 @@ def bulk_release_work_orders(
             continue
         except SQLAlchemyError as exc:
             if is_lost_lock_race(exc):
-                logger.warning("Bulk release: work order %s lost a lock race; skipped", work_order_id)
+                # The same race answers the single route's 409 (``app/main.py``), with the same
+                # text -- and, like there, it is reported: a lost race is a lock-order symptom.
+                pgcode = getattr(getattr(exc, "orig", None), "pgcode", None)
+                logger.warning(
+                    "Bulk release: work order %s lost a lock race (SQLSTATE %s); skipped", work_order_id, pgcode
+                )
+                capture_exception_to_sentry(
+                    exc,
+                    context={
+                        "lost_lock_race": True,
+                        "pgcode": str(pgcode),
+                        "work_order_id": work_order_id,
+                        "company_id": company_id,
+                    },
+                    fingerprint=["lost-lock-race", "bulk-release-item", str(pgcode)],
+                )
+                detail = STALE_WRITE_CONFLICT_DETAIL
             else:
                 report_absorbed_exception(
                     logger,
@@ -366,15 +453,17 @@ def bulk_release_work_orders(
                     exc,
                     context={"work_order_id": work_order_id, "company_id": company_id},
                 )
-            by_id[work_order_id] = _error(work_order_id, work_order_number, BULK_RELEASE_RETRY_DETAIL)
+                detail = BULK_RELEASE_RETRY_DETAIL
+            by_id[work_order_id] = _error(work_order_id, work_order_number, detail)
             continue
         released.append((work_order, old_status))
         by_id[work_order_id] = BulkReleaseItem(
             work_order_id=work_order_id, work_order_number=work_order_number, status="released"
         )
 
-    # Every row lock is held and every row write is done: only now take the global audit
-    # chain lock, one STATUS_CHANGE row per released work order, identical to the single door's.
+    # Every released item's row locks are held and every row write is done: only now take the
+    # global audit chain lock, one STATUS_CHANGE row per released work order, identical to the
+    # single door's.
     work_order_ids_by_work_center: Dict[int, List[int]] = {}
     if released:
         db.flush()

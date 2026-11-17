@@ -11,8 +11,11 @@ The bulk door is the single release route's rule applied per item
   per work order -- all in ONE commit;
 * a per-item failure rolls back that item only (its own savepoint): no status change, no
   audit row, no event, and an event it emitted before failing is never enqueued;
-* the lock order: every target row is locked before the first write and every audit row
-  is written after the last one (the global audit-chain lock is the last lock taken);
+* the lock order: each item locks its own rows -- operations, then the work order,
+  ``FOR NO KEY UPDATE`` -- inside its own savepoint before its first write, and every audit
+  row is written after the last item (the global audit-chain lock is the last lock taken);
+* a lost lock race (40P01 / 40001) while locking one item fails THAT item only, with the
+  stale-write retry text; the items before and after it still release, commit and audit;
 * one tenant-scoped scheduling run over the union of released work orders, after the commit;
 * request validation (1-50 positive ids, no extra keys) and the role gate.
 
@@ -25,8 +28,9 @@ from typing import Any, Dict, List
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
+from sqlalchemy import update
 from sqlalchemy.dialects import postgresql
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 
@@ -460,9 +464,10 @@ def test_an_event_emitted_inside_a_failed_item_is_never_enqueued(
 # --------------------------------------------------------------------------------------
 
 
-def test_every_row_is_locked_before_the_first_write_and_audited_after_the_last(
+def test_each_item_locks_its_own_rows_in_its_savepoint_and_every_audit_comes_last(
     client: TestClient, db_session: Session, scheduling_spy, monkeypatch
 ):
+    """Per item, inside its savepoint: operations, then the work order, then the release; audits after all."""
     manager = make_user(db_session, role=UserRole.MANAGER)
     wos = [_draft_with_ops(db_session) for _ in range(3)]
     trail: List[tuple] = []
@@ -472,16 +477,16 @@ def test_every_row_is_locked_before_the_first_write_and_audited_after_the_last(
     real_apply = release_service.apply_work_order_release
     real_log = AuditService.log
 
-    def _op_lock(db, **kwargs):
-        trail.append(("lock_operations",))
-        return real_op_lock(db, **kwargs)
+    def _op_lock(db, *, work_order_id, company_id):
+        trail.append(("lock_operations", work_order_id, db.in_nested_transaction()))
+        return real_op_lock(db, work_order_id=work_order_id, company_id=company_id)
 
-    def _wo_lock(db, **kwargs):
-        trail.append(("lock_work_orders",))
-        return real_wo_lock(db, **kwargs)
+    def _wo_lock(db, *, work_order_id, company_id):
+        trail.append(("lock_work_order", work_order_id, db.in_nested_transaction()))
+        return real_wo_lock(db, work_order_id=work_order_id, company_id=company_id)
 
     def _apply(db, *, work_order, **kwargs):
-        trail.append(("release", work_order.id))
+        trail.append(("release", work_order.id, db.in_nested_transaction()))
         return real_apply(db, work_order=work_order, **kwargs)
 
     def _log(self, action, resource_type, resource_id=None, *args, **kwargs):
@@ -496,44 +501,199 @@ def test_every_row_is_locked_before_the_first_write_and_audited_after_the_last(
     requested = [wos[2].id, wos[0].id, wos[1].id]
     resp = client.post(URL, json={"work_order_ids": requested}, headers=headers_for(manager))
     assert resp.status_code == status.HTTP_200_OK, resp.text
+    assert resp.json()["released_count"] == 3
 
-    # Operations, then work orders, before anything else.
-    assert trail[:2] == [("lock_operations",), ("lock_work_orders",)]
-    releases = [step for step in trail if step[0] == "release"]
-    audits = [step for step in trail if step[0] == "audit"]
-    # Released in ascending id order, whatever the request order.
-    assert [step[1] for step in releases] == sorted(wo.id for wo in wos)
-    # Every audit row -- of any kind -- after the last release: the chain lock is the last lock.
-    last_release = max(index for index, step in enumerate(trail) if step[0] == "release")
-    first_audit = min(index for index, step in enumerate(trail) if step[0] == "audit")
-    assert first_audit > last_release
-    assert audits == [("audit", "work_order", wo_id) for wo_id in sorted(wo.id for wo in wos)]
+    ascending = sorted(wo.id for wo in wos)
+    expected: List[tuple] = []
+    for wo_id in ascending:
+        # Each item: its operations, then its work order, then its release -- all inside its own
+        # savepoint, so a lost lock race on either lock rolls back with that item alone.
+        expected += [("lock_operations", wo_id, True), ("lock_work_order", wo_id, True), ("release", wo_id, True)]
+    # Every audit row -- of any kind -- after the last item: the global audit-chain lock is the last
+    # lock the request takes. (Not asserted outside a savepoint: ``AuditService.log`` leaves its own
+    # INSERT savepoint open on success, so from the second row on the session is nested anyway.)
+    expected += [("audit", "work_order", wo_id) for wo_id in ascending]
+    assert trail == expected
 
 
-def test_lock_statements_are_for_update_ordered_tenant_scoped_and_join_free(db_session: Session):
-    """Dialect-compiled for Postgres (SQLite renders no FOR UPDATE)."""
-    ids = [5, 3, 9]
+def test_lock_statements_are_no_key_update_ordered_tenant_scoped_and_join_free(db_session: Session):
+    """Dialect-compiled for Postgres (SQLite renders no row-lock clause)."""
     operation_sql = str(
-        release_service.operation_lock_query(db_session, work_order_ids=ids, company_id=COMPANY_A).statement.compile(
+        release_service.operation_lock_query(db_session, work_order_id=5, company_id=COMPANY_A).statement.compile(
             dialect=postgresql.dialect()
         )
     )
     work_order_sql = str(
-        release_service.work_order_lock_query(db_session, work_order_ids=ids, company_id=COMPANY_A).statement.compile(
+        release_service.work_order_lock_query(db_session, work_order_id=5, company_id=COMPANY_A).statement.compile(
             dialect=postgresql.dialect()
         )
     )
 
     for sql in (operation_sql, work_order_sql):
-        assert sql.rstrip().endswith("FOR UPDATE"), sql
-        assert " JOIN " not in sql.upper(), sql  # FOR UPDATE on an outer join's nullable side fails on Postgres
+        # The strength the release's own UPDATEs take (no key column changes): it blocks every other
+        # writer but not a concurrent INSERT's foreign-key KEY SHARE, which FOR UPDATE would queue on.
+        assert sql.rstrip().endswith("FOR NO KEY UPDATE"), sql
+        assert " JOIN " not in sql.upper(), sql  # a row lock on an outer join's nullable side fails on Postgres
         assert "is_deleted" in sql, sql
         assert "company_id" in sql, sql
 
     assert "ORDER BY work_order_operations.id ASC" in operation_sql
     assert operation_sql.startswith("SELECT work_order_operations.")
-    assert "ORDER BY work_orders.id ASC" in work_order_sql
     assert work_order_sql.startswith("SELECT work_orders.")
+
+
+class _LostRaceDriverError(Exception):
+    """Stands in for the psycopg2 error Postgres raises on the side it rolls back to settle a lock race."""
+
+    def __init__(self, pgcode: str) -> None:
+        super().__init__("deadlock detected DETAIL: Process 4242 waits for ShareLock on transaction 99")
+        self.pgcode = pgcode
+
+
+@pytest.mark.parametrize(
+    "losing_lock, pgcode",
+    [
+        # The reviewed cycle: the item holds the job's operations and loses waiting for its work order
+        # to a work-order-first writer (the single release route, PUT, force-complete, scheduling).
+        ("work_order_lock_query", "40P01"),
+        ("operation_lock_query", "40P01"),
+        ("work_order_lock_query", "40001"),
+    ],
+)
+def test_a_lost_lock_race_while_locking_one_item_fails_only_that_item(
+    client: TestClient, db_session: Session, scheduling_spy, monkeypatch, losing_lock, pgcode
+):
+    manager = make_user(db_session, role=UserRole.MANAGER)
+    first, losing, third = (_draft_with_ops(db_session) for _ in range(3))
+    assert first.id < losing.id < third.id, "the losing item is processed between the other two"
+    numbers = {wo.id: wo.work_order_number for wo in (first, losing, third)}
+
+    commits: List[int] = []
+    real_commit = db_session.commit
+
+    def _counting_commit():
+        commits.append(1)
+        return real_commit()
+
+    monkeypatch.setattr(db_session, "commit", _counting_commit)
+
+    reported: List[Dict[str, Any]] = []
+    monkeypatch.setattr(
+        release_service,
+        "capture_exception_to_sentry",
+        lambda exc, *, context=None, fingerprint=None: reported.append({"context": context, "fp": fingerprint}),
+    )
+
+    raised: List[OperationalError] = []
+    real_lock = getattr(release_service, losing_lock)
+
+    def _lock(db, *, work_order_id, company_id):
+        if work_order_id == losing.id:
+            assert db.in_nested_transaction(), "the item's locks must be taken inside its own savepoint"
+            exc = OperationalError("SELECT ... FOR NO KEY UPDATE", {}, _LostRaceDriverError(pgcode))
+            raised.append(exc)
+            raise exc
+        return real_lock(db, work_order_id=work_order_id, company_id=company_id)
+
+    monkeypatch.setattr(release_service, losing_lock, _lock)
+
+    requested = [third.id, losing.id, first.id]
+    resp = client.post(URL, json={"work_order_ids": requested}, headers=headers_for(manager))
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    assert raised, "the simulated lost race was raised"
+    body = resp.json()
+    assert body["released_count"] == 2 and body["error_count"] == 1
+    assert body["results"] == [
+        {"work_order_id": third.id, "work_order_number": numbers[third.id], "status": "released", "detail": None},
+        {
+            "work_order_id": losing.id,
+            "work_order_number": numbers[losing.id],
+            "status": "error",
+            "detail": STALE_WRITE_CONFLICT_DETAIL,
+        },
+        {"work_order_id": first.id, "work_order_number": numbers[first.id], "status": "released", "detail": None},
+    ]
+    # Never the driver's text.
+    for leaked in ("deadlock", "Process 4242", "ShareLock", "FOR NO KEY UPDATE", pgcode):
+        assert leaked not in resp.text
+    # Reported like the app-wide lost-race 409: a lost race is a lock-order symptom, not noise.
+    assert reported == [
+        {
+            "context": {
+                "lost_lock_race": True,
+                "pgcode": pgcode,
+                "work_order_id": losing.id,
+                "company_id": COMPANY_A,
+            },
+            "fp": ["lost-lock-race", "bulk-release-item", pgcode],
+        }
+    ]
+
+    # ONE commit carried both survivors.
+    assert len(commits) == 1
+
+    # The losing item: nothing of it was saved.
+    db_session.expire_all()
+    stored = db_session.get(WorkOrder, losing.id)
+    assert stored.status == WorkOrderStatus.DRAFT
+    assert stored.released_by is None and stored.released_at is None
+    assert _first_op(db_session, losing.id).status == OperationStatus.PENDING
+    assert _events(db_session, losing.id, "work_order_released") == []
+    assert _events(db_session, losing.id, "operation_ready") == []
+    assert _committed_release_audits(db_session, losing.id) == []
+
+    # The items before AND after it: released, committed, audited.
+    for ok in (first, third):
+        db_session.expire_all()
+        stored = db_session.get(WorkOrder, ok.id)
+        assert stored.status == WorkOrderStatus.RELEASED
+        assert stored.released_by == manager.id
+        assert _first_op(db_session, ok.id).status == OperationStatus.READY
+        assert len(_events(db_session, ok.id, "work_order_released")) == 1
+        rows = _committed_release_audits(db_session, ok.id)
+        assert len(rows) == 1
+        assert rows[0].old_values == {"status": "draft"} and rows[0].new_values == {"status": "released"}
+
+    (spy,) = scheduling_spy.instances
+    assert spy.calls[0]["work_order_ids"] == [first.id, third.id]
+
+
+def test_a_target_deleted_before_its_lock_is_not_found_without_a_number(
+    client: TestClient, db_session: Session, scheduling_spy, monkeypatch
+):
+    """The unlocked pre-read saw it live; the locked re-read under the item's savepoint does not."""
+    manager = make_user(db_session, role=UserRole.MANAGER)
+    ok, vanishing = (_draft_with_ops(db_session) for _ in range(2))
+
+    real_wo_lock = release_service.work_order_lock_query
+
+    def _wo_lock(db, *, work_order_id, company_id):
+        if work_order_id == vanishing.id:
+            # A concurrent soft delete landing between the unlocked read and this item's lock.
+            db.execute(update(WorkOrder).where(WorkOrder.id == work_order_id).values(is_deleted=True))
+        return real_wo_lock(db, work_order_id=work_order_id, company_id=company_id)
+
+    monkeypatch.setattr(release_service, "work_order_lock_query", _wo_lock)
+
+    resp = client.post(URL, json={"work_order_ids": [vanishing.id, ok.id]}, headers=headers_for(manager))
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    body = resp.json()
+    assert body["released_count"] == 1 and body["error_count"] == 1
+    # The same answer as any other foreign / deleted / absent id: no number, no existence oracle.
+    assert body["results"][0] == {
+        "work_order_id": vanishing.id,
+        "work_order_number": None,
+        "status": "error",
+        "detail": "Work order not found",
+    }
+    assert body["results"][1]["status"] == "released"
+
+    db_session.expire_all()
+    stored = db_session.get(WorkOrder, vanishing.id)
+    assert stored.status == WorkOrderStatus.DRAFT and stored.released_at is None
+    assert _committed_release_audits(db_session, vanishing.id) == []
+    assert _events(db_session, vanishing.id, "work_order_released") == []
+    assert len(_committed_release_audits(db_session, ok.id)) == 1
 
 
 # --------------------------------------------------------------------------------------

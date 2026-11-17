@@ -1223,8 +1223,13 @@ class WorkOrderBulkReleaseResult(UTCModel):
     status: Literal["released", "error"]
     detail: Optional[str] = Field(
         None,
-        description="Why it was not released (the single release route's own text, e.g. 'Only draft work orders "
-        "can be released'); null when released.",
+        description="Why it was not released; null when released. A refusal carries the single release route's "
+        "own text ('Only draft work orders can be released', 'Work order must have at least one operation', "
+        "'Work order not found'). Two texts are bulk-only RETRY texts instead, for a failure the single route "
+        "answers as a whole-request error: 'This record was modified by someone else. Refresh and try again.' "
+        "when the item lost a race with a concurrent writer (the single route's 409), and 'Work order could not "
+        "be released. Refresh and try again.' for any other database failure. Either way nothing of that item "
+        "was saved, the other items are unaffected, and retrying it is safe.",
     )
 
 
