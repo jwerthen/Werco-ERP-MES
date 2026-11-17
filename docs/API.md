@@ -11419,11 +11419,11 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 | POST | `/analytics/custom-report` | Run an ad-hoc report (returns `columns` / `rows` / `row_count` / `truncated` / `notes`) | Admin / Manager |
 | GET | `/analytics/custom-report/templates` | List saved report templates: the caller's own plus every shared one | Yes |
 | POST | `/analytics/custom-report/templates` | Save a report definition as a named template (validated, audited) | Admin / Manager |
-| GET | `/analytics/custom-report/templates/{template_id}` | Get one saved template, with its `definition_errors` | Admin / Manager — own or shared |
+| GET | `/analytics/custom-report/templates/{template_id}` | Get one saved template, with its `definition_errors` | Admin / Manager — own or shared (any for an Admin) |
 | PATCH | `/analytics/custom-report/templates/{template_id}` | Change a template's name / description / sharing / definition (audited) | Admin / Manager — author or Admin |
-| DELETE | `/analytics/custom-report/templates/{template_id}` | Delete a template (audited with a snapshot) | Admin / Manager — author or Admin |
-| POST | `/analytics/custom-report/templates/{template_id}/run` | Run a saved template (`?limit=`, 1–10,000, default 1,000) | Admin / Manager — own or shared |
-| GET | `/analytics/custom-report/export` | Export a saved template's full result as CSV (`?template_id=`; csv only; audited) | Admin / Manager — own or shared |
+| DELETE | `/analytics/custom-report/templates/{template_id}` | Delete a template (required audit row with a snapshot; 503 and nothing deleted if it cannot be saved) | Admin / Manager — author or Admin |
+| POST | `/analytics/custom-report/templates/{template_id}/run` | Run a saved template (`?limit=`, 1–10,000, default 1,000) | Admin / Manager — own or shared (any for an Admin) |
+| GET | `/analytics/custom-report/export` | Export a saved template's full result as CSV (`?template_id=`; csv only; audited; read-only / AI-external token 403) | Admin / Manager — own or shared (any for an Admin) |
 
 > **Days in analytics (P1, 2026-11-13).** Every analytics range is a set of **company-local calendar
 > days** (`Company.timezone`), and a point or bucket is dated in that same zone:
@@ -11600,8 +11600,8 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 > **Unknown keys are refused at every level**, so a misspelled `agregate` is a 422, not a silently
 > ignored key.
 > - **Column** `{field, alias?, aggregate?}`. The output key is the alias, else the field; two columns
->   producing the same key are refused, and an alias is at most 100 characters and may not contain a
->   NUL character. `sum` and `avg` take
+>   producing the same key are refused, and an alias is at most 100 characters and may contain neither
+>   a NUL character nor an unpaired UTF-16 surrogate (see below). `sum` and `avg` take
 >   number fields; `min` and `max` take number, date, datetime and string fields; `count` takes any.
 >   Once any column aggregates or `group_by` is set, every non-aggregated column must be in
 >   `group_by`.
@@ -11610,7 +11610,13 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 >   `ne` / `gt` / `gte` / `lt` / `lte` / `between`; enum `eq` / `ne` / `in`. Values are typed:
 >   - a number is a JSON number (not a boolean, not a numeric string, finite); an integer must fit in
 >     64 bits (−2^63 to 2^63−1);
->   - text is at most 500 characters, and no value (of any type) may contain a NUL character;
+>   - text is at most 500 characters, and no value (of any type, `in` items included) may contain a
+>     NUL character or an unpaired UTF-16 surrogate. JSON allows a lone `"\ud800"` escape, but no
+>     response can carry it: a template that stored one answered 500 on every later read, the
+>     company's whole template list included. The 422 says `a value cannot contain characters that
+>     cannot be stored (an unpaired UTF-16 surrogate)` and never echoes the value. `value2` is
+>     checked the same way even when the operator does not read it, because it is stored with the
+>     filter;
 >   - a date is `YYYY-MM-DD`;
 >   - a datetime is ISO-8601 with at least hours and minutes. No zone means UTC, and a zone is
 >     converted to UTC; an instant whose zone pushes it outside years 1-9999 in UTC is a 422 (`… is
@@ -11672,7 +11678,9 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 > **Saved templates.** A template is a named definition, private to its author unless `is_shared`.
 > - **Create** (`POST /analytics/custom-report/templates`). The body is the definition fields at the
 >   top level plus `name` (1–255 characters, trimmed), `description` (optional, at most 2,000) and
->   `is_shared` (default `false`). It is validated by the same rules, with the same single 422.
+>   `is_shared` (default `false`). It is validated by the same rules, with the same single 422. A
+>   `name` or `description` holding a NUL or an unpaired surrogate is a 422 (`unstorable_text` /
+>   `string_unicode`); it used to be a 500.
 > - **Change** (`PATCH /analytics/custom-report/templates/{template_id}`). Send any of `name`,
 >   `description` (`null` clears it), `is_shared` and `definition`. `definition` is the whole
 >   `{data_source, columns, filters, group_by, sort}` object nested under that key; it replaces the
@@ -11686,22 +11694,29 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 >   default 1,000. It returns the same result shape as an ad-hoc run.
 > - **Delete** (`DELETE /analytics/custom-report/templates/{template_id}`) answers
 >   `{"message": "Template deleted"}`. It stays a physical delete: `ReportTemplate` is not
->   soft-deletable, and the audit row keeps a snapshot of what was removed. The row is deleted
->   (tenant-scoped) before the audit row is written, the same row-then-audit-chain lock order as
->   create and update; a delete that finds no row (a concurrent delete won) is the same **404** as a
->   missing template and writes no audit row.
+>   soft-deletable, and the audit row keeps a snapshot of what was removed. That audit row is
+>   **required**: if it cannot be written the delete is rolled back and the answer is **503**
+>   `The audit record for this delete could not be saved; the template was not deleted. Retry.` The
+>   row is deleted (tenant-scoped) before the audit row is written, the same row-then-audit-chain
+>   lock order as create and update; a delete that finds no row (a concurrent delete won) is the
+>   same **404** as a missing template and writes no audit row.
 >
 > **Template access rule** (`report_template_service`):
 >
 > | Verb | Who | Otherwise |
 > |---|---|---|
 > | List | Any signed-in role; returns the caller's own templates plus every shared one, by name | — |
-> | Get, run, export | Admin / Manager, and the template is the caller's own or shared | **403** `Access denied to this report` |
+> | Get, run, export | Admin / Manager, and the template is the caller's own, shared, or the caller is an Admin (a superuser or Platform Admin counts as an Admin) | **403** `Access denied to this report` |
 > | Change, delete | Admin / Manager, and the caller is the author or an Admin (a superuser or Platform Admin counts as an Admin) | **403** `Only the template's author or an admin can change or delete it` |
 >
 > A template in another company is **404** `Report template not found` on every verb, byte-identical
 > to an id that does not exist, and never appears in the list. So a shared template can be run by
-> every Admin / Manager in the company but changed only by its author or an Admin.
+> every Admin / Manager in the company but changed only by its author or an Admin, and an Admin can
+> open, run and export any template in the company. The read and change rules name the same Admin:
+> until 2026-11-16 an Admin was refused a colleague's private template on read, yet could `PATCH` it
+> and receive the whole definition back, so the refusal protected nothing. The list is unchanged —
+> the caller's own plus every shared template, for every role — so an Admin opens a colleague's
+> private template by id.
 >
 > **Stored templates are judged, never trusted.** Before this change templates were saved with type
 > checks only, so a stored one can break a rule added since. Such a template still lists and opens,
@@ -11711,15 +11726,28 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 > they cannot disagree. Judging a stored definition never raises: an unexpected error while checking
 > one is logged and reported as the single problem `The saved definition could not be checked; edit
 > the report and save it again`, so one bad row can never fail the template list for the company.
+> A stored definition holding an unpaired surrogate (saved before the refusal above existed) is
+> rendered with U+FFFD in place of each such character, wherever it sits (a value, an alias, a key),
+> and lists and opens with `The saved definition contains characters that cannot be stored (shown
+> here as �); edit the report and save it again` first in `definition_errors`; running or exporting
+> it is the **409**, since the definition that would run is not the one that was saved. Every
+> serialization of a stored definition goes through that rendering, the audit snapshots included,
+> so a repair or delete never writes an audit row no audit-log read could render.
 >
-> **Audit.** Create, change and delete each write a best-effort `report_template` audit row:
-> `log_create`, `log_update` with old and new values, and `log_delete` with a snapshot of the deleted
-> definition. They follow the repo-wide best-effort `AuditService.log` contract rather than the
-> required-audit one, because a template is a saved query, not a quality record. Before this
-> change, template create and delete wrote no audit row (and there was no update verb).
+> **Audit.** Create, change and delete each write a `report_template` audit row: `log_create`,
+> `log_update` with old and new values, and a `DELETE` row with a snapshot of the deleted definition.
+> Create and change are best-effort (the repo-wide `AuditService.log` contract), because a template
+> is a saved query, not a quality record. **Delete is required** (`log_required`, the same fields
+> `log_delete` writes): the delete is physical, so its snapshot is the only trace of the template,
+> and a delete whose audit row cannot be saved is rolled back (**503**, above). Before this change,
+> template create and delete wrote no audit row (and there was no update verb).
 >
 > **Export: `GET /analytics/custom-report/export?template_id=&format=csv`.** The caller must be able
-> to read the template (own or shared).
+> to read the template (own, shared, or any for an Admin).
+> - **A read-only or AI-external API token is refused 403** `Read-only API token cannot download
+>   files.` before anything is read — the template, the query, the row cap. It could never receive
+>   the file, and the over-cap and empty-result 400s, which used to answer first, told it how many
+>   rows a template matched.
 > - **Every matching row is exported**, up to the shared bulk-export cap `MAX_EXPORT_ROWS` (10,000,
 >   imported from `exports.py`). Over it the export is refused **400** `This export matches more than
 >   10,000 rows. Add a filter, then export again.` rather than cut short — see

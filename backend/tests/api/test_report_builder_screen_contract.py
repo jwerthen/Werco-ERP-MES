@@ -914,22 +914,23 @@ def test_delete_template_audits_a_snapshot(client: TestClient, db_session: Sessi
 
 
 def test_delete_removes_the_row_before_it_audits(client: TestClient, db_session: Session, monkeypatch):
-    """Lock order: the row's DELETE runs before ``log_delete`` takes the audit-chain lock,
-    the same order create and update take, so a concurrent PATCH cannot deadlock with it."""
+    """Lock order: the row's DELETE runs before the (required) audit write takes the
+    audit-chain lock, the same order create and update take, so a concurrent PATCH cannot
+    deadlock with it."""
     manager = make_user(db_session)
     template = make_template(db_session, manager, name="Ordered")
     template_id = template.id
-    real_log_delete = AuditService.log_delete
+    real_log_required = AuditService.log_required
     rows_when_audited = []
 
-    def recording_log_delete(self, resource_type, resource_id, *args, **kwargs):
+    def recording_log_required(self, action, resource_type, **kwargs):
         if resource_type == "report_template":
             rows_when_audited.append(
-                db_session.query(ReportTemplate.id).filter(ReportTemplate.id == resource_id).count()
+                db_session.query(ReportTemplate.id).filter(ReportTemplate.id == kwargs["resource_id"]).count()
             )
-        return real_log_delete(self, resource_type, resource_id, *args, **kwargs)
+        return real_log_required(self, action, resource_type, **kwargs)
 
-    monkeypatch.setattr(AuditService, "log_delete", recording_log_delete)
+    monkeypatch.setattr(AuditService, "log_required", recording_log_required)
     resp = client.delete(f"{TEMPLATES}/{template_id}", headers=headers_for(manager))
     assert resp.status_code == status.HTTP_200_OK, resp.text
     assert rows_when_audited == [0]
@@ -958,6 +959,7 @@ def test_delete_that_finds_no_row_is_404_and_audits_nothing(db_session: Session)
         report_template_service.delete_template(db_session, kept, COMPANY_B, audit)
     assert foreign_exc.value.status_code == status.HTTP_404_NOT_FOUND
     assert db_session.query(ReportTemplate.id).filter(ReportTemplate.id == kept.id).count() == 1
+    audit.log_required.assert_not_called()
     audit.log_delete.assert_not_called()
 
 

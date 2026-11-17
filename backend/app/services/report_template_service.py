@@ -2,12 +2,19 @@
 
 Access (deliberate, enforced here and documented on each route):
 
-* **Read or run** a template -- ADMIN/MANAGER (the route's role gate), and only the
-  author's own templates or shared ones (``require_readable``, 403 otherwise).
+* **Read, run or export** a template -- ADMIN/MANAGER (the route's role gate), and only
+  the author's own templates, shared ones, or any template for an ADMIN
+  (``require_readable``, 403 otherwise).
 * **Change or delete** -- ADMIN/MANAGER, and only the author or an ADMIN
-  (``require_modifiable``, 403 otherwise). A platform principal counts as an ADMIN here,
-  as ``require_role`` already treats it everywhere else.
+  (``require_modifiable``, 403 otherwise).
+* An ADMIN is the same caller in both rules -- a superuser or a platform principal counts
+  as one, as ``require_role`` already treats them everywhere else. The two rules used to
+  disagree: an Admin was refused READ of a colleague's private template yet could PATCH
+  it, and the PATCH response carried the whole definition (a no-op PATCH writing no audit
+  row), so the read refusal protected nothing.
 * A template of another company, or no template at all, is the same 404.
+* The list stays the caller's own templates plus every shared one, for every role
+  (``list_templates``); an Admin opens a colleague's private template by id.
 
 Stored definitions are judged, never trusted. ``report_templates`` rows were written with
 type checks only (the API and the MCP tool ``create_report_template``), so a template
@@ -19,12 +26,23 @@ stored JSON (``_judge_stored``, behind ``request_from_template`` / ``stored_defi
 value in one may 500 the list, so anything unexpected the rules raise on it is logged and
 reported as a definition error like any other.
 
-Template writes are audited best-effort (``AuditService.log_create`` / ``log_update`` /
-``log_delete``, resource type ``report_template``): a template is a saved query, not a
-quality record. ``ReportTemplate`` is not a ``SoftDeleteMixin`` model, so delete stays a
-physical delete; the audit row keeps a snapshot of the definition it removed. Every write
-takes the template's row lock BEFORE the audit call (which takes the global audit-chain
-lock), so two writers can never wait on each other's lock in opposite order.
+That includes text no response can carry. A legacy row can hold a string with an unpaired
+UTF-16 surrogate (JSON ``"\\ud800"``: the API accepted it in any filter value, and the JSON
+column stores it), and rendering one raises ``UnicodeEncodeError`` after the route ran -- a
+500 for the company's whole template list. Every serialization of a stored definition
+(``template_response``, the audit ``_snapshot``) goes through ``_renderable_definition``,
+which replaces such characters with U+FFFD; ``_judge_stored`` then reports
+``UNENCODABLE_DEFINITION_PROBLEM`` so list/get answer 200 and run/export 409. New ones are
+refused at the door (``report_builder.coerce_value`` / ``definition_problems``).
+
+Create and update are audited best-effort (``AuditService.log_create`` / ``log_update``,
+resource type ``report_template``): a template is a saved query, not a quality record.
+``ReportTemplate`` is not a ``SoftDeleteMixin`` model, so delete stays a physical delete,
+and its audit row -- a snapshot of the definition it removed -- is the only trace left. So
+the delete's audit row is REQUIRED (``log_required``): if it cannot be written the delete
+rolls back (the route answers 503). Every write takes the template's row lock BEFORE the
+audit call (which takes the global audit-chain lock), so two writers can never wait on
+each other's lock in opposite order.
 """
 
 import logging
@@ -34,6 +52,7 @@ from fastapi import HTTPException, status
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.orm import Session
 
+from app.core.unicode_text import contains_unencodable_text, replace_unencodable, scrub_unencodable_text
 from app.db.tenant_filter import tenant_query
 from app.models.analytics import ReportTemplate
 from app.models.user import User, UserRole
@@ -56,6 +75,11 @@ READ_DENIED_DETAIL = "Access denied to this report"
 MODIFY_DENIED_DETAIL = "Only the template's author or an admin can change or delete it"
 # The one problem a stored definition carries when judging it raised something unexpected.
 UNCHECKABLE_DEFINITION_PROBLEM = "The saved definition could not be checked; edit the report and save it again"
+# The problem a stored definition carries when it holds text no response can encode.
+UNENCODABLE_DEFINITION_PROBLEM = (
+    "The saved definition contains characters that cannot be stored (shown here as \ufffd); "
+    "edit the report and save it again"
+)
 
 _Judged = TypeVar("_Judged", bound=BaseModel)
 
@@ -87,6 +111,23 @@ def _stored_definition(template: ReportTemplate) -> Dict[str, Any]:
     }
 
 
+def _renderable_definition(template: ReportTemplate) -> Tuple[Dict[str, Any], bool]:
+    """The stored definition, safe to serialize: ``(definition, replaced)``.
+
+    Every string that cannot be encoded as UTF-8 (an unpaired surrogate) is replaced with
+    U+FFFD, and ``replaced`` says whether any was. EVERY serialization of a stored
+    definition goes through here; one that did not would 500 the moment it met such a row.
+    """
+    definition = _stored_definition(template)
+    if not contains_unencodable_text(definition):
+        return definition, False
+    return scrub_unencodable_text(definition), True
+
+
+def _renderable_text(text: Optional[str]) -> Optional[str]:
+    return None if text is None else replace_unencodable(text)
+
+
 def _judge_stored(
     template: ReportTemplate, model: Type[_Judged], extra: Dict[str, Any]
 ) -> Tuple[Optional[_Judged], List[str]]:
@@ -97,14 +138,24 @@ def _judge_stored(
     rules raise on a stored value is a defect in the rules, not in the request -- but the
     row was saved before that defect could be refused, so it is logged and reported as one
     problem instead of escaping: one bad row must never 500 the company's template list.
+
+    A definition holding unencodable text is judged as rendered (U+FFFD in place of each bad
+    character), so its other problems are still reported, and it is NEVER runnable: the
+    definition that would run is not the one that was saved.
     """
+    definition, replaced = _renderable_definition(template)
+    request: Optional[_Judged] = None
     try:
-        return model.model_validate({**_stored_definition(template), **extra}), []
+        request, problems = model.model_validate({**definition, **extra}), []
     except ValidationError as exc:
-        return None, validation_problems(exc)
+        problems = validation_problems(exc)
     except Exception:  # deliberately broad -- see the docstring
         logger.exception("Could not judge the stored definition of report template %s", template.id)
-        return None, [UNCHECKABLE_DEFINITION_PROBLEM]
+        problems = [UNCHECKABLE_DEFINITION_PROBLEM]
+    if replaced:
+        request, problems = None, [UNENCODABLE_DEFINITION_PROBLEM, *problems]
+    # A problem may quote a stored key back; it is rendered too, so it must encode.
+    return request, [replace_unencodable(problem) for problem in problems]
 
 
 def stored_definition_errors(template: ReportTemplate) -> List[str]:
@@ -118,23 +169,29 @@ def request_from_template(template: ReportTemplate, *, limit: int = REPORT_DEFAU
     if request is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f'Saved report "{template.name}" can no longer run: {"; ".join(problems)}. '
+            detail=f'Saved report "{_renderable_text(template.name)}" can no longer run: {"; ".join(problems)}. '
             "Edit it and save it again.",
         )
     return request
 
 
 def template_response(template: ReportTemplate) -> ReportTemplateResponse:
-    """Render a stored template, including its ``definition_errors``."""
+    """Render a stored template, including its ``definition_errors``.
+
+    The definition is rendered through ``_renderable_definition``, so a legacy row holding
+    unencodable text still answers 200 (with U+FFFD in its place and
+    ``UNENCODABLE_DEFINITION_PROBLEM`` among its ``definition_errors``).
+    """
+    definition, _replaced = _renderable_definition(template)
     return ReportTemplateResponse(
         id=template.id,
-        name=template.name,
-        description=template.description,
-        data_source=template.data_source,
-        columns=template.columns or [],
-        filters=template.filters or [],
-        group_by=template.group_by or [],
-        sort=template.sort or [],
+        name=_renderable_text(template.name),
+        description=_renderable_text(template.description),
+        data_source=definition["data_source"],
+        columns=definition["columns"],
+        filters=definition["filters"],
+        group_by=definition["group_by"],
+        sort=definition["sort"],
         is_shared=bool(template.is_shared),
         created_by=template.created_by,
         created_at=template.created_at,
@@ -155,9 +212,15 @@ def get_template(db: Session, template_id: int, company_id: int) -> ReportTempla
 
 
 def require_readable(db: Session, template_id: int, company_id: int, user: User) -> ReportTemplate:
-    """The template, if the caller may read or run it: their own, or shared."""
+    """The template, if the caller may read, run or export it: their own, a shared one, or
+    any template for an admin (superuser and Platform Admin included).
+
+    An admin may change any template (``require_modifiable``), and a change answers with the
+    whole definition, so refusing an admin the read protected nothing -- the two rules name
+    the same admin.
+    """
     template = get_template(db, template_id, company_id)
-    if not template.is_shared and template.created_by != user.id:
+    if not template.is_shared and template.created_by != user.id and not _is_admin(user):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=READ_DENIED_DETAIL)
     return template
 
@@ -192,13 +255,18 @@ def _definition_json(definition: ReportDefinitionInput) -> Dict[str, Any]:
 
 
 def _snapshot(template: ReportTemplate) -> Dict[str, Any]:
-    """What the audit row records: the template's identity, sharing and full definition."""
+    """What the audit row records: the template's identity, sharing and full definition.
+
+    Rendered like a response (``_renderable_definition``): an audit row is immutable, so a
+    snapshot carrying unencodable text from a legacy row would leave an audit entry no
+    audit-log read could ever render. U+FFFD stands in for each such character.
+    """
     return {
-        "name": template.name,
-        "description": template.description,
+        "name": _renderable_text(template.name),
+        "description": _renderable_text(template.description),
         "is_shared": bool(template.is_shared),
         "created_by": template.created_by,
-        **_stored_definition(template),
+        **_renderable_definition(template)[0],
     }
 
 
@@ -243,10 +311,16 @@ def update_template(
 
 
 def delete_template(db: Session, template: ReportTemplate, company_id: int, audit: AuditService) -> None:
-    """Physically delete ``template`` and audit a snapshot of what it held.
+    """Physically delete ``template`` and audit a snapshot of what it held -- REQUIRED.
+
+    The delete is physical, so the audit row's snapshot is the only trace of the template.
+    It is written with ``log_required`` (the fields ``log_delete`` writes): if it cannot be
+    saved this raises ``AuditWriteError`` BEFORE the commit, and the caller rolls the delete
+    back (the route wraps this in ``app.api.audit_guard.required_audit``: 503, nothing
+    deleted).
 
     Lock order matches create and update: the row first (the DELETE below takes its row
-    lock), THEN ``log_delete`` (the global audit-chain lock). Auditing first inverted the
+    lock), THEN the audit write (the global audit-chain lock). Auditing first inverted the
     order a concurrent PATCH takes -- row, then audit -- so the two could deadlock.
 
     The DELETE is an explicit tenant-scoped statement whose rowcount is checked. If a
@@ -255,7 +329,7 @@ def delete_template(db: Session, template: ReportTemplate, company_id: int, audi
     written for a delete that did not happen.
     """
     template_id = template.id
-    name = template.name
+    name = _renderable_text(template.name)
     snapshot = _snapshot(template)
     deleted = (
         tenant_query(db, ReportTemplate, company_id)
@@ -264,5 +338,13 @@ def delete_template(db: Session, template: ReportTemplate, company_id: int, audi
     )
     if deleted != 1:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_FOUND_DETAIL)
-    audit.log_delete(AUDIT_RESOURCE_TYPE, template_id, name, old_values=snapshot)
+    audit.log_required(
+        action=AuditService.ACTIONS["DELETE"],
+        resource_type=AUDIT_RESOURCE_TYPE,
+        resource_id=template_id,
+        resource_identifier=name,
+        description=f"Deleted {AUDIT_RESOURCE_TYPE}: {name}",
+        old_values=snapshot,
+        extra_data={"soft_delete": False},
+    )
     db.commit()

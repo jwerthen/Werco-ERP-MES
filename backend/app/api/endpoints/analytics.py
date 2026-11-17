@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+from app.api.audit_guard import required_audit
 from app.api.date_window import company_period
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 
@@ -48,7 +49,7 @@ from app.services import report_template_service
 from app.services.adoption_metrics_service import get_adoption_metrics
 from app.services.analytics_service import AnalyticsService
 from app.services.audit_service import AuditService
-from app.services.export_audit import log_export
+from app.services.export_audit import log_export, refuse_file_export_to_narrowed_token
 from app.services.export_safety import attachment_content_disposition, sanitize_csv_mapping, sanitize_csv_row
 from app.services.flow_metrics_service import get_flow_metrics, get_wip_aging
 from app.services.prediction_service import PredictionService
@@ -260,10 +261,11 @@ def get_inventory_analytics(
 
 # ============ CUSTOM REPORT BUILDER ============
 #
-# Access rule for templates (enforced in ``report_template_service``): reading or running
-# one is ADMIN/MANAGER and only the caller's own or a shared template; changing or deleting
-# one is ADMIN/MANAGER and only its author or an ADMIN. Listing stays open to any role, as
-# it always has. A template in another company is the same 404 as a missing one.
+# Access rule for templates (enforced in ``report_template_service``): reading, running or
+# exporting one is ADMIN/MANAGER and only the caller's own, a shared one, or any for an
+# ADMIN; changing or deleting one is ADMIN/MANAGER and only its author or an ADMIN (a
+# superuser or Platform Admin counts as an ADMIN in both). Listing stays open to any role,
+# as it always has. A template in another company is the same 404 as a missing one.
 
 
 @router.post("/custom-report", response_model=CustomReportResult)
@@ -305,13 +307,19 @@ def export_custom_report(
 ):
     """Download a saved report template's full result as a CSV file.
 
-    The caller must own the template or it must be shared. Every matching row is exported
-    (no 1,000-row default); a result over 10,000 rows is refused with 400 rather than cut
-    short -- add a filter to the template and export again. A template whose saved
-    definition no longer passes validation is refused with 409 (its
+    The caller must own the template or it must be shared (an ADMIN may export any). Every
+    matching row is exported (no 1,000-row default); a result over 10,000 rows is refused
+    with 400 rather than cut short -- add a filter to the template and export again. A
+    template whose saved definition no longer passes validation is refused with 409 (its
     ``definition_errors`` in GET /analytics/custom-report/templates say why). An empty
-    result is a 400. The export is recorded in the audit log. ADMIN or MANAGER only.
+    result is a 400. The export is recorded in the audit log. A read-only or AI-external
+    API token is refused 403 before anything is read. ADMIN or MANAGER only.
     """
+    # First, before the template read and the up-to-10,001-row query: a narrowed token can
+    # never receive the file (the response middleware would replace it), so running the
+    # query for one only costs a full read -- and the over-cap / empty 400s it could reach
+    # first would tell it how many rows the template matches.
+    refuse_file_export_to_narrowed_token(current_user)
     template = report_template_service.require_readable(db, template_id, company_id, current_user)
     request = report_template_service.request_from_template(template)
 
@@ -412,8 +420,8 @@ def get_report_template(
 ):
     """Get one saved report template, with its definition and ``definition_errors``.
 
-    The caller must own the template or it must be shared (403 otherwise); an unknown id
-    is 404. ADMIN or MANAGER only.
+    The caller must own the template or it must be shared (403 otherwise; an ADMIN may open
+    any); an unknown id is 404. ADMIN or MANAGER only.
     """
     template = report_template_service.require_readable(db, template_id, company_id, current_user)
     return report_template_service.template_response(template)
@@ -454,10 +462,14 @@ def delete_report_template(
     """Delete a saved report template.
 
     Only the template's author or an ADMIN may delete it (403 otherwise). The audit log
-    keeps a snapshot of the deleted definition. ADMIN or MANAGER only.
+    keeps a snapshot of the deleted definition; that audit row is required, so if it cannot
+    be saved nothing is deleted (503). ADMIN or MANAGER only.
     """
     template = report_template_service.require_modifiable(db, template_id, company_id, current_user)
-    report_template_service.delete_template(db, template, company_id, audit)
+    with required_audit(
+        db, "The audit record for this delete could not be saved; the template was not deleted. Retry."
+    ):
+        report_template_service.delete_template(db, template, company_id, audit)
     return {"message": "Template deleted"}
 
 
@@ -472,10 +484,10 @@ def run_report_template(
     """Run a saved report template and return its rows (same result shape as
     POST /analytics/custom-report).
 
-    The caller must own the template or it must be shared (403 otherwise). A template whose
-    saved definition no longer passes validation answers 409 naming the template and its
-    problems; fix it with PATCH. ``truncated`` is true when more than ``limit`` rows
-    matched. ADMIN or MANAGER only.
+    The caller must own the template or it must be shared (403 otherwise; an ADMIN may run
+    any). A template whose saved definition no longer passes validation answers 409 naming
+    the template and its problems; fix it with PATCH. ``truncated`` is true when more than
+    ``limit`` rows matched. ADMIN or MANAGER only.
     """
     template = report_template_service.require_readable(db, template_id, company_id, current_user)
     request = report_template_service.request_from_template(template, limit=limit)

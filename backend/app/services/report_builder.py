@@ -30,6 +30,7 @@ from sqlalchemy import Float, Integer, Numeric, String, and_, asc, desc, func
 from sqlalchemy.orm import Session
 
 from app.core.time_utils import to_utc_iso
+from app.core.unicode_text import contains_unencodable_text, is_utf8_encodable
 from app.db.mixins import SoftDeleteMixin
 from app.db.tenant_filter import tenant_filter
 from app.models.inventory import InventoryItem
@@ -109,6 +110,13 @@ MAX_ALIAS_LENGTH = 100
 # a number filter outside this range is refused rather than allowed to fail at execution.
 MIN_INTEGER_VALUE = -(2**63)
 MAX_INTEGER_VALUE = 2**63 - 1
+
+# The refusal for text a value or alias carries that UTF-8 cannot encode (an unpaired UTF-16
+# surrogate such as JSON's ``"\\ud800"``). It never echoes the value: rendering it is the failure.
+# Such text is accepted by ``json.loads``, ``Any`` and ``str`` alike and stored by a JSON
+# column, and then every response that renders the template raises -- so ONE saved template
+# carrying it 500'd the company's whole template list.
+UNENCODABLE_TEXT_PROBLEM = "cannot contain characters that cannot be stored (an unpaired UTF-16 surrogate)"
 
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 # An instant: a date, then a time of at least hours and minutes; zone optional (none = UTC).
@@ -373,13 +381,16 @@ def coerce_value(spec: ReportField, value: Any) -> Any:
     Every way a value can fail -- here OR later, when the engine binds it -- must surface
     as a ``ReportValueError``: anything else escapes ``definition_problems`` and the request
     validator, so a request answers 500 instead of 422, and one stored template carrying
-    such a value would 500 the template list. Hence the integer range, the NUL refusal and
-    the guarded UTC conversion below.
+    such a value would 500 the template list. Hence the integer range, the NUL and
+    unencodable-text refusals and the guarded UTC conversion below.
     """
     if isinstance(value, str) and "\x00" in value:
         # Postgres text cannot hold NUL (the driver raises at bind), and CPython's
         # ``fromisoformat`` quietly ignores a trailing one -- so it is refused for every type.
         raise ReportValueError("a value cannot contain a NUL (0x00) character")
+    if isinstance(value, str) and not is_utf8_encodable(value):
+        # Refused for every type, like NUL. Nothing would match it, and it would be stored.
+        raise ReportValueError(f"a value {UNENCODABLE_TEXT_PROBLEM}")
     if spec.type == "number":
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ReportValueError(f"{_show(value)} is not a number")
@@ -432,8 +443,11 @@ def coerce_filter(spec: ReportField, operator: Any, value: Any, value2: Any) -> 
 
     ``value`` null means IS NULL / IS NOT NULL and is accepted only with ``eq`` / ``ne``.
     ``value2`` is read only by ``between``, and a ``value2`` of 0 is a real bound (the old
-    engine's truthiness check dropped it).
+    engine's truthiness check dropped it). An unread ``value2`` is still STORED with the
+    filter, so text in it that cannot be stored is refused whatever the operator.
     """
+    if contains_unencodable_text(value2):
+        raise ReportValueError(f"value2 {UNENCODABLE_TEXT_PROBLEM}")
     allowed = OPERATORS_BY_TYPE[spec.type]
     if operator not in OPERATORS:
         raise ReportValueError(f"unknown operator {_show(operator)}; use one of: {', '.join(allowed)}")
@@ -505,6 +519,8 @@ def definition_problems(
         if column.alias is not None and "\x00" in column.alias:
             # The output key is the SELECT label, so it reaches the SQL text itself.
             problems.append(f"Column {index}: an alias cannot contain a NUL (0x00) character")
+        if column.alias is not None and not is_utf8_encodable(column.alias):
+            problems.append(f"Column {index}: an alias {UNENCODABLE_TEXT_PROBLEM}")
         key = output_key(column)
         if key in output_keys:
             problems.append(

@@ -6,9 +6,10 @@ from datetime import date, datetime
 from enum import Enum
 from typing import Annotated, Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, WithJsonSchema, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StringConstraints, WithJsonSchema, model_validator
 from pydantic_core import PydanticCustomError
 
+from app.core.unicode_text import is_utf8_encodable
 from app.schemas.base import UTCModel
 from app.schemas.material_readiness import MaterialReadiness
 
@@ -389,8 +390,31 @@ class CustomReportRequest(ReportDefinitionInput):
     limit: int = Field(REPORT_DEFAULT_LIMIT, ge=1, le=REPORT_MAX_LIMIT)
 
 
-TemplateName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)]
-TemplateDescription = Annotated[str, StringConstraints(strip_whitespace=True, max_length=2000)]
+def _storable_template_text(value: str) -> str:
+    """Refuse a template name / description no database column can hold.
+
+    A NUL fails at bind on Postgres -- a 500 for a caller's input error. An unpaired UTF-16
+    surrogate (JSON ``"\\ud800"``) cannot be encoded at all; pydantic-core's constrained-str
+    check already refuses one (``string_unicode``), so that branch is the backstop should it
+    ever stop. The message never echoes the value.
+    """
+    if "\x00" in value:
+        raise PydanticCustomError("unstorable_text", "Text cannot contain a NUL (0x00) character")
+    if not is_utf8_encodable(value):
+        raise PydanticCustomError(
+            "unstorable_text", "Text cannot contain characters that cannot be stored (an unpaired UTF-16 surrogate)"
+        )
+    return value
+
+
+TemplateName = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=255),
+    AfterValidator(_storable_template_text),
+]
+TemplateDescription = Annotated[
+    str, StringConstraints(strip_whitespace=True, max_length=2000), AfterValidator(_storable_template_text)
+]
 
 
 class ReportTemplateCreate(ReportDefinitionInput):
