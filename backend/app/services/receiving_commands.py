@@ -42,7 +42,7 @@ def generate_receipt_number(db: Session, company_id: int) -> str:
     return f"{prefix}{new_num:03d}"
 
 
-def _receive_material(receipt_in, db, current_user, company_id, audit):
+def _receive_material(receipt_in, db, current_user, company_id, audit, *, certificate_checked=False):
     """
     Receive material against a PO line.
 
@@ -103,9 +103,12 @@ def _receive_material(receipt_in, db, current_user, company_id, audit):
         raise HTTPException(status_code=404, detail="PO line not found")
 
     po = po_line.purchase_order
-    from app.services.receiving_delivery_service import validate_certificate
+    if not certificate_checked:
+        # A delivery passes True: it locked and checked every line's certificate before its
+        # first line wrote the audit row that takes the chain lock (lock_delivery_certificates).
+        from app.services.receiving_delivery_service import validate_certificate
 
-    validate_certificate(db, company_id, po_line, receipt_in.certificate_document_id)
+        validate_certificate(db, company_id, po_line, receipt_in.certificate_document_id)
     if po.status not in [POStatus.SENT, POStatus.PARTIAL]:
         raise HTTPException(status_code=400, detail="PO must be in sent or partial status to receive")
 

@@ -5,13 +5,17 @@ from unittest.mock import Mock
 from zoneinfo import ZoneInfo
 
 import pytest
+from sqlalchemy import Select, event
+from sqlalchemy.dialects import postgresql
 
+from app.core.config import settings
 from app.models.audit_log import AuditLog
 from app.models.company import Company
 from app.models.inventory import InventoryItem, InventoryTransaction
 from app.models.purchasing import POReceipt, POStatus, PurchaseOrderLine, ReceivingDeliveryBatch
 from app.models.role_permission import RolePermission
 from app.models.user import UserRole
+from app.services.audit_service import AuditService
 from tests.api.test_receiving_compliance import headers_for, make_po_line, make_user
 
 
@@ -310,3 +314,124 @@ def test_receiving_events_snapshot_each_received_line_not_cumulative_po_quantity
         .count()
         == 2
     )
+
+
+def _upload_certificate(client, user, po_line_id, name):
+    response = client.post(
+        '/api/v1/receiving/certificates',
+        headers=headers_for(user),
+        data={'po_line_id': po_line_id},
+        files={'file': (name, b'%PDF-1.4 synthetic ' + name.encode(), 'application/pdf')},
+    )
+    assert response.status_code == 200, response.text
+    return response.json()['id']
+
+
+def _record_lock_order(db_session, monkeypatch):
+    """Record, in execution order, each row-locking read of ``documents`` (compiled for Postgres --
+    SQLite drops the clause) and each take of the global audit-chain lock."""
+    events = []
+
+    def before_execute(conn, clauseelement, multiparams, params, execution_options):  # noqa: ARG001
+        if isinstance(clauseelement, Select) and 'documents' in {
+            getattr(table, 'name', None) for table in clauseelement.get_final_froms()
+        }:
+            compiled = clauseelement.compile(dialect=postgresql.dialect())
+            if 'FOR UPDATE' in str(compiled):
+                events.append(('document_lock', str(compiled), compiled.params))
+
+    monkeypatch.setattr(settings, 'AUDIT_HASH_CHAIN_ENABLED', True)
+    original_chain_lock = AuditService._acquire_chain_lock
+
+    def spy_chain_lock(self):
+        events.append(('chain_lock', None, None))
+        original_chain_lock(self)
+
+    monkeypatch.setattr(AuditService, '_acquire_chain_lock', spy_chain_lock)
+    engine = db_session.get_bind()
+    event.listen(engine, 'before_execute', before_execute)
+    return events, lambda: event.remove(engine, 'before_execute', before_execute)
+
+
+def test_delivery_locks_every_certificate_in_id_order_before_the_audit_chain_lock(
+    client, db_session, monkeypatch, tmp_path
+):
+    """Line 1's audit row takes the global audit-chain lock. Every other document writer (delete,
+    QMS links, laser-nest attach, ECO create / update) locks the document row first and the chain
+    second, so a delivery that locked line 2's certificate after line 1's audit row deadlocked
+    against any of them on Postgres (40P01, answered 409). All of the delivery's certificates must be
+    row-locked -- ascending id, whatever the line order -- before the first chain lock, and none
+    after it."""
+    from app.services.storage_service import LocalStorageBackend
+
+    monkeypatch.setattr('app.services.receiving_delivery_service.get_storage', lambda: LocalStorageBackend())
+    monkeypatch.setattr('app.services.receiving_delivery_service.resolve_upload_dir', lambda: str(tmp_path))
+    user, first, second, body = setup_delivery(db_session)
+    lower = _upload_certificate(client, user, first.id, 'lower.pdf')
+    higher = _upload_certificate(client, user, second.id, 'higher.pdf')
+    assert lower < higher
+    # Line order is the reverse of id order, so a per-line lock cannot pass for an id-ordered one.
+    body['lines'][0]['certificate_document_id'] = higher
+    body['lines'][1]['certificate_document_id'] = lower
+
+    events, stop = _record_lock_order(db_session, monkeypatch)
+    try:
+        response = client.post('/api/v1/receiving/deliveries', headers=headers_for(user), json=body)
+    finally:
+        stop()
+
+    assert response.status_code == 200, response.text
+    assert [row['certificate_document_id'] for row in response.json()['receipts']] == [higher, lower]
+    kinds = [kind for kind, _, _ in events]
+    assert 'document_lock' in kinds and 'chain_lock' in kinds, kinds
+    first_chain_lock = kinds.index('chain_lock')
+    assert 'document_lock' not in kinds[first_chain_lock:], kinds
+    document_locks = [(sql, bound) for kind, sql, bound in events if kind == 'document_lock']
+    assert len(document_locks) == 1, document_locks
+    sql, bound = document_locks[0]
+    assert 'ORDER BY documents.id' in sql and sql.rstrip().endswith('FOR UPDATE'), sql
+    assert [value for value in bound.values() if isinstance(value, list)] == [[lower, higher]], bound
+
+
+def test_delivery_without_certificates_locks_no_document(client, db_session, monkeypatch):
+    user, _, _, body = setup_delivery(db_session)
+    events, stop = _record_lock_order(db_session, monkeypatch)
+    try:
+        response = client.post('/api/v1/receiving/deliveries', headers=headers_for(user), json=body)
+    finally:
+        stop()
+    assert response.status_code == 200, response.text
+    assert 'document_lock' not in [kind for kind, _, _ in events], events
+
+
+def test_later_line_certificate_refusal_names_the_line_before_any_line_is_received(
+    client, db_session, monkeypatch, tmp_path
+):
+    """Every line's certificate is checked before line 1 is received, so a bad certificate on line 2
+    is refused with its line number, no audit row written and nothing posted."""
+    from app.services.storage_service import LocalStorageBackend
+
+    monkeypatch.setattr('app.services.receiving_delivery_service.get_storage', lambda: LocalStorageBackend())
+    monkeypatch.setattr('app.services.receiving_delivery_service.resolve_upload_dir', lambda: str(tmp_path))
+    user, first, _, body = setup_delivery(db_session)
+    good = _upload_certificate(client, user, first.id, 'good.pdf')
+    other_supplier = make_po_line(db_session, company_id=1)
+    wrong = _upload_certificate(client, user, other_supplier.id, 'wrong.pdf')
+    body['lines'][0]['certificate_document_id'] = good
+    body['lines'][1]['certificate_document_id'] = wrong
+    audit_rows = db_session.query(AuditLog).count()
+
+    events, stop = _record_lock_order(db_session, monkeypatch)
+    try:
+        response = client.post('/api/v1/receiving/deliveries', headers=headers_for(user), json=body)
+    finally:
+        stop()
+
+    assert response.status_code == 422, response.text
+    assert response.json()['detail'] == (
+        'Delivery line 2: Choose a certificate uploaded for this part and supplier. No delivery lines were posted.'
+    )
+    assert 'chain_lock' not in [kind for kind, _, _ in events], events
+    for model in (POReceipt, InventoryItem, InventoryTransaction, ReceivingDeliveryBatch):
+        assert db_session.query(model).count() == 0
+    assert db_session.query(AuditLog).count() == audit_rows

@@ -15,7 +15,24 @@ from app.services.document_numbering import generate_document_number
 from app.services.storage_service import delete_ref, get_storage, ref_exists, resolve_upload_dir
 
 
+def _check_certificate(document, line, *, check_storage=True):
+    if not document or document.part_id != line.part_id or document.vendor_id != line.purchase_order.vendor_id:
+        raise HTTPException(422, "Choose a certificate uploaded for this part and supplier")
+    if document.document_type not in (DocumentType.CERTIFICATE, DocumentType.MATERIAL_CERT) or not document.file_path:
+        raise HTTPException(422, "The linked document must be a stored certificate")
+    if check_storage and not ref_exists(document.file_path):
+        raise HTTPException(422, "Certificate file is unavailable. Upload it again before receiving.")
+
+
 def validate_certificate(db, company_id, line, document_id, *, check_storage=True):
+    """Row-lock one certificate and check it belongs to ``line``'s part and supplier.
+
+    The caller must not have written an audit row yet: the lock has to come before the global
+    audit-chain lock, the order every document writer uses. (Hank intake calls this after its
+    audit row, on a document it inserted in the same transaction, which no other transaction can
+    lock.) A delivery locks all its lines' certificates up front instead
+    (``lock_delivery_certificates``).
+    """
     if not document_id:
         return
     document = (
@@ -24,12 +41,69 @@ def validate_certificate(db, company_id, line, document_id, *, check_storage=Tru
         .with_for_update()
         .first()
     )
-    if not document or document.part_id != line.part_id or document.vendor_id != line.purchase_order.vendor_id:
-        raise HTTPException(422, "Choose a certificate uploaded for this part and supplier")
-    if document.document_type not in (DocumentType.CERTIFICATE, DocumentType.MATERIAL_CERT) or not document.file_path:
-        raise HTTPException(422, "The linked document must be a stored certificate")
-    if check_storage and not ref_exists(document.file_path):
-        raise HTTPException(422, "Certificate file is unavailable. Upload it again before receiving.")
+    _check_certificate(document, line, check_storage=check_storage)
+
+
+def _delivery_line_error(index, exc):
+    return HTTPException(exc.status_code, f"Delivery line {index + 1}: {exc.detail}. No delivery lines were posted.")
+
+
+def lock_delivery_certificates(db, company_id, purchase_order_id, delivery_lines):
+    """Row-lock and check every line's certificate before the delivery receives its first line.
+
+    Receiving line 1 writes an audit row, which takes the global audit-chain lock; locking line 2's
+    certificate after that would invert the order every other document writer uses (document row,
+    then the chain lock: document delete, the QMS link writes, laser-nest attach, ECO create /
+    update) and deadlock against any of them holding that certificate. So all of the delivery's
+    certificates are locked here, in ascending id order, after the receipt-number lock and the PO
+    row lock that line 1 takes first -- the order a single receipt takes them in. The receive loop
+    then skips its per-line certificate check (``certificate_checked=True``); the rows stay locked
+    until the delivery commits or rolls back.
+    """
+    document_ids = sorted({line.certificate_document_id for line in delivery_lines if line.certificate_document_id})
+    if not document_ids:
+        return
+    acquire_generator_lock(db, "receipt_number", company_id)
+    po = (
+        db.query(PurchaseOrder)
+        .filter(
+            PurchaseOrder.id == purchase_order_id,
+            PurchaseOrder.company_id == company_id,
+            PurchaseOrder.is_deleted.is_(False),
+        )
+        .with_for_update()
+        .populate_existing()
+        .first()
+    )
+    if not po:
+        raise HTTPException(404, "Purchase order not found")
+    documents = {
+        document.id: document
+        for document in db.query(Document)
+        .filter(Document.company_id == company_id, Document.id.in_(document_ids))
+        .order_by(Document.id)
+        .with_for_update()
+        .all()
+    }
+    certificate_line_ids = sorted({line.po_line_id for line in delivery_lines if line.certificate_document_id})
+    po_lines = {
+        row.id: row
+        for row in db.query(PurchaseOrderLine).filter(
+            PurchaseOrderLine.company_id == company_id,
+            PurchaseOrderLine.purchase_order_id == po.id,
+            PurchaseOrderLine.id.in_(certificate_line_ids),
+        )
+    }
+    for index, line in enumerate(delivery_lines):
+        if not line.certificate_document_id:
+            continue
+        po_line = po_lines.get(line.po_line_id)
+        if po_line is None:
+            raise HTTPException(422, "Every delivery line must belong to this purchase order")
+        try:
+            _check_certificate(documents.get(line.certificate_document_id), po_line)
+        except HTTPException as exc:
+            raise _delivery_line_error(index, exc) from exc
 
 
 def post_delivery_command(db, user, company_id, body, audit, *, return_created=False):
@@ -68,6 +142,8 @@ def post_delivery_command(db, user, company_id, body, audit, *, return_created=F
     valid_ids = {row.id for row in lines}
     if any(line.po_line_id not in valid_ids for line in body.lines):
         raise HTTPException(422, "Every delivery line must belong to this purchase order")
+    # Before line 1's audit row takes the global audit-chain lock; see the helper.
+    lock_delivery_certificates(db, company_id, body.purchase_order_id, body.lines)
     batch = ReceivingDeliveryBatch(
         company_id=company_id,
         purchase_order_id=body.purchase_order_id,
@@ -81,11 +157,9 @@ def post_delivery_command(db, user, company_id, body, audit, *, return_created=F
     receipts = []
     for index, line in enumerate(body.lines):
         try:
-            receipt = _receive_material(line, db, user, company_id, audit)
+            receipt = _receive_material(line, db, user, company_id, audit, certificate_checked=True)
         except HTTPException as exc:
-            raise HTTPException(
-                exc.status_code, f"Delivery line {index + 1}: {exc.detail}. No delivery lines were posted."
-            ) from exc
+            raise _delivery_line_error(index, exc) from exc
         receipt.delivery_batch_id = batch.id
         receipts.append(receipt)
     db.flush()
