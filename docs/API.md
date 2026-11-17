@@ -8972,9 +8972,12 @@ in `RBAC_PERMISSIONS.md`.
 > missing id or another company's gets the same 404 (it used to be an empty list). Before this,
 > all of them still answered for a removed standard's clauses: a `PUT` could change a clause's
 > `compliance_status` on a standard that had left the record, the list still showed its clauses
-> and their evidence links, and adding evidence created a link no screen would show. The standard
-> is checked when the request reads the clause; a removal that commits between that read and the
-> request's own commit is not seen.
+> and their evidence links, and adding evidence created a link no screen would show. Nor does such a
+> clause render as a sub-clause of a live standard's clause (a cross-standard `parent_clause_id`
+> could be written before the parent check above existed): the standard and clause-list reads, and
+> both `PUT` responses, leave it and its evidence out. The standard is checked when the request
+> reads the clause; a removal that commits between that read and the request's own commit is not
+> seen.
 
 > **Evidence under a removed clause or standard is frozen.** Removing a standard or a clause marks
 > only that row deleted; the evidence links under it keep their own flag but disappear with their

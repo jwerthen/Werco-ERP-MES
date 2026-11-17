@@ -227,3 +227,74 @@ def test_listing_a_live_standards_clauses_still_works(client: TestClient, db_ses
     body = response.json()
     assert [c["id"] for c in body] == [clause.id]
     assert [e["title"] for e in body[0]["evidence_links"]] == ["Lot traceability"]
+
+
+# ---------------------------------------------------------------------------
+# A removed standard's clause rendered as another clause's sub-clause
+# ---------------------------------------------------------------------------
+
+
+def _graft(db: Session) -> Dict[str, int]:
+    """Live standard LIVE with a parent clause and its own sub-clause; standard GONE's clause grafted under it.
+
+    A cross-standard ``parent_clause_id`` could be written before the parent check existed, so
+    production may hold one. ``sub_clauses`` is loaded by ``parent_clause_id`` alone.
+    """
+    _ensure_company(db, COMPANY_A)
+    live = QMSStandard(company_id=COMPANY_A, name="LIVE", version="1", is_active=True)
+    gone = QMSStandard(company_id=COMPANY_A, name="GONE", version="1", is_active=True)
+    db.add_all([live, gone])
+    db.flush()
+    parent = QMSClause(company_id=COMPANY_A, standard_id=live.id, clause_number="8", title="Operation")
+    db.add(parent)
+    db.flush()
+    own_child = QMSClause(
+        company_id=COMPANY_A, standard_id=live.id, clause_number="8.1", title="Planning", parent_clause_id=parent.id
+    )
+    grafted = QMSClause(
+        company_id=COMPANY_A, standard_id=gone.id, clause_number="8.5", title="Grafted", parent_clause_id=parent.id
+    )
+    db.add_all([own_child, grafted])
+    db.flush()
+    db.add(QMSClauseEvidence(company_id=COMPANY_A, clause_id=grafted.id, evidence_type="document", title="Doc"))
+    db.commit()
+    return {"live": live.id, "gone": gone.id, "parent": parent.id, "own_child": own_child.id, "grafted": grafted.id}
+
+
+def _sub_clause_ids(clauses: List[Dict[str, Any]]) -> set:
+    return {s["id"] for c in clauses for s in c["sub_clauses"]}
+
+
+def _rendered_trees(client: TestClient, ids: Dict[str, int], headers: dict) -> Dict[str, List[Dict[str, Any]]]:
+    """Every response that serializes the live standard's clause tree, keyed by route."""
+    standard = client.get(f"{BASE}/{ids['live']}", headers=headers)
+    listed = client.get(f"{BASE}/{ids['live']}/clauses", headers=headers)
+    clause_put = client.put(f"{BASE}/clauses/{ids['parent']}", json={"title": "Operation (rev)"}, headers=headers)
+    standard_put = client.put(f"{BASE}/{ids['live']}", json={"description": "touched"}, headers=headers)
+    for response in (standard, listed, clause_put, standard_put):
+        assert response.status_code == status.HTTP_200_OK, response.text
+    return {
+        "GET standard": standard.json()["clauses"],
+        "GET clauses": listed.json(),
+        "PUT clause": [clause_put.json()],
+        "PUT standard": standard_put.json()["clauses"],
+    }
+
+
+def test_removed_standards_clause_grafted_under_a_live_clause_is_not_rendered(
+    client: TestClient, db_session: Session, admin_headers: dict
+):
+    ids = _graft(db_session)
+    before = _rendered_trees(client, ids, admin_headers)
+    for route, clauses in before.items():
+        assert ids["grafted"] in _sub_clause_ids(clauses), f"{route}: a live standard's graft renders (unchanged)"
+
+    assert client.delete(f"{BASE}/{ids['gone']}", headers=admin_headers).status_code == status.HTTP_204_NO_CONTENT
+    after = _rendered_trees(client, ids, admin_headers)
+
+    for route, clauses in after.items():
+        subs = _sub_clause_ids(clauses)
+        assert ids["grafted"] not in subs, f"{route}: a removed standard's clause must not render"
+        assert ids["own_child"] in subs, f"{route}: the live standard's own sub-clause still renders"
+    top_level = {c["id"] for c in after["GET standard"]}
+    assert {ids["parent"], ids["own_child"]} <= top_level, "the live standard's own clauses still render"

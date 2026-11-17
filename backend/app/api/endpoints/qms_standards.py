@@ -467,7 +467,11 @@ def _clause_tree_criteria(company_id: int) -> list:
     criteria propagate to those lazy loads, so a sub-clause renders only when it is live and
     belongs to the active company. The company half is what keeps a clause another company
     grafted under one of ours (a ``parent_clause_id`` written before the write-side check
-    existed) out of our reads, with its evidence.
+    existed) out of our reads, with its evidence. The standard half (the clause's own standard
+    must be live and the company's) does the same for a clause of a REMOVED standard grafted
+    under one of a live standard's clauses (a cross-standard ``parent_clause_id`` written before
+    the same check): a clause of a removed standard is removed with it, everywhere it could
+    render, as ``_live_clause_or_404`` treats it on the routes that take a clause id.
 
     Pair them with ``populate_existing()``. The criteria ride on each instance's load options,
     which a query sets only on an instance it loads fresh: a clause already in the session when
@@ -475,7 +479,13 @@ def _clause_tree_criteria(company_id: int) -> list:
     would silently depend on what the request happened to load first.
     """
     return [
-        with_loader_criteria(QMSClause, (QMSClause.company_id == company_id) & (QMSClause.is_deleted == False)),
+        with_loader_criteria(
+            QMSClause,
+            (QMSClause.company_id == company_id) & (QMSClause.is_deleted == False)
+            # Correlated EXISTS on the clause's own standard (``has`` never correlates the
+            # standards table to an enclosing query on it, so it holds inside the standard read).
+            & QMSClause.standard.has((QMSStandard.company_id == company_id) & (QMSStandard.is_deleted == False)),
+        ),
         with_loader_criteria(
             QMSClauseEvidence,
             (QMSClauseEvidence.company_id == company_id) & (QMSClauseEvidence.is_deleted == False),
@@ -545,10 +555,13 @@ def _live_clause_or_404(db: Session, clause_id: int, company_id: int) -> QMSClau
 
     Removing a standard soft-deletes only the standard row. Its clauses keep ``is_deleted = false``
     but leave every read with it (the standard, clause-list and audit-readiness reads all require
-    a live standard), so a clause of a removed standard is removed too. Every route that resolves
-    a clause from a request goes through here, so none of them edits, removes, links evidence to
-    or reports on such a clause. Before, ``PUT`` could still change its ``compliance_status`` and
-    ``POST .../evidence`` could link evidence no screen would show.
+    a live standard, and ``_clause_tree_criteria`` hides one rendered as another clause's
+    sub-clause), so a clause of a removed standard is removed too. Every route that takes a clause
+    id in its path goes through here, so none of them edits, removes, links evidence to or reports
+    on such a clause. (A ``parent_clause_id`` in a body is resolved by ``_assert_parent_clauses``,
+    which confines it to the clause's own standard, already live by then.) Before, ``PUT`` could
+    still change its ``compliance_status`` and ``POST .../evidence`` could link evidence no
+    screen would show.
 
     The standard is joined inside the active company, so a clause whose standard is not the
     company's (bad data) is not found either. The 404 is the same in every case. Both flags are
