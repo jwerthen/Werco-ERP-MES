@@ -1,25 +1,27 @@
-"""Required audit evidence on the QMS evidence edit routes.
+"""Required audit evidence on the QMS evidence routes.
 
-``PUT /qms-standards/evidence/{id}`` (edit / Verify) and ``DELETE /qms-standards/evidence/{id}``
-(Remove) used to call ``audit.log_update`` / ``audit.log_delete``, which are best-effort: a
-retry-exhausted sequence collision or a Python-side failure inside ``AuditService.log`` dropped
-the audit row and the route still answered 200 / 204. A Verify is a quality judgment whose only
-history is its audit row (the evidence row keeps only the latest ``verified_by`` /
-``verified_date``), so both routes now write their row through ``log_required`` inside
-``app.api.audit_guard.required_audit``: no audit row, no change -- rollback and 503.
+``POST /qms-standards/clauses/{id}/evidence`` (Link), ``PUT /qms-standards/evidence/{id}`` (edit /
+Verify) and ``DELETE /qms-standards/evidence/{id}`` (Remove) used to call ``audit.log_create`` /
+``log_update`` / ``log_delete``, which are best-effort: a retry-exhausted sequence collision or a
+Python-side failure inside ``AuditService.log`` dropped the audit row and the route still
+answered 201 / 200 / 204. A Verify is a quality judgment whose only history is its audit row (the
+evidence row keeps only the latest ``verified_by`` / ``verified_date``), so all three routes now
+write their row through ``log_required`` inside ``app.api.audit_guard.required_audit``: no audit
+row, no change -- rollback and 503.
 
 Pinned here:
 
-1. the happy path still writes exactly one committed row, JSON-ready, with the UPDATE row's
-   ``extra_data.changes`` diff and the DELETE row's ``extra_data.soft_delete`` + pre-delete
-   ``old_values``; a re-Verify and an un-verify each write their own row (the history the row
-   itself does not keep), and a row written under an API token carries the credential marker;
+1. the happy path still writes exactly one committed row, JSON-ready: the CREATE row's
+   ``new_values``, the UPDATE row's ``extra_data.changes`` diff and the DELETE row's
+   ``extra_data.soft_delete`` + pre-delete ``old_values``; a re-Verify and an un-verify each
+   write their own row (the history the row itself does not keep), and a row written under an API
+   token carries the credential marker;
 2. a PUT that changes nothing writes no row (and so cannot fail on one);
 3. a failed audit write (``log`` returns ``None``, or raises a database error) answers 503 and
-   leaves the evidence exactly as it was, with no audit row;
+   leaves the evidence exactly as it was (or, for a Link, not created), with no audit row;
 4. an evidence title longer than ``audit_log.resource_identifier`` (String(255)) is cut to fit
-   in the identifier, so a long title cannot make every edit of its row a 503 on PostgreSQL, nor
-   adding the evidence (``POST /clauses/{id}/evidence``, best-effort ``log_create``) a 500.
+   in the identifier, so a long title cannot make every add, edit or removal of that evidence a
+   503 on PostgreSQL.
 
 Every read of the outcome rolls back first: the ``client`` fixture shares one session with the
 routes, so a flushed-but-uncommitted row (or change) would otherwise look saved.
@@ -31,6 +33,7 @@ from typing import List
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
@@ -46,6 +49,7 @@ pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 COMPANY_A = 1
 API_TOKENS_URL = "/api/v1/api-tokens/"
 
+POST_503_DETAIL = "The audit record for linking this evidence could not be saved; the evidence was not linked. Retry."
 PUT_503_DETAIL = "The audit record for this evidence change could not be saved; nothing was changed. Retry."
 DELETE_503_DETAIL = (
     "The audit record for removing this evidence could not be saved; the evidence was not removed. Retry."
@@ -113,6 +117,20 @@ def _make_evidence(db: Session, *, title: str = "", notes: str = "") -> QMSClaus
     db.commit()
     db.refresh(evidence)
     return evidence
+
+
+def _add_url(clause_id: int) -> str:
+    return f"/api/v1/qms-standards/clauses/{clause_id}/evidence"
+
+
+def _committed_links(db: Session, clause_id: int, title: str) -> List[QMSClauseEvidence]:
+    """Evidence rows COMMITTED on the clause under this title (roll back first, then read)."""
+    db.rollback()
+    return (
+        db.query(QMSClauseEvidence)
+        .filter(QMSClauseEvidence.clause_id == clause_id, QMSClauseEvidence.title == title)
+        .all()
+    )
 
 
 def _url(evidence_id: int) -> str:
@@ -454,8 +472,8 @@ def test_add_evidence_cuts_the_audit_identifier_and_keeps_the_whole_title(
 ):
     """``POST /clauses/{id}/evidence`` takes a 500-char title; its CREATE row's identifier fits 255.
 
-    On PostgreSQL an uncut identifier fails the audit INSERT, which ``AuditService.log``
-    re-raises, so adding a valid long-titled link answered 500. SQLite does not enforce the
+    On PostgreSQL an uncut identifier fails the audit INSERT, so adding a valid long-titled link
+    answered 500 (and, with the row now required, would answer 503). SQLite does not enforce the
     length, so this pins the cut; the short-title case pins that nothing else moved.
     """
     user = _make_user(db_session)
@@ -476,3 +494,99 @@ def test_add_evidence_cuts_the_audit_identifier_and_keeps_the_whole_title(
     assert rows[0].resource_identifier == title[:255]
     assert rows[0].description == f"Created qms_clause_evidence: {title}"
     assert rows[0].new_values["title"] == title
+
+
+# ---------------------------------------------------------------------------
+# 5. Link (POST): the CREATE row is required too
+# ---------------------------------------------------------------------------
+
+
+def test_link_writes_one_required_create_row(client: TestClient, db_session: Session):
+    user = _make_user(db_session)
+    clause_id = _make_evidence(db_session).clause_id
+    title = f"Linked by hand {_next()}"
+
+    resp = client.post(
+        _add_url(clause_id),
+        json={"evidence_type": "procedure", "title": title, "module_reference": "/quality/ncr"},
+        headers=_headers_for(user),
+    )
+    assert resp.status_code == status.HTTP_201_CREATED, resp.text
+    evidence_id = resp.json()["id"]
+
+    rows = _committed_audit_rows(db_session, evidence_id, "CREATE")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.company_id == COMPANY_A
+    assert row.user_id == user.id
+    assert row.resource_identifier == title
+    assert row.description == f"Created qms_clause_evidence: {title}"
+    assert row.old_values is None
+    # The row as created, JSON-ready (as ``log_create`` stored it): every column, no more, no less.
+    assert set(row.new_values) == {attr.key for attr in sa_inspect(QMSClauseEvidence).mapper.column_attrs}
+    assert row.new_values["id"] == evidence_id
+    assert row.new_values["clause_id"] == clause_id
+    assert row.new_values["title"] == title
+    assert row.new_values["evidence_type"] == "procedure"
+    assert row.new_values["module_reference"] == "/quality/ncr"
+    assert row.new_values["created_by"] == user.id
+    assert row.new_values["company_id"] == COMPANY_A
+    assert isinstance(row.new_values["created_at"], str)
+    datetime.fromisoformat(row.new_values["created_at"])
+    assert not (row.extra_data or {}).get("credential")
+
+    assert len(_committed_links(db_session, clause_id, title)) == 1
+
+
+@pytest.mark.parametrize("break_audit", [_audit_returns_none, _audit_raises_db_error], ids=["none", "db-error"])
+def test_link_without_its_audit_row_is_503_and_nothing_is_linked(
+    break_audit, client: TestClient, db_session: Session, monkeypatch: pytest.MonkeyPatch
+):
+    user = _make_user(db_session)
+    clause_id = _make_evidence(db_session).clause_id
+    title = f"Never linked {_next()}"
+    body = {"evidence_type": "other", "title": title}
+
+    with monkeypatch.context() as mp:
+        break_audit(mp)
+        resp = client.post(_add_url(clause_id), json=body, headers=_headers_for(user))
+    assert resp.status_code == status.HTTP_503_SERVICE_UNAVAILABLE, resp.text
+    assert resp.json()["detail"] == POST_503_DETAIL
+
+    assert _committed_links(db_session, clause_id, title) == []
+    assert (
+        db_session.query(AuditLog)
+        .filter(AuditLog.resource_type == "qms_clause_evidence", AuditLog.resource_identifier == title)
+        .all()
+        == []
+    )
+
+    # Safe to retry: with the audit working again the same request links it once, with its row.
+    retry = client.post(_add_url(clause_id), json=body, headers=_headers_for(user))
+    assert retry.status_code == status.HTTP_201_CREATED, retry.text
+    links = _committed_links(db_session, clause_id, title)
+    assert [link.id for link in links] == [retry.json()["id"]]
+    assert len(_committed_audit_rows(db_session, links[0].id, "CREATE")) == 1
+
+
+def test_link_under_an_api_token_carries_the_credential_marker(client: TestClient, db_session: Session):
+    admin = _make_user(db_session, role=UserRole.ADMIN)
+    holder = _make_user(db_session)
+    issued = client.post(API_TOKENS_URL, json={"user_id": holder.id, "label": "qms link"}, headers=_headers_for(admin))
+    assert issued.status_code == status.HTTP_201_CREATED, issued.text
+    token_id = issued.json()["id"]
+    token_headers = {"Authorization": f"Bearer {issued.json()['token']}", "X-Requested-With": "XMLHttpRequest"}
+    clause_id = _make_evidence(db_session).clause_id
+
+    resp = client.post(
+        _add_url(clause_id),
+        json={"evidence_type": "module", "title": f"Token link {_next()}"},
+        headers=token_headers,
+    )
+    assert resp.status_code == status.HTTP_201_CREATED, resp.text
+
+    rows = _committed_audit_rows(db_session, resp.json()["id"], "CREATE")
+    assert len(rows) == 1
+    assert rows[0].user_id == holder.id
+    assert rows[0].extra_data["credential"]["kind"] == "api_token"
+    assert rows[0].extra_data["credential"]["api_token_id"] == token_id

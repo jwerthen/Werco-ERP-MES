@@ -866,10 +866,9 @@ def _evidence_audit_snapshot(evidence: QMSClauseEvidence) -> Dict[str, Any]:
 
 
 # ``audit_log.resource_identifier`` is String(255); an evidence title may be 500 (the schemas allow
-# it). On PostgreSQL a longer identifier fails the audit INSERT, which ``AuditService.log`` re-raises
-# (so adding the evidence answered 500) and a required audit row turns into a 503 on every edit of
-# that row. So the identifier is cut to fit on all three evidence routes; the description keeps the
-# whole title.
+# it). On PostgreSQL a longer identifier fails the audit INSERT, which a required audit row turns
+# into a 503 on every add, edit or removal of that evidence. So the identifier is cut to fit on all
+# three evidence routes; the description keeps the whole title.
 _AUDIT_IDENTIFIER_MAX = 255
 
 
@@ -904,13 +903,20 @@ def add_evidence(
     db.add(evidence)
     db.flush()  # assign PK without committing so the audit row carries resource_id
 
-    audit.log_create(
-        "qms_clause_evidence",
-        evidence.id,
-        evidence.title[:_AUDIT_IDENTIFIER_MAX],
-        new_values=evidence,
-        description=f"Created qms_clause_evidence: {evidence.title}",
-    )
+    # REQUIRED evidence, like the edit and remove routes below: the link is saved only with its
+    # CREATE row (who linked it, and the row as created). If the row cannot be written the insert
+    # is rolled back and the answer is 503; nothing was linked, so a retry is safe.
+    with required_audit(
+        db, "The audit record for linking this evidence could not be saved; the evidence was not linked. Retry."
+    ):
+        audit.log_required(
+            audit.ACTIONS["CREATE"],
+            "qms_clause_evidence",
+            resource_id=evidence.id,
+            resource_identifier=evidence.title[:_AUDIT_IDENTIFIER_MAX],
+            description=f"Created qms_clause_evidence: {evidence.title}",
+            new_values=_evidence_audit_snapshot(evidence),
+        )
     db.commit()
     db.refresh(evidence)
     return evidence
