@@ -9,7 +9,7 @@ Railway project, this document says so and tells you how to get it — it never 
 > Redis/backlog investigation and staged cron procedure. They are not a statement
 > that the current production worker is absent. `WORKER_SERVICE.md` describes its
 > current implementation; `DEPLOYMENT.md` and `DEPLOYMENT_RUNBOOK.md` describe normal
-> releases. A nesting update uses the existing worker and gated pipeline; it does
+> releases. A normal release uses the existing worker and gated pipeline; it does
 > not repeat service provisioning or enable unrelated schedules.
 
 ## Current Hank follow-up release procedure

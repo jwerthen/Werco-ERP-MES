@@ -25,8 +25,8 @@ Select a label to inspect the exact observation, source snapshot, evidence hash,
 
 An interrupted save retains its exact request key and body while the editor remains open. **Retry same request** recovers the receipt without creating another observation. Fields remain locked while that result is uncertain; do not assume that an interrupted response means nothing was saved. A rejected source/version request offers explicit review and editing. Cancel, navigation and browser close use the shared unsaved-change guard. Switching user/company remounts the observation panel and aborts pending UI requests; the server independently checks the command's expected company. An abort does not undo a committed record.
 
-## Separation from Material Nesting
+## Separation from quoting
 
-The register has no DXF import, automatic adoption of predicted leftovers, “Use in nest,” available/reservable state, monetary credit or operational stock creation. Material Nesting still opens as a fresh empty estimate. Predicted leftover regions remain review-only with zero credit. Exclusive piece allocation, physical parent/child lineage, certified eligibility and valuation require later, separately coordinated inventory work.
+The register has no DXF import, automatic adoption of predicted leftovers, “Use in nest,” available/reservable state, monetary credit or operational stock creation. The Material Nesting estimator that once read recorded pieces was retired on 2026-09-16; [Fabrication Quoting](FABRICATION_QUOTING.md), which replaced it, does not read this register. Exclusive piece allocation, physical parent/child lineage, certified eligibility and valuation require later, separately coordinated inventory work.
 
 The register filter searches labels on the currently loaded page only; page controls cover the rest of the register. Reads do not reconcile or rewrite observations. For API, concurrency and rollback details see [API.md](API.md) and [STOCK_OBSERVATION_ARCHITECTURE.md](STOCK_OBSERVATION_ARCHITECTURE.md).
