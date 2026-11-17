@@ -8762,18 +8762,21 @@ check the document was deleted and `GET /eco/eco/affected-items/{id}` silently d
 change record (AS9100D 8.5.6). ECOs have no delete verb, so the reference lasts. The check depends
 on the ECO's status:
 
-- **Not yet approved** (draft, submitted, under review): *"This document is listed as affected by
-  engineering change ECO-… [and N other engineering changes]. Take it out of that change's
-  affected_documents first (PUT /eco/eco/{id}), while the change is not yet approved."* That is
-  `PUT /eco/eco/{id}` with the list minus this id (Admin / Manager, audited). The Engineering
-  Changes page has no document field, so this is an API / MCP step.
-- **Approved or later, rejected or cancelled included**: *"This document is listed as affected by
-  engineering change ECO-… (approved), which keeps the record of what the change covered. It must
-  remain available and cannot be deleted."* From approval on, the list is the authorized change
-  scope; a rejected or cancelled change records what was decided. Known gap: `PUT /eco/eco/{id}`
-  still accepts edits to an approved or in-implementation ECO (it refuses only completed, rejected
-  and cancelled ones), so the API still lets a person take the document off such an ECO and then
-  delete it.
+- **No approver has decided yet** (draft, submitted): *"This document is listed as affected by
+  engineering change ECO-… (PUT /eco/eco/41). Take it out of that change's affected_documents
+  first, while no approver has decided on it yet."* Every such ECO is named with its own edit
+  path (*"engineering changes ECO-… (PUT /eco/eco/41), ECO-… (PUT /eco/eco/43) and …"*), because
+  the Engineering Changes page has no document field and the ECO list can't be searched by
+  document. The edit is `PUT /eco/eco/{id}` with the list minus this id (Admin / Manager,
+  audited), an API / MCP step.
+- **Under review, approved or later, rejected or cancelled**: *"This document is listed as affected
+  by engineering change ECO-… (under review), which keeps the record of what the change covered.
+  It must remain available and cannot be deleted."* Under review means at least one approver has
+  already signed the scope, so editing it would leave sign-offs on a scope those people never saw.
+  From approval on the list is the authorized change scope, and a rejected or cancelled change
+  records what was decided. Known gap: `PUT /eco/eco/{id}` still accepts edits to an under-review,
+  approved or in-implementation ECO (it refuses only completed, rejected and cancelled ones), so the
+  API still lets a person take the document off such an ECO and then delete it.
 
 The id is matched exactly: the text column is only narrowed by substring, then each candidate's
 JSON is parsed, so an ECO listing document 12 never blocks deleting document 1. A string id
@@ -8781,11 +8784,12 @@ JSON is parsed, so an ECO listing document 12 never blocks deleting document 1. 
 Because there is no foreign key, ECO create and update lock each document they name (`FOR KEY
 SHARE`, the lock a foreign key takes) before their audit row. A list written at the same time as a
 delete is therefore either seen by the delete, or fails its own validation with **422** once the
-delete commits.
+delete commits. (This relies on Postgres's default READ COMMITTED isolation, which the app does not
+change.)
 
 **Order of reasons.** Every reason that keeps the document for good is reported before any
 instruction: the retained records above, then a removed QMS link, then a worked or removed nest,
-then an approved or closed ECO. Only when every blocker can be released does the refusal give
+then an ECO under review, approved or closed. Only when every blocker can be released does the refusal give
 instructions, and then it gives the QMS unlink, the nest Detach and the ECO edit together in one
 message. Nobody is sent to unlink or detach
 something (an audited change, and on the floor a nest losing its drawing) only to be refused
@@ -9249,9 +9253,9 @@ the public paths are `/eco/eco/…`.
 > and commit.
 >
 > **A listed document can't be deleted.** `DELETE /documents/{id}` refuses **409** while an ECO of
-> the active company lists the document in `affected_documents`. Before approval, take it out of
-> the list with `PUT /eco/eco/{id}` first; from approval on (and for a rejected or cancelled ECO)
-> the document is kept. See [Documents](#documents).
+> the active company lists the document in `affected_documents`. While the ECO is draft or
+> submitted, take it out of the list with `PUT /eco/eco/{id}` first. From under review on (and for
+> a rejected or cancelled ECO) the document is kept. See [Documents](#documents).
 >
 > **Mutations require Admin / Manager.** All state-changing ECO endpoints (create, update, submit,
 > approve, reject, implement, complete, add/update task, add approval) require role **ADMIN or

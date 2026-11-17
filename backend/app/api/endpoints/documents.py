@@ -5,7 +5,7 @@ import mimetypes
 import os
 import uuid
 from datetime import datetime
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel
@@ -349,13 +349,14 @@ def _laser_nest_blockers(db: Session, company_id: int, document_id: int) -> Tupl
     return permanent, release
 
 
-# An ECO's affected items are the scope of the change. Until it is approved the scope
-# is still a proposal that its owner may edit; from approval on (and for a rejected or
-# cancelled change) it is the record of what was authorized or decided.
-_ECO_SCOPE_EDITABLE_STATUSES = (ECOStatus.DRAFT, ECOStatus.SUBMITTED, ECOStatus.UNDER_REVIEW)
+# An ECO's affected items are the scope of the change. Until anyone has decided on it the
+# scope is still a proposal its owner may edit. From the first approval decision on (under
+# review means at least one approver has signed and others are pending), and for a rejected
+# or cancelled change, it is the record of what was authorized or decided.
+_ECO_SCOPE_EDITABLE_STATUSES = (ECOStatus.DRAFT, ECOStatus.SUBMITTED)
 
 
-def _eco_document_ids(raw: Optional[str]) -> set:
+def _eco_document_ids(raw: Optional[str]) -> Set[int]:
     """The document ids an ECO's ``affected_documents`` JSON names; empty when unreadable.
 
     ``GET /eco/eco/affected-items/{id}`` skips a value it cannot parse, so it names no
@@ -367,7 +368,7 @@ def _eco_document_ids(raw: Optional[str]) -> set:
         return set()
     if not isinstance(values, list):
         return set()
-    ids = set()
+    ids: Set[int] = set()
     for value in values:
         try:
             ids.add(int(value))
@@ -386,26 +387,34 @@ def _eco_blockers(db: Session, company_id: int, document_id: int) -> Tuple[Optio
     trace on it (AS9100D 8.5.6). ECOs have no delete verb, so the reference lasts as long
     as the company does.
 
-    - ``release``: an ECO not yet approved (draft, submitted, under review). Its owner may
-      still edit its scope, so the refusal says to take the document out of
+    - ``release``: an ECO no approver has decided on yet (draft, submitted). Its owner may
+      still edit its scope, so the refusal lists each one with its edit path and says to take
+      the document out of
       ``affected_documents`` with ``PUT /eco/eco/{id}`` (Admin / Manager, audited).
-    - ``permanent``: an ECO approved or later, rejected or cancelled included. The list is
-      then the record of what the change covered, so the refusal does not suggest editing
-      it. (``PUT /eco/eco/{id}`` still accepts an approved or in-implementation ECO; that is a
-      separate owner decision.) A status outside the known ones also counts as permanent.
+    - ``permanent``: an ECO under review (an approver has already signed its scope),
+      approved or later, rejected or cancelled. The list is then the record of what the
+      change covered, so the refusal does not suggest editing it. (``PUT /eco/eco/{id}``
+      still accepts an under-review, approved or in-implementation ECO; that is a separate
+      owner decision.) A status outside the known ones also counts as permanent.
 
     The text column is narrowed with a substring match on the id's digits, a superset of
     the rows that name it, and each candidate's JSON is then parsed, so id 1 never matches
     12. ``ECO create / update`` take a key-share lock on every document they name before
     their audit row, the lock a foreign key would take, so a list written concurrently
-    with this delete is either seen here or fails its own validation afterwards.
+    with this delete is either seen here or fails its own validation afterwards. That
+    relies on READ COMMITTED (the Postgres default, which the app does not change): this read
+    starts after the document row lock is granted and so sees an ECO that committed while
+    the delete waited. Under REPEATABLE READ it would not.
 
     Scoped to the active company. ECO validation accepts only the company's own document
     ids, and another company's ECO is never read.
     """
     candidates = (
         db.query(
-            EngineeringChangeOrder.eco_number, EngineeringChangeOrder.status, EngineeringChangeOrder.affected_documents
+            EngineeringChangeOrder.id,
+            EngineeringChangeOrder.eco_number,
+            EngineeringChangeOrder.status,
+            EngineeringChangeOrder.affected_documents,
         )
         .filter(
             EngineeringChangeOrder.company_id == company_id,
@@ -430,11 +439,18 @@ def _eco_blockers(db: Session, company_id: int, document_id: int) -> Tuple[Optio
         )
     release = None
     if editable:
-        others = len(editable) - 1
-        also = f" and {others} other engineering change{'s' if others > 1 else ''}" if others else ""
+        # Every one is named with its edit path: the Engineering Changes page has no document
+        # field and the ECO list cannot be searched by document, so "and N others" would leave
+        # the user no way to find them.
+        named = [f"{eco.eco_number} (PUT /eco/eco/{eco.id})" for eco in editable]
+        if len(named) == 1:
+            which, scope = f"engineering change {named[0]}", "that change's"
+        else:
+            which = f"engineering changes {', '.join(named[:-1])} and {named[-1]}"
+            scope = "each of those changes'"
         release = (
-            f"This document is listed as affected by engineering change {editable[0].eco_number}{also}. Take it out "
-            "of that change's affected_documents first (PUT /eco/eco/{id}), while the change is not yet approved."
+            f"This document is listed as affected by {which}. Take it out of {scope} affected_documents first, "
+            "while no approver has decided on it yet."
         )
     return permanent, release
 

@@ -518,8 +518,8 @@ def test_nest_attach_reaches_the_document_before_the_audit_chain_lock(
 
 # --------------------------------------------------------------------------- ECOs
 
-ECO_EDITABLE = ["draft", "submitted", "under_review"]
-ECO_RECORDED = ["approved", "in_implementation", "completed", "rejected", "cancelled"]
+ECO_EDITABLE = ["draft", "submitted"]
+ECO_RECORDED = ["under_review", "approved", "in_implementation", "completed", "rejected", "cancelled"]
 
 
 def _eco(db, affected_documents, *, company_id=1, status="draft"):
@@ -541,25 +541,41 @@ def _eco(db, affected_documents, *, company_id=1, status="draft"):
 
 
 @pytest.mark.parametrize("status", ECO_EDITABLE)
-def test_an_eco_not_yet_approved_sends_the_user_to_edit_it(client, db_session, admin_headers, local_files, status):
+def test_an_undecided_eco_sends_the_user_to_edit_it(client, db_session, admin_headers, local_files, status):
     document_id = _upload(client, admin_headers)
     eco = _eco(db_session, f"[{document_id}]", status=status)
-    _eco(db_session, f"[{document_id}]", status="draft")
     audit_before = db_session.query(AuditLog).count()
 
     response = _delete(client, admin_headers, document_id)
 
     assert response.status_code == 409
     detail = response.json()["detail"]
-    assert f"listed as affected by engineering change {eco.eco_number} and 1 other engineering change." in detail
-    assert "Take it out of that change's affected_documents first (PUT /eco/eco/{id})" in detail
+    assert (
+        f"listed as affected by engineering change {eco.eco_number} (PUT /eco/eco/{eco.id}). "
+        "Take it out of that change's affected_documents first" in detail
+    )
     _assert_untouched(db_session, document_id, audit_before, local_files)
+
+
+def test_every_undecided_eco_is_named_with_its_edit_path(client, db_session, admin_headers, local_files):
+    """The ECO list can't be searched by document, so "and N others" would leave the user stuck."""
+    document_id = _upload(client, admin_headers)
+    ecos = [_eco(db_session, f"[{document_id}]", status=status) for status in ("draft", "submitted", "draft")]
+
+    response = _delete(client, admin_headers, document_id)
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    first, second, third = (f"{eco.eco_number} (PUT /eco/eco/{eco.id})" for eco in ecos)
+    assert f"engineering changes {first}, {second} and {third}." in detail
+    assert "each of those changes' affected_documents" in detail
 
 
 @pytest.mark.parametrize("status", ECO_RECORDED)
 def test_an_approved_or_closed_eco_keeps_the_document(client, db_session, admin_headers, local_files, status):
-    """From approval on, the affected list is the record of what the change covered (and a
-    rejected or cancelled change records what was decided), so the refusal does not suggest editing it."""
+    """Once an approver has signed (under review) or the change is approved, the affected list is
+    the record of what was authorized, and a rejected or cancelled change records what was
+    decided, so the refusal does not suggest editing it."""
     document_id = _upload(client, admin_headers)
     _eco(db_session, f"[{document_id}]", status="draft")
     eco = _eco(db_session, f"[{document_id}]", status=status)
@@ -663,6 +679,31 @@ def test_another_companys_eco_is_not_read(client, db_session, admin_headers, loc
 
     assert response.status_code == 200, response.text
     assert eco.eco_number not in response.text
+
+
+def test_eco_update_without_affected_documents_locks_no_document(client, db_session, admin_headers, local_files):
+    """Only a write that names documents locks them; a title edit takes no document lock."""
+    document_id = _upload(client, admin_headers)
+    eco = _eco(db_session, f"[{document_id}]")
+    locked = []
+
+    def before_execute(conn, clauseelement, multiparams, params, execution_options):  # noqa: ARG001
+        if isinstance(clauseelement, Select) and "FOR KEY SHARE" in str(
+            clauseelement.compile(dialect=postgresql.dialect())
+        ):
+            locked.append(clauseelement)
+
+    engine = db_session.get_bind()
+    event.listen(engine, "before_execute", before_execute)
+    try:
+        response = client.put(f"/api/v1/eco/eco/{eco.id}", headers=admin_headers, json={"title": "Retitled"})
+    finally:
+        event.remove(engine, "before_execute", before_execute)
+
+    assert response.status_code == 200, response.text
+    assert locked == []
+    db_session.rollback()
+    assert db_session.get(EngineeringChangeOrder, eco.id).affected_documents == f"[{document_id}]"
 
 
 @pytest.mark.parametrize("verb", ["create", "update"])
