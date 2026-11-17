@@ -8,7 +8,9 @@ import {
   QuestionMarkCircleIcon,
 } from '@heroicons/react/24/outline';
 import api from '../services/api';
-import { Button, ConfirmDialog, statusColor, useToast } from '../components/ui';
+// The shared dialog primitive, aliased because this page still carries its own
+// older local `Modal` helper (below) for its form dialogs.
+import { Button, ConfirmDialog, Modal as UiModal, statusColor, useToast } from '../components/ui';
 import { FormField } from '../components/ui/FormField';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { formatCentralDate } from '../utils/centralTime';
@@ -55,6 +57,30 @@ function evidenceNotComputedMessage(failed: number): string {
   return `${failed} ${rules} could not be computed this run. ${links} left as last refreshed, not updated.`;
 }
 
+/** Why auto-link kept a stale link: the API's `reason`, in words. */
+const KEPT_REASON_LABELS: Record<string, string> = {
+  verified: 'Verified',
+  annotated: 'Document or notes attached',
+};
+
+/**
+ * What an auto-link run says about stale auto-linked links it did not retire
+ * because a person reviewed them. The run succeeded, but each one is left for
+ * a person to decide.
+ */
+function keptReviewedMessage(kept: number): string {
+  if (kept === 1) {
+    return (
+      '1 auto-linked evidence link no longer matches its clause but was kept because a person ' +
+      'verified or annotated it. Check whether it still belongs.'
+    );
+  }
+  return (
+    `${kept} auto-linked evidence links no longer match their clauses but were kept because a person ` +
+    'verified or annotated them. Check whether each still belongs.'
+  );
+}
+
 export default function QMSStandards() {
   const { showToast } = useToast();
   const [standards, setStandards] = useState<QMSStandardListResponse[]>([]);
@@ -86,6 +112,7 @@ export default function QMSStandards() {
   const [deleteEvidencePending, setDeleteEvidencePending] = useState(false);
   const [autoLinkResult, setAutoLinkResult] = useState<AutoLinkSummary | null>(null);
   const [showAutoLinkResult, setShowAutoLinkResult] = useState(false);
+  const keptForReview = autoLinkResult?.evidence_kept_reviewed ?? [];
 
   const fetchData = useCallback(async () => {
     try {
@@ -245,11 +272,17 @@ export default function QMSStandards() {
       const result = await api.autoLinkStandard(selectedStandard.id);
       setAutoLinkResult(result);
       setShowAutoLinkResult(true);
-      // The run succeeded but did not compute everything it was asked to: a
-      // warning, not a success (which would hide it) or an error (nothing failed
-      // to save).
-      if (result.total_evidence_failed > 0) {
-        showToast('warning', `Auto-link finished with gaps. ${evidenceNotComputedMessage(result.total_evidence_failed)}`);
+      // The run succeeded but did not compute everything it was asked to, or
+      // left stale links a person reviewed for a person to check: a warning, not
+      // a success (which would hide it) or an error (nothing failed to save).
+      const failed = result.total_evidence_failed;
+      const kept = result.evidence_kept_reviewed?.length ?? 0;
+      const notices: string[] = [];
+      if (failed > 0) notices.push(evidenceNotComputedMessage(failed));
+      if (kept > 0) notices.push(keptReviewedMessage(kept));
+      if (notices.length > 0) {
+        const lead = failed > 0 ? 'Auto-link finished with gaps.' : 'Auto-link finished; review needed.';
+        showToast('warning', `${lead} ${notices.join(' ')}`);
       }
       // Refresh the standard detail to show new evidence
       loadStandardDetail(selectedStandard.id);
@@ -746,11 +779,21 @@ export default function QMSStandards() {
       )}
 
       {/* Auto-Link Result Modal */}
-      {showAutoLinkResult && autoLinkResult && (
-        <Modal
-          title={autoLinkResult.total_evidence_failed > 0 ? 'Auto-Link Evidence Finished With Gaps' : 'Auto-Link Evidence Complete'}
-          onClose={() => setShowAutoLinkResult(false)}
-        >
+      {autoLinkResult && (
+        <UiModal open={showAutoLinkResult} onClose={() => setShowAutoLinkResult(false)} size="lg">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="font-bold text-lg">
+              {autoLinkResult.total_evidence_failed > 0 ? 'Auto-Link Evidence Finished With Gaps' : 'Auto-Link Evidence Complete'}
+            </h3>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm btn-circle"
+              aria-label="Close"
+              onClick={() => setShowAutoLinkResult(false)}
+            >
+              X
+            </button>
+          </div>
           <div className="space-y-4">
             {autoLinkResult.total_evidence_failed > 0 && (
               <div className="bg-red-500/10 border border-red-500/30 rounded-sm p-3" data-testid="auto-link-not-computed">
@@ -762,6 +805,26 @@ export default function QMSStandards() {
                   {evidenceNotComputedMessage(autoLinkResult.total_evidence_failed)}{' '}
                   A clause with an uncomputed rule is not counted as compliant. Run Auto-Link again to retry.
                 </p>
+              </div>
+            )}
+            {keptForReview.length > 0 && (
+              <div className="bg-amber-500/10 border border-amber-500/30 rounded-sm p-3" data-testid="auto-link-kept-reviewed">
+                <div className="flex items-baseline gap-3">
+                  <p className="text-2xl font-bold text-amber-400 tabular-nums">{keptForReview.length}</p>
+                  <p className="text-xs font-semibold text-amber-300">Kept for Review</p>
+                </div>
+                <p className="text-xs text-slate-300 mt-1">
+                  {keptReviewedMessage(keptForReview.length)} If a link no longer applies, remove it from its clause.
+                </p>
+                <ul className="mt-2 divide-y divide-amber-500/20" aria-label="Evidence links kept for review">
+                  {keptForReview.map(item => (
+                    <li key={item.evidence_id} className="flex items-baseline gap-3 py-1 text-xs">
+                      <span className="font-mono font-semibold text-slate-200">Clause {item.clause_number}</span>
+                      <span className="text-amber-200">{KEPT_REASON_LABELS[item.reason] ?? item.reason}</span>
+                      {item.rule_id && <span className="ml-auto font-mono text-slate-500">rule {item.rule_id}</span>}
+                    </li>
+                  ))}
+                </ul>
               </div>
             )}
             <div className="grid grid-cols-2 gap-3">
@@ -783,6 +846,22 @@ export default function QMSStandards() {
                 <p className="text-xs text-amber-300">Evidence Updated</p>
               </div>
             </div>
+            {/* Absent is not zero: an API from before retirement existed sends no count. */}
+            {typeof autoLinkResult.total_evidence_retired === 'number' && (
+              <div className="bg-fd-raised rounded-sm p-3" data-testid="auto-link-retired">
+                <div className="flex items-baseline gap-3">
+                  <p className="text-2xl font-bold text-slate-300 tabular-nums">{autoLinkResult.total_evidence_retired}</p>
+                  <p className="text-xs font-semibold text-slate-300">Stale Links Retired</p>
+                </div>
+                {autoLinkResult.total_evidence_retired > 0 && (
+                  <p className="text-xs text-slate-400 mt-1">
+                    Auto-linked evidence links whose rule no longer matches their clause were removed, and each removal
+                    is recorded in the audit log. Clause compliance statuses were not changed: reassess any clause that
+                    relied on a removed link.
+                  </p>
+                )}
+              </div>
+            )}
 
             {Object.keys(autoLinkResult.compliance_summary).length > 0 && (
               <div>
@@ -807,7 +886,7 @@ export default function QMSStandards() {
               </Button>
             </div>
           </div>
-        </Modal>
+        </UiModal>
       )}
 
       {/* Bulk Import Modal */}
