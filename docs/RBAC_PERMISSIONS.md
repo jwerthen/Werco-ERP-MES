@@ -437,15 +437,16 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > and each released work order gets its own audit row attributed to the caller. No role gained or lost
 > a capability: the bulk route does nothing a run of single releases by the same user could not.
 >
-> **The Work Orders list now hides Release from roles that cannot release.** The row **Release**
-> button (desktop table and mobile cards) and the bulk-release checkboxes render only for a user whose
-> role holds `work_orders:release` (Admin, Manager, Supervisor, Platform Admin) or a superuser — the
-> set the endpoints admit. Before this, the row button rendered for **every** role, and an Operator,
-> Quality, Shipping or Viewer user who clicked it got the 403. Checkboxes appear on **draft** rows
-> only, on the desktop table only (none on the mobile card list), and select-all covers the drafts
-> loaded on the current page. As above, `customPermissions` can still diverge at runtime and the server
-> stays authoritative. **Work Order detail's Release button is unchanged**: it still renders on any
-> draft for every role, and a role outside the three gets the server's 403 there.
+> **The Work Orders list and the Work Order detail page now hide Release from roles that cannot
+> release.** The list's row **Release** button (desktop table and mobile cards), the bulk-release
+> checkboxes and the detail page's **Release** button render only for a user whose role holds
+> `work_orders:release` (Admin, Manager, Supervisor, Platform Admin) or a superuser — the set the
+> endpoints admit — through one shared check, `userCanReleaseWorkOrders` in
+> `frontend/src/utils/permissions.ts`. Before this, both buttons rendered for **every** role, and an
+> Operator, Quality, Shipping or Viewer user who clicked one got the 403. Checkboxes appear on
+> **draft** rows only, on the desktop table only (none on the mobile card list), and select-all covers
+> the drafts loaded on the current page. As above, `customPermissions` can still diverge at runtime
+> and the server stays authoritative.
 >
 > **Not an MCP tool.** Bulk release is in `catalog.EXCLUDED_OPERATIONS`, so an agent releases one job
 > per call through `release_work_order`. That is an exclusion from the agent catalog, not a credential
