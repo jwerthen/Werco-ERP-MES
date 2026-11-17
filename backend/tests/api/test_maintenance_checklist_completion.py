@@ -33,7 +33,7 @@ from app.models.maintenance import MaintenanceLog, MaintenanceSchedule, Maintena
 from app.models.user import UserRole
 from app.services.audit_service import AuditService, AuditWriteError
 from app.services.company_time import company_today
-from app.services.maintenance_checklist import API_TOKEN_INCOMPLETE_CHECKLIST
+from app.services.maintenance_checklist import API_TOKEN_CHECKLIST_REMOVAL, API_TOKEN_INCOMPLETE_CHECKLIST
 from tests.api.test_maintenance_assets import make_wc
 from tests.api.test_maintenance_pm_roll_forward import make_schedule
 from tests.api.test_receiving_compliance import headers_for, make_user
@@ -453,3 +453,132 @@ class TestAnApiTokenCannotSkipChecklistItems:
         [row] = completion_audit(db_session, wo["id"])
         assert "credential" not in row.extra_data
         assert row.extra_data["incomplete_checklist_reason"] == "Coolant concentrate on back order"
+
+
+SCHEDULE_CHECKLIST = json.dumps(["Lubricate ways", "Check coolant"])
+
+
+def pm_from_checklisted_schedule(client, headers, db: Session, *, checklist_results):
+    """A PM work order opened from a schedule whose OWN checklist names two steps, carrying
+    ``checklist_results`` (which may leave schedule steps out)."""
+    schedule = make_schedule(db, next_due=company_today(db, 1), checklist=SCHEDULE_CHECKLIST)
+    body = {"schedule_id": schedule.id, "title": "Synthetic PM"}
+    if checklist_results is not ...:
+        body["checklist_results"] = checklist_results
+    created = client.post(WORK_ORDERS, headers=headers, json=body)
+    assert created.status_code == 200, created.text
+    return schedule, created.json()
+
+
+class TestTheScheduleChecklistIsJudgedToo:
+    """A PM work order answers for its schedule's checklist: a step left off the work order -- at
+    Start PM, at create through the API, or by a later PUT -- still needs a tick or a reason."""
+
+    def test_a_schedule_step_missing_from_the_work_order_needs_a_reason(self, client, db_session, headers):
+        schedule, wo = pm_from_checklisted_schedule(
+            client, headers, db_session, checklist_results=checklist(("Lubricate ways", True))
+        )
+        before = stored_state(db_session, wo["id"], schedule.id)
+        refused = complete(client, headers, wo["id"])
+        assert refused.status_code == status.HTTP_409_CONFLICT, refused.text
+        assert refused.json()["detail"].startswith("1 of 2 checklist items")
+        assert stored_state(db_session, wo["id"], schedule.id) == before
+
+        done = complete(client, headers, wo["id"], **{REASON_FIELD: "Coolant check moved to next PM"})
+        assert done.status_code == 200, done.text
+        [row] = completion_audit(db_session, wo["id"])
+        assert row.extra_data["checklist_unticked_items"] == ["Check coolant"]
+        assert row.extra_data["checklist_item_count"] == 2
+
+    def test_a_pm_opened_with_no_checklist_still_answers_for_the_schedules(self, client, db_session, headers):
+        schedule, wo = pm_from_checklisted_schedule(client, headers, db_session, checklist_results=...)
+        refused = complete(client, headers, wo["id"])
+        assert refused.status_code == status.HTTP_409_CONFLICT, refused.text
+        assert refused.json()["detail"].startswith("2 of 2 checklist items")
+
+    def test_ticking_the_schedule_step_at_completion_needs_no_reason(self, client, db_session, headers):
+        schedule, wo = pm_from_checklisted_schedule(
+            client, headers, db_session, checklist_results=checklist(("Lubricate ways", True))
+        )
+        done = complete(client, headers, wo["id"], checklist_results=BOTH_TICKED)
+        assert done.status_code == 200, done.text
+        [row] = completion_audit(db_session, wo["id"])
+        assert "checklist_unticked_items" not in row.extra_data
+
+    def test_a_token_cannot_skip_a_schedule_step_left_off_the_work_order(
+        self, client, db_session, headers, token_headers
+    ):
+        schedule, wo = pm_from_checklisted_schedule(
+            client, headers, db_session, checklist_results=checklist(("Lubricate ways", True))
+        )
+        refused = complete(client, token_headers, wo["id"], **{REASON_FIELD: "n/a"})
+        assert refused.status_code == status.HTTP_403_FORBIDDEN, refused.text
+        assert refused.json()["detail"] == API_TOKEN_INCOMPLETE_CHECKLIST
+
+
+class TestATokenCannotPutChecklistItemsAway:
+    """Without this a token reaches the refused completion in two steps: PUT the unticked items
+    off the work order, then complete with nothing left to explain."""
+
+    def put(self, client, headers, wo_id, checklist_results):
+        return client.put(f"{WORK_ORDERS}/{wo_id}", headers=headers, json={"checklist_results": checklist_results})
+
+    @pytest.mark.parametrize(
+        "trimmed",
+        [
+            None,
+            "",
+            checklist(("Lubricate ways", False)),
+            checklist(("Lubricate ways", False), ("Check coolant!", False)),
+        ],
+        ids=["null", "empty", "dropped", "renamed"],
+    )
+    def test_removing_items_is_403_and_changes_nothing(self, client, db_session, headers, token_headers, trimmed):
+        wc = make_wc(db_session)
+        created = client.post(
+            WORK_ORDERS,
+            headers=headers,
+            json={"work_center_id": wc.id, "title": "Corrective", "checklist_results": TWO_ITEMS_OPEN},
+        )
+        wo_id = created.json()["id"]
+        refused = self.put(client, token_headers, wo_id, trimmed)
+        assert refused.status_code == status.HTTP_403_FORBIDDEN, refused.text
+        assert refused.json()["detail"] == API_TOKEN_CHECKLIST_REMOVAL
+        db_session.expire_all()
+        assert db_session.get(MaintenanceWorkOrder, wo_id).checklist_results == TWO_ITEMS_OPEN
+        # ...so the two-step route ends where the one-step one does.
+        assert complete(client, token_headers, wo_id, **{REASON_FIELD: "x"}).status_code == 403
+
+    def test_a_token_may_tick_or_add_items(self, client, db_session, headers, token_headers):
+        schedule, wo = start_pm(client, headers, db_session)
+        ticked = self.put(client, token_headers, wo["id"], BOTH_TICKED)
+        assert ticked.status_code == 200, ticked.text
+        added = self.put(
+            client,
+            token_headers,
+            wo["id"],
+            checklist(("Lubricate ways", True), ("Check coolant", True), ("Wipe down", False)),
+        )
+        assert added.status_code == 200, added.text
+
+    def test_a_person_may_still_edit_the_checklist_and_it_is_audited(self, client, db_session, headers):
+        wc = make_wc(db_session)
+        created = client.post(
+            WORK_ORDERS,
+            headers=headers,
+            json={"work_center_id": wc.id, "title": "Corrective", "checklist_results": TWO_ITEMS_OPEN},
+        )
+        wo_id = created.json()["id"]
+        edited = self.put(client, headers, wo_id, None)
+        assert edited.status_code == 200, edited.text
+        db_session.expire_all()
+        row = (
+            db_session.query(AuditLog)
+            .filter(
+                AuditLog.resource_type == "maintenance_work_order",
+                AuditLog.resource_id == wo_id,
+                AuditLog.action == "UPDATE",
+            )
+            .one()
+        )
+        assert row.old_values["checklist_results"] == TWO_ITEMS_OPEN

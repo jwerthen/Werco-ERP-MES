@@ -11,7 +11,12 @@ import json
 
 import pytest
 
-from app.services.maintenance_checklist import ChecklistEntry, parse_checklist_results, unticked_checklist_items
+from app.services.maintenance_checklist import (
+    ChecklistEntry,
+    parse_checklist_results,
+    removed_checklist_items,
+    unticked_checklist_items,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -185,3 +190,58 @@ class TestRepeatedItemsAreAMultiset:
     def test_repeated_plain_text_lines_count_each_copy(self):
         stored = "Grease bearing\nGrease bearing"
         assert unticked_checklist_items(stored, stored) == (["Grease bearing", "Grease bearing"], 2)
+
+
+class TestParityWithThePagesReader:
+    """``String(value ?? '').trim()`` and the page's handling of a nested array."""
+
+    def test_booleans_read_as_the_page_writes_them(self):
+        assert [e.item for e in parse_checklist_results("[true, false]")] == ["true", "false"]
+
+    def test_a_whole_float_reads_without_its_decimal(self):
+        assert [e.item for e in parse_checklist_results("[1.0, 2.5]")] == ["1", "2.5"]
+
+    def test_a_nested_array_entry_is_dropped(self):
+        assert parse_checklist_results('[[1, 2], "Check belt"]') == [ChecklistEntry("Check belt", False)]
+
+
+class TestRequiredItems:
+    """``required``: a PM schedule's checklist, judged whatever the work order's says."""
+
+    def test_a_required_item_the_work_order_lacks_is_unticked(self):
+        assert unticked_checklist_items(
+            checklist(("Lubricate ways", True)),
+            checklist(("Lubricate ways", True)),
+            ["Lubricate ways", "Check coolant"],
+        ) == (["Check coolant"], 2)
+
+    def test_a_required_item_ticked_on_the_work_order_is_done(self):
+        done = checklist(("Lubricate ways", True), ("Check coolant", True))
+        assert unticked_checklist_items(done, done, ["Lubricate ways", "Check coolant"]) == ([], 2)
+
+    def test_required_copies_count_as_a_multiset(self):
+        assert unticked_checklist_items(
+            None, checklist(("Grease bearing", True)), ["Grease bearing", "Grease bearing"]
+        ) == (["Grease bearing"], 2)
+
+    def test_blank_required_items_are_ignored(self):
+        assert unticked_checklist_items(None, None, ["", "Check belt"]) == (["Check belt"], 1)
+
+
+class TestRemovedChecklistItems:
+    def test_ticking_unticking_or_adding_removes_nothing(self):
+        stored = checklist(("A", False), ("B", True))
+        assert removed_checklist_items(stored, checklist(("A", True), ("B", False), ("C", False))) == []
+
+    @pytest.mark.parametrize("new", [None, "", "[]"])
+    def test_clearing_removes_every_item(self, new):
+        assert removed_checklist_items(checklist(("A", False), ("B", False)), new) == ["A", "B"]
+
+    def test_a_rename_removes_the_old_text(self):
+        assert removed_checklist_items(checklist(("Check belt", False)), checklist(("Check belts", False))) == [
+            "Check belt"
+        ]
+
+    def test_one_copy_of_a_repeated_item_removed_counts(self):
+        stored = checklist(("Grease bearing", False), ("Grease bearing", False))
+        assert removed_checklist_items(stored, checklist(("Grease bearing", False))) == ["Grease bearing"]

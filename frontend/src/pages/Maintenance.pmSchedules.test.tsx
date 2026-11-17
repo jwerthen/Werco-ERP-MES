@@ -373,6 +373,40 @@ describe('Maintenance — completing with checklist items unticked', () => {
   });
 });
 
+describe('Maintenance — a PM answers for its schedule’s checklist', () => {
+  it('adds a schedule step the work order no longer carries, unticked, and sends it', async () => {
+    mockedApi.getMaintenanceSchedules.mockResolvedValue([
+      millPm,
+      { ...compressorPm, checklist_items: ['Drain tank', 'Check belt', 'Check oil'] },
+    ]);
+    const dialog = await openCompleteDialog();
+    expect(dialog).toHaveTextContent('Checklist (0 of 3 done)');
+    for (const name of ['Drain tank', 'Check belt', 'Check oil']) {
+      fireEvent.click(within(dialog).getByRole('checkbox', { name }));
+    }
+    expect(within(dialog).queryByLabelText(REASON_LABEL)).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Complete' }));
+
+    await waitFor(() => expect(mockedApi.completeMaintenanceWorkOrder).toHaveBeenCalledTimes(1));
+    const [, body] = mockedApi.completeMaintenanceWorkOrder.mock.calls[0];
+    expect(JSON.parse(body.checklist_results)).toEqual([
+      { item: 'Drain tank', done: true },
+      { item: 'Check belt', done: true },
+      { item: 'Check oil', done: true },
+    ]);
+    expect(body).not.toHaveProperty('incomplete_checklist_reason');
+  });
+
+  it('opens with nothing to save when the work order already carries every schedule step', async () => {
+    mockedApi.getMaintenanceSchedules.mockResolvedValue([
+      millPm,
+      { ...compressorPm, checklist_items: ['Drain tank', 'Check belt'] },
+    ]);
+    const dialog = await openCompleteDialog();
+    expect(dialog).toHaveTextContent('Checklist (0 of 2 done)');
+  });
+});
+
 describe('Maintenance — editing a schedule', () => {
   it('PUTs only the fields that changed', async () => {
     renderPage('/maintenance?tab=schedules');

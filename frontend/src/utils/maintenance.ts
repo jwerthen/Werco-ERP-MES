@@ -119,6 +119,29 @@ export const parseChecklistResults = (raw?: string | null): ChecklistResultItem[
     .map(item => ({ item, done: false }));
 };
 
+/**
+ * The checklist a work order is completed with: its own items, then — unticked — any item of its
+ * PM schedule's checklist it no longer carries (counted as a multiset). The server judges both
+ * lists, so a schedule step dropped at Start PM or by a later edit must be ticked or explained
+ * here too.
+ */
+export const completionChecklist = (
+  workOrderItems: ChecklistResultItem[],
+  scheduleItems: readonly string[] = []
+): ChecklistResultItem[] => {
+  const carried = new Map<string, number>();
+  for (const entry of workOrderItems) carried.set(entry.item, (carried.get(entry.item) ?? 0) + 1);
+  const missing: ChecklistResultItem[] = [];
+  for (const raw of scheduleItems) {
+    const item = raw.trim();
+    if (!item) continue;
+    const left = carried.get(item) ?? 0;
+    if (left > 0) carried.set(item, left - 1);
+    else missing.push({ item, done: false });
+  }
+  return [...workOrderItems, ...missing];
+};
+
 /** The `checklist_results` a work order is opened with: one unticked item per non-blank line. */
 export const checklistResultsPayload = (text: string): string | null => {
   const items = text

@@ -35,7 +35,12 @@ from app.services import downtime_service
 from app.services.audit_service import AuditService
 from app.services.company_time import company_today, company_window, company_zone
 from app.services.import_service import MAX_IMPORT_FILE_BYTES, ImportFileError
-from app.services.maintenance_checklist import API_TOKEN_INCOMPLETE_CHECKLIST, unticked_checklist_items
+from app.services.maintenance_checklist import (
+    API_TOKEN_CHECKLIST_REMOVAL,
+    API_TOKEN_INCOMPLETE_CHECKLIST,
+    removed_checklist_items,
+    unticked_checklist_items,
+)
 from app.services.maintenance_schedule_import_service import commit_pm_import, parse_checklist, preview_pm_import
 
 router = APIRouter()
@@ -1016,7 +1021,9 @@ def update_work_order(
     (in progress / on hold) to scheduled or overdue, and for changing ``requires_shutdown`` on
     a started work order (its downtime is already being recorded, or not), and for ANY status
     change on a completed or cancelled work order (a final record -- open a new one instead).
-    Re-sending the current value is accepted. Moving to ``cancelled`` settles any downtime the work order
+    Re-sending the current value is accepted. A standing API token that takes items off
+    ``checklist_results`` (dropping, renaming or clearing them) is **403**; ticking or adding is
+    allowed. Moving to ``cancelled`` settles any downtime the work order
     holds: resolved, handed to another shutdown work order still holding the machine down, or
     -- for an operator's event the work order adopted -- handed back to the machine, still
     open. ``on_hold`` keeps the machine down (the downtime runs on until the work order ends)."""
@@ -1024,6 +1031,13 @@ def update_work_order(
 
     update_data = data.model_dump(exclude_unset=True)
     _assert_wo_edit_allowed(wo, update_data)
+    if (
+        "checklist_results" in update_data
+        and is_api_token_credential(current_user)
+        and removed_checklist_items(wo.checklist_results, update_data["checklist_results"])
+    ):
+        # Else a token could PUT the unticked steps away and then complete without a person's reason.
+        raise HTTPException(status_code=403, detail=API_TOKEN_CHECKLIST_REMOVAL)
     old_values = {c.key: getattr(wo, c.key) for c in wo.__table__.columns}
     was_terminal = wo.status in _TERMINAL_STATUSES
 
@@ -1139,7 +1153,7 @@ def complete_work_order(
     ``checklist_results`` omitted keeps the checklist the work order already carries. Completing
     with ANY checklist item unticked needs ``incomplete_checklist_reason`` (**409** without one,
     nothing saved); an item the work order carried that ``checklist_results`` leaves out counts as
-    unticked. A standing API token may complete only with every item ticked: with any unticked it is
+    unticked, and so does an item of a PM work order's SCHEDULE checklist that is not ticked. A standing API token may complete only with every item ticked: with any unticked it is
     **403**, whatever reason it sends (owner decision 2026-11-17). The reason and the unticked items are recorded in the completion's audit row (then
     required evidence: **503**, nothing saved, if it cannot be written) and its log entry."""
     wo = _wo_or_404(db, wo_id, company_id, for_update=True)
@@ -1168,7 +1182,13 @@ def complete_work_order(
     completed_checklist = (
         data.checklist_results if "checklist_results" in data.model_fields_set else wo.checklist_results
     )
-    unticked, checklist_total = unticked_checklist_items(wo.checklist_results, completed_checklist)
+    # A PM work order also answers for its schedule's checklist: a step dropped from the work order
+    # (at Start PM, or by a PUT) is still a step of the PM.
+    unticked, checklist_total = unticked_checklist_items(
+        wo.checklist_results,
+        completed_checklist,
+        parse_checklist(schedule.checklist) if schedule is not None else (),
+    )
     checklist_reason = (data.incomplete_checklist_reason or "").strip()
     if unticked and is_api_token_credential(current_user):
         # Whatever reason it sends: only a person records why PM steps were skipped.

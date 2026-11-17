@@ -32,6 +32,7 @@ import {
   canPlanMaintenance,
   checklistPayload,
   checklistResultsPayload,
+  completionChecklist,
   frequencyText,
   openWorkOrdersBySchedule,
   parseChecklistResults,
@@ -341,15 +342,20 @@ export default function Maintenance() {
     if (actionBusy || !confirmDiscard()) return;
     resetWOModal();
   };
-  const openCompleteModal = useCallback((wo: MaintenanceWorkOrder) => {
-    const checklist = parseChecklistResults(wo.checklist_results);
-    setSelectedWO(wo);
-    setActionError('');
-    setCompleteForm(BLANK_COMPLETE);
-    setCompleteChecklist(checklist);
-    setCompleteChecklistBaseline(checklist);
-    setShowCompleteModal(true);
-  }, []);
+  const openCompleteModal = useCallback(
+    (wo: MaintenanceWorkOrder) => {
+      // A PM work order answers for its schedule's checklist too (the server judges both).
+      const schedule = wo.schedule_id != null ? schedulesById.get(wo.schedule_id) : undefined;
+      const checklist = completionChecklist(parseChecklistResults(wo.checklist_results), schedule?.checklist_items);
+      setSelectedWO(wo);
+      setActionError('');
+      setCompleteForm(BLANK_COMPLETE);
+      setCompleteChecklist(checklist);
+      setCompleteChecklistBaseline(checklist);
+      setShowCompleteModal(true);
+    },
+    [schedulesById]
+  );
   const closeCompleteModal = () => {
     if (actionBusy || !confirmDiscard()) return;
     setShowCompleteModal(false);

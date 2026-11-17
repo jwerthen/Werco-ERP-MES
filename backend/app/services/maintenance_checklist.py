@@ -12,7 +12,7 @@ Pure functions: no database, no audit, no side effects.
 import json
 import re
 from collections import Counter
-from typing import Any, List, NamedTuple, Optional, Tuple
+from typing import Any, List, NamedTuple, Optional, Sequence, Tuple
 
 # Owner decision 2026-11-17, under the 2026-11-07 scrap principle (``API_TOKEN_SHORT_CLOSE``): why a
 # PM step was skipped is a person's judgment, so a standing API token may complete a maintenance
@@ -20,6 +20,12 @@ from typing import Any, List, NamedTuple, Optional, Tuple
 API_TOKEN_INCOMPLETE_CHECKLIST = (
     "Completing a maintenance work order with checklist items unticked must be done by a person signed in "
     "to the app, not an API token."
+)
+# ...and, so a token cannot reach the same end in two steps (PUT the checklist down, then complete):
+# taking items off an open work order's checklist is a person's edit too.
+API_TOKEN_CHECKLIST_REMOVAL = (
+    "Removing items from a maintenance work order's checklist must be done by a person signed in to the app, "
+    "not an API token."
 )
 
 
@@ -29,8 +35,13 @@ class ChecklistEntry(NamedTuple):
 
 
 def _item_text(value: Any) -> str:
+    """``String(value ?? '').trim()`` as the page computes it, for the JSON scalars it can meet."""
     if value is None:
         return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
     return (value if isinstance(value, str) else str(value)).strip()
 
 
@@ -47,6 +58,9 @@ def parse_checklist_results(raw: Optional[str]) -> List[ChecklistEntry]:
     if isinstance(parsed, list):
         entries: List[ChecklistEntry] = []
         for entry in parsed:
+            if isinstance(entry, list):
+                # The page reads a nested array as an object with no ``item``: dropped.
+                continue
             if isinstance(entry, dict):
                 item, done = _item_text(entry.get("item")), entry.get("done") is True
             else:
@@ -59,14 +73,18 @@ def parse_checklist_results(raw: Optional[str]) -> List[ChecklistEntry]:
     return [ChecklistEntry(line.strip(), False) for line in re.split(r"\r?\n", text) if line.strip()]
 
 
-def unticked_checklist_items(stored: Optional[str], completed_with: Optional[str]) -> Tuple[List[str], int]:
+def unticked_checklist_items(
+    stored: Optional[str], completed_with: Optional[str], required: Sequence[str] = ()
+) -> Tuple[List[str], int]:
     """The checklist items a completion leaves unticked, and how many items there are in all.
 
     ``stored`` is the checklist the work order carried before the completion; ``completed_with``
     the one it completes with (the same text when the completion does not send one). An item is
     done only when ``completed_with`` ticks it. An item ``stored`` carried that ``completed_with``
     leaves out -- or a completion that clears the checklist -- counts as NOT done: dropping a line
-    is not a way to close without doing it.
+    is not a way to close without doing it. ``required`` adds items that must be ticked whatever
+    either checklist says: a PM work order's schedule checklist, so a step taken off the work
+    order (at Start PM, or by a later edit) still needs a tick or a reason.
 
     Items are matched by their text, as a MULTISET: a checklist may name the same step twice
     ("Grease bearing" for each of two bearings), and ticking one copy must not tick the other.
@@ -77,10 +95,24 @@ def unticked_checklist_items(stored: Optional[str], completed_with: Optional[str
     ticked = Counter(entry.item for entry in completed if entry.done)
     in_completed = Counter(entry.item for entry in completed)
     in_previous = Counter(entry.item for entry in previous)
+    in_required = Counter(item for item in required if item)
     unticked: List[str] = []
     total = 0
-    for text in dict.fromkeys(entry.item for entry in [*completed, *previous]):
-        copies = max(in_completed[text], in_previous[text])
+    for text in dict.fromkeys([*(entry.item for entry in [*completed, *previous]), *in_required]):
+        copies = max(in_completed[text], in_previous[text], in_required[text])
         total += copies
         unticked.extend([text] * (copies - ticked[text]))
     return unticked, total
+
+
+def removed_checklist_items(stored: Optional[str], new: Optional[str]) -> List[str]:
+    """Items ``stored`` carries that ``new`` does not (as a multiset: one copy of a repeated item
+    removed counts). Ticking, unticking or adding an item removes nothing."""
+    remaining = Counter(entry.item for entry in parse_checklist_results(new))
+    removed: List[str] = []
+    for entry in parse_checklist_results(stored):
+        if remaining[entry.item] > 0:
+            remaining[entry.item] -= 1
+        else:
+            removed.append(entry.item)
+    return removed

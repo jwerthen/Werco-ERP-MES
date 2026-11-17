@@ -6143,7 +6143,10 @@ uploads go through text extraction + LLM. See
 >   one never reaches an agent (owner decision 2026-11-17; a token's fully ticked completion is
 >   unchanged; see `docs/RBAC_PERMISSIONS.md` → Credential policy for judgment writes).
 >   - The items judged are those the work order carried plus any in the body's `checklist_results`,
->     matched by text. An item is ticked only when the checklist the work order completes with marks
+>     plus — for a PM work order — every item of its **schedule's** checklist, matched by text. A
+>     schedule step left off the work order (at Start PM, by a create through the API that sent no
+>     checklist, or by a later `PUT`) is still a step of the PM: it needs a tick or a reason. The
+>     Complete dialog lists such a step, unticked, after the work order's own items. An item is ticked only when the checklist the work order completes with marks
 >     it `"done": true`; a plain-string item, or a line of a one-item-per-line checklist (split on
 >     `\r?\n`, as the page splits it), is unticked. Items count as a **multiset**: a checklist that
 >     names one step twice needs both copies ticked, and the audit row lists a text once per unticked
@@ -6161,9 +6164,13 @@ uploads go through text extraction + LLM. See
 >     recorded, and the audit row stays the ordinary best-effort status-change row.
 >   - The Maintenance page's Complete dialog shows a required reason field whenever an item is
 >     unticked and keeps **Complete** disabled until it is filled; the reason is sent only then.
->   - The rule judges the checklist the work order carries **at the moment of completion**. `PUT
->     /maintenance/work-orders/{id}` (planning roles) can still rewrite `checklist_results` before
->     that; such an edit is its own audited `maintenance_work_order` `UPDATE` row, not this rule.
+>   - `PUT /maintenance/work-orders/{id}` (planning roles) can still rewrite `checklist_results`
+>     before completion; a person's edit is its own audited `maintenance_work_order` `UPDATE` row,
+>     and on a PM work order it cannot take a schedule step off the judged list. A standing API token
+>     whose `PUT` takes items off the checklist (drops, renames or clears them) is **403**
+>     `API_TOKEN_CHECKLIST_REMOVAL` *"Removing items from a maintenance work order's checklist must be
+>     done by a person signed in to the app, not an API token."* — otherwise a token could reach the
+>     refused completion in two steps. Ticking or adding items is allowed.
 > - **Edit** (Schedules tab; planning roles) → `PUT /maintenance/schedules/{id}`: next due date,
 >   frequency (`frequency_days` for custom), priority, estimated duration, requires shutdown,
 >   checklist. A schedule has no `version` column, so this `PUT` has no compare-and-swap; the dialog
