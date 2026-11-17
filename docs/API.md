@@ -8759,6 +8759,18 @@ in `RBAC_PERMISSIONS.md`.
 | PUT | `/qms-standards/evidence/{evidence_id}` | Update evidence, incl. verification | Admin / Manager / Quality |
 | DELETE | `/qms-standards/evidence/{evidence_id}` | Remove an evidence link | Admin / Manager / Quality |
 
+> **A linked document must be your company's:** the four routes that take a `document_id` in the
+> body (`POST /qms-standards/`, `PUT /qms-standards/{standard_id}`, `POST
+> /qms-standards/clauses/{clause_id}/evidence` and `PUT /qms-standards/evidence/{evidence_id}`)
+> check it against the active company's documents before they write anything. An id that does not
+> exist and an id that belongs to another company both get the same **404 `Document not found`**,
+> with nothing saved and no audit entry, so the answer says nothing about other companies'
+> documents. `document_id: null` on a `PUT` still clears the link, and a `PUT` that does not send
+> `document_id` is not judged on the value already stored (the QMS Standards page's Verify sends
+> `is_verified` only, and the page never sends `document_id`). The document's control status
+> (draft, obsolete, ...) is not checked. Before this, a nonexistent id failed with a 500, while any
+> existing id, another company's included, was accepted and linked.
+
 > **PDF clause extraction:** `POST /qms-standards/{standard_id}/upload-pdf` requires a text-based
 > PDF (≤ 20 MB; scanned/image-only PDFs are rejected) and a configured `ANTHROPIC_API_KEY` — it
 > returns **500** if the key is missing. Claude extracts the numbered clauses and persists them
