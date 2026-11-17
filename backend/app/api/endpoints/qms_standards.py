@@ -30,6 +30,7 @@ from app.services.audit_service import AuditService
 from app.services.auto_evidence_service import (
     compute_overall_compliance,
     discover_evidence_for_clause,
+    is_evaluation_failed,
 )
 from app.services.llm_client import LLMEgressDisabledError, LLMNotConfiguredError
 from app.services.qms_extraction_service import extract_clauses_with_llm
@@ -620,7 +621,14 @@ def get_clause_auto_evidence(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Discover live ERP/MES evidence for a single clause."""
+    """Discover live ERP/MES evidence for a single clause.
+
+    An evidence rule whose query fails is listed as a placeholder row (``health_status``
+    ``not_computed``, ``suggested_compliance`` ``not_assessed``, zero placeholder counts), so the
+    clause never rolls up ``compliant`` while part of its evidence could not be computed.
+    ``not_computed`` means nothing is known about that module from this call; ``no_data`` means
+    the query ran and found no records. Do not report a ``not_computed`` row's counts.
+    """
     clause = (
         db.query(QMSClause)
         .filter(
@@ -636,8 +644,9 @@ def get_clause_auto_evidence(
     results = discover_evidence_for_clause(db, clause, company_id)
     overall = compute_overall_compliance(results)
 
-    # Strip internal _rule_id before returning
-    clean_results = [{k: v for k, v in r.items() if k != "_rule_id"} for r in results]
+    # Strip internal keys (_rule_id, _evaluation_failed) before returning. A rule whose query
+    # failed is still listed, as its not_computed / not_assessed placeholder row.
+    clean_results = [{k: v for k, v in r.items() if not k.startswith("_")} for r in results]
 
     return ClauseAutoEvidenceResponse(
         clause_id=clause.id,
@@ -658,6 +667,14 @@ def auto_link_standard(
     """
     Run auto-discovery for ALL clauses in a standard and persist evidence links.
     Creates or updates QMSClauseEvidence records with is_auto_linked=True.
+
+    A rule whose query failed this run is counted in ``compliance_summary`` (its clause
+    rolls up ``not_assessed`` unless a computed row is ``non_compliant`` / ``partial``) and in
+    ``total_evidence_failed``, but persists nothing: its stored evidence keeps the counts and
+    ``last_refreshed`` of the last run that computed them, rather than being overwritten by a
+    transient failure. It does not make its clause count as a clause with evidence. The audit
+    row names every skipped (clause, rule) in ``extra_data.evidence_not_computed``, since the
+    stale ``last_refreshed`` on those rows is otherwise unexplained.
     """
     standard = (
         db.query(QMSStandard)
@@ -684,19 +701,30 @@ def auto_link_standard(
     now = datetime.utcnow()
     total_created = 0
     total_updated = 0
+    not_computed: List[dict] = []
     clauses_with_evidence = 0
     compliance_counts = {}
 
     for clause in clauses:
         results = discover_evidence_for_clause(db, clause, company_id)
+        computed = [r for r in results if not is_evaluation_failed(r)]
+        not_computed.extend(
+            {"clause_id": clause.id, "clause_number": clause.clause_number, "rule_id": r["_rule_id"]}
+            for r in results
+            if is_evaluation_failed(r)
+        )
 
-        if results:
+        if computed:
             clauses_with_evidence += 1
 
+        # The roll-up sees the failed rules' placeholder rows, so a clause whose rule failed
+        # is summarized not_assessed (or worse), never compliant from its other rows.
         overall = compute_overall_compliance(results)
         compliance_counts[overall] = compliance_counts.get(overall, 0) + 1
 
-        for result in results:
+        # Persistence sees only computed rows: a transient failure must not overwrite the
+        # stored counts of the last run that could compute them.
+        for result in computed:
             rule_id = result.get("_rule_id", result.get("evidence_type", "unknown"))
 
             # Check for existing auto-linked evidence of this type on this clause
@@ -741,11 +769,16 @@ def auto_link_standard(
 
     db.flush()  # assign any new evidence PKs without committing
 
+    total_failed = len(not_computed)
     audit.log_create(
         "qms_standard",
         standard.id,
         standard.name,
-        description=f"Auto-linked evidence: {total_created} created, {total_updated} updated",
+        description=(
+            f"Auto-linked evidence: {total_created} created, {total_updated} updated"
+            + (f", {total_failed} not computed (left unchanged)" if total_failed else "")
+        ),
+        extra_data={"evidence_not_computed": not_computed} if not_computed else None,
     )
 
     db.commit()
@@ -753,7 +786,8 @@ def auto_link_standard(
     logger.info(
         f"Auto-link for standard {standard.name}: "
         f"{total_created} created, {total_updated} updated, "
-        f"{clauses_with_evidence}/{len(clauses)} clauses with evidence"
+        f"{clauses_with_evidence}/{len(clauses)} clauses with evidence, "
+        f"{total_failed} evidence rules not computed"
     )
 
     return AutoLinkSummary(
@@ -764,6 +798,7 @@ def auto_link_standard(
         clauses_without_evidence=len(clauses) - clauses_with_evidence,
         total_evidence_created=total_created,
         total_evidence_updated=total_updated,
+        total_evidence_failed=total_failed,
         compliance_summary=compliance_counts,
     )
 

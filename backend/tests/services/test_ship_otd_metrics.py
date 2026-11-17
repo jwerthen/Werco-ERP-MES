@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 from app.models.shipping import ShipmentStatus
 from app.models.work_order import WorkOrderStatus
 from app.services.analytics_service import AnalyticsService
+from app.services.company_time import company_today
 from tests.lean_phase1_helpers import (
     COMPANY_A,
     COMPANY_B,
@@ -142,7 +143,10 @@ def test_ship_otd_report_rows_rollup_and_open_miss_days_late(db_session: Session
     s1, s2, s3, s4 = _seed_mixed_delivery_set(db_session)
     # An open WO whose promise passed without full shipment: a LIVE miss whose
     # days_late grows daily. Promise is in the fixed window AND in the past.
-    days_since_promise = (date.today() - date(2026, 6, 25)).days
+    # "Today" is the company's calendar date (Central), as the service counts it -- a UTC
+    # runner's date.today() is a day ahead from 6/7 PM Central and over-counts by one.
+    today = company_today(db_session, COMPANY_A)
+    days_since_promise = (today - date(2026, 6, 25)).days
 
     svc = AnalyticsService(db_session, COMPANY_A)
     report = svc.get_ship_otd_report(WINDOW_START, WINDOW_END)
@@ -169,7 +173,7 @@ def test_ship_otd_report_rows_rollup_and_open_miss_days_late(db_session: Session
     # Partial only, promise passed -> live miss counted from today.
     assert rows[s4.id].on_time is False
     assert rows[s4.id].fully_shipped is False
-    assert rows[s4.id].days_late == (date.today() - date(2026, 6, 20)).days
+    assert rows[s4.id].days_late == (today - date(2026, 6, 20)).days
 
     # Per-customer rollup covers only determinable rows: Acme = S1 + S2.
     acme = next(c for c in report.by_customer if c.customer_name == "Acme")
