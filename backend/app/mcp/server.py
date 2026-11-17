@@ -32,9 +32,10 @@ And one narrowing applies to EVERY caller, a person's own access JWT included, b
 about the agent rather than the credential: a Hank task kind that posts a person's own words
 (``credentials.PEOPLE_ONLY_HANK_TASK_KINDS``: ``add_note``, a work-order comment) is never run
 through an agent. ``prepare_task`` for such a kind, and ``execute_task`` on such a task (read
-first, as the caller, through ``GET /hank/tasks/{task_id}``; a read that cannot complete is a 503,
-never a blind execute), answer 403 before dispatch -- the reason the comment write routes are not
-tools at all. One code path:
+first, as the caller, through ``GET /hank/tasks/{task_id}``; a read refused for good is answered
+with the read's own status and detail, a read that cannot complete is a 503 -- the execute is
+dispatched only after a read that names a kind, never blind), answer 403 before dispatch -- the
+reason the comment write routes are not tools at all. One code path:
 ``app.mcp.people_only.people_only_refusal``. Both tools stay listed; every other kind is
 unaffected, and the routes themselves still serve a person in the app.
 """

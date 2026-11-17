@@ -15,12 +15,16 @@ the one place that closes that door, and it is ONE code path, :func:`people_only
 * ``execute_task`` -> the task is first READ through the same router, as the same caller
   (``GET /hank/tasks/{task_id}``); a people-only kind -> the same 403, and the execute is never
   dispatched. When the read is REFUSED for good (401 / 403 / 404 / 422: absent, foreign, another
-  credential's task, a role that may not see it), the original call proceeds and ITS OWN error
-  wins -- the execute route resolves the task the same way, so this check answers nothing a caller
-  could not already learn from ``get_task``. Any other outcome (a 5xx, a 429, a transport failure,
-  a body without a ``kind``) means the kind is unknown, and the execute is NOT dispatched: 503 with
-  a neutral text. That fails closed without telling the caller anything, where proceeding would let
-  a transient read failure post a note.
+  credential's task, a role that may not see it), the execute is NOT dispatched either: the read's
+  own status and verbatim ``detail`` are the tool's error result. That is the answer the execute
+  route would have given -- it resolves the task through the same ``HankTaskService.get`` -- so it
+  tells the caller nothing ``get_task`` does not. Dispatching it instead "so the route's own error
+  wins" would be a check-then-act gap: a people-only task that became visible to the caller between
+  the read and the execute would be run unread. Any other outcome (a 5xx, a 429, a transport
+  failure, a body without a ``kind``) means the kind is unknown, and the execute is NOT dispatched:
+  503 with a neutral text. That fails closed without telling the caller anything, where proceeding
+  would let a transient read failure post a note. So the execute is dispatched ONLY after a 200 read
+  named a kind outside the people-only set.
 
 The routes themselves are unchanged: a person in the app prepares and executes a note as usual, and
 an API token is refused by ``hank_task_service`` on every door. Matching is by ROUTE (method + path
@@ -39,9 +43,11 @@ from typing import Any, Optional, Tuple
 
 from app.core.config import settings
 from app.core.credentials import AGENT_PEOPLE_ONLY_TASK_DETAIL, PEOPLE_ONLY_HANK_TASK_KINDS
+from app.mcp.results import extract_detail
 
 # A read refused with one of these is refused for good: the execute route resolves the task through
-# the same ``HankTaskService.get`` and answers the same way, so the call proceeds to that answer.
+# the same ``HankTaskService.get`` and would answer the same way, so the read's own answer is returned
+# and the execute is never dispatched (dispatching it would run a task that appeared after the read).
 _FINAL_REFUSALS = frozenset({401, 403, 404, 422})
 AGENT_TASK_UNVERIFIED_DETAIL = (
     "Could not confirm what kind of Hank task this is before executing it, so nothing was executed. Try again."
@@ -64,10 +70,11 @@ def _kind_of(body: Any) -> Optional[str]:
 
 async def people_only_refusal(
     *, method: str, route: str, path: str, json_body: Any, executor: Any, auth: Any
-) -> Optional[Tuple[int, str]]:
+) -> Optional[Tuple[int, Any]]:
     """``(status, detail)`` when this call must not be dispatched, else None.
 
-    403 when it would run a people-only Hank task kind; 503 when an execute's task could not be read
+    403 when it would run a people-only Hank task kind; the read's own status and ``detail`` when an
+    execute's task read is refused for good (401 / 403 / 404 / 422); 503 when it could not be read
     to find out. ``route`` is the tool's path TEMPLATE and ``path`` the concrete path the call would
     hit. Only the execute case makes a request of its own (one GET, as the caller); every other tool
     returns None without touching the executor.
@@ -89,7 +96,8 @@ async def people_only_refusal(
             auth=auth,
         )
         if outcome.status in _FINAL_REFUSALS:
-            return None  # refused to this caller: the execute route will refuse it the same way
+            # Refused to this caller: answer what the execute route would, and never dispatch it.
+            return outcome.status, extract_detail(outcome)
         kind = _kind_of(outcome.json()) if outcome.status == 200 and outcome.is_json else None
     except Exception:  # noqa: BLE001 - an unreadable task is refused below, never executed blind
         logger.warning("people-only pre-read of %s failed; the execute is not dispatched", path, exc_info=True)

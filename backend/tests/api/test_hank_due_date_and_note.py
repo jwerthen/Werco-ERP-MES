@@ -25,13 +25,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+from contextlib import contextmanager
 from datetime import date, timedelta
-from typing import Dict, List
+from typing import Dict, List, Set, Tuple
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import event
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Session
 
 import app.services.notification_dispatch as dispatch
@@ -884,3 +888,119 @@ class TestPutSharesTheRule:
         db_session.expire_all()
         assert db_session.get(WorkOrder, test_work_order.id).notes != 'edited after delete'
         assert db_session.query(AuditLog).filter_by(resource_type='work_order').count() == 0
+
+
+# ---------------------------------------------------------------------------
+# Row-lock strength: the weakest lock each kind's write needs
+# ---------------------------------------------------------------------------
+
+# The trailing row-lock clause of a compiled Postgres SELECT. The alternation order does not matter
+# for correctness ("FOR UPDATE" cannot match inside "FOR NO KEY UPDATE", nor "FOR SHARE" inside
+# "FOR KEY SHARE"), but the longer forms go first for the reader.
+_LOCK_CLAUSE = re.compile(r'\bFOR (NO KEY UPDATE|KEY SHARE|UPDATE|SHARE)\b')
+
+
+@contextmanager
+def locked_reads(db: Session):
+    """Every row-locking ORM read issued on ``db`` while open, as ``(tables, Postgres lock clause)``.
+
+    SQLite takes no row locks and renders none, so the locking SELECT is compiled with the Postgres
+    dialect -- the one place the lock mode is visible (CLAUDE.md: assert engine-specific behavior by
+    dialect-compiling, never by executing on SQLite and trusting the result).
+    """
+    seen: List[Tuple[Set[str], str]] = []
+
+    def capture(state):
+        if not state.is_select or getattr(state.statement, '_for_update_arg', None) is None:
+            return
+        sql = str(state.statement.compile(dialect=postgresql.dialect()))
+        match = _LOCK_CLAUSE.search(sql)
+        assert match is not None, sql
+        tables = {getattr(source, 'name', str(source)) for source in state.statement.get_final_froms()}
+        seen.append((tables, match.group(0)))
+
+    event.listen(db, 'do_orm_execute', capture)
+    try:
+        yield seen
+    finally:
+        event.remove(db, 'do_orm_execute', capture)
+
+
+def _work_order_locks(seen) -> List[str]:
+    return [clause for tables, clause in seen if 'work_orders' in tables]
+
+
+def _locked_preview(db, user, kind, data):
+    """Run ``kind``'s preview exactly as execute does (``locked=True``) and return its locked reads.
+
+    A refusal after the reads (a missing document, vendor) is fine: the locks were already issued.
+    """
+    service = HankTaskService(db, user, 1)
+    parsed = INPUT_SCHEMAS[kind].model_validate(data).model_dump(mode='json')
+    with locked_reads(db) as seen:
+        try:
+            service._preview(kind, parsed, locked=True)
+        except HTTPException:
+            pass
+    db.rollback()
+    return seen
+
+
+class TestLockStrength:
+    """Execute re-runs the preview under row locks, then takes the global audit-chain lock. A plain
+    FOR UPDATE on the work order conflicts with the FOR KEY SHARE every concurrent foreign-key insert
+    on it takes (events, time entries, comments), widening the deadlock window against writers that
+    take the chain lock first -- so the two kinds that only guard the work order take the weakest
+    lock their own write needs, and every other kind keeps FOR UPDATE."""
+
+    def test_a_due_date_change_locks_the_work_order_for_no_key_update(self, db_session, test_user, test_work_order):
+        seen = _locked_preview(db_session, test_user, 'change_due_date', due_input(test_work_order))
+        # Exactly the lock its own non-key UPDATE takes: no upgrade mid-transaction, and a soft
+        # delete or version-bumping write still waits.
+        assert seen == [({'work_orders'}, 'FOR NO KEY UPDATE')]
+
+    def test_a_note_locks_the_work_order_for_share(self, db_session, test_user, test_work_order):
+        seen = _locked_preview(db_session, test_user, 'add_note', note_input(test_work_order))
+        locks = _work_order_locks(seen)
+        assert locks and locks[0] == 'FOR SHARE', seen
+        # Nothing on the note path locks the work order for an update of any kind.
+        assert not {'FOR UPDATE', 'FOR NO KEY UPDATE'} & set(locks), seen
+
+    @pytest.mark.parametrize(
+        'kind, table',
+        [('repeat_job', 'work_orders'), ('attach_document', 'work_orders'), ('draft_purchase_order', 'vendors')],
+    )
+    def test_every_other_kind_still_locks_for_update(self, db_session, test_user, test_work_order, kind, table):
+        data = dict(SAMPLE_INPUTS[kind])
+        if 'source_work_order_id' in data:
+            data['source_work_order_id'] = test_work_order.id
+        if 'work_order_id' in data:
+            data['work_order_id'] = test_work_order.id
+        seen = _locked_preview(db_session, test_user, kind, data)
+        assert any(table in tables for tables, _ in seen), seen
+        assert {clause for _, clause in seen} == {'FOR UPDATE'}, seen
+
+    def test_the_whole_due_date_execute_never_locks_the_work_order_harder(
+        self, client, db_session, auth_headers, test_work_order
+    ):
+        task = propose(client, auth_headers, 'change_due_date', due_input(test_work_order)).json()
+        with locked_reads(db_session) as seen:
+            response = execute(client, auth_headers, task)
+        assert response.status_code == 200, response.text
+        assert set(_work_order_locks(seen)) == {'FOR NO KEY UPDATE'}, seen
+        # The task row itself keeps its FOR UPDATE: two executes of one task must serialize.
+        assert ({'hank_tasks'}, 'FOR UPDATE') in seen
+
+    def test_the_whole_note_execute_never_locks_the_work_order_for_an_update(
+        self, client, db_session, auth_headers, test_work_order
+    ):
+        task = propose(client, auth_headers, 'add_note', note_input(test_work_order)).json()
+        with locked_reads(db_session) as seen:
+            response = execute(client, auth_headers, task)
+        assert response.status_code == 200, response.text
+        locks = _work_order_locks(seen)
+        assert locks and locks[0] == 'FOR SHARE', seen
+        # The comment service may read the record FOR KEY SHARE too; neither conflicts with an
+        # FK insert, and neither is an update lock.
+        assert set(locks) <= {'FOR SHARE', 'FOR KEY SHARE'}, seen
+        assert db_session.query(Comment).count() == 1

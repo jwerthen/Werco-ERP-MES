@@ -93,6 +93,33 @@ UNSUPPORTED_KIND_DETAIL = 'Hank cannot run this kind of task.'
 PLAN_ROW_LIMIT = 2000
 
 
+class RowLock(str, Enum):
+    """How strongly a ``locked`` read in :meth:`HankTaskService._rows` locks the rows it reads.
+
+    Postgres row-lock modes (SQLite takes no row locks, so tests compile the SQL with the Postgres
+    dialect to see them). ``UPDATE`` is the default and what every kind takes unless its preview
+    names a weaker mode. A plain FOR UPDATE conflicts with the FOR KEY SHARE that every concurrent
+    foreign-key insert referencing the row takes (an operational event, a time entry, a comment's
+    events), and an execute goes on to take the global audit-chain lock -- so a lock stronger than
+    the kind's own write needs only widens the window for a deadlock against a writer that took the
+    chain lock first. A kind that only has to keep the row from changing under it takes the weakest
+    mode that does.
+    """
+
+    UPDATE = 'update'  # FOR UPDATE: conflicts with every other row lock, KEY SHARE included
+    NO_KEY_UPDATE = 'no_key_update'  # FOR NO KEY UPDATE: the lock a non-key UPDATE takes anyway
+    SHARE = 'share'  # FOR SHARE: blocks any UPDATE / DELETE of the row, never a KEY SHARE
+
+
+# ``with_for_update`` arguments per mode. ``key_share=True`` ALONE renders FOR NO KEY UPDATE;
+# ``read=True`` alone renders FOR SHARE (both together would be FOR KEY SHARE, which no kind uses).
+_ROW_LOCK_ARGS = {
+    RowLock.UPDATE: {},
+    RowLock.NO_KEY_UPDATE: {'key_share': True},
+    RowLock.SHARE: {'read': True},
+}
+
+
 def _default(value):
     if isinstance(value, Enum):
         return value.value
@@ -277,17 +304,18 @@ class HankTaskService:
             snoozed_until=task.snoozed_until,
         )
 
-    def _rows(self, model, predicate, *, locked=False):
+    def _rows(self, model, predicate, *, locked=False, strength=RowLock.UPDATE):
+        """``strength`` applies only when ``locked``; see :class:`RowLock` for when to weaken it."""
         query = tenant_query(self.db, model, self.company_id).filter(predicate).order_by(model.id)
         if locked:
-            query = query.with_for_update().populate_existing()
+            query = query.with_for_update(**_ROW_LOCK_ARGS[strength]).populate_existing()
         rows = query.limit(PLAN_ROW_LIMIT + 1).all()
         if len(rows) > PLAN_ROW_LIMIT:
             raise HTTPException(409, 'This source plan is too large for Hank. Use the existing ERP workflow.')
         return rows
 
-    def _work_order(self, row_id, *, locked=False):
-        rows = self._rows(WorkOrder, WorkOrder.id == row_id, locked=locked)
+    def _work_order(self, row_id, *, locked=False, strength=RowLock.UPDATE):
+        rows = self._rows(WorkOrder, WorkOrder.id == row_id, locked=locked, strength=strength)
         if not rows or rows[0].is_deleted:
             raise HTTPException(404, 'Work order not found')
         return rows[0]
@@ -538,7 +566,12 @@ class HankTaskService:
         """Move ``due_date`` only -- never ``must_ship_by``. Refusals (no-op, terminal status) run at
         prepare and again under the row lock at execute."""
         parsed = ChangeDueDateInput.model_validate(data)
-        work_order = self._work_order(parsed.work_order_id, locked=locked)
+        # FOR NO KEY UPDATE, not FOR UPDATE: the execute's own write is a non-key UPDATE of this row,
+        # which takes exactly this lock anyway (so no upgrade happens mid-transaction), and it still
+        # blocks a concurrent soft delete or version-bumping write between the snapshot check and
+        # the write. Unlike FOR UPDATE it does not block the FOR KEY SHARE a concurrent foreign-key
+        # insert on this work order takes (events, time entries, comments) -- see RowLock.
+        work_order = self._work_order(parsed.work_order_id, locked=locked, strength=RowLock.NO_KEY_UPDATE)
         number = work_order.work_order_number
         new_due_date = parsed.new_due_date.isoformat()
         if work_order.due_date == parsed.new_due_date:
@@ -583,7 +616,13 @@ class HankTaskService:
         without writing anything."""
         self._refuse_api_token_for_people_only('add_note')
         parsed = AddNoteInput.model_validate(data)
-        work_order = self._work_order(parsed.work_order_id, locked=locked)
+        # FOR SHARE, not FOR UPDATE: a note never writes the work-order row, it only needs the row
+        # to stay live and unchanged until the comment is in. FOR SHARE blocks a concurrent soft
+        # delete or header write and does not conflict with FOR KEY SHARE -- the lock the comment
+        # service itself takes on this row and every concurrent foreign-key insert takes -- see RowLock.
+        # If the note path ever UPDATEs the work order, this must become NO_KEY_UPDATE: two notes
+        # holding FOR SHARE that both upgrade to an update lock deadlock on each other.
+        work_order = self._work_order(parsed.work_order_id, locked=locked, strength=RowLock.SHARE)
         draft = comment_service.validate_comment(
             self.db,
             company_id=self.company_id,

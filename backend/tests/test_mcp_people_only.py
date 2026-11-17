@@ -9,7 +9,9 @@ PERSON's JWT (the case the API-token refusals cannot see):
 * ``prepare_task`` with kind ``add_note`` -> 403, nothing dispatched, no task row;
 * ``execute_task`` on an ``add_note`` task the person prepared in the app -> 403 after ONE read of
   the task, the execute never dispatched, no comment;
-* a task the caller cannot read (absent, someone else's) -> the route's own 404, unchanged;
+* a task the caller cannot read (absent, someone else's) -> the read's own 404, which is the answer
+  the execute route gives, after exactly ONE read and with the execute never dispatched -- a task
+  that becomes visible between the read and the execute is never run unread;
 * a read that cannot complete -> 503, the execute never dispatched (fail closed, no information);
 * ``change_due_date`` is prepared and executed through MCP as before;
 * the routes themselves still serve the person in the app;
@@ -133,12 +135,12 @@ class TestExecute:
         assert done.status_code == 200, done.text
         assert db_session.query(Comment).count() == 1
 
-    async def test_a_task_the_caller_cannot_read_gets_the_routes_own_answer(
+    async def test_a_task_the_caller_cannot_read_gets_the_routes_own_answer_without_an_execute(
         self, client, db_session, auth_headers, admin_headers, test_work_order, catalog
     ):
         someone_elses = prepare_in_app(client, admin_headers, 'add_note', note_input(test_work_order))
-        server, executor = make_server(catalog, headers=auth_headers)
         for task_id in (someone_elses['id'], 987654):
+            server, executor = make_server(catalog, headers=auth_headers)
             result = await call(
                 server, 'execute_task', {'task_id': task_id, 'expected_company_id': 1, 'expected_version': 1}
             )
@@ -148,15 +150,80 @@ class TestExecute:
                 json={'expected_company_id': 1, 'expected_version': 1},
             )
             assert result.is_error and direct.status_code == 404
+            # The same answer the execute route gives, so the read is no oracle...
             assert result.structured_content['status'] == 404
             assert result.structured_content['detail'] == direct.json()['detail']
-        assert executor.calls == [
-            ('GET', f'{TASKS}/{someone_elses["id"]}'),
-            ('POST', f'{TASKS}/{someone_elses["id"]}/execute'),
-            ('GET', f'{TASKS}/987654'),
-            ('POST', f'{TASKS}/987654/execute'),
-        ]
+            # ...after exactly ONE read, and the execute is never dispatched.
+            assert executor.calls == [('GET', f'{TASKS}/{task_id}')]
+        db_session.expire_all()
         assert db_session.query(Comment).count() == 0
+        assert db_session.get(HankTask, someone_elses['id']).status == 'awaiting_review'
+
+    async def test_a_note_that_appears_after_a_refused_read_is_never_executed(
+        self, client, db_session, auth_headers, test_work_order, catalog
+    ):
+        """Check-then-act: the read is refused, the task is readable by the time an execute would land.
+
+        The canned 404 stands in for a task that was created (or became visible to this caller) between
+        the read and the execute. Dispatching the execute "so the route's own error wins" would post the
+        note; the read's answer is returned instead and nothing is dispatched after it.
+        """
+        task = prepare_in_app(client, auth_headers, 'add_note', note_input(test_work_order))
+        read_path = f'{TASKS}/{task["id"]}'
+        not_found = ExecResult(
+            status=404, content=b'{"detail": "Hank task not found"}', content_type='application/json'
+        )
+        server, executor = make_server(catalog, headers=auth_headers)
+        executor.refuse = lambda method, path: not_found if (method, path) == ('GET', read_path) else None
+        result = await call(
+            server, 'execute_task', {'task_id': task['id'], 'expected_company_id': 1, 'expected_version': 1}
+        )
+        assert result.is_error
+        assert (result.structured_content['status'], result.structured_content['detail']) == (
+            404,
+            'Hank task not found',
+        )
+        assert executor.calls == [('GET', read_path)], 'the execute is never dispatched after a refused read'
+        db_session.expire_all()
+        assert db_session.query(Comment).count() == 0
+        assert db_session.get(HankTask, task['id']).status == 'awaiting_review'
+
+    @pytest.mark.parametrize(
+        'status, body, detail',
+        [
+            (401, b'{"detail": "Could not validate credentials"}', 'Could not validate credentials'),
+            (
+                403,
+                b'{"detail": "Your current role cannot view this Hank task"}',
+                'Your current role cannot view this Hank task',
+            ),
+            (404, b'{"detail": "Hank task not found"}', 'Hank task not found'),
+            (
+                422,
+                b'{"detail": [{"loc": ["path", "task_id"], "msg": "bad", "type": "int_parsing"}]}',
+                [{'loc': ['path', 'task_id'], 'msg': 'bad', 'type': 'int_parsing'}],
+            ),
+        ],
+    )
+    async def test_every_final_refusal_is_returned_verbatim_and_nothing_is_dispatched(
+        self, client, db_session, auth_headers, test_work_order, catalog, status, body, detail
+    ):
+        task = prepare_in_app(client, auth_headers, 'change_due_date', due_input(test_work_order))
+        read_path = f'{TASKS}/{task["id"]}'
+        canned = ExecResult(status=status, content=body, content_type='application/json')
+        server, executor = make_server(catalog, headers=auth_headers)
+        executor.refuse = lambda method, path: canned if (method, path) == ('GET', read_path) else None
+        result = await call(
+            server, 'execute_task', {'task_id': task['id'], 'expected_company_id': 1, 'expected_version': 1}
+        )
+        assert result.is_error
+        assert result.structured_content['status'] == status
+        assert result.structured_content['detail'] == detail
+        assert result.structured_content['path'] == f'{read_path}/execute'
+        # Even a kind an agent MAY run is not executed on a refused read: the refusal is the answer.
+        assert executor.calls == [('GET', read_path)]
+        db_session.expire_all()
+        assert db_session.get(HankTask, task['id']).status == 'awaiting_review'
 
     @pytest.mark.parametrize('failure', ['server_error', 'rate_limited', 'transport', 'no_kind'])
     async def test_a_read_that_cannot_complete_fails_closed(
