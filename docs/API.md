@@ -6032,12 +6032,14 @@ uploads go through text extraction + LLM. See
 >   (*Checklist at completion* below). `notes` is refused too, because `/complete` writes them as part
 >   of the completion record; a later note is `POST /maintenance/log` naming the work order's machine
 >   or asset and its `maintenance_wo_id` — a dated `maintenance_logs` row signed by its author
->   (`performed_by`), with its own audit row — not an edit of the record. A value identical to the
->   record's is an echo, not a change, and is accepted (enums by value, `requires_shutdown` by truth —
->   a legacy `null` reads as `false` — everything else exactly as stored, text not normalized); on a
->   completed or cancelled work order such a request writes nothing (no update, no audit row) and
->   returns the work order unchanged. Open work orders are unaffected, and the Maintenance page offers
->   no edit on a completed or cancelled row.
+>   (`performed_by`), with its own audit row — not an edit of the record. (The server does not yet
+>   check that the log's machine or asset is the work order's, and the Maintenance page has no
+>   log-entry form; both are open follow-ups.) A value identical to the record's is an echo, not a
+>   change, and is accepted (enums by value, `requires_shutdown` by truth — a legacy `null` reads as
+>   `false` — `title` trimmed, as the request's is, and everything else exactly as stored, other text
+>   not normalized); on a completed or cancelled work order such a request writes nothing (no update,
+>   no audit row) and returns the work order unchanged. Open work orders are unaffected, and the
+>   Maintenance page offers no edit on a completed or cancelled row.
 > - **An operator report cannot double it either.** `POST /downtime/` on a machine a maintenance work
 >   order already holds down (its event is open, the work order in progress or on hold after a start)
 >   is **409** naming the work order and the open event: the stoppage is already being recorded, and

@@ -961,9 +961,12 @@ def create_work_order(
 def _same_as_record(field: str, current: Any, sent: Any) -> bool:
     """Whether a ``PUT`` value repeats what the work order already holds. Enum members compare by
     value; ``requires_shutdown`` by truth, as its started-WO rule below reads it (a legacy NULL is
-    "no shutdown"). Anything else must be equal as stored -- text is not normalized."""
+    "no shutdown"); ``title`` trimmed, since the request's is (a legacy title stored with stray
+    spaces can still be echoed). Anything else must be equal as stored -- text is not normalized."""
     if field == "requires_shutdown":
         return bool(current) == bool(sent)
+    if field == "title" and isinstance(current, str):
+        current = current.strip()
     current = current.value if isinstance(current, Enum) else current
     sent = sent.value if isinstance(sent, Enum) else sent
     return current == sent
