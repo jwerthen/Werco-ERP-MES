@@ -2454,7 +2454,12 @@ or linked-record ids return **404**; role refusals return **403**. Revision hist
 rebound or deleted, and receipt certificates remain protected even after a receipt is voided
 (**409**). A document that a same-company QMS standard or QMS clause evidence link names is
 refused too (**409**), including through a removed standard, clause or evidence link; clearing
-the link's `document_id` (Admin / Manager / Quality, audited) releases it. New revisions retain prior files, type and links. Required audit loss returns **503**
+the link's `document_id` (Admin / Manager / Quality, audited) releases it. So is a document that
+a same-company shipment carrier label or bill of lading, receipt receiving label, process-sheet
+step record attachment or governed file record names (**409**), voided, removed and superseded
+records included: none has a verb that releases it. A laser nest's PDF is refused too, a removed
+nest's included, until Detach (`DELETE /laser-nests/{id}/document`, Admin / Manager / Supervisor,
+audited) clears it from every live nest. New revisions retain prior files, type and links. Required audit loss returns **503**
 and rolls back metadata changes; bytes are removed only by the corresponding failure cleanup
 or after an audited deletion commits. Same-company historical part labels remain available.
 The Documents, Quality and Job Costing UI write controls reflect the fixed role gates and FAI

@@ -263,6 +263,12 @@ def attach_laser_nest_document(
 
     old_document_id = nest.document_id
     nest.document_id = document.id
+    # Flush the link before the audit row. The audit row takes the global chain lock
+    # with a raw statement that does not autoflush, so an unflushed link would take its
+    # key-share lock on the document row only after the chain lock: the opposite order
+    # to DELETE /documents/{id}, which locks the document row first and could deadlock
+    # against this attach on Postgres.
+    db.flush()
 
     audit.log_update(
         resource_type="laser_nest",

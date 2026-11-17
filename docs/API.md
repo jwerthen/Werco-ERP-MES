@@ -4163,7 +4163,7 @@ mixed**:
 | POST | `/work-orders/{id}/laser-nests/manual` | Manually add **one** nest to a work order (child laser WO of an assembly, or the addressed `laser_cutting` WO directly). Creates a clock-in-able `LASER` operation; sets the laser WO RELEASED the same way the import does (release recorded when it was a draft or unstamped; an **on-hold** laser WO stays on hold, so the new nest cannot be started until the hold is lifted) | Admin / Manager / Supervisor |
 | PATCH | `/laser-nests/{id}` | Edit a manual nest (all fields optional). Raising `planned_runs` on a COMPLETE nest or a finished laser work order is **409**; a standing API token lowering it once work is recorded on the nest is **403** | Admin / Manager / Supervisor |
 | POST | `/laser-nests/{id}/attach-document` | Attach an already-uploaded PDF Document to the nest (PDF-only) | Admin / Manager / Supervisor |
-| DELETE | `/laser-nests/{id}/document` | Detach the PDF (clears the FK; the Document row is left intact) | Admin / Manager / Supervisor |
+| DELETE | `/laser-nests/{id}/document` | Detach the PDF (clears the FK; the Document row is left intact). The only way to release a live nest's PDF for `DELETE /documents/{id}`, which refuses **409** while any nest, removed ones included, carries it | Admin / Manager / Supervisor |
 | GET | `/laser-nests/{id}/document` | Serve the attached PDF **inline** for operator preview | Yes (any authenticated user) |
 | DELETE | `/laser-nests/{id}` | Soft-delete the nest; its operation goes `ON_HOLD` | Admin / Manager / Supervisor |
 | POST | `/laser-nests/{id}/restore` | Restore a cancelled nest and its planned runs, retaining the original operation and drawing | Admin / Manager / Supervisor |
@@ -8722,6 +8722,39 @@ Only the active company's QMS rows are read. A link from another company's QMS r
 create / update routes have accepted any existing document id, another company's included) is not
 named, since that would disclose the other tenant's record; on Postgres that delete still fails at
 the foreign key until the link is cleared.
+
+Every other table with a foreign key to `documents.id` is checked the same way: before the audit
+write and before any change, so a refusal (**409**) writes nothing and keeps the bytes. None of these
+columns has an `ON DELETE` either, so each used to fail at flush on Postgres with a **500** that gave
+no reason. The records below keep their document for as long as they exist, removed or voided
+included, and there is no verb that lets go of it:
+
+| Referencing column | Refusal says | Kept after |
+|---|---|---|
+| `shipments.label_document_id` / `bol_document_id` | *"This document is the carrier label (or bill of lading) for shipment SHP-…"* | the label is voided or the shipment is removed |
+| `po_receipts.label_document_id` | *"This document is the receiving label for receipt RCV-…"* | the receipt is voided |
+| `operation_step_records.attachment_document_id` | *"This document is evidence captured at a process-sheet step on work order WO-…"* | the step record is superseded |
+| `document_files.document_id` | *"This document is held by a governed file record…"* (retention policy / legal hold) | — |
+
+A receipt reprint stores a new label document and points the receipt at it, so only the label the
+receipt currently names is protected by this check; an earlier print is no longer referenced.
+
+A **laser nest's PDF** (`laser_nests.document_id`) is a reference drawing with its own audited
+release: *"This document is the PDF attached to laser nest CNC-… on work order WO-… [and N other
+laser nests]. Detach it from the nest first (Detach on the work order's laser nest row)."* That is
+`DELETE /laser-nests/{id}/document` (Admin / Manager / Supervisor), once per nest; a duplicated work
+order copies the reference, so one PDF can sit on several nests. A **removed** nest keeps its PDF
+(*"…the PDF of a removed laser nest, which keeps it so that restoring the nest brings its drawing
+back"*): `POST /laser-nests/{id}/restore` brings the nest back with it, and Detach answers **404** for
+a removed nest. Removing a nest therefore does not release its PDF; detach it first.
+
+The retained records are checked before the QMS and nest links, so a user is never sent to unlink
+or detach something only to be refused again for a label or evidence. The nest attach verb
+(`POST /laser-nests/{id}/attach-document`) flushes the link before its audit row, like the QMS
+`PUT`s, so it takes its lock on the document row before the audit-chain lock. Every other writer of
+these columns creates the document in the same transaction or already flushes first. Only the active
+company's rows are read; no writer accepts another company's document, and a row of another company
+is never named.
 
 Manual upload is a release action: the persisted Document stores `status="released"`, the actual
 `released_by` actor, and UTC `released_at`. Returned metadata exposes the released status;
