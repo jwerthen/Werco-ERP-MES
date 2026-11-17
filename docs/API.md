@@ -8975,27 +8975,43 @@ in `RBAC_PERMISSIONS.md`.
 > | paused | K ≥ 0 (the company has entries) | `warning` / `partial` | `…; SHA-256 integrity chain paused (K entries written without it, J in last 12 months)` — or `(no entries written without it yet)` |
 > | either | no entries at all | `no_data` / `not_assessed` | unchanged when on; `…; SHA-256 integrity chain paused` when paused |
 >
-> If the trigger check finds either trigger missing or disabled, the row is `warning` / `partial`
-> whatever the chain state, and `description` ends `; database UPDATE/DELETE triggers missing or
-> disabled`. `health_detail` ends with the trigger finding: "Database triggers refuse UPDATE and DELETE
-> statements on audit entries." when both are in force, the missing/disabled sentence when not, and
-> "Database UPDATE/DELETE trigger status could not be checked." off PostgreSQL (dev/test SQLite) or if
-> the catalog read fails (it runs in its own savepoint, so a failure cannot abort the request). A failed
-> read **on PostgreSQL** also caps the row at `warning` / `partial` and appends `; database UPDATE/DELETE
-> trigger status could not be checked` to `description`; off PostgreSQL there is nothing to read, so it
-> does not cap. The warning rows' `health_detail` also says the paused entries carry no integrity hash and can never be
-> cryptographically verified, with the split `K of N (J in the last 12 months)`. The healthy text says
-> the chain is **enabled**, not verified — chain integrity is checked by the platform-admin
-> `/audit/integrity/*` endpoints, not by this row.
+> Once the company has at least one audit entry, the trigger check can cap the row too. If it finds
+> either trigger missing or disabled, the row is `warning` / `partial` whatever the chain state, and
+> `description` ends `; database UPDATE/DELETE triggers missing or disabled`. A failed catalog read
+> **on PostgreSQL** (it runs in its own savepoint, so a failure cannot abort the request) caps the row
+> the same way, with `description` ending `; database UPDATE/DELETE trigger status could not be
+> checked`; off PostgreSQL (dev/test SQLite) there is no catalog to read, so the status is reported as
+> unchecked without capping. `health_detail` then ends with the trigger finding: "Database triggers
+> refuse UPDATE and DELETE statements on audit entries." when both are in force, "The database triggers
+> that refuse UPDATE and DELETE statements on audit entries are missing or disabled." when not, and
+> "Database UPDATE/DELETE trigger status could not be checked." when the read failed or there is no
+> catalog to read.
 >
-> A clause backed by this row therefore gets a suggested roll-up (`overall_suggested_compliance`,
-> auto-link's `compliance_summary`) of `partial` at best, never `compliant`, once the company has any
-> paused entry, while the chain is paused, or while the triggers are missing or unreadable. That is a
-> suggestion only: neither endpoint writes the clause's `compliance_status`. Of the fields that
-> change, auto-link (`POST /qms-standards/{standard_id}/auto-link`) stores only `description`
-> (`health_status`, `health_detail` and `suggested_compliance` are computed per call and never
-> persisted), so stored evidence picks up the new wording on the next auto-link run in which the audit
-> rule computes (a run where it fails leaves the stored link unchanged; see `evidence_not_computed`).
+> With **no** audit entries the trigger state never caps the row: it stays `no_data` /
+> `not_assessed` and `description` carries no trigger suffix. While the chain is on, `health_detail` is
+> just "No audit log entries found"; while it is paused, it adds that entries written now will not be
+> hash-chained, followed by the trigger finding.
+>
+> When the warning comes from the chain — paused now, or paused entries on record — `health_detail`
+> also says the paused entries carry no integrity hash and can never be cryptographically verified,
+> with the split `K of N (J in the last 12 months)` (K can be 0 while the chain is paused, until one of
+> the company's entries is written without it). A warning from the triggers alone keeps the healthy
+> chain text and adds the trigger finding. The healthy text says the chain is **enabled**, not
+> verified: this row does not check chain integrity. `GET /audit/integrity/verify` and
+> `/audit/integrity/verify-recent` do (platform-admin only, like the `/audit/integrity/status`
+> statistics), and `GET /audit/integrity/record/{sequence_number}` verifies one of the company's own
+> entries for a tenant Admin (see [Audit Log](#audit-log)).
+>
+> For a company with audit entries, a clause backed by this row therefore never gets a suggested
+> roll-up (`overall_suggested_compliance`, auto-link's `compliance_summary`) of `compliant` once the
+> company has any paused entry, while the chain is paused, or while the triggers are missing, disabled
+> or (on PostgreSQL) unreadable: `partial` at best. Nor does a company with no audit entries, whose
+> `not_assessed` row never rolls up `compliant`. That is a suggestion only: neither endpoint writes the
+> clause's `compliance_status`. Of the fields that change, auto-link
+> (`POST /qms-standards/{standard_id}/auto-link`) stores only `description` (`health_status`,
+> `health_detail` and `suggested_compliance` are computed per call and never persisted), so stored
+> evidence picks up the new wording on the next auto-link run in which the audit rule computes (a run
+> where it fails leaves the stored link unchanged; see `evidence_not_computed`).
 > The QMS page's linked-evidence list shows a stored link's `title` and count, not its `description`;
 > the live auto-evidence preview shows `description` and `health_detail`. That is why the title was
 > renamed: "Immutable Hash-Chain" was untrue for every paused entry and is the one claim the list

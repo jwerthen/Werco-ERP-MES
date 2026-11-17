@@ -20,6 +20,7 @@ suite runs on SQLite, where trigger state cannot be read (``None`` -> "could not
 the PostgreSQL answers are injected by patching ``_audit_triggers_in_force``.
 """
 
+import logging
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -38,6 +39,7 @@ from app.services.audit_service import PAUSED_CHAIN_PLACEHOLDER, AuditService
 from app.services.auto_evidence_service import (
     _AUDIT_LOG_TRIGGER_CHECK_SQL,
     AUDIT_LOG_TRIGGER_NAMES,
+    AUDIT_TRIGGER_READ_FAILED_LOG,
     AUDIT_TRIGGERS_IN_FORCE_SENTENCE,
     AUDIT_TRIGGERS_MISSING_SENTENCE,
     AUDIT_TRIGGERS_UNCHECKED_SENTENCE,
@@ -481,6 +483,49 @@ def test_successful_trigger_read_is_released_and_needs_both_triggers(db_session:
         ("sql", "trigger check"),
         ("RELEASE SAVEPOINT", savepoints[0]),
     ]
+
+
+def test_a_persistent_trigger_read_failure_logs_its_traceback_once_per_run(db_session: Session, monkeypatch, caplog):
+    """A catalog read that keeps failing must not put a traceback in the log on every request.
+
+    Every auto-evidence GET, and every audit-matching clause of an auto-link run, reads the
+    triggers. The first failure of a run logs at WARNING with its traceback, the repeats at DEBUG;
+    a successful read ends the run, so the next failure warns again. The row's answer -- capped,
+    "could not be checked" -- is the same every time: quieter logging changes nothing it says.
+    """
+    monkeypatch.setattr(auto_evidence_service, "_trigger_read_failure_reported", False)
+    _set_chain(monkeypatch, True)
+    _write(db_session, _writer(db_session, COMPANY_A), 2)
+    monkeypatch.setattr(auto_evidence_service, "_dialect_name", lambda db: "postgresql")
+    logger_name = auto_evidence_service.logger.name
+    caplog.set_level(logging.DEBUG, logger=logger_name)
+
+    def _trigger_read_logs() -> list:
+        return [r for r in caplog.records if r.name == logger_name and AUDIT_TRIGGER_READ_FAILED_LOG in r.getMessage()]
+
+    results = [_query_audit_log(db_session, COMPANY_A) for _ in range(3)]
+
+    assert results[0] == results[1] == results[2]
+    assert results[0]["health_status"] == "warning"
+    assert results[0]["suggested_compliance"] == "partial"
+    assert results[0]["description"].endswith("; database UPDATE/DELETE trigger status could not be checked")
+    assert results[0]["health_detail"].endswith(AUDIT_TRIGGERS_UNCHECKED_SENTENCE)
+    records = _trigger_read_logs()
+    assert [r.levelno for r in records] == [logging.WARNING, logging.DEBUG, logging.DEBUG]
+    assert records[0].exc_info is not None
+
+    # A read that succeeds ends the run of failures...
+    caplog.clear()
+    monkeypatch.setattr(auto_evidence_service, "_AUDIT_LOG_TRIGGER_CHECK_SQL", "SELECT 2")
+    assert _audit_triggers_in_force(db_session) is True
+    assert _trigger_read_logs() == []
+
+    # ...so the next failure is reported at WARNING, with its traceback, again.
+    monkeypatch.setattr(auto_evidence_service, "_AUDIT_LOG_TRIGGER_CHECK_SQL", _AUDIT_LOG_TRIGGER_CHECK_SQL)
+    assert _audit_triggers_in_force(db_session) is None
+    records = _trigger_read_logs()
+    assert [r.levelno for r in records] == [logging.WARNING]
+    assert records[0].exc_info is not None
 
 
 def test_trigger_check_sql_names_the_migration_triggers():
