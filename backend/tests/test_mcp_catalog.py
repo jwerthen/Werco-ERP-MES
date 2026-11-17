@@ -144,8 +144,10 @@ class TestMembership:
         # only a named person's click runs a recommendation), the two customer
         # export-control writes (only an Admin signed in to the app marks a customer
         # controlled), the four company egress kill-switch writes (lead decision
-        # 2026-11-15: an egress switch is a person's judgment) and the Approved Supplier
-        # List writes (a supplier-approval decision is a person's judgment) -- nothing else.
+        # 2026-11-15: an egress switch is a person's judgment), the Approved Supplier
+        # List writes (a supplier-approval decision is a person's judgment) and bulk
+        # release (release_work_order stays the agent's only release door, one job per
+        # call) -- nothing else.
         assert set(EXCLUDED_OPERATIONS) == {
             ("POST", "/api/v1/work-orders/import"),
             ("POST", "/api/v1/purchasing/purchase-orders/import"),
@@ -162,6 +164,8 @@ class TestMembership:
             # The legacy approved_supplier_list writes (read-only history since migration 123).
             ("POST", "/api/v1/supplier-scorecards/approved-suppliers/"),
             ("PUT", "/api/v1/supplier-scorecards/approved-suppliers/{asl_id}"),
+            # Bulk release: an app action, never a tool.
+            ("POST", "/api/v1/work-orders/bulk-release"),
         }
         assert EGRESS_SWITCH_OPERATIONS <= set(EXCLUDED_OPERATIONS)
 

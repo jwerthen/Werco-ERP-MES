@@ -9,6 +9,7 @@ import {
   isAdmin,
   canManageUsers,
   canApprove,
+  userCanReleaseWorkOrders,
   getPermissionsForRole,
   ROLE_LABELS,
   ROLE_DESCRIPTIONS,
@@ -239,6 +240,27 @@ describe('permissions utility', () => {
 
     it('returns false for undefined role', () => {
       expect(canApprove(undefined)).toBe(false);
+    });
+  });
+
+  describe('userCanReleaseWorkOrders', () => {
+    // Mirrors require_role([ADMIN, MANAGER, SUPERVISOR]) on POST /work-orders/{id}/release
+    // and POST /work-orders/bulk-release (platform admin / superuser pass require_role).
+    it.each(['admin', 'manager', 'supervisor', 'platform_admin'] as const)('allows %s', (role) => {
+      expect(userCanReleaseWorkOrders({ role })).toBe(true);
+    });
+
+    it.each(['operator', 'quality', 'shipping', 'viewer'] as const)('refuses %s', (role) => {
+      expect(userCanReleaseWorkOrders({ role, is_superuser: false })).toBe(false);
+    });
+
+    it('allows a superuser whatever the role', () => {
+      expect(userCanReleaseWorkOrders({ role: 'viewer', is_superuser: true })).toBe(true);
+    });
+
+    it('refuses a missing user', () => {
+      expect(userCanReleaseWorkOrders(null)).toBe(false);
+      expect(userCanReleaseWorkOrders(undefined)).toBe(false);
     });
   });
 

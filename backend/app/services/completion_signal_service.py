@@ -16,6 +16,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from app.core.queue import enqueue_job_best_effort
+from app.models.user import User
 from app.models.work_order import WorkOrder, WorkOrderOperation
 from app.services.audit_service import AuditService
 from app.services.operational_event_service import OperationalEventService
@@ -107,6 +108,46 @@ def emit_operation_ready_event(
         )
     except Exception:  # pragma: no cover - signal failure must not fail the transition
         logger.exception("operation_ready event emit failed for op %s (company %s)", operation.id, company_id)
+
+
+def emit_work_order_lifecycle_event(
+    db: Session,
+    *,
+    company_id: int,
+    current_user: User,
+    work_order: WorkOrder,
+    event_type: str,
+    severity: str = "info",
+    payload: Optional[dict] = None,
+) -> None:
+    """Emit a WO-lifecycle OperationalEvent (released/started/completed/...).
+
+    BEST-EFFORT: these events are telemetry attached to the status change, not the
+    status change itself -- an event-store failure must never fail the release/
+    start/complete that triggered it, so this routes through ``emit_best_effort``
+    (which logs the failure with event type / WO id / company id and continues).
+
+    Lives here, not in the work-orders router, so a service can emit one without
+    importing an endpoint module (``work_order_release_service`` is the first such
+    caller); the router imports it under its historical name ``_emit_work_order_event``.
+    ``source_module`` stays ``"work_orders"`` for every caller, so the stored event is
+    byte-identical to what the router wrote before the move.
+    """
+    OperationalEventService(db).emit_best_effort(
+        company_id=company_id,
+        event_type=event_type,
+        source_module="work_orders",
+        entity_type="work_order",
+        entity_id=work_order.id,
+        work_order_id=work_order.id,
+        user_id=current_user.id,
+        severity=severity,
+        event_payload={
+            "work_order_number": work_order.work_order_number,
+            "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
+            **(payload or {}),
+        },
+    )
 
 
 def emit_work_order_completed_event(

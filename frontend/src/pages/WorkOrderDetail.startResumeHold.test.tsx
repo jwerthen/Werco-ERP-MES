@@ -1,5 +1,5 @@
 /**
- * WorkOrderDetail — Start, Resume Work Order, Hold Work Order, and Complete on a held job.
+ * WorkOrderDetail — Start, Resume Work Order, Hold Work Order, Release, and Complete on a held job.
  *
  * Owner ruling 2026-11-05 made the work-order start supervisor-tier and
  * released-only, and took the hold-lift off it. The office therefore needs its
@@ -14,6 +14,8 @@
  *  - Hold Work Order: released / in_progress + supervisor-tier, the existing
  *    version-gated PUT {status: 'on_hold'}; never offered on a draft (the server
  *    refuses DRAFT→ON_HOLD);
+ *  - Release: draft + the shared work_orders:release gate (ADMIN/MANAGER/SUPERVISOR,
+ *    or superuser), the same gate as the work-order list's Release;
  *  - Complete on a READY operation of a held job is disabled — completing would
  *    START it, which the server refuses 409 — while an IN_PROGRESS operation
  *    stays completable (labor already running must always be closable).
@@ -467,6 +469,63 @@ describe('WorkOrderDetail — Hold Work Order', () => {
     renderDetail();
     await loaded();
     expect(screen.queryByRole('button', { name: 'Hold Work Order' })).not.toBeInTheDocument();
+  });
+});
+
+describe('WorkOrderDetail — Release', () => {
+  // POST /work-orders/{id}/release is require_role([ADMIN, MANAGER, SUPERVISOR]); the
+  // button reads the same shared gate as the work-order list's row Release and bulk
+  // selection (userCanReleaseWorkOrders), so the two screens agree on who releases.
+  const releaseButton = () => screen.queryByRole('button', { name: /^release$/i });
+
+  it.each(['operator', 'viewer', 'quality', 'shipping'])(
+    'hides Release on a draft from %s (the server would 403)',
+    async role => {
+      mockUser = { id: 2, role, is_superuser: false };
+      setStatus('draft');
+      renderDetail();
+      await loaded();
+      expect(releaseButton()).not.toBeInTheDocument();
+    }
+  );
+
+  it.each(['admin', 'manager', 'supervisor'])('offers Release on a draft to %s', async role => {
+    mockUser = { id: 3, role, is_superuser: false };
+    setStatus('draft');
+    renderDetail();
+    await loaded();
+    expect(releaseButton()).toBeInTheDocument();
+  });
+
+  it('offers Release to a superuser whatever the role (require_role waves them through)', async () => {
+    mockUser = { id: 4, role: 'viewer', is_superuser: true };
+    setStatus('draft');
+    renderDetail();
+    await loaded();
+    expect(releaseButton()).toBeInTheDocument();
+  });
+
+  it('releases the draft for a supervisor, then re-reads the job', async () => {
+    mockedApi.releaseWorkOrder.mockResolvedValue({});
+    setStatus('draft');
+    renderDetail();
+    await loaded();
+    const loadsBefore = mockedApi.getWorkOrder.mock.calls.length;
+
+    await act(async () => {
+      fireEvent.click(releaseButton()!);
+    });
+
+    expect(mockedApi.releaseWorkOrder).toHaveBeenCalledTimes(1);
+    expect(mockedApi.releaseWorkOrder).toHaveBeenCalledWith(42);
+    await waitFor(() => expect(mockedApi.getWorkOrder.mock.calls.length).toBeGreaterThan(loadsBefore));
+  });
+
+  it('is not offered on a job that is no longer a draft (control)', async () => {
+    setStatus('released');
+    renderDetail();
+    await loaded();
+    expect(releaseButton()).not.toBeInTheDocument();
   });
 });
 

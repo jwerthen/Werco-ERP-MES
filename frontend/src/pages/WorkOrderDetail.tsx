@@ -17,7 +17,7 @@ import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
 import { useAuth } from '../context/AuthContext';
 import { canPublishDocuments } from '../utils/recordWriteAccess';
-import { hasPermission } from '../utils/permissions';
+import { hasPermission, userCanReleaseWorkOrders } from '../utils/permissions';
 import { customerPoDashboardUrl } from '../utils/customerPurchaseOrders';
 import LaserNestManualModal from '../components/laser/LaserNestManualModal';
 import LaserNestImportWizard from '../components/laser/LaserNestImportWizard';
@@ -552,6 +552,12 @@ export default function WorkOrderDetail() {
   // maps to. Named separately so the gate reads at its call site: an operator
   // offered Start would only meet a 403.
   const canStartWorkOrder = canCorrectCount;
+  // Release (`POST /work-orders/{id}/release`) is require_role([ADMIN, MANAGER,
+  // SUPERVISOR]) on the backend. It reads the SAME shared gate as the work-order
+  // list's row Release and bulk selection, so the two screens can never disagree
+  // about who releases; until this gate existed every role saw Release on a draft
+  // and anyone below supervisor clicked straight into a 403.
+  const canReleaseWorkOrder = userCanReleaseWorkOrders(user);
   // Material-tie PATCH/untie is require_role([ADMIN, MANAGER, SUPERVISOR]) on
   // the backend — the same tier work_orders:edit maps to. Reads are open to any
   // authenticated tenant user, so the panel itself is not gated.
@@ -2172,7 +2178,7 @@ export default function WorkOrderDetail() {
           <span className={`px-3 py-1 rounded-full text-sm font-medium capitalize ${statusColor(workOrder.status)}`}>
             {workOrder.status.replace('_', ' ')}
           </span>
-          {workOrder.status === 'draft' && (
+          {workOrder.status === 'draft' && canReleaseWorkOrder && (
             <Button onClick={handleRelease} className="flex items-center">
               <PlayIcon className="h-5 w-5 mr-2" />
               Release

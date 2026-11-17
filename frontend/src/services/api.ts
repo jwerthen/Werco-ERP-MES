@@ -64,6 +64,8 @@ import {
   WorkOrderDuplicateResult,
   WorkOrderRestoreResponse,
   WorkOrderResumeResponse,
+  WorkOrderBulkReleaseRequest,
+  WorkOrderBulkReleaseResponse,
   WorkOrderTemplate,
   WorkOrderTemplateCreatePayload,
   WorkOrderTemplateListResult,
@@ -1421,6 +1423,19 @@ class ApiService {
 
   async releaseWorkOrder(id: number) {
     const response = await this.api.post(`/work-orders/${id}/release`);
+    this.invalidateDashboardCache();
+    return response.data;
+  }
+
+  // Release several DRAFT work orders in one call (Admin/Manager/Supervisor, the
+  // single-release roles; 1-50 ids, deduped server-side). Each id is released on its
+  // own and the answer is HTTP 200 even when some or all were refused, so callers
+  // must read `released_count` / `error_count` / per-item `results` — never treat a
+  // resolved promise as "all released". Server-gated, so callers stay
+  // NON-optimistic.
+  async bulkReleaseWorkOrders(ids: number[]): Promise<WorkOrderBulkReleaseResponse> {
+    const body: WorkOrderBulkReleaseRequest = { work_order_ids: ids };
+    const response = await this.api.post<WorkOrderBulkReleaseResponse>('/work-orders/bulk-release', body);
     this.invalidateDashboardCache();
     return response.data;
   }
