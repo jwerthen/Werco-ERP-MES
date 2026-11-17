@@ -8915,8 +8915,9 @@ in `RBAC_PERMISSIONS.md`.
 > change is rolled back and the answer is **503** — `PUT`: `"The audit record for this evidence
 > change could not be saved; nothing was changed. Retry."`; `DELETE`: `"The audit record for
 > removing this evidence could not be saved; the evidence was not removed. Retry."` Nothing was
-> saved, so retrying the same request is safe. Before this, a failed audit write was skipped and the
-> route still answered 200 / 204. Unchanged: a `PUT` that changes nothing (an empty body, or values
+> saved, so retrying the same request is safe. Before this, an audit write that failed without a
+> database error (a retry-exhausted sequence collision, a value the audit row could not serialize)
+> was skipped and the route still answered 200 / 204 with the change saved. Unchanged: a `PUT` that changes nothing (an empty body, or values
 > equal to the stored ones) writes no entry and answers 200; the `UPDATE` entry carries the full
 > before / after row in `old_values` / `new_values` and the field-level diff in
 > `extra_data.changes`; the `DELETE` entry carries the row as it stood before the removal in

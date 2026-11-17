@@ -12,7 +12,8 @@ Pinned here:
 
 1. the happy path still writes exactly one committed row, JSON-ready, with the UPDATE row's
    ``extra_data.changes`` diff and the DELETE row's ``extra_data.soft_delete`` + pre-delete
-   ``old_values``;
+   ``old_values``; a re-Verify and an un-verify each write their own row (the history the row
+   itself does not keep), and a row written under an API token carries the credential marker;
 2. a PUT that changes nothing writes no row (and so cannot fail on one);
 3. a failed audit write (``log`` returns ``None``, or raises a database error) answers 503 and
    leaves the evidence exactly as it was, with no audit row;
@@ -42,6 +43,7 @@ from app.services.audit_service import AuditService
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 
 COMPANY_A = 1
+API_TOKENS_URL = "/api/v1/api-tokens/"
 
 PUT_503_DETAIL = "The audit record for this evidence change could not be saved; nothing was changed. Retry."
 DELETE_503_DETAIL = (
@@ -238,6 +240,78 @@ def test_remove_writes_one_required_delete_row_with_the_pre_delete_image(client:
     assert stored.deleted_by == user.id
 
 
+def test_reverify_writes_its_own_row_with_the_judgment_it_replaced(client: TestClient, db_session: Session):
+    """The evidence row keeps only the latest Verify; the audit rows are the history of each one."""
+    first = _make_user(db_session)
+    second = _make_user(db_session)
+    evidence = _make_evidence(db_session)
+    evidence_id = evidence.id
+
+    assert client.put(_url(evidence_id), json={"is_verified": True}, headers=_headers_for(first)).status_code == 200
+    resp = client.put(_url(evidence_id), json={"is_verified": True}, headers=_headers_for(second))
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+
+    rows = sorted(_committed_audit_rows(db_session, evidence_id, "UPDATE"), key=lambda r: r.id)
+    assert len(rows) == 2
+    first_date = rows[0].extra_data["changes"]["verified_date"]["new"]
+    changes = rows[1].extra_data["changes"]
+    assert rows[1].user_id == second.id
+    assert changes["verified_by"] == {"old": first.id, "new": second.id}
+    assert changes["verified_date"]["old"] == first_date
+    assert "is_verified" not in changes  # it was already true
+
+
+def test_unverify_writes_a_row(client: TestClient, db_session: Session):
+    user = _make_user(db_session)
+    evidence = _make_evidence(db_session)
+    evidence_id = evidence.id
+
+    assert client.put(_url(evidence_id), json={"is_verified": True}, headers=_headers_for(user)).status_code == 200
+    resp = client.put(_url(evidence_id), json={"is_verified": False}, headers=_headers_for(user))
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+
+    rows = sorted(_committed_audit_rows(db_session, evidence_id, "UPDATE"), key=lambda r: r.id)
+    assert len(rows) == 2
+    changes = rows[1].extra_data["changes"]
+    assert changes["is_verified"] == {"old": True, "new": False}
+    # An un-verify leaves who verified it, and when, on the row; the audit row says it was undone.
+    assert "verified_by" not in changes
+    assert rows[1].new_values["verified_by"] == user.id
+
+
+@pytest.mark.parametrize("verb", ["put", "delete"])
+def test_row_written_under_an_api_token_carries_the_credential_marker(
+    verb: str, client: TestClient, db_session: Session
+):
+    admin = _make_user(db_session, role=UserRole.ADMIN)
+    holder = _make_user(db_session)
+    issued = client.post(API_TOKENS_URL, json={"user_id": holder.id, "label": "qms probe"}, headers=_headers_for(admin))
+    assert issued.status_code == status.HTTP_201_CREATED, issued.text
+    token_id = issued.json()["id"]
+    token_headers = {"Authorization": f"Bearer {issued.json()['token']}", "X-Requested-With": "XMLHttpRequest"}
+    evidence = _make_evidence(db_session)
+    evidence_id = evidence.id
+
+    if verb == "put":
+        resp = client.put(_url(evidence_id), json={"is_verified": True}, headers=token_headers)
+        action = "UPDATE"
+    else:
+        resp = client.delete(_url(evidence_id), headers=token_headers)
+        action = "DELETE"
+    assert resp.status_code in (status.HTTP_200_OK, status.HTTP_204_NO_CONTENT), resp.text
+
+    rows = _committed_audit_rows(db_session, evidence_id, action)
+    assert len(rows) == 1
+    assert rows[0].user_id == holder.id
+    assert rows[0].extra_data["credential"]["kind"] == "api_token"
+    assert rows[0].extra_data["credential"]["api_token_id"] == token_id
+    # The route's own extra_data survives alongside the marker.
+    if verb == "put":
+        assert rows[0].extra_data["changes"]["is_verified"] == {"old": False, "new": True}
+    else:
+        assert rows[0].extra_data["soft_delete"] is True
+
+
 # ---------------------------------------------------------------------------
 # 2. A PUT that changes nothing writes no row, and so cannot fail on one
 # ---------------------------------------------------------------------------
@@ -300,6 +374,17 @@ def test_verify_without_its_audit_row_is_503_and_nothing_is_saved(
     assert stored.verified_date is None
     assert stored.verification_notes == "before"
     assert _committed_audit_rows(db_session, evidence_id, "UPDATE") == []
+
+    # Safe to retry: with the audit working again the same request goes through, once.
+    retry = client.put(
+        _url(evidence_id),
+        json={"is_verified": True, "verification_notes": "after"},
+        headers=_headers_for(user),
+    )
+    assert retry.status_code == status.HTTP_200_OK, retry.text
+    rows = _committed_audit_rows(db_session, evidence_id, "UPDATE")
+    assert len(rows) == 1
+    assert rows[0].extra_data["changes"]["is_verified"] == {"old": False, "new": True}
 
 
 @pytest.mark.parametrize("break_audit", [_audit_returns_none, _audit_raises_db_error], ids=["none", "db-error"])
