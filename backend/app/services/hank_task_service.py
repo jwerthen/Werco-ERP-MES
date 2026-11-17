@@ -670,7 +670,15 @@ class HankTaskService:
         number = work_order.work_order_number
         old_text = old_due_date.isoformat() if old_due_date else 'not set'
         new_text = parsed.new_due_date.isoformat()
-        # REQUIRED: a lost row is AuditWriteError -> rollback -> 503, and the date never moves.
+        # Best-effort telemetry in the PUT's shape, written BEFORE the audit row: the audit row takes
+        # the global audit-chain lock (held to commit), and the event insert's foreign-key checks
+        # take KEY SHARE on the company, user and work-order rows, so the insert may not follow it
+        # (the comment service and PUT /work-orders/{id} use the same order). The event sits in a
+        # savepoint and is enqueued only at the outermost commit, so a lost required audit still
+        # rolls it back. The reason stays on the audit row only: ``reason`` is an email detail key,
+        # so it never goes into the event payload.
+        emit_due_date_changed_event(self.db, company_id=self.company_id, actor=self.user, work_order=work_order)
+        # REQUIRED, and LAST: a lost row is AuditWriteError -> rollback -> 503, and the date never moves.
         _RequiredCreateAudit(audit).log_update(
             resource_type='work_order',
             resource_id=work_order.id,
@@ -680,9 +688,6 @@ class HankTaskService:
             description=f'Due date of {number} moved from {old_text} to {new_text} through Hank',
             extra_data={'reason': parsed.reason, 'via': 'hank'},
         )
-        # Best-effort telemetry in the PUT's shape. The reason stays on the audit row only:
-        # ``reason`` is an email detail key, so it never goes into the event payload.
-        emit_due_date_changed_event(self.db, company_id=self.company_id, actor=self.user, work_order=work_order)
         # No realtime broadcast, deliberately: Hank's endpoint commits once with no post-commit hook,
         # a broadcast must never precede the commit, and realtime ships dark
         # (REALTIME_BROADCAST_ENABLED=False). Open views pick the date up on their next read.

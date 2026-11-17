@@ -12782,10 +12782,12 @@ date is allowed, only flagged). The source fingerprint is deliberately narrow �
 `due_date`, `must_ship_by`, `status` and `version` — so any edit of the work order between review and
 execution is the 409 `The source records changed. Prepare and review a fresh task.`, while a
 dispatch-plan rank write (which bumps no `version`) is not. Execution writes `due_date` only and
-flushes, so a concurrent stale write is refused 409 (the `version` lock) rather than lost; then a **required** `UPDATE` audit
-row on `work_order` (old and new `due_date`, `extra_data: {"reason": …, "via": "hank"}`; failure →
-**503**, nothing saved) and a best-effort `work_order_updated` operational event in the `PUT`'s shape
-(`updated_fields: ["due_date"]`) that deliberately omits the reason, which stays on the audit row. No
+flushes, so a concurrent stale write is refused 409 (the `version` lock) rather than lost; then a
+best-effort `work_order_updated` operational event in the `PUT`'s shape (`updated_fields: ["due_date"]`)
+that deliberately omits the reason, and **last** a **required** `UPDATE` audit row on `work_order` (old and
+new `due_date`, `extra_data: {"reason": …, "via": "hank"}`; failure → **503**, nothing saved, the event
+rolled back with it). The event comes first because the audit row takes the global audit-chain lock,
+which no row lock (the event insert's foreign-key checks) may follow. No
 realtime broadcast is sent; open views pick up the date on their next read. Receipt:
 `Moved the due date of <WO number> from <old> to <new>.`, with the warning
 `Must ship by <date> was not changed.` when one is set. **Credentials:** parity with the

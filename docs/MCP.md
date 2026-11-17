@@ -640,6 +640,13 @@ there:
   closed rather than let a transient read failure post a note. The read is a second inner request,
   so it counts against the inner per-IP rate limit like any other.
 
+**What is still reachable, deliberately.** Hank chat (`POST /api/v1/copilot/chat`) is itself a tool,
+and its own `prepare_hank_task` tool can still *prepare* an `add_note` proposal in the person's review
+queue when an agent asks it to on that person's JWT. That proposal can never be posted by an agent:
+chat cannot execute a task, `execute_task` refuses it as above, and only the person can submit it from
+the app. Preparing is a draft for the person's review; posting is the person's act. Whether agents
+should be able to leave such drafts at all is an open owner question.
+
 The check runs after argument validation (a malformed call is still a **422**) and before dispatch,
 in one code path, `app.mcp.people_only.people_only_refusal`, called from `server.on_call_tool`. It
 matches by route (method and path template), never by tool name, and reads its kind set

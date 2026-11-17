@@ -421,9 +421,9 @@ confirms it.
     row lock on submission. Its source check covers only the job's due date,
     must-ship-by, status and version: any edit of the job requires a fresh review,
     while a dispatch-plan rank write, which bumps no version, does not. The work-order
-    audit row is **required** (a lost row rolls everything back with 503) and carries
-    the reason and `via: hank`. A best-effort `work_order_updated` event is written
-    without the reason. There is no realtime broadcast: open screens show the new
+    audit row is **required** (a lost row rolls everything back with 503), carries
+    the reason and `via: hank`, and is written last; the best-effort
+    `work_order_updated` event before it carries no reason. There is no realtime broadcast: open screens show the new
     date on their next read.
   - `add_note` checks the note with the comment service's own rules at review,
     writing nothing, and again on submission, which posts through the same service

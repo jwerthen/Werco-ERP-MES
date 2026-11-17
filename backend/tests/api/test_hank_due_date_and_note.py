@@ -532,6 +532,34 @@ class TestChangeDueDate:
         assert events(db_session, 'work_order_updated') == []
         assert db_session.query(AuditLog).filter_by(resource_type='work_order').count() == 0
 
+    def test_the_event_is_written_before_the_required_audit_row(
+        self, client, db_session, auth_headers, test_work_order, monkeypatch
+    ):
+        """Lock order: the audit row takes the global audit-chain lock (held to commit), and the
+        event insert's foreign-key checks take KEY SHARE on the company, user and work-order rows,
+        so the event must be written first -- the same order as the comment service and the PUT."""
+        task = propose(client, auth_headers, 'change_due_date', due_input(test_work_order)).json()
+        calls: List[str] = []
+        original_emit = hank_task_service.emit_due_date_changed_event
+        original_log_update = AuditService.log_update
+
+        def recording_emit(*args, **kwargs):
+            calls.append('event')
+            return original_emit(*args, **kwargs)
+
+        def recording_log_update(self, resource_type, *args, **kwargs):
+            if resource_type == 'work_order':
+                calls.append('audit')
+            return original_log_update(self, resource_type, *args, **kwargs)
+
+        monkeypatch.setattr(hank_task_service, 'emit_due_date_changed_event', recording_emit)
+        monkeypatch.setattr(AuditService, 'log_update', recording_log_update)
+        response = execute(client, auth_headers, task)
+        assert response.status_code == 200, response.text
+        assert calls == ['event', 'audit']
+        assert len(events(db_session, 'work_order_updated')) == 1
+        assert db_session.query(AuditLog).filter_by(resource_type='work_order').count() == 1
+
     def test_the_snapshot_ignores_a_dispatch_rank_write_but_not_a_due_date_change(
         self, client, db_session, auth_headers, test_work_order
     ):
