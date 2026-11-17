@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from sqlalchemy import inspect
 from sqlalchemy.exc import DBAPIError
 
-from app.core.credentials import API_TOKEN_COMMENT_WRITE, is_api_token_credential
+from app.core.credentials import API_TOKEN_COMMENT_WRITE, PEOPLE_ONLY_HANK_TASK_KINDS, is_api_token_credential
 from app.core.time_utils import central_today
 from app.db.locks import acquire_generator_lock
 from app.db.tenant_filter import tenant_query
@@ -83,8 +83,9 @@ ACTION_PERMISSIONS = {
 # (owner decision for work-order comments, 2026-11-16): ANY API token, whatever its scope or role,
 # is refused 403 with the comment routes' own text at prepare and at execute, and the kind is left
 # out of a token's capabilities. A crew-station badge token is not an API token, but its path fence
-# keeps it off /hank entirely.
-PEOPLE_ONLY_KINDS = frozenset({'add_note'})
+# keeps it off /hank entirely. The set lives in app.core.credentials because the MCP package reads
+# it too: an agent on a person's own JWT is refused these kinds there (app/mcp/people_only.py).
+PEOPLE_ONLY_KINDS = PEOPLE_ONLY_HANK_TASK_KINDS
 # A kind with no branch of its own. HankTaskCreate's Literal admits only registered kinds, so this
 # is a programming error (a kind added to the maps without its preview / execute branch), answered
 # as a clean 400 rather than by running some other kind's code.

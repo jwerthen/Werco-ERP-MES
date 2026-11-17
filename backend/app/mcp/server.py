@@ -27,6 +27,16 @@ to the tools whose every route is on ``app.core.export_control.AI_EXTERNAL_ALLOW
 its ``tools/list`` shows only those, and any other tool called by name is a 403 with the
 API layer's own text before dispatch. What those tools return is redacted by the API's
 export-control middleware on the in-process dispatch, not here.
+
+And one narrowing applies to EVERY caller, a person's own access JWT included, because it is
+about the agent rather than the credential: a Hank task kind that posts a person's own words
+(``credentials.PEOPLE_ONLY_HANK_TASK_KINDS``: ``add_note``, a work-order comment) is never run
+through an agent. ``prepare_task`` for such a kind, and ``execute_task`` on such a task (read
+first, as the caller, through ``GET /hank/tasks/{task_id}``; a read that cannot complete is a 503,
+never a blind execute), answer 403 before dispatch -- the reason the comment write routes are not
+tools at all. One code path:
+``app.mcp.people_only.people_only_refusal``. Both tools stay listed; every other kind is
+unaffected, and the routes themselves still serve a person in the app.
 """
 
 from __future__ import annotations
@@ -65,6 +75,7 @@ from app.mcp.convenience import (
     convenience_tool_tag,
 )
 from app.mcp.executor import Executor, FilesArg, UploadError, decode_upload, decode_upload_list
+from app.mcp.people_only import people_only_refusal
 from app.mcp.results import build_tool_result, error_result, transport_error_result, validation_error_result
 
 logger = logging.getLogger(__name__)
@@ -108,6 +119,9 @@ DEFAULT_INSTRUCTIONS = (
     "- A READ-ONLY API token is shown only tools that read, outside the areas denied to read-only tokens "
     "(documents, exports, users, the audit log, admin and platform settings, API tokens, intake uploads). A tool "
     "that writes, or one in a denied area, answers 403 when called by name; so does the API itself.\n"
+    "- Hank notes are a person's own words: prepare_task with kind 'add_note', and execute_task on an add_note "
+    "task, answer 403 here on any credential -- ask the person to post the note from the app. Other Hank task "
+    "kinds (change_due_date included) are prepared and executed as usual.\n"
     "- An AI-EXTERNAL token sees a narrower read set still. Records of export-controlled customers, and records "
     "the ERP cannot tie to a customer, come back with their ids, statuses, dates and quantities but every other "
     "text replaced by '[export-controlled]' (and \"export_controlled\": true): report them as withheld, never "
@@ -550,6 +564,19 @@ def build_server(
             path, query, json_body, files, form = build_generated_request(
                 generated, arguments, max_upload_bytes=result_caps.max_upload_bytes
             )
+            # People-only Hank kinds (add_note): refused for an agent on ANY credential, before dispatch.
+            # Judged on the body the route would receive; an execute reads the task first, as the caller.
+            people_only = await people_only_refusal(
+                method=generated.method,
+                route=generated.path,
+                path=path,
+                json_body=json_body,
+                executor=executor,
+                auth=auth,
+            )
+            if people_only is not None:
+                status, detail = people_only
+                return error_result(status=status, detail=detail, method=generated.method, path=path)
             outcome = await executor.request(
                 method=generated.method, path=path, query=query, json=json_body, files=files, form=form, auth=auth
             )

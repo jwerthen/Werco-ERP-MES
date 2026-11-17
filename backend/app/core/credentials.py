@@ -50,7 +50,9 @@ writes nothing (lead decision, Claude-plugin brief build 2026-11-15).
 :data:`API_TOKEN_EGRESS_SWITCH` is the refusal every company egress kill-switch route
 answers an API token (any scope): opening or closing data egress is a person's judgment.
 :data:`API_TOKEN_COMMENT_WRITE` is the refusal every comment / watcher write answers an API
-token (any scope): a comment is a person's own words.
+token (any scope): a comment is a person's own words. :data:`PEOPLE_ONLY_HANK_TASK_KINDS` names the
+Hank task kinds that are comment writes too (``add_note``), and
+:data:`AGENT_PEOPLE_ONLY_TASK_DETAIL` is what the MCP package answers an agent that tries one.
 
 This module is pure: it imports nothing from the app, so any layer can use it.
 """
@@ -104,6 +106,23 @@ API_TOKEN_COMMENT_WRITE = (
     "A comment is a person's own words: an API token cannot post, edit or delete comments or change who is "
     "watching a record. Sign in to the app."
 )
+
+# The Hank task kinds only a PERSON may run, because each posts a person's own words (owner decision
+# for work-order comments, 2026-11-16): ``add_note`` posts a work-order comment. Two gates read this
+# one set, at the two doors an automated caller could use:
+#
+# * ``hank_task_service`` refuses ANY API token 403 (``API_TOKEN_COMMENT_WRITE``) at prepare and
+#   execute, and leaves these kinds out of a token's capabilities;
+# * the MCP package (``app.mcp.people_only``) refuses an AGENT on ANY credential -- a person's own
+#   access JWT included -- 403 (``AGENT_PEOPLE_ONLY_TASK_DETAIL``) before ``prepare_task`` or
+#   ``execute_task`` is dispatched for one, for the reason the comment write routes are not MCP tools
+#   at all (``app.mcp.catalog.COMMENT_WRITE_OPERATIONS``): a person's JWT would otherwise let an agent
+#   post words in that person's name.
+#
+# A person in the app prepares and executes them as usual. Kept here, in this import-free module,
+# so the MCP package can read it without importing a service.
+PEOPLE_ONLY_HANK_TASK_KINDS = frozenset({"add_note"})
+AGENT_PEOPLE_ONLY_TASK_DETAIL = "A note is a person's own words: post it from the app, not through an agent."
 
 
 def is_api_token_credential(user: Any) -> bool:
