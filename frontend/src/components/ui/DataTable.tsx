@@ -107,6 +107,18 @@ export interface DataTableProps<T> {
    */
   groupBy?: DataTableGroupBy<T>;
   selection?: DataTableSelection;
+  /**
+   * Which rows can be selected. A row this returns false for renders NO checkbox
+   * (an empty cell keeps the column aligned) and is left out of select-all: the
+   * header checkbox's checked / indeterminate state is computed over the
+   * selectable visible rows only, and it is disabled when none are selectable.
+   * Omitted = every visible row is selectable (the pre-existing behavior).
+   */
+  isRowSelectable?: (row: T) => boolean;
+  /** Accessible name of a row's checkbox. Defaults to `Select row {rowKey}`. */
+  rowSelectionLabel?: (row: T) => string;
+  /** Accessible name of the header select-all checkbox. Defaults to `Select all rows`. */
+  selectAllLabel?: string;
   bulkActions?: React.ReactNode;
   /** Optional page filters beside the existing export control. */
   toolbarStart?: React.ReactNode;
@@ -228,6 +240,9 @@ export function DataTable<T>({
   manualSorting = false,
   groupBy,
   selection,
+  isRowSelectable,
+  rowSelectionLabel,
+  selectAllLabel = 'Select all rows',
   bulkActions,
   toolbarStart,
   csvExport,
@@ -319,9 +334,14 @@ export function DataTable<T>({
   );
 
   // ---- Selection ----
+  // Select-all acts on the selectable visible rows only; with no `isRowSelectable`
+  // that is every visible row, exactly as before the predicate existed.
   const selectableKeys = useMemo(
-    () => visibleRows.map((r) => rowKey(r)),
-    [visibleRows, rowKey]
+    () =>
+      (isRowSelectable ? visibleRows.filter((r) => isRowSelectable(r)) : visibleRows).map((r) =>
+        rowKey(r)
+      ),
+    [visibleRows, rowKey, isRowSelectable]
   );
   const allVisibleSelected =
     !!selection &&
@@ -429,8 +449,11 @@ export function DataTable<T>({
             <input
               type="checkbox"
               className="checkbox"
-              aria-label="Select all rows"
+              aria-label={selectAllLabel}
               checked={allVisibleSelected}
+              // Only when a predicate is in play: without one the header keeps its
+              // pre-existing always-enabled behavior.
+              disabled={!!isRowSelectable && selectableKeys.length === 0}
               ref={(el) => {
                 if (el) el.indeterminate = !allVisibleSelected && someVisibleSelected;
               }}
@@ -507,7 +530,8 @@ export function DataTable<T>({
 
   const renderRow = (row: T) => {
     const key = rowKey(row);
-    const selected = !!selection && selection.selectedKeys.has(key);
+    const selectable = !isRowSelectable || isRowSelectable(row);
+    const selected = !!selection && selectable && selection.selectedKeys.has(key);
     return (
       <tr
         key={key}
@@ -516,17 +540,26 @@ export function DataTable<T>({
           selected ? 'bg-werco-navy-600/10' : ''
         } ${rowClassName ? rowClassName(row) : ''}`}
       >
-        {selection && (
-          <td className={cellPad} onClick={(e) => e.stopPropagation()}>
-            <input
-              type="checkbox"
-              className="checkbox"
-              aria-label={`Select row ${key}`}
-              checked={selected}
-              onChange={() => toggleRow(key)}
-            />
-          </td>
-        )}
+        {selection &&
+          (selectable ? (
+            <td className={cellPad} onClick={(e) => e.stopPropagation()}>
+              <input
+                type="checkbox"
+                className="checkbox"
+                aria-label={rowSelectionLabel ? rowSelectionLabel(row) : `Select row ${key}`}
+                checked={selected}
+                onChange={() => toggleRow(key)}
+              />
+            </td>
+          ) : (
+            // Not selectable: no checkbox at all (a disabled one would need a
+            // per-row reason the table cannot know). The cell keeps the column
+            // aligned, lets a click fall through to `onRowClick`, and tells a
+            // screen reader why the selection column is blank on this row.
+            <td className={cellPad}>
+              <span className="sr-only">Not selectable</span>
+            </td>
+          ))}
         {columns.map((col) => (
           <td
             key={col.key}

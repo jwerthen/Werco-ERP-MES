@@ -768,3 +768,191 @@ test('both server paging directions are disabled while a page request is pending
   expect(screen.getByRole('button', { name: 'Previous page' })).toBeDisabled();
   expect(screen.getByRole('button', { name: 'Next page' })).toBeDisabled();
 });
+
+// ---- isRowSelectable: some rows can be selected, some cannot. ----
+// The predicate drives BOTH the per-row checkbox (a non-selectable row renders
+// none) AND the select-all set (only selectable visible rows; checked /
+// indeterminate computed over them). Absent, every row stays selectable — the
+// pre-existing tests above are the no-change guard for that path.
+describe('DataTable — isRowSelectable', () => {
+  // Alpha (qty 10) is the only row the predicate refuses.
+  const selectableRow = (r: Row) => r.qty >= 20;
+
+  function Harness({
+    initial = new Set<string | number>(),
+    onChange,
+    predicate = selectableRow,
+    data = rows,
+    onRowClick,
+    labels = false,
+  }: {
+    initial?: Set<string | number>;
+    onChange?: (keys: Set<string | number>) => void;
+    predicate?: (r: Row) => boolean;
+    data?: Row[];
+    onRowClick?: (r: Row) => void;
+    labels?: boolean;
+  }) {
+    const [keys, setKeys] = React.useState<Set<string | number>>(initial);
+    return (
+      <DataTable
+        columns={columns}
+        data={data}
+        rowKey={(r) => r.id}
+        onRowClick={onRowClick}
+        isRowSelectable={predicate}
+        rowSelectionLabel={labels ? (r) => `Select ${r.name}` : undefined}
+        selectAllLabel={labels ? 'Select all eligible rows' : undefined}
+        selection={{
+          selectedKeys: keys,
+          onChange: (next) => {
+            onChange?.(next);
+            setKeys(next);
+          },
+        }}
+      />
+    );
+  }
+
+  const checkbox = (label: string) => screen.getByLabelText(label) as HTMLInputElement;
+
+  it('renders a checkbox only on selectable rows (an empty cell on the rest)', () => {
+    render(<Harness />);
+    expect(screen.getByLabelText('Select row 1')).toBeInTheDocument(); // Charlie 30
+    expect(screen.getByLabelText('Select row 3')).toBeInTheDocument(); // Bravo 20
+    expect(screen.queryByLabelText('Select row 2')).not.toBeInTheDocument(); // Alpha 10
+
+    // The non-selectable row keeps its leading cell so the columns stay aligned.
+    const table = screen.getByTestId('data-table');
+    const alphaRow = within(table)
+      .getAllByRole('row')
+      .find((r) => within(r).queryByText('Alpha'))!;
+    const cells = within(alphaRow).getAllByRole('cell');
+    expect(cells).toHaveLength(columns.length + 1);
+    expect(within(cells[0]).queryByRole('checkbox')).not.toBeInTheDocument();
+    expect(cells[0]).toHaveTextContent('Not selectable');
+  });
+
+  it('select-all adds only the selectable rows and checks once they are all selected', () => {
+    const onChange = jest.fn();
+    render(<Harness onChange={onChange} />);
+    const selectAll = checkbox('Select all rows');
+    expect(selectAll.checked).toBe(false);
+
+    fireEvent.click(selectAll);
+    expect(onChange).toHaveBeenLastCalledWith(new Set([1, 3]));
+    expect(checkbox('Select row 1').checked).toBe(true);
+    expect(checkbox('Select row 3').checked).toBe(true);
+    // Every SELECTABLE row is selected, so select-all reads checked even though
+    // Alpha (unselectable) is not in the set.
+    expect(selectAll.checked).toBe(true);
+    expect(selectAll.indeterminate).toBe(false);
+
+    // A second click clears the selectable rows.
+    fireEvent.click(selectAll);
+    expect(onChange).toHaveBeenLastCalledWith(new Set());
+    expect(selectAll.checked).toBe(false);
+  });
+
+  it('computes indeterminate over the selectable rows only', () => {
+    render(<Harness />);
+    fireEvent.click(checkbox('Select row 1'));
+    const selectAll = checkbox('Select all rows');
+    expect(selectAll.checked).toBe(false);
+    expect(selectAll.indeterminate).toBe(true);
+    fireEvent.click(checkbox('Select row 3'));
+    expect(selectAll.checked).toBe(true);
+    expect(selectAll.indeterminate).toBe(false);
+  });
+
+  it('ignores a stale key for a row that is no longer selectable', () => {
+    // Key 2 (Alpha) arrives pre-selected but the predicate refuses it: it must not
+    // count toward select-all, and select-all must not drop keys it does not own.
+    const onChange = jest.fn();
+    render(<Harness initial={new Set([2])} onChange={onChange} />);
+    const selectAll = checkbox('Select all rows');
+    expect(selectAll.checked).toBe(false);
+    expect(selectAll.indeterminate).toBe(false);
+    fireEvent.click(selectAll);
+    expect(onChange).toHaveBeenLastCalledWith(new Set([2, 1, 3]));
+  });
+
+  it('disables select-all when no visible row is selectable', () => {
+    render(<Harness predicate={() => false} />);
+    const selectAll = checkbox('Select all rows');
+    expect(selectAll).toBeDisabled();
+    expect(screen.queryByLabelText(/^Select row/)).not.toBeInTheDocument();
+  });
+
+  it('keeps the header enabled when the predicate is absent (no behavior change)', () => {
+    function Plain() {
+      const [keys, setKeys] = React.useState<Set<string | number>>(new Set());
+      return (
+        <DataTable
+          columns={columns}
+          data={rows}
+          rowKey={(r) => r.id}
+          selection={{ selectedKeys: keys, onChange: setKeys }}
+        />
+      );
+    }
+    render(<Plain />);
+    expect(checkbox('Select all rows')).toBeEnabled();
+    [1, 2, 3].forEach((id) => expect(screen.getByLabelText(`Select row ${id}`)).toBeInTheDocument());
+  });
+
+  it('lets a click on a non-selectable row\'s leading cell reach onRowClick', () => {
+    const onRowClick = jest.fn();
+    render(<Harness onRowClick={onRowClick} />);
+    const table = screen.getByTestId('data-table');
+    const alphaRow = within(table)
+      .getAllByRole('row')
+      .find((r) => within(r).queryByText('Alpha'))!;
+    fireEvent.click(within(alphaRow).getAllByRole('cell')[0]);
+    expect(onRowClick).toHaveBeenCalledWith(rows[1]);
+    // A selectable row's checkbox cell still swallows the click.
+    onRowClick.mockClear();
+    fireEvent.click(checkbox('Select row 1'));
+    expect(onRowClick).not.toHaveBeenCalled();
+  });
+
+  it('uses the caller-supplied accessible names when given', () => {
+    render(<Harness labels />);
+    expect(screen.getByLabelText('Select all eligible rows')).toBeInTheDocument();
+    expect(screen.getByLabelText('Select Charlie')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Select Alpha')).not.toBeInTheDocument();
+  });
+
+  it('applies the predicate per group: select-all spans only selectable rows across groups', () => {
+    interface GR { id: number; type: string; name: string }
+    const data: GR[] = [
+      { id: 1, type: 'a', name: 'One' },
+      { id: 2, type: 'a', name: 'Two' },
+      { id: 3, type: 'b', name: 'Three' },
+    ];
+    const onChange = jest.fn();
+    function GHarness() {
+      const [keys, setKeys] = React.useState<Set<string | number>>(new Set());
+      return (
+        <DataTable
+          columns={[{ key: 'name', header: 'Name', accessor: (r: GR) => r.name }]}
+          data={data}
+          rowKey={(r) => r.id}
+          groupBy={{ key: (r) => r.type }}
+          isRowSelectable={(r) => r.id !== 2}
+          selection={{
+            selectedKeys: keys,
+            onChange: (next) => {
+              onChange(next);
+              setKeys(next);
+            },
+          }}
+        />
+      );
+    }
+    render(<GHarness />);
+    fireEvent.click(checkbox('Select all rows'));
+    expect(onChange).toHaveBeenLastCalledWith(new Set([1, 3]));
+    expect(screen.queryByLabelText('Select row 2')).not.toBeInTheDocument();
+  });
+});
