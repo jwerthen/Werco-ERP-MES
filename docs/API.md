@@ -11600,18 +11600,21 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 > **Unknown keys are refused at every level**, so a misspelled `agregate` is a 422, not a silently
 > ignored key.
 > - **Column** `{field, alias?, aggregate?}`. The output key is the alias, else the field; two columns
->   producing the same key are refused, and an alias is at most 100 characters. `sum` and `avg` take
+>   producing the same key are refused, and an alias is at most 100 characters and may not contain a
+>   NUL character. `sum` and `avg` take
 >   number fields; `min` and `max` take number, date, datetime and string fields; `count` takes any.
 >   Once any column aggregates or `group_by` is set, every non-aggregated column must be in
 >   `group_by`.
 > - **Filter** `{field, operator, value, value2?}`. Operators by type: string `eq` / `ne` / `in` /
 >   `like`; number `eq` / `ne` / `gt` / `gte` / `lt` / `lte` / `in` / `between`; date and datetime `eq` /
 >   `ne` / `gt` / `gte` / `lt` / `lte` / `between`; enum `eq` / `ne` / `in`. Values are typed:
->   - a number is a JSON number (not a boolean, not a numeric string, finite);
->   - text is at most 500 characters;
+>   - a number is a JSON number (not a boolean, not a numeric string, finite); an integer must fit in
+>     64 bits (−2^63 to 2^63−1);
+>   - text is at most 500 characters, and no value (of any type) may contain a NUL character;
 >   - a date is `YYYY-MM-DD`;
 >   - a datetime is ISO-8601 with at least hours and minutes. No zone means UTC, and a zone is
->     converted to UTC;
+>     converted to UTC; an instant whose zone pushes it outside years 1-9999 in UTC is a 422 (`… is
+>     outside the supported range of dates and times`);
 >   - an enum value is one of the field's `options` — the lowercase value (`in_progress`), never the
 >     member name (`IN_PROGRESS`).
 >
@@ -11683,7 +11686,10 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 >   default 1,000. It returns the same result shape as an ad-hoc run.
 > - **Delete** (`DELETE /analytics/custom-report/templates/{template_id}`) answers
 >   `{"message": "Template deleted"}`. It stays a physical delete: `ReportTemplate` is not
->   soft-deletable, and the audit row keeps a snapshot of what was removed.
+>   soft-deletable, and the audit row keeps a snapshot of what was removed. The row is deleted
+>   (tenant-scoped) before the audit row is written, the same row-then-audit-chain lock order as
+>   create and update; a delete that finds no row (a concurrent delete won) is the same **404** as a
+>   missing template and writes no audit row.
 >
 > **Template access rule** (`report_template_service`):
 >
@@ -11702,7 +11708,9 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 > with `definition_errors` naming each problem. Running or exporting it answers **409**
 > `Saved report "<name>" can no longer run: <problems>. Edit it and save it again.`, and a `PATCH` with
 > a valid `definition` repairs it. `definition_errors` and the 409 come from the same validation, so
-> they cannot disagree.
+> they cannot disagree. Judging a stored definition never raises: an unexpected error while checking
+> one is logged and reported as the single problem `The saved definition could not be checked; edit
+> the report and save it again`, so one bad row can never fail the template list for the company.
 >
 > **Audit.** Create, change and delete each write a best-effort `report_template` audit row:
 > `log_create`, `log_update` with old and new values, and `log_delete` with a snapshot of the deleted
