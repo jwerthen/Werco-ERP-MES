@@ -13,31 +13,24 @@
 > and it has **no healthcheck** (it serves no HTTP).
 
 > **Vercel frontend.** The ERP at `wercomfg.app` deploys to its existing Vercel
-> project; Material Nesting's `/nest` route is included in the updated frontend
-> build. This runbook's Railway
-> frontend commands and release checks apply to `werco-frontend` on Railway;
-> they do not establish that a build is serving on `wercomfg.app`. Use
-> [DEPLOYMENT.md → Existing Vercel frontend](DEPLOYMENT.md#existing-vercel-frontend-material-nesting)
-> for the native nesting feature's deployment scope and checks.
+> project. This runbook's Railway frontend commands and release checks apply to
+> `werco-frontend` on Railway; they do not establish that a build is serving on
+> `wercomfg.app`. Use
+> [DEPLOYMENT.md → Existing ERP frontend: Fabrication Quoting](DEPLOYMENT.md#existing-erp-frontend-fabrication-quoting)
+> for the estimator's deployment scope and checks. The retired Material Nesting route
+> `/nest` now only redirects to `/fabrication-quotes`.
 
-> **Saved nesting calculations.** The normal combined release must migrate the API
-> through 102 before uploading the worker. CI builds the separate worker image, tests
-> its fixed Node executable without network access, and preserves the bundle manifest.
-> Before Vercel promotion, worker-touched releases require an active Railway SUCCESS
-> deployment and a heartbeat no older than 90 seconds from that exact deployment, published
-> after a successful Redis write, matching the release/manifest/Node identity. The gate
-> rechecks active state. Failure blocks promotion; do not replace it with a manual upload
-> or an old log check. Roll back compatible application images while retaining additive
-> draft/run tables and immutable history. See [WORKER_SERVICE.md](WORKER_SERVICE.md#saved-nesting-calculation-runtime).
-
-> **Spacing policies.** Apply additive migration 103 after 102 through the normal API
-> boot migration path. It creates no seed/approved policy and introduces no secret,
-> environment or cron setting. The API, frontend and compiled shared worker must all
-> understand project 10/quote 9, so retain the existing exact-release API and fresh worker
-> identity gates before public promotion. Validate policy approval/withdrawal and a new
-> saved custom-spacing revision without changing historical reports. Application rollback
-> retains policy/draft/run history and restores compatible images; do not downgrade 103
-> or rewrite saved format versions as an ordinary rollback.
+> **Retired quote-nesting runtime.** Commit `3e17456e` (2026-09-16) removed the
+> Material Nesting estimator, its Node solver worker and every `/quote-nesting` API.
+> A release no longer builds a nesting worker bundle or checks a manifest, Node identity
+> or nesting heartbeat, and there is nothing to verify for saved runs, spacing policies,
+> stock exclusions, compensated envelopes or original-DXF attachments. The worker's
+> release gate is now the generic heartbeat described in
+> [DEPLOYMENT.md → Existing ERP frontend: Fabrication Quoting](DEPLOYMENT.md#existing-erp-frontend-fabrication-quoting).
+> Migrations `101_quote_nesting_drafts`, `102_quote_nesting_runs`,
+> `103_nesting_spacing_policies` and `105_nesting_cad_sources` still run in the normal
+> chain and their tables are kept as historical records with no reader or writer. On an
+> ordinary application rollback do not run their downgrades: each one drops that history.
 
 > **Piece observations.** Apply additive `104_stock_piece_observations` after
 > `103_nesting_spacing_policies` in the API before frontend promotion. The PostgreSQL
@@ -50,34 +43,6 @@
 > dependencies, environment settings, crons or solver/profile changes. Keep the existing
 > exact-release/runtime gates. On application rollback retain migration104, piece and
 > observation records and audit history; do not invoke its destructive downgrade.
-
-> **Original DXFs.** Apply additive `105_nesting_cad_sources` after 104 before
-> releasing the saved-revision attachment UI. Verify PostgreSQL bootstrap/migration
-> immutability and tenant guards plus the actual JWT/file-storage race gate. Run an
-> explicit synthetic attachment, lost-response recovery and authenticated byte-exact
-> download. Existing storage configuration is reused; verify provider durability
-> separately. No worker/cron/profile changes or source backfill occur. Keep intent,
-> attempt, receipt and binding history on application rollback; no object purge or
-> destructive schema downgrade is part of ordinary rollback. See `CAD_SOURCE_STORAGE.md`.
-
-> **Stock exclusions.** This increment adds no migration, permission, environment or
-> cron change. Release the quote 11/project 12 API/frontend contract with the compiled
-> `werco-contour-v5` worker through the same backend-first, exact-image/readiness gate.
-> Legacy job 13 is local-only. Verify a saved exclusion-bearing scenario and its v2
-> leftover ledger; absent/empty regions retain v1. These scenario constraints do not
-> establish physical inventory or reserve stock. On rollback retain the original
-> input versions, exclusion geometry and historical results; never remove constraints
-> to make an older runtime accept them.
-
-> **Compensated envelopes.** Release solver v6, quote 14/project 15 and the exact
-> `werco-compensated-v1` source profile as a compatible API/frontend/worker set.
-> CI checks the generated frontend adapter against normative backend JSON; isolated
-> frontend/Node builds also self-check its digest. The manifest and hello bind
-> `geometry_profile`; heartbeat fields and the active/fresh identity gate are unchanged.
-> There is no migration, environment or cron change. Verify explicit legacy-input
-> upgrade, v3 ledger evidence and frozen v4/v5 historical preview without rerunning it.
-> Retain profile-bearing files/checkpoints on rollback; do not rewrite versions or
-> remove constraints to force compatibility. Local job 16 remains local-only.
 
 ---
 
