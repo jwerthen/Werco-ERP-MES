@@ -5911,7 +5911,11 @@ uploads go through text extraction + LLM. See
 > `due_date`), so responses are unchanged. Both consumers of the signal — `GET
 > /maintenance/dashboard` and the AS9100D evidence card in `auto_evidence_service` — now derive it
 > from `due_date` too, which is strictly more accurate: the overdue count no longer depends on
-> whether a human loaded the Maintenance page today.
+> whether a human loaded the Maintenance page today. The two figures are not identical, though: the
+> evidence card compares against the **company's local date** and also counts **active PM schedules**
+> whose `next_due_date` has passed (see QMS Standards → *the PM evidence row now judges the PM
+> schedules*), while the dashboard's `overdue_count` compares against the server's date and counts
+> maintenance work orders only.
 
 > **RBAC was added; there was none.** Every endpoint was a bare `get_current_user`, so a **viewer
 > could create, start and complete maintenance work orders**. Reads stay open to any authenticated
@@ -8760,16 +8764,15 @@ in `RBAC_PERMISSIONS.md`.
 > the catalog read fails (it runs in its own savepoint, so a failure cannot abort the request). A failed
 > read **on PostgreSQL** also caps the row at `warning` / `partial` and appends `; database UPDATE/DELETE
 > trigger status could not be checked` to `description`; off PostgreSQL there is nothing to read, so it
-> does not cap. The
-> warning rows' `health_detail` also says the paused entries carry no integrity hash and can never be
+> does not cap. The warning rows' `health_detail` also says the paused entries carry no integrity hash and can never be
 > cryptographically verified, with the split `K of N (J in the last 12 months)`. The healthy text says
 > the chain is **enabled**, not verified — chain integrity is checked by the platform-admin
 > `/audit/integrity/*` endpoints, not by this row.
 >
 > A clause backed by this row therefore gets a suggested roll-up (`overall_suggested_compliance`,
 > auto-link's `compliance_summary`) of `partial` at best, never `compliant`, once the company has any
-> paused entry, while the chain is paused, or while the triggers are missing or unreadable. That is a suggestion
-> only: neither endpoint writes the clause's `compliance_status`. Of the fields that change, auto-link
+> paused entry, while the chain is paused, or while the triggers are missing or unreadable. That is a
+> suggestion only: neither endpoint writes the clause's `compliance_status`. Of the fields that change, auto-link
 > (`POST /qms-standards/{standard_id}/auto-link`) stores only `description` (`health_status`,
 > `health_detail` and `suggested_compliance` are computed per call and never persisted), so stored
 > evidence picks up the new wording on the next auto-link run. The QMS page's linked-evidence list
@@ -8779,6 +8782,40 @@ in `RBAC_PERMISSIONS.md`.
 > the row reports and asserts nothing. Existing auto-linked evidence picks up the new title on its next
 > auto-link run (matched by rule id; no migration). The row's `title`, `module_reference` and
 > `evidence_type` do not change with the chain or trigger state.
+
+> **The PM evidence row now judges the PM schedules, not just maintenance work orders — expect the
+> verdict to drop.** The *Preventive Maintenance & Infrastructure* row (clauses matched on maintenance
+> / infrastructure keywords, e.g. 7.1.3) counted every `MaintenanceSchedule`, active or not, and took
+> "overdue" from maintenance work orders alone. A shop holding thirty PM schedules that had never been
+> performed (first due date still ahead, no maintenance work orders) read **healthy / compliant** —
+> and kept reading it with every schedule deactivated. Now only **active** schedules count (the same
+> set `GET /maintenance/schedules` lists by default), "today" is the company's local date
+> (America/Chicago unless the company sets another zone), and the first matching rung decides:
+>
+> | # | Condition | `health_status` / `suggested_compliance` |
+> |---|---|---|
+> | 1 | No active schedule and no maintenance work order | `no_data` / `not_assessed` |
+> | 2 | An active schedule's `next_due_date` is before today, or a `scheduled` / `overdue` maintenance work order is past its `due_date` | `critical` / `non_compliant` |
+> | 3 | No active schedule, but maintenance work orders exist (no PM plan) | `warning` / `partial` |
+> | 4 | No active schedule has performance evidence | `warning` / `not_assessed` |
+> | 5 | Some active schedules never performed, or some with no next due date | `warning` / `partial` |
+> | 6 | Every active schedule current, dated and performed at least once | `healthy` / `compliant` |
+>
+> *Performance evidence* is a `last_completed_date` on the schedule, or a **completed** maintenance
+> work order of the same company linked to it; completing a schedule-linked maintenance work order
+> (`POST /maintenance/work-orders/{id}/complete`) is what clears "never performed". An overdue
+> maintenance work order used to give `warning` / `partial`; it now gives `critical` /
+> `non_compliant`, the calibration row's verdict for an overdue gauge. The response shape is
+> unchanged: `total_count` is still the maintenance work-order count (the figure auto-link stores as
+> the evidence's live count), and `recent_count` is now the **active** schedule count (it was every
+> schedule). The description reads *"N active PM schedules (X past due, Y never performed), M
+> maintenance WOs (C completed, O overdue)"*. Because `overall_suggested_compliance` is `partial`
+> whenever a clause's rows disagree, a clause whose other rows are all `compliant` now rolls up to
+> `partial`, not `compliant`, while this row is `not_assessed`. A shop that loaded its PM schedules
+> before performing any PM will see the row at `not_assessed` until the first schedule-linked
+> maintenance work order is completed — intended: a false "compliant" in front of a registrar is worse
+> than "not assessed". Auto-link persists the counts and description as evidence; it never sets a
+> clause's `compliance_status`.
 
 > **Deletes are soft (records retained):** the three `DELETE` endpoints above return **204** but
 > do not physically remove rows — the standard / clause / evidence is marked deleted and disappears
