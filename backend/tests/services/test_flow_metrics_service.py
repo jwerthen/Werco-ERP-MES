@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from app.models.operational_event import OperationalEvent
 from app.models.time_entry import TimeEntryType
 from app.models.work_order import OperationStatus, WorkOrderStatus
+from app.services.company_time import company_today
 from app.services.flow_metrics_service import get_flow_metrics, get_wip_aging
 from tests.lean_phase1_helpers import (
     COMPANY_A,
@@ -284,6 +285,9 @@ def test_wip_aging_ordering_and_anchors(db_session: Session):
     """Aging list: oldest release first; days-in-op from actual_start, else the
     ready event; days_to_due negative when past due. Tenant + status scoped."""
     now = datetime.utcnow()
+    # days_to_due counts the COMPANY's calendar dates (Central), so "yesterday" is too: a
+    # UTC runner's date.today() is a day ahead from 6/7 PM Central, which read as 0 days.
+    today = company_today(db_session, COMPANY_A)
     part = make_part(db_session)
     wc = make_work_center(db_session)
 
@@ -293,7 +297,7 @@ def test_wip_aging_ordering_and_anchors(db_session: Session):
         part,
         status_=WorkOrderStatus.IN_PROGRESS,
         released_at=now - timedelta(days=10),
-        due_date=date.today() - timedelta(days=1),
+        due_date=today - timedelta(days=1),
     )
     op1 = make_op(
         db_session,
