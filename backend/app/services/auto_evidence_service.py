@@ -953,7 +953,11 @@ def _query_audit_log(db: Session, company_id: int) -> dict:
 
     return dict(
         evidence_type="module",
-        title="Audit Trail (Immutable Hash-Chain Log)",
+        # Names what the row reports and asserts nothing: it is the only text the QMS page's
+        # linked-evidence list shows for a stored link, and it cannot vary with the state (auto-link
+        # rewrites stored titles by rule id). Formerly "Audit Trail (Immutable Hash-Chain Log)", untrue for
+        # every entry written while the chain was paused.
+        title="Audit Trail (Audit Log & Hash-Chain Status)",
         description=description,
         module_reference="/audit",
         total_count=total,

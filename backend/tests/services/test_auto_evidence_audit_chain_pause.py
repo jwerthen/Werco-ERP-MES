@@ -466,7 +466,7 @@ def test_title_and_module_reference_do_not_vary_with_chain_state(db_session: Ses
     result = _query_audit_log(db_session, COMPANY_A)
 
     assert result["evidence_type"] == "module"
-    assert result["title"] == "Audit Trail (Immutable Hash-Chain Log)"
+    assert result["title"] == "Audit Trail (Audit Log & Hash-Chain Status)"
     assert result["module_reference"] == "/audit"
     assert set(result) == {
         "evidence_type",

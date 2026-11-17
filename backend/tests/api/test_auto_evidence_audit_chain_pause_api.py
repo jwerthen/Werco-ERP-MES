@@ -37,7 +37,7 @@ pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 # move the counts this file asserts exactly.
 COMPANY = 941
 
-AUDIT_TITLE = "Audit Trail (Immutable Hash-Chain Log)"
+AUDIT_TITLE = "Audit Trail (Audit Log & Hash-Chain Status)"
 
 _seq = {"n": 0}
 
