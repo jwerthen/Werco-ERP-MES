@@ -160,6 +160,45 @@ describe('MentionTextarea', () => {
     expect(field()).toHaveAttribute('aria-expanded', 'false');
   });
 
+  /** Focus the field with the caret at the end, as an editor opening does. */
+  const focusAtEnd = (input: HTMLTextAreaElement) =>
+    act(() => {
+      input.setSelectionRange(input.value.length, input.value.length);
+      input.focus();
+    });
+  const pastDebounce = () =>
+    act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 300));
+    });
+
+  it('treats a picked mention that ends the starting text as completed; a new @ still triggers', async () => {
+    const user = userEvent.setup();
+    render(<Harness initialValue="Ping @Jamie Okafor" initialMentions={[JAMIE]} />);
+    const input = field();
+
+    focusAtEnd(input);
+    await pastDebounce();
+    // Settled, as right after a pick: no search, no list, nothing announced.
+    expect(mockedApi.searchMentionableUsers).not.toHaveBeenCalled();
+    expect(input).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    expect(screen.getByRole('status').textContent).toBe('');
+
+    await user.type(input, ' and @ja');
+    await waitFor(() => expect(input).toHaveAttribute('aria-expanded', 'true'));
+    expect(mockedApi.searchMentionableUsers).toHaveBeenCalledTimes(1);
+    expect(mockedApi.searchMentionableUsers).toHaveBeenCalledWith('ja', 8);
+  });
+
+  it('still searches a trailing @name in the starting text that no chip names', async () => {
+    render(<Harness initialValue="Ping @Jamie Okafor" />);
+    const input = field();
+
+    focusAtEnd(input);
+    await waitFor(() => expect(input).toHaveAttribute('aria-expanded', 'true'));
+    expect(mockedApi.searchMentionableUsers).toHaveBeenCalledWith('Jamie Okafor', 8);
+  });
+
   it('ArrowDown + Enter inserts the name and adds a removable chip', async () => {
     const user = userEvent.setup();
     const onMentions = jest.fn();

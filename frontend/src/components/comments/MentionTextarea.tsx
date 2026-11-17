@@ -118,6 +118,18 @@ export function findMentionQuery(text: string, caret: number): MentionQuery | nu
   return { start: before.length - query.length - 1, query };
 }
 
+/**
+ * The `@` index of an already-picked mention that ends `text` — its name is
+ * exactly one of `mentions`' display names, as a pick writes it — or null.
+ */
+function settledTrailingMentionStart(text: string, mentions: CommentPerson[]): number | null {
+  const trailing = findMentionQuery(text, text.length);
+  if (!trailing) return null;
+  // A pick inserts a space after the name; a saved body is trimmed of it.
+  const name = trailing.query.replace(/\s+$/, '');
+  return mentions.some(person => person.display_name === name) ? trailing.start : null;
+}
+
 type SearchState =
   | { status: 'idle' }
   | { status: 'loading'; query: string }
@@ -166,12 +178,21 @@ export const MentionTextarea = forwardRef<HTMLTextAreaElement, MentionTextareaPr
   const searchSeqRef = useRef(0);
 
   const [focused, setFocused] = useState(false);
-  const [caret, setCaret] = useState(0);
+  // Starts at the end of the starting text, where an editor opened on an
+  // existing comment puts it (an empty composer: 0, as before). Only the
+  // dismissal check below reads it before the first focus syncs the real
+  // caret; starting at 0 would make that check drop a settled trailing mention.
+  const [caret, setCaret] = useState(() => value.length);
   // The `@` index of a trigger the user closed (Escape) or just completed (a
   // pick). The same trigger stays closed while it is still being typed — so a
   // one-word name followed by the inserted space does not pop the list straight
-  // back open — and a NEW `@` opens normally.
-  const [dismissedStart, setDismissedStart] = useState<number | null>(null);
+  // back open — and a NEW `@` opens normally. A mention the STARTING text
+  // already ends with (an existing comment opened for editing) starts out
+  // completed, exactly as a pick leaves it, so putting the caret after it
+  // neither pops the list nor announces a search.
+  const [dismissedStart, setDismissedStart] = useState<number | null>(() =>
+    settledTrailingMentionStart(value, mentions)
+  );
   const [activeIndex, setActiveIndex] = useState(0);
   const [search, setSearch] = useState<SearchState>({ status: 'idle' });
   const [announcement, setAnnouncement] = useState('');

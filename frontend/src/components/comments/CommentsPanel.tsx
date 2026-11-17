@@ -68,6 +68,16 @@ function upsertComment(list: CommentResponse[], comment: CommentResponse): Comme
   return [...list, comment];
 }
 
+/**
+ * Focus is nowhere in particular (<body>) or still inside `area` — the test for
+ * moving it after a write lands without yanking it from wherever the user went
+ * while the request was in flight.
+ */
+function focusIdleOrWithin(area: HTMLElement | null): boolean {
+  const active = document.activeElement;
+  return !active || active === document.body || (area !== null && area.contains(active));
+}
+
 const RECORD_NOUN: Record<CommentEntityType, string> = { work_order: 'work order' };
 
 export function CommentsPanel({ entityType, entityId, className }: CommentsPanelProps) {
@@ -99,6 +109,10 @@ export function CommentsPanel({ entityType, entityId, className }: CommentsPanel
   const hasThreadRef = useRef(false);
   const threadRef = useRef<HTMLOListElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const composerAreaRef = useRef<HTMLDivElement>(null);
+  // The open inline editor (one at a time): its textarea and its whole area.
+  const editTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const editAreaRef = useRef<HTMLDivElement>(null);
   // Each comment's Edit button, so focus can return to it when its editor
   // closes (saved or cancelled) instead of dropping to <body>.
   const editButtonRefs = useRef(new Map<number, HTMLButtonElement>());
@@ -201,6 +215,25 @@ export function CommentsPanel({ entityType, entityId, className }: CommentsPanel
     }
   }, [comments, editing, showToast]);
 
+  // An editor that has just opened takes focus, caret at the end of the text:
+  // the Edit button that opened it is replaced by the editor, so focus would
+  // otherwise drop to <body>. Keyed on WHICH comment is open, not on the edit
+  // state, so a keystroke or a background poll never re-runs it — focus and
+  // caret move only when an editor opens.
+  const editingId = editing?.id ?? null;
+  useEffect(() => {
+    if (editingId === null) return;
+    const el = editTextareaRef.current;
+    if (!el) return;
+    const end = el.value.length;
+    // Caret first, so the field's focus handler reads the end (where a
+    // trailing mention is already settled), then again in case focusing
+    // moved it.
+    el.setSelectionRange(end, end);
+    el.focus();
+    el.setSelectionRange(end, end);
+  }, [editingId]);
+
   useEffect(() => {
     if (editing !== null) return;
     const id = focusEditButtonRef.current;
@@ -240,8 +273,10 @@ export function CommentsPanel({ entityType, entityId, className }: CommentsPanel
       setDraft('');
       setDraftMentions([]);
       showToast('success', 'Comment posted');
-      // Ready for the next comment (the Post button just went disabled).
-      composerRef.current?.focus();
+      // Ready for the next comment (the Post button just went disabled) —
+      // unless focus moved on while the post was in flight, e.g. into an
+      // editor opened meanwhile, which must not be yanked away mid-typing.
+      if (focusIdleOrWithin(composerAreaRef.current)) composerRef.current?.focus();
       void refreshWatch();
     } catch (err) {
       const detail = apiErrorDetail(err, 'The comment could not be posted.');
@@ -290,7 +325,10 @@ export function CommentsPanel({ entityType, entityId, className }: CommentsPanel
       // Close the editor this save belongs to — never one opened since (the
       // other Edit buttons are disabled while saving; this holds regardless).
       if (editingIdRef.current === savedId) {
-        focusEditButtonRef.current = savedId;
+        // Back to its Edit button only if focus is still in this editor (or
+        // nowhere): someone who moved on while the save was in flight, say to
+        // the composer, keeps their place.
+        if (focusIdleOrWithin(editAreaRef.current)) focusEditButtonRef.current = savedId;
         setEditing(current => (current?.id === savedId ? null : current));
       }
       showToast('success', 'Comment updated');
@@ -458,8 +496,9 @@ export function CommentsPanel({ entityType, entityId, className }: CommentsPanel
               </div>
 
               {isEditing && editing ? (
-                <div className="mt-2 space-y-2">
+                <div ref={editAreaRef} className="mt-2 space-y-2">
                   <MentionTextarea
+                    ref={editTextareaRef}
                     label="Edit comment"
                     value={editing.body}
                     onChange={body => {
@@ -536,7 +575,7 @@ export function CommentsPanel({ entityType, entityId, className }: CommentsPanel
 
       {thread}
 
-      <div className="space-y-2 border-t border-fd-line pt-3">
+      <div ref={composerAreaRef} className="space-y-2 border-t border-fd-line pt-3">
         <MentionTextarea
           ref={composerRef}
           label="Add a comment"

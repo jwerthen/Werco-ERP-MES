@@ -14,7 +14,12 @@
  *  - the Watch toggle is a real toggle (`aria-pressed`) and the watch state is
  *    re-read after posting (the server auto-watches commenters);
  *  - the panel's own 30 s poll refreshes the thread, skips hidden tabs, and
- *    never clobbers a draft or an open edit.
+ *    never clobbers a draft or an open edit;
+ *  - FOCUS: opening an editor (click, Enter or Space) moves focus into it with
+ *    the caret at the end (a mention the comment ends with stays settled: no
+ *    suggestion list); Save/Cancel return it to that comment's Edit button, a
+ *    post to the composer; neither a poll nor a landing write steals it from
+ *    wherever the user moved meanwhile.
  */
 
 import React from 'react';
@@ -245,6 +250,25 @@ describe('posting', () => {
     expect(within(thread()).getAllByRole('listitem').filter(li => li.parentElement === thread())).toHaveLength(2);
   });
 
+  it('leaves focus in an editor opened while the post was in flight', async () => {
+    const created = deferred<CommentResponse>();
+    mockedApi.createComment.mockReturnValueOnce(created.promise);
+    renderPanel();
+    await screen.findByText('Material is staged at the brake.');
+
+    fireEvent.change(composer(), { target: { value: 'Posting this' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Post comment' }));
+    fireEvent.click(within(commentItem('Material is staged')).getByRole('button', { name: /^Edit comment/ }));
+    const editor = screen.getByRole('combobox', { name: /edit comment/i });
+    expect(editor).toHaveFocus();
+
+    await act(async () => created.resolve(makeComment({ id: 4, body: 'Posting this' })));
+    expect(within(thread()).getByText('Posting this')).toBeInTheDocument();
+    expect(composer().value).toBe('');
+    // The post landing does not pull focus back to the composer.
+    expect(editor).toHaveFocus();
+  });
+
   it('keeps Post disabled for an empty or whitespace-only draft', async () => {
     renderPanel();
     await screen.findByText('Material is staged at the brake.');
@@ -389,6 +413,112 @@ describe('editing and deleting', () => {
     expect(within(thread()).getByText(/\(edited/)).toBeInTheDocument();
     // Focus goes back to the comment's Edit button rather than <body>.
     expect(screen.getByRole('button', { name: /^Edit comment/ })).toHaveFocus();
+  });
+
+  it('moves focus into the editor it opens, caret at the end of the text', async () => {
+    const user = userEvent.setup();
+    renderPanel();
+    await screen.findByText('Material is staged at the brake.');
+
+    await user.click(within(commentItem('Material is staged')).getByRole('button', { name: /^Edit comment/ }));
+    const editor = screen.getByRole('combobox', { name: /edit comment/i }) as HTMLTextAreaElement;
+    expect(editor.value).toBe(OWN.body);
+    // Not <body>: the Edit button that had focus was replaced by the editor.
+    expect(editor).toHaveFocus();
+    expect(editor.selectionStart).toBe(editor.value.length);
+    expect(editor.selectionEnd).toBe(editor.value.length);
+  });
+
+  it('opens the editor from the keyboard (Enter, then Space) with focus in it', async () => {
+    const user = userEvent.setup();
+    renderPanel();
+    await screen.findByText('Material is staged at the brake.');
+    const editButton = () => within(commentItem('Material is staged')).getByRole('button', { name: /^Edit comment/ });
+    const editor = () => screen.getByRole('combobox', { name: /edit comment/i }) as HTMLTextAreaElement;
+
+    act(() => editButton().focus());
+    await user.keyboard('{Enter}');
+    expect(editor()).toHaveFocus();
+    expect(editor().selectionStart).toBe(OWN.body.length);
+    // Enter activated the button; it typed nothing into the editor.
+    expect(editor().value).toBe(OWN.body);
+
+    // Tab past Save (disabled: nothing changed) to Cancel; Enter closes the
+    // editor and focus returns to the comment's Edit button.
+    await user.tab();
+    expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus();
+    await user.keyboard('{Enter}');
+    expect(screen.queryByRole('combobox', { name: /edit comment/i })).not.toBeInTheDocument();
+    expect(editButton()).toHaveFocus();
+
+    await user.keyboard(' ');
+    expect(editor()).toHaveFocus();
+    expect(editor().selectionStart).toBe(OWN.body.length);
+    expect(editor().value).toBe(OWN.body);
+  });
+
+  it('opens the editor on a comment ending in a mention without popping the suggestion list', async () => {
+    const user = userEvent.setup();
+    const withMention = makeComment({ body: 'Ping @Jamie Okafor', mentions: [JAMIE] });
+    mockedApi.listComments.mockResolvedValue([withMention]);
+    renderPanel();
+    await screen.findByText('Ping @Jamie Okafor');
+
+    await user.click(screen.getByRole('button', { name: /^Edit comment/ }));
+    const editor = screen.getByRole('combobox', { name: /edit comment/i }) as HTMLTextAreaElement;
+    expect(editor).toHaveFocus();
+    expect(editor.selectionStart).toBe(editor.value.length);
+    // Past the 200 ms debounce: the caret sits after "@Jamie Okafor", but that
+    // mention is already picked (it has a chip) — nothing is searched or shown.
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 300));
+    });
+    expect(mockedApi.searchMentionableUsers).not.toHaveBeenCalled();
+    expect(editor).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+
+    // A new @ in the editor still searches.
+    await user.type(editor, ' and @ja');
+    await waitFor(() => expect(editor).toHaveAttribute('aria-expanded', 'true'));
+    expect(mockedApi.searchMentionableUsers).toHaveBeenCalledWith('ja', 8);
+  });
+
+  it('leaves focus where the user moved it while an edit save was in flight', async () => {
+    const saving = deferred<CommentResponse>();
+    mockedApi.updateComment.mockReturnValueOnce(saving.promise);
+    renderPanel();
+    await screen.findByText('Material is staged at the brake.');
+
+    fireEvent.click(within(commentItem('Material is staged')).getByRole('button', { name: /^Edit comment/ }));
+    fireEvent.change(screen.getByRole('combobox', { name: /edit comment/i }), { target: { value: 'Staged at brake 2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save comment' }));
+    // While the save is in flight, the user goes on to the composer.
+    act(() => composer().focus());
+
+    await act(async () =>
+      saving.resolve({ ...OWN, body: 'Staged at brake 2', edited_at: '2026-11-16T18:00:00Z' })
+    );
+    expect(within(thread()).getByText('Staged at brake 2')).toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: /edit comment/i })).not.toBeInTheDocument();
+    expect(composer()).toHaveFocus();
+  });
+
+  it('returns focus to the Edit button when a save lands with focus nowhere in particular', async () => {
+    const saving = deferred<CommentResponse>();
+    mockedApi.updateComment.mockReturnValueOnce(saving.promise);
+    renderPanel();
+    await screen.findByText('Material is staged at the brake.');
+
+    fireEvent.click(within(commentItem('Material is staged')).getByRole('button', { name: /^Edit comment/ }));
+    fireEvent.change(screen.getByRole('combobox', { name: /edit comment/i }), { target: { value: 'Staged at brake 2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save comment' }));
+    act(() => (document.activeElement as HTMLElement).blur());
+    expect(document.activeElement).toBe(document.body);
+
+    await act(async () =>
+      saving.resolve({ ...OWN, body: 'Staged at brake 2', edited_at: '2026-11-16T18:00:00Z' })
+    );
+    expect(within(commentItem('Staged at brake 2')).getByRole('button', { name: /^Edit comment/ })).toHaveFocus();
   });
 
   it('locks the other Edit buttons while a save is in flight, then closes only the saved editor', async () => {
@@ -559,6 +689,44 @@ describe('polling', () => {
     expect((screen.getByRole('combobox', { name: /edit comment/i }) as HTMLTextAreaElement).value).toBe(
       'my unsaved edit'
     );
+  });
+
+  it('never moves focus or the caret when a refresh lands while an editor is open', async () => {
+    jest.useFakeTimers();
+    const fromFloor = (id: number, body: string) =>
+      makeComment({ id, body, author: JAMIE, can_edit: false, can_delete: false });
+    renderPanel();
+    await screen.findByText('Material is staged at the brake.');
+    fireEvent.click(within(commentItem('Material is staged')).getByRole('button', { name: /^Edit comment/ }));
+    const editor = screen.getByRole('combobox', { name: /edit comment/i }) as HTMLTextAreaElement;
+    expect(editor).toHaveFocus();
+
+    // The editor is left open while the user works in the composer.
+    act(() => composer().focus());
+    mockedApi.listComments.mockResolvedValueOnce([OWN, OTHERS, fromFloor(9, 'New from the floor')]);
+    await act(async () => {
+      jest.advanceTimersByTime(COMMENTS_POLL_INTERVAL_MS);
+    });
+    expect(await screen.findByText('New from the floor')).toBeInTheDocument();
+    expect(composer()).toHaveFocus();
+
+    // Back in the editor with the caret moved to the start: a refresh keeps both.
+    act(() => {
+      editor.focus();
+      editor.setSelectionRange(0, 0);
+    });
+    mockedApi.listComments.mockResolvedValueOnce([
+      OWN,
+      OTHERS,
+      fromFloor(9, 'New from the floor'),
+      fromFloor(10, 'Another from the floor'),
+    ]);
+    await act(async () => {
+      jest.advanceTimersByTime(COMMENTS_POLL_INTERVAL_MS);
+    });
+    expect(await screen.findByText('Another from the floor')).toBeInTheDocument();
+    expect(editor).toHaveFocus();
+    expect(editor.selectionStart).toBe(0);
   });
 
   it('skips the poll while the tab is hidden and refreshes when it becomes visible', async () => {
