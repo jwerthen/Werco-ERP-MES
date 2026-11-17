@@ -496,6 +496,20 @@ describe('saved templates', () => {
     expect(screen.getByRole('button', { name: 'Delete Legacy hours' })).toBeInTheDocument();
   });
 
+  // The server's require_modifiable counts a Platform Admin and any superuser as an Admin
+  // (report_template_service._is_admin), so the row actions must agree for them too.
+  it.each([
+    ['a Platform Admin', { id: 2, role: 'platform_admin', is_superuser: false }],
+    ['a superuser Manager', { id: 3, role: 'manager', is_superuser: true }],
+  ])('shows Edit / Delete on a colleague’s template to %s', async (_who, user) => {
+    mockUser = user;
+    renderBuilder();
+    await screen.findByText('Legacy hours');
+    expect(screen.getByRole('button', { name: 'Edit Legacy hours' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Delete Legacy hours' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Edit Open work by status' })).toBeInTheDocument();
+  });
+
   it('runs a grouped template and charts it, with the table as the data of record', async () => {
     mockedApi.runReportTemplate.mockResolvedValue(groupedResult);
     renderBuilder();
