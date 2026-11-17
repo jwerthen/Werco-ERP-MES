@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useLayoutEffect, useRef } from 'react';
 import {
   RectangleStackIcon,
   ListBulletIcon,
@@ -1071,19 +1071,34 @@ function ClauseRow({
             ) : (
               <div className="space-y-2">
                 {clause.evidence_links.map(ev => (
-                  <div key={ev.id} className={`flex items-center gap-3 rounded-sm border px-3 py-2 text-sm ${ev.is_auto_linked ? 'bg-amber-500/10 border-amber-500/30' : 'bg-fd-panel border-fd-line'}`}>
+                  <div
+                    key={ev.id}
+                    data-testid="linked-evidence-row"
+                    className={`flex flex-wrap items-baseline gap-x-3 gap-y-2 rounded-sm border px-3 py-2 text-sm ${ev.is_auto_linked ? 'bg-amber-500/10 border-amber-500/30' : 'bg-fd-panel border-fd-line'}`}
+                  >
+                    {/* items-baseline: the title's first line, the link and the 44px buttons' labels share a baseline, with or without a description below. */}
                     {ev.is_auto_linked && (
                       <span className="text-amber-500 text-xs font-bold" title="Auto-linked from ERP/MES">{'\u26A1'}</span>
                     )}
                     <span className="badge badge-ghost badge-xs">{ev.evidence_type}</span>
-                    <span className="flex-1">
-                      {ev.title}
-                      {ev.is_auto_linked && ev.live_count != null && (
-                        <span className="ml-2 text-xs text-amber-300 font-medium">
-                          ({ev.live_count} records{ev.last_refreshed ? ` | Refreshed ${formatCentralDate(ev.last_refreshed)}` : ''})
-                        </span>
+                    {/* min-w-48: on a narrow screen the link and buttons wrap below the text rather than squeezing it to one character wide. */}
+                    <div className="flex-1 min-w-48">
+                      <span className="break-words">
+                        {ev.title}
+                        {ev.is_auto_linked && ev.live_count != null && (
+                          <span className="ml-2 text-xs text-amber-300 font-medium">
+                            ({ev.live_count} records{ev.last_refreshed ? ` | Refreshed ${formatCentralDate(ev.last_refreshed)}` : ''})
+                          </span>
+                        )}
+                      </span>
+                      {ev.description && (
+                        <EvidenceDescription
+                          id={`evidence-${ev.id}-description`}
+                          text={ev.description}
+                          autoLinked={ev.is_auto_linked}
+                        />
                       )}
-                    </span>
+                    </div>
                     {ev.module_reference && (
                       <a href={ev.module_reference} className="text-xs text-fd-blue hover:underline">
                         {ev.module_reference}
@@ -1181,6 +1196,100 @@ function ClauseRow({
         </div>
       )}
     </div>
+  );
+}
+
+/** A manual description taller than this many rendered lines starts clamped behind "Show more". */
+const EVIDENCE_DESCRIPTION_CLAMP_LINES = 3;
+
+/**
+ * Whether a description's full text is taller than EVIDENCE_DESCRIPTION_CLAMP_LINES lines.
+ * `scrollHeight` is the full content height whether or not the element is clamped, so the
+ * same reading decides both "start clamping" and "stop clamping". jsdom has no layout (its
+ * computed line height is empty and `scrollHeight` is 0), so tests stub `scrollHeight`.
+ */
+function descriptionOverflows(el: HTMLElement): boolean {
+  const style = window.getComputedStyle(el);
+  // text-xs: 12px font, 16px line. Fall back to that ratio if the line height is "normal".
+  const lineHeight = parseFloat(style.lineHeight) || (parseFloat(style.fontSize) || 12) * (4 / 3);
+  return el.scrollHeight > lineHeight * EVIDENCE_DESCRIPTION_CLAMP_LINES + 1;
+}
+
+/**
+ * A stored evidence link's `description`, under its title in the clause's linked-evidence list.
+ *
+ * Auto-link stores only `description` from a live evidence row (never `health_status` or
+ * `health_detail`), so this is the one place on the page an auditor reads what that row
+ * disclosed on its last refresh: a paused audit hash chain, missing audit triggers, and so on.
+ * Those disclosures are appended at the END of the text ("…integrity chain enabled, but 12
+ * entries were written while it was paused"), so an auto-linked description is never clamped:
+ * a clamp could show the claim and hide the qualification after it.
+ *
+ * A manual description is free text (up to 5,000 characters). It is clamped to three lines only
+ * while its measured height says it needs more, and only then is the "Show more" control shown:
+ * clamped and having the control are the same state, so no text is ever hidden without a way to
+ * reveal it. It is re-measured when the element resizes (window width, fonts loading) or the
+ * text changes. The whole text stays in the DOM for screen readers either way.
+ */
+function EvidenceDescription({ id, text, autoLinked }: { id: string; text: string; autoLinked: boolean }) {
+  const ref = useRef<HTMLParagraphElement>(null);
+  const [overflows, setOverflows] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const trimmed = text.trim();
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (autoLinked || !el) return undefined;
+    let active = true;
+    const measure = () => {
+      if (active) setOverflows(descriptionOverflows(el));
+    };
+    measure();
+    // A web font arriving after the first measure can change line wrapping without changing a
+    // clamped box's size, which a ResizeObserver would not report.
+    document.fonts?.ready.then(measure).catch(() => undefined);
+    if (typeof ResizeObserver !== 'undefined') {
+      const observer = new ResizeObserver(measure);
+      observer.observe(el);
+      return () => {
+        active = false;
+        observer.disconnect();
+      };
+    }
+    window.addEventListener('resize', measure);
+    return () => {
+      active = false;
+      window.removeEventListener('resize', measure);
+    };
+  }, [autoLinked, trimmed]);
+
+  if (!trimmed) return null;
+
+  const clampable = !autoLinked && overflows;
+  const clamped = clampable && !expanded;
+
+  return (
+    <>
+      <p
+        ref={ref}
+        id={id}
+        data-testid="linked-evidence-description"
+        className={`mt-0.5 text-xs text-slate-400 whitespace-pre-wrap break-words${clamped ? ' line-clamp-3' : ''}`}
+      >
+        {trimmed}
+      </p>
+      {clampable && (
+        <button
+          type="button"
+          className="mt-0.5 text-xs text-fd-blue hover:underline"
+          aria-expanded={expanded}
+          aria-controls={id}
+          onClick={() => setExpanded(value => !value)}
+        >
+          {expanded ? 'Show less' : 'Show more'}
+        </button>
+      )}
+    </>
   );
 }
 

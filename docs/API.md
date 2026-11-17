@@ -8871,15 +8871,25 @@ in `RBAC_PERMISSIONS.md`.
 > (`POST /qms-standards/{standard_id}/auto-link`) stores only `description` (`health_status`,
 > `health_detail` and `suggested_compliance` are computed per call and never persisted), so stored
 > evidence picks up the new wording on the next auto-link run in which the audit rule computes (a run
-> where it fails leaves the stored link unchanged; see `evidence_not_computed`).
-> The QMS page's linked-evidence list shows a stored link's `title` and count, not its `description`;
-> the live auto-evidence preview shows `description` and `health_detail`. That is why the title was
-> renamed: "Immutable Hash-Chain" was untrue for every paused entry and is the one claim the list
-> shows, so the title now names what the row reports and asserts nothing. Existing auto-linked
-> evidence picks up the new title on the next auto-link run in which the audit rule computes (a run
-> where it fails leaves the stored link unchanged; see `evidence_not_computed`), matched by rule id;
-> no migration. The row's `title`, `module_reference` and `evidence_type` do not change with the chain
-> or trigger state.
+> where it fails leaves the stored link unchanged; see `evidence_not_computed`). The QMS page's
+> linked-evidence list shows each stored link's `description` under its title. For an auto-linked row
+> that is the text written by the last auto-link run in which its rule computed, dated by the row's
+> "Refreshed" stamp; an edit through `PUT /qms-standards/evidence/{evidence_id}` replaces it without
+> moving that stamp, until the next auto-link run in which the rule computes overwrites it (a run where
+> it fails leaves the stored link unchanged; see `evidence_not_computed`). An auto-linked description
+> is always shown in full, never clamped, because the paused-chain and trigger disclosures sit at the
+> end of the text. A manual description is clamped to three lines behind **Show more** only while it
+> needs more than three lines on screen, so clamped text always has that control. `health_status`,
+> `health_detail` and `suggested_compliance` are not stored: the live auto-evidence preview
+> (**Auto-Discover**) shows each row's `health_detail` and its `health_status` as a coloured dot (a
+> failed rule's row also reads *Not computed*), and only the clause-level roll-up of
+> `suggested_compliance` (`overall_suggested_compliance`). The title was renamed because "Immutable
+> Hash-Chain" was untrue for every paused entry, and until the list showed `description` the title was
+> the one claim it showed; the title now names what the row reports and asserts nothing. Existing
+> auto-linked evidence picks up the new title on the next auto-link run in which the audit rule
+> computes (a run where it fails leaves the stored link unchanged; see `evidence_not_computed`),
+> matched by rule id; no migration. The row's `title`, `module_reference` and `evidence_type` do not
+> change with the chain or trigger state.
 
 > **The PM evidence row now judges the PM schedules, not just maintenance work orders — expect the
 > verdict to drop.** The *Preventive Maintenance & Infrastructure* row (clauses matched on maintenance
