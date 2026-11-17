@@ -140,7 +140,10 @@ owner ruling 3 only a person signed in to the app runs an AI recommendation's ac
 `catalog.EXCLUDED_OPERATIONS`, and the route refuses API tokens besides. The three Approved Supplier
 List writes (recording a supplier-approval decision and the ASL import preview / commit) and the two
 legacy `approved_supplier_list` writes are excluded the same way, and refuse API tokens too — see
-[Purchasing](#purchasing). Bulk release (`POST /work-orders/bulk-release`) is excluded as well, so an
+[Purchasing](#purchasing). So are the five comment and watcher writes (`POST` / `PATCH` / `DELETE
+/comments`, `POST` / `DELETE /watchers`; owner decision 2026-11-16, a comment is a person's own
+words): the reads — the thread, the watch state and mention search — stay tools; see
+[Comments and watchers](#comments-and-watchers). Bulk release (`POST /work-orders/bulk-release`) is excluded as well, so an
 agent releases one job per call; unlike those, the route itself has no API-token refusal — see
 [Work Orders](#work-orders). An agent on an API token
 also gets a 403 the same person would not get in the UI when it tries to mark an AI action card
@@ -169,8 +172,8 @@ Quality Manager approval, FAI customer approval) and its review follow-ups (the 
 disposition and the CAR form's vendor / customer sign-off boxes), and the lead's decisions of
 2026-11-15 (an egress kill switch is a person's judgment; a narrowed token's read writes nothing),
 the Approved Supplier List change of 2026-11-13 (the supplier-approval rows), and the owner's
-decision of 2026-11-17 (a standing API token may not complete a maintenance work order with checklist
-items unticked).
+decisions of 2026-11-16 for work-order comments (a comment is a person's own words) and of 2026-11-17
+(a standing API token may not complete a maintenance work order with checklist items unticked).
 This section is the **one list** of those credential rules — what refuses a credential,
 what is deliberately left open (and who decided each), and what is deliberately not refused —
 across the AI governance (ruling 3), floor-gates (ruling 2) and short-count (ruling 1) changes;
@@ -193,7 +196,7 @@ list of credential predicates.
 Writes that apply them — each refused before any write and before any audit row (the 403 texts
 live in `ai_action_applier.py` and `operation_action_gates.py`, for the quality judgments in
 `quality_record_service.py` and `fai_service.py`, for export control
-`app/api/endpoints/customers.py`, for the egress switches `app/core/credentials.py`, and for the supplier-approval rows
+`app/api/endpoints/customers.py`, for the egress switches and the comment writes `app/core/credentials.py`, and for the supplier-approval rows
 `app/services/supplier_approval_service.py` and `app/api/endpoints/purchasing.py`, for the maintenance
 checklist `app/services/maintenance_checklist.py`; where each sits in its route's
 check order is in `docs/API.md` → Work Orders → "Short count at completion" and → AI
@@ -220,6 +223,7 @@ Recommendations):
 | **Completing a maintenance work order with checklist items unticked** — `POST /maintenance/work-orders/{id}/complete` when any checklist item the work order carries (or the body sends) is left unticked, whatever `incomplete_checklist_reason` it sends. Refused before the reason check and before any write. A token's completion with every item ticked (or no checklist) is unchanged, and so is a person's completion with a reason | `is_api_token_credential`, inline in `complete_work_order` | **403** `API_TOKEN_INCOMPLETE_CHECKLIST` (`Completing a maintenance work order with checklist items unticked must be done by a person signed in to the app, not an API token.`; text in `app/services/maintenance_checklist.py`) | Owner decision 2026-11-17, under the 2026-11-07 principle: why a PM step was skipped is a person's judgment, and a completion resets the machine's PM clock for a full interval |
 | **Taking items off a maintenance work order's checklist** — `PUT /maintenance/work-orders/{id}` whose `checklist_results` drops, renames or clears an item the work order carries (ticking, unticking or adding is unchanged). Refused before the first write | `is_api_token_credential`, through `maintenance_checklist.removed_checklist_items` | **403** `API_TOKEN_CHECKLIST_REMOVAL` (`Removing items from a maintenance work order's checklist must be done by a person signed in to the app, not an API token.`) | **This PR's extension** of the owner's 2026-11-17 decision: without it a token reaches the refused completion in two steps (PUT the unticked items away, then complete) |
 | **Taking items off a PM schedule's checklist while it has an open work order** — `PUT /maintenance/schedules/{id}` whose `checklist` drops, renames or clears a step while a scheduled / overdue / in-progress / on-hold work order carries the schedule's id (completion judges the schedule's steps too). Adding steps, and editing a schedule with no open work order, are unchanged | `is_api_token_credential`, inline in `update_schedule` | **403** `API_TOKEN_SCHEDULE_CHECKLIST_REMOVAL` (`Removing items from the checklist of a PM schedule that has an open work order must be done by a person signed in to the app, not an API token.`) | **This PR's extension**, for the same reason: the third route to the same skip |
+| **Posting, editing or deleting a comment, or watching / unwatching a record** — `POST /comments`, `PATCH /comments/{comment_id}`, `DELETE /comments/{comment_id}`, `POST /watchers`, `DELETE /watchers`. Refused in the route's first dependency, before the body is validated or anything is read or written. None of the five is an MCP tool (`catalog.COMMENT_WRITE_OPERATIONS`, part of `EXCLUDED_OPERATIONS`), so a person's own JWT cannot reach them through an agent either. The reads (`GET /comments`, `GET /watchers`, `GET /users/mention-search`) stay open to a token the read gates admit | `is_api_token_credential`, in the `comment_writer` dependency (`app/api/endpoints/comments.py`) | **403** `API_TOKEN_COMMENT_WRITE` (`A comment is a person's own words: an API token cannot post, edit or delete comments or change who is watching a record. Sign in to the app.`) — any token, whatever its role or scope (a read-only or AI-external token meets its own gate's 403 first) | Owner decision 2026-11-16 (work-order comments): a comment is a person's own words, and a watch a person's own preference |
 
 Deliberately **not** refused:
 
@@ -1007,6 +1011,52 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > undocumented in the matrix even though the rows above are defined by reference to it. Worth adding
 > when someone next edits this section. See `docs/API.md` → Work Orders → "Work order
 > templates" and [docs/WORK_ORDER_TEMPLATES.md](WORK_ORDER_TEMPLATES.md).
+
+### Comments and watchers
+
+v1 (2026-11-16): comment threads, @mentions and watchers on **work orders only**, in the office app
+(the Comments panel on the work-order detail page). Routes: `GET`/`POST /comments`,
+`PATCH`/`DELETE /comments/{comment_id}`, `GET`/`POST`/`DELETE /watchers`, `GET /users/mention-search`.
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| Read a work order's comments and watch state | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Post a comment (and @mention people) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Edit a comment | own | own | own | own | own | own | own |
+| Delete a comment | any | any | own | own | own | own | own |
+| Watch / unwatch a work order (self) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Mention search (`GET /users/mention-search`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+> **Who may comment mirrors work-order READ access** — every signed-in member of the active company,
+> all seven tenant roles, Viewer included — because `GET /work-orders/{id}` itself depends only on
+> authentication and the active company. The record-type registry in
+> `app/services/comment_service.py` (`COMMENTABLE_TYPES`) owns that rule per record type, so a
+> future type (a PO, a quote) gets the read RBAC of its own domain rather than this one. The same
+> check gates each @mention (an inactive, foreign or not-permitted id is **422**, naming ids only)
+> and each notification recipient, re-checked when the worker dispatches.
+>
+> - **Edit is the author's alone.** An Admin or Manager can remove a comment but never rewrite
+>   someone's words: anyone else's `PATCH` is **403**.
+> - **Delete** is the author, an Admin or a Manager (moderation); a superuser or Platform Admin
+>   passes, as with `require_role`. Deletion is a soft delete, audited with `extra_data.moderated`
+>   when the deleter is not the author. There is no restore in v1.
+> - **Watching** is the caller's own preference: `POST` / `DELETE /watchers` act only on the
+>   caller, never on another user id. Posting a comment auto-watches its author and everyone it
+>   mentions.
+> - **Mention search** returns `{id, display_name}` only — never an email, role or phone — and is
+>   open to every member of the company, unlike the Admin / Manager `GET /users/` list.
+> - **Tenancy.** The work order is resolved in the active company and must be live; another
+>   company's, an absent or a soft-deleted work order is **404** on every route, never **403**.
+>
+> **Credentials (owner decision 2026-11-16).** Every write — posting, editing and deleting
+> comments, watching and unwatching — refuses **any** API token **403**, and none of the five is an
+> MCP tool; see [Credential policy for judgment writes](#credential-policy-for-judgment-writes).
+> The reads stay open to a token the read gates admit: a full token reads all three; a read-only
+> token reads the thread and the watch state but is **403** on mention search (`Users` tag, part of
+> the read-only deny floor); an AI-external token is **403** on all three (none is on its
+> allowlist). A crew-station badge token is refused **403** on every route here by its path fence,
+> so the kiosk shows no comments. See
+> [API.md → Comments and watchers](API.md#comments-and-watchers).
 
 ### Parts
 
@@ -2518,6 +2568,7 @@ UI controls do not grant API authority. See [API: Documents](API.md#documents).
 | Delete | ✓ | | | | | | |
 | Roles | ✓ | | | | | | |
 | Own profile + notification settings (`/users/me/*`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Mention search (`GET /users/mention-search`, `{id, display_name}` only — see [Comments and watchers](#comments-and-watchers)) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 > **Self-scoped `/users/me/*` routes are open to every authenticated role — by construction, not by
 > grant.** `GET /users/me`, `PUT /users/me/phone`, `GET`/`PUT /users/me/notification-preferences`,

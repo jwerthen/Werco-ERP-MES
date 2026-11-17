@@ -98,6 +98,32 @@ domain code ──► OperationalEventService.emit(...)   (catalog-mapped event 
 - **Lifecycle**: recipient resolution filters `User.is_active` across all three sources (roles, watchers, direct); watcher rows survive soft-delete (restore keeps watchers) but resolution skips deleted entities; notification deep links to since-deleted records render a "record deleted" affordance rather than a dead link; deactivated users' unread rows are excluded from unread counts and pruned by retention.
 - Comment create/edit/delete audited via `AuditService`.
 
+> **Shipped 2026-11-16 (v1) — work orders only** (owner decisions 2026-11-16). Migration
+> `125_work_order_comments` creates the three tables as designed above; the routes are
+> `GET`/`POST /comments`, `PATCH`/`DELETE /comments/{id}`, `GET`/`POST`/`DELETE /watchers` and
+> `GET /users/mention-search` ([API.md → Comments and watchers](API.md#comments-and-watchers)), and
+> `<CommentsPanel>` is mounted on the **work-order detail page** of the office app only. The
+> record-type registry is `comment_service.COMMENTABLE_TYPES`: `entity_type` must be exactly
+> `work_order` (anything else is 422), and enabling the next type is a registry entry (a
+> tenant-scoped live resolver, a `can_view` mirroring that domain's read RBAC, a label, the
+> notification identifier), never a migration — there is deliberately no CHECK on `entity_type`.
+> Where v1 differs from the design above:
+>
+> - **Auto-watch** is the author and every person mentioned, made by the comment itself. Creating a
+>   work order does not watch it, and nothing is backfilled.
+> - **Mention-search is company-wide**, not "in context": every company member can read a work
+>   order, so there is no narrower context yet. Each mentioned id is still re-checked at compose
+>   (422 naming the refused ids, never a name) and again at dispatch.
+> - **Emails carry no comment text** — who, where and the link only
+>   ([NOTIFICATIONS.md → §11.1, 2026-11-16](NOTIFICATIONS.md#email-content-rule-plan-111--relaxed-2026-07-29)).
+> - **Writes are people-only.** `POST`/`PATCH`/`DELETE /comments` and `POST`/`DELETE /watchers`
+>   refuse every API token **403** and are not MCP tools (`catalog.COMMENT_WRITE_OPERATIONS`); the
+>   three reads stay tools ([RBAC_PERMISSIONS.md → Comments and watchers](RBAC_PERMISSIONS.md#comments-and-watchers)).
+>
+> **Not shipped:** the other record types listed above (and their panels), comments on the kiosk,
+> attachments, reactions, a `?comment=` deep-link anchor (notifications link to the work order),
+> restoring a deleted comment, and paging a thread beyond its newest 500 comments.
+
 ### 3.7 Preferences & governance
 
 - `NotificationPreference.preferences` JSON widens from `{email, digest}` to `{in_app, email, sms, digest}` per event. **No more row auto-creation**: an absent row means catalog defaults, resolved in memory at dispatch time; a row is persisted only when the user explicitly saves (this also removes today's mid-request commit inside pref resolution and the `IntegrityError` auto-create defect, §9.8). PR 1's migration normalizes existing rows to the new shape (one-time, idempotent).

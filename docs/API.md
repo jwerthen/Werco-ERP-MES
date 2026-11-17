@@ -677,6 +677,10 @@ tokens" below), never wider.
 >   order, or a laser nest's planned runs, once work is recorded; re-importing a nest package onto a
 >   laser job with recorded work (its own refusal text) — **403**. See Work Orders → "Short count at
 >   completion" → "API tokens may not declare scrap or make count judgments".
+> - **Comments and watchers (owner decision 2026-11-16).** Posting, editing or deleting a comment and
+>   watching or unwatching a record answer **403** to every API token, whatever its role or scope: a
+>   comment is a person's own words. The reads stay open to a token the read gates admit. See
+>   [Comments and watchers](#comments-and-watchers).
 > - **Left open.** **Resume Work Order** (`POST /work-orders/{id}/resume`): a token whose user holds
 >   Admin / Manager / Supervisor may lift a work-order hold, audited as that user with
 >   `extra_data.credential` (owner decision 2026-11-07). Dismiss, snooze and feedback on a
@@ -1566,6 +1570,10 @@ company-scoped.
 | GET | `/work-orders/{id}/material-allocations/{allocation_id}/consumption` | Per-source-lot ledger position of a tie (`issued` / `returned` / `net`) — the pre-confirm read behind the return dialog | Yes |
 | POST | `/work-orders/{id}/material-allocations/{allocation_id}/return` | **Return consumed material to its source lots** — reasoned, audited, compensating. The only verb on this router that posts inventory | Admin / Manager / Supervisor |
 | GET | `/work-orders/{id}/backflush-preview` | **Dry run (PR 4.5)** — what completing this work order would consume, per component and per lot, before anything moves. Pure read: no ledger row, no audit row, no event | Yes |
+
+> **Comments on a work order** (the detail page's Comments panel, with @mentions and a Watch
+> toggle) are their own routes, `/comments` and `/watchers` with `entity_type=work_order` — see
+> [Comments and watchers](#comments-and-watchers).
 
 > **Tenant isolation on operation/completion endpoints.** The operation- and completion-level
 > endpoints above (`/start`, `/complete`, `/operations/{id}`, `/operations/{id}/start`,
@@ -11980,6 +11988,7 @@ There is no delete endpoint.
 | POST | `/users/{id}/activate` | Reactivate an account, without restoring revoked API tokens | Admin |
 | DELETE | `/users/{id}` | Deactivate user (sets `is_active=false`; cannot deactivate yourself). Revokes every live API token the user holds in the same transaction (reason `user deactivated`, one `API_TOKEN_REVOKED` audit trail each); the response carries `api_tokens_revoked`. Reactivation (`POST /users/{id}/activate`) restores the account, never a token | Admin |
 | POST | `/users/{id}/unlock` | Clear failed-login lockout | Admin |
+| GET | `/users/mention-search` | People to @mention in a comment: active members of the active company by name, `{id, display_name}` only (never email, role or phone). Documented under [Comments and watchers](#comments-and-watchers) | Any signed-in member of the company (a read-only API token is **403**: `Users` tag) |
 
 > **User writes are Admin-only; the list read is Admin / Manager.** `GET /users/` (and
 > `GET /users/{id}`) are `require_role([ADMIN, MANAGER])`; `POST` / `PUT` / `DELETE` are
@@ -13101,6 +13110,141 @@ quote statuses (accepted / rejected / converted / expired) auto-record `quote_re
 > default (operators keep the kiosk station screen; deep links are unaffected). The page shows a
 > "Top 3 today" hero — the three highest-scoring pending recommendations.
 
+### Comments and watchers
+
+A discussion thread on a record, with @mentions that notify the person named and watchers who hear
+about new comments. **v1 is work orders only, in the office app only** (owner decision 2026-11-16):
+the **Comments** panel on the work-order detail page. Not in v1: other record types, the kiosk,
+attachments, reactions. Service `app/services/comment_service.py`, migration `125_work_order_comments`;
+the two notification events are in [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#what-actually-fires-in-pr-1).
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/comments?entity_type=work_order&entity_id={id}` | The work order's live comments, **oldest first**: the newest 500, with no pagination (an older comment past that is not returned) | Any signed-in member of the company |
+| POST | `/comments` | Post a comment, optionally @mentioning people by user id. **201** with the comment | Any signed-in member of the company; **API tokens 403** |
+| PATCH | `/comments/{comment_id}` | Edit a comment: the full new `body` and `mentioned_user_ids` | The author only; **API tokens 403** |
+| DELETE | `/comments/{comment_id}` | Soft-delete a comment (it stops being listed). **204**, no body | The author, an Admin or a Manager; **API tokens 403** |
+| GET | `/watchers?entity_type=work_order&entity_id={id}` | Whether the caller watches the work order, and how many people do | Any signed-in member of the company |
+| POST | `/watchers` | Start watching (idempotent); returns the watch state | Any signed-in member of the company; **API tokens 403** |
+| DELETE | `/watchers?entity_type=work_order&entity_id={id}` | Stop watching (idempotent); returns the watch state | Any signed-in member of the company; **API tokens 403** |
+| GET | `/users/mention-search?q={text}&limit={n}` | People to @mention: active members of the active company by name, `{id, display_name}` only | Any signed-in member of the company |
+
+**Requests.** All three bodies refuse unknown fields (**422**).
+
+```json
+POST /comments
+{"entity_type": "work_order", "entity_id": 1042, "body": "Can this run before the 14th?", "mentioned_user_ids": [17]}
+
+PATCH /comments/{comment_id}          (both fields required)
+{"body": "Can this run before the 12th?", "mentioned_user_ids": [17, 23]}
+
+POST /watchers
+{"entity_type": "work_order", "entity_id": 1042}
+```
+
+**Responses.** A comment (the list returns an array of these):
+
+```json
+{
+  "id": 311,
+  "entity_type": "work_order",
+  "entity_id": 1042,
+  "author": {"id": 9, "display_name": "Avery Quill"},
+  "body": "Can this run before the 14th?",
+  "created_at": "2026-11-16T15:04:11Z",
+  "edited_at": null,
+  "mentions": [{"id": 17, "display_name": "Jane Doe"}],
+  "can_edit": true,
+  "can_delete": true
+}
+```
+
+`can_edit` / `can_delete` are **the caller's** rights on that comment. A person is
+`{id, display_name}` only, never an email, role or phone; mention-search returns the same shape.
+The watch routes return `{"watching": true, "watcher_count": 3}`.
+
+> **Validation.**
+> - **`entity_type`** must be exactly `work_order` (case-sensitive; 1–40 characters) on every route,
+>   or **422** `Comments are not available on this kind of record. Enabled entity_type values:
+>   work_order.` `entity_id` is a strict integer above 0.
+> - **`body`** is stripped, then must be 1–5000 characters. Whitespace-only, over 5000, or
+>   containing a NUL character is **422**. Nothing else is rewritten: the text is stored verbatim
+>   (no markup is stripped) and the app renders it as text.
+> - **`mentioned_user_ids`**: at most 20, distinct, positive integers (a JSON `true` is refused);
+>   otherwise **422**. Mentions are **structured**: the client sends ids chosen from mention-search,
+>   and the server never parses names out of the text. Each id must be an **active** person of the
+>   **active company** who can read the work order, or the request is **422**
+>   `These people can't be mentioned on this work order: user 41, user 52.` The refusal names
+>   **ids only**, never a name, so a foreign or inactive id cannot be used to learn whose it is.
+>   Mentioning yourself is allowed.
+>
+> **404s.** The work order is resolved in the active company and must be live: an absent id,
+> another company's work order and a soft-deleted one all answer **404** `Work order not found`,
+> on every comment and watcher route. A comment id that is absent, another company's or already
+> deleted is **404** `Comment not found`, and a comment whose work order has since been deleted is
+> the work order's 404.
+>
+> **Who can do what** (see [RBAC_PERMISSIONS.md → Comments and watchers](RBAC_PERMISSIONS.md#comments-and-watchers)).
+> Reading, posting and watching follow work-order read access: every signed-in member of the
+> company, all seven tenant roles, Viewer included. **Editing is the author's alone**: anyone
+> else, an Admin included, gets **403** `Only the person who wrote a comment can edit it.` An
+> Admin or Manager can remove a comment but never rewrite one. **Deleting** is the author, an
+> Admin or a Manager (a superuser or Platform Admin passes, as with `require_role`); anyone else
+> gets **403** `Only the person who wrote a comment, an Admin or a Manager can delete it.`
+>
+> **Edits.** `PATCH` replaces the text and the mention set. Only people the edit **newly** adds
+> are validated, notified and auto-watched; a mention kept from before is not re-checked, so a
+> person deactivated since does not block an edit of the text. `edited_at` is stamped. An edit
+> that changes neither the text nor the mention set writes nothing: no `edited_at`, no audit row,
+> no notification.
+>
+> **Auto-watch.** Posting a comment makes the author and everyone it mentions watchers of the work
+> order (idempotent). Creating a work order does not watch it, and nothing is backfilled.
+> `watching` is whether the caller has a watch row; **`watcher_count`** counts **active** members
+> of the company watching (a deactivated person's row persists but is neither counted nor
+> notified). Watch rows survive a work order's soft delete, so a restore keeps them, but every
+> route answers 404 while it is deleted.
+>
+> **Notifications.** A new comment emits `comment.mention` (to the people it mentions) and
+> `comment.added` (to the other watchers, never the author); an edit emits `comment.mention` for the
+> people it newly adds and nothing else. **Neither carries the comment text**: the title is the
+> label plus the work-order number, the body says who wrote it ("By: …"), and the link is
+> `/work-orders/{id}` (owner decision 2026-11-16). Recipients are re-checked when the worker
+> dispatches, and the events are best-effort: a failed notification never fails the comment. See
+> [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#content-rules-compliance).
+>
+> **Audit.** Create, edit and delete write `CREATE` / `UPDATE` / `DELETE` rows on resource type
+> `comment`: the create row records the body, the mentioned ids and
+> `extra_data.auto_watched_user_ids`; the edit row keeps the old and new text and mention sets; the
+> delete row snapshots the body, author, mentions and timestamps, with `extra_data.moderated: true`
+> when someone other than the author deleted it. Watch and unwatch write `CREATE` / `DELETE` on
+> `entity_watcher`; a watch or unwatch that changes nothing writes nothing. These are ordinary
+> best-effort audit writes, not the required-audit 503 path. A comment is **soft-deleted** and never
+> physically removed; an unwatch physically removes the watch row (a preference, not a record), and
+> an edit that drops a mention removes that mention row (its audit row keeps both sets).
+>
+> **Mention search.** `q` is 1–100 characters (whitespace collapsed) and matches a first name, last
+> name or "first last", case-insensitively, as a substring; `%` and `_` are literal, not wildcards.
+> Ordered by first name, then last name, then id. `limit` 1–25, default 10. Active members of the
+> active company only.
+>
+> **API tokens and agents (owner decision 2026-11-16).** A comment is a person's own words and a
+> watch a person's own preference, so every write — `POST` / `PATCH` / `DELETE /comments` and
+> `POST` / `DELETE /watchers` — refuses **any** API token, whatever its role or scope, **403**
+> `A comment is a person's own words: an API token cannot post, edit or delete comments or change
+> who is watching a record. Sign in to the app.` (`API_TOKEN_COMMENT_WRITE`). It answers in the
+> route's first dependency, before the body is validated or anything is read or written; a
+> read-only or AI-external token meets its own gate's 403 first. None of the five writes is an MCP
+> tool, so a person's own JWT cannot reach them through an agent either. The reads are generated
+> tools (`list_record_comments`, `get_record_watch_state`, `search_mentionable_users`):
+> - a **full** token reads all three;
+> - a **read-only** token reads the thread and the watch state, but mention-search is **403**: it
+>   sits under the `Users` tag, which `READ_ONLY_DENY_TAG_FLOOR` denies every read-only token;
+> - an **AI-external** token is **403** on all three: none is on the AI-external allowlist, because
+>   comment bodies are free text the export-control redaction cannot vouch for.
+>
+> A crew-station badge (kiosk) token is refused **403** on every route here by its path fence.
+
 ### Notifications (in-app inbox)
 
 Per-user notification inbox for the bell / popover / `/notifications` page — PR 1 (Foundation +
@@ -13167,9 +13311,11 @@ their own inbox).
 > **Content (revised 2026-07-29, after CMMC L2 was descoped):** `title` is the catalog label plus
 > the record identifier. `body` is the catalog description, then a blank line, then a detail line
 > composed from a curated payload allowlist — statuses and transitions, the `quantity_*` family,
-> priorities, day counts, disposition/category/source/inspection method, and `reason` — pipe-joined,
+> priorities, day counts, disposition/category/source/inspection method, `reason`, and (since
+> 2026-11-16, on the two comment events only) `comment_author` as "By" — pipe-joined,
 > each value truncated at 120 chars. When the payload carries none of those keys the body is the
-> description alone. **Part numbers and customer names are still absent**: the dispatcher reads the
+> description alone. The comment events never carry the comment text (see
+> [Comments and watchers](#comments-and-watchers)). **Part numbers and customer names are still absent**: the dispatcher reads the
 > event payload only and never re-queries to resolve `part_id` into a part number (a scope/N+1
 > decision, not a security boundary). See
 > [docs/NOTIFICATIONS.md → Content rules](NOTIFICATIONS.md#content-rules-compliance) for the
@@ -14440,10 +14586,10 @@ What matters from this file's point of view:
   routers with the caller's own bearer token. The router is the boundary: the same `require_role`
   gates, tenant scoping, audit rows, optimistic-locking 409s and per-endpoint size caps apply, and a
   401/403/409/422 comes back verbatim as an `is_error` tool result carrying the server's `detail`.
-- **The catalog is this API.** 764 tools are generated from `app.openapi()` at startup — every
+- **The catalog is this API.** 767 tools are generated from `app.openapi()` at startup — every
   secured operation except the `Authentication`, `Carrier Webhooks`, `Error Logging` (and its router-level `errors` twin) and `WebSocket` tags, the
   unauthenticated health/station-login routes (named one by one in `catalog.PUBLIC_OPERATIONS`) and
-  the fifteen operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders
+  the twenty operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders
   (`POST /work-orders/import`, `POST /purchasing/purchase-orders/import` — they mint work orders
   RELEASED / IN_PROGRESS and POs SENT, a record of a past system rather than a user action),
   AI Accept & apply (`POST /ai/recommendations/{recommendation_id}/apply` — owner ruling 3: only a
@@ -14456,9 +14602,12 @@ What matters from this file's point of view:
   Supplier List writes (`PUT /purchasing/vendors/{vendor_id}/approval`,
   `POST /purchasing/vendors/asl-import/preview` and `/commit` — a supplier-approval decision is a
   person's judgment; the routes also refuse API tokens), the two legacy `approved_supplier_list`
-  writes (`POST /supplier-scorecards/approved-suppliers/`, `PUT .../approved-suppliers/{asl_id}`) and
+  writes (`POST /supplier-scorecards/approved-suppliers/`, `PUT .../approved-suppliers/{asl_id}`),
   bulk release (`POST /work-orders/bulk-release` — `release_work_order` stays an agent's only release
-  door, one job per call; this route does not refuse API tokens) — plus 15 fixed-name convenience tools that shadow 16
+  door, one job per call; this route does not refuse API tokens) and
+  the five comment / watcher writes (`POST /comments`, `PATCH` / `DELETE /comments/{comment_id}`,
+  `POST` / `DELETE /watchers` — owner decision 2026-11-16: a comment is a person's own words; the
+  routes also refuse API tokens, and the three reads stay tools) — plus 15 fixed-name convenience tools that shadow 16
   raw routes (`POST /work-orders/`, `PUT /work-orders/{id}`, `POST /work-orders/{id}/release`, the two
   nest-package imports, the manual nest add, `GET /search/`, …) to enforce agent rules the routes do
   not: create/duplicate always land DRAFT, release is a separate explicit tool and the generic update

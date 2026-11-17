@@ -207,7 +207,7 @@ but **only entries whose source is wired today actually fire**; the rest are **d
 `shipment.shipped`,
 `coc.generation_failed`, `downtime.started`, `downtime.resolved`, `material.allocation_shortage`,
 `material.backflush_shortage`, `material.allocation_consumption_failed`, `material.backflush_failed`,
-`material.backflush_demand_refused`, `dispatch.changed`.
+`material.backflush_demand_refused`, `dispatch.changed`, `comment.mention`, `comment.added`.
 
 > **`downtime.started` / `downtime.resolved` have a second source since migration `124`.** Besides
 > an operator report on `/downtime`, starting a work-center maintenance work order with
@@ -252,6 +252,45 @@ but **only entries whose source is wired today actually fire**; the rest are **d
 > **Known gap, by design of "clocked in".** Recipients are resolved when the worker dispatches
 > (seconds after the commit). An operator between jobs — the kiosk clocks out before completing —
 > holds no open entry and is not found; the banner on the queue read is what reaches them.
+
+> **`comment.mention` / `comment.added` — wired 2026-11-16 (work-order comments, v1).** Dormant
+> catalog rows until the comment thread shipped on the work-order detail page
+> (`services/comment_service.py`, migration `125`; see
+> [API.md → Comments and watchers](API.md#comments-and-watchers)). v1 is work orders only.
+>
+> | Field | `comment.mention` | `comment.added` |
+> |-------|-------------------|-----------------|
+> | `label` | You were mentioned | New comment |
+> | `category` / `severity` | System / info | System / info |
+> | `default_channels` | `in_app` + `email` | `in_app` only |
+> | `mandatory_channel` | `in_app` | none |
+> | `sms_eligible` / `recurring` | `false` / `false` | `false` / `false` |
+> | Recipients | resolver `resolve_comment_mentioned_users` (`comment_service.mention_recipients`): the payload's `mentioned_user_ids`, **re-checked at dispatch** — same company, active, may view the work order — and nobody once the work order is soft-deleted | resolver `resolve_comment_watchers` (`comment_service.watcher_recipients`): the work order's active watchers in the event's company, **minus** everyone the comment mentions (they get `comment.mention` instead) **minus** the author; nobody once the work order is soft-deleted |
+> | `source_event_types` | `("comment_mentioned",)` | `("comment_added",)` |
+> | Emitted on | create (everyone mentioned) and edit (only the people the edit **newly** adds) | create only — an edit never re-notifies watchers |
+>
+> **The event's entity is the comment, not the work order** (`entity_type = "comment"`,
+> `entity_id` = the comment id, `work_order_id` = the work order). The ~5-minute delivery dedup is
+> keyed on `(event_key, related_type, related_id, user_id, channel)` with `related_*` taken from
+> the event's entity, so a work-order entity would silently drop a second comment (or a second
+> mention) on the same work order inside that window. `work_order_id` makes the link
+> `/work-orders/{id}` — the first row of [What each event links to](#what-each-event-links-to).
+>
+> **Best-effort, in one savepoint.** `_emit_comment_events` emits through `emit_best_effort` inside
+> `begin_nested()`: any failure, the event INSERT's flush included, rolls back only the savepoint,
+> so a failed notification never fails the comment. The outbox enqueues at the request's outermost
+> commit only (see *Savepoints are not commits*), so a rolled-back comment notifies nobody.
+>
+> **No comment text.** The payload carries ids (`comment_id`, `record_type`, `record_id`,
+> `mentioned_user_ids`) and two strings — `work_order_number`, which titles the row ("You were
+> mentioned: WO-1042"), and `comment_author`, the author's name snapshotted at write time, which
+> becomes the body's `By:` detail line — and never the body. See the 2026-11-16 entry under
+> [§11.1](#email-content-rule-plan-111--relaxed-2026-07-29). Both event types are catalog source
+> types, so `POST /operational-events/` refuses them **400** like every other server-recorded event:
+> no client can forge a mention.
+>
+> **Neither is under Admin Settings → Email Recipients** — see
+> [Admin email recipients](#admin-email-recipients).
 
 **Direct-dispatch** (crons / MRP / scheduling call `dispatch_direct`):
 `calibration.due`, `wo.late`, `stock.low`, `quote.expiring` (the four recurring crons in
@@ -424,7 +463,8 @@ it is driven by the direct bridge, not the outbox tee.)
   `rma.approved`, `rma.received`, `po.deleted`, `vendor.deactivated`, `quote.sent`, `quote.accepted`,
   `shipment.delivery_exception`, `eco.submitted/approved/rejected/implemented`, `maintenance.due`,
   `maintenance.overdue`, `account.locked`, `import.completed`, `import.failed`.
-- **PR 5 comments**: `comment.mention`, `comment.added`.
+- **PR 5 comments** (`comment.mention`, `comment.added`) were dormant here until **2026-11-16**;
+  they are now wired for work orders — see the outbox-driven list above.
 
 ---
 
@@ -828,8 +868,9 @@ Phone numbers are never logged in full — `mask_phone()` renders them as `***12
 `api/endpoints/users.py`, used only by the self-profile routes (`GET /users/me`, the
 `/users/me/*` self-service routes) and the ADMIN/MANAGER user-management routes. General user
 serialization goes through `app.schemas.user.UserResponse` (auth/token/platform browse) and the
-per-domain `UserSummary`-style schemas — **none of which expose a phone number**, and neither will
-PR 5's mention-search. Keep it that way when adding user-shaped responses.
+per-domain `UserSummary`-style schemas — **none of which expose a phone number**, and neither does
+the comment mention-search (`GET /users/mention-search` and the comment author / mention fields
+return `{id, display_name}` only). Keep it that way when adding user-shaped responses.
 
 ---
 
@@ -899,6 +940,23 @@ first unread row, so a "next up" line in it would go stale. That detail lives on
 banner, which reads the frozen payload through `schemas.dispatch.DispatchNotice`. The link is
 the record-less `/shop-floor/operations` (`links.SHOP_FLOOR_OPERATIONS`), which every role can
 open.
+
+**2026-11-16 — comment and @mention notifications (owner decision 2026-11-16).** `comment.mention`
+and `comment.added` carry **no comment text** — not in the title, the body, the email or the event
+payload. They say who, where and where to click, nothing more: the comment itself stays in the app,
+behind the work order's read access. The title is the catalog label plus the work-order number
+("You were mentioned: WO-1042"; `work_order_number` is already an `_IDENTIFIER_KEYS` entry). The
+body is the catalog's static description plus a detail line whose only new key is
+**`comment_author`** (label **"By"**): the author's name, **snapshotted into the payload at write
+time** (the dispatcher reads the payload and never re-queries the user). It is deliberately a new key rather than
+`actor_display`, which this section keeps out of email (see the dispatch-notice entry above), so
+admitting a comment's author admits nothing else that carries a person's name. It is appended
+**last** to `_DETAIL_KEYS`, so no existing email changes (no other emitted payload carries it), and
+it is **never** an `_SMS_DETAIL_KEYS` entry — neither event is SMS-eligible, and a person's name does
+not go on a lock screen. The rest of the payload is ids only — `comment_id`, `record_type`,
+`record_id`, `mentioned_user_ids` — plus those two strings, never the body.
+`tests/services/test_notification_email_content.py` pins `comment_author` as mailable and the
+comment body as not.
 
 ### Terse SMS body rule (plan §3.4 / §11.1) — **narrowly relaxed 2026-07-29**
 
@@ -972,6 +1030,18 @@ now actually send. Before enabling in production, verify DNS for the `SMTP_FROM`
 Administrators can now select an exclusive audience per automated email in **Admin Settings → Email Recipients**.
 Werco's work order completion and material receipt emails default to Ashley Werthen, Jon Werthen, and Jon Werthen Jr.
 See [configuration, delivery behavior, and deployment notes](notification-email-recipients.md).
+
+**The two comment events are excluded (2026-11-16).** `comment.mention` and `comment.added` are in
+`notification_email_recipients.EMAIL_RECIPIENT_EXCLUDED_EVENTS`, so they are not in `EMAIL_EVENTS`:
+they never appear on the Email Recipients screen, and `PUT /admin/settings/email-recipients/{event_key}`
+refuses either key **400** ("This email type does not have configurable recipients."). Their
+audience *is* the person a comment names or the people who chose to watch the work order, so a
+company-wide list would break them both ways: a non-empty saved list would drop mention email for
+every mentioned person not on it and email everyone on it for every mention anywhere, and an empty
+list would switch mention email off company-wide. A row saved for `comment.mention` before the
+exclusion (it was listed while the event was dormant) is ignored: `email_recipient_ids` returns
+the automatic audience for any key not in `EMAIL_EVENTS`. `comment.added` has no email channel
+today; it is listed so gaining one cannot re-admit it.
 
 ## Compliance invariants (checklist)
 
@@ -1211,8 +1281,11 @@ PR 1 is the foundation; the remaining PRs (see [NOTIFICATIONS_PLAN.md §10](NOTI
   [Content rules](#content-rules-compliance) (narrowly relaxed 2026-07-29 to allow one vetted
   closed-vocabulary classifier). Still deferred from §3.4: the Twilio inbound
   STOP/opt-out webhook and the delivery-receipt webhook.
-- **PR 5 — Comments & mentions**: `comments` / `comment_mentions` / `entity_watchers`, `<CommentsPanel>`,
-  the `comment.mention` / `comment.added` events, per-entity-type RBAC (documented in
-  [RBAC_PERMISSIONS.md](RBAC_PERMISSIONS.md) when it lands), auto-watch.
+- **PR 5 — Comments & mentions**: ✅ **v1 shipped 2026-11-16, work orders only** — migration `125`
+  (`comments` / `comment_mentions` / `entity_watchers`), `<CommentsPanel>` on the work-order detail
+  page, the `comment.mention` / `comment.added` events ([above](#what-actually-fires-in-pr-1)),
+  auto-watch, and the role table in [RBAC_PERMISSIONS.md → Comments and watchers](RBAC_PERMISSIONS.md#comments-and-watchers).
+  Still deferred: the other record types, the kiosk, attachments and reactions — see
+  [NOTIFICATIONS_PLAN.md §3.6](NOTIFICATIONS_PLAN.md#36-comments--mentions--watchers).
 - **PR 6 — Event coverage**: instrument the dormant domains (quotes, complaints/RMA, ECO,
   maintenance, delivery exceptions, account lockout, cert-expiry cron) so their catalog rows fire.

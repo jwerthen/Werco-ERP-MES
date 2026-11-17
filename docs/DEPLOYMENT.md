@@ -220,6 +220,43 @@ rollback step; it does not undo documents, receipts, production or shipments
 already created by completed actions. Intake-linked Documents cannot be deleted
 through the application because the saved source and receipt must remain valid.
 
+### Work-order comments, mentions and watchers (migration 125)
+
+Apply **125_work_order_comments** after **124_maintenance_assets** through the normal API boot
+migration path. No environment variable, secret, cron or worker job is added; the two notification
+events (`comment.mention`, `comment.added`) ride the existing outbox and worker.
+
+- **Purely additive.** It creates three tenant tables — `comments` (soft-deleted, never physically
+  removed), `comment_mentions` and `entity_watchers` — with their indexes and unique constraints, and
+  touches no existing table, enum or row: there is no backfill. Each new table gets RLS enabled with
+  no policies, and table and sequence revoked from `PUBLIC`, and from `anon` / `authenticated` where
+  those roles exist, matching model bootstrap. There is deliberately no CHECK on `entity_type`; v1
+  enables `work_order` in the service layer only.
+- **Locks.** The revision runs `SET LOCAL lock_timeout = '5s'`. Creating the new foreign keys takes a
+  brief SHARE ROW EXCLUSIVE lock on `users` and `companies` (it blocks writes to them, not reads),
+  held until the boot transaction commits; the tables are new and empty, so the DDL itself is quick.
+  A long transaction holding either table fails the boot after 5 seconds with the database back
+  where the boot started (a boot that also ran **121** has the caveat under
+  [One boot, two transactions](#job-cost-subcontract-element-migration-121)), and redeploying is safe.
+- **Order.** The migration ships with the API, which the boot path does. Deploy the **worker with the
+  API**: an older worker has no catalog source for `comment_mentioned` / `comment_added`, so it marks
+  those events handled without notifying anyone, and a comment posted before it updates notifies
+  nobody. Deploy the API before the frontend: the work-order detail page's new Comments panel calls
+  routes the old API does not have.
+- **Verify** in a test company: on a work order, post a comment that @mentions another user. The
+  comment appears in the thread, both of you show as watching, and the mentioned user gets a "You
+  were mentioned" notification (and email, by default) that carries no comment text. The Audit Log
+  shows a `comment` CREATE row. `SELECT relname, relrowsecurity FROM pg_class WHERE relname IN
+  ('comments', 'comment_mentions', 'entity_watchers');` is true for all three.
+- **Rollback.** Keep the migration on an ordinary application rollback: older code never reads these
+  tables. Once `125` has run, an older image cannot boot until the database is stamped back, so from
+  a checkout of this release run `alembic stamp 124_maintenance_assets` before redeploying a pre-125
+  image (the next forward deploy re-runs 125 as a guarded no-op). The downgrade is **lossy** and is
+  not a rollback step: it drops all three tables, so every comment thread and watch list is lost.
+  Export them first if they matter. The `audit_log` rows that recorded each comment write remain,
+  but nothing rebuilds the tables from them. See
+  [API.md → Comments and watchers](API.md#comments-and-watchers).
+
 ### Approved Supplier List, equipment assets and maintenance downtime (migrations 123 and 124)
 
 Apply **123_vendor_asl** (after **122_car_form_quote_rev**), then **124_maintenance_assets**, through
@@ -343,7 +380,7 @@ FROM cost_entries WHERE entry_type = 'SUBCONTRACT'`) and re-key them to `other` 
 
 **One boot, two transactions.** The API boot runs every pending revision in one transaction, but
 121's autocommit step first **commits everything that boot has already applied**. So a boot that
-takes the database from 118 or 119 through 121 (and on to 122–124 in a stacked release) is not
+takes the database from 118 or 119 through 121 (and on to 122–125 in a stacked release) is not
 all-or-nothing. If 121's `job_costs` ALTER, or any later revision, then fails (a `lock_timeout` behind
 a long transaction, say), the boot fails with the database left at **120_production_calendar**:
 119's columns, 120's tables and the `SUBCONTRACT` label stay; 121's column and every later revision

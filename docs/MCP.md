@@ -2,8 +2,8 @@
 
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
-(Cursor, Claude Code, a chat bot) gets **779 tools** — 15 hand-written *convenience* tools plus
-**764 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+(Cursor, Claude Code, a chat bot) gets **782 tools** — 15 hand-written *convenience* tools plus
+**767 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
 as the same request from the web app. A **read-only** API token is shown fewer tools, and an
 **AI-external** one fewer still (§4.1, §4.2).
 
@@ -42,6 +42,14 @@ shifted: 15 convenience + **764** generated, 16 shadowed. The read-only catalog 
 **Re-checked again on 2026-11-16 after bulk release** (`POST /work-orders/bulk-release`) was added and
 joined `EXCLUDED_OPERATIONS` in the same change (§6.1): counts unchanged at 15 convenience + **764**
 generated, 16 shadowed, and the read-only catalog at 8 convenience + **298** generated.
+
+**Re-checked again on 2026-11-16 after work-order comments (migration 125) added three read tools**
+(`list_record_comments` and `get_record_watch_state` under the new `Comments` tag,
+`search_mentionable_users` under `Users`) while the five comment / watcher writes join
+`EXCLUDED_OPERATIONS` (§6.1); no existing name shifted: 15 convenience + **767** generated, 16
+shadowed. The read-only catalog is 8 convenience + **300** generated (the two `Comments` reads;
+mention search sits under `Users`, which the read-only deny list always carries). The AI-external
+listing is unchanged at 48: none of the three reads is on its allowlist (§4.2).
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
 `backend/tests/test_mcp_docs_names.py` checks every tool name this file, `CLAUDE.md` and `API.md`
@@ -234,13 +242,13 @@ routes authenticate every call; in IN-PROCESS mode it uses the real `ErpTokenVer
  "generated_tools":   [{"name": "...", "method": "GET", "path": "/api/v1/...", "tag": "...",
                         "function": "...", "annotations": {...}, "deprecated": false}],
  "shadowed_operations": [["GET", "/api/v1/inventory/"], ...],
- "counts": {"convenience": 15, "generated": 764, "shadowed": 16}
+ "counts": {"convenience": 15, "generated": 767, "shadowed": 16}
 }
 ```
 
 `--print-catalog --read-only` prints the same keys filtered to what a read-only token is shown
 (tools that only read, under no tag in `WERCO_MCP_READ_ONLY_DENY_TAGS`), with the counts
-recomputed (`"convenience": 8, "generated": 298` on 2026-11-15), plus `"scope": "read_only"` and
+recomputed (`"convenience": 8, "generated": 300` on 2026-11-16), plus `"scope": "read_only"` and
 the `"deny_tags"` applied. Without `--read-only` the output is the full catalog with the keys
 above, as before. There is no flag for the AI-external catalog; §4.2 lists it.
 
@@ -462,7 +470,8 @@ from `Hank` to their own `Hank Intake` tag for this, with no tool name changed, 
 Hank stays readable. "CAD source storage" has no live router (retired 2026-09-16); the CAD source
 bytes that remain, Fabrication Quoting's source files (`original_file`), are covered by the file
 rule below. Denying Users also removes `get_current_user_info`, so a read-only token cannot
-introspect its own user.
+introspect its own user, and the comment mention search `search_mentionable_users` (the comment
+thread and watch-state reads, under `Comments`, stay).
 
 **Enforced twice, with the same rule:**
 
@@ -473,7 +482,7 @@ introspect its own user.
   - a denied tag gets **403** `"Read-only API token cannot access this resource."`;
   - a request that matches no route fails closed with that same 403.
 - **The MCP door** narrows `tools/list` to the tools that only read and carry no denied tag. On
-  2026-11-15 that is 8 convenience + 298 generated tools; `--print-catalog --read-only` prints
+  2026-11-16 that is 8 convenience + 300 generated tools; `--print-catalog --read-only` prints
   them. Calling any other tool by name answers, **before argument validation or dispatch**:
   - **403** `"Read-only API token: this tool writes."` for a tool that writes; the write check
     comes first, so a writing tool under a denied tag gets this text;
@@ -609,7 +618,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `SetupWizard` (`/setup`) | Setup & Readiness | `get_setup_health`, `get_part_readiness` |
 | `WorkOrders` (`/work-orders`) | Work Orders, Work Order Templates | `work_orders_list_work_orders`, `get_work_order_by_number`, `update_work_order_priority`, `work_orders_delete_work_order`, `work_orders_restore_work_order`, `list_work_order_templates`, `use_work_order_template`, `release_work_order`★ — **bulk release is not a tool**: `POST /work-orders/bulk-release` is in `EXCLUDED_OPERATIONS` (§6.1), so release one job per call |
 | `WorkOrderNew` (`/work-orders/new`) | Work Orders, Parts, Bill of Materials, Routing, Customers, Setup & Readiness, Work Centers | `create_work_order`★, `preview_work_order_operations`, `get_routing_by_part`, `list_customer_names`, `get_part_readiness`, `list_work_centers`★ |
-| `WorkOrderDetail` (`/work-orders/:id`) | Work Orders, Work Order Materials, Laser Nests, Work Order Blockers, Documents, Shop Floor | `get_work_order`★, `add_operation`★, `update_work_order`★, `release_work_order`★, `duplicate_work_order`★, `add_laser_nest`★, `work_orders_start_work_order`, `work_orders_resume_work_order`, `work_orders_complete_work_order`, `work_orders_complete_operation`, `work_orders_update_operation`, `update_laser_nest`, `delete_laser_nest`, `list_material_allocations`, `create_work_order_blocker`, `attach_document_to_work_order` |
+| `WorkOrderDetail` (`/work-orders/:id`) | Work Orders, Work Order Materials, Laser Nests, Work Order Blockers, Documents, Shop Floor, Comments, Users | `get_work_order`★, `add_operation`★, `update_work_order`★, `release_work_order`★, `duplicate_work_order`★, `add_laser_nest`★, `work_orders_start_work_order`, `work_orders_resume_work_order`, `work_orders_complete_work_order`, `work_orders_complete_operation`, `work_orders_update_operation`, `update_laser_nest`, `delete_laser_nest`, `list_material_allocations`, `create_work_order_blocker`, `attach_document_to_work_order`, `list_record_comments`, `get_record_watch_state`, `search_mentionable_users` (the Comments panel's reads; **posting, editing or deleting a comment and watching are not tools**: the five writes are in `EXCLUDED_OPERATIONS`, §6.1) |
 | `ShopFloor` (`/shop-floor`) | Shop Floor, Work Order Blockers, Work Centers, Work Orders | `get_shop_floor_dashboard`★, `get_all_operations`, `get_active_shop_users`, `list_work_order_blockers`, `resolve_work_order_blocker` |
 | `ShopFloorSimple` (`/shop-floor/operations`) | Shop Floor, Scanner, Work Centers, Work Orders | `get_all_operations`, `shop_floor_start_operation`, `shop_floor_complete_operation`, `put_operation_on_hold`, `shop_floor_resume_operation`, `lookup_barcode`, `resolve_action` |
 | `OperatorKiosk` (`/kiosk`) | Shop Floor | `clock_in`, `clock_out`, `get_my_active_job`, `get_work_center_queue`, `get_operation_steps`, `record_operation_step`, `report_operation_production`, `shop_floor_complete_operation` — under the caller's own user token (kiosk badge tokens are refused) |
@@ -694,7 +703,7 @@ minus two further, named sets:
   They are listed **by name** rather than skipped silently, so a new route that forgets its
   `security` dependency — even under a tag that already has tools — fails the coverage guard
   (`catalog.unaccounted_operations`, §14) until it is either secured or named there.
-- **`EXCLUDED_OPERATIONS`** — fifteen operations, none with a convenience twin:
+- **`EXCLUDED_OPERATIONS`** — twenty operations, none with a convenience twin:
   - The two Excel-cutover loaders, `POST /work-orders/import` and
     `POST /purchasing/purchase-orders/import` (`migration_import_service`). They record a *past*
     system's state rather than perform a user action: the work-order loader mints work orders
@@ -746,6 +755,14 @@ minus two further, named sets:
     API token whose user holds Admin / Manager / Supervisor can still call it directly on `/api/v1` —
     so the exclusion is what keeps it off an agent's tool list. See
     [API.md → Work Orders](API.md#work-orders) → *Releasing several work orders at once*.
+  - The five **comment / watcher writes** (`catalog.COMMENT_WRITE_OPERATIONS`; owner decision
+    2026-11-16): `POST /comments`, `PATCH /comments/{comment_id}`, `DELETE /comments/{comment_id}`,
+    `POST /watchers` and `DELETE /watchers`. A comment is a person's own words and a watch a
+    person's own preference. The routes refuse every API token **403**
+    (`app.core.credentials.API_TOKEN_COMMENT_WRITE`), and the exclusion closes the door a person's
+    own JWT would leave open: an agent posting words in a person's name. The reads stay tools:
+    `list_record_comments`, `get_record_watch_state` and `search_mentionable_users`. See
+    [API.md → Comments and watchers](API.md#comments-and-watchers).
 
 The `Import Batches` tag also excludes the recoverable Import Center review, receipt,
 correction and commit routes. These wrap the same cutover loaders, including their
@@ -756,7 +773,8 @@ On the commit that shipped API tokens: 706 operations, 689 secured, 680 candidat
 (§8), 2 excluded → **662 generated tools**. On 2026-11-15, with fourteen excluded and the CAR form /
 FAI log, Approved Supplier List and equipment-asset / PM-import routes added: **764 generated tools**
 (`--print-catalog` `counts`). On 2026-11-16 bulk release added one secured route and its exclusion
-together, so fifteen are excluded and the count stays **764**.
+together, so fifteen were excluded and the count stayed **764**; the five comment / watcher writes then
+joined the exclusions (twenty) and the three comment reads were added: **767 generated tools**.
 
 ### 6.2 Naming and the collision policy (`app/mcp/naming.py`)
 
@@ -918,7 +936,7 @@ Every other operation stays generated — including the neighbours of the shadow
 `get_work_order_by_number`, `update_laser_nest`, `get_inventory_summary`, `get_purchase_order`, …) —
 except the operations in `EXCLUDED_OPERATIONS` (§6.1) — the two cutover loaders, AI Accept &
 apply, the two customer export-control writes, the four egress kill-switch writes, the three Approved Supplier
-List writes, the two legacy ASL-table writes and bulk release — which have no tool and no replacement. Adding a convenience tool whose route is *not* in the shadow set is a build error
+List writes, the two legacy ASL-table writes, bulk release and the five comment / watcher writes — which have no tool and no replacement. Adding a convenience tool whose route is *not* in the shadow set is a build error
 (`build_registry` refuses a duplicate name) rather than a silent win.
 
 ---
@@ -1267,8 +1285,8 @@ count, in which case there is nothing left to close.
     secured, unshadowed, unexcluded operation is exactly one tool; `PUBLIC_OPERATIONS` names exactly
     the unsecured routes; `EXCLUDED_OPERATIONS` are exactly the two loaders, the AI apply route,
     the two customer export-control writes, the four egress kill-switch writes, the three Approved
-    Supplier List writes, the two legacy ASL-table writes and bulk release, and the record-only
-    accept stays a tool),
+    Supplier List writes, the two legacy ASL-table writes, bulk release and the five comment / watcher
+    writes, the three comment reads stay tools, and the record-only accept stays a tool),
     names (unique, wire-valid,
     ≤ 64, collisions prefixed, the numeric-suffix fallback proven on synthetic input and unused on
     the live catalog), schemas (`$ref`-free, `additionalProperties: false`, every JSON body's
