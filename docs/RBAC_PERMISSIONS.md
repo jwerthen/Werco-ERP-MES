@@ -159,7 +159,7 @@ AI-external token bound to a **Viewer** user.
 ### Credential policy for judgment writes
 
 A few writes record a **person's judgment** — not just a permitted action — and some of them are
-restricted to certain *credentials*, on top of the role gate. The restrictions have seven sources,
+restricted to certain *credentials*, on top of the role gate. The restrictions have eight sources,
 and each row below names its own: owner ruling 3 of 2026-11-05 (the two AI rows), the owner's
 decision of 2026-11-07 (a standing API token may not declare scrap or close work short), this
 PR's extensions of that decision (scrap reasons, the re-stamp short close and the other count
@@ -168,7 +168,9 @@ export-controlled), the lead's design decision of 2026-11-13 for the two quality
 Quality Manager approval, FAI customer approval) and its review follow-ups (the FAI final
 disposition and the CAR form's vendor / customer sign-off boxes), and the lead's decisions of
 2026-11-15 (an egress kill switch is a person's judgment; a narrowed token's read writes nothing),
-and the Approved Supplier List change of 2026-11-13 (the supplier-approval rows).
+the Approved Supplier List change of 2026-11-13 (the supplier-approval rows), and the owner's
+decision of 2026-11-17 (a standing API token may not complete a maintenance work order with checklist
+items unticked).
 This section is the **one list** of those credential rules — what refuses a credential,
 what is deliberately left open (and who decided each), and what is deliberately not refused —
 across the AI governance (ruling 3), floor-gates (ruling 2) and short-count (ruling 1) changes;
@@ -192,7 +194,8 @@ Writes that apply them — each refused before any write and before any audit ro
 live in `ai_action_applier.py` and `operation_action_gates.py`, for the quality judgments in
 `quality_record_service.py` and `fai_service.py`, for export control
 `app/api/endpoints/customers.py`, for the egress switches `app/core/credentials.py`, and for the supplier-approval rows
-`app/services/supplier_approval_service.py` and `app/api/endpoints/purchasing.py`; where each sits in its route's
+`app/services/supplier_approval_service.py` and `app/api/endpoints/purchasing.py`, for the maintenance
+checklist `app/services/maintenance_checklist.py`; where each sits in its route's
 check order is in `docs/API.md` → Work Orders → "Short count at completion" and → AI
 Recommendations):
 
@@ -214,6 +217,9 @@ Recommendations):
 | **Recording a supplier-approval decision or loading the Approved Supplier List** — `PUT /purchasing/vendors/{id}/approval`, `POST /purchasing/vendors/asl-import/preview` and `POST /purchasing/vendors/asl-import/commit` (the preview too: it exists only to feed a commit) | `is_api_token_credential` | **403** (`Supplier approval is a person's decision: an API token cannot change the Approved Supplier List. Sign in to the app to do this.`); also not MCP tools (`catalog.EXCLUDED_OPERATIONS`) | Design decision of the Approved Supplier List change (2026-11-13): a supplier approval on the AS9100D 8.4 list is a named person's judgment. Not an owner ruling |
 | **Writing the legacy `approved_supplier_list` table** — `POST /supplier-scorecards/approved-suppliers/` and `PUT /supplier-scorecards/approved-suppliers/{asl_id}` (read-only history since migration 123) | `is_api_token_credential` | **403**, the same text; also not MCP tools (`catalog.EXCLUDED_OPERATIONS`) | Review follow-up of the same change: an agent's "approved" entry there would contradict the vendor's own ASL status. People's use of the two routes is unchanged |
 | **Granting vendor approval by the checkbox** — `POST /purchasing/vendors` with `is_approved: true`, `PUT /purchasing/vendors/{id}` raising `is_approved` from `false` to `true`, and `POST /purchasing/vendors/import-csv` when any row asks for `is_approved` (refused before any row is written, dry run included). A token may still create and edit vendors, re-send `true` on an approved one, and withdraw approval | `is_api_token_credential` | **403** (`Approving a supplier is a person's decision: an API token cannot mark a vendor approved. Sign in to the app to do this.`) | Review follow-up of the same change: the checkbox is the approval that puts a vendor not on the ASL into the Create PO picker. Not an owner ruling |
+| **Completing a maintenance work order with checklist items unticked** — `POST /maintenance/work-orders/{id}/complete` when any checklist item the work order carries (or the body sends) is left unticked, whatever `incomplete_checklist_reason` it sends. Refused before the reason check and before any write. A token's completion with every item ticked (or no checklist) is unchanged, and so is a person's completion with a reason | `is_api_token_credential`, inline in `complete_work_order` | **403** `API_TOKEN_INCOMPLETE_CHECKLIST` (`Completing a maintenance work order with checklist items unticked must be done by a person signed in to the app, not an API token.`; text in `app/services/maintenance_checklist.py`) | Owner decision 2026-11-17, under the 2026-11-07 principle: why a PM step was skipped is a person's judgment, and a completion resets the machine's PM clock for a full interval |
+| **Taking items off a maintenance work order's checklist** — `PUT /maintenance/work-orders/{id}` whose `checklist_results` drops, renames or clears an item the work order carries (ticking, unticking or adding is unchanged). Refused before the first write | `is_api_token_credential`, through `maintenance_checklist.removed_checklist_items` | **403** `API_TOKEN_CHECKLIST_REMOVAL` (`Removing items from a maintenance work order's checklist must be done by a person signed in to the app, not an API token.`) | **This PR's extension** of the owner's 2026-11-17 decision: without it a token reaches the refused completion in two steps (PUT the unticked items away, then complete) |
+| **Taking items off a PM schedule's checklist while it has an open work order** — `PUT /maintenance/schedules/{id}` whose `checklist` drops, renames or clears a step while a scheduled / overdue / in-progress / on-hold work order carries the schedule's id (completion judges the schedule's steps too). Adding steps, and editing a schedule with no open work order, are unchanged | `is_api_token_credential`, inline in `update_schedule` | **403** `API_TOKEN_SCHEDULE_CHECKLIST_REMOVAL` (`Removing items from the checklist of a PM schedule that has an open work order must be done by a person signed in to the app, not an API token.`) | **This PR's extension**, for the same reason: the third route to the same skip |
 
 Deliberately **not** refused:
 
@@ -1318,6 +1324,18 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > Cancel to Admin / Manager / Supervisor / Platform Admin); that `PUT` refuses `in_progress` and
 > `completed` (**409**, the Start / Complete verbs own them), un-starting a started WO, and changing
 > `requires_shutdown` once started.
+>
+> **Two state refusals on the same gates (2026-11-17; no role changed).** Creating a maintenance WO
+> with a `schedule_id` that already has an open one (scheduled, overdue, in progress or on hold) is
+> **409** naming it, for every role — one open work order per PM schedule. Completing a WO with any
+> checklist item unticked needs a written `incomplete_checklist_reason` (**409** without one, nothing
+> saved; owner decision 2026-11-17); with one, the completion's `STATUS_CHANGE` audit row records the
+> unticked items and the reason and is **required** evidence (**503**, nothing saved, if it cannot be
+> written). It is a reason on the record, not an approval, so the performing gate is unchanged: an
+> Operator who may complete the WO may record it. A standing API token may not: with any item
+> unticked its completion is **403** `API_TOKEN_INCOMPLETE_CHECKLIST` whatever reason it sends (owner
+> decision 2026-11-17) — see [Credential policy for judgment writes](#credential-policy-for-judgment-writes). Details in
+> `docs/API.md` → Maintenance → *The PM loop*.
 
 > **Tenancy: ten of the sixteen handlers took no company argument.** `start` and `complete`
 > resolved the work order by bare id, and `dashboard` / `calendar` / `history` / `overdue`

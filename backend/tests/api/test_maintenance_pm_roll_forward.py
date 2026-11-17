@@ -11,12 +11,17 @@ schedule (and says so in the response and in a ``maintenance_schedule`` audit ro
 completion that omits ``checklist_results`` keeps the checklist the work order was opened
 with; the schedule edit (``PUT /schedules/{id}``) is a planning-role write that never moves the
 target; and ``GET /maintenance/dashboard`` reports overdue / due-this-week SCHEDULES that have
-no open work order beside its (unchanged) work-order counts -- tenant-scoped, active only, and
-never counting one PM twice.
+no work order being worked (none open, or the open one ON HOLD) beside its (unchanged)
+work-order counts -- tenant-scoped, active only, and never counting one PM twice.
+
+"Today" in every expectation here is ``company_today`` -- the company's calendar day the endpoint
+stamps and reads -- never the server's UTC day, which on a UTC CI runner is already tomorrow
+from 6 PM Central. The evening case itself is pinned with a frozen clock in
+``test_maintenance_company_day``.
 """
 
 import json
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 import pytest
 from sqlalchemy.orm import Session
@@ -29,6 +34,7 @@ from app.models.maintenance import (
     MaintenanceWorkOrder,
 )
 from app.models.user import UserRole
+from app.services.company_time import company_today
 from tests.api.test_maintenance_assets import make_asset, make_wc
 from tests.api.test_receiving_compliance import _next, headers_for, make_user
 
@@ -99,7 +105,7 @@ def schedule_audit_rows(db: Session, schedule_id: int):
 
 class TestScheduleToWorkOrderToCompletion:
     def test_completing_a_pm_work_order_rolls_its_schedule_forward(self, client, db_session, planner_headers):
-        overdue_since = date.today() - timedelta(days=3)
+        overdue_since = company_today(db_session, 1) - timedelta(days=3)
         checklist = json.dumps(["Lubricate ways", "Check coolant"])
         schedule = make_schedule(db_session, next_due=overdue_since, checklist=checklist)
 
@@ -125,10 +131,16 @@ class TestScheduleToWorkOrderToCompletion:
         assert wo["checklist_results"] == checklist_results
 
         assert client.post(f"{WORK_ORDERS}/{wo['id']}/start", headers=planner_headers).status_code == 200
-        done = client.post(f"{WORK_ORDERS}/{wo['id']}/complete", headers=planner_headers, json={"notes": "ok"})
+        # Both items are still unticked, so the completion needs a reason (pinned in detail in
+        # test_maintenance_checklist_completion); the checklist itself is omitted.
+        done = client.post(
+            f"{WORK_ORDERS}/{wo['id']}/complete",
+            headers=planner_headers,
+            json={"notes": "ok", "incomplete_checklist_reason": "Coolant concentrate on order"},
+        )
         assert done.status_code == 200, done.text
 
-        today = datetime.utcnow().date()
+        today = company_today(db_session, 1)
         expected_next = today + timedelta(days=30)
         assert done.json()["schedule_next_due_date"] == expected_next.isoformat()
         # Omitted checklist_results keeps the checklist the work order was opened with.
@@ -163,7 +175,7 @@ class TestScheduleToWorkOrderToCompletion:
         asset = make_asset(db_session)
         schedule = make_schedule(
             db_session,
-            next_due=date.today(),
+            next_due=company_today(db_session, 1),
             frequency=frequency,
             frequency_days=frequency_days,
             asset_id=asset.id,
@@ -173,7 +185,7 @@ class TestScheduleToWorkOrderToCompletion:
         # Completing straight from scheduled (no start) advances it too.
         done = client.post(f"{WORK_ORDERS}/{wo['id']}/complete", headers=planner_headers, json={})
         assert done.status_code == 200, done.text
-        expected = datetime.utcnow().date() + timedelta(days=interval)
+        expected = company_today(db_session, 1) + timedelta(days=interval)
         assert done.json()["schedule_next_due_date"] == expected.isoformat()
 
     def test_a_work_order_without_a_schedule_advances_nothing(self, client, db_session, planner_headers):
@@ -183,7 +195,7 @@ class TestScheduleToWorkOrderToCompletion:
         assert done.status_code == 200 and done.json()["schedule_next_due_date"] is None
 
     def test_an_explicit_checklist_replaces_and_an_explicit_null_clears(self, client, db_session, planner_headers):
-        schedule = make_schedule(db_session, next_due=date.today())
+        schedule = make_schedule(db_session, next_due=company_today(db_session, 1))
         opened = json.dumps([{"item": "Grease", "done": False}])
         ticked = json.dumps([{"item": "Grease", "done": True}])
         first = client.post(
@@ -201,13 +213,22 @@ class TestScheduleToWorkOrderToCompletion:
             headers=planner_headers,
             json={"schedule_id": schedule.id, "title": "PM", "checklist_results": opened},
         ).json()
-        cleared = client.post(
+        # Clearing the checklist leaves its item undone, so the clear needs a reason ...
+        refused = client.post(
             f"{WORK_ORDERS}/{second['id']}/complete", headers=planner_headers, json={"checklist_results": None}
         )
+        assert refused.status_code == 409, refused.text
+        # ... and with one, the explicit null still clears it.
+        cleared = client.post(
+            f"{WORK_ORDERS}/{second['id']}/complete",
+            headers=planner_headers,
+            json={"checklist_results": None, "incomplete_checklist_reason": "Grease point removed in the retrofit"},
+        )
+        assert cleared.status_code == 200, cleared.text
         assert cleared.json()["checklist_results"] is None
 
     def test_another_target_than_the_schedules_is_still_409(self, client, db_session, planner_headers):
-        schedule = make_schedule(db_session, next_due=date.today())
+        schedule = make_schedule(db_session, next_due=company_today(db_session, 1))
         other = make_wc(db_session)
         resp = client.post(
             WORK_ORDERS,
@@ -262,7 +283,7 @@ class TestScheduleEdit:
 
 class TestDashboardScheduleCounts:
     def test_unstarted_schedules_are_counted_beside_the_work_order_counts(self, client, db_session, planner_headers):
-        today = date.today()
+        today = company_today(db_session, 1)
         overdue = make_schedule(db_session, next_due=today - timedelta(days=1))
         make_schedule(db_session, next_due=today)  # due today: due this week
         make_schedule(db_session, next_due=today + timedelta(days=7))  # last day of the week window
@@ -284,11 +305,17 @@ class TestDashboardScheduleCounts:
         body = dashboard(client, planner_headers)
         assert (body["schedules_overdue"], body["overdue_count"]) == (0, 1)
 
-        # On hold is still open: the schedule stays represented by its work order.
+        # In progress: represented by its work order (in_progress), not by the schedule.
         assert client.post(f"{WORK_ORDERS}/{wo['id']}/start", headers=planner_headers).status_code == 200
+        body = dashboard(client, planner_headers)
+        assert (body["schedules_overdue"], body["overdue_count"], body["in_progress"]) == (0, 0, 1)
+
+        # On hold: the PM is not being done, and an on-hold work order is on no work-order tile, so
+        # the schedule counts again by its own due date (owner decision 2026-11-17) -- once.
         hold = client.put(f"{WORK_ORDERS}/{wo['id']}", headers=planner_headers, json={"status": "on_hold"})
         assert hold.status_code == 200, hold.text
-        assert dashboard(client, planner_headers)["schedules_overdue"] == 0
+        body = dashboard(client, planner_headers)
+        assert (body["schedules_overdue"], body["overdue_count"], body["in_progress"]) == (1, 0, 0)
 
         # Completed: the schedule is no longer due at all (rolled forward 30 days).
         assert client.post(f"{WORK_ORDERS}/{wo['id']}/complete", headers=planner_headers, json={}).status_code == 400
@@ -299,7 +326,7 @@ class TestDashboardScheduleCounts:
         assert (body["schedules_overdue"], body["overdue_count"], body["schedules_due_this_week"]) == (0, 0, 2)
 
     def test_a_cancelled_work_order_puts_the_schedule_back_in_the_count(self, client, db_session, planner_headers):
-        schedule = make_schedule(db_session, next_due=date.today() - timedelta(days=2))
+        schedule = make_schedule(db_session, next_due=company_today(db_session, 1) - timedelta(days=2))
         wo = client.post(WORK_ORDERS, headers=planner_headers, json={"schedule_id": schedule.id, "title": "PM"}).json()
         assert dashboard(client, planner_headers)["schedules_overdue"] == 0
         client.put(f"{WORK_ORDERS}/{wo['id']}", headers=planner_headers, json={"status": "cancelled"})
@@ -345,7 +372,7 @@ class TestDashboardScheduleCountsStayInTenant:
         company 2's (legacy, mis-tenanted) open work order naming company 1's schedule would make
         company 1's overdue PM vanish from company 1's dashboard -- a PM nobody is working, shown
         as one somebody is."""
-        today = date.today()
+        today = company_today(db_session, 1)
         overdue = make_schedule(db_session, next_due=today - timedelta(days=4))
         due_soon = make_schedule(db_session, next_due=today + timedelta(days=2))
         make_raw_wo(
@@ -371,7 +398,7 @@ class TestDashboardScheduleCountsStayInTenant:
         """``id NOT IN (subquery)`` is NULL -- not true -- for every row once the subquery yields a
         single NULL, so one open corrective work order (no ``schedule_id``) would zero both schedule
         counts. The subquery drops NULL schedule ids; this pins it."""
-        today = date.today()
+        today = company_today(db_session, 1)
         make_schedule(db_session, next_due=today - timedelta(days=1))
         make_schedule(db_session, next_due=today + timedelta(days=1))
         wc = make_wc(db_session)
@@ -394,7 +421,7 @@ class TestRollForwardStaysInTenant:
         work order naming another company's schedule must neither hand back that schedule's due
         date nor write a row about it. (That the foreign schedule itself stays put is pinned in
         ``test_maintenance_tenant_isolation``.)"""
-        foreign = make_schedule(db_session, company_id=2, next_due=date.today() - timedelta(days=1))
+        foreign = make_schedule(db_session, company_id=2, next_due=company_today(db_session, 2) - timedelta(days=1))
         wo = make_raw_wo(db_session, company_id=1, schedule_id=foreign.id, status=MaintenanceStatus.IN_PROGRESS)
 
         done = client.post(f"{WORK_ORDERS}/{wo.id}/complete", headers=planner_headers, json={})

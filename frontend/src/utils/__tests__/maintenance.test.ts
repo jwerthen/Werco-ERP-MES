@@ -1,4 +1,9 @@
-import { checklistResultsPayload, openWorkOrdersBySchedule, parseChecklistResults } from '../maintenance';
+import {
+  checklistResultsPayload,
+  completionChecklist,
+  openWorkOrdersBySchedule,
+  parseChecklistResults,
+} from '../maintenance';
 import {
   scheduleEditForm,
   scheduleEditPayload,
@@ -91,5 +96,30 @@ describe('schedule edit payload', () => {
     expect(scheduleEditProblem({ ...form, frequency: 'custom', frequency_days: '2.5' })).toMatch(/Every N days/);
     expect(scheduleEditProblem({ ...form, estimated_duration_hours: '-1' })).toMatch(/duration/);
     expect(scheduleEditProblem({ ...form, estimated_duration_hours: '' })).toMatch(/duration/);
+  });
+});
+
+describe('completionChecklist', () => {
+  it('appends, unticked, the schedule items the work order no longer carries', () => {
+    expect(completionChecklist([{ item: 'Grease', done: true }], ['Grease', 'Check belt', ' ', 'Check oil'])).toEqual([
+      { item: 'Grease', done: true },
+      { item: 'Check belt', done: false },
+      { item: 'Check oil', done: false },
+    ]);
+  });
+
+  it('counts repeated schedule items as a multiset, like the server', () => {
+    expect(completionChecklist([{ item: 'Grease bearing', done: true }], ['Grease bearing', 'Grease bearing'])).toEqual(
+      [
+        { item: 'Grease bearing', done: true },
+        { item: 'Grease bearing', done: false },
+      ]
+    );
+  });
+
+  it('leaves a work order with no schedule checklist as it is', () => {
+    const items = [{ item: 'Drain tank', done: false }];
+    expect(completionChecklist(items)).toEqual(items);
+    expect(completionChecklist(items, [])).toEqual(items);
   });
 });

@@ -5931,20 +5931,20 @@ uploads go through text extraction + LLM. See
 |--------|----------|-------------|---------------|
 | GET | `/maintenance/schedules` | List PM schedules (`is_active` default true; `work_center_id` or `asset_id` narrows to one target) | Yes |
 | GET | `/maintenance/schedules/{id}` | PM schedule detail | Yes |
-| POST | `/maintenance/schedules` | Create PM schedule on a work center **or** an equipment asset | Admin / Manager / Supervisor |
+| POST | `/maintenance/schedules` | Create PM schedule on a work center **or** an equipment asset (`next_due_date` left blank is the company's day) | Admin / Manager / Supervisor |
 | PUT | `/maintenance/schedules/{id}` | Update PM schedule (the target is not changed here) | Admin / Manager / Supervisor |
 | DELETE | `/maintenance/schedules/{id}` | Deactivate PM schedule (`is_active` → `false`; no soft-delete mixin) | Admin / Manager / Supervisor |
 | POST | `/maintenance/schedules/import/preview` | Dry run of a PM schedule sheet (multipart `file`; template `maintenance-schedules`). Writes nothing | Admin / Manager / Supervisor |
 | POST | `/maintenance/schedules/import/commit` | Apply a previewed PM sheet (multipart `file` + form field `expected_source_hash`). All-or-nothing | Admin / Manager / Supervisor |
-| GET | `/maintenance/work-orders` | List maintenance work orders (**pure read**, see below; `asset_id` filter beside `work_center_id`) | Yes |
-| GET | `/maintenance/work-orders/overdue` | Overdue maintenance work orders (**pure read**) | Yes |
+| GET | `/maintenance/work-orders` | List maintenance work orders (**pure read**, see below; `asset_id` filter beside `work_center_id`). The derived `overdue` label compares `due_date` with the company's day | Yes |
+| GET | `/maintenance/work-orders/overdue` | Overdue maintenance work orders (**pure read**; `due_date` before the company's day) | Yes |
 | GET | `/maintenance/work-orders/{id}` | Maintenance work order detail | Yes |
-| POST | `/maintenance/work-orders` | Create maintenance work order on a work center **or** an asset (or neither, with a `schedule_id`, to inherit the schedule's target) | Admin / Manager / Supervisor |
+| POST | `/maintenance/work-orders` | Create maintenance work order on a work center **or** an asset (or neither, with a `schedule_id`, to inherit the schedule's target). A `schedule_id` that already has an open work order (`scheduled` / `overdue` / `in_progress` / `on_hold`) is **409** naming it. `scheduled_date` / `due_date` left blank are the company's day | Admin / Manager / Supervisor |
 | PUT | `/maintenance/work-orders/{id}` | Update maintenance work order; `status` among `scheduled`, `overdue`, `on_hold`, `cancelled` only (**409** for `in_progress` / `completed` — use the verbs — for returning a started work order to `scheduled` / `overdue`, and for changing `requires_shutdown` once started). Moving it to `cancelled` settles any downtime event it holds | Admin / Manager / Supervisor |
 | POST | `/maintenance/work-orders/{id}/start` | Start (→ `in_progress`). A work-center work order with `requires_shutdown` opens, adopts or shares a downtime event — never a second open one on the machine | Admin / Manager / Supervisor / Operator |
-| POST | `/maintenance/work-orders/{id}/complete` | Complete (→ `completed`, advances the linked schedule — the response adds `schedule_next_due_date`) and resolve the work order's open downtime event. `checklist_results` omitted keeps the work order's checklist | Admin / Manager / Supervisor / Operator |
+| POST | `/maintenance/work-orders/{id}/complete` | Complete (→ `completed`, advances the linked schedule from the company's day — the response adds `schedule_next_due_date`) and resolve the work order's open downtime event. `checklist_results` omitted keeps the work order's checklist. Any checklist item left unticked needs `incomplete_checklist_reason` (**409** without one) and a person: an API token is **403** (see *Checklist at completion* below) | Admin / Manager / Supervisor / Operator |
 | GET | `/maintenance/calendar` | Work orders in a date window (**capped at 366 days**) | Yes |
-| GET | `/maintenance/dashboard` | Counts, cost, per-machine MTBF/MTTR (work centers only). `overdue_count` / `due_this_week` count work orders; `schedules_overdue` / `schedules_due_this_week` count due PM schedules with no open work order (see *The PM loop* below) | Yes |
+| GET | `/maintenance/dashboard` | Counts, cost, per-machine MTBF/MTTR (work centers only). `overdue_count` / `due_this_week` count work orders; `schedules_overdue` / `schedules_due_this_week` count due PM schedules no scheduled / overdue / in-progress work order covers, so a PM whose work order is on hold still counts. "Today" is the company's day (see *The PM loop* below) | Yes |
 | GET | `/maintenance/history/{work_center_id}` | Event log for one machine (`limit` 1…5000, default 100) | Yes |
 | GET | `/maintenance/assets` | List equipment assets (`include_inactive` default false, `search` on tag / name / type), each with `active_schedule_count` and `open_work_order_count` | Yes |
 | GET | `/maintenance/assets/{id}` | Equipment asset detail | Yes |
@@ -5993,11 +5993,12 @@ uploads go through text extraction + LLM. See
 > `due_date`), so responses are unchanged. Both consumers of the signal — `GET
 > /maintenance/dashboard` and the AS9100D evidence card in `auto_evidence_service` — now derive it
 > from `due_date` too, which is strictly more accurate: the overdue count no longer depends on
-> whether a human loaded the Maintenance page today. The two figures are not identical, though: the
-> evidence card compares against the **company's local date** and also counts **active PM schedules**
-> whose `next_due_date` has passed (see QMS Standards → *the PM evidence row now judges the PM
-> schedules*), while the dashboard's `overdue_count` compares against the server's date and counts
-> maintenance work orders only.
+> whether a human loaded the Maintenance page today. Both compare against the **company's local
+> date** (the dashboard and the two list reads used to read the server's UTC date). The two
+> figures are still not identical: the evidence card also counts every **active PM schedule** whose
+> `next_due_date` has passed (see QMS Standards → *the PM evidence row now judges the PM
+> schedules*), while the dashboard's `overdue_count` counts maintenance work orders only (its sibling
+> `schedules_overdue` counts the due schedules no work order is being worked on — see *The PM loop*).
 
 > **RBAC was added; there was none.** Every endpoint was a bare `get_current_user`, so a **viewer
 > could create, start and complete maintenance work orders**. Reads stay open to any authenticated
@@ -6011,9 +6012,11 @@ uploads go through text extraction + LLM. See
 > previously wrote none at all). Resource types: `maintenance_schedule` (`CREATE` / `UPDATE`, with
 > the deactivation logged as the `is_active` flip), `maintenance_work_order` (`CREATE` / `UPDATE`,
 > plus `STATUS_CHANGE` on start and complete — the complete row carries `total_cost`,
-> `downtime_minutes`, `actual_duration_hours`, `schedule_id` and `schedule_next_due_date` in
-> `extra_data`), and `maintenance_log` (`CREATE`). A completion that advances a PM schedule also
-> writes that schedule's own `maintenance_schedule` `UPDATE` row. Rows are logged **before** the
+> `downtime_minutes`, `actual_duration_hours`, `schedule_id`, `schedule_next_due_date` and
+> `resolved_downtime_event_ids` in `extra_data`, plus the unticked-checklist fields when the work
+> order closes with part of its checklist undone, and that row is then **required** evidence — see
+> *Checklist at completion* under *The PM loop*), and `maintenance_log` (`CREATE`). A completion
+> that advances a PM schedule also writes that schedule's own `maintenance_schedule` `UPDATE` row. Rows are logged **before** the
 > terminal commit so they commit atomically with the change.
 
 > **`GET /maintenance/calendar` refuses a window wider than 366 days (400)**, and refuses
@@ -6165,18 +6168,28 @@ uploads go through text extraction + LLM. See
 
 > **The PM loop: a due schedule, its work order, and the roll-forward.**
 >
+> - **"Today" is the company's calendar day.** What each of these reads as today — the dashboard's
+>   counts, the `overdue` label on `GET /maintenance/work-orders` and `/work-orders/overdue`, the
+>   blank-field defaults on `POST /maintenance/schedules` and `POST /maintenance/work-orders`, and the
+>   date a completion stamps on its PM schedule — is the day on the company's wall clock
+>   (`Company.timezone`, America/Chicago when unset or unrecognized), the same day the QMS PM evidence
+>   row reads. It used to be the server's `date.today()`, which on the UTC deployment turns over at
+>   6 PM (CST) / 7 PM (CDT): an evening completion was stamped with tomorrow's date and pushed the next
+>   due date a day late.
 > - **Dashboard.** `overdue_count` / `due_this_week` are unchanged: maintenance **work orders**
 >   (`scheduled` or `overdue`) by `due_date`. `schedules_overdue` / `schedules_due_this_week` count
->   **active** PM schedules by `next_due_date` (before today; today through today + 7) with **no open
->   work order** (`scheduled` / `overdue` / `in_progress` / `on_hold`) carrying their `schedule_id`.
->   A schedule with an open work order is counted through that work order, so the two pairs never
->   count one PM twice — but only as far as the work-order counts reach: a PM whose work order is
->   `in_progress` shows only on the **In progress** tile, and one `on_hold` is on **no** tile (an
->   on-hold maintenance work order never was; find it on the Work Orders tab's On Hold filter). The
->   Maintenance page's Overdue / Due This Week tiles and the dashboard's
->   **Maintenance Due** widget show the sum, the page with a *"N work orders · M PMs not started"*
->   split. "Today" is the server's `date.today()` (UTC on the deployed server), as for the work-order
->   counts, and a schedule on a retired asset still counts until the schedule itself is deactivated.
+>   **active** PM schedules by `next_due_date` (before today; today through today + 7) that no
+>   `scheduled` / `overdue` / `in_progress` work order carrying their `schedule_id` covers. A covered
+>   schedule is counted through that work order (by its `due_date`, or on the **In progress** tile),
+>   so the two pairs never count one PM twice. A PM whose open work order is **`on_hold`** has not
+>   been done, so its schedule still counts here, by the schedule's own `next_due_date` (owner
+>   decision 2026-11-17); the held work order itself is on no work-order count. A held work order
+>   with **no** `schedule_id` (a corrective job) is still on no tile — find it on the Work Orders
+>   tab's On Hold filter. `completed_this_month` and `total_cost_month` count completions since the
+>   company-local first of the month (its local midnight, compared with the UTC `completed_at`). The
+>   Maintenance page's Overdue / Due This Week tiles and the dashboard's **Maintenance Due** widget
+>   show the sum, the page with a *"N work orders · M PMs not started or on hold"* split. A schedule
+>   on a retired asset still counts until the schedule itself is deactivated.
 > - **Start PM** (Schedules tab rows and the Dashboard tab's Upcoming cards; planning roles) opens the
 >   work-order form pre-filled from the schedule — title = schedule name, type, priority,
 >   `requires_shutdown`, description, checklist, due date = the schedule's `next_due_date`, scheduled
@@ -6185,13 +6198,68 @@ uploads go through text extraction + LLM. See
 >   already has an open work order shows that work order's number instead. The checklist is stored in
 >   the work order's `checklist_results` as a JSON array of `{"item": …, "done": false}`; the Complete
 >   dialog ticks each item and sends the array back.
+> - **One open work order per schedule.** The server holds the same rule as the Start PM button:
+>   `POST /maintenance/work-orders` with a `schedule_id` that already has a `scheduled` / `overdue` /
+>   `in_progress` / `on_hold` work order is **409** *"PM schedule '…' already has an open maintenance
+>   work order, MWO-… (on hold). Complete or cancel it before opening another."* — completing either of
+>   two would advance the schedule and leave the other working to a due date it no longer has. A
+>   `completed` or `cancelled` work order does not count. The check runs under a row lock on the
+>   schedule, so two simultaneous Start PMs serialize and the second gets the 409. Data that already
+>   holds two open work orders on one schedule is not repaired; the 409 names the oldest.
 > - **Complete** on a work order with a `schedule_id` sets the schedule's `last_completed_date` to the
->   completion date (UTC) and `next_due_date` to that date plus the interval, in fixed days: daily 1,
->   weekly 7, biweekly 14, monthly 30, quarterly 90, semi_annual 182, annual 365, custom
->   `frequency_days`. The response's `schedule_next_due_date` is the new date (`null` when no schedule
+>   company's calendar day at the moment of completion and `next_due_date` to that date plus the
+>   interval, in fixed days: daily 1, weekly 7, biweekly 14, monthly 30, quarterly 90, semi_annual
+>   182, annual 365, custom `frequency_days`. The response's `schedule_next_due_date` is the new date (`null` when no schedule
 >   was advanced); the schedule's `UPDATE` audit row reads *"… advanced by completing maintenance work
 >   order MWO-…"* with `extra_data.maintenance_work_order_id`. `checklist_results` omitted keeps the
 >   checklist the work order carries; a value, or an explicit `null`, replaces it.
+> - **Checklist at completion (owner decision 2026-11-17).** `POST
+>   /maintenance/work-orders/{id}/complete` takes `incomplete_checklist_reason` (string, at most 2000
+>   characters). Completing with **any** checklist item unticked and no non-blank reason is **409**
+>   *"N of M checklist items on maintenance work order MWO-… are not ticked (item; item). Tick them, or
+>   give a reason for completing without them."* (the first ten items are named), judged before the first write, so nothing is saved (a work order
+>   in a status that cannot complete gets its **400** first). A standing API token is refused **403**
+>   `API_TOKEN_INCOMPLETE_CHECKLIST` *"Completing a maintenance work order with checklist items
+>   unticked must be done by a person signed in to the app, not an API token."* whenever any item is
+>   unticked, whatever reason it sends — checked before the reason, so the 409's invitation to give
+>   one never reaches an agent (owner decision 2026-11-17; a token's fully ticked completion is
+>   unchanged; see `docs/RBAC_PERMISSIONS.md` → Credential policy for judgment writes).
+>   - The items judged are those the work order carried plus any in the body's `checklist_results`,
+>     plus — for a PM work order — every item of its **schedule's** checklist, matched by text. A
+>     schedule step left off the work order (at Start PM, by a create through the API that sent no
+>     checklist, or by a later `PUT`) is still a step of the PM: it needs a tick or a reason. Every
+>     maintenance work-order response carries those steps as `schedule_checklist_items` (`[]` without
+>     a schedule; read whether or not the schedule is still active, exactly as completion reads it),
+>     and the Complete dialog lists any it lacks, unticked, after the work order's own items. A
+>     standing API token's `PUT /maintenance/schedules/{id}` that takes items off `checklist` while
+>     the schedule has an open work order is **403** `API_TOKEN_SCHEDULE_CHECKLIST_REMOVAL` *"Removing
+>     items from the checklist of a PM schedule that has an open work order must be done by a person
+>     signed in to the app, not an API token."* (adding steps, or editing a schedule with no open work
+>     order, is unchanged). An item is ticked only when the checklist the work order completes with marks
+>     it `"done": true`; a plain-string item, or a line of a one-item-per-line checklist (split on
+>     `\r?\n`, as the page splits it), is unticked. Items count as a **multiset**: a checklist that
+>     names one step twice needs both copies ticked, and the audit row lists a text once per unticked
+>     copy.
+>     An item the work order carried that `checklist_results` leaves out — or an explicit `null` that
+>     clears the checklist — counts as **unticked**: dropping a line is not a way to close without
+>     doing it.
+>   - With a reason, the completion's `maintenance_work_order` `STATUS_CHANGE` audit row adds
+>     `checklist_item_count`, `checklist_unticked_items` (the item texts) and
+>     `incomplete_checklist_reason` to `extra_data`, and is **required** evidence: if it cannot be
+>     written the request is **503** *"The audit record for completing maintenance work order MWO-…
+>     could not be saved; nothing was changed. Retry."* and nothing is saved. The `completed` log
+>     entry's description adds *"Checklist: N of M items not ticked (…). Reason: …"*.
+>   - With every item ticked (or no checklist) no reason is needed, one sent is ignored and not
+>     recorded, and the audit row stays the ordinary best-effort status-change row.
+>   - The Maintenance page's Complete dialog shows a required reason field whenever an item is
+>     unticked and keeps **Complete** disabled until it is filled; the reason is sent only then.
+>   - `PUT /maintenance/work-orders/{id}` (planning roles) can still rewrite `checklist_results`
+>     before completion; a person's edit is its own audited `maintenance_work_order` `UPDATE` row,
+>     and on a PM work order it cannot take a schedule step off the judged list. A standing API token
+>     whose `PUT` takes items off the checklist (drops, renames or clears them) is **403**
+>     `API_TOKEN_CHECKLIST_REMOVAL` *"Removing items from a maintenance work order's checklist must be
+>     done by a person signed in to the app, not an API token."* — otherwise a token could reach the
+>     refused completion in two steps. Ticking or adding items is allowed.
 > - **Edit** (Schedules tab; planning roles) → `PUT /maintenance/schedules/{id}`: next due date,
 >   frequency (`frequency_days` for custom), priority, estimated duration, requires shutdown,
 >   checklist. A schedule has no `version` column, so this `PUT` has no compare-and-swap; the dialog

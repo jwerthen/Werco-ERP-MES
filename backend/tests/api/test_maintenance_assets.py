@@ -9,7 +9,7 @@ the asset CRUD's roles, case-insensitive tag uniqueness, version CAS and audit r
 isolation of asset ids, and that the MTBF/MTTR dashboard stays work-center-only.
 """
 
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 import pytest
 from fastapi import status
@@ -27,6 +27,7 @@ from app.models.maintenance import (
 )
 from app.models.user import UserRole
 from app.models.work_center import WorkCenter
+from app.services.company_time import company_today
 from tests.api.test_receiving_compliance import _ensure_company, _next, headers_for, make_user
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
@@ -302,7 +303,8 @@ class TestTargets:
         """The calendar and overdue reads serialize every work order through the shared target
         fields; an asset work order (no work center) reads as an asset there, not a 500."""
         asset = make_asset(db_session, tag="CAL-1", name="Cold saw")
-        late = date.today() - timedelta(days=3)
+        today = company_today(db_session, 1)
+        late = today - timedelta(days=3)
         db_session.add(
             MaintenanceWorkOrder(
                 company_id=1,
@@ -315,7 +317,7 @@ class TestTargets:
             )
         )
         db_session.commit()
-        window = {"start_date": (late - timedelta(days=1)).isoformat(), "end_date": date.today().isoformat()}
+        window = {"start_date": (late - timedelta(days=1)).isoformat(), "end_date": today.isoformat()}
         calendar = client.get("/api/v1/maintenance/calendar", headers=planner_headers, params=window)
         assert calendar.status_code == 200, calendar.text
         assert [(row["target_type"], row["target_code"], row["target_name"]) for row in calendar.json()] == [
