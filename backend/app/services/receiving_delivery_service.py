@@ -28,10 +28,9 @@ def validate_certificate(db, company_id, line, document_id, *, check_storage=Tru
     """Row-lock one certificate and check it belongs to ``line``'s part and supplier.
 
     The caller must not have written an audit row yet: the lock has to come before the global
-    audit-chain lock, the order every document writer uses. (Hank intake calls this after its
+    audit-chain lock, the order document writers take them in. (Hank intake calls this after its
     audit row, on a document it inserted in the same transaction, which no other transaction can
-    lock.) A delivery locks all its lines' certificates up front instead
-    (``lock_delivery_certificates``).
+    lock.) A delivery locks all its lines' certificates up front instead (``_lock_delivery``).
     """
     if not document_id:
         return
@@ -48,21 +47,26 @@ def _delivery_line_error(index, exc):
     return HTTPException(exc.status_code, f"Delivery line {index + 1}: {exc.detail}. No delivery lines were posted.")
 
 
-def lock_delivery_certificates(db, company_id, purchase_order_id, delivery_lines):
-    """Row-lock and check every line's certificate before the delivery receives its first line.
+def _lock_delivery(db, company_id, purchase_order_id, delivery_lines):
+    """Take a delivery's locks before it writes anything, in the order a single receipt takes them.
 
-    Receiving line 1 writes an audit row, which takes the global audit-chain lock; locking line 2's
-    certificate after that would invert the order every other document writer uses (document row,
-    then the chain lock: document delete, the QMS link writes, laser-nest attach, ECO create /
-    update) and deadlock against any of them holding that certificate. So all of the delivery's
-    certificates are locked here, in ascending id order, after the receipt-number lock and the PO
-    row lock that line 1 takes first -- the order a single receipt takes them in. The receive loop
-    then skips its per-line certificate check (``certificate_checked=True``); the rows stay locked
-    until the delivery commits or rolls back.
+    The order is the receipt-number lock, the PO row (``FOR UPDATE``), then every line's certificate
+    in ascending id order: ``_receive_material``'s order for one receipt, and Hank's locked preview's.
+    They are taken here, not in the receive loop, for two reasons:
+
+    - The batch insert takes ``FOR KEY SHARE`` on the PO through its foreign key. Done before the
+      receipt-number lock, it deadlocks against a single receipt on the same PO that holds that lock
+      and waits for the PO's ``FOR UPDATE``.
+    - Receiving line 1 writes an audit row, which takes the global audit-chain lock. Locking line 2's
+      certificate after that inverts the order document writers use (the document row, then the
+      chain lock: document delete, revision upload, document attach) and deadlocks against one
+      holding that certificate.
+
+    Every line's certificate is checked here, with ``validate_certificate``'s checks. Returns the ids
+    of the certificates locked and checked; the receive loop hands them to ``_receive_material`` so
+    it does not check (and lock) them again after the chain lock. The locks last until the delivery
+    commits or rolls back.
     """
-    document_ids = sorted({line.certificate_document_id for line in delivery_lines if line.certificate_document_id})
-    if not document_ids:
-        return
     acquire_generator_lock(db, "receipt_number", company_id)
     po = (
         db.query(PurchaseOrder)
@@ -77,6 +81,9 @@ def lock_delivery_certificates(db, company_id, purchase_order_id, delivery_lines
     )
     if not po:
         raise HTTPException(404, "Purchase order not found")
+    document_ids = sorted({line.certificate_document_id for line in delivery_lines if line.certificate_document_id})
+    if not document_ids:
+        return frozenset()
     documents = {
         document.id: document
         for document in db.query(Document)
@@ -104,6 +111,7 @@ def lock_delivery_certificates(db, company_id, purchase_order_id, delivery_lines
             _check_certificate(documents.get(line.certificate_document_id), po_line)
         except HTTPException as exc:
             raise _delivery_line_error(index, exc) from exc
+    return frozenset(document_ids)
 
 
 def post_delivery_command(db, user, company_id, body, audit, *, return_created=False):
@@ -142,8 +150,8 @@ def post_delivery_command(db, user, company_id, body, audit, *, return_created=F
     valid_ids = {row.id for row in lines}
     if any(line.po_line_id not in valid_ids for line in body.lines):
         raise HTTPException(422, "Every delivery line must belong to this purchase order")
-    # Before line 1's audit row takes the global audit-chain lock; see the helper.
-    lock_delivery_certificates(db, company_id, body.purchase_order_id, body.lines)
+    # Before the batch insert and line 1's audit row; see the helper.
+    checked_certificate_ids = _lock_delivery(db, company_id, body.purchase_order_id, body.lines)
     batch = ReceivingDeliveryBatch(
         company_id=company_id,
         purchase_order_id=body.purchase_order_id,
@@ -157,7 +165,9 @@ def post_delivery_command(db, user, company_id, body, audit, *, return_created=F
     receipts = []
     for index, line in enumerate(body.lines):
         try:
-            receipt = _receive_material(line, db, user, company_id, audit, certificate_checked=True)
+            receipt = _receive_material(
+                line, db, user, company_id, audit, checked_certificate_ids=checked_certificate_ids
+            )
         except HTTPException as exc:
             raise _delivery_line_error(index, exc) from exc
         receipt.delivery_batch_id = batch.id

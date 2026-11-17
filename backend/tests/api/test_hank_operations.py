@@ -6,6 +6,7 @@ import pytest
 
 from app.models.audit_log import AuditLog
 from app.models.company import Company
+from app.models.document import Document, DocumentType
 from app.models.hank import HankTask
 from app.models.inventory import InventoryItem
 from app.models.purchasing import POReceipt, POStatus, PurchaseOrder, PurchaseOrderLine, Vendor
@@ -118,6 +119,36 @@ def test_receive_refuses_stale_quantities_and_foreign_line(client, auth_headers,
     po[1].company_id = 2
     db_session.commit()
     assert propose(client, auth_headers, 'receive_delivery', delivery_input(po)).status_code == 422
+
+
+def test_receive_execute_refuses_a_certificate_for_another_supplier(client, auth_headers, db_session, po):
+    """The preview only checks the certificate exists in the company; execution runs the delivery's
+    full certificate check (part, supplier, type, stored file) before receiving anything."""
+    other = Vendor(company_id=1, code='OPS-V2', name='Other vendor', is_active=True)
+    db_session.add(other)
+    db_session.flush()
+    document = Document(
+        company_id=1,
+        document_number='OPS-CERT-1',
+        title='Certificate from another supplier',
+        revision='A',
+        document_type=DocumentType.MATERIAL_CERT,
+        part_id=po[1].part_id,
+        vendor_id=other.id,
+        file_path='/nonexistent/ops-cert.pdf',
+        status='released',
+    )
+    db_session.add(document)
+    db_session.commit()
+    task = propose(client, auth_headers, 'receive_delivery', delivery_input(po, certificate_document_id=document.id))
+    assert task.status_code == 200, task.text
+    response = execute(client, auth_headers, task.json())
+    assert response.status_code == 422, response.text
+    assert response.json()['detail'] == (
+        'Delivery line 1: Choose a certificate uploaded for this part and supplier. No delivery lines were posted.'
+    )
+    assert db_session.query(POReceipt).count() == 0
+    assert db_session.query(InventoryItem).count() == 0
 
 
 @pytest.mark.parametrize('failed_resource', ['receipt', 'inventory', 'hank_task'])

@@ -1,22 +1,24 @@
 """Atomic receipts, retry identity, real certificate bytes, and supplier follow-up."""
 
+import os
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import Select, event
+from sqlalchemy import Insert, Select, event
 from sqlalchemy.dialects import postgresql
 
 from app.core.config import settings
 from app.models.audit_log import AuditLog
 from app.models.company import Company
+from app.models.document import Document, DocumentType
 from app.models.inventory import InventoryItem, InventoryTransaction
 from app.models.purchasing import POReceipt, POStatus, PurchaseOrderLine, ReceivingDeliveryBatch
 from app.models.role_permission import RolePermission
 from app.models.user import UserRole
 from app.services.audit_service import AuditService
-from tests.api.test_receiving_compliance import headers_for, make_po_line, make_user
+from tests.api.test_receiving_compliance import _ensure_company, headers_for, make_po_line, make_user
 
 
 @pytest.fixture(autouse=True)
@@ -327,18 +329,36 @@ def _upload_certificate(client, user, po_line_id, name):
     return response.json()['id']
 
 
+@pytest.fixture
+def local_certificates(monkeypatch, tmp_path):
+    from app.services.storage_service import LocalStorageBackend
+
+    monkeypatch.setattr('app.services.receiving_delivery_service.get_storage', lambda: LocalStorageBackend())
+    monkeypatch.setattr('app.services.receiving_delivery_service.resolve_upload_dir', lambda: str(tmp_path))
+
+
+def _final_tables(statement):
+    return {getattr(table, 'name', None) for table in statement.get_final_froms()}
+
+
 def _record_lock_order(db_session, monkeypatch):
-    """Record, in execution order, each row-locking read of ``documents`` (compiled for Postgres --
-    SQLite drops the clause) and each take of the global audit-chain lock."""
+    """Record, in execution order: each row-locking read of ``documents`` and ``purchase_orders``
+    (compiled for Postgres -- SQLite drops the clause), the delivery batch insert, and each take of
+    the global audit-chain lock."""
     events = []
 
     def before_execute(conn, clauseelement, multiparams, params, execution_options):  # noqa: ARG001
-        if isinstance(clauseelement, Select) and 'documents' in {
-            getattr(table, 'name', None) for table in clauseelement.get_final_froms()
-        }:
+        if isinstance(clauseelement, Select):
             compiled = clauseelement.compile(dialect=postgresql.dialect())
-            if 'FOR UPDATE' in str(compiled):
+            if 'FOR UPDATE' not in str(compiled):
+                return
+            tables = _final_tables(clauseelement)
+            if 'documents' in tables:
                 events.append(('document_lock', str(compiled), compiled.params))
+            elif 'purchase_orders' in tables:
+                events.append(('po_lock', str(compiled), compiled.params))
+        elif isinstance(clauseelement, Insert) and clauseelement.table.name == 'receiving_delivery_batches':
+            events.append(('batch_insert', None, None))
 
     monkeypatch.setattr(settings, 'AUDIT_HASH_CHAIN_ENABLED', True)
     original_chain_lock = AuditService._acquire_chain_lock
@@ -353,19 +373,23 @@ def _record_lock_order(db_session, monkeypatch):
     return events, lambda: event.remove(engine, 'before_execute', before_execute)
 
 
-def test_delivery_locks_every_certificate_in_id_order_before_the_audit_chain_lock(
-    client, db_session, monkeypatch, tmp_path
-):
-    """Line 1's audit row takes the global audit-chain lock. Every other document writer (delete,
-    QMS links, laser-nest attach, ECO create / update) locks the document row first and the chain
-    second, so a delivery that locked line 2's certificate after line 1's audit row deadlocked
-    against any of them on Postgres (40P01, answered 409). All of the delivery's certificates must be
-    row-locked -- ascending id, whatever the line order -- before the first chain lock, and none
-    after it."""
-    from app.services.storage_service import LocalStorageBackend
+def _post_recording(client, db_session, monkeypatch, user, body):
+    events, stop = _record_lock_order(db_session, monkeypatch)
+    try:
+        response = client.post('/api/v1/receiving/deliveries', headers=headers_for(user), json=body)
+    finally:
+        stop()
+    return response, events
 
-    monkeypatch.setattr('app.services.receiving_delivery_service.get_storage', lambda: LocalStorageBackend())
-    monkeypatch.setattr('app.services.receiving_delivery_service.resolve_upload_dir', lambda: str(tmp_path))
+
+def test_delivery_locks_every_certificate_in_id_order_before_the_audit_chain_lock(
+    client, db_session, monkeypatch, local_certificates
+):
+    """Line 1's audit row takes the global audit-chain lock, and document writers lock the document
+    row first and the chain second. A delivery that locked line 2's certificate after line 1's audit
+    row deadlocked against such a writer on Postgres (40P01, answered 409). All of the delivery's
+    certificates must be row-locked -- tenant-scoped, ascending id whatever the line order, after the
+    PO row as a single receipt locks them -- before the first chain lock, and none after it."""
     user, first, second, body = setup_delivery(db_session)
     lower = _upload_certificate(client, user, first.id, 'lower.pdf')
     higher = _upload_certificate(client, user, second.id, 'higher.pdf')
@@ -374,63 +398,100 @@ def test_delivery_locks_every_certificate_in_id_order_before_the_audit_chain_loc
     body['lines'][0]['certificate_document_id'] = higher
     body['lines'][1]['certificate_document_id'] = lower
 
-    events, stop = _record_lock_order(db_session, monkeypatch)
-    try:
-        response = client.post('/api/v1/receiving/deliveries', headers=headers_for(user), json=body)
-    finally:
-        stop()
+    response, events = _post_recording(client, db_session, monkeypatch, user, body)
 
     assert response.status_code == 200, response.text
     assert [row['certificate_document_id'] for row in response.json()['receipts']] == [higher, lower]
     kinds = [kind for kind, _, _ in events]
     assert 'document_lock' in kinds and 'chain_lock' in kinds, kinds
-    first_chain_lock = kinds.index('chain_lock')
-    assert 'document_lock' not in kinds[first_chain_lock:], kinds
+    assert 'document_lock' not in kinds[kinds.index('chain_lock') :], kinds
+    assert kinds.index('po_lock') < kinds.index('document_lock'), kinds
     document_locks = [(sql, bound) for kind, sql, bound in events if kind == 'document_lock']
     assert len(document_locks) == 1, document_locks
     sql, bound = document_locks[0]
+    assert 'documents.company_id = ' in sql, sql
     assert 'ORDER BY documents.id' in sql and sql.rstrip().endswith('FOR UPDATE'), sql
     assert [value for value in bound.values() if isinstance(value, list)] == [[lower, higher]], bound
 
 
-def test_delivery_without_certificates_locks_no_document(client, db_session, monkeypatch):
-    user, _, _, body = setup_delivery(db_session)
-    events, stop = _record_lock_order(db_session, monkeypatch)
-    try:
-        response = client.post('/api/v1/receiving/deliveries', headers=headers_for(user), json=body)
-    finally:
-        stop()
-    assert response.status_code == 200, response.text
-    assert 'document_lock' not in [kind for kind, _, _ in events], events
-
-
-def test_later_line_certificate_refusal_names_the_line_before_any_line_is_received(
-    client, db_session, monkeypatch, tmp_path
+def test_delivery_locks_the_po_before_its_batch_row_and_no_document_without_certificates(
+    client, db_session, monkeypatch
 ):
-    """Every line's certificate is checked before line 1 is received, so a bad certificate on line 2
-    is refused with its line number, no audit row written and nothing posted."""
-    from app.services.storage_service import LocalStorageBackend
+    """The batch insert takes FOR KEY SHARE on the PO through its foreign key. A delivery that inserted
+    it before the receipt-number lock and the PO's FOR UPDATE deadlocked against a single receipt on
+    the same PO holding the receipt-number lock and waiting on the PO. Certificates or not, the PO
+    row lock comes first; with no certificate named, no document is locked."""
+    user, _, _, body = setup_delivery(db_session)
 
-    monkeypatch.setattr('app.services.receiving_delivery_service.get_storage', lambda: LocalStorageBackend())
-    monkeypatch.setattr('app.services.receiving_delivery_service.resolve_upload_dir', lambda: str(tmp_path))
-    user, first, _, body = setup_delivery(db_session)
-    good = _upload_certificate(client, user, first.id, 'good.pdf')
-    other_supplier = make_po_line(db_session, company_id=1)
-    wrong = _upload_certificate(client, user, other_supplier.id, 'wrong.pdf')
-    body['lines'][0]['certificate_document_id'] = good
-    body['lines'][1]['certificate_document_id'] = wrong
+    response, events = _post_recording(client, db_session, monkeypatch, user, body)
+
+    assert response.status_code == 200, response.text
+    kinds = [kind for kind, _, _ in events]
+    assert 'po_lock' in kinds and 'batch_insert' in kinds, kinds
+    assert kinds.index('po_lock') < kinds.index('batch_insert'), kinds
+    assert 'document_lock' not in kinds, kinds
+
+
+def _foreign_company_certificate(client, db_session, user, line, second):
+    """A certificate in another company that otherwise matches the line's part and supplier, so only
+    the tenant filter refuses it."""
+    _ensure_company(db_session, 2)
+    document = Document(
+        company_id=2,
+        document_number='FOREIGN-CERT-1',
+        title='Foreign certificate',
+        revision='A',
+        document_type=DocumentType.MATERIAL_CERT,
+        part_id=second.part_id,
+        vendor_id=second.purchase_order.vendor_id,
+        file_path=db_session.get(Document, _upload_certificate(client, user, line.id, 'own.pdf')).file_path,
+        status='released',
+    )
+    db_session.add(document)
+    db_session.commit()
+    return document.id
+
+
+def _drawing(client, db_session, user, line, second):
+    document = db_session.get(Document, _upload_certificate(client, user, second.id, 'drawing.pdf'))
+    document.document_type = DocumentType.DRAWING
+    db_session.commit()
+    return document.id
+
+
+def _missing_file(client, db_session, user, line, second):
+    document = db_session.get(Document, _upload_certificate(client, user, second.id, 'gone.pdf'))
+    os.remove(document.file_path)
+    return document.id
+
+
+def _other_supplier(client, db_session, user, line, second):
+    return _upload_certificate(client, user, make_po_line(db_session, company_id=1).id, 'wrong.pdf')
+
+
+@pytest.mark.parametrize(
+    'make_certificate,reason',
+    [
+        (_other_supplier, 'Choose a certificate uploaded for this part and supplier'),
+        (_foreign_company_certificate, 'Choose a certificate uploaded for this part and supplier'),
+        (_drawing, 'The linked document must be a stored certificate'),
+        (_missing_file, 'Certificate file is unavailable. Upload it again before receiving.'),
+    ],
+)
+def test_later_line_certificate_refusal_names_the_line_before_any_line_is_received(
+    client, db_session, monkeypatch, local_certificates, make_certificate, reason
+):
+    """Every line's certificate is checked, with the per-receipt checks, before line 1 is received: a
+    bad certificate on line 2 is refused with its line number before any audit row, nothing posted."""
+    user, first, second, body = setup_delivery(db_session)
+    body['lines'][0]['certificate_document_id'] = _upload_certificate(client, user, first.id, 'good.pdf')
+    body['lines'][1]['certificate_document_id'] = make_certificate(client, db_session, user, first, second)
     audit_rows = db_session.query(AuditLog).count()
 
-    events, stop = _record_lock_order(db_session, monkeypatch)
-    try:
-        response = client.post('/api/v1/receiving/deliveries', headers=headers_for(user), json=body)
-    finally:
-        stop()
+    response, events = _post_recording(client, db_session, monkeypatch, user, body)
 
     assert response.status_code == 422, response.text
-    assert response.json()['detail'] == (
-        'Delivery line 2: Choose a certificate uploaded for this part and supplier. No delivery lines were posted.'
-    )
+    assert response.json()['detail'] == f'Delivery line 2: {reason}. No delivery lines were posted.'
     assert 'chain_lock' not in [kind for kind, _, _ in events], events
     for model in (POReceipt, InventoryItem, InventoryTransaction, ReceivingDeliveryBatch):
         assert db_session.query(model).count() == 0
