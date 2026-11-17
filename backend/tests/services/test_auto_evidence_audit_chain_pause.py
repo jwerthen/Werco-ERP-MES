@@ -20,10 +20,12 @@ suite runs on SQLite, where trigger state cannot be read (``None`` -> "could not
 the PostgreSQL answers are injected by patching ``_audit_triggers_in_force``.
 """
 
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -388,10 +390,11 @@ def test_failed_trigger_read_on_postgresql_caps_the_row_and_leaves_the_transacti
 ):
     """Pretend the bind is PostgreSQL: the ``pg_trigger`` read then really fails on SQLite.
 
-    The failure must answer ``None`` ("could not be checked", never a claim either way), be
-    contained by the check's own savepoint so the evidence query after it still runs, and -- on
+    The failure must answer ``None`` ("could not be checked", never a claim either way) and -- on
     PostgreSQL, where the read should have worked -- cap the row: an unknown about the last
-    tamper control is not evidence of compliance.
+    tamper control is not evidence of compliance. That the read is wrapped in its own savepoint
+    is proven by the SQL-trace tests below; SQLite never aborts on a failed statement, so this
+    test alone cannot see it.
     """
     _set_chain(monkeypatch, True)
     _write(db_session, _writer(db_session, COMPANY_A), 2)
@@ -408,6 +411,76 @@ def test_failed_trigger_read_on_postgresql_caps_the_row_and_leaves_the_transacti
         "database UPDATE/DELETE trigger status could not be checked"
     )
     assert result["health_detail"].endswith(AUDIT_TRIGGERS_UNCHECKED_SENTENCE)
+
+
+_SAVEPOINT_SQL = re.compile(r"^\s*(SAVEPOINT|ROLLBACK TO SAVEPOINT|RELEASE SAVEPOINT)\s+(\S+)", re.IGNORECASE)
+
+
+def _trace_trigger_check(db: Session, monkeypatch, check_sql: str = None) -> tuple:
+    """Run ``_audit_triggers_in_force`` on a pretend-PostgreSQL bind and record the SQL sent.
+
+    SQLite never aborts a transaction on a failed statement, so whether the result survives a
+    failure says nothing about the savepoint; only the statements reaching the cursor do. (Same
+    approach as ``test_savepoint_sql_wraps_each_rule`` in test_auto_evidence_failed_rule.py.)
+    ``check_sql`` swaps in a SQLite-valid stand-in for the ``pg_trigger`` read to drive the
+    success path; left unset, the real catalog query runs and fails (SQLite has no pg_trigger).
+    """
+    monkeypatch.setattr(auto_evidence_service, "_dialect_name", lambda db: "postgresql")
+    if check_sql is not None:
+        monkeypatch.setattr(auto_evidence_service, "_AUDIT_LOG_TRIGGER_CHECK_SQL", check_sql)
+    marker = check_sql or _AUDIT_LOG_TRIGGER_CHECK_SQL
+    trace: list = []
+
+    def _record(conn, cursor, statement, parameters, context, executemany):
+        match = _SAVEPOINT_SQL.match(statement)
+        if match:
+            trace.append((match.group(1).upper(), match.group(2)))
+        elif statement.strip() == marker.strip():
+            trace.append(("sql", "trigger check"))
+
+    engine = db.get_bind()
+    event.listen(engine, "before_cursor_execute", _record)
+    try:
+        state = _audit_triggers_in_force(db)
+    finally:
+        event.remove(engine, "before_cursor_execute", _record)
+    return state, trace
+
+
+def test_failed_trigger_read_runs_inside_its_own_savepoint_and_rolls_back_to_it(db_session: Session, monkeypatch):
+    """On PostgreSQL a failed statement aborts the whole transaction; only ``ROLLBACK TO SAVEPOINT``
+    restores it. A bare ``try`` / ``except`` around the read would leave every later statement in
+    the request failing -- this trace is what tells the two apart on SQLite."""
+    _write(db_session, _writer(db_session, COMPANY_A), 1)
+
+    state, trace = _trace_trigger_check(db_session, monkeypatch)
+
+    assert state is None
+    savepoints = [name for kind, name in trace if kind == "SAVEPOINT"]
+    assert len(savepoints) == 1, trace
+    assert trace == [
+        ("SAVEPOINT", savepoints[0]),
+        ("sql", "trigger check"),
+        ("ROLLBACK TO SAVEPOINT", savepoints[0]),
+    ]
+
+
+@pytest.mark.parametrize(("found", "expected"), [(2, True), (1, False), (0, False)])
+def test_successful_trigger_read_is_released_and_needs_both_triggers(db_session: Session, monkeypatch, found, expected):
+    """Success path: the read sits between ``SAVEPOINT`` and ``RELEASE SAVEPOINT``, and only both
+    triggers in force (count == len(AUDIT_LOG_TRIGGER_NAMES)) reads as in force."""
+    _write(db_session, _writer(db_session, COMPANY_A), 1)
+
+    state, trace = _trace_trigger_check(db_session, monkeypatch, check_sql=f"SELECT {found}")
+
+    assert state is expected
+    savepoints = [name for kind, name in trace if kind == "SAVEPOINT"]
+    assert len(savepoints) == 1, trace
+    assert trace == [
+        ("SAVEPOINT", savepoints[0]),
+        ("sql", "trigger check"),
+        ("RELEASE SAVEPOINT", savepoints[0]),
+    ]
 
 
 def test_trigger_check_sql_names_the_migration_triggers():

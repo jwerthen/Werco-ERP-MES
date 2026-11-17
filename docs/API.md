@@ -8772,16 +8772,19 @@ in `RBAC_PERMISSIONS.md`.
 > A clause backed by this row therefore gets a suggested roll-up (`overall_suggested_compliance`,
 > auto-link's `compliance_summary`) of `partial` at best, never `compliant`, once the company has any
 > paused entry, while the chain is paused, or while the triggers are missing or unreadable. That is a
-> suggestion only: neither endpoint writes the clause's `compliance_status`. Of the fields that change, auto-link
-> (`POST /qms-standards/{standard_id}/auto-link`) stores only `description` (`health_status`,
-> `health_detail` and `suggested_compliance` are computed per call and never persisted), so stored
-> evidence picks up the new wording on the next auto-link run. The QMS page's linked-evidence list
-> shows a stored link's `title` and count, not its `description`; the live auto-evidence preview
-> shows `description` and `health_detail`. That is why the title was renamed: "Immutable Hash-Chain"
-> was untrue for every paused entry and is the one claim the list shows, so the title now names what
-> the row reports and asserts nothing. Existing auto-linked evidence picks up the new title on its next
-> auto-link run (matched by rule id; no migration). The row's `title`, `module_reference` and
-> `evidence_type` do not change with the chain or trigger state.
+> suggestion only: neither endpoint writes the clause's `compliance_status`. Of the fields that
+> change, auto-link (`POST /qms-standards/{standard_id}/auto-link`) stores only `description`
+> (`health_status`, `health_detail` and `suggested_compliance` are computed per call and never
+> persisted), so stored evidence picks up the new wording on the next auto-link run in which the audit
+> rule computes (a run where it fails leaves the stored link unchanged; see `evidence_not_computed`).
+> The QMS page's linked-evidence list shows a stored link's `title` and count, not its `description`;
+> the live auto-evidence preview shows `description` and `health_detail`. That is why the title was
+> renamed: "Immutable Hash-Chain" was untrue for every paused entry and is the one claim the list
+> shows, so the title now names what the row reports and asserts nothing. Existing auto-linked
+> evidence picks up the new title on the next auto-link run in which the audit rule computes (a run
+> where it fails leaves the stored link unchanged; see `evidence_not_computed`), matched by rule id;
+> no migration. The row's `title`, `module_reference` and `evidence_type` do not change with the chain
+> or trigger state.
 
 > **The PM evidence row now judges the PM schedules, not just maintenance work orders — expect the
 > verdict to drop.** The *Preventive Maintenance & Infrastructure* row (clauses matched on maintenance
