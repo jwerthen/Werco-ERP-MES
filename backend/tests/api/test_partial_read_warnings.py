@@ -323,7 +323,8 @@ def qms_llm(monkeypatch):
             model_selection_reason="test",
         )
 
-    monkeypatch.setattr("app.api.endpoints.qms_standards.run_llm_task", fake_run_llm_task)
+    # Since #9-0 the model call lives in qms_extraction_service, which the handler calls.
+    monkeypatch.setattr("app.services.qms_extraction_service.run_llm_task", fake_run_llm_task)
     return calls
 
 
@@ -442,11 +443,15 @@ def test_qms_upload_that_broke_part_way_asks_for_a_new_copy_not_a_split(
 
 def test_qms_prompt_sends_exactly_the_window_the_refusal_rule_measures():
     """Review F7. ``QMS_PROMPT_TEXT_CHARS`` decides when a partial read is refused; the prompt
-    f-string slices the text with a literal. They must stay equal, or a partial read could pass
-    the refusal check and still hand the AI a shorter text than a whole read would. (The prompt
-    text itself is deliberately not edited in this PR.)"""
-    import inspect
+    sends only a slice of the text. They must stay equal, or a partial read could pass the refusal
+    check and still hand the AI a shorter text than a whole read would. Since #9-0 the slice lives
+    in ``qms_extraction_service`` (``QMS_DOCUMENT_TEXT_MAX_CHARS``), so this pins both the constant
+    and what the rendered prompt actually carries. (The prompt text itself is not edited.)"""
+    from app.api.endpoints.qms_standards import QMS_PROMPT_TEXT_CHARS
+    from app.services import qms_extraction_service
 
-    from app.api.endpoints.qms_standards import QMS_PROMPT_TEXT_CHARS, upload_pdf_and_extract_clauses
-
-    assert f"pdf_text[:{QMS_PROMPT_TEXT_CHARS}]" in inspect.getsource(upload_pdf_and_extract_clauses)
+    assert QMS_PROMPT_TEXT_CHARS == qms_extraction_service.QMS_DOCUMENT_TEXT_MAX_CHARS
+    prompt = qms_extraction_service.build_qms_clause_extraction_prompt(
+        "A" * QMS_PROMPT_TEXT_CHARS + "B", name="Manual", version="2015"
+    )
+    assert f"---\n{'A' * QMS_PROMPT_TEXT_CHARS}\n---" in prompt

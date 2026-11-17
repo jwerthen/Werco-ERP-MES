@@ -142,7 +142,7 @@ def _quote() -> bytes:
         total_amount=1234.5,
         line_summaries=[{"part_display": "Dim 2.500 <REF>", "qty": 2, "material": "A36", "thickness": "0.125"}],
         assumptions=[{"field": "finish", "assumption": "Powder coat"}],
-        exclusions=["Hardware"],
+        terms=["Hardware"],
     )
 
 
