@@ -66,6 +66,8 @@ export interface MaintenanceWorkOrder extends MaintenanceTargetFields {
   title: string;
   description?: string | null;
   checklist_results?: string | null;
+  /** The PM schedule's checklist steps, which completion also judges (absent from an older API). */
+  schedule_checklist_items?: string[];
   scheduled_date?: string | null;
   due_date?: string | null;
   started_at?: string | null;

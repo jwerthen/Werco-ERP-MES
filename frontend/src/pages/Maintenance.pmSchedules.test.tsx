@@ -5,9 +5,12 @@
  *    schedule and sends its `schedule_id` with NO target, so the server inherits the schedule's
  *    target and completing the work order advances the schedule's next due date.
  *  - A schedule that already has an open work order names it instead of offering Start PM.
- *  - Completing a PM work order ticks its checklist and reports the schedule's new due date.
+ *  - Completing a PM work order ticks its checklist and reports the schedule's new due date. With
+ *    any item left unticked the dialog asks for a reason (the server refuses 409 without one) and
+ *    sends it, trimmed — only then.
  *  - "Edit" opens the schedule dialog and PUTs only the fields that changed (never a target).
- *  - The Overdue / Due This Week tiles add the PM schedules nobody has started.
+ *  - The Overdue / Due This Week tiles add the PM schedules nobody has started, or whose work order
+ *    is on hold.
  */
 import React from 'react';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -217,19 +220,26 @@ describe('Maintenance — Start PM from a schedule', () => {
   });
 });
 
+const REASON_LABEL = /^Reason for completing with/;
+
+const openCompleteDialog = async () => {
+  renderPage('/maintenance?tab=work_orders');
+  const table = await screen.findByTestId('data-table');
+  await waitFor(() => expect(within(table).getByText('PM: Compressor Annual PM')).toBeInTheDocument());
+  fireEvent.click(within(table).getByRole('button', { name: 'Complete work order MWO-2026-0041' }));
+  return screen.findByRole('dialog');
+};
+
 describe('Maintenance — completing a PM work order', () => {
   it('ticks the checklist, sends it, and reports the schedule’s new due date', async () => {
-    renderPage('/maintenance?tab=work_orders');
-    const table = await screen.findByTestId('data-table');
-    await waitFor(() => expect(within(table).getByText('PM: Compressor Annual PM')).toBeInTheDocument());
-    fireEvent.click(within(table).getByRole('button', { name: 'Complete work order MWO-2026-0041' }));
-
-    const dialog = await screen.findByRole('dialog');
+    const dialog = await openCompleteDialog();
     expect(dialog).toHaveTextContent('moves PM schedule Compressor Annual PM forward');
     expect(dialog).toHaveTextContent('Checklist (0 of 2 done)');
     expect(dialog).toHaveTextContent('Planned: 2h');
     fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Drain tank' }));
     expect(dialog).toHaveTextContent('Checklist (1 of 2 done)');
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Check belt' }));
+    expect(dialog).toHaveTextContent('Checklist (2 of 2 done)');
 
     fireEvent.click(within(dialog).getByRole('button', { name: 'Complete' }));
     await waitFor(() => expect(mockedApi.completeMaintenanceWorkOrder).toHaveBeenCalledTimes(1));
@@ -237,8 +247,10 @@ describe('Maintenance — completing a PM work order', () => {
     expect(id).toBe(41);
     expect(JSON.parse(body.checklist_results)).toEqual([
       { item: 'Drain tank', done: true },
-      { item: 'Check belt', done: false },
+      { item: 'Check belt', done: true },
     ]);
+    // Every item ticked: no reason is asked for, and none is sent.
+    expect(body).not.toHaveProperty('incomplete_checklist_reason');
     // The date comes from the completion response, not from the cached schedule (still Dec 1, 2026).
     expect(
       await screen.findByText('MWO-2026-0041 completed — Compressor Annual PM is next due Nov 16, 2027')
@@ -252,9 +264,160 @@ describe('Maintenance — completing a PM work order', () => {
     fireEvent.click(await within(table).findByRole('button', { name: 'Complete work order MWO-2026-0041' }));
     const dialog = await screen.findByRole('dialog');
     expect(dialog).not.toHaveTextContent('Checklist (');
+    expect(within(dialog).queryByLabelText(REASON_LABEL)).not.toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole('button', { name: 'Complete' }));
     await waitFor(() => expect(mockedApi.completeMaintenanceWorkOrder).toHaveBeenCalledTimes(1));
     expect(mockedApi.completeMaintenanceWorkOrder.mock.calls[0][1]).not.toHaveProperty('checklist_results');
+    expect(mockedApi.completeMaintenanceWorkOrder.mock.calls[0][1]).not.toHaveProperty('incomplete_checklist_reason');
+  });
+});
+
+describe('Maintenance — completing with checklist items unticked', () => {
+  it('asks for a reason exactly while an item is unticked, counting them', async () => {
+    const dialog = await openCompleteDialog();
+    // Nothing ticked yet: both items are open.
+    expect(within(dialog).getByLabelText(/^Reason for completing with 2 items unticked\b/)).toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Drain tank' }));
+    expect(within(dialog).getByLabelText(/^Reason for completing with 1 item unticked\b/)).toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Check belt' }));
+    expect(within(dialog).queryByLabelText(REASON_LABEL)).not.toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Complete' })).toBeEnabled();
+
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Check belt' }));
+    const reason = within(dialog).getByLabelText(/^Reason for completing with 1 item unticked\b/);
+    expect(reason).toHaveAttribute('aria-required', 'true');
+    expect(reason).toHaveAttribute('maxLength', '2000');
+    expect(dialog).toHaveTextContent('Recorded in the audit trail with the unticked items.');
+  });
+
+  it('keeps Complete disabled until the reason is more than whitespace', async () => {
+    const dialog = await openCompleteDialog();
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Drain tank' }));
+    const complete = within(dialog).getByRole('button', { name: 'Complete' });
+    expect(complete).toBeDisabled();
+    expect(complete).toHaveAttribute('title', 'Give a reason for the unticked checklist items, or tick them');
+
+    const reason = within(dialog).getByLabelText(REASON_LABEL);
+    fireEvent.change(reason, { target: { value: '   \n ' } });
+    expect(complete).toBeDisabled();
+    fireEvent.click(complete);
+    expect(mockedApi.completeMaintenanceWorkOrder).not.toHaveBeenCalled();
+
+    fireEvent.change(reason, { target: { value: 'Belt on order' } });
+    expect(complete).toBeEnabled();
+    expect(complete).not.toHaveAttribute('title');
+  });
+
+  it('sends the reason, trimmed, with the checklist it applies to', async () => {
+    const dialog = await openCompleteDialog();
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Drain tank' }));
+    fireEvent.change(within(dialog).getByLabelText(REASON_LABEL), {
+      target: { value: '  Replacement belt on back order  ' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Complete' }));
+
+    await waitFor(() => expect(mockedApi.completeMaintenanceWorkOrder).toHaveBeenCalledTimes(1));
+    const [id, body] = mockedApi.completeMaintenanceWorkOrder.mock.calls[0];
+    expect(id).toBe(41);
+    expect(body.incomplete_checklist_reason).toBe('Replacement belt on back order');
+    expect(JSON.parse(body.checklist_results)).toEqual([
+      { item: 'Drain tank', done: true },
+      { item: 'Check belt', done: false },
+    ]);
+    expect(await screen.findByText(/MWO-2026-0041 completed/)).toBeInTheDocument();
+  });
+
+  it('drops a typed reason once every item is ticked', async () => {
+    const dialog = await openCompleteDialog();
+    fireEvent.change(within(dialog).getByLabelText(REASON_LABEL), { target: { value: 'Ran out of time' } });
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Drain tank' }));
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Check belt' }));
+    expect(within(dialog).queryByLabelText(REASON_LABEL)).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Complete' }));
+
+    await waitFor(() => expect(mockedApi.completeMaintenanceWorkOrder).toHaveBeenCalledTimes(1));
+    expect(mockedApi.completeMaintenanceWorkOrder.mock.calls[0][1]).not.toHaveProperty('incomplete_checklist_reason');
+  });
+
+  it('keeps the dialog open with the server’s refusal when the completion is refused', async () => {
+    const detail =
+      '1 of 2 checklist items on maintenance work order MWO-2026-0041 are not ticked. Tick them, or give a reason for completing without them.';
+    mockedApi.completeMaintenanceWorkOrder.mockRejectedValue({ response: { status: 409, data: { detail } } });
+    const dialog = await openCompleteDialog();
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Drain tank' }));
+    fireEvent.change(within(dialog).getByLabelText(REASON_LABEL), { target: { value: 'Belt on order' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Complete' }));
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+      '1 of 2 checklist items on maintenance work order MWO-2026-0041 are not ticked.'
+    );
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    // What was entered survives the refusal, so the retry is one click.
+    expect(within(dialog).getByLabelText(REASON_LABEL)).toHaveValue('Belt on order');
+    expect(within(dialog).getByRole('checkbox', { name: 'Drain tank' })).toBeChecked();
+  });
+
+  it('counts typing a reason as an unsaved change', async () => {
+    const confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(false);
+    try {
+      const dialog = await openCompleteDialog();
+      fireEvent.change(within(dialog).getByLabelText(REASON_LABEL), { target: { value: 'Belt on order' } });
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+      expect(confirmSpy).toHaveBeenCalledTimes(1);
+      expect(within(dialog).getByLabelText(REASON_LABEL)).toHaveValue('Belt on order');
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+});
+
+describe('Maintenance — a PM answers for its schedule’s checklist', () => {
+  it('adds a schedule step the work order no longer carries, unticked, and sends it', async () => {
+    mockedApi.getMaintenanceSchedules.mockResolvedValue([
+      millPm,
+      { ...compressorPm, checklist_items: ['Drain tank', 'Check belt', 'Check oil'] },
+    ]);
+    const dialog = await openCompleteDialog();
+    expect(dialog).toHaveTextContent('Checklist (0 of 3 done)');
+    for (const name of ['Drain tank', 'Check belt', 'Check oil']) {
+      fireEvent.click(within(dialog).getByRole('checkbox', { name }));
+    }
+    expect(within(dialog).queryByLabelText(REASON_LABEL)).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Complete' }));
+
+    await waitFor(() => expect(mockedApi.completeMaintenanceWorkOrder).toHaveBeenCalledTimes(1));
+    const [, body] = mockedApi.completeMaintenanceWorkOrder.mock.calls[0];
+    expect(JSON.parse(body.checklist_results)).toEqual([
+      { item: 'Drain tank', done: true },
+      { item: 'Check belt', done: true },
+      { item: 'Check oil', done: true },
+    ]);
+    expect(body).not.toHaveProperty('incomplete_checklist_reason');
+  });
+
+  it('takes the steps from the work order (the list the server judges), even for an inactive schedule', async () => {
+    // The page loads active schedules only; the work order carries its schedule's steps itself.
+    mockedApi.getMaintenanceSchedules.mockResolvedValue([millPm]);
+    mockedApi.getMaintenanceWorkOrders.mockResolvedValue([
+      { ...openPmWO, schedule_checklist_items: ['Drain tank', 'Check belt', 'Check oil'] },
+    ]);
+    renderPage('/maintenance?tab=work_orders');
+    const table = await screen.findByTestId('data-table');
+    fireEvent.click(await within(table).findByRole('button', { name: 'Complete work order MWO-2026-0041' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toHaveTextContent('Checklist (0 of 3 done)');
+    expect(within(dialog).getByRole('checkbox', { name: 'Check oil' })).not.toBeChecked();
+  });
+
+  it('opens with nothing to save when the work order already carries every schedule step', async () => {
+    mockedApi.getMaintenanceSchedules.mockResolvedValue([
+      millPm,
+      { ...compressorPm, checklist_items: ['Drain tank', 'Check belt'] },
+    ]);
+    const dialog = await openCompleteDialog();
+    expect(dialog).toHaveTextContent('Checklist (0 of 2 done)');
   });
 });
 
@@ -327,8 +490,8 @@ describe('Maintenance — editing a schedule', () => {
   });
 });
 
-describe('Maintenance — KPI tiles count PMs nobody has started', () => {
-  it('adds unstarted PM schedules to the work-order counts and shows the split', async () => {
+describe('Maintenance — KPI tiles count PMs nobody has started or that are on hold', () => {
+  it('adds unstarted or held PM schedules to the work-order counts and shows the split', async () => {
     mockedApi.getMaintenanceDashboard.mockResolvedValue({
       overdue_count: 1,
       due_this_week: 2,
@@ -344,10 +507,10 @@ describe('Maintenance — KPI tiles count PMs nobody has started', () => {
     expect(await screen.findByText('Overdue')).toBeInTheDocument();
     const overdue = screen.getByText('Overdue').closest('div')?.parentElement as HTMLElement;
     expect(overdue).toHaveTextContent('31');
-    expect(overdue).toHaveTextContent('1 work order · 30 PMs not started');
+    expect(overdue).toHaveTextContent('1 work order · 30 PMs not started or on hold');
     const due = screen.getByText('Due This Week').closest('div')?.parentElement as HTMLElement;
     expect(due).toHaveTextContent('6');
-    expect(due).toHaveTextContent('2 work orders · 4 PMs not started');
+    expect(due).toHaveTextContent('2 work orders · 4 PMs not started or on hold');
   });
 });
 

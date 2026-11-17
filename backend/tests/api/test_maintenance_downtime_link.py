@@ -22,6 +22,7 @@ from app.models.downtime import DowntimeCategory, DowntimeEvent, DowntimePlanned
 from app.models.maintenance import MaintenanceStatus, MaintenanceWorkOrder
 from app.models.operational_event import OperationalEvent
 from app.models.user import UserRole
+from app.services.company_time import company_today
 from app.services.oee_service import work_center_has_activity
 from app.services.production_calendar import current_production_day
 from app.services.production_calendar_service import load_production_calendar
@@ -224,7 +225,7 @@ class TestNoDoubleCounting:
         [event] = events_for(db_session, work_center_id=wc.id)
         assert event.end_time is not None and 59 <= event.duration_minutes <= 61
         assert second_done.json()["downtime_minutes"] == event.duration_minutes
-        today = datetime.utcnow().date()
+        today = company_today(db_session, 1)  # the summary's date filter is a company-local day
         summary = client.get(
             "/api/v1/downtime/summary",
             headers=headers,
@@ -649,6 +650,12 @@ class TestScheduleTarget:
         same = client.post(
             WORK_ORDERS, headers=headers, json={"title": "PM", "schedule_id": schedule_id, "work_center_id": wc.id}
         )
+        assert same.status_code == 200, same.text
+        # One open work order per schedule: the inherited-target create waits for the first to end.
+        second = client.post(WORK_ORDERS, headers=headers, json={"title": "PM", "schedule_id": schedule_id})
+        assert second.status_code == status.HTTP_409_CONFLICT, second.text
+        cancelled = client.put(f"{WORK_ORDERS}/{same.json()['id']}", headers=headers, json={"status": "cancelled"})
+        assert cancelled.status_code == 200, cancelled.text
         inherited = client.post(WORK_ORDERS, headers=headers, json={"title": "PM", "schedule_id": schedule_id})
-        assert same.status_code == inherited.status_code == 200
+        assert inherited.status_code == 200, inherited.text
         assert same.json()["work_center_id"] == inherited.json()["work_center_id"] == wc.id
