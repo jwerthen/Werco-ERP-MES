@@ -14764,8 +14764,9 @@ What matters from this file's point of view:
   answers **403** `"A note is a person's own words: post it from the app, not through an agent."`
   before dispatch; `execute_task` first reads the task as the caller (`GET /hank/tasks/{task_id}`, the
   `get_task` route) and answers the same 403 for an `add_note` task without dispatching the execute.
-  When that read is refused 401 / 403 / 404 / 422 the call proceeds, and the execute route refuses it
-  the same way; any other failure (5xx, 429, transport, no `kind`) is **503** `"Could not confirm what kind
+  When that read is refused 401 / 403 / 404 / 422, that refusal (its status and detail) is the tool's
+  answer and the execute is not dispatched — the answer the execute route would have given; any other
+  failure (5xx, 429, transport, no `kind`) is **503** `"Could not confirm what kind
   of Hank task this is before executing it, so nothing was executed. Try again."`. Both tools stay
   listed, every other kind (`change_due_date` included) is unaffected, and the routes still serve a
   person in the app. See [docs/MCP.md](MCP.md) §4.3.

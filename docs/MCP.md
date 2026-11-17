@@ -629,8 +629,12 @@ there:
 - **`execute_task`** first reads the task through the same router, as the same caller
   (`GET /api/v1/hank/tasks/{task_id}`, the route behind `get_task`). An `add_note` task answers the
   same **403**, and the execute is never dispatched. A read refused **401 / 403 / 404 / 422** (absent,
-  another credential's task, a role that may not see it) lets the call proceed, and the execute route
-  answers it the same way, so the check tells a caller nothing `get_task` would not. Any other outcome
+  another credential's task, a role that may not see it) is returned as the tool's result with the
+  read's own status and detail, and the execute is **not** dispatched either — the execute route
+  resolves the task the same way, so this is the answer it would have given, it tells a caller nothing
+  `get_task` would not, and a task that becomes visible between the read and the execute can never be
+  executed by the check's own call. The execute is dispatched only after a 200 read whose `kind` is
+  not people-only. Any other outcome
   — a 5xx, a 429, a transport failure, a body with no `kind` — answers **503** `"Could not confirm
   what kind of Hank task this is before executing it, so nothing was executed. Try again."`: it fails
   closed rather than let a transient read failure post a note. The read is a second inner request,
