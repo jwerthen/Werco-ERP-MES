@@ -209,9 +209,24 @@ def test_the_email_allowlist_is_a_closed_set():
         "source",
         "inspection_method",
         "reason",
+        # Work-order comments (2026-11-16): the comment AUTHOR's name, the "who" of a
+        # comment.mention / comment.added email whose comment text is never sent. Appended
+        # last so no existing email changes; never an SMS key.
+        "comment_author",
     ]
-    # Operator-typed free-text fields that are NOT mailable.
-    for banned in ("title", "note", "scrap_reason", "defect_type", "step_label", "customer_name", "part_number"):
+    # Operator-typed free-text fields that are NOT mailable -- the comment text included.
+    for banned in (
+        "title",
+        "note",
+        "scrap_reason",
+        "defect_type",
+        "step_label",
+        "customer_name",
+        "part_number",
+        "body",
+        "comment_body",
+        "actor_display",
+    ):
         assert banned not in {key for key, _ in _DETAIL_KEYS}
 
 

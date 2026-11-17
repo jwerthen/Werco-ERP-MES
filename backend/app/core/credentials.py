@@ -49,6 +49,8 @@ writes nothing (lead decision, Claude-plugin brief build 2026-11-15).
 
 :data:`API_TOKEN_EGRESS_SWITCH` is the refusal every company egress kill-switch route
 answers an API token (any scope): opening or closing data egress is a person's judgment.
+:data:`API_TOKEN_COMMENT_WRITE` is the refusal every comment / watcher write answers an API
+token (any scope): a comment is a person's own words.
 
 This module is pure: it imports nothing from the app, so any layer can use it.
 """
@@ -86,6 +88,19 @@ READ_ONLY_TOOL_DENIED_DETAIL = "Read-only API token: this tool is not available 
 API_TOKEN_EGRESS_SWITCH = (
     "A company egress kill switch (AI, SMS, carrier or label-print egress) is turned on or off by an Admin "
     "signed in to the app, not an API token: opening or closing data egress is a person's judgment."
+)
+
+# Comments and watchers (docs/NOTIFICATIONS_PLAN.md section 3.6; owner decision for work-order
+# comments, 2026-11-16). A comment is a person's own words and a watch is a person's own
+# preference, so every comment / watcher WRITE (``POST``/``PATCH``/``DELETE /comments``,
+# ``POST``/``DELETE /watchers``) refuses ANY API token, whatever its role or scope, with this
+# text before it reads or writes anything. The reads (the thread, the watch state, mention
+# search) stay open to a token the read gates admit. None of the writes is an MCP tool
+# (``app.mcp.catalog.COMMENT_WRITE_OPERATIONS``). A crew-station badge token never reaches
+# them (its path fence keeps it on the shop floor).
+API_TOKEN_COMMENT_WRITE = (
+    "A comment is a person's own words: an API token cannot post, edit or delete comments or change who is "
+    "watching a record. Sign in to the app."
 )
 
 
