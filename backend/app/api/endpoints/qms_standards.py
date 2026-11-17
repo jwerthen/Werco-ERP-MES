@@ -813,7 +813,7 @@ def auto_link_standard(
 
 
 def _lock_live_evidence_or_404(db: Session, evidence_id: int, company_id: int) -> QMSClauseEvidence:
-    """Lock the caller's evidence row and return it, or 404 if it is missing or deleted.
+    """Lock the caller's evidence row and return it, or 404 if it, its clause or its standard is removed.
 
     For the evidence ``PUT`` and ``DELETE``. The row is read ``FOR UPDATE`` (a no-op on SQLite),
     so this request is serialized on the row with any other writer of it, including an auto-link
@@ -831,8 +831,19 @@ def _lock_live_evidence_or_404(db: Session, evidence_id: int, company_id: int) -
       in the ``WHERE``: a row that auto-link retired, or another person removed, while this
       request waited is a 404. Before, a Verify that read the row before a retirement committed
       could still mark it verified, leaving it verified and deleted, and answer 200.
+    * No edit under a removed clause or standard. Removing a standard or clause soft-deletes only
+      that row; its evidence keeps ``is_deleted = false`` and is hidden by every QMS read, and
+      ``DELETE /documents/{id}`` counts it as removed (it keeps its document). Such a row is a
+      frozen record, so it answers the same 404 as a removed row, and nothing is written. Before,
+      ``PUT`` could clear its ``document_id`` and so let that document be deleted.
 
-    The ``WHERE`` keeps the tenant filter, so another company's row is never locked.
+    The ``WHERE`` keeps the tenant filter, so another company's row is never locked. The clause
+    and standard are read after the lock, also inside the tenant (a clause or standard that does
+    not join is not found), as a plain read of their flags as committed now. They are not locked:
+    ``delete_standard``, ``delete_clause`` and ``update_clause`` write their audit row, taking the
+    global audit-chain lock, before their own row change, so a share lock here, held while this
+    request waits for the chain lock, would deadlock against them. The cost is that a clause or
+    standard removed after this read and before this request commits is not seen.
     """
     evidence = (
         db.query(QMSClauseEvidence)
@@ -845,6 +856,19 @@ def _lock_live_evidence_or_404(db: Session, evidence_id: int, company_id: int) -
         .first()
     )
     if evidence is None or evidence.is_deleted:
+        raise HTTPException(status_code=404, detail="Evidence not found")
+    # Column reads, not entities: the flags come from the database, never a stale session copy.
+    parents = (
+        db.query(QMSClause.is_deleted.label("clause_deleted"), QMSStandard.is_deleted.label("standard_deleted"))
+        .join(QMSStandard, QMSStandard.id == QMSClause.standard_id)
+        .filter(
+            QMSClause.id == evidence.clause_id,
+            QMSClause.company_id == company_id,
+            QMSStandard.company_id == company_id,
+        )
+        .first()
+    )
+    if parents is None or parents.clause_deleted or parents.standard_deleted:
         raise HTTPException(status_code=404, detail="Evidence not found")
     return evidence
 

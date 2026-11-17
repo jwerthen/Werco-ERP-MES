@@ -82,10 +82,9 @@ def _qms_link_refusal(db: Session, company_id: int, document_id: int) -> Optiona
     record of which document a clause was assessed against, and nulling its link would
     rewrite that record. Its document stays retained, as a voided receipt's certificate
     does. Evidence under a removed clause or standard counts as removed even when its
-    own flag is clear, because every QMS read hides it with its parent. (The evidence
-    ``PUT`` / ``DELETE`` check only the evidence row's own flag, so an API caller can
-    still edit such a row. That is a gap in those routes, not a reason to call the row
-    live here.)
+    own flag is clear, because every QMS read hides it with its parent, and the evidence
+    ``PUT`` / ``DELETE`` refuse it (404) as they refuse a removed link
+    (``qms_standards._lock_live_evidence_or_404``), so its link cannot be cleared either.
 
     The document row lock the caller already holds orders this against a concurrent
     link. Every QMS write that sets ``document_id`` flushes it before its audit row, so

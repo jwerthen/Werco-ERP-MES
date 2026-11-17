@@ -8710,8 +8710,9 @@ before any change, so a refusal writes nothing and keeps the bytes. The message 
   clearing its link would rewrite that record, so the document is retained the way a voided
   receipt's certificate is. Removing an evidence link (`DELETE /qms-standards/evidence/{id}`)
   therefore does **not** release its document; clear `document_id` first if the document is meant
-  to go. Known gap: the evidence `PUT` / `DELETE` check only the evidence row's own flag, so they
-  still accept evidence whose clause or standard was removed.
+  to go. The same goes for removing a clause or standard: clear its evidence links' `document_id`
+  first, because once the clause or standard is removed, the evidence `PUT` answers **404** for
+  the links under it.
 
 The standard and evidence `PUT`s flush their change before writing the audit row, so a new
 `document_id` takes its lock on the document row before the global audit-chain lock, the order
@@ -8947,6 +8948,15 @@ in `RBAC_PERMISSIONS.md`.
 > a Verify or Remove racing auto-link could fail with the app-wide 409. A 404 here means the link
 > is gone; if it should still exist, link it again. The `UPDATE` audit entry's `changes` now also
 > lists the row's new `updated_at`.
+
+> **Evidence under a removed clause or standard is frozen.** Removing a standard or a clause marks
+> only that row deleted; the evidence links under it keep their own flag but disappear from every
+> read with their parent. `PUT` and `DELETE /qms-standards/evidence/{evidence_id}` treat such a link
+> as removed: **404 `Evidence not found`** (the same answer as for a removed link, judged after the
+> row lock) and nothing is written. Before this, both accepted it, so an API caller could edit,
+> verify or clear the `document_id` of a link that had left the record, and a cleared link let its
+> document be deleted. The clause and standard are checked when the request reads them; a removal
+> that commits between that read and the request's own commit is not seen.
 
 #### Audit-Readiness Summary Schema (`GET /qms-standards/audit-readiness`)
 
