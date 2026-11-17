@@ -357,6 +357,7 @@ When you want the numbers behind the floor:
 1. **Analytics** opens to the **Analytics Dashboard** with real-time KPI cards — OEE, on-time delivery, first-pass yield, scrap rate, open NCRs, quote win rate, backlog hours, and inventory turnover — plus production trends. Use the period selector (**Today**, **7 Days**, **30 Days**, **90 Days**, **Year to Date**) to change the window.
    - Two shipping-based delivery cards sit alongside the completion-based on-time delivery: **OTD (shipped)** — of the jobs that finished shipping in the period, the share whose full quantity shipped on or before the promise date — and **OTIF** ("on time, in full") — of the jobs promised in the period, the share delivered in full by the promise, so a job still open past its promise counts against it. The **promise date** is the work order's must-ship-by date, or its due date if no ship-by is set. Click either card to jump to the **Ship OTD** report (below).
 2. Tabs across the top switch to focused views for **Production**, **Quality**, **Inventory**, **Forecasting** (capacity outlook and inventory risk), and **Costs**, plus **Flow** and **Custom Reports**.
+   - **Custom Reports** (admins and managers only) builds your own report: pick a data source (work orders, parts, inventory, NCRs, purchase orders, or quotes), choose columns and totals, add filters, group and sort, then **Run**. A grouped report also draws a chart. Save it as a template to run again later, share it with the other admins and managers, or export it as CSV (up to 10,000 rows; add a filter if it's bigger). Only a template's author or an admin can edit or delete it.
 
    ![Analytics dashboard with KPI cards and production trend charts](images/analytics.png)
    *The Analytics dashboard is the shop's scoreboard — switch tabs for the detail behind each number.*
@@ -396,6 +397,7 @@ When you want the numbers behind the floor:
 | A machine shows red on the capacity heatmap | It's booked past capacity for that day. Drag a job off it, shift dates, or move work to another work center to rebalance. |
 | Receiving inspection won't complete | Confirm the accepted and rejected quantities are valid and that any required reject notes are filled in (see the Warehouse guide). |
 | The Flow tab doesn't show on Analytics | It's role-gated. Admins, managers, and supervisors get the full view; quality roles get its yield and scrap sections; other roles don't see the tab. |
+| The Custom Reports tab doesn't show on Analytics | It's for admins and managers only. Ask one of them to run or export the report you need. |
 | OTD (shipped) or OTIF shows n/a | Nothing was measurable in the period — usually jobs with no promise date. Open **Reports → Ship OTD** and clear the **Promise Hygiene** list by giving those jobs a due date. |
 
 ## Where to get help

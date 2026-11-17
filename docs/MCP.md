@@ -2,8 +2,8 @@
 
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
-(Cursor, Claude Code, a chat bot) gets **779 tools** — 15 hand-written *convenience* tools plus
-**764 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+(Cursor, Claude Code, a chat bot) gets **782 tools** — 15 hand-written *convenience* tools plus
+**767 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
 as the same request from the web app. A **read-only** API token is shown fewer tools, and an
 **AI-external** one fewer still (§4.1, §4.2).
 
@@ -42,6 +42,16 @@ shifted: 15 convenience + **764** generated, 16 shadowed. The read-only catalog 
 **Re-checked again on 2026-11-16 after bulk release** (`POST /work-orders/bulk-release`) was added and
 joined `EXCLUDED_OPERATIONS` in the same change (§6.1): counts unchanged at 15 convenience + **764**
 generated, 16 shadowed, and the read-only catalog at 8 convenience + **298** generated.
+
+**Re-checked again on 2026-11-16 after the custom report builder fixes added three tools**
+(`get_report_template`, `update_report_template`, `run_report_template`; no existing name shifted):
+15 convenience + **767** generated, 16 shadowed. The read-only catalog is 8 convenience + **299**
+generated (`get_report_template` is the one new read; the run is a `POST`). The same change altered
+**`run_custom_report`'s result**: it is now one object, `{columns, rows, row_count, truncated,
+notes}`, where it used to be a bare list of row dicts that arrived wrapped as `{"result": [...]}`
+(§11). The labor-not-tracked note moved from response headers into `notes`. `export_custom_report`'s
+`format` argument is now `const: "csv"`, so `xlsx` / `pdf` are refused at argument validation. See
+[API.md → Custom report builder](API.md#custom-report-builder).
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
 `backend/tests/test_mcp_docs_names.py` checks every tool name this file, `CLAUDE.md` and `API.md`
@@ -234,13 +244,13 @@ routes authenticate every call; in IN-PROCESS mode it uses the real `ErpTokenVer
  "generated_tools":   [{"name": "...", "method": "GET", "path": "/api/v1/...", "tag": "...",
                         "function": "...", "annotations": {...}, "deprecated": false}],
  "shadowed_operations": [["GET", "/api/v1/inventory/"], ...],
- "counts": {"convenience": 15, "generated": 764, "shadowed": 16}
+ "counts": {"convenience": 15, "generated": 767, "shadowed": 16}
 }
 ```
 
 `--print-catalog --read-only` prints the same keys filtered to what a read-only token is shown
 (tools that only read, under no tag in `WERCO_MCP_READ_ONLY_DENY_TAGS`), with the counts
-recomputed (`"convenience": 8, "generated": 298` on 2026-11-15), plus `"scope": "read_only"` and
+recomputed (`"convenience": 8, "generated": 299` on 2026-11-16), plus `"scope": "read_only"` and
 the `"deny_tags"` applied. Without `--read-only` the output is the full catalog with the keys
 above, as before. There is no flag for the AI-external catalog; §4.2 lists it.
 
@@ -473,7 +483,7 @@ introspect its own user.
   - a denied tag gets **403** `"Read-only API token cannot access this resource."`;
   - a request that matches no route fails closed with that same 403.
 - **The MCP door** narrows `tools/list` to the tools that only read and carry no denied tag. On
-  2026-11-15 that is 8 convenience + 298 generated tools; `--print-catalog --read-only` prints
+  2026-11-16 that is 8 convenience + 299 generated tools; `--print-catalog --read-only` prints
   them. Calling any other tool by name answers, **before argument validation or dispatch**:
   - **403** `"Read-only API token: this tool writes."` for a tool that writes; the write check
     comes first, so a writing tool under a denied tag gets this text;
@@ -655,7 +665,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `OperatorCertifications` (`/certifications`) | Operator Certifications | `list_certifications`, `certification_dashboard`, `get_expiring_certifications`, `list_skill_matrix`, `check_operator_qualification` |
 | `ToolManagement` (`/tool-management`) | Tool & Fixture Management | `list_tools`, `checkout_tool`, `checkin_tool`, `list_inspection_due`, `tool_fixture_management_get_dashboard` |
 | `QMSStandards` (`/qms-standards`) | QMS Standards & Audit Readiness | `list_standards`, `get_audit_readiness`, `list_clauses`, `add_evidence`, `upload_pdf_and_extract_clauses` |
-| `Analytics` (`/analytics/*`) | Analytics & BI | `get_kpi_dashboard`, `get_production_trends`, `analytics_bi_get_quality_metrics`, `get_flow_metrics`, `get_fpy`, `get_wip_aging`, `run_custom_report` |
+| `Analytics` (`/analytics/*`) | Analytics & BI | `get_kpi_dashboard`, `get_production_trends`, `analytics_bi_get_quality_metrics`, `get_flow_metrics`, `get_fpy`, `get_wip_aging`; Custom Reports (Admin / Manager): `get_available_data_sources` (read it first: every source, field, type and enum option), `run_custom_report` (returns `{columns, rows, row_count, truncated, notes}`; a broken definition is one 422 listing every problem), `list_report_templates` (any role), `get_report_template`, `create_report_template`, `update_report_template`, `run_report_template`, `delete_report_template`, `export_custom_report` (CSV only, refused over 10,000 rows) — a saved template is read or run only by its author or when shared, and changed or deleted only by its author or an Admin ([API.md → Custom report builder](API.md#custom-report-builder)) |
 | `Reports` (`/reports`) | Reports | `get_production_summary`, `get_work_center_utilization`, `get_inventory_value`, `get_ship_otd_report`, `reports_get_quality_metrics`, `get_daily_output`, `get_employee_time_report` (the last two read production days) |
 | `PrintTraveler` (`/print/traveler/:id`) | Work Orders, Print Reports, Parts | `get_work_order`★, `get_work_order_print_data`, `get_part` |
 | `PrintPurchaseOrder` (`/print/purchase-order/:id`) | Print Reports | `get_purchase_order_print_data` |
@@ -756,7 +766,8 @@ On the commit that shipped API tokens: 706 operations, 689 secured, 680 candidat
 (§8), 2 excluded → **662 generated tools**. On 2026-11-15, with fourteen excluded and the CAR form /
 FAI log, Approved Supplier List and equipment-asset / PM-import routes added: **764 generated tools**
 (`--print-catalog` `counts`). On 2026-11-16 bulk release added one secured route and its exclusion
-together, so fifteen are excluded and the count stays **764**.
+together, so fifteen are excluded and the count stays **764**; the three report-template routes then
+made it **767**.
 
 ### 6.2 Naming and the collision policy (`app/mcp/naming.py`)
 
