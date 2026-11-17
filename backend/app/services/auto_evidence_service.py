@@ -1153,11 +1153,20 @@ def _query_suppliers(db: Session, company_id: int) -> dict:
 
 # ---------------------------------------------------------------------------
 # Mapping rules: keyword patterns → query functions
+#
+# ``evidence_type`` / ``title`` / ``module_reference`` repeat what each rule's
+# ``query_fn`` returns. They exist for the one row the query function cannot
+# build: the placeholder ``discover_evidence_for_clause`` substitutes when the
+# query raises (see ``_evaluation_failed_result``). A test holds every rule's
+# copy equal to its query function's, so the two cannot drift.
 # ---------------------------------------------------------------------------
 
 EVIDENCE_MAPPING_RULES: List[dict] = [
     {
         "id": "ncr",
+        "evidence_type": "ncr",
+        "title": "Non-Conformance Reports (NCR)",
+        "module_reference": "/quality/ncr",
         "keywords": [
             "nonconform",
             "control of nonconforming",
@@ -1171,6 +1180,9 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
     },
     {
         "id": "car",
+        "evidence_type": "car",
+        "title": "Corrective/Preventive Action Reports (CAR)",
+        "module_reference": "/quality/car",
         "keywords": [
             "corrective action",
             "preventive action",
@@ -1183,6 +1195,9 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
     },
     {
         "id": "fai",
+        "evidence_type": "fai",
+        "title": "First Article Inspections (FAI / AS9102)",
+        "module_reference": "/quality/fai",
         "keywords": [
             "first article",
             "production process verification",
@@ -1194,6 +1209,9 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
     },
     {
         "id": "calibration",
+        "evidence_type": "calibration",
+        "title": "Calibration & Measurement Equipment",
+        "module_reference": "/calibration",
         "keywords": [
             "calibration",
             "monitoring and measuring",
@@ -1207,6 +1225,9 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
     },
     {
         "id": "document_control",
+        "evidence_type": "document",
+        "title": "Document Control (Procedures & Work Instructions)",
+        "module_reference": "/documents",
         "keywords": [
             "document control",
             "documented information",
@@ -1221,6 +1242,9 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
     },
     {
         "id": "complaints",
+        "evidence_type": "other",
+        "title": "Customer Complaints & Satisfaction",
+        "module_reference": "/customer-complaints",
         "keywords": [
             "customer satisfaction",
             "customer complaint",
@@ -1232,11 +1256,17 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
     },
     {
         "id": "training",
+        "evidence_type": "training",
+        "title": "Training & Operator Certifications",
+        "module_reference": "/operator-certifications",
         "keywords": ["training", "competence", "awareness", "qualification", "personnel", "human resource", "skill"],
         "query_fn": _query_training,
     },
     {
         "id": "traceability",
+        "evidence_type": "module",
+        "title": "Work Order Traceability (Lot/Serial Tracking)",
+        "module_reference": "/work-orders",
         "keywords": [
             "traceability",
             "identification and traceability",
@@ -1249,6 +1279,9 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
     },
     {
         "id": "spc",
+        "evidence_type": "spc",
+        "title": "Statistical Process Control (SPC)",
+        "module_reference": "/spc",
         "keywords": [
             "statistical",
             "spc",
@@ -1261,11 +1294,17 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
     },
     {
         "id": "audit",
+        "evidence_type": "module",
+        "title": "Audit Trail (Immutable Hash-Chain Log)",
+        "module_reference": "/audit",
         "keywords": ["internal audit", "audit program", "audit trail", "management review", "audit log"],
         "query_fn": _query_audit_log,
     },
     {
         "id": "maintenance",
+        "evidence_type": "module",
+        "title": "Preventive Maintenance & Infrastructure",
+        "module_reference": "/maintenance",
         "keywords": [
             "maintenance",
             "infrastructure",
@@ -1278,6 +1317,9 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
     },
     {
         "id": "eco",
+        "evidence_type": "module",
+        "title": "Engineering Change Orders (ECO)",
+        "module_reference": "/engineering-changes",
         "keywords": [
             "engineering change",
             "design change",
@@ -1290,6 +1332,9 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
     },
     {
         "id": "suppliers",
+        "evidence_type": "module",
+        "title": "Supplier Management & Evaluation",
+        "module_reference": "/purchasing/vendors",
         "keywords": [
             "purchasing",
             "external provider",
@@ -1323,11 +1368,82 @@ def _match_rules(clause: QMSClause) -> List[dict]:
     return matched
 
 
+# Internal key on a result row whose rule raised instead of computing evidence. Like
+# ``_rule_id`` it is never serialized; ``POST /qms-standards/{id}/auto-link`` reads it
+# to leave that rule's stored evidence untouched.
+EVALUATION_FAILED_KEY = "_evaluation_failed"
+
+# The placeholder's ``health_status``. Reserved for it: no query function returns it, so a
+# client can tell "the query failed" from a module that genuinely has no records (``no_data``,
+# with the same zero counts). The SPA hides the record count for it and MCP agents read it
+# from the same GET.
+EVALUATION_FAILED_HEALTH_STATUS = "not_computed"
+
+EVALUATION_FAILED_DESCRIPTION = "Evidence could not be computed from live records"
+EVALUATION_FAILED_DETAIL = (
+    "Evidence could not be computed: the query for this module failed. "
+    "Nothing is known about it from this run, so it is not assessed."
+)
+
+
+def _evaluation_failed_result(rule: dict) -> dict:
+    """The row that stands in for a rule whose query raised.
+
+    Same keys as a computed row, so ``ClauseAutoEvidenceResponse`` keeps its shape. It says
+    ``not_computed`` / ``not_assessed``: an unknown is never evidence of compliance, and
+    ``compute_overall_compliance`` rolls a clause carrying this row up to ``not_assessed``
+    (unless a computed row is ``non_compliant`` / ``partial``), never ``compliant``.
+    The zero counts are placeholders required by the schema, not measurements -- which is
+    why ``health_status`` is ``not_computed`` rather than ``no_data``: a genuinely empty
+    module reports the same zeros, and a reader must not show this row as "0 records".
+    """
+    return {
+        "evidence_type": rule["evidence_type"],
+        "title": rule["title"],
+        "description": EVALUATION_FAILED_DESCRIPTION,
+        "module_reference": rule["module_reference"],
+        "total_count": 0,
+        "recent_count": 0,
+        "health_status": EVALUATION_FAILED_HEALTH_STATUS,
+        "health_detail": EVALUATION_FAILED_DETAIL,
+        "examples": [],
+        "suggested_compliance": "not_assessed",
+        "_rule_id": rule["id"],
+        EVALUATION_FAILED_KEY: True,
+    }
+
+
+def is_evaluation_failed(result: dict) -> bool:
+    """True for the placeholder row of a rule whose query raised."""
+    return bool(result.get(EVALUATION_FAILED_KEY))
+
+
 def discover_evidence_for_clause(db: Session, clause: QMSClause, company_id: int) -> List[dict]:
     """
     Discover live ERP/MES evidence for a single QMS clause.
-    Returns a list of AutoEvidenceResult-compatible dicts.
+    Returns a list of AutoEvidenceResult-compatible dicts, one per matched rule.
     All evidence counts and examples are scoped to the given company.
+
+    A RULE THAT RAISES IS REPORTED, NEVER DROPPED. Each query runs in its own savepoint
+    (``db.begin_nested()``); on any exception the savepoint is rolled back and the rule's
+    row becomes ``_evaluation_failed_result`` (``not_computed`` / ``not_assessed``). Two things
+    depend on that:
+
+    * The roll-up. Dropping the row let a clause matching, say, calibration + maintenance
+      roll up ``compliant`` from calibration alone while its maintenance query was failing --
+      a false "compliant" in an auditor-facing view, which is worse than "not assessed".
+    * The rules after it. On PostgreSQL a failed statement aborts the whole transaction, so
+      without the savepoint every later rule failed too (and was dropped too). Rolling back
+      to the savepoint restores the transaction and the next rule runs normally.
+
+    The savepoint is opened OUTSIDE the ``try``: ``begin_nested()`` first flushes the
+    caller's pending writes (auto-link's evidence rows from earlier clauses), and a failure
+    there is the caller's, not this rule's -- it must propagate rather than be recorded as a
+    failed rule. A failed savepoint rollback propagates for the same reason.
+
+    SQLAlchemy emits the ``SAVEPOINT`` lazily, just before the rule's first statement, so a
+    rule that raises before running any SQL leaves no savepoint SQL in a trace. That is not a
+    bug: nothing ran, so there is nothing to roll back.
     """
     matched_rules = _match_rules(clause)
     results = []
@@ -1338,18 +1454,37 @@ def discover_evidence_for_clause(db: Session, clause: QMSClause, company_id: int
         if rule["id"] in seen_ids:
             continue
         seen_ids.add(rule["id"])
+        savepoint = db.begin_nested()
         try:
             result = rule["query_fn"](db, company_id)
-            result["_rule_id"] = rule["id"]
-            results.append(result)
-        except Exception as e:
-            logger.error(f"Error querying {rule['id']} for clause {clause.clause_number}: {e}")
+        except Exception:  # noqa: BLE001 - one rule's failure must become a visible row, not a 500
+            savepoint.rollback()
+            logger.error(
+                "Auto-evidence rule %s failed for clause %s (company %s); reported as not assessed",
+                rule["id"],
+                clause.clause_number,
+                company_id,
+                exc_info=True,
+            )
+            results.append(_evaluation_failed_result(rule))
+            continue
+        savepoint.commit()
+        result["_rule_id"] = rule["id"]
+        results.append(result)
 
     return results
 
 
 def compute_overall_compliance(evidence_results: List[dict]) -> str:
-    """Compute overall suggested compliance from multiple evidence results."""
+    """Compute overall suggested compliance from multiple evidence results.
+
+    A finding from a row that WAS computed (``non_compliant``, then ``partial``) still wins.
+    Otherwise a clause with any rule that could not be computed is ``not_assessed``: its
+    other rows may all be compliant, but reporting ``partial`` would present a query failure
+    as a compliance gap, and ``compliant`` would claim evidence nobody computed. Call this
+    with the rows as ``discover_evidence_for_clause`` returned them, before internal keys
+    are stripped, or the failure flag is lost.
+    """
     if not evidence_results:
         return "not_assessed"
 
@@ -1359,6 +1494,8 @@ def compute_overall_compliance(evidence_results: List[dict]) -> str:
         return "non_compliant"
     if "partial" in statuses:
         return "partial"
+    if any(is_evaluation_failed(r) for r in evidence_results):
+        return "not_assessed"
     if all(s == "compliant" for s in statuses):
         return "compliant"
     if all(s == "not_assessed" for s in statuses):

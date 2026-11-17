@@ -206,7 +206,9 @@ class AutoEvidenceResult(BaseModel):
     module_reference: str  # e.g. "/quality/ncr"
     total_count: int
     recent_count: int  # Last 12 months
-    health_status: str  # healthy, warning, critical, no_data
+    # healthy, warning, critical, no_data -- or not_computed: the placeholder for a rule whose
+    # query failed (zero counts are placeholders, not measurements; never produced by a query).
+    health_status: str
     health_detail: str  # e.g. "All NCRs resolved within SLA"
     examples: List[AutoEvidenceExample] = Field(default_factory=list)
     suggested_compliance: str  # compliant, partial, non_compliant, not_assessed
@@ -231,4 +233,7 @@ class AutoLinkSummary(BaseModel):
     clauses_without_evidence: int
     total_evidence_created: int
     total_evidence_updated: int
+    # Evidence rules whose query failed this run: reported as not_assessed in the roll-up,
+    # nothing persisted for them (their stored evidence is left as the last good run wrote it).
+    total_evidence_failed: int = 0
     compliance_summary: dict = Field(default_factory=dict)  # {"compliant": 38, "partial": 5, ...}
