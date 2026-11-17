@@ -8838,6 +8838,43 @@ or sharing its retained source storage reference. This preserves the reviewed
 PDF, completed intake receipt and source-page recovery together with existing
 receipt-certificate and revision-history retention.
 
+Deletion also refuses (**409**) a document that a same-company QMS standard or QMS clause
+evidence link names through its `document_id`. Both columns are plain foreign keys with no
+`ON DELETE`, so on Postgres the unguarded delete failed at flush, after the document row lock and
+the audit-chain lock were taken: a **500**, or a deadlock (40P01, answered **409** or **503**
+depending on where the delete lost) against an evidence edit holding the referencing row, and
+neither said why. The check runs before the audit write and
+before any change, so a refusal writes nothing and keeps the bytes. The message depends on the link:
+
+- **A live link** (the standard, or the evidence with its clause and standard, not removed):
+  *"This document is linked to QMS standard AS9100D"* or *"…linked as QMS evidence on AS9100D
+  clause 7.5.3"*, plus *"and N other QMS links"* when there are more, then *"Unlink it first by
+  setting document_id to null on that QMS standard or evidence link."* That means
+  `PUT /qms-standards/{standard_id}` or `PUT /qms-standards/evidence/{evidence_id}` with
+  `{"document_id": null}` (both audited). The QMS Standards page has no document field, so this is
+  an API / MCP step.
+- **Only removed links** (a soft-deleted standard, clause or evidence link, including evidence
+  under a removed clause or standard): *"This document is named by a removed QMS standard, clause or
+  evidence link, which keeps the record of what was assessed. It must remain available and cannot be
+  deleted."* A removed QMS row still records which document a clause was assessed against, and
+  clearing its link would rewrite that record, so the document is retained the way a voided
+  receipt's certificate is. Removing an evidence link (`DELETE /qms-standards/evidence/{id}`)
+  therefore does **not** release its document; clear `document_id` first if the document is meant
+  to go. The same goes for removing a clause or standard: clear its evidence links' `document_id`
+  first, because once the clause or standard is removed, the evidence `PUT` answers **404** for
+  the links under it. There is no restore for a removed QMS standard, clause or evidence link, so a
+  document still linked when its QMS row is removed stays permanently.
+
+The standard and evidence `PUT`s flush their change before writing the audit row, so a new
+`document_id` takes its lock on the document row before the global audit-chain lock, the order
+the delete takes them in. A link made concurrently with a delete either commits first, and the
+delete sees it and refuses, or waits for the delete and then fails its own foreign-key check.
+
+Only the active company's QMS rows are read. A link from another company's QMS row (the QMS
+create / update routes have accepted any existing document id, another company's included) is not
+named, since that would disclose the other tenant's record; on Postgres that delete still fails at
+the foreign key until the link is cleared.
+
 Manual upload is a release action: the persisted Document stores `status="released"`, the actual
 `released_by` actor, and UTC `released_at`. Returned metadata exposes the released status;
 the audit details retain release actor/time, which are not fields of `DocumentResponse`.
@@ -8884,6 +8921,12 @@ in `RBAC_PERMISSIONS.md`.
 | PUT | `/qms-standards/{standard_id}` | Update standard | Admin / Manager / Quality |
 | DELETE | `/qms-standards/{standard_id}` | Delete standard and all its clauses/evidence | Admin |
 
+> **A document a standard or evidence link names cannot be deleted.** `DELETE /documents/{id}`
+> answers **409** while a standard's or an evidence link's `document_id` points at it, and removed
+> standards, clauses and evidence links keep it too. To release a document, set `document_id` to
+> `null` on the standard or evidence link first; removing the link does not. See
+> [Documents](#documents).
+
 **Clauses**
 
 | Method | Endpoint | Description | Auth Required |
@@ -8893,6 +8936,29 @@ in `RBAC_PERMISSIONS.md`.
 | POST | `/qms-standards/{standard_id}/clauses/bulk` | Bulk-import clauses (e.g. from a parsed document) | Admin / Manager / Quality |
 | PUT | `/qms-standards/clauses/{clause_id}` | Update clause, incl. compliance-status assessment | Admin / Manager / Quality |
 | DELETE | `/qms-standards/clauses/{clause_id}` | Delete a clause and its evidence links | Admin / Manager |
+
+> **A parent clause must be a live clause of your company in the same standard:** the three routes
+> that take a `parent_clause_id` in the body (`POST /qms-standards/{standard_id}/clauses`, `POST
+> /qms-standards/{standard_id}/clauses/bulk` and `PUT /qms-standards/clauses/{clause_id}`) check it
+> before they write anything. An id that does not exist, another company's clause, a deleted clause
+> and a clause of another standard all get the same **404 `Parent clause not found`**, with nothing
+> saved and no audit entry, so the answer says nothing about other companies' clauses. The bulk
+> import is all-or-nothing: one bad parent refuses every clause in the request (clauses in the same
+> request cannot name each other; they have no id yet). On a `PUT`, the clause itself (**422** `A
+> clause cannot be its own parent clause`) or any of its own sub-clauses at any depth (**422** `A
+> clause cannot be placed under one of its own sub-clauses`) is refused, so no new cycle can be
+> stored. The descendant check follows stored links through deleted clauses too, and re-parenting is
+> serialized per company (a Postgres advisory lock), so two opposite moves sent at the same moment
+> cannot both pass. `parent_clause_id: null` still clears the parent, and a `PUT` that does not send
+> `parent_clause_id` is not judged on the value already stored. Every response that carries a clause
+> tree renders `clauses`, `sub_clauses` and their evidence from your own company's live rows only
+> (`GET /qms-standards/{standard_id}`, `GET /qms-standards/{standard_id}/clauses`, and the `PUT
+> /qms-standards/{standard_id}` and `PUT /qms-standards/clauses/{clause_id}` responses), so a link
+> written before this check existed no longer shows another company's clause.
+> Before this, any existing clause id, another company's included, was accepted, while a
+> nonexistent one failed with a 500, and a self- or descendant parent stored a cycle that made every
+> read of that standard fail with a 500. To clear such a stored link, `PUT {"parent_clause_id":
+> null}` on the child clause.
 
 **Auto-evidence discovery**
 
@@ -9061,6 +9127,43 @@ in `RBAC_PERMISSIONS.md`.
 > the record is retained for AS9100D traceability. All QMS create / update / delete operations — plus
 > a status-change entry when a clause's `compliance_status` changes — are captured in the tamper-evident
 > audit trail (`GET /api/v1/audit/`).
+
+> **A clause of a removed standard is removed with it.** Removing a standard marks only the
+> standard row deleted; its clauses keep their own flag. Every route that takes a clause id treats
+> a clause whose standard is removed (or is not your company's) as removed: `PUT` and `DELETE
+> /qms-standards/clauses/{clause_id}`, `GET /qms-standards/clauses/{clause_id}/auto-evidence` and
+> `POST /qms-standards/clauses/{clause_id}/evidence` answer **404 `Clause not found`**, the same as
+> for a removed clause, and write nothing. `GET /qms-standards/{standard_id}/clauses` answers **404
+> `QMS standard not found`** for a removed standard, as `GET /qms-standards/{standard_id}` does; a
+> missing id or another company's gets the same 404 (it used to be an empty list). Before this,
+> all of them still answered for a removed standard's clauses: a `PUT` could change a clause's
+> `compliance_status` on a standard that had left the record, the list still showed its clauses
+> and their evidence links, and adding evidence created a link no screen would show. Nor does such a
+> clause render as a sub-clause of a live standard's clause (a cross-standard `parent_clause_id`
+> could be written before the parent check above existed): the standard and clause-list reads, and
+> both `PUT` responses, leave it and its evidence out. The standard is checked when the request
+> reads the clause; a removal that commits between that read and the request's own commit is not
+> seen.
+
+> **Evidence under a removed clause or standard is frozen.** Removing a standard or a clause marks
+> only that row deleted; the evidence links under it keep their own flag but disappear with their
+> parent from every QMS read. `PUT` and `DELETE /qms-standards/evidence/{evidence_id}` treat such a
+> link as removed: **404 `Evidence not found`** (the same answer as for a removed link, judged after
+> the row lock) and nothing is written. Before this, both accepted it, so an API caller could edit,
+> verify or clear the `document_id` of a link that had left the record, and a cleared link let its
+> document be deleted. The clause and standard are checked when the request reads them; a removal
+> that commits between that read and the request's own commit is not seen.
+
+> **Editing or removing an evidence link locks it first:** `PUT` and `DELETE
+> /qms-standards/evidence/{evidence_id}` lock the evidence row before they read it, and write the
+> change before the audit entry. So a Verify or Remove that runs at the same time as auto-link (or
+> as another person's edit) waits for the other write to finish and is then judged against the row
+> as it stands. If the link was removed while the request waited (auto-link retired it, or someone
+> else removed it), the answer is **404 `Evidence not found`** and nothing is written. Before this,
+> a Verify could mark a link that auto-link had just retired as verified and still answer 200, and
+> a Verify or Remove racing auto-link could fail with the app-wide 409. A 404 here means the link
+> is gone; if it should still exist, link it again. The `UPDATE` audit entry's `changes` now also
+> lists the row's new `updated_at`.
 
 #### Audit-Readiness Summary Schema (`GET /qms-standards/audit-readiness`)
 
