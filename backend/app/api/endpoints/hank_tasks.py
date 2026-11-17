@@ -84,7 +84,10 @@ def prepare_task(
 ):
     """Prepare a typed task for review; nothing is executed. A standing API token may not prepare
     a report_production task that reports scrap (403, owner decision 2026-11-07): a person reports
-    scrap. A good-only production report is unaffected."""
+    scrap. A good-only production report is unaffected. An add_note task posts a work-order comment,
+    which is a person's own words: ANY API token is refused 403. change_due_date moves the work
+    order's due_date only (never must_ship_by), needs a reason, and is refused 409 on a complete,
+    closed or cancelled work order or when the date would not change."""
     service = HankTaskService(db, user, company_id)
     return _command(db, service, lambda: service.prepare(payload, audit))
 
@@ -100,7 +103,8 @@ def execute_task(
 ):
     """Execute a reviewed task as its owner. A standing API token may not execute a
     report_production task that reports scrap (403, owner decision 2026-11-07); nothing is
-    written. A good-only production report is unaffected."""
+    written. A good-only production report is unaffected. An API token may never execute an
+    add_note task (403)."""
     service = HankTaskService(db, user, company_id)
     return _command(db, service, lambda: service.execute(task_id, payload, audit))
 

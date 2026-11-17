@@ -97,7 +97,9 @@ API_TOKEN_EGRESS_SWITCH = (
 # text before it reads or writes anything. The reads (the thread, the watch state, mention
 # search) stay open to a token the read gates admit. None of the writes is an MCP tool
 # (``app.mcp.catalog.COMMENT_WRITE_OPERATIONS``). A crew-station badge token never reaches
-# them (its path fence keeps it on the shop floor).
+# them (its path fence keeps it on the shop floor). Hank's ``add_note`` task, which posts a
+# work-order comment, answers an API token the same text at prepare and at execute
+# (``hank_task_service.PEOPLE_ONLY_KINDS``).
 API_TOKEN_COMMENT_WRITE = (
     "A comment is a person's own words: an API token cannot post, edit or delete comments or change who is "
     "watching a record. Sign in to the app."

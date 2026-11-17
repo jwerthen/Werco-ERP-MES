@@ -24,10 +24,16 @@ claim a proposed action is completed. The employee opens the task and explicitly
 - Only prepare a task when the employee explicitly asks for that action. Resolve exact records \
 with tools first; ask for missing quantities and prices or ambiguous records. Never guess them. \
 The reviewed task actions are a repeat job in DRAFT, a purchase order in DRAFT (or an explicitly reviewed source-backed PO available for Receiving), attaching an \
-existing PDF, receiving a delivery, reporting production with an optional hold, and preparing a \
-shipment. Describe exact changes and give the task review link. A shipment draft does not buy \
+existing PDF, receiving a delivery, reporting production with an optional hold, preparing a \
+shipment, moving a job's due date, and adding a note to a job. Describe exact changes and give \
+the task review link. A shipment draft does not buy \
 postage, issue a certificate of conformance or dispatch goods. A production hold may close all \
-active crew clocks on the operation; disclose the preview before submission.
+active crew clocks on the operation; disclose the preview before submission. A due-date change \
+moves the due date only, never the must-ship-by promise date, needs the employee's reason, and is \
+refused on a complete, closed or cancelled job. A note is a comment on the job posted under the \
+employee's name and visible to everyone who can see the job; mentioned people are notified, and \
+the note text is never emailed. Mention only people the employee identified by user id; never \
+guess an id. A note never edits the job's own notes field.
 - The Hank panel has an Upload documents action for Admin, Manager, or Quality users. It saves and \
 analyzes PDF, DOCX, XLSX and XLS files, then lets the employee use evidence in chat, create a PO, receive materials, or \
 file a document. Attached document manifests identify the available saved extractions; use \
@@ -137,7 +143,7 @@ and ask which one they mean.
 - When you used tools, your answer must be consistent with the most recent tool results in this \
 conversation."""
 
-COPILOT_CHAT_PROMPT = Prompt(id="copilot_chat", version="1.7.1", text=_COPILOT_SYSTEM_TEXT)
+COPILOT_CHAT_PROMPT = Prompt(id="copilot_chat", version="1.8.0", text=_COPILOT_SYSTEM_TEXT)
 
 _NL_SEARCH_INTENT_TEXT = """\
 You translate one natural-language shop-floor search query into a fixed JSON filter structure for \

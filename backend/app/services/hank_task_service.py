@@ -9,6 +9,8 @@ from fastapi import HTTPException
 from sqlalchemy import inspect
 from sqlalchemy.exc import DBAPIError
 
+from app.core.credentials import API_TOKEN_COMMENT_WRITE, is_api_token_credential
+from app.core.time_utils import central_today
 from app.db.locks import acquire_generator_lock
 from app.db.tenant_filter import tenant_query
 from app.models.company import Company
@@ -25,6 +27,8 @@ from app.models.work_order import WorkOrder, WorkOrderOperation
 from app.models.work_order_material import WorkOrderMaterialAllocation
 from app.schemas.hank_tasks import (
     INPUT_SCHEMAS,
+    AddNoteInput,
+    ChangeDueDateInput,
     HankCapabilities,
     HankTaskList,
     HankTaskPreview,
@@ -32,10 +36,15 @@ from app.schemas.hank_tasks import (
     HankTaskResult,
 )
 from app.schemas.purchasing import POCreate
-from app.services import notification_links
+from app.services import comment_service, notification_links
 from app.services.audit_service import AuditService, AuditWriteError
 from app.services.erp_draft_commands import attach_document_command, create_purchase_order_command
 from app.services.supplier_approval_service import assert_vendor_not_disqualified
+from app.services.work_order_due_date import (
+    apply_due_date_change,
+    assert_due_date_change_allowed,
+    emit_due_date_changed_event,
+)
 from app.services.work_order_duplicate_service import duplicate_work_order
 
 ACTION_ROLES = {
@@ -45,6 +54,20 @@ ACTION_ROLES = {
     'receive_delivery': {UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR},
     'report_production': {UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR, UserRole.OPERATOR, UserRole.QUALITY},
     'draft_shipment': {UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR, UserRole.SHIPPING},
+    # The roles that hold work_orders:edit by default -- the role set of PUT /work-orders/{id}, the
+    # other door that moves a due date.
+    'change_due_date': {UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR},
+    # Commenting is open to everyone who can read the work order (all seven tenant roles), so a
+    # VIEWER's first Hank write is a note. It is a person's own words: see PEOPLE_ONLY_KINDS.
+    'add_note': {
+        UserRole.ADMIN,
+        UserRole.MANAGER,
+        UserRole.SUPERVISOR,
+        UserRole.OPERATOR,
+        UserRole.QUALITY,
+        UserRole.SHIPPING,
+        UserRole.VIEWER,
+    },
 }
 ACTION_PERMISSIONS = {
     'repeat_job': {'work_orders:view', 'work_orders:create'},
@@ -53,7 +76,19 @@ ACTION_PERMISSIONS = {
     'receive_delivery': {'receiving:view', 'receiving:create'},
     'report_production': {'work_orders:view', 'work_orders:complete'},
     'draft_shipment': {'shipping:view', 'shipping:create', 'work_orders:view'},
+    'change_due_date': {'work_orders:view', 'work_orders:edit'},
+    'add_note': {'work_orders:view'},
 }
+# Kinds only a PERSON may run. A note is a work-order comment, and a comment is a person's own words
+# (owner decision for work-order comments, 2026-11-16): ANY API token, whatever its scope or role,
+# is refused 403 with the comment routes' own text at prepare and at execute, and the kind is left
+# out of a token's capabilities. A crew-station badge token is not an API token, but its path fence
+# keeps it off /hank entirely.
+PEOPLE_ONLY_KINDS = frozenset({'add_note'})
+# A kind with no branch of its own. HankTaskCreate's Literal admits only registered kinds, so this
+# is a programming error (a kind added to the maps without its preview / execute branch), answered
+# as a clean 400 rather than by running some other kind's code.
+UNSUPPORTED_KIND_DETAIL = 'Hank cannot run this kind of task.'
 PLAN_ROW_LIMIT = 2000
 
 
@@ -132,10 +167,14 @@ class HankTaskService:
             self.user.is_active
         )
         elevated = self.user.is_superuser or self.user.role == UserRole.PLATFORM_ADMIN
+        api_token = is_api_token_credential(self.user)
         allowed = [
             kind
             for kind, roles in ACTION_ROLES.items()
             if writable
+            # Capabilities stay honest: a token is never offered a person-only kind. Reads of a
+            # token's own saved tasks (write=False) are unaffected -- a token can never own one.
+            and not (write and api_token and kind in PEOPLE_ONLY_KINDS)
             and (elevated or self.user.role in roles)
             and (
                 ACTION_PERMISSIONS[kind]
@@ -170,6 +209,15 @@ class HankTaskService:
     def _require_action(self, kind):
         if kind not in self.capabilities().allowed_kinds:
             raise HTTPException(403, 'Your current role or company context cannot perform this Hank action')
+
+    def _refuse_api_token_for_people_only(self, kind):
+        """403 with the comment routes' text for an API token on a person-only kind.
+
+        Runs BEFORE ``_require_action`` at prepare and at execute, so the specific refusal wins over
+        the generic one; ``_preview`` repeats it as defense in depth.
+        """
+        if kind in PEOPLE_ONLY_KINDS and is_api_token_credential(self.user):
+            raise HTTPException(403, API_TOKEN_COMMENT_WRITE)
 
     def _company(self, expected):
         if expected != self.company_id:
@@ -426,6 +474,17 @@ class HankTaskService:
                 ),
                 snapshot,
             )
+        # Every kind has its OWN branch. Nothing falls through to attach_document: a new kind
+        # without a branch is refused below rather than run as someone else's preview.
+        if kind == 'change_due_date':
+            return self._due_date_preview(data, locked=locked)
+        if kind == 'add_note':
+            return self._note_preview(data, locked=locked)
+        if kind == 'attach_document':
+            return self._attach_document_preview(data, locked=locked)
+        raise HTTPException(400, UNSUPPORTED_KIND_DETAIL)
+
+    def _attach_document_preview(self, data, *, locked=False):
         work_order = self._work_order(data['work_order_id'], locked=locked)
         document_rows = self._rows(Document, Document.id == data['document_id'], locked=locked)
         if not document_rows:
@@ -465,8 +524,162 @@ class HankTaskService:
             snapshot,
         )
 
+    @staticmethod
+    def _work_order_reference(work_order):
+        return _reference(
+            'work_order',
+            work_order.id,
+            work_order.work_order_number,
+            notification_links.work_order_detail(work_order.id),
+        )
+
+    def _due_date_preview(self, data, *, locked=False):
+        """Move ``due_date`` only -- never ``must_ship_by``. Refusals (no-op, terminal status) run at
+        prepare and again under the row lock at execute."""
+        parsed = ChangeDueDateInput.model_validate(data)
+        work_order = self._work_order(parsed.work_order_id, locked=locked)
+        number = work_order.work_order_number
+        new_due_date = parsed.new_due_date.isoformat()
+        if work_order.due_date == parsed.new_due_date:
+            raise HTTPException(409, f'{number} is already due {new_due_date}. There is nothing to change.')
+        # The PUT's own rule (services/work_order_due_date.py), never a copy of it.
+        assert_due_date_change_allowed(work_order, parsed.new_due_date)
+        old_due_date = work_order.due_date.isoformat() if work_order.due_date else 'not set'
+        warnings = ['Only the due date changes. Scheduled dates, priority and the dispatch plan are not edited.']
+        if work_order.must_ship_by is not None:
+            warnings.append(
+                f'The promise date does not move: must ship by {work_order.must_ship_by.isoformat()} stays as it '
+                'is, and it takes precedence over the due date for on-time delivery.'
+            )
+        if parsed.new_due_date < central_today():
+            warnings.append('The new due date is already in the past.')
+        # NARROW on purpose: a full-row digest would refuse execute after any column change,
+        # including dispatch-plan rank writes that deliberately bump nothing. These four are what
+        # the review judged; ``version`` catches every ORM edit of the work order.
+        snapshot = {
+            'due_date_source_sha256': _digest(
+                {
+                    'due_date': work_order.due_date,
+                    'must_ship_by': work_order.must_ship_by,
+                    'status': work_order.status,
+                    'version': work_order.version,
+                }
+            )
+        }
+        return (
+            f'Move due date of {number}'[:300],
+            HankTaskPreview(
+                summary=f'Change the due date of {number} to {new_due_date}.',
+                changes=[f'Due date: {old_due_date} → {new_due_date}.', f'Reason: {parsed.reason}'],
+                warnings=warnings,
+                references=[self._work_order_reference(work_order)],
+            ),
+            snapshot,
+        )
+
+    def _note_preview(self, data, *, locked=False):
+        """A work-order COMMENT (never ``WorkOrder.notes``), judged by the comment service's own rules
+        without writing anything."""
+        self._refuse_api_token_for_people_only('add_note')
+        parsed = AddNoteInput.model_validate(data)
+        work_order = self._work_order(parsed.work_order_id, locked=locked)
+        draft = comment_service.validate_comment(
+            self.db,
+            company_id=self.company_id,
+            actor=self.user,
+            entity_type='work_order',
+            entity_id=work_order.id,
+            body=parsed.body,
+            mentioned_user_ids=parsed.mentioned_user_ids,
+        )
+        number = work_order.work_order_number
+        changes = [f'Note: {draft.body}']
+        warnings = ['Everyone who can see this job can read the note. It is posted under your name.']
+        if draft.mentioned:
+            changes.append('Mentions: ' + ', '.join(user.full_name for user in draft.mentioned) + '.')
+            warnings.append(
+                'Mentioned people are notified in the app and by email; the email does not include the note text.'
+            )
+        warnings.append('People watching this job get an in-app notice that does not include the note text.')
+        snapshot = {
+            'note_target_sha256': _digest(
+                {
+                    'work_order_id': work_order.id,
+                    'is_deleted': bool(work_order.is_deleted),
+                    'mentioned_user_ids': draft.mention_ids,
+                }
+            )
+        }
+        return (
+            f'Add a note to {number}'[:300],
+            HankTaskPreview(
+                summary=f'Add a note to {number}.',
+                changes=changes,
+                warnings=warnings,
+                references=[self._work_order_reference(work_order)],
+            ),
+            snapshot,
+        )
+
+    def _execute_due_date_change(self, data, audit):
+        parsed = ChangeDueDateInput.model_validate(data)
+        # The row _preview just locked and re-read under the matching snapshot.
+        work_order = self._work_order(parsed.work_order_id)
+        old_due_date = work_order.due_date
+        apply_due_date_change(self.db, work_order, parsed.new_due_date)
+        number = work_order.work_order_number
+        old_text = old_due_date.isoformat() if old_due_date else 'not set'
+        new_text = parsed.new_due_date.isoformat()
+        # REQUIRED: a lost row is AuditWriteError -> rollback -> 503, and the date never moves.
+        _RequiredCreateAudit(audit).log_update(
+            resource_type='work_order',
+            resource_id=work_order.id,
+            resource_identifier=number,
+            old_values={'due_date': old_due_date},
+            new_values={'due_date': work_order.due_date},
+            description=f'Due date of {number} moved from {old_text} to {new_text} through Hank',
+            extra_data={'reason': parsed.reason, 'via': 'hank'},
+        )
+        # Best-effort telemetry in the PUT's shape. The reason stays on the audit row only:
+        # ``reason`` is an email detail key, so it never goes into the event payload.
+        emit_due_date_changed_event(self.db, company_id=self.company_id, actor=self.user, work_order=work_order)
+        # No realtime broadcast, deliberately: Hank's endpoint commits once with no post-commit hook,
+        # a broadcast must never precede the commit, and realtime ships dark
+        # (REALTIME_BROADCAST_ENABLED=False). Open views pick the date up on their next read.
+        warnings = []
+        if work_order.must_ship_by is not None:
+            warnings.append(f'Must ship by {work_order.must_ship_by.isoformat()} was not changed.')
+        return HankTaskResult(
+            summary=f'Moved the due date of {number} from {old_text} to {new_text}.',
+            warnings=warnings,
+            references=[self._work_order_reference(work_order)],
+        )
+
+    def _execute_add_note(self, data, audit):
+        self._refuse_api_token_for_people_only('add_note')
+        parsed = AddNoteInput.model_validate(data)
+        # The comment service owns every rule and the one REQUIRED create audit (the wrapper makes
+        # its single log_create fail closed); the submitter is the author.
+        comment_service.create_comment(
+            self.db,
+            company_id=self.company_id,
+            actor=self.user,
+            entity_type='work_order',
+            entity_id=parsed.work_order_id,
+            body=parsed.body,
+            mentioned_user_ids=parsed.mentioned_user_ids,
+            audit=_RequiredCreateAudit(audit),
+            audit_extra={'via': 'hank'},
+        )
+        work_order = self._work_order(parsed.work_order_id)
+        return HankTaskResult(
+            summary=f'Added a note to {work_order.work_order_number}.',
+            references=[self._work_order_reference(work_order)],
+        )
+
     def prepare(self, payload, audit):
         """Flush a durable reviewed proposal; caller commits. Safe for endpoint or chat use."""
+        self._refuse_api_token_for_people_only(payload.kind)
         self._company(payload.expected_company_id)
         self._require_action(payload.kind)
         request_hash = _digest(
@@ -535,6 +748,7 @@ class HankTaskService:
         self._company(command.expected_company_id)
         acquire_generator_lock(self.db, f'hank_task:{task_id}', self.company_id)
         task = self.get(task_id, locked=True)
+        self._refuse_api_token_for_people_only(task.kind)
         self._require_action(task.kind)
         if task.status == 'completed':
             return task
@@ -627,7 +841,13 @@ class HankTaskService:
                     else []
                 ),
             )
-        else:
+        elif task.kind == 'change_due_date':
+            receipt = self._execute_due_date_change(data, audit)
+        elif task.kind == 'add_note':
+            receipt = self._execute_add_note(data, audit)
+        elif task.kind == 'attach_document':
+            # The raw ``audit`` is safe here only because attach_document_command writes its own
+            # document audit through log_required.
             document = attach_document_command(
                 self.db, data['document_id'], data['work_order_id'], self.company_id, audit
             )
@@ -644,6 +864,8 @@ class HankTaskService:
                     ),
                 ],
             )
+        else:
+            raise HTTPException(400, UNSUPPORTED_KIND_DETAIL)
         now = datetime.utcnow()
         changed = (
             self._query()

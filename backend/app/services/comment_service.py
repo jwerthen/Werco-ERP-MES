@@ -15,10 +15,9 @@ The rules every verb here holds:
   resolved the same way and then RE-RESOLVES its record, so a comment on a since-deleted work
   order is a 404 on every verb.
 * **People only.** The routes refuse every API token before calling in here
-  (``app.core.credentials.API_TOKEN_COMMENT_WRITE``). The service functions are also the contract
-  for a caller that acts on a person's behalf without the routes (the planned Hank ``add_note``
-  task, not on this branch): such a caller would call :func:`create_comment` directly and could
-  tag its evidence with ``audit_extra`` (e.g. ``{"via": "hank"}``).
+  (``app.core.credentials.API_TOKEN_COMMENT_WRITE``); Hank's ``add_note`` refuses every API token
+  too, judges the note with :func:`validate_comment` when it is prepared (nothing written), then
+  reaches :func:`create_comment` on a person's behalf and passes ``audit_extra={"via": "hank"}``.
 * **Watching is membership-only.** Delivery notifies only members of the event's company, so only
   a member watches: a Platform Admin (or any switched-context caller) commenting while viewing
   another company is not auto-watched, ``POST /watchers`` is 409 for them, and the watch state
@@ -504,6 +503,45 @@ def _audit_extra(
     return extra
 
 
+@dataclass(frozen=True)
+class CommentDraft:
+    """A comment that has passed every rule :func:`create_comment` holds, not yet written."""
+
+    spec: CommentableType
+    record: Any
+    body: str
+    mention_ids: List[int]
+    mentioned: List[User]
+
+
+def validate_comment(
+    db: Session,
+    *,
+    company_id: int,
+    actor: User,
+    entity_type: str,
+    entity_id: int,
+    body: str,
+    mentioned_user_ids: Optional[Sequence[int]],
+    lock: bool = False,
+) -> CommentDraft:
+    """Judge a new comment WITHOUT writing anything: the record (422 type / 403 / 404), the body
+    (422) and every mention (422 naming refused ids).
+
+    The ONE implementation of a new comment's rules: :func:`create_comment` runs it before its first
+    write, and Hank's ``add_note`` runs it when a note is prepared for review (and again, through
+    :func:`create_comment`, when it is submitted). Pure reads; with ``lock=True`` (the create path
+    only) the record is read ``FOR KEY SHARE``, the verb's first lock (module docstring, lock order).
+    """
+    spec, record = resolve_target(
+        db, company_id=company_id, actor=actor, entity_type=entity_type, entity_id=entity_id, lock=lock
+    )
+    text = _clean_body(body)
+    mention_ids = _clean_mention_ids(mentioned_user_ids)
+    mentioned = _mentionable_users(db, company_id, spec, mention_ids)
+    return CommentDraft(spec=spec, record=record, body=text, mention_ids=mention_ids, mentioned=mentioned)
+
+
 def create_comment(
     db: Session,
     *,
@@ -519,25 +557,37 @@ def create_comment(
     """Post a comment on a live record of the active company. Flushes, never commits.
 
     Validates the record (422 type / 403 / 404; read ``FOR KEY SHARE``, this verb's first lock),
-    the body (422) and every mention (422 naming refused ids); inserts the comment and its mention
-    rows; auto-watches the author (when a member of the company) and each mentioned person
-    (idempotent, no backfill of older records); emits the ``comment_mentioned`` / ``comment_added`` notification events,
-    best-effort; and LAST writes ONE ``audit.log_create`` (resource type ``comment``;
-    ``extra_data`` carries the record, the mentioned and the newly auto-watched ids, with
-    ``audit_extra`` merged in under them). The audit row comes last because it takes the global
-    audit-chain lock, which no row lock may follow (module docstring, lock order).
+    the body (422) and every mention (422 naming refused ids) through :func:`validate_comment`;
+    inserts the comment and its mention rows; auto-watches the author (when a member of the
+    company) and each mentioned person (idempotent, no backfill of older records); emits the
+    ``comment_mentioned`` / ``comment_added`` notification events, best-effort; and LAST writes ONE
+    ``audit.log_create`` (resource type ``comment``; ``extra_data`` carries the record, the
+    mentioned and the newly auto-watched ids, with ``audit_extra`` merged in under them). The audit
+    row comes last because it takes the global audit-chain lock, which no row lock may follow
+    (module docstring, lock order).
 
     ``audit`` is anything with ``AuditService.log_create``'s signature. That is the only audit
     call made, so a caller that needs a required audit can pass a wrapper whose ``log_create`` is
     required; if it raises, the caller rolls back and the events go with the comment. ``actor``
     is the author -- always a person.
     """
-    spec, record = resolve_target(
-        db, company_id=company_id, actor=actor, entity_type=entity_type, entity_id=entity_id, lock=True
+    draft = validate_comment(
+        db,
+        company_id=company_id,
+        actor=actor,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        body=body,
+        mentioned_user_ids=mentioned_user_ids,
+        lock=True,
     )
-    text = _clean_body(body)
-    mention_ids = _clean_mention_ids(mentioned_user_ids)
-    mentioned = _mentionable_users(db, company_id, spec, mention_ids)
+    spec, record, text, mention_ids, mentioned = (
+        draft.spec,
+        draft.record,
+        draft.body,
+        draft.mention_ids,
+        draft.mentioned,
+    )
 
     comment = Comment(
         company_id=company_id,

@@ -216,6 +216,7 @@ from app.services.wallboard_service import operator_display_name
 from app.services.work_center_type_service import get_work_center_group
 from app.services.work_order_browse_service import browse_work_orders
 from app.services.work_order_cost_view import inject_cost_figures
+from app.services.work_order_due_date import assert_due_date_change_allowed
 from app.services.work_order_duplicate_service import duplicate_work_order
 from app.services.work_order_state_service import (
     QTY_EPSILON,
@@ -4323,8 +4324,20 @@ def update_work_order(
     PENDING, one REQUIRED audited status change each (the resume-to-draft recipe), so a
     draft leaves no cards on the dispatch board or the kiosk. Worked operations are left
     as they are. **503** (nothing changed) when those audit rows cannot be written.
+
+    A soft-deleted work order is **404**, like one that does not exist.
     """
-    work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id).first()
+    # Invariant 3: a tombstoned work order is not editable through the generic update (restore
+    # is its own verb), so it answers the same 404 as an absent or foreign one.
+    work_order = (
+        db.query(WorkOrder)
+        .filter(
+            WorkOrder.id == work_order_id,
+            WorkOrder.company_id == company_id,
+            WorkOrder.is_deleted == False,  # noqa: E712
+        )
+        .first()
+    )
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
 
@@ -4446,16 +4459,12 @@ def update_work_order(
     # the fact is exactly what those fields are for). It refuses only an actual CHANGE,
     # so re-sending the value a terminal WO already has stays idempotent. And it runs
     # before the first setattr, so a refusal leaves the row untouched.
-    if "due_date" in update_data and work_order.status in TERMINAL_WO_STATUSES:
-        if update_data["due_date"] != work_order.due_date:
-            current = work_order.status.value if hasattr(work_order.status, "value") else work_order.status
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"cannot change the due date of a work order in terminal status '{current}': its due date is "
-                    "the promise date its delivery performance was scored against."
-                ),
-            )
+    #
+    # The rule is ONE implementation (services/work_order_due_date.py), shared with Hank's
+    # change_due_date task. Only the judgment runs here; the setattr loop below still writes
+    # the value, exactly once.
+    if "due_date" in update_data:
+        assert_due_date_change_allowed(work_order, update_data["due_date"])
 
     # Owner ruling 1 (INT8): lowering the order below what a whole-order stage has already
     # accounted for (good + scrap) would turn that stage's surplus into a short close of
