@@ -1550,7 +1550,7 @@ company-scoped.
 | GET | `/work-orders/by-number/{wo_number}` | Get work order by number: the **same body** as by ID (every computed field included). A soft-deleted work order is **404**, as by ID. Unlike the read by ID it does **not** reconcile on read — it writes nothing | Yes |
 | GET | `/work-orders/{id}/timeline` | Chronological job history with category, actor and time filters; opaque cursor, `limit` 1–100 (default 30). Returns business events and source links, not raw audit payloads. Each item a single operation owns (its start / finish, production receipts, process-step evidence, labor, a blocker filed against it) carries `operation_id`; the job's own items carry `null` | Yes |
 | PUT | `/work-orders/{id}` | Update work order (body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status, **or sets `status` to COMPLETE/CLOSED from any status other than COMPLETE/CLOSED** — see "Terminal-state lock" below). **`due_date` is the one non-`status` field that IS status-gated: changing it on a COMPLETE/CLOSED/CANCELLED work order returns 409** (see "Due date on a finished job" below). Other non-`status` fields such as `notes` / `special_instructions` / `unit_number` carry **no status gate**: they are editable at any status, including terminal ones (send `unit_number: null` — or `""`, which is trimmed to NULL — to clear it). **The flip verb for `sequential_operations`** — turning it *on* returns **409** on a laser nest WO, and **409 naming the operations** when work is already under way out of sequence; otherwise it demotes un-worked blocked operations READY → PENDING, one audit row each (see "READY promotion" below). **`status: on_hold` on a DRAFT work order returns 409** (a draft has nothing on the floor to hold — release it first); this `PUT` is the "Hold Work Order" write for a released / in-progress job, and the door that puts a held job back on the floor is `POST /work-orders/{id}/resume` (this `PUT` can still move a held job to `draft` or `cancelled`, which keeps it off the floor; its blind move to `released` / `in_progress` is a known gap — see "Draft and on-hold work orders refuse every start" below). **Any move to `draft`** (from released / in progress / on hold) returns every un-worked READY operation — laser nests included — to PENDING with one **required** audit row each; **503**, nothing changed, when those rows cannot be written (see "Returning a job to draft" below). **Lowering `quantity_ordered` below what a whole-order operation has already accounted for (its good + scrap) returns 409** naming the operation, before any field is written — lower the order only by units no operation has started; **raising** it once a whole-order or component operation has completed returns 409 too; whole-order targets restated as `component_quantity` move with the order (audited); an API token lowering it once work is recorded gets 403, as does an API token raising the header's `quantity_scrapped` (only a person declares scrap — owner decision 2026-11-07), changing `scrap_reason`, or changing the header's `quantity_complete` / `quantity_scrapped` in either direction (this PR's extension); and a `sequential_operations` flip that would re-interpret a declared short returns 409 (see "Short count at completion" below) | Admin / Manager / Supervisor |
-| DELETE | `/work-orders/{id}` | Delete work order (soft by default; `hard_delete=true` only for draft/cancelled, and refused **409** when ledger-backed ties or saved templates reference it) | Admin / Manager |
+| DELETE | `/work-orders/{id}` | Delete work order (soft by default; `hard_delete=true` only for draft/cancelled, and refused **409** when ledger-backed ties or saved templates reference it, or when it has comments) | Admin / Manager |
 | POST | `/work-orders/{id}/restore` | Restore a soft-deleted work order (**400** if it is not deleted). Re-opens the ties the delete cancelled — **except** any whose part has since been reclassified into one the shop produces. Returns an **envelope** (`message` + `skipped_material_allocations`), not a bare message; see "Restoring a work order" below. Reached from Work Orders → **Deleted** (`deleted_only=true` above) | Admin / Manager |
 | POST | `/work-orders/{id}/release` | Release to production. **400** `Only draft work orders can be released` when not DRAFT, **400** `Work order must have at least one operation` when it has none — the only two checks; there is no material, blocker or readiness gate (see "Releasing work orders" below). **404** when missing or soft-deleted | Admin / Manager / Supervisor |
 | POST | `/work-orders/bulk-release` | **Release several DRAFT work orders in one call.** Body `{"work_order_ids": [...]}`: 1–50 positive ids (repeats count toward the 50 and are de-duplicated, first occurrence kept); any other key → **422**. Each id is judged and released exactly as `POST /work-orders/{id}/release` would, all in **one** commit. **200** once the body validates — even when every item was refused — with `{results, released_count, error_count}`, one result per distinct id in request order, unless the whole request fails after the per-item phase (the audit rows or the commit: **409** on a lost lock race, otherwise 5xx, nothing saved). Not an MCP tool. See "Releasing several work orders at once" below | Admin / Manager / Supervisor |
@@ -4026,6 +4026,19 @@ company-scoped.
 > FK enforcement is off there). **Only live templates are named**, since a tombstone has no name the
 > planner can act on. And **soft delete is untouched** — it is the point: a soft-deleted work order
 > keeps every template working. See Work Orders → "Work order templates".
+
+> **Hard delete is also refused 409 when the work order has comments** (2026-11-16). Comments and
+> watchers name the work order with no foreign key, but every comment's `comment_added` /
+> `comment_mentioned` notification event carries `operational_events.work_order_id`, a plain FK with
+> no `ON DELETE`, so an unguarded hard delete was a `ForeignKeyViolation` **500** on Postgres (and,
+> had the best-effort emit failed, a silent orphaning of the thread). The refusal is raised **before
+> the first mutation**, after the ledger and template probes: *"This work order has N comment(s), so
+> it cannot be permanently deleted. Soft delete instead — the work order and its comment thread stay
+> intact."* For the template guard's reason, **deleted comments count too** — their events stay and
+> Postgres does not read `is_deleted` — so a work order whose comments were all deleted is refused
+> with *"This work order has deleted comments that are kept as records with their notifications,
+> …"*. The probe is tenant-scoped (`comment_service.comment_counts_for_record`). Soft delete is
+> untouched and keeps the thread. See [Comments and watchers](#comments-and-watchers).
 
 > **Seeing a deleted work order: `GET /work-orders/?deleted_only=true` (the restore view).**
 > The work-order twin of the vendor and PO restore views documented under Purchasing, and it exists
@@ -13125,7 +13138,7 @@ the two notification events are in [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#what
 | PATCH | `/comments/{comment_id}` | Edit a comment: the full new `body` and `mentioned_user_ids` | The author only; **API tokens 403** |
 | DELETE | `/comments/{comment_id}` | Soft-delete a comment (it stops being listed). **204**, no body | The author, an Admin or a Manager; **API tokens 403** |
 | GET | `/watchers?entity_type=work_order&entity_id={id}` | Whether the caller watches the work order, and how many people do | Any signed-in member of the company |
-| POST | `/watchers` | Start watching (idempotent); returns the watch state | Any signed-in member of the company; **API tokens 403** |
+| POST | `/watchers` | Start watching (idempotent); returns the watch state. **409** for a caller who is not a member of the active company (a Platform Admin viewing another company), writing nothing | Any signed-in member of the company; **API tokens 403** |
 | DELETE | `/watchers?entity_type=work_order&entity_id={id}` | Stop watching (idempotent); returns the watch state | Any signed-in member of the company; **API tokens 403** |
 | GET | `/users/mention-search?q={text}&limit={n}` | People to @mention: active members of the active company by name, `{id, display_name}` only | Any signed-in member of the company |
 
@@ -13202,7 +13215,14 @@ The watch routes return `{"watching": true, "watcher_count": 3}`.
 > order (idempotent). Creating a work order does not watch it, and nothing is backfilled.
 > `watching` is whether the caller has a watch row; **`watcher_count`** counts **active** members
 > of the company watching (a deactivated person's row persists but is neither counted nor
-> notified). Watch rows survive a work order's soft delete, so a restore keeps them, but every
+> notified).
+>
+> **Watching is for members of the company.** Notifications go only to members of the work order's
+> company, so a caller whose own company is not the active one — a Platform Admin viewing another
+> company — may read and comment there but never watches: their comment does not auto-watch them,
+> `POST /watchers` is **409** `You can only watch records of your own company: notifications go to
+> its members.` (nothing written), and `GET /watchers` reports `watching: false` for them.
+> `DELETE /watchers` stays open to them, so a row they hold can still be cleared. Watch rows survive a work order's soft delete, so a restore keeps them, but every
 > route answers 404 while it is deleted.
 >
 > **Notifications.** A new comment emits `comment.mention` (to the people it mentions) and
@@ -13210,8 +13230,18 @@ The watch routes return `{"watching": true, "watcher_count": 3}`.
 > people it newly adds and nothing else. **Neither carries the comment text**: the title is the
 > label plus the work-order number, the body says who wrote it ("By: …"), and the link is
 > `/work-orders/{id}` (owner decision 2026-11-16). Recipients are re-checked when the worker
-> dispatches, and the events are best-effort: a failed notification never fails the comment. See
+> dispatches — and so are the work order and the **comment**: a comment deleted before the worker
+> runs (an author who deletes it seconds after posting) notifies nobody. The events are
+> best-effort: a failed notification never fails the comment. See
 > [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#content-rules-compliance).
+>
+> **Not in the copilot's context.** The AI work-order context (`AIContextService.work_order_context`,
+> the newest 20 events on the work order) leaves `comment_added` / `comment_mentioned` out, so a busy
+> thread cannot push the production events out of that window and no commenter's name
+> (`comment_author`) is sent to the model.
+>
+> **A work order with comments cannot be hard-deleted** (**409**, deleted comments included; soft
+> delete keeps the thread). See Work Orders → the hard-delete refusals.
 >
 > **Audit.** Create, edit and delete write `CREATE` / `UPDATE` / `DELETE` rows on resource type
 > `comment`: the create row records the body, the mentioned ids and

@@ -83,6 +83,7 @@ from app.schemas.work_order import (
 from app.schemas.work_order_timeline import TimelineCategory, WorkOrderTimelineResponse
 from app.services import dispatch_service, process_sheet_service, work_order_release_service
 from app.services.audit_service import AuditService, AuditWriteError
+from app.services.comment_service import comment_counts_for_record
 from app.services.completion_cost_service import (
     apply_completion_cost_rollup,
     rollup_labor_hours_for_closed_entries,
@@ -4834,8 +4835,10 @@ def delete_work_order(
     inventory-ledger movement is tied to it, or when a work order template was saved
     from it — a template copies its plan live off the job it points at, so the row has
     to outlive the template. A soft-deleted template still counts: its foreign key is
-    just as real, and only Postgres would notice. Both refusals name a remedy, and both
-    leave soft delete available: a soft-deleted work order keeps every template working.
+    just as real, and only Postgres would notice. Also refused **409** when the work
+    order has comments (deleted ones included — their notification events still
+    reference it). Every refusal names a remedy, and all leave soft delete available:
+    a soft-deleted work order keeps every template and its comment thread working.
     """
     work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id).first()
     if not work_order:
@@ -4917,6 +4920,34 @@ def delete_work_order(
                     f"{named}, and a template copies its plan straight off the job it points at, so "
                     "permanently deleting it would leave them with nothing to run. Soft delete instead — "
                     "a soft-deleted work order keeps every template working."
+                ),
+            )
+
+        # A COMMENT THREAD is on this work order. Comments and watchers name it polymorphically
+        # (no foreign key), so a physical delete would orphan them silently -- but every comment's
+        # ``comment_added`` / ``comment_mentioned`` OperationalEvent carries
+        # ``operational_events.work_order_id``, a plain FK with no ON DELETE, so on Postgres the
+        # delete hits a ForeignKeyViolation and surfaces as a 500 (SQLite never enforces it).
+        # Refuse legibly, before the first mutation, the way the template guard above does.
+        #
+        # TOMBSTONED comments count, for the template guard's reason: their events stay, and
+        # Postgres does not consult ``is_deleted`` before refusing to drop a referenced row. Only
+        # LIVE comments are counted in the message -- a deleted one is not on the thread the
+        # planner can see. Soft delete is the remedy and stays available: the thread survives it.
+        live_comments, all_comments = comment_counts_for_record(
+            db, company_id=company_id, entity_type="work_order", entity_id=wo_id
+        )
+        if all_comments:
+            what = (
+                f"{live_comments} comment(s)"
+                if live_comments
+                else "deleted comments that are kept as records with their notifications"
+            )
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"This work order has {what}, so it cannot be permanently deleted. Soft delete "
+                    "instead — the work order and its comment thread stay intact."
                 ),
             )
 

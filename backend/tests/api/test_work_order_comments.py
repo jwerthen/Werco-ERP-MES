@@ -31,6 +31,7 @@ import dataclasses
 import itertools
 import re
 from contextlib import contextmanager
+from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, Iterator, List, Tuple
 
 import pytest
@@ -49,6 +50,7 @@ from app.models.part import Part
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder
 from app.services import comment_service
+from app.services.ai_context_service import AIContextService
 from app.services.audit_service import AuditService
 from tests.api.export_control_helpers import bearer, issue_token
 from tests.api.kiosk_test_helpers import COMPANY_A, COMPANY_B, ensure_company, make_user, user_headers
@@ -1106,3 +1108,256 @@ class TestNotificationEvents:
             headers=user_headers(people["admin"]),
         )
         assert response.status_code == 400, response.text
+
+
+# ---------------------------------------------------------------------------
+# A comment thread blocks the work order's HARD delete (soft delete is the remedy)
+# ---------------------------------------------------------------------------
+
+
+class TestWorkOrderHardDelete:
+    """``DELETE /work-orders/{id}?hard_delete=true`` refuses 409 while the work order has comments.
+
+    Comments and watchers name the work order with no foreign key, but every comment's
+    ``comment_added`` / ``comment_mentioned`` event carries ``operational_events.work_order_id``, a
+    plain FK with no ON DELETE: on Postgres an unguarded hard delete is a ForeignKeyViolation 500.
+    This suite runs on SQLite with foreign keys off, where that delete would simply succeed -- so,
+    like the template guard's tests, these pin the APPLICATION-layer refusal (engine-identical,
+    raised before any SQL write) and never assert the database's reaction.
+    """
+
+    def _hard_delete(self, client: TestClient, admin: User, wo: WorkOrder):
+        return client.delete(f"{API}/work-orders/{wo.id}", params={"hard_delete": "true"}, headers=user_headers(admin))
+
+    def _state(self, db: Session, wo: WorkOrder) -> Dict[str, Any]:
+        db.expire_all()
+        row = db.query(WorkOrder).filter(WorkOrder.id == wo.id).one_or_none()
+        return {
+            "work_order": None if row is None else (row.is_deleted, row.status, row.version, row.updated_at),
+            "comments": [(c.id, c.is_deleted, c.body) for c in db.query(Comment).order_by(Comment.id)],
+            "watchers": watcher_ids(db, wo),
+            "events": [e.id for e in db.query(OperationalEvent).filter(OperationalEvent.work_order_id == wo.id)],
+            "audit": [a.id for a in db.query(AuditLog).order_by(AuditLog.id)],
+        }
+
+    def test_a_draft_with_a_live_comment_is_a_409_and_nothing_moves(self, client, db_session, people):
+        wo = make_wo(db_session)
+        created = post_comment(client, user_headers(people["author"]), wo, mentioned_user_ids=[people["colleague"].id])
+        assert created.status_code == 201, created.text
+        before = self._state(db_session, wo)
+        assert before["events"], "the comment's events reference the work order -- the Postgres FK the guard protects"
+
+        response = self._hard_delete(client, people["admin"], wo)
+
+        assert response.status_code == 409, response.text
+        detail = response.json()["detail"]
+        assert "1 comment(s)" in detail
+        assert "Soft delete instead" in detail, "name a remedy that exists"
+        db_session.rollback()
+        assert self._state(db_session, wo) == before
+
+    def test_a_deleted_comment_still_blocks_because_its_events_still_reference_the_work_order(
+        self, client, db_session, people
+    ):
+        """The tombstone's events stay, and Postgres does not read ``is_deleted`` before refusing
+        to drop a referenced row -- filtering tombstones out would put the 500 back for this case."""
+        wo = make_wo(db_session)
+        headers = user_headers(people["author"])
+        comment_id = post_comment(client, headers, wo).json()["id"]
+        assert client.delete(f"{COMMENTS}/{comment_id}", headers=headers).status_code == 204
+        before = self._state(db_session, wo)
+
+        response = self._hard_delete(client, people["admin"], wo)
+
+        assert response.status_code == 409, response.text
+        detail = response.json()["detail"]
+        assert "deleted comments" in detail and "comment(s)" not in detail, "the thread the planner sees is empty"
+        assert "Soft delete instead" in detail
+        db_session.rollback()
+        assert self._state(db_session, wo) == before
+
+    def test_the_guard_is_narrow_and_tenant_scoped(self, client, db_session, people):
+        """A draft with no comment of ITS company still hard-deletes: another company's (corrupt)
+        comment row naming the same id is not this work order's thread. Without this, the tests
+        above are equally satisfied by a guard that refuses every hard delete."""
+        wo = make_wo(db_session)
+        db_session.add(
+            Comment(
+                company_id=COMPANY_B,
+                entity_type="work_order",
+                entity_id=wo.id,
+                author_id=people["foreign"].id,
+                body="not this tenant's thread",
+            )
+        )
+        db_session.commit()
+
+        response = self._hard_delete(client, people["admin"], wo)
+
+        assert response.status_code == 204, response.text
+        db_session.expire_all()
+        assert db_session.query(WorkOrder).filter(WorkOrder.id == wo.id).one_or_none() is None
+
+    def test_soft_delete_is_unaffected_and_keeps_the_thread(self, client, db_session, people):
+        wo = make_wo(db_session)
+        comment_id = post_comment(client, user_headers(people["author"]), wo).json()["id"]
+
+        response = client.delete(f"{API}/work-orders/{wo.id}", headers=user_headers(people["admin"]))
+
+        assert response.status_code == 204, response.text
+        db_session.expire_all()
+        assert db_session.get(WorkOrder, wo.id).is_deleted is True
+        assert db_session.get(Comment, comment_id).is_deleted is False
+
+
+# ---------------------------------------------------------------------------
+# The AI work-order context leaves comment events out
+# ---------------------------------------------------------------------------
+
+
+class TestAIContext:
+    """``AIContextService.work_order_context`` serves the newest 20 events on the work order to the
+    copilot. Comment events carry ``work_order_id`` too, so without the exclusion a busy thread
+    would push the production events out of that window, and every one would send
+    ``comment_author`` (a person's name) to the model when AI egress is on."""
+
+    def test_a_busy_thread_neither_crowds_out_production_events_nor_reaches_the_model(self, db_session, people):
+        wo = make_wo(db_session)
+        earlier = datetime.utcnow() - timedelta(hours=1)
+        production = []
+        for minute, event_type in enumerate(("work_order_released", "operation_started", "operation_completed")):
+            row = OperationalEvent(
+                company_id=COMPANY_A,
+                event_type=event_type,
+                source_module="shop_floor",
+                work_order_id=wo.id,
+                severity="info",
+                event_payload={"work_order_number": wo.work_order_number},
+                occurred_at=earlier + timedelta(minutes=minute),
+            )
+            db_session.add(row)
+            production.append(event_type)
+        db_session.commit()
+        # 11 comments, each mentioning someone: 22 comment events, all NEWER than the production
+        # ones -- more than the 20-row window on their own.
+        for n in range(11):
+            comment_service.create_comment(
+                db_session,
+                company_id=COMPANY_A,
+                actor=people["author"],
+                entity_type="work_order",
+                entity_id=wo.id,
+                body=f"Update {n}",
+                mentioned_user_ids=[people["colleague"].id],
+                audit=AuditService(db_session, people["author"]),
+            )
+            db_session.commit()
+        db_session.expire_all()
+        comment_events = (
+            db_session.query(OperationalEvent)
+            .filter(
+                OperationalEvent.work_order_id == wo.id,
+                OperationalEvent.event_type.in_(comment_service.COMMENT_EVENT_TYPES),
+            )
+            .count()
+        )
+        assert comment_events == 22, "the fixture must overflow the window on its own"
+
+        context = AIContextService(db_session).work_order_context(company_id=COMPANY_A, work_order_id=wo.id)
+
+        assert [event["event_type"] for event in context["recent_events"]] == list(reversed(production))
+        assert "Avery Quill" not in repr(context), "no commenter's name reaches the model"
+        assert "comment_author" not in repr(context)
+
+    def test_the_comment_event_types_are_every_type_the_service_emits(self):
+        assert set(comment_service.COMMENT_EVENT_TYPES) == {
+            comment_service.COMMENT_ADDED_EVENT_TYPE,
+            comment_service.COMMENT_MENTIONED_EVENT_TYPE,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Watching is membership-only: the watch state never promises a notification delivery won't send
+# ---------------------------------------------------------------------------
+
+
+class TestWatchingIsMembershipOnly:
+    """A Platform Admin switched into company B may read and comment on B's work orders, but the
+    notification resolvers and the dispatcher's fan-out deliver only to MEMBERS of the event's
+    company -- so the admin is not auto-watched there, cannot watch (409), and reads
+    ``watching: false``. At home (a member) nothing changes."""
+
+    @pytest.fixture
+    def platform_admin(self, db_session: Session) -> User:
+        return make_user(
+            db_session, role=UserRole.PLATFORM_ADMIN, company_id=COMPANY_A, first_name="Plato", last_name="Oversight"
+        )
+
+    @staticmethod
+    def _params(wo: WorkOrder) -> Dict[str, Any]:
+        return {"entity_type": "work_order", "entity_id": wo.id}
+
+    def test_commenting_in_a_viewed_company_does_not_auto_watch_the_non_member_author(
+        self, client, db_session, platform_admin
+    ):
+        b_wo = make_wo(db_session, company_id=COMPANY_B)
+        b_person = make_user(db_session, company_id=COMPANY_B, first_name="Imogen", last_name="Bayliss")
+        viewing_b = user_headers(platform_admin, active_company_id=COMPANY_B)
+
+        created = post_comment(client, viewing_b, b_wo, "Oversight note", mentioned_user_ids=[b_person.id])
+
+        assert created.status_code == 201, created.text
+        assert watcher_ids(db_session, b_wo) == [b_person.id], "the mentioned member is watched; the admin is not"
+        (create_audit,) = audit_rows(db_session, "comment", created.json()["id"])
+        assert create_audit.extra_data["auto_watched_user_ids"] == [b_person.id]
+        state = client.get(WATCHERS, params=self._params(b_wo), headers=viewing_b)
+        assert state.status_code == 200, state.text
+        assert state.json() == {"watching": False, "watcher_count": 1}
+
+    def test_a_non_member_cannot_watch_and_nothing_is_written(self, client, db_session, platform_admin):
+        b_wo = make_wo(db_session, company_id=COMPANY_B)
+        viewing_b = user_headers(platform_admin, active_company_id=COMPANY_B)
+        audit_before = [row.id for row in audit_rows(db_session, "entity_watcher")]
+
+        response = client.post(WATCHERS, json=self._params(b_wo), headers=viewing_b)
+
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"] == comment_service.WATCH_NON_MEMBER_DETAIL
+        assert watcher_ids(db_session, b_wo) == []
+        assert [row.id for row in audit_rows(db_session, "entity_watcher")] == audit_before
+
+    def test_a_stray_row_reads_as_not_watching_and_unwatch_clears_it(self, client, db_session, platform_admin):
+        """A row a non-member holds (written before auto-watch became membership-only) is never
+        reported as watching -- delivery would not use it -- and unwatch is open to them so it can
+        be cleared."""
+        b_wo = make_wo(db_session, company_id=COMPANY_B)
+        db_session.add(
+            EntityWatcher(company_id=COMPANY_B, entity_type="work_order", entity_id=b_wo.id, user_id=platform_admin.id)
+        )
+        db_session.commit()
+        viewing_b = user_headers(platform_admin, active_company_id=COMPANY_B)
+
+        assert client.get(WATCHERS, params=self._params(b_wo), headers=viewing_b).json() == {
+            "watching": False,
+            "watcher_count": 0,
+        }
+        cleared = client.delete(WATCHERS, params=self._params(b_wo), headers=viewing_b)
+        assert cleared.status_code == 200, cleared.text
+        assert cleared.json() == {"watching": False, "watcher_count": 0}
+        assert watcher_ids(db_session, b_wo) == []
+
+    def test_at_home_the_platform_admin_is_a_member_and_watches_as_before(self, client, db_session, platform_admin):
+        a_wo = make_wo(db_session, company_id=COMPANY_A)
+        at_home = user_headers(platform_admin)
+
+        assert post_comment(client, at_home, a_wo, "Home note").status_code == 201
+        assert watcher_ids(db_session, a_wo) == [platform_admin.id]
+        assert client.get(WATCHERS, params=self._params(a_wo), headers=at_home).json() == {
+            "watching": True,
+            "watcher_count": 1,
+        }
+        assert client.delete(WATCHERS, params=self._params(a_wo), headers=at_home).json()["watching"] is False
+        assert client.post(WATCHERS, json=self._params(a_wo), headers=at_home).json() == {
+            "watching": True,
+            "watcher_count": 1,
+        }

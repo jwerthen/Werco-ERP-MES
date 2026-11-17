@@ -76,8 +76,9 @@ def create_record_comment(
     """Post a comment on a record (v1: a work order), optionally @mentioning people by user id.
 
     Anyone who can read the work order may comment. Each mentioned id must be an active person
-    of the company who can read it (422 naming the refused ids). The author and every mentioned
-    person start watching the record. Mentioned people get a ``comment.mention`` notification and
+    of the company who can read it (422 naming the refused ids). The author (when a member of the
+    company, not a Platform Admin viewing it) and every mentioned person start watching the record.
+    Mentioned people get a ``comment.mention`` notification and
     other watchers a ``comment.added`` one; neither carries the comment text. API tokens are
     refused (403): a comment is a person's own words.
     """
@@ -149,8 +150,9 @@ def get_record_watch_state(
 ):
     """Whether the caller watches a record (v1: a work order), and how many active people do.
 
-    Watchers are notified of new comments on the record. 404 when the work order does not exist
-    in the active company or is deleted.
+    Watchers are notified of new comments on the record. Only members of the company are, so a
+    caller viewing another company (a Platform Admin) is always ``watching: false``. 404 when the
+    work order does not exist in the active company or is deleted.
     """
     return comment_service.watch_state(
         db, company_id=company_id, actor=current_user, entity_type=entity_type, entity_id=entity_id
@@ -165,7 +167,11 @@ def watch_record(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Start watching a record (idempotent). API tokens are refused (403)."""
+    """Start watching a record (idempotent). API tokens are refused (403).
+
+    409, writing nothing, when the caller is not a member of the active company (a Platform Admin
+    viewing another company): notifications go to the company's members only.
+    """
     state = comment_service.watch(
         db,
         company_id=company_id,

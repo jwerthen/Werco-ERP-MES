@@ -1042,7 +1042,9 @@ v1 (2026-11-16): comment threads, @mentions and watchers on **work orders only**
 >   when the deleter is not the author. There is no restore in v1.
 > - **Watching** is the caller's own preference: `POST` / `DELETE /watchers` act only on the
 >   caller, never on another user id. Posting a comment auto-watches its author and everyone it
->   mentions.
+>   mentions. Only **members** of the active company watch, because only members are notified: a
+>   Platform Admin viewing another company is not auto-watched there, `POST /watchers` is **409**
+>   for them, and `GET /watchers` reports `watching: false`.
 > - **Mention search** returns `{id, display_name}` only — never an email, role or phone — and is
 >   open to every member of the company, unlike the Admin / Manager `GET /users/` list.
 > - **Tenancy.** The work order is resolved in the active company and must be live; another

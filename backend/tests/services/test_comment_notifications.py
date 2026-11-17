@@ -375,6 +375,99 @@ def test_a_soft_deleted_work_order_notifies_nobody(db_session, crew, redis):
     assert db_session.query(Notification).count() == 0
 
 
+def test_a_comment_deleted_before_dispatch_notifies_nobody(db_session, crew, redis):
+    """The author posts with a mention and deletes it seconds later, before the worker runs: the
+    resolvers re-check the COMMENT too, so nobody is told about a comment the thread no longer shows."""
+    wo = make_wo(db_session)
+    watch(db_session, crew["watcher"], wo)
+    row = comment(db_session, crew["author"], wo, mentions=[crew["mentioned"].id])
+    comment_service.delete_comment(
+        db_session,
+        company_id=COMPANY_A,
+        actor=crew["author"],
+        comment_id=row.id,
+        audit=AuditService(db_session, crew["author"]),
+    )
+    db_session.commit()
+
+    (added,) = events(db_session, "comment_added")
+    (mentioned,) = events(db_session, "comment_mentioned")
+    assert resolve_comment_mentioned_users(db_session, mentioned, COMPANY_A) == []
+    assert resolve_comment_watchers(db_session, added, COMPANY_A) == []
+    deliver_all(db_session)
+    assert db_session.query(Notification).count() == 0
+    assert db_session.query(NotificationLog).count() == 0
+
+
+def test_a_live_comment_still_notifies_after_another_comment_is_deleted(db_session, crew, redis):
+    """The re-check is per comment: deleting one comment does not silence another on the thread."""
+    wo = make_wo(db_session)
+    first = comment(db_session, crew["author"], wo, "first", mentions=[crew["mentioned"].id])
+    comment(db_session, crew["author"], wo, "second", mentions=[crew["mentioned"].id])
+    comment_service.delete_comment(
+        db_session,
+        company_id=COMPANY_A,
+        actor=crew["author"],
+        comment_id=first.id,
+        audit=AuditService(db_session, crew["author"]),
+    )
+    db_session.commit()
+
+    deliver_all(db_session)
+    (row,) = inbox(db_session, crew["mentioned"], "comment.mention")
+    assert row.related_type == "comment"
+
+
+def test_an_event_naming_no_live_comment_on_its_record_notifies_nobody(db_session, crew, redis):
+    """The event must name the comment (entity ``comment``) and that comment must sit on the
+    payload's record: an event pointed at another work order's live comment, at a missing
+    comment, or at a non-comment entity reaches nobody."""
+    wo, other = make_wo(db_session), make_wo(db_session)
+    watch(db_session, crew["watcher"], wo)
+    comment(db_session, crew["author"], wo, mentions=[crew["mentioned"].id])
+    elsewhere = comment(db_session, crew["author"], other, "on another work order")
+    (mentioned,) = events(db_session, "comment_mentioned")
+    added = [event for event in events(db_session, "comment_added") if event.work_order_id == wo.id][0]
+    assert [u.id for u in resolve_comment_mentioned_users(db_session, mentioned, COMPANY_A)] == [crew["mentioned"].id]
+    own_comment_id = mentioned.entity_id
+
+    for entity_type, entity_id in (
+        ("comment", elsewhere.id),
+        ("comment", 10_000_000),
+        ("comment", None),
+        ("work_order", wo.id),
+        (None, own_comment_id),
+        ("work_order", own_comment_id),
+    ):
+        for event in (mentioned, added):
+            event.entity_type, event.entity_id = entity_type, entity_id
+        assert resolve_comment_mentioned_users(db_session, mentioned, COMPANY_A) == [], (entity_type, entity_id)
+        assert resolve_comment_watchers(db_session, added, COMPANY_A) == [], (entity_type, entity_id)
+    db_session.rollback()
+
+
+def test_a_platform_admins_watch_state_in_a_viewed_company_matches_delivery(db_session, crew, redis):
+    """A Platform Admin who comments while viewing company B is not a member of B: delivery would
+    never reach them there, so they are not auto-watched and the watch state says so -- what the
+    state reports and what delivery does agree."""
+    platform_admin = make_user(db_session, role=UserRole.PLATFORM_ADMIN, company_id=COMPANY_A)
+    b_person = make_user(db_session, company_id=COMPANY_B, first_name="Bea", last_name="Bexley")
+    b_wo = make_wo(db_session, company_id=COMPANY_B)
+    comment(db_session, platform_admin, b_wo, "oversight note")
+    comment(db_session, b_person, b_wo, "reply from B")
+
+    state = comment_service.watch_state(
+        db_session, company_id=COMPANY_B, actor=platform_admin, entity_type="work_order", entity_id=b_wo.id
+    )
+    deliver_all(db_session)
+
+    assert state.watching is False
+    assert inbox(db_session, platform_admin) == []
+    # Delivery reaches members only: the B member (auto-watching since their reply) hears of the
+    # admin's comment; nobody hears of their own.
+    assert {row.user_id for row in db_session.query(Notification)} == {b_person.id}
+
+
 def test_resolvers_are_tenant_scoped(db_session, crew, redis):
     wo = make_wo(db_session)
     foreign = make_user(db_session, company_id=COMPANY_B)

@@ -197,7 +197,7 @@ def resolve_clocked_in_operators(db, event, company_id: int) -> List:
 def resolve_comment_mentioned_users(db, event, company_id: int) -> List:
     """``comment.mention``: the people the comment newly @mentions (the payload's
     ``mentioned_user_ids``), re-checked at dispatch -- same company, active, may view the record,
-    and the record still live. See ``comment_service.mention_recipients``."""
+    and the record and the comment still live. See ``comment_service.mention_recipients``."""
     from app.services.comment_service import mention_recipients
 
     return mention_recipients(db, event, company_id)
@@ -205,7 +205,8 @@ def resolve_comment_mentioned_users(db, event, company_id: int) -> List:
 
 def resolve_comment_watchers(db, event, company_id: int) -> List:
     """``comment.added``: the record's watchers minus everyone mentioned in the comment minus the
-    author; nobody once the record is soft-deleted. See ``comment_service.watcher_recipients``."""
+    author; nobody once the record or the comment is soft-deleted. See
+    ``comment_service.watcher_recipients``."""
     from app.services.comment_service import watcher_recipients
 
     return watcher_recipients(db, event, company_id)

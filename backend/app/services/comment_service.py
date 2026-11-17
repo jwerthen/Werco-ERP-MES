@@ -19,6 +19,10 @@ The rules every verb here holds:
   for a caller that acts on a person's behalf without the routes (the planned Hank ``add_note``
   task, not on this branch): such a caller would call :func:`create_comment` directly and could
   tag its evidence with ``audit_extra`` (e.g. ``{"via": "hank"}``).
+* **Watching is membership-only.** Delivery notifies only members of the event's company, so only
+  a member watches: a Platform Admin (or any switched-context caller) commenting while viewing
+  another company is not auto-watched, ``POST /watchers`` is 409 for them, and the watch state
+  reports ``watching: false`` (:func:`_is_company_member`).
 * **Mentions are structured.** The caller sends user ids; each is re-checked here (same company,
   active, may view the record). A refusal names the ids only -- never a name, so a foreign id
   cannot be used to learn who it belongs to. Names are never parsed out of the text.
@@ -108,6 +112,9 @@ WATCHER_RESOURCE_TYPE = "entity_watcher"
 # (``operational_events.SERVER_ONLY_EVENT_TYPES``): a client cannot post one.
 COMMENT_MENTIONED_EVENT_TYPE = "comment_mentioned"
 COMMENT_ADDED_EVENT_TYPE = "comment_added"
+# Every event type this module emits. Readers that must leave comment chatter out (the AI
+# work-order context, ``ai_context_service``) filter on this, so a new type is added here.
+COMMENT_EVENT_TYPES = (COMMENT_MENTIONED_EVENT_TYPE, COMMENT_ADDED_EVENT_TYPE)
 COMMENT_EVENT_SOURCE_MODULE = "comments"
 # The events' ``entity`` is the COMMENT, not the record: notification delivery dedups for five
 # minutes on (event_key, related_type, related_id, user, channel) with ``related_*`` taken from
@@ -123,6 +130,7 @@ COMMENT_LIST_LIMIT = 500
 COMMENT_NOT_FOUND_DETAIL = "Comment not found"
 EDIT_FORBIDDEN_DETAIL = "Only the person who wrote a comment can edit it."
 DELETE_FORBIDDEN_DETAIL = "Only the person who wrote a comment, an Admin or a Manager can delete it."
+WATCH_NON_MEMBER_DETAIL = "You can only watch records of your own company: notifications go to its members."
 
 # Roles that may delete anyone's comment (moderation). An Admin or Manager can REMOVE a comment,
 # but never rewrite one: an edit is the author's alone.
@@ -377,15 +385,29 @@ def _ensure_watching(
     return [created[user_id] for user_id in wanted if user_id in created]
 
 
-def _watch_state(db: Session, company_id: int, entity_type: str, entity_id: int, user_id: int) -> WatchStateResponse:
-    """``watching`` = the caller has a row; ``watcher_count`` = ACTIVE members of the company
-    watching (a deactivated person's row persists but is not counted, and is never notified)."""
+def _is_company_member(user: User, company_id: int) -> bool:
+    """Whether ``user`` belongs to ``company_id`` (their OWN company, not one they are viewing).
+
+    Watching is membership-only because delivery is: ``watcher_recipients`` and the dispatcher's
+    fan-out notify only members of the event's company. A Platform Admin (or any switched-context
+    caller) viewing another company may read and comment there, but is never auto-watched, cannot
+    watch, and is reported ``watching: false`` -- so the watch state never promises a notification
+    that delivery would not send.
+    """
+    return user.company_id is not None and user.company_id == company_id
+
+
+def _watch_state(db: Session, company_id: int, entity_type: str, entity_id: int, actor: User) -> WatchStateResponse:
+    """``watching`` = the caller is a member of the company AND has a row (a non-member is never
+    notified, so never ``watching``); ``watcher_count`` = ACTIVE members of the company watching (a
+    deactivated person's row persists but is not counted, and is never notified)."""
     watching = (
-        tenant_query(db, EntityWatcher, company_id)
+        _is_company_member(actor, company_id)
+        and tenant_query(db, EntityWatcher, company_id)
         .filter(
             EntityWatcher.entity_type == entity_type,
             EntityWatcher.entity_id == entity_id,
-            EntityWatcher.user_id == user_id,
+            EntityWatcher.user_id == actor.id,
         )
         .first()
         is not None
@@ -406,12 +428,18 @@ def _watch_state(db: Session, company_id: int, entity_type: str, entity_id: int,
 
 def watch_state(db: Session, *, company_id: int, actor: User, entity_type: str, entity_id: int) -> WatchStateResponse:
     spec, record = resolve_target(db, company_id=company_id, actor=actor, entity_type=entity_type, entity_id=entity_id)
-    return _watch_state(db, company_id, spec.entity_type, record.id, actor.id)
+    return _watch_state(db, company_id, spec.entity_type, record.id, actor)
 
 
 def watch(db: Session, *, company_id: int, actor: User, entity_type: str, entity_id: int, audit) -> WatchStateResponse:
-    """Start watching (idempotent: already watching writes nothing). Flushes, never commits."""
+    """Start watching (idempotent: already watching writes nothing). Flushes, never commits.
+
+    409 (:data:`WATCH_NON_MEMBER_DETAIL`), writing nothing, when the caller is not a member of the
+    active company (a Platform Admin viewing another company): such a watch could never notify.
+    """
     spec, record = resolve_target(db, company_id=company_id, actor=actor, entity_type=entity_type, entity_id=entity_id)
+    if not _is_company_member(actor, company_id):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=WATCH_NON_MEMBER_DETAIL)
     created = _ensure_watching(db, company_id, spec.entity_type, record.id, [actor.id])
     if created:
         row = created[0]
@@ -424,14 +452,15 @@ def watch(db: Session, *, company_id: int, actor: User, entity_type: str, entity
             description=f"Started watching {spec.label} {identifier}",
             extra_data={"entity_type": spec.entity_type, "entity_id": record.id, "entity_identifier": identifier},
         )
-    return _watch_state(db, company_id, spec.entity_type, record.id, actor.id)
+    return _watch_state(db, company_id, spec.entity_type, record.id, actor)
 
 
 def unwatch(
     db: Session, *, company_id: int, actor: User, entity_type: str, entity_id: int, audit
 ) -> WatchStateResponse:
     """Stop watching (idempotent). The watcher row is PHYSICALLY deleted: it is a preference, not a
-    record. Flushes, never commits."""
+    record. Flushes, never commits. Open to a non-member too (no 409): it can only remove a row,
+    so it is how a stray one -- written before auto-watch became membership-only -- is cleared."""
     spec, record = resolve_target(db, company_id=company_id, actor=actor, entity_type=entity_type, entity_id=entity_id)
     row = _watcher_rows(db, company_id, spec.entity_type, record.id, [actor.id]).get(actor.id)
     if row is not None:
@@ -448,7 +477,7 @@ def unwatch(
             extra_data={"entity_type": spec.entity_type, "entity_id": record.id, "entity_identifier": identifier},
             soft_delete=False,
         )
-    return _watch_state(db, company_id, spec.entity_type, record.id, actor.id)
+    return _watch_state(db, company_id, spec.entity_type, record.id, actor)
 
 
 # ---------------------------------------------------------------------------
@@ -491,8 +520,8 @@ def create_comment(
 
     Validates the record (422 type / 403 / 404; read ``FOR KEY SHARE``, this verb's first lock),
     the body (422) and every mention (422 naming refused ids); inserts the comment and its mention
-    rows; auto-watches the author and each mentioned person (idempotent, no backfill of older
-    records); emits the ``comment_mentioned`` / ``comment_added`` notification events,
+    rows; auto-watches the author (when a member of the company) and each mentioned person
+    (idempotent, no backfill of older records); emits the ``comment_mentioned`` / ``comment_added`` notification events,
     best-effort; and LAST writes ONE ``audit.log_create`` (resource type ``comment``;
     ``extra_data`` carries the record, the mentioned and the newly auto-watched ids, with
     ``audit_extra`` merged in under them). The audit row comes last because it takes the global
@@ -524,8 +553,12 @@ def create_comment(
     db.flush()
     db.expire(comment, ["mentions"])
 
+    # The author is auto-watched only as a MEMBER of the company (``_is_company_member``): a Platform
+    # Admin commenting while viewing another company could never be notified there. Mentioned
+    # people are members already (``_mentionable_users``).
+    author_ids = [actor.id] if _is_company_member(actor, company_id) else []
     auto_watched = _ensure_watching(
-        db, company_id, spec.entity_type, record.id, [actor.id, *(user.id for user in mentioned)]
+        db, company_id, spec.entity_type, record.id, [*author_ids, *(user.id for user in mentioned)]
     )
     auto_watched_ids = [row.user_id for row in auto_watched]
 
@@ -754,6 +787,27 @@ def list_comments(
     return [comment_response(comment, actor) for comment in rows]
 
 
+def comment_counts_for_record(db: Session, *, company_id: int, entity_type: str, entity_id: int) -> Tuple[int, int]:
+    """``(live, total)`` comments on one record in this company; ``total`` counts tombstones too.
+
+    The probe behind the work-order HARD delete's refusal (``DELETE /work-orders/{id}
+    ?hard_delete=true``). Tombstones count because a deleted comment's ``comment_added`` /
+    ``comment_mentioned`` events stay, and ``operational_events.work_order_id`` is a plain foreign
+    key with no ON DELETE: Postgres refuses to drop the work order whatever ``is_deleted`` says (the
+    suite's SQLite never enforces it). Pure read: no lock, no write.
+    """
+    rows = (
+        tenant_query(db, Comment, company_id)
+        .with_entities(Comment.is_deleted, func.count(Comment.id))
+        .filter(Comment.entity_type == entity_type, Comment.entity_id == entity_id)
+        .group_by(Comment.is_deleted)
+        .all()
+    )
+    live = sum(int(count) for is_deleted, count in rows if not is_deleted)
+    total = sum(int(count) for _is_deleted, count in rows)
+    return live, total
+
+
 # ---------------------------------------------------------------------------
 # Mention search
 # ---------------------------------------------------------------------------
@@ -868,12 +922,39 @@ def _emit_comment_events(
             logger.warning("comment notification savepoint rollback failed", exc_info=True)
 
 
+def _is_int_id(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _event_record(db: Session, event, company_id: int) -> Tuple[Optional[CommentableType], Optional[Any]]:
-    """The event's record, re-resolved LIVE in the event's company; ``(None, None)`` when gone."""
+    """The event's record, re-resolved LIVE in the event's company; ``(None, None)`` when gone.
+
+    The COMMENT is re-resolved too, not only the record: the event's entity (``entity_type ==
+    "comment"``, ``entity_id`` = the comment id) must still be a live (``is_deleted == False``)
+    comment of this company on this same record. Without it, an author who deletes a comment
+    seconds after posting it would still have the worker send "You were mentioned" (in-app and
+    email) linking to a thread that no longer shows it. A deleted, foreign or mismatched comment
+    -- or an event that names none -- notifies nobody.
+    """
     payload = event.event_payload or {}
     spec = COMMENTABLE_TYPES.get(payload.get("record_type"))
     record_id = payload.get("record_id")
-    if spec is None or isinstance(record_id, bool) or not isinstance(record_id, int):
+    if spec is None or not _is_int_id(record_id):
+        return None, None
+    comment_id = getattr(event, "entity_id", None)
+    if getattr(event, "entity_type", None) != COMMENT_EVENT_ENTITY_TYPE or not _is_int_id(comment_id):
+        return None, None
+    live_comment = (
+        tenant_query(db, Comment, company_id)
+        .filter(
+            Comment.id == comment_id,
+            Comment.is_deleted.is_(False),
+            Comment.entity_type == spec.entity_type,
+            Comment.entity_id == record_id,
+        )
+        .first()
+    )
+    if live_comment is None:
         return None, None
     record = spec.resolve(db, company_id, record_id)
     if record is None:
@@ -885,14 +966,15 @@ def _payload_user_ids(event) -> List[int]:
     values = (event.event_payload or {}).get("mentioned_user_ids") or []
     if not isinstance(values, list):
         return []
-    return [value for value in values if isinstance(value, int) and not isinstance(value, bool)]
+    return [value for value in values if _is_int_id(value)]
 
 
 def mention_recipients(db: Session, event, company_id: int) -> List[User]:
     """``comment.mention`` recipients: the payload's ``mentioned_user_ids``, RE-CHECKED at dispatch.
 
-    Same company, active, and allowed to view the record -- which must still be live (a record
-    deleted before the worker ran notifies nobody). The author is dropped by ``_fan_out``.
+    Same company, active, and allowed to view the record -- which must still be live, and so must
+    the comment (a record or comment deleted before the worker ran notifies nobody). The author is
+    dropped by ``_fan_out``.
     """
     spec, _record = _event_record(db, event, company_id)
     user_ids = _payload_user_ids(event)
@@ -910,7 +992,7 @@ def mention_recipients(db: Session, event, company_id: int) -> List[User]:
 def watcher_recipients(db: Session, event, company_id: int) -> List[User]:
     """``comment.added`` recipients: the record's watchers MINUS everyone mentioned in this comment
     (they get ``comment.mention`` instead) MINUS the author. Active members of the company who may
-    view the record; nobody when the record is no longer live."""
+    view the record; nobody when the record or the comment is no longer live."""
     spec, record = _event_record(db, event, company_id)
     if spec is None:
         return []

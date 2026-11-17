@@ -265,7 +265,7 @@ but **only entries whose source is wired today actually fire**; the rest are **d
 > | `default_channels` | `in_app` + `email` | `in_app` only |
 > | `mandatory_channel` | `in_app` | none |
 > | `sms_eligible` / `recurring` | `false` / `false` | `false` / `false` |
-> | Recipients | resolver `resolve_comment_mentioned_users` (`comment_service.mention_recipients`): the payload's `mentioned_user_ids`, **re-checked at dispatch** — same company, active, may view the work order — and nobody once the work order is soft-deleted | resolver `resolve_comment_watchers` (`comment_service.watcher_recipients`): the work order's active watchers in the event's company, **minus** everyone the comment mentions (they get `comment.mention` instead) **minus** the author; nobody once the work order is soft-deleted |
+> | Recipients | resolver `resolve_comment_mentioned_users` (`comment_service.mention_recipients`): the payload's `mentioned_user_ids`, **re-checked at dispatch** — same company, active, may view the work order — and nobody once the work order **or the comment** is soft-deleted (the comment the event names must still be a live comment of the company on that work order, so a comment deleted seconds after posting notifies nobody) | resolver `resolve_comment_watchers` (`comment_service.watcher_recipients`): the work order's active watchers in the event's company, **minus** everyone the comment mentions (they get `comment.mention` instead) **minus** the author; nobody once the work order or the comment is soft-deleted |
 > | `source_event_types` | `("comment_mentioned",)` | `("comment_added",)` |
 > | Emitted on | create (everyone mentioned) and edit (only the people the edit **newly** adds) | create only — an edit never re-notifies watchers |
 >
