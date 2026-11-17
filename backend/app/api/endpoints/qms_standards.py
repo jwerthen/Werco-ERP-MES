@@ -4,8 +4,10 @@ from datetime import datetime
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import Session, joinedload, with_loader_criteria
 
+from app.api.audit_guard import required_audit
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
 from app.models.qms_standard import QMSClause, QMSClauseEvidence, QMSStandard
@@ -843,13 +845,31 @@ def _lock_live_evidence_or_404(db: Session, evidence_id: int, company_id: int) -
     return evidence
 
 
-def _evidence_column_values(evidence: QMSClauseEvidence) -> Dict[str, Any]:
-    """Every column of the evidence row as it stands now, for ``log_update`` / ``log_delete``'s ``old_values``.
+def _evidence_audit_snapshot(evidence: QMSClauseEvidence) -> Dict[str, Any]:
+    """Every column of the evidence row, JSON-ready (``log_required`` stores values as given).
 
-    Raw values (datetimes included): those helpers serialize them. ``log_required`` stores
-    ``old_values`` as given, so it needs JSON-ready values instead.
+    Dates and datetimes become ISO strings and any other non-JSON value its ``str()``, so a
+    column type added later cannot make every evidence edit or removal fail its required audit
+    row (``json.dumps`` of a raw value would fail inside ``AuditService.log``, which a required
+    row turns into a 503).
     """
-    return {c.key: getattr(evidence, c.key) for c in evidence.__table__.columns}
+    snapshot: Dict[str, Any] = {}
+    for attr in sa_inspect(evidence).mapper.column_attrs:
+        value = getattr(evidence, attr.key)
+        if value is None or isinstance(value, (bool, int, float, str)):
+            snapshot[attr.key] = value
+        elif hasattr(value, "isoformat"):
+            snapshot[attr.key] = value.isoformat()
+        else:
+            snapshot[attr.key] = str(value)
+    return snapshot
+
+
+# ``audit_log.resource_identifier`` is String(255); an evidence title may be 500 (the schemas allow
+# it). On PostgreSQL a longer identifier fails the audit INSERT, which a required audit row turns
+# into a 503 on every edit of that row, so the identifier is cut to fit. The description keeps the
+# whole title.
+_AUDIT_IDENTIFIER_MAX = 255
 
 
 @router.post("/clauses/{clause_id}/evidence", response_model=QMSEvidenceResponse, status_code=status.HTTP_201_CREATED)
@@ -903,10 +923,17 @@ def update_evidence(
     The row is locked before it is read and the change is flushed before the audit row is
     written, so this takes its row lock ahead of the global audit-chain lock. See
     ``_lock_live_evidence_or_404``.
+
+    The audit UPDATE row is REQUIRED evidence, written in the same transaction. A Verify is a
+    quality judgment and the row keeps only the latest one (a re-Verify overwrites
+    ``verified_by`` / ``verified_date``; an un-verify clears ``is_verified`` and leaves them
+    stale), so the audit rows are the only history of who judged the evidence and when. If the
+    row cannot be written the change is rolled back and the answer is 503; nothing was saved,
+    so a retry is safe. A request that changes nothing writes no row, as before.
     """
     evidence = _lock_live_evidence_or_404(db, evidence_id, company_id)
 
-    old_values = _evidence_column_values(evidence)
+    old_values = _evidence_audit_snapshot(evidence)
 
     update_data = data.model_dump(exclude_unset=True)
 
@@ -922,7 +949,27 @@ def update_evidence(
     # audit-chain lock as its first statement, so an unflushed change would reach the database
     # only after it, while this request held the chain lock (the opposite of the codebase order).
     db.flush()
-    audit.log_update("qms_clause_evidence", evidence.id, evidence.title, old_values=old_values, new_values=evidence)
+
+    new_values = _evidence_audit_snapshot(evidence)
+    changes = {
+        key: {"old": old_values.get(key), "new": new_values.get(key)}
+        for key in sorted(old_values.keys() | new_values.keys())
+        if old_values.get(key) != new_values.get(key)
+    }
+    if changes:
+        with required_audit(
+            db, "The audit record for this evidence change could not be saved; nothing was changed. Retry."
+        ):
+            audit.log_required(
+                audit.ACTIONS["UPDATE"],
+                "qms_clause_evidence",
+                resource_id=evidence.id,
+                resource_identifier=evidence.title[:_AUDIT_IDENTIFIER_MAX],
+                description=f"Updated qms_clause_evidence: {evidence.title}",
+                old_values=old_values,
+                new_values=new_values,
+                extra_data={"changes": changes},
+            )
     db.commit()
     db.refresh(evidence)
     return evidence
@@ -940,12 +987,28 @@ def delete_evidence(
 
     Locks the row, soft-deletes it and flushes that before the audit row is written, so the row
     lock comes before the global audit-chain lock. See ``_lock_live_evidence_or_404``.
+
+    The audit DELETE row is REQUIRED evidence, written in the same transaction: it records who
+    removed the link and the row as it stood before the removal. If it cannot be written the
+    removal is rolled back and the answer is 503; the evidence is still linked, so a retry is
+    safe.
     """
     evidence = _lock_live_evidence_or_404(db, evidence_id, company_id)
 
     # The audit row records the row as it was before the delete, so take its values first.
-    old_values = _evidence_column_values(evidence)
+    old_values = _evidence_audit_snapshot(evidence)
     evidence.soft_delete(current_user.id)
     db.flush()
-    audit.log_delete("qms_clause_evidence", evidence.id, evidence.title, old_values=old_values, soft_delete=True)
+    with required_audit(
+        db, "The audit record for removing this evidence could not be saved; the evidence was not removed. Retry."
+    ):
+        audit.log_required(
+            audit.ACTIONS["DELETE"],
+            "qms_clause_evidence",
+            resource_id=evidence.id,
+            resource_identifier=evidence.title[:_AUDIT_IDENTIFIER_MAX],
+            description=f"Soft Deleted qms_clause_evidence: {evidence.title}",
+            old_values=old_values,
+            extra_data={"soft_delete": True},
+        )
     db.commit()

@@ -8756,8 +8756,8 @@ in `RBAC_PERMISSIONS.md`.
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
 | POST | `/qms-standards/clauses/{clause_id}/evidence` | Link evidence to a clause | Admin / Manager / Quality |
-| PUT | `/qms-standards/evidence/{evidence_id}` | Update evidence, incl. verification | Admin / Manager / Quality |
-| DELETE | `/qms-standards/evidence/{evidence_id}` | Remove an evidence link | Admin / Manager / Quality |
+| PUT | `/qms-standards/evidence/{evidence_id}` | Update evidence, incl. verification. The audit `UPDATE` row is required evidence: **503** and nothing saved if it cannot be written (see below) | Admin / Manager / Quality |
+| DELETE | `/qms-standards/evidence/{evidence_id}` | Remove an evidence link. The audit `DELETE` row is required evidence: **503** and the link stays if it cannot be written (see below) | Admin / Manager / Quality |
 
 > **PDF clause extraction:** `POST /qms-standards/{standard_id}/upload-pdf` requires a text-based
 > PDF (≤ 20 MB; scanned/image-only PDFs are rejected) and a configured `ANTHROPIC_API_KEY` — it
@@ -8906,6 +8906,23 @@ in `RBAC_PERMISSIONS.md`.
 > a Verify or Remove racing auto-link could fail with the app-wide 409. A 404 here means the link
 > is gone; if it should still exist, link it again. The `UPDATE` audit entry's `changes` now also
 > lists the row's new `updated_at`.
+
+> **Verify, edit and Remove of an evidence link are required audit evidence:** `PUT` and `DELETE
+> /qms-standards/evidence/{evidence_id}` write their audit entry in the same transaction as the
+> change, and the change is saved only if the entry is. A Verify is a quality judgment and the
+> evidence row keeps only the latest one (`verified_by` / `verified_date` are overwritten by the
+> next Verify), so the audit entries are its only history. If the entry cannot be written the
+> change is rolled back and the answer is **503** — `PUT`: `"The audit record for this evidence
+> change could not be saved; nothing was changed. Retry."`; `DELETE`: `"The audit record for
+> removing this evidence could not be saved; the evidence was not removed. Retry."` Nothing was
+> saved, so retrying the same request is safe. Before this, a failed audit write was skipped and the
+> route still answered 200 / 204. Unchanged: a `PUT` that changes nothing (an empty body, or values
+> equal to the stored ones) writes no entry and answers 200; the `UPDATE` entry carries the full
+> before / after row in `old_values` / `new_values` and the field-level diff in
+> `extra_data.changes`; the `DELETE` entry carries the row as it stood before the removal in
+> `old_values` and `extra_data.soft_delete: true`. The entry's `resource_identifier` is the
+> evidence title cut to 255 characters (the audit column's length; a title may be 500), and its
+> `description` keeps the whole title.
 
 #### Audit-Readiness Summary Schema (`GET /qms-standards/audit-readiness`)
 
