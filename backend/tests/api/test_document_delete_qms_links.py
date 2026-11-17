@@ -156,7 +156,9 @@ def test_removed_qms_links_keep_the_document(client, db_session, admin_headers, 
     _assert_untouched(db_session, document_id, audit_before, local_files)
 
 
-def test_live_link_is_named_ahead_of_removed_ones(client, db_session, admin_headers, local_files):
+def test_removed_link_is_reported_ahead_of_live_ones(client, db_session, admin_headers, local_files):
+    """Unlinking the live standard would not free a document a removed link keeps, so the
+    refusal says so first rather than sending the user to make an audited change for nothing."""
     document_id = _upload(client, admin_headers)
     _evidence(db_session, document_id, is_deleted=True)
     _standard(db_session, name="Live manual", document_id=document_id)
@@ -165,7 +167,9 @@ def test_live_link_is_named_ahead_of_removed_ones(client, db_session, admin_head
     response = _delete(client, admin_headers, document_id)
 
     assert response.status_code == 409
-    assert "linked to QMS standard Live manual." in response.json()["detail"]
+    detail = response.json()["detail"]
+    assert "removed QMS standard, clause or evidence link" in detail
+    assert "Unlink it first" not in detail
 
 
 def test_unlinking_the_evidence_releases_the_document(client, db_session, admin_headers, local_files):

@@ -4245,7 +4245,7 @@ mixed**:
 | POST | `/work-orders/{id}/laser-nests/manual` | Manually add **one** nest to a work order (child laser WO of an assembly, or the addressed `laser_cutting` WO directly). Creates a clock-in-able `LASER` operation; sets the laser WO RELEASED the same way the import does (release recorded when it was a draft or unstamped; an **on-hold** laser WO stays on hold, so the new nest cannot be started until the hold is lifted) | Admin / Manager / Supervisor |
 | PATCH | `/laser-nests/{id}` | Edit a manual nest (all fields optional). Raising `planned_runs` on a COMPLETE nest or a finished laser work order is **409**; a standing API token lowering it once work is recorded on the nest is **403** | Admin / Manager / Supervisor |
 | POST | `/laser-nests/{id}/attach-document` | Attach an already-uploaded PDF Document to the nest (PDF-only) | Admin / Manager / Supervisor |
-| DELETE | `/laser-nests/{id}/document` | Detach the PDF (clears the FK; the Document row is left intact) | Admin / Manager / Supervisor |
+| DELETE | `/laser-nests/{id}/document` | Detach the PDF (clears the FK; the Document row is left intact). The only way to release a live nest's PDF for `DELETE /documents/{id}`, which refuses **409** while any nest, removed ones included, carries it | Admin / Manager / Supervisor |
 | GET | `/laser-nests/{id}/document` | Serve the attached PDF **inline** for operator preview | Yes (any authenticated user) |
 | DELETE | `/laser-nests/{id}` | Soft-delete the nest; its operation goes `ON_HOLD` | Admin / Manager / Supervisor |
 | POST | `/laser-nests/{id}/restore` | Restore a cancelled nest and its planned runs, retaining the original operation and drawing | Admin / Manager / Supervisor |
@@ -8853,8 +8853,8 @@ before any change, so a refusal writes nothing and keeps the bytes. The message 
   `PUT /qms-standards/{standard_id}` or `PUT /qms-standards/evidence/{evidence_id}` with
   `{"document_id": null}` (both audited). The QMS Standards page has no document field, so this is
   an API / MCP step.
-- **Only removed links** (a soft-deleted standard, clause or evidence link, including evidence
-  under a removed clause or standard): *"This document is named by a removed QMS standard, clause or
+- **Any removed link** (a soft-deleted standard, clause or evidence link, including evidence
+  under a removed clause or standard), reported ahead of any live link: *"This document is named by a removed QMS standard, clause or
   evidence link, which keeps the record of what was assessed. It must remain available and cannot be
   deleted."* A removed QMS row still records which document a clause was assessed against, and
   clearing its link would rewrite that record, so the document is retained the way a voided
@@ -8874,6 +8874,83 @@ Only the active company's QMS rows are read. A link from another company's QMS r
 create / update routes have accepted any existing document id, another company's included) is not
 named, since that would disclose the other tenant's record; on Postgres that delete still fails at
 the foreign key until the link is cleared.
+
+Every other table with a foreign key to `documents.id` is checked the same way: before the audit
+write and before any change, so a refusal (**409**) writes nothing and keeps the bytes. None of these
+columns has an `ON DELETE` either, so each used to fail at flush on Postgres with a **500** that gave
+no reason. The records below keep their document for as long as they exist, removed or voided
+included, and there is no verb that lets go of it:
+
+| Referencing column | Refusal says | Kept after |
+|---|---|---|
+| `shipments.label_document_id` / `bol_document_id` | *"This document is the carrier label (or bill of lading) for shipment SHP-…"* | the label is voided or the shipment is removed |
+| `po_receipts.label_document_id` | *"This document is the receiving label for receipt RCV-…"* | the receipt is voided |
+| `operation_step_records.attachment_document_id` | *"This document is evidence captured at a process-sheet step on work order WO-…"* | the step record is superseded |
+| `document_files.document_id` | *"This document is held by a governed file record…"* (retention policy / legal hold) | — |
+
+A receipt reprint stores a new label document and points the receipt at it, so only the label the
+receipt currently names is protected by this check; an earlier print is no longer referenced.
+
+A **laser nest's PDF** (`laser_nests.document_id`) is a reference drawing with its own audited
+release: *"This document is the PDF attached to laser nest CNC-… on work order WO-… [and N other
+laser nests]. Detach it from the nest first (Detach on the work order's laser nest row)."* That is
+`DELETE /laser-nests/{id}/document` (Admin / Manager / Supervisor), once per nest; a duplicated work
+order copies the reference, so one PDF can sit on several nests. Two cases keep the PDF instead, with
+no mention of Detach:
+
+- **A nest whose operation has recorded work** (good, scrap, a start or labor: the
+  `operation_has_recorded_work` predicate): *"This document is the PDF of laser nest CNC-… on work
+  order WO-…, which has recorded work, so it is the record of what was cut."* The PDF is the layout
+  the sheet was cut from. Known gap: Detach itself is not gated on recorded work, so the API still
+  lets a person detach such a PDF and then delete it.
+- **A removed nest** (*"…the PDF of a removed laser nest, which keeps it so that restoring the nest
+  brings its drawing back"*): `POST /laser-nests/{id}/restore` brings the nest back with it, and
+  Detach answers **404** for a removed nest. Removing a nest therefore does not release its PDF;
+  detach it first.
+
+An **engineering change order's affected documents** (`engineering_change_orders.affected_documents`)
+are a JSON id list, not a foreign key, so here Postgres would *not* stop the delete. Before this
+check the document was deleted and `GET /eco/eco/affected-items/{id}` silently dropped it from the
+change record (AS9100D 8.5.6). ECOs have no delete verb, so the reference lasts. The check depends
+on the ECO's status:
+
+- **No approver has decided yet** (draft, submitted): *"This document is listed as affected by
+  engineering change ECO-… (PUT /eco/eco/41). Take it out of that change's affected_documents
+  first, while no approver has decided on it yet."* Every such ECO is named with its own edit
+  path (*"engineering changes ECO-… (PUT /eco/eco/41), ECO-… (PUT /eco/eco/43) and …"*), because
+  the Engineering Changes page has no document field and the ECO list can't be searched by
+  document. The edit is `PUT /eco/eco/{id}` with the list minus this id (Admin / Manager,
+  audited), an API / MCP step.
+- **Under review, approved or later, rejected or cancelled**: *"This document is listed as affected
+  by engineering change ECO-… (under review), which keeps the record of what the change covered.
+  It must remain available and cannot be deleted."* Under review means at least one approver has
+  already signed the scope, so editing it would leave sign-offs on a scope those people never saw.
+  From approval on the list is the authorized change scope, and a rejected or cancelled change
+  records what was decided. Known gap: `PUT /eco/eco/{id}` still accepts edits to an under-review,
+  approved or in-implementation ECO (it refuses only completed, rejected and cancelled ones), so the
+  API still lets a person take the document off such an ECO and then delete it.
+
+The id is matched exactly: the text column is only narrowed by substring, then each candidate's
+JSON is parsed, so an ECO listing document 12 never blocks deleting document 1. A string id
+(`"12"`) counts; a value that is not a JSON list is skipped, as the affected-items read skips it.
+Because there is no foreign key, ECO create and update lock each document they name (`FOR KEY
+SHARE`, the lock a foreign key takes) before their audit row. A list written at the same time as a
+delete is therefore either seen by the delete, or fails its own validation with **422** once the
+delete commits. (This relies on Postgres's default READ COMMITTED isolation, which the app does not
+change.)
+
+**Order of reasons.** Every reason that keeps the document for good is reported before any
+instruction: the retained records above, then a removed QMS link, then a worked or removed nest,
+then an ECO under review, approved or closed. Only when every blocker can be released does the refusal give
+instructions, and then it gives the QMS unlink, the nest Detach and the ECO edit together in one
+message. Nobody is sent to unlink or detach
+something (an audited change, and on the floor a nest losing its drawing) only to be refused
+again. The nest attach verb
+(`POST /laser-nests/{id}/attach-document`) flushes the link before its audit row, like the QMS
+`PUT`s, so it takes its lock on the document row before the audit-chain lock. Every other writer of
+these columns creates the document in the same transaction or already flushes first. Only the active
+company's rows are read; no writer accepts another company's document, and a row of another company
+is never named.
 
 Manual upload is a release action: the persisted Document stores `status="released"`, the actual
 `released_by` actor, and UTC `released_at`. Returned metadata exposes the released status;
@@ -9428,7 +9505,14 @@ the public paths are `/eco/eco/…`.
 > **Cross-tenant affected ids are rejected with 422.** `affected_parts`, `affected_work_orders`, and
 > `affected_documents` are id lists. On create and update, every referenced id must resolve to a live row
 > **in the active company**; the first unknown or cross-tenant id returns **422 Unprocessable Entity**
-> (`{"detail": "Unknown or cross-tenant <part|work order|document> id(s): [...]"}`).
+> (`{"detail": "Unknown or cross-tenant <part|work order|document> id(s): [...]"}`). Each named
+> document is locked `FOR KEY SHARE` during that check, so it can't be deleted between validation
+> and commit.
+>
+> **A listed document can't be deleted.** `DELETE /documents/{id}` refuses **409** while an ECO of
+> the active company lists the document in `affected_documents`. While the ECO is draft or
+> submitted, take it out of the list with `PUT /eco/eco/{id}` first. From under review on (and for
+> a rejected or cancelled ECO) the document is kept. See [Documents](#documents).
 >
 > **Mutations require Admin / Manager.** All state-changing ECO endpoints (create, update, submit,
 > approve, reject, implement, complete, add/update task, add approval) require role **ADMIN or
