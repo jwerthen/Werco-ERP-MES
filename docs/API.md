@@ -8519,6 +8519,12 @@ new financial approval workflow; automatic work-order completion keeps its exist
 | POST | `/documents/{id}/attach-work-order` | Body `{"work_order_id": id}`; attach an unlinked PDF | Admin / Manager / Quality |
 | DELETE | `/documents/{id}` | Delete a document only when no retention reference protects it | Admin / Manager |
 
+`part_id` is optional on `POST /documents/upload`. The Documents page's **Upload Document**
+dialog requires a part only for the part-specific types `drawing`, `inspection_plan` and `fai`
+(so they can be found by part number); for every other type, such as a procedure, form or
+specification, **No part (company-wide document)** is a valid choice. Whatever is chosen carries
+to every later revision, because a revision must keep its predecessor's part link.
+
 Deletion also refuses documents referenced by a same-company Hank intake result
 or sharing its retained source storage reference. This preserves the reviewed
 PDF, completed intake receipt and source-page recovery together with existing
@@ -8537,8 +8543,9 @@ before any change, so a refusal writes nothing and keeps the bytes. The message 
   clause 7.5.3"*, plus *"and N other QMS links"* when there are more, then *"Unlink it first by
   setting document_id to null on that QMS standard or evidence link."* That means
   `PUT /qms-standards/{standard_id}` or `PUT /qms-standards/evidence/{evidence_id}` with
-  `{"document_id": null}` (both audited). The QMS Standards page has no document field, so this is
-  an API / MCP step.
+  `{"document_id": null}` (both audited). The QMS Standards page picks a document only when it links
+  new evidence (the Link Evidence dialog's optional **Linked Document** field); it cannot change or
+  clear the document on an existing standard or evidence link, so this is an API / MCP step.
 - **Any removed link** (a soft-deleted standard, clause or evidence link, including evidence
   under a removed clause or standard), reported ahead of any live link: *"This document is named by a removed QMS standard, clause or
   evidence link, which keeps the record of what was assessed. It must remain available and cannot be
@@ -8748,9 +8755,27 @@ in `RBAC_PERMISSIONS.md`.
 > with nothing saved and no audit entry, so the answer says nothing about other companies'
 > documents. `document_id: null` on a `PUT` still clears the link, and a `PUT` that does not send
 > `document_id` is not judged on the value already stored (the QMS Standards page's Verify sends
-> `is_verified` only, and the page never sends `document_id`). The document's control status
-> (draft, obsolete, ...) is not checked. Before this, a nonexistent id failed with a 500, while any
-> existing id, another company's included, was accepted and linked.
+> `is_verified` only). The document's control status (draft, obsolete, ...) is not checked. Before
+> this, a nonexistent id failed with a 500, while any existing id, another company's included, was
+> accepted and linked.
+>
+> **On the QMS Standards page**, the Link Evidence dialog has an optional **Linked Document** field:
+> a searchable list of the active company's documents (from `GET /documents/`, fetched each time
+> the dialog opens), each shown by title with its document number and revision. It offers only the
+> current revision of each document (a row that a later revision names in `previous_revision_id`
+> is left out) and no shipping or receiving paperwork (`receiving_label`, `shipping_label`,
+> `bill_of_lading`). Choosing a document fills the title with "*title*, Rev *revision*" while the
+> title is empty or still the picker's own wording: choosing another document replaces it, clearing
+> the document clears it, and a typed or edited title is never changed. If a reloaded list no
+> longer offers the chosen document (a newer revision superseded it, or it was removed), the choice
+> is dropped with a notice rather than sent. The page sends `document_id` only on
+> `POST /qms-standards/clauses/{clause_id}/evidence`, and only when a document is chosen; evidence
+> can still be linked without one. A refusal such as the **404** above
+> is shown inside the dialog, which stays open with what was typed; closing a dialog with input asks
+> before discarding it. Every evidence row that carries a
+> `document_id`, including links written through the API or MCP, shows an **Open document** link to
+> `/documents?document=<id>`, which opens that document's preview on the Documents page. The page
+> does not edit or clear an existing link's `document_id`.
 
 > **PDF clause extraction:** `POST /qms-standards/{standard_id}/upload-pdf` requires a text-based
 > PDF (≤ 20 MB, else **413** before any work; scanned/image-only PDFs are rejected) and a

@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useCallback, useLayoutEffect, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useLayoutEffect, useMemo, useRef } from 'react';
+import { Link } from 'react-router-dom';
 import {
   RectangleStackIcon,
   ListBulletIcon,
@@ -10,10 +11,12 @@ import {
 import api from '../services/api';
 // The shared dialog primitive, aliased because this page still carries its own
 // older local `Modal` helper (below) for its form dialogs.
-import { Button, ConfirmDialog, Modal as UiModal, statusColor, useToast } from '../components/ui';
+import { Button, ComboBox, ConfirmDialog, Modal as UiModal, statusColor, useToast } from '../components/ui';
+import type { ComboBoxOption } from '../components/ui';
 import { FormField } from '../components/ui/FormField';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { formatCentralDate } from '../utils/centralTime';
+import { useUnsavedChanges } from '../hooks/useUnsavedChanges';
 import {
   QMSStandardListResponse,
   QMSStandardResponse,
@@ -45,6 +48,46 @@ const EVIDENCE_TYPES = [
   { value: 'spc', label: 'SPC Data' },
   { value: 'other', label: 'Other' },
 ];
+
+/** A company document offered by the evidence dialog's "Linked Document" picker. */
+export interface EvidenceDocumentChoice {
+  id: number;
+  document_number: string;
+  revision: string;
+  title: string;
+  document_type: string;
+  previous_revision_id?: number | null;
+}
+
+/** Shipping and receiving paperwork: printed by their own flows, never QMS evidence. */
+const NON_EVIDENCE_DOCUMENT_TYPES: ReadonlySet<string> = new Set(['receiving_label', 'shipping_label', 'bill_of_lading']);
+
+/**
+ * The documents the evidence picker offers: the CURRENT revision of each document, minus
+ * shipping/receiving paperwork. A revision upload is a new row that names its predecessor in
+ * `previous_revision_id`, and the predecessor stays `released`, so without this filter an
+ * obsolete revision would be offered as an equal choice (AS9100D 7.5.3.2). Sorted by title.
+ */
+export function currentEvidenceDocuments(docs: EvidenceDocumentChoice[]): EvidenceDocumentChoice[] {
+  const superseded = new Set<number>();
+  for (const doc of docs) if (doc.previous_revision_id != null) superseded.add(doc.previous_revision_id);
+  return docs
+    .filter(doc => !superseded.has(doc.id) && !NON_EVIDENCE_DOCUMENT_TYPES.has(doc.document_type))
+    .sort((a, b) => a.title.localeCompare(b.title));
+}
+
+/** The evidence title the picker fills in for a document. */
+const documentEvidenceTitle = (doc: EvidenceDocumentChoice) => `${doc.title}, Rev ${doc.revision}`;
+
+const EMPTY_EVIDENCE_FORM = { evidence_type: 'document', title: '', description: '', module_reference: '', document_id: '' };
+
+/** The Linked Document picker's input id, so focus can return to it after a Retry. */
+const EVIDENCE_DOCUMENT_FIELD_ID = 'qms-evidence-linked-document';
+
+/** Where a linked document opens: the Documents page previews the one named in `document`. */
+export function linkedDocumentHref(documentId: number): string {
+  return `/documents?document=${documentId}`;
+}
 
 /**
  * What an auto-link run that could not compute some evidence rules says about
@@ -100,7 +143,17 @@ export default function QMSStandards() {
   // Form states
   const [standardForm, setStandardForm] = useState({ name: '', version: '', description: '', standard_body: '' });
   const [clauseForm, setClauseForm] = useState({ clause_number: '', title: '', description: '' });
-  const [evidenceForm, setEvidenceForm] = useState({ evidence_type: 'document', title: '', description: '', module_reference: '' });
+  const [evidenceForm, setEvidenceForm] = useState(EMPTY_EVIDENCE_FORM);
+  const [evidenceError, setEvidenceError] = useState('');
+  // The company's documents, loaded the first time the evidence dialog opens. null = not loaded yet.
+  const [evidenceDocs, setEvidenceDocs] = useState<EvidenceDocumentChoice[] | null>(null);
+  const [evidenceDocsFailed, setEvidenceDocsFailed] = useState(false);
+  const [evidenceDocsReload, setEvidenceDocsReload] = useState(0);
+  const [evidenceDocNotice, setEvidenceDocNotice] = useState('');
+  // The evidence title the picker last wrote, so choosing another document can replace it.
+  const autoEvidenceTitle = useRef<string | null>(null);
+  const retryFocusPending = useRef(false);
+  const retryButtonRef = useRef<HTMLButtonElement>(null);
   const [bulkText, setBulkText] = useState('');
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -184,17 +237,123 @@ export default function QMSStandards() {
     }
   };
 
+  // Load the document choices every time the evidence dialog opens, so a document uploaded
+  // since the last open is offered. A list from an earlier open stays usable while the new one
+  // loads. The picker is optional: the rest of the form works while it loads or if it cannot.
+  useEffect(() => {
+    if (!showAddEvidence) return;
+    let active = true;
+    // getDocuments pages through every document; a closed or reopened dialog stops the old read.
+    const controller = new AbortController();
+    setEvidenceDocsFailed(false);
+    api
+      .getDocuments(undefined, controller.signal)
+      .then((docs: EvidenceDocumentChoice[]) => {
+        if (active) setEvidenceDocs(docs);
+      })
+      .catch(() => {
+        if (active) setEvidenceDocsFailed(true);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [showAddEvidence, evidenceDocsReload]);
+
+  const evidenceDocOptions = useMemo<ComboBoxOption[]>(
+    () =>
+      currentEvidenceDocuments(evidenceDocs ?? []).map(doc => ({
+        value: String(doc.id),
+        label: doc.title,
+        hint: `${doc.document_number} Rev ${doc.revision}`,
+      })),
+    [evidenceDocs]
+  );
+
+  // A choice made from an earlier list can stop being offered when the reloaded list arrives:
+  // a newer revision superseded it, or it was removed. The field would then show blank while the
+  // old id was still sent, linking an obsolete revision. Drop the choice (and a picker-written
+  // title, as a manual clear would) and say why.
+  useEffect(() => {
+    const chosen = evidenceForm.document_id;
+    if (!chosen || evidenceDocs === null || evidenceDocOptions.some(o => o.value === chosen)) return;
+    const autoTitle = autoEvidenceTitle.current;
+    const titleIsAuto = autoTitle !== null && evidenceForm.title === autoTitle;
+    if (titleIsAuto) autoEvidenceTitle.current = null;
+    setEvidenceForm({ ...evidenceForm, document_id: '', title: titleIsAuto ? '' : evidenceForm.title });
+    setEvidenceDocNotice(
+      'The document you chose has a newer revision or was removed, so it was cleared. Choose the current one again.'
+    );
+  }, [evidenceDocOptions, evidenceDocs, evidenceForm]);
+
+  // After a Retry the button unmounts; put focus somewhere useful rather than on <body>.
+  useEffect(() => {
+    if (!retryFocusPending.current) return;
+    if (evidenceDocsFailed) {
+      retryFocusPending.current = false;
+      retryButtonRef.current?.focus();
+    } else if (evidenceDocs !== null) {
+      retryFocusPending.current = false;
+      document.getElementById(EVIDENCE_DOCUMENT_FIELD_ID)?.focus();
+    }
+  }, [evidenceDocs, evidenceDocsFailed]);
+
+  const handleEvidenceDocumentChange = (value: string) => {
+    setEvidenceDocNotice('');
+    const doc = evidenceDocs?.find(d => String(d.id) === value);
+    // The title follows the chosen document while it is empty or still the picker's own
+    // wording; a title the user typed is never replaced. Clearing the document clears a
+    // picker-written title, so a row is never named after a document it does not link.
+    const autoTitle = autoEvidenceTitle.current;
+    const replaceable = !evidenceForm.title.trim() || (autoTitle !== null && evidenceForm.title === autoTitle);
+    const nextTitle = replaceable ? (doc ? documentEvidenceTitle(doc) : '') : evidenceForm.title;
+    autoEvidenceTitle.current = replaceable ? (doc ? nextTitle : null) : autoTitle;
+    setEvidenceForm({ ...evidenceForm, document_id: value, title: nextTitle });
+  };
+
+  const evidenceDirty =
+    showAddEvidence &&
+    (evidenceForm.document_id !== '' ||
+      evidenceForm.evidence_type !== EMPTY_EVIDENCE_FORM.evidence_type ||
+      [evidenceForm.title, evidenceForm.description, evidenceForm.module_reference].some(v => v.trim() !== ''));
+  const { confirmDiscard: confirmDiscardEvidence, markSaved: markEvidenceSaved } = useUnsavedChanges(evidenceDirty);
+
+  const resetEvidenceDialog = () => {
+    setShowAddEvidence(false);
+    setEvidenceClauseId(null);
+    setEvidenceForm(EMPTY_EVIDENCE_FORM);
+    setEvidenceError('');
+    setEvidenceDocNotice('');
+    autoEvidenceTitle.current = null;
+  };
+
+  // Close, Cancel and Escape all come here; anything typed is discarded only after a confirm.
+  const closeEvidenceDialog = () => {
+    if (saving) return;
+    if (!confirmDiscardEvidence()) return;
+    resetEvidenceDialog();
+  };
+
   const handleAddEvidence = async () => {
-    if (!evidenceClauseId || !evidenceForm.title) return;
+    if (!evidenceClauseId || !evidenceForm.title.trim()) return;
+    const { document_id, ...fields } = evidenceForm;
+    // Belt and braces for the reload effect above: never send a document the picker no longer offers.
+    if (document_id && !evidenceDocOptions.some(o => o.value === document_id)) {
+      setEvidenceError('The chosen document is no longer the current revision. Choose it again.');
+      return;
+    }
     setSaving(true);
+    setEvidenceError('');
     try {
-      await api.addQMSEvidence(evidenceClauseId, evidenceForm);
-      setShowAddEvidence(false);
-      setEvidenceForm({ evidence_type: 'document', title: '', description: '', module_reference: '' });
-      setEvidenceClauseId(null);
+      await api.addQMSEvidence(evidenceClauseId, document_id ? { ...fields, document_id: Number(document_id) } : fields);
+      markEvidenceSaved();
+      resetEvidenceDialog();
       if (selectedStandard) loadStandardDetail(selectedStandard.id);
     } catch (err: any) {
-      setError(err?.response?.data?.detail || 'Failed to add evidence');
+      // Shown in the dialog, which stays open so nothing typed is lost. A document that is not
+      // one of this company's answers 404 "Document not found", and nothing is linked.
+      const detail = err?.response?.data?.detail;
+      setEvidenceError(typeof detail === 'string' && detail ? detail : 'Failed to link evidence. Try again.');
     } finally {
       setSaving(false);
     }
@@ -712,9 +871,32 @@ export default function QMSStandards() {
         </Modal>
       )}
 
-      {/* Add Evidence Modal */}
+      {/* Add Evidence Modal: the shared primitive (z-[60]), because the document picker's list
+          portals at z-[70] and would open behind this page's older DaisyUI modal (z-index 999). */}
       {showAddEvidence && (
-        <Modal title="Link Evidence to Clause" onClose={() => { setShowAddEvidence(false); setEvidenceClauseId(null); }}>
+        <UiModal open onClose={closeEvidenceDialog} size="md" closeOnBackdrop={false} ariaLabel="Link Evidence to Clause">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="font-bold text-lg">Link Evidence to Clause</h3>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm btn-circle"
+              onClick={closeEvidenceDialog}
+              disabled={saving}
+              aria-label="Close"
+            >
+              X
+            </button>
+          </div>
+          {evidenceError && (
+            <p role="alert" className="mb-4 text-sm text-red-300">
+              {evidenceError}
+            </p>
+          )}
+          {evidenceDocNotice && (
+            <p role="status" className="mb-4 text-sm text-amber-300">
+              {evidenceDocNotice}
+            </p>
+          )}
           <div className="space-y-4">
             <FormField label={<span className="label-text font-medium">Evidence Type</span>} required>
               {field => (
@@ -728,6 +910,45 @@ export default function QMSStandards() {
                     <option key={t.value} value={t.value}>{t.label}</option>
                   ))}
                 </select>
+              )}
+            </FormField>
+            <FormField
+              label={<span className="label-text font-medium">Linked Document</span>}
+              htmlFor={EVIDENCE_DOCUMENT_FIELD_ID}
+              help={
+                evidenceDocsFailed ? (
+                  <>
+                    <span role="status">The document list could not be loaded.</span>{' '}
+                    <button
+                      ref={retryButtonRef}
+                      type="button"
+                      className="link link-primary"
+                      onClick={() => {
+                        retryFocusPending.current = true;
+                        setEvidenceDocsReload(n => n + 1);
+                      }}
+                    >
+                      Retry
+                    </button>{' '}
+                    You can still link evidence without a document.
+                  </>
+                ) : (
+                  'Optional. Pick the current revision of an uploaded procedure, form or record so it opens from this clause. Upload new documents on the Documents page.'
+                )
+              }
+            >
+              {field => (
+                <ComboBox
+                  id={field.id}
+                  ariaDescribedBy={field['aria-describedby']}
+                  options={evidenceDocOptions}
+                  value={evidenceForm.document_id}
+                  onChange={handleEvidenceDocumentChange}
+                  emptyOptionLabel="No document"
+                  placeholder={evidenceDocs === null && !evidenceDocsFailed ? 'Loading documents…' : 'Search by title or document number…'}
+                  noResultsLabel="No matching documents"
+                  disabled={evidenceDocs === null || saving}
+                />
               )}
             </FormField>
             <FormField label={<span className="label-text font-medium">Title</span>} required>
@@ -765,17 +986,17 @@ export default function QMSStandards() {
               )}
             </FormField>
             <div className="flex justify-end gap-2">
-              <Button variant="ghost" size="sm" onClick={() => { setShowAddEvidence(false); setEvidenceClauseId(null); }}>Cancel</Button>
+              <Button variant="ghost" size="sm" onClick={closeEvidenceDialog} disabled={saving}>Cancel</Button>
               <Button
                 size="sm"
                 onClick={handleAddEvidence}
-                disabled={saving || !evidenceForm.title}
+                disabled={saving || !evidenceForm.title.trim()}
               >
                 {saving ? 'Linking...' : 'Link Evidence'}
               </Button>
             </div>
           </div>
-        </Modal>
+        </UiModal>
       )}
 
       {/* Auto-Link Result Modal */}
@@ -1099,6 +1320,15 @@ function ClauseRow({
                         />
                       )}
                     </div>
+                    {ev.document_id != null && (
+                      <Link
+                        to={linkedDocumentHref(ev.document_id)}
+                        className="text-xs text-fd-blue hover:underline"
+                        aria-label={`Open document: ${ev.title}`}
+                      >
+                        Open document
+                      </Link>
+                    )}
                     {ev.module_reference && (
                       <a href={ev.module_reference} className="text-xs text-fd-blue hover:underline">
                         {ev.module_reference}
