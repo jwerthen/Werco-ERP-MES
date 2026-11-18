@@ -294,6 +294,19 @@ statement, writes no row, and adds no environment variable, secret, cron or work
   under, and the migration will not pick which company's record to change.
   See [API.md → Customer Complaints & RMA](API.md#customer-complaints--rma).
 
+**QMS `company_id` repair.** Apply **126_qms_company_id** after **125_work_order_comments** through
+the normal API boot migration path. It adds the `company_id` column (`integer NOT NULL`, FK
+`<table>_company_id_fkey`, index `ix_<table>_company_id`) that production's `qms_standards`,
+`qms_clauses` and `qms_clause_evidence` lack, and no-ops on any database that has it. Production's
+three tables are empty, so nothing is backfilled; elsewhere a row takes its creator's, standard's or
+clause's company, or the only company, and a multi-company database with an unattributable row fails
+the boot (rolled back to `125`) with the ids rather than guess. Under `SET LOCAL lock_timeout = '5s'`
+the FK briefly takes SHARE ROW EXCLUSIVE on `companies`. No environment variable, secret, cron or
+worker job is added. On an application rollback keep the column: before redeploying a pre-126 image,
+from a checkout of this release run `railway run --service werco-api alembic stamp
+125_work_order_comments`. The downgrade leaves the column in place by design. Verification and the
+full notes are in [QMS `company_id` repair](DEPLOYMENT.md#qms-company_id-repair-migration-126).
+
 **Work-order comments, mentions and watchers.** Apply **125_work_order_comments** after
 **124_maintenance_assets** through the normal API boot migration path. It is purely additive: three
 new tenant tables (`comments`, `comment_mentions`, `entity_watchers`) with RLS enabled and revokes

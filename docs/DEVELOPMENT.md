@@ -960,14 +960,32 @@ After bootstrap, normal incremental `alembic upgrade head` is the standard path.
 > Anything a migration creates with no model mirror — raw-DDL trigger functions and RLS
 > statements, but equally ordinary `op.create_index` / `op.create_check_constraint` /
 > `op.create_foreign_key` calls — is **silently skipped** when the baseline is stamped past it.
-> Prod has been bitten three times, all the same cause: the `008` audit-immutability triggers
+> Prod has been bitten four times, all the same cause: the `008` audit-immutability triggers
 > (found 2026-07-07; see `docs/SUPABASE_SECURITY.md`), ~42 read-path indexes that lived only in
 > migrations `001`/`003`/`020`/`026`/`027` (found 2026-07-31 via a read-only prod `pg_indexes`
-> audit; restored by `079_restore_stamped_over_idx`), and — same audit, same day, against
-> `pg_constraint` — `003`'s named lineage foreign keys and value-range CHECK constraints
-> (restored by `080_restore_stamped_over_con`). Both `079` and `080` also mirror every restored
-> object into the owning model (`__table_args__` / `ForeignKey(...)`) so `create_all` reproduces
-> them and a future stamp can never skip them again.
+> audit; restored by `079_restore_stamped_over_idx`); same audit, same day, against
+> `pg_constraint`, `003`'s named lineage foreign keys and value-range CHECK constraints
+> (restored by `080_restore_stamped_over_con`); and the `company_id` column on `qms_standards`,
+> `qms_clauses` and `qms_clause_evidence` (found 2026-11-18 by a read-only comparison of prod
+> against `Base.metadata`; restored by `126_qms_company_id`). Both `079` and `080` also mirror
+> every restored object into the owning model (`__table_args__` / `ForeignKey(...)`) so
+> `create_all` reproduces them and a future stamp can never skip them again.
+>
+> The QMS case is the same hazard reached from the other side, and the model mirror did not
+> prevent it. Prod's QMS tables were built by `create_all` while the QMS models had no
+> `company_id`, and prod was stamped past `026`, the migration that adds it. When `59dbf26d`
+> (2026-06-05) later gave the models `TenantMixin` on the assumption that `026` had run, nothing
+> added the column: `create_all` never alters a table that already exists, and `026` had been
+> stamped over. Every tenant-scoped QMS query failed with `UndefinedColumn`, and the per-table
+> `company_id` line below ("verified model-mirrored") was true only of a *fresh* bootstrap. So:
+> **a model that gains a column, index or constraint needs a migration that really adds it,
+> guarded, even when an old migration "already" did** — a database stamped past that migration
+> never ran it. `126` restores the column with create_all's exact names (`<table>_company_id_fkey`,
+> `ix_<table>_company_id`), backfills each row's company from its creator (a standard; platform
+> principals excluded), its standard (a clause) or its clause (evidence), assigns the one company
+> only when exactly one exists, and otherwise refuses with the row ids rather than guess. Its
+> downgrade deliberately keeps the column: it is part of revision `125`'s schema. The migration's
+> docstring has the full argument.
 >
 > On a fresh Supabase Postgres: after `create_all`, stamp at **`058_process_sheets`** so
 > `alembic upgrade head` really runs `059`+ — `059` (dynamic RLS enablement + privilege
@@ -1010,7 +1028,9 @@ After bootstrap, normal incremental `alembic upgrade head` is the standard path.
 > Everything else at or below `058` is covered: enum `ALTER TYPE` migrations (`create_all` builds
 > each enum at its current model shape), data heals/backfills (vacuous on an empty DB), and the
 > remaining index/constraint DDL (`006`, `016`, `022`, `026`/`027` tenant uniques + per-table
-> `company_id`, `030`–`037`, `041`/`076`, `042`, `044`–`058`) is verified model-mirrored. The rule going
+> `company_id`, `030`–`037`, `041`/`076`, `042`, `044`–`058`) is verified model-mirrored — for a
+> fresh bootstrap. A database whose tables predate a model change is a different case: see the
+> QMS `company_id` paragraph above (`126`). The rule going
 > forward: DDL the models *can* express must be declared on the model in the same PR as the
 > migration (the `042`/`078`/`079`/`080` lock-step convention) — and never stamp past DDL they cannot.
 
