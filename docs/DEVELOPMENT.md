@@ -446,7 +446,7 @@ prints the exact entry to paste. Do all three in the same change:
 1. Bump the prompt's `version`: patch for wording or layout only, minor for behavior, major
    for the output contract.
 2. Add a line to `app/services/prompts/CHANGELOG.md`, such as
-   ``- `copilot_chat` 1.7.1 → 1.7.2 — <what changed and why>``.
+   ``- `<id>` <old> → <new> — <what changed and why>``.
 3. **Append** the printed `{version, sha256, variants}` entry to that id's history in
    `prompt_lock.json`.
 

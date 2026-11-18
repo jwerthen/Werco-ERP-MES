@@ -655,7 +655,20 @@ def test_rule_placeholder_metadata_matches_its_query(db_session: Session, rule: 
     # Public keys only: internal ``_``-prefixed markers differ by design (the placeholder's
     # ``_evaluation_failed``, the not-tracked row's ``_not_tracked``) and are never serialized.
     assert _public_keys(placeholder) == _public_keys(computed)
-    assert not {k for k in _public_keys(computed) if k.startswith("_")}, "an unlisted internal key"
+
+    # ...but a COMPUTED row may carry exactly one internal marker, ``_not_tracked``, and only on
+    # the internal-audit / management-review rule. Comparing public keys alone would let a query
+    # return ``_evaluation_failed: True`` (rolling its clause up ``not_assessed`` as a failed
+    # rule) or ``_not_tracked: True`` (auto-link would never persist it) on a real computed row
+    # and still pass. ``_rule_id`` is stamped by ``discover_evidence_for_clause``, never by a query.
+    allowed_internal = {NOT_TRACKED_KEY} if rule["id"] == "internal_audit_review" else set()
+    assert {k for k in computed if k.startswith("_")} == allowed_internal, (
+        f"rule {rule['id']!r}'s query returned internal keys "
+        f"{sorted(k for k in computed if k.startswith('_'))}, expected {sorted(allowed_internal)}"
+    )
+    assert set(computed) - _public_keys(computed) == allowed_internal
+    for key in allowed_internal:
+        assert computed[key] is True, f"rule {rule['id']!r} carries {key!r} but not as True"
 
 
 def test_not_computed_is_reserved_for_the_placeholder_in_every_branch():
