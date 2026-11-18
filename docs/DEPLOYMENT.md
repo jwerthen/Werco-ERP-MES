@@ -245,7 +245,8 @@ path. No environment variable, secret, cron or worker job is added, and no model
   with the database back at `125`, and redeploying is safe.
 - **Order.** None beyond the boot path: the code already on `main` expects the column.
 - **Verify** after the deploy: the query below returns three rows, each `NO` with both names present,
-  and the QMS page loads and saves a standard in a test company.
+  and the QMS Standards page loads (its list call answers 200 where it answered 500 before). A read
+  is enough: there is no need to create a quality record on production to prove the repair.
 
     ```sql
     SELECT c.table_name, c.is_nullable, con.conname, ix.indexname
