@@ -1171,6 +1171,16 @@ def _retire_unmatched_auto_links(
     verified and deleted. These row locks come before the audit-chain lock, which
     ``auto_link_standard`` takes only after its flush -- the same order as those two routes.
 
+    "As it then stands" is what ``populate_existing()`` on the locked read buys. Without it the
+    ORM returns the copy already in the session's identity map for any row loaded earlier in the
+    request, discarding the locked row's fresh ``is_verified`` / ``document_id`` /
+    ``verification_notes``: a Verify or annotation that committed while this run waited would be
+    overruled and the row retired, left verified AND deleted. Nothing earlier in an auto-link
+    request loads a clause's evidence today; ``populate_existing()`` keeps the decision right the
+    day something does (the same pattern as ``_lock_live_evidence_or_404``). It would also discard
+    an unflushed change to a returned row, and there is none to lose: a run writes a clause's
+    evidence only after retiring from it. ``tests/api/test_qms_auto_link_lock_order.py`` pins it.
+
     Returns ``(retired, kept_reviewed)``. Each retired entry carries a JSON-ready pre-delete
     ``snapshot`` for the caller's required audit DELETE row.
     """
@@ -1185,6 +1195,7 @@ def _retire_unmatched_auto_links(
         )
         .order_by(QMSClauseEvidence.id)
         .with_for_update()
+        .populate_existing()  # judge the row as locked, never a stale session copy (see docstring)
         .all()
     )
 

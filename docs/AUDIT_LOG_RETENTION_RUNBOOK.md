@@ -199,11 +199,17 @@ PostgreSQL there is no catalog to read: a row with entries says the trigger stat
 and is not capped). A company with **no** audit entries gets `no_data` / `not_assessed` whatever the
 chain and trigger state, though its row still says when the chain is paused (`docs/API.md` → QMS
 Standards & Audit Readiness). A failed `pg_trigger` read logs a WARNING with its traceback once per
-worker process (two threads failing at the same moment may each warn), then repeats at DEBUG until a
-read succeeds, so a persistent failure does not flood the log. Evidence links stored before
-that change keep the old title and wording until the next auto-link run in which the audit rule
-computes (a run where it fails leaves the stored link unchanged; see `evidence_not_computed` in
-`docs/API.md`).
+run of consecutive failures in each worker process, and every repeat in that run at DEBUG; a
+successful read ends the run, so the next failure after it warns again (two threads failing at the
+same moment may each warn). A persistent failure therefore does not flood the log. Evidence links
+stored before that change keep the old title and wording until the next auto-link run in which the
+audit rule computes for their clause (a run where it fails leaves the stored link unchanged; see
+`evidence_not_computed` in `docs/API.md`). That rule no longer matches a 9.2 *Internal audit* or 9.3
+*Management review* clause (unless its title or description says "audit trail" or "audit log"), so
+such a clause's stored link is never refreshed: the next auto-link run retires it, or, if a person
+verified it, attached a document or left non-blank verification notes, keeps it for review
+(`evidence_kept_reviewed`) with whatever title and wording it had at its last refresh, or a person
+has since given it (`docs/API.md` → *Auto-link retires its own stale links*).
 
 ---
 

@@ -8558,9 +8558,10 @@ delete sees it and refuses, or waits for the delete and then fails its own forei
 
 Only the active company's QMS rows are read. A link from another company's QMS row is not
 named, since that would disclose the other tenant's record; on Postgres that delete still fails at
-the foreign key until the link is cleared. The QMS create / update routes now refuse another
-company's document (see QMS Standards → *A linked document must be your company's*), so such a link
-can only be one written before that check existed, when they accepted any existing document id.
+the foreign key until the link is cleared. Since 2026-11-17 (#348) the QMS create / update routes
+refuse another company's document (see QMS Standards → *A linked document must be your
+company's*), so such a link can only be one written before that check existed, when they accepted
+any existing document id.
 
 Every other table with a foreign key to `documents.id` is checked the same way: before the audit
 write and before any change, so a refusal (**409**) writes nothing and keeps the bytes. None of these
@@ -8870,13 +8871,19 @@ in `RBAC_PERMISSIONS.md`.
 > clause's `compliance_status`. Of the fields that change, auto-link
 > (`POST /qms-standards/{standard_id}/auto-link`) stores only `description` (`health_status`,
 > `health_detail` and `suggested_compliance` are computed per call and never persisted), so stored
-> evidence picks up the new wording on the next auto-link run in which the audit rule computes (a run
-> where it fails leaves the stored link unchanged; see `evidence_not_computed`). The QMS page's
+> evidence picks up the new wording on the next auto-link run in which the audit rule computes for its
+> clause (a run where it fails leaves the stored link unchanged; see `evidence_not_computed`). That
+> rule no longer matches a 9.2 / 9.3 clause (unless its text says "audit trail" or "audit log"), so
+> such a clause's stored link never picks it up: the next run retires the link or keeps it for review
+> unrefreshed (see *Auto-link retires its own stale links* below). The QMS page's
 > linked-evidence list shows each stored link's `description` under its title. For an auto-linked row
 > that is the text written by the last auto-link run in which its rule computed, dated by the row's
 > "Refreshed" stamp; an edit through `PUT /qms-standards/evidence/{evidence_id}` replaces it without
 > moving that stamp, until the next auto-link run in which the rule computes overwrites it (a run where
-> it fails leaves the stored link unchanged; see `evidence_not_computed`). An auto-linked description
+> it fails leaves the stored link unchanged; see `evidence_not_computed`). A link whose rule no longer
+> matches its clause (a 9.2 / 9.3 clause's audit-trail link, say) is not refreshed while that stays
+> true: auto-link retires it, or keeps it for review exactly as it stands (a kept link is refreshed
+> again only if the clause is later re-worded so its rule matches). An auto-linked description
 > is always shown in full, never clamped, because the paused-chain and trigger disclosures sit at the
 > end of the text. A manual description is clamped to three lines behind **Show more** only while it
 > needs more than three lines on screen, so clamped text always has that control. `health_status`,
@@ -8887,8 +8894,11 @@ in `RBAC_PERMISSIONS.md`.
 > Hash-Chain" was untrue for every paused entry, and until the list showed `description` the title was
 > the one claim it showed; the title now names what the row reports and asserts nothing. Existing
 > auto-linked evidence picks up the new title on the next auto-link run in which the audit rule
-> computes (a run where it fails leaves the stored link unchanged; see `evidence_not_computed`),
-> matched by rule id; no migration. The row's `title`, `module_reference` and `evidence_type` do not
+> computes for its clause (a run where it fails leaves the stored link unchanged; see
+> `evidence_not_computed`), matched by rule id; no migration. On a 9.2 / 9.3 clause, which that rule
+> no longer matches, a stored link keeps whatever title it had at its last refresh (or a person has
+> since given it) until auto-link retires it or, if it is kept for review, a person removes it (see
+> *What operators see* below). The row's `title`, `module_reference` and `evidence_type` do not
 > change with the chain or trigger state.
 
 > **The PM evidence row now judges the PM schedules, not just maintenance work orders — expect the
@@ -8928,9 +8938,15 @@ in `RBAC_PERMISSIONS.md`.
 > **Deletes are soft (records retained):** the three `DELETE` endpoints above return **204** but
 > do not physically remove rows — the standard / clause / evidence is marked deleted and disappears
 > from all reads (including the nested clauses/evidence on `GET /qms-standards/{standard_id}`), while
-> the record is retained for AS9100D traceability. All QMS create / update / delete operations — plus
-> a status-change entry when a clause's `compliance_status` changes — are captured in the tamper-evident
-> audit trail (`GET /api/v1/audit/`).
+> the record is retained for AS9100D traceability. Every QMS create / update / delete route — plus
+> a status-change entry when a clause's `compliance_status` changes — writes to the tamper-evident
+> audit trail (`GET /api/v1/audit/`), with three routes audited at the summary level rather than per
+> record: `POST /qms-standards/{standard_id}/clauses/bulk` and `POST /qms-standards/{standard_id}/upload-pdf`
+> each write one entry on the standard for all the clauses they add; and
+> `POST /qms-standards/{standard_id}/auto-link` writes no entry for the evidence links it creates or
+> refreshes, just the run's one best-effort summary entry on the standard (`Auto-linked evidence: N
+> created, M updated…`), while each link it retires gets a **required** `DELETE` entry (see *Auto-link
+> retires its own stale links* below). An evidence `PUT` that changes nothing writes no entry.
 
 > **A clause of a removed standard is removed with it.** Removing a standard marks only the
 > standard row deleted; its clauses keep their own flag. Every route that takes a clause id treats
@@ -8991,7 +9007,9 @@ in `RBAC_PERMISSIONS.md`.
 > row in `old_values` / `new_values` and the field-level diff in `extra_data.changes`; the `DELETE`
 > entry carries the row as it stood before the removal in `old_values` and
 > `extra_data.soft_delete: true`. Auto-link (`POST /qms-standards/{standard_id}/auto-link`) keeps
-> its own audit rules and is not changed by this.
+> its own audit rules and is not changed by this; those rules include required evidence too, since
+> each link it retires gets a required `DELETE` entry (see *Auto-link retires its own stale links*
+> below).
 >
 > Each entry's `resource_identifier` is the evidence title cut to 255 characters (the audit
 > column's length; a title may be 500), and its `description` keeps the whole title. Before the
@@ -9062,9 +9080,12 @@ in `RBAC_PERMISSIONS.md`.
 > for Review* with its clause number, reason and rule, and raises a warning toast when any were kept.
 >
 > **What operators see:** a 9.2 or 9.3 clause already linked to the audit-trail row loses that link
-> on the next **Auto-Link Evidence** run, unless someone verified or annotated it. That link still
-> shows its old title, *Audit Trail (Immutable Hash-Chain Log)*: the audit rule no longer matches
-> those clauses, so the rename above never refreshes it there. Such a link is kept and listed in
+> on the next **Auto-Link Evidence** run, unless someone verified or annotated it. That link keeps
+> whatever title and description it had at its last refresh, because the audit rule no longer matches
+> those clauses and no later run refreshes it there: the new title if an auto-link run refreshed it
+> after the rename above but before the rule stopped matching, the old *Audit Trail (Immutable
+> Hash-Chain Log)* otherwise (an edit a person made since through
+> `PUT /qms-standards/evidence/{evidence_id}` stands). Such a link is kept and listed in
 > `evidence_kept_reviewed`: review it and, if it is wrong, remove it by hand
 > (`DELETE /qms-standards/evidence/{evidence_id}`). Retirement never changes a clause's
 > `compliance_status`, so a clause someone already set to `compliant` keeps that status until a

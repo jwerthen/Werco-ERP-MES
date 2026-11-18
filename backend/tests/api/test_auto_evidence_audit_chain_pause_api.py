@@ -56,6 +56,22 @@ def _next() -> int:
     return _seq["n"]
 
 
+@pytest.fixture(autouse=True)
+def _reset_trigger_read_failure_flag():
+    """Start and end every test with no failed ``pg_trigger`` read on record.
+
+    ``auto_evidence_service._trigger_read_failure_reported`` is module state that outlives a test
+    (see the same fixture in tests/services/test_auto_evidence_audit_chain_pause.py). Nothing here
+    sets it today: these tests run on SQLite, where the trigger check returns before it touches
+    the flag. The reset is for a test added here that fakes PostgreSQL, so it neither inherits a
+    value an earlier test on this worker left nor hands one on. Plain assignment: ``monkeypatch``
+    would restore a leaked value.
+    """
+    auto_evidence_service._trigger_read_failure_reported = False
+    yield
+    auto_evidence_service._trigger_read_failure_reported = False
+
+
 def _set_chain(monkeypatch, enabled: bool) -> None:
     """Flip the one ``settings`` object both the request-scoped writer and the evidence row read."""
     monkeypatch.setattr(settings, "AUDIT_HASH_CHAIN_ENABLED", enabled)

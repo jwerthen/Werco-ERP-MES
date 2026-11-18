@@ -70,6 +70,21 @@ def _next() -> int:
     return _seq["n"]
 
 
+@pytest.fixture(autouse=True)
+def _reset_trigger_read_failure_flag():
+    """Start and end every test with no failed ``pg_trigger`` read on record.
+
+    ``auto_evidence_service._trigger_read_failure_reported`` is module state that lives as long as
+    the worker process. A test whose pretend-PostgreSQL read fails leaves it ``True``, and a later
+    test on the same worker that asserts the first failure's WARNING would then see DEBUG instead
+    -- an order-dependent failure. Plain assignment, not ``monkeypatch``: ``monkeypatch`` would put
+    back whatever value it found, including a ``True`` leaked by an earlier test.
+    """
+    auto_evidence_service._trigger_read_failure_reported = False
+    yield
+    auto_evidence_service._trigger_read_failure_reported = False
+
+
 def _set_chain(monkeypatch, enabled: bool) -> None:
     """Flip the one ``settings`` object both the writer and the evidence row read per call."""
     monkeypatch.setattr(settings, "AUDIT_HASH_CHAIN_ENABLED", enabled)
@@ -492,8 +507,8 @@ def test_a_persistent_trigger_read_failure_logs_its_traceback_once_per_run(db_se
     triggers. The first failure of a run logs at WARNING with its traceback, the repeats at DEBUG;
     a successful read ends the run, so the next failure warns again. The row's answer -- capped,
     "could not be checked" -- is the same every time: quieter logging changes nothing it says.
+    (No earlier failure is on record: ``_reset_trigger_read_failure_flag`` clears it.)
     """
-    monkeypatch.setattr(auto_evidence_service, "_trigger_read_failure_reported", False)
     _set_chain(monkeypatch, True)
     _write(db_session, _writer(db_session, COMPANY_A), 2)
     monkeypatch.setattr(auto_evidence_service, "_dialect_name", lambda db: "postgresql")
