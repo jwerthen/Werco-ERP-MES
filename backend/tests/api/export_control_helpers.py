@@ -14,7 +14,7 @@ canary: they are business identifiers the owner allowed through.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, Dict, Optional, Tuple
 
@@ -36,6 +36,7 @@ from app.models.time_entry import TimeEntry
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
+from app.services.company_time import company_today
 from tests.api.kiosk_test_helpers import ensure_company
 
 CANARY = "ITARCANARY"
@@ -137,7 +138,11 @@ def seed_world(db: Session, *, company_id: int = 1, controlled: bool = True, pre
     """
     p = prefix
     ensure_company(db, company_id)
-    today = date.today()
+    # The company's own calendar day, the one the routes judge dates by (overdue, due-soon,
+    # re-evaluation). A bare date.today() is the CI runner's UTC date, which is already
+    # tomorrow from 6pm Central, so a canary seeded "due yesterday" stopped being overdue
+    # every evening and its case read as vacuous.
+    today = company_today(db, company_id)
     now = datetime.utcnow().replace(microsecond=0)
 
     reporter = User(
