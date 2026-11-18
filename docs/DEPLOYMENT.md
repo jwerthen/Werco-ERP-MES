@@ -220,6 +220,53 @@ rollback step; it does not undo documents, receipts, production or shipments
 already created by completed actions. Intake-linked Documents cannot be deleted
 through the application because the saved source and receipt must remain valid.
 
+### QMS `company_id` repair (migration 126)
+
+Apply **126_qms_company_id** after **125_work_order_comments** through the normal API boot migration
+path. No environment variable, secret, cron or worker job is added, and no model or route changes.
+
+- **What it does.** Production's `qms_standards`, `qms_clauses` and `qms_clause_evidence` have no
+  `company_id` (their tables predate `TenantMixin` on the QMS models, and the database was stamped past
+  `026`, which adds it), so every tenant-scoped QMS query fails. The revision adds the column exactly as
+  `create_all` builds it: `integer NOT NULL`, FK `<table>_company_id_fkey` to `companies(id)` with no
+  `ON DELETE`, index `ix_<table>_company_id`. Production holds zero rows in the three tables, so
+  nothing is backfilled there. On any database that already has the column (every `create_all`
+  database, every one that ran `026`) it reads the catalog and changes nothing.
+- **Backfill and refusal** (only where rows exist without the column). A standard takes its creator's
+  company (a superuser or `PLATFORM_ADMIN` creator does not count), a clause its standard's, evidence
+  its clause's; a row left over gets the company only when the database holds exactly one. With two or
+  more companies and an unattributable row, the revision raises, naming the tables, counts and ids: the
+  boot fails, the transaction rolls back to `125`, and the old deployment keeps serving. A person
+  decides the owner, sets it by hand (`ALTER TABLE <t> ADD COLUMN IF NOT EXISTS company_id integer;
+  UPDATE <t> SET company_id = …`) and redeploys; the revision keeps values already set.
+- **Locks.** `SET LOCAL lock_timeout = '5s'`. Where it repairs, the QMS tables are ACCESS EXCLUSIVE
+  until the boot transaction commits and the FK briefly takes SHARE ROW EXCLUSIVE on `companies`
+  (blocks writes to it, not reads); on empty tables this is milliseconds. A timeout fails the boot
+  with the database back at `125`, and redeploying is safe.
+- **Order.** None beyond the boot path: the code already on `main` expects the column.
+- **Verify** after the deploy: the query below returns three rows, each `NO` with both names present,
+  and the QMS page loads and saves a standard in a test company.
+
+    ```sql
+    SELECT c.table_name, c.is_nullable, con.conname, ix.indexname
+      FROM information_schema.columns c
+      LEFT JOIN pg_constraint con
+             ON con.conrelid = ('public.' || c.table_name)::regclass
+            AND con.conname = c.table_name || '_company_id_fkey'
+      LEFT JOIN pg_indexes ix
+             ON ix.schemaname = 'public' AND ix.indexname = 'ix_' || c.table_name || '_company_id'
+     WHERE c.table_schema = 'public' AND c.column_name = 'company_id'
+       AND c.table_name IN ('qms_standards', 'qms_clauses', 'qms_clause_evidence')
+     ORDER BY 1;
+    ```
+
+- **Rollback.** Keep the column: the pre-126 code needs it too. Once `126` has run, an older image
+  cannot boot until the database is moved back to `125`; from a checkout of this release run `alembic
+  stamp 125_work_order_comments` (or `alembic downgrade -1`, which is equivalent here) before
+  redeploying a pre-126 image. The downgrade deliberately leaves the column, FK, index and values in
+  place, because they belong to revision `125`'s schema; the next forward deploy re-runs `126` as a
+  no-op.
+
 ### Work-order comments, mentions and watchers (migration 125)
 
 Apply **125_work_order_comments** after **124_maintenance_assets** through the normal API boot
