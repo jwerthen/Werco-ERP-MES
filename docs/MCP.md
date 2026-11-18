@@ -43,18 +43,17 @@ shifted: 15 convenience + **764** generated, 16 shadowed. The read-only catalog 
 joined `EXCLUDED_OPERATIONS` in the same change (§6.1): counts unchanged at 15 convenience + **764**
 generated, 16 shadowed, and the read-only catalog at 8 convenience + **298** generated.
 
-**Re-checked again on 2026-11-16 after work-order comments (migration 125) added three read tools**
+**Re-checked again on 2026-11-16 after work-order comments (migration 125) and then the custom report
+builder fixes merged on top; the counts here are for both together.** Comments added three read tools
 (`list_record_comments` and `get_record_watch_state` under the new `Comments` tag,
-`search_mentionable_users` under `Users`) while the five comment / watcher writes join
-`EXCLUDED_OPERATIONS` (§6.1); no existing name shifted: 15 convenience + **767** generated, 16
-shadowed. The read-only catalog is 8 convenience + **300** generated (the two `Comments` reads;
-mention search sits under `Users`, which the read-only deny list always carries). The AI-external
-listing is unchanged at 48: none of the three reads is on its allowlist (§4.2).
-**Re-checked again on 2026-11-16 after the custom report builder fixes merged on top and added three
-tools** (`get_report_template`, `update_report_template`, `run_report_template`; no existing name
-shifted): 15 convenience + **770** generated, 16 shadowed. The read-only catalog is 8 convenience +
-**301** generated (`get_report_template` is the one new read; the run is a `POST`), and the
-AI-external listing is still 48. The same change altered
+`search_mentionable_users` under `Users`) while the five comment / watcher writes joined
+`EXCLUDED_OPERATIONS` (§6.1); the report builder added three more (`get_report_template`,
+`update_report_template`, `run_report_template`). No existing name shifted: 15 convenience + **770**
+generated, 16 shadowed. The read-only catalog is 8 convenience + **301** generated, three of them new:
+the two `Comments` reads and `get_report_template` (mention search sits under `Users`, which the
+read-only deny list always carries; the template update is a `PATCH` and the run a `POST`). The
+AI-external listing is unchanged at 48: none of the six new tools is on its allowlist (§4.2). The
+report builder change also altered
 **`run_custom_report`'s result**: it is now one object, `{columns, rows, row_count, truncated,
 notes}`, where it used to be a bare list of row dicts that arrived wrapped as `{"result": [...]}`
 (§11). The labor-not-tracked note moved from response headers into `notes`. `export_custom_report`'s

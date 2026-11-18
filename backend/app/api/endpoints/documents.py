@@ -107,9 +107,9 @@ def _qms_link_blockers(db: Session, company_id: int, document_id: int) -> Tuple[
 
     Scoped to the active company. A link held by another company's QMS row is not
     reported, since naming it would disclose the other tenant's record. On Postgres that
-    delete still fails at the foreign key. The QMS create / update routes now refuse another
-    company's document (``qms_standards._assert_company_document``), so such a link can only
-    be one written before that check, when they accepted any existing document id.
+    delete still fails at the foreign key. Since 2026-11-17 (#348) the QMS create / update routes
+    refuse another company's document (``qms_standards._assert_company_document``), so such a link
+    can only be one written before that check, when they accepted any existing document id.
     """
     standards = (
         db.query(QMSStandard.name, QMSStandard.is_deleted)
