@@ -61,6 +61,24 @@ const typeIcons: Record<string, string> = {
   other: '📄',
 };
 
+/**
+ * Document types that describe one part, and so must name it on upload: a drawing, an
+ * inspection plan and an FAI report are found by part number. Every other type (procedures,
+ * work instructions, specifications, forms and quality records) can be company-wide, so the
+ * part is optional there. The API has always accepted a part-less upload; this is a UI rule.
+ * The choice (a part, or none) stays on every later revision: a revision must keep its
+ * predecessor's part link. So never pick a placeholder part to get past the form.
+ *
+ * Each entry is the noun phrase the form uses for that type, written out rather than derived
+ * from the API's label ("Fai" would read "a fai").
+ */
+const PART_REQUIRED_TYPE_PHRASES: Readonly<Record<string, { a: string; this: string }>> = {
+  drawing: { a: 'a drawing', this: 'this drawing' },
+  inspection_plan: { a: 'an inspection plan', this: 'this inspection plan' },
+  fai: { a: 'an FAI report', this: 'this FAI report' },
+};
+export const PART_REQUIRED_DOCUMENT_TYPES: ReadonlySet<string> = new Set(Object.keys(PART_REQUIRED_TYPE_PHRASES));
+
 const formatFileSize = (bytes?: number) => {
   if (!bytes) return '-';
   if (bytes < 1024) return `${bytes} B`;
@@ -109,6 +127,8 @@ export default function Documents() {
     file: null as File | null,
   });
   const partsById = useMemo(() => new Map(parts.map(part => [part.id, part])), [parts]);
+  const partRequiredPhrase = PART_REQUIRED_TYPE_PHRASES[uploadForm.document_type];
+  const partRequired = partRequiredPhrase !== undefined;
 
   useEffect(() => {
     let active = true;
@@ -152,8 +172,8 @@ export default function Documents() {
       showToast('error', 'Please select a file');
       return;
     }
-    if (!partsById.has(uploadForm.part_id)) {
-      setActionError('Select the associated part before uploading so this document can be found by part number.');
+    if (partRequiredPhrase && !partsById.has(uploadForm.part_id)) {
+      setActionError(`Select the associated part before uploading ${partRequiredPhrase.this} so it can be found by part number.`);
       return;
     }
 
@@ -163,7 +183,8 @@ export default function Documents() {
     formData.append('document_type', uploadForm.document_type);
     formData.append('description', uploadForm.description);
     formData.append('revision', uploadForm.revision);
-    if (uploadForm.part_id > 0) {
+    // Only a part from the loaded list is ever sent; "no part" sends nothing (company-wide).
+    if (partsById.has(uploadForm.part_id)) {
       formData.append('part_id', uploadForm.part_id.toString());
     }
 
@@ -524,16 +545,24 @@ export default function Documents() {
               )}
             </FormField>
           </div>
-          <FormField label="Associated Part" required>
+          <FormField
+            label="Associated Part"
+            required={partRequired}
+            help={
+              partRequiredPhrase
+                ? `Required for ${partRequiredPhrase.a}, so it can be found by part number. Choose the part explicitly; filenames are not used to infer a link.`
+                : 'Optional. Leave it blank for a company-wide document such as a procedure or form. Every later revision keeps this choice, a part or no part.'
+            }
+          >
             {field => (
               <select
                 {...field}
                 value={uploadForm.part_id || ''}
                 onChange={e => setUploadForm({ ...uploadForm, part_id: Number(e.target.value) })}
                 className="input"
-                required
+                required={partRequired}
               >
-                <option value="">Select the associated part</option>
+                <option value="">{partRequired ? 'Select the associated part' : 'No part (company-wide document)'}</option>
                 {parts.map(p => (
                   <option key={p.id} value={p.id}>
                     {p.part_number} - {p.name}
@@ -542,7 +571,6 @@ export default function Documents() {
               </select>
             )}
           </FormField>
-          <p className="text-xs text-slate-300">Required for part-number lookup. Choose the part explicitly; filenames are not used to infer a link.</p>
           <FormField label="Description">
             {field => (
               <textarea
