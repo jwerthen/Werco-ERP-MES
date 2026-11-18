@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useLayoutEffect, useRef } from 'react';
 import {
   RectangleStackIcon,
   ListBulletIcon,
@@ -8,7 +8,9 @@ import {
   QuestionMarkCircleIcon,
 } from '@heroicons/react/24/outline';
 import api from '../services/api';
-import { Button, ConfirmDialog, statusColor, useToast } from '../components/ui';
+// The shared dialog primitive, aliased because this page still carries its own
+// older local `Modal` helper (below) for its form dialogs.
+import { Button, ConfirmDialog, Modal as UiModal, statusColor, useToast } from '../components/ui';
 import { FormField } from '../components/ui/FormField';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { formatCentralDate } from '../utils/centralTime';
@@ -55,6 +57,30 @@ function evidenceNotComputedMessage(failed: number): string {
   return `${failed} ${rules} could not be computed this run. ${links} left as last refreshed, not updated.`;
 }
 
+/** Why auto-link kept a stale link: the API's `reason`, in words. */
+const KEPT_REASON_LABELS: Record<string, string> = {
+  verified: 'Verified',
+  annotated: 'Document or notes attached',
+};
+
+/**
+ * What an auto-link run says about stale auto-linked links it did not retire
+ * because a person reviewed them. The run succeeded, but each one is left for
+ * a person to decide.
+ */
+function keptReviewedMessage(kept: number): string {
+  if (kept === 1) {
+    return (
+      '1 auto-linked evidence link no longer matches its clause but was kept because a person ' +
+      'verified or annotated it. Check whether it still belongs.'
+    );
+  }
+  return (
+    `${kept} auto-linked evidence links no longer match their clauses but were kept because a person ` +
+    'verified or annotated them. Check whether each still belongs.'
+  );
+}
+
 export default function QMSStandards() {
   const { showToast } = useToast();
   const [standards, setStandards] = useState<QMSStandardListResponse[]>([]);
@@ -86,6 +112,7 @@ export default function QMSStandards() {
   const [deleteEvidencePending, setDeleteEvidencePending] = useState(false);
   const [autoLinkResult, setAutoLinkResult] = useState<AutoLinkSummary | null>(null);
   const [showAutoLinkResult, setShowAutoLinkResult] = useState(false);
+  const keptForReview = autoLinkResult?.evidence_kept_reviewed ?? [];
 
   const fetchData = useCallback(async () => {
     try {
@@ -245,11 +272,17 @@ export default function QMSStandards() {
       const result = await api.autoLinkStandard(selectedStandard.id);
       setAutoLinkResult(result);
       setShowAutoLinkResult(true);
-      // The run succeeded but did not compute everything it was asked to: a
-      // warning, not a success (which would hide it) or an error (nothing failed
-      // to save).
-      if (result.total_evidence_failed > 0) {
-        showToast('warning', `Auto-link finished with gaps. ${evidenceNotComputedMessage(result.total_evidence_failed)}`);
+      // The run succeeded but did not compute everything it was asked to, or
+      // left stale links a person reviewed for a person to check: a warning, not
+      // a success (which would hide it) or an error (nothing failed to save).
+      const failed = result.total_evidence_failed;
+      const kept = result.evidence_kept_reviewed?.length ?? 0;
+      const notices: string[] = [];
+      if (failed > 0) notices.push(evidenceNotComputedMessage(failed));
+      if (kept > 0) notices.push(keptReviewedMessage(kept));
+      if (notices.length > 0) {
+        const lead = failed > 0 ? 'Auto-link finished with gaps.' : 'Auto-link finished; review needed.';
+        showToast('warning', `${lead} ${notices.join(' ')}`);
       }
       // Refresh the standard detail to show new evidence
       loadStandardDetail(selectedStandard.id);
@@ -746,11 +779,21 @@ export default function QMSStandards() {
       )}
 
       {/* Auto-Link Result Modal */}
-      {showAutoLinkResult && autoLinkResult && (
-        <Modal
-          title={autoLinkResult.total_evidence_failed > 0 ? 'Auto-Link Evidence Finished With Gaps' : 'Auto-Link Evidence Complete'}
-          onClose={() => setShowAutoLinkResult(false)}
-        >
+      {autoLinkResult && (
+        <UiModal open={showAutoLinkResult} onClose={() => setShowAutoLinkResult(false)} size="lg">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="font-bold text-lg">
+              {autoLinkResult.total_evidence_failed > 0 ? 'Auto-Link Evidence Finished With Gaps' : 'Auto-Link Evidence Complete'}
+            </h3>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm btn-circle"
+              aria-label="Close"
+              onClick={() => setShowAutoLinkResult(false)}
+            >
+              X
+            </button>
+          </div>
           <div className="space-y-4">
             {autoLinkResult.total_evidence_failed > 0 && (
               <div className="bg-red-500/10 border border-red-500/30 rounded-sm p-3" data-testid="auto-link-not-computed">
@@ -762,6 +805,26 @@ export default function QMSStandards() {
                   {evidenceNotComputedMessage(autoLinkResult.total_evidence_failed)}{' '}
                   A clause with an uncomputed rule is not counted as compliant. Run Auto-Link again to retry.
                 </p>
+              </div>
+            )}
+            {keptForReview.length > 0 && (
+              <div className="bg-amber-500/10 border border-amber-500/30 rounded-sm p-3" data-testid="auto-link-kept-reviewed">
+                <div className="flex items-baseline gap-3">
+                  <p className="text-2xl font-bold text-amber-400 tabular-nums">{keptForReview.length}</p>
+                  <p className="text-xs font-semibold text-amber-300">Kept for Review</p>
+                </div>
+                <p className="text-xs text-slate-300 mt-1">
+                  {keptReviewedMessage(keptForReview.length)} If a link no longer applies, remove it from its clause.
+                </p>
+                <ul className="mt-2 divide-y divide-amber-500/20" aria-label="Evidence links kept for review">
+                  {keptForReview.map(item => (
+                    <li key={item.evidence_id} className="flex items-baseline gap-3 py-1 text-xs">
+                      <span className="font-mono font-semibold text-slate-200">Clause {item.clause_number}</span>
+                      <span className="text-amber-200">{KEPT_REASON_LABELS[item.reason] ?? item.reason}</span>
+                      {item.rule_id && <span className="ml-auto font-mono text-slate-500">rule {item.rule_id}</span>}
+                    </li>
+                  ))}
+                </ul>
               </div>
             )}
             <div className="grid grid-cols-2 gap-3">
@@ -783,6 +846,22 @@ export default function QMSStandards() {
                 <p className="text-xs text-amber-300">Evidence Updated</p>
               </div>
             </div>
+            {/* Absent is not zero: an API from before retirement existed sends no count. */}
+            {typeof autoLinkResult.total_evidence_retired === 'number' && (
+              <div className="bg-fd-raised rounded-sm p-3" data-testid="auto-link-retired">
+                <div className="flex items-baseline gap-3">
+                  <p className="text-2xl font-bold text-slate-300 tabular-nums">{autoLinkResult.total_evidence_retired}</p>
+                  <p className="text-xs font-semibold text-slate-300">Stale Links Retired</p>
+                </div>
+                {autoLinkResult.total_evidence_retired > 0 && (
+                  <p className="text-xs text-slate-400 mt-1">
+                    Auto-linked evidence links whose rule no longer matches their clause were removed, and each removal
+                    is recorded in the audit log. Clause compliance statuses were not changed: reassess any clause that
+                    relied on a removed link.
+                  </p>
+                )}
+              </div>
+            )}
 
             {Object.keys(autoLinkResult.compliance_summary).length > 0 && (
               <div>
@@ -807,7 +886,7 @@ export default function QMSStandards() {
               </Button>
             </div>
           </div>
-        </Modal>
+        </UiModal>
       )}
 
       {/* Bulk Import Modal */}
@@ -992,19 +1071,34 @@ function ClauseRow({
             ) : (
               <div className="space-y-2">
                 {clause.evidence_links.map(ev => (
-                  <div key={ev.id} className={`flex items-center gap-3 rounded-sm border px-3 py-2 text-sm ${ev.is_auto_linked ? 'bg-amber-500/10 border-amber-500/30' : 'bg-fd-panel border-fd-line'}`}>
+                  <div
+                    key={ev.id}
+                    data-testid="linked-evidence-row"
+                    className={`flex flex-wrap items-baseline gap-x-3 gap-y-2 rounded-sm border px-3 py-2 text-sm ${ev.is_auto_linked ? 'bg-amber-500/10 border-amber-500/30' : 'bg-fd-panel border-fd-line'}`}
+                  >
+                    {/* items-baseline: the title's first line, the link and the 44px buttons' labels share a baseline, with or without a description below. */}
                     {ev.is_auto_linked && (
                       <span className="text-amber-500 text-xs font-bold" title="Auto-linked from ERP/MES">{'\u26A1'}</span>
                     )}
                     <span className="badge badge-ghost badge-xs">{ev.evidence_type}</span>
-                    <span className="flex-1">
-                      {ev.title}
-                      {ev.is_auto_linked && ev.live_count != null && (
-                        <span className="ml-2 text-xs text-amber-300 font-medium">
-                          ({ev.live_count} records{ev.last_refreshed ? ` | Refreshed ${formatCentralDate(ev.last_refreshed)}` : ''})
-                        </span>
+                    {/* min-w-48: on a narrow screen the link and buttons wrap below the text rather than squeezing it to one character wide. */}
+                    <div className="flex-1 min-w-48">
+                      <span className="break-words">
+                        {ev.title}
+                        {ev.is_auto_linked && ev.live_count != null && (
+                          <span className="ml-2 text-xs text-amber-300 font-medium">
+                            ({ev.live_count} records{ev.last_refreshed ? ` | Refreshed ${formatCentralDate(ev.last_refreshed)}` : ''})
+                          </span>
+                        )}
+                      </span>
+                      {ev.description && (
+                        <EvidenceDescription
+                          id={`evidence-${ev.id}-description`}
+                          text={ev.description}
+                          autoLinked={ev.is_auto_linked}
+                        />
                       )}
-                    </span>
+                    </div>
                     {ev.module_reference && (
                       <a href={ev.module_reference} className="text-xs text-fd-blue hover:underline">
                         {ev.module_reference}
@@ -1102,6 +1196,100 @@ function ClauseRow({
         </div>
       )}
     </div>
+  );
+}
+
+/** A manual description taller than this many rendered lines starts clamped behind "Show more". */
+const EVIDENCE_DESCRIPTION_CLAMP_LINES = 3;
+
+/**
+ * Whether a description's full text is taller than EVIDENCE_DESCRIPTION_CLAMP_LINES lines.
+ * `scrollHeight` is the full content height whether or not the element is clamped, so the
+ * same reading decides both "start clamping" and "stop clamping". jsdom has no layout (its
+ * computed line height is empty and `scrollHeight` is 0), so tests stub `scrollHeight`.
+ */
+function descriptionOverflows(el: HTMLElement): boolean {
+  const style = window.getComputedStyle(el);
+  // text-xs: 12px font, 16px line. Fall back to that ratio if the line height is "normal".
+  const lineHeight = parseFloat(style.lineHeight) || (parseFloat(style.fontSize) || 12) * (4 / 3);
+  return el.scrollHeight > lineHeight * EVIDENCE_DESCRIPTION_CLAMP_LINES + 1;
+}
+
+/**
+ * A stored evidence link's `description`, under its title in the clause's linked-evidence list.
+ *
+ * Auto-link stores only `description` from a live evidence row (never `health_status` or
+ * `health_detail`), so this is the one place on the page an auditor reads what that row
+ * disclosed on its last refresh: a paused audit hash chain, missing audit triggers, and so on.
+ * Those disclosures are appended at the END of the text ("…integrity chain enabled, but 12
+ * entries were written while it was paused"), so an auto-linked description is never clamped:
+ * a clamp could show the claim and hide the qualification after it.
+ *
+ * A manual description is free text (up to 5,000 characters). It is clamped to three lines only
+ * while its measured height says it needs more, and only then is the "Show more" control shown:
+ * clamped and having the control are the same state, so no text is ever hidden without a way to
+ * reveal it. It is re-measured when the element resizes (window width, fonts loading) or the
+ * text changes. The whole text stays in the DOM for screen readers either way.
+ */
+function EvidenceDescription({ id, text, autoLinked }: { id: string; text: string; autoLinked: boolean }) {
+  const ref = useRef<HTMLParagraphElement>(null);
+  const [overflows, setOverflows] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const trimmed = text.trim();
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (autoLinked || !el) return undefined;
+    let active = true;
+    const measure = () => {
+      if (active) setOverflows(descriptionOverflows(el));
+    };
+    measure();
+    // A web font arriving after the first measure can change line wrapping without changing a
+    // clamped box's size, which a ResizeObserver would not report.
+    document.fonts?.ready.then(measure).catch(() => undefined);
+    if (typeof ResizeObserver !== 'undefined') {
+      const observer = new ResizeObserver(measure);
+      observer.observe(el);
+      return () => {
+        active = false;
+        observer.disconnect();
+      };
+    }
+    window.addEventListener('resize', measure);
+    return () => {
+      active = false;
+      window.removeEventListener('resize', measure);
+    };
+  }, [autoLinked, trimmed]);
+
+  if (!trimmed) return null;
+
+  const clampable = !autoLinked && overflows;
+  const clamped = clampable && !expanded;
+
+  return (
+    <>
+      <p
+        ref={ref}
+        id={id}
+        data-testid="linked-evidence-description"
+        className={`mt-0.5 text-xs text-slate-400 whitespace-pre-wrap break-words${clamped ? ' line-clamp-3' : ''}`}
+      >
+        {trimmed}
+      </p>
+      {clampable && (
+        <button
+          type="button"
+          className="mt-0.5 text-xs text-fd-blue hover:underline"
+          aria-expanded={expanded}
+          aria-controls={id}
+          onClick={() => setExpanded(value => !value)}
+        >
+          {expanded ? 'Show less' : 'Show more'}
+        </button>
+      )}
+    </>
   );
 }
 

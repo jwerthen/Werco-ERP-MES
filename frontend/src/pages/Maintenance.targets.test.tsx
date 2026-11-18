@@ -287,6 +287,58 @@ describe('Maintenance — work-order actions and roles', () => {
     expect(await screen.findByRole('button', { name: /New Work Order/ })).toBeInTheDocument();
   });
 
+  it.each(['supervisor', 'admin'])(
+    'offers a %s no row action on a completed or cancelled work order (the server holds them final)',
+    async role => {
+      mockRole = role;
+      const completedWO: MaintenanceWorkOrder = {
+        ...scheduledWO,
+        id: 32,
+        wo_number: 'MWO-2026-0032',
+        title: 'Grease spindle',
+        status: 'completed',
+        checklist_results: JSON.stringify([{ item: 'Grease spindle', done: true }]),
+        started_at: '2026-11-10T14:00:00Z',
+        completed_at: '2026-11-10T15:30:00Z',
+        completed_by: 1,
+        notes: 'Spindle greased',
+      };
+      const cancelledWO: MaintenanceWorkOrder = {
+        ...scheduledWO,
+        id: 33,
+        wo_number: 'MWO-2026-0033',
+        title: 'Swap coolant pump',
+        status: 'cancelled',
+        notes: 'Pump never arrived',
+      };
+      // The scheduled row is the control: its actions render, so the absences below are real.
+      mockedApi.getMaintenanceWorkOrders.mockResolvedValue([scheduledWO, completedWO, cancelledWO]);
+      renderPage('/maintenance?tab=work_orders');
+      const table = await screen.findByTestId('data-table');
+      await waitFor(() => expect(within(table).getByText('Grease spindle')).toBeInTheDocument());
+      const open = within(table).getByText('Replace way wipers').closest('tr') as HTMLElement;
+      expect(within(open).getByRole('button', { name: 'Start work order MWO-2026-0031' })).toBeInTheDocument();
+      expect(within(open).getByRole('button', { name: 'Cancel work order MWO-2026-0031' })).toBeInTheDocument();
+
+      for (const wo of [completedWO, cancelledWO]) {
+        const row = within(table).getByText(wo.title).closest('tr') as HTMLElement;
+        expect(within(row).getByText(wo.wo_number)).toBeInTheDocument();
+        expect(within(row).queryAllByRole('button')).toHaveLength(0);
+        // Nowhere on the page -- table or mobile card -- is there an action naming the final record.
+        for (const name of [
+          `Start work order ${wo.wo_number}`,
+          `Complete work order ${wo.wo_number}`,
+          `Put work order ${wo.wo_number} on hold`,
+          `Cancel work order ${wo.wo_number}`,
+        ]) {
+          expect(screen.queryByRole('button', { name })).not.toBeInTheDocument();
+        }
+      }
+      expect(mockedApi.updateMaintenanceWorkOrder).not.toHaveBeenCalled();
+      expect(mockedApi.startMaintenanceWorkOrder).not.toHaveBeenCalled();
+    }
+  );
+
   it('is read-only for a viewer', async () => {
     mockRole = 'viewer';
     renderPage('/maintenance?tab=work_orders');

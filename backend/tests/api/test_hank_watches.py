@@ -206,7 +206,9 @@ def test_operator_can_watch_but_other_owner_cannot_recover(
 ):
     capability = client.get(BASE + '/capabilities', headers=operator_headers).json()
     assert capability['can_watch'] is True
-    assert capability['allowed_kinds'] == ['report_production']
+    # add_note is open to every role that can read a work order (commenting's own rule), so an
+    # operator's write capabilities are production reporting and notes.
+    assert capability['allowed_kinds'] == ['report_production', 'add_note']
     task = start(client, operator_headers, test_work_order).json()
     assert client.get(f'{BASE}/tasks/{task["id"]}', headers=auth_headers).status_code == 404
     assert command(client, auth_headers, task, 'check').status_code == 404

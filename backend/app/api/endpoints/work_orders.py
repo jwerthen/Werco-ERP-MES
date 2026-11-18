@@ -38,6 +38,7 @@ from app.core.credentials import is_api_token_credential, is_narrowed_api_token
 from app.core.observability import report_absorbed_exception
 from app.core.realtime import safe_broadcast
 from app.core.time_utils import to_utc_iso
+from app.core.upload_limits import ensure_upload_within_limit, format_byte_limit
 from app.core.websocket import (
     broadcast_dashboard_update,
     broadcast_shop_floor_update,
@@ -83,6 +84,7 @@ from app.schemas.work_order import (
 from app.schemas.work_order_timeline import TimelineCategory, WorkOrderTimelineResponse
 from app.services import dispatch_service, process_sheet_service, work_order_release_service
 from app.services.audit_service import AuditService, AuditWriteError
+from app.services.comment_service import comment_counts_for_record
 from app.services.completion_cost_service import (
     apply_completion_cost_rollup,
     rollup_labor_hours_for_closed_entries,
@@ -114,6 +116,7 @@ from app.services.laser_nest_pdf_split_service import (
 )
 from app.services.laser_nest_service import (
     LASER_PDF_PACKAGE_MAX,
+    LaserZipLimitError,
     ParsedLaserNest,
     active_laser_nest,
     build_laser_nest_child_work_order,
@@ -122,6 +125,7 @@ from app.services.laser_nest_service import (
     create_manual_laser_nest,
     create_nest_material_allocation,
     extract_laser_nest_zip,
+    extract_laser_nest_zip_within_limits,
     import_would_wipe_recorded_work,
     laser_import_wipe_operation_ids,
     manual_nest_response_dict,
@@ -215,6 +219,7 @@ from app.services.wallboard_service import operator_display_name
 from app.services.work_center_type_service import get_work_center_group
 from app.services.work_order_browse_service import browse_work_orders
 from app.services.work_order_cost_view import inject_cost_figures
+from app.services.work_order_due_date import assert_due_date_change_allowed
 from app.services.work_order_duplicate_service import duplicate_work_order
 from app.services.work_order_state_service import (
     QTY_EPSILON,
@@ -1242,10 +1247,16 @@ def _find_nest_material_part(db: Session, company_id: int, part_id: int) -> Part
 LASER_UPLOAD_MAX_BYTES = 50 * 1024 * 1024
 
 
-async def _save_upload_to_temp(file: UploadFile, max_bytes: Optional[int] = None) -> str:
-    # Resolved at call time (not def time) so the module-level cap stays the
-    # single tunable source of truth.
-    limit = max_bytes if max_bytes is not None else LASER_UPLOAD_MAX_BYTES
+def _laser_upload_too_large_detail(limit: int) -> str:
+    return f"Upload exceeds the {format_byte_limit(limit)} limit. Split the package into smaller batches."
+
+
+def _write_upload_to_temp(file: UploadFile, limit: int) -> str:
+    """Stream ``file`` into a fresh temp file, 413 once more than ``limit`` bytes arrive.
+
+    Synchronous: blocking reads of Starlette's spool plus disk writes. The temp file is removed
+    on any failure, so a refused upload leaves nothing behind.
+    """
     suffix = os.path.splitext(file.filename or "")[1] or ".zip"
     fd, temp_path = tempfile.mkstemp(suffix=suffix)
     written = 0
@@ -1254,19 +1265,31 @@ async def _save_upload_to_temp(file: UploadFile, max_bytes: Optional[int] = None
             while chunk := file.file.read(1024 * 1024):
                 written += len(chunk)
                 if written > limit:
-                    raise HTTPException(
-                        status_code=413,
-                        detail=f"Upload exceeds the {limit // (1024 * 1024)} MB limit. "
-                        "Split the package into smaller batches.",
-                    )
+                    raise HTTPException(status_code=413, detail=_laser_upload_too_large_detail(limit))
                 handle.write(chunk)
     except Exception:
         if os.path.exists(temp_path):
             os.remove(temp_path)
         raise
+    return temp_path
+
+
+async def _save_upload_to_temp(file: UploadFile, max_bytes: Optional[int] = None, *, offload: bool = False) -> str:
+    """Save a laser-package upload to a temp file under the byte cap, then close the upload.
+
+    ``offload=True`` runs the copy on the default threadpool (the PREVIEW). The package IMPORT
+    still copies on the event loop: #9-6 offloads its whole body, after it fixes the import's
+    lock order, because offloading first would let two imports on one process run concurrently.
+    """
+    # Resolved at call time (not def time) so the module-level cap stays the
+    # single tunable source of truth.
+    limit = max_bytes if max_bytes is not None else LASER_UPLOAD_MAX_BYTES
+    try:
+        if offload:
+            return await run_in_threadpool(_write_upload_to_temp, file, limit)
+        return _write_upload_to_temp(file, limit)
     finally:
         await file.close()
-    return temp_path
 
 
 def _laser_package_name(file: Optional[UploadFile], source_path: Optional[str]) -> str:
@@ -3142,13 +3165,19 @@ async def _run_laser_nest_preview(
     source_page_count: Optional[int] = None
     segmentation_warning: Optional[str] = None
     skipped_pages: Optional[List[int]] = None
+    if file:
+        # 413 before a byte is copied when Starlette already counted too many; the streaming
+        # copy in _save_upload_to_temp is the bound that holds when the count is missing or wrong.
+        ensure_upload_within_limit(
+            file, LASER_UPLOAD_MAX_BYTES, detail=_laser_upload_too_large_detail(LASER_UPLOAD_MAX_BYTES)
+        )
     try:
         if file and is_bare_pdf_upload(file.filename or "", file.content_type):
             # Bare (possibly multi-page) PDF: segment (AI pass 0, degrades to
             # one-nest-per-page) -> deterministic split -> the same bounded
             # parallel per-segment extraction the ZIP path uses. Rows carry the
             # segment's page list so import can re-split without AI.
-            temp_path = await _save_upload_to_temp(file)
+            temp_path = await _save_upload_to_temp(file, offload=True)
             page_count = await _read_bare_pdf_page_count_or_400(temp_path)
             segmentation = await run_in_threadpool(
                 segment_nest_pdf, temp_path, file.filename or "nests.pdf", page_count, company_id
@@ -3185,16 +3214,22 @@ async def _run_laser_nest_preview(
             segmentation_warning = segmentation.get("warning")
             skipped_pages = list(segmentation.get("skipped_pages") or [])
         elif file:
-            temp_path = await _save_upload_to_temp(file)
+            temp_path = await _save_upload_to_temp(file, offload=True)
             # Extract once into a temp dir so we can inspect contents (PDF vs CNC)
-            # and run the AI extraction over the materialized files.
+            # and run the AI extraction over the materialized files. The zip-bomb
+            # caps (member count, total unpacked size) are checked against the
+            # central directory before anything is written, and the decompression
+            # runs on the default threadpool, not the event loop.
             with TemporaryDirectory() as scan_dir:
-                extract_laser_nest_zip(temp_path, scan_dir)
+                await run_in_threadpool(extract_laser_nest_zip_within_limits, temp_path, scan_dir)
                 nests = await _preview_nests_from_folder(scan_dir, company_id)
         elif source_path:
             nests = await _preview_nests_from_folder(source_path, company_id)
         else:
             raise HTTPException(status_code=400, detail="Upload a zipped package or provide source_path")
+    except LaserZipLimitError as exc:
+        # Before the ValueError arm: the caps are a size refusal (413), not a malformed package (400).
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
@@ -3279,7 +3314,10 @@ async def preview_standalone_laser_nest_package(
 
     Identical parsing/extraction behavior to the ``{work_order_id}`` preview,
     just not anchored to any existing work order -- the wizard uses this before
-    a standalone import that will create a fresh part-less laser WO.
+    a standalone import that will create a fresh part-less laser WO. Same size
+    limits too: uploads over 50 MB, and ZIPs listing more than 200 files and
+    folders or unpacking to more than 200 MB, are refused with 413 before
+    anything is unpacked.
 
     The ``db`` session is here for the sheet-stock suggestion pass only; it is
     used for tenant-scoped READS (``company_id`` from the token, never the body)
@@ -3301,7 +3339,9 @@ async def preview_laser_nest_package_import(
 
     See ``_run_laser_nest_preview`` for the package-shape detection. The addressed
     WO may be an assembly parent or (since the standalone generalization) a
-    laser-cutting WO itself.
+    laser-cutting WO itself. Uploads over 50 MB, and ZIPs listing more than 200
+    files and folders or unpacking to more than 200 MB, are refused with 413
+    before anything is unpacked.
     """
     _load_parent_work_order(db, work_order_id, company_id)
     return await _run_laser_nest_preview(file=file, source_path=source_path, company_id=company_id, db=db)
@@ -4322,8 +4362,20 @@ def update_work_order(
     PENDING, one REQUIRED audited status change each (the resume-to-draft recipe), so a
     draft leaves no cards on the dispatch board or the kiosk. Worked operations are left
     as they are. **503** (nothing changed) when those audit rows cannot be written.
+
+    A soft-deleted work order is **404**, like one that does not exist.
     """
-    work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id).first()
+    # Invariant 3: a tombstoned work order is not editable through the generic update (restore
+    # is its own verb), so it answers the same 404 as an absent or foreign one.
+    work_order = (
+        db.query(WorkOrder)
+        .filter(
+            WorkOrder.id == work_order_id,
+            WorkOrder.company_id == company_id,
+            WorkOrder.is_deleted == False,  # noqa: E712
+        )
+        .first()
+    )
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
 
@@ -4445,16 +4497,12 @@ def update_work_order(
     # the fact is exactly what those fields are for). It refuses only an actual CHANGE,
     # so re-sending the value a terminal WO already has stays idempotent. And it runs
     # before the first setattr, so a refusal leaves the row untouched.
-    if "due_date" in update_data and work_order.status in TERMINAL_WO_STATUSES:
-        if update_data["due_date"] != work_order.due_date:
-            current = work_order.status.value if hasattr(work_order.status, "value") else work_order.status
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"cannot change the due date of a work order in terminal status '{current}': its due date is "
-                    "the promise date its delivery performance was scored against."
-                ),
-            )
+    #
+    # The rule is ONE implementation (services/work_order_due_date.py), shared with Hank's
+    # change_due_date task. Only the judgment runs here; the setattr loop below still writes
+    # the value, exactly once.
+    if "due_date" in update_data:
+        assert_due_date_change_allowed(work_order, update_data["due_date"])
 
     # Owner ruling 1 (INT8): lowering the order below what a whole-order stage has already
     # accounted for (good + scrap) would turn that stage's surplus into a short close of
@@ -4834,8 +4882,10 @@ def delete_work_order(
     inventory-ledger movement is tied to it, or when a work order template was saved
     from it — a template copies its plan live off the job it points at, so the row has
     to outlive the template. A soft-deleted template still counts: its foreign key is
-    just as real, and only Postgres would notice. Both refusals name a remedy, and both
-    leave soft delete available: a soft-deleted work order keeps every template working.
+    just as real, and only Postgres would notice. Also refused **409** when the work
+    order has comments (deleted ones included — their notification events still
+    reference it). Every refusal names a remedy, and all leave soft delete available:
+    a soft-deleted work order keeps every template and its comment thread working.
     """
     work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id).first()
     if not work_order:
@@ -4917,6 +4967,34 @@ def delete_work_order(
                     f"{named}, and a template copies its plan straight off the job it points at, so "
                     "permanently deleting it would leave them with nothing to run. Soft delete instead — "
                     "a soft-deleted work order keeps every template working."
+                ),
+            )
+
+        # A COMMENT THREAD is on this work order. Comments and watchers name it polymorphically
+        # (no foreign key), so a physical delete would orphan them silently -- but every comment's
+        # ``comment_added`` / ``comment_mentioned`` OperationalEvent carries
+        # ``operational_events.work_order_id``, a plain FK with no ON DELETE, so on Postgres the
+        # delete hits a ForeignKeyViolation and surfaces as a 500 (SQLite never enforces it).
+        # Refuse legibly, before the first mutation, the way the template guard above does.
+        #
+        # TOMBSTONED comments count, for the template guard's reason: their events stay, and
+        # Postgres does not consult ``is_deleted`` before refusing to drop a referenced row. Only
+        # LIVE comments are counted in the message -- a deleted one is not on the thread the
+        # planner can see. Soft delete is the remedy and stays available: the thread survives it.
+        live_comments, all_comments = comment_counts_for_record(
+            db, company_id=company_id, entity_type="work_order", entity_id=wo_id
+        )
+        if all_comments:
+            what = (
+                f"{live_comments} comment(s)"
+                if live_comments
+                else "deleted comments that are kept as records with their notifications"
+            )
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"This work order has {what}, so it cannot be permanently deleted. Soft delete "
+                    "instead — the work order and its comment thread stay intact."
                 ),
             )
 

@@ -22,11 +22,23 @@ logger = logging.getLogger(__name__)
 SETTING_PREFIX = "notification_email_recipients."
 WERCO_DEFAULT_EMAILS = ("awerthen@wercomfg.com", "jwerthen@wercomfg.com", "jmw@wercomfg.com")
 WERCO_RESTRICTED_EVENTS = frozenset({"wo.completed", "receipt.created"})
+# Person-addressed events: the audience IS the person a comment names (an @mention) or the
+# people who chose to watch the record, so a company-wide email audience must never apply.
+# Listed, a saved recipient list would break them both ways -- a non-empty list drops email
+# for every mentioned person not on it and emails everyone on it for every mention anywhere,
+# and an empty list switches mention email off company-wide. Excluded, they never appear under
+# Admin Settings -> Email Recipients, the settings PUT refuses them, and a row saved for one
+# before this exclusion (``comment.mention`` was listed while it was dormant) is ignored:
+# ``email_recipient_ids`` returns None (the automatic audience) for any key not in EMAIL_EVENTS.
+# ``comment.added`` has no email channel today; it is listed so gaining one cannot re-admit it.
+EMAIL_RECIPIENT_EXCLUDED_EVENTS = frozenset({"comment.mention", "comment.added"})
 # Account/security messages with a mandatory email channel keep their recipient.
 EMAIL_EVENTS = {
     key: entry
     for key, entry in CATALOG.items()
-    if CHANNEL_EMAIL in entry.default_channels and entry.mandatory_channel != CHANNEL_EMAIL
+    if CHANNEL_EMAIL in entry.default_channels
+    and entry.mandatory_channel != CHANNEL_EMAIL
+    and key not in EMAIL_RECIPIENT_EXCLUDED_EVENTS
 }
 
 

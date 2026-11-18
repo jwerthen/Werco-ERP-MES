@@ -28,6 +28,7 @@ import pytest
 
 from app.main import app
 from app.mcp.catalog import (
+    COMMENT_WRITE_OPERATIONS,
     EGRESS_SWITCH_OPERATIONS,
     EXCLUDED_OPERATIONS,
     EXCLUDED_TAGS,
@@ -145,9 +146,10 @@ class TestMembership:
         # export-control writes (only an Admin signed in to the app marks a customer
         # controlled), the four company egress kill-switch writes (lead decision
         # 2026-11-15: an egress switch is a person's judgment), the Approved Supplier
-        # List writes (a supplier-approval decision is a person's judgment) and bulk
+        # List writes (a supplier-approval decision is a person's judgment), bulk
         # release (release_work_order stays the agent's only release door, one job per
-        # call) -- nothing else.
+        # call) and the five comment / watcher writes (owner decision 2026-11-16: a
+        # comment is a person's own words) -- nothing else.
         assert set(EXCLUDED_OPERATIONS) == {
             ("POST", "/api/v1/work-orders/import"),
             ("POST", "/api/v1/purchasing/purchase-orders/import"),
@@ -166,8 +168,14 @@ class TestMembership:
             ("PUT", "/api/v1/supplier-scorecards/approved-suppliers/{asl_id}"),
             # Bulk release: an app action, never a tool.
             ("POST", "/api/v1/work-orders/bulk-release"),
+            ("POST", "/api/v1/comments"),
+            ("PATCH", "/api/v1/comments/{comment_id}"),
+            ("DELETE", "/api/v1/comments/{comment_id}"),
+            ("POST", "/api/v1/watchers"),
+            ("DELETE", "/api/v1/watchers"),
         }
         assert EGRESS_SWITCH_OPERATIONS <= set(EXCLUDED_OPERATIONS)
+        assert COMMENT_WRITE_OPERATIONS <= set(EXCLUDED_OPERATIONS)
 
     def test_flipping_an_egress_kill_switch_is_never_a_tool(self, catalog):
         """Lead decision 2026-11-15: an egress kill switch is a person's judgment. The routes
@@ -185,6 +193,25 @@ class TestMembership:
         }.isdisjoint(names)
         assert by_key[("GET", "/api/v1/admin/settings/shipping-profile")] == "get_shipping_profile"
         assert by_key[("GET", "/api/v1/receiving/print-profile")] == "get_print_profile"
+
+    def test_writing_a_comment_or_changing_a_watch_is_never_a_tool(self, catalog):
+        """Owner decision 2026-11-16: a comment is a person's own words. The routes refuse every
+        API token, but a person's own JWT reaches a tool -- so the writes are not tools at all.
+        The three reads are generated tools under their route names."""
+        by_key = {tool.key: tool.name for tool in catalog}
+        names = set(by_key.values())
+        for key in COMMENT_WRITE_OPERATIONS:
+            assert key not in by_key, key
+        assert {
+            "create_record_comment",
+            "edit_record_comment",
+            "delete_record_comment",
+            "watch_record",
+            "unwatch_record",
+        }.isdisjoint(names)
+        assert by_key[("GET", "/api/v1/comments")] == "list_record_comments"
+        assert by_key[("GET", "/api/v1/watchers")] == "get_record_watch_state"
+        assert by_key[("GET", "/api/v1/users/mention-search")] == "search_mentionable_users"
 
     def test_marking_a_customer_export_controlled_is_never_a_tool(self, catalog):
         """Compliance review P0, finding 2: a person's own JWT reaches a tool, so an agent
@@ -809,6 +836,22 @@ class TestConvenienceSchemasMirrorTheirRoutes:
         convenience = _convenience("add_laser_nest")
         assert set(convenience.input_schema["properties"]) - {"release"} == set(generated.input_schema["properties"])
         assert set(convenience.input_schema["required"]) == set(generated.input_schema["required"])
+
+    def test_add_laser_nest_planned_runs_bounds_mirror_the_route(self, unshadowed):
+        """The hand-written ``planned_runs`` bounds must equal the route's, so an agent is
+        told up front what the route would refuse with a 422 (MAX_PLANNED_RUNS = 9,999)."""
+        generated = unshadowed[("POST", "/api/v1/work-orders/{work_order_id}/laser-nests/manual")]
+        route_runs = generated.input_schema["properties"]["planned_runs"]
+        tool_runs = _convenience("add_laser_nest").input_schema["properties"]["planned_runs"]
+        for keyword in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"):
+            assert tool_runs.get(keyword) == route_runs.get(keyword), keyword
+        assert route_runs.get("maximum") == 9_999
+
+        # The generated PATCH tool takes the same bound straight from LaserNestUpdate.
+        patch = unshadowed[("PATCH", "/api/v1/laser-nests/{laser_nest_id}")]
+        patch_runs = patch.input_schema["properties"]["planned_runs"]
+        integer_branch = next(branch for branch in patch_runs["anyOf"] if branch.get("type") == "integer")
+        assert integer_branch.get("maximum") == 9_999
 
     def test_every_convenience_schema_is_strict_and_claims_a_tag(self):
         for tool in CONVENIENCE_TOOLS:

@@ -6,6 +6,7 @@ from .audit_log import AuditLog
 from .bom import BOM, BOMItem, BOMItemType
 from .calibration import CalibrationRecord, CalibrationStatus, Equipment
 from .carrier_account import CarrierAccount, CompanyShippingProfile
+from .comment import Comment, CommentMention, EntityWatcher
 from .company import Company
 from .consumable import ConsumableCheckout
 from .continuous_improvement import ImprovementActivity, ImprovementSuggestion
@@ -214,6 +215,9 @@ __all__ = [
     "HankRoutineRun",
     "HankPreference",
     "DashboardLayout",
+    "Comment",
+    "CommentMention",
+    "EntityWatcher",
     "FabricationQuote",
     "FabricationQuoteActual",
     "FabricationQuoteFile",

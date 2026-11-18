@@ -247,7 +247,11 @@ def test_tenant_owner_permissions_and_credential_bound_recovery(
     db_session.add(RolePermission(company_id=1, role=test_user.role, permissions=['work_orders:view']))
     db_session.commit()
     assert execute(client, auth_headers, task).status_code == 403
-    assert client.get(BASE + '/capabilities', headers=auth_headers).json()['allowed_kinds'] == ['attach_document']
+    # work_orders:view alone still allows the view-only kinds: attaching a PDF and adding a note.
+    assert client.get(BASE + '/capabilities', headers=auth_headers).json()['allowed_kinds'] == [
+        'attach_document',
+        'add_note',
+    ]
 
 
 def test_foreign_source_and_unknown_input_are_rejected(client, db_session, auth_headers, test_work_order):

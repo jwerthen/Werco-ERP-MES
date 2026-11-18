@@ -491,5 +491,32 @@ export interface AutoLinkSummary {
    * the last run that computed it, and its clause is never summarized compliant.
    */
   total_evidence_failed: number;
+  /**
+   * Auto-linked evidence links soft-deleted this run because their rule no
+   * longer matches their clause (one audit DELETE row each).
+   *
+   * Optional because the SPA and the API deploy separately: an API from before
+   * the field existed omits it, and it retired nothing. Absent is not zero, so
+   * the result dialog shows the count only when the API sent one.
+   */
+  total_evidence_retired?: number;
+  /**
+   * Auto-linked links whose rule no longer matches their clause but that a
+   * person reviewed (verified, or attached a document or notes). Auto-link kept
+   * them; someone should check whether each still belongs. Optional for the
+   * same reason as `total_evidence_retired`.
+   */
+  evidence_kept_reviewed?: AutoLinkKeptEvidence[];
   compliance_summary: Record<string, number>;
+}
+
+/** A stale auto-linked evidence link auto-link kept because a person reviewed it. */
+export interface AutoLinkKeptEvidence {
+  evidence_id: number;
+  clause_id: number;
+  clause_number: string;
+  /** The mapping rule that once linked it. */
+  rule_id: string | null;
+  /** `verified`, or `annotated` (a document or notes are attached). */
+  reason: string;
 }

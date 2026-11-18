@@ -1,16 +1,23 @@
 import json
 import logging
 from datetime import datetime
-from typing import List
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import Session, joinedload, with_loader_criteria
 
+from app.api.audit_guard import required_audit
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
+from app.core.upload_limits import ensure_upload_within_limit, read_upload_within_limit
 from app.db.database import get_db
+from app.db.locks import acquire_generator_lock
+from app.db.tenant_filter import tenant_query
+from app.models.document import Document
 from app.models.qms_standard import QMSClause, QMSClauseEvidence, QMSStandard
 from app.models.user import User, UserRole
 from app.schemas.qms_standard import (
+    AutoLinkKeptEvidence,
     AutoLinkSummary,
     ClauseAutoEvidenceResponse,
     QMSAuditReadinessSummary,
@@ -31,12 +38,71 @@ from app.services.auto_evidence_service import (
     compute_overall_compliance,
     discover_evidence_for_clause,
     is_evaluation_failed,
+    is_not_tracked,
+    matched_rule_ids,
 )
 from app.services.llm_client import LLMEgressDisabledError, LLMNotConfiguredError
-from app.services.qms_extraction_service import extract_clauses_with_llm
+from app.services.pdf_text_reader import MIB, PdfReadError, PdfReadLimits, read_pdf_pages
+from app.services.qms_extraction_service import QMS_DOCUMENT_TEXT_MAX_CHARS, extract_clauses_with_llm
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Text-layer read limits for an uploaded standard. Standards and quality manuals run to hundreds of
+# pages, so these are wider than pdf_service's. The prompt sends only the first
+# QMS_PROMPT_TEXT_CHARS characters (qms_extraction_service slices ``pdf_text`` with
+# QMS_DOCUMENT_TEXT_MAX_CHARS; QMS_PROMPT_TEXT_CHARS is that constant, so the two cannot drift) and
+# the model router only distinguishes input sizes up to 85,000, so the total-character cap can never
+# change what the AI sees or which model reads it.
+#
+# QMS_PDF_MAX_BYTES is both the upload cap for ``upload-pdf`` (413 over it, checked before the body
+# is read; see ``app.core.upload_limits``) and the reader's byte limit. Both read it at call time, so
+# this constant is the one tunable.
+QMS_PDF_MAX_BYTES = 20 * MIB  # 20MB
+QMS_PDF_MAX_PAGES = 2000
+QMS_PDF_MAX_PAGE_CHARS = 100_000
+QMS_PDF_MAX_TOTAL_CHARS = 2_000_000
+QMS_PDF_CPU_SECONDS = 60
+QMS_PDF_WALL_SECONDS = 90.0
+QMS_PROMPT_TEXT_CHARS = QMS_DOCUMENT_TEXT_MAX_CHARS
+
+
+def _qms_pdf_read_limits() -> PdfReadLimits:
+    return PdfReadLimits(
+        max_bytes=QMS_PDF_MAX_BYTES,
+        max_pages=QMS_PDF_MAX_PAGES,
+        max_page_chars=QMS_PDF_MAX_PAGE_CHARS,
+        max_total_chars=QMS_PDF_MAX_TOTAL_CHARS,
+        cpu_seconds=QMS_PDF_CPU_SECONDS,
+        wall_seconds=QMS_PDF_WALL_SECONDS,
+    )
+
+
+def _assert_company_document(db: Session, document_id: Optional[int], company_id: int) -> None:
+    """Refuse a ``document_id`` that is not one of the active company's documents.
+
+    ``QMSStandard.document_id`` and ``QMSClauseEvidence.document_id`` are plain foreign keys to
+    ``documents``, a table every tenant shares, so the database alone accepts another company's
+    document. Called before the write (and, on the edits, after the row is resolved) by the four
+    routes that take the field from a request body: standard create / update and evidence
+    create / update.
+
+    The refusal is the same 404 ``Document not found`` for an id that does not exist and for an
+    id that belongs to another company, one indexed primary-key read either way, so the answer
+    says nothing about another tenant's documents. Before this, a missing id failed the FK at
+    flush (a 500 on Postgres) while any existing id, another company's included, answered 200
+    and was linked.
+
+    ``None`` is not checked: clearing the link stays allowed. Documents are deleted physically
+    (``DELETE /documents/{id}``, no tombstone), so a row that exists in the caller's company is a
+    live one; its control status (draft, obsolete, ...) is a quality judgment this check does
+    not make.
+    """
+    if document_id is None:
+        return
+    found = tenant_query(db, Document, company_id).filter(Document.id == document_id).with_entities(Document.id).first()
+    if found is None:
+        raise HTTPException(status_code=404, detail="Document not found")
 
 
 # ============== QMS Standards ==============
@@ -94,7 +160,12 @@ def create_standard(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Create a new QMS standard."""
+    """Create a new QMS standard.
+
+    A ``document_id`` must name one of your company's documents. Any other id, including one that
+    does not exist, is refused 404 ``Document not found`` and nothing is written.
+    """
+    _assert_company_document(db, data.document_id, company_id)
     standard = QMSStandard(
         **data.model_dump(),
         created_by=current_user.id,
@@ -120,7 +191,8 @@ async def upload_pdf_and_extract_clauses(
 ):
     """
     Upload a QMS standard PDF (quality manual, AS9100D, ISO 9001, etc.)
-    and automatically extract all clauses using AI.
+    and automatically extract all clauses using AI. PDFs over 20 MB are refused with 413
+    before any work runs.
     """
     standard = (
         db.query(QMSStandard)
@@ -138,26 +210,33 @@ async def upload_pdf_and_extract_clauses(
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
 
-    content = await file.read()
-    if len(content) > 20 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="File too large. Maximum 20MB.")
+    # Size first (413 without reading a byte when Starlette already counted too many), then a
+    # read bounded at QMS_PDF_MAX_BYTES + 1 -- the whole body is never buffered just to measure it.
+    ensure_upload_within_limit(file, QMS_PDF_MAX_BYTES)
+    content = await read_upload_within_limit(file, QMS_PDF_MAX_BYTES)
 
-    # Extract text from PDF
+    # Extract text from PDF, in the resource-limited reader process (same text as in-process pypdf).
     try:
-        import io
-
-        from pypdf import PdfReader
-
-        reader = PdfReader(io.BytesIO(content))
-        pages_text = []
-        for page in reader.pages:
-            text = page.extract_text()
-            if text:
-                pages_text.append(text)
-        pdf_text = "\n\n".join(pages_text)
-    except Exception as e:
+        read = read_pdf_pages(content, _qms_pdf_read_limits())
+    except PdfReadError as e:
         logger.error(f"PDF parsing failed: {e}")
-        raise HTTPException(status_code=400, detail=f"Failed to read PDF: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Failed to read PDF: {e}")
+    pages_text = [text for text in read.pages if text]
+    pdf_text = "\n\n".join(pages_text)
+    if read.warnings and len(pdf_text) < QMS_PROMPT_TEXT_CHARS:
+        # A partial read that already covers the prompt's whole text window changes nothing the
+        # AI sees. A shorter one would silently drop clauses, and this response has no place
+        # to say so, so refuse instead. A parser error means a damaged page, which splitting
+        # the file would not get past; a new copy of the PDF often does.
+        advice = (
+            " The PDF may be damaged. Save or export it again as a new PDF and upload that copy."
+            if read.stopped_on_error
+            else " Split it into smaller PDFs and upload each one."
+        )
+        raise HTTPException(
+            status_code=400,
+            detail="Only part of this PDF could be read: " + " ".join(read.warnings) + advice,
+        )
 
     if not pdf_text or len(pdf_text.strip()) < 50:
         raise HTTPException(
@@ -342,6 +421,30 @@ def get_audit_readiness(
     )
 
 
+def _standard_with_clause_tree(db: Session, standard_id: int, company_id: int) -> QMSStandard | None:
+    """The live standard of the active company, loaded for a ``QMSStandardResponse``.
+
+    Every response that serializes a standard's clause tree goes through here (``GET`` and the
+    ``PUT`` response), so its clauses, their ``sub_clauses`` and their evidence are the active
+    company's live rows only. A plain ``db.refresh`` would lazy-load all three unfiltered.
+    """
+    return (
+        db.query(QMSStandard)
+        .options(
+            joinedload(QMSStandard.clauses).joinedload(QMSClause.evidence_links),
+            # Only live, own-company clauses/evidence in the nested payload, sub_clauses included.
+            *_clause_tree_criteria(company_id),
+        )
+        .filter(
+            QMSStandard.id == standard_id,
+            QMSStandard.company_id == company_id,
+            QMSStandard.is_deleted == False,
+        )
+        .populate_existing()  # see _clause_tree_criteria
+        .first()
+    )
+
+
 @router.get("/{standard_id}", response_model=QMSStandardResponse)
 def get_standard(
     standard_id: int,
@@ -350,21 +453,7 @@ def get_standard(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get a QMS standard with all its clauses and evidence."""
-    standard = (
-        db.query(QMSStandard)
-        .options(
-            joinedload(QMSStandard.clauses).joinedload(QMSClause.evidence_links),
-            # Exclude soft-deleted clauses/evidence from the eager-loaded nested payload.
-            with_loader_criteria(QMSClause, QMSClause.is_deleted == False),
-            with_loader_criteria(QMSClauseEvidence, QMSClauseEvidence.is_deleted == False),
-        )
-        .filter(
-            QMSStandard.id == standard_id,
-            QMSStandard.company_id == company_id,
-            QMSStandard.is_deleted == False,
-        )
-        .first()
-    )
+    standard = _standard_with_clause_tree(db, standard_id, company_id)
     if not standard:
         raise HTTPException(status_code=404, detail="QMS standard not found")
     return standard
@@ -379,7 +468,12 @@ def update_standard(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Update a QMS standard."""
+    """Update a QMS standard.
+
+    A non-null ``document_id`` must name one of your company's documents. Any other id, including
+    one that does not exist, is refused 404 ``Document not found`` and nothing is written.
+    ``null`` clears the link.
+    """
     standard = (
         db.query(QMSStandard)
         .filter(
@@ -392,15 +486,27 @@ def update_standard(
     if not standard:
         raise HTTPException(status_code=404, detail="QMS standard not found")
 
+    update_data = data.model_dump(exclude_unset=True)
+    # A supplied document must be the active company's; ``null`` clears the link.
+    _assert_company_document(db, update_data.get("document_id"), company_id)
+
     old_values = {c.key: getattr(standard, c.key) for c in standard.__table__.columns}
 
-    for key, value in data.model_dump(exclude_unset=True).items():
+    for key, value in update_data.items():
         setattr(standard, key, value)
 
+    # Write the row change before the audit row: ``AuditService.log`` takes the global
+    # audit-chain lock as its first statement, so an unflushed change would reach the database
+    # only after it, while this request held the chain lock (the opposite of the codebase order).
+    # A new ``document_id`` takes its key-share lock on the document row here, ahead of the chain
+    # lock, which is the order ``DELETE /documents/{id}`` takes them in.
+    db.flush()
     audit.log_update("qms_standard", standard.id, standard.name, old_values=old_values, new_values=standard)
     db.commit()
-    db.refresh(standard)
-    return standard
+    updated = _standard_with_clause_tree(db, standard.id, company_id)
+    if updated is None:  # deleted by a concurrent request between the commit and this reload
+        raise HTTPException(status_code=404, detail="QMS standard not found")
+    return updated
 
 
 @router.delete("/{standard_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -431,6 +537,144 @@ def delete_standard(
 
 # ============== QMS Clauses ==============
 
+# One refusal for every parent id that is not a live clause of the active company in the same
+# standard: an id that does not exist, another company's clause, a deleted clause and a clause of
+# another standard all get these exact bytes, so the answer says nothing about other tenants.
+PARENT_CLAUSE_NOT_FOUND = "Parent clause not found"
+PARENT_CLAUSE_IS_SELF = "A clause cannot be its own parent clause"
+PARENT_CLAUSE_IS_DESCENDANT = "A clause cannot be placed under one of its own sub-clauses"
+QMS_CLAUSE_PARENT_LOCK = "qms_clause_parent"
+
+
+def _clause_tree_criteria(company_id: int) -> list:
+    """Loader criteria for every response that serializes a clause tree.
+
+    ``QMSClauseResponse`` renders the self-referential ``sub_clauses`` backref (and each
+    sub-clause's ``evidence_links``), which is loaded by ``parent_clause_id`` alone. These
+    criteria propagate to those lazy loads, so a sub-clause renders only when it is live and
+    belongs to the active company. The company half is what keeps a clause another company
+    grafted under one of ours (a ``parent_clause_id`` written before the write-side check
+    existed) out of our reads, with its evidence. The standard half (the clause's own standard
+    must be live and the company's) does the same for a clause of a REMOVED standard grafted
+    under one of a live standard's clauses (a cross-standard ``parent_clause_id`` written before
+    the same check): a clause of a removed standard is removed with it, everywhere it could
+    render, as ``_live_clause_or_404`` treats it on the routes that take a clause id.
+
+    Pair them with ``populate_existing()``. The criteria ride on each instance's load options,
+    which a query sets only on an instance it loads fresh: a clause already in the session when
+    the query runs would keep lazy-loading ``sub_clauses`` without them, so the tenant filter
+    would silently depend on what the request happened to load first.
+    """
+    return [
+        with_loader_criteria(
+            QMSClause,
+            (QMSClause.company_id == company_id) & (QMSClause.is_deleted == False)
+            # Correlated EXISTS on the clause's own standard (``has`` never correlates the
+            # standards table to an enclosing query on it, so it holds inside the standard read).
+            & QMSClause.standard.has((QMSStandard.company_id == company_id) & (QMSStandard.is_deleted == False)),
+        ),
+        with_loader_criteria(
+            QMSClauseEvidence,
+            (QMSClauseEvidence.company_id == company_id) & (QMSClauseEvidence.is_deleted == False),
+        ),
+    ]
+
+
+def _assert_parent_clauses(
+    db: Session, parent_clause_ids: List[int | None], *, company_id: int, standard_id: int
+) -> None:
+    """Refuse any ``parent_clause_id`` that is not a live clause of the active company in ``standard_id``.
+
+    ``qms_clauses.parent_clause_id`` is a plain self-referencing foreign key, so the database
+    alone accepts any clause row, another company's included, and the ``sub_clauses`` backref
+    then renders the child under that parent in the other company's reads. One indexed read
+    resolves every distinct id; any id it does not return refuses the whole request 404
+    ``Parent clause not found`` before anything is written. ``None`` is skipped: no parent (or,
+    on an update, clearing it) is always allowed.
+    """
+    wanted = {pid for pid in parent_clause_ids if pid is not None}
+    if not wanted:
+        return
+    found = {
+        row.id
+        for row in db.query(QMSClause.id).filter(
+            QMSClause.id.in_(wanted),
+            QMSClause.company_id == company_id,
+            QMSClause.standard_id == standard_id,
+            QMSClause.is_deleted == False,
+        )
+    }
+    if found != wanted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=PARENT_CLAUSE_NOT_FOUND)
+
+
+def _assert_not_own_descendant(db: Session, clause_id: int, parent_clause_id: int, *, company_id: int) -> None:
+    """Refuse a parent that is the clause itself or one of its descendants (422).
+
+    Called only after ``_assert_parent_clauses`` has resolved ``parent_clause_id`` as one of the
+    active company's clauses, so another company's id never reaches it. Either case would store a
+    cycle, which fails response serialization and then every read of the standard.
+
+    Walks the stored parent links up from the proposed parent, scoped to the company and NOT
+    filtered on ``is_deleted``: a deleted clause's link is still stored, and a cycle through it
+    would come back if the clause were ever restored. ``seen`` bounds the walk on a chain that is
+    already cyclic from before this check. One primary-key read per level; clause trees are a
+    handful deep. The caller holds the company's ``QMS_CLAUSE_PARENT_LOCK``, so the links it reads
+    cannot be changed by another re-parent before this transaction commits.
+    """
+    if parent_clause_id == clause_id:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=PARENT_CLAUSE_IS_SELF)
+    seen: set = set()
+    current: int | None = parent_clause_id
+    while current is not None and current not in seen:
+        if current == clause_id:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=PARENT_CLAUSE_IS_DESCENDANT)
+        seen.add(current)
+        current = (
+            db.query(QMSClause.parent_clause_id)
+            .filter(QMSClause.id == current, QMSClause.company_id == company_id)
+            .scalar()
+        )
+
+
+def _live_clause_or_404(db: Session, clause_id: int, company_id: int) -> QMSClause:
+    """The active company's clause, or 404 ``Clause not found`` if it or its standard is removed.
+
+    Removing a standard soft-deletes only the standard row. Its clauses keep ``is_deleted = false``
+    but leave every read with it (the standard, clause-list and audit-readiness reads all require
+    a live standard, and ``_clause_tree_criteria`` hides one rendered as another clause's
+    sub-clause), so a clause of a removed standard is removed too. Every route that takes a clause
+    id in its path goes through here, so none of them edits, removes, links evidence to or reports
+    on such a clause. (A ``parent_clause_id`` in a body is resolved by ``_assert_parent_clauses``,
+    which confines it to the clause's own standard, already live by then.) Before, ``PUT`` could
+    still change its ``compliance_status`` and ``POST .../evidence`` could link evidence no
+    screen would show.
+
+    The standard is joined inside the active company, so a clause whose standard is not the
+    company's (bad data) is not found either. The 404 is the same in every case. Both flags are
+    judged in the ``WHERE``, by the database, whatever copy of either row the session holds.
+
+    A plain read: the standard row is not locked. ``delete_standard`` writes its audit row, taking
+    the global audit-chain lock, before its own row change, so a share lock held here while a
+    write route waits for the chain lock would deadlock against it. A standard removed between
+    this read and the caller's commit is not seen.
+    """
+    clause = (
+        db.query(QMSClause)
+        .join(QMSStandard, QMSStandard.id == QMSClause.standard_id)
+        .filter(
+            QMSClause.id == clause_id,
+            QMSClause.company_id == company_id,
+            QMSClause.is_deleted == False,
+            QMSStandard.company_id == company_id,
+            QMSStandard.is_deleted == False,
+        )
+        .first()
+    )
+    if clause is None:
+        raise HTTPException(status_code=404, detail="Clause not found")
+    return clause
+
 
 @router.get("/{standard_id}/clauses", response_model=List[QMSClauseResponse])
 def list_clauses(
@@ -439,16 +683,31 @@ def list_clauses(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """List all clauses for a standard (flat list, use parent_clause_id for tree)."""
+    """List all clauses for a standard (flat list, use parent_clause_id for tree).
+
+    404 ``QMS standard not found`` unless the standard is a live one of the active company, as for
+    ``GET /{standard_id}``. Removing a standard leaves its clauses' own flags clear, so without
+    this a removed standard's clauses and evidence links were still listed here. A missing or
+    another company's id answers the same 404 (it used to answer an empty list).
+    """
+    standard_live = (
+        db.query(QMSStandard.id)
+        .filter(
+            QMSStandard.id == standard_id,
+            QMSStandard.company_id == company_id,
+            QMSStandard.is_deleted == False,
+        )
+        .first()
+    )
+    if standard_live is None:
+        raise HTTPException(status_code=404, detail="QMS standard not found")
     clauses = (
         db.query(QMSClause)
         .options(
             joinedload(QMSClause.evidence_links),
-            # Exclude soft-deleted evidence and nested sub-clauses from the payload.
-            # QMSClauseResponse serializes the self-referential `sub_clauses` backref,
-            # which would otherwise lazy-load soft-deleted child clauses unfiltered.
-            with_loader_criteria(QMSClause, QMSClause.is_deleted == False),
-            with_loader_criteria(QMSClauseEvidence, QMSClauseEvidence.is_deleted == False),
+            # QMSClauseResponse serializes the self-referential `sub_clauses` backref, which would
+            # otherwise lazy-load soft-deleted and other companies' child clauses unfiltered.
+            *_clause_tree_criteria(company_id),
         )
         .filter(
             QMSClause.standard_id == standard_id,
@@ -456,6 +715,7 @@ def list_clauses(
             QMSClause.is_deleted == False,
         )
         .order_by(QMSClause.sort_order, QMSClause.clause_number)
+        .populate_existing()  # see _clause_tree_criteria
         .all()
     )
     return clauses
@@ -470,7 +730,12 @@ def create_clause(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Add a clause to a standard."""
+    """Add a clause to a standard.
+
+    A ``parent_clause_id`` must name a live clause of your company in the same standard. Any other
+    id (one that does not exist, another company's, a deleted clause, a clause of another
+    standard) is refused 404 ``Parent clause not found`` and nothing is written.
+    """
     standard = (
         db.query(QMSStandard)
         .filter(
@@ -482,6 +747,8 @@ def create_clause(
     )
     if not standard:
         raise HTTPException(status_code=404, detail="QMS standard not found")
+
+    _assert_parent_clauses(db, [data.parent_clause_id], company_id=company_id, standard_id=standard_id)
 
     clause = QMSClause(standard_id=standard_id, company_id=company_id, **data.model_dump())
     db.add(clause)
@@ -502,7 +769,12 @@ def bulk_create_clauses(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Bulk-import clauses for a standard (e.g., from a parsed document)."""
+    """Bulk-import clauses for a standard (e.g., from a parsed document).
+
+    Every ``parent_clause_id`` must name a live clause of your company already in this standard
+    (clauses in the same request have no id yet). One that does not refuses the whole request 404
+    ``Parent clause not found``, and no clause is created.
+    """
     standard = (
         db.query(QMSStandard)
         .filter(
@@ -514,6 +786,10 @@ def bulk_create_clauses(
     )
     if not standard:
         raise HTTPException(status_code=404, detail="QMS standard not found")
+
+    _assert_parent_clauses(
+        db, [c.parent_clause_id for c in data.clauses], company_id=company_id, standard_id=standard_id
+    )
 
     clauses = []
     for i, clause_data in enumerate(data.clauses):
@@ -550,23 +826,34 @@ def update_clause(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Update a clause, including compliance status assessment."""
-    clause = (
-        db.query(QMSClause)
-        .filter(
-            QMSClause.id == clause_id,
-            QMSClause.company_id == company_id,
-            QMSClause.is_deleted == False,
+    """Update a clause, including compliance status assessment.
+
+    A non-null ``parent_clause_id`` must name a live clause of your company in the clause's own
+    standard: any other id (one that does not exist, another company's, a deleted clause, a
+    clause of another standard) is refused 404 ``Parent clause not found``. The clause itself,
+    or one of its own sub-clauses at any depth, is refused 422. Either way nothing is written,
+    the other fields in the same request included. ``null`` clears the parent. A request that
+    does not send ``parent_clause_id`` is not judged on the value already stored.
+    """
+    clause = _live_clause_or_404(db, clause_id, company_id)
+
+    update_data = data.model_dump(exclude_unset=True)
+    # Before any attribute is set, so a refusal leaves the row and the audit log untouched.
+    if update_data.get("parent_clause_id") is not None:
+        # Serializes re-parenting within the company, so two opposite moves in flight at once
+        # (C under P, P under C) cannot both pass the descendant walk: the second waits, then its
+        # walk reads the first one's committed link. This is the only place that takes it, before
+        # the request writes anything or reaches the audit chain lock, so it adds no lock-order
+        # edge (the chain lock is the single-bigint advisory form; this is the two-int form, a
+        # separate key space). No-op on SQLite.
+        acquire_generator_lock(db, QMS_CLAUSE_PARENT_LOCK, company_id)
+        _assert_parent_clauses(
+            db, [update_data["parent_clause_id"]], company_id=company_id, standard_id=clause.standard_id
         )
-        .first()
-    )
-    if not clause:
-        raise HTTPException(status_code=404, detail="Clause not found")
+        _assert_not_own_descendant(db, clause.id, update_data["parent_clause_id"], company_id=company_id)
 
     old_values = {c.key: getattr(clause, c.key) for c in clause.__table__.columns}
     old_status = clause.compliance_status
-
-    update_data = data.model_dump(exclude_unset=True)
 
     # Track who assessed compliance
     if "compliance_status" in update_data:
@@ -581,8 +868,15 @@ def update_clause(
         audit.log_status_change("qms_clause", clause.id, clause.clause_number, old_status, clause.compliance_status)
 
     db.commit()
-    db.refresh(clause)
-    return clause
+    # Reload through the same criteria as the reads: a plain refresh would lazy-load sub_clauses
+    # unfiltered, rendering deleted children and any clause another company grafted under this one.
+    return (
+        db.query(QMSClause)
+        .options(joinedload(QMSClause.evidence_links), *_clause_tree_criteria(company_id))
+        .filter(QMSClause.id == clause.id, QMSClause.company_id == company_id)
+        .populate_existing()
+        .one()
+    )
 
 
 @router.delete("/clauses/{clause_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -594,17 +888,7 @@ def delete_clause(
     audit: AuditService = Depends(get_audit_service),
 ):
     """Delete a clause and its evidence links."""
-    clause = (
-        db.query(QMSClause)
-        .filter(
-            QMSClause.id == clause_id,
-            QMSClause.company_id == company_id,
-            QMSClause.is_deleted == False,
-        )
-        .first()
-    )
-    if not clause:
-        raise HTTPException(status_code=404, detail="Clause not found")
+    clause = _live_clause_or_404(db, clause_id, company_id)
 
     audit.log_delete("qms_clause", clause.id, clause.clause_number, old_values=clause, soft_delete=True)
     clause.soft_delete(current_user.id)
@@ -628,24 +912,19 @@ def get_clause_auto_evidence(
     clause never rolls up ``compliant`` while part of its evidence could not be computed.
     ``not_computed`` means nothing is known about that module from this call; ``no_data`` means
     the query ran and found no records. Do not report a ``not_computed`` row's counts.
+
+    A clause about internal audit or management review also lists a row titled
+    "Internal Audit & Management Review (Not Assessed Automatically)": the ERP has no record of
+    either, so that row suggests ``not_assessed`` and the clause never rolls up ``compliant``.
     """
-    clause = (
-        db.query(QMSClause)
-        .filter(
-            QMSClause.id == clause_id,
-            QMSClause.company_id == company_id,
-            QMSClause.is_deleted == False,
-        )
-        .first()
-    )
-    if not clause:
-        raise HTTPException(status_code=404, detail="Clause not found")
+    clause = _live_clause_or_404(db, clause_id, company_id)
 
     results = discover_evidence_for_clause(db, clause, company_id)
     overall = compute_overall_compliance(results)
 
-    # Strip internal keys (_rule_id, _evaluation_failed) before returning. A rule whose query
-    # failed is still listed, as its not_computed / not_assessed placeholder row.
+    # Strip internal keys (_rule_id, _evaluation_failed, _not_tracked) before returning. A rule
+    # whose query failed is still listed, as its not_computed / not_assessed placeholder row, and
+    # so is a not-tracked row: it is how the clause says auto-evidence cannot assess it.
     clean_results = [{k: v for k, v in r.items() if not k.startswith("_")} for r in results]
 
     return ClauseAutoEvidenceResponse(
@@ -675,6 +954,15 @@ def auto_link_standard(
     transient failure. It does not make its clause count as a clause with evidence. The audit
     row names every skipped (clause, rule) in ``extra_data.evidence_not_computed``, since the
     stale ``last_refreshed`` on those rows is otherwise unexplained.
+
+    A not-tracked row (a clause about internal audit or management review, which auto-evidence
+    cannot assess) is counted in ``compliance_summary`` but is not evidence: it persists nothing
+    and does not make its clause count as a clause with evidence.
+
+    Auto-linked evidence whose rule no longer matches its clause is retired (soft-deleted, one
+    required audit DELETE row each) and counted in ``total_evidence_retired``. A row a person
+    has reviewed (verified it, attached a document or wrote notes) is never retired: it is left
+    in place and listed in ``evidence_kept_reviewed``. See ``_retire_unmatched_auto_links``.
     """
     standard = (
         db.query(QMSStandard)
@@ -688,6 +976,7 @@ def auto_link_standard(
     if not standard:
         raise HTTPException(status_code=404, detail="QMS standard not found")
 
+    # Ordered so two concurrent runs on one standard take the evidence row locks in the same order.
     clauses = (
         db.query(QMSClause)
         .filter(
@@ -695,6 +984,7 @@ def auto_link_standard(
             QMSClause.company_id == company_id,
             QMSClause.is_deleted == False,
         )
+        .order_by(QMSClause.id)
         .all()
     )
 
@@ -704,6 +994,8 @@ def auto_link_standard(
     not_computed: List[dict] = []
     clauses_with_evidence = 0
     compliance_counts = {}
+    retired: List[Dict[str, Any]] = []
+    kept_reviewed: List[Dict[str, Any]] = []
 
     for clause in clauses:
         results = discover_evidence_for_clause(db, clause, company_id)
@@ -713,8 +1005,11 @@ def auto_link_standard(
             for r in results
             if is_evaluation_failed(r)
         )
+        # A not-tracked row reports that auto-evidence cannot assess the clause. It rolls up
+        # (below) but is not evidence, so it is neither persisted nor counted.
+        evidence_rows = [r for r in computed if not is_not_tracked(r)]
 
-        if computed:
+        if evidence_rows:
             clauses_with_evidence += 1
 
         # The roll-up sees the failed rules' placeholder rows, so a clause whose rule failed
@@ -722,9 +1017,13 @@ def auto_link_standard(
         overall = compute_overall_compliance(results)
         compliance_counts[overall] = compliance_counts.get(overall, 0) + 1
 
-        # Persistence sees only computed rows: a transient failure must not overwrite the
-        # stored counts of the last run that could compute them.
-        for result in computed:
+        clause_retired, clause_kept = _retire_unmatched_auto_links(db, clause, company_id, current_user.id)
+        retired.extend(clause_retired)
+        kept_reviewed.extend(clause_kept)
+
+        # Persistence sees only computed evidence rows: a transient failure must not overwrite the
+        # stored counts of the last run that could compute them, and a not-tracked row is not evidence.
+        for result in evidence_rows:
             rule_id = result.get("_rule_id", result.get("evidence_type", "unknown"))
 
             # Check for existing auto-linked evidence of this type on this clause
@@ -770,6 +1069,39 @@ def auto_link_standard(
     db.flush()  # assign any new evidence PKs without committing
 
     total_failed = len(not_computed)
+
+    # Audit rows are written only now, after every evidence write has been flushed, so this run
+    # takes its evidence row locks before the global audit-chain lock (the codebase's order).
+    #
+    # Each retirement's DELETE row is REQUIRED evidence: it is the only record that auto-link,
+    # not the person who clicked it, decided to remove the link, and why. Without it the
+    # tombstone's ``deleted_by`` would blame that person for a removal they never saw. So if
+    # one cannot be written the whole run rolls back and answers 503; it is safe to retry.
+    with required_audit(
+        db, "The audit record for retiring stale auto-linked evidence could not be saved; nothing was changed. Retry."
+    ):
+        for entry in retired:
+            audit.log_required(
+                audit.ACTIONS["DELETE"],
+                "qms_clause_evidence",
+                resource_id=entry["evidence_id"],
+                # audit_log.resource_identifier is String(255); an evidence title may be 500.
+                resource_identifier=entry["title"][:_AUDIT_IDENTIFIER_MAX],
+                description=(
+                    f"Auto-link retired evidence '{entry['title']}' from clause {entry['clause_number']}: "
+                    f"its rule '{entry['rule_id']}' no longer matches the clause"
+                ),
+                old_values=entry["snapshot"],
+                extra_data={"soft_delete": True, "retired_by": "auto_link", **_retirement_ref(entry)},
+            )
+
+    summary_extra: Dict[str, Any] = {}
+    if not_computed:
+        summary_extra["evidence_not_computed"] = not_computed
+    if retired:
+        summary_extra["evidence_retired"] = [_retirement_ref(entry) for entry in retired]
+    if kept_reviewed:
+        summary_extra["evidence_kept_reviewed"] = kept_reviewed
     audit.log_create(
         "qms_standard",
         standard.id,
@@ -777,15 +1109,17 @@ def auto_link_standard(
         description=(
             f"Auto-linked evidence: {total_created} created, {total_updated} updated"
             + (f", {total_failed} not computed (left unchanged)" if total_failed else "")
+            + (f", {len(retired)} retired (rule no longer matches)" if retired else "")
+            + (f", {len(kept_reviewed)} stale but kept because a person reviewed them" if kept_reviewed else "")
         ),
-        extra_data={"evidence_not_computed": not_computed} if not_computed else None,
+        extra_data=summary_extra or None,
     )
 
     db.commit()
 
     logger.info(
         f"Auto-link for standard {standard.name}: "
-        f"{total_created} created, {total_updated} updated, "
+        f"{total_created} created, {total_updated} updated, {len(retired)} retired, "
         f"{clauses_with_evidence}/{len(clauses)} clauses with evidence, "
         f"{total_failed} evidence rules not computed"
     )
@@ -799,11 +1133,175 @@ def auto_link_standard(
         total_evidence_created=total_created,
         total_evidence_updated=total_updated,
         total_evidence_failed=total_failed,
+        total_evidence_retired=len(retired),
+        evidence_kept_reviewed=[AutoLinkKeptEvidence(**entry) for entry in kept_reviewed],
         compliance_summary=compliance_counts,
     )
 
 
+def _retirement_ref(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """The identifying fields of a retired evidence row, as the audit rows record them."""
+    return {k: entry[k] for k in ("evidence_id", "clause_id", "clause_number", "rule_id")}
+
+
+def _retire_unmatched_auto_links(
+    db: Session, clause: QMSClause, company_id: int, user_id: int
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Soft-delete the clause's auto-linked evidence whose rule no longer matches the clause.
+
+    An auto-linked row exists only because a mapping rule matched its clause. Once the rule
+    stops matching (its keywords changed, or the clause was re-worded) the link is a claim
+    nothing supports any more -- e.g. the ERP change log linked to 9.2 Internal audit before
+    that clause stopped routing to the audit-log rule. So the next auto-link run retires it.
+
+    * A rule is "matched" by its keywords (``matched_rule_ids``), not by having produced a row
+      this run: a rule whose query failed this run still matches, and its stored row stays.
+    * A row a person has reviewed is never retired: verified (``is_verified``), or carrying a
+      document or notes only a person sets (``document_id``, ``verification_notes`` -- auto-link
+      writes neither). It is returned in the second list, with the reason, and left as it is.
+      A person's judgment is not overruled by an automated keyword change.
+    * Manually linked rows (``is_auto_linked`` false) are never touched.
+
+    The candidate rows are read ``FOR UPDATE`` (a no-op on SQLite), so a second auto-link run on
+    the same standard, or a Verify that COMMITTED before this run took the lock, is decided
+    against the row as it then stands: a just-retired row is not retired twice, a just-verified
+    row is kept. A Verify or Remove that reaches the row while this run holds it waits: the
+    evidence ``PUT`` and ``DELETE`` lock the row too (``_lock_live_evidence_or_404``) and judge
+    ``is_deleted`` after the lock, so a row this run retired is a 404 for them, never a row left
+    verified and deleted. These row locks come before the audit-chain lock, which
+    ``auto_link_standard`` takes only after its flush -- the same order as those two routes.
+
+    Returns ``(retired, kept_reviewed)``. Each retired entry carries a JSON-ready pre-delete
+    ``snapshot`` for the caller's required audit DELETE row.
+    """
+    matched = matched_rule_ids(clause)
+    auto_linked = (
+        db.query(QMSClauseEvidence)
+        .filter(
+            QMSClauseEvidence.clause_id == clause.id,
+            QMSClauseEvidence.company_id == company_id,
+            QMSClauseEvidence.is_deleted == False,
+            QMSClauseEvidence.is_auto_linked == True,
+        )
+        .order_by(QMSClauseEvidence.id)
+        .with_for_update()
+        .all()
+    )
+
+    retired: List[Dict[str, Any]] = []
+    kept_reviewed: List[Dict[str, Any]] = []
+    for evidence in auto_linked:
+        if evidence.auto_link_query in matched:
+            continue
+        ref = {
+            "evidence_id": evidence.id,
+            "clause_id": clause.id,
+            "clause_number": clause.clause_number,
+            "rule_id": evidence.auto_link_query,
+        }
+        if evidence.is_verified:
+            kept_reviewed.append({**ref, "reason": "verified"})
+            continue
+        if evidence.document_id is not None or (evidence.verification_notes or "").strip():
+            kept_reviewed.append({**ref, "reason": "annotated"})
+            continue
+        snapshot = _evidence_audit_snapshot(evidence)
+        evidence.soft_delete(user_id)
+        retired.append({**ref, "title": evidence.title, "snapshot": snapshot})
+    return retired, kept_reviewed
+
+
 # ============== Evidence Links ==============
+
+
+def _lock_live_evidence_or_404(db: Session, evidence_id: int, company_id: int) -> QMSClauseEvidence:
+    """Lock the caller's evidence row and return it, or 404 if it, its clause or its standard is removed.
+
+    For the evidence ``PUT`` and ``DELETE``. The row is read ``FOR UPDATE`` (a no-op on SQLite),
+    so this request is serialized on the row with any other writer of it, including an auto-link
+    run (``POST /{standard_id}/auto-link``), which writes the clause's auto-linked rows before
+    its audit rows:
+
+    * Lock order. The caller flushes its change before it writes its audit row, so it holds this
+      row lock before the global audit-chain lock, the order auto-link and the rest of the
+      codebase use. Before this, these routes read the row without a lock and let the audit row
+      take the chain lock first, then waited for the row while holding it: a deadlock against
+      auto-link (40P01, the app-wide 409), and a stall of every tenant's audited writes while
+      the request waited.
+    * No edit of a removed row. ``is_deleted`` is tested after the lock, on the row as it stands
+      once the lock is held (``populate_existing`` re-reads a row already in the session), not
+      in the ``WHERE``: a row that auto-link retired, or another person removed, while this
+      request waited is a 404. Before, a Verify that read the row before a retirement committed
+      could still mark it verified, leaving it verified and deleted, and answer 200.
+    * No edit under a removed clause or standard. Removing a standard or clause soft-deletes only
+      that row; its evidence keeps ``is_deleted = false``, every QMS read hides it with its
+      parent, and ``DELETE /documents/{id}`` counts it as removed (it keeps its document). Such a
+      row is a frozen record, so it answers the same 404 as a removed row, and nothing is written.
+      Before, ``PUT`` could clear its ``document_id`` and so let that document be deleted. The
+      clause routes refuse a clause of a removed standard for the same reason
+      (``_live_clause_or_404``).
+
+    The ``WHERE`` keeps the tenant filter, so another company's row is never locked. The clause
+    and standard are read after the lock, also inside the tenant (a clause or standard that does
+    not join is not found), as a plain read of their flags as committed now. They are not locked:
+    ``delete_standard``, ``delete_clause`` and ``update_clause`` write their audit row, taking the
+    global audit-chain lock, before their own row change, so a share lock here, held while this
+    request waits for the chain lock, would deadlock against them. The cost is that a clause or
+    standard removed after this read and before this request commits is not seen.
+    """
+    evidence = (
+        db.query(QMSClauseEvidence)
+        .filter(
+            QMSClauseEvidence.id == evidence_id,
+            QMSClauseEvidence.company_id == company_id,
+        )
+        .with_for_update()
+        .populate_existing()
+        .first()
+    )
+    if evidence is None or evidence.is_deleted:
+        raise HTTPException(status_code=404, detail="Evidence not found")
+    # Column reads, not entities: the flags come from the database, never a stale session copy.
+    parents = (
+        db.query(QMSClause.is_deleted.label("clause_deleted"), QMSStandard.is_deleted.label("standard_deleted"))
+        .join(QMSStandard, QMSStandard.id == QMSClause.standard_id)
+        .filter(
+            QMSClause.id == evidence.clause_id,
+            QMSClause.company_id == company_id,
+            QMSStandard.company_id == company_id,
+        )
+        .first()
+    )
+    if parents is None or parents.clause_deleted or parents.standard_deleted:
+        raise HTTPException(status_code=404, detail="Evidence not found")
+    return evidence
+
+
+def _evidence_audit_snapshot(evidence: QMSClauseEvidence) -> Dict[str, Any]:
+    """Every column of the evidence row, JSON-ready (``log_required`` stores values as given).
+
+    Dates and datetimes become ISO strings and any other non-JSON value its ``str()``, so a
+    column type added later cannot make every evidence link, edit, removal or auto-link
+    retirement fail its required audit row (``json.dumps`` of a raw value would fail inside
+    ``AuditService.log``, which a required row turns into a 503).
+    """
+    snapshot: Dict[str, Any] = {}
+    for attr in sa_inspect(evidence).mapper.column_attrs:
+        value = getattr(evidence, attr.key)
+        if value is None or isinstance(value, (bool, int, float, str)):
+            snapshot[attr.key] = value
+        elif hasattr(value, "isoformat"):
+            snapshot[attr.key] = value.isoformat()
+        else:
+            snapshot[attr.key] = str(value)
+    return snapshot
+
+
+# ``audit_log.resource_identifier`` is String(255); an evidence title may be 500 (the schemas allow
+# it). On PostgreSQL a longer identifier fails the audit INSERT, which a required audit row turns
+# into a 503 on every add, edit or removal of that evidence. So the identifier is cut to fit on all
+# three evidence routes; the description keeps the whole title.
+_AUDIT_IDENTIFIER_MAX = 255
 
 
 @router.post("/clauses/{clause_id}/evidence", response_model=QMSEvidenceResponse, status_code=status.HTTP_201_CREATED)
@@ -815,18 +1313,16 @@ def add_evidence(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Link evidence to a clause."""
-    clause = (
-        db.query(QMSClause)
-        .filter(
-            QMSClause.id == clause_id,
-            QMSClause.company_id == company_id,
-            QMSClause.is_deleted == False,
-        )
-        .first()
-    )
-    if not clause:
-        raise HTTPException(status_code=404, detail="Clause not found")
+    """Link evidence to a clause.
+
+    A ``document_id`` must name one of your company's documents. Any other id, including one that
+    does not exist, is refused 404 ``Document not found`` and nothing is written.
+    """
+    # A clause of a removed standard is not found: evidence linked there could never be edited or
+    # cleared (``_lock_live_evidence_or_404`` refuses it), so its document could never be deleted.
+    _live_clause_or_404(db, clause_id, company_id)
+
+    _assert_company_document(db, data.document_id, company_id)
 
     evidence = QMSClauseEvidence(
         clause_id=clause_id,
@@ -837,7 +1333,20 @@ def add_evidence(
     db.add(evidence)
     db.flush()  # assign PK without committing so the audit row carries resource_id
 
-    audit.log_create("qms_clause_evidence", evidence.id, evidence.title, new_values=evidence)
+    # REQUIRED evidence, like the edit and remove routes below: the link is saved only with its
+    # CREATE row (who linked it, and the row as created). If the row cannot be written the insert
+    # is rolled back and the answer is 503; nothing was linked, so a retry is safe.
+    with required_audit(
+        db, "The audit record for linking this evidence could not be saved; the evidence was not linked. Retry."
+    ):
+        audit.log_required(
+            audit.ACTIONS["CREATE"],
+            "qms_clause_evidence",
+            resource_id=evidence.id,
+            resource_identifier=evidence.title[:_AUDIT_IDENTIFIER_MAX],
+            description=f"Created qms_clause_evidence: {evidence.title}",
+            new_values=_evidence_audit_snapshot(evidence),
+        )
     db.commit()
     db.refresh(evidence)
     return evidence
@@ -852,22 +1361,30 @@ def update_evidence(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Update evidence, including verification."""
-    evidence = (
-        db.query(QMSClauseEvidence)
-        .filter(
-            QMSClauseEvidence.id == evidence_id,
-            QMSClauseEvidence.company_id == company_id,
-            QMSClauseEvidence.is_deleted == False,
-        )
-        .first()
-    )
-    if not evidence:
-        raise HTTPException(status_code=404, detail="Evidence not found")
+    """Update evidence, including verification.
 
-    old_values = {c.key: getattr(evidence, c.key) for c in evidence.__table__.columns}
+    A non-null ``document_id`` must name one of your company's documents. Any other id, including
+    one that does not exist, is refused 404 ``Document not found`` and nothing is written, the
+    other fields in the same request included. ``null`` clears the link.
+
+    The row is locked before it is read and the change is flushed before the audit row is
+    written, so this takes its row lock ahead of the global audit-chain lock. See
+    ``_lock_live_evidence_or_404``.
+
+    The audit UPDATE row is REQUIRED evidence, written in the same transaction. A Verify is a
+    quality judgment and the row keeps only the latest one (a re-Verify overwrites
+    ``verified_by`` / ``verified_date``; an un-verify clears ``is_verified`` and leaves them
+    stale), so the audit rows are the only history of who judged the evidence and when. If the
+    row cannot be written the change is rolled back and the answer is 503; nothing was saved,
+    so a retry is safe. A request that changes nothing writes no row, as before.
+    """
+    evidence = _lock_live_evidence_or_404(db, evidence_id, company_id)
+
+    old_values = _evidence_audit_snapshot(evidence)
 
     update_data = data.model_dump(exclude_unset=True)
+    # Before any attribute is set, so a refusal leaves the row and the audit log untouched.
+    _assert_company_document(db, update_data.get("document_id"), company_id)
 
     # Track who verified
     if "is_verified" in update_data and update_data["is_verified"]:
@@ -877,7 +1394,31 @@ def update_evidence(
     for key, value in update_data.items():
         setattr(evidence, key, value)
 
-    audit.log_update("qms_clause_evidence", evidence.id, evidence.title, old_values=old_values, new_values=evidence)
+    # Write the row change before the audit row: ``AuditService.log`` takes the global
+    # audit-chain lock as its first statement, so an unflushed change would reach the database
+    # only after it, while this request held the chain lock (the opposite of the codebase order).
+    db.flush()
+
+    new_values = _evidence_audit_snapshot(evidence)
+    changes = {
+        key: {"old": old_values.get(key), "new": new_values.get(key)}
+        for key in sorted(old_values.keys() | new_values.keys())
+        if old_values.get(key) != new_values.get(key)
+    }
+    if changes:
+        with required_audit(
+            db, "The audit record for this evidence change could not be saved; nothing was changed. Retry."
+        ):
+            audit.log_required(
+                audit.ACTIONS["UPDATE"],
+                "qms_clause_evidence",
+                resource_id=evidence.id,
+                resource_identifier=evidence.title[:_AUDIT_IDENTIFIER_MAX],
+                description=f"Updated qms_clause_evidence: {evidence.title}",
+                old_values=old_values,
+                new_values=new_values,
+                extra_data={"changes": changes},
+            )
     db.commit()
     db.refresh(evidence)
     return evidence
@@ -891,19 +1432,32 @@ def delete_evidence(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Remove an evidence link."""
-    evidence = (
-        db.query(QMSClauseEvidence)
-        .filter(
-            QMSClauseEvidence.id == evidence_id,
-            QMSClauseEvidence.company_id == company_id,
-            QMSClauseEvidence.is_deleted == False,
-        )
-        .first()
-    )
-    if not evidence:
-        raise HTTPException(status_code=404, detail="Evidence not found")
+    """Remove an evidence link.
 
-    audit.log_delete("qms_clause_evidence", evidence.id, evidence.title, old_values=evidence, soft_delete=True)
+    Locks the row, soft-deletes it and flushes that before the audit row is written, so the row
+    lock comes before the global audit-chain lock. See ``_lock_live_evidence_or_404``.
+
+    The audit DELETE row is REQUIRED evidence, written in the same transaction: it records who
+    removed the link and the row as it stood before the removal. If it cannot be written the
+    removal is rolled back and the answer is 503; the evidence is still linked, so a retry is
+    safe.
+    """
+    evidence = _lock_live_evidence_or_404(db, evidence_id, company_id)
+
+    # The audit row records the row as it was before the delete, so take its values first.
+    old_values = _evidence_audit_snapshot(evidence)
     evidence.soft_delete(current_user.id)
+    db.flush()
+    with required_audit(
+        db, "The audit record for removing this evidence could not be saved; the evidence was not removed. Retry."
+    ):
+        audit.log_required(
+            audit.ACTIONS["DELETE"],
+            "qms_clause_evidence",
+            resource_id=evidence.id,
+            resource_identifier=evidence.title[:_AUDIT_IDENTIFIER_MAX],
+            description=f"Soft Deleted qms_clause_evidence: {evidence.title}",
+            old_values=old_values,
+            extra_data={"soft_delete": True},
+        )
     db.commit()

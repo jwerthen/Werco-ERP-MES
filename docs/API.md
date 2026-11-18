@@ -677,18 +677,29 @@ tokens" below), never wider.
 >   order, or a laser nest's planned runs, once work is recorded; re-importing a nest package onto a
 >   laser job with recorded work (its own refusal text) — **403**. See Work Orders → "Short count at
 >   completion" → "API tokens may not declare scrap or make count judgments".
+> - **Comments and watchers (owner decision 2026-11-16).** Posting, editing or deleting a comment and
+>   watching or unwatching a record answer **403** to every API token, whatever its role or scope: a
+>   comment is a person's own words. The reads stay open to a token the read gates admit. See
+>   [Comments and watchers](#comments-and-watchers).
+> - **Hank notes (owner decision 2026-11-16).** Hank's `add_note` task posts a work-order comment,
+>   so every API token is refused **403** at `POST /hank/tasks` and `POST /hank/tasks/{id}/execute`
+>   with the comment routes' text, whatever its role or scope. See Hank → "Reviewed task contract".
 > - **Left open.** **Resume Work Order** (`POST /work-orders/{id}/resume`): a token whose user holds
 >   Admin / Manager / Supervisor may lift a work-order hold, audited as that user with
 >   `extra_data.credential` (owner decision 2026-11-07). Dismiss, snooze and feedback on a
 >   recommendation stay open to every credential — a design decision of the AI governance change,
->   confirmed by the owner 2026-11-07 for Dismiss on an action card.
+>   confirmed by the owner 2026-11-07 for Dismiss on an action card. Hank's `change_due_date` task is
+>   open to a full token whose user holds Admin / Manager / Supervisor, in parity with
+>   `PUT /work-orders/{id}` (owner decision 2026-11-16; whether agents may move due dates is an open
+>   owner follow-up).
 >
 > A crew-station badge token is a person and passes the scrap, short-close and count rules (for scrap
 > and short closes that is the owner's decision, which names the crew badge; for the count rules it is
 > this PR's reading). An
 > interactive JWT, including one an MCP client carries, is the person's own session and is not
 > refused by any of them — that is current behavior, not part of the 2026-11-07 decision, which
-> covered standing API tokens only.
+> covered standing API tokens only. Separately, the MCP door refuses a Hank `add_note` to an agent
+> even on a person's own JWT (see [MCP door](#mcp-door-mcp)).
 >
 > **The row wins over the claims.** The `api_tokens` row — never the JWT — says who and which
 > company: the JWT's `user_id` / `company_id` must equal the row's or the token is refused, the active
@@ -948,437 +959,24 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 
 ## Core Endpoints
 
-### Buyer material plan PDF
+### Retired quote-nesting endpoints
 
-`POST /api/v1/quote-nesting/buyer-pdf` formats explicitly selected local planning
-layouts into a PDF attachment. Company/preparer identity comes from the authenticated
-active context. It does not retrieve or certify a saved nest, recalculate geometry,
-submit an order, or write business/audit/inventory records. The supplied input SHA-256
-identifies client planning input, not server approval or original DXF bytes.
+Every `/api/v1/quote-nesting/*` route was removed with the Material Nesting estimator in
+commit `3e17456e` (2026-09-16): the buyer material-plan PDF, catalog material resolution,
+team drafts and their revisions, saved server calculations (including runtime readiness,
+checkpoints and reports), spacing policies, and the original-DXF `/sources` attachments on
+saved revisions. No router mounts that prefix any more, so a request to any of them returns
+**404** (`backend/tests/api/test_quoting_cutover.py` pins it for the drafts, runs and
+buyer-PDF paths). New estimates, including their
+nesting, use `/fabrication-quotes` — see [FABRICATION_QUOTING.md](FABRICATION_QUOTING.md).
 
-Authentication and effective `purchasing:view` are checked before multipart parsing.
-Any conditional group or recorded-piece sheet additionally requires effective
-`inventory:view`. Company role overrides and existing platform exemptions apply.
-Disabled users, kiosk credentials and read-only switched-company POST restrictions
-retain their existing fences; this POST has no read-only-context exemption.
-
-Send exactly two multipart fields, without duplicates:
-
-| Field | Contract |
-|-------|----------|
-| `report` | UTF-8 JSON file, at most 8 MiB. Strict version1, `units: "in"`, `solverVersion: "werco-contour-v7"`, `expectedCompanyId`, project reference/notes, input SHA-256 and selected material groups. Unknown/duplicate JSON keys and nonfinite values are refused. |
-| `expected_company_id` | Positive 32-bit integer; both this field and the report's company ID must match the authenticated active company. A stale/mismatched company returns 409. |
-
-Groups contain material/description/thickness, part requirements, sequential sheets,
-actual outlines/holes, unavailable zones and placed contours. Every requested original
-instance must appear exactly once. A conditional plan includes its replacement
-full-sheet purchase fallback; one recorded piece can be used in one group. Limits
-are 300 original instances, 300 sheets, 200,000 aggregate vertices, 8 MiB JSON and
-20 MiB output. Positive dimensions/radii/thickness are bounded to 1e-9–100,000
-inches. A raw request cap of 8 MiB plus 64 KiB multipart overhead checks
-declared and streamed bytes before file spooling. Parsing/formatting runs off the
-event loop. Structural extent checks are not a second topology or approval engine.
-
-Success returns `application/pdf`, an attachment filename, `Cache-Control:
-private, no-store`, and `X-Content-Type-Options: nosniff`. The PDF separates selected
-purchase counts from conditional existing-piece use and its fallback. Part quantities,
-revisions and fitted vector layouts use inches; prices, quote totals, NC output and
-material credit are absent. Text is escaped; unsupported font characters remain
-visible as code-point markers. Rendering accepts no external images, SVG, URLs or
-filesystem paths. Errors include 401/403 for access, 409 for company drift, 413 for
-size, 415 for media type, and 400/422 for malformed multipart/report data.
-
-No migration, environment variable, runtime profile or permission key is added.
-See [the user workflow](MATERIAL_NESTING.md#buyer-pdf-for-the-selected-material-plan).
-
-### Quote nesting material provenance
-
-These endpoints support `/nest` with read-only selection of existing active
-`QuoteMaterial` catalog rows. Both require the active company's effective
-`purchasing:view` permission, including its role overrides and the existing
-Platform Admin/superuser exemptions. Existing authentication, kiosk/API-token,
-and read-only switched-company restrictions still apply; the POST has no
-read-only-context exemption. See [Material Nesting permissions](RBAC_PERMISSIONS.md#material-nesting).
-Paths below are relative to `/api/v1`.
-
-| Method | Endpoint | Contract |
-|--------|----------|----------|
-| GET | `/quote-nesting/materials` | Active-company catalog; `offset` ≥ 0 (default 0), `limit` 1–500 (default 200). Returns `schema_version: 1`, `items`, `total`, `offset`, `limit`. An empty catalog stays empty; this read never seeds defaults. |
-| POST | `/quote-nesting/material-resolution` | Resolve one explicitly selected catalog record and price basis against estimator-supplied stock dimensions. Does not save, approve, reserve, or mutate any record. |
-
-Example resolution request:
-
-```json
-{
-  "catalog_material_id": 42,
-  "thickness_in": "0.125",
-  "stock_options": [{"id": "48x96", "width_in": "48", "length_in": "96"}],
-  "price_basis": "per_lb"
-}
-```
-
-Use an ID returned by the current company's catalog. Optionally supply
-`expected_catalog_hash` with that row's 64-character lowercase SHA-256 digest;
-a changed snapshot returns **409**, requiring reload. The frontend supplies it.
-Inactive, foreign-company, and missing IDs return the same **404** response.
-Invalid request shapes return **422**: IDs must be positive JSON integers;
-dimensions must be positive decimal **strings**, with at most 12 digits before
-and 12 after the decimal point. Fractions, scientific notation, JSON numbers,
-non-finite values, and unknown fields are rejected. Stock options require 1–20
-unique nonblank IDs (≤100 characters each).
-
-| Explicit `price_basis` | Source field | Sheet-cost formula |
-|------------------------|--------------|--------------------|
-| `per_lb` | `stock_price_per_pound` | width × length × thickness × catalog density × price |
-| `per_cubic_inch` | `stock_price_per_cubic_inch` | width × length × thickness × price |
-| `per_square_foot` | `sheet_pricing[price_key]` | width × length × price ÷ 144 |
-
-All input dimensions are inches and density is lb/in³. `per_square_foot`
-requires the exact catalog `price_key` (1–100 characters); other bases forbid
-it. No nearest-thickness, name, first-price, alternate-basis, or typical-density
-fallback is applied. A sheet-price key's relationship to the entered thickness
-remains unverified even when the selected price is calculable. Invalid or
-nonpositive source prices are unavailable, not zero-cost stock. Without valid
-density, weight is null and per-pound pricing is unresolved; the other two
-bases may still calculate with the density warning retained.
-
-Catalog items return identity/name/category, nullable `source_updated_at`,
-`catalog_hash`, nullable decimal-string density, `price_options` with exact
-source fields/keys and nullable decimal-string unit prices, and `missing_metadata`.
-Resolution responses add `company_id`, the selected catalog snapshot and basis,
-canonical `thickness_in`, `stocks`, `issues`, and `content_hash`. Each stock
-returns decimal strings for dimensions, square-inch/square-foot area and
-cubic-inch volume, plus nullable `weight_lb` and `sheet_cost`. Money uses
-decimal arithmetic and half-up rounding to two places; the displayed
-square-foot area is rounded to 12 places without affecting cost arithmetic.
-
-Every result has `confirmed: false` and `currency: null`. `status` is
-`review_required` when numerically `calculable`, otherwise `unresolved`.
-The legacy catalog does not establish currency, structured grade/coating,
-certification, inventory mapping, price effectivity/expiry, approved revision,
-or authoritative thickness. These gaps always appear as issues; its update
-timestamp is not a price effective date. Canonical hashes include company and
-source identity, normalize equivalent decimal representations, and sort stock
-rows by ID. They detect changed inputs; they are not signed approvals or
-persisted audit events. CAD geometry is not submitted to these endpoints.
-
-### Quote nesting draft revisions
-
-Explicit Save/Open of **unapproved client inputs**, separate from operational
-quotes, laser nests, and inventory. All paths are relative to `/api/v1` and
-require the active company's effective `purchasing:view`; POST also requires
-`purchasing:create`. Existing role overrides, platform/superuser behavior, and
-read-only company/kiosk/API-token fences still apply. Read handlers make no
-business or audit writes; API-token authentication may retain its normal usage telemetry.
-
-| Method | Endpoint | Contract |
-|--------|----------|----------|
-| GET | `/quote-nesting/drafts` | Latest revision summaries, newest first with stable ID tie-break. `page` 1–100000 (default 1), `per_page` 1–100 (default 20). |
-| GET | `/quote-nesting/drafts/{id}/revisions` | Paginated immutable revision summaries with the same paging fields. |
-| GET | `/quote-nesting/drafts/{id}/revisions/{number}` | Exact revision plus its imperial `estimate` input object. Its `draft_version` is that revision's version, not today's latest. |
-| POST | `/quote-nesting/drafts` | Multipart JSON file `estimate`, UUID `request_key`, positive integer `expected_company_id`; create a new draft. |
-| POST | `/quote-nesting/drafts/{id}/revisions` | The same fields plus positive `expected_version`; append only when that version is current. |
-
-POST returns **200** for both a new save and an identical idempotent replay.
-The file limit is 5 MiB; a route-specific ASGI cap limits the entire upload to
-5 MiB + 16 KiB before multipart parsing. The global 256 KiB JSON-body cap is
-unchanged. Only the documented, nonduplicated fields are accepted. Current
-project formats 4/5/6/10/12/15 must explicitly use inches and USD, with bounded metadata,
-300 total part instances, 20,000 source geometry vertices, and 12 stock options per group.
-Duplicate JSON keys, non-finite values, unknown fields, original CAD blobs,
-approval flags, and solver/placement output are refused. This is structural
-validation of an input draft, not authoritative geometric acceptance.
-
-Stock exclusions require quote **11** or **14** inside project **12** or **15**, respectively; project 12 may also
-contain earlier quote 3/7/9 groups. Quote 11 retains orientation and spacing-policy
-fields from quote 7/9. A stock option's optional `exclusions` array contains
-`{id,label,reason,outline,clearance}`: a 1–64 character `[A-Za-z0-9_-]` ID,
-trimmed nonblank label (up to 120 characters), trimmed reason (up to 1,000), one
-closed polygon or analytical circle using the existing saved loop representation,
-and additional clearance 0–100 inches. All coordinates and clearance are inches.
-Each option allows 16 regions and 2,000 source vertices; a circle counts as one.
-The 20,000 project cap includes parts, reference paths and exclusions on every
-option, including disabled options. IDs are unique per option. Raw outlines must
-lie inside the gross sheet; overlap is permitted, and clearance may extend beyond
-the sheet. The server never crops or renormalizes them. Explicit `null` is invalid;
-an explicitly present empty array still requires the new file versions.
-
-Current geometry rules use quote **14** inside project **15**, with required
-`geometryProfile: {id: "werco-compensated-v1", sha256: <registered digest>}`.
-The exact two-field reference identifies a fixed engineering configuration;
-missing/null/extra fields or an unknown ID/digest reject. Quote 14 retains the
-orientation, policy, catalog and exclusion fields from prior formats. Earlier
-quote versions reject any profile-field presence. Project 15 can preserve mixed
-quote 3/7/9/11/14 groups. Saving and opening an earlier estimate never adds a
-profile, changes its source numbers or rewrites its canonical hash. Explicit
-upgrade is an input edit and requires a new saved revision for a new server run.
-Profile-bearing saves include `geometry_profile_not_shop_approval` review evidence;
-this configuration is not approval of physical allowances, material or pricing.
-
-These are estimator-reported, scenario-wide unavailable areas repeated on each
-hypothetical sheet, with no physical stock identity or machine-control meaning.
-Saving retains the exact source JSON and adds `unverified_stock_exclusions` review
-evidence per affected group. Python checks bounded primitives, metadata and raw
-sheet bounds; the shared calculation kernel checks polygon topology, numerical
-representability and guarded placement constraints before a checkpoint can be
-accepted. An unapproved draft save is not proof that its geometry can be calculated.
-
-Revision summaries contain `draft_id`, `company_id`, `revision_number`,
-`draft_version`, `name`, `status: DRAFT`, `content_sha256`, `payload_schema_version`,
-`payload_bytes`, `created_by`, `created_at`, and `review_issues` (code/message,
-optional group ID). Pages add `schema_version: 1`, `items`, `total`, `page`,
-`per_page`; exact-revision/save responses add `schema_version: 1` and `estimate`.
-The content hash covers server canonical JSON (sorted keys, compact separators,
-UTF-8, no non-finite numbers), not authenticated original DXF bytes. Geometry,
-pricing, and imported CAD hashes remain unapproved client assertions.
-
-Catalog bindings must reference this company's existing IDs. Changed/inactive
-sources are preserved with explicit review notes; missing/foreign IDs are
-refused without saving. Open clears catalog-price acknowledgment in the UI.
-Applied spacing-policy claims additionally require current immutable publication
-verification; see the spacing-policy contract below. Legacy inputs have no policy
-conformance claim and keep their original canonical payload/hash.
-Every successful first write adds one immutable revision and its required audit
-event in one transaction; failed audit evidence rolls back all draft changes.
-No quote totals, material allocation, remnant reservation, or operational records
-are modified. PostgreSQL rejects revision UPDATE/DELETE/TRUNCATE. There is no
-revision mutation/deletion or approval endpoint.
-
-- **403**: effective permission or existing session/company restriction.
-- **404**: inaccessible or missing draft/revision.
-- **409**: stale version, changed intended company, reused request key with a
-  different actor/payload/target, or a concurrent unique-key conflict.
-- **413**: file or whole-upload limit; **415**: wrong media type; **422**: invalid input.
-- **503**: required audit evidence failed; the transaction was rolled back.
-
-Retries must reuse the same UUID, intended company, target/version and exact
-input snapshot. An identical same-actor retry returns the original result before
-checking today's draft version. It never appends a second revision or audit event.
-See [Material Nesting](MATERIAL_NESTING.md#team-drafts-and-revision-history).
-
-### Quote nesting saved server calculations
-
-These routes calculate **unapproved quote layouts** from an exact immutable team
-draft revision. They do not accept arbitrary geometry/programs at execution time,
-approve a quote, control a laser, reserve material, or write operational costs.
-All reads require effective `purchasing:view`; start and cancel additionally require
-`purchasing:create`, using the draft routes' existing session/company restrictions.
-
-| Method | Endpoint | Contract |
-|--------|----------|----------|
-| GET | `/quote-nesting/runs/runtime` | Fresh, matching worker readiness: `schema_version`, `available`, `reason`, nullable `identity`. No geometry or credentials. |
-| POST | `/quote-nesting/runs` | Strict JSON: positive `draft_id`, `revision_number`, `expected_company_id`, lowercase SHA256 `input_sha256`, UUID `request_key`. Returns `RunDetail` (200); queues IDs after commit. |
-| GET | `/quote-nesting/runs` | Summary page with optional `draft_id`/`revision_number`; `page` 1–100000 and `per_page` 1–100. No geometry. |
-| GET | `/quote-nesting/runs/{run_id}` | Exact run status/settings/warnings and checkpoint metadata. |
-| GET | `/quote-nesting/runs/{run_id}/checkpoints/{sequence}` | One immutable option result and content hash; sequence 1–36. |
-| POST | `/quote-nesting/runs/{run_id}/cancel` | Strict JSON `expected_company_id`, `expected_version`; audited cancellation request, returns `RunDetail`. |
-| GET | `/quote-nesting/runs/{run_id}/report` | Exact saved inputs, run detail and available checkpoint payloads with a report digest; always `status: UNAPPROVED`. Read-only evidence, not an approved quote export. |
-
-The caller may explicitly calculate an older saved revision carrying the current
-geometry profile on every populated material group. Its ID/number/hash
-must match; the service never substitutes the latest revision. New runs require
-a live worker heartbeat matching the API release, pinned bundle, solver and Node
-runtime. A same-actor/key/request replay returns its original run even if current
-readiness is unavailable; a queued replay retries ID-only dispatch without creating
-a second run or audit event. Changed key meaning, active-company intent or input hash
-is rejected. Only one QUEUED/RUNNING calculation is permitted per company; a
-completed run can be recalculated only by an explicit new request.
-
-Every populated group is checked before creating a new run; empty legacy groups
-may remain untouched. An older populated group without the explicit current
-profile produces **422** with no run, checkpoint, dispatch or run-audit write.
-Same-key recovery precedes current-profile/runtime checks, so retrying an existing
-v4/v5 run does not require rewriting its input. At worker claim, a queued run
-whose frozen settings/runtime differ from the installed release fails with the
-existing audited `runtime_mismatch` outcome before the new profile check. It is
-never upgraded or silently recalculated. Historical report reads remain read-only
-and preserve their recorded settings, solver identity, placements and hashes.
-
-`RunSummary` identifies `id`, company/draft/revision IDs, revision number, input
-hash, actor, status/version/cancellation flag, timestamps, release/solver/bundle/
-Node identity, evaluated/complete-option counts, checkpoint bytes and bounded
-error code/message. `RunDetail` adds `schema_version: 1`, frozen `settings`, nullable
-`summary`, `warnings` and checkpoint metadata. Metadata contains sequence, group
-and stock-option IDs, content hash/bytes/time, complete flag, sheets, placed and
-unplaced counts. Pages use `items`, `total`, `page`, `per_page`, `schema_version: 1`.
-
-The checkpoint response adds `schema_version: 1` and `result`, the exact protocol-1
-Node option envelope for ordinary inputs, or protocol-2 stage envelope for a source-bound
-recorded-piece project. Historical payloads retain their original protocol and solver. Original saved inputs use inches; this internal geometry
-envelope explicitly declares millimeters. The application converts all displayed
-dimensions/areas to imperial. Report `content_sha256` hashes the server's canonical
-JSON excluding the hash field itself. Checkpoint hashes cover the entire option
-envelope. These are stored-result identities, not signatures authenticating original
-CAD bytes, material certification or approved pricing. A report fetched during an
-active run is a snapshot of currently retained work; later reports may contain
-additional checkpoints. Reports do not create immutable quote-export records.
-
-The fixed `standard-v1` technical profile limits the whole project to 120 seconds,
-36 enabled stock options, 5 MiB saved input, an 8 MiB result line including newline,
-24 MiB total retained checkpoint content and a 512 MiB Node heap. There is one
-nesting child per worker process; other ARQ functions retain their existing limits.
-Source groups/options are evaluated in their saved order. The shared kernel uses
-code-unit tie-breaking (`werco-contour-v7`), with `seed: null` because it is not
-random. Replaying identical saved inputs/build/runtime and completed work is
-deterministic; a wall-time cutoff is not a deterministic work budget.
-
-QUEUED → RUNNING → COMPLETED/PARTIAL/CANCELLED/FAILED are separate from quote
-approval. **COMPLETED means all planned stock options were evaluated**, not that
-every part fits. `completed_count` counts feasible stock alternatives for their
-individual material groups, not a combined purchased-sheet order. Each emitted
-nest is checked against original contours, spacing, margins, grain, quantities
-and the compensated part/part, part/exclusion and full-envelope sheet-edge constraints
-before its checkpoint is accepted. Time/work/output limits retain earlier checked
-results and explicitly identify unfinished work. They never establish infeasibility.
-All predicted leftovers remain review-only with zero credit.
-
-Checkpoint framing binds exclusion field presence, array order, IDs, labels,
-reasons, clearance and every source coordinate in both `stock` and `result.option`
-to the immutable imperial input converted to millimeters. No numerical tolerance
-permits a reduced clearance or changed outline. Current stock dimensions, gap and
-margin also retain exact imperial-to-metric source identity. Solver v6's build
-manifest, child `hello.geometry_profile` and immutable `settings.geometry_profile`
-bind the same registered profile reference; each checkpoint `stock.geometryProfile`
-matches its source quote. A stock option itself does not duplicate that group setting.
-
-Every new calculation uses `werco-leftovers-v3` with the exact normative profile
-payload, fixed reservation explanation and a required `excludedArea` ledger in
-square millimeters, including zero for absent/empty exclusions. This is the union of guarded
-exclusions intersected with the inward usable sheet, excluding margin overlap.
-The gross ledger reconciles edge margin + excluded area + nominal parts + reserved
-internal cutouts + clearance/numerical protection + remaining area + bounded
-roundoff residual. The software profile reserves half-gap plus imported tolerance
-and numerical protection around each part, with square-tangent corners. The entire
-envelope must stay within the inward-protected usable sheet outside the selected
-margin; it cannot be clipped to make a placement valid. Original nominal minimum
-distance checks remain independent. Historical v4/v5 records retain their v1/v2
-leftover objects and prior rules rather than being reinterpreted as v3.
-
-The profile's normative JSON is packaged under
-`app/data/nesting_profiles/werco-compensated-v1.json`. Its SHA-256 covers recursively
-key-sorted compact ASCII JSON `{id,profile}`, excluding the digest itself and any
-trailing newline. Nonintegral constants are decimal strings. Python checks that
-source on load; generated frontend data and the bundled child are checked against
-the same payload. This hash convention does not change older estimate/report hashes.
-
-Run creation/cancellation and worker lifecycle/checkpoint changes use required
-audit writes in the same database transaction. Background lifecycle evidence
-retains the submitting API-token credential attribution, including when revocation
-or expiry stops execution; this attribution does not grant execution rights.
-Heartbeats renew a 45-second lease
-every 10 seconds; cancellation/actor eligibility is checked while the child runs.
-The narrow relay requeues committed pending IDs and marks expired leases failed;
-it does not rerun a terminal result. Input/settings references and completed
-checkpoints are immutable; SQL guards enforce tenant/lease/input relationships,
-version increments, legal transitions and terminal immutability. No database
-transaction spans a geometry calculation; only short lifecycle/poll transactions
-run while the child works. Failed required audit evidence
-rolls back the associated change.
-
-Readiness identity contains release, protocol, solver version, bundle SHA, Node
-version, instance ID, observation time and nullable Railway deployment ID. Its
-Redis heartbeat expires after 90 seconds and is refreshed every 30 seconds. The
-worker publishes readiness only when its nesting relay cron is selected; disabling
-that relay leaves new server calculations unavailable.
-`reason` may be `ready`, `missing`, `stale`, `release_mismatch`, `queue_unavailable`
-or `invalid_identity`. No private drawing information is published in this key.
-
-- **403:** permission/session/company restriction; **404:** inaccessible run/input.
-- **409:** active run, stale cancellation version, input/request conflict or concurrent write.
-- **422:** invalid request; existing global JSON-body cap still applies.
-- **503:** matching runtime unavailable for a new request or required audit failure.
-
-### Quote nesting spacing policies
-
-`/quote-nesting/spacing-policies` governs **family-level quoting allowances** for
-Carbon steel, Stainless steel and Aluminum. It does not approve a quote, a laser
-process, a material grade or remnant eligibility. Reads and resolution require
-effective `purchasing:view`. Creating revisions, publishing and withdrawing also
-require Admin authority and effective `purchasing:create`, with the existing
-active-company, API-token, kiosk and read-only-context fences. An Admin may
-explicitly approve their own revision; this is the initial workflow assumption,
-not a claim of independent approval or compliance certification.
-
-| Method | Relative endpoint | Contract |
-|--------|-------------------|----------|
-| GET | (base) | Current header/selection plus separately counted revision and publication history; `page` 1–100000 and `per_page` 1–100 apply to both history lists. |
-| GET | `/revisions/{number}` | Immutable revision content, author/time, canonical content hash and size. |
-| POST | `/revisions` | Append a draft from `content`, `reason`, UUID `request_key`, `expected_company_id`, and `expected_version` (0 only for the initial company policy). |
-| POST | `/publications` | Explicit approval of `revision_number` and `content_sha256`, with the common command fields and `effective_at`: null for server-now, or a future UTC timestamp. |
-| POST | `/publications/{id}/withdraw` | Append a reasoned withdrawal using the common command fields. No history is edited or deleted. |
-| POST | `/resolve` | Read-only `{material, thickness_in}`; returns `{schema_version:1,status:resolved\|unmatched\|unavailable,policy:null\|snapshot,explanation}`. Application to workspace inputs remains explicit. |
-
-There is one company policy header and immutable content revisions. A shared
-append-only command ledger records revision creation, publication and withdrawal.
-The company version advances for every command; the revision number advances only
-when content is appended. Company locks, expected-version checks and database
-constraints protect races. A UUID is unique across all three commands in the
-company and binds the submitting actor/credential and exact command. Same-key
-retries recover that event before checking the current version; they create no
-second decision or audit row. Command receipts return `schema_version`, original
-`policy_version`, `event_id`, revision summary and nullable publication detail.
-Publication detail includes its current scheduled/current/superseded/withdrawn
-status, so its status may change when the original command is retrieved later.
-
-Content is `{schema_version:1,units:"in",name,bands}`. Each band contains `id`,
-`material`, `thickness_min_in`, `thickness_max_in`, `minimum_gap_in`,
-`gap_thickness_multiplier`, `minimum_margin_in`, and `margin_thickness_multiplier`.
-Band IDs are unique ASCII letters/digits/underscore/hyphen, 1–64 characters.
-The interval includes its lower bound and excludes its upper bound. Bands for
-one family cannot overlap; gaps are allowed and return `unmatched`.
-
-Policy values are canonical unsigned decimal strings with at most nine fractional
-digits, no exponent notation and no unnecessary leading/trailing zeros.
-Resolution accepts a thickness string with up to 18 fractional digits. Thickness
-is normalized **half-up to 0.000000001 inch**; a value rounded to zero is refused.
-For each allowance, compute the maximum of its minimum and normalized thickness
-times its multiplier, then round **up** to that same inch quantum. Python uses a
-fresh fixed Decimal context and the shared TypeScript implementation uses integer
-arithmetic. Policy-bearing saved quotes store numeric gap/margin from the exact
-canonical resolved strings; the backend checks those IEEE numeric values exactly,
-instead of accepting a tolerance that could understate the allowance.
-
-Structural limits are 128 bands, thickness bounds between 0 and 4 inches, minima
-and multipliers between 0 and 100, and 64 KiB canonical policy content. Each gap
-and margin formula must have a positive minimum or multiplier. These limits are
-technical bounds, not recommended manufacturing settings. No policy or approval
-is seeded by migration or created by a read. Copying the estimator's existing
-starting allowances into a policy draft requires explicit action.
-
-Publications cannot be retroactive or share an effective instant. Selection first
-finds the latest publication effective at the server's current time, then checks
-withdrawal. A withdrawn publication never reactivates an earlier one. Withdrawing
-a future publication leaves the prior current publication applicable until the
-future effective instant; thereafter that withdrawn publication makes resolution
-unavailable until a later effective publication replaces it. All API timestamps
-are complete UTC date/times ending in `Z`; the UI displays Central time.
-
-Saved quote version **9** and project version **10** (also exclusion-bearing
-quote 11/project 12) carry `spacingPolicy` or
-`spacingOverride`. Omit unused fields; explicit null is invalid. Older discriminants reject these fields. A policy snapshot
-contains schema/company/policy/publication/revision identity, content hash, exact
-matched band, canonical thickness/gap/margin and `resolved_at`; it requires
-`spacingMode:"policy"`. A custom override contains `{schema_version:1,reason,
-changed_at}`, requires manual mode and cannot coexist with a policy claim.
-Absent metadata remains visibly unreviewed. Legacy revisions and their hashes
-are not rewritten.
-
-New draft saves and new server runs verify policy claims against immutable source
-records and the currently effective, unwithdrawn publication under the same company
-policy lock. Material/thickness/spacing changes, forged source fields and stale
-approvals cannot pass as conforming. The estimator must resolve/apply the current
-policy or explicitly choose unapproved custom spacing with a reason. Already
-queued runs retain their exact accepted input snapshot; claim/replay never applies
-a newer policy or withdraws previously accepted work retroactively. Historical
-reports remain unchanged, and same-key run retries recover their original run.
-
-Policy commands use required audit evidence in the same transaction; an audit
-failure rolls back the header, content and command. Failure responses are 403 for
-authority/context restrictions, 404 for inaccessible policy records, 409 for
-version/request/currentness conflicts, 422 for invalid content/snapshot/schedule,
-and 503 when required audit evidence fails. Existing global JSON-body limits remain
-in force. All quote outputs remain unapproved and predicted leftovers retain zero
-credit; no inventory, reservation, quote total or machine-control record changes.
+The tables those routes wrote (migrations `101`, `102`, `103` and `105`) are kept as
+historical records; no route, service or job reads or writes them. Their database guards
+are described in [SUPABASE_SECURITY.md](SUPABASE_SECURITY.md). Production laser nests
+([Laser Nests](#laser-nests)) and the recorded-piece routes under `/inventory`
+([Advisory physical-piece observations](#advisory-physical-piece-observations),
+[Recorded-piece planning snapshot](#recorded-piece-planning-snapshot)) are separate and
+unaffected.
 
 ### Global search and customer edits
 
@@ -1545,8 +1143,8 @@ company-scoped.
 | GET | `/work-orders/{id}` | Get work order by ID. Also carries the job's cost by element (`job_cost_actuals`), the inventory-ledger material figure (`issued_material_cost`) and, per operation, where its actual hours come from (`hours_source`, `recorded_setup_hours`, `recorded_run_hours`, `hours_include_backfill`) — see "Cost and actual hours on the work-order read" below | Yes |
 | GET | `/work-orders/by-number/{wo_number}` | Get work order by number: the **same body** as by ID (every computed field included). A soft-deleted work order is **404**, as by ID. Unlike the read by ID it does **not** reconcile on read — it writes nothing | Yes |
 | GET | `/work-orders/{id}/timeline` | Chronological job history with category, actor and time filters; opaque cursor, `limit` 1–100 (default 30). Returns business events and source links, not raw audit payloads. Each item a single operation owns (its start / finish, production receipts, process-step evidence, labor, a blocker filed against it) carries `operation_id`; the job's own items carry `null` | Yes |
-| PUT | `/work-orders/{id}` | Update work order (body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status, **or sets `status` to COMPLETE/CLOSED from any status other than COMPLETE/CLOSED** — see "Terminal-state lock" below). **`due_date` is the one non-`status` field that IS status-gated: changing it on a COMPLETE/CLOSED/CANCELLED work order returns 409** (see "Due date on a finished job" below). Other non-`status` fields such as `notes` / `special_instructions` / `unit_number` carry **no status gate**: they are editable at any status, including terminal ones (send `unit_number: null` — or `""`, which is trimmed to NULL — to clear it). **The flip verb for `sequential_operations`** — turning it *on* returns **409** on a laser nest WO, and **409 naming the operations** when work is already under way out of sequence; otherwise it demotes un-worked blocked operations READY → PENDING, one audit row each (see "READY promotion" below). **`status: on_hold` on a DRAFT work order returns 409** (a draft has nothing on the floor to hold — release it first); this `PUT` is the "Hold Work Order" write for a released / in-progress job, and the door that puts a held job back on the floor is `POST /work-orders/{id}/resume` (this `PUT` can still move a held job to `draft` or `cancelled`, which keeps it off the floor; its blind move to `released` / `in_progress` is a known gap — see "Draft and on-hold work orders refuse every start" below). **Any move to `draft`** (from released / in progress / on hold) returns every un-worked READY operation — laser nests included — to PENDING with one **required** audit row each; **503**, nothing changed, when those rows cannot be written (see "Returning a job to draft" below). **Lowering `quantity_ordered` below what a whole-order operation has already accounted for (its good + scrap) returns 409** naming the operation, before any field is written — lower the order only by units no operation has started; **raising** it once a whole-order or component operation has completed returns 409 too; whole-order targets restated as `component_quantity` move with the order (audited); an API token lowering it once work is recorded gets 403, as does an API token raising the header's `quantity_scrapped` (only a person declares scrap — owner decision 2026-11-07), changing `scrap_reason`, or changing the header's `quantity_complete` / `quantity_scrapped` in either direction (this PR's extension); and a `sequential_operations` flip that would re-interpret a declared short returns 409 (see "Short count at completion" below) | Admin / Manager / Supervisor |
-| DELETE | `/work-orders/{id}` | Delete work order (soft by default; `hard_delete=true` only for draft/cancelled, and refused **409** when ledger-backed ties or saved templates reference it) | Admin / Manager |
+| PUT | `/work-orders/{id}` | Update work order (an absent, other-company **or soft-deleted** work order is **404** `Work order not found` — restore is its own verb; body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status, **or sets `status` to COMPLETE/CLOSED from any status other than COMPLETE/CLOSED** — see "Terminal-state lock" below). **`due_date` is the one non-`status` field that IS status-gated: changing it on a COMPLETE/CLOSED/CANCELLED work order returns 409** (see "Due date on a finished job" below). Other non-`status` fields such as `notes` / `special_instructions` / `unit_number` carry **no status gate**: they are editable at any status, including terminal ones (send `unit_number: null` — or `""`, which is trimmed to NULL — to clear it). **The flip verb for `sequential_operations`** — turning it *on* returns **409** on a laser nest WO, and **409 naming the operations** when work is already under way out of sequence; otherwise it demotes un-worked blocked operations READY → PENDING, one audit row each (see "READY promotion" below). **`status: on_hold` on a DRAFT work order returns 409** (a draft has nothing on the floor to hold — release it first); this `PUT` is the "Hold Work Order" write for a released / in-progress job, and the door that puts a held job back on the floor is `POST /work-orders/{id}/resume` (this `PUT` can still move a held job to `draft` or `cancelled`, which keeps it off the floor; its blind move to `released` / `in_progress` is a known gap — see "Draft and on-hold work orders refuse every start" below). **Any move to `draft`** (from released / in progress / on hold) returns every un-worked READY operation — laser nests included — to PENDING with one **required** audit row each; **503**, nothing changed, when those rows cannot be written (see "Returning a job to draft" below). **Lowering `quantity_ordered` below what a whole-order operation has already accounted for (its good + scrap) returns 409** naming the operation, before any field is written — lower the order only by units no operation has started; **raising** it once a whole-order or component operation has completed returns 409 too; whole-order targets restated as `component_quantity` move with the order (audited); an API token lowering it once work is recorded gets 403, as does an API token raising the header's `quantity_scrapped` (only a person declares scrap — owner decision 2026-11-07), changing `scrap_reason`, or changing the header's `quantity_complete` / `quantity_scrapped` in either direction (this PR's extension); and a `sequential_operations` flip that would re-interpret a declared short returns 409 (see "Short count at completion" below) | Admin / Manager / Supervisor |
+| DELETE | `/work-orders/{id}` | Delete work order (soft by default; `hard_delete=true` only for draft/cancelled, and refused **409** when ledger-backed ties or saved templates reference it, or when it has comments) | Admin / Manager |
 | POST | `/work-orders/{id}/restore` | Restore a soft-deleted work order (**400** if it is not deleted). Re-opens the ties the delete cancelled — **except** any whose part has since been reclassified into one the shop produces. Returns an **envelope** (`message` + `skipped_material_allocations`), not a bare message; see "Restoring a work order" below. Reached from Work Orders → **Deleted** (`deleted_only=true` above) | Admin / Manager |
 | POST | `/work-orders/{id}/release` | Release to production. **400** `Only draft work orders can be released` when not DRAFT, **400** `Work order must have at least one operation` when it has none — the only two checks; there is no material, blocker or readiness gate (see "Releasing work orders" below). **404** when missing or soft-deleted | Admin / Manager / Supervisor |
 | POST | `/work-orders/bulk-release` | **Release several DRAFT work orders in one call.** Body `{"work_order_ids": [...]}`: 1–50 positive ids (repeats count toward the 50 and are de-duplicated, first occurrence kept); any other key → **422**. Each id is judged and released exactly as `POST /work-orders/{id}/release` would, all in **one** commit. **200** once the body validates — even when every item was refused — with `{results, released_count, error_count}`, one result per distinct id in request order, unless the whole request fails after the per-item phase (the audit rows or the commit: **409** on a lost lock race, otherwise 5xx, nothing saved). Not an MCP tool. See "Releasing several work orders at once" below | Admin / Manager / Supervisor |
@@ -1566,6 +1164,10 @@ company-scoped.
 | GET | `/work-orders/{id}/material-allocations/{allocation_id}/consumption` | Per-source-lot ledger position of a tie (`issued` / `returned` / `net`) — the pre-confirm read behind the return dialog | Yes |
 | POST | `/work-orders/{id}/material-allocations/{allocation_id}/return` | **Return consumed material to its source lots** — reasoned, audited, compensating. The only verb on this router that posts inventory | Admin / Manager / Supervisor |
 | GET | `/work-orders/{id}/backflush-preview` | **Dry run (PR 4.5)** — what completing this work order would consume, per component and per lot, before anything moves. Pure read: no ledger row, no audit row, no event | Yes |
+
+> **Comments on a work order** (the detail page's Comments panel, with @mentions and a Watch
+> toggle) are their own routes, `/comments` and `/watchers` with `entity_type=work_order` — see
+> [Comments and watchers](#comments-and-watchers).
 
 > **Tenant isolation on operation/completion endpoints.** The operation- and completion-level
 > endpoints above (`/start`, `/complete`, `/operations/{id}`, `/operations/{id}/start`,
@@ -1632,6 +1234,11 @@ company-scoped.
 > work-order list hid the control while the detail page and the API permitted the same edit, which made
 > the audit trail look like a restriction was holding when two other doors were open. Both UI surfaces
 > now hide the due-date pencil on a terminal WO to match, but the 409 is what enforces it.
+>
+> The rule is **one implementation**, `services/work_order_due_date.py`
+> (`assert_due_date_change_allowed`), shared by this `PUT` and Hank's `change_due_date` task (Hank →
+> "Reviewed task contract"), so the two doors cannot drift apart. The `PUT` only judges the change
+> there; its own `setattr` loop still writes the value.
 >
 > **READY promotion: a sequenced ROUTING or a DISPATCH POOL, chosen per work order.** Which of the two
 > a work order is, is its own setting — `sequential_operations`, added by migration `081` and carried on
@@ -2033,7 +1640,8 @@ company-scoped.
 >   terminal work order.
 > - **A soft-deleted work order is 404** on clock-in, both start verbs, `POST /work-orders/{id}/start`,
 >   `POST /work-orders/{id}/release` and the generic `PUT /work-orders/operations/{id}` (the whole verb:
->   no field of a deleted job's operation is editable through it).
+>   no field of a deleted job's operation is editable through it) — and, since 2026-11-16, the header
+>   `PUT /work-orders/{id}` too (restore is its own verb).
 > - **A laser child does not inherit its assembly parent's draft or hold** — the gate reads the
 >   operation's own work order. Hold the laser work order itself to stop its nests.
 > - **List membership does not change.** Draft and held jobs stay on the kiosk queue, the crew station,
@@ -4019,6 +3627,19 @@ company-scoped.
 > planner can act on. And **soft delete is untouched** — it is the point: a soft-deleted work order
 > keeps every template working. See Work Orders → "Work order templates".
 
+> **Hard delete is also refused 409 when the work order has comments** (2026-11-16). Comments and
+> watchers name the work order with no foreign key, but every comment's `comment_added` /
+> `comment_mentioned` notification event carries `operational_events.work_order_id`, a plain FK with
+> no `ON DELETE`, so an unguarded hard delete was a `ForeignKeyViolation` **500** on Postgres (and,
+> had the best-effort emit failed, a silent orphaning of the thread). The refusal is raised **before
+> the first mutation**, after the ledger and template probes: *"This work order has N comment(s), so
+> it cannot be permanently deleted. Soft delete instead — the work order and its comment thread stay
+> intact."* For the template guard's reason, **deleted comments count too** — their events stay and
+> Postgres does not read `is_deleted` — so a work order whose comments were all deleted is refused
+> with *"This work order has deleted comments that are kept as records with their notifications,
+> …"*. The probe is tenant-scoped (`comment_service.comment_counts_for_record`). Soft delete is
+> untouched and keeps the thread. See [Comments and watchers](#comments-and-watchers).
+
 > **Seeing a deleted work order: `GET /work-orders/?deleted_only=true` (the restore view).**
 > The work-order twin of the vendor and PO restore views documented under Purchasing, and it exists
 > for the sharper of their two reasons: `POST /work-orders/{id}/restore` had shipped, been audited and
@@ -4242,10 +3863,10 @@ mixed**:
 | POST | `/work-orders/laser-nest-packages/standalone/preview` | Same preview with **no work order in the path** — used before a standalone import (same `sheet_suggestion` on every row) | Admin / Manager / Supervisor |
 | POST | `/work-orders/laser-nest-packages/standalone/import` | Import a package into a **fresh standalone laser WO** — creates a released, part-less `laser_cutting` work order with the release recorded as the importer's (`released_by` / `released_at`) (no parent; quantity = total planned sheet runs; optional `due_date`, optional `sheet_match_provenance`) | Admin / Manager / Supervisor |
 | POST | `/laser-nests/extract` | Auto-extract nest fields (CNC #, material, size) from a single uploaded nest PDF. Stateless — no DB write, no audit | Admin / Manager / Supervisor |
-| POST | `/work-orders/{id}/laser-nests/manual` | Manually add **one** nest to a work order (child laser WO of an assembly, or the addressed `laser_cutting` WO directly). Creates a clock-in-able `LASER` operation; sets the laser WO RELEASED the same way the import does (release recorded when it was a draft or unstamped; an **on-hold** laser WO stays on hold, so the new nest cannot be started until the hold is lifted) | Admin / Manager / Supervisor |
-| PATCH | `/laser-nests/{id}` | Edit a manual nest (all fields optional). Raising `planned_runs` on a COMPLETE nest or a finished laser work order is **409**; a standing API token lowering it once work is recorded on the nest is **403** | Admin / Manager / Supervisor |
+| POST | `/work-orders/{id}/laser-nests/manual` | Manually add **one** nest to a work order (child laser WO of an assembly, or the addressed `laser_cutting` WO directly). Creates a clock-in-able `LASER` operation; sets the laser WO RELEASED the same way the import does (release recorded when it was a draft or unstamped; an **on-hold** laser WO stays on hold, so the new nest cannot be started until the hold is lifted). `planned_runs` must be 1–9,999 (**422** otherwise) | Admin / Manager / Supervisor |
+| PATCH | `/laser-nests/{id}` | Edit a manual nest (all fields optional). `planned_runs` outside 1–9,999 is **422**. Raising `planned_runs` on a COMPLETE nest or a finished laser work order is **409**; a standing API token lowering it once work is recorded on the nest is **403** | Admin / Manager / Supervisor |
 | POST | `/laser-nests/{id}/attach-document` | Attach an already-uploaded PDF Document to the nest (PDF-only) | Admin / Manager / Supervisor |
-| DELETE | `/laser-nests/{id}/document` | Detach the PDF (clears the FK; the Document row is left intact) | Admin / Manager / Supervisor |
+| DELETE | `/laser-nests/{id}/document` | Detach the PDF (clears the FK; the Document row is left intact). The only way to release a live nest's PDF for `DELETE /documents/{id}`, which refuses **409** while any nest, removed ones included, carries it | Admin / Manager / Supervisor |
 | GET | `/laser-nests/{id}/document` | Serve the attached PDF **inline** for operator preview | Yes (any authenticated user) |
 | DELETE | `/laser-nests/{id}` | Soft-delete the nest; its operation goes `ON_HOLD` | Admin / Manager / Supervisor |
 | POST | `/laser-nests/{id}/restore` | Restore a cancelled nest and its planned runs, retaining the original operation and drawing | Admin / Manager / Supervisor |
@@ -4549,12 +4170,19 @@ environment variable or deployment configuration change is needed.
 > shared `run_llm_task` pipeline (one tenant-scoped `ai_usage_events` row per pass — telemetry,
 > not audit):
 >
-> - **Single-PDF (`POST /laser-nests/extract`).** Multipart `file` (PDF; non-PDF → **400**).
+> - **Single-PDF (`POST /laser-nests/extract`).** Multipart `file` (PDF; non-PDF → **400**; over
+>   **50 MB** → **413** before any work, see [AI document uploads](#ai-document-uploads); a PDF
+>   over the ~20 MB native cap is still read, through the flattened-text fallback).
 >   **Stateless — no DB write, no audit**; `company_id` flows through only for usage telemetry.
 >   Used by the manual-create modal to auto-fill fields from a dropped PDF. Returns
 >   `{ cnc_number, material, thickness, sheet_size, planned_runs, confidence, source, warning, passes }`
 >   where `source` ∈ `{ai, filename}`, `confidence` ∈ `{high, medium, low}` (overall — the
->   per-field minimum when both passes ran), and `passes` ∈ `{1, 2}`.
+>   per-field minimum when both passes ran), and `passes` ∈ `{1, 2}`. `planned_runs` is a real
+>   **`null`** whenever the run count was not cleanly read — missing, not a whole number, below 1,
+>   or above 9,999 — and `confidence` is then **`low`**; a count above 9,999 also adds a `warning`
+>   (joined with `; ` to any existing one). The response never carries the model's raw value, so the
+>   manual form is never pre-filled with a count the create route would refuse (and a non-numeric
+>   value such as `"N/A"` or `2.5` is no longer a **500**).
 >   Declared as a static `/extract` route so it matches ahead of the dynamic `/{laser_nest_id}` routes.
 >
 > - **Batch ZIP (`…/laser-nest-packages/preview` → `…/import`).** A package is treated as a **PDF
@@ -4577,7 +4205,10 @@ environment variable or deployment configuration change is needed.
 >   supplies PDF bytes). When `rows` is absent, the legacy CNC-file import is unchanged.
 >
 >   `rows` is **strictly validated** before anything is persisted (`LaserNestImportRow`):
->   `source_file` required (1–1000 chars), `planned_runs` required and **≥ 1**,
+>   `source_file` required (1–1000 chars), `planned_runs` required and **1–9,999** (before the
+>   bound, a count from 10,000 up to int4's 2,147,483,647 was stored without complaint and only a
+>   larger one failed as a **500** on Postgres; both are now a failing row like any other — the
+>   import wizard refuses an over-the-limit count itself before it sends the rows),
 >   `source_pages` optional (required on the bare-PDF path — see below): non-empty, entries
 >   **≥ 1**, ascending and consecutive,
 >   `work_center_id` optional and **> 0** (per-nest override; must resolve to an **active**,
@@ -4623,8 +4254,15 @@ environment variable or deployment configuration change is needed.
 > - **50-PDF cap (`LASER_PDF_PACKAGE_MAX`).** A package (or `rows` array) with more than **50**
 >   PDFs — or a bare PDF with more than **50 pages** — is rejected with **400**.
 > - **Upload size + abuse guards.** The upload body (ZIP or bare PDF) is capped at **50 MB**
->   (`LASER_UPLOAD_MAX_BYTES`), enforced while the body streams to disk → **413**. The local page
->   split refuses pathological amplification (pages sharing huge embedded resources that would
+>   (`LASER_UPLOAD_MAX_BYTES`), enforced while the body streams to disk → **413**. On **preview**
+>   the counted upload size is checked first (413 before a byte is copied), and a ZIP is refused
+>   with **413** before anything is unpacked when its central directory lists more than **200**
+>   files and folders (`LASER_ZIP_MAX_MEMBERS`) or more than **200 MB** unpacked
+>   (`LASER_ZIP_MAX_UNCOMPRESSED_BYTES`) — the zip-bomb guard, since the 50 MB cap counts
+>   compressed bytes only. Preview copies and unpacks on a worker thread, not the event loop.
+>   **Import** does not yet check the counted size or the two ZIP caps — only the streaming 50 MB
+>   cap applies there, and it still copies and unpacks on the event loop. The local page split
+>   refuses pathological amplification (pages sharing huge embedded resources that would
 >   multiply on split) → **400**. The per-request AI fan-out shares one **process-global**
 >   concurrency cap (5), and the two standalone routes carry a **10/minute** per-path rate limit.
 > - **Graceful degrade.** A PDF the model can't read falls back to the **filename stem** as the
@@ -4640,20 +4278,31 @@ environment variable or deployment configuration change is needed.
 >   segmentation defaults to one nest per page — the page split itself is local `pypdf` and keeps
 >   working.
 > - **`planned_runs` reads differently on the two entry points, and the difference is load-bearing.**
->   The stateless single-PDF `POST /laser-nests/extract` passes the model's value straight through, so
->   it returns **`null`** when no run count was found. **Preview rows do not**: `LaserNestPreviewRow`
->   types `planned_runs` as a non-optional `int` and `_coerce_planned_runs` **floors it at 1**, so a
->   nest that genuinely runs once and a nest whose count neither pass could find are the **same `1`**
->   in the response. `field_confidence["planned_runs"] == "low"` is the **only** signal that separates
->   them — read the confidence, never the number, and the import wizard accordingly counts and labels
->   those rows rather than presenting them as read values. Accepted coercion shapes (widened
->   2026-08-05, since a model asked for one integer emits all of these): `3`, `3.0`, `"3"`, `"x3"`,
->   `"3 sheets"`, `"3 of 5"` — a **leading** integer is required for the free-text case, so `"sheet 4"`
->   reads as 1 rather than mistaking a label for a count. Anything else (a fractional float, junk,
->   missing) falls back to 1 rather than raising and 400-ing the whole preview batch.
+>   Both read the model's value through the same `read_planned_runs` (`laser_nest_service.py`), which
+>   accepts a whole count from 1 to 9,999 (`MAX_PLANNED_RUNS`) and treats everything else as **not
+>   read**. The stateless single-PDF `POST /laser-nests/extract` returns a not-read count as **`null`**
+>   at `low` confidence (above). **Preview rows do not**: `LaserNestPreviewRow` types `planned_runs` as
+>   a non-optional `int`, so a not-read count is **floored at 1**, and a nest that genuinely runs once
+>   and a nest whose count neither pass could read are the **same `1`** in the response.
+>   `field_confidence["planned_runs"] == "low"` is the **only** signal that separates them — read the
+>   confidence, never the number, and the import wizard accordingly counts and labels those rows
+>   rather than presenting them as read values. **Every floor now carries that `low`, and so does the
+>   row's overall `confidence`** (it is the minimum across fields), whatever the two-pass merge
+>   scored: the merge scores *agreement*, so before this rule two passes that both answered `"N/A"`
+>   came out a **high** `1`, and two that misread the same 11-digit number passed it through **high**
+>   into the import. A count above 9,999 is not clamped to the limit: it reads as `1`, `low`, and adds
+>   the row `warning` `Run count '…' looked wrong — enter it by hand (the limit is 9,999 runs per
+>   nest).` Accepted shapes (widened 2026-08-05, since a model asked for one integer emits all of
+>   these): `3`, `3.0`, `"3"`, `"x3"`, `"3 sheets"`, `"3 of 5"` — a **leading** integer is required for
+>   the free-text case, so `"sheet 4"` is not read rather than mistaking a label for a count. Anything
+>   else (a fractional value such as `2.5` or `"2.5"`, 0 or a negative, junk, missing) is not read; it
+>   never raises and 400s the whole preview batch. The 9,999 limit is a design default (2026-11-09)
+>   the owner can still change: one constant, `MAX_PLANNED_RUNS` in `app/models/laser_nest.py`, behind
+>   every bound in this section; the MCP `add_laser_nest` schema repeats it as a literal `maximum`
+>   that a catalog test holds equal to the route's.
 >
 > **Manual nest create (`POST /work-orders/{id}/laser-nests/manual`).** Body: `cnc_number`
-> (required, 1–100 chars), `planned_runs` (required, **≥ 1**), and optional `nest_name`,
+> (required, 1–100 chars), `planned_runs` (required, **1–9,999**, **422** otherwise), and optional `nest_name`,
 > `material`, `thickness`, `sheet_size`, plus the same optional **material tie** the import rows take
 > (`material_part_id` **> 0**, `qty_per_run` **> 0** — see "Nest material ties" below), and an
 > optional **`work_center_id`** (**> 0**) naming the laser this nest runs on. Resolves the target
@@ -4868,7 +4517,11 @@ environment variable or deployment configuration change is needed.
 > `planned_runs`, `material`, `thickness`, `sheet_size`). A `planned_runs` change **reverse-syncs**
 > the operation's `component_quantity` and re-derives the laser WO's `quantity_ordered` over
 > its non-deleted nests. Lowering `planned_runs` below `completed_runs` is allowed (over-run is
-> acceptable); only the schema's `ge=1` floor applies. **Raising** it is refused **409** before any
+> acceptable); only the schema's bounds apply (1–9,999, **422** outside them). A nest stored with more
+> than 9,999 runs before the bound existed (2026-11-09) keeps that value — no migration touches it — but
+> any PATCH that **sends** `planned_runs` must bring it within 1–9,999. The manual modal's edit always
+> sends it, so editing such a nest through the modal (to fix its material, say) means correcting its
+> run count too; the modal flags the count field before sending anything. **Raising** it is refused **409** before any
 > write when the nest's operation is COMPLETE (`Nest N is already complete at {runs} runs; raising its
 > planned runs would leave a completed operation short. Add a nest for the extra runs.`) or the laser
 > work order is COMPLETE / CLOSED / CANCELLED (`This laser work order is {status}; Nest N's planned
@@ -5779,6 +5432,10 @@ uploads go through text extraction + LLM. See
 | POST | `/bom/import/commit` | Commit a reviewed preview payload — creates parts, the BOM, and BOM items | Admin / Manager / Supervisor |
 | POST | `/bom/import` | One-shot upload → LLM extraction → create parts/BOM items (`create_missing_parts` form flag, default `true`) | Admin / Manager / Supervisor |
 
+> **Upload cap.** `POST /bom/import/preview` and `POST /bom/import` refuse a file over **20 MB**
+> with **413** before any work runs (see [AI document uploads](#ai-document-uploads)); an empty file
+> is **400**.
+
 > **Excel scanning is bounded** with the same caps as the shared Bulk Imports parser: at most
 > **256 columns** are read per row, more than **10,000 collected data rows** refuses the file
 > (**400**), and scanning more than **100,000 raw rows** workbook-wide refuses the file (**400**).
@@ -5792,6 +5449,14 @@ uploads go through text extraction + LLM. See
 > standard Excel workbook."`. On `POST /bom/import` (the LLM path), Excel **text extraction
 > degrades gracefully** at the scan cap — partial text at `"medium"` confidence — rather than
 > refusing the file.
+
+> **A partly read PDF is reported (2026-11-09).** On a PDF upload to `POST /bom/import/preview` or
+> `POST /bom/import`, each page the extractor skipped or cut short (see
+> [Document Text Extraction Limits](#document-text-extraction-limits)) adds a sentence to the start of
+> the response's `warnings`. When too little text came back to send to the AI, the **400** detail
+> `"Could not extract text from document"` becomes `"Could not extract text from document."` followed
+> by those sentences, so the user sees the reason (for example, that the 90-second OCR limit ran out).
+> Word and Excel uploads never produce these warnings.
 
 > **The assembly promotion is refused when live material ties stand** (2026-08-18). Both importers
 > resolve an existing part by part number and set `part_type = assembly` whenever the document is a
@@ -5940,7 +5605,7 @@ uploads go through text extraction + LLM. See
 | GET | `/maintenance/work-orders/overdue` | Overdue maintenance work orders (**pure read**; `due_date` before the company's day) | Yes |
 | GET | `/maintenance/work-orders/{id}` | Maintenance work order detail | Yes |
 | POST | `/maintenance/work-orders` | Create maintenance work order on a work center **or** an asset (or neither, with a `schedule_id`, to inherit the schedule's target). A `schedule_id` that already has an open work order (`scheduled` / `overdue` / `in_progress` / `on_hold`) is **409** naming it. `scheduled_date` / `due_date` left blank are the company's day | Admin / Manager / Supervisor |
-| PUT | `/maintenance/work-orders/{id}` | Update maintenance work order; `status` among `scheduled`, `overdue`, `on_hold`, `cancelled` only (**409** for `in_progress` / `completed` — use the verbs — for returning a started work order to `scheduled` / `overdue`, and for changing `requires_shutdown` once started). Moving it to `cancelled` settles any downtime event it holds | Admin / Manager / Supervisor |
+| PUT | `/maintenance/work-orders/{id}` | Update an open maintenance work order; `status` among `scheduled`, `overdue`, `on_hold`, `cancelled` only (**409** for `in_progress` / `completed` — use the verbs — for returning a started work order to `scheduled` / `overdue`, for changing `requires_shutdown` once started, and for changing **any** field of a `completed` or `cancelled` work order, a final record; see below). Moving it to `cancelled` settles any downtime event it holds | Admin / Manager / Supervisor |
 | POST | `/maintenance/work-orders/{id}/start` | Start (→ `in_progress`). A work-center work order with `requires_shutdown` opens, adopts or shares a downtime event — never a second open one on the machine | Admin / Manager / Supervisor / Operator |
 | POST | `/maintenance/work-orders/{id}/complete` | Complete (→ `completed`, advances the linked schedule from the company's day — the response adds `schedule_next_due_date`) and resolve the work order's open downtime event. `checklist_results` omitted keeps the work order's checklist. Any checklist item left unticked needs `incomplete_checklist_reason` (**409** without one) and a person: an API token is **403** (see *Checklist at completion* below) | Admin / Manager / Supervisor / Operator |
 | GET | `/maintenance/calendar` | Work orders in a date window (**capped at 366 days**) | Yes |
@@ -6097,13 +5762,31 @@ uploads go through text extraction + LLM. See
 > - **`PUT` cannot bypass the verbs** (it is also an MCP tool): `status: in_progress` is **409** (use
 >   `/start`), `status: completed` is **409** (use `/complete` — findings, costs, downtime minutes and the
 >   PM schedule's next due date), a started work order (in progress, or on hold after a start) cannot go
->   back to `scheduled` / `overdue` (**409**), `requires_shutdown` cannot change once it has
->   started (**409**), and a **completed or cancelled** work order is a final record — any status
+>   back to `scheduled` / `overdue` (**409**), and `requires_shutdown` cannot change once it has
+>   started (**409**). Re-sending the current value is accepted. `on_hold` keeps the machine down.
+> - **A completed or cancelled work order is a final record; `PUT` changes nothing on it.** Any status
 >   change out of either is **409** (*"… is completed, a final record; it cannot be moved to …"*;
 >   open a new work order instead). Reopening one used to let a completed work order on hold take over
 >   the next work order's downtime event, which then never closed, and a second `/complete` overwrite
->   the maintenance record and advance its PM schedule again. Re-sending the current value is accepted.
->   `on_hold` keeps the machine down.
+>   the maintenance record and advance its PM schedule again. Every other field is held the same way
+>   (2026-11-17): a `PUT` that would change `checklist_results`, `notes`, `title`, `description`,
+>   `scheduled_date`, `due_date`, `priority`, `assigned_to` or `requires_shutdown` is **409**, a plain
+>   string naming the fields — *"Maintenance work order MWO-… is completed, a final record; its
+>   checklist_results, notes can no longer change. Add a later note as a maintenance log entry on the
+>   work order, or open a new maintenance work order for further work."* — raised before any write.
+>   Until then only the status was held, so a planning role or a token could re-tick a completed PM's
+>   checklist after the fact: the very steps `/complete` demands a written reason to leave unticked
+>   (*Checklist at completion* below). `notes` is refused too, because `/complete` writes them as part
+>   of the completion record; a later note is `POST /maintenance/log` naming the work order's machine
+>   or asset and its `maintenance_wo_id` — a dated `maintenance_logs` row signed by its author
+>   (`performed_by`), with its own audit row — not an edit of the record. (The server does not yet
+>   check that the log's machine or asset is the work order's, and the Maintenance page has no
+>   log-entry form; both are open follow-ups.) A value identical to the record's is an echo, not a
+>   change, and is accepted (enums by value, `requires_shutdown` by truth — a legacy `null` reads as
+>   `false` — `title` trimmed, as the request's is, and everything else exactly as stored, other text
+>   not normalized); on a completed or cancelled work order such a request writes nothing (no update,
+>   no audit row) and returns the work order unchanged. Open work orders are unaffected, and the
+>   Maintenance page offers no edit on a completed or cancelled row.
 > - **An operator report cannot double it either.** `POST /downtime/` on a machine a maintenance work
 >   order already holds down (its event is open, the work order in progress or on hold after a start)
 >   is **409** naming the work order and the open event: the stoppage is already being recorded, and
@@ -6255,7 +5938,10 @@ uploads go through text extraction + LLM. See
 >     unticked and keeps **Complete** disabled until it is filled; the reason is sent only then.
 >   - `PUT /maintenance/work-orders/{id}` (planning roles) can still rewrite `checklist_results`
 >     before completion; a person's edit is its own audited `maintenance_work_order` `UPDATE` row,
->     and on a PM work order it cannot take a schedule step off the judged list. A standing API token
+>     and on a PM work order it cannot take a schedule step off the judged list. **After** completion
+>     (or cancellation) it cannot rewrite the checklist at all, for any role or credential: the work
+>     order is a final record and any change is **409** (*A completed or cancelled work order is a
+>     final record* above), so the ticks the completion recorded stay as recorded. A standing API token
 >     whose `PUT` takes items off the checklist (drops, renames or clears them) is **403**
 >     `API_TOKEN_CHECKLIST_REMOVAL` *"Removing items from a maintenance work order's checklist must be
 >     done by a person signed in to the app, not an API token."* — otherwise a token could reach the
@@ -6367,7 +6053,7 @@ uploads go through text extraction + LLM. See
 | POST | `/routing/{id}/operations/reorder` | Reorder operations (**400** on a released routing, **422** on a malformed body). **Also rewrites each listed operation's `operation_number` from its new `sequence`** — see the `operation_number` note below | Admin / Manager / Supervisor |
 | POST | `/routing/import/preview` | Upload a routing CSV/XLSX (multipart `file`), preview it WITHOUT writing (dry-run, fully rolled back) | Admin / Manager / Supervisor |
 | POST | `/routing/import/commit` | Commit a routing CSV/XLSX import — one draft routing per part, with one `audit_log` CREATE per routing | Admin / Manager / Supervisor |
-| POST | `/routing/generate-from-drawing` | AI step 1: upload a drawing (multipart `file` + `part_id`) and get a **proposed** routing for review — creates no routing. **404** on a soft-deleted part | Admin / Manager / Supervisor |
+| POST | `/routing/generate-from-drawing` | AI step 1: upload a drawing (multipart `file` + `part_id`) and get a **proposed** routing for review — creates no routing. **404** on a soft-deleted part; **413** for a drawing over 10 MB. If a PDF was only partly read, each gap adds a line to `warnings` (see [Document Text Extraction Limits](#document-text-extraction-limits)) | Admin / Manager / Supervisor |
 | POST | `/routing/create-from-generation` | AI step 2: create the reviewed/edited proposal as a **draft** routing, writing one tamper-evident `audit_log` CREATE (see note). **404** on a soft-deleted part or an unknown generation session | Admin / Manager / Supervisor |
 
 > **AI routing generation — the accept step is the audited record (2026-11-05).**
@@ -8838,6 +8524,121 @@ or sharing its retained source storage reference. This preserves the reviewed
 PDF, completed intake receipt and source-page recovery together with existing
 receipt-certificate and revision-history retention.
 
+Deletion also refuses (**409**) a document that a same-company QMS standard or QMS clause
+evidence link names through its `document_id`. Both columns are plain foreign keys with no
+`ON DELETE`, so on Postgres the unguarded delete failed at flush, after the document row lock and
+the audit-chain lock were taken: a **500**, or a deadlock (40P01, answered **409** or **503**
+depending on where the delete lost) against an evidence edit holding the referencing row, and
+neither said why. The check runs before the audit write and
+before any change, so a refusal writes nothing and keeps the bytes. The message depends on the link:
+
+- **A live link** (the standard, or the evidence with its clause and standard, not removed):
+  *"This document is linked to QMS standard AS9100D"* or *"…linked as QMS evidence on AS9100D
+  clause 7.5.3"*, plus *"and N other QMS links"* when there are more, then *"Unlink it first by
+  setting document_id to null on that QMS standard or evidence link."* That means
+  `PUT /qms-standards/{standard_id}` or `PUT /qms-standards/evidence/{evidence_id}` with
+  `{"document_id": null}` (both audited). The QMS Standards page has no document field, so this is
+  an API / MCP step.
+- **Any removed link** (a soft-deleted standard, clause or evidence link, including evidence
+  under a removed clause or standard), reported ahead of any live link: *"This document is named by a removed QMS standard, clause or
+  evidence link, which keeps the record of what was assessed. It must remain available and cannot be
+  deleted."* A removed QMS row still records which document a clause was assessed against, and
+  clearing its link would rewrite that record, so the document is retained the way a voided
+  receipt's certificate is. Removing an evidence link (`DELETE /qms-standards/evidence/{id}`)
+  therefore does **not** release its document; clear `document_id` first if the document is meant
+  to go. The same goes for removing a clause or standard: clear its evidence links' `document_id`
+  first, because once the clause or standard is removed, the evidence `PUT` answers **404** for
+  the links under it. There is no restore for a removed QMS standard, clause or evidence link, so a
+  document still linked when its QMS row is removed stays permanently.
+
+The standard and evidence `PUT`s flush their change before writing the audit row, so a new
+`document_id` takes its lock on the document row before the global audit-chain lock, the order
+the delete takes them in. A link made concurrently with a delete either commits first, and the
+delete sees it and refuses, or waits for the delete and then fails its own foreign-key check.
+
+Only the active company's QMS rows are read. A link from another company's QMS row is not
+named, since that would disclose the other tenant's record; on Postgres that delete still fails at
+the foreign key until the link is cleared. The QMS create / update routes now refuse another
+company's document (see QMS Standards → *A linked document must be your company's*), so such a link
+can only be one written before that check existed, when they accepted any existing document id.
+
+Every other table with a foreign key to `documents.id` is checked the same way: before the audit
+write and before any change, so a refusal (**409**) writes nothing and keeps the bytes. None of these
+columns has an `ON DELETE` either, so each used to fail at flush on Postgres with a **500** that gave
+no reason. The records below keep their document for as long as they exist, removed or voided
+included, and there is no verb that lets go of it:
+
+| Referencing column | Refusal says | Kept after |
+|---|---|---|
+| `shipments.label_document_id` / `bol_document_id` | *"This document is the carrier label (or bill of lading) for shipment SHP-…"* | the label is voided or the shipment is removed |
+| `po_receipts.label_document_id` | *"This document is the receiving label for receipt RCV-…"* | the receipt is voided |
+| `operation_step_records.attachment_document_id` | *"This document is evidence captured at a process-sheet step on work order WO-…"* | the step record is superseded |
+| `document_files.document_id` | *"This document is held by a governed file record…"* (retention policy / legal hold) | — |
+
+A receipt reprint stores a new label document and points the receipt at it, so only the label the
+receipt currently names is protected by this check; an earlier print is no longer referenced.
+
+A **laser nest's PDF** (`laser_nests.document_id`) is a reference drawing with its own audited
+release: *"This document is the PDF attached to laser nest CNC-… on work order WO-… [and N other
+laser nests]. Detach it from the nest first (Detach on the work order's laser nest row)."* That is
+`DELETE /laser-nests/{id}/document` (Admin / Manager / Supervisor), once per nest; a duplicated work
+order copies the reference, so one PDF can sit on several nests. Two cases keep the PDF instead, with
+no mention of Detach:
+
+- **A nest whose operation has recorded work** (good, scrap, a start or labor: the
+  `operation_has_recorded_work` predicate): *"This document is the PDF of laser nest CNC-… on work
+  order WO-…, which has recorded work, so it is the record of what was cut."* The PDF is the layout
+  the sheet was cut from. Known gap: Detach itself is not gated on recorded work, so the API still
+  lets a person detach such a PDF and then delete it.
+- **A removed nest** (*"…the PDF of a removed laser nest, which keeps it so that restoring the nest
+  brings its drawing back"*): `POST /laser-nests/{id}/restore` brings the nest back with it, and
+  Detach answers **404** for a removed nest. Removing a nest therefore does not release its PDF;
+  detach it first.
+
+An **engineering change order's affected documents** (`engineering_change_orders.affected_documents`)
+are a JSON id list, not a foreign key, so here Postgres would *not* stop the delete. Before this
+check the document was deleted and `GET /eco/eco/affected-items/{id}` silently dropped it from the
+change record (AS9100D 8.5.6). ECOs have no delete verb, so the reference lasts. The check depends
+on the ECO's status:
+
+- **No approver has decided yet** (draft, submitted): *"This document is listed as affected by
+  engineering change ECO-… (PUT /eco/eco/41). Take it out of that change's affected_documents
+  first, while no approver has decided on it yet."* Every such ECO is named with its own edit
+  path (*"engineering changes ECO-… (PUT /eco/eco/41), ECO-… (PUT /eco/eco/43) and …"*), because
+  the Engineering Changes page has no document field and the ECO list can't be searched by
+  document. The edit is `PUT /eco/eco/{id}` with the list minus this id (Admin / Manager,
+  audited), an API / MCP step.
+- **Under review, approved or later, rejected or cancelled**: *"This document is listed as affected
+  by engineering change ECO-… (under review), which keeps the record of what the change covered.
+  It must remain available and cannot be deleted."* Under review means at least one approver has
+  already signed the scope, so editing it would leave sign-offs on a scope those people never saw.
+  From approval on the list is the authorized change scope, and a rejected or cancelled change
+  records what was decided. Known gap: `PUT /eco/eco/{id}` still accepts edits to an under-review,
+  approved or in-implementation ECO (it refuses only completed, rejected and cancelled ones), so the
+  API still lets a person take the document off such an ECO and then delete it.
+
+The id is matched exactly: the text column is only narrowed by substring, then each candidate's
+JSON is parsed, so an ECO listing document 12 never blocks deleting document 1. A string id
+(`"12"`) counts; a value that is not a JSON list is skipped, as the affected-items read skips it.
+Because there is no foreign key, ECO create and update lock each document they name (`FOR KEY
+SHARE`, the lock a foreign key takes) before their audit row. A list written at the same time as a
+delete is therefore either seen by the delete, or fails its own validation with **422** once the
+delete commits. (This relies on Postgres's default READ COMMITTED isolation, which the app does not
+change.)
+
+**Order of reasons.** Every reason that keeps the document for good is reported before any
+instruction: the retained records above, then a removed QMS link, then a worked or removed nest,
+then an ECO under review, approved or closed. Only when every blocker can be released does the refusal give
+instructions, and then it gives the QMS unlink, the nest Detach and the ECO edit together in one
+message. Nobody is sent to unlink or detach
+something (an audited change, and on the floor a nest losing its drawing) only to be refused
+again. The nest attach verb
+(`POST /laser-nests/{id}/attach-document`) flushes the link before its audit row, like the QMS
+`PUT`s, so it takes its lock on the document row before the audit-chain lock. Every other writer of
+these columns creates the document in the same transaction or already flushes first. Only the active
+company's rows are read; no writer accepts another company's document, and a row of another company
+is never named.
+
 Manual upload is a release action: the persisted Document stores `status="released"`, the actual
 `released_by` actor, and UTC `released_at`. Returned metadata exposes the released status;
 the audit details retain release actor/time, which are not fields of `DocumentResponse`.
@@ -8884,6 +8685,12 @@ in `RBAC_PERMISSIONS.md`.
 | PUT | `/qms-standards/{standard_id}` | Update standard | Admin / Manager / Quality |
 | DELETE | `/qms-standards/{standard_id}` | Delete standard and all its clauses/evidence | Admin |
 
+> **A document a standard or evidence link names cannot be deleted.** `DELETE /documents/{id}`
+> answers **409** while a standard's or an evidence link's `document_id` points at it, and removed
+> standards, clauses and evidence links keep it too. To release a document, set `document_id` to
+> `null` on the standard or evidence link first; removing the link does not. See
+> [Documents](#documents).
+
 **Clauses**
 
 | Method | Endpoint | Description | Auth Required |
@@ -8893,6 +8700,29 @@ in `RBAC_PERMISSIONS.md`.
 | POST | `/qms-standards/{standard_id}/clauses/bulk` | Bulk-import clauses (e.g. from a parsed document) | Admin / Manager / Quality |
 | PUT | `/qms-standards/clauses/{clause_id}` | Update clause, incl. compliance-status assessment | Admin / Manager / Quality |
 | DELETE | `/qms-standards/clauses/{clause_id}` | Delete a clause and its evidence links | Admin / Manager |
+
+> **A parent clause must be a live clause of your company in the same standard:** the three routes
+> that take a `parent_clause_id` in the body (`POST /qms-standards/{standard_id}/clauses`, `POST
+> /qms-standards/{standard_id}/clauses/bulk` and `PUT /qms-standards/clauses/{clause_id}`) check it
+> before they write anything. An id that does not exist, another company's clause, a deleted clause
+> and a clause of another standard all get the same **404 `Parent clause not found`**, with nothing
+> saved and no audit entry, so the answer says nothing about other companies' clauses. The bulk
+> import is all-or-nothing: one bad parent refuses every clause in the request (clauses in the same
+> request cannot name each other; they have no id yet). On a `PUT`, the clause itself (**422** `A
+> clause cannot be its own parent clause`) or any of its own sub-clauses at any depth (**422** `A
+> clause cannot be placed under one of its own sub-clauses`) is refused, so no new cycle can be
+> stored. The descendant check follows stored links through deleted clauses too, and re-parenting is
+> serialized per company (a Postgres advisory lock), so two opposite moves sent at the same moment
+> cannot both pass. `parent_clause_id: null` still clears the parent, and a `PUT` that does not send
+> `parent_clause_id` is not judged on the value already stored. Every response that carries a clause
+> tree renders `clauses`, `sub_clauses` and their evidence from your own company's live rows only
+> (`GET /qms-standards/{standard_id}`, `GET /qms-standards/{standard_id}/clauses`, and the `PUT
+> /qms-standards/{standard_id}` and `PUT /qms-standards/clauses/{clause_id}` responses), so a link
+> written before this check existed no longer shows another company's clause.
+> Before this, any existing clause id, another company's included, was accepted, while a
+> nonexistent one failed with a 500, and a self- or descendant parent stored a cycle that made every
+> read of that standard fail with a 500. To clear such a stored link, `PUT {"parent_clause_id":
+> null}` on the child clause.
 
 **Auto-evidence discovery**
 
@@ -8905,14 +8735,44 @@ in `RBAC_PERMISSIONS.md`.
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| POST | `/qms-standards/clauses/{clause_id}/evidence` | Link evidence to a clause | Admin / Manager / Quality |
-| PUT | `/qms-standards/evidence/{evidence_id}` | Update evidence, incl. verification | Admin / Manager / Quality |
-| DELETE | `/qms-standards/evidence/{evidence_id}` | Remove an evidence link | Admin / Manager / Quality |
+| POST | `/qms-standards/clauses/{clause_id}/evidence` | Link evidence to a clause. The audit `CREATE` row is required evidence: **503** and nothing linked if it cannot be written (see below) | Admin / Manager / Quality |
+| PUT | `/qms-standards/evidence/{evidence_id}` | Update evidence, incl. verification. The audit `UPDATE` row is required evidence: **503** and nothing saved if it cannot be written (see below) | Admin / Manager / Quality |
+| DELETE | `/qms-standards/evidence/{evidence_id}` | Remove an evidence link. The audit `DELETE` row is required evidence: **503** and the link stays if it cannot be written (see below) | Admin / Manager / Quality |
+
+> **A linked document must be your company's:** the four routes that take a `document_id` in the
+> body (`POST /qms-standards/`, `PUT /qms-standards/{standard_id}`, `POST
+> /qms-standards/clauses/{clause_id}/evidence` and `PUT /qms-standards/evidence/{evidence_id}`)
+> check it against the active company's documents before they write anything. An id that does not
+> exist and an id that belongs to another company both get the same **404 `Document not found`**,
+> with nothing saved and no audit entry, so the answer says nothing about other companies'
+> documents. `document_id: null` on a `PUT` still clears the link, and a `PUT` that does not send
+> `document_id` is not judged on the value already stored (the QMS Standards page's Verify sends
+> `is_verified` only, and the page never sends `document_id`). The document's control status
+> (draft, obsolete, ...) is not checked. Before this, a nonexistent id failed with a 500, while any
+> existing id, another company's included, was accepted and linked.
 
 > **PDF clause extraction:** `POST /qms-standards/{standard_id}/upload-pdf` requires a text-based
-> PDF (≤ 20 MB; scanned/image-only PDFs are rejected) and a configured `ANTHROPIC_API_KEY` — it
-> returns **500** if the key is missing. Claude extracts the numbered clauses and persists them
-> against the standard.
+> PDF (≤ 20 MB, else **413** before any work; scanned/image-only PDFs are rejected) and a
+> configured `ANTHROPIC_API_KEY` — it returns **500** if the key is missing. Claude extracts the
+> numbered clauses and persists them against the standard.
+>
+> The text layer is read in the resource-limited reader process, with the QMS limits listed in
+> [Document Text Extraction Limits](#document-text-extraction-limits): 2,000 pages, 2,000,000
+> characters, 90 seconds. That read can refuse the upload with a **400** in two ways, both before
+> the AI call, so nothing is saved:
+> - `"Failed to read PDF: …"` when nothing could be read at all. Since 2026-11-09 the rest of the
+>   detail is a plain sentence, for example "The PDF could not be read. It may be damaged or not a
+>   PDF." or "Reading the PDF took longer than 90 seconds, so its text was not read.". It used to be
+>   the parser's exception text.
+> - (new 2026-11-09) `"Only part of this PDF could be read: … Split it into smaller PDFs and upload each one."` when
+>   the read stopped part-way **and** the text it got is shorter than the 100,000 characters the AI
+>   is sent. This response has no place for a warning, so the upload is refused rather than saving a
+>   clause list that silently misses the unread pages. If a partial read already covers the first
+>   100,000 characters, the upload goes ahead unchanged, because the AI never reads past that point.
+>   When the read stopped because a page could not be parsed (rather than at a limit), the advice
+>   ends `"The PDF may be damaged. Save or export it again as a new PDF and upload that copy."`
+>   instead, since splitting the file would not get past a damaged page. Before 2026-11-09 such a
+>   PDF was refused whatever was read before the damaged page, with the parser's exception text.
 
 > **An evidence rule that fails is reported as not assessed, never dropped.** Each evidence rule a
 > clause matches runs its query in its own savepoint. A rule whose query raises is rolled back to that
@@ -9011,15 +8871,25 @@ in `RBAC_PERMISSIONS.md`.
 > (`POST /qms-standards/{standard_id}/auto-link`) stores only `description` (`health_status`,
 > `health_detail` and `suggested_compliance` are computed per call and never persisted), so stored
 > evidence picks up the new wording on the next auto-link run in which the audit rule computes (a run
-> where it fails leaves the stored link unchanged; see `evidence_not_computed`).
-> The QMS page's linked-evidence list shows a stored link's `title` and count, not its `description`;
-> the live auto-evidence preview shows `description` and `health_detail`. That is why the title was
-> renamed: "Immutable Hash-Chain" was untrue for every paused entry and is the one claim the list
-> shows, so the title now names what the row reports and asserts nothing. Existing auto-linked
-> evidence picks up the new title on the next auto-link run in which the audit rule computes (a run
-> where it fails leaves the stored link unchanged; see `evidence_not_computed`), matched by rule id;
-> no migration. The row's `title`, `module_reference` and `evidence_type` do not change with the chain
-> or trigger state.
+> where it fails leaves the stored link unchanged; see `evidence_not_computed`). The QMS page's
+> linked-evidence list shows each stored link's `description` under its title. For an auto-linked row
+> that is the text written by the last auto-link run in which its rule computed, dated by the row's
+> "Refreshed" stamp; an edit through `PUT /qms-standards/evidence/{evidence_id}` replaces it without
+> moving that stamp, until the next auto-link run in which the rule computes overwrites it (a run where
+> it fails leaves the stored link unchanged; see `evidence_not_computed`). An auto-linked description
+> is always shown in full, never clamped, because the paused-chain and trigger disclosures sit at the
+> end of the text. A manual description is clamped to three lines behind **Show more** only while it
+> needs more than three lines on screen, so clamped text always has that control. `health_status`,
+> `health_detail` and `suggested_compliance` are not stored: the live auto-evidence preview
+> (**Auto-Discover**) shows each row's `health_detail` and its `health_status` as a coloured dot (a
+> failed rule's row also reads *Not computed*), and only the clause-level roll-up of
+> `suggested_compliance` (`overall_suggested_compliance`). The title was renamed because "Immutable
+> Hash-Chain" was untrue for every paused entry, and until the list showed `description` the title was
+> the one claim it showed; the title now names what the row reports and asserts nothing. Existing
+> auto-linked evidence picks up the new title on the next auto-link run in which the audit rule
+> computes (a run where it fails leaves the stored link unchanged; see `evidence_not_computed`),
+> matched by rule id; no migration. The row's `title`, `module_reference` and `evidence_type` do not
+> change with the chain or trigger state.
 
 > **The PM evidence row now judges the PM schedules, not just maintenance work orders — expect the
 > verdict to drop.** The *Preventive Maintenance & Infrastructure* row (clauses matched on maintenance
@@ -9061,6 +8931,145 @@ in `RBAC_PERMISSIONS.md`.
 > the record is retained for AS9100D traceability. All QMS create / update / delete operations — plus
 > a status-change entry when a clause's `compliance_status` changes — are captured in the tamper-evident
 > audit trail (`GET /api/v1/audit/`).
+
+> **A clause of a removed standard is removed with it.** Removing a standard marks only the
+> standard row deleted; its clauses keep their own flag. Every route that takes a clause id treats
+> a clause whose standard is removed (or is not your company's) as removed: `PUT` and `DELETE
+> /qms-standards/clauses/{clause_id}`, `GET /qms-standards/clauses/{clause_id}/auto-evidence` and
+> `POST /qms-standards/clauses/{clause_id}/evidence` answer **404 `Clause not found`**, the same as
+> for a removed clause, and write nothing. `GET /qms-standards/{standard_id}/clauses` answers **404
+> `QMS standard not found`** for a removed standard, as `GET /qms-standards/{standard_id}` does; a
+> missing id or another company's gets the same 404 (it used to be an empty list). Before this,
+> all of them still answered for a removed standard's clauses: a `PUT` could change a clause's
+> `compliance_status` on a standard that had left the record, the list still showed its clauses
+> and their evidence links, and adding evidence created a link no screen would show. Nor does such a
+> clause render as a sub-clause of a live standard's clause (a cross-standard `parent_clause_id`
+> could be written before the parent check above existed): the standard and clause-list reads, and
+> both `PUT` responses, leave it and its evidence out. The standard is checked when the request
+> reads the clause; a removal that commits between that read and the request's own commit is not
+> seen.
+
+> **Evidence under a removed clause or standard is frozen.** Removing a standard or a clause marks
+> only that row deleted; the evidence links under it keep their own flag but disappear with their
+> parent from every QMS read. `PUT` and `DELETE /qms-standards/evidence/{evidence_id}` treat such a
+> link as removed: **404 `Evidence not found`** (the same answer as for a removed link, judged after
+> the row lock) and nothing is written. Before this, both accepted it, so an API caller could edit,
+> verify or clear the `document_id` of a link that had left the record, and a cleared link let its
+> document be deleted. The clause and standard are checked when the request reads them; a removal
+> that commits between that read and the request's own commit is not seen.
+
+> **Editing or removing an evidence link locks it first:** `PUT` and `DELETE
+> /qms-standards/evidence/{evidence_id}` lock the evidence row before they read it, and write the
+> change before the audit entry. So a Verify or Remove that runs at the same time as auto-link (or
+> as another person's edit) waits for the other write to finish and is then judged against the row
+> as it stands. If the link was removed while the request waited (auto-link retired it, or someone
+> else removed it), the answer is **404 `Evidence not found`** and nothing is written. Before this,
+> a Verify could mark a link that auto-link had just retired as verified and still answer 200, and
+> a Verify or Remove racing auto-link could fail with the app-wide 409. A 404 here means the link
+> is gone; if it should still exist, link it again. The `UPDATE` audit entry's `changes` now also
+> lists the row's new `updated_at`.
+
+> **Linking, editing (incl. Verify) and removing an evidence link are required audit evidence:**
+> `POST /qms-standards/clauses/{clause_id}/evidence`, `PUT /qms-standards/evidence/{evidence_id}`
+> and `DELETE /qms-standards/evidence/{evidence_id}` write their audit entry in the same
+> transaction as the change, and the change is saved only if the entry is. A Verify is a quality
+> judgment and the evidence row keeps only the latest one (`verified_by` / `verified_date` are
+> overwritten by the next Verify), so the audit entries are its only history. If the entry cannot
+> be written the change is rolled back and the answer is **503**:
+>
+> - `POST`: `"The audit record for linking this evidence could not be saved; the evidence was not linked. Retry."`
+> - `PUT`: `"The audit record for this evidence change could not be saved; nothing was changed. Retry."`
+> - `DELETE`: `"The audit record for removing this evidence could not be saved; the evidence was not removed. Retry."`
+>
+> Nothing was saved, so retrying the same request is safe (a retried `POST` links the evidence
+> once). An audit write that loses a PostgreSQL lock race (deadlock / serialization failure) also
+> answers this 503 rather than the app-wide 409; either way nothing was saved. Before this, an audit write that failed without a database error (a retry-exhausted
+> sequence collision, a value the audit row could not serialize) was skipped and the route still
+> answered 201 / 200 / 204 with the change saved. Unchanged: a `PUT` that changes nothing (an empty
+> body, or values equal to the stored ones) writes no entry and answers 200; the `CREATE` entry
+> carries the row as created in `new_values`; the `UPDATE` entry carries the full before / after
+> row in `old_values` / `new_values` and the field-level diff in `extra_data.changes`; the `DELETE`
+> entry carries the row as it stood before the removal in `old_values` and
+> `extra_data.soft_delete: true`. Auto-link (`POST /qms-standards/{standard_id}/auto-link`) keeps
+> its own audit rules and is not changed by this.
+>
+> Each entry's `resource_identifier` is the evidence title cut to 255 characters (the audit
+> column's length; a title may be 500), and its `description` keeps the whole title. Before the
+> cut, linking evidence whose title was longer than 255 characters failed with a 500 on PostgreSQL
+> (the uncut identifier failed the audit INSERT).
+
+> **Internal audit and management review are not assessed from the ERP — expect the suggested
+> compliance for those clauses to drop.** Auto-evidence picks rules for a clause by keywords in its
+> title and description. The *Audit Trail (Audit Log & Hash-Chain Status)* row (the ERP's own
+> change log) used to match "internal audit", "audit program" and "management review" as well as "audit
+> trail" and "audit log". Change-log entries exist on any working system, so AS9100D / ISO 9001
+> 9.2 *Internal audit* and 9.3 *Management review* rolled up `compliant` with no evidence that an
+> audit was run or a review held. The change-log row now matches only "audit trail" and "audit
+> log". "internal audit", "audit program" (which also matches "audit programme") and "management
+> review" go to a separate rule, `internal_audit_review`. So do a few common paraphrases a company
+> quality manual uses: "internal quality audit", "audits at planned intervals" / "audit at planned
+> intervals", "top management shall review" and "review by top management". These are kept
+> specific on purpose: a bare "quality audit" or "audit plan" would also hit supplier-audit clauses.
+> The rule's row is always the same: `title` *Internal Audit & Management Review (Not Assessed
+> Automatically)*, `evidence_type` `other`, `total_count` and `recent_count` `0`, `health_status`
+> `no_data`, `suggested_compliance` `not_assessed`. The zeros mean the ERP has no internal-audit,
+> audit-program or management-review record type to count. The row says only that auto-evidence
+> cannot assess the clause, not that the ERP holds nothing about audits: a person may have linked
+> an audit report or review minutes to the clause, and the description asks for exactly that. NCRs
+> with `source` `internal_audit` and CARs with `initiation_reason` `internal_audit` or
+> `management_review` are deliberately not counted: they show a finding was raised, not that the
+> program ran.
+>
+> `GET /qms-standards/clauses/{clause_id}/auto-evidence` lists the row like any other; internal
+> `_`-prefixed keys are stripped from every row. The roll-up rule is unchanged: on its own the row
+> gives `overall_suggested_compliance` `not_assessed`, and beside other rows the clause rolls up
+> `partial` (or `non_compliant` when another row is), never `compliant`.
+
+> **Auto-link retires its own stale links — expect 9.2 / 9.3 clauses to lose the change-log link.**
+> An auto-linked evidence row exists only because a rule matched its clause. Each run of
+> `POST /qms-standards/{standard_id}/auto-link` now goes through every clause of the standard and
+> soft-deletes its auto-linked (`is_auto_linked` true) evidence rows whose rule (`auto_link_query`)
+> no longer matches the clause's text, unless a person reviewed them (below). Each retired row gets
+> one audit `DELETE` row: `resource_type` `qms_clause_evidence`, `extra_data.soft_delete` `true`,
+> `extra_data.retired_by` `auto_link`, plus `rule_id`, `clause_id`, `clause_number` and
+> `evidence_id`, with the pre-delete row in `old_values`. That row is **required**: it is the only
+> record that auto-link, not the person who clicked it, removed the link. If it cannot be written,
+> the whole run rolls back and answers **503** (*The audit record for retiring stale auto-linked
+> evidence could not be saved; nothing was changed. Retry.*). A retry is safe.
+>
+> - A row a person reviewed is never retired: verified (`is_verified` true), or carrying a document
+>   (`document_id`) or non-blank `verification_notes`, which auto-link never writes. It is kept and
+>   listed, with `reason` `verified` or `annotated`, in the response's `evidence_kept_reviewed` and
+>   in the run's summary audit row.
+> - Manually linked rows (`is_auto_linked` false) are never touched.
+> - A rule is "matched" by its keywords, not by producing a row this run. A rule whose query failed
+>   this run still counts as matched, so its stored row stays.
+> - The *Internal Audit & Management Review* row is never persisted. A clause whose only row is that
+>   one counts in `clauses_without_evidence`, not `clauses_with_evidence`. Its `not_assessed` still
+>   counts in `compliance_summary`.
+>
+> The response gains `total_evidence_retired` (`0` when nothing was retired) and
+> `evidence_kept_reviewed` (empty when nothing was kept); see the schema below. The run's summary
+> audit row (`resource_type` `qms_standard`) carries `extra_data.evidence_retired` (a list of
+> `{evidence_id, clause_id, clause_number, rule_id}`) and `extra_data.evidence_kept_reviewed` (the
+> same, plus `reason`), each only when non-empty. Candidate rows are locked (`FOR UPDATE`) for the
+> run, so a second run on the same standard never retires a row twice, and a **Verify** committed
+> before the run reached the row is honored. A Verify or Remove that reaches a row while the run
+> holds it waits for the run to finish; if the run retired that row, the answer is **404 `Evidence
+> not found`** and nothing is written (see "Editing or removing an evidence link locks it first"
+> above). The QMS Standards page's auto-link result dialog shows `total_evidence_retired` as *Stale
+> Links Retired* (only when the API sends it), lists each `evidence_kept_reviewed` link under *Kept
+> for Review* with its clause number, reason and rule, and raises a warning toast when any were kept.
+>
+> **What operators see:** a 9.2 or 9.3 clause already linked to the audit-trail row loses that link
+> on the next **Auto-Link Evidence** run, unless someone verified or annotated it. That link still
+> shows its old title, *Audit Trail (Immutable Hash-Chain Log)*: the audit rule no longer matches
+> those clauses, so the rename above never refreshes it there. Such a link is kept and listed in
+> `evidence_kept_reviewed`: review it and, if it is wrong, remove it by hand
+> (`DELETE /qms-standards/evidence/{evidence_id}`). Retirement never changes a clause's
+> `compliance_status`, so a clause someone already set to `compliant` keeps that status until a
+> person reassesses it. Retired rows drop out of `total_evidence_links` and `unverified_evidence` on
+> `GET /qms-standards/audit-readiness`.
 
 #### Audit-Readiness Summary Schema (`GET /qms-standards/audit-readiness`)
 
@@ -9108,6 +9117,30 @@ in `RBAC_PERMISSIONS.md`.
 `health_status` is `healthy`, `warning`, `critical` or `no_data` (the query ran and found no records),
 or `not_computed` for the placeholder row of a rule whose query failed — its zero counts are not
 measurements (see *An evidence rule that fails is reported as not assessed, never dropped* above).
+
+#### Auto-Link Summary Schema (`POST /qms-standards/{standard_id}/auto-link`)
+
+```json
+{
+  "standard_id": 1,
+  "standard_name": "AS9100D",
+  "total_clauses": 48,
+  "clauses_with_evidence": 31,
+  "clauses_without_evidence": 17,
+  "total_evidence_created": 4,
+  "total_evidence_updated": 52,
+  "total_evidence_failed": 0,
+  "total_evidence_retired": 2,
+  "evidence_kept_reviewed": [
+    {"evidence_id": 311, "clause_id": 87, "clause_number": "9.2", "rule_id": "audit", "reason": "verified"}
+  ],
+  "compliance_summary": {"compliant": 20, "partial": 9, "non_compliant": 1, "not_assessed": 18}
+}
+```
+
+`compliance_summary` counts each clause's `overall_suggested_compliance` and sums to
+`total_clauses`. `total_evidence_retired` and `evidence_kept_reviewed` are described in the
+auto-link retirement note above.
 
 ### Customer Complaints & RMA
 
@@ -9274,7 +9307,7 @@ the public paths are `/eco/eco/…`.
 | GET | `/eco/eco/` | List ECOs | Yes |
 | GET | `/eco/eco/{id}` | Get an ECO | Yes |
 | POST | `/eco/eco/` | Create an ECO | Admin / Manager |
-| PUT | `/eco/eco/{id}` | Update an ECO | Admin / Manager |
+| PUT | `/eco/eco/{id}` | Update an ECO. **400** on a completed, rejected or cancelled ECO. An edit that changes a stored value is saved only with its audit row (**503**, nothing saved, otherwise) | Admin / Manager |
 | POST | `/eco/eco/{id}/submit` | Submit a draft ECO for review | Admin / Manager |
 | POST | `/eco/eco/{id}/approve` | Record an approval decision | Admin / Manager |
 | POST | `/eco/eco/{id}/reject` | Reject an ECO | Admin / Manager |
@@ -9283,7 +9316,7 @@ the public paths are `/eco/eco/…`.
 | GET | `/eco/eco/{id}/approvals` | List an ECO's approvals | Yes |
 | POST | `/eco/eco/{id}/approvals` | Add an approval requirement | Admin / Manager |
 | POST | `/eco/eco/{id}/tasks` | Add an implementation task | Admin / Manager |
-| PUT | `/eco/eco/{id}/tasks/{task_id}` | Update an implementation task | Admin / Manager |
+| PUT | `/eco/eco/{id}/tasks/{task_id}` | Update an implementation task. An edit that changes a stored value is saved only with its audit row (**503**, nothing saved, otherwise) | Admin / Manager |
 | GET | `/eco/eco/affected-items/{id}` | Resolve the ECO's affected parts / work orders / documents | Yes |
 
 > **Tenant isolation (all ECO endpoints).** Every ECO lookup is scoped to the caller's **active
@@ -9296,7 +9329,14 @@ the public paths are `/eco/eco/…`.
 > **Cross-tenant affected ids are rejected with 422.** `affected_parts`, `affected_work_orders`, and
 > `affected_documents` are id lists. On create and update, every referenced id must resolve to a live row
 > **in the active company**; the first unknown or cross-tenant id returns **422 Unprocessable Entity**
-> (`{"detail": "Unknown or cross-tenant <part|work order|document> id(s): [...]"}`).
+> (`{"detail": "Unknown or cross-tenant <part|work order|document> id(s): [...]"}`). Each named
+> document is locked `FOR KEY SHARE` during that check, so it can't be deleted between validation
+> and commit.
+>
+> **A listed document can't be deleted.** `DELETE /documents/{id}` refuses **409** while an ECO of
+> the active company lists the document in `affected_documents`. While the ECO is draft or
+> submitted, take it out of the list with `PUT /eco/eco/{id}` first. From under review on (and for
+> a rejected or cancelled ECO) the document is kept. See [Documents](#documents).
 >
 > **Mutations require Admin / Manager.** All state-changing ECO endpoints (create, update, submit,
 > approve, reject, implement, complete, add/update task, add approval) require role **ADMIN or
@@ -9304,9 +9344,33 @@ the public paths are `/eco/eco/…`.
 > list approvals, affected items) remain available to any authenticated user. Adding an approval also
 > verifies the named approver belongs to the active company (else **404**).
 >
-> **ECO state changes are audited.** Create, update, submit, approve, reject, implement, and complete —
-> plus task create/update and approval create — write to the tamper-evident `audit_log` (`GET /audit/`),
-> so the engineering-change lifecycle is fully traceable for AS9100D.
+> **ECO state changes are audited.** Create, update, submit, reject, implement, and complete — plus
+> task create/update and approval create — write to the tamper-evident `audit_log` (`GET /audit/`).
+> Approve writes a row only when the decision moves the ECO's status (the first decision, a rejection,
+> or the last approval); each decision itself (approver, approved / rejected, comments, date) is kept
+> on its approval row, which nothing changes afterwards.
+>
+> **An ECO edit's audit row is required.** `PUT /eco/eco/{id}` overwrites the change record in
+> place (scope, effectivity, reason, risk assessment), so its `UPDATE` row, with the old and new
+> value of every changed field, is the only trace of what was replaced. That row is written in the
+> same transaction as the edit: if it cannot be written, the edit is rolled back and the answer is
+> **503** *"The audit record for this engineering change edit could not be saved; nothing was
+> changed. Retry."* This holds for every field, not only `affected_parts`, `affected_work_orders`
+> and `affected_documents`, because effectivity and the risk assessment are as much the authorized
+> change as the scope is. It matters most for `affected_documents`: `DELETE /documents/{id}` refuses a
+> document that a draft or submitted ECO lists and tells the user to take it out through this `PUT`,
+> so a lost row would let a document leave the change record with nothing to show it was there.
+> `PUT /eco/eco/{id}/tasks/{task_id}` follows the same rule (503 *"The audit record for this
+> implementation task edit could not be saved; nothing was changed. Retry."*): it overwrites a task's
+> description, notes, owner and status in place, and a task set to `skipped` is what lets
+> `complete` close the change with that work undone.
+>
+> An edit that changes no stored value (the same values sent back) writes no row and answers
+> **200**, even while the audit store is down. Note that create stores an empty affected list as
+> null while update stores it as `[]`, so sending `[]` for a list that was created empty is a change
+> and is audited. The other ECO writes (create, the status verbs, approval create, task create) still
+> audit best-effort: an audit failure that leaves the transaction usable is logged and the change is
+> saved.
 
 ### Quotes
 
@@ -10246,13 +10310,24 @@ call per file (at most 2 concurrent) and one `create-from-upload` call per revie
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| POST | `/po-upload/upload-po` | Upload a PO document (`.pdf`/`.doc`/`.docx`, 10 MB cap; else **400**) — AI-extracts data for review before commit | Yes |
-| POST | `/po-upload/upload-quote` | Upload a vendor quote document — AI-extracts data to build a PO | Yes |
+| POST | `/po-upload/upload-po` | Upload a PO document (`.pdf`/`.doc`/`.docx`, 10 MB cap; over it **413** before any work — this was a **400** before 2026-11-09) — AI-extracts data for review before commit | Yes |
+| POST | `/po-upload/upload-quote` | Upload a vendor quote document (same types and 10 MB / **413** cap) — AI-extracts data to build a PO | Yes |
 | POST | `/po-upload/upload-invoice` | Legacy alias of `upload-quote` (same extraction behavior) | Yes |
 | POST | `/po-upload/create-from-upload` | Create the PO from the reviewed extraction — can create the vendor and missing parts. Part-number matching is **case-insensitive** and ignores surrounding whitespace: the same number repeated across lines / `create_parts` creates the part **once** (stored as the first occurrence's stripped form) and attaches every matching line to it; an active part already holding the number is reused, and a line with no `part_id` resolves by part number to an existing active part even when it isn't in `create_parts`. **400** if `line_items` is empty, the PO number already exists, a supplied `vendor_id` / line `part_id` doesn't exist in the active company **or is soft-deleted**, a line's part number matches no active part and isn't in `create_parts`, or a new part's number belongs to a **soft-deleted** part (restore it via `POST /parts/{id}/restore` or use a different number). **409** when the vendor is Disqualified on the Approved Supplier List, checked before any part is created; otherwise the response's `supplier_approval_warnings` lists the advisory ASL warnings, which the create audit row also records (see Purchasing → *Approved Supplier List on the vendor record*) | Admin / Manager / Supervisor |
 | GET | `/po-upload/pdf/{path}` | Serve the uploaded source document for preview (`s3://` refs and local paths) | Yes |
 | GET | `/po-upload/search-parts` | Part typeahead for extraction-review matching. `q` matches **part number, name, description, and customer part number** — every whitespace-separated term must appear, then results are ranked by similar-word score so a query like `raw material` surfaces `A36 Raw Material Sheet`. `limit` **1–50**, default 10 | Yes |
 | GET | `/po-upload/search-vendors` | Vendor typeahead for extraction-review matching (`q`, `limit` **1–50**, default 10) — active, **non-soft-deleted** vendors only | Yes |
+
+> **A partly read PDF is flagged in `validation_issues` (2026-11-09).** When the extractor read only
+> part of an uploaded PDF (see [Document Text Extraction Limits](#document-text-extraction-limits)), each
+> gap becomes an entry such as
+> `{"field": "document_content", "severity": "warning", "code": "OCR_PARTIAL", "message": "Only the first 30 of 120 scanned pages were read."}`.
+> `code` is `OCR_PARTIAL` when scanned pages were skipped or cut short, and `TEXT_PARTIAL` when the
+> text layer was cut short. On a normal extraction these entries come before the field checks; only
+> the "PO number already exists" warning is listed ahead of them. The two low-confidence responses
+> (no usable text, and an AI extraction error) list them after their `error` entry. Today these are
+> the only `validation_issues` entries that carry a `code`; every other entry has just `field`,
+> `severity` and `message`.
 
 ### Receiving & Inspection
 
@@ -10263,7 +10338,7 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 | GET | `/receiving/open-pos` | List POs available for receiving (sent/partial); each PO carries `order_date` / `required_date` / `expected_date` plus its open lines | Yes |
 | GET | `/receiving/po/{po_id}` | Get full PO detail for receiving | Yes |
 | POST | `/receiving/receive` | Receive material against a PO line (`lot_number` optional — auto-assigned when blank, see below) | Admin / Manager / Supervisor |
-| POST | `/receiving/deliveries` | Atomically receive multiple lines with a stable request ID; identical retry returns the durable receipt, changed payload is refused. Certificate document IDs are validated against the PO line | Admin / Manager / Supervisor, plus receiving view/create permission |
+| POST | `/receiving/deliveries` | Atomically receive multiple lines with a stable request ID; identical retry returns the durable receipt, changed payload is refused. Certificate document IDs are validated against the PO line — every line's before the first line is received, so a bad certificate on any line is refused **422** `Delivery line N: …` with nothing posted. At that point the delivery takes its locks in the order a single receipt does (the receipt-number lock, the PO row, then the certificates in ascending id order), before it inserts anything and before the first audit row takes the audit-chain lock, so it holds no document lock that a document writer (row first, chain lock second) could deadlock against | Admin / Manager / Supervisor, plus receiving view/create permission |
 | POST | `/receiving/certificates` | Upload a real PDF/PNG/JPEG (20 MB maximum), bound to `po_line_id`; optional `receipt_id` attaches it to an existing receipt. Linked certificate bytes cannot be deleted through the document endpoint | Admin / Manager / Supervisor, plus receiving view/create permission |
 | GET | `/receiving/inspection-queue` | List receipts pending inspection (`days_back` optional, bounded 1–3650; **no date cutoff by default** — pending receipts never age out, so the list matches the `/stats` `pending_inspection` count) | Yes |
 | GET | `/receiving/receipt/{receipt_id}` | Get receipt detail | Yes |
@@ -11431,8 +11506,15 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 | GET | `/analytics/predict/delivery/{work_order_id}` | Predicted completion date + per-operation forecast for one work order | Admin / Manager / Supervisor |
 | GET | `/analytics/predict/capacity` | Capacity utilization forecast by work center, by week | Admin / Manager / Supervisor |
 | GET | `/analytics/predict/inventory-demand` | Predicted stockout dates / reorder urgency by part | Admin / Manager / Supervisor |
-| POST | `/analytics/custom-report` | Run a custom-report query (returns rows) | Admin / Manager |
-| GET | `/analytics/custom-report/export` | Export a saved report template (csv / xlsx / pdf) | Admin / Manager |
+| GET | `/analytics/data-sources` | Custom-report catalog: every data source and field (name, label, type, enum `options`) | Admin / Manager |
+| POST | `/analytics/custom-report` | Run an ad-hoc report (returns `columns` / `rows` / `row_count` / `truncated` / `notes`) | Admin / Manager |
+| GET | `/analytics/custom-report/templates` | List saved report templates: the caller's own plus every shared one | Yes |
+| POST | `/analytics/custom-report/templates` | Save a report definition as a named template (validated, audited) | Admin / Manager |
+| GET | `/analytics/custom-report/templates/{template_id}` | Get one saved template, with its `definition_errors` | Admin / Manager — own or shared (any for an Admin) |
+| PATCH | `/analytics/custom-report/templates/{template_id}` | Change a template's name / description / sharing / definition (audited) | Admin / Manager — author or Admin |
+| DELETE | `/analytics/custom-report/templates/{template_id}` | Delete a template (required audit row with a snapshot; 503 and nothing deleted if it cannot be saved) | Admin / Manager — author or Admin |
+| POST | `/analytics/custom-report/templates/{template_id}/run` | Run a saved template (`?limit=`, 1–10,000, default 1,000) | Admin / Manager — own or shared (any for an Admin) |
+| GET | `/analytics/custom-report/export` | Export a saved template's full result as CSV (`?template_id=`; csv only; audited; read-only / AI-external token 403) | Admin / Manager — own or shared (any for an Admin) |
 
 > **Days in analytics (P1, 2026-11-13).** Every analytics range is a set of **company-local calendar
 > days** (`Company.timezone`), and a point or bucket is dated in that same zone:
@@ -11570,33 +11652,256 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 > suppresses a real stockout warning; and retired (`is_deleted`) parts were still being forecast and
 > reordered. All are now excluded, so these figures can move on a single-company install as well.
 
-> **Custom reports are tenant-scoped.** Both `POST /analytics/custom-report` and
-> `GET /analytics/custom-report/export` run the report through the shared `ReportBuilderService`, which
-> now **always restricts the query to the caller's active company** (`company_id`) before applying any
-> user-supplied filters/group-by/sort. Every supported data source (work orders, parts, inventory, NCRs,
-> purchase orders, quotes) carries `company_id`, so a report can never return another tenant's rows. This
-> is a scoping-only fix — the request/response shape is unchanged.
+<a id="custom-report-builder"></a>
+> **Custom report builder (2026-11-16).** An ad-hoc query over **one** data source, run live or
+> saved as a named template. One catalog in `app/services/report_builder.py` (`REPORT_SOURCES`)
+> declares every data source and field: its column, label, type, enum options and any join it
+> needs. The `GET /analytics/data-sources` body, validation (`definition_problems`) and execution are
+> all derived from it, so the fields a client is shown and the fields the engine accepts cannot
+> disagree. Template access and writes are in `app/services/report_template_service.py`. Every route
+> is Admin / Manager except the template list (any signed-in role). The screen is Analytics →
+> **Custom Reports** (below).
 >
-> **The exported CSV is formula-neutralized, header row included** — the header comes from the
-> tenant-authored template's column list, not a fixed allowlist. Affected cells gain a leading `'`;
-> see [Spreadsheet Exports](#spreadsheet-exports-csv--xlsx).
+> **Catalog: `GET /analytics/data-sources`.** Keyed by `data_source` value; each entry is
+> `{label, fields: [{name, label, type, options?}]}`. `type` is `string`, `number`, `date`, `datetime`
+> or `enum`. It is derived from the column's SQLAlchemy type and decides the allowed operators and
+> aggregates. `options` appears on enum fields only: the values a filter takes and a row shows. The
+> list is complete (a field not in it is refused) and the same for every company. The sources are
+> `work_orders`, `parts`, `inventory`, `quality` (NCRs), `purchasing` (purchase orders) and `quotes`.
+> - **`production` is gone.** It never had a backing model, so every report on it answered 500. A
+>   request naming it is now **422**, and the catalog leaves it out. The enum member stays so a stored
+>   template that names it still lists.
+> - **The old hand-written catalog was wrong in both directions.** It advertised two fields the
+>   engine silently dropped and hid sixteen it supported. The two now work: `inventory.part_number`
+>   and `purchasing.vendor_name`. Each is a LEFT OUTER JOIN to `parts` / `vendors` with the
+>   active company in the ON clause, so a foreign row with a colliding id is never joined. The joined
+>   row is deliberately **not** tombstone-filtered: a lot's part and a PO's vendor are historical
+>   records that keep naming who they named (invariant 3). The sixteen are now listed:
+>   `quantity_scrapped`, `customer_po` and `created_at` (work orders); `material_cost`, `labor_cost`,
+>   `safety_stock` and `reorder_point` (parts); `quantity_available` and `status` (inventory);
+>   `quantity_rejected`, `closed_date` and `actual_cost` (NCRs); `required_date` and `subtotal` (POs);
+>   `subtotal` and `lead_time_days` (quotes).
+> - **`estimated_hours` is not a work-order field.** It has no writer anywhere (structurally 0 in
+>   every tenant), so it was dropped from the catalog (G3-content). Naming it is now a 422; before
+>   this change it silently dropped out of the report.
 >
-> **Custom-report labor honesty (G3-content).** Two changes make labor columns read truthfully when
-> labor cost is not being tracked:
-> - **`estimated_hours` is no longer a selectable WORK_ORDERS column.** It has no writer anywhere in
->   the system (it is structurally 0 in every tenant), so it has been dropped from
->   `GET /analytics/data-sources` and from the report builder's field map. Selecting it is no longer
->   possible (it silently dropped out before).
-> - **Labor-not-tracked response headers on `POST /analytics/custom-report`.** When
->   `LABOR_COST_ROLLUP_ENABLED` is **off** (the default) **and** the report selects any labor-derived
->   WORK_ORDERS column (`actual_hours`, `actual_cost`, `estimated_cost`) — which then render a literal
->   `0` meaning "not tracked", not a measured zero — the response sets two headers so a consumer can
->   tell the two apart: `X-Report-Labor-Not-Tracked` (a JSON array of the affected column names) and
->   `X-Report-Labor-Note` (a human-readable explanation). The **response body is unchanged** (the
->   bare-list contract the export + clients rely on); the headers are set only when applicable. When
->   the flag is on, the data source isn't WORK_ORDERS, or no labor-derived column is selected, no
->   headers are set.
+> **The definition** is the body of `POST /analytics/custom-report` and the stored part of a template:
+> `data_source`, `columns` (1–40), `filters` (at most 20), `group_by` (at most 10) and `sort` (at most
+> 10). A run adds `limit`: 1–10,000, default 1,000. `null` is refused; it used to mean "no limit".
+> **Unknown keys are refused at every level**, so a misspelled `agregate` is a 422, not a silently
+> ignored key.
+> - **Column** `{field, alias?, aggregate?}`. The output key is the alias, else the field; two columns
+>   producing the same key are refused, and an alias is at most 100 characters and may contain neither
+>   a NUL character nor an unpaired UTF-16 surrogate (see below). `sum` and `avg` take
+>   number fields; `min` and `max` take number, date, datetime and string fields; `count` takes any.
+>   Once any column aggregates or `group_by` is set, every non-aggregated column must be in
+>   `group_by`.
+> - **Filter** `{field, operator, value, value2?}`. Operators by type: string `eq` / `ne` / `in` /
+>   `like`; number `eq` / `ne` / `gt` / `gte` / `lt` / `lte` / `in` / `between`; date and datetime `eq` /
+>   `ne` / `gt` / `gte` / `lt` / `lte` / `between`; enum `eq` / `ne` / `in`. Values are typed:
+>   - a number is a JSON number (not a boolean, not a numeric string, finite); an integer must fit in
+>     64 bits (−2^63 to 2^63−1);
+>   - text is at most 500 characters, and no value (of any type, `in` items included) may contain a
+>     NUL character or an unpaired UTF-16 surrogate. JSON allows a lone `"\ud800"` escape, but no
+>     response can carry it: a template that stored one answered 500 on every later read, the
+>     company's whole template list included. The problem message says `a value cannot contain
+>     characters that cannot be stored (an unpaired UTF-16 surrogate)` and does not quote the value;
+>     the 422 entry's `input` still echoes the request body, with U+FFFD in place of each such
+>     character;
+>   - a date is `YYYY-MM-DD`;
+>   - a datetime is ISO-8601 with at least hours and minutes. No zone means UTC, and a zone is
+>     converted to UTC; an instant whose zone pushes it outside years 1-9999 in UTC is a 422 (`… is
+>     outside the supported range of dates and times`);
+>   - an enum value is one of the field's `options` — the lowercase value (`in_progress`), never the
+>     member name (`IN_PROGRESS`).
 >
+>   `value: null` is allowed only with `eq` / `ne` and means IS NULL / IS NOT NULL. `in` takes a
+>   non-empty list of at most 500 values, none of them null. `between` needs `value2`, is inclusive at
+>   both ends, and treats `value2: 0` as a real bound. `like` is a case-insensitive "contains" in which
+>   `%`, `_` and `\` match literally.
+>
+>   **`value2` must be `null` or one scalar** — text, a finite number or `true` / `false` — for
+>   **every** operator, including those that never read it, because it is stored with the filter.
+>   A list or object is a 422 (`value2 must be null or a single value (text, a number or
+>   true/false), not a list or an object`). Text in it follows the text rules above (no NUL, no
+>   unpaired surrogate, at most 500 characters), and `NaN` / `Infinity` is refused. It used to take any
+>   JSON at all, so a deeply nested one could be saved and then fail every later read of the
+>   template list. An unread scalar `value2`, such as a bound left behind when a filter is switched
+>   from `between` to `eq`, is still accepted and ignored.
+> - **Group by** `{field}`. `granularity` is not supported yet; setting it is a 422.
+> - **Sort** `{field, direction}`. `field` is a catalog field or the output key of a selected column.
+>   `direction` is `asc` or `desc` in any case, stored lowercase. A grouped report sorts by a
+>   group-by field or one of its own columns.
+>
+> **One 422 lists every problem.** Every semantic rule runs in `definition_problems`, and a broken
+> definition comes back as a single `detail` entry with `type: "report_definition"`. Its `msg` joins
+> every problem with `; ` and `ctx.problems` carries the same problems as a list, for example
+> `Column 1: "nope" is not a Work Orders field; Filter 1 (Status): operator "gt" does not apply to an
+> enum field; use one of: eq, ne, in`. Shape errors — an unknown key, a list over its cap, a `limit`
+> out of range, an unknown `data_source` — are FastAPI's ordinary per-field entries.
+>
+> **The result** of `POST /analytics/custom-report` and `POST /analytics/custom-report/templates/{template_id}/run`:
+>
+> ```json
+> {
+>   "columns": [
+>     {"key": "status", "label": "Status", "type": "enum"},
+>     {"key": "quantity_ordered", "label": "Sum of Qty Ordered", "type": "number"}
+>   ],
+>   "rows": [{"status": "in_progress", "quantity_ordered": 140}],
+>   "row_count": 1,
+>   "truncated": false,
+>   "notes": []
+> }
+> ```
+>
+> - `columns[]` follows the selected columns in order. `key` is the row key (alias, else field).
+>   `label` is the alias, else the catalog label, prefixed `Sum of` / `Average of` / `Count of` /
+>   `Minimum of` / `Maximum of` when aggregated. `type` is the field's type, except that `sum`, `avg`
+>   and `count` are always `number`.
+> - `rows[]` are keyed by column key. An enum cell is its value, a datetime is UTC ISO-8601 with `Z`,
+>   a date is `YYYY-MM-DD`, and floats and Postgres decimals are rounded to 2 places.
+> - `row_count` is the number of rows returned. `truncated` is true exactly when more than `limit`
+>   rows matched (the query fetches one extra row). An ungrouped report adds the base record's id as a
+>   final sort key, so the first `limit` rows are deterministic.
+> - `notes[]` entries are `{code, message, fields}`. There is one code today, `labor_not_tracked`.
+>   When `LABOR_COST_ROLLUP_ENABLED` is off (the default) and a `work_orders` report selects
+>   `actual_hours`, `actual_cost` or `estimated_cost`, those columns read a literal `0` that means
+>   "not tracked", not a measured $0. The note names them in `fields`.
+>
+> **Scoping.** The base query is always restricted to the caller's active company before any
+> caller-supplied filter, group-by or sort (G3-scope), and every join is company-scoped in its ON
+> clause, so a report can never return another tenant's rows. **Soft-deleted base records are
+> excluded** — work orders, parts, NCRs (voided ones included) and purchase orders. Inventory items
+> and quotes have no soft delete. Running a report writes nothing.
+>
+> **Saved templates.** A template is a named definition, private to its author unless `is_shared`.
+> - **Create** (`POST /analytics/custom-report/templates`). The body is the definition fields at the
+>   top level plus `name` (1–255 characters, trimmed), `description` (optional, at most 2,000) and
+>   `is_shared` (default `false`). It is validated by the same rules, with the same single 422. A
+>   `name` or `description` holding a NUL or an unpaired surrogate is a 422 (`unstorable_text` /
+>   `string_unicode`); it used to be a 500.
+> - **Change** (`PATCH /analytics/custom-report/templates/{template_id}`). Send any of `name`,
+>   `description` (`null` clears it), `is_shared` and `definition`. `definition` is the whole
+>   `{data_source, columns, filters, group_by, sort}` object nested under that key; it replaces the
+>   stored one and is validated like a new one. `name`, `is_shared` and `definition` may not be
+>   `null`, and an empty body or an unknown key is a 422.
+> - **Response** (`ReportTemplateResponse`, on every template verb but delete): `id`, `name`,
+>   `description`, `data_source`, `columns`, `filters`, `group_by`, `sort`, `is_shared`, `created_by`,
+>   `created_at`, plus two new fields, `updated_at` and `definition_errors`. The stored definition is
+>   normalized: plain JSON, sort directions lowercased.
+> - **Run** (`POST /analytics/custom-report/templates/{template_id}/run?limit=`). `limit` is 1–10,000,
+>   default 1,000. It returns the same result shape as an ad-hoc run.
+> - **Delete** (`DELETE /analytics/custom-report/templates/{template_id}`) answers
+>   `{"message": "Template deleted"}`. It stays a physical delete: `ReportTemplate` is not
+>   soft-deletable, and the audit row keeps a snapshot of what was removed. That audit row is
+>   **required**: if it cannot be written the delete is rolled back and the answer is **503**
+>   `The audit record for this delete could not be saved; the template was not deleted. Retry.` The
+>   row is deleted (tenant-scoped) before the audit row is written, the same row-then-audit-chain
+>   lock order as create and update; a delete that finds no row (a concurrent delete won) is the
+>   same **404** as a missing template and writes no audit row.
+>
+> **Template access rule** (`report_template_service`):
+>
+> | Verb | Who | Otherwise |
+> |---|---|---|
+> | List | Any signed-in role; returns the caller's own templates plus every shared one, by name | — |
+> | Get, run, export | Admin / Manager, and the template is the caller's own, shared, or the caller is an Admin (a superuser or Platform Admin counts as an Admin) | **403** `Access denied to this report` |
+> | Change, delete | Admin / Manager, and the caller is the author or an Admin (a superuser or Platform Admin counts as an Admin) | **403** `Only the template's author or an admin can change or delete it` |
+>
+> A template in another company is **404** `Report template not found` on every verb, byte-identical
+> to an id that does not exist, and never appears in the list. So a shared template can be run by
+> every Admin / Manager in the company but changed only by its author or an Admin, and an Admin can
+> open, run and export any template in the company. The read and change rules name the same Admin:
+> until 2026-11-16 an Admin was refused a colleague's private template on read, yet could `PATCH` it
+> and receive the whole definition back, so the refusal protected nothing. The list is unchanged —
+> the caller's own plus every shared template, for every role — so an Admin opens a colleague's
+> private template by id.
+>
+> **Stored templates are judged, never trusted.** Before this change templates were saved with type
+> checks only, so a stored one can break a rule added since. Such a template still lists and opens,
+> with `definition_errors` naming each problem. Running or exporting it answers **409**
+> `Saved report "<name>" can no longer run: <problems>. Edit it and save it again.`, and a `PATCH` with
+> a valid `definition` repairs it. `definition_errors` and the 409 come from the same validation, so
+> they cannot disagree. Judging a stored definition never raises: an unexpected error while checking
+> one is logged and reported as the single problem `The saved definition could not be checked; edit
+> the report and save it again`, so one bad row can never fail the template list for the company.
+> A stored definition holding an unpaired surrogate (saved before the refusal above existed) is
+> rendered with U+FFFD in place of each such character, wherever it sits (a value, an alias, a key),
+> and lists and opens with `The saved definition contains characters that cannot be stored (shown
+> here as �); edit the report and save it again` first in `definition_errors`; running or exporting
+> it is the **409**, since the definition that would run is not the one that was saved. A stored
+> definition nested more than 32 levels deep (only an old `value2` could be; pydantic's serializer
+> fails near 255, which 500'd the list) is treated the same way: everything past the bound is shown
+> as `�`, and `The saved definition contains a value nested too deeply to show (shown here as �);
+> edit the report and save it again` comes first in `definition_errors`. Every serialization of a
+> stored definition goes through that rendering, the audit snapshots included, so a repair or
+> delete never writes an audit row no audit-log read could render. The rendering walks are
+> iterative, so no depth of stored JSON can make them fail.
+>
+> **Audit.** Create, change and delete each write a `report_template` audit row: `log_create`,
+> `log_update` with old and new values, and a `DELETE` row with a snapshot of the deleted definition.
+> Create and change are best-effort (the repo-wide `AuditService.log` contract), because a template
+> is a saved query, not a quality record. **Delete is required** (`log_required`, the same fields
+> `log_delete` writes): the delete is physical, so its snapshot is the only trace of the template,
+> and a delete whose audit row cannot be saved is rolled back (**503**, above). Before this change,
+> template create and delete wrote no audit row (and there was no update verb).
+>
+> **Export: `GET /analytics/custom-report/export?template_id=&format=csv`.** The caller must be able
+> to read the template (own, shared, or any for an Admin).
+> - **A read-only or AI-external API token is refused 403** `Read-only API token cannot download
+>   files.` before anything is read — the template, the query, the row cap. It could never receive
+>   the file, and the over-cap and empty-result 400s, which used to answer first, told it how many
+>   rows a template matched.
+> - **Every matching row is exported**, up to the shared bulk-export cap `MAX_EXPORT_ROWS` (10,000,
+>   imported from `exports.py`). Over it the export is refused **400** `This export matches more than
+>   10,000 rows. Add a filter, then export again.` rather than cut short — see
+>   [Row cap on `/exports/*`](#row-cap-on-exports--refuses-at-10000-400). Before this change the export
+>   ran with the run default and so stopped at 1,000 rows, with nothing in the file to say so.
+> - An empty result is **400** `No data to export`; a template that can no longer run is **409**.
+> - **`format` takes only `csv`** (OpenAPI `const: "csv"`). `xlsx` and `pdf` are a **422** at
+>   validation. They used to be advertised in the parameter description and then answered 400
+>   `Format … not yet supported`.
+> - The header row is the column keys in column order. Cells and header are formula-neutralized; see
+>   [Spreadsheet Exports](#spreadsheet-exports-csv--xlsx).
+> - The file name is the template name, sent per RFC 6266 by
+>   `export_safety.attachment_content_disposition`:
+>   `attachment; filename="<ascii fallback>.csv"; filename*=UTF-8''<percent-encoded name>.csv`. The
+>   fallback replaces non-ASCII, `"`, `/`, `\` and control characters with `_`. It used to be a bare
+>   `filename=<name>.csv`, which broke on a space, a quote or a non-Latin-1 character.
+> - A refusal (403, 404, 409, 422, the row cap, an empty result) writes no audit row. A successful
+>   export still writes its `EXPORT` row (`resource_type` `custom_report`, the template as
+>   `resource_id`, the stored columns and filters, never the rows) before the file streams.
+>
+> **Screen.** Analytics → **Custom Reports** (`/analytics/reports`) is a full builder. You pick a
+> source, then columns and aggregates, typed filters, group by, sort and limit, and Run. The result
+> renders as a table, plus a chart when the report is grouped. Saved templates open through
+> `?template=<id>` (a reload or a shared link reopens the same one) and can be run, exported as CSV,
+> edited, shared and deleted from the panel. The tab and the route require `analytics:export`
+> (Admin, Manager and Platform Admin by default), which is the role set of the endpoints. Before
+> this change every role saw the tab and then got 403s. See
+> [RBAC_PERMISSIONS.md → Analytics](RBAC_PERMISSIONS.md#analytics).
+>
+> **⚠️ Contract change for API and MCP clients (2026-11-16).**
+> - **`POST /analytics/custom-report` returns an object, not a bare array of row dicts.** A client
+>   that read the array now reads `rows`. Through MCP, `run_custom_report`'s `structured_content` is
+>   this object; before, the bare list arrived wrapped as `{"result": [...]}`
+>   ([MCP.md §11](MCP.md#11-result-shapes-and-caps)).
+> - **The `X-Report-Labor-Not-Tracked` and `X-Report-Labor-Note` response headers are gone.** The same
+>   information is the `labor_not_tracked` entry in `notes`. Browsers could never read those headers:
+>   they were not in `Access-Control-Expose-Headers` (see [CORS](#cors)).
+> - **Definitions that used to run with parts silently ignored are now 422s.** That covers an
+>   unknown column, filter, group-by or sort field (an unknown filter field was dropped, so the
+>   report returned unfiltered rows), an unknown operator, a wrongly typed value, `between` without
+>   `value2`, `granularity`, an unknown key, a `limit` of `null` or above 10,000, and
+>   `data_source: "production"`, which used to answer 500.
+> - **Some filters now match what they say.** An enum filter binds the enum member, where the bare
+>   string used to match nothing on most enum columns. `like` matches `%` and `_` literally.
+>   `between` with `value2: 0` is applied instead of dropped.
+> - **Soft-deleted work orders, parts, NCRs and purchase orders no longer appear.**
+> - **The export takes csv only (422 otherwise)** and refuses over 10,000 rows (400) where it used to
+>   stop at 1,000.
+
 > **KPI values can be `null` ("n/a").** Each KPI on `GET /analytics/kpis` is a `KPIValue` whose
 > **`value` (and `prior_value` / `change_pct`) are nullable**. A genuinely-uncomputable metric returns
 > `null` rather than a misleading 0/100, and the frontend renders **"n/a"**:
@@ -11996,6 +12301,7 @@ There is no delete endpoint.
 | POST | `/users/{id}/activate` | Reactivate an account, without restoring revoked API tokens | Admin |
 | DELETE | `/users/{id}` | Deactivate user (sets `is_active=false`; cannot deactivate yourself). Revokes every live API token the user holds in the same transaction (reason `user deactivated`, one `API_TOKEN_REVOKED` audit trail each); the response carries `api_tokens_revoked`. Reactivation (`POST /users/{id}/activate`) restores the account, never a token | Admin |
 | POST | `/users/{id}/unlock` | Clear failed-login lockout | Admin |
+| GET | `/users/mention-search` | People to @mention in a comment: active members of the active company by name, `{id, display_name}` only (never email, role or phone). Documented under [Comments and watchers](#comments-and-watchers) | Any signed-in member of the company (a read-only API token is **403**: `Users` tag) |
 
 > **User writes are Admin-only; the list read is Admin / Manager.** `GET /users/` (and
 > `GET /users/{id}`) are `require_role([ADMIN, MANAGER])`; `POST` / `PUT` / `DELETE` are
@@ -12579,7 +12885,7 @@ hidden spreadsheet content and external workbook links are unsupported.
 Formulas are never evaluated, and cached formula values remain uncertain.
 Upload request keys are company-scoped and bound to actor plus exact
 filename/hash inputs. Extraction uses the shared, company-egress-gated model
-client with `hank_document_intake` prompt 1.2.0. A request-driven ARQ job claims
+client with `hank_document_intake` prompt 1.2.1. A request-driven ARQ job claims
 and commits before parsing/model work, then reloads current authority and saves
 its result with required audit. Parsing runs in a resource-bounded subprocess;
 no database transaction stays open during file or model I/O.
@@ -12680,7 +12986,7 @@ or scheduled cron. Intake requires a matching enqueue-driven worker.
 
 **Reviewed task contract.** `POST /hank/tasks` accepts
 `{ expected_company_id, request_key, kind, input }`. `request_key` is normalized to a canonical
-UUID. The six `kind` values are listed below; each input is
+UUID. The eight `kind` values are listed below; each input is
 validated against its specific schema and undeclared fields are rejected. The task stores
 immutable input/preview evidence and fingerprints of the source plan. There is a cap of 100
 proposals awaiting review per actor/credential. Creating a proposal requires the same
@@ -12694,6 +13000,8 @@ authority as its eventual action:
 | `receive_delivery` | `purchase_order_id`, 1–50 receipt lines; each requires `po_line_id`, positive actual `quantity_received` and explicit `requires_inspection`; optional lot/heat/serial/certificate/location/over-receipt details | Admin/Manager/Supervisor plus `receiving:view` + `receiving:create`; canonical atomic delivery/stock posting, with no automatic printing |
 | `report_production` | `operation_id`, nonnegative good/scrap deltas (at least one positive), scrap reason/code when reporting scrap; optional NCR details and reasoned hold | Admin/Manager/Supervisor/Operator/Quality plus `work_orders:view` + `work_orders:complete`; caller must have an open clock on the operation; no implicit job/operation completion. A standing API token may report good only: a scrap delta is refused **403** in the preview, so at preparation (no task saved) and again at execution (the task stays `awaiting_review`, nothing written) — owner decision 2026-11-07, only a person declares scrap |
 | `draft_shipment` | `work_order_id`, positive `quantity_shipped`, optional destination/carrier/package details; `cert_of_conformance` must be false | Admin/Manager/Supervisor/Shipping plus `shipping:view` + `shipping:create` + `work_orders:view`; reserves available completed units in a pending shipment, without dispatch/CoC/carrier purchase |
+| `change_due_date` | `work_order_id`, `new_due_date` (`YYYY-MM-DD`; required, a due date is never cleared), `reason` (stripped, 1–500 characters, no NUL) | Admin/Manager/Supervisor plus `work_orders:view` + `work_orders:edit` (the role set of `PUT /work-orders/{id}`); moves `due_date` only, **never `must_ship_by`**. API tokens are treated like any other credential (a full token may run it) — see below |
+| `add_note` | `work_order_id`, `body` (stripped, 1–5000 characters, no NUL), optional `mentioned_user_ids` (at most 20 distinct positive integers) | All seven tenant roles, Viewer included, plus `work_orders:view`; posts a **work-order comment** under the employee's name, never `WorkOrder.notes`. **People only:** every API token is refused **403** at preparation and at execution, and the MCP door refuses it to an agent on any credential — see below |
 
 Existing Superuser/Platform Admin bypass, active-company and token fences remain. A read-only
 company context cannot create or execute proposals. A task is scoped to company, actor,
@@ -12736,6 +13044,71 @@ from copied runs, and skipped operations/material ties appear in the receipt. Ex
 work-order/revision-history document bindings cannot be reassigned. Schema migration108
 adds the task store; no new environment variable or LLM call is needed for direct tasks.
 
+Every kind has its own preview and execution branch. An unregistered `kind` is **422** at
+validation; a registered kind that lacks a branch (a programming error) is **400**
+`Hank cannot run this kind of task.` rather than being run as another kind — before 2026-11-16
+both the preview and the execution fell through to `attach_document`.
+
+**`change_due_date`.** The rule is the generic `PUT /work-orders/{id}`'s, from one shared helper
+(`services/work_order_due_date.py`, `assert_due_date_change_allowed`), judged at preparation and
+again under the work-order row lock at execution:
+
+- **409** `<WO number> is already due <date>. There is nothing to change.` when the new date equals
+  the stored one (checked first);
+- **409** `cannot change the due date of a work order in terminal status '<status>': its due date is
+  the promise date its delivery performance was scored against.` on a COMPLETE, CLOSED or CANCELLED
+  work order — the `PUT`'s own text (see Work Orders → "Due date on a finished job");
+- **404** `Work order not found` for an absent, other-company or soft-deleted work order.
+
+The preview's `changes` are `Due date: <old, or "not set"> → <new>.` and `Reason: <reason>`. Its
+`warnings` always say that only the due date changes (scheduled dates, priority and the dispatch
+plan are not edited); add `The promise date does not move: must ship by <date> stays as it is, and it
+takes precedence over the due date for on-time delivery.` when `must_ship_by` is set; and add
+`The new due date is already in the past.` when the new date is before today's Central date (a past
+date is allowed, only flagged). The source fingerprint is deliberately narrow — the work order's
+`due_date`, `must_ship_by`, `status` and `version` — so any edit of the work order between review and
+execution is the 409 `The source records changed. Prepare and review a fresh task.`, while a
+dispatch-plan rank write (which bumps no `version`) is not. Execution writes `due_date` only and
+flushes, so a concurrent stale write is refused 409 (the `version` lock) rather than lost; then a
+best-effort `work_order_updated` operational event in the `PUT`'s shape (`updated_fields: ["due_date"]`)
+that deliberately omits the reason, and **last** a **required** `UPDATE` audit row on `work_order` (old and
+new `due_date`, `extra_data: {"reason": …, "via": "hank"}`; failure → **503**, nothing saved, the event
+rolled back with it). The event comes first because the audit row takes the global audit-chain lock,
+which no row lock (the event insert's foreign-key checks) may follow. No
+realtime broadcast is sent; open views pick up the date on their next read. Receipt:
+`Moved the due date of <WO number> from <old> to <new>.`, with the warning
+`Must ship by <date> was not changed.` when one is set. **Credentials:** parity with the
+`update_work_order` agent door, which already sets `due_date` — a **full** API token whose user holds
+the role and permissions may prepare and execute it; a read-only or AI-external token is refused by
+its own gates, as on every write (owner decision 2026-11-16; whether agents may move due dates at all
+is an open owner follow-up).
+
+**`add_note`.** A note is a **work-order comment** — the same record the work-order Comments panel
+shows ([Comments and watchers](#comments-and-watchers)) — and never writes `WorkOrder.notes`. At
+preparation the comment service judges it without writing anything (`comment_service.validate_comment`:
+the work order is live in the active company, the body, and every mention — an inactive, other-company
+or not-permitted id is **422** naming ids only). Execution posts it through `create_comment` as the
+submitting employee, so it gets exactly a typed comment's rules, mention rows, auto-watch of the author
+and the mentioned people, and `comment.mention` / `comment.added` notifications — **none of which
+carries the note text**. The comment's create audit is **required** here (**503**, nothing saved) and
+carries `extra_data.via: "hank"`. The preview's `changes` are `Note: <text>` and, with mentions,
+`Mentions: <names>.`; its `warnings` say that everyone who can see the job can read the note under your
+name, that mentioned people are notified in the app and by email without the note text, and that
+watchers get an in-app notice without the note text. The source fingerprint is the work-order id, its
+deleted flag and the mention ids, so later edits of the job do not invalidate a reviewed note; a
+deleted job is **404** and a person who can no longer be mentioned is **422** at execution. Receipt:
+`Added a note to <WO number>.`
+
+**`add_note` is people-only (owner decision 2026-11-16: a comment is a person's own words).** Any API
+token — whatever its role or scope — is refused **403** `A comment is a person's own words: an API
+token cannot post, edit or delete comments or change who is watching a record. Sign in to the app.`
+(`API_TOKEN_COMMENT_WRITE`, the comment routes' own text) at preparation and at execution, before the
+generic role check, with nothing written; `GET /hank/capabilities` leaves `add_note` out of a token's
+`allowed_kinds`. A read-only or AI-external token meets its own gate's 403 first, and an invalid input
+is still 422 before any of these. Through MCP the door also refuses an **agent** on any credential, a
+person's own JWT included ([MCP door](#mcp-door-mcp)). Because commenting is open to every role, a
+**Viewer** now has a reviewed task kind: `can_write: true`, `allowed_kinds: ["add_note"]`.
+
 **Personal follow-ups.** `POST /hank/watches` accepts
 `{ expected_company_id, request_key, work_order_id, condition, document_type? }`.
 The UUID request key is canonicalized and bound to the company, employee and exact input;
@@ -12754,7 +13127,7 @@ There are at most 50 active (`watching`/`snoozed`) watches per owner/company and
 interactive-only: API-token and kiosk credentials cannot create, control, or read watches.
 Effective `work_orders:view`, an active owner/company, and membership or existing elevated
 company access are required. Read-only company contexts may read saved watches but cannot
-control them. These gates are separate from the role fences for the six reviewed actions.
+control them. These gates are separate from the role fences for the eight reviewed actions.
 
 Commands accept `{ expected_company_id, expected_version }`. `check` evaluates a watching
 task now. `snooze` pauses it for one hour; `resume` retains its original baseline and makes
@@ -12882,7 +13255,7 @@ already gathered.
   external model latency never holds its audit-chain lock. If later narration fails or is
   stopped, the saved proposal remains recoverable through the task APIs; it remains unexecuted.
   Terminal SSE success is emitted only after the final chat transaction commits.
-- Prompt `copilot_chat` is version **1.7.0**. Saved intake extraction can be read
+- Prompt `copilot_chat` is version **1.8.0**. Saved intake extraction can be read
   through `hank_saved_work` with its source evidence; the general document-search
   tool still returns metadata only. Chat does not create handoffs, approve
   routines, advance steps or execute filing/actions.
@@ -13117,6 +13490,158 @@ quote statuses (accepted / rejected / converted / expired) auto-record `quote_re
 > default (operators keep the kiosk station screen; deep links are unaffected). The page shows a
 > "Top 3 today" hero — the three highest-scoring pending recommendations.
 
+### Comments and watchers
+
+A discussion thread on a record, with @mentions that notify the person named and watchers who hear
+about new comments. **v1 is work orders only, in the office app only** (owner decision 2026-11-16):
+the **Comments** panel on the work-order detail page. Not in v1: other record types, the kiosk,
+attachments, reactions. Service `app/services/comment_service.py`, migration `125_work_order_comments`;
+the two notification events are in [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#what-actually-fires-in-pr-1).
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/comments?entity_type=work_order&entity_id={id}` | The work order's live comments, **oldest first**: the newest 500, with no pagination (an older comment past that is not returned) | Any signed-in member of the company |
+| POST | `/comments` | Post a comment, optionally @mentioning people by user id. **201** with the comment | Any signed-in member of the company; **API tokens 403** |
+| PATCH | `/comments/{comment_id}` | Edit a comment: the full new `body` and `mentioned_user_ids` | The author only; **API tokens 403** |
+| DELETE | `/comments/{comment_id}` | Soft-delete a comment (it stops being listed). **204**, no body | The author, an Admin or a Manager; **API tokens 403** |
+| GET | `/watchers?entity_type=work_order&entity_id={id}` | Whether the caller watches the work order, and how many people do | Any signed-in member of the company |
+| POST | `/watchers` | Start watching (idempotent); returns the watch state. **409** for a caller who is not a member of the active company (a Platform Admin viewing another company), writing nothing | Any signed-in member of the company; **API tokens 403** |
+| DELETE | `/watchers?entity_type=work_order&entity_id={id}` | Stop watching (idempotent); returns the watch state | Any signed-in member of the company; **API tokens 403** |
+| GET | `/users/mention-search?q={text}&limit={n}` | People to @mention: active members of the active company by name, `{id, display_name}` only | Any signed-in member of the company |
+
+**Requests.** All three bodies refuse unknown fields (**422**).
+
+```json
+POST /comments
+{"entity_type": "work_order", "entity_id": 1042, "body": "Can this run before the 14th?", "mentioned_user_ids": [17]}
+
+PATCH /comments/{comment_id}          (both fields required)
+{"body": "Can this run before the 12th?", "mentioned_user_ids": [17, 23]}
+
+POST /watchers
+{"entity_type": "work_order", "entity_id": 1042}
+```
+
+**Responses.** A comment (the list returns an array of these):
+
+```json
+{
+  "id": 311,
+  "entity_type": "work_order",
+  "entity_id": 1042,
+  "author": {"id": 9, "display_name": "Avery Quill"},
+  "body": "Can this run before the 14th?",
+  "created_at": "2026-11-16T15:04:11Z",
+  "edited_at": null,
+  "mentions": [{"id": 17, "display_name": "Jane Doe"}],
+  "can_edit": true,
+  "can_delete": true
+}
+```
+
+`can_edit` / `can_delete` are **the caller's** rights on that comment. A person is
+`{id, display_name}` only, never an email, role or phone; mention-search returns the same shape.
+The watch routes return `{"watching": true, "watcher_count": 3}`.
+
+> **Validation.**
+> - **`entity_type`** must be exactly `work_order` (case-sensitive; 1–40 characters) on every route,
+>   or **422** `Comments are not available on this kind of record. Enabled entity_type values:
+>   work_order.` `entity_id` is a strict integer above 0.
+> - **`body`** is stripped, then must be 1–5000 characters. Whitespace-only, over 5000, or
+>   containing a NUL character is **422**. Nothing else is rewritten: the text is stored verbatim
+>   (no markup is stripped) and the app renders it as text.
+> - **`mentioned_user_ids`**: at most 20, distinct, positive integers (a JSON `true` is refused);
+>   otherwise **422**. Mentions are **structured**: the client sends ids chosen from mention-search,
+>   and the server never parses names out of the text. Each id must be an **active** person of the
+>   **active company** who can read the work order, or the request is **422**
+>   `These people can't be mentioned on this work order: user 41, user 52.` The refusal names
+>   **ids only**, never a name, so a foreign or inactive id cannot be used to learn whose it is.
+>   Mentioning yourself is allowed.
+>
+> **404s.** The work order is resolved in the active company and must be live: an absent id,
+> another company's work order and a soft-deleted one all answer **404** `Work order not found`,
+> on every comment and watcher route. A comment id that is absent, another company's or already
+> deleted is **404** `Comment not found`, and a comment whose work order has since been deleted is
+> the work order's 404.
+>
+> **Who can do what** (see [RBAC_PERMISSIONS.md → Comments and watchers](RBAC_PERMISSIONS.md#comments-and-watchers)).
+> Reading, posting and watching follow work-order read access: every signed-in member of the
+> company, all seven tenant roles, Viewer included. **Editing is the author's alone**: anyone
+> else, an Admin included, gets **403** `Only the person who wrote a comment can edit it.` An
+> Admin or Manager can remove a comment but never rewrite one. **Deleting** is the author, an
+> Admin or a Manager (a superuser or Platform Admin passes, as with `require_role`); anyone else
+> gets **403** `Only the person who wrote a comment, an Admin or a Manager can delete it.`
+>
+> **Edits.** `PATCH` replaces the text and the mention set. Only people the edit **newly** adds
+> are validated, notified and auto-watched; a mention kept from before is not re-checked, so a
+> person deactivated since does not block an edit of the text. `edited_at` is stamped. An edit
+> that changes neither the text nor the mention set writes nothing: no `edited_at`, no audit row,
+> no notification.
+>
+> **Auto-watch.** Posting a comment makes the author and everyone it mentions watchers of the work
+> order (idempotent). Creating a work order does not watch it, and nothing is backfilled.
+> `watching` is whether the caller has a watch row; **`watcher_count`** counts **active** members
+> of the company watching (a deactivated person's row persists but is neither counted nor
+> notified).
+>
+> **Watching is for members of the company.** Notifications go only to members of the work order's
+> company, so a caller whose own company is not the active one — a Platform Admin viewing another
+> company — may read and comment there but never watches: their comment does not auto-watch them,
+> `POST /watchers` is **409** `You can only watch records of your own company: notifications go to
+> its members.` (nothing written), and `GET /watchers` reports `watching: false` for them.
+> `DELETE /watchers` stays open to them, so a row they hold can still be cleared. Watch rows survive a work order's soft delete, so a restore keeps them, but every
+> route answers 404 while it is deleted.
+>
+> **Notifications.** A new comment emits `comment.mention` (to the people it mentions) and
+> `comment.added` (to the other watchers, never the author); an edit emits `comment.mention` for the
+> people it newly adds and nothing else. **Neither carries the comment text**: the title is the
+> label plus the work-order number, the body says who wrote it ("By: …"), and the link is
+> `/work-orders/{id}` (owner decision 2026-11-16). Recipients are re-checked when the worker
+> dispatches — and so are the work order and the **comment**: a comment deleted before the worker
+> runs (an author who deletes it seconds after posting) notifies nobody. The events are
+> best-effort: a failed notification never fails the comment. See
+> [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#content-rules-compliance).
+>
+> **Not in the copilot's context.** The AI work-order context (`AIContextService.work_order_context`,
+> the newest 20 events on the work order) leaves `comment_added` / `comment_mentioned` out, so a busy
+> thread cannot push the production events out of that window and no commenter's name
+> (`comment_author`) is sent to the model.
+>
+> **A work order with comments cannot be hard-deleted** (**409**, deleted comments included; soft
+> delete keeps the thread). See Work Orders → the hard-delete refusals.
+>
+> **Audit.** Create, edit and delete write `CREATE` / `UPDATE` / `DELETE` rows on resource type
+> `comment`: the create row records the body, the mentioned ids and
+> `extra_data.auto_watched_user_ids`; the edit row keeps the old and new text and mention sets; the
+> delete row snapshots the body, author, mentions and timestamps, with `extra_data.moderated: true`
+> when someone other than the author deleted it. Watch and unwatch write `CREATE` / `DELETE` on
+> `entity_watcher`; a watch or unwatch that changes nothing writes nothing. These are ordinary
+> best-effort audit writes, not the required-audit 503 path. A comment is **soft-deleted** and never
+> physically removed; an unwatch physically removes the watch row (a preference, not a record), and
+> an edit that drops a mention removes that mention row (its audit row keeps both sets).
+>
+> **Mention search.** `q` is 1–100 characters (whitespace collapsed) and matches a first name, last
+> name or "first last", case-insensitively, as a substring; `%` and `_` are literal, not wildcards.
+> Ordered by first name, then last name, then id. `limit` 1–25, default 10. Active members of the
+> active company only.
+>
+> **API tokens and agents (owner decision 2026-11-16).** A comment is a person's own words and a
+> watch a person's own preference, so every write — `POST` / `PATCH` / `DELETE /comments` and
+> `POST` / `DELETE /watchers` — refuses **any** API token, whatever its role or scope, **403**
+> `A comment is a person's own words: an API token cannot post, edit or delete comments or change
+> who is watching a record. Sign in to the app.` (`API_TOKEN_COMMENT_WRITE`). It answers in the
+> route's first dependency, before the body is validated or anything is read or written; a
+> read-only or AI-external token meets its own gate's 403 first. None of the five writes is an MCP
+> tool, so a person's own JWT cannot reach them through an agent either. The reads are generated
+> tools (`list_record_comments`, `get_record_watch_state`, `search_mentionable_users`):
+> - a **full** token reads all three;
+> - a **read-only** token reads the thread and the watch state, but mention-search is **403**: it
+>   sits under the `Users` tag, which `READ_ONLY_DENY_TAG_FLOOR` denies every read-only token;
+> - an **AI-external** token is **403** on all three: none is on the AI-external allowlist, because
+>   comment bodies are free text the export-control redaction cannot vouch for.
+>
+> A crew-station badge (kiosk) token is refused **403** on every route here by its path fence.
+
 ### Notifications (in-app inbox)
 
 Per-user notification inbox for the bell / popover / `/notifications` page — PR 1 (Foundation +
@@ -13183,9 +13708,11 @@ their own inbox).
 > **Content (revised 2026-07-29, after CMMC L2 was descoped):** `title` is the catalog label plus
 > the record identifier. `body` is the catalog description, then a blank line, then a detail line
 > composed from a curated payload allowlist — statuses and transitions, the `quantity_*` family,
-> priorities, day counts, disposition/category/source/inspection method, and `reason` — pipe-joined,
+> priorities, day counts, disposition/category/source/inspection method, `reason`, and (since
+> 2026-11-16, on the two comment events only) `comment_author` as "By" — pipe-joined,
 > each value truncated at 120 chars. When the payload carries none of those keys the body is the
-> description alone. **Part numbers and customer names are still absent**: the dispatcher reads the
+> description alone. The comment events never carry the comment text (see
+> [Comments and watchers](#comments-and-watchers)). **Part numbers and customer names are still absent**: the dispatcher reads the
 > event payload only and never re-queries to resolve `part_id` into a part number (a scope/N+1
 > decision, not a security boundary). See
 > [docs/NOTIFICATIONS.md → Content rules](NOTIFICATIONS.md#content-rules-compliance) for the
@@ -13768,6 +14295,13 @@ rendered with replacement characters (`U+FFFD`). Until 2026-11-05 such a body ma
 itself fail, so the caller got a **500** instead of the **422**, on any JSON route and without
 authentication.
 
+Two parsed-JSON values no response can encode are rewritten in the echo the same way (2026-11-16):
+an unpaired UTF-16 surrogate (`"\ud800"`) anywhere in `input`, `loc` or `ctx`, dict keys included,
+becomes `U+FFFD`, and a `NaN` / `Infinity` / `-Infinity` literal (Python's JSON parser accepts them)
+becomes the string `"NaN"` / `"Infinity"` / `"-Infinity"`. Either used to make the 422 a **500** on
+any route, e.g. a `NaN` in `POST /parts/`. The rewrite walks the echo iteratively, so a deeply nested
+body cannot make it fail, and an error with nothing to rewrite is echoed unchanged.
+
 ### Not Found error (404)
 ```json
 {
@@ -14166,8 +14700,8 @@ parses `text/plain` as JSON (it is the label the SPA's `navigator.sendBeacon` bo
 unauthenticated JSON parse. Both gates apply to it. On every other path `text/plain` is neither
 parsed as JSON nor capped by this middleware.
 
-**Not affected:** `multipart/form-data` uploads, which keep their own per-endpoint caps (20 MB
-for QMS standard uploads, 50 MB `LASER_UPLOAD_MAX_BYTES` for laser-nest ZIP/PDF — those also
+**Not affected:** `multipart/form-data` uploads, which keep their own per-endpoint caps (the AI
+document routes are listed under [AI document uploads](#ai-document-uploads) below; all of them
 return **413**), and inbound carrier tracking webhooks, which bypass this middleware entirely so
 their HMAC verifies against raw bytes.
 
@@ -14180,6 +14714,124 @@ create ~201 KB. A BOM create above roughly **1300 line items** exceeds the cap; 
 data — as of 2026-07-30 the middleware only measures size. Angle brackets in a note field (ASME
 Y14.5 notation such as `2.500 <REF>`, or `<` meaning "less than") round-trip byte-for-byte
 through create/read/update. Server-rendered PDFs escape at render.
+
+### AI document uploads
+
+These routes hand an uploaded document to the AI. Each refuses an oversized file with **413**
+before it does any work — no document saved, no text extraction, no model call. (Hank's document
+intake keeps its own per-file and per-batch caps, also **413**; see
+[Hank (AI shop teammate)](#hank-ai-shop-teammate).)
+
+| Route | Cap | Constant |
+|---|---|---|
+| `POST /po-upload/upload-po`, `/upload-quote`, `/upload-invoice` | 10 MB | `po_upload.MAX_FILE_SIZE` |
+| `POST /routing/generate-from-drawing` | 10 MB | `routing.MAX_FILE_SIZE` |
+| `POST /qms-standards/{standard_id}/upload-pdf` | 20 MB | `qms_standards.QMS_PDF_MAX_BYTES` |
+| `POST /bom/import/preview`, `POST /bom/import` | 20 MB | `bom.BOM_IMPORT_MAX_BYTES` |
+| `POST /laser-nests/extract` | 50 MB, the same as the laser package upload (a PDF over the extractor's ~20 MB native cap is read through the text fallback, not refused) | `laser_nests.LASER_NEST_EXTRACT_MAX_BYTES` |
+| `POST /work-orders/{work_order_id}/laser-nest-packages/preview`, `POST /work-orders/laser-nest-packages/standalone/preview` | 50 MB upload; a ZIP also ≤ 200 files and folders and ≤ 200 MB unpacked | `work_orders.LASER_UPLOAD_MAX_BYTES`, `laser_nest_service.LASER_ZIP_MAX_MEMBERS` / `LASER_ZIP_MAX_UNCOMPRESSED_BYTES` |
+
+The check runs in two steps (`app/core/upload_limits.py`). First the size the server counted while
+receiving the multipart body: over the cap, the request is refused without the file being read into
+memory. Then the file is read up to the cap plus one byte, and refused if more arrived, so the bound
+holds even when the counted size is missing or wrong. The laser package previews take the same
+first step, then stream the upload to a temporary file and refuse once more than 50 MB has arrived;
+a ZIP's member count and unpacked size are then read from its central directory and refused before
+anything is unpacked. Unpacking writes each central-directory entry exactly once, so a file name
+repeated many times inside the ZIP cannot unpack its largest copy once per repeat; what ends up on
+disk is the last copy, as before. Any temporary file is removed on refusal.
+
+The `detail` is a plain string such as `"File too large (max 10 MB)."`; the laser package routes
+say `"Upload exceeds the 50 MB limit. Split the package into smaller batches."`, and a ZIP over the
+member or unpacked-size cap names that cap. Before 2026-11-09 the PO, routing-drawing and QMS routes
+answered an oversized file with **400**, and the BOM routes and `/laser-nests/extract` had no cap.
+The PO upload, routing drawing, QMS, BOM import and laser package screens show `detail` for any
+status, so the message reaches the user the same way. The one exception is the manual-nest modal,
+the only caller of `/laser-nests/extract`: auto-fill there is best-effort and it drops every error
+silently, a 413 included, so a PDF over 50 MB just gets no auto-fill (the PDF itself still
+attaches through the document upload).
+
+## Document Text Extraction Limits
+
+Several AI document uploads read an uploaded PDF's text before calling the model: PO upload
+(`/po-upload/upload-po`, `/upload-quote`, `/upload-invoice`), BOM import (`/bom/import/preview`,
+`/bom/import`), `/routing/generate-from-drawing`, the laser-nest flattened-text fallback, and the QMS
+standard upload (`/qms-standards/{standard_id}/upload-pdf`). Since 2026-11-09 that read runs under the
+fixed limits below. They are code constants, not environment variables (`app/services/pdf_service.py`,
+`app/api/endpoints/qms_standards.py`, `app/core/parse_limits.py`).
+
+**Text layer.** pypdf runs in a separate, resource-limited child process
+(`app/services/pdf_text_reader.py`), not inside the API process. For a document within the limits
+the text is exactly what the old in-process read returned, and a test holds the two equal.
+
+| Limit | Document uploads (`pdf_service`) | QMS standard upload |
+|---|---|---|
+| File size | 64 MiB | 20 MB (the route's own upload cap) |
+| Pages read | the first 500 | the first 2,000 |
+| Characters per page | 100,000 | 100,000 |
+| Characters in total | 1,000,000 | 2,000,000 |
+| CPU time | 30 s | 60 s |
+| Wall clock | 45 s | 90 s |
+| Memory (Linux only) | 512 MiB address space | 512 MiB address space |
+
+When the page-count, total-character, CPU, memory or time limit is reached part-way through, the
+read stops there, the pages already read are kept, and a plain-language warning says so, for example
+"Only the first 500 of 812 pages were read." or "Reading the PDF's text stopped after 45 seconds
+(pages 1–14 of 120 read).". A page longer than the per-page limit is cut at 100,000 characters and
+reading carries on with the next page, with a warning naming the cut page. A file over the size limit
+is not read at all. A PDF that cannot be opened still yields no text, and the document uploads then
+try OCR. A parser error part-way through (a damaged page) is handled as before: the document uploads
+treat the text layer as unreadable and OCR the whole document, and only the QMS upload keeps the
+pages read before the error (see [QMS Standards](#qms-standards--audit-readiness)).
+
+**OCR (scanned PDFs).** When the text layer yields 100 characters or fewer, the document uploads fall
+back to OCR (pdf2image + tesseract). It is bounded per document:
+
+- only the first **30 pages** are read ("Only the first 30 of 120 scanned pages were read.");
+- the whole pass gets **90 seconds**, including the wait for an OCR slot. When the time runs out, one
+  warning names every page not read, those past the 30-page cap included ("Text recognition stopped
+  after 90 seconds, so pages 5–120 of 120 were not read."), in place of the 30-page sentence;
+- counting the pages (poppler's `pdfinfo`) gets **10 seconds**. A scan that cannot be opened in that
+  time is skipped with a warning ("Text recognition was skipped: the scanned document could not be
+  opened within 10 seconds.");
+- rendering a page and recognizing it each get **30 seconds**. A page that times out or cannot be
+  processed is **skipped with a warning**, and the remaining pages are still read. Before, one failure
+  threw away all OCR text;
+- pages are rendered one at a time at 300 dpi. A page that would be larger than **25 megapixels** at
+  300 dpi, such as a large-format drawing, is rendered at a lower dpi;
+- (changed 2026-11-09) each page is rendered from its **crop box**, the area a PDF viewer shows.
+  Before, it was rendered from the media box (poppler's default), so text printed outside a page's
+  crop box, which a viewer does not show either, is no longer recognized. On the usual page, where
+  the two boxes are the same, nothing changes.
+
+If tesseract or poppler is not installed, OCR yields no text and no warning, as before.
+
+**Concurrency, per process.** At most **2** CPU-heavy parses run at once: PDF text-layer reads, the
+Excel parsing in BOM import and in document text extraction, and PO line-item matching. At most **2**
+OCR passes run at once. Other requests wait for a slot. A parse waits as long as it takes; an OCR pass
+waits only within its 90-second budget, and if no slot frees up it is skipped with a warning to try
+again in a minute.
+
+> **Interim, until the AI routes move off the event loop (roadmap #9-2a).** PO upload, routing
+> generation and the QMS upload still parse on the server's event loop, while BOM import and
+> `/laser-nests/extract` parse in worker threads. A parse on the event loop takes no slot and never
+> waits, because waiting there would stall every request the process is serving, kiosk polls
+> included, for as long as the worker-thread parse ran (up to 45 s for a text-layer read, 90 s for
+> OCR). So each process can run one parse and one OCR pass beyond the caps above. Each PDF read on
+> those three routes also starts a reader process first, which adds roughly 0.1–0.25 s during which
+> the process serves nothing else. Both go away when #9-2a moves those parses into worker threads.
+
+**Where the warnings appear.** They describe the read that produced the returned text: text-layer
+warnings when the text layer was used, OCR warnings when OCR was, and both when neither produced
+usable text.
+
+| Endpoint | Where |
+|---|---|
+| `POST /po-upload/upload-po`, `/upload-quote`, `/upload-invoice` | `validation_issues` entries with `severity: "warning"` and `code` `OCR_PARTIAL` or `TEXT_PARTIAL` (see [PO Upload](#po-upload-ai-document-extraction)) |
+| `POST /routing/generate-from-drawing` | lines in `warnings` |
+| `POST /bom/import/preview`, `POST /bom/import` | lines at the start of `warnings`, and appended to the no-text **400** detail |
+| `POST /qms-standards/{standard_id}/upload-pdf` | a **400** when the text read is shorter than the 100,000 characters the AI is sent (see [QMS Standards](#qms-standards--audit-readiness)) |
+| Laser-nest flattened-text fallback | not surfaced yet: the limits apply, but no warning reaches the preview row or the `/laser-nests/extract` result |
 
 ## Spreadsheet Exports (CSV / XLSX)
 
@@ -14205,7 +14857,8 @@ Each successful export writes one audit row (`app/services/export_audit.py`, via
 
 The row is committed **before** the file streams, so an abandoned download is still recorded. A
 **403 writes no row**, and neither does a refusal (the 10,000-row cap below, an oversized filter
-value, an unsupported `format`, or an empty custom-report result) — nothing was disclosed.
+value, an unsupported `format`, an empty custom-report result, or a saved report template that can
+no longer run) — nothing was disclosed.
 
 Because an `audit_log` row is immutable and undeletable, everything the request contributes to it is
 bounded first. `columns` is filtered to the names the endpoint recognizes; free-text filters are
@@ -14341,9 +14994,16 @@ whole workbook in memory before streaming, so the cap also bounds peak memory.
 > other six endpoints of that time had no limit at all and returned everything, so for them the 400 replaces an
 > unbounded read, not a silent truncation.
 
-**Not covered by this cap:** `GET /analytics/custom-report/export`, `GET /visitor-logs/export.csv`
-and `GET /estimate-workbench/{estimate_id}/export/audit.xlsx` live on their own routers and keep
-their existing behaviour — `MAX_EXPORT_ROWS` applies to the `/exports/*` router only.
+**`GET /analytics/custom-report/export` shares this cap (2026-11-16).** It imports the same
+`MAX_EXPORT_ROWS` and refuses the same way, before writing any bytes or an audit row, with its own
+text: `"This export matches more than 10,000 rows. Add a filter, then export again."` (a report
+template has no date range to narrow). Before that it ran the template with the ad-hoc run's
+1,000-row default, so a larger result was cut at 1,000 rows with nothing in the file to say so.
+See [Custom report builder](#custom-report-builder).
+
+**Not covered by this cap:** `GET /visitor-logs/export.csv` and
+`GET /estimate-workbench/{estimate_id}/export/audit.xlsx` live on their own routers and keep their
+existing behaviour.
 
 ## CORS
 
@@ -14430,7 +15090,7 @@ log. `unconfigured` means every enqueue will fail and no background job or cron 
 | 200 | Success |
 | 201 | Created |
 | 204 | No Content |
-| 400 | Bad Request (also returned for a `Host` header not on the `ALLOWED_HOSTS` allowlist, and for an `/exports/*` request matching more than `MAX_EXPORT_ROWS` — see [Row cap on `/exports/*`](#row-cap-on-exports--refuses-at-10000-400)) |
+| 400 | Bad Request (also returned for a `Host` header not on the `ALLOWED_HOSTS` allowlist, and for an `/exports/*` or `GET /analytics/custom-report/export` request matching more than `MAX_EXPORT_ROWS` — see [Row cap on `/exports/*`](#row-cap-on-exports--refuses-at-10000-400)) |
 | 401 | Unauthorized |
 | 403 | Forbidden (also returned to a caller below `ADMIN` / `MANAGER` on any bulk-export endpoint — see [Access: bulk export is `ADMIN` / `MANAGER`](#access-bulk-export-is-admin--manager-and-every-export-is-audited)) |
 | 404 | Not Found |
@@ -14456,10 +15116,10 @@ What matters from this file's point of view:
   routers with the caller's own bearer token. The router is the boundary: the same `require_role`
   gates, tenant scoping, audit rows, optimistic-locking 409s and per-endpoint size caps apply, and a
   401/403/409/422 comes back verbatim as an `is_error` tool result carrying the server's `detail`.
-- **The catalog is this API.** 764 tools are generated from `app.openapi()` at startup — every
+- **The catalog is this API.** 770 tools are generated from `app.openapi()` at startup — every
   secured operation except the `Authentication`, `Carrier Webhooks`, `Error Logging` (and its router-level `errors` twin) and `WebSocket` tags, the
   unauthenticated health/station-login routes (named one by one in `catalog.PUBLIC_OPERATIONS`) and
-  the fifteen operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders
+  the twenty operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders
   (`POST /work-orders/import`, `POST /purchasing/purchase-orders/import` — they mint work orders
   RELEASED / IN_PROGRESS and POs SENT, a record of a past system rather than a user action),
   AI Accept & apply (`POST /ai/recommendations/{recommendation_id}/apply` — owner ruling 3: only a
@@ -14472,9 +15132,12 @@ What matters from this file's point of view:
   Supplier List writes (`PUT /purchasing/vendors/{vendor_id}/approval`,
   `POST /purchasing/vendors/asl-import/preview` and `/commit` — a supplier-approval decision is a
   person's judgment; the routes also refuse API tokens), the two legacy `approved_supplier_list`
-  writes (`POST /supplier-scorecards/approved-suppliers/`, `PUT .../approved-suppliers/{asl_id}`) and
+  writes (`POST /supplier-scorecards/approved-suppliers/`, `PUT .../approved-suppliers/{asl_id}`),
   bulk release (`POST /work-orders/bulk-release` — `release_work_order` stays an agent's only release
-  door, one job per call; this route does not refuse API tokens) — plus 15 fixed-name convenience tools that shadow 16
+  door, one job per call; this route does not refuse API tokens) and
+  the five comment / watcher writes (`POST /comments`, `PATCH` / `DELETE /comments/{comment_id}`,
+  `POST` / `DELETE /watchers` — owner decision 2026-11-16: a comment is a person's own words; the
+  routes also refuse API tokens, and the three reads stay tools) — plus 15 fixed-name convenience tools that shadow 16
   raw routes (`POST /work-orders/`, `PUT /work-orders/{id}`, `POST /work-orders/{id}/release`, the two
   nest-package imports, the manual nest add, `GET /search/`, …) to enforce agent rules the routes do
   not: create/duplicate always land DRAFT, release is a separate explicit tool and the generic update
@@ -14517,6 +15180,18 @@ What matters from this file's point of view:
   `tools/list`. What its tools return is redacted by the same response middleware as a direct
   call. See [docs/MCP.md](MCP.md) §4.1 / §4.2 and
   [docs/EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md).
+- **A Hank note is never posted through an agent, on any credential** (owner decision 2026-11-16: a
+  comment is a person's own words). The door, not the route, refuses it, because a person's own JWT
+  would otherwise let an agent write in that person's name: `prepare_task` with `kind: "add_note"`
+  answers **403** `"A note is a person's own words: post it from the app, not through an agent."`
+  before dispatch; `execute_task` first reads the task as the caller (`GET /hank/tasks/{task_id}`, the
+  `get_task` route) and answers the same 403 for an `add_note` task without dispatching the execute.
+  When that read is refused 401 / 403 / 404 / 422, that refusal (its status and detail) is the tool's
+  answer and the execute is not dispatched — the answer the execute route would have given; any other
+  failure (5xx, 429, transport, no `kind`) is **503** `"Could not confirm what kind
+  of Hank task this is before executing it, so nothing was executed. Try again."`. Both tools stay
+  listed, every other kind (`change_due_date` included) is unaffected, and the routes still serve a
+  person in the app. See [docs/MCP.md](MCP.md) §4.3.
 
 Settings: [ENVIRONMENT_VARIABLES.md → MCP](ENVIRONMENT_VARIABLES.md#mcp-model-context-protocol-door-and-bridge).
 Access model: [RBAC_PERMISSIONS.md → MCP / agent access](RBAC_PERMISSIONS.md#mcp--agent-access).
@@ -14538,7 +15213,7 @@ For more details on specific endpoints, use the interactive documentation above.
 
 ## Advisory physical-piece observations
 
-These authenticated `/api/v1/inventory` endpoints record explicitly reported physical measurements. Each source and observation record carries **“Recorded observation — availability and eligibility unverified.”** They create no inventory quantity, transaction, reservation, operational quote, remnant credit or solver supply. Existing stock writers and negative-on-hand behavior are unchanged. There is no production seeding, automatic remnant generation or adoption of existing inventory.
+These authenticated `/api/v1/inventory` endpoints record explicitly reported physical measurements. Each source and observation record carries **“Recorded observation — availability and eligibility unverified.”** They create no inventory quantity, transaction, reservation, operational quote or remnant credit. Existing stock writers and negative-on-hand behavior are unchanged. There is no production seeding, automatic remnant generation or adoption of existing inventory.
 
 | Method and path | Contract |
 |---|---|
@@ -14557,42 +15232,11 @@ Every command contains `expected_company_id`, a canonical UUID `request_key`, re
 
 Supported reported shapes are `{kind:"unknown"}`, `{kind:"rectangle",width,height}`, `{kind:"circle",cx,cy,r}`, or `{kind:"polygon",outer:[{x,y},...],holes:[[{x,y},...],...]}`. The measured polygon is retained; its bounding rectangle is never substituted. Each unavailable zone has `{id,label,reason,outline}` where `outline` is a circle or `{kind:"polygon",pts:[{x,y},...]}`. Zone IDs are unique and use 1–64 ASCII letters/digits/underscore/hyphen. Budgets are 16 zones, 16 interior rings, 2,000 total source vertices across shape/holes/zones (circle counts 1, rectangle 4), and 128 KiB canonical measurement payload. The existing 256 KiB global JSON receive limit applies before route handling. Unknown geometry cannot carry positioned unavailable zones. Duplicate JSON keys, unknown fields, explicit null required geometry, malformed/nonfinite values and over-budget input fail without saving.
 
-Geometry validation here is deliberately structural and bounded. The shared server calculation kernel has **not** checked topology, hole containment or usable regions for these observations. Neither reported geometry nor a matching source hash verifies actual presence, material specification, grain, damage, ownership or certification. Free-text evidence does not establish an approved material mapping. Structured PO/document revision and solver-origin lineage links are deferred; no implicit relationships are created.
+Geometry validation here is deliberately structural and bounded. No calculation kernel checks topology, hole containment or usable regions for these observations. Neither reported geometry nor a matching source hash verifies actual presence, material specification, grain, damage, ownership or certification. Free-text evidence does not establish an approved material mapping. Structured PO/document revision and solver-origin lineage links are deferred; no implicit relationships are created.
 
 Each source item includes its exact tenant-scoped Item/Part relationship, historical lot/heat/cert/UOM/status/location/cost metadata and a movement watermark. One SQL statement captures Item, Part and watermark together. Coverage is explicitly `direct_item_and_unattributed_same_part`: directly attributed item transactions plus same-Part transactions whose inventory item ID is null. Thus consume/receive turnover is visible even when on-hand returns to the same number; unattributed movements may conservatively flag another lot. Legacy finite floating values are reported as decimal text, nonfinite values as unknown, and no currency or piece valuation is inferred. Source IDs are immutable historical evidence locators without operational foreign keys; new recorded observations validate their current tenant relationship in both API and database guards.
 
 Read-time `source_status` is `unchanged`, `changed` or `missing`, accompanied by `current_source_sha256`. It is a staleness warning, never a lock or availability result. GETs do not reconcile or mutate stock/history. New recorded commands must present the current source fingerprint or receive 409. Same-key recovery runs before source-currentness and version checks, returning the original immutable observation (with a fresh read-time drift warning). Conflicting UUID payload/actor/credential, stale versions and duplicate labels receive 409; cross-company/unknown source relationships receive 404; malformed inputs receive 422; size limits receive 413. Required audit failure returns 503 and rolls back header, observation and audit as one transaction. Database RLS/revokes and immutable UPDATE/DELETE/TRUNCATE guards are supplied by migration 104 and matching model bootstrap DDL; they do not certify physical material.
-
-## Original DXF evidence for saved nesting revisions
-
-These endpoints retain original bytes against an **exact immutable saved input revision**. The existing `quote-nesting` namespace is reused; this feature adds part/source traceability, not quotation totals, pricing, quote approval, reservations or inventory availability. A receipt means `server_hash_verified_unapproved`: the server read back the recorded byte count and SHA-256 at `verified_at`. It does not prove that the importer derived the geometry correctly, that a customer approved the revision, or that the storage provider will retain bytes indefinitely.
-
-All paths below are relative to `/api/v1/quote-nesting/drafts/{draft_id}/revisions/{number}/sources`. IDs and revision numbers are positive 32-bit integers. Read access requires effective `purchasing:view`; mutations also require `purchasing:create`, current active-company authority and a writable context. Normal token expiry/revocation and kiosk fences apply. No new role or permission is introduced.
-
-| Method/path suffix | Contract |
-|---|---|
-| `GET /` | List intents and any completed receipts for this exact revision. `page` defaults to 1 (maximum 100,000), `per_page` defaults to and cannot exceed 10. No storage access, reconciliation or writes. |
-| `POST /` | JSON intent: `{expected_company_id,request_key,expected_input_sha256,source_sha256,byte_count,source_name,mime_type,targets:[{group_id,part_id}]}`. Creates the immutable intent and required audit atomically; exact actor/credential/command replay returns the prior result. |
-| `POST /{intent_id}/content?expected_company_id=...` | One raw `application/octet-stream` original DXF. The server verifies bytes against the intent, tries recovery from previous tracked attempts, then may allocate one audited fresh storage attempt. Successful read-back completes the receipt and all selected bindings atomically with required audit. |
-| `POST /{intent_id}/finalize` | JSON `{expected_company_id}`. Recover an already readable matching attempt without uploading or repairing anything. Return an existing receipt unchanged when the operation already completed. |
-| `GET /{intent_id}/download` | Require a completed receipt and read/verify the entire bounded object before responding with an authenticated attachment. Headers include `Cache-Control: private, no-store` and `X-Content-Type-Options: nosniff`. No public URL or inline CAD execution. |
-
-Intent UUIDs are canonical lowercase UUID strings. All hashes are lowercase 64-character SHA-256 values. `source_name` is a trimmed DXF basename without path separators or control characters, at most 1,024 characters; MIME is bounded descriptive input, not a file-type approval. The byte count must be greater than zero and **strictly less than 5,000,000**, matching the browser importer. Uploaded BOMs, encodings and line endings are retained unchanged; there is no text normalization, ZIP extraction, remote fetch or AI egress.
-
-Select at most 1,000 unique exact `(group_id,part_id)` targets. Every selected part must already have matching `original-bytes` source provenance in the named saved revision. Matching filenames alone are insufficient. `utf8-text`, absent provenance or another source hash returns 409; reimporting and saving a new revision are separate explicit actions. The binding stores the saved provenance plus `reportedRevision` only when the saved part contains a revision field; this text is not an approved ERP/customer revision. One original may bind multiple profiles, but a completed saved-part binding cannot be replaced by a different intent.
-
-Raw content is capped before handler execution, including chunked/no-Content-Length uploads. Intent/finalize JSON is capped at 256 KiB by the new route-specific middleware and remains subject to the existing global JSON limit if it is configured lower. Canonical selected-target evidence is capped at 512 KiB before intent creation. Select fewer profiles when that limit is exceeded. Lists contain at most ten full target-evidence summaries per page. Storage writes are capped at **eight tracked attempts per intent**; recovery can still inspect those attempts after the cap. No automatic body retries, deletion, purge, rename or overwrite path exists. The browser sends an explicitly selected batch sequentially and retains the same intent for recovery.
-
-CAD storage uses an independent S3 client with a 3-second connect timeout, an 8-second socket read timeout and one SDK attempt per operation. The shared document-storage client is unchanged. Each content, finalize or download service operation has a shared 60-second monotonic budget, checked between recorded attempts, before and after streamed chunks, and before new attempt allocation/write. Expiry returns 503 without starting another storage operation; already committed attempts and bytes remain recoverable. This is a cooperative limit, not a hard request deadline: an in-flight SDK call/read, DNS, local filesystem, database work and body reception are not forcibly interrupted. No background cancellation thread or automatic provider retry is introduced. CAD-owned clients and streaming bodies are closed on success and failure.
-
-The page response is `{company_id,draft_id,revision_number,input_sha256,can_attach,items,total,page,per_page}`. Each item contains exact revision/source identities, request UUID, name/MIME/count, target evidence and its digest, actor/credential/time, `attempt_count`, `can_resume`, and nullable `receipt`. State `PENDING` means no completion receipt exists. `ATTACHED` means verification was recorded at the receipt timestamp; listing does not check current object availability. The receipt includes its ID, source hash/count, verifier/credential/time and the fixed unapproved claim. Neither object paths, provider details nor attempt IDs are returned to browsers.
-
-Only the original actor and exact API-token identity (or the same interactive actor) can resume the intent. An authorized colleague may read/download completed evidence but cannot take over an uncertain command. Required authority is rechecked after storage I/O before committing completion. A switched company, revoked token, disabled user or revoked write permission cannot complete a staged upload. Previously committed staging/audit history remains.
-
-The intent, each fresh attempt and its audit commit **before** the corresponding object write. Each attempt freezes a generated company-scoped key and nonsecret provider identity; a retry never reuses an uncertain attempt for another write. Storage I/O occurs outside DB transactions/connections. Partial, late and unsuccessful objects remain accounted for by immutable attempts. A unique receipt and complete binding set commit with required audit in a separate transaction. Failed completion/audit may be retried through finalize without another upload. Completed command recovery returns historical receipt metadata without requiring the provider to be online. Download separately fails closed if bytes are missing, changed, oversized or unavailable.
-
-Success and exact replay return 200. Unknown/cross-company revisions or intents return 404; changed company, mismatched bytes/targets/UUID, occupied bindings and attempt exhaustion return 409; ownership/permission failures return 403; malformed/duplicate fields return 422; size limits return 413; incorrect content type returns 415. Storage uncertainty, incomplete finalize and required audit failure return 503 with recovery guidance. A 503 does not authorize an automatic fresh upload: check completion, then let the user explicitly resend the original file if needed. No storage error may silently rewrite a receipt or the saved input JSON.
-
 
 ## Recorded-piece planning snapshot
 
@@ -14613,8 +15257,8 @@ response requires the latest RECORDED observation, a still-present and unchanged
 source, active Item/Part, source status `available`, known geometry kind, known
 positive thickness within the planning range and known reported grade. This does
 not establish physical availability or material suitability. Geometrically invalid
-evidence is never repaired here; bounded structural evidence is retained, and the
-calculation kernel must separately validate topology before accepting placements.
+evidence is never repaired here; bounded structural evidence is retained, and no
+topology validation is performed.
 
 `snapshot` preserves exact observation identity, observer/reason/timestamps, canonical
 inch measurement evidence and its existing payload hash/count, source IDs/hash, and
@@ -14632,74 +15276,7 @@ specification return 409. Existing permission/token/read-only restrictions retur
 the existing global JSON receive cap returns 413. No fallback mapping from catalog,
 Part name, grade aliases, gauge, UOM or inventory quantity is inferred.
 
-The resolver itself makes no calculation or write. An explicit source-bound selection
-can be saved in project18 and calculated through the existing authenticated saved-run routes.
-
-### Source-bound recorded-piece projects and worker stages
-
-Project18 adds optional `remnantPlan`; explicit null is rejected and older project
-versions reject the field. A project18 without the field uses ordinary protocol1;
-normal writers emit project15 when no piece is selected. One project may select one
-recorded physical piece, assigned to exactly one populated quote14 group. The selection
-contains the exact observation snapshot and typed snapshot SHA, current remnant-domain
-profile identity, canonical-inch zone clearance, and an explicit family/grade/thickness
-assignment with reason and a typed hash over `{groupId, requiredGrade, quote}`. That hash
-uses the original saved imperial quote before defaults or unit conversion. Grade is
-trimmed case-sensitive text and thickness must be known and equal; no catalog-to-inventory
-mapping is inferred. `capacity: 1`, `planningOnly: true`, `eligibilityVerified: false`,
-and `availabilityVerified: false` are mandatory.
-
-New saves and new starts require the same-company latest RECORDED observation, its exact
-payload/source hashes, an unchanged active/available Item+Part source, and known compatible
-reported shape/specification. The check holds the observation header FOR SHARE until the
-save/start transaction commits, after existing draft/run and policy locks. It does not lock
-inventory, reserve a piece or promise that another planner will not select it. Later source
-movement is possible. Exact same-key retries first check current authorization, then return
-the original record without applying current-source checks again. Queued claims similarly
-retain their frozen source and only recheck actor/token permissions, input integrity and
-exact runtime/profile identity. Historical reads never rewrite or silently refresh evidence.
-
-Remnant-bearing evidence additionally requires effective `inventory:view` on draft lists,
-history/detail/save and retries; run lists/detail/checkpoints/reports/start/cancel and retries;
-all original-CAD source routes, including completion and download recovery; and worker
-claim/live checkpoint checks. A purchasing grant alone does not expose recorded stock.
-Omitted remnant fields preserve ordinary nesting access. No new role or inventory mutation
-authority is introduced.
-
-The v7 manifest declares base `protocol: 1`, exact `supported_protocols: [1,2]` and the
-packaged `remnant_domain_profile`. The readiness heartbeat remains its existing eight-field
-protocol1 identity. For a remnant-bearing project, frozen run settings select protocol2
-and add the remnant profile; their runtime identity remains protocol1. Protocol2 hello
-also binds the exact remnant profile, base geometry profile, bundle and Node version.
-
-Protocol2 stages are ordered: every full-sheet baseline, one recorded-piece evaluation,
-then every enabled full-sheet option for that group's remaining instances. The total
-`B + 1 + K` must be at most 36 before save/start and shares the existing 120-second, heap,
-frame and retained-checkpoint budgets. No timeout or missing work proves infeasibility.
-Each stage has an input-derived `stage-01`…`stage-36` identity, sequence, kind, group,
-original `option_id` (null for the piece), dependency (piece stage for residuals), requested
-count, exact source stock, result and instance map. Source stock is independently rebuilt
-from canonical nanoinches; bounding extents are never treated as available material.
-
-The recorded-piece result has only `nest`, `error`, `complete`, `area` and optional leftover
-status—no price, cost or financial option. It uses zero or one physical piece. If geometry
-cannot be prepared, an explicit error with null stock/nest preserves all requested instances.
-Residual maps enumerate each remaining original instance exactly once in original part order;
-compact residual quantities cannot erase, duplicate or substitute originals. All-fit cases
-still emit planned residual stages with zero requested instances, an empty map and null
-stock/result. Those are complete alternatives requiring zero full sheets.
-
-Public checkpoint `option_id` holds the stage identity. Protocol2 metadata additionally has
-`stage_kind`, `source_option_id` and `depends_on`; these three keys remain absent from legacy
-metadata. The canonical checkpoint hash covers the exact decoded JSON frame, not its NDJSON
-whitespace. `completed_count` counts complete baseline/residual alternatives, including empty
-residuals, and excludes the recorded-piece stage. COMPLETED means evaluations finished.
-
-Recorded-piece leftover evidence is v4, always unapproved and zero-credit. Per-sheet
-`grossArea` is analytical reported material minus physical holes; `protectedArea` is actual
-inward-protected material before zones; `usableArea` is final vector material after zones.
-`edgeMarginArea = grossArea - protectedArea` and `excludedArea = protectedArea - usableArea`.
-The complete ledger also includes nominal parts, reserved part cutouts, clearance/protection,
-remaining regions and bounded reconciliation residual. Exact profile/area definitions and
-source identity accompany the report. These are conditional planning results, not physical
-availability, reservation, consumption, valuation or automatic child-remnant records.
+The resolver itself makes no calculation or write. Its only in-app consumer was the
+retired Material Nesting estimator, whose project18 saves and saved-run calculations were
+removed with every `/quote-nesting/*` route in `3e17456e` (2026-09-16); the route remains
+live as a read-only evidence resolver, and no current screen calls it.

@@ -10,6 +10,7 @@ from app.models.operational_event import OperationalEvent
 from app.models.part import Part
 from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.models.work_order_blocker import WorkOrderBlocker, WorkOrderBlockerStatus
+from app.services.comment_service import COMMENT_EVENT_TYPES
 
 
 class AIContextService:
@@ -52,12 +53,23 @@ class AIContextService:
         # the assistant's context. (POST /operational-events clamps occurred_at, so
         # only a row written some other way can be future-dated.) Naive UTC, the form
         # OperationalEventService.emit writes.
+        #
+        # Comment events (``comment_added`` / ``comment_mentioned``) are left out, for two
+        # reasons. They carry ``work_order_id`` (the notification deep link), so on a busy
+        # thread they would fill the 20 slots and push the production events this context
+        # exists for out of the window. And each payload carries ``comment_author``, a
+        # person's name, that would go to the model whenever AI egress is on -- with no
+        # production signal to justify it (the comment text is never in the payload, so the
+        # assistant learns nothing about the work from them). Filtered by event TYPE: both
+        # are server-only (a client cannot post one), so the filter cannot be dodged or
+        # abused, and a new comment event type joins ``COMMENT_EVENT_TYPES``.
         events = (
             self.db.query(OperationalEvent)
             .filter(
                 OperationalEvent.company_id == company_id,
                 OperationalEvent.work_order_id == work_order.id,
                 OperationalEvent.occurred_at <= datetime.utcnow(),
+                OperationalEvent.event_type.notin_(COMMENT_EVENT_TYPES),
             )
             .order_by(OperationalEvent.occurred_at.desc())
             .limit(20)

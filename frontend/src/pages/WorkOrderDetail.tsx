@@ -1,5 +1,6 @@
 import JobTimelinePanel from '../components/workorders/JobTimelinePanel';
 import JobForecastPanel from '../components/workorders/JobForecastPanel';
+import CommentsPanel from '../components/comments/CommentsPanel';
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
@@ -620,6 +621,20 @@ export default function WorkOrderDetail() {
     return checkedAt ? ` Last verified ${formatDateTimeCT(checkedAt)}.` : '';
   };
   const [error, setError] = useState('');
+  // A RELOAD of a work order already on screen that failed (the 30 s poll, a
+  // focus/visibility/realtime refresh, the re-read after an action). The page
+  // keeps the last good work order and says it may be stale, rather than
+  // swapping to the full-page ErrorState — which would unmount everything on
+  // it, the Comments panel's unsent draft or open edit included. Only a failed
+  // FIRST load (nothing to show yet) and a 403/404 (the job is gone or no longer
+  // ours to see) take the full-page error path.
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const [refreshRetrying, setRefreshRetrying] = useState(false);
+  const [lastLoadedAt, setLastLoadedAt] = useState<string | null>(null);
+  // The work order id whose load last succeeded — the "already on screen" test.
+  // A ref, because loadWorkOrder is a stable callback that must not re-create
+  // (and restart every poll) each time the work order changes.
+  const loadedWorkOrderIdRef = useRef<number | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   // Work-order Start / Resume / Hold. All three are server-GATED (the server may
@@ -813,7 +828,6 @@ export default function WorkOrderDetail() {
     const currentWorkOrderId = parseInt(id, 10);
 
     try {
-      setError('');
       const response = await api.getWorkOrder(currentWorkOrderId);
       if (requestId !== loadRequestRef.current) return;
       const hydratedWorkOrder = await hydrateOperationsFromShopFloor(response);
@@ -822,6 +836,12 @@ export default function WorkOrderDetail() {
         ...hydratedWorkOrder,
         operations: sortOperationsForDisplay(hydratedWorkOrder.operations || []),
       });
+      // Cleared on success rather than when a load starts, so a poll running
+      // while an error is on screen does not flash the page back in between.
+      setError('');
+      setRefreshError(null);
+      loadedWorkOrderIdRef.current = currentWorkOrderId;
+      setLastLoadedAt(new Date().toISOString());
       setLoading(false);
       setSecondaryLoading({ materials: true, blockers: true, documents: true, documentChoices: true });
 
@@ -848,14 +868,30 @@ export default function WorkOrderDetail() {
         settleSecondary('documentChoices', api.getDocuments({ limit: 500 }), value => setAvailablePdfDocuments((value as WorkOrderDocument[]).filter(isPdfDocument).filter(document => !document.work_order_id))),
       ]);
 
-    } catch {
+    } catch (err) {
       if (requestId !== loadRequestRef.current) return;
-      setError('Failed to load work order');
+      const status = (err as { response?: { status?: number } } | null)?.response?.status;
+      const recordGone = status === 403 || status === 404;
+      if (loadedWorkOrderIdRef.current === currentWorkOrderId && !recordGone) {
+        setRefreshError("Couldn't refresh this work order. The details below may be out of date.");
+      } else {
+        loadedWorkOrderIdRef.current = null;
+        setError('Failed to load work order');
+      }
     } finally {
       if (requestId !== loadRequestRef.current) return;
       setLoading(false);
     }
   }, [id]);
+
+  const retryRefresh = useCallback(async () => {
+    setRefreshRetrying(true);
+    try {
+      await loadWorkOrder();
+    } finally {
+      setRefreshRetrying(false);
+    }
+  }, [loadWorkOrder]);
 
   const scheduleRealtimeRefresh = useCallback(() => {
     if (realtimeRefreshRef.current) return;
@@ -881,6 +917,9 @@ export default function WorkOrderDetail() {
   useEffect(() => {
     setLoading(true);
     setError('');
+    setRefreshError(null);
+    setLastLoadedAt(null);
+    loadedWorkOrderIdRef.current = null;
     setWorkOrder(null);
     setMaterialReqs(null);
     setBlockers([]);
@@ -2160,6 +2199,28 @@ export default function WorkOrderDetail() {
         ]}
       />
 
+      {refreshError && (
+        <div
+          role="status"
+          className="flex flex-wrap items-center justify-between gap-2 border border-fd-amber/40 bg-fd-amber/10 px-3 py-2 text-sm text-fd-body-2"
+        >
+          <span>
+            {refreshError}
+            {lastLoadedAt ? ` Last loaded ${formatDateTimeCT(lastLoadedAt)}.` : ''}
+          </span>
+          <LoadingButton
+            variant="ghost"
+            size="sm"
+            loading={refreshRetrying}
+            loadingText="Retrying…"
+            focusableWhileLoading
+            onClick={() => void retryRefresh()}
+          >
+            Retry
+          </LoadingButton>
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center">
@@ -2989,6 +3050,11 @@ export default function WorkOrderDetail() {
           </>
         )}
       </CockpitPanel>
+
+      {/* Comments — the people side of the job (questions, hand-offs, @mentions),
+          kept beside the planning notes. Keyed on the work order so navigating
+          between work orders starts a fresh thread and composer. */}
+      <CommentsPanel key={`comments-${workOrder.id}`} entityType="work_order" entityId={workOrder.id} />
 
       <div className="card card-compact">
         <div className="flex flex-col xl:flex-row xl:items-start xl:justify-between gap-3 mb-3">

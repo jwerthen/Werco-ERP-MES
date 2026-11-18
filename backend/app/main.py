@@ -25,6 +25,7 @@ from app.core.media_types import is_json_media_type, is_text_plain_media_type
 from app.core.observability import capture_exception_to_sentry
 from app.core.observability import init_sentry as _init_sentry
 from app.core.queue import log_redis_target as _log_redis_target
+from app.core.unicode_text import contains_unrenderable, make_renderable
 from app.db import locks as db_locks
 from app.db.database import Base, engine
 from app.db.mixins import STALE_WRITE_CONFLICT_DETAIL
@@ -991,7 +992,7 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 
 
 def _encodable_validation_errors(errors: Sequence[Any]) -> list[Any]:
-    """``exc.errors()`` made safe for ``jsonable_encoder``.
+    """``exc.errors()`` made safe for ``jsonable_encoder`` and the JSON response.
 
     For a body FastAPI did not parse (any non-JSON label), an error's ``input`` is the raw
     body BYTES, and ``jsonable_encoder`` ``.decode()``s bytes strictly -- so undecodable
@@ -999,11 +1000,31 @@ def _encodable_validation_errors(errors: Sequence[Any]) -> list[Any]:
     (an ERROR line and Sentry events per request, on any JSON route). Decode with
     replacement characters instead. Bytes that decode cleanly come out exactly as the
     encoder always rendered them, so the 422 is unchanged for every body that worked.
+
+    The parsed-JSON twins: a JSON body may carry an unpaired UTF-16 surrogate (``"\\ud800"``),
+    which ``json.loads`` keeps in a ``str``, or a ``NaN`` / ``Infinity`` / ``-Infinity``
+    literal, which it parses to a non-finite float. Echoed in an error's ``input`` / ``loc``
+    / ``ctx``, either made the response's encode raise (UTF-8, or "Out of range float values
+    are not JSON compliant"), so the 422 itself became a 500 -- on any route, e.g. a
+    ``NaN`` in ``POST /parts/``. Such characters are replaced with U+FFFD and such numbers
+    with the strings ``"NaN"`` / ``"Infinity"`` / ``"-Infinity"``, wherever they sit in the
+    error (dict keys included); an error holding neither is passed through untouched.
+
+    Both walks are iterative (``app.core.unicode_text``): ``input`` is whatever body the
+    caller sent, and a recursive walk made a ``[[[...]]]`` body a few hundred levels deep a
+    ``RecursionError`` -- a 422 turned into a 500, an ERROR line and a Sentry event, for an
+    unauthenticated caller. And this function must never be the thing that fails: if the
+    scrub raises anyway, the error is passed through as it was before the scrub existed.
     """
     safe: list[Any] = []
     for error in errors:
         if isinstance(error, dict) and isinstance(error.get("input"), (bytes, bytearray)):
             error = {**error, "input": bytes(error["input"]).decode("utf-8", "replace")}
+        try:
+            if contains_unrenderable(error):
+                error = make_renderable(error)
+        except Exception:  # deliberately broad -- never turn a 422 into a 500 (docstring)
+            pass  # nosec B110 - the unscrubbed error is exactly the pre-scrub behavior
         safe.append(error)
     return safe
 

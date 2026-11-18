@@ -995,7 +995,8 @@ _ADD_LASER_NEST_SCHEMA: Dict[str, Any] = {
             "(the nest is appended to it).",
         },
         "cnc_number": {"type": "string", "minLength": 1, "maxLength": 100, "description": "CNC program number."},
-        "planned_runs": {"type": "integer", "minimum": 1, "description": "Planned sheet runs."},
+        # The bound mirrors LaserNestManualCreate (MAX_PLANNED_RUNS); test_mcp_catalog holds the two together.
+        "planned_runs": {"type": "integer", "minimum": 1, "maximum": 9999, "description": "Planned sheet runs."},
         "nest_name": {"type": "string", "maxLength": 255},
         "material": {"type": "string", "maxLength": 100},
         "thickness": {"type": "string", "maxLength": 50},

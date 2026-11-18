@@ -74,6 +74,22 @@ EGRESS_SWITCH_OPERATIONS: FrozenSet[Tuple[str, str]] = frozenset(
     }
 )
 
+# And the comment / watcher WRITES (owner decision for work-order comments, 2026-11-16): a
+# comment is a person's own words and a watch a person's own preference. The routes refuse every
+# API token (``app.core.credentials.API_TOKEN_COMMENT_WRITE``), and a person's own JWT would still
+# reach them through a tool call -- an agent posting words in a person's name -- so none is a
+# tool. The reads (the thread, the watch state, mention search) stay tools. Named on their own so
+# the credential tests walk exactly these routes.
+COMMENT_WRITE_OPERATIONS: FrozenSet[Tuple[str, str]] = frozenset(
+    {
+        ("POST", "/api/v1/comments"),
+        ("PATCH", "/api/v1/comments/{comment_id}"),
+        ("DELETE", "/api/v1/comments/{comment_id}"),
+        ("POST", "/api/v1/watchers"),
+        ("DELETE", "/api/v1/watchers"),
+    }
+)
+
 # And the Approved Supplier List writes (AS9100D 8.4): recording a supplier-approval
 # decision and loading the controlled QL 7.4 list are a named person's judgment, so they
 # are app actions only (the routes also refuse API tokens). The import preview goes with
@@ -104,6 +120,7 @@ EXCLUDED_OPERATIONS: FrozenSet[Tuple[str, str]] = (
         }
     )
     | EGRESS_SWITCH_OPERATIONS
+    | COMMENT_WRITE_OPERATIONS
 )
 
 # Every operation in the document that declares NO ``security`` block, BY NAME. None

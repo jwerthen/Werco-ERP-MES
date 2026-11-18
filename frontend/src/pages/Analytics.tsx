@@ -24,6 +24,7 @@ import {
 import { formatCentralDate } from '../utils/centralTime';
 import { MiniStatStrip, CockpitPanel } from '../components/cockpit';
 import FlowAnalytics from '../components/analytics/FlowAnalytics';
+import ReportBuilder from '../components/analytics/reportBuilder/ReportBuilder';
 import { getMetricTrend, METRIC_POLARITY, MetricKey } from '../components/analytics/metricPolarity';
 import { findProductionSpikes, isSevereTargetMiss } from '../components/analytics/analyticsSignals';
 import { usePermissions } from '../hooks/usePermissions';
@@ -212,25 +213,6 @@ interface InventoryDemandResponse {
   warning_count: number;
 }
 
-interface ReportTemplate {
-  id: number;
-  name: string;
-  description?: string | null;
-  data_source: string;
-  is_shared: boolean;
-  created_at: string;
-}
-
-interface DataSourceField {
-  name: string;
-  type: string;
-  label: string;
-}
-
-interface DataSourceInfo {
-  label: string;
-  fields: DataSourceField[];
-}
 const PERIODS = [
   { value: 'today', label: 'Today' },
   { value: '7d', label: '7 Days' },
@@ -245,11 +227,15 @@ const formatChartDate = (value: string) =>
 export default function Analytics() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { canAny } = usePermissions();
+  const { can, canAny } = usePermissions();
   // Flow view mirrors the backend gates: flow/wip/adoption need
   // work_orders:release (admin/manager/supervisor); fpy/scrap-pareto also
   // allow quality:approve. Anyone in either set gets the section link.
   const canSeeFlow = canAny(['work_orders:release', 'quality:approve']);
+  // Custom Reports: every report-builder endpoint is ADMIN / MANAGER, which is the
+  // analytics:export set. The route (/analytics/reports in routeAccess.ts) is gated on
+  // the same permission, so a hidden tab and a refused deep link always agree.
+  const canSeeReports = can('analytics:export');
   const [period, setPeriod] = useState('30d');
   const [loading, setLoading] = useState(true);
   const [kpis, setKpis] = useState<KPIDashboard | null>(null);
@@ -262,8 +248,6 @@ export default function Analytics() {
   const [costAnalysis, setCostAnalysis] = useState<CostAnalysisResponse | null>(null);
   const [capacityForecastDetail, setCapacityForecastDetail] = useState<CapacityForecastResponse | null>(null);
   const [inventoryDemand, setInventoryDemand] = useState<InventoryDemandResponse | null>(null);
-  const [reportTemplates, setReportTemplates] = useState<ReportTemplate[]>([]);
-  const [dataSources, setDataSources] = useState<Record<string, DataSourceInfo>>({});
   const [error, setError] = useState('');
   const realtimeRefreshRef = useRef<NodeJS.Timeout | null>(null);
   const view = useMemo(() => {
@@ -294,9 +278,11 @@ export default function Analytics() {
     }
     setError('');
     try {
-      // The Flow view owns its data loading (FlowAnalytics fetches per-section
-      // with independent error states) — nothing to load at the page level.
-      if (view === 'flow') {
+      // The Flow and Custom Reports views own their data loading (each fetches
+      // with its own error states) — nothing to load at the page level. Reports in
+      // particular must never be fetched for any other view: its endpoints are
+      // ADMIN / MANAGER only.
+      if (view === 'flow' || view === 'reports') {
         return;
       }
 
@@ -347,16 +333,6 @@ export default function Analytics() {
       if (view === 'costs') {
         const costRes = await api.getCostAnalysis({ period });
         setCostAnalysis(costRes);
-        return;
-      }
-
-      if (view === 'reports') {
-        const [templatesRes, sourcesRes] = await Promise.all([
-          api.getReportTemplates(),
-          api.getDataSources(),
-        ]);
-        setReportTemplates(templatesRes || []);
-        setDataSources(sourcesRes || {});
         return;
       }
     } catch (err: any) {
@@ -545,13 +521,15 @@ export default function Analytics() {
       case 'flow':
         return { title: 'Flow Analytics', subtitle: 'Lead time, WIP aging, yield, scrap Pareto, and adoption' };
       case 'reports':
-        return { title: 'Custom Reports', subtitle: 'Report templates and data sources' };
+        return { title: 'Custom Reports', subtitle: 'Build, run, save and export reports over live ERP data' };
       default:
         return { title: 'Analytics Dashboard', subtitle: 'Real-time KPIs and business intelligence' };
     }
   }, [view]);
 
   const showPeriodSelector = view !== 'reports';
+  // The reports view reloads its own catalog and templates; the page Refresh has nothing to do there.
+  const showRefresh = view !== 'reports';
 
   // Breadcrumb parent — non-null only on the /analytics/* sub-views, so the
   // bare hub renders no crumb. One mount covers all seven sub-routes.
@@ -597,10 +575,12 @@ export default function Analytics() {
               ))}
             </select>
           )}
-          <button onClick={() => loadData(true)} className="btn-secondary flex items-center gap-2">
-            <ArrowPathIcon className="h-4 w-4" />
-            Refresh
-          </button>
+          {showRefresh && (
+            <button onClick={() => loadData(true)} className="btn-secondary flex items-center gap-2">
+              <ArrowPathIcon className="h-4 w-4" />
+              Refresh
+            </button>
+          )}
         </div>
       </div>
 
@@ -616,7 +596,7 @@ export default function Analytics() {
             { id: 'forecasting', label: 'Forecasting', href: '/analytics/forecasting' },
             { id: 'costs', label: 'Costs', href: '/analytics/costs' },
             ...(canSeeFlow ? [{ id: 'flow', label: 'Flow', href: '/analytics/flow' }] : []),
-            { id: 'reports', label: 'Custom Reports', href: '/analytics/reports' },
+            ...(canSeeReports ? [{ id: 'reports', label: 'Custom Reports', href: '/analytics/reports' }] : []),
           ].map((section) => (
             <button
               key={section.id}
@@ -1239,48 +1219,9 @@ export default function Analytics() {
       {/* Flow view (Lean Phase 1) — owns its data loading + per-section errors. */}
       {view === 'flow' && <FlowAnalytics period={period} />}
 
-      {view === 'reports' && (
-        <div className="space-y-6">
-          <div className="card">
-            <h3 className="text-lg font-semibold mb-4">Report Templates</h3>
-            {reportTemplates.length ? (
-              <div className="space-y-3">
-                {reportTemplates.map((template) => (
-                  <div key={template.id} className="border border-slate-700 rounded-lg p-3">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="font-medium">{template.name}</p>
-                        <p className="text-sm text-slate-400">{template.description || template.data_source}</p>
-                      </div>
-                      {template.is_shared && (
-                        <span className="text-xs px-2 py-0.5 rounded-full bg-werco-500/10 text-werco-primary">Shared</span>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-sm text-slate-400">No report templates available.</p>
-            )}
-          </div>
-
-          <div className="card">
-            <h3 className="text-lg font-semibold mb-4">Available Data Sources</h3>
-            {Object.keys(dataSources).length ? (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {Object.entries(dataSources).map(([key, info]) => (
-                  <div key={key} className="border border-slate-700 rounded-lg p-3">
-                    <p className="font-medium">{info.label}</p>
-                    <p className="text-sm text-slate-400">{info.fields.length} fields</p>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-sm text-slate-400">No data sources found.</p>
-            )}
-          </div>
-        </div>
-      )}
+      {/* Custom Reports — the builder owns its own loading; mounted only when the
+          user may call the (ADMIN / MANAGER) report endpoints. */}
+      {view === 'reports' && canSeeReports && <ReportBuilder />}
     </div>
   );
 }

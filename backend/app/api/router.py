@@ -11,6 +11,7 @@ from app.api.endpoints import (
     bom,
     calibration,
     carrier_webhooks,
+    comments,
     companies,
     consumables,
     continuous_improvement,
@@ -128,6 +129,9 @@ api_router.include_router(work_orders.router, prefix="/work-orders", tags=["Work
 # already owns completion/laser-nest/import). Every path here has a LITERAL middle
 # segment, so no route above can shadow it. Mirrors the scrap_reasons/quality precedent.
 api_router.include_router(work_order_materials.router, prefix="/work-orders", tags=["Work Order Materials"])
+# Comments with @mentions and record watchers (/comments, /watchers). No prefix: the router owns
+# both top-level paths. v1 enables work orders only (comment_service.COMMENTABLE_TYPES).
+api_router.include_router(comments.router, tags=["Comments"])
 api_router.include_router(laser_nests.router, prefix="/laser-nests", tags=["Laser Nests"])
 api_router.include_router(work_order_blockers.router, prefix="/work-order-blockers", tags=["Work Order Blockers"])
 # A named catalog of jobs the shop re-runs. Its own prefix rather than a sibling under

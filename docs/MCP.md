@@ -2,8 +2,8 @@
 
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
-(Cursor, Claude Code, a chat bot) gets **779 tools** — 15 hand-written *convenience* tools plus
-**764 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+(Cursor, Claude Code, a chat bot) gets **785 tools** — 15 hand-written *convenience* tools plus
+**770 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
 as the same request from the web app. A **read-only** API token is shown fewer tools, and an
 **AI-external** one fewer still (§4.1, §4.2).
 
@@ -42,6 +42,24 @@ shifted: 15 convenience + **764** generated, 16 shadowed. The read-only catalog 
 **Re-checked again on 2026-11-16 after bulk release** (`POST /work-orders/bulk-release`) was added and
 joined `EXCLUDED_OPERATIONS` in the same change (§6.1): counts unchanged at 15 convenience + **764**
 generated, 16 shadowed, and the read-only catalog at 8 convenience + **298** generated.
+
+**Re-checked again on 2026-11-16 after work-order comments (migration 125) added three read tools**
+(`list_record_comments` and `get_record_watch_state` under the new `Comments` tag,
+`search_mentionable_users` under `Users`) while the five comment / watcher writes join
+`EXCLUDED_OPERATIONS` (§6.1); no existing name shifted: 15 convenience + **767** generated, 16
+shadowed. The read-only catalog is 8 convenience + **300** generated (the two `Comments` reads;
+mention search sits under `Users`, which the read-only deny list always carries). The AI-external
+listing is unchanged at 48: none of the three reads is on its allowlist (§4.2).
+**Re-checked again on 2026-11-16 after the custom report builder fixes merged on top and added three
+tools** (`get_report_template`, `update_report_template`, `run_report_template`; no existing name
+shifted): 15 convenience + **770** generated, 16 shadowed. The read-only catalog is 8 convenience +
+**301** generated (`get_report_template` is the one new read; the run is a `POST`), and the
+AI-external listing is still 48. The same change altered
+**`run_custom_report`'s result**: it is now one object, `{columns, rows, row_count, truncated,
+notes}`, where it used to be a bare list of row dicts that arrived wrapped as `{"result": [...]}`
+(§11). The labor-not-tracked note moved from response headers into `notes`. `export_custom_report`'s
+`format` argument is now `const: "csv"`, so `xlsx` / `pdf` are refused at argument validation. See
+[API.md → Custom report builder](API.md#custom-report-builder).
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
 `backend/tests/test_mcp_docs_names.py` checks every tool name this file, `CLAUDE.md` and `API.md`
@@ -124,6 +142,7 @@ backend/app/mcp/
                   (an access JWT by signature, an API token by its api_tokens row)
   executor.py     InProcessExecutor (httpx.ASGITransport into app) / RemoteExecutor (HTTPS)
   convenience.py  the 15 hand-written tools + SHADOWED_OPERATIONS (16 raw routes they replace)
+  people_only.py  people_only_refusal(): Hank task kinds an agent never runs, on any credential (§4.3)
   server.py       build_server(): registry, per-call auth, jsonschema validation, dispatch
   http.py         McpDoor + mount_mcp(app): the Streamable HTTP door at WERCO_MCP_HTTP_PATH
   __main__.py     python -m app.mcp: stdio bridge, dev HTTP server, --print-catalog
@@ -234,13 +253,13 @@ routes authenticate every call; in IN-PROCESS mode it uses the real `ErpTokenVer
  "generated_tools":   [{"name": "...", "method": "GET", "path": "/api/v1/...", "tag": "...",
                         "function": "...", "annotations": {...}, "deprecated": false}],
  "shadowed_operations": [["GET", "/api/v1/inventory/"], ...],
- "counts": {"convenience": 15, "generated": 764, "shadowed": 16}
+ "counts": {"convenience": 15, "generated": 770, "shadowed": 16}
 }
 ```
 
 `--print-catalog --read-only` prints the same keys filtered to what a read-only token is shown
 (tools that only read, under no tag in `WERCO_MCP_READ_ONLY_DENY_TAGS`), with the counts
-recomputed (`"convenience": 8, "generated": 298` on 2026-11-15), plus `"scope": "read_only"` and
+recomputed (`"convenience": 8, "generated": 301` on 2026-11-16), plus `"scope": "read_only"` and
 the `"deny_tags"` applied. Without `--read-only` the output is the full catalog with the keys
 above, as before. There is no flag for the AI-external catalog; §4.2 lists it.
 
@@ -401,15 +420,27 @@ list):
   approval box answers **403** `"A standing API token cannot record or change a CAR's vendor or
   customer approval. …"`. The reads beside them (`get_car_pdf`, `list_fai_log`) stay open; a
   read-only token is still refused `get_car_pdf`'s PDF bytes (§4.1).
+- **Nor post a Hank note** (owner decision 2026-11-16 — a note is a work-order comment, and a
+  comment is a person's own words): the API refuses an API token **403** `"A comment is a person's
+  own words: an API token cannot post, edit or delete comments or change who is watching a record.
+  Sign in to the app."` at `POST /hank/tasks` and its execute route (the routes behind
+  `prepare_task` / `execute_task`) for an `add_note` task, and never lists the kind in a token's
+  capabilities. Through MCP the door's own refusal (§4.3) answers before either route is reached, and
+  on **every** credential.
 - **Deliberately left open.** `work_orders_resume_work_order` lifts a work-order hold for a token
   whose user holds Admin / Manager / Supervisor, audited as that user (owner decision 2026-11-07).
   `dismiss_ai_recommendation`, snooze and feedback stay open to every credential — a design decision
   of the AI governance change, which the owner confirmed 2026-11-07 for Dismiss on an action card.
+  `prepare_task` / `execute_task` for a Hank `change_due_date` task stay open to a full token whose
+  user holds Admin / Manager / Supervisor, in parity with `update_work_order`, which already sets
+  `due_date` (owner decision 2026-11-16; whether agents may move due dates at all is an open owner
+  follow-up).
 
 An interactive access JWT —
 the person's own session, which the MCP client approves call by call — is not refused by any of
 these: current behavior, not part of the 2026-11-07 decision, which covered standing API tokens
-only. No token is ever bound to a superuser / `platform_admin` (409 at mint, refused at use),
+only. The one exception among them is the Hank note: the door refuses it to an agent on a person's
+JWT too (§4.3). No token is ever bound to a superuser / `platform_admin` (409 at mint, refused at use),
 deactivating a token's user revokes it, and every audit row a token writes carries
 `extra_data.credential` naming the token. The one full list of these credential rules — what
 refuses a token, what is deliberately left open and who decided each — is
@@ -462,7 +493,8 @@ from `Hank` to their own `Hank Intake` tag for this, with no tool name changed, 
 Hank stays readable. "CAD source storage" has no live router (retired 2026-09-16); the CAD source
 bytes that remain, Fabrication Quoting's source files (`original_file`), are covered by the file
 rule below. Denying Users also removes `get_current_user_info`, so a read-only token cannot
-introspect its own user.
+introspect its own user, and the comment mention search `search_mentionable_users` (the comment
+thread and watch-state reads, under `Comments`, stay).
 
 **Enforced twice, with the same rule:**
 
@@ -473,7 +505,7 @@ introspect its own user.
   - a denied tag gets **403** `"Read-only API token cannot access this resource."`;
   - a request that matches no route fails closed with that same 403.
 - **The MCP door** narrows `tools/list` to the tools that only read and carry no denied tag. On
-  2026-11-15 that is 8 convenience + 298 generated tools; `--print-catalog --read-only` prints
+  2026-11-16 that is 8 convenience + 301 generated tools; `--print-catalog --read-only` prints
   them. Calling any other tool by name answers, **before argument validation or dispatch**:
   - **403** `"Read-only API token: this tool writes."` for a tool that writes; the write check
     comes first, so a writing tool under a denied tag gets this text;
@@ -592,6 +624,51 @@ The rules for which customers and records are controlled, how an Admin marks a c
 ledger, and the steps to connect Claude are in
 [EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md).
 
+### 4.3 People-only Hank tasks (every credential)
+
+§4.1 and §4.2 narrow a **token**. This narrowing is about the **agent**, so it applies to every
+caller, a person's own access JWT included (owner decision 2026-11-16 for work-order comments: a
+comment is a person's own words). Hank's `add_note` task posts a work-order comment, and the comment
+write routes are not tools at all (§6.1), because a person's JWT — the stdio bridge's email /
+password, or the HTTP door — would otherwise let an agent write in that person's name. `add_note`
+travels through two generated tools that must stay tools for every other kind, so the door closes it
+there:
+
+- **`prepare_task`** with `kind: "add_note"` answers **403** `"A note is a person's own words: post it
+  from the app, not through an agent."`. The kind is read from the JSON body the call would send.
+- **`execute_task`** first reads the task through the same router, as the same caller
+  (`GET /api/v1/hank/tasks/{task_id}`, the route behind `get_task`). An `add_note` task answers the
+  same **403**, and the execute is never dispatched. A read refused **401 / 403 / 404 / 422** (absent,
+  another credential's task, a role that may not see it) is returned as the tool's result with the
+  read's own status and detail, and the execute is **not** dispatched either — the execute route
+  resolves the task the same way, so this is the answer it would have given, it tells a caller nothing
+  `get_task` would not, and a task that becomes visible between the read and the execute can never be
+  executed by the check's own call. The execute is dispatched only after a 200 read whose `kind` is
+  not people-only. Any other outcome
+  — a 5xx, a 429, a transport failure, a body with no `kind` — answers **503** `"Could not confirm
+  what kind of Hank task this is before executing it, so nothing was executed. Try again."`: it fails
+  closed rather than let a transient read failure post a note. The read is a second inner request,
+  so it counts against the inner per-IP rate limit like any other.
+
+**What is still reachable, deliberately.** Hank chat (`POST /api/v1/copilot/chat`) is itself a tool,
+and its own `prepare_hank_task` tool can still *prepare* an `add_note` proposal in the person's review
+queue when an agent asks it to on that person's JWT. That proposal can never be posted by an agent:
+chat cannot execute a task, `execute_task` refuses it as above, and only the person can submit it from
+the app. Preparing is a draft for the person's review; posting is the person's act. Whether agents
+should be able to leave such drafts at all is an open owner question.
+
+The check runs after argument validation (a malformed call is still a **422**) and before dispatch,
+in one code path, `app.mcp.people_only.people_only_refusal`, called from `server.on_call_tool`. It
+matches by route (method and path template), never by tool name, and reads its kind set
+(`app.core.credentials.PEOPLE_ONLY_HANK_TASK_KINDS`) and refusal text from the import-free
+`credentials` module, so the package still imports no service. Both tools stay listed and the tool
+count is unchanged. Every other kind — `change_due_date` included — is prepared and executed as
+before, and the routes still serve a person in the app. The server instructions tell the agent to ask
+the person to post the note from the app. A read-only or AI-external token never gets this far:
+`prepare_task` and `execute_task` are writes, refused by §4.1 first. On a direct API call (not
+through MCP) an API token gets the route's own **403** (§4, "Nor post a Hank note"), while a person's
+own JWT is served exactly as in the app.
+
 ---
 
 ## 5. Program map — every SPA page → OpenAPI tag(s) → tools
@@ -609,7 +686,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `SetupWizard` (`/setup`) | Setup & Readiness | `get_setup_health`, `get_part_readiness` |
 | `WorkOrders` (`/work-orders`) | Work Orders, Work Order Templates | `work_orders_list_work_orders`, `get_work_order_by_number`, `update_work_order_priority`, `work_orders_delete_work_order`, `work_orders_restore_work_order`, `list_work_order_templates`, `use_work_order_template`, `release_work_order`★ — **bulk release is not a tool**: `POST /work-orders/bulk-release` is in `EXCLUDED_OPERATIONS` (§6.1), so release one job per call |
 | `WorkOrderNew` (`/work-orders/new`) | Work Orders, Parts, Bill of Materials, Routing, Customers, Setup & Readiness, Work Centers | `create_work_order`★, `preview_work_order_operations`, `get_routing_by_part`, `list_customer_names`, `get_part_readiness`, `list_work_centers`★ |
-| `WorkOrderDetail` (`/work-orders/:id`) | Work Orders, Work Order Materials, Laser Nests, Work Order Blockers, Documents, Shop Floor | `get_work_order`★, `add_operation`★, `update_work_order`★, `release_work_order`★, `duplicate_work_order`★, `add_laser_nest`★, `work_orders_start_work_order`, `work_orders_resume_work_order`, `work_orders_complete_work_order`, `work_orders_complete_operation`, `work_orders_update_operation`, `update_laser_nest`, `delete_laser_nest`, `list_material_allocations`, `create_work_order_blocker`, `attach_document_to_work_order` |
+| `WorkOrderDetail` (`/work-orders/:id`) | Work Orders, Work Order Materials, Laser Nests, Work Order Blockers, Documents, Shop Floor, Comments, Users | `get_work_order`★, `add_operation`★, `update_work_order`★, `release_work_order`★, `duplicate_work_order`★, `add_laser_nest`★, `work_orders_start_work_order`, `work_orders_resume_work_order`, `work_orders_complete_work_order`, `work_orders_complete_operation`, `work_orders_update_operation`, `update_laser_nest`, `delete_laser_nest`, `list_material_allocations`, `create_work_order_blocker`, `attach_document_to_work_order`, `list_record_comments`, `get_record_watch_state`, `search_mentionable_users` (the Comments panel's reads; **posting, editing or deleting a comment and watching are not tools**: the five writes are in `EXCLUDED_OPERATIONS`, §6.1) |
 | `ShopFloor` (`/shop-floor`) | Shop Floor, Work Order Blockers, Work Centers, Work Orders | `get_shop_floor_dashboard`★, `get_all_operations`, `get_active_shop_users`, `list_work_order_blockers`, `resolve_work_order_blocker` |
 | `ShopFloorSimple` (`/shop-floor/operations`) | Shop Floor, Scanner, Work Centers, Work Orders | `get_all_operations`, `shop_floor_start_operation`, `shop_floor_complete_operation`, `put_operation_on_hold`, `shop_floor_resume_operation`, `lookup_barcode`, `resolve_action` |
 | `OperatorKiosk` (`/kiosk`) | Shop Floor | `clock_in`, `clock_out`, `get_my_active_job`, `get_work_center_queue`, `get_operation_steps`, `record_operation_step`, `report_operation_production`, `shop_floor_complete_operation` — under the caller's own user token (kiosk badge tokens are refused) |
@@ -655,7 +732,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `OperatorCertifications` (`/certifications`) | Operator Certifications | `list_certifications`, `certification_dashboard`, `get_expiring_certifications`, `list_skill_matrix`, `check_operator_qualification` |
 | `ToolManagement` (`/tool-management`) | Tool & Fixture Management | `list_tools`, `checkout_tool`, `checkin_tool`, `list_inspection_due`, `tool_fixture_management_get_dashboard` |
 | `QMSStandards` (`/qms-standards`) | QMS Standards & Audit Readiness | `list_standards`, `get_audit_readiness`, `list_clauses`, `add_evidence`, `upload_pdf_and_extract_clauses` |
-| `Analytics` (`/analytics/*`) | Analytics & BI | `get_kpi_dashboard`, `get_production_trends`, `analytics_bi_get_quality_metrics`, `get_flow_metrics`, `get_fpy`, `get_wip_aging`, `run_custom_report` |
+| `Analytics` (`/analytics/*`) | Analytics & BI | `get_kpi_dashboard`, `get_production_trends`, `analytics_bi_get_quality_metrics`, `get_flow_metrics`, `get_fpy`, `get_wip_aging`; Custom Reports (Admin / Manager): `get_available_data_sources` (read it first: every source, field, type and enum option), `run_custom_report` (returns `{columns, rows, row_count, truncated, notes}`; a broken definition is one 422 listing every problem), `list_report_templates` (any role), `get_report_template`, `create_report_template`, `update_report_template`, `run_report_template`, `delete_report_template`, `export_custom_report` (CSV only, refused over 10,000 rows) — a saved template is read, run or exported by its author, when shared, or by an Admin, and changed or deleted only by its author or an Admin ([API.md → Custom report builder](API.md#custom-report-builder)) |
 | `Reports` (`/reports`) | Reports | `get_production_summary`, `get_work_center_utilization`, `get_inventory_value`, `get_ship_otd_report`, `reports_get_quality_metrics`, `get_daily_output`, `get_employee_time_report` (the last two read production days) |
 | `PrintTraveler` (`/print/traveler/:id`) | Work Orders, Print Reports, Parts | `get_work_order`★, `get_work_order_print_data`, `get_part` |
 | `PrintPurchaseOrder` (`/print/purchase-order/:id`) | Print Reports | `get_purchase_order_print_data` |
@@ -694,7 +771,7 @@ minus two further, named sets:
   They are listed **by name** rather than skipped silently, so a new route that forgets its
   `security` dependency — even under a tag that already has tools — fails the coverage guard
   (`catalog.unaccounted_operations`, §14) until it is either secured or named there.
-- **`EXCLUDED_OPERATIONS`** — fifteen operations, none with a convenience twin:
+- **`EXCLUDED_OPERATIONS`** — twenty operations, none with a convenience twin:
   - The two Excel-cutover loaders, `POST /work-orders/import` and
     `POST /purchasing/purchase-orders/import` (`migration_import_service`). They record a *past*
     system's state rather than perform a user action: the work-order loader mints work orders
@@ -746,6 +823,14 @@ minus two further, named sets:
     API token whose user holds Admin / Manager / Supervisor can still call it directly on `/api/v1` —
     so the exclusion is what keeps it off an agent's tool list. See
     [API.md → Work Orders](API.md#work-orders) → *Releasing several work orders at once*.
+  - The five **comment / watcher writes** (`catalog.COMMENT_WRITE_OPERATIONS`; owner decision
+    2026-11-16): `POST /comments`, `PATCH /comments/{comment_id}`, `DELETE /comments/{comment_id}`,
+    `POST /watchers` and `DELETE /watchers`. A comment is a person's own words and a watch a
+    person's own preference. The routes refuse every API token **403**
+    (`app.core.credentials.API_TOKEN_COMMENT_WRITE`), and the exclusion closes the door a person's
+    own JWT would leave open: an agent posting words in a person's name. The reads stay tools:
+    `list_record_comments`, `get_record_watch_state` and `search_mentionable_users`. See
+    [API.md → Comments and watchers](API.md#comments-and-watchers).
 
 The `Import Batches` tag also excludes the recoverable Import Center review, receipt,
 correction and commit routes. These wrap the same cutover loaders, including their
@@ -756,7 +841,9 @@ On the commit that shipped API tokens: 706 operations, 689 secured, 680 candidat
 (§8), 2 excluded → **662 generated tools**. On 2026-11-15, with fourteen excluded and the CAR form /
 FAI log, Approved Supplier List and equipment-asset / PM-import routes added: **764 generated tools**
 (`--print-catalog` `counts`). On 2026-11-16 bulk release added one secured route and its exclusion
-together, so fifteen are excluded and the count stays **764**.
+together, so fifteen were excluded and the count stayed **764**; the five comment / watcher writes then
+joined the exclusions (twenty) and the three comment reads were added: **767 generated tools**; the
+three report-template routes then made it **770 generated tools**.
 
 ### 6.2 Naming and the collision policy (`app/mcp/naming.py`)
 
@@ -874,7 +961,7 @@ with a 422 that names it, never accepted-and-ignored.
 | `duplicate_work_order` | `POST /work-orders/{id}/duplicate` | `work_order_id`, `quantity_ordered` (both required — the route requires the quantity; a laser job ignores it and derives its own from the copied nests), `due_date` | Copies the *plan* onto a new DRAFT (`WORK_ORDER_TEMPLATES.md` / duplicate service); post-checks DRAFT |
 | `release_work_order` | `POST /work-orders/{id}/release` | `work_order_id` | Explicit only; the route refuses anything not DRAFT. The **only** tool that releases work |
 | `import_laser_nest_package` | `POST /work-orders/laser-nest-packages/standalone/import` or `POST /work-orders/{id}/laser-nest-packages/import` | `work_order_id` (omit for standalone), `file` `{filename, content_base64, content_type?}` **or** `source_path`, `rows` (list → sent as the JSON string the route expects, or a string), `work_center_id`, `due_date` (standalone only), `sheet_match_provenance`, `release` (default `false`) | See [Nest import demotion](#10-nest-import-demotion). Returns `{import, work_order, demoted_to_draft, operations_returned_to_pending, note}`. An API token re-importing onto a laser job whose nest operations have recorded good, scrap, a start or any labor, or whose header already carries good or scrap, gets the route's **403** re-import text (`Re-importing a nest package replaces nests that already have recorded work …`) as an `is_error` result, nothing written (this PR's extension; a person's re-import is unchanged) |
-| `add_laser_nest` | `POST /work-orders/{id}/laser-nests/manual` | `work_order_id`, `cnc_number`, `planned_runs` (required); `nest_name`, `material`, `thickness`, `sheet_size`, `work_center_id`, `material_part_id`, `qty_per_run` (the route's `LaserNestManualCreate`, pinned by a catalog test); `release` (default `false`) | Keys one nest by hand onto an assembly parent (its laser child is found-or-created by the route) or a laser WO. The route **force-sets the laser WO RELEASED** with the new nest READY (recording the release as the caller's when it was a draft or unstamped; an **on-hold** job stays on hold and the `note` says so, naming `work_orders_resume_work_order`); the tool applies §10 to it — a **new** laser WO, or one that was **DRAFT before the call**, comes back DRAFT with PENDING operations; a job already on the floor (released / in progress / on hold before the call) is **never taken off it** (`demoted_to_draft: false` + a `note`). Refuses **409** a job whose nests came from a package import (§10 rule 1, the other direction). Returns `{nest, work_order, demoted_to_draft, ...}` |
+| `add_laser_nest` | `POST /work-orders/{id}/laser-nests/manual` | `work_order_id`, `cnc_number`, `planned_runs` (required; 1–9,999, the route's own bound, so a larger count is refused by the tool's schema before any call); `nest_name`, `material`, `thickness`, `sheet_size`, `work_center_id`, `material_part_id`, `qty_per_run` (the route's `LaserNestManualCreate`, pinned by a catalog test); `release` (default `false`) | Keys one nest by hand onto an assembly parent (its laser child is found-or-created by the route) or a laser WO. The route **force-sets the laser WO RELEASED** with the new nest READY (recording the release as the caller's when it was a draft or unstamped; an **on-hold** job stays on hold and the `note` says so, naming `work_orders_resume_work_order`); the tool applies §10 to it — a **new** laser WO, or one that was **DRAFT before the call**, comes back DRAFT with PENDING operations; a job already on the floor (released / in progress / on hold before the call) is **never taken off it** (`demoted_to_draft: false` + a `note`). Refuses **409** a job whose nests came from a package import (§10 rule 1, the other direction). Returns `{nest, work_order, demoted_to_draft, ...}` |
 | `get_shop_floor_dashboard` | `GET /shop-floor/dashboard` (+ `GET /shop-floor/dispatch-board`) | `include_dispatch_board` (default `false`) | With the flag: `{"dashboard": …, "dispatch_board": …}` |
 | `list_inventory` | `GET /inventory/` or `GET /inventory/summary` | `summary` (default `false`), `part_id`, `warehouse`, `location_code`, `has_quantity` (default `true`), `limit` (default 200, max 10000), `offset` | `summary=true` → per-part totals |
 | `list_purchase_orders` | `GET /purchasing/purchase-orders` | `status`, `vendor_id`, `deleted_only`, `limit` (default 200), `offset` | |
@@ -918,7 +1005,7 @@ Every other operation stays generated — including the neighbours of the shadow
 `get_work_order_by_number`, `update_laser_nest`, `get_inventory_summary`, `get_purchase_order`, …) —
 except the operations in `EXCLUDED_OPERATIONS` (§6.1) — the two cutover loaders, AI Accept &
 apply, the two customer export-control writes, the four egress kill-switch writes, the three Approved Supplier
-List writes, the two legacy ASL-table writes and bulk release — which have no tool and no replacement. Adding a convenience tool whose route is *not* in the shadow set is a build error
+List writes, the two legacy ASL-table writes, bulk release and the five comment / watcher writes — which have no tool and no replacement. Adding a convenience tool whose route is *not* in the shadow set is a build error
 (`build_registry` refuses a duplicate name) rather than a silent win.
 
 ---
@@ -1228,6 +1315,8 @@ count, in which case there is nothing left to close.
 | `{"status": 403, "detail": "Closing work short must be done by a person signed in to the app, not an API token."}` | An API token tried to close an operation or a work order short | A person closes it in the app; nothing an API token holds changes this |
 | `{"status": 403, "detail": "Recording more good than the floor counted, editing an operation's counts, or lowering the order after work was recorded…"}` | An API token tried to book good above the floor's record, edit an operation's or a work order header's counts, correct a count through a reduce-production tool, or lower an order (or a laser nest's `planned_runs` through `update_laser_nest`) once work was recorded | A person makes that correction in the app; nothing an API token holds changes this |
 | `{"status": 403, "detail": "Re-importing a nest package replaces nests that already have recorded work…"}` | An API token called `import_laser_nest_package` with a `work_order_id` on a laser job whose nest operations have recorded work, or whose header already carries good or scrap | A person re-imports in the app; nothing an API token holds changes this |
+| `{"status": 403, "detail": "A note is a person's own words: post it from the app, not through an agent."}` from `prepare_task` or `execute_task` | The call would prepare or execute a Hank `add_note` task. The door refuses it on every credential, a person's own JWT included; nothing was dispatched (§4.3) | Ask the person to post the note from the app (Hank → Tasks, or the work order's Comments panel). Nothing any credential holds changes this |
+| `{"status": 503, "detail": "Could not confirm what kind of Hank task this is before executing it, so nothing was executed. Try again."}` from `execute_task` | The door's read of the task (`GET /hank/tasks/{task_id}`) failed with a 5xx, a 429 or a transport error, or returned no `kind`; the execute was not dispatched (§4.3) | Retry; on a 429 slow down first |
 | `{"status": 409, "detail": "… is complete; its counts are the completion record…"}` from `work_orders_update_operation` | A count or status edit on a COMPLETE operation | Corrections go through `reduce_operation_production_office` (Admin / Manager / Supervisor), which can reopen the operation — a person's decision |
 | `{"status": 409, "detail": "Op N is complete with … so only n more can be recorded as scrap…"}` from `work_orders_update_operation` | Scrap added to a COMPLETE operation past what is still unaccounted — good + scrap would exceed what reached it | On a live work order, pieces counted good and later found bad are a person's correction: `reduce_operation_production_office` with `reopen_operation`, then a re-close with the scrap (an API token is refused both). When the message says the work order is complete / closed / cancelled, no operation-level correction exists: tell the user the bad pieces are recorded as a nonconformance (NCR), and do not retry |
 | `{"status": 409, "detail": "Nest N is already complete at … runs; raising its planned runs…"}` or `"This laser work order is …; Nest N's planned runs can no longer be raised…"` from `update_laser_nest` | `planned_runs` raised on a COMPLETE nest, or on a COMPLETE / CLOSED / CANCELLED laser work order — a completed operation is never short | Do what the message says: add a nest for the extra runs, or open a new work order when the job is finished. Every other field still works, and so does lowering `planned_runs` — except that an API token lowering it once work is recorded on the nest gets the 403 above |
@@ -1238,7 +1327,7 @@ count, in which case there is nothing left to close.
 | `{"status": 400, "detail": "Work order must have at least one operation"}` from `release_work_order` | The DRAFT has no operation — the only other release check (there is no material or blocker gate) | Add one with `add_operation`, then release |
 | HTTP **413** from `/mcp` | The JSON-RPC envelope (a base64 file inside it) is over `WERCO_MCP_MAX_UPLOAD_BYTES` (25 MB) | Smaller file, or raise the setting on the server |
 | Tool result `{"status": 413, "detail": "File … exceeds the …-byte MCP upload cap."}` | Same cap, decoded on the bridge side | As above |
-| `{"status": 413, ...}` with the route's own message | The inner route's cap (50 MB `LASER_UPLOAD_MAX_BYTES`, 20 MB QMS PDFs) or, for a plain JSON tool, `MAX_JSON_BODY_BYTES` (256 KB) on the inner request | Split the payload — [API.md → Request Size Limits](API.md#request-size-limits) |
+| `{"status": 413, ...}` with the route's own message | The inner route's cap (10 MB PO documents and routing drawings; 20 MB QMS PDFs and BOM documents; 50 MB single nest PDFs and `LASER_UPLOAD_MAX_BYTES`, and a nest-package ZIP previewed with more than 200 files and folders or over 200 MB unpacked — see [API.md → AI document uploads](API.md#ai-document-uploads)) or, for a plain JSON tool, `MAX_JSON_BODY_BYTES` (256 KB) on the inner request | Split the payload — [API.md → Request Size Limits](API.md#request-size-limits) |
 | `{"status": 429, "detail": "Rate limit exceeded: …"}` (a tool result) | The inner route's per-IP limit (100/60 s default, stricter per-path limits on auth, scanner and standalone nest preview/import) — one charge per tool call, exactly like the SPA | Slow down; on the door the caller's IP is the key, on a remote bridge the bridge host's IP is, on an in-process bridge it is `127.0.0.1` |
 | HTTP **429** from `/mcp` itself | The door path's own ceiling, `WERCO_MCP_HTTP_RATE_LIMIT` (300/minute per IP by default): `tools/list`, `initialize`, schema-rejected calls and unauthenticated probes never reach an inner route, so this is the only limit that counts them (§3.1) | Stop re-listing the catalog on every turn (cache it); raise the setting if a shop legitimately runs many agents behind one NAT address |
 | HTTP **405** from `GET /mcp` | The door is stateless and has no server-push stream to open | Nothing to do — clients POST; the TypeScript SDK treats 405 as "no push stream" |
@@ -1267,8 +1356,8 @@ count, in which case there is nothing left to close.
     secured, unshadowed, unexcluded operation is exactly one tool; `PUBLIC_OPERATIONS` names exactly
     the unsecured routes; `EXCLUDED_OPERATIONS` are exactly the two loaders, the AI apply route,
     the two customer export-control writes, the four egress kill-switch writes, the three Approved
-    Supplier List writes, the two legacy ASL-table writes and bulk release, and the record-only
-    accept stays a tool),
+    Supplier List writes, the two legacy ASL-table writes, bulk release and the five comment / watcher
+    writes, the three comment reads stay tools, and the record-only accept stays a tool),
     names (unique, wire-valid,
     ≤ 64, collisions prefixed, the numeric-suffix fallback proven on synthetic input and unused on
     the live catalog), schemas (`$ref`-free, `additionalProperties: false`, every JSON body's
@@ -1335,6 +1424,12 @@ count, in which case there is nothing left to close.
     per allowlisted route and the ledger are in `tests/api/test_ai_external_token.py`, with
     `tests/test_export_control_index.py` and `tests/test_export_control_redaction.py` for the pure
     rules ([EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md#10-code-and-tests)).
+  - `backend/tests/test_mcp_people_only.py` — §4.3 end to end on a person's own JWT: `prepare_task`
+    with kind `add_note` refused with no task row, `execute_task` on an `add_note` task refused after
+    one read with no comment, an unreadable task answering the route's own 404, a failed read failing
+    closed (503), `change_due_date` prepared and executed as before, matching by route, and the
+    catalog unchanged. The API side (an API token refused at prepare and execute) is in
+    `tests/api/test_hank_due_date_and_note.py`.
 - API tokens (server side): `app/api/endpoints/api_tokens.py`,
   `app/services/api_token_service.py` (`check_api_token` is the one row check the door and
   `get_current_user` share), `app/models/api_token.py`, migrations `088_api_tokens` and
@@ -1342,7 +1437,8 @@ count, in which case there is nothing left to close.
   predicates in `app/core/credentials.py`, the AI-external allowlist in `app/core/export_control.py`
   and the response side in `app/middleware/export_control.py`. The door half is `app/mcp/auth.py`
   (`live_api_token_principal`, `live_api_token_grant`, `ErpTokenVerifier`), `app/mcp/http.py`
-  (`AiEgressDoorGuard`) and `app/mcp/server.py` (the per-caller listings).
+  (`AiEgressDoorGuard`) and `app/mcp/server.py` (the per-caller listings). The people-only Hank
+  refusal (§4.3), which narrows every caller rather than a token, is `app/mcp/people_only.py`.
 - Related: [API.md → MCP door](API.md#mcp-door-mcp), [API.md → API tokens](API.md#api-tokens-bots-and-mcp-clients),
   [EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md),
   [RBAC_PERMISSIONS.md → MCP / agent access](RBAC_PERMISSIONS.md#mcp--agent-access),

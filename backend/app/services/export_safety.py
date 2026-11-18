@@ -148,3 +148,24 @@ def harden_workbook(workbook: Any) -> None:
     """
     for worksheet in workbook.worksheets:
         harden_worksheet(worksheet)
+
+
+# Characters the ASCII ``filename="..."`` fallback may not carry: anything outside
+# printable ASCII, the quote that would end the parameter, and the path separators a
+# browser might honor.
+_UNSAFE_FILENAME_FALLBACK = re.compile(r'[^\x20-\x7e]|["/\\]')
+
+
+def attachment_content_disposition(filename: str) -> str:
+    """``Content-Disposition: attachment`` for a caller-influenced download name.
+
+    RFC 6266: ``filename*=UTF-8''<percent-encoded>`` carries the exact name (encoded with
+    ``safe=""`` so ``/`` is percent-encoded too), and an ASCII ``filename="..."`` fallback
+    for clients that ignore ``filename*`` has non-ASCII, quotes, ``/``, ``\\`` and control
+    characters replaced by ``_``. A raw name in a bare ``filename=`` (what the custom
+    report export used to send) breaks on a space, a quote or a non-Latin-1 character.
+    """
+    from urllib.parse import quote
+
+    fallback = _UNSAFE_FILENAME_FALLBACK.sub("_", filename)
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename, safe='')}"

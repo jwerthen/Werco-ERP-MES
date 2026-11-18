@@ -128,7 +128,11 @@ from the route is returned verbatim rather than worked around. Kiosk-scoped badg
 display tokens and station tokens are refused at the door because they are not user credentials;
 an API token is accepted, as the one user it is bound to. What
 the MCP layer *adds* is stricter, not looser. A narrowed token's listing and by-name refusals
-mirror the API's own gates (above). Its hand-written tools force new and duplicated work
+mirror the API's own gates (above). One refusal is the door's own and applies to every caller, a
+person's own JWT included: a Hank note (`prepare_task` with kind `add_note`, or `execute_task` on
+an `add_note` task) is **403** before dispatch, because a note is a person's own words (owner
+decision 2026-11-16; [MCP.md §4.3](MCP.md#43-people-only-hank-tasks-every-credential)). The
+layer's hand-written tools force new and duplicated work
 orders to land DRAFT, keep release an explicit separate call (the header-update tool refuses
 `status: released` / `in_progress`, which the raw `PUT` would have accepted with no release stamp),
 set an imported or hand-keyed nest package back to DRAFT with its operations pending (a job on hold
@@ -140,7 +144,10 @@ owner ruling 3 only a person signed in to the app runs an AI recommendation's ac
 `catalog.EXCLUDED_OPERATIONS`, and the route refuses API tokens besides. The three Approved Supplier
 List writes (recording a supplier-approval decision and the ASL import preview / commit) and the two
 legacy `approved_supplier_list` writes are excluded the same way, and refuse API tokens too — see
-[Purchasing](#purchasing). Bulk release (`POST /work-orders/bulk-release`) is excluded as well, so an
+[Purchasing](#purchasing). So are the five comment and watcher writes (`POST` / `PATCH` / `DELETE
+/comments`, `POST` / `DELETE /watchers`; owner decision 2026-11-16, a comment is a person's own
+words): the reads — the thread, the watch state and mention search — stay tools; see
+[Comments and watchers](#comments-and-watchers). Bulk release (`POST /work-orders/bulk-release`) is excluded as well, so an
 agent releases one job per call; unlike those, the route itself has no API-token refusal — see
 [Work Orders](#work-orders). An agent on an API token
 also gets a 403 the same person would not get in the UI when it tries to mark an AI action card
@@ -159,7 +166,7 @@ AI-external token bound to a **Viewer** user.
 ### Credential policy for judgment writes
 
 A few writes record a **person's judgment** — not just a permitted action — and some of them are
-restricted to certain *credentials*, on top of the role gate. The restrictions have eight sources,
+restricted to certain *credentials*, on top of the role gate. The restrictions have nine sources,
 and each row below names its own: owner ruling 3 of 2026-11-05 (the two AI rows), the owner's
 decision of 2026-11-07 (a standing API token may not declare scrap or close work short), this
 PR's extensions of that decision (scrap reasons, the re-stamp short close and the other count
@@ -169,8 +176,8 @@ Quality Manager approval, FAI customer approval) and its review follow-ups (the 
 disposition and the CAR form's vendor / customer sign-off boxes), and the lead's decisions of
 2026-11-15 (an egress kill switch is a person's judgment; a narrowed token's read writes nothing),
 the Approved Supplier List change of 2026-11-13 (the supplier-approval rows), and the owner's
-decision of 2026-11-17 (a standing API token may not complete a maintenance work order with checklist
-items unticked).
+decisions of 2026-11-16 for work-order comments (a comment is a person's own words) and of 2026-11-17
+(a standing API token may not complete a maintenance work order with checklist items unticked).
 This section is the **one list** of those credential rules — what refuses a credential,
 what is deliberately left open (and who decided each), and what is deliberately not refused —
 across the AI governance (ruling 3), floor-gates (ruling 2) and short-count (ruling 1) changes;
@@ -193,7 +200,7 @@ list of credential predicates.
 Writes that apply them — each refused before any write and before any audit row (the 403 texts
 live in `ai_action_applier.py` and `operation_action_gates.py`, for the quality judgments in
 `quality_record_service.py` and `fai_service.py`, for export control
-`app/api/endpoints/customers.py`, for the egress switches `app/core/credentials.py`, and for the supplier-approval rows
+`app/api/endpoints/customers.py`, for the egress switches and the comment writes `app/core/credentials.py`, and for the supplier-approval rows
 `app/services/supplier_approval_service.py` and `app/api/endpoints/purchasing.py`, for the maintenance
 checklist `app/services/maintenance_checklist.py`; where each sits in its route's
 check order is in `docs/API.md` → Work Orders → "Short count at completion" and → AI
@@ -218,8 +225,10 @@ Recommendations):
 | **Writing the legacy `approved_supplier_list` table** — `POST /supplier-scorecards/approved-suppliers/` and `PUT /supplier-scorecards/approved-suppliers/{asl_id}` (read-only history since migration 123) | `is_api_token_credential` | **403**, the same text; also not MCP tools (`catalog.EXCLUDED_OPERATIONS`) | Review follow-up of the same change: an agent's "approved" entry there would contradict the vendor's own ASL status. People's use of the two routes is unchanged |
 | **Granting vendor approval by the checkbox** — `POST /purchasing/vendors` with `is_approved: true`, `PUT /purchasing/vendors/{id}` raising `is_approved` from `false` to `true`, and `POST /purchasing/vendors/import-csv` when any row asks for `is_approved` (refused before any row is written, dry run included). A token may still create and edit vendors, re-send `true` on an approved one, and withdraw approval | `is_api_token_credential` | **403** (`Approving a supplier is a person's decision: an API token cannot mark a vendor approved. Sign in to the app to do this.`) | Review follow-up of the same change: the checkbox is the approval that puts a vendor not on the ASL into the Create PO picker. Not an owner ruling |
 | **Completing a maintenance work order with checklist items unticked** — `POST /maintenance/work-orders/{id}/complete` when any checklist item the work order carries (or the body sends) is left unticked, whatever `incomplete_checklist_reason` it sends. Refused before the reason check and before any write. A token's completion with every item ticked (or no checklist) is unchanged, and so is a person's completion with a reason | `is_api_token_credential`, inline in `complete_work_order` | **403** `API_TOKEN_INCOMPLETE_CHECKLIST` (`Completing a maintenance work order with checklist items unticked must be done by a person signed in to the app, not an API token.`; text in `app/services/maintenance_checklist.py`) | Owner decision 2026-11-17, under the 2026-11-07 principle: why a PM step was skipped is a person's judgment, and a completion resets the machine's PM clock for a full interval |
-| **Taking items off a maintenance work order's checklist** — `PUT /maintenance/work-orders/{id}` whose `checklist_results` drops, renames or clears an item the work order carries (ticking, unticking or adding is unchanged). Refused before the first write | `is_api_token_credential`, through `maintenance_checklist.removed_checklist_items` | **403** `API_TOKEN_CHECKLIST_REMOVAL` (`Removing items from a maintenance work order's checklist must be done by a person signed in to the app, not an API token.`) | **This PR's extension** of the owner's 2026-11-17 decision: without it a token reaches the refused completion in two steps (PUT the unticked items away, then complete) |
+| **Taking items off a maintenance work order's checklist** — `PUT /maintenance/work-orders/{id}` whose `checklist_results` drops, renames or clears an item an **open** work order carries (ticking, unticking or adding is unchanged; on a completed or cancelled work order every change is already **409**, for every credential, before this check). Refused before the first write | `is_api_token_credential`, through `maintenance_checklist.removed_checklist_items` | **403** `API_TOKEN_CHECKLIST_REMOVAL` (`Removing items from a maintenance work order's checklist must be done by a person signed in to the app, not an API token.`) | **This PR's extension** of the owner's 2026-11-17 decision: without it a token reaches the refused completion in two steps (PUT the unticked items away, then complete) |
 | **Taking items off a PM schedule's checklist while it has an open work order** — `PUT /maintenance/schedules/{id}` whose `checklist` drops, renames or clears a step while a scheduled / overdue / in-progress / on-hold work order carries the schedule's id (completion judges the schedule's steps too). Adding steps, and editing a schedule with no open work order, are unchanged | `is_api_token_credential`, inline in `update_schedule` | **403** `API_TOKEN_SCHEDULE_CHECKLIST_REMOVAL` (`Removing items from the checklist of a PM schedule that has an open work order must be done by a person signed in to the app, not an API token.`) | **This PR's extension**, for the same reason: the third route to the same skip |
+| **Posting, editing or deleting a comment, or watching / unwatching a record** — `POST /comments`, `PATCH /comments/{comment_id}`, `DELETE /comments/{comment_id}`, `POST /watchers`, `DELETE /watchers`. Refused in the route's first dependency, before the body is validated or anything is read or written. None of the five is an MCP tool (`catalog.COMMENT_WRITE_OPERATIONS`, part of `EXCLUDED_OPERATIONS`), so a person's own JWT cannot reach them through an agent either. The reads (`GET /comments`, `GET /watchers`, `GET /users/mention-search`) stay open to a token the read gates admit | `is_api_token_credential`, in the `comment_writer` dependency (`app/api/endpoints/comments.py`) | **403** `API_TOKEN_COMMENT_WRITE` (`A comment is a person's own words: an API token cannot post, edit or delete comments or change who is watching a record. Sign in to the app.`) — any token, whatever its role or scope (a read-only or AI-external token meets its own gate's 403 first) | Owner decision 2026-11-16 (work-order comments): a comment is a person's own words, and a watch a person's own preference |
+| **Posting a note through Hank** — the `add_note` task, a work-order comment, at `POST /hank/tasks` (prepare) and `POST /hank/tasks/{id}/execute`. Refused before the generic role check and before anything is written, and `GET /hank/capabilities` never offers the kind to a token. **At the MCP door the rule looks past the credential**: `prepare_task` with kind `add_note`, and `execute_task` on an `add_note` task (read first as the caller), answer **403** `"A note is a person's own words: post it from the app, not through an agent."` to an agent on **any** credential, a person's own JWT included (a pre-read that cannot complete is **503**, nothing executed) — `app/mcp/people_only.py` | `is_api_token_credential`, in `hank_task_service._refuse_api_token_for_people_only` over `credentials.PEOPLE_ONLY_HANK_TASK_KINDS` (the MCP package reads the same set) | **403** `API_TOKEN_COMMENT_WRITE` (`A comment is a person's own words: an API token cannot post, edit or delete comments or change who is watching a record. Sign in to the app.`) — any token, whatever its role or scope | Owner decision 2026-11-16 (work-order comments): a comment is a person's own words, so Hank's note takes the comment routes' rule |
 
 Deliberately **not** refused:
 
@@ -232,7 +241,9 @@ Deliberately **not** refused:
   person) is that person's session to both predicates and is not refused — current behavior, not an
   owner decision. The 2026-11-07 decision
   covered standing API tokens only; whether an agent on a person's JWT may make these writes was
-  not part of it.
+  not part of it. The exception is the Hank note row above: the MCP door refuses `add_note` to an
+  agent on any credential (owner decision 2026-11-16), and writes that are not MCP tools at all
+  (`catalog.EXCLUDED_OPERATIONS`) are out of an agent's reach whatever it carries.
 - **Not yet decided (owner question):** a CAR status move through `PUT /quality/car/{id}` to
   `verification` or `closed` stamps `verified_by` / `closed_by` with the token's user, and is not
   refused for a standing API token today. It is the same kind of write as the rows above; whether
@@ -264,6 +275,7 @@ route's own fences still do):
 | **Resume Work Order** — `POST /work-orders/{id}/resume` (lifts a work-order hold) | Any credential of a user holding Admin / Manager / Supervisor, a standing **API token** included (the MCP tool `work_orders_resume_work_order`); kiosk badge and station tokens are refused by their path fence, as on every `/work-orders` route. Each call's required audit rows are written as the token's user with `extra_data.credential` | Owner decision 2026-11-07: an agent may lift a work-order hold |
 | **Release** — `POST /work-orders/{id}/release` and `POST /work-orders/bulk-release` (puts DRAFT work on the floor) | Any credential of a user holding Admin / Manager / Supervisor, a standing **API token** included; read-only and AI-external tokens are refused by the global gates, kiosk badge and station tokens by their path fence. Each release's audit row carries `extra_data.credential` | Existing behavior, not an owner ruling: the MCP tool `release_work_order` is an agent's release door, one job per call; bulk release is kept off the MCP catalog only. Whether a standing token should bulk-release is an open owner question |
 | **Dismiss**, snooze and feedback on a recommendation, action cards included | Every authenticated user and every credential | A design decision of the AI governance change; for Dismiss on an action card, confirmed by the owner 2026-11-07 (it does not take the Mark handled gate) — see [AI recommendations (Action Inbox)](#ai-recommendations-action-inbox) |
+| **Moving a work order's due date through Hank** — the `change_due_date` task (`POST /hank/tasks`, `POST /hank/tasks/{id}/execute`; the MCP tools `prepare_task` / `execute_task`) | Any credential of a user holding Admin / Manager / Supervisor with `work_orders:view` + `work_orders:edit`, a **full** API token included; read-only and AI-external tokens are refused by their own gates, as on every write. Each execution's required audit row carries the reason and `via: hank` (and `extra_data.credential` under a token) | Owner decision 2026-11-16: parity with `update_work_order` / `PUT /work-orders/{id}`, which already moves `due_date` for a token. **Open owner follow-up:** may agents move due dates at all? |
 
 ## Permission Matrix
 
@@ -1008,6 +1020,54 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > when someone next edits this section. See `docs/API.md` → Work Orders → "Work order
 > templates" and [docs/WORK_ORDER_TEMPLATES.md](WORK_ORDER_TEMPLATES.md).
 
+### Comments and watchers
+
+v1 (2026-11-16): comment threads, @mentions and watchers on **work orders only**, in the office app
+(the Comments panel on the work-order detail page). Routes: `GET`/`POST /comments`,
+`PATCH`/`DELETE /comments/{comment_id}`, `GET`/`POST`/`DELETE /watchers`, `GET /users/mention-search`.
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| Read a work order's comments and watch state | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Post a comment (and @mention people) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Edit a comment | own | own | own | own | own | own | own |
+| Delete a comment | any | any | own | own | own | own | own |
+| Watch / unwatch a work order (self) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Mention search (`GET /users/mention-search`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+> **Who may comment mirrors work-order READ access** — every signed-in member of the active company,
+> all seven tenant roles, Viewer included — because `GET /work-orders/{id}` itself depends only on
+> authentication and the active company. The record-type registry in
+> `app/services/comment_service.py` (`COMMENTABLE_TYPES`) owns that rule per record type, so a
+> future type (a PO, a quote) gets the read RBAC of its own domain rather than this one. The same
+> check gates each @mention (an inactive, foreign or not-permitted id is **422**, naming ids only)
+> and each notification recipient, re-checked when the worker dispatches.
+>
+> - **Edit is the author's alone.** An Admin or Manager can remove a comment but never rewrite
+>   someone's words: anyone else's `PATCH` is **403**.
+> - **Delete** is the author, an Admin or a Manager (moderation); a superuser or Platform Admin
+>   passes, as with `require_role`. Deletion is a soft delete, audited with `extra_data.moderated`
+>   when the deleter is not the author. There is no restore in v1.
+> - **Watching** is the caller's own preference: `POST` / `DELETE /watchers` act only on the
+>   caller, never on another user id. Posting a comment auto-watches its author and everyone it
+>   mentions. Only **members** of the active company watch, because only members are notified: a
+>   Platform Admin viewing another company is not auto-watched there, `POST /watchers` is **409**
+>   for them, and `GET /watchers` reports `watching: false`.
+> - **Mention search** returns `{id, display_name}` only — never an email, role or phone — and is
+>   open to every member of the company, unlike the Admin / Manager `GET /users/` list.
+> - **Tenancy.** The work order is resolved in the active company and must be live; another
+>   company's, an absent or a soft-deleted work order is **404** on every route, never **403**.
+>
+> **Credentials (owner decision 2026-11-16).** Every write — posting, editing and deleting
+> comments, watching and unwatching — refuses **any** API token **403**, and none of the five is an
+> MCP tool; see [Credential policy for judgment writes](#credential-policy-for-judgment-writes).
+> The reads stay open to a token the read gates admit: a full token reads all three; a read-only
+> token reads the thread and the watch state but is **403** on mention search (`Users` tag, part of
+> the read-only deny floor); an AI-external token is **403** on all three (none is on its
+> allowlist). A crew-station badge token is refused **403** on every route here by its path fence,
+> so the kiosk shows no comments. See
+> [API.md → Comments and watchers](API.md#comments-and-watchers).
+
 ### Parts
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
@@ -1321,11 +1381,12 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > Adopting, handing over or handing back sets only the event's `maintenance_work_order_id` /
 > `maintenance_adopted` link (fields `PUT /downtime/{id}` cannot write). Holding and cancelling go
 > through `PUT /maintenance/work-orders/{id}` (planning roles, so the Maintenance page shows Hold /
-> Cancel to Admin / Manager / Supervisor / Platform Admin); that `PUT` refuses `in_progress` and
-> `completed` (**409**, the Start / Complete verbs own them), un-starting a started WO, and changing
-> `requires_shutdown` once started.
+> Cancel to Admin / Manager / Supervisor / Platform Admin, on open rows only); that `PUT` refuses
+> `in_progress` and `completed` (**409**, the Start / Complete verbs own them), un-starting a started
+> WO, changing `requires_shutdown` once started, and any change at all to a completed or cancelled WO
+> (below).
 >
-> **Two state refusals on the same gates (2026-11-17; no role changed).** Creating a maintenance WO
+> **Three state refusals on the same gates (2026-11-17; no role changed).** Creating a maintenance WO
 > with a `schedule_id` that already has an open one (scheduled, overdue, in progress or on hold) is
 > **409** naming it, for every role — one open work order per PM schedule. Completing a WO with any
 > checklist item unticked needs a written `incomplete_checklist_reason` (**409** without one, nothing
@@ -1334,8 +1395,18 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > written). It is a reason on the record, not an approval, so the performing gate is unchanged: an
 > Operator who may complete the WO may record it. A standing API token may not: with any item
 > unticked its completion is **403** `API_TOKEN_INCOMPLETE_CHECKLIST` whatever reason it sends (owner
-> decision 2026-11-17) — see [Credential policy for judgment writes](#credential-policy-for-judgment-writes). Details in
-> `docs/API.md` → Maintenance → *The PM loop*.
+> decision 2026-11-17) — see [Credential policy for judgment writes](#credential-policy-for-judgment-writes). And a
+> completed or cancelled maintenance WO is a final record: a `PUT` that would change **any** of its
+> fields is **409** before any write — its status as before, and now also `checklist_results`,
+> `notes`, title, description, dates, priority, assignee and `requires_shutdown` (the detail names
+> the fields) — for every role and every credential: a person's session, a Platform Admin and an API
+> token alike. Before, only the status was held, so a planning-role `PUT` could re-tick a completed
+> PM's checklist after the fact. Re-sending the record's own value is accepted and writes nothing
+> (no audit row). A later note goes on the record as a `POST /maintenance/log` entry with
+> `maintenance_wo_id` (performing roles, as in the table; dated, signed, audited), never as an edit
+> of the WO. This is a state rule, not a credential policy, so it has no row in the credential table.
+> Details in `docs/API.md` → Maintenance → *A completed or cancelled work order is a final record*
+> and *The PM loop*.
 
 > **Tenancy: ten of the sixteen handlers took no company argument.** `start` and `complete`
 > resolved the work order by bare id, and `dashboard` / `calendar` / `history` / `overdue`
@@ -1897,112 +1968,16 @@ Follow-up owners must be active users in the same company with purchasing access
 > Admin / Manager / Supervisor set plus superuser and Platform Admin, which the page's old inline role
 > list left out.
 
-### Material Nesting
+### Material Nesting (retired)
 
-**Sales & Quoting → Material Nesting** (`/nest`) requires a signed-in ERP user and
-`purchasing:view` on both the sidebar link and the direct route, matching Quote
-Calculator. By default, Admin, Manager, Supervisor, and Viewer have access;
-Operator, Quality, and Shipping do not. Active-company role-permission overrides
-can grant or revoke this permission. Platform Admin and the existing superuser
-override also pass; an override from another company is not used.
-
-All permitted users can edit the current browser estimate, compare sheets, and
-download or reopen local estimate files. These are client-side calculations and
-downloads; they create no ERP quote, purchase order, inventory transaction, work
-order, or audit record. The downloadable review record is draft evidence, not
-a server approval or immutable audit event.
-
-**Export buyer PDF** formats one complete, current alternative per populated group.
-`POST /api/v1/quote-nesting/buyer-pdf` independently requires effective
-`purchasing:view`; any conditional group or recorded-piece sheet additionally
-requires `inventory:view`. Both multipart/report company IDs must match the active
-company. Company/preparer identity comes from the authenticated server context.
-The endpoint writes no order, inventory, quote, revision or audit record and adds
-no permission key. Existing kiosk, disabled-user and read-only switched-company
-POST restrictions remain in force. The PDF does not establish material availability,
-reservation, certification or manufacturing approval.
-
-`GET /api/v1/quote-nesting/materials` and
-`POST /api/v1/quote-nesting/material-resolution` independently enforce the same
-effective `purchasing:view` permission. They read only active catalog rows from
-the active company; missing, inactive, and foreign-company IDs all return 404.
-Neither endpoint seeds defaults or writes data. Existing disabled-user,
-kiosk/API-token, and read-only switched-company restrictions remain in force;
-the calculation POST is not exempt from the read-only-context fence. No new
-permission key, inventory reservation, or approval authority
-is introduced by catalog resolution. See [MATERIAL_NESTING.md](MATERIAL_NESTING.md) and the
-[API contract](API.md#quote-nesting-material-provenance).
-
-**Team draft persistence** adds a separate explicit write boundary:
-
-| Action | Required effective permissions |
-|--------|--------------------------------|
-| List drafts/history or open a revision | `purchasing:view` |
-| Save new draft or append a revision | `purchasing:view` **and** `purchasing:create` |
-
-Defaults allow Admin, Manager and Supervisor to save; Viewer can open drafts.
-Tenant overrides are honored and malformed overrides fail closed. Existing
-Platform Admin/superuser exemptions remain, but read-only switched-company
-contexts cannot write. The frontend hides Save when create permission is absent;
-the server checks independently. These permissions grant neither geometry/quote
-approval nor physical-material reservation. New saves add immutable input
-revisions and required audit events, never operational quote or inventory writes.
-Company scope is enforced on every draft query/reference. Customer/job-specific
-segregation and approvals are future capabilities, not implied by draft access.
-
-**Saved server calculations** use the same effective permissions:
-
-| Action | Required effective permissions |
-|--------|--------------------------------|
-| Read runtime readiness, run history, status, exact checkpoint or draft report | `purchasing:view` |
-| Start a calculation from an exact saved revision or cancel a run | `purchasing:view` **and** `purchasing:create` |
-
-The worker rechecks the submitting actor's active user/company membership,
-effective permissions and API-token validity before claiming work and while it
-runs. Queue payloads contain only company/run IDs; no user credential or drawing
-is put in Redis. Worker build readiness is shared infrastructure metadata, not
-another tenant's data. All result/report queries remain company-scoped. Start
-and cancel explicitly bind the intended company. Reads create no business/audit
-events; normal API-token usage telemetry still applies. New run, cancellation,
-lease and checkpoint writes require transactional audit evidence. A run remains
-unapproved even when its geometry is checked and its search finishes. No new
-permission key, quote approval, cost writeback, original-CAD authentication or
-inventory reservation authority is introduced.
-
-**Configured stock exclusions** use the existing estimate, draft and calculation
-permissions above. Editing an exclusion in the browser requires nesting access;
-persisting it or starting a saved calculation still requires effective
-`purchasing:view` and `purchasing:create`. No role, permission key or approval
-boundary changes. Its label, reason, outline and entered clearance describe every
-hypothetical sheet of one stock-size scenario. They do not certify physical stock,
-claim a machine zone, reserve material or grant inventory write authority. The API
-bounds saved input structure; worker geometry validation does not promote the draft
-to an approved nest or quote.
-
-**Quote-spacing policy governance** adds Admin decisions, separate from quote approval:
-
-| Action | Required authority |
-|--------|--------------------|
-| Read policy history/revisions or resolve a matching band | Effective `purchasing:view` |
-| Create policy draft, publish approval or withdraw approval | Admin (or existing Platform Admin/superuser exemption) **and** effective `purchasing:view` + `purchasing:create` |
-| Apply a resolved band or enter a custom-spacing reason in the browser | Existing nesting access; persistence still uses the draft/run write gates |
-
-A Manager or Supervisor with purchasing create permission cannot administer
-spacing policies. Admin permission overrides still apply. The server independently
-checks every command; API-token, kiosk, disabled-user and read-only switched-company
-fences remain. Each write names the intended company, expected policy version,
-request UUID and reason. Same-request replay is bound to the actor and credential;
-tenant references are scoped and foreign IDs return 404. Reads create no policy
-or approval rows. Publication binds an immutable content hash; withdrawal appends
-history instead of deleting it. Required audit failure rolls back the command.
-
-The initial workflow allows an Admin to approve their own draft. This is a
-quoting-allowance approval only, not two-person quote approval, material/certification
-acceptance or manufacturing authority. Saving or starting new policy-bound work
-revalidates current approval on the server. Already accepted queued calculations
-keep their frozen inputs. Custom-spacing overrides expressly remove the approval
-claim and retain an estimator reason. Company switches abort pending UI operations
-and clear the prior decision target. See [MATERIAL_NESTING.md](MATERIAL_NESTING.md#admin-policy-history-and-decisions).
+The Material Nesting estimator (`/nest`) and every `/api/v1/quote-nesting/*` route it used —
+buyer PDF, catalog material resolution, team drafts, saved calculations, spacing-policy
+governance and original-DXF attachments — were removed in commit `3e17456e` (2026-09-16).
+Their permission rules went with them: `/nest` now only redirects to `/fabrication-quotes`,
+and the API answers **404** for every one of those paths. No permission key was added or
+removed by the retirement; `purchasing:view` / `purchasing:create` keep their other uses.
+For the estimator that replaced it, see [FABRICATION_QUOTING.md](FABRICATION_QUOTING.md).
+The tables those routes wrote are kept as historical records with no API reader or writer.
 
 ### Receiving
 
@@ -2501,7 +2476,19 @@ upload/revision and attachment require Admin / Manager / Quality. Delete retains
 Generated artifacts use their existing receipt/shipping business-route gates. Foreign document
 or linked-record ids return **404**; role refusals return **403**. Revision histories cannot be
 rebound or deleted, and receipt certificates remain protected even after a receipt is voided
-(**409**). New revisions retain prior files, type and links. Required audit loss returns **503**
+(**409**). A document that a same-company QMS standard or QMS clause evidence link names is
+refused too (**409**), including through a removed standard, clause or evidence link; clearing
+the link's `document_id` (Admin / Manager / Quality, audited) releases it. So is a document that
+a same-company shipment carrier label or bill of lading, receipt receiving label, process-sheet
+step record attachment or governed file record names (**409**), voided, removed and superseded
+records included: none has a verb that releases it. A laser nest's PDF is refused too. A removed
+nest, or a live nest whose operation has recorded work, keeps it. Otherwise Detach
+(`DELETE /laser-nests/{id}/document`, Admin / Manager / Supervisor, audited) releases it once it is
+cleared from every nest. A document an engineering change order lists in `affected_documents` is
+refused too: while the ECO is draft or submitted, taking it out of the list (`PUT /eco/eco/{id}`,
+Admin / Manager, audited) releases it; from under review on, and for a rejected or cancelled ECO,
+it is kept. A refusal reports every permanent reason before any unlink, Detach or ECO-edit
+instruction. New revisions retain prior files, type and links. Required audit loss returns **503**
 and rolls back metadata changes; bytes are removed only by the corresponding failure cleanup
 or after an audited deletion commits. Same-company historical part labels remain available.
 The Documents, Quality and Job Costing UI write controls reflect the fixed role gates and FAI
@@ -2518,6 +2505,7 @@ UI controls do not grant API authority. See [API: Documents](API.md#documents).
 | Delete | ✓ | | | | | | |
 | Roles | ✓ | | | | | | |
 | Own profile + notification settings (`/users/me/*`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Mention search (`GET /users/mention-search`, `{id, display_name}` only — see [Comments and watchers](#comments-and-watchers)) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 > **Self-scoped `/users/me/*` routes are open to every authenticated role — by construction, not by
 > grant.** `GET /users/me`, `PUT /users/me/phone`, `GET`/`PUT /users/me/notification-preferences`,
@@ -2824,7 +2812,7 @@ and writes an `EXPORT` audit row through `AuditService`:
 | `GET /api/v1/exports/quotes/export` | `quote` | **customer contact + email (PII)**, subtotal / total |
 | `GET /api/v1/exports/inventory/transactions/export` | `inventory_transaction` | the whole valuation ledger incl. free-text `notes` |
 | `GET /api/v1/exports/fai/export` | `fai` | the FAI log of record: every first article with its customer, customer PO, job, result and customer approval |
-| `GET /api/v1/analytics/custom-report/export` | `custom_report` | a tenant-authored query over a whole data source — unbounded by construction |
+| `GET /api/v1/analytics/custom-report/export` | `custom_report` | a tenant-authored query over a whole data source — every matching row, capped at 10,000 (refused **400** over it, never truncated); only a template the caller owns, a shared one, or any for an Admin ([Analytics](#analytics)) |
 | `GET /api/v1/consumables/checkouts/export.csv` | `consumable_checkout` | employee names/departments, quantities, issuer and free-text notes |
 
 > **Two surfaces sit at a stricter tier and stay there.** `GET /visitor-logs/export.csv` is
@@ -2881,7 +2869,11 @@ and writes an `EXPORT` audit row through `AuditService`:
 | Flow / WIP-aging / adoption (Lean Phase 1) | ✓ | ✓ | ✓ | | | | |
 | FPY / scrap Pareto (Lean Phase 1) | ✓ | ✓ | ✓ | | ✓ | | |
 | Predictive forecasts (delivery / capacity / inventory demand) | ✓ | ✓ | ✓ | | | | |
-| Export (`GET /custom-report/export`, audits an `EXPORT` action) | ✓ | ✓ | | | | | |
+| Custom reports — data-source catalog, ad-hoc run, save a template (`GET /data-sources`, `POST /custom-report`, `POST /custom-report/templates`) | ✓ | ✓ | | | | | |
+| Custom reports — list saved templates, own + shared (`GET /custom-report/templates`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Custom reports — open / run a saved template: own or shared, or any for an Admin (`GET /custom-report/templates/{id}`, `POST …/{id}/run`) | ✓ | ✓ | | | | | |
+| Custom reports — change / delete a saved template, author or Admin only (`PATCH` / `DELETE /custom-report/templates/{id}`) | ✓ | ✓ | | | | | |
+| Export (`GET /custom-report/export`, own or shared template or any for an Admin, audits an `EXPORT` action) | ✓ | ✓ | | | | | |
 
 > **Lean Phase 1 analytics reads are role-gated in code.** `GET /api/v1/analytics/flow`,
 > `GET /analytics/wip-aging`, and `GET /analytics/adoption` require
@@ -2924,6 +2916,48 @@ and writes an `EXPORT` audit row through `AuditService`:
 > customer-name delivery rollups (per-customer OTD %, late counts) to every role in the tenant,
 > including Operator/Viewer, under that pre-existing posture. If reports are later role-tiered,
 > this endpoint should be revisited with the rest of `/reports/*`.
+
+> **Custom reports: Admin / Manager on every verb but the list, plus an ownership rule on saved
+> templates (2026-11-16).** Every route under `/api/v1/analytics/custom-report*` and
+> `GET /analytics/data-sources` is `require_role([ADMIN, MANAGER])` and tenant-scoped, except
+> `GET /analytics/custom-report/templates`, which stays any-authenticated as it always has. On top
+> of the role gate, `app/services/report_template_service.py` applies one ownership rule:
+> - **Read, run or export a template** (`require_readable`). Allowed when it is the caller's own,
+>   `is_shared`, or the caller is an Admin; otherwise **403** `Access denied to this report`.
+> - **Change or delete a template** (`require_modifiable`). Allowed for the template's author or an
+>   Admin; otherwise **403** `Only the template's author or an admin can change or delete it`.
+> - In both rules a superuser or Platform Admin counts as an Admin, as `require_role` already treats
+>   them everywhere else. So a Manager can run a colleague's shared template but cannot open a
+>   private one, edit or delete it, while an Admin can do all of these. The two rules used to
+>   disagree: an Admin was refused a colleague's private template on read yet could `PATCH` it and
+>   get the whole definition back, so the read refusal protected nothing (2026-11-16).
+> - **A template in another company** is **404** `Report template not found` on every verb,
+>   byte-identical to an id that does not exist, and is never listed.
+>
+> The list returns the caller's own templates plus every shared one, for every role (an Admin
+> included, who opens a colleague's private template by id). A Supervisor, Operator, Quality,
+> Shipping or Viewer user can therefore list shared templates but not open, run or export them.
+> `GET` and `PATCH /analytics/custom-report/templates/{id}` and
+> `POST /analytics/custom-report/templates/{id}/run` are new in this change. Template create, change
+> and delete write `report_template` audit rows (the delete's is required: no row, no delete — 503);
+> running a report writes nothing, and the export writes its `EXPORT` row only on success. API
+> tokens are not refused on any of these routes (none is a judgment write), so an Admin- or
+> Manager-bound token can build and run reports. A read-only token can read the catalog and the
+> templates, but cannot run a report (both run verbs are `POST`) or download the CSV: the export
+> refuses a read-only or AI-external token **403** before it reads the template or runs the query
+> (`refuse_file_export_to_narrowed_token`), so neither the row-cap nor the empty-result 400 can
+> answer it. See [API.md → Custom report builder](API.md#custom-report-builder).
+>
+> **The Custom Reports screen is gated to match (2026-11-16).** The Analytics → **Custom Reports**
+> tab (`frontend/src/pages/Analytics.tsx`, `can('analytics:export')`) and the `/analytics/reports`
+> route (`frontend/src/utils/routeAccess.ts`, `{ prefix: '/analytics/reports', permission:
+> 'analytics:export' }`, which wins over `/analytics` → `analytics:view` by longest prefix) both
+> require `analytics:export`. In the shipped role sets that permission is held by Platform Admin,
+> Admin and Manager, the same set as the endpoints. Before this change every role saw the tab and
+> then got a screen of 403s. A deep link from any other role is now refused at the route instead.
+> The frontend gate reads the *effective* permission, so a company role override that grants
+> `analytics:export` to another role shows that role the tab, but the server role gate still answers
+> 403. As everywhere in this document, the server gate is the enforcement.
 
 ### OEE
 
@@ -3106,6 +3140,8 @@ and writes an `EXPORT` audit row through `AuditService`:
 | Receive-delivery task (`receiving:view` + `receiving:create`) | ✓ | ✓ | ✓ | | | | |
 | Report-production task (`work_orders:view` + `work_orders:complete`; own active clock required) | ✓ | ✓ | ✓ | ✓ | ✓ | | |
 | Pending-shipment task (`shipping:view` + `shipping:create` + `work_orders:view`) | ✓ | ✓ | ✓ | | | ✓ | |
+| Change-due-date task (`work_orders:view` + `work_orders:edit`; moves `due_date` only, never `must_ship_by`) | ✓ | ✓ | ✓ | | | | |
+| Add-note task (`work_orders:view`; posts a work-order comment; a person only — never an API token, never through MCP) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Handoffs and own routine runs (interactive `work_orders:view`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Draft/edit/archive a routine (interactive `work_orders:view`) | ✓ | ✓ | ✓ | | | | |
 | Approve a routine (interactive `work_orders:view`) | ✓ | ✓ | | | | | |
@@ -3124,6 +3160,21 @@ and writes an `EXPORT` audit row through `AuditService`:
 > current view-access predicates on every page. A filter cannot reveal another employee's
 > task or recover records whose source access was removed. Shared handoffs are a separate
 > participant-scoped resource; they do not expose another employee's private tasks.
+>
+> **Due-date and note tasks (2026-11-16).** `change_due_date` takes the role set of
+> `PUT /work-orders/{id}`, the other door that moves a due date — Admin / Manager / Supervisor,
+> the roles that hold `work_orders:edit` by default — and that route's terminal-status 409 through
+> one shared helper. `add_note` follows the comment rule: commenting mirrors work-order read access,
+> so all seven tenant roles hold it, and a **Viewer**'s capabilities now report `can_write: true`
+> with `allowed_kinds: ["add_note"]` — the first reviewed task open to a Viewer (follow-ups,
+> preferences and handoffs were already open; they are not task kinds). Credentials (owner
+> decision 2026-11-16): `add_note` is **people-only** — every API token is refused **403** at
+> preparation and execution and is never offered the kind, and the MCP door refuses it to an agent
+> even on a person's own JWT; `change_due_date` stays open to a **full** API token, in parity with
+> the `update_work_order` agent door, while read-only and AI-external tokens are refused by their
+> own gates. Both are in
+> [Credential policy for judgment writes](#credential-policy-for-judgment-writes), the second as an
+> open owner follow-up. See [API → Hank](API.md#hank-ai-shop-teammate).
 >
 > **Intake has document-publication authority.** Upload/analysis/review/file/retry/cancel
 > are restricted to interactive Admin/Manager/Quality (or existing elevated authority).
@@ -3582,20 +3633,6 @@ import { ProtectedRoute, AdminRoute } from './components/ProtectedRoute';
 } />
 ```
 
-## Original DXF evidence on saved nesting revisions
-
-`/quote-nesting/drafts/{draft_id}/revisions/{number}/sources` retains unapproved original-byte evidence for material planning and part traceability. The historical namespace does not confer quote approval or inventory authority. These routes reuse effective role permissions, including company overrides:
-
-| Action | Server requirement |
-|---|---|
-| List exact-revision attachment history or download a completed source | Active-company authority and `purchasing:view` |
-| Create an intent, submit original bytes, or finalize tracked bytes | `purchasing:view` **and** `purchasing:create`, writable company context, normal authenticated user/API-token eligibility |
-| Resume an existing intent | All write requirements, plus the exact recorded actor and API-token identity (or the same interactive actor) |
-
-Normal platform/superuser permission bypass remains, but never bypasses read-only context, intended-company checks or another actor/credential's command identity. A read-only colleague can inspect or download completed evidence without becoming its uploader. Revocation/expiry and kiosk path fences remain authoritative; the service rechecks authority before completion after external storage I/O. `can_attach` and per-item `can_resume` describe these capabilities for the UI, not source approval or storage availability.
-
-Intent, storage-attempt and completion mutations each require `AuditService.log_required` in their DB transaction with original credential attribution. Exact completed recovery adds no extra completion audit or object. Staged objects cannot be adopted by another credential, and there is no edit/delete/purge, manufacturing release, quote approval, stock reservation or remnant-credit permission in this feature. See [the source-evidence API contract](API.md#original-dxf-evidence-for-saved-nesting-revisions).
-
 ## Superuser Override
 
 Stored `is_superuser=true` and Platform Admin principals bypass role gates. They still obey
@@ -3635,17 +3672,7 @@ resolver requires effective `inventory:view` and normal tenant/token/kiosk acces
 It does not require Admin/Manager/Supervisor inventory mutation authority and makes
 no observation, audit or inventory change. Existing read-only-company contexts still
 refuse the POST under the central method fence; no read-only exemption is added.
-No purchasing permission grants inventory access. Project18 records carrying an actual
-`remnantPlan` field additionally require effective `inventory:view` wherever their evidence
-leaves the API: draft list/history/detail/save and exact retries; saved-run list/detail,
-checkpoint/report/start/cancel and retries; and all attached CAD intent/content/finalize/
-download operations. The gate uses field presence, not version alone. Worker claim and
-live checkpoint acceptance recheck the submitting actor/token's inventory permission.
-Ordinary inputs without that field retain their existing nesting permissions.
-
-Authorization precedes idempotent recovery. Current observation/source checks apply only to
-new saves and starts, under a short observation-header shared lock after the existing policy
-locks. Historical reads and queued calculations preserve their frozen unapproved evidence;
-a source correction or withdrawal does not rewrite a saved record. No stock-mutator role,
-reservation/consumption grant or new approval authority is introduced. A source selection
-remains planner-declared and physically unverified, even after a successful calculation.
+No purchasing permission grants inventory access. The saved-draft, saved-run and
+original-DXF routes that once carried the selected piece onward (with their own
+`inventory:view` gates) were retired with every `/quote-nesting/*` route in `3e17456e`
+(2026-09-16); this resolver is the only remaining recorded-piece planning route.
