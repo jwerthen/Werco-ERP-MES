@@ -41,6 +41,8 @@ pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 
 BASE = "/api/v1/quality"
 ROOT_CAUSE = "Fixture wear let the edge burr through deburr."
+# Closing an NCR also needs what was physically done (AS9100D 8.7, migration 127).
+ACTION_TAKEN = "Scrapped the five brackets and tagged them to the scrap bin."
 _seq = itertools.count(1)
 
 
@@ -123,12 +125,17 @@ def _make_car(db, company_id=1, **extra):
 
 
 def _closeable_car(db, **extra):
+    # A corrective CAR also needs the AS9100D 10.2.1 reviews and an effective effectiveness
+    # verification to close (migration 127).
     return _make_car(
         db,
         root_cause="Worn deburr fixture.",
         corrective_action="Replace and add fixture to PM.",
         verification_method="Inspect 3 consecutive lots.",
         verification_results="No burrs in 3 lots.",
+        human_factors_review="No fatigue or training factor; the fixture wore out of tolerance.",
+        similar_nonconformities_review="Checked the two sister fixtures; both within tolerance.",
+        effectiveness_result="effective",
         **extra,
     )
 
@@ -302,14 +309,17 @@ class TestUpdateNCR:
         }
 
     def test_disposition_change_is_audited(self, client, db_session):
-        _, headers = _headers(db_session)
+        user, headers = _headers(db_session)
         ncr = _make_ncr(db_session)
         resp = client.put(f"{BASE}/ncr/{ncr.id}", headers=headers, json={"version": 0, "disposition": "rework"})
         assert resp.status_code == 200, resp.text
         rows = _committed("ncr", ncr.id)
         assert len(rows) == 1 and rows[0]["action"] == "UPDATE"
-        assert rows[0]["old_values"] == {"disposition": "pending"}
-        assert rows[0]["new_values"] == {"disposition": "rework"}
+        # The server stamps who decided the disposition and when, on the same row (migration 127).
+        assert rows[0]["old_values"] == {"disposition": "pending", "dispositioned_by": None, "dispositioned_at": None}
+        new = rows[0]["new_values"]
+        assert set(new) == {"disposition", "dispositioned_by", "dispositioned_at"}
+        assert (new["disposition"], new["dispositioned_by"]) == ("rework", user.id) and new["dispositioned_at"]
         assert rows[0]["extra_data"]["disposition_change"] is True
 
     def test_closure_commits_status_change_with_disposition_and_closer(self, client, db_session):
@@ -318,7 +328,13 @@ class TestUpdateNCR:
         resp = client.put(
             f"{BASE}/ncr/{ncr.id}",
             headers=headers,
-            json={"version": 0, "status": "closed", "disposition": "scrap", "root_cause": ROOT_CAUSE},
+            json={
+                "version": 0,
+                "status": "closed",
+                "disposition": "scrap",
+                "root_cause": ROOT_CAUSE,
+                "action_taken": ACTION_TAKEN,
+            },
         )
         assert resp.status_code == 200, resp.text
         assert resp.json()["closed_date"] == date.today().isoformat()
@@ -728,7 +744,13 @@ def _perform(client, db_session, headers, verb):
         if verb == "update_ncr":
             return lambda: client.put(url, headers=headers, json={"version": 0, "disposition": "rework"})
         if verb == "close_ncr":
-            body = {"version": 0, "status": "closed", "disposition": "scrap", "root_cause": ROOT_CAUSE}
+            body = {
+                "version": 0,
+                "status": "closed",
+                "disposition": "scrap",
+                "root_cause": ROOT_CAUSE,
+                "action_taken": ACTION_TAKEN,
+            }
             return lambda: client.put(url, headers=headers, json=body)
         if verb == "void_ncr":
             return lambda: client.request("DELETE", url, headers=headers, json={"reason": "Raised in error"})

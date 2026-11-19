@@ -590,6 +590,10 @@ class TestQualityApproval:
             corrective_action="Replace and add fixture to PM.",
             verification_method="Inspect 3 consecutive lots.",
             verification_results="No burrs in 3 lots.",
+            # A corrective CAR's 10.2.1 closure evidence (migration 127) -- still no approval.
+            human_factors_review="No fatigue or training factor; the fixture wore out of tolerance.",
+            similar_nonconformities_review="Checked the two sister fixtures; both within tolerance.",
+            effectiveness_result="effective",
         )
         closing = client.put(
             f"{BASE}/car/{unapproved.id}",

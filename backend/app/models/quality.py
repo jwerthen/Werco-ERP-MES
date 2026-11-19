@@ -77,6 +77,41 @@ CAR_INITIATION_REASON_CHECK = "initiation_reason IN ({})".format(
 )
 
 
+class NCRReverificationResult(str, enum.Enum):
+    """The outcome of re-verifying reworked or repaired product (AS9100D 8.7.1).
+
+    Stored on ``ncrs.reverification_result`` as a plain ``String(20)`` held to these two
+    values by the CHECK ``ck_ncrs_reverification_result`` (migration 127_ncr_car_records),
+    the String + CHECK pattern of ``CARInitiationReason``. Written only by
+    ``POST /quality/ncr/{id}/reverification``, never by a request body on ``PUT``.
+    """
+
+    CONFORMING = "conforming"
+    NONCONFORMING = "nonconforming"
+
+
+class CAREffectivenessResult(str, enum.Enum):
+    """The outcome of reviewing a corrective action's effectiveness (AS9100D 10.2.1 d).
+
+    Stored on ``cars.effectiveness_result`` as a plain ``String(20)`` held to these two
+    values by the CHECK ``ck_cars_effectiveness_result`` (migration 127_ncr_car_records).
+    Written only by ``POST /quality/car/{id}/effectiveness``, never by a request body.
+    """
+
+    EFFECTIVE = "effective"
+    NOT_EFFECTIVE = "not_effective"
+
+
+# Lock-step with migration 127_ncr_car_records, which creates these CHECKs with the identical
+# text (the fresh-bootstrap round-trip compares model and migration).
+NCR_REVERIFICATION_RESULT_CHECK = "reverification_result IN ({})".format(
+    ", ".join(f"'{result.value}'" for result in NCRReverificationResult)
+)
+CAR_EFFECTIVENESS_RESULT_CHECK = "effectiveness_result IN ({})".format(
+    ", ".join(f"'{result.value}'" for result in CAREffectivenessResult)
+)
+
+
 class FAIStatus(str, enum.Enum):
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
@@ -103,6 +138,8 @@ class NonConformanceReport(Base, SoftDeleteMixin, TenantMixin):
         Index("ix_ncrs_source", "source"),
         Index("ix_ncrs_disposition", "disposition"),
         UniqueConstraint("company_id", "ncr_number", name="uq_ncrs_company_ncr_number"),
+        # Lock-step with migration 127_ncr_car_records.
+        CheckConstraint(NCR_REVERIFICATION_RESULT_CHECK, name="ck_ncrs_reverification_result"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -157,6 +194,23 @@ class NonConformanceReport(Base, SoftDeleteMixin, TenantMixin):
     car_required = Column(Boolean, default=False)
     car_id = Column(Integer, ForeignKey("cars.id"), nullable=True)
 
+    # AS9100D 8.7.1 / 8.7.2 disposition evidence (migration 127_ncr_car_records). Every column
+    # below is nullable with no default and no backfill: a pre-127 NCR simply never recorded
+    # them. Writes go through app/services/quality_record_service.py.
+    action_taken = Column(Text, nullable=True)  # what was physically done to the product
+    concession_reference = Column(String(100), nullable=True)  # customer deviation / waiver / concession #
+    concession_authorized_by = Column(String(255), nullable=True)  # who at the customer authorized it
+    concession_date = Column(Date, nullable=True)  # when authorized; never later than today (Central)
+    # Re-verification of reworked / repaired product: written and server-stamped only by
+    # POST /quality/ncr/{id}/reverification, never accepted from a PUT body.
+    reverification_result = Column(String(20), nullable=True)  # one NCRReverificationResult value
+    reverification_notes = Column(Text, nullable=True)
+    reverified_by = Column(Integer, ForeignKey("users.id", name="fk_ncrs_reverified_by"), nullable=True)
+    reverified_at = Column(DateTime, nullable=True)
+    # Who decided the disposition and when: server-stamped whenever the disposition changes.
+    dispositioned_by = Column(Integer, ForeignKey("users.id", name="fk_ncrs_dispositioned_by"), nullable=True)
+    dispositioned_at = Column(DateTime, nullable=True)
+
     # Audit
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -184,6 +238,8 @@ class CorrectiveActionRequest(Base, TenantMixin):
         UniqueConstraint("company_id", "car_number", name="uq_cars_company_car_number"),
         # Lock-step with migration 122_car_form_quote_rev.
         CheckConstraint(CAR_INITIATION_REASON_CHECK, name="ck_cars_initiation_reason"),
+        # Lock-step with migration 127_ncr_car_records.
+        CheckConstraint(CAR_EFFECTIVENESS_RESULT_CHECK, name="ck_cars_effectiveness_result"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -210,6 +266,8 @@ class CorrectiveActionRequest(Base, TenantMixin):
     # Verification
     verification_method = Column(Text)
     verification_results = Column(Text)
+    # The evidence reviewed for effectiveness. Once an effectiveness result is recorded it is
+    # changed only by recording a new verification (POST /quality/car/{id}/effectiveness).
     effectiveness_check = Column(Text)
 
     # Dates
@@ -255,6 +313,19 @@ class CorrectiveActionRequest(Base, TenantMixin):
     # never accepted from a request body.
     quality_approved_by = Column(Integer, ForeignKey("users.id", name="fk_cars_quality_approved_by"), nullable=True)
     quality_approved_at = Column(DateTime, nullable=True)
+
+    # AS9100D 10.2.1 / 10.2.2 corrective-action evidence (migration 127_ncr_car_records). All
+    # nullable with no default and no backfill: a pre-127 CAR simply never recorded them.
+    # The effectiveness verification is written and server-stamped only by
+    # POST /quality/car/{id}/effectiveness, never accepted from a request body.
+    effectiveness_result = Column(String(20), nullable=True)  # one CAREffectivenessResult value
+    effectiveness_verified_by = Column(
+        Integer, ForeignKey("users.id", name="fk_cars_effectiveness_verified_by"), nullable=True
+    )
+    effectiveness_verified_at = Column(DateTime, nullable=True)
+    effectiveness_due = Column(Date, nullable=True)  # when the follow-up effectiveness check is due
+    human_factors_review = Column(Text, nullable=True)  # 10.2.1 human factors
+    similar_nonconformities_review = Column(Text, nullable=True)  # 10.2.1 c) similar nonconformities
 
     # Audit
     created_at = Column(DateTime, default=datetime.utcnow)

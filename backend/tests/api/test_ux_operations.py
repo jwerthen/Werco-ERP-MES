@@ -64,6 +64,8 @@ def test_quality_detail_closure_requires_final_disposition_and_authorized_role(c
         'status': 'closed',
         'disposition': 'pending',
         'root_cause': 'Supplier handling damaged the finished surface.',
+        # Closure also needs what was physically done (AS9100D 8.7, migration 127).
+        'action_taken': 'Scrapped the damaged parts and requested replacements from the supplier.',
     }
     url = f"/api/v1/quality/ncr/{record['id']}"
     assert client.put(url, headers=headers, json=payload).status_code == 422

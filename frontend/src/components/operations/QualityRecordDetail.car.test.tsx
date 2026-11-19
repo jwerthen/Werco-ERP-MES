@@ -95,6 +95,13 @@ const car: CARRecord = {
   quality_approved_by: null,
   quality_approved_by_name: null,
   quality_approved_at: null,
+  human_factors_review: null,
+  similar_nonconformities_review: null,
+  effectiveness_due: null,
+  effectiveness_result: null,
+  effectiveness_verified_by: null,
+  effectiveness_verified_by_name: null,
+  effectiveness_verified_at: null,
 };
 
 const renderDetail = (onSaved = jest.fn()) =>

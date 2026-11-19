@@ -2,8 +2,8 @@
 
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
-(Cursor, Claude Code, a chat bot) gets **785 tools** — 15 hand-written *convenience* tools plus
-**770 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+(Cursor, Claude Code, a chat bot) gets **787 tools** — 15 hand-written *convenience* tools plus
+**772 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
 as the same request from the web app. A **read-only** API token is shown fewer tools, and an
 **AI-external** one fewer still (§4.1, §4.2).
 
@@ -59,6 +59,11 @@ notes}`, where it used to be a bare list of row dicts that arrived wrapped as `{
 (§11). The labor-not-tracked note moved from response headers into `notes`. `export_custom_report`'s
 `format` argument is now `const: "csv"`, so `xlsx` / `pdf` are refused at argument validation. See
 [API.md → Custom report builder](API.md#custom-report-builder).
+
+**Re-checked again on 2026-11-19 after the NCR / CAR records change (migration 127) added two
+Quality tools** (`record_ncr_reverification`, `record_car_effectiveness`; no existing name
+shifted): 15 convenience + **772** generated, 16 shadowed. Both are writes, so the read-only catalog
+is unchanged at 8 convenience + **301** generated, and neither is on the AI-external allowlist.
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
 `backend/tests/test_mcp_docs_names.py` checks every tool name this file, `CLAUDE.md` and `API.md`
@@ -252,7 +257,7 @@ routes authenticate every call; in IN-PROCESS mode it uses the real `ErpTokenVer
  "generated_tools":   [{"name": "...", "method": "GET", "path": "/api/v1/...", "tag": "...",
                         "function": "...", "annotations": {...}, "deprecated": false}],
  "shadowed_operations": [["GET", "/api/v1/inventory/"], ...],
- "counts": {"convenience": 15, "generated": 770, "shadowed": 16}
+ "counts": {"convenience": 15, "generated": 772, "shadowed": 16}
 }
 ```
 
@@ -417,8 +422,16 @@ list):
   `failed`, `conditional`) answers **403** `"A standing API token cannot record an FAI's final
   disposition. …"`, and `create_car` / `update_car` filling or changing a vendor or customer
   approval box answers **403** `"A standing API token cannot record or change a CAR's vendor or
-  customer approval. …"`. The reads beside them (`get_car_pdf`, `list_fai_log`) stay open; a
-  read-only token is still refused `get_car_pdf`'s PDF bytes (§4.1).
+  customer approval. …"`. The NCR / CAR records change (2026-11-19, migration 127; a design
+  decision, not an owner ruling) adds three more: `update_ncr` changing `disposition` or any
+  `concession_*` field answers **403** `"A standing API token cannot record an NCR's disposition or
+  customer concession. …"`, `record_ncr_reverification` answers **403** `"A standing API token
+  cannot record an NCR's re-verification. …"`, and `record_car_effectiveness` answers **403** `"A
+  standing API token cannot record a CAR's effectiveness verification. …"`, all before any write.
+  Since a rework / repair NCR closes only on a recorded conforming re-verification and a corrective
+  CAR only on a recorded effective result, an agent on a token cannot finish those closures alone.
+  The reads beside them (`get_car_pdf`, `list_fai_log`) stay open; a read-only token is still
+  refused `get_car_pdf`'s PDF bytes (§4.1).
 - **Nor post a Hank note** (owner decision 2026-11-16 — a note is a work-order comment, and a
   comment is a person's own words): the API refuses an API token **403** `"A comment is a person's
   own words: an API token cannot post, edit or delete comments or change who is watching a record.
@@ -724,7 +737,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `FabricationQuoting` sources, nesting and actuals | Fabrication Quoting | `upload_file`, `original_file`, `nest`, `save_nest`, `revisions`, `revision`, `list_actuals`, `record_actuals` |
 | `FabricationQuoting` process profiles | Fabrication Quoting | `list_profiles`, `list_revisions`, `save_profile`, `capabilities` |
 | `Customers` (`/customers`) | Customers | `list_customers`, `create_customer`, `update_customer`, `get_customer_stats`, `import_customers_csv`, `get_customer_export_control` (read-only; **marking a customer controlled is not a tool**: `POST /customers/{customer_id}/contracts` and `PUT /customers/{customer_id}/contracts/{contract_id}` are in `EXCLUDED_OPERATIONS` (§6.1) — Admin only, in the app's Export control panel, and refused **403** to every API token — [EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md#6-marking-a-customer-export-controlled-admin)) |
-| `Quality` (`/quality`) | Quality Management, Parts, Data Export | `list_quality_ncrs`★, `get_ncr`, `create_ncr`, `update_ncr`, `void_ncr`, `list_cars`, `get_car_pdf`, `approve_car_quality`, `create_fai`, `record_fai_customer_approval`, `list_fai_log`, `export_fai_log`, `get_quality_summary`, `list_scrap_reason_codes` |
+| `Quality` (`/quality`) | Quality Management, Parts, Data Export | `list_quality_ncrs`★, `get_ncr`, `create_ncr`, `update_ncr`, `record_ncr_reverification`, `void_ncr`, `list_cars`, `get_car_pdf`, `approve_car_quality`, `record_car_effectiveness`, `create_fai`, `record_fai_customer_approval`, `list_fai_log`, `export_fai_log`, `get_quality_summary`, `list_scrap_reason_codes` |
 | `SPC` (`/spc`) | Statistical Process Control, Parts | `list_characteristics`, `add_measurements`, `get_chart_data`, `calculate_control_limits`, `get_capability`, `statistical_process_control_get_dashboard` |
 | `CustomerComplaints` (`/customer-complaints`) | Customer Complaints & RMA | `list_complaints`, `create_complaint`, `create_rma`, `get_8d_report`, `customer_complaints_rma_get_dashboard` |
 | `Calibration` (`/calibration`) | Calibration | `list_equipment`, `get_equipment_due_soon`, `record_calibration`, `get_calibration_history` |
@@ -842,7 +855,8 @@ FAI log, Approved Supplier List and equipment-asset / PM-import routes added: **
 (`--print-catalog` `counts`). On 2026-11-16 bulk release added one secured route and its exclusion
 together, so fifteen were excluded and the count stayed **764**; the five comment / watcher writes then
 joined the exclusions (twenty) and the three comment reads were added: **767 generated tools**; the
-three report-template routes then made it **770 generated tools**.
+three report-template routes then made it **770 generated tools**, and on 2026-11-19 the NCR
+re-verification and CAR effectiveness verbs **772**.
 
 ### 6.2 Naming and the collision policy (`app/mcp/naming.py`)
 

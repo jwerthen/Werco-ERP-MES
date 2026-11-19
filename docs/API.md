@@ -8009,7 +8009,8 @@ the caller's most recent closed unapproved session.)
 | GET | `/quality/ncr` | List live NCRs, newest first (`status` / `part_id` filters) | Yes |
 | POST | `/quality/ncr` | File an NCR; `part_id` / `work_order_id`, when given, must be live records of the active company (**404** otherwise). See "NCR / CAR writes" | Yes |
 | GET | `/quality/ncr/{ncr_id}` | Get a live NCR | Yes |
-| PUT | `/quality/ncr/{ncr_id}` | Edit, disposition, close, reopen, assign, or link a CAR. See "NCR / CAR writes" | Admin / Manager / Quality |
+| PUT | `/quality/ncr/{ncr_id}` | Edit, disposition (the server stamps who decided it), record the action taken and the customer concession, close, reopen, assign, or link a CAR. See "NCR / CAR writes" and "NCR disposition evidence" | Admin / Manager / Quality |
+| POST | `/quality/ncr/{ncr_id}/reverification` | Record the re-verification of reworked or repaired product; body `{ "result": "conforming" or "nonconforming", "notes": "<non-blank>" }`. Server-stamped, re-recordable. **409** on a CLOSED NCR or unless it is dispositioned `rework` / `repair`, **403** for a standing API token. See "NCR disposition evidence" | Admin / Manager / Quality |
 | DELETE | `/quality/ncr/{ncr_id}` | **Void** an NCR (soft-delete + status → `void`); body `{ "reason": "<non-blank>" }`. Guarded, see note | Admin / Manager / Quality |
 | POST | `/quality/ncr/{ncr_id}/restore` | Restore a voided NCR — reopens it to `open` | Admin / Manager / Quality |
 | POST | `/quality/ncr/{ncr_id}/create-car` | Raise a CAR from the NCR and link it, prefilled with the NCR's part and PO number; **409** naming the CAR when one that is not void is already linked | Admin / Manager / Quality |
@@ -8017,8 +8018,9 @@ the caller's most recent closed unapproved session.)
 | POST | `/quality/car` | Open a CAR, including the CAR form fields. See "CAR form fields" | Yes |
 | GET | `/quality/car/{car_id}` | Get a CAR | Yes |
 | GET | `/quality/car/{car_id}/pdf` | The printable CAR (PDF, `inline`) in the layout of Werco's controlled CAR form. Writes nothing. See "Printable CAR" | Yes |
-| PUT | `/quality/car/{car_id}` | Edit, verify, close, reopen, or assign a CAR. See "NCR / CAR writes" | Admin / Manager / Quality |
+| PUT | `/quality/car/{car_id}` | Edit, verify, close, reopen, or assign a CAR. See "NCR / CAR writes" and "CAR corrective-action evidence" | Admin / Manager / Quality |
 | POST | `/quality/car/{car_id}/quality-approval` | Record the form's Quality Manager approval; no body. Server-stamped, once. **409** on a VOID or already-approved CAR, **403** for a standing API token. See "Quality Manager approval" | Admin / Manager / Quality |
+| POST | `/quality/car/{car_id}/effectiveness` | Record the effectiveness verification of the corrective action; body `{ "result": "effective" or "not_effective", "evidence": "<non-blank>" }`. Server-stamped, re-recordable, only while the CAR is in `verification` (**409** otherwise); `not_effective` returns it to `corrective_action`. **403** for a standing API token. See "CAR corrective-action evidence" | Admin / Manager / Quality |
 | POST | `/quality/car/{car_id}/void` | **Void** a CAR; body `{ "reason": "<non-blank>" }`; returns the CAR with `status: "void"`. See note | Admin / Manager / Quality |
 | POST | `/quality/car/{car_id}/restore` | Restore a voided CAR — reopens it to `open`; **409** when the CAR is not void. See note | Admin / Manager / Quality |
 
@@ -8053,8 +8055,9 @@ the caller's most recent closed unapproved session.)
 
 > **NCR / CAR writes (`services/quality_record_service.py`).** Every NCR and CAR write behind
 > `/quality/ncr` and `/quality/car` — create, `PUT` (including disposition, closure, reopen and CAR
-> verification), `create-car`, NCR void / restore, CAR void / restore, and the CAR quality-approval
-> verb — commits together with a **required** `audit_log` row in one transaction.
+> verification), `create-car`, NCR void / restore, CAR void / restore, the CAR quality-approval
+> verb, the NCR re-verification verb and the CAR effectiveness verb — commits together with a
+> **required** `audit_log` row in one transaction.
 > If that row cannot be written, the change is rolled back and the route answers **503**
 > (`"Unable to save audit record"`), the same posture as FAI and job costing. The `ncr_*` / `car_*`
 > operational events are still emitted, but as notification / timeline telemetry, not as the audit
@@ -8071,7 +8074,16 @@ the caller's most recent closed unapproved session.)
 >   record. `create-car` writes a CAR `CREATE` row (`extra_data.ncr_id` / `ncr_number`) **and** an NCR
 >   `UPDATE` row recording the `car_required` / `car_id` link. The quality approval writes one
 >   `APPROVE` row (old/new `quality_approved_by` / `quality_approved_at`,
->   `extra_data.quality_approval = true`).
+>   `extra_data.quality_approval = true`). A disposition change carries the server's
+>   `dispositioned_by` / `dispositioned_at` stamp, and any re-verification it cleared, on its row;
+>   a CAR `PUT` changing `root_cause` or `corrective_action` likewise carries any effectiveness
+>   verification it cleared.
+>   The NCR re-verification writes one `UPDATE` row (old/new `reverification_result` /
+>   `reverification_notes` / `reverified_by` / `reverified_at`, `extra_data.reverification = true`).
+>   The CAR effectiveness verification writes one row, `STATUS_CHANGE` when a `not_effective`
+>   result moved the status and `UPDATE` otherwise (old/new `effectiveness_check` /
+>   `effectiveness_result` / `effectiveness_verified_by` / `effectiveness_verified_at`, plus
+>   `status` when it moved; `extra_data.effectiveness_verification = true`).
 > - **Only real changes are written.** Each requested value is compared with the stored one (`""`
 >   equals `null`, a decimal equals the stored number, enums compare by value), and unchanged fields
 >   are dropped. A `PUT` that changes nothing writes no audit row, emits no event and returns **200**,
@@ -8099,8 +8111,9 @@ the caller's most recent closed unapproved session.)
 >   **422**; use the void verbs.
 > - **Other `PUT` refusals.** An explicit `null` on NCR `status` / `disposition` / `car_required` /
 >   `quantity_rejected` / `estimated_cost` / `actual_cost` or CAR `status` / `priority` is **422**
->   (`"<field> cannot be null"`). Closing a CAR requires root cause, corrective action, verification
->   method and verification results (**422** naming the missing ones). A CAR `initiation_reason` of
+>   (`"<field> cannot be null"`). Closing an NCR or a CAR requires its evidence (**422**
+>   `"Closure requires …"` naming everything missing); see "NCR disposition evidence" and "CAR
+>   corrective-action evidence" below for the exact lists. A CAR `initiation_reason` of
 >   `other` with a blank `initiation_reason_other` is **422** (create too). An `expected_updated_at`
 >   that no longer matches the record is **409** (`"This record changed since you opened it. …"`). That
 >   is the only conflict check: the required `version` field is **ignored** (NCRs and CARs carry no
@@ -8114,6 +8127,89 @@ the caller's most recent closed unapproved session.)
 >   `part_id` (only when that part belongs to the company; a soft-deleted one is still carried, as the
 >   record it inherits), its `po_number` as `vendor_po_number`, and today's Central date as
 >   `submitted_date`.
+
+> **NCR disposition evidence (migration `127_ncr_car_records`, AS9100D 8.7).** An NCR records what
+> was done with the nonconforming product, the customer's concession where one is needed, who
+> decided the disposition, and the re-verification of corrected product. Every new column is
+> nullable; an NCR filed before `127` reads `null` in each (nothing was backfilled).
+>
+> | Field | Type | Written by | Rule |
+> |---|---|---|---|
+> | `action_taken` | text ≤ 4000 | `PUT` | What was physically done to the nonconforming product. Required to close |
+> | `concession_reference` | text ≤ 100 | `PUT` | The customer's deviation / waiver / concession number. Required to close a `use_as_is` or `repair` disposition. **Not by a standing API token** |
+> | `concession_authorized_by` | text ≤ 255 | `PUT` | Who at the customer authorized it (a name, not a user: the authorizer is outside the company). **Not by a standing API token** |
+> | `concession_date` | date | `PUT` | When the customer authorized it. Later than today (Central) is **422** (`"The concession date cannot be in the future."`); an unchanged date is not re-checked. **Not by a standing API token** |
+> | `dispositioned_by`, `dispositioned_at` | user id, UTC datetime | the server | Who decided the disposition, and when. Never accepted in a body |
+> | `reverification_result` | `conforming` or `nonconforming` (DB CHECK `ck_ncrs_reverification_result`) | `POST /quality/ncr/{ncr_id}/reverification` | |
+> | `reverification_notes` | text ≤ 4000 | the same verb | What was re-inspected or re-tested, against which requirement |
+> | `reverified_by`, `reverified_at` | user id, UTC datetime | the server | Stamped by the re-verification verb. Never accepted in a body |
+>
+> `NCRResponse` adds every field above plus `dispositioned_by_name` and `reverified_by_name`, on
+> every NCR route, list included. The names resolve tenant-scoped: a stamped user outside the company
+> is named only when it is a superuser or Platform Admin who acted in this company's context, as on
+> the CAR.
+>
+> - **The disposition stamp.** A `PUT` that changes `disposition` to anything but `pending` stamps
+>   `dispositioned_by` (the caller) and `dispositioned_at` (now, UTC); changing it back to `pending`
+>   clears both. Re-sending the stored disposition stamps nothing. The stamp rides on that request's
+>   one audit row, old → new.
+> - **A disposition change clears the re-verification.** A re-verification vouches for the
+>   correction of one disposition (a rework verified conforming says nothing about a later repair),
+>   so changing `disposition` sets `reverification_result`, `reverification_notes`, `reverified_by`
+>   and `reverified_at` back to `null`. The cleared values stay on the same audit row, old → new.
+> - **A standing API token may not change the judgment.** A token `PUT` that changes `disposition`
+>   or any `concession_*` field (clearing included) is **403** (`"A standing API token cannot record
+>   an NCR's disposition or customer concession. A person signed in to the app must record it."`),
+>   before any write. Re-sending the stored values beside another edit is not a change and is not
+>   refused, and `action_taken` is open to a token. See
+>   [RBAC → Credential policy for judgment writes](RBAC_PERMISSIONS.md#credential-policy-for-judgment-writes).
+> - **Closing (`status: "closed"`) needs its evidence.** Request validation runs first, unchanged:
+>   the closing body itself must carry a `disposition` other than `pending` and a `root_cause` of at
+>   least 20 characters (**422**). The service then judges the record as it would be saved (a value
+>   this request changes, else the stored one) and refuses **422** `"Closure requires …"`, naming
+>   everything missing in this order: `a disposition`, `action taken`, `a customer concession
+>   reference (use-as-is and repair)`, `a conforming re-verification (rework and repair)`.
+>
+>   | Disposition | Required to close, beyond root cause |
+>   |---|---|
+>   | `scrap`, `return_to_vendor` | `action_taken` |
+>   | `use_as_is` | `action_taken` and `concession_reference` |
+>   | `rework` | `action_taken` and a stored `conforming` re-verification |
+>   | `repair` | `action_taken`, `concession_reference` and a stored `conforming` re-verification |
+>
+>   The concession may be entered in the closing request itself. The re-verification cannot: only
+>   its own verb writes it, so the gate reads the stored result. A `nonconforming` result does not
+>   satisfy it, and a closing request that also changes the disposition clears it, so it cannot
+>   close a `rework` / `repair` NCR. An NCR closed before `127` keeps its closure; reopened, it
+>   meets this gate to close again.
+>
+> **Re-verification (`POST /quality/ncr/{ncr_id}/reverification`, MCP tool
+> `record_ncr_reverification`).** Body `NCRReverificationRequest`
+> `{ "result": "conforming" or "nonconforming", "notes": "..." }`. `notes` is required and trimmed,
+> at most 4000 characters; blank or whitespace-only is **422**, and so is an unknown key. The server
+> stamps `reverified_by` (the caller) and `reverified_at` (UTC). Neither is ever taken from a body,
+> and no `PUT` body carries a `reverification_*` or `reverified_*` field. Gate **Admin / Manager /
+> Quality**. Returns the NCR (`NCRResponse`).
+>
+> - **403** for a standing API token (`"A standing API token cannot record an NCR's re-verification.
+>   A person signed in to the app must record it."`), before the NCR is read.
+> - **409** on a CLOSED NCR (`"NCR … is closed; reopen it to record a re-verification."`; reopen
+>   with a status-only `PUT` first) and on a legacy `void`-status row. A voided NCR is
+>   soft-deleted, so it is **404**.
+> - **409** unless the stored disposition is `rework` or `repair` (`"Re-verification applies to
+>   rework and repair dispositions; NCR … is dispositioned <value>."`). Save a disposition change
+>   before recording: the verb reads the stored disposition.
+> - **Re-recordable.** A later re-verification replaces the earlier one (result, notes, who, when),
+>   and the audit row keeps what it replaced. Only a `conforming` result lets a `rework` / `repair`
+>   NCR close.
+> - The NCR row is locked first, so concurrent re-verifications serialize. The required `UPDATE`
+>   audit row commits with the stamp, or neither is saved (**503**). It emits `ncr_updated`
+>   best-effort; the status does not move, so no `ncr.closed` notification fires.
+> - The NCR detail screen shows who decided the disposition and when, the action-taken and
+>   concession fields, and a **Re-verification** panel on a `rework` / `repair` NCR (or one still
+>   carrying a recorded re-verification). **Record re-verification** shows for `quality:approve`
+>   holders on an NCR that is not closed, is disabled while edits are unsaved, waits for the server, and shows a
+>   refusal verbatim.
 
 > **CAR form fields (migration `122_car_form_quote_rev`).** A CAR carries the fields of Werco's
 > controlled form, "AS9100 PROCESS - Corrective Action Report". `POST /quality/car` and
@@ -8153,7 +8249,8 @@ the caller's most recent closed unapproved session.)
 >   `quality_approved_by_name` / `quality_approved_at`. Part and vendor names are read without an
 >   `is_deleted` filter (historical record), but always tenant-scoped, so a legacy row pointing at
 >   another company's record shows no name rather than theirs. A server-stamped user
->   (`initiated_by`, `verified_by`, `closed_by`, `quality_approved_by`) outside the company is
+>   (`initiated_by`, `verified_by`, `closed_by`, `quality_approved_by`, and since `127`
+>   `effectiveness_verified_by`) outside the company is
 >   named only when it is a superuser or Platform Admin who acted in this company's context; an
 >   ordinary user of another company is never named. Every CAR route, list included,
 >   returns this shape.
@@ -8165,7 +8262,8 @@ the caller's most recent closed unapproved session.)
 >   served in full to an AI-external API token only when every one of those links clears, so
 >   setting a controlled customer on a CAR raised from a cleared NCR withholds it from the next
 >   request on. Inside a withheld CAR the form's text (reason, RMA #, vendor PO, management action,
->   approval names and titles) is `"[export-controlled]"`; the cost buckets and `cost_total` stay
+>   approval names and titles, and since `127` the two reviews and the effectiveness evidence) is
+>   `"[export-controlled]"`; the cost buckets and `cost_total` stay
 >   true. `GET /quality/car/{car_id}/pdf` is a file and is refused to every read-only token. See
 >   [EXPORT_CONTROL_AI_EGRESS.md → Linkage map](EXPORT_CONTROL_AI_EGRESS.md#linkage-map).
 >
@@ -8190,6 +8288,95 @@ the caller's most recent closed unapproved session.)
 >   an unapproved, non-void CAR, is disabled while edits are unsaved, waits for the server, and
 >   shows a refusal verbatim.
 >
+> **CAR corrective-action evidence (migration `127_ncr_car_records`, AS9100D 10.2).** A CAR records
+> the human-factors and similar-nonconformity reviews behind its corrective action, when the
+> follow-up effectiveness check is due, and the effectiveness verification itself. Every new column
+> is nullable; a CAR raised before `127` reads `null` in each (nothing was backfilled).
+>
+> | Field | Type | Written by | Rule |
+> |---|---|---|---|
+> | `human_factors_review` | text ≤ 4000 | `POST` / `PUT` (`CARFormFields`) | Human factors considered in the cause (fatigue, training, procedure clarity, workload, environment, communication). Required to close a corrective CAR |
+> | `similar_nonconformities_review` | text ≤ 4000 | `POST` / `PUT` | Where else this nonconformity exists or could occur. Required to close a corrective CAR |
+> | `effectiveness_due` | date | `POST` / `PUT` | When the follow-up effectiveness check is due. Recorded only: nothing gates or notifies on it |
+> | `effectiveness_check` (existing column) | text ≤ 4000 (was 2000) | `PUT`, while no result is recorded; then only the effectiveness verb (its `evidence`) | Now "the evidence reviewed for effectiveness". Locked while a result is recorded (below) |
+> | `effectiveness_result` | `effective` or `not_effective` (DB CHECK `ck_cars_effectiveness_result`) | `POST /quality/car/{car_id}/effectiveness` | Cleared by a `PUT` that changes `root_cause` or `corrective_action` (below) |
+> | `effectiveness_verified_by`, `effectiveness_verified_at` | user id, UTC datetime | the server | Stamped by the effectiveness verb. Never accepted in a body. Cleared with the result |
+>
+> `CARResponse` adds the six new columns plus `effectiveness_verified_by_name`, resolved like the
+> other stamped users above.
+>
+> - **Closing a corrective CAR needs the 10.2 evidence.** For `car_type` `corrective`, or `null`
+>   (which has always meant corrective), closing (`status: "closed"`) requires, beyond root cause,
+>   corrective action, verification method and verification results: a non-blank
+>   `human_factors_review`, a non-blank `similar_nonconformities_review`, and a **stored**
+>   `effective` effectiveness result. It is judged on the record as it would be saved: the two
+>   reviews may be entered in the closing request, the result only through its verb. **422**
+>   `"Closure requires …"` names everything missing, in this order: `root cause`, `corrective
+>   action`, `verification method`, `verification results`, `human factors review`, `similar
+>   nonconformities review`, `an effective effectiveness verification`. `preventive` and
+>   `improvement` CARs keep the original four. Since a result is recorded only in `verification`, a
+>   corrective CAR passes through `verification` before it can close. A CAR closed before `127` keeps
+>   its closure; reopened, it meets this gate to close again.
+> - **`effectiveness_check` is locked while a result is recorded.** The evidence a recorded
+>   verification reviewed is part of that record, so a `PUT` that changes `effectiveness_check` on a
+>   CAR carrying an `effectiveness_result` is **409** (`"CAR … has a recorded effectiveness
+>   verification; record a new one with the effectiveness action to change its evidence."`).
+>   Re-sending it unchanged is not a change. It changes by recording a new verification, which
+>   re-stamps who reviewed it and when, or in a request that clears the result (next bullet).
+> - **Changing what was reviewed clears the effectiveness verification.** A verification vouches
+>   for the cause and action it reviewed, and no more. So a `PUT` that changes `root_cause` or
+>   `corrective_action` on a CAR carrying a recorded verification sets `effectiveness_result`,
+>   `effectiveness_verified_by` and `effectiveness_verified_at` back to `null`, `not_effective`
+>   results included. The cleared values stay on that request's audit row, old → new. The evidence
+>   text (`effectiveness_check`) stays, unlocked: the same request may change it without the
+>   **409**, and so may any later `PUT` until a new result is recorded. A close in the same request
+>   is judged as already cleared, so a corrective CAR gets the **422** naming `an effective
+>   effectiveness verification`. The status does not move, and a status-only reopen of a CLOSED CAR
+>   changes neither field, so it clears nothing. This is the CAR twin of the NCR rule that a
+>   disposition change clears the re-verification.
+>
+> **Effectiveness verification (`POST /quality/car/{car_id}/effectiveness`, MCP tool
+> `record_car_effectiveness`).** Body `CAREffectivenessRequest`
+> `{ "result": "effective" or "not_effective", "evidence": "..." }`. `evidence` (what was reviewed to
+> judge it) is required and trimmed, at most 4000 characters; blank or whitespace-only is **422**,
+> and so is an unknown key. It is stored as `effectiveness_check`. The server stamps
+> `effectiveness_verified_by` (the caller) and `effectiveness_verified_at` (UTC); no `POST` or `PUT`
+> body carries `effectiveness_result` or either stamp. Gate **Admin / Manager / Quality**. Returns
+> the CAR (`CARResponse`).
+>
+> - **403** for a standing API token (`"A standing API token cannot record a CAR's effectiveness
+>   verification. A person signed in to the app must record it."`), before the CAR is read.
+> - **409** unless the CAR is in `verification` (`"Record effectiveness once CAR … is in
+>   Verification; it is <status>."`), VOID and CLOSED included.
+> - **`not_effective` returns the CAR to `corrective_action`**, on the same audit row
+>   (`STATUS_CHANGE`, described as the verification finding it not effective and returning it from
+>   `verification` to `corrective_action`): the action did not work, so the work is not done. The
+>   stored result stays `not_effective`, which keeps a corrective CAR from closing, until a new
+>   verification replaces it (or a revised `root_cause` / `corrective_action` clears it, above);
+>   move the CAR back to `verification` (a `PUT`, which records the verifier as before) and record
+>   one. `effective` leaves the status alone.
+> - **Re-recordable.** A later verification replaces result, evidence, who and when, and the audit
+>   row keeps what it replaced.
+> - The CAR row is locked first, so concurrent verifications serialize. The required audit row
+>   commits with the stamp, or neither is saved (**503**). It emits `car_updated` best-effort
+>   (severity `medium` for `not_effective`, `info` otherwise).
+> - The CAR detail screen has the two review fields and the due date, and an **Effectiveness
+>   verification** panel showing the result, evidence, verifier and date. **Record effectiveness**
+>   shows for `quality:approve` holders while the CAR is in Verification, is disabled while edits
+>   are unsaved, waits for the server, and shows a refusal verbatim; the evidence field is read-only
+>   once a result is recorded.
+>
+> **For the Quality Manager: which AS9100D clause each new record serves.** These are records, not
+> new approvals; who recorded each stamped one is on the record and on its audit row.
+>
+> | AS9100D clause | Record | What it holds |
+> |---|---|---|
+> | 8.7.1 (concession) | NCR `concession_reference`, `concession_authorized_by`, `concession_date` | The customer's concession for releasing use-as-is or repaired product: its number, who at the customer authorized it, and when. Required to close a use-as-is or repair NCR |
+> | 8.7.1 (re-verification after correction) | NCR re-verification: `reverification_result`, `reverification_notes`, `reverified_by`, `reverified_at` | That corrected (reworked or repaired) product was re-verified against the requirement, what was checked, the result, by whom and when. A conforming result is required to close a rework or repair NCR |
+> | 8.7.2 (action taken, who decided) | NCR `action_taken`; `dispositioned_by`, `dispositioned_at` | What was done with the nonconforming product, and the authority who decided the disposition (server-stamped, never typed) |
+> | 10.2.1 (human factors, similar nonconformities) | CAR `human_factors_review`, `similar_nonconformities_review` | The review of human factors in the cause, and of whether similar nonconformities exist or could occur. Both required to close a corrective CAR |
+> | 10.2.2 (effectiveness evidence and result) | CAR `effectiveness_check`, `effectiveness_result`, `effectiveness_verified_by`, `effectiveness_verified_at`, `effectiveness_due` | The evidence reviewed, the result (effective / not effective), who judged it and when, and when the check was due. An effective result is required to close a corrective CAR; a not-effective one sends the CAR back to corrective action. Changing the root cause or corrective action clears the result, so it always speaks to the action as it stands |
+>
 > **Printable CAR (`GET /quality/car/{car_id}/pdf`).** Returns the CAR as a PDF in the layout of the
 > controlled form (`services/car_pdf_service.py`), served `inline` as `<car_number>.pdf`. It has the
 > same read access as `GET /quality/car/{car_id}`; another company's CAR is **404**. The header is the
@@ -8201,6 +8388,15 @@ the caller's most recent closed unapproved session.)
 > long text continues on the next page, and every page has a footer with the CAR number and page
 > number. Every value is escaped at the reportlab sink. It writes nothing and records no audit row
 > (one record, not a bulk export). The CAR detail screen's **Print CAR** button opens it in a preview.
+>
+> Since `127` the grid also carries the AS9100D 10.2 evidence the paper form has no room for, as
+> boxes of its own: a **Human Factors Review** and a **Similar Nonconformities Review** after the
+> corrective action, and, after the management action and just above the approvals, an
+> **Effectiveness Verification** row (result printed `Effective` / `Not effective`, verified by, and
+> the Central date of the UTC stamp) followed by **Evidence Reviewed for Effectiveness**. An empty
+> box prints blank, leaving room to write in. **The printed CAR now has boxes Werco's controlled CAR
+> form does not, so Quality should bump the controlled form's revision** to match what the ERP
+> prints.
 
 > **CAR void + restore (`POST /quality/car/{car_id}/void`, `POST /quality/car/{car_id}/restore`).**
 > Void retires a duplicate CAR or one raised in error. Body `CARVoidRequest` `{ "reason": "..." }`:
@@ -15162,7 +15358,7 @@ What matters from this file's point of view:
   routers with the caller's own bearer token. The router is the boundary: the same `require_role`
   gates, tenant scoping, audit rows, optimistic-locking 409s and per-endpoint size caps apply, and a
   401/403/409/422 comes back verbatim as an `is_error` tool result carrying the server's `detail`.
-- **The catalog is this API.** 770 tools are generated from `app.openapi()` at startup — every
+- **The catalog is this API.** 772 tools are generated from `app.openapi()` at startup — every
   secured operation except the `Authentication`, `Carrier Webhooks`, `Error Logging` (and its router-level `errors` twin) and `WebSocket` tags, the
   unauthenticated health/station-login routes (named one by one in `catalog.PUBLIC_OPERATIONS`) and
   the twenty operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders

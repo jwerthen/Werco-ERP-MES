@@ -48,6 +48,39 @@ Rules every writer here keeps:
   reason ``other`` needs its text (422); the cost total is computed at read time, never
   stored. The Quality Manager approval is its own verb (:func:`approve_car_quality`):
   server-stamped, once, never by an API token, never from a request body.
+* **Who decided an NCR's disposition is stamped, never sent** (AS9100D 8.7.1, migration
+  ``127_ncr_car_records``). A ``PUT`` that changes ``disposition`` to anything but PENDING
+  stamps ``dispositioned_by`` / ``dispositioned_at`` (the caller, now); back to PENDING
+  clears both. Both ride on that request's one audit row, old -> new. A disposition change
+  also clears any stored re-verification (result, notes, who, when -- kept on the audit row):
+  it vouched for the previous disposition's correction, not the new one's.
+* **Judgments are a person's.** A standing API token (``is_api_token_credential``) may not
+  CHANGE an NCR's disposition or customer concession (``concession_*``) -- 403
+  ``API_TOKEN_NCR_JUDGMENT`` before any write; re-sending the stored values with another edit
+  is not a change. The three stamped verbs -- the CAR quality approval, the NCR
+  re-verification and the CAR effectiveness verification -- refuse a token outright (403).
+  ``concession_date`` records a past event: never later than today (Central) (422).
+* **Closure needs its evidence**, judged on the MERGED record (the request's value, else the
+  stored one) and refused 422 naming everything missing before any write. An NCR needs a
+  non-PENDING disposition and ``action_taken``; use-as-is and repair also need a customer
+  ``concession_reference``; rework and repair also need a STORED ``conforming``
+  re-verification. A CAR needs root cause, corrective action, verification method and
+  results; a corrective one (``car_type`` corrective, or NULL) also needs
+  ``human_factors_review``, ``similar_nonconformities_review`` and a STORED ``effective``
+  effectiveness verification. Preventive / improvement CARs keep the original four.
+* **Re-verification and effectiveness are their own verbs, server-stamped and re-recordable**
+  (:func:`record_ncr_reverification`, :func:`record_car_effectiveness`): the result and its
+  notes / evidence come from the body, who and when never do, and a later recording
+  overwrites the earlier one with the audit row keeping what it replaced. No ``PUT`` body
+  carries ``reverification_*`` / ``effectiveness_result`` / ``*_verified_*``. Once an
+  effectiveness result is recorded, the evidence it reviewed (``effectiveness_check``) is
+  part of that record: a ``PUT`` that changes it is 409. ``not_effective`` returns the CAR
+  from VERIFICATION to CORRECTIVE_ACTION on the same (STATUS_CHANGE) audit row.
+* **A verification vouches for what it reviewed, and no more.** A ``PUT`` that changes an
+  NCR's disposition clears its re-verification; one that changes a CAR's ``root_cause`` or
+  ``corrective_action`` clears its effectiveness result, verifier and instant (the evidence
+  text stays, unlocked, for the next recording). The cleared values ride old -> new on that
+  request's audit row, and a close in the same request is judged as if already cleared.
 
 Lock order: every row lock (``SELECT ... FOR UPDATE``) and number-generator advisory
 lock is taken BEFORE the first audit row, because the audit chain lock is global.
@@ -57,7 +90,7 @@ import enum
 from contextlib import contextmanager
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 from fastapi import HTTPException
 from sqlalchemy import inspect, or_
@@ -73,9 +106,13 @@ from app.models.customer import Customer
 from app.models.part import Part
 from app.models.purchasing import Vendor
 from app.models.quality import (
+    CAREffectivenessResult,
     CARInitiationReason,
     CARStatus,
+    CARType,
     CorrectiveActionRequest,
+    NCRDisposition,
+    NCRReverificationResult,
     NCRSource,
     NCRStatus,
     NonConformanceReport,
@@ -83,7 +120,16 @@ from app.models.quality import (
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder
 from app.models.work_order_blocker import WorkOrderBlocker, WorkOrderBlockerStatus
-from app.schemas.quality import CARCreate, CARResponse, CARUpdate, NCRCreate, NCRUpdate
+from app.schemas.quality import (
+    CARCreate,
+    CAREffectivenessRequest,
+    CARResponse,
+    CARUpdate,
+    NCRCreate,
+    NCRResponse,
+    NCRReverificationRequest,
+    NCRUpdate,
+)
 from app.services.audit_service import AuditService, AuditWriteError
 from app.services.operational_event_service import OperationalEventService
 from app.services.quality_numbering import generate_car_number as _generate_car_number
@@ -132,6 +178,30 @@ _CAR_RECORD_DATES = {
     "vendor_approval_date": "The vendor approval date",
     "customer_approval_date": "The customer approval date",
 }
+# The same rule for the NCR's customer concession (AS9100D 8.7.1 d): it was authorized on that day.
+_NCR_RECORD_DATES = {"concession_date": "The concession date"}
+
+# An NCR's disposition and the customer concession behind a use-as-is / repair are a person's
+# judgment (AS9100D 8.7.1), and the disposition stamp names that person -- so a standing API
+# token may not record or change them, and may not record a re-verification of reworked /
+# repaired product. ``is_api_token_credential``, as for the CAR approval above.
+NCR_JUDGMENT_FIELDS = ("disposition", "concession_reference", "concession_authorized_by", "concession_date")
+API_TOKEN_NCR_JUDGMENT = (
+    "A standing API token cannot record an NCR's disposition or customer concession. "
+    "A person signed in to the app must record it."
+)
+API_TOKEN_NCR_REVERIFICATION = (
+    "A standing API token cannot record an NCR's re-verification. A person signed in to the app must record it."
+)
+# The CAR's effectiveness verification (AS9100D 10.2.1 d) is the same kind of judgment.
+API_TOKEN_CAR_EFFECTIVENESS = (
+    "A standing API token cannot record a CAR's effectiveness verification. "
+    "A person signed in to the app must record it."
+)
+# Dispositions that release product only with the customer's concession (use-as-is, repair),
+# and those that change the product and so must be re-verified before closure (rework, repair).
+_CONCESSION_DISPOSITIONS = (NCRDisposition.USE_AS_IS, NCRDisposition.REPAIR)
+_REVERIFY_DISPOSITIONS = (NCRDisposition.REWORK, NCRDisposition.REPAIR)
 
 # Columns a request may never null out (each has a model default and readers that
 # assume a value). ``quantity_rejected`` is also refused by ``NCRUpdate`` itself, and
@@ -457,11 +527,52 @@ def update_ncr(
         if requested.get("quantity_rejected", ncr.quantity_rejected or 0) > ncr.quantity_affected:
             raise HTTPException(status_code=422, detail="Rejected quantity cannot exceed affected quantity")
         changes = _changed_fields(ncr, requested)
+        # Both refusals see only CHANGED fields: re-sending the stored disposition or concession
+        # alongside another edit is not a judgment, and an unchanged past date is not re-checked.
+        if is_api_token_credential(user) and any(field in changes for field in NCR_JUDGMENT_FIELDS):
+            raise HTTPException(status_code=403, detail=API_TOKEN_NCR_JUDGMENT)
+        _check_record_dates(changes, _NCR_RECORD_DATES)
         if changes:
             _write_ncr_changes(db, company_id, ncr, changes, user, audit)
     # Read back AFTER the commit (which expires every loaded attribute) so the response's
     # ``part`` comes through the tenant-scoped loader, not an unscoped lazy load.
     return get_ncr(db, company_id, ncr_id)
+
+
+def _blank(value: Any) -> bool:
+    return not str(value or "").strip()
+
+
+_NCR_REVERIFICATION_FIELDS = ("reverification_result", "reverification_notes", "reverified_by", "reverified_at")
+
+
+def _check_ncr_closure(ncr: NonConformanceReport, changes: Dict[str, Any]) -> None:
+    """422 (before any write) naming the AS9100D 8.7 evidence a closing NCR still lacks.
+
+    Judged on the MERGED record (a value this request changes, else the stored one), so the
+    evidence may be supplied in the closing request itself -- except the re-verification,
+    which only its own verb records and so is always the stored result. The schema-level
+    disposition / root-cause check on ``NCRUpdate`` still runs first.
+    """
+
+    def merged(field: str) -> Any:
+        return changes.get(field, getattr(ncr, field))
+
+    disposition = merged("disposition")
+    missing: List[str] = []
+    if disposition is None or disposition == NCRDisposition.PENDING:
+        missing.append("a disposition")
+    if _blank(merged("action_taken")):
+        missing.append("action taken")
+    if disposition in _CONCESSION_DISPOSITIONS and _blank(merged("concession_reference")):
+        missing.append("a customer concession reference (use-as-is and repair)")
+    # A disposition change in this same request clears the stored re-verification (see
+    # ``_write_ncr_changes``), so it cannot vouch for the disposition being closed.
+    reverification = None if "disposition" in changes else ncr.reverification_result
+    if disposition in _REVERIFY_DISPOSITIONS and reverification != NCRReverificationResult.CONFORMING:
+        missing.append("a conforming re-verification (rework and repair)")
+    if missing:
+        raise HTTPException(status_code=422, detail="Closure requires " + ", ".join(missing))
 
 
 def _write_ncr_changes(
@@ -473,18 +584,44 @@ def _write_ncr_changes(
     audit: AuditService,
 ) -> None:
     reopening = _guard_final_record(ncr.status, changes, f"NCR {ncr.ncr_number}", NCRStatus.CLOSED, NCRStatus.VOID)
+    closing = changes.get("status") == NCRStatus.CLOSED
+    if closing:
+        _check_ncr_closure(ncr, changes)
     if changes.get("assigned_to") is not None:
         _assignable_user_or_404(db, company_id, changes["assigned_to"])
     if changes.get("car_id") is not None:
         _linkable_car_or_404(db, company_id, changes["car_id"])
 
-    closing = changes.get("status") == NCRStatus.CLOSED
-    tracked = list(changes) + (["closed_date", "closed_by"] if closing or reopening else [])
+    dispositioning = "disposition" in changes
+    # A re-verification vouches for the correction of ONE disposition: a rework verified
+    # conforming says nothing about a later repair. Changing the disposition clears it (the
+    # audit row keeps the cleared values), so the close gate needs a fresh one.
+    clearing_reverification = dispositioning and any(
+        getattr(ncr, field) is not None for field in _NCR_REVERIFICATION_FIELDS
+    )
+    side_fields: List[str] = (
+        (["dispositioned_by", "dispositioned_at"] if dispositioning else [])
+        + (list(_NCR_REVERIFICATION_FIELDS) if clearing_reverification else [])
+        + (["closed_date", "closed_by"] if closing or reopening else [])
+    )
+    tracked = list(changes) + side_fields
     old = {field: _value(getattr(ncr, field)) for field in tracked}
     previous_status = ncr.status
     previous_disposition = ncr.disposition
     for field, value in changes.items():
         setattr(ncr, field, value)
+    if dispositioning:
+        # Who decided the disposition and when (AS9100D 8.7.1): server-stamped, never sent.
+        # Back to PENDING means nobody has decided it, so the stamp clears.
+        if changes["disposition"] == NCRDisposition.PENDING:
+            ncr.dispositioned_by = None
+            ncr.dispositioned_at = None
+        else:
+            ncr.dispositioned_by = user.id
+            ncr.dispositioned_at = datetime.utcnow()
+    if clearing_reverification:
+        for field in _NCR_REVERIFICATION_FIELDS:
+            setattr(ncr, field, None)
     if closing:
         ncr.closed_date = date.today()
         ncr.closed_by = user.id
@@ -619,6 +756,85 @@ def restore_ncr(db: Session, company_id: int, ncr_id: int, audit: AuditService) 
     return number
 
 
+def record_ncr_reverification(
+    db: Session, company_id: int, ncr_id: int, data: NCRReverificationRequest, user: User, audit: AuditService
+) -> NonConformanceReport:
+    """Record the re-verification of reworked or repaired product (AS9100D 8.7.1): server-stamped.
+
+    The result and notes come from the request; who recorded it and when are stamped here and
+    never taken from a body. Re-recordable: a later re-verification overwrites the earlier
+    one, and the audit row keeps the values it replaced (old -> new). Applies only while the
+    disposition is rework or repair (409 otherwise) and the NCR is open (a CLOSED or VOID NCR
+    is 409 -- reopen it first). A standing API token is refused (403) before anything is read:
+    the stamp names a person. The NCR row is locked first, so two concurrent re-verifications
+    serialize; the UPDATE audit row commits with the stamp or neither does (503). A
+    ``conforming`` result is what closing a rework / repair NCR requires.
+    """
+    if is_api_token_credential(user):
+        raise HTTPException(status_code=403, detail=API_TOKEN_NCR_REVERIFICATION)
+    with quality_record_transaction(db):
+        ncr = _live_ncr_for_update_or_404(db, company_id, ncr_id)
+        if ncr.status == NCRStatus.VOID:
+            raise HTTPException(
+                status_code=409, detail=f"NCR {ncr.ncr_number} is void; a voided record cannot be changed."
+            )
+        if ncr.status == NCRStatus.CLOSED:
+            raise HTTPException(
+                status_code=409, detail=f"NCR {ncr.ncr_number} is closed; reopen it to record a re-verification."
+            )
+        if ncr.disposition not in _REVERIFY_DISPOSITIONS:
+            disposition = _value(ncr.disposition) or NCRDisposition.PENDING.value
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Re-verification applies to rework and repair dispositions; "
+                    f"NCR {ncr.ncr_number} is dispositioned {disposition}."
+                ),
+            )
+        tracked = _NCR_REVERIFICATION_FIELDS
+        old = {field: _value(getattr(ncr, field)) for field in tracked}
+        ncr.reverification_result = data.result.value
+        ncr.reverification_notes = data.notes
+        ncr.reverified_by = user.id
+        ncr.reverified_at = datetime.utcnow()
+        new = {field: _value(getattr(ncr, field)) for field in tracked}
+        _audit(
+            audit,
+            "UPDATE",
+            NCR_RESOURCE,
+            ncr,
+            ncr.ncr_number,
+            description=f"Recorded re-verification of NCR {ncr.ncr_number}: {data.result.value}",
+            old=old,
+            new=new,
+            extra={
+                "changes": _diff(old, new),
+                "reverification": True,
+                "disposition": _value(ncr.disposition),
+                "status": _value(ncr.status),
+            },
+        )
+        OperationalEventService(db).emit_best_effort(
+            company_id=company_id,
+            event_type="ncr_updated",
+            source_module="quality",
+            entity_type="ncr",
+            entity_id=ncr.id,
+            work_order_id=ncr.work_order_id,
+            user_id=user.id,
+            severity="info",
+            event_payload={
+                "ncr_number": ncr.ncr_number,
+                "changed_fields": sorted(tracked),
+                "previous_status": _value(ncr.status),
+                "status": _value(ncr.status),
+                "previous_disposition": _value(ncr.disposition),
+                "disposition": _value(ncr.disposition),
+            },
+        )
+    return get_ncr(db, company_id, ncr_id)
+
+
 # --------------------------------------------------------------------------- CAR writes
 
 
@@ -679,10 +895,10 @@ def _refuse_token_signoff(user: User, values: Dict[str, Any], *, changes: bool) 
             raise HTTPException(status_code=403, detail=API_TOKEN_CAR_SIGNOFF)
 
 
-def _check_record_dates(values: Dict[str, Any]) -> None:
+def _check_record_dates(values: Dict[str, Any], labels: Optional[Dict[str, str]] = None) -> None:
     """422 (before any write) when a date recording a past event is after today (Central)."""
     today = central_today()
-    for field, label in _CAR_RECORD_DATES.items():
+    for field, label in (_CAR_RECORD_DATES if labels is None else labels).items():
         value = values.get(field)
         if value is not None and value > today:
             raise HTTPException(status_code=422, detail=f"{label} cannot be in the future.")
@@ -878,6 +1094,45 @@ def update_car(
     return get_car(db, company_id, car_id)
 
 
+# What a CAR's effectiveness verification reviewed: the cause it found and the action taken
+# against it. Changing either clears the recorded result (and its verifier and instant), so a
+# closed CAR can never name someone as having found effective an action they never reviewed.
+_CAR_EFFECTIVENESS_REVIEWED_FIELDS = ("root_cause", "corrective_action")
+_CAR_EFFECTIVENESS_RESULT_FIELDS = ("effectiveness_result", "effectiveness_verified_by", "effectiveness_verified_at")
+
+
+def _check_car_closure(
+    car: CorrectiveActionRequest, requested: Dict[str, Any], *, clearing_effectiveness: bool = False
+) -> None:
+    """422 (before any write) naming the evidence a closing CAR still lacks.
+
+    Judged on the MERGED record (the requested value, else the stored one). A corrective CAR
+    -- ``car_type`` corrective, or NULL, which has always meant corrective -- also needs the
+    AS9100D 10.2.1 reviews (human factors, similar nonconformities) and a recorded
+    ``effective`` effectiveness verification (10.2.1 d), which only its own verb writes and so
+    is always the stored result. Preventive and improvement CARs keep the original four.
+    """
+
+    def blank(field: str) -> bool:
+        return _blank(requested.get(field, getattr(car, field)))
+
+    missing = [
+        field.replace("_", " ")
+        for field in ("root_cause", "corrective_action", "verification_method", "verification_results")
+        if blank(field)
+    ]
+    if car.car_type is None or car.car_type == CARType.CORRECTIVE:
+        if blank("human_factors_review"):
+            missing.append("human factors review")
+        if blank("similar_nonconformities_review"):
+            missing.append("similar nonconformities review")
+        result = None if clearing_effectiveness else car.effectiveness_result
+        if result != CAREffectivenessResult.EFFECTIVE:
+            missing.append("an effective effectiveness verification")
+    if missing:
+        raise HTTPException(status_code=422, detail="Closure requires " + ", ".join(missing))
+
+
 def _write_car_changes(
     db: Session,
     company_id: int,
@@ -888,16 +1143,23 @@ def _write_car_changes(
     audit: AuditService,
 ) -> None:
     reopening = _guard_final_record(car.status, changes, f"CAR {car.car_number}", CARStatus.CLOSED, CARStatus.VOID)
+    clearing_effectiveness = any(field in changes for field in _CAR_EFFECTIVENESS_REVIEWED_FIELDS) and any(
+        getattr(car, field) is not None for field in _CAR_EFFECTIVENESS_RESULT_FIELDS
+    )
+    if "effectiveness_check" in changes and car.effectiveness_result is not None and not clearing_effectiveness:
+        # The evidence a recorded verification reviewed is part of that record: it changes only
+        # by recording a new verification, which re-stamps who reviewed it and when.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"CAR {car.car_number} has a recorded effectiveness verification; record a new one with the "
+                "effectiveness action to change its evidence."
+            ),
+        )
     closing = changes.get("status") == CARStatus.CLOSED
     verifying = changes.get("status") == CARStatus.VERIFICATION
     if closing:
-        missing = [
-            field.replace("_", " ")
-            for field in ("root_cause", "corrective_action", "verification_method", "verification_results")
-            if not str(requested.get(field, getattr(car, field)) or "").strip()
-        ]
-        if missing:
-            raise HTTPException(status_code=422, detail="Closure requires " + ", ".join(missing))
+        _check_car_closure(car, requested, clearing_effectiveness=clearing_effectiveness)
     if changes.get("assigned_to") is not None:
         _assignable_user_or_404(db, company_id, changes["assigned_to"])
     if (
@@ -926,6 +1188,7 @@ def _write_car_changes(
         (["verified_by"] if verifying else [])
         + (["closed_date", "closed_by"] if closing or reopening else [])
         + (["customer_name"] if snapshot_customer else [])
+        + (list(_CAR_EFFECTIVENESS_RESULT_FIELDS) if clearing_effectiveness else [])
     )
     tracked = list(changes) + side_fields
     old = {field: _value(getattr(car, field)) for field in tracked}
@@ -936,6 +1199,9 @@ def _write_car_changes(
         car.customer_name = customer.name if customer is not None else None
     if verifying:
         car.verified_by = user.id
+    if clearing_effectiveness:
+        for field in _CAR_EFFECTIVENESS_RESULT_FIELDS:
+            setattr(car, field, None)
     if closing:
         car.closed_date = date.today()
         car.closed_by = user.id
@@ -1150,6 +1416,84 @@ def approve_car_quality(
     return get_car(db, company_id, car_id)
 
 
+def record_car_effectiveness(
+    db: Session, company_id: int, car_id: int, data: CAREffectivenessRequest, user: User, audit: AuditService
+) -> CorrectiveActionRequest:
+    """Record the review of a corrective action's effectiveness (AS9100D 10.2.1 d): server-stamped.
+
+    Only while the CAR is in VERIFICATION (409 otherwise, VOID and CLOSED included). Writes the
+    evidence reviewed (``effectiveness_check``) and the result; who recorded it and when are
+    stamped here, never taken from a body. Re-recordable: a later verification overwrites the
+    earlier one and the audit row keeps what it replaced. ``not_effective`` also returns the
+    CAR to CORRECTIVE_ACTION (a STATUS_CHANGE row) -- the action did not work, so the work is
+    not done; ``effective`` leaves the status alone and is what closing a corrective CAR
+    requires. A standing API token is refused (403) before anything is read: the stamp names a
+    person. The CAR row is locked first; the audit row commits with the stamp or neither does
+    (503).
+    """
+    if is_api_token_credential(user):
+        raise HTTPException(status_code=403, detail=API_TOKEN_CAR_EFFECTIVENESS)
+    with quality_record_transaction(db):
+        car = _car_for_update_or_404(db, company_id, car_id)
+        if car.status != CARStatus.VERIFICATION:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Record effectiveness once CAR {car.car_number} is in Verification; "
+                    f"it is {_value(car.status)}."
+                ),
+            )
+        not_effective = data.result == CAREffectivenessResult.NOT_EFFECTIVE
+        tracked = (
+            "effectiveness_check",
+            "effectiveness_result",
+            "effectiveness_verified_by",
+            "effectiveness_verified_at",
+        ) + (("status",) if not_effective else ())
+        old = {field: _value(getattr(car, field)) for field in tracked}
+        previous_status = car.status
+        car.effectiveness_check = data.evidence
+        car.effectiveness_result = data.result.value
+        car.effectiveness_verified_by = user.id
+        car.effectiveness_verified_at = datetime.utcnow()
+        if not_effective:
+            car.status = CARStatus.CORRECTIVE_ACTION
+        new = {field: _value(getattr(car, field)) for field in tracked}
+        _audit(
+            audit,
+            "STATUS_CHANGE" if not_effective else "UPDATE",
+            CAR_RESOURCE,
+            car,
+            car.car_number,
+            description=(
+                f"Effectiveness verification of CAR {car.car_number} found it not effective; returned it from "
+                "'verification' to 'corrective_action'"
+                if not_effective
+                else f"Recorded effectiveness verification of CAR {car.car_number}: effective"
+            ),
+            old=old,
+            new=new,
+            extra={"changes": _diff(old, new), "effectiveness_verification": True},
+        )
+        OperationalEventService(db).emit_best_effort(
+            company_id=company_id,
+            event_type="car_updated",
+            source_module="quality",
+            entity_type="car",
+            entity_id=car.id,
+            user_id=user.id,
+            severity="medium" if not_effective else "info",
+            event_payload={
+                "car_number": car.car_number,
+                "changed_fields": sorted(tracked),
+                "previous_status": _value(previous_status),
+                "status": _value(car.status),
+                "priority": car.priority,
+            },
+        )
+    return get_car(db, company_id, car_id)
+
+
 def car_reference_count(
     db: Session, company_id: int, *, part_id: Optional[int] = None, customer_id: Optional[int] = None
 ) -> int:
@@ -1188,7 +1532,13 @@ def car_reference_refusal(count: int, label: str) -> Optional[str]:
 # restricted to platform principals (superuser / PLATFORM_ADMIN, as ``fai_responses``) rather
 # than printing a blank approver -- never an ordinary user of another company.
 _CAR_SELECTED_USER_FIELDS = ("assigned_to",)
-_CAR_STAMPED_USER_FIELDS = ("initiated_by", "verified_by", "closed_by", "quality_approved_by")
+_CAR_STAMPED_USER_FIELDS = (
+    "initiated_by",
+    "verified_by",
+    "closed_by",
+    "quality_approved_by",
+    "effectiveness_verified_by",
+)
 _CAR_COST_FIELDS = ("cost_labor", "cost_material", "cost_outside_services", "cost_shipping")
 
 
@@ -1214,33 +1564,12 @@ def car_responses(db: Session, company_id: int, cars: Sequence[CorrectiveActionR
     def ids(fields: Iterable[str]) -> set:
         return {getattr(car, field) for car in cars for field in fields if getattr(car, field) is not None}
 
-    user_ids = ids(_CAR_SELECTED_USER_FIELDS + _CAR_STAMPED_USER_FIELDS)
-    users = {u.id: u for u in tenant_query(db, User, company_id).filter(User.id.in_(user_ids))} if user_ids else {}
-    stamped_elsewhere = ids(_CAR_STAMPED_USER_FIELDS) - set(users)
-    # Only a PLATFORM principal is named from outside the company (as ``fai_responses`` does):
-    # an ordinary user of another company -- a legacy or imported row, a moved account -- must
-    # never have their name printed on this company's CAR.
-    attributed = (
-        {
-            u.id: u
-            for u in db.query(User).filter(
-                User.id.in_(stamped_elsewhere),
-                or_(User.is_superuser.is_(True), User.role == UserRole.PLATFORM_ADMIN),
-            )
-        }
-        if stamped_elsewhere
-        else {}
-    )
+    user_name = _user_namer(db, company_id, cars, _CAR_SELECTED_USER_FIELDS, _CAR_STAMPED_USER_FIELDS)
     part_ids, vendor_ids = ids(("part_id",)), ids(("vendor_id",))
     parts = {p.id: p for p in tenant_query(db, Part, company_id).filter(Part.id.in_(part_ids))} if part_ids else {}
     vendors = (
         {v.id: v for v in tenant_query(db, Vendor, company_id).filter(Vendor.id.in_(vendor_ids))} if vendor_ids else {}
     )
-
-    def user_name(car: Any, field: str) -> Optional[str]:
-        user_id = getattr(car, field)
-        found = users.get(user_id) or (attributed.get(user_id) if field in _CAR_STAMPED_USER_FIELDS else None)
-        return found.full_name if found is not None else None
 
     responses = []
     for car in cars:
@@ -1263,6 +1592,76 @@ def car_response(db: Session, company_id: int, car: CorrectiveActionRequest) -> 
     return car_responses(db, company_id, [car])[0]
 
 
+# ------------------------------------------------------------------------- NCR responses
+
+# Users an NCR names on its response. Both are server-stamped ATTRIBUTION facts (who decided
+# the disposition; who recorded the re-verification), resolved exactly like the CAR's stamped
+# fields: tenant-scoped, else a platform principal acting in this company's context.
+_NCR_STAMPED_USER_FIELDS = ("dispositioned_by", "reverified_by")
+
+
+def ncr_responses(db: Session, company_id: int, ncrs: Sequence[NonConformanceReport]) -> List[NCRResponse]:
+    """``NCRResponse`` for each NCR (loaded through :func:`ncr_query`), with stamped user names
+    resolved in at most two batched reads -- never an ordinary user of another company."""
+    ncrs = list(ncrs)
+    if not ncrs:
+        return []
+    user_name = _user_namer(db, company_id, ncrs, (), _NCR_STAMPED_USER_FIELDS)
+    return [
+        NCRResponse.model_validate(ncr).model_copy(
+            update={f"{field}_name": user_name(ncr, field) for field in _NCR_STAMPED_USER_FIELDS}
+        )
+        for ncr in ncrs
+    ]
+
+
+def ncr_response(db: Session, company_id: int, ncr: NonConformanceReport) -> NCRResponse:
+    return ncr_responses(db, company_id, [ncr])[0]
+
+
+def _user_namer(
+    db: Session,
+    company_id: int,
+    rows: Sequence[Any],
+    selected_fields: Sequence[str],
+    stamped_fields: Sequence[str],
+) -> Callable[[Any, str], Optional[str]]:
+    """A ``(row, field) -> full name | None`` resolver over every user id ``rows`` name.
+
+    A SELECTED field (a client's choice, validated tenant-scoped at write time) resolves only
+    to a user of the company. A STAMPED field (the server's record of who acted) falls back to
+    a lookup by id restricted to platform principals (superuser / ``PLATFORM_ADMIN``, as
+    ``fai_responses`` does), so a platform admin acting in this company's context is still
+    named -- but an ordinary user of another company (a legacy or imported row, a moved
+    account) never is.
+    """
+
+    def ids(fields: Iterable[str]) -> set:
+        return {getattr(row, field) for row in rows for field in fields if getattr(row, field) is not None}
+
+    user_ids = ids(tuple(selected_fields) + tuple(stamped_fields))
+    users = {u.id: u for u in tenant_query(db, User, company_id).filter(User.id.in_(user_ids))} if user_ids else {}
+    stamped_elsewhere = ids(stamped_fields) - set(users)
+    attributed = (
+        {
+            u.id: u
+            for u in db.query(User).filter(
+                User.id.in_(stamped_elsewhere),
+                or_(User.is_superuser.is_(True), User.role == UserRole.PLATFORM_ADMIN),
+            )
+        }
+        if stamped_elsewhere
+        else {}
+    )
+
+    def user_name(row: Any, field: str) -> Optional[str]:
+        user_id = getattr(row, field)
+        found = users.get(user_id) or (attributed.get(user_id) if field in stamped_fields else None)
+        return found.full_name if found is not None else None
+
+    return user_name
+
+
 # ------------------------------------------------------------------------ printable CAR
 
 
@@ -1274,16 +1673,27 @@ def _form_money(value: Optional[Decimal]) -> Optional[str]:
     return f"{Decimal(str(value)):,.2f}" if value is not None else None
 
 
+def _central_stamp_date(value: Optional[datetime]) -> Optional[str]:
+    """The Central-calendar date of a stored UTC stamp, in the form's date format."""
+    stamped = ensure_utc(value)
+    return _form_date(stamped.astimezone(CENTRAL_TIME_ZONE).date()) if stamped is not None else None
+
+
+_EFFECTIVENESS_LABELS = {
+    CAREffectivenessResult.EFFECTIVE: "Effective",
+    CAREffectivenessResult.NOT_EFFECTIVE: "Not effective",
+}
+
+
 def car_print_context(db: Session, company_id: int, car: CorrectiveActionRequest) -> Dict[str, Any]:
     """Every value the printable CAR shows, resolved tenant-scoped and formatted. Writes nothing.
 
     The header is the active company's own record (name / address / phone) -- never a
-    hard-coded block -- and the Quality Manager approval date is the Central-calendar date
-    of the UTC stamp (store UTC, display Central).
+    hard-coded block -- and the Quality Manager approval and effectiveness verification dates
+    are the Central-calendar dates of their UTC stamps (store UTC, display Central).
     """
     view = car_response(db, company_id, car)
     company = db.query(Company).filter(Company.id == company_id).first()
-    approved_at = ensure_utc(view.quality_approved_at)
     return dict(
         car_number=view.car_number,
         company_name=company.name if company is not None else "",
@@ -1319,9 +1729,15 @@ def car_print_context(db: Session, company_id: int, car: CorrectiveActionRequest
         customer_approval_name=view.customer_approval_name,
         customer_approval_date=_form_date(view.customer_approval_date),
         quality_approved_by=view.quality_approved_by_name,
-        quality_approved_date=(
-            _form_date(approved_at.astimezone(CENTRAL_TIME_ZONE).date()) if approved_at is not None else None
+        quality_approved_date=_central_stamp_date(view.quality_approved_at),
+        human_factors_review=view.human_factors_review,
+        similar_nonconformities_review=view.similar_nonconformities_review,
+        effectiveness_result=(
+            _EFFECTIVENESS_LABELS[view.effectiveness_result] if view.effectiveness_result is not None else None
         ),
+        effectiveness_evidence=view.effectiveness_check,
+        effectiveness_verified_by=view.effectiveness_verified_by_name,
+        effectiveness_verified_date=_central_stamp_date(view.effectiveness_verified_at),
     )
 
 

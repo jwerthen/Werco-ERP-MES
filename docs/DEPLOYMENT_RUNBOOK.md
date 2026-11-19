@@ -294,6 +294,17 @@ statement, writes no row, and adds no environment variable, secret, cron or work
   under, and the migration will not pick which company's record to change.
   See [API.md → Customer Complaints & RMA](API.md#customer-complaints--rma).
 
+**NCR and CAR evidence columns.** Apply **127_ncr_car_records** after **126_qms_company_id** through
+the normal API boot migration path. It adds nullable NCR columns (action taken, customer concession,
+re-verification, disposition stamp) and CAR columns (effectiveness result and stamp, effectiveness due,
+human-factors and similar-nonconformity reviews), with two CHECKs and three FKs to `users`. There is no
+backfill and no table rewrite. Under `SET LOCAL lock_timeout = '5s'` the FKs briefly take SHARE ROW
+EXCLUSIVE on `users`. No environment variable, secret, cron or worker job is added. Tell Quality first:
+open NCRs and corrective CARs now need the new evidence to close. On an application rollback keep the
+columns: run `railway run --service werco-api alembic stamp 126_qms_company_id` before redeploying a
+pre-127 image (the downgrade discards recorded evidence). Full notes are in
+[NCR and CAR evidence columns](DEPLOYMENT.md#ncr-and-car-evidence-columns-migration-127).
+
 **QMS `company_id` repair.** Apply **126_qms_company_id** after **125_work_order_comments** through
 the normal API boot migration path. It adds the `company_id` column (`integer NOT NULL`, FK
 `<table>_company_id_fkey`, index `ix_<table>_company_id`) that production's `qms_standards`,

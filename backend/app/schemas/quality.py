@@ -6,11 +6,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from app.core.validation import DescriptionLong, Money, MoneySmall
 from app.models.quality import (
+    CAREffectivenessResult,
     CARInitiationReason,
     CARStatus,
     CARType,
     FAIStatus,
     NCRDisposition,
+    NCRReverificationResult,
     NCRSource,
     NCRStatus,
 )
@@ -67,6 +69,34 @@ class NCRUpdate(BaseModel):
     assigned_to: Optional[int] = Field(None, gt=0)
     car_required: Optional[bool] = None
     car_id: Optional[int] = Field(None, gt=0)
+    # AS9100D 8.7 disposition evidence (migration 127_ncr_car_records). The disposition's
+    # decider and instant are server-stamped, and the re-verification has its own verb
+    # (POST /quality/ncr/{id}/reverification) -- neither is ever accepted here.
+    action_taken: Optional[str] = Field(
+        None,
+        max_length=4000,
+        description="What was physically done to the nonconforming product. Required to close the NCR.",
+    )
+    concession_reference: Optional[str] = Field(
+        None,
+        max_length=100,
+        description=(
+            "The customer's deviation / waiver / concession number. Required to close a use-as-is or repair "
+            "disposition. A standing API token may not record or change it."
+        ),
+    )
+    concession_authorized_by: Optional[str] = Field(
+        None,
+        max_length=255,
+        description="Who at the customer authorized the concession. A standing API token may not record it.",
+    )
+    concession_date: Optional[date] = Field(
+        None,
+        description=(
+            "The date the customer authorized the concession; never later than today (Central). A standing "
+            "API token may not record it."
+        ),
+    )
 
     @field_validator('quantity_rejected')
     @classmethod
@@ -98,6 +128,68 @@ class NCRVoidRequest(BaseModel):
         if not value.strip():
             raise ValueError('reason is required')
         return value.strip()
+
+
+def _required_text(value: str, field: str) -> str:
+    """Strip a required free-text field; whitespace-only is missing (422)."""
+    stripped = value.strip()
+    if not stripped:
+        raise ValueError(f'{field} is required')
+    return stripped
+
+
+class NCRReverificationRequest(BaseModel):
+    """POST /quality/ncr/{ncr_id}/reverification -- the re-verification of reworked or repaired product.
+
+    The verifier and the instant are stamped by the server, never taken from the body.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    result: NCRReverificationResult = Field(
+        ..., description="conforming: the product now meets requirements; nonconforming: it still does not"
+    )
+    notes: str = Field(
+        ...,
+        min_length=1,
+        max_length=4000,
+        description="What was re-inspected or re-tested and against which requirement (required)",
+    )
+
+    # mode="before": strip first, so max_length judges the stored (stripped) text.
+    @field_validator('notes', mode='before')
+    @classmethod
+    def _notes_not_blank(cls, value: object) -> object:
+        return _required_text(value, 'notes') if isinstance(value, str) else value
+
+
+class CAREffectivenessRequest(BaseModel):
+    """POST /quality/car/{car_id}/effectiveness -- the review of the corrective action's effectiveness.
+
+    The verifier and the instant are stamped by the server, never taken from the body.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    result: CAREffectivenessResult = Field(
+        ...,
+        description=(
+            "effective: the corrective action eliminated the cause; not_effective: it did not, and the CAR "
+            "returns to corrective_action"
+        ),
+    )
+    evidence: str = Field(
+        ...,
+        min_length=1,
+        max_length=4000,
+        description="The evidence reviewed for effectiveness (required); stored as the CAR's effectiveness_check",
+    )
+
+    # mode="before": strip first, so max_length judges the stored (stripped) text.
+    @field_validator('evidence', mode='before')
+    @classmethod
+    def _evidence_not_blank(cls, value: object) -> object:
+        return _required_text(value, 'evidence') if isinstance(value, str) else value
 
 
 class CARVoidRequest(NCRVoidRequest):
@@ -146,6 +238,21 @@ class NCRResponse(UTCModel):
     created_at: datetime
     updated_at: Optional[datetime] = None
 
+    # AS9100D 8.7 disposition evidence (migration 127_ncr_car_records), plus display names
+    # resolved tenant-scoped by ``quality_record_service.ncr_responses``.
+    action_taken: Optional[str] = None
+    concession_reference: Optional[str] = None
+    concession_authorized_by: Optional[str] = None
+    concession_date: Optional[date] = None
+    reverification_result: Optional[NCRReverificationResult] = None
+    reverification_notes: Optional[str] = None
+    reverified_by: Optional[int] = None
+    reverified_by_name: Optional[str] = None
+    reverified_at: Optional[datetime] = None
+    dispositioned_by: Optional[int] = None
+    dispositioned_by_name: Optional[str] = None
+    dispositioned_at: Optional[datetime] = None
+
     class Config:
         from_attributes = True
 
@@ -166,7 +273,9 @@ class CARFormFields(BaseModel):
     and the Quality Manager approval is server-stamped by its own verb
     (``POST /quality/car/{id}/quality-approval``), never sent in a body. A standing API token
     may not write or change the vendor / customer approval boxes (403), and ``submitted_date``
-    and the two approval dates cannot be later than today (Central) (422).
+    and the two approval dates cannot be later than today (Central) (422). The AS9100D 10.2.1
+    reviews and ``effectiveness_due`` (migration 127_ncr_car_records) ride here too; the
+    effectiveness RESULT is recorded only by ``POST /quality/car/{id}/effectiveness``.
     """
 
     initiation_reason: Optional[CARInitiationReason] = Field(
@@ -194,6 +303,23 @@ class CARFormFields(BaseModel):
     vendor_approval_date: Optional[date] = None
     customer_approval_name: Optional[str] = Field(None, max_length=255)
     customer_approval_date: Optional[date] = None
+    # AS9100D 10.2.1 corrective-action evidence (migration 127_ncr_car_records). The
+    # effectiveness verification itself has its own verb (POST /quality/car/{id}/effectiveness)
+    # and is never accepted here.
+    human_factors_review: Optional[str] = Field(
+        None,
+        max_length=4000,
+        description=(
+            "Human factors considered in the cause (fatigue, training, procedure clarity, workload, environment, "
+            "communication). Required to close a corrective CAR."
+        ),
+    )
+    similar_nonconformities_review: Optional[str] = Field(
+        None,
+        max_length=4000,
+        description="Where else this nonconformity exists or could occur. Required to close a corrective CAR.",
+    )
+    effectiveness_due: Optional[date] = Field(None, description="When the follow-up effectiveness check is due")
 
 
 class CARCreate(CARFormFields):
@@ -244,7 +370,16 @@ class CARUpdate(CARFormFields):
     preventive_action: Optional[str] = Field(None, max_length=2000)
     verification_method: Optional[str] = Field(None, max_length=2000)
     verification_results: Optional[str] = Field(None, max_length=2000)
-    effectiveness_check: Optional[str] = Field(None, max_length=2000)
+    # 4000, matching CAREffectivenessRequest.evidence (stored in this same Text column), so a
+    # client re-sending a recorded verification's evidence unchanged is never a 422.
+    effectiveness_check: Optional[str] = Field(
+        None,
+        max_length=4000,
+        description=(
+            "The evidence reviewed for effectiveness. Once an effectiveness result is recorded it changes only by "
+            "recording a new verification (POST /quality/car/{id}/effectiveness); a change here is 409."
+        ),
+    )
     assigned_to: Optional[int] = Field(None, gt=0)
     due_date: Optional[date] = None
     verification_due: Optional[date] = None
@@ -261,6 +396,15 @@ class CARResponse(UTCModel):
     priority: int
     title: str
     problem_description: str
+
+    @field_validator("car_type", mode="before")
+    @classmethod
+    def _null_type_reads_as_corrective(cls, value: object) -> object:
+        # ``cars.car_type`` has a Python-side default only, so a row written outside the ORM can
+        # hold NULL. NULL has always meant corrective (the closure gate judges it so), and a
+        # required response field must not 500 the read -- or a close that already committed.
+        return CARType.CORRECTIVE if value is None else value
+
     root_cause_analysis: Optional[str]
     root_cause: Optional[str]
     containment_action: Optional[str]
@@ -320,6 +464,15 @@ class CARResponse(UTCModel):
     quality_approved_by: Optional[int] = None
     quality_approved_by_name: Optional[str] = None
     quality_approved_at: Optional[datetime] = None
+
+    # AS9100D 10.2 corrective-action evidence (migration 127_ncr_car_records).
+    effectiveness_result: Optional[CAREffectivenessResult] = None
+    effectiveness_verified_by: Optional[int] = None
+    effectiveness_verified_by_name: Optional[str] = None
+    effectiveness_verified_at: Optional[datetime] = None
+    effectiveness_due: Optional[date] = None
+    human_factors_review: Optional[str] = None
+    similar_nonconformities_review: Optional[str] = None
 
     class Config:
         from_attributes = True

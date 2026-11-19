@@ -21,6 +21,7 @@ from app.models.quality import (
 from app.models.user import User
 from app.schemas.quality import (
     CARCreate,
+    CAREffectivenessRequest,
     CARResponse,
     CARUpdate,
     CARVoidRequest,
@@ -35,6 +36,7 @@ from app.schemas.quality import (
     FAIUpdate,
     NCRCreate,
     NCRResponse,
+    NCRReverificationRequest,
     NCRUpdate,
     NCRVoidRequest,
 )
@@ -75,7 +77,8 @@ def list_ncrs(
     if part_id:
         query = query.filter(NonConformanceReport.part_id == part_id)
 
-    return query.order_by(NonConformanceReport.created_at.desc()).offset(skip).limit(limit).all()
+    ncrs = query.order_by(NonConformanceReport.created_at.desc()).offset(skip).limit(limit).all()
+    return quality_record_service.ncr_responses(db, company_id, ncrs)
 
 
 @router.post("/ncr", response_model=NCRResponse)
@@ -91,7 +94,8 @@ def create_ncr(
     ``part_id`` and ``work_order_id`` must name live records of the active company (404
     otherwise). The NCR and its CREATE audit row commit together.
     """
-    return quality_record_service.create_ncr(db, company_id, ncr_in, current_user, audit)
+    ncr = quality_record_service.create_ncr(db, company_id, ncr_in, current_user, audit)
+    return quality_record_service.ncr_response(db, company_id, ncr)
 
 
 @router.get("/ncr/{ncr_id}", response_model=NCRResponse)
@@ -101,8 +105,9 @@ def get_ncr(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Get NCR details"""
-    return quality_record_service.get_ncr(db, company_id, ncr_id)
+    """Get NCR details, including the disposition evidence and resolved display names."""
+    ncr = quality_record_service.get_ncr(db, company_id, ncr_id)
+    return quality_record_service.ncr_response(db, company_id, ncr)
 
 
 @router.put("/ncr/{ncr_id}", response_model=NCRResponse)
@@ -114,14 +119,53 @@ def update_ncr(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Update an NCR: content, disposition, status (incl. closure), assignment or CAR link.
+    """Update an NCR: content, disposition, action taken, customer concession, status (incl.
+    closure), assignment or CAR link.
 
     Only fields whose value actually changes are written, on one audit row (old -> new).
     A CLOSED NCR refuses every change (409) except a status-only reopen. ``assigned_to``
     must be an active user of the company and ``car_id`` a non-void CAR of it (404 / 409).
     Voiding goes through ``DELETE /quality/ncr/{id}``, never this route.
+
+    Changing ``disposition`` records who decided it and when (``dispositioned_by`` /
+    ``dispositioned_at``, stamped by the server; back to ``pending`` clears them).
+    ``concession_date`` cannot be in the future (422). A standing API token may not change
+    the disposition or any ``concession_*`` field (403) -- a person records that judgment.
+
+    Closing (``status: closed``) also requires, on the record as it would be saved: a
+    disposition other than pending, ``action_taken``, a ``concession_reference`` for a
+    use-as-is or repair disposition, and -- for rework or repair -- a ``conforming``
+    re-verification recorded with ``POST /quality/ncr/{id}/reverification`` (422 naming
+    everything missing). The re-verification is never set through this route.
     """
-    return quality_record_service.update_ncr(db, company_id, ncr_id, ncr_in, current_user, audit)
+    ncr = quality_record_service.update_ncr(db, company_id, ncr_id, ncr_in, current_user, audit)
+    return quality_record_service.ncr_response(db, company_id, ncr)
+
+
+@router.post("/ncr/{ncr_id}/reverification", response_model=NCRResponse)
+def record_ncr_reverification(
+    ncr_id: int,
+    reverification_in: NCRReverificationRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(quality_record_service.WRITE_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Record the re-verification of an NCR's reworked or repaired product (Admin, Manager or Quality).
+
+    Send ``result`` (``conforming`` or ``nonconforming``) and ``notes`` describing what was
+    re-inspected or re-tested (required). The server stamps who recorded it and when; neither
+    is taken from the request. Only for an NCR dispositioned ``rework`` or ``repair`` (409
+    otherwise) that is not closed (409 -- reopen it first) or void. Recording again replaces
+    the earlier re-verification; the audit row keeps what it replaced. A ``conforming`` result
+    is required before a rework or repair NCR can be closed with ``PUT /quality/ncr/{id}``.
+    A standing API token is refused (403) -- a person records it. The audit row commits with
+    the re-verification, or neither is saved (503).
+    """
+    ncr = quality_record_service.record_ncr_reverification(
+        db, company_id, ncr_id, reverification_in, current_user, audit
+    )
+    return quality_record_service.ncr_response(db, company_id, ncr)
 
 
 @router.delete("/ncr/{ncr_id}")
@@ -271,8 +315,13 @@ def update_car(
 
     Only fields whose value actually changes are written, on one audit row (old -> new).
     Moving to ``verification`` records the verifier; closing requires root cause,
-    corrective action, verification method and results. A CLOSED CAR refuses every change
-    (409) except a status-only reopen; a VOID CAR refuses all. Voiding goes through
+    corrective action, verification method and results, and a corrective CAR (``car_type``
+    corrective) also requires ``human_factors_review``, ``similar_nonconformities_review``
+    and an ``effective`` effectiveness verification recorded with
+    ``POST /quality/car/{id}/effectiveness`` (422 naming everything missing). Once an
+    effectiveness result is recorded, changing ``effectiveness_check`` here is refused (409):
+    record a new verification instead. A CLOSED CAR refuses every change (409) except a
+    status-only reopen; a VOID CAR refuses all. Voiding goes through
     ``POST /quality/car/{id}/void``.
 
     The CAR form fields are editable here too: a CHANGED part or customer must be a live
@@ -304,6 +353,30 @@ def approve_car_quality(
     the stamp, or neither is saved (503).
     """
     car = quality_record_service.approve_car_quality(db, company_id, car_id, current_user, audit)
+    return quality_record_service.car_response(db, company_id, car)
+
+
+@router.post("/car/{car_id}/effectiveness", response_model=CARResponse)
+def record_car_effectiveness(
+    car_id: int,
+    effectiveness_in: CAREffectivenessRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(quality_record_service.WRITE_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Record the effectiveness verification of a CAR's corrective action (Admin, Manager or Quality).
+
+    Send ``result`` (``effective`` or ``not_effective``) and ``evidence``: what was reviewed to
+    judge it (required; stored as the CAR's ``effectiveness_check``). The server stamps who
+    recorded it and when; neither is taken from the request. Only while the CAR is in
+    ``verification`` (409 otherwise). ``not_effective`` returns the CAR to
+    ``corrective_action``; ``effective`` leaves the status alone and is required before a
+    corrective CAR can be closed. Recording again replaces the earlier verification; the audit
+    row keeps what it replaced. A standing API token is refused (403) -- a person records it.
+    The audit row commits with the verification, or neither is saved (503).
+    """
+    car = quality_record_service.record_car_effectiveness(db, company_id, car_id, effectiveness_in, current_user, audit)
     return quality_record_service.car_response(db, company_id, car)
 
 
