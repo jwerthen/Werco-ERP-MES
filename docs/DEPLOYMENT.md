@@ -220,6 +220,54 @@ rollback step; it does not undo documents, receipts, production or shipments
 already created by completed actions. Intake-linked Documents cannot be deleted
 through the application because the saved source and receipt must remain valid.
 
+### Purchase-order quality flow-down (migration 128)
+
+Apply **128_po_flowdown** after **127_ncr_car_records** through the normal API boot migration path.
+No environment variable, secret, cron or worker job is added.
+
+- **Additive, no backfill.** It creates two tenant tables, `po_flowdown_profiles` (one row per
+  company) and `po_quality_clauses`, each with RLS enabled and no policies, and table and sequence
+  revoked from `PUBLIC`, and from `anon` / `authenticated` where those roles exist, matching model
+  bootstrap. It adds two nullable JSON columns to `purchase_orders`, `quality_clause_codes` and
+  `flowdown_snapshot`. No row is read or written. Both tables start empty, so no company prints a
+  flow-down block until a person turns it on in **Purchasing → Quality flow-down**, and every
+  existing purchase order prints exactly as before (an already-issued PO has no snapshot and never
+  prints a block).
+- **Locks.** `SET LOCAL lock_timeout = '5s'`. The new foreign keys briefly take SHARE ROW EXCLUSIVE
+  on `companies` and `users` (blocks writes to them, not reads); each `ADD COLUMN` is metadata-only
+  on PostgreSQL 11+ but takes a brief ACCESS EXCLUSIVE lock on `purchase_orders`. A timeout fails the
+  boot with the database back where the boot started, and redeploying is safe.
+- **Order.** Deploy the **worker with or after the API**, never before: the new code selects the two
+  new `purchase_orders` columns on every PO load, so a new worker on an un-migrated database fails
+  them (the MRP auto-PO job included). Old code is safe on the new schema. Deploy the API before the
+  frontend: the Purchasing page's Quality flow-down tab, the Quality page's PO Flow-down tab and the
+  PO clause checklist call routes the old API does not have.
+- **Every PO's email fingerprint changes once.** The document-delivery source fingerprint of a
+  purchase order covers its print data (which gains `quality_flowdown`) and its header columns
+  (which gain `quality_clause_codes`), so every PO's fingerprint changes at this deploy. A PO email
+  preview prepared before the deploy is refused at Send with **409** *"The document changed after
+  this PDF was prepared. Create a fresh preview before sending."*; prepare it again. Re-opening the
+  email composer for a PO whose email was already accepted prepares a new preview instead of showing
+  the "already sent" replay; nothing goes out unless someone clicks Send, which would email the PO
+  again. Both are harmless and happen once per PO.
+- **Verify** in a test company, with invented text: in **Quality → PO Flow-down** (or **Purchasing →
+  Quality flow-down**), turn the block on with a document reference and one clause marked
+  *Pre-check on new purchase orders*. Print a draft PO and find the block after the totals. Send
+  that PO, edit the clause's title, and print both again: the sent PO still shows the old title and
+  a new draft shows the new one. The Audit Log shows `po_flowdown_profile` and `po_quality_clause`
+  rows, and the sent PO's STATUS_CHANGE row carries `flowdown_snapshot_sha256`. `SELECT relname,
+  relrowsecurity FROM pg_class WHERE relname IN ('po_flowdown_profiles', 'po_quality_clauses');` is
+  true for both.
+- **Rollback.** Keep the migration on an ordinary application rollback: older code never reads the
+  new tables or columns. Once `128` has run, an older image cannot boot until the database is
+  stamped back, so from a checkout of this release run `alembic stamp 127_ncr_car_records` before
+  redeploying a pre-128 image (the next forward deploy re-runs 128 as a guarded no-op that keeps the
+  data). The downgrade is **lossy** and is not a rollback step: it drops both columns and both
+  tables, discarding every issued PO's frozen flow-down record (AS9100D 8.4.3 evidence), every
+  clause choice, the catalog and the settings. Export the snapshots first if it is ever genuinely
+  needed. See
+  [API.md → Quality flow-down on the purchase order](API.md#quality-flow-down-on-the-purchase-order).
+
 ### NCR and CAR evidence columns (migration 127)
 
 Apply **127_ncr_car_records** after **126_qms_company_id** through the normal API boot migration path.

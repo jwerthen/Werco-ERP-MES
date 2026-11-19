@@ -30,6 +30,7 @@ from app.services.document_pdf_service import (
     company_quote_terms,
     quote_pdf_context,
 )
+from app.services.po_flowdown_service import flowdown_snapshot_sha256
 from app.services.quote_send_gate import assert_quote_sendable
 from app.services.supplier_approval_service import assert_purchase_order_vendor_not_disqualified
 
@@ -325,7 +326,18 @@ class DocumentDeliveryService:
     def columns(record):
         # Sending status/timestamps are workflow metadata, not PDF content. Their
         # transition after acceptance must not turn an identical PDF into a new send.
-        ignored = {'status', 'created_at', 'updated_at', 'version', 'request_key', 'request_hash'}
+        # ``flowdown_snapshot`` likewise: it is written by the freeze when the PO leaves DRAFT
+        # (the accepted send itself), and the block it holds is already fingerprinted through
+        # the print data's ``quality_flowdown``.
+        ignored = {
+            'status',
+            'created_at',
+            'updated_at',
+            'version',
+            'request_key',
+            'request_hash',
+            'flowdown_snapshot',
+        }
         return {
             column.name: getattr(record, column.name)
             for column in record.__table__.columns
@@ -550,17 +562,23 @@ class DocumentDeliveryService:
                 current.status = QuoteStatus.SENT if record.entity_type == 'quote' else POStatus.SENT
                 if record.entity_type == 'purchase_order' and not current.order_date:
                     current.order_date = record.issue_date
+                status_extra = {
+                    'delivery_id': record.id,
+                    'delivery_status': 'accepted',
+                    'manually_verified': record.verified_at is not None,
+                }
+                if record.entity_type == 'purchase_order' and old_status == POStatus.DRAFT.value:
+                    # The flush runs the freeze listener (the PO leaves DRAFT here); the audit row
+                    # records what was frozen as a digest, never the block itself.
+                    self.db.flush()
+                    status_extra['flowdown_snapshot_sha256'] = flowdown_snapshot_sha256(current.flowdown_snapshot)
                 self.audit.log_status_change(
                     record.entity_type,
                     current.id,
                     record.document_number,
                     old_status=old_status,
                     new_status='sent',
-                    extra_data={
-                        'delivery_id': record.id,
-                        'delivery_status': 'accepted',
-                        'manually_verified': record.verified_at is not None,
-                    },
+                    extra_data=status_extra,
                 )
             else:
                 record.status_detail += ' The source changed; its workflow status was retained.'

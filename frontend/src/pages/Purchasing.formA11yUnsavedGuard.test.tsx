@@ -32,6 +32,8 @@ jest.mock('../services/api', () => ({
     createPurchaseOrder: jest.fn(),
     createVendor: jest.fn(),
     updateVendor: jest.fn(),
+    // Quality flow-down clauses for the Create PO checklist (read when the modal opens).
+    getPOQualityClauses: jest.fn(),
   },
 }));
 
@@ -100,6 +102,7 @@ beforeEach(() => {
   mockedApi.getParts.mockResolvedValue([] as any);
   mockedApi.getDocuments.mockResolvedValue([] as any);
   mockedApi.getDocumentTypes.mockResolvedValue([] as any);
+  mockedApi.getPOQualityClauses.mockResolvedValue([]);
 });
 
 describe('Purchasing — Create Vendor unsaved-changes guard', () => {

@@ -28,6 +28,8 @@ jest.mock('../services/api', () => ({
     getPurchaseOrders: jest.fn(),
     getParts: jest.fn(),
     createPurchaseOrder: jest.fn(),
+    // Quality flow-down clauses for the Create PO checklist (read when the modal opens).
+    getPOQualityClauses: jest.fn(),
   },
 }));
 
@@ -81,6 +83,8 @@ beforeEach(() => {
   mockedApi.getPurchaseOrders.mockResolvedValue(purchaseOrders as any);
   mockedApi.getParts.mockResolvedValue(parts as any);
   mockedApi.createPurchaseOrder.mockResolvedValue({ id: 99 } as any);
+  // An empty catalog: no checklist entries, and the create leaves quality_clause_codes off.
+  mockedApi.getPOQualityClauses.mockResolvedValue([]);
 });
 
 describe('Purchasing — create PO validation', () => {

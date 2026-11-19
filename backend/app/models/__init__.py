@@ -99,6 +99,7 @@ from .operator_certification import (
 )
 from .part import Part, PartType, UnitOfMeasure
 from .part_number_alias import PartNumberAlias, normalize_alias_key
+from .po_flowdown import POFlowdownProfile, POQualityClause
 from .print_profile import CompanyPrintProfile
 from .process_sheet import (
     OperationStepRecord,
@@ -413,6 +414,8 @@ __all__ = [
     "Vendor",
     "PurchaseOrder",
     "PurchaseOrderLine",
+    "POFlowdownProfile",
+    "POQualityClause",
     "POReceipt",
     "ReceivingDeliveryBatch",
     "POStatus",

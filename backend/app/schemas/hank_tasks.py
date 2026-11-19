@@ -5,6 +5,7 @@ from typing import Any, Literal, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from app.schemas.base import UTCModel
 from app.schemas.comment import (
@@ -60,6 +61,11 @@ class DraftPurchaseOrderInput(POCreate):
     po_number: str | None = Field(default=None, min_length=1, max_length=50)
     order_date: date | None = None
     ready_for_receiving: bool = False
+    # Quality flow-down codes (AS9100D 8.4.3) are the buyer's choice in the app, not Hank's: a
+    # Hank-drafted PO stores NULL and so prints the catalog's default clauses. The override keeps
+    # the field out of the tool schema (the versioned copilot prompt) and out of the dumped input
+    # that keys a task's retries, and refuses any value a caller sends anyway.
+    quality_clause_codes: SkipJsonSchema[None] = Field(default=None, exclude=True)
 
     @field_validator("po_number")
     @classmethod
@@ -179,7 +185,7 @@ class HankTaskCreate(BaseModel):
         if self.kind == 'draft_purchase_order' and self.input.get('source_intake_file_id') is None:
             # Existing retry keys hash the original POCreate shape. Newly optional
             # import metadata must not change a legacy manual command's identity.
-            self.input = POCreate.model_validate(self.input).model_dump(mode='json')
+            self.input = POCreate.model_validate(self.input).model_dump(mode='json', exclude={'quality_clause_codes'})
         return self
 
 

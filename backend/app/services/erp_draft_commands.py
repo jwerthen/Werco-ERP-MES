@@ -17,6 +17,7 @@ from app.models.part import Part
 from app.models.purchasing import POStatus, PurchaseOrder, PurchaseOrderLine, Vendor
 from app.models.work_order import WorkOrder
 from app.services.operational_event_service import OperationalEventService
+from app.services.po_flowdown_service import flowdown_snapshot_sha256, resolve_clause_codes
 from app.services.supplier_approval_service import approval_warnings, assert_vendor_not_disqualified
 
 
@@ -110,6 +111,11 @@ def create_purchase_order_command(
     # to a Disqualified vendor, from any door that reaches this command -- the Purchasing
     # screen, Hank and the AI draft applier. Raised before anything is written.
     assert_vendor_not_disqualified(vendor)
+    # Supplier quality flow-down selection (AS9100D 8.4.3): every code must name an ACTIVE
+    # clause of the company (422 naming the rest), checked before anything is written. Absent
+    # or null -- MRP, the AI applier, a Hank draft that names none -- stores NULL, which prints
+    # the catalog's default-selected clauses.
+    quality_clause_codes = resolve_clause_codes(db, company_id, getattr(po_in, "quality_clause_codes", None))
 
     po_number = imported_po_number or generate_po_number(db, company_id)
 
@@ -124,6 +130,7 @@ def create_purchase_order_command(
         created_by=current_user.id,
         order_date=imported_order_date,
         source_document_path=source_document_path,
+        quality_clause_codes=quality_clause_codes,
     )
     po.company_id = company_id
     db.add(po)
@@ -194,6 +201,8 @@ def create_purchase_order_command(
                 "action": "reviewed_document_import",
                 "order_date": po.order_date.isoformat() if po.order_date else None,
                 "delivery_status": "not_dispatched",
+                # The flush above froze the PO's quality flow-down (it left DRAFT).
+                "flowdown_snapshot_sha256": flowdown_snapshot_sha256(po.flowdown_snapshot),
             },
         )
     OperationalEventService(db).emit_best_effort(

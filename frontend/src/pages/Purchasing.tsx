@@ -29,6 +29,10 @@ import { AslStatusPill } from '../components/suppliers/AslStatusPill';
 import { SupplierApprovalWarnings } from '../components/suppliers/SupplierApprovalWarnings';
 import type { AslStatus, SupplierApprovalCheck, SupplierApprovalWarning } from '../types/supplierApproval';
 import { aslStatusLabel, isOfferedForPurchaseOrders } from '../utils/supplierApproval';
+import { QualityClauseChecklist } from '../components/purchasing/QualityClauseChecklist';
+import { QualityFlowdownSettings } from '../components/purchasing/QualityFlowdownSettings';
+import type { POQualityClause } from '../types/poFlowdown';
+import { defaultQualityClauseCodes } from '../utils/qualityFlowdown';
 import {
   Button,
   ConfirmDialog,
@@ -141,7 +145,7 @@ interface DocumentType {
   label: string;
 }
 
-type TabType = 'orders' | 'vendors';
+type TabType = 'orders' | 'vendors' | 'flowdown';
 
 // Which book of purchase orders the Orders tab is showing. Mutually exclusive on
 // purpose (see the segmented control in the Orders tab): a deleted PO is a RECORD,
@@ -167,6 +171,10 @@ const BLANK_PO = {
   required_date: '',
   notes: '',
   lines: [] as Array<{ part_id: number; quantity_ordered: number; unit_price: number }>,
+  // The buyer's quality flow-down clause choice. `null` = untouched, so the checklist shows
+  // (and the create sends) the catalog's default clauses; a list once the buyer changes it.
+  // Part of the draft so a resumed draft keeps the choice and the dirty check sees a change.
+  quality_clause_codes: null as string[] | null,
 };
 
 const BLANK_VENDOR = {
@@ -238,6 +246,14 @@ export default function Purchasing() {
   // not silently move the other. The deleted VIEW is again ungated — `deleted_only` on
   // GET /purchasing/vendors stays on get_current_user.
   const canRestoreVendor = user?.role === 'admin' || user?.role === 'manager' || !!user?.is_superuser;
+  // The quality flow-down settings (profile + clause catalog) are written by
+  // PUT /purchasing/flowdown-profile and POST/PUT /purchasing/quality-clauses, all
+  // require_role([ADMIN, MANAGER, QUALITY]); superuser qualifies. PLATFORM_ADMIN omitted for the
+  // house reason given at canRestorePO. The tab is hidden from everyone else rather than shown
+  // read-only: the profile and catalog are configuration, and a buyer sees their effect on the
+  // PO form and the printed PO.
+  const canManageFlowdown =
+    user?.role === 'admin' || user?.role === 'manager' || user?.role === 'quality' || !!user?.is_superuser;
   const [searchParams, setSearchParams] = useSearchParams();
   const detailPOId = Number(searchParams.get('po') || 0);
   const openPODetail = (id: number) => {
@@ -251,6 +267,10 @@ export default function Purchasing() {
     setSearchParams(next);
   };
   const [activeTab, setActiveTab] = useState<TabType>('orders');
+  // The Quality flow-down panel mounts on first entry (its reads stay off the default page
+  // load) and then STAYS mounted, hidden, across tab switches: it holds an unsaved-changes
+  // guarded form, and unmounting it on a tab click would drop an edit without asking.
+  const [flowdownVisited, setFlowdownVisited] = useState(false);
   const [vendors, setVendors] = useState<Vendor[]>([]);
   const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([]);
   const [parts, setParts] = useState<Part[]>([]);
@@ -345,6 +365,33 @@ export default function Purchasing() {
 
   const [newPO, setNewPO] = useState(BLANK_PO);
 
+  // Active quality clauses for the Create PO checklist. Read LAZILY each time the modal opens,
+  // so the default page load emits exactly the requests it always did and a clause Quality
+  // just added or retired is reflected. `null` = loading. A failed read (an API that predates
+  // the flow-down, a network blip) never blocks the create: the field is then left off the
+  // request and the server applies the catalog defaults.
+  const [poClauses, setPoClauses] = useState<POQualityClause[] | null>(null);
+  const [poClausesError, setPoClausesError] = useState(false);
+  useEffect(() => {
+    if (!showPOModal) return;
+    let active = true;
+    setPoClauses(null);
+    setPoClausesError(false);
+    Promise.resolve()
+      .then(() => api.getPOQualityClauses())
+      .then(rows => {
+        if (active) setPoClauses(Array.isArray(rows) ? rows : []);
+      })
+      .catch(() => {
+        if (active) setPoClausesError(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, [showPOModal]);
+  const poDefaultClauseCodes = poClauses ? defaultQualityClauseCodes(poClauses) : [];
+  const poSelectedClauseCodes = newPO.quality_clause_codes ?? poDefaultClauseCodes;
+
   const [newVendor, setNewVendor] = useState(BLANK_VENDOR);
 
   const [editVendorForm, setEditVendorForm] = useState(BLANK_EDIT_VENDOR);
@@ -400,7 +447,10 @@ export default function Purchasing() {
     valid: (data: unknown): data is typeof newPO => {
       const saved = data as typeof newPO | null;
       return !!saved && typeof saved.vendor_id === 'number' && Array.isArray(saved.lines)
-        && saved.lines.every(line => !!line && typeof line.part_id === 'number' && typeof line.quantity_ordered === 'number' && typeof line.unit_price === 'number');
+        && saved.lines.every(line => !!line && typeof line.part_id === 'number' && typeof line.quantity_ordered === 'number' && typeof line.unit_price === 'number')
+        // Drafts saved before the flow-down existed carry no key at all; restore fills in null.
+        && (saved.quality_clause_codes == null
+          || (Array.isArray(saved.quality_clause_codes) && saved.quality_clause_codes.every(code => typeof code === 'string')));
     }, restore: saved => setNewPO({ ...BLANK_PO, ...saved }),
   });
   const isVendorDirty = showVendorModal && JSON.stringify(newVendor) !== JSON.stringify(BLANK_VENDOR);
@@ -596,6 +646,7 @@ export default function Purchasing() {
    */
   const selectTab = (tab: TabType) => {
     setActiveTab(tab);
+    if (tab === 'flowdown') setFlowdownVisited(true);
     if (tab !== 'orders') setPoView('active');
     // Same rule for the vendor archive, and for the same reason: every entry into a
     // Deleted view is supposed to re-read it, so a tab round-trip must not re-open one on
@@ -1039,10 +1090,19 @@ export default function Purchasing() {
     setActionBusy(true);
     setActionError('');
     try {
+      // Quality flow-down: the buyer's explicit choice, else the pre-checked defaults they saw.
+      // Left OFF the request (server default = the catalog's defaults, resolved at issue) when
+      // the catalog could not be read or offers no active clause — sending [] then would pin
+      // this PO to "no clauses" even after Quality sets the catalog up.
+      const clauseCodes =
+        newPO.quality_clause_codes ?? (poClauses && poClauses.length > 0 ? poDefaultClauseCodes : undefined);
       // An empty-string date 422s server-side — omit it when blank.
       const created = await api.createPurchaseOrder({
-        ...newPO,
+        vendor_id: newPO.vendor_id,
         required_date: newPO.required_date || undefined,
+        notes: newPO.notes,
+        lines: newPO.lines,
+        ...(clauseCodes !== undefined ? { quality_clause_codes: clauseCodes } : {}),
       });
       if (!await poDraft.clear()) showToast('warning', 'Purchase order created, but the recovery draft could not be removed. Check the order list before resuming it.');
       setShowPOModal(false);
@@ -1807,12 +1867,13 @@ export default function Purchasing() {
           {[
             { id: 'orders', label: 'Purchase Orders', count: purchaseOrders.length },
             { id: 'vendors', label: 'Vendors', count: vendors.length },
+            ...(canManageFlowdown ? [{ id: 'flowdown', label: 'Quality flow-down', count: 0 }] : []),
           ].map(tab => (
             <button
               key={tab.id}
               role="tab"
               id={`purchasing-tab-${tab.id}`}
-              aria-controls="purchasing-panel"
+              aria-controls={tab.id === 'flowdown' ? 'purchasing-panel-flowdown' : 'purchasing-panel'}
               aria-selected={activeTab === tab.id}
               tabIndex={activeTab === tab.id ? 0 : -1}
               onClick={() => selectTab(tab.id as TabType)}
@@ -2167,6 +2228,21 @@ export default function Purchasing() {
         </div>
       )}
 
+      {/* Quality flow-down tab (AS9100D 8.4.3). Mounted on first entry, then kept mounted and
+          hidden — see flowdownVisited. Its own panel id because it can coexist with the other
+          tab's panel in the DOM. */}
+      {canManageFlowdown && flowdownVisited && (
+        <div
+          className="card"
+          role="tabpanel"
+          id="purchasing-panel-flowdown"
+          aria-labelledby="purchasing-tab-flowdown"
+          hidden={activeTab !== 'flowdown'}
+        >
+          <QualityFlowdownSettings />
+        </div>
+      )}
+
       {emailPOId && <DocumentDeliveryComposer key={emailPOId} entityType="purchase_order" entityId={emailPOId} canPrepare={canSendPO && canDeletePurchasing} canReconcile={canSendPO && canDeletePurchasing} onClose={() => setEmailPOId(null)} onAccepted={() => void loadData()} />}
       {/* Create PO Modal */}
       <Modal open={showPOModal} onClose={requestClosePOModal} size="2xl" closeOnBackdrop={false}>
@@ -2294,6 +2370,21 @@ export default function Purchasing() {
             ))}
             {newPO.lines.length === 0 && <p className="text-slate-400 text-sm">Click "+ Add Line" to add items</p>}
           </div>
+
+          <QualityClauseChecklist
+            clauses={poClauses}
+            loadError={poClausesError}
+            loadErrorText={
+              newPO.quality_clause_codes === null
+                ? "Quality clauses could not be loaded. The purchase order will carry the catalog's default clauses."
+                : `Quality clauses could not be loaded. The purchase order will carry the clauses saved with this draft: ${
+                    newPO.quality_clause_codes.join(', ') || 'none'
+                  }.`
+            }
+            selected={poSelectedClauseCodes}
+            onChange={codes => setNewPO({ ...newPO, quality_clause_codes: codes })}
+            note="Printed on the purchase order with the supplier quality requirements. Frozen when the PO is issued."
+          />
 
           <FormField label="Notes">
             {field => (

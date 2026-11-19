@@ -30,6 +30,8 @@ jest.mock('../services/api', () => ({
     getPurchaseOrders: jest.fn(),
     getParts: jest.fn(),
     getPurchaseOrder: jest.fn(),
+    // The PO detail modal reads the quality clause catalog with the PO.
+    getPOQualityClauses: jest.fn(),
   },
 }));
 
@@ -107,6 +109,7 @@ beforeEach(() => {
   mockedApi.getPurchaseOrders.mockResolvedValue([listedPO] as any);
   mockedApi.getParts.mockResolvedValue([] as any);
   mockedApi.getPurchaseOrder.mockResolvedValue(detailPO as any);
+  mockedApi.getPOQualityClauses.mockResolvedValue([]);
 });
 
 const searchBox = () => screen.getByLabelText('Search purchase orders') as HTMLInputElement;

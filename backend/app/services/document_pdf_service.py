@@ -170,6 +170,33 @@ def build_quote_document(db, quote, company_id):
     )
 
 
+def purchase_order_flowdown_story(flowdown: Optional[dict], heading_style, text_style) -> list:
+    """The supplier quality flow-down block (AS9100D 8.4.3) as reportlab flowables.
+
+    ``flowdown`` is ``PurchaseOrderPrintData.quality_flowdown`` (``None`` -> nothing): the
+    heading, "Reference: <document>", the body split into paragraphs on blank lines, then one
+    paragraph per clause ("<code> — <title>: <body>"). Every value goes through ``pdf_escape``:
+    clause text is free text a company types and routinely carries ``<``, ``>`` and ``&``.
+    """
+    from reportlab.platypus import Paragraph, Spacer
+
+    if not flowdown:
+        return []
+    story: list = [Spacer(1, 4), Paragraph(f"<b>{pdf_escape(flowdown.get('heading') or '')}</b>", heading_style)]
+    if flowdown.get('document_reference'):
+        story.append(Paragraph(f"<b>Reference:</b> {pdf_escape(flowdown['document_reference'])}", text_style))
+    for chunk in re.split(r'\n\s*\n', flowdown.get('body') or ''):
+        if chunk.strip():
+            story.append(Paragraph(pdf_escape(chunk.strip()).replace('\n', '<br/>'), text_style))
+    for clause in flowdown.get('clauses') or []:
+        text = f"<b>{pdf_escape(clause.get('code'))} \u2014 {pdf_escape(clause.get('title'))}</b>"
+        if clause.get('body'):
+            text += f": {pdf_escape(clause['body'].strip())}"
+        story.append(Paragraph(text.replace('\n', '<br/>'), text_style))
+    story.append(Spacer(1, 8))
+    return story
+
+
 def build_purchase_order_document(print_data: dict) -> bytes:
     """Server PDF of the existing PrintPurchaseOrder vendor-facing template.
 
@@ -348,6 +375,7 @@ def build_purchase_order_document(print_data: dict) -> bytes:
     )
     totals.setStyle(TableStyle([('LINEABOVE', (0, -1), (-1, -1), 0.7, colors.black)]))
     story.append(KeepTogether([totals, Spacer(1, 8)]))
+    story.extend(purchase_order_flowdown_story(data.get('quality_flowdown'), styles['Heading4'], small))
     if data.get('notes'):
         story.extend(block('Notes', [data['notes']]))
     doc.build(story, onFirstPage=footer, onLaterPages=footer)
