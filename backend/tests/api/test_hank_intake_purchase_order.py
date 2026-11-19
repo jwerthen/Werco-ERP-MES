@@ -415,7 +415,10 @@ def test_preexisting_legacy_draft_fingerprint_still_executes(
     key = str(uuid4())
     task = propose(client, auth_headers, "draft_purchase_order", payload, key).json()
     row = db_session.get(HankTask, task["id"])
-    original_input = POCreate.model_validate(payload).model_dump(mode='json')
+    # The legacy identity is the pre-128 POCreate shape: migration 128's quality_clause_codes is the
+    # buyer's choice in the app and never part of a Hank task's input or retry key.
+    original_input = POCreate.model_validate(payload).model_dump(mode='json', exclude={'quality_clause_codes'})
+    assert 'quality_clause_codes' not in original_input
     original_command = {
         'expected_company_id': 1,
         'request_key': key,
@@ -665,3 +668,17 @@ def test_manual_po_execution_locks_number_before_vendor_and_part_rows(
     result = execute(client, auth_headers, task)
     assert result.status_code == 200, result.text
     assert calls.index('po_number') < calls.index('Vendor') < calls.index('Part')
+
+
+def test_hank_draft_po_input_never_carries_quality_clause_codes():
+    """Flow-down clause codes are the buyer's choice in the app (migration 128): Hank's draft-PO
+    input keeps them out of its tool schema and refuses a value, so a Hank PO prints the defaults."""
+    from pydantic import ValidationError
+
+    from app.schemas.hank_tasks import DraftPurchaseOrderInput
+
+    assert "quality_clause_codes" not in DraftPurchaseOrderInput.model_json_schema()["properties"]
+    base = {"vendor_id": 1, "lines": [{"part_id": 1, "quantity_ordered": 1, "unit_price": 1}]}
+    assert "quality_clause_codes" not in DraftPurchaseOrderInput.model_validate(base).model_dump(mode="json")
+    with pytest.raises(ValidationError):
+        DraftPurchaseOrderInput.model_validate({**base, "quality_clause_codes": ["Q1"]})
