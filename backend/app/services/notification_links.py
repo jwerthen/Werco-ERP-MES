@@ -86,6 +86,9 @@ SCHEDULING_LIST = "/scheduling"
 # ``dispatch.changed`` reaches.
 SHOP_FLOOR_OPERATIONS = "/shop-floor/operations"
 VISITOR_LOG = "/visitor-log"
+# Record-less: the Users admin page, where an Admin sees a floor-PIN lock and unlocks it
+# (``floor_pin.lockout`` is delivered to Admins only, who all reach ``/users``).
+USERS_ADMIN = "/users"
 
 ALL_LINK_TEMPLATES: tuple[str, ...] = (
     HANK_HANDOFF,
@@ -104,6 +107,7 @@ ALL_LINK_TEMPLATES: tuple[str, ...] = (
     SCHEDULING_LIST,
     SHOP_FLOOR_OPERATIONS,
     VISITOR_LOG,
+    USERS_ADMIN,
 )
 
 # Shapes written to notifications.link (and DigestQueue.event_data["link"], and mailed as

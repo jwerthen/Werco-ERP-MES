@@ -172,7 +172,7 @@ the emitted `OperationalEvent.event_type` strings that map to this key.
   related_id, user_id)` exists** — the digest still accrues. So a WO late for two weeks is one inbox
   row + the digest, not 14 emails. Recurring in PR 1: `wo.late`, `stock.low`, `calibration.due`,
   `quote.expiring`, `cert.expiring`, `maintenance.overdue`. Added since: `dispatch.changed` (Dispatch
-  v2), keyed per machine.
+  v2), keyed per machine, and `floor_pin.lockout` (migration `130`), keyed per locked user.
 
 ### Hank personal follow-ups
 
@@ -207,7 +207,8 @@ but **only entries whose source is wired today actually fire**; the rest are **d
 `shipment.shipped`,
 `coc.generation_failed`, `downtime.started`, `downtime.resolved`, `material.allocation_shortage`,
 `material.backflush_shortage`, `material.allocation_consumption_failed`, `material.backflush_failed`,
-`material.backflush_demand_refused`, `dispatch.changed`, `comment.mention`, `comment.added`.
+`material.backflush_demand_refused`, `dispatch.changed`, `comment.mention`, `comment.added`,
+`floor_pin.lockout`.
 
 > **`downtime.started` / `downtime.resolved` have a second source since migration `124`.** Besides
 > an operator report on `/downtime`, starting a work-center maintenance work order with
@@ -291,6 +292,37 @@ but **only entries whose source is wired today actually fire**; the rest are **d
 >
 > **Neither is under Admin Settings → Email Recipients** — see
 > [Admin email recipients](#admin-email-recipients).
+
+> **`floor_pin.lockout` — added with the floor PIN (migration `130`, 2026-11-19).** Wrong PINs
+> against a badge locked its floor PIN for **24 hours or more**, so someone may be guessing it. Every
+> PIN lock expires on its own (the tiers run 15 minutes, 2 hours, 24 hours, 48 hours, 96 hours,
+> then 7 days per further 5 wrong PINs); this alert tells the people who can lift one early. See
+> [API.md → Badge sign-on and the floor PIN](API.md#badge-sign-on-and-the-floor-pin-as9100d-852).
+>
+> | Field | Value |
+> |-------|-------|
+> | `event_key` | `floor_pin.lockout` |
+> | `label` | Floor PIN locked out |
+> | `category` / `severity` | **System** / **warning** |
+> | `default_channels` | `in_app` only |
+> | `mandatory_channel` | `in_app` — a security signal, so an Admin cannot mute it |
+> | `sms_eligible` | `false` |
+> | `recurring` | `true` — one unread row per locked user per Admin; a badge walked up the tiers (24 h → 48 h → …) does not stack a row per tier |
+> | Recipients | `roles=(ADMIN,)`: the company's active Admins |
+> | `source_event_types` | `("floor_pin_lockout",)` — outbox-driven |
+>
+> **What emits it.** The badge sign-on step (`app/api/endpoints/auth.py::_notify_long_floor_pin_lock`)
+> on `POST /auth/employee-login` and the crew-station badge mint, when a wrong PIN starts a lock of 24
+> hours or more. The event is `entity_type = "user"`, `entity_id` = the locked user, with payload
+> `user_id`, `tier` and `lock_hours` only (never a PIN, never a badge number). None of those keys is
+> in `_IDENTIFIER_KEYS` or `_DETAIL_KEYS`, so the row reads "Floor PIN locked out" with the catalog
+> description as its body and names nobody; the Users page shows who. It is emitted best-effort inside
+> a savepoint and commits with the failure audit row, so it never changes the sign-on answer. Like
+> every catalog source type it is refused **400** by `POST /operational-events/`, so no client can
+> forge one.
+>
+> **Link:** the record-less `/users`, which for Admins and Managers lists every currently locked
+> floor PIN above the table, each with its end time and the **Unlock** that lifts it early.
 
 **Direct-dispatch** (crons / MRP / scheduling call `dispatch_direct`):
 `calibration.due`, `wo.late`, `stock.low`, `quote.expiring` (the four recurring crons in
@@ -633,6 +665,7 @@ pattern is an existing list page plus a param that page already reads (`pages/Pu
 | `entity_type="car"`, no work order | `/quality?tab=car` — record-less | Same: no CAR detail view. Previously `None`. |
 | `entity_type="downtime_event"`, no work order (the normal case — downtime is reported against a work center) | `/downtime` — record-less | No per-event detail view. Previously `None`. |
 | `entity_type="work_center"` — `dispatch.changed` (Dispatch v2), which deliberately carries no `work_order_id` | `/shop-floor/operations` — record-less | The shop-floor operations list, in dispatch order. Its recipients are operators clocked in at the machine; `/shop-floor` needs `work_orders:view`, which every role holds (rule 4). |
+| `entity_type="user"` — `floor_pin.lockout` (migration `130`) | `/users` — record-less (`USERS_ADMIN`) | The Users page, which lists every currently locked floor PIN above the table with its end time and **Unlock**. Its only recipients are Admins, who all reach `/users`. |
 | `calibration.due` — both the 7-day and 1-day cron windows | `/calibration` — record-less and **deliberately unfiltered** | `?filter=due` reads as more helpful and is provably empty: the cron selects `Equipment.status == ACTIVE`, while `GET /calibration/equipment?status=due` filters the **persisted** status column *before* `update_equipment_status` recomputes it — so the rows that trigger the notification are exactly the rows that filter excludes. The unfiltered list sorts by `next_calibration_date` ascending (due item first) and repairs the stale status for every row it returns. |
 | `quote.expiring` (cron) | `/quotes?id={id}` | `Quotes.tsx` selects the quote with a `GET /quotes/{id}` fallback — needed because the list excludes `CONVERTED`/`EXPIRED`, i.e. exactly the quote you were warned about. |
 | `wo.late`, `stock.low`, `mrp.completed` / `mrp.review_needed`, `capacity.overload`, `mrp.expedite_required`, `visitor.check_in` (all `dispatch_direct`) | `/work-orders/{id}`, `/inventory`, `/mrp`, `/scheduling`, `/parts/{id}`, `/visitor-log` — **values unchanged** | Already resolved; moved into the registry so the guard test covers them and the no-inline-literal grep can be total. |

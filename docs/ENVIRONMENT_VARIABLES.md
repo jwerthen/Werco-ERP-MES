@@ -796,36 +796,56 @@ AWS_REGION=us-east-1
 > distinguished one deploy from another.)
 
 > **What Sentry never receives.** `init_sentry` (`app/core/observability.py`, used by the API and
-> the worker) protects credentials in two layers:
+> the worker) keeps credentials out of Sentry in four layers, outermost last:
 >
-> - **A key denylist.** `sentry_sdk.init` gets an `EventScrubber` with `recursive=True`, whose
->   denylist is the SDK default (passwords, tokens, authorization headers, cookies, ...) plus
->   `SENTRY_EXTRA_DENYLIST`: `pin`, `new_pin` and `floor_pin` (a floor PIN, and a station or
->   visitor-tablet PIN); the password names the default misses (`plain_password`, `new_password`,
->   `current_password`, `admin_password`, `default_password`); and the hash names `stored_hash`,
->   `hashed`, `hashed_password`, `floor_pin_hash` and `password_hash`, because the bcrypt hash of a
->   4–6 digit PIN *is* the PIN to anyone who can run bcrypt a million times. A key is matched
->   exactly (case-insensitive) at any depth of a request body, an `extra` or a frame's local
->   variables. The floor-PIN request fields are also declared `repr=False`.
-> - **A `before_send` hook** (`scrub_sentry_event`, also `before_send_transaction`) for what a key
->   list cannot see inside a value. On every event it drops the raw request-body frame variables
->   (`body_bytes`, `body`, `raw_body`, `json_body`, `request_body`, `content`, which hold the body
->   as a repr string such as `b'{"employee_id": "0042", "pin": "2580"}'`), replaces any frame
->   variable holding a bcrypt-hash-shaped value with `[Filtered]`, cuts SQLAlchemy's
->   `[parameters: ...]` and bcrypt hashes out of exception and log messages, and cuts bcrypt hashes
->   out of the request data and extras. On a **credential route** (every `/auth/` path, the
->   floor-PIN routes, the password reset and change, and the visitor-tablet and crew-station PIN
->   sign-ins and PIN writes) it drops **every** frame variable and the request data entirely.
+> 1. **A key denylist.** `sentry_sdk.init` gets an `EventScrubber` with `recursive=True`, whose
+>    denylist is the SDK default (passwords, tokens, authorization headers, cookies, ...) plus
+>    `SENTRY_EXTRA_DENYLIST`: `pin`, `new_pin` and `floor_pin` (a floor PIN, and a station or
+>    visitor-tablet PIN); the password names the default misses (`plain_password`, `new_password`,
+>    `current_password`, `admin_password`, `default_password`); and the hash names `stored_hash`,
+>    `hashed`, `hashed_password`, `floor_pin_hash` and `password_hash`, because the bcrypt hash of a
+>    4–6 digit PIN *is* the PIN to anyone who can run bcrypt a million times. A key is matched
+>    exactly (case-insensitive) at any depth of a request body, an `extra` or a frame's local
+>    variables. The floor-PIN request fields are also declared `repr=False`.
+> 2. **A `before_send` hook on every event** (`scrub_sentry_event`, also `before_send_transaction`)
+>    for what a key list cannot see, because the credential sits *inside a value*:
+>    - frame variables: it drops the raw request-body locals (`body_bytes`, `body`, `raw_body`,
+>      `json_body`, `request_body`, `content`, which hold the body as a repr string such as
+>      `b'{"employee_id": "0042", "pin": "2580"}'`) and any variable whose repr is an object
+>      carrying a credential field (a request model such as `UserCreate(..., password='...')` on
+>      `POST /users/` or `CompanyRegister(..., admin_password='...')` on the public signup), and
+>      replaces any variable holding a bcrypt hash with `[Filtered]`;
+>    - every remaining string, in the frame variables, the exception values, the top-level
+>      message, `logentry` (message, formatted string and params), every breadcrumb's message and
+>      data, the extras and the request data, goes through `scrub_text`.
+> 3. **`scrub_text`** masks the value of every `key=value`, `key: value`, `'key': 'value'` or
+>    `"key": "value"` whose key is a credential name (`password`, `pin`, `secret`, `token`,
+>    `api_key` and their variants, including any name ending in one, such as `access_token`,
+>    `admin_password` or `station_pin`, but not one that merely contains it, such as `token_type`),
+>    keeping the key; removes bcrypt hashes; and cuts SQLAlchemy's `[parameters: ...]` and Postgres's
+>    `Failing row contains (...)`, which prints the whole failing row, `hashed_password` and
+>    `floor_pin_hash` included.
+> 4. **Credential routes** (every `/auth/` path, the floor-PIN routes, the password reset and change,
+>    and the visitor-tablet and crew-station PIN sign-ins and PIN writes): the event loses **every**
+>    frame variable and the request data entirely.
 >
-> It is not a setting: it applies whenever `SENTRY_DSN` is set, and
+> Layers 2 and 3 are what cover the password **create** routes too (`POST /users/`,
+> `POST /companies/register`), which are not on the credential-route list. The application's own
+> log lines that can carry a database error (the audit writer, the auth event logger) log only the
+> exception's class and, for a database error, the driver error's class and SQLSTATE
+> (`describe_exception`), never its text, so a logged failure cannot reach Sentry as a breadcrumb
+> carrying a row. It is not a setting: it applies whenever `SENTRY_DSN` is set, and
 > `backend/tests/test_sentry_observability_config.py` and `test_sentry_credential_events.py` pin it.
 >
 > **Debugging note: SQL errors carry no parameter values.** The database engine is created with
 > `hide_parameters=True` (`app/db/database.py`), so a failed statement's message, in logs and in
 > Sentry alike, shows the SQL and `[SQL parameters hidden due to hide_parameters=True]` instead of
 > the values: a failed `UPDATE users SET floor_pin_hash=...` would otherwise carry the PIN's hash.
-> When chasing a data-dependent SQL error, reproduce it locally with the parameters logged by your
-> own code, not by turning this off in a deployed environment.
+> The audit writer's and the auth event logger's error lines go further and show only the
+> exception class, the driver error class and the SQLSTATE (for example `IntegrityError
+> [NotNullViolation] (SQLSTATE 23502)`), and Sentry cuts `Failing row contains (...)` from any
+> message. When chasing a data-dependent SQL error, reproduce it locally with the parameters logged
+> by your own code, not by turning this off in a deployed environment.
 
 ### External Services
 

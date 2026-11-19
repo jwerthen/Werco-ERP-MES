@@ -29,10 +29,11 @@ export interface User {
   has_floor_pin?: boolean;
   /** UTC ISO instant the current PIN was set; null when none is set. */
   floor_pin_set_at?: string | null;
-  /** UTC ISO instant a timed PIN lock lifts (5 wrong PINs → 15 min, 10 → 2 h); past or null = none. */
+  /**
+   * UTC ISO instant the PIN lock lifts; past or null = not locked. Every tier expires: 5
+   * wrong PINs → 15 min, 10 → 2 h, then 24 h doubling to a 7-day cap.
+   */
   floor_pin_locked_until?: string | null;
-  /** 15 cumulative wrong PINs: locked until an Admin / Manager unlocks, sets or clears it. */
-  floor_pin_admin_locked?: boolean;
   /** A promotion into Admin / Manager / Quality cleared the PIN; badge sign-on is refused until an Admin sets one. */
   floor_pin_reset_required?: boolean;
 }

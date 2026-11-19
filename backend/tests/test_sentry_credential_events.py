@@ -224,3 +224,152 @@ def test_control_without_before_send_the_pin_does_leak(sentry_events, monkeypatc
         "#", serialized
     ), "the raw body local no longer carries the PIN; the leak tests above prove nothing"
     assert "$2b$" in serialized
+
+
+# ------------------------------------------------- the REAL password-bearing create routes
+#
+# PR #369 re-check: a request MODEL in a frame variable reprs its fields --
+# ``UserCreate(..., password='...')`` -- which no key list can see. Driven here through the real
+# ``app.main`` app (real routes, real models), with a dependency forced to fail after validation.
+
+PASSWORD = "Glacier7!Harbor-Quartz"
+
+
+@pytest.fixture
+def real_client(db_session) -> Iterator[TestClient]:
+    from app.db.database import get_db
+
+    def override_get_db():
+        yield db_session
+
+    app_main.app.dependency_overrides[get_db] = override_get_db
+    try:
+        with TestClient(app_main.app, raise_server_exceptions=False) as test_client:
+            yield test_client
+    finally:
+        app_main.app.dependency_overrides.clear()
+
+
+def _fail_after_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("provisioning store unavailable")
+
+    monkeypatch.setattr("app.api.endpoints.users.create_tenant_user", boom)
+    monkeypatch.setattr("app.api.endpoints.companies.onboard_company", boom)
+
+
+def _post_user(client: TestClient, headers: Dict[str, str]):
+    return client.post(
+        "/api/v1/users/",
+        json={
+            "email": "new.hire@werco.com",
+            "employee_id": "NH-1001",
+            "first_name": "New",
+            "last_name": "Hire",
+            "password": PASSWORD,
+            "role": "operator",
+        },
+        headers=headers,
+    )
+
+
+def _post_company_signup(client: TestClient):
+    return client.post(
+        "/api/v1/companies/register",
+        json={
+            "company_name": "Signup Probe Co",
+            "admin_email": "owner@signup-probe.com",
+            "admin_first_name": "Owner",
+            "admin_last_name": "Probe",
+            "admin_password": PASSWORD,
+        },
+        headers={"X-Requested-With": "XMLHttpRequest"},
+    )
+
+
+@pytest.mark.parametrize("route", ["users_create", "company_signup"])
+def test_a_password_create_route_error_event_carries_no_password(
+    sentry_events, real_client, admin_headers, monkeypatch, route
+):
+    _fail_after_validation(monkeypatch)
+
+    response = _post_user(real_client, admin_headers) if route == "users_create" else _post_company_signup(real_client)
+
+    assert response.status_code == 500, response.text
+    serialized = _serialized(sentry_events)
+    assert PASSWORD not in serialized
+    assert "$2b$" not in serialized
+
+
+@pytest.mark.parametrize("route", ["users_create", "company_signup"])
+def test_control_without_before_send_the_password_does_leak(
+    sentry_events, real_client, admin_headers, monkeypatch, route
+):
+    """Non-vacuity: the same requests with only the key scrubber leak the password."""
+    sentry_sdk.get_client().close()
+    monkeypatch.setattr(observability, "scrub_sentry_event", lambda event, hint=None: event)
+    app_main.init_sentry()
+    _fail_after_validation(monkeypatch)
+
+    _post_user(real_client, admin_headers) if route == "users_create" else _post_company_signup(real_client)
+
+    assert PASSWORD in _serialized(sentry_events)
+
+
+# ------------------------------------------------------------ breadcrumbs and log entries
+
+# Assembled at run time: a captured frame carries its SOURCE lines as context, so a secret written
+# literally near the logging call would "leak" from this file's own code, not from the scrubber.
+LOGGED_SECRET = "".join(["hun", "ter2-", "Sec", "ret"])
+FAILING_ROW = (
+    '(psycopg2.errors.NotNullViolation) null value in column "first_name" violates not-null constraint\n'
+    "DETAIL:  Failing row contains (5, 1, EMP-1, op@werco.com, {hash}, null, Op, operator, {hash}).\n"
+    "[SQL: UPDATE users SET first_name=%(first_name)s WHERE users.id = %(users_id)s]\n"
+    "[parameters: {{'first_name': None, 'password': '{secret}'}}]"
+)
+
+
+def test_a_logged_db_error_is_scrubbed_in_its_event_and_its_breadcrumb(sentry_events):
+    import logging
+
+    text = FAILING_ROW.format(hash=get_password_hash(PIN), secret=LOGGED_SECRET)
+    logger = logging.getLogger("app.services.audit_service")
+    # As a log line the old code wrote (f-string), and with the text as a param.
+    logger.error(f"Failed to create audit log: {text}")
+    logger.error("Failed to create audit log: %s", text)
+    logger.warning(f"context password={LOGGED_SECRET} pin: {PIN}")
+    try:
+        raise RuntimeError("a later failure carries the earlier log lines as breadcrumbs")
+    except RuntimeError as exc:
+        sentry_sdk.capture_exception(exc)
+
+    serialized = _serialized(sentry_events)
+    assert any(event.get("breadcrumbs") for event in sentry_events.events), "the breadcrumbs were expected"
+    assert any(event.get("logentry") for event in sentry_events.events), "the log events were expected"
+    assert "$2b$" not in serialized
+    assert LOGGED_SECRET not in serialized
+    _assert_no_pin_or_hash(serialized)
+    assert "Failing row contains ([Filtered])" in serialized
+
+
+def test_the_audit_writer_logs_a_db_error_by_class_and_sqlstate_only(db_session, monkeypatch, caplog):
+    from sqlalchemy.exc import OperationalError
+
+    from app.services.audit_service import AuditService
+
+    class _DriverError(Exception):
+        pgcode = "23502"
+
+    hashed = get_password_hash(PIN)
+
+    def lost(*_args: Any, **_kwargs: Any) -> None:
+        raise OperationalError("UPDATE users", {}, _DriverError(FAILING_ROW.format(hash=hashed, secret=LOGGED_SECRET)))
+
+    monkeypatch.setattr(AuditService, "_acquire_chain_lock", lost)
+    with caplog.at_level("ERROR"), pytest.raises(OperationalError):
+        AuditService(db_session).log(action="UPDATE", resource_type="user", resource_id=1)
+
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "Failed to create audit log" in logged
+    assert "OperationalError [_DriverError] (SQLSTATE 23502)" in logged
+    assert "$2b$" not in logged and "Failing row" not in logged and LOGGED_SECRET not in logged

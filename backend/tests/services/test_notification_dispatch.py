@@ -474,6 +474,8 @@ def test_the_mandatory_email_and_in_app_entries_are_the_ones_these_tests_assume(
         "quality.hold",
         "inspection.failed",
         "comment.mention",
+        # PR #369: a floor-PIN lock of a day or more, delivered in-app to the company's Admins.
+        "floor_pin.lockout",
     }
 
 

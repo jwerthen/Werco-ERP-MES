@@ -20,9 +20,8 @@ only the columns it reads, every one guarded on its own:
   - ``floor_pin_set_at``          DateTime NULL -- when the PIN was last set (naive UTC).
   - ``floor_pin_failed_attempts`` Integer NOT NULL, server default ``'0'`` -- CUMULATIVE wrong
     PINs since the last correct PIN or admin unlock / set / clear (a lock does not reset it).
-  - ``floor_pin_locked_until``    DateTime NULL -- the PIN lockout (naive UTC).
-  - ``floor_pin_admin_locked``    Boolean NOT NULL, server default ``sa.false()`` -- set at 15
-    cumulative wrong PINs; only an Admin / Manager unlock, set or clear lifts it.
+  - ``floor_pin_locked_until``    DateTime NULL -- the PIN lockout (naive UTC). Every lock
+    expires: the tiers escalate from 15 minutes to a 7-day cap, never to a permanent lock.
   - ``floor_pin_reset_required``  Boolean NOT NULL, server default ``sa.false()`` -- set when a
     promotion into Admin / Manager / Quality cleared a PIN; badge sign-on is refused until an
     Admin sets a new PIN or clears it.
@@ -38,7 +37,7 @@ only the columns it reads, every one guarded on its own:
 No backfill: behavior is unchanged after upgrade (deliberate)
 -------------------------------------------------------------
 No data is backfilled. After upgrade NO user has a PIN (every ``floor_pin_hash`` is NULL, every
-counter 0, nothing locked or admin-locked, no reset required) and EVERY company is off
+counter 0, nothing locked, no reset required) and EVERY company is off
 (``require_floor_pin`` false), which is the
 truthful state and exactly what the sign-on code treats as "no PIN step": badge sign-on behaves
 as it does today until a supervisor sets a PIN or an Admin turns the policy on -- each a reasoned,
@@ -51,10 +50,9 @@ spelled exactly as on the models and as ``054``'s ``allow_ai_egress`` (``server_
 -- never ``sa.text`` (``072`` used ``sa.text("false")`` for ``allow_sms_egress``, which renders a
 different DEFAULT on SQLite and is one of the accepted ``059``-``088`` differences the
 fresh-bootstrap round-trip stays above). A plain string also keeps the SQLite batch from needing a
-rebuild (below). The two later booleans, ``floor_pin_admin_locked`` and
-``floor_pin_reset_required``, use ``sa.false()`` on model and migration alike: it renders
-``DEFAULT false`` on PostgreSQL and ``DEFAULT 0`` on SQLite, so those columns carry no
-TEXT-``'false'`` artifact and need no SQLite normalization.
+rebuild (below). The later boolean, ``floor_pin_reset_required``, uses ``sa.false()`` on model
+and migration alike: it renders ``DEFAULT false`` on PostgreSQL and ``DEFAULT 0`` on SQLite, so
+that column carries no TEXT-``'false'`` artifact and needs no SQLite normalization.
 
 SQLite storage normalization (local / test databases only; PostgreSQL is untouched): SQLite
 stores a plain ``DEFAULT 'false'`` as the TEXT ``'false'`` for a row that existed before the
@@ -166,8 +164,8 @@ COMPANIES = "companies"
 
 # The server defaults of the first two NOT NULL columns. Plain strings, exactly as on the models
 # and 054's ``allow_ai_egress`` (never ``sa.text``, which renders a different DEFAULT on SQLite,
-# breaks the fresh-bootstrap diff and would force a SQLite batch rebuild). The two later booleans
-# use ``sa.false()`` on model and migration alike (module docstring).
+# breaks the fresh-bootstrap diff and would force a SQLite batch rebuild). The later boolean
+# (``floor_pin_reset_required``) uses ``sa.false()`` on model and migration alike (module docstring).
 DEFAULT_FAILED_ATTEMPTS = "0"
 DEFAULT_REQUIRE_FLOOR_PIN = "false"
 
@@ -192,7 +190,6 @@ def _user_columns() -> List[sa.Column]:
         sa.Column("floor_pin_set_at", sa.DateTime(), nullable=True),
         sa.Column("floor_pin_failed_attempts", sa.Integer(), nullable=False, server_default=DEFAULT_FAILED_ATTEMPTS),
         sa.Column("floor_pin_locked_until", sa.DateTime(), nullable=True),
-        sa.Column("floor_pin_admin_locked", sa.Boolean(), nullable=False, server_default=sa.false()),
         sa.Column("floor_pin_reset_required", sa.Boolean(), nullable=False, server_default=sa.false()),
     ]
 

@@ -205,8 +205,6 @@ class UserResponse(UTCModel):
     has_floor_pin: bool = False
     floor_pin_set_at: Optional[datetime] = None
     floor_pin_locked_until: Optional[datetime] = None
-    # 15 cumulative wrong PINs: no time lifts it, only an Admin / Manager unlock, set or clear.
-    floor_pin_admin_locked: bool = False
     # A promotion into Admin / Manager / Quality cleared the PIN: badge sign-on is refused until an
     # Admin sets a new PIN or clears it.
     floor_pin_reset_required: bool = False
@@ -1370,8 +1368,8 @@ def set_user_floor_pin(
     The PIN is 4 to 6 digits and may not be one digit repeated (0000), a straight run up or
     down (1234, 4321), or the user's own employee ID / the last digits of their badge; a
     broken rule is **422** naming the rule (never the PIN). Setting a PIN also clears the
-    wrong-PIN count and every PIN lock -- the timed lock and the admin lock -- and the
-    ``floor_pin_reset_required`` flag a promotion left. From then on ``POST /auth/employee-login``
+    wrong-PIN count and any PIN lock, and the ``floor_pin_reset_required`` flag a promotion
+    left. From then on ``POST /auth/employee-login``
     and the crew-station badge mint challenge that badge for the PIN, and every existing
     ``["badge", "pin"]`` session of this user -- it verified the OLD PIN -- is refused **401**
     ``floor_pin_reauth_required`` at its next request or refresh.
@@ -1396,7 +1394,6 @@ def set_user_floor_pin(
     now = datetime.utcnow()
     replaced_existing = user.has_floor_pin
     cleared_lock = user.floor_pin_locked_until is not None and user.floor_pin_locked_until > now
-    cleared_admin_lock = bool(user.floor_pin_admin_locked)
     cleared_reset_required = bool(user.floor_pin_reset_required)
     identifier = user.employee_id or user.email
     with atomic_security_write(db):
@@ -1405,7 +1402,6 @@ def set_user_floor_pin(
         user.floor_pin_set_at = now
         user.floor_pin_failed_attempts = 0
         user.floor_pin_locked_until = None
-        user.floor_pin_admin_locked = False
         user.floor_pin_reset_required = False
         # No old/new values: the PIN hash must never enter the audit log.
         audit.log_required(
@@ -1418,7 +1414,6 @@ def set_user_floor_pin(
                 "source": "admin_set",
                 "replaced_existing_pin": replaced_existing,
                 "cleared_pin_lockout": cleared_lock,
-                "cleared_pin_admin_lock": cleared_admin_lock,
                 "cleared_pin_reset_required": cleared_reset_required,
             },
         )
@@ -1438,8 +1433,8 @@ def clear_user_floor_pin(
 
     Afterwards the badge signs in without a PIN -- unless the company requires one
     (``require_floor_pin``), in which case badge sign-on is refused **403**
-    ``floor_pin_not_set`` until a new PIN is set. Clearing also lifts the timed and admin
-    locks and the ``floor_pin_reset_required`` flag a promotion left: an explicit decision to
+    ``floor_pin_not_set`` until a new PIN is set. Clearing also lifts any PIN lock and the
+    ``floor_pin_reset_required`` flag a promotion left: an explicit decision to
     let that person sign in on the badge alone. Every existing ``["badge", "pin"]`` session of
     the user is refused **401** ``floor_pin_reauth_required`` at its next request or refresh.
     Idempotent: a user with no PIN and no PIN lock or reset state is returned unchanged and
@@ -1455,25 +1450,19 @@ def clear_user_floor_pin(
     user = _floor_pin_target_or_404(db, user_id, company_id, current_user)
 
     had_pin = user.has_floor_pin
-    had_lock_state = (
-        bool(user.floor_pin_failed_attempts)
-        or user.floor_pin_locked_until is not None
-        or bool(user.floor_pin_admin_locked)
-    )
+    had_lock_state = bool(user.floor_pin_failed_attempts) or user.floor_pin_locked_until is not None
     had_reset_required = bool(user.floor_pin_reset_required)
     if not had_pin and not had_lock_state and not had_reset_required and user.floor_pin_set_at is None:
         return user
 
     now = datetime.utcnow()
     cleared_lock = user.floor_pin_locked_until is not None and user.floor_pin_locked_until > now
-    cleared_admin_lock = bool(user.floor_pin_admin_locked)
     identifier = user.employee_id or user.email
     with atomic_security_write(db):
         user.floor_pin_hash = None
         user.floor_pin_set_at = None
         user.floor_pin_failed_attempts = 0
         user.floor_pin_locked_until = None
-        user.floor_pin_admin_locked = False
         user.floor_pin_reset_required = False
         audit.log_required(
             action="FLOOR_PIN_CLEARED",
@@ -1485,7 +1474,6 @@ def clear_user_floor_pin(
                 "source": "admin_clear",
                 "had_pin": had_pin,
                 "cleared_pin_lockout": cleared_lock,
-                "cleared_pin_admin_lock": cleared_admin_lock,
                 "cleared_pin_reset_required": had_reset_required,
             },
         )
@@ -1507,13 +1495,15 @@ def unlock_user_floor_pin(
 ):
     """Lift a floor-PIN lock, keeping the PIN (Admin or Manager).
 
-    Wrong PINs are cumulative until a correct PIN: 5 lock the badge's PIN for 15 minutes and 10
-    for 2 hours (``floor_pin_locked_until``), and 15 ADMIN-lock it (``floor_pin_admin_locked``),
-    which no time lifts. This clears the timed lock, the admin lock and the wrong-PIN count so
-    the person can sign in with their existing PIN right away; the PIN itself is unchanged and
-    sessions that verified it carry on (to replace it, use ``PUT /users/{user_id}/floor-pin``).
-    A no-op when neither lock is in force: **200** with the user record, nothing written,
-    nothing recorded. The password-login lockout is separate (``POST /users/{user_id}/unlock``).
+    Wrong PINs are cumulative until a correct PIN, and every 5th locks the badge's PIN for longer
+    (``floor_pin_locked_until``): 15 minutes, 2 hours, 24 hours, 48 hours, 96 hours, then 7 days
+    per further 5. Every lock expires on its own; one of 24 hours or more alerts the company's
+    Admins (``floor_pin_lockout``), and this is how they lift it early. It clears the lock and
+    the wrong-PIN count so the person can sign in with their existing PIN right away; the PIN
+    itself is unchanged and sessions that verified it carry on (to replace it, use
+    ``PUT /users/{user_id}/floor-pin``). A no-op when no lock is in force: **200** with the user
+    record, nothing written, nothing recorded. The password-login lockout is separate
+    (``POST /users/{user_id}/unlock``).
 
     Same authority as setting a PIN: no API token (**403**), not an MCP tool, the target in
     the active company (**404**), platform accounts need a platform administrator, and a
@@ -1526,9 +1516,7 @@ def unlock_user_floor_pin(
 
     now = datetime.utcnow()
     prior_locked_until = user.floor_pin_locked_until
-    timed_lock_in_force = prior_locked_until is not None and prior_locked_until > now
-    prior_admin_locked = bool(user.floor_pin_admin_locked)
-    if not timed_lock_in_force and not prior_admin_locked:
+    if prior_locked_until is None or prior_locked_until <= now:
         return user
 
     prior_attempts = user.floor_pin_failed_attempts or 0
@@ -1536,7 +1524,6 @@ def unlock_user_floor_pin(
     with atomic_security_write(db):
         user.floor_pin_failed_attempts = 0
         user.floor_pin_locked_until = None
-        user.floor_pin_admin_locked = False
         audit.log_required(
             action="FLOOR_PIN_UNLOCKED",
             resource_type="user",
@@ -1545,8 +1532,7 @@ def unlock_user_floor_pin(
             description=f"Cleared floor PIN lockout for user {identifier}",
             extra_data={
                 "source": "admin_unlock",
-                "floor_pin_locked_until": prior_locked_until.isoformat() if prior_locked_until else None,
-                "floor_pin_admin_locked": prior_admin_locked,
+                "floor_pin_locked_until": prior_locked_until.isoformat(),
                 "floor_pin_failed_attempts": prior_attempts,
             },
         )

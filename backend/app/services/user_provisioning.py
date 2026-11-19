@@ -56,7 +56,6 @@ def clear_floor_pin_on_promotion(user: User, previous_role: Optional[UserRole]) 
         or user.floor_pin_set_at is not None
         or bool(user.floor_pin_failed_attempts)
         or user.floor_pin_locked_until is not None
-        or bool(user.floor_pin_admin_locked)
     )
     if not has_pin_state:
         return False
@@ -64,7 +63,6 @@ def clear_floor_pin_on_promotion(user: User, previous_role: Optional[UserRole]) 
     user.floor_pin_set_at = None
     user.floor_pin_failed_attempts = 0
     user.floor_pin_locked_until = None
-    user.floor_pin_admin_locked = False
     if had_pin:
         user.floor_pin_reset_required = True
     return True

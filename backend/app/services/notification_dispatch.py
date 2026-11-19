@@ -332,6 +332,10 @@ def _link_for_event(event) -> Optional[str]:
     # holds work_orders:view) see the new order, and it needs no id to honour the link.
     if entity_type == "work_center":
         return links.SHOP_FLOOR_OPERATIONS
+    # A floor-PIN lockout alert names a USER (its only recipients are Admins): record-less, on the
+    # Users page where the lock shows and the Unlock verb is.
+    if entity_type == "user":
+        return links.USERS_ADMIN
     # entity_type == "shipment" is deliberately absent: shipments.work_order_id is
     # nullable=False (models/shipping.py), so the work_order_id branch above always wins
     # first and the old /shipping/{id} branch was unreachable dead code. Do not "restore" it.

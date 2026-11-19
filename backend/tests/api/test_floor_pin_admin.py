@@ -284,7 +284,6 @@ class TestSetResetClear:
             "source": "admin_set",
             "replaced_existing_pin": False,
             "cleared_pin_lockout": False,
-            "cleared_pin_admin_lock": False,
             "cleared_pin_reset_required": False,
         }
         assert PIN not in row_text(row) and stored_hash not in row_text(row)
@@ -339,7 +338,6 @@ class TestSetResetClear:
             "source": "admin_clear",
             "had_pin": True,
             "cleared_pin_lockout": True,
-            "cleared_pin_admin_lock": False,
             "cleared_pin_reset_required": False,
         }
 
@@ -729,7 +727,6 @@ class TestUnlock:
         assert row.extra_data == {
             "source": "admin_unlock",
             "floor_pin_locked_until": locked_until.isoformat(),
-            "floor_pin_admin_locked": False,
             "floor_pin_failed_attempts": 2,
         }
         assert stored_hash not in row_text(row) and OTHER_PIN not in row_text(row)

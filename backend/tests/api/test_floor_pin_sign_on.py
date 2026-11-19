@@ -430,35 +430,42 @@ class TestAttemptReservation:
 
         assert auth_endpoints._reserve_floor_pin_attempt(db_session, user.id, datetime.utcnow()) == 1
 
-    def test_the_lock_sets_fifteen_minutes_and_keeps_the_cumulative_counter(self, db_session):
+    def test_the_reservation_reaching_a_tier_sets_its_lock_and_keeps_the_count(self, db_session):
+        """PR #369 re-check: the attempt that REACHES a tier locks the PIN in the same statement
+        that reserves it, so no concurrent attempt runs past the tier; the count is cumulative."""
         user = make_badge_user(db_session, "FP-6404", pin=PIN)
-        user.floor_pin_failed_attempts = FLOOR_PIN_MAX_FAILURES
+        user.floor_pin_failed_attempts = FLOOR_PIN_MAX_FAILURES - 1
         db_session.commit()
         now = datetime.utcnow()
 
-        assert auth_endpoints._lock_floor_pin(db_session, user.id, now) is True
+        assert auth_endpoints._reserve_floor_pin_attempt(db_session, user.id, now) == FLOOR_PIN_MAX_FAILURES
 
         user = fresh(db_session, user)
-        # Review fix (PR #369 findings 3/4): the count is cumulative, so the next tier escalates.
         assert user.floor_pin_failed_attempts == FLOOR_PIN_MAX_FAILURES
         assert user.floor_pin_locked_until == now + timedelta(minutes=FLOOR_PIN_LOCKOUT_MINUTES)
 
-    def test_a_racing_lock_is_never_extended(self, db_session):
+    def test_a_lock_in_force_is_never_extended_by_a_racing_attempt(self, db_session):
         user = make_badge_user(db_session, "FP-6405", pin=PIN)
         first_lock = datetime.utcnow() + timedelta(minutes=3)
+        user.floor_pin_failed_attempts = FLOOR_PIN_MAX_FAILURES - 1
         user.floor_pin_locked_until = first_lock
         db_session.commit()
 
-        assert auth_endpoints._lock_floor_pin(db_session, user.id, datetime.utcnow()) is False
-        assert fresh(db_session, user).floor_pin_locked_until == first_lock
+        assert auth_endpoints._reserve_floor_pin_attempt(db_session, user.id, datetime.utcnow()) is None
+        user = fresh(db_session, user)
+        assert user.floor_pin_locked_until == first_lock
+        assert user.floor_pin_failed_attempts == FLOOR_PIN_MAX_FAILURES - 1
 
-    def test_settling_a_right_pin_is_refused_while_a_lock_is_in_force(self, db_session):
+    def test_settling_a_right_pin_is_refused_when_a_racing_attempt_locked_it(self, db_session):
+        """The settle is a compare-and-set on the reserved count: another attempt reserved since
+        (3 is no longer this attempt's 2) and locked the PIN, so the right PIN is refused and
+        nothing is reset."""
         user = make_badge_user(db_session, "FP-6406", pin=PIN)
         user.floor_pin_failed_attempts = 3
         user.floor_pin_locked_until = datetime.utcnow() + timedelta(minutes=3)
         db_session.commit()
 
-        assert auth_endpoints._settle_verified_floor_pin(db_session, user.id, datetime.utcnow()) is False
+        assert auth_endpoints._settle_verified_floor_pin(db_session, user.id, 2, datetime.utcnow()) is False
         user = fresh(db_session, user)
         assert user.floor_pin_failed_attempts == 3 and user.floor_pin_locked_until is not None
 
@@ -501,9 +508,13 @@ class TestAttemptReservation:
         real_verify = auth_endpoints.verify_floor_pin
 
         def verify_while_another_station_locks_it(pin, hashed):
-            # A racing wrong guess at another station locks the badge while this bcrypt runs.
+            # A racing wrong guess at another station reserves (count + 1) and, reaching a tier,
+            # locks the badge while this bcrypt runs -- exactly what its reservation would write.
             db_session.execute(
-                text("UPDATE users SET floor_pin_locked_until = :until WHERE id = :id"),
+                text(
+                    "UPDATE users SET floor_pin_failed_attempts = floor_pin_failed_attempts + 1, "
+                    "floor_pin_locked_until = :until WHERE id = :id"
+                ),
                 {"until": datetime.utcnow() + timedelta(minutes=15), "id": user.id},
             )
             return real_verify(pin, hashed)

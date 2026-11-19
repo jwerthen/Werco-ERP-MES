@@ -212,7 +212,7 @@ describe('signOnWithBadge', () => {
   it.each([
     ['the challenge again', () => kioskError(401, CHALLENGE_DETAIL, 'Enter your PIN.')],
     ['a lock-tier text', () => axiosError(401, 'PIN locked for 2 hours')],
-    ['an admin-lock code', () => axiosError(401, { code: 'floor_pin_admin_locked', message: 'Ask an Admin' })],
+    ['a structured lock refusal', () => axiosError(401, { code: 'floor_pin_locked', message: 'Locked for 7 days' })],
   ])('a PIN refused with %s re-asks with the uniform text, never the server one', async (_label, makeError) => {
     const attempt = jest
       .fn()

@@ -225,12 +225,12 @@ through the application because the saved source and receipt must remain valid.
 Apply **130_floor_pin** after **129_owned_property** through the normal API boot migration path.
 No environment variable, secret, cron or worker job is added.
 
-- **Catalog-only change, no backfill.** Adds six columns to `users` (`floor_pin_hash` nullable,
+- **Catalog-only change, no backfill.** Adds five columns to `users` (`floor_pin_hash` nullable,
   `floor_pin_set_at` nullable, `floor_pin_failed_attempts` `integer NOT NULL` server default `0`,
-  `floor_pin_locked_until` nullable, and `floor_pin_admin_locked` and `floor_pin_reset_required`,
-  each `boolean NOT NULL` server default `false`) and one to `companies` (`require_floor_pin`
-  `boolean NOT NULL` server default `false`), each guarded. On PostgreSQL 11+ every `ADD COLUMN`
-  is metadata-only: the nullable columns have no default and the four NOT NULL ones a constant
+  `floor_pin_locked_until` nullable, and `floor_pin_reset_required` `boolean NOT NULL` server
+  default `false`) and one to `companies` (`require_floor_pin` `boolean NOT NULL` server default
+  `false`), each guarded. On PostgreSQL 11+ every `ADD COLUMN` is metadata-only: the nullable
+  columns have no default and the three NOT NULL ones a constant
   default kept in the catalog, so there is no table rewrite, no NOT NULL scan, no index, FK or
   CHECK, and no `UPDATE`. After the upgrade no user has a PIN, nothing is locked or flagged and
   every company is off, so badge sign-on behaves exactly as before until someone sets a PIN.
@@ -252,8 +252,8 @@ No environment variable, secret, cron or worker job is added.
   `ADD COLUMN` leaves pre-existing rows holding the default as the text `'false'`, which
   SQLAlchemy reads as true, so without it every company on an incrementally migrated local
   database would require PINs and lock every PIN-less badge out of local dev. PostgreSQL gets no
-  `UPDATE`. The two later booleans, `floor_pin_admin_locked` and `floor_pin_reset_required`, use
-  `sa.false()` as their server default, which SQLite stores as `0`, so they need no such fix.
+  `UPDATE`. The later boolean, `floor_pin_reset_required`, uses `sa.false()` as its server
+  default, which SQLite stores as `0`, so it needs no such fix.
 - **Owner runbook: turning PINs on.**
   1. **Set PINs first.** Users → the **Floor PIN** column (Admin and Manager) reads *Not set* for
      everyone who has none; **Manage → Set** gives a person a 4–6 digit PIN (not one digit
@@ -291,20 +291,30 @@ No environment variable, secret, cron or worker job is added.
      accounts excluded, so a desk user with an employee ID who never badges in still counts. Anyone
      still without a PIN is refused at the kiosk, the crew station and Badge Only sign-in with "No
      PIN is set for this badge. Ask a supervisor to set one."
-  4. **A forgotten PIN or a PIN lock.** Wrong PINs add up until the person's next correct PIN: 5
-     lock the PIN for 15 minutes, 10 for 2 hours, and 15 lock it until someone unlocks it (the
-     Users page shows *Locked: needs unlock*). Users → **Floor PIN** → Manage → **Unlock** lifts
-     any of them and keeps the PIN; setting a new PIN also lifts it (same roles as step 1). The
-     Users page's password Unlock clears the password lockout only. Separately, if wrong PINs from
-     one network on the public sign-in reach 20 in 15 minutes, PIN entry from that network pauses
-     for 15 minutes (the pad says so and offers only Back); badge sign-in without a PIN carries on,
-     and the crew station is never paused this way.
-  5. **A leaked PIN: set a new one.** Setting a new PIN (or clearing the PIN) ends **every badge +
+  4. **A forgotten PIN or a PIN lock.** Wrong PINs add up until the person's next correct PIN,
+     and every 5th locks the PIN for longer: 15 minutes, 2 hours, 24 hours, 48 hours, 96 hours,
+     then 7 days for each further 5. **Every lock expires on its own.** A lock of 24 hours or more
+     sends the company's Admins an in-app alert, *Floor PIN locked out*, which opens Users; Users
+     lists every locked floor PIN above the table with its end time. **Unlock** there (or in
+     Manage) lifts the lock early, resets the count and keeps the PIN; setting a new PIN also lifts
+     it (same roles as step 1). The Users page's password Unlock clears the password lockout only.
+     Anyone who knows a badge number can lock that person's PIN by typing wrong PINs, so treat a
+     long-lock alert as a possible guessing attempt: check the `EMPLOYEE_LOGIN_FAILED` rows, and
+     consider a new PIN rather than an unlock.
+  5. **What a shop behind one internet address will see.** The desks and solo kiosks usually share
+     one address, and with it a budget of **60 wrong PINs per 15 minutes** on the public sign-in.
+     Correct PINs give their unit back, so ordinary sign-ins never use it up. If 60 wrong PINs
+     (and attempts against locked PINs) pile up from that address inside 15 minutes, **PIN sign-in
+     from the building pauses for up to 15 minutes**: everyone with a PIN is refused at the desk and
+     the solo kiosk with "Too many wrong PINs from this network", and the pad offers only Back.
+     People without a PIN (where the policy allows it), password sign-in and the crew stations
+     keep working. If it trips, wait it out; there is no admin reset.
+  6. **A leaked PIN: set a new one.** Setting a new PIN (or clearing the PIN) ends **every badge +
      PIN session of that person**, at a desk, a solo kiosk or a crew station, at its next request:
      the person is signed out and asked to sign in again with badge and PIN. Do not rely on
      deactivating the user instead: deactivation only pauses a session, and once the account is
      reactivated its old refresh tokens, still inside their 7-day window, work again.
-- **Verify.** On production a read is enough: the query below returns seven rows (the six `users`
+- **Verify.** On production a read is enough: the query below returns six rows (the five `users`
   columns and `require_floor_pin`), the Users page loads with its Floor PIN column, and a badge
   with no PIN still signs in. In a test company, with an invented badge: set a PIN, sign in by
   Badge Only and get the PIN step, enter a wrong PIN ("Invalid badge or PIN"), then the right one.
@@ -326,8 +336,8 @@ No environment variable, secret, cron or worker job is added.
   so rows written then carry no `auth_methods`; after rolling forward again, those sessions are the
   pre-deploy kind, so repeat the `REFRESH_TOKEN_SECRET_KEY` rotation (owner runbook step 2) before
   relying on the policy. The downgrade is **lossy** and not a rollback step:
-  it drops every PIN (each person needs a new one after a re-upgrade), every PIN lock and admin
-  lock, every promotion's reset flag and each company's policy (back to off). The `FLOOR_PIN_SET` and policy audit rows remain, but nothing
+  it drops every PIN (each person needs a new one after a re-upgrade), every PIN lock, every
+  promotion's reset flag and each company's policy (back to off). The `FLOOR_PIN_SET` and policy audit rows remain, but nothing
   re-derives the columns from them. See
   [API.md → Badge sign-on and the floor PIN](API.md#badge-sign-on-and-the-floor-pin-as9100d-852).
 

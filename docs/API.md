@@ -272,7 +272,7 @@ its own budget** (`backend/app/core/login_throttle.py`):
 |------|------|------|------|
 | `POST /auth/login` — enumerable identifiers only | `auth:login:failed:<ip>` | **60** failed attempts per **6 hours** (`PASSWORD_LOGIN_*`) | **429** for **1 hour** |
 | `POST /auth/employee-login` — the kiosk badge route, unchanged | `auth:employee-login:failed:<ip>` | **8** failed attempts per **15 minutes** (`EMPLOYEE_LOGIN_*`) | **429** for **15 minutes** |
-| `POST /auth/employee-login` — wrong floor PINs only (migration `130`) | `auth:employee-login:wrong-pin:<ip>` | **20** wrong PINs per **15 minutes** (`FLOOR_PIN_IP_*`) | **429** for **15 minutes**, on PIN attempts only; badge-only sign-in carries on ([Badge sign-on and the floor PIN](#badge-sign-on-and-the-floor-pin-as9100d-852)) |
+| `POST /auth/employee-login` — floor-PIN attempts only (migration `130`) | `auth:employee-login:wrong-pin:<ip>` | **60** per **15 minutes** (`FLOOR_PIN_IP_*`), spent at each PIN attempt and refunded by a correct PIN | **429** for **15 minutes**, on PIN attempts only; badge-only sign-in carries on ([Badge sign-on and the floor PIN](#badge-sign-on-and-the-floor-pin-as9100d-852)) |
 
 Both send a `Retry-After` header (seconds until retry), but the **bodies differ**, because the
 block lengths do:
@@ -986,30 +986,59 @@ their own badge resolution and locked / inactive checks and before their success
 |---|---|---|---|---|
 | Needs a new PIN after a promotion (`floor_pin_reset_required`) | anything | **403** `{"code": "floor_pin_reset_required", "message": "Your role changed. Ask an Admin to set a new floor PIN."}`, **whatever the company policy**, until an Admin sets a new PIN or clears it | FAILED, `PIN reset required` | — |
 | Has a PIN | no `pin` (or `""`) | **401** `{"code": "floor_pin_required", "message": "Enter your PIN."}` — a **challenge**: resubmit the same badge with `pin` | none | not counted |
-| Has a PIN; this IP's wrong-PIN budget is spent (`employee-login` only) | a `pin` | **429** `"Too many wrong PINs from this network. Try again in about N minutes."` with `Retry-After` | `EMPLOYEE_LOGIN_BLOCKED`, `Throttled: too many wrong PINs from this address` | not counted |
-| Has a PIN, locked (timed or admin) | a `pin` | **401** `"Invalid badge or PIN"` (the PIN is never checked) | FAILED, `PIN locked` (plus `extra_data.floor_pin_admin_locked: true` for the admin lock) | not counted, lock not extended |
-| Has a PIN | wrong `pin` | **401** `"Invalid badge or PIN"` | FAILED, `Wrong PIN` (plus `extra_data.floor_pin_locked: true` on the attempt that locked it, and `floor_pin_admin_locked: true` at the admin lock) | counted; see the lock tiers below. On `employee-login` it also charges this IP's wrong-PIN budget |
-| Has a PIN | right `pin` | Signed in. `amr` = `["badge", "pin"]`, `pst` = that PIN's set time | the route's success row | counted, then the count and any expired timed lock are cleared |
+| Has a PIN; this IP's PIN budget is spent (`employee-login` only) | a `pin` | **429** `"Too many wrong PINs from this network. Try again in about N minutes."` with `Retry-After` | `EMPLOYEE_LOGIN_BLOCKED`, `Throttled: too many wrong PINs from this address` | not counted |
+| Has a PIN, locked | a `pin` | **401** `"Invalid badge or PIN"` (the PIN is never checked) | FAILED, `PIN locked` | not counted, lock not extended. On `employee-login` the IP's unit stays spent |
+| Has a PIN | wrong `pin` | **401** `"Invalid badge or PIN"` | FAILED, `Wrong PIN` (plus `extra_data.floor_pin_locked: true` on the attempt that reached a tier); a `floor_pin_lockout` event when that lock is 24 hours or more | counted; see the lock tiers below. On `employee-login` the IP's unit stays spent |
+| Has a PIN | right `pin` | Signed in. `amr` = `["badge", "pin"]`, `pst` = that PIN's set time | the route's success row | counted, then settled by a compare-and-set: if nobody else reserved meanwhile, the count and the lock (including one this attempt's own tier boundary set) are cleared; if a racing wrong guess locked the PIN meanwhile, refused as locked. On `employee-login` the IP's unit is refunded |
 | No PIN, company `require_floor_pin` on | anything | **403** `{"code": "floor_pin_not_set", "message": "No PIN is set for this badge. Ask a supervisor to set one."}` | FAILED, `No PIN set` | — |
 | No PIN, policy off | anything (a supplied `pin` is ignored) | Signed in as before. `amr` = `["badge"]` | the route's success row | — |
 
-**The lock tiers.** The wrong-PIN count is **cumulative**: a lock does not reset it, only a correct
-PIN or an admin unlock, new PIN or clear does. At **5** the PIN locks for **15 minutes**, at **10**
-for **2 hours**, and at **15** it is **admin-locked** (`floor_pin_admin_locked`): no time lifts it,
-only `POST /users/{user_id}/floor-pin/unlock`, a new PIN or a clear, by an Admin or by a Manager for
-an Operator / Supervisor / Shipping / Viewer account ([Users](#users-admin)). Every tier answers the
-same **401** "Invalid badge or PIN", so the response never says which tier, or how many tries are
-left. Guessing is therefore capped at 15 tries per PIN between the person's own correct sign-ins.
+**The lock tiers.** The wrong-PIN count is **cumulative**: a lock does not reset it; only a correct
+PIN, or `POST /users/{user_id}/floor-pin/unlock` on a lock in force, a new PIN or a clear (by an
+Admin, or by a Manager for an Operator / Supervisor / Shipping / Viewer account; [Users](#users-admin))
+does. Every 5th wrong PIN starts a longer lock (`app/core/floor_pin.py::floor_pin_lock_minutes`), and
+**every lock expires**; none is permanent:
 
-**The per-IP wrong-PIN budget (public `employee-login` only).** The per-person tiers cap guessing per
-badge; an attacker on the public route rotates across badges. So wrong PINs there also charge their
-own per-IP counter (`floor_pin_ip_throttle`, key prefix `auth:employee-login:wrong-pin`): **20** wrong
-PINs in **15 minutes**, then a **15-minute** block. The block refuses only **PIN attempts** from that
-IP (a request carrying a `pin` for a badge that has one), before the attempt is reserved, so a
-blocked attempt costs the badge's own count nothing. Badge-only sign-in, the PIN challenge and
-unknown-badge handling never read or charge it, and it is separate from the route's unknown-badge
-throttle (8 per 15 minutes; see [Rate Limiting](#rate-limiting)), which no PIN outcome charges. The
-station-gated crew mint charges no IP at all.
+| Cumulative wrong PINs | 5 | 10 | 15 | 20 | 25 | 30, and every further 5 |
+|---|---|---|---|---|---|---|
+| Lock | 15 minutes | 2 hours | 24 hours | 48 hours | 96 hours | 7 days (the cap) |
+
+The attempt that **reaches** a tier sets that tier's lock in the same conditional `UPDATE` that
+counts it, so every concurrent attempt after it is refused: no burst can run past a tier or skip
+one. Every tier answers the same **401** "Invalid badge or PIN", so the response never says which
+tier, or how many tries are left. A lock of **24 hours or more** emits a `floor_pin_lockout`
+OperationalEvent (payload: the user id, the tier and the lock hours; never a PIN or badge number),
+delivered in-app to the company's Admins as `floor_pin.lockout`
+([NOTIFICATIONS.md](NOTIFICATIONS.md#event-catalog)); it links to `/users`, which lists every
+currently locked floor PIN with its end time. The emit is best-effort and never changes the sign-on
+answer.
+
+**The lock-out trade-off.** Badge numbers are printed, so anyone who knows one can lock that
+person's PIN with wrong PINs, for up to 7 days at a time; with the company policy on, badge
+sign-on is then that person's only way in until the lock ends or someone unlocks it. A permanent
+lock would let anyone holding badge numbers lock every PIN holder out, which is why every tier
+expires and the long ones alert the Admins instead.
+
+**The per-IP PIN budget (public `employee-login` only).** The per-person tiers cap guessing per
+badge; an attacker on the public route rotates across badges. So PIN attempts there also spend their
+own per-IP counter (`floor_pin_ip_throttle`, key prefix `auth:employee-login:wrong-pin`): **60 per 15
+minutes**, then a **15-minute** block. Each PIN attempt spends one unit when it is reserved, in one
+atomic step (`try_spend`), so concurrent requests cannot overshoot it; a **correct** PIN refunds its
+unit (`refund`), so correct sign-ins cost nothing and only wrong PINs and attempts against a locked
+PIN stay spent. Once spent, it refuses only **PIN attempts** from that address (a request carrying a
+`pin` for a badge that has one), before the attempt is reserved, so a blocked attempt costs the
+badge's own count nothing. Badge-only sign-in, the PIN challenge and unknown-badge handling never
+read or charge it, and it is separate from the route's unknown-badge throttle (8 per 15 minutes; see
+[Rate Limiting](#rate-limiting)), which no PIN outcome charges. Like the other login throttles it
+fails open when its counter store is unavailable. The station-gated crew mint charges no IP at all.
+
+**What a shop behind one NAT address sees.** Desks and solo kiosks in one building usually share an
+egress address, and so share this budget. Correct sign-ins never spend it, so ordinary use costs
+nothing. If 60 wrong PINs (and attempts against locked PINs) pile up from that address within 15
+minutes, by a bad morning of fumbled PINs or by someone sweeping badges, **PIN sign-in from that
+address pauses for up to 15 minutes**: every badge whose user has a PIN gets the **429** at the desk
+and the solo kiosk. Badges without a PIN (where the policy allows it), password sign-in and the
+crew stations are unaffected.
 
 - **`detail` is an object** for the coded answers (`floor_pin_required`, `floor_pin_not_set`,
   `floor_pin_reset_required`, and on any session `floor_pin_reauth_required`, below); read
@@ -1028,15 +1057,17 @@ station-gated crew mint charges no IP at all.
   local variable, Sentry events are scrubbed of PINs, hashes, raw request bodies and SQL parameters
   (see [ENVIRONMENT_VARIABLES.md → Monitoring](ENVIRONMENT_VARIABLES.md#monitoring--error-tracking)),
   and no audit row carries `floor_pin_hash` (`AuditService` drops it from every model snapshot).
-- **Its own lock, and race-safe.** `floor_pin_failed_attempts` / `floor_pin_locked_until` /
-  `floor_pin_admin_locked` are separate from the password lockout (`failed_login_attempts` /
-  `locked_until`) in both directions: a PIN lock never locks the person's password login, and
-  `POST /users/{id}/unlock` does not clear a PIN lock. It is one count per person across both
-  routes. Each attempt is **reserved before the PIN is checked**: one conditional `UPDATE` counts it
-  unless a lock is in force, and that count is committed before bcrypt runs, so racing attempts on
-  one badge each spend their own guess and a lost audit row or a crash never gives one back. A right
-  PIN then clears the count, unless a racing wrong guess locked the PIN meanwhile, in which case it
-  is refused as locked. A lock in force is never extended or shortened by later attempts.
+- **Its own lock, and race-safe.** `floor_pin_failed_attempts` / `floor_pin_locked_until` are
+  separate from the password lockout (`failed_login_attempts` / `locked_until`) in both directions:
+  a PIN lock never locks the person's password login, and `POST /users/{id}/unlock` does not clear
+  a PIN lock. It is one count per person across both routes. Each attempt is **reserved before the
+  PIN is checked**: one conditional `UPDATE` counts it, and sets the tier's lock when the count
+  reaches one, unless a lock is in force; that count is committed before bcrypt runs, so racing
+  attempts on one badge each spend their own guess and a lost audit row or a crash never gives one
+  back. A right PIN then settles by compare-and-set (`WHERE` the count is still the one it
+  reserved): it clears the count and any lock its own attempt set, keeps a racing attempt's count
+  when another reserved meanwhile, and is refused as locked only when one of those locked the PIN.
+  A lock in force is never extended or shortened by later attempts.
 - **Audit rows.** `employee-login` writes `EMPLOYEE_LOGIN_FAILED` / `EMPLOYEE_LOGIN_SUCCESS` (and
   `EMPLOYEE_LOGIN_BLOCKED` for the per-IP PIN block); the mint writes `KIOSK_BADGE_TOKEN_FAILED` /
   `KIOSK_BADGE_TOKEN_ISSUED`, station-keyed as before, its PIN failures adding
@@ -13098,7 +13129,7 @@ There is no delete endpoint.
 | POST | `/users/{id}/unlock` | Clear failed-login lockout (not a floor-PIN lock — see `POST /users/{user_id}/floor-pin/unlock`) | Admin |
 | PUT | `/users/{user_id}/floor-pin` | Set or reset the user's floor PIN for badge sign-on. Body `{"pin"}` → the user record. Also clears any PIN lock and the wrong-PIN count. See the floor PIN note below | Admin; a Manager for Operator / Supervisor / Shipping / Viewer accounts only. Signed in (any API token **403**; not an MCP tool) |
 | DELETE | `/users/{user_id}/floor-pin` | Clear the user's floor PIN and any PIN lock → the user record. Idempotent | Admin; a Manager for Operator / Supervisor / Shipping / Viewer accounts only. Signed in (any API token **403**; not an MCP tool) |
-| POST | `/users/{user_id}/floor-pin/unlock` | Lift a floor-PIN lock (a timed lock, or the admin lock at 15 wrong PINs), keeping the PIN → the user record. Idempotent | Admin; a Manager for Operator / Supervisor / Shipping / Viewer accounts only. Signed in (any API token **403**; not an MCP tool) |
+| POST | `/users/{user_id}/floor-pin/unlock` | Lift a floor-PIN lock early (every lock also expires on its own) and reset the wrong-PIN count, keeping the PIN → the user record. Idempotent | Admin; a Manager for Operator / Supervisor / Shipping / Viewer accounts only. Signed in (any API token **403**; not an MCP tool) |
 | GET | `/users/mention-search` | People to @mention in a comment: active members of the active company by name, `{id, display_name}` only (never email, role or phone). Documented under [Comments and watchers](#comments-and-watchers) | Any signed-in member of the company (a read-only API token is **403**: `Users` tag) |
 
 > **User writes are Admin-only; the list read is Admin / Manager.** `GET /users/` (and
@@ -13166,40 +13197,38 @@ There is no delete endpoint.
 >   digits or their badge's last 4, 5 or 6 digits (`"A floor PIN cannot be the user's own employee
 >   ID or the last digits of their badge."`).
 > - **`PUT`** stores a bcrypt hash, stamps a new `floor_pin_set_at`, and clears the wrong-PIN count,
->   the timed lock, the admin lock and the `floor_pin_reset_required` flag. Required audit row
+>   any PIN lock and the `floor_pin_reset_required` flag. Required audit row
 >   `FLOOR_PIN_SET` (`resource_type=user`; `extra_data`: `source: "admin_set"`,
->   `replaced_existing_pin`, `cleared_pin_lockout`, `cleared_pin_admin_lock`,
->   `cleared_pin_reset_required`), never the PIN or its hash; **503** `"Unable to save audit
+>   `replaced_existing_pin`, `cleared_pin_lockout`, `cleared_pin_reset_required`), never the PIN or its hash; **503** `"Unable to save audit
 >   record"` and nothing saved if it cannot be written. The new set time **ends every
 >   `["badge", "pin"]` session of that user** at its next request or refresh (**401**
 >   `floor_pin_reauth_required`): they verified the old PIN.
-> - **`DELETE`** clears the hash, the set date, the count, both locks and the reset flag. From then
+> - **`DELETE`** clears the hash, the set date, the count, any lock and the reset flag. From then
 >   on the badge signs in without a PIN, unless the company requires one (then **403**
 >   `floor_pin_not_set` until a new PIN is set); on a promoted user that is an explicit decision to
 >   allow badge-only sign-on. It ends the user's badge + PIN sessions the same way. Required audit
->   row `FLOOR_PIN_CLEARED` (`had_pin`, `cleared_pin_lockout`, `cleared_pin_admin_lock`,
->   `cleared_pin_reset_required`). A user with no PIN and no lock or reset state is returned
+>   row `FLOOR_PIN_CLEARED` (`had_pin`, `cleared_pin_lockout`, `cleared_pin_reset_required`). A user with no PIN and no lock or reset state is returned
 >   unchanged, with no row.
-> - **`POST …/floor-pin/unlock`** lifts a timed lock in force (`floor_pin_locked_until` in the
->   future) or the admin lock (`floor_pin_admin_locked`, 15 wrong PINs) and clears the wrong-PIN
->   count, keeping the PIN, so the person can sign in with it at once; sessions that verified it
->   carry on. Required audit row `FLOOR_PIN_UNLOCKED` (`source: "admin_unlock"`, the prior
->   `floor_pin_locked_until`, `floor_pin_admin_locked` and `floor_pin_failed_attempts`; **503**,
->   nothing saved, if it cannot be written). With neither lock in force it answers **200** with the
->   user record and writes nothing.
+> - **`POST …/floor-pin/unlock`** lifts a lock in force (`floor_pin_locked_until` in the future,
+>   any tier) early and resets the wrong-PIN count, keeping the PIN, so the person can sign in with
+>   it at once; sessions that verified it carry on. Every lock also expires on its own; the unlock is
+>   how an Admin answers a `floor_pin.lockout` alert sooner. Required audit row `FLOOR_PIN_UNLOCKED`
+>   (`source: "admin_unlock"`, the prior `floor_pin_locked_until` and `floor_pin_failed_attempts`;
+>   **503**, nothing saved, if it cannot be written). With no lock in force it answers **200** with
+>   the user record and writes nothing (the count is left as it is).
 > - **Response fields.** The inline user-management `UserResponse` (every `/users` route that
 >   returns a user record, `GET /users/me` included) carries `has_floor_pin` (bool),
->   `floor_pin_set_at`, `floor_pin_locked_until` (UTC `Z`; a future value means a timed lock),
->   `floor_pin_admin_locked` (bool; 15 wrong PINs, only an unlock, new PIN or clear lifts it) and
->   `floor_pin_reset_required` (bool; a promotion cleared the PIN). Never the PIN or its hash. The
->   Users page shows them as the **Floor PIN** column for Admin and Manager: *New PIN needed (role
->   changed)*, *Locked: needs unlock* (the admin lock), *Locked* until a time, *Set* with the date,
->   or *Not set*. Its Manage action opens the set / reset / clear dialog, which carries **Unlock**
->   while the PIN is locked; on a row the caller may not manage, the action is replaced by *Admin
->   only* (or *Platform admin only*).
+>   `floor_pin_set_at`, `floor_pin_locked_until` (UTC `Z`; a future value means a lock in force, and
+>   is always its end) and `floor_pin_reset_required` (bool; a promotion cleared the PIN). Never the
+>   PIN or its hash. The Users page shows them as the **Floor PIN** column for Admin and Manager:
+>   *New PIN needed (role changed)*, *Locked* with its end time, *Set* with the date, or *Not set*.
+>   Above the table it lists every floor PIN currently locked, each with its end time and the way to
+>   unlock it (the `floor_pin.lockout` alert lands there). The Manage action opens the set / reset /
+>   clear dialog, which carries **Unlock** while the PIN is locked; on a row the caller may not
+>   manage, the action is replaced by *Admin only* (or *Platform admin only*).
 > - **A promotion clears the PIN and requires a new one.** A role change into Admin, Manager or
 >   Quality from any other role, on `PUT /users/{id}` or `POST /users/{id}/approve`, clears the
->   user's floor PIN (hash, set date, wrong-PIN count and both locks) in the same transaction, and
+>   user's floor PIN (hash, set date, wrong-PIN count and any lock) in the same transaction, and
 >   that route's required audit row carries `extra_data.floor_pin_cleared_on_promotion: true`. If the
 >   user **had** a PIN it also sets `floor_pin_reset_required` (marked `floor_pin_reset_required:
 >   true` on the same row): both badge routes then answer **403** `floor_pin_reset_required`
@@ -14932,8 +14961,8 @@ tenants, so the aggregate chain-verification endpoints are **platform-admin only
 >   PIN was issued, reset or removed, and by whom; never the PIN), `FLOOR_PIN_UNLOCKED` rows (a lock
 >   lifted early) and the company policy's `UPDATE`
 >   / `STATUS_CHANGE` rows (when PINs were required). Wrong and locked PIN attempts are
->   `EMPLOYEE_LOGIN_FAILED` / `KIOSK_BADGE_TOKEN_FAILED` rows (`floor_pin_admin_locked` marks the
->   15-wrong-PIN admin lock), and a session ended because its PIN changed leaves a
+>   `EMPLOYEE_LOGIN_FAILED` / `KIOSK_BADGE_TOKEN_FAILED` rows (`floor_pin_locked` marks the attempt
+>   that started a lock), and a session ended because its PIN changed leaves a
 >   `TOKEN_REFRESH_FAILED` / `COMPANY_SWITCH_FAILED` row `PIN changed` when it tries to renew. See
 >   [Badge sign-on and the floor PIN](#badge-sign-on-and-the-floor-pin-as9100d-852).
 
@@ -15611,8 +15640,9 @@ sign-in attempts — wait a few minutes") with a `Retry-After` header and a 15-m
 An unknown badge and a locked or disabled account count; successful logins and every floor-PIN
 outcome (the challenge, a wrong PIN, a locked PIN) never count toward the window, so one person's
 PIN typos never lock badge sign-in on a shared kiosk IP. Wrong PINs charge their **own** per-IP
-budget instead (20 per 15 minutes, key prefix `auth:employee-login:wrong-pin`), which when spent
-answers **429** to PIN attempts only; see
+budget instead (60 per 15 minutes, key prefix `auth:employee-login:wrong-pin`, spent at each PIN
+attempt and refunded by a correct one), which when spent pauses PIN sign-in from that address:
+**429** to PIN attempts only; see
 [Badge sign-on and the floor PIN](#badge-sign-on-and-the-floor-pin-as9100d-852). The check
 runs before any user lookup; each
 throttled rejection is audited as `EMPLOYEE_LOGIN_BLOCKED`; a counter-storage outage fails open

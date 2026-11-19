@@ -61,12 +61,10 @@ class User(Base):
     floor_pin_hash = Column(String(255), nullable=True)
     floor_pin_set_at = Column(DateTime, nullable=True)
     # Wrong PINs since the last correct PIN or admin unlock / set / clear. CUMULATIVE: a lock
-    # does not reset it, so the lock tiers escalate (5 -> 15 minutes, 10 -> 2 hours, 15 ->
-    # ``floor_pin_admin_locked``; ``app.core.floor_pin``).
+    # does not reset it, so every 5th starts a longer, always-expiring lock (5 -> 15 minutes ...
+    # 30+ -> 7 days; ``app.core.floor_pin.floor_pin_lock_minutes``).
     floor_pin_failed_attempts = Column(Integer, nullable=False, default=0, server_default="0")
     floor_pin_locked_until = Column(DateTime, nullable=True)
-    # Set at 15 cumulative wrong PINs: only an Admin / Manager unlock, set or clear lifts it.
-    floor_pin_admin_locked = Column(Boolean, nullable=False, default=False, server_default=false())
     # Set when a promotion into Admin / Manager / Quality cleared a PIN: badge sign-on is refused
     # (403 ``floor_pin_reset_required``) until an Admin sets a new PIN or clears the PIN.
     floor_pin_reset_required = Column(Boolean, nullable=False, default=False, server_default=false())

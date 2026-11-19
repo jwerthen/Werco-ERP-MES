@@ -2674,7 +2674,7 @@ UI controls do not grant API authority. See [API: Documents](API.md#documents).
 > so on its own it would let a PIN a Manager chose for an Operator survive that person's promotion.
 > Instead, a role change **into** Admin, Manager or Quality **from any other role**, through
 > `PUT /users/{id}` or `POST /users/{id}/approve`, clears the floor PIN (hash, set date, wrong-PIN
-> count and both locks) in the same transaction (`user_provisioning.clear_floor_pin_on_promotion`),
+> count and any lock) in the same transaction (`user_provisioning.clear_floor_pin_on_promotion`),
 > and the role change's required audit row carries `extra_data.floor_pin_cleared_on_promotion: true`.
 > If the person **had** a PIN, the promotion also sets `floor_pin_reset_required` (marked
 > `floor_pin_reset_required: true` on the same row): both badge sign-on routes then answer **403**
@@ -2691,8 +2691,11 @@ UI controls do not grant API authority. See [API: Documents](API.md#documents).
 > (Platform Admin / superuser too); on a row the caller may not manage, the Manage action reads
 > *Admin only* (or *Platform admin only*), and the server enforces the same rule. Unlocking a
 > password lockout (`POST /users/{id}/unlock`, Admin) does not touch a PIN lock; the floor-PIN
-> unlock, a new PIN or a clear lifts it, including the **admin lock** at 15 cumulative wrong PINs,
-> which no time lifts (*Locked: needs unlock* on the Users page). Setting or clearing a PIN also
+> unlock, a new PIN or a clear lifts it early and resets the wrong-PIN count. Every PIN lock also
+> expires on its own (15 minutes up to a 7-day cap); a lock of 24 hours or more alerts the company's
+> **Admins** in the app (`floor_pin.lockout`, mandatory in-app), and the Users page lists every
+> currently locked floor PIN above the table, with its end time, for Admin and Manager. A Manager
+> can unlock only the accounts in the scope above. Setting or clearing a PIN also
 > ends that person's badge + PIN sessions at their next request; the unlock keeps the PIN and the
 > sessions. The company policy that makes a PIN mandatory is Admin-only
 > ([Admin](#admin)). See `docs/API.md` → Users (Admin) → "Floor PIN".

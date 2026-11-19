@@ -6,10 +6,14 @@
      promotion. The scenario the review traced: a Manager sets an Operator's PIN, signs in as
      the Operator, the Operator is promoted to Quality -- the Manager's session must die at its
      next request, not live on as a Quality identity. A lock does NOT end a session.
-3/4. **PIN guessing is capped.** Wrong PINs are cumulative until a correct PIN or an admin
-     unlock / set / clear: 5 -> 15 minutes, 10 -> 2 hours, 15 -> admin-locked (only an
-     Admin / Manager unlock, set or clear lifts it). On the PUBLIC employee-login route, wrong
-     PINs charge their own per-IP budget, which blocks only further PIN attempts (429).
+3/4. **PIN guessing is capped, and no lock is permanent** (re-check of 90296e58). Wrong PINs are
+     cumulative until a correct PIN or an admin unlock / set / clear, and every 5th starts a
+     longer, EXPIRING lock: 15 minutes, 2 hours, 24 hours, 48 hours, 96 hours, then 7 days per
+     further 5. The attempt that reaches a tier sets its lock in the same UPDATE that reserves
+     it, so no burst runs past a tier; a right PIN settles by compare-and-set. A lock of a day or
+     more alerts the company's Admins (``floor_pin.lockout``). On the PUBLIC employee-login
+     route, PIN attempts spend a per-IP budget of 60 at reservation and a correct PIN refunds
+     it; spent, it blocks only further PIN attempts (429).
 5.   **A promotion requires a new PIN** rather than downgrading the badge to badge-only:
      ``floor_pin_reset_required`` refuses badge sign-on 403 whatever the policy, until an Admin
      sets a new PIN or clears it.
@@ -28,11 +32,9 @@ from sqlalchemy.orm import Session
 from app.api.endpoints import auth as auth_endpoints
 from app.core.config import settings
 from app.core.floor_pin import (
-    FLOOR_PIN_ADMIN_LOCK_FAILURES,
     FLOOR_PIN_LOCKOUT_MINUTES,
-    FLOOR_PIN_LONG_LOCK_FAILURES,
-    FLOOR_PIN_LONG_LOCKOUT_MINUTES,
     FLOOR_PIN_MAX_FAILURES,
+    floor_pin_lock_minutes,
     floor_pin_stamp,
     hash_floor_pin,
 )
@@ -40,6 +42,7 @@ from app.core.login_throttle import FLOOR_PIN_IP_MAX_WRONG_PINS, employee_login_
 from app.core.security import create_access_token
 from app.models.audit_log import AuditLog
 from app.models.company import Company
+from app.models.operational_event import OperationalEvent
 from app.models.user import User, UserRole
 from tests.api.kiosk_test_helpers import BADGE_TOKEN_URL, bearer, ensure_company, kiosk_token_for, make_kiosk_station
 from tests.conftest import TEST_PASSWORD_HASH
@@ -219,8 +222,7 @@ class TestBadgePinSessionEndsWithItsPin:
         assert client.put(pin_url(user), json={"pin": PIN}, headers=admin_headers).status_code == 200
         tokens = badge_pin_session(client, user)
         locked = fresh(db_session, user)
-        locked.floor_pin_locked_until = datetime.utcnow() + timedelta(minutes=10)
-        locked.floor_pin_admin_locked = True
+        locked.floor_pin_locked_until = datetime.utcnow() + timedelta(days=7)
         db_session.commit()
 
         assert client.get(ME, headers=auth(tokens["access_token"])).status_code == 200
@@ -287,75 +289,79 @@ class TestBadgePinSessionEndsWithItsPin:
 # 3/4. Cumulative lock tiers and the per-IP wrong-PIN budget
 # ===========================================================================
 class TestLockTiers:
-    def test_the_tiers_escalate_on_a_cumulative_count(self, client, db_session, admin_headers):
+    @pytest.mark.parametrize(
+        "count, minutes",
+        [(5, 15), (10, 120), (15, 24 * 60), (20, 48 * 60), (25, 96 * 60), (30, 7 * 24 * 60), (45, 7 * 24 * 60)],
+    )
+    def test_every_fifth_wrong_pin_starts_a_longer_expiring_lock(self, client, db_session, count, minutes):
+        user = make_user(db_session, pin=PIN)
+        state = fresh(db_session, user)
+        state.floor_pin_failed_attempts = count - 1
+        db_session.commit()
+
+        before = datetime.utcnow()
+        response = badge_login(client, user, WRONG_PIN)
+
+        assert response.status_code == 401 and response.json()["detail"] == INVALID
+        state = fresh(db_session, user)
+        assert state.floor_pin_failed_attempts == count, "the count is cumulative across locks"
+        assert before + timedelta(minutes=minutes) <= state.floor_pin_locked_until
+        assert state.floor_pin_locked_until <= datetime.utcnow() + timedelta(minutes=minutes)
+        assert rows(db_session, "EMPLOYEE_LOGIN_FAILED")[-1].extra_data == {"floor_pin_locked": True}
+
+    @pytest.mark.parametrize("count", [1, 4, 6, 9, 11, 14, 29, 31])
+    def test_a_count_between_tiers_locks_nothing(self, client, db_session, count):
+        user = make_user(db_session, pin=PIN)
+        state = fresh(db_session, user)
+        state.floor_pin_failed_attempts = count - 1
+        db_session.commit()
+
+        assert badge_login(client, user, WRONG_PIN).status_code == 401
+        state = fresh(db_session, user)
+        assert state.floor_pin_failed_attempts == count and state.floor_pin_locked_until is None
+        assert rows(db_session, "EMPLOYEE_LOGIN_FAILED")[-1].extra_data is None
+
+    def test_no_lock_is_permanent_even_at_the_cap(self, client, db_session):
+        user = make_user(db_session, pin=PIN)
+        state = fresh(db_session, user)
+        state.floor_pin_failed_attempts = 100
+        state.floor_pin_locked_until = datetime.utcnow() - timedelta(seconds=1)  # a 7-day lock that ran out
+        db_session.commit()
+
+        assert badge_login(client, user, PIN).status_code == 200
+        state = fresh(db_session, user)
+        assert (state.floor_pin_failed_attempts, state.floor_pin_locked_until) == (0, None)
+
+    def test_the_tiers_escalate_end_to_end_and_an_unlock_lifts_them(self, client, db_session, admin_headers):
         user = make_user(db_session, pin=PIN)
 
-        # Tier 1: 5 wrong PINs -> 15 minutes; the count is NOT reset.
+        # Tier 1: the 5th wrong PIN locks for 15 minutes; the count carries on.
         for _ in range(FLOOR_PIN_MAX_FAILURES):
             assert badge_login(client, user, WRONG_PIN).status_code == 401
         state = fresh(db_session, user)
         assert state.floor_pin_failed_attempts == FLOOR_PIN_MAX_FAILURES
         assert state.floor_pin_locked_until > datetime.utcnow() + timedelta(minutes=FLOOR_PIN_LOCKOUT_MINUTES - 1)
-        assert not state.floor_pin_admin_locked
 
-        # Tier 2: the 10th cumulative wrong PIN -> 2 hours.
+        # While locked even the right PIN is refused, unverified and uncounted.
+        assert badge_login(client, user, PIN).status_code == 401
+        assert fresh(db_session, user).floor_pin_failed_attempts == FLOOR_PIN_MAX_FAILURES
+
+        # Tier 3 after the lock runs out: the 15th -> 24 hours.
+        state = fresh(db_session, user)
         state.floor_pin_locked_until = datetime.utcnow() - timedelta(seconds=1)
-        state.floor_pin_failed_attempts = FLOOR_PIN_LONG_LOCK_FAILURES - 1
+        state.floor_pin_failed_attempts = 14
         db_session.commit()
         assert badge_login(client, user, WRONG_PIN).status_code == 401
         state = fresh(db_session, user)
-        assert state.floor_pin_failed_attempts == FLOOR_PIN_LONG_LOCK_FAILURES
-        assert state.floor_pin_locked_until > datetime.utcnow() + timedelta(minutes=FLOOR_PIN_LONG_LOCKOUT_MINUTES - 1)
-        assert rows(db_session, "EMPLOYEE_LOGIN_FAILED")[-1].extra_data == {"floor_pin_locked": True}
+        assert state.floor_pin_locked_until > datetime.utcnow() + timedelta(hours=23)
 
-        # Tier 3: the 15th -> admin-locked, marked on its row.
-        state.floor_pin_locked_until = datetime.utcnow() - timedelta(seconds=1)
-        state.floor_pin_failed_attempts = FLOOR_PIN_ADMIN_LOCK_FAILURES - 1
-        db_session.commit()
-        response = badge_login(client, user, WRONG_PIN)
-        assert response.status_code == 401 and response.json()["detail"] == INVALID
-        state = fresh(db_session, user)
-        assert state.floor_pin_admin_locked is True
-        locking = rows(db_session, "EMPLOYEE_LOGIN_FAILED")[-1]
-        assert locking.error_message == "Wrong PIN"
-        assert locking.extra_data == {"floor_pin_locked": True, "floor_pin_admin_locked": True}
-
-        # No time lifts it: even the right PIN gets the uniform 401, with a row, and bcrypt never runs.
-        state.floor_pin_locked_until = None
-        db_session.commit()
-        refused = badge_login(client, user, PIN)
-        assert refused.status_code == 401 and refused.json()["detail"] == INVALID
-        held = rows(db_session, "EMPLOYEE_LOGIN_FAILED")[-1]
-        assert held.error_message == "PIN locked" and held.extra_data == {"floor_pin_admin_locked": True}
-        assert fresh(db_session, user).floor_pin_failed_attempts == FLOOR_PIN_ADMIN_LOCK_FAILURES
-
-        # The unlock lifts the counter, the timed lock and the admin lock.
+        # An unlock lifts it and resets the count; the PIN works at once.
         unlocked = client.post(pin_url(user, "/unlock"), headers=admin_headers)
         assert unlocked.status_code == 200, unlocked.text
-        assert unlocked.json()["floor_pin_admin_locked"] is False
+        assert "floor_pin_admin_locked" not in unlocked.json()
         state = fresh(db_session, user)
-        assert (state.floor_pin_failed_attempts, state.floor_pin_locked_until, state.floor_pin_admin_locked) == (
-            0,
-            None,
-            False,
-        )
-        assert rows(db_session, "FLOOR_PIN_UNLOCKED")[-1].extra_data["floor_pin_admin_locked"] is True
+        assert (state.floor_pin_failed_attempts, state.floor_pin_locked_until) == (0, None)
         assert badge_login(client, user, PIN).status_code == 200
-
-    def test_an_admin_lock_is_never_lifted_by_time_and_bcrypt_never_runs(self, client, db_session, monkeypatch):
-        user = make_user(db_session, pin=PIN)
-        state = fresh(db_session, user)
-        state.floor_pin_admin_locked = True
-        db_session.commit()
-
-        def must_not_verify(*_a, **_k):
-            raise AssertionError("an admin-locked PIN must not be checked")
-
-        monkeypatch.setattr(auth_endpoints, "verify_floor_pin", must_not_verify)
-        response = badge_login(client, user, PIN)
-
-        assert response.status_code == 401 and response.json()["detail"] == INVALID
-        assert fresh(db_session, user).floor_pin_failed_attempts == 0
 
     def test_a_correct_pin_resets_the_cumulative_count(self, client, db_session):
         user = make_user(db_session, pin=PIN)
@@ -366,12 +372,24 @@ class TestLockTiers:
         assert badge_login(client, user, PIN).status_code == 200
         assert fresh(db_session, user).floor_pin_failed_attempts == 0
 
-    @pytest.mark.parametrize("verb", ["set", "clear"])
-    def test_a_set_or_clear_lifts_an_admin_lock(self, client, db_session, admin_headers, verb):
+    def test_a_right_pin_on_the_boundary_attempt_clears_the_lock_it_set(self, client, db_session):
+        """The 5th attempt locks the PIN as it is reserved; when it turns out to be the RIGHT PIN,
+        the compare-and-set settle (count still 5) clears that very lock and signs in."""
         user = make_user(db_session, pin=PIN)
         state = fresh(db_session, user)
-        state.floor_pin_admin_locked = True
-        state.floor_pin_failed_attempts = FLOOR_PIN_ADMIN_LOCK_FAILURES
+        state.floor_pin_failed_attempts = FLOOR_PIN_MAX_FAILURES - 1
+        db_session.commit()
+
+        assert badge_login(client, user, PIN).status_code == 200
+        state = fresh(db_session, user)
+        assert (state.floor_pin_failed_attempts, state.floor_pin_locked_until) == (0, None)
+
+    @pytest.mark.parametrize("verb", ["set", "clear"])
+    def test_a_set_or_clear_lifts_a_lock_and_resets_the_count(self, client, db_session, admin_headers, verb):
+        user = make_user(db_session, pin=PIN)
+        state = fresh(db_session, user)
+        state.floor_pin_locked_until = datetime.utcnow() + timedelta(days=7)
+        state.floor_pin_failed_attempts = 30
         db_session.commit()
 
         if verb == "set":
@@ -380,7 +398,7 @@ class TestLockTiers:
             response = client.delete(pin_url(user), headers=admin_headers)
 
         assert response.status_code == 200, response.text
-        assert response.json()["floor_pin_admin_locked"] is False
+        assert response.json()["floor_pin_locked_until"] is None
         assert fresh(db_session, user).floor_pin_failed_attempts == 0
 
     def test_a_manager_unlock_follows_the_manager_scope(self, client, db_session, manager_headers):
@@ -388,18 +406,18 @@ class TestLockTiers:
         quality = make_user(db_session, role=UserRole.QUALITY, pin=PIN)
         for user in (operator, quality):
             state = fresh(db_session, user)
-            state.floor_pin_admin_locked = True
+            state.floor_pin_locked_until = datetime.utcnow() + timedelta(days=1)
         db_session.commit()
 
         assert client.post(pin_url(operator, "/unlock"), headers=manager_headers).status_code == 200
         assert client.post(pin_url(quality, "/unlock"), headers=manager_headers).status_code == 403
-        assert fresh(db_session, quality).floor_pin_admin_locked is True
+        assert fresh(db_session, quality).floor_pin_locked_until is not None
 
     def test_the_crew_station_follows_the_same_tiers(self, client, db_session):
         station = make_kiosk_station(db_session, company_id=1)
         user = make_user(db_session, pin=PIN)
         state = fresh(db_session, user)
-        state.floor_pin_failed_attempts = FLOOR_PIN_ADMIN_LOCK_FAILURES - 1
+        state.floor_pin_failed_attempts = 14
         db_session.commit()
 
         response = client.post(
@@ -409,31 +427,204 @@ class TestLockTiers:
         )
 
         assert response.status_code == 401 and response.json()["detail"] == INVALID
-        assert fresh(db_session, user).floor_pin_admin_locked is True
+        assert fresh(db_session, user).floor_pin_locked_until > datetime.utcnow() + timedelta(hours=23)
         failed = rows(db_session, "KIOSK_BADGE_TOKEN_FAILED")[-1]
-        assert failed.extra_data["floor_pin_admin_locked"] is True and failed.extra_data["badge_user_id"] == user.id
+        assert failed.extra_data == {"badge_user_id": user.id, "floor_pin_locked": True}
+        assert lockout_events(db_session), "a day-long lock from the station alerts the Admins too"
         assert ip_pin_failures() == 0, "the station-gated mint charges no IP budget"
 
 
-class TestPerIpWrongPinBudget:
-    def test_wrong_pins_charge_their_own_budget_and_block_only_pin_attempts(self, client, db_session):
+class TestReservationUnderConcurrency:
+    """Direct statement sequencing of interleaved attempts on one badge (the reservation and the
+    settle are each ONE conditional statement, so their order IS the interleaving)."""
+
+    def test_the_attempt_reaching_a_tier_locks_it_and_the_rest_of_a_burst_is_refused(self, db_session):
+        user = make_user(db_session, pin=PIN)
+        state = fresh(db_session, user)
+        state.floor_pin_failed_attempts = 3
+        db_session.commit()
+        now = datetime.utcnow()
+
+        burst = [auth_endpoints._reserve_floor_pin_attempt(db_session, user.id, now) for _ in range(6)]
+
+        # Attempt 4 is free, attempt 5 reaches the tier and locks in the same statement; the
+        # other four reserve nothing -- the burst cannot run past the tier.
+        assert burst == [4, 5, None, None, None, None]
+        state = fresh(db_session, user)
+        assert state.floor_pin_failed_attempts == 5
+        assert state.floor_pin_locked_until == now + timedelta(minutes=FLOOR_PIN_LOCKOUT_MINUTES)
+
+    def test_a_burst_can_never_skip_a_tier(self, db_session):
+        user = make_user(db_session, pin=PIN)
+        state = fresh(db_session, user)
+        state.floor_pin_failed_attempts = 8
+        db_session.commit()
+        now = datetime.utcnow()
+
+        assert [auth_endpoints._reserve_floor_pin_attempt(db_session, user.id, now) for _ in range(4)] == [
+            9,
+            10,
+            None,
+            None,
+        ]
+        assert fresh(db_session, user).floor_pin_locked_until == now + timedelta(minutes=floor_pin_lock_minutes(10))
+
+    def test_a_right_pin_whose_count_moved_on_to_a_lock_is_refused(self, db_session):
+        user = make_user(db_session, pin=PIN)
+        state = fresh(db_session, user)
+        state.floor_pin_failed_attempts = 3
+        db_session.commit()
+        now = datetime.utcnow()
+
+        mine = auth_endpoints._reserve_floor_pin_attempt(db_session, user.id, now)  # 4: the right PIN
+        racing = auth_endpoints._reserve_floor_pin_attempt(db_session, user.id, now)  # 5: locks the PIN
+
+        assert (mine, racing) == (4, 5)
+        assert auth_endpoints._settle_verified_floor_pin(db_session, user.id, mine, now) is False
+        state = fresh(db_session, user)
+        assert state.floor_pin_failed_attempts == 5 and state.floor_pin_locked_until is not None
+
+    def test_a_right_pin_with_an_unlocking_race_signs_in_without_forgiving_the_race(self, db_session):
+        user = make_user(db_session, pin=PIN)
+        now = datetime.utcnow()
+
+        mine = auth_endpoints._reserve_floor_pin_attempt(db_session, user.id, now)  # 1: the right PIN
+        racing = auth_endpoints._reserve_floor_pin_attempt(db_session, user.id, now)  # 2: no tier
+
+        assert auth_endpoints._settle_verified_floor_pin(db_session, user.id, mine, now) is True
+        # The compare-and-set saw a count of 2, not 1: nothing is reset, so the racing guess stays counted.
+        assert fresh(db_session, user).floor_pin_failed_attempts == racing == 2
+
+    def test_a_right_pin_settles_by_compare_and_set_when_nobody_raced(self, db_session):
+        user = make_user(db_session, pin=PIN)
+        state = fresh(db_session, user)
+        state.floor_pin_failed_attempts = 4
+        db_session.commit()
+        now = datetime.utcnow()
+
+        mine = auth_endpoints._reserve_floor_pin_attempt(db_session, user.id, now)  # 5: locks as it reserves
+        assert fresh(db_session, user).floor_pin_locked_until is not None
+
+        assert auth_endpoints._settle_verified_floor_pin(db_session, user.id, mine, now) is True
+        state = fresh(db_session, user)
+        assert (state.floor_pin_failed_attempts, state.floor_pin_locked_until) == (0, None)
+
+
+def lockout_events(db: Session) -> List[OperationalEvent]:
+    db.expire_all()
+    return db.query(OperationalEvent).filter(OperationalEvent.event_type == "floor_pin_lockout").all()
+
+
+class TestLongLockAlertsTheAdmins:
+    def test_a_day_long_lock_records_a_server_event_with_no_pin_or_badge(self, client, db_session):
+        user = make_user(db_session, pin=PIN)
+        state = fresh(db_session, user)
+        state.floor_pin_failed_attempts = 14
+        db_session.commit()
+
+        assert badge_login(client, user, WRONG_PIN).status_code == 401
+
+        (event,) = lockout_events(db_session)
+        assert event.company_id == 1 and event.entity_type == "user" and event.entity_id == user.id
+        assert event.user_id is None
+        assert event.event_payload == {"user_id": user.id, "tier": 3, "lock_hours": 24}
+        text = str(event.event_payload)
+        assert user.employee_id not in text and WRONG_PIN not in text and PIN not in text
+
+    @pytest.mark.parametrize("count", [5, 10])
+    def test_a_shorter_lock_does_not_alert(self, client, db_session, count):
+        user = make_user(db_session, pin=PIN)
+        state = fresh(db_session, user)
+        state.floor_pin_failed_attempts = count - 1
+        db_session.commit()
+
+        assert badge_login(client, user, WRONG_PIN).status_code == 401
+        assert lockout_events(db_session) == []
+
+    def test_a_right_pin_on_a_day_long_boundary_does_not_alert(self, client, db_session):
+        user = make_user(db_session, pin=PIN)
+        state = fresh(db_session, user)
+        state.floor_pin_failed_attempts = 14
+        db_session.commit()
+
+        assert badge_login(client, user, PIN).status_code == 200
+        assert lockout_events(db_session) == []
+
+    def test_the_alert_reaches_the_companys_admins_in_app_with_a_users_link(self, db_session, monkeypatch):
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        import app.services.notification_dispatch as dispatch
+        from app.models.notification import Notification
+        from app.services.notification_catalog import CATALOG, CHANNEL_IN_APP, SOURCE_EVENT_TYPE_TO_KEY
+
+        monkeypatch.setattr(dispatch, "enqueue_job", AsyncMock())
+        monkeypatch.setattr(dispatch, "_dedup_reserve", AsyncMock(return_value=True))
+        entry = CATALOG[SOURCE_EVENT_TYPE_TO_KEY["floor_pin_lockout"]]
+        assert entry.event_key == "floor_pin.lockout" and entry.roles == (UserRole.ADMIN,)
+        assert entry.default_channels == frozenset({CHANNEL_IN_APP}) and entry.mandatory_channel == CHANNEL_IN_APP
+        assert entry.sms_eligible is False
+
+        admin = make_user(db_session, role=UserRole.ADMIN)
+        manager = make_user(db_session, role=UserRole.MANAGER)
+        locked = make_user(db_session, pin=PIN)
+        ensure_company(db_session, 2)
+        foreign_admin = make_user(db_session, role=UserRole.ADMIN)
+        foreign_admin.company_id = 2
+        db_session.commit()
+        event = OperationalEvent(
+            company_id=1,
+            event_type="floor_pin_lockout",
+            source_module="auth",
+            entity_type="user",
+            entity_id=locked.id,
+            user_id=None,
+            severity="warning",
+            event_payload={"user_id": locked.id, "tier": 3, "lock_hours": 24},
+        )
+        db_session.add(event)
+        db_session.commit()
+
+        asyncio.run(dispatch.dispatch_for_event(db_session, event))
+        db_session.commit()
+
+        notified = {row.user_id: row for row in db_session.query(Notification).all()}
+        assert admin.id in notified
+        assert manager.id not in notified and foreign_admin.id not in notified and locked.id not in notified
+        assert notified[admin.id].event_key == "floor_pin.lockout"
+        assert notified[admin.id].link == "/users"
+
+
+class TestPerIpPinBudget:
+    def test_the_budget_is_sixty_and_correct_sign_ins_cost_nothing(self, client, db_session):
+        assert FLOOR_PIN_IP_MAX_WRONG_PINS == 60
+        user = make_user(db_session, pin=PIN)
+        for _ in range(3):
+            assert badge_login(client, user, PIN).status_code == 200
+        assert ip_pin_failures() == 0, "a correct PIN refunds the unit its attempt spent"
+
+        assert badge_login(client, user, WRONG_PIN).status_code == 401
+        assert ip_pin_failures() == 1
+
+    def test_a_spent_budget_blocks_only_pin_attempts(self, client, db_session):
         pinned = make_user(db_session, pin=PIN)
         other = make_user(db_session, pin=NEW_PIN)
         badge_only = make_user(db_session)
         for _ in range(FLOOR_PIN_IP_MAX_WRONG_PINS - 1):
-            floor_pin_ip_throttle.register_failure(TESTCLIENT_IP)
+            assert floor_pin_ip_throttle.try_spend(TESTCLIENT_IP)
 
         last_wrong = badge_login(client, other, WRONG_PIN)
         assert last_wrong.status_code == 401
         assert ip_pin_failures() == FLOOR_PIN_IP_MAX_WRONG_PINS
         assert employee_login_throttle._memory.get(TESTCLIENT_IP) is None, "never the shared badge budget"
 
-        # A PIN attempt from this IP -- even the right PIN -- is now 429, before any reservation.
+        # A PIN attempt from this address -- even the right PIN -- is now 429, before any reservation.
         blocked = badge_login(client, pinned, PIN)
         assert blocked.status_code == 429, blocked.text
         assert int(blocked.headers["Retry-After"]) > 0
         assert fresh(db_session, pinned).floor_pin_failed_attempts == 0
         assert rows(db_session, "EMPLOYEE_LOGIN_BLOCKED")[-1].user_id == pinned.id
+        assert ip_pin_failures() == FLOOR_PIN_IP_MAX_WRONG_PINS, "a refused attempt spends nothing"
 
         # Everything that is not a PIN attempt carries on.
         challenge = badge_login(client, pinned)
@@ -441,6 +632,13 @@ class TestPerIpWrongPinBudget:
         assert badge_login(client, badge_only).status_code == 200
         unknown = client.post(EMPLOYEE_LOGIN, json={"employee_id": "UNKNOWN-9"}, headers=XHR)
         assert unknown.status_code == 401 and unknown.json()["detail"] == "Invalid employee ID"
+
+    def test_the_budget_is_spent_at_reservation_so_a_burst_cannot_overshoot_it(self):
+        for _ in range(FLOOR_PIN_IP_MAX_WRONG_PINS - 1):
+            assert floor_pin_ip_throttle.try_spend(TESTCLIENT_IP)
+        # Two attempts arriving together: the spend IS the check, so exactly one gets through.
+        assert [floor_pin_ip_throttle.try_spend(TESTCLIENT_IP) for _ in range(2)] == [True, False]
+        assert ip_pin_failures() == FLOOR_PIN_IP_MAX_WRONG_PINS
 
 
 # ===========================================================================

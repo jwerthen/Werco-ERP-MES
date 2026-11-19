@@ -49,8 +49,8 @@ const ROSA: FloorPinUser = {
 const inMinutes = (m: number) => new Date(Date.now() + m * 60_000).toISOString();
 const WITH_PIN: FloorPinUser = { ...ROSA, has_floor_pin: true, floor_pin_set_at: '2026-11-16T15:00:00Z' };
 const LOCKED: FloorPinUser = { ...WITH_PIN, floor_pin_locked_until: inMinutes(12) };
-// 15 cumulative wrong PINs: no time lifts it (whatever floor_pin_locked_until says).
-const ADMIN_LOCKED: FloorPinUser = { ...WITH_PIN, floor_pin_admin_locked: true, floor_pin_locked_until: null };
+// A top-tier lock (15+ cumulative wrong PINs): 24 h, doubling to a 7-day cap — and it still expires.
+const LONG_LOCKED: FloorPinUser = { ...WITH_PIN, floor_pin_locked_until: inMinutes(3 * 24 * 60) };
 // A promotion into Admin / Manager / Quality cleared the PIN.
 const RESET_REQUIRED: FloorPinUser = { ...ROSA, role: 'quality', has_floor_pin: false, floor_pin_reset_required: true };
 
@@ -409,11 +409,12 @@ describe('floorPinManageRefusal (the client twin of the server rule)', () => {
   });
 });
 
-describe('the admin lock and the role-change reset (review fixes)', () => {
-  it('an admin-locked PIN reads "Locked: needs unlock" and offers Unlock, which keeps the dialog open', async () => {
-    const { onChanged, onClose } = renderDialog(ADMIN_LOCKED);
+describe('long locks and the role-change reset (review fixes)', () => {
+  it('a multi-day lock reads "Locked … until <Central time>" and offers Unlock, which keeps the dialog open', async () => {
+    const { onChanged, onClose } = renderDialog(LONG_LOCKED);
 
-    expect(screen.getByText(/Locked: needs unlock/)).toBeInTheDocument();
+    expect(screen.getByText(/Locked after wrong PINs until/)).toBeInTheDocument();
+    expect(screen.queryByText(/needs unlock/)).not.toBeInTheDocument();
     expect(screen.getByText('Setting a new PIN also lifts the lock.')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Unlock' }));
 
@@ -431,33 +432,33 @@ describe('the admin lock and the role-change reset (review fixes)', () => {
     expect(screen.queryByRole('button', { name: 'Unlock' })).not.toBeInTheDocument();
   });
 
-  it('the cell shows both states as needing attention', () => {
-    const { rerender } = render(<FloorPinCell user={ADMIN_LOCKED} onManage={jest.fn()} />);
-    expect(screen.getByText('Locked: needs unlock')).toBeInTheDocument();
+  it('the cell shows a long lock with its end time, and the reset, as needing attention', () => {
+    const { rerender } = render(<FloorPinCell user={LONG_LOCKED} onManage={jest.fn()} />);
+    expect(screen.getByText('Locked')).toBeInTheDocument();
+    expect(screen.getByText(/^until /)).toBeInTheDocument();
 
     rerender(<FloorPinCell user={RESET_REQUIRED} onManage={jest.fn()} />);
     expect(screen.getByText('New PIN needed (role changed)')).toBeInTheDocument();
   });
 
-  it('floorPinStatus ranks the reset, then the admin lock, then a timed lock, then set / not set', () => {
+  it('floorPinStatus ranks the reset, then a lock in force, then set / not set', () => {
     const now = Date.parse('2026-11-19T12:00:00Z');
-    const timed = { ...WITH_PIN, floor_pin_locked_until: '2026-11-19T12:05:00Z' };
-    expect(floorPinStatus({ ...timed, floor_pin_admin_locked: true, floor_pin_reset_required: true }, now).kind).toBe(
-      'reset_required'
-    );
-    expect(floorPinStatus({ ...timed, floor_pin_admin_locked: true }, now).kind).toBe('admin_locked');
-    expect(floorPinStatus(timed, now)).toMatchObject({ kind: 'locked', label: 'Locked', attention: true });
+    const locked = { ...WITH_PIN, floor_pin_locked_until: '2026-11-26T12:00:00Z' };
+    expect(floorPinStatus({ ...locked, floor_pin_reset_required: true }, now).kind).toBe('reset_required');
+    expect(floorPinStatus(locked, now)).toMatchObject({ kind: 'locked', label: 'Locked', attention: true });
+    expect(floorPinStatus(locked, now).detail).toMatch(/^until /);
+    expect(floorPinStatus({ ...locked, floor_pin_locked_until: '2026-11-19T11:00:00Z' }, now).kind).toBe('set');
     expect(floorPinStatus(WITH_PIN, now)).toMatchObject({ kind: 'set', label: 'Set', attention: false });
     expect(floorPinStatus(ROSA, now)).toMatchObject({ kind: 'not_set', label: 'Not set', attention: false });
   });
 
-  it('isFloorPinLocked counts the admin lock with no end time', () => {
-    expect(isFloorPinLocked(ADMIN_LOCKED)).toBe(true);
-    expect(isFloorPinLocked({ ...ADMIN_LOCKED, floor_pin_admin_locked: false })).toBe(false);
+  it('a lock is only ever its end time: a multi-day lock counts, an expired one does not', () => {
+    expect(isFloorPinLocked(LONG_LOCKED)).toBe(true);
+    expect(isFloorPinLocked({ ...LONG_LOCKED, floor_pin_locked_until: inMinutes(-1) })).toBe(false);
   });
 
-  it("a Manager may unlock an in-scope admin lock; a role-change reset (Admin / Manager / Quality) is an Admin's", () => {
-    const lockedOperator: FloorPinUser = { ...ADMIN_LOCKED, role: 'operator' };
+  it("a Manager may unlock an in-scope long lock; a role-change reset (Admin / Manager / Quality) is an Admin's", () => {
+    const lockedOperator: FloorPinUser = { ...LONG_LOCKED, role: 'operator' };
     expect(floorPinManageRefusal({ role: 'manager' }, lockedOperator)).toBeNull();
     expect(floorPinManageRefusal({ role: 'manager' }, RESET_REQUIRED)).toBe('Admin only');
     expect(floorPinManageRefusal({ role: 'admin' }, RESET_REQUIRED)).toBeNull();

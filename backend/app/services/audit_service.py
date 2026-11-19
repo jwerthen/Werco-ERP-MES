@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.logging import get_correlation_id, get_logger
+from app.core.observability import describe_exception
 from app.models.audit_log import AuditLog
 from app.models.user import User
 
@@ -502,7 +503,7 @@ class AuditService:
             nested.commit()
         except Exception as exc:
             nested.rollback()
-            logger.error(f"Could not resync audit sequence '{_AUDIT_SEQUENCE_NAME}': {exc}")
+            logger.error("Could not resync audit sequence '%s': %s", _AUDIT_SEQUENCE_NAME, describe_exception(exc))
 
     def _get_next_sequence_and_previous_hash(self) -> Tuple[int, Optional[str]]:
         """
@@ -747,10 +748,15 @@ class AuditService:
             # retried above, and the paused-mode ``nextval`` / resync. So do the audit's own
             # Python-side failures (the ``except Exception`` below), including one inside the
             # INSERT savepoint, which is rolled back first.
-            logger.error(f"Failed to create audit log; the database error aborts the transaction: {e}")
+            # The class and SQLSTATE only, never the text: a database error's text can print the
+            # whole failing row (``Failing row contains (...)`` -- on ``users``, the password and
+            # PIN hashes), and a logged line reaches Sentry as a breadcrumb.
+            logger.error(
+                "Failed to create audit log; the database error aborts the transaction: %s", describe_exception(e)
+            )
             raise
         except Exception as e:
-            logger.error(f"Failed to create audit log: {e}")
+            logger.error("Failed to create audit log: %s", describe_exception(e))
             # Don't raise - audit logging should not break the main operation
             return None
 

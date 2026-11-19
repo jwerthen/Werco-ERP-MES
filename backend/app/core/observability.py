@@ -57,20 +57,44 @@ SENTRY_EXTRA_DENYLIST = (
 
 # --- before_send: what a key-only denylist cannot reach ---------------------------------------
 #
-# Three things carry a credential in a VALUE, where the scrubber (which matches dict keys) never
+# The scrubber above matches dict KEYS. A credential also travels inside VALUES, where it never
 # looks:
 #   1. raw request-body locals -- ``fastapi.routing``'s ``body_bytes`` and ``app.main``'s
 #      ``limit_json_body_size`` ``body`` hold ``b'{"employee_id": "0042", "pin": "2580"}'`` as a
 #      repr string while the route runs, in every traceback;
-#   2. a bcrypt hash bound to any local under any name;
-#   3. SQLAlchemy's ``[parameters: {...}]`` in an exception message (also turned off at the
-#      source with the engine's ``hide_parameters=True``, ``app/db/database.py``).
+#   2. the repr of a request model in a frame variable -- ``UserCreate(email=..., password='...')``
+#      on ``POST /users/``, ``CompanyRegister(..., admin_password='...')`` on the public signup;
+#   3. ``key=value`` / ``"key": "value"`` text inside any string: an exception message, a log
+#      message or its params, a breadcrumb, an extra;
+#   4. a bcrypt hash anywhere (a hash of a 4-6 digit PIN IS the PIN to anyone who can run bcrypt);
+#   5. SQLAlchemy's ``[parameters: {...}]`` and Postgres's ``Failing row contains (...)`` (which
+#      prints the whole row, ``hashed_password`` and ``floor_pin_hash`` included) in an error text.
 # And on a CREDENTIAL route nothing in the frames or the request body is worth the risk, so every
 # frame variable and the request data are dropped there entirely.
 SENTRY_FILTERED = "[Filtered]"
 _BODY_FRAME_VARS = frozenset({"body_bytes", "body", "raw_body", "json_body", "request_body", "content"})
 _BCRYPT_HASH = re.compile(r"\$2[aby]\$\d\d\$[./A-Za-z0-9]*")
 _SQL_PARAMETERS = re.compile(r"\[parameters: [^\n]*")
+_FAILING_ROW = re.compile(r"(Failing row contains )\([^\n]*")
+# Credential field names. A name ENDING in one of them counts too (``access_token``,
+# ``admin_password``, ``station_pin``); one that merely contains it does not (``spin``,
+# ``pinned_inventory_item_id``, ``token_type``).
+_CREDENTIAL_KEYWORDS = (
+    "password|new_password|current_password|plain_password|default_password|hashed_password|"
+    "password_hash|pin|new_pin|floor_pin|floor_pin_hash|secret|token|api_key"
+)
+_CREDENTIAL_KEY = r"(?<![A-Za-z0-9_])(?:[A-Za-z0-9]+_)*(?:" + _CREDENTIAL_KEYWORDS + r")"
+# ``key=value``, ``key: value``, ``'key': 'value'``, ``"key": "value"`` -- the value quoted (to its
+# closing quote, escapes included) or bare (to the next quote, comma, paren, brace or space).
+_CREDENTIAL_ASSIGNMENT = re.compile(
+    r"(?P<key>" + _CREDENTIAL_KEY + r")(?P<kq>['\"]?)(?P<sep>\s*[=:]\s*)"
+    r"(?P<value>b?'(?:[^'\\]|\\.)*'|b?\"(?:[^\"\\]|\\.)*\"|[^'\",)\s}\]]+)",
+    re.IGNORECASE,
+)
+# A frame variable whose repr is a model / dataclass instance carrying such a field
+# (``UserCreate(..., password='...')``): the whole variable goes.
+_OBJECT_REPR = re.compile(r"^<?[A-Za-z_][\w.]*\(")
+_CREDENTIAL_FIELD_IN_REPR = re.compile(r"[(,\s]" + _CREDENTIAL_KEY + r"\s*=", re.IGNORECASE)
 # Paths (after the API prefix) whose request body carries a credential: every ``/auth/`` route,
 # floor-PIN administration, the visitor-tablet and crew-station PIN sign-ins and PIN writes, and
 # the password writes on the users router.
@@ -87,6 +111,24 @@ _CREDENTIAL_ROUTE_PATTERNS = tuple(
         r"^/shop-floor/kiosk-stations(/[^/]+/reset-pin)?$",
     )
 )
+
+
+def describe_exception(exc: BaseException) -> str:
+    """An exception for a log line: its class and, for a database error, the driver error's class
+    and SQLSTATE -- NEVER its text.
+
+    A database error's text is not safe to log: Postgres's ``DETAIL: Failing row contains (...)``
+    prints the whole row (on ``users``, ``hashed_password`` and ``floor_pin_hash``), and a driver
+    without ``hide_parameters`` adds the bound values. Logged text reaches Sentry as a breadcrumb
+    or an event, so the log line carries only what identifies the failure.
+    """
+    name = type(exc).__name__
+    orig = getattr(exc, "orig", None)
+    if orig is None:
+        return name
+    code = getattr(orig, "pgcode", None) or getattr(orig, "sqlstate", None)
+    detail = f"{name} [{type(orig).__name__}]"
+    return f"{detail} (SQLSTATE {code})" if code else detail
 
 
 def is_credential_route(path: str) -> bool:
@@ -111,14 +153,34 @@ def _iter_frames(event: Dict[str, Any]) -> Any:
                     yield frame
 
 
-def _filter_hashes(value: Any, whole: bool) -> Any:
-    """``value`` with every bcrypt hash removed, at any depth (iterative). ``whole`` replaces a
-    string containing one entirely; otherwise only the hash itself is cut out of it."""
+def _mask_value(match: "re.Match[str]") -> str:
+    value = match.group("value")
+    prefix = "b" if value[:1] in ("b", "B") and value[1:2] in ("'", '"') else ""
+    quote = value[len(prefix)] if value[len(prefix) : len(prefix) + 1] in ("'", '"') else ""
+    return f"{match.group('key')}{match.group('kq')}{match.group('sep')}{prefix}{quote}{SENTRY_FILTERED}{quote}"
+
+
+def scrub_text(text: str) -> str:
+    """One string with every credential VALUE cut out: SQL parameters, a ``Failing row contains``
+    row, bcrypt hashes, and ``key=value`` / ``"key": "value"`` for every credential key (the key
+    is kept, so the text still says what was there)."""
+    text = _SQL_PARAMETERS.sub("[parameters: " + SENTRY_FILTERED + "]", text)
+    text = _FAILING_ROW.sub(r"\1(" + SENTRY_FILTERED + ")", text)
+    text = _BCRYPT_HASH.sub(SENTRY_FILTERED, text)
+    return _CREDENTIAL_ASSIGNMENT.sub(_mask_value, text)
+
+
+def _scrub_strings(value: Any, whole_on_hash: bool = False) -> Any:
+    """``value`` with every string run through ``scrub_text``, at any depth (iterative).
+
+    ``whole_on_hash`` (frame variables) replaces a string holding a bcrypt hash entirely rather
+    than cutting just the hash out of it.
+    """
 
     def clean(text: str) -> str:
-        if not _BCRYPT_HASH.search(text):
-            return text
-        return SENTRY_FILTERED if whole else _BCRYPT_HASH.sub(SENTRY_FILTERED, text)
+        if whole_on_hash and _BCRYPT_HASH.search(text):
+            return SENTRY_FILTERED
+        return scrub_text(text)
 
     if isinstance(value, str):
         return clean(value)
@@ -134,12 +196,20 @@ def _filter_hashes(value: Any, whole: bool) -> Any:
     return value
 
 
+def _is_credential_bearing_repr(value: Any) -> bool:
+    return isinstance(value, str) and bool(_OBJECT_REPR.match(value)) and bool(_CREDENTIAL_FIELD_IN_REPR.search(value))
+
+
 def scrub_sentry_event(event: Dict[str, Any], hint: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """``before_send``: remove what the key-based ``EventScrubber`` cannot see (see above).
 
-    For EVERY event: drop the raw-body frame variables (``_BODY_FRAME_VARS``), replace any frame
-    variable holding a bcrypt hash with ``"[Filtered]"``, cut ``[parameters: ...]`` and bcrypt
-    hashes out of exception messages, and cut bcrypt hashes out of the request data and extras.
+    For EVERY event:
+      * frame variables -- drop the raw-body ones (``_BODY_FRAME_VARS``) and any whose repr is an
+        object carrying a credential field; replace one holding a bcrypt hash with
+        ``"[Filtered]"``; run ``scrub_text`` over every other string, at any depth;
+      * exception values, the top-level message, ``logentry.message`` / ``formatted`` /
+        ``params``, every breadcrumb's ``message`` and ``data``, the extras and the request
+        data -- ``scrub_text`` over every string.
     For an event from a CREDENTIAL route (``is_credential_route``): drop every frame variable and
     the request data entirely. Never raises in practice; if it ever did, the SDK drops the event
     (its ``before_send`` wrapper keeps no partial result), which is the safe direction.
@@ -155,28 +225,37 @@ def scrub_sentry_event(event: Dict[str, Any], hint: Optional[Dict[str, Any]] = N
         if credential_route:
             frame.pop("vars", None)
             continue
-        for name in _BODY_FRAME_VARS & set(frame_vars):
-            del frame_vars[name]
-        _filter_hashes(frame_vars, whole=True)
+        for name in list(frame_vars):
+            if name in _BODY_FRAME_VARS or _is_credential_bearing_repr(frame_vars[name]):
+                del frame_vars[name]
+        _scrub_strings(frame_vars, whole_on_hash=True)
 
     exception = event.get("exception")
     for value in (exception.get("values") if isinstance(exception, dict) else None) or ():
         if isinstance(value, dict) and isinstance(value.get("value"), str):
-            message = _SQL_PARAMETERS.sub("[parameters: [Filtered]]", value["value"])
-            value["value"] = _filter_hashes(message, whole=False)
+            value["value"] = scrub_text(value["value"])
+    if isinstance(event.get("message"), str):
+        event["message"] = scrub_text(event["message"])
     logentry = event.get("logentry")
     if isinstance(logentry, dict):
-        for key in ("message", "formatted"):
-            if isinstance(logentry.get(key), str):
-                logentry[key] = _filter_hashes(_SQL_PARAMETERS.sub("[parameters: [Filtered]]", logentry[key]), False)
+        for key in ("message", "formatted", "params"):
+            if key in logentry:
+                logentry[key] = _scrub_strings(logentry[key])
+    breadcrumbs = event.get("breadcrumbs")
+    crumbs = breadcrumbs.get("values") if isinstance(breadcrumbs, dict) else breadcrumbs
+    for crumb in crumbs if isinstance(crumbs, list) else ():
+        if isinstance(crumb, dict):
+            for key in ("message", "data"):
+                if key in crumb:
+                    crumb[key] = _scrub_strings(crumb[key])
 
     if isinstance(request, dict):
         if credential_route:
             request.pop("data", None)
         elif "data" in request:
-            request["data"] = _filter_hashes(request["data"], whole=False)
+            request["data"] = _scrub_strings(request["data"])
     if "extra" in event:
-        event["extra"] = _filter_hashes(event["extra"], whole=False)
+        event["extra"] = _scrub_strings(event["extra"])
     return event
 
 

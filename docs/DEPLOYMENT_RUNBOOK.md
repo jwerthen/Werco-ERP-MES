@@ -295,10 +295,9 @@ statement, writes no row, and adds no environment variable, secret, cron or work
   See [API.md → Customer Complaints & RMA](API.md#customer-complaints--rma).
 
 **Floor PIN for badge sign-on.** Apply **130_floor_pin** after **129_owned_property** through the
-normal API boot migration path. It is a catalog-only change with no backfill: six columns on
+normal API boot migration path. It is a catalog-only change with no backfill: five columns on
 `users` (`floor_pin_hash`, `floor_pin_set_at`, `floor_pin_failed_attempts` NOT NULL default `0`,
-`floor_pin_locked_until`, and `floor_pin_admin_locked` and `floor_pin_reset_required`, each NOT NULL
-default `false`) and `require_floor_pin` (NOT NULL default `false`) on `companies`, each
+`floor_pin_locked_until`, and `floor_pin_reset_required` NOT NULL default `false`) and `require_floor_pin` (NOT NULL default `false`) on `companies`, each
 metadata-only on PostgreSQL 11+, with no rewrite, no index and no `UPDATE`. Nobody has a PIN and
 every company is off after it, so badge sign-on is unchanged. Under `SET LOCAL lock_timeout = '5s'`
 it takes a brief ACCESS EXCLUSIVE lock on `users` (read by every authenticated request), then on
@@ -319,8 +318,13 @@ everyone out once. It is needed because a badge session signed in before this de
 that refreshes at least weekly could survive it indefinitely, and its writes carry no
 `auth_methods`, so they read like password sessions. API, wallboard and crew-station tokens are
 signed with `SECRET_KEY` and keep working. (3) Then turn on Admin Settings → **Badge Sign-in**
-(Admin). Wrong PINs add up until a correct one (5 → 15-minute lock, 10 → 2 hours, 15 → locked
-until unlocked); **Unlock** in the Floor PIN dialog lifts any lock and keeps the PIN. For a leaked
+(Admin). Wrong PINs add up until a correct one, and every 5th starts a longer lock (15 minutes,
+2 hours, 24 hours, 48 hours, 96 hours, then 7 days); every lock expires on its own, a lock of 24
+hours or more alerts the Admins in-app (`floor_pin.lockout`), and Users lists the locked PINs.
+**Unlock** lifts a lock early and keeps the PIN. On the public sign-in, 60 net wrong PINs from one
+address in 15 minutes (correct PINs are refunded) pause PIN sign-in from that address for 15
+minutes; behind one NAT that is the whole building's desks and solo kiosks, while badges without a
+PIN, password sign-in and crew stations keep working. For a leaked
 PIN, **set a new PIN**: that ends every badge + PIN session of the person at its next request.
 Deactivating the user only pauses such a session, and reactivating revives its refresh tokens. On an
 application rollback keep the migration: before

@@ -34,33 +34,56 @@ FLOOR_PIN_MIN_LENGTH = 4
 FLOOR_PIN_MAX_LENGTH = 6
 
 # The PIN lock tiers. ``users.floor_pin_failed_attempts`` is CUMULATIVE -- a lock does not reset
-# it; only a correct PIN or an admin unlock / set / clear does -- so the locks escalate:
-#   * at 5 wrong PINs the PIN locks for 15 minutes;
-#   * at 10, for 2 hours;
-#   * at 15 it is ADMIN-locked (``users.floor_pin_admin_locked``): no time lifts it, only an
-#     Admin / Manager unlock, set or clear.
-# That caps guessing at 15 tries per PIN between a person's own correct sign-ins and an admin's
-# attention. Separate counters from the password lockout (``users.failed_login_attempts`` /
-# ``locked_until``), so a PIN lockout never locks the person's password login and a password
-# lockout never touches the PIN.
-FLOOR_PIN_MAX_FAILURES = 5
+# it; only a correct PIN or an admin unlock / set / clear does -- and EVERY 5th wrong PIN starts a
+# longer lock, all of them EXPIRING:
+#     5 -> 15 minutes, 10 -> 2 hours, 15 -> 24 hours, 20 -> 48 hours, 25 -> 96 hours,
+#     30 and every further 5 -> 7 days (the cap).
+# No tier is permanent on purpose: a lock only an admin can lift would let anyone holding badge
+# numbers lock every PIN holder out from the public route (PR #369 re-check). Instead a lock of
+# 24 hours or longer notifies the company's Admins (``floor_pin_lockout``), who can unlock early.
+# A tier lock is set by the SAME conditional UPDATE that reserves the attempt that reaches it, so
+# a burst can never run past a tier (``app.api.endpoints.auth._reserve_floor_pin_attempt``).
+# Separate counters from the password lockout (``users.failed_login_attempts`` / ``locked_until``),
+# so a PIN lockout never locks the person's password login and a password lockout never touches
+# the PIN.
+FLOOR_PIN_LOCK_STEP = 5
+FLOOR_PIN_MAX_FAILURES = FLOOR_PIN_LOCK_STEP  # the first tier
 FLOOR_PIN_LOCKOUT_MINUTES = 15
 FLOOR_PIN_LONG_LOCK_FAILURES = 10
 FLOOR_PIN_LONG_LOCKOUT_MINUTES = 120
-FLOOR_PIN_ADMIN_LOCK_FAILURES = 15
-# (cumulative wrong PINs, minutes) for the two timed tiers, checked at exactly that count.
-FLOOR_PIN_TIMED_LOCK_TIERS: Tuple[Tuple[int, int], ...] = (
-    (FLOOR_PIN_MAX_FAILURES, FLOOR_PIN_LOCKOUT_MINUTES),
-    (FLOOR_PIN_LONG_LOCK_FAILURES, FLOOR_PIN_LONG_LOCKOUT_MINUTES),
+# (cumulative wrong PINs, lock minutes); every multiple of 5 past the last row takes the cap.
+FLOOR_PIN_LOCK_TIERS: Tuple[Tuple[int, int], ...] = (
+    (5, 15),
+    (10, 2 * 60),
+    (15, 24 * 60),
+    (20, 48 * 60),
+    (25, 96 * 60),
 )
+FLOOR_PIN_LOCK_CAP_MINUTES = 7 * 24 * 60
+# A lock this long or longer notifies the company's Admins (in-app).
+FLOOR_PIN_NOTIFY_LOCK_MINUTES = 24 * 60
+FLOOR_PIN_LOCKOUT_EVENT_TYPE = "floor_pin_lockout"
 
 
-def floor_pin_timed_lock_minutes(attempts: int) -> Optional[int]:
-    """The timed lock (minutes) that ``attempts`` cumulative wrong PINs start, or None."""
-    for threshold, minutes in FLOOR_PIN_TIMED_LOCK_TIERS:
+def floor_pin_lock_minutes(attempts: int) -> Optional[int]:
+    """The lock (minutes) that the ``attempts``-th cumulative wrong PIN starts, or None.
+
+    Every multiple of ``FLOOR_PIN_LOCK_STEP`` is a tier boundary; the tiers escalate and cap at
+    7 days. Pure, so the reservation's SQL ``CASE`` and every caller read the same table.
+    """
+    if attempts < FLOOR_PIN_LOCK_STEP or attempts % FLOOR_PIN_LOCK_STEP:
+        return None
+    for threshold, minutes in FLOOR_PIN_LOCK_TIERS:
         if attempts == threshold:
             return minutes
-    return None
+    return FLOOR_PIN_LOCK_CAP_MINUTES
+
+
+def floor_pin_lock_tier(attempts: int) -> Optional[int]:
+    """The tier number (1 = 15 minutes ... 6 = the 7-day cap) of a boundary count, or None."""
+    if floor_pin_lock_minutes(attempts) is None:
+        return None
+    return min(attempts // FLOOR_PIN_LOCK_STEP, len(FLOOR_PIN_LOCK_TIERS) + 1)
 
 
 # Sign-on refusals that are not a challenge or a wrong / locked PIN.

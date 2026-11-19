@@ -18,8 +18,6 @@ export interface FloorPinUser {
   has_floor_pin?: boolean;
   floor_pin_set_at?: string | null;
   floor_pin_locked_until?: string | null;
-  /** 15 cumulative wrong PINs: no time lifts it — only an unlock, set or clear. */
-  floor_pin_admin_locked?: boolean;
   /** A promotion into Admin / Manager / Quality cleared the PIN; an Admin must set a new one. */
   floor_pin_reset_required?: boolean;
 }
@@ -62,21 +60,20 @@ export function floorPinManageRefusal(actor: FloorPinActor | null | undefined, t
   return 'Admin only';
 }
 
-/** True while a TIMED lock runs (5 wrong PINs → 15 min, 10 → 2 h): `floor_pin_locked_until` in the future. */
-function isTimedLock(user: FloorPinUser, now: number): boolean {
+/**
+ * True while wrong PINs hold the PIN locked: `floor_pin_locked_until` in the future. Every
+ * lock tier expires (15 min, 2 h, then 24 h doubling to a 7-day cap), so the end time is
+ * always the whole story; an Unlock, a new PIN or a Clear lifts it sooner.
+ */
+export function isFloorPinLocked(user: FloorPinUser, now: number = Date.now()): boolean {
   if (!user.floor_pin_locked_until) return false;
   const until = toDate(user.floor_pin_locked_until);
   return !!until && until.getTime() > now;
 }
 
-/** True while wrong PINs hold the PIN locked: a timed lock in force, or the admin lock (15). */
-export function isFloorPinLocked(user: FloorPinUser, now: number = Date.now()): boolean {
-  return user.floor_pin_admin_locked === true || isTimedLock(user, now);
-}
-
 /** One person's floor-PIN state as the Users page shows it (most urgent first). */
 export interface FloorPinStatus {
-  kind: 'reset_required' | 'admin_locked' | 'locked' | 'set' | 'not_set';
+  kind: 'reset_required' | 'locked' | 'set' | 'not_set';
   /** The headline: also the column's sort / CSV value. */
   label: string;
   /** A second line (the lock's end, or when the PIN was set), or null. */
@@ -89,10 +86,7 @@ export function floorPinStatus(user: FloorPinUser, now: number = Date.now()): Fl
   if (user.floor_pin_reset_required) {
     return { kind: 'reset_required', label: 'New PIN needed (role changed)', detail: null, attention: true };
   }
-  if (user.floor_pin_admin_locked) {
-    return { kind: 'admin_locked', label: 'Locked: needs unlock', detail: null, attention: true };
-  }
-  if (isTimedLock(user, now)) {
+  if (isFloorPinLocked(user, now)) {
     return {
       kind: 'locked',
       label: 'Locked',
@@ -177,8 +171,8 @@ const RANGE_TEXT = `${FLOOR_PIN_MIN_LENGTH}–${FLOOR_PIN_MAX_LENGTH} digits`;
 
 /**
  * Users → Floor PIN: set, reset, clear or unlock one person's badge-sign-in PIN, and
- * show the two states that need someone: the admin lock (15 wrong PINs, which no time
- * lifts) and "new PIN needed" after a promotion cleared the PIN
+ * show the two states that need someone: a lock after wrong PINs (always with its end
+ * time — every tier expires) and "new PIN needed" after a promotion cleared the PIN
  * (AS9100D 8.5.2). Admin, or a Manager for Operator / Supervisor / Shipping / Viewer
  * accounts (PUT / DELETE /users/{id}/floor-pin, POST .../floor-pin/unlock).
  *
@@ -215,7 +209,6 @@ export default function FloorPinDialog({ user, onClose, onChanged }: FloorPinDia
   const name = `${user.first_name} ${user.last_name}`;
   const hasPin = !!user.has_floor_pin;
   const locked = isFloorPinLocked(user);
-  const adminLocked = user.floor_pin_admin_locked === true;
   const resetRequired = user.floor_pin_reset_required === true;
   const busy = saving || clearing || unlocking;
 
@@ -335,9 +328,7 @@ export default function FloorPinDialog({ user, onClose, onChanged }: FloorPinDia
               <>
                 <span className="flex items-center gap-1.5">
                   <LockClosedIcon className="h-4 w-4 shrink-0" aria-hidden="true" />
-                  {adminLocked
-                    ? 'Locked: needs unlock (too many wrong PINs)'
-                    : `Locked after wrong PINs until ${formatCentralDateTime(user.floor_pin_locked_until)}`}
+                  Locked after wrong PINs until {formatCentralDateTime(user.floor_pin_locked_until)}
                 </span>
                 <LoadingButton
                   type="button"

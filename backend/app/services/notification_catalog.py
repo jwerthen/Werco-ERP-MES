@@ -1084,6 +1084,28 @@ _ENTRIES: List[CatalogEntry] = [
         #                          Central-formatted arrival time) and renders the visitor_check_in template.
         #                          The description below is the static preferences-matrix label, not the body.
     ),
+    CatalogEntry(
+        event_key="floor_pin.lockout",
+        label="Floor PIN locked out",
+        description=(
+            "Repeated wrong PINs locked a badge's floor PIN for 24 hours or more — someone may be "
+            "guessing it. Unlock it early from Users if the person needs to sign in."
+        ),
+        category=Category.SYSTEM,
+        severity="warning",
+        default_channels=frozenset({CHANNEL_IN_APP}),
+        # A security signal for the people who can act on it: forced on, in-app only.
+        mandatory_channel=CHANNEL_IN_APP,
+        sms_eligible=False,
+        # One unread row per locked user per Admin: an attacker walking a badge up the tiers
+        # (24 h -> 48 h -> ...) must not stack a row per tier.
+        recurring=True,
+        # Emitted by the badge sign-on step (app.api.endpoints.auth._notify_long_floor_pin_lock)
+        # when a wrong PIN starts a lock of 24 hours or more. The payload carries the user id and
+        # the tier only -- never a PIN, never a badge number. The link lands on Users.
+        source_event_types=("floor_pin_lockout",),
+        roles=(UserRole.ADMIN,),
+    ),
 ]
 
 
