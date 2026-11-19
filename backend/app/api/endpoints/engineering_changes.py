@@ -1,6 +1,6 @@
 import json
 from datetime import date, datetime
-from typing import List, Optional
+from typing import List, Optional, Set
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -21,6 +21,7 @@ from app.models.engineering_change import (
 from app.models.user import User, UserRole
 from app.schemas.base import UTCModel
 from app.services.audit_service import AuditService
+from app.services.document_access import visible_document_ids, visible_documents_clause
 
 router = APIRouter()
 
@@ -242,7 +243,26 @@ def get_eco_or_404(db: Session, eco_id: int, company_id: int) -> EngineeringChan
     return eco
 
 
-def _validate_affected_ids_in_company(db: Session, company_id: int, eco_in) -> None:
+def _stored_document_ids(raw: Optional[str]) -> Set[int]:
+    """The document ids an ECO's stored ``affected_documents`` JSON names; empty when unreadable."""
+    try:
+        values = json.loads(raw) if raw else []
+    except (json.JSONDecodeError, TypeError):
+        return set()
+    if not isinstance(values, list):
+        return set()
+    ids: Set[int] = set()
+    for value in values:
+        try:
+            ids.add(int(value))
+        except (TypeError, ValueError):
+            continue
+    return ids
+
+
+def _validate_affected_ids_in_company(
+    db: Session, company_id: int, eco_in, user: User, *, stored_document_ids: Optional[Set[int]] = None
+) -> None:
     """Reject any affected part/work-order/document id that is not in the active company.
 
     Tenant isolation (G4-Fix1): ``affected_parts``/``affected_work_orders``/
@@ -251,12 +271,17 @@ def _validate_affected_ids_in_company(db: Session, company_id: int, eco_in) -> N
     affected-items endpoint would then resolve. Each referenced id must resolve to a
     live row WITHIN ``company_id`` (Part/WorkOrder are soft-deletable, so exclude
     deleted rows). Raises 422 on the first foreign/nonexistent id.
+
+    A document the caller may not open (``app.services.document_access``) that the ECO does not
+    already list is refused with the SAME 422 as a nonexistent one, so the answer says nothing
+    about it. One the ECO already lists (``stored_document_ids``) is not being chosen now, so an
+    edit that re-sends the stored list is not refused for it.
     """
     from app.models.document import Document
     from app.models.part import Part
     from app.models.work_order import WorkOrder
 
-    def _check(model, ids, label, soft_delete, key_share_lock=False):
+    def _check(model, ids, label, soft_delete, key_share_lock=False, hidden=frozenset()):
         if not ids:
             return
         unique_ids = list({int(i) for i in ids})
@@ -265,7 +290,7 @@ def _validate_affected_ids_in_company(db: Session, company_id: int, eco_in) -> N
             query = query.filter(model.is_deleted == False)  # noqa: E712
         if key_share_lock:
             query = query.order_by(model.id).with_for_update(read=True, key_share=True)
-        found = {row[0] for row in query.all()}
+        found = {row[0] for row in query.all()} - set(hidden)
         missing = [i for i in unique_ids if i not in found]
         if missing:
             raise HTTPException(
@@ -281,7 +306,10 @@ def _validate_affected_ids_in_company(db: Session, company_id: int, eco_in) -> N
     # /documents/{id} takes them in. A delete that got there first has committed by the
     # time the lock is granted, so the row is gone and this answers 422; a delete that
     # comes later waits for this ECO to commit, then sees the id and refuses.
-    _check(Document, eco_in.affected_documents, "document", soft_delete=False, key_share_lock=True)
+    # Ids the caller may not open count as unknown, in the same list as the missing ones.
+    chosen = {int(i) for i in (eco_in.affected_documents or [])} - (stored_document_ids or set())
+    hidden = chosen - visible_document_ids(db, company_id, user, chosen)
+    _check(Document, eco_in.affected_documents, "document", soft_delete=False, key_share_lock=True, hidden=hidden)
 
 
 # ============== CRUD Endpoints ==============
@@ -458,7 +486,7 @@ def create_eco(
     """Create a new Engineering Change Order"""
     # G4-Fix1: every affected id must resolve within the active company before persist,
     # so a crafted payload cannot store cross-tenant references.
-    _validate_affected_ids_in_company(db, company_id, eco_in)
+    _validate_affected_ids_in_company(db, company_id, eco_in, current_user)
 
     data = eco_in.model_dump(exclude={"affected_parts", "affected_work_orders", "affected_documents"})
 
@@ -503,7 +531,9 @@ def update_eco(
         raise HTTPException(status_code=400, detail="Cannot update a completed, rejected, or cancelled ECO")
 
     # G4-Fix1: validate affected ids against the active company before persisting.
-    _validate_affected_ids_in_company(db, company_id, eco_in)
+    _validate_affected_ids_in_company(
+        db, company_id, eco_in, current_user, stored_document_ids=_stored_document_ids(eco.affected_documents)
+    )
 
     old_values = {c.key: getattr(eco, c.key) for c in eco.__table__.columns}
 
@@ -941,7 +971,11 @@ def get_affected_items(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Get details of all affected parts, work orders, and documents for an ECO"""
+    """Get details of all affected parts, work orders, and documents for an ECO.
+
+    A listed document the caller may not open (its access level: restricted, or export
+    controlled without the caller's own export authorization) is left out.
+    """
     eco = get_eco_or_404(db, eco_id, company_id)
 
     result = {
@@ -1005,7 +1039,15 @@ def get_affected_items(
             if doc_ids:
                 from app.models.document import Document
 
-                docs = db.query(Document).filter(Document.id.in_(doc_ids), Document.company_id == company_id).all()
+                docs = (
+                    db.query(Document)
+                    .filter(
+                        Document.id.in_(doc_ids),
+                        Document.company_id == company_id,
+                        visible_documents_clause(current_user),
+                    )
+                    .all()
+                )
                 result["documents"] = [
                     {
                         "id": d.id,

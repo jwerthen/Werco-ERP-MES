@@ -53,6 +53,16 @@ describe('LaserNestPdfPreview', () => {
     expect(await screen.findByText(/could not load the nest pdf/i)).toBeInTheDocument();
   });
 
+  // A 404 is how the server answers a nest PDF the person may not view (a restricted or
+  // export-controlled document) as well as a missing one: "not available", not an error.
+  it('reads a 404 as not available rather than a failure', async () => {
+    mockApi.fetchLaserNestDocument.mockRejectedValue({ response: { status: 404 } });
+    render(<LaserNestPdfPreview laserNestId={3} />);
+    expect(await screen.findByText('Nest PDF not available.')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByText(/could not load the nest pdf/i)).not.toBeInTheDocument();
+  });
+
   // Kiosk transport injection (Kiosk Foundry Redesign): a provided fetchBlob
   // fully replaces the global-axios default so fenced kiosk surfaces never
   // drive the /login-redirecting client.

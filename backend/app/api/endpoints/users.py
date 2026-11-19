@@ -22,7 +22,11 @@ from app.api.deps import (
     get_current_user,
     require_role,
 )
-from app.core.credentials import API_TOKEN_FLOOR_PIN_ADMIN, is_api_token_credential
+from app.core.credentials import (
+    API_TOKEN_EXPORT_AUTHORIZATION,
+    API_TOKEN_FLOOR_PIN_ADMIN,
+    is_api_token_credential,
+)
 from app.core.floor_pin import FloorPinInput, FloorPinRuleError, hash_floor_pin, validate_floor_pin
 from app.core.security import get_password_hash, verify_password
 from app.db.database import get_db
@@ -31,6 +35,7 @@ from app.models.notification import NotificationLog, NotificationPreference
 from app.models.user import User, UserRole
 from app.schemas.base import UTCModel
 from app.schemas.comment import MentionableUser
+from app.schemas.document_access import ExportAuthorizationUpdate
 from app.schemas.notification import (
     NotificationPreferencesResponse,
     NotificationPreferencesUpdate,
@@ -208,6 +213,11 @@ class UserResponse(UTCModel):
     # A promotion into Admin / Manager / Quality cleared the PIN: badge sign-on is refused until an
     # Admin sets a new PIN or clears it.
     floor_pin_reset_required: bool = False
+    # Export authorization (AS9100D 7.5.3.1 / 7.5.3.2): the ONLY thing that opens an
+    # export_controlled document. Who granted it and when (null after a revoke).
+    export_authorized: bool = False
+    export_authorized_at: Optional[datetime] = None
+    export_authorized_by: Optional[int] = None
 
 
 class UserCsvImportError(BaseModel):
@@ -1535,6 +1545,71 @@ def unlock_user_floor_pin(
                 "floor_pin_locked_until": prior_locked_until.isoformat(),
                 "floor_pin_failed_attempts": prior_attempts,
             },
+        )
+    db.refresh(user)
+    return user
+
+
+# ---------------------------------------------------------------------------
+# Export authorization (AS9100D 7.5.3.1 / 7.5.3.2, migration 131): the only thing that opens
+# an ``export_controlled`` document (``app.services.document_access``). No role bypasses it.
+# ---------------------------------------------------------------------------
+
+
+@router.put(
+    "/{user_id}/export-authorization",
+    response_model=UserResponse,
+    summary="Grant or revoke a user's export authorization",
+)
+def set_user_export_authorization(
+    user_id: int,
+    payload: ExportAuthorizationUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Grant or revoke a user's export authorization (Admin only), with a required reason.
+
+    An export-authorized user may open ``export_controlled`` documents; nobody else may, whatever
+    their role (Admin, superuser and Platform Admin included). A grant stamps
+    ``export_authorized_at`` / ``export_authorized_by``; a revoke clears them. **409** when the
+    user is already in the requested state. Only a person signed in to the app does this: ANY API
+    token is refused **403** before anything is read, and the route is not an MCP tool. The
+    target must be in the active company (**404** otherwise), and a platform account needs a
+    platform administrator (**403**). Recorded as a required audit row with the old and new value
+    and the reason, in the same transaction (**503**, nothing saved, if it cannot be written).
+    Returns the user record.
+    """
+    if is_api_token_credential(current_user):
+        raise HTTPException(status_code=403, detail=API_TOKEN_EXPORT_AUTHORIZATION)
+    user = db.query(User).filter(User.id == user_id, User.company_id == company_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    require_manageable_user(current_user, user)
+    granting = payload.export_authorized
+    if bool(user.export_authorized) == granting:
+        raise HTTPException(
+            status_code=409,
+            detail="The user is already export-authorized" if granting else "The user is not export-authorized",
+        )
+
+    old_values = {"export_authorized": bool(user.export_authorized)}
+    previous_grant = {
+        "export_authorized_at": user.export_authorized_at.isoformat() + "Z" if user.export_authorized_at else None,
+        "export_authorized_by": user.export_authorized_by,
+    }
+    with atomic_security_write(db):
+        user.export_authorized = granting
+        user.export_authorized_at = datetime.utcnow() if granting else None
+        user.export_authorized_by = current_user.id if granting else None
+        audit_user_update(
+            audit,
+            user,
+            old_values,
+            action="EXPORT_AUTHORIZATION_GRANT" if granting else "EXPORT_AUTHORIZATION_REVOKE",
+            description=(f"{'Granted' if granting else 'Revoked'} export authorization for user {user.employee_id}"),
+            extra_data={"reason": payload.reason, **({} if granting else {"revoked_grant": previous_grant})},
         )
     db.refresh(user)
     return user

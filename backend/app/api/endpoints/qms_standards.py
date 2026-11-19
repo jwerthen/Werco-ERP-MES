@@ -41,6 +41,7 @@ from app.services.auto_evidence_service import (
     is_not_tracked,
     matched_rule_ids,
 )
+from app.services.document_access import visible_documents_clause
 from app.services.llm_client import LLMEgressDisabledError, LLMNotConfiguredError
 from app.services.pdf_text_reader import MIB, PdfReadError, PdfReadLimits, read_pdf_pages
 from app.services.qms_extraction_service import QMS_DOCUMENT_TEXT_MAX_CHARS, extract_clauses_with_llm
@@ -78,7 +79,9 @@ def _qms_pdf_read_limits() -> PdfReadLimits:
     )
 
 
-def _assert_company_document(db: Session, document_id: Optional[int], company_id: int) -> None:
+def _assert_company_document(
+    db: Session, document_id: Optional[int], company_id: int, user: User, *, stored_id: Optional[int] = None
+) -> None:
     """Refuse a ``document_id`` that is not one of the active company's documents.
 
     ``QMSStandard.document_id`` and ``QMSClauseEvidence.document_id`` are plain foreign keys to
@@ -97,10 +100,19 @@ def _assert_company_document(db: Session, document_id: Optional[int], company_id
     (``DELETE /documents/{id}``, no tombstone), so a row that exists in the caller's company is a
     live one; its control status (draft, obsolete, ...) is a quality judgment this check does
     not make.
+
+    A document above the caller's access level (``app.services.document_access``: restricted, or
+    export_controlled without the caller's own export authorization) is the same 404, so a link
+    can only name a document its author may open. An edit that re-sends the link it already
+    holds (``stored_id``) is not choosing a document, so only the tenant check applies to it:
+    otherwise a form that echoes an unchanged link would lock its author out of the row.
     """
     if document_id is None:
         return
-    found = tenant_query(db, Document, company_id).filter(Document.id == document_id).with_entities(Document.id).first()
+    query = tenant_query(db, Document, company_id).filter(Document.id == document_id)
+    if stored_id is None or document_id != stored_id:
+        query = query.filter(visible_documents_clause(user))
+    found = query.with_entities(Document.id).first()
     if found is None:
         raise HTTPException(status_code=404, detail="Document not found")
 
@@ -165,7 +177,7 @@ def create_standard(
     A ``document_id`` must name one of your company's documents. Any other id, including one that
     does not exist, is refused 404 ``Document not found`` and nothing is written.
     """
-    _assert_company_document(db, data.document_id, company_id)
+    _assert_company_document(db, data.document_id, company_id, current_user)
     standard = QMSStandard(
         **data.model_dump(),
         created_by=current_user.id,
@@ -488,7 +500,9 @@ def update_standard(
 
     update_data = data.model_dump(exclude_unset=True)
     # A supplied document must be the active company's; ``null`` clears the link.
-    _assert_company_document(db, update_data.get("document_id"), company_id)
+    _assert_company_document(
+        db, update_data.get("document_id"), company_id, current_user, stored_id=standard.document_id
+    )
 
     old_values = {c.key: getattr(standard, c.key) for c in standard.__table__.columns}
 
@@ -919,7 +933,7 @@ def get_clause_auto_evidence(
     """
     clause = _live_clause_or_404(db, clause_id, company_id)
 
-    results = discover_evidence_for_clause(db, clause, company_id)
+    results = discover_evidence_for_clause(db, clause, company_id, viewer=current_user)
     overall = compute_overall_compliance(results)
 
     # Strip internal keys (_rule_id, _evaluation_failed, _not_tracked) before returning. A rule
@@ -998,7 +1012,7 @@ def auto_link_standard(
     kept_reviewed: List[Dict[str, Any]] = []
 
     for clause in clauses:
-        results = discover_evidence_for_clause(db, clause, company_id)
+        results = discover_evidence_for_clause(db, clause, company_id, viewer=current_user)
         computed = [r for r in results if not is_evaluation_failed(r)]
         not_computed.extend(
             {"clause_id": clause.id, "clause_number": clause.clause_number, "rule_id": r["_rule_id"]}
@@ -1333,7 +1347,7 @@ def add_evidence(
     # cleared (``_lock_live_evidence_or_404`` refuses it), so its document could never be deleted.
     _live_clause_or_404(db, clause_id, company_id)
 
-    _assert_company_document(db, data.document_id, company_id)
+    _assert_company_document(db, data.document_id, company_id, current_user)
 
     evidence = QMSClauseEvidence(
         clause_id=clause_id,
@@ -1395,7 +1409,9 @@ def update_evidence(
 
     update_data = data.model_dump(exclude_unset=True)
     # Before any attribute is set, so a refusal leaves the row and the audit log untouched.
-    _assert_company_document(db, update_data.get("document_id"), company_id)
+    _assert_company_document(
+        db, update_data.get("document_id"), company_id, current_user, stored_id=evidence.document_id
+    )
 
     # Track who verified
     if "is_verified" in update_data and update_data["is_verified"]:

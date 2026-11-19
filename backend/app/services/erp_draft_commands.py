@@ -16,6 +16,7 @@ from app.models.document import Document
 from app.models.part import Part
 from app.models.purchasing import POStatus, PurchaseOrder, PurchaseOrderLine, Vendor
 from app.models.work_order import WorkOrder
+from app.services.document_access import visible_document_or_404
 from app.services.operational_event_service import OperationalEventService
 from app.services.po_flowdown_service import flowdown_snapshot_sha256, resolve_clause_codes
 from app.services.supplier_approval_service import approval_warnings, assert_vendor_not_disqualified
@@ -240,6 +241,7 @@ def _audit_values(document: Document) -> dict:
         "file_name": document.file_name,
         "file_size": document.file_size,
         "status": document.status,
+        "access_level": document.access_level,
         "released_by": document.released_by,
         "released_at": document.released_at.isoformat() if document.released_at else None,
     }
@@ -261,16 +263,13 @@ def _audit_document(db, audit, document, *, action, old_values=None, extra_data=
         db.delete(document)
 
 
-def attach_document_command(db, document_id, work_order_id, company_id, audit):
-    """Apply the guarded existing attachment workflow; caller commits evidence atomically."""
-    document = (
-        db.query(Document)
-        .filter(Document.id == document_id, Document.company_id == company_id)
-        .with_for_update()
-        .first()
-    )
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
+def attach_document_command(db, document_id, work_order_id, company_id, audit, *, viewer):
+    """Apply the guarded existing attachment workflow; caller commits evidence atomically.
+
+    ``viewer`` is the person the attach is done for. A document they may not open
+    (``app.services.document_access``) is the same 404 as a missing one, before any other check.
+    """
+    document = visible_document_or_404(db, company_id, viewer, document_id, for_update=True)
 
     work_order = (
         db.query(WorkOrder)

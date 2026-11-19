@@ -105,6 +105,7 @@ from app.services.completion_signal_service import (
     enqueue_work_order_completion_signals,
     record_parent_children_complete,
 )
+from app.services.document_access import can_view_document
 from app.services.import_service import ImportFileError, parse_import_file
 from app.services.labor_cost_service import is_labor_cost_rollup_enabled
 from app.services.laser_nest_extraction_service import extract_nest_fields_from_pdf, segment_nest_pdf
@@ -894,7 +895,7 @@ def _reconcile_operation_component_quantities(
     return changed
 
 
-def _enrich_work_order_operations(work_order: WorkOrder, *, db: Session, company_id: int) -> None:
+def _enrich_work_order_operations(work_order: WorkOrder, *, db: Session, company_id: int, viewer: Any) -> None:
     """Inject the computed, non-column attributes every work-order response renders.
 
     ``db``/``company_id`` are KEYWORD-ONLY and required: they exist for the hold-provenance
@@ -985,13 +986,17 @@ def _enrich_work_order_operations(work_order: WorkOrder, *, db: Session, company
         # ``set_committed_value`` overrides the loaded value as if it came from
         # the DB -- it marks nothing dirty -- so the guard is safe regardless of
         # call order. For a live nest, inject has_document / document_file_name
-        # as in-memory attrs (not ORM columns), like work_center_name above.
+        # as in-memory attrs (not ORM columns), like work_center_name above. A PDF
+        # ``viewer`` may not open (app.services.document_access) reads as none:
+        # has_document false, no file name. ``document_id`` is an ORM column and a
+        # bare pointer, so it is left as stored; the bytes are gated where served.
         nest = active_laser_nest(op)
         if nest is None:
             set_committed_value(op, "laser_nest", None)
         else:
-            nest.has_document = bool(nest.document_id)
-            nest.document_file_name = nest.document.file_name if nest.document else None
+            document_visible = bool(nest.document_id) and can_view_document(viewer, nest.document)
+            nest.has_document = document_visible
+            nest.document_file_name = nest.document.file_name if document_visible else None
 
         if op.component_part_id:
             component = op.component_part
@@ -2730,7 +2735,7 @@ def create_work_order(
         db.expire_all()
         work_order = load_created_work_order()
 
-    _enrich_work_order_operations(work_order, db=db, company_id=company_id)
+    _enrich_work_order_operations(work_order, db=db, company_id=company_id, viewer=current_user)
 
     safe_broadcast(
         broadcast_dashboard_update,
@@ -2856,7 +2861,7 @@ def duplicate_work_order_endpoint(
         .filter(WorkOrder.id == new_work_order_id, WorkOrder.company_id == company_id)
         .first()
     )
-    _enrich_work_order_operations(work_order, db=db, company_id=company_id)
+    _enrich_work_order_operations(work_order, db=db, company_id=company_id, viewer=current_user)
 
     safe_broadcast(
         broadcast_dashboard_update,
@@ -3902,7 +3907,7 @@ async def _run_laser_nest_import(
         )
         .first()
     )
-    _enrich_work_order_operations(child_work_order, db=db, company_id=company_id)
+    _enrich_work_order_operations(child_work_order, db=db, company_id=company_id, viewer=current_user)
 
     safe_broadcast(
         broadcast_work_order_update,
@@ -4159,7 +4164,7 @@ def create_manual_laser_nest_endpoint(
         )
 
     db.refresh(nest)
-    return LaserNestManualResponse(**manual_nest_response_dict(nest))
+    return LaserNestManualResponse(**manual_nest_response_dict(nest, current_user))
 
 
 @router.get("/{work_order_id}/timeline", response_model=WorkOrderTimelineResponse)
@@ -4249,7 +4254,7 @@ def get_work_order(
             db.expire_all()
     # AUD-3: terminal reconcile-driven transitions are audited to the requesting user.
     _reconcile_and_commit(db, [work_order], current_user, company_id)
-    _enrich_work_order_operations(work_order, db=db, company_id=company_id)
+    _enrich_work_order_operations(work_order, db=db, company_id=company_id, viewer=current_user)
     inject_cost_figures(db, company_id=company_id, work_order=work_order)
 
     return work_order
@@ -4305,7 +4310,7 @@ def get_work_order_by_number(
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
     _normalize_work_order_header(work_order)
-    _enrich_work_order_operations(work_order, db=db, company_id=company_id)
+    _enrich_work_order_operations(work_order, db=db, company_id=company_id, viewer=current_user)
     inject_cost_figures(db, company_id=company_id, work_order=work_order)
     return work_order
 

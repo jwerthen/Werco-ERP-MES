@@ -20,6 +20,7 @@ from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.models.work_order_blocker import WorkOrderBlocker
 from app.models.work_order_material import AllocationStatus, WorkOrderMaterialAllocation
 from app.schemas.hank_operations import HankOperationalCheck, HankOperationalReport
+from app.services.document_access import visible_documents_clause
 from app.services.hank_task_service import HankTaskService, _reference
 from app.services.material_consumption_service import AUTO_DRAW_ITEM_CLAUSES
 from app.services.material_readiness_service import material_readiness
@@ -82,6 +83,11 @@ class HankOperationsService:
         )
 
     def documents(self, wo):
+        """The job's released documents that the asking user may open (app.services.document_access).
+
+        Feeds readiness, knowledge and the shipping packet: a restricted or export-controlled
+        document the user could not open is neither named nor counted.
+        """
         return (
             tenant_query(self.db, Document, self.company_id)
             .filter(
@@ -89,6 +95,7 @@ class HankOperationsService:
                     Document.work_order_id == wo.id, (Document.part_id == wo.part_id) & Document.work_order_id.is_(None)
                 ),
                 Document.status == 'released',
+                visible_documents_clause(self.user),
             )
             .order_by(Document.id.desc())
             .limit(LIMIT)

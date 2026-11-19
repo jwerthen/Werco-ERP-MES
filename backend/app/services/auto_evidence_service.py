@@ -7,7 +7,7 @@ Uses keyword-based matching rules so it works across AS9100D, ISO 9001, IATF 169
 
 import logging
 from datetime import date, datetime, timedelta
-from typing import List, Optional, Set
+from typing import Any, List, Optional, Set
 
 from sqlalchemy import and_, case, func, text
 from sqlalchemy.orm import Session
@@ -35,6 +35,7 @@ from app.models.supplier_scorecard import SupplierScorecard
 from app.models.work_order import WorkOrder
 from app.services.audit_service import PAUSED_CHAIN_PLACEHOLDER
 from app.services.company_time import company_today
+from app.services.document_access import visible_documents_clause
 from app.services.supplier_approval_service import APPROVED_STATUSES
 
 logger = logging.getLogger(__name__)
@@ -397,12 +398,21 @@ def _query_calibration(db: Session, company_id: int) -> dict:
     )
 
 
-def _query_documents(db: Session, company_id: int) -> dict:
+def _query_documents(db: Session, company_id: int, viewer: Optional[Any] = None) -> dict:
+    """Document-control evidence, over the documents ``viewer`` may open only.
+
+    Counts and example titles / numbers are computed over the documents the person asking
+    may open (``app.services.document_access``), so a restricted or export-controlled
+    document's title never reaches someone who could not open it, and nor does its count.
+    ``viewer=None`` (no person) counts ``standard`` documents only.
+    """
+    visible = visible_documents_clause(viewer)
     procedures = (
         db.query(func.count(Document.id))
         .filter(
             Document.company_id == company_id,
             Document.document_type.in_([DocumentType.PROCEDURE, DocumentType.WORK_INSTRUCTION]),
+            visible,
         )
         .scalar()
         or 0
@@ -413,14 +423,15 @@ def _query_documents(db: Session, company_id: int) -> dict:
             Document.company_id == company_id,
             Document.document_type.in_([DocumentType.PROCEDURE, DocumentType.WORK_INSTRUCTION]),
             Document.status.in_(["approved", "released"]),
+            visible,
         )
         .scalar()
         or 0
     )
-    total = db.query(func.count(Document.id)).filter(Document.company_id == company_id).scalar() or 0
+    total = db.query(func.count(Document.id)).filter(Document.company_id == company_id, visible).scalar() or 0
     controlled = (
         db.query(func.count(Document.id))
-        .filter(Document.company_id == company_id, Document.is_controlled == True)
+        .filter(Document.company_id == company_id, Document.is_controlled == True, visible)
         .scalar()
         or 0
     )
@@ -430,6 +441,7 @@ def _query_documents(db: Session, company_id: int) -> dict:
         .filter(
             Document.company_id == company_id,
             Document.document_type.in_([DocumentType.PROCEDURE, DocumentType.WORK_INSTRUCTION]),
+            visible,
         )
         .order_by(Document.updated_at.desc().nullslast())
         .limit(5)
@@ -1468,6 +1480,9 @@ EVIDENCE_MAPPING_RULES: List[dict] = [
             "retention",
         ],
         "query_fn": _query_documents,
+        # Called with the person asking (``viewer``): its counts and examples are computed over
+        # the documents that person may open (app.services.document_access).
+        "viewer_scoped": True,
     },
     {
         "id": "complaints",
@@ -1684,11 +1699,16 @@ def is_evaluation_failed(result: dict) -> bool:
     return bool(result.get(EVALUATION_FAILED_KEY))
 
 
-def discover_evidence_for_clause(db: Session, clause: QMSClause, company_id: int) -> List[dict]:
+def discover_evidence_for_clause(
+    db: Session, clause: QMSClause, company_id: int, viewer: Optional[Any] = None
+) -> List[dict]:
     """
     Discover live ERP/MES evidence for a single QMS clause.
     Returns a list of AutoEvidenceResult-compatible dicts, one per matched rule.
     All evidence counts and examples are scoped to the given company.
+
+    ``viewer`` is the person asking. A ``viewer_scoped`` rule (document control) computes over
+    the documents that person may open; ``None`` (no person) means ``standard`` documents only.
 
     A RULE THAT RAISES IS REPORTED, NEVER DROPPED. Each query runs in its own savepoint
     (``db.begin_nested()``); on any exception the savepoint is rolled back and the rule's
@@ -1722,7 +1742,10 @@ def discover_evidence_for_clause(db: Session, clause: QMSClause, company_id: int
         seen_ids.add(rule["id"])
         savepoint = db.begin_nested()
         try:
-            result = rule["query_fn"](db, company_id)
+            if rule.get("viewer_scoped"):
+                result = rule["query_fn"](db, company_id, viewer=viewer)
+            else:
+                result = rule["query_fn"](db, company_id)
         except Exception:  # noqa: BLE001 - one rule's failure must become a visible row, not a 500
             savepoint.rollback()
             logger.error(

@@ -3173,7 +3173,11 @@ export default function WorkOrderDetail() {
                   onChange={(event) => setAttachDocumentId(event.target.value)}
                   className="input w-full"
                 >
-                  <option value="">Select unassigned PDF</option>
+                  <option value="">
+                    {availablePdfDocuments.length === 0 && !secondaryLoading.documentChoices && !secondaryErrors.documentChoices
+                      ? 'No unassigned PDFs available'
+                      : 'Select unassigned PDF'}
+                  </option>
                   {availablePdfDocuments.map((document) => (
                     <option key={document.id} value={document.id}>
                       {document.title} - {document.file_name || document.document_number}

@@ -8,14 +8,16 @@ from datetime import datetime
 from typing import List, Optional, Set, Tuple
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session, joinedload, with_loader_criteria
 
+from app.api.audit_guard import REQUIRED_AUDIT_UNAVAILABLE_DETAIL, required_audit
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
+from app.core.credentials import API_TOKEN_DOCUMENT_ACCESS_LEVEL, is_api_token_credential
 from app.db.database import get_db
 from app.db.tenant_filter import tenant_query
-from app.models.document import Document, DocumentType
+from app.models.document import Document, DocumentAccessLevel, DocumentType
 from app.models.engineering_change import ECOStatus, EngineeringChangeOrder
 from app.models.governance import DocumentFile
 from app.models.hank_intake import HankIntakeFile
@@ -28,7 +30,23 @@ from app.models.shipping import Shipment
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder, WorkOrderOperation
 from app.schemas.base import UTCModel
+from app.schemas.document_access import (
+    DocumentAccessLevelChange,
+    DocumentAccessReviewResponse,
+    DocumentAccessReviewRow,
+)
 from app.services.audit_service import AuditService, AuditWriteError
+from app.services.document_access import (
+    ACCESS_LEVEL_ORDER,
+    export_authorized_user_count,
+    visible_document_or_404,
+    visible_documents_clause,
+)
+from app.services.document_access_service import (
+    change_document_access_level,
+    document_access_review,
+    resolve_upload_access_level,
+)
 from app.services.document_numbering import generate_document_number as generate_shared_document_number
 from app.services.erp_draft_commands import _audit_document, _audit_values, attach_document_command
 from app.services.operation_action_gates import operation_has_recorded_work
@@ -47,19 +65,32 @@ logger = logging.getLogger(__name__)
 # Manual uploads publish immediately. These are release-capable office roles;
 # generated receipt/shipping artifacts retain their own business-route gates.
 DOCUMENT_WRITE_ROLES = [UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY]
+# Changing who may open a document, and reviewing which documents should be export controlled
+# (AS9100D 7.5.3.1 / 7.5.3.2): Quality owns document control, the Admin owns access.
+DOCUMENT_ACCESS_ROLES = [UserRole.ADMIN, UserRole.QUALITY]
 
 UPLOAD_DIR = resolve_upload_dir()
 
 
-def _document_query(db: Session, company_id: int):
-    # Historical documents still name a removed part, but never another tenant's
-    # part. Refresh loaded relationships too, including after a write/commit.
+def _written_document_query(db: Session, company_id: int):
+    """The active company's documents with their part, WITHOUT the access rule.
+
+    Only for echoing back a row this request itself just wrote (an upload, an access-level
+    change), whose metadata the caller supplied or already saw; every read goes through
+    :func:`_document_query`. Historical documents still name a removed part, but never
+    another tenant's part. Refresh loaded relationships too, including after a write/commit.
+    """
     return (
         db.query(Document)
         .options(joinedload(Document.part), with_loader_criteria(Part, Part.company_id == company_id))
         .filter(Document.company_id == company_id)
         .populate_existing()
     )
+
+
+def _document_query(db: Session, company_id: int, user: User):
+    """The active company's documents that ``user`` may open (``app.services.document_access``)."""
+    return _written_document_query(db, company_id).filter(visible_documents_clause(user))
 
 
 def _commit_audited_document(db, audit, document, *, action, old_values=None, extra_data=None):
@@ -480,6 +511,8 @@ class DocumentResponse(UTCModel):
     file_size: Optional[int] = None
     mime_type: Optional[str] = None
     status: str
+    # Who may open it: standard / restricted / export_controlled (app.services.document_access).
+    access_level: str = DocumentAccessLevel.STANDARD.value
     created_at: datetime
 
     class Config:
@@ -487,8 +520,40 @@ class DocumentResponse(UTCModel):
         use_enum_values = True
 
 
+class DocumentUploadResponse(DocumentResponse):
+    """The uploaded document, plus whether the server stored it above the level that was asked for."""
+
+    access_level_requested: str = DocumentAccessLevel.STANDARD.value
+    access_level_raised: bool = False
+    # Why, in order: "predecessor_revision" (a revision is never easier to open than the one it
+    # supersedes), "export_controlled_customer" (the linked part's customer is export-controlled).
+    access_level_raised_because: List[str] = Field(default_factory=list)
+
+
+class DocumentAccessLevelChangeResponse(DocumentResponse):
+    previous_access_level: str
+    # Active users of the company who may open an export_controlled document. 0 with an
+    # export_controlled level means nobody can open it until someone is authorized.
+    authorized_user_count: int
+
+
 class WorkOrderDocumentAttachRequest(BaseModel):
     work_order_id: int
+
+
+def _refuse_api_token_access_level(current_user: User) -> None:
+    """403 for ANY API token on the access-level verb, before anything is read or written."""
+    if is_api_token_credential(current_user):
+        raise HTTPException(status_code=403, detail=API_TOKEN_DOCUMENT_ACCESS_LEVEL)
+
+
+def _access_level_or_422(value: Optional[str]) -> Optional[str]:
+    if value is None or not value.strip():
+        return None
+    level = value.strip()
+    if level not in ACCESS_LEVEL_ORDER:
+        raise HTTPException(status_code=422, detail=f"access_level must be one of {', '.join(ACCESS_LEVEL_ORDER)}")
+    return level
 
 
 def _content_disposition(file_name: Optional[str]) -> str:
@@ -515,6 +580,7 @@ def list_documents(
     work_order_id: Optional[int] = None,
     vendor_id: Optional[int] = None,
     document_type: Optional[str] = None,
+    access_level: Optional[str] = Query(None, description="standard, restricted or export_controlled"),
     search: Optional[str] = None,
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=5000),
@@ -522,7 +588,18 @@ def list_documents(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    query = _document_query(db, company_id)
+    """List the active company's documents the caller may open, newest first.
+
+    Only documents whose ``access_level`` the caller may open are listed: ``restricted`` needs
+    Admin, Manager, Quality or Supervisor; ``export_controlled`` needs the caller's own export
+    authorization, whatever their role. A document the caller may not open is simply absent.
+    Filters: part, work order, vendor, document type, access level, and a free-text search over
+    number, title and description.
+    """
+    query = _document_query(db, company_id, current_user)
+    level_filter = _access_level_or_422(access_level)
+    if level_filter:
+        query = query.filter(Document.access_level == level_filter)
 
     if part_id:
         query = query.filter(Document.part_id == part_id)
@@ -545,7 +622,7 @@ def list_documents(
     return query.order_by(Document.created_at.desc()).offset(skip).limit(limit).all()
 
 
-@router.post("/upload", response_model=DocumentResponse)
+@router.post("/upload", response_model=DocumentUploadResponse)
 async def upload_document(
     file: UploadFile = File(...),
     title: str = Form(...),
@@ -557,6 +634,7 @@ async def upload_document(
     revision: str = Form("A"),
     previous_revision_id: Optional[int] = Form(None),
     revision_notes: Optional[str] = Form(None),
+    access_level: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(DOCUMENT_WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
@@ -566,7 +644,15 @@ async def upload_document(
 
     Revisions retain the previous document's type and linked records; existing
     files remain available. Failure to save the required audit refuses publication.
+
+    ``access_level`` (standard, restricted or export_controlled; default standard) says who
+    may open it. The server only ever RAISES it: a revision is stored at least at its
+    predecessor's level, and a document whose linked part's customer is export-controlled is
+    stored ``export_controlled``. The response says what was asked for and why it was raised
+    (``access_level_requested`` / ``access_level_raised`` / ``access_level_raised_because``).
+    A predecessor the caller may not open is the same 404 as a missing one.
     """
+    requested_access_level = _access_level_or_422(access_level)
     try:
         parsed_document_type = DocumentType(document_type)
     except ValueError as exc:
@@ -615,9 +701,14 @@ async def upload_document(
 
     previous = None
     if previous_revision_id:
+        # A predecessor the uploader may not open is the same 404 as a missing one.
         previous = (
             db.query(Document)
-            .filter(Document.id == previous_revision_id, Document.company_id == company_id)
+            .filter(
+                Document.id == previous_revision_id,
+                Document.company_id == company_id,
+                visible_documents_clause(current_user),
+            )
             .with_for_update()
             .first()
         )
@@ -662,6 +753,10 @@ async def upload_document(
     if not revision.strip() or len(revision.strip()) > 20:
         raise HTTPException(status_code=422, detail="Revision must contain 1–20 characters")
 
+    stored_level = resolve_upload_access_level(
+        db, company_id, requested=requested_access_level, part_id=normalized_part_id, previous=previous
+    )
+
     # Allocate before storing bytes so a numbering failure cannot leave an orphan.
     doc_number = generate_document_number(db, document_type)
 
@@ -693,21 +788,20 @@ async def upload_document(
         file_size=len(content),
         mime_type=file.content_type,
         status="released",
+        access_level=stored_level.access_level,
         released_by=current_user.id,
         released_at=datetime.utcnow(),
         created_by=current_user.id,
         company_id=company_id,
     )
 
+    extra_data = {"release": True, "content_sha256": hashlib.sha256(content).hexdigest()}
+    if stored_level.raised:
+        extra_data["access_level_requested"] = stored_level.requested
+        extra_data["access_level_raised_because"] = list(stored_level.raised_because)
     try:
         db.add(document)
-        _commit_audited_document(
-            db,
-            audit,
-            document,
-            action="CREATE",
-            extra_data={"release": True, "content_sha256": hashlib.sha256(content).hexdigest()},
-        )
+        _commit_audited_document(db, audit, document, action="CREATE", extra_data=extra_data)
     except Exception:
         # A refused publication must not retain newly uploaded bytes. Earlier
         # revision files are never touched by this compensation.
@@ -716,12 +810,42 @@ async def upload_document(
         except Exception:
             logger.error("Could not remove an unpublished document upload")
         raise
-    return _document_query(db, company_id).filter(Document.id == document.id).one()
+    # Echoed back even when the stored level is one the uploader cannot open (they supplied it).
+    written = _written_document_query(db, company_id).filter(Document.id == document.id).one()
+    response = DocumentUploadResponse.model_validate(written)
+    response.access_level_requested = stored_level.requested
+    response.access_level_raised = stored_level.raised
+    response.access_level_raised_because = list(stored_level.raised_because)
+    return response
 
 
 @router.get("/types/list")
 def list_document_types(current_user: User = Depends(get_current_user)):
     return [{"value": t.value, "label": t.value.replace("_", " ").title()} for t in DocumentType]
+
+
+@router.get("/access-review", response_model=DocumentAccessReviewResponse)
+def get_document_access_review(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(DOCUMENT_ACCESS_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Documents that probably should be export_controlled and are not (Admin or Quality).
+
+    Lists every document of the active company whose linked part's customer is
+    export-controlled (a controlling customer contract or handling instruction, the same
+    finding that redacts an AI-external connector) but whose ``access_level`` is still
+    ``standard`` or ``restricted``: id, number, revision, title, type, level, part, customer
+    and the customer's classification. ``unlinked_document_count`` counts the documents below
+    ``export_controlled`` that have no part link, which the server cannot judge. Pure read; fix
+    a row with ``POST /documents/{document_id}/access-level``.
+    """
+    review = document_access_review(db, company_id, current_user)
+    return DocumentAccessReviewResponse(
+        documents=[DocumentAccessReviewRow(**row.__dict__) for row in review.documents],
+        document_count=len(review.documents),
+        unlinked_document_count=review.unlinked_document_count,
+    )
 
 
 @router.get("/{document_id}/revisions", response_model=List[DocumentResponse])
@@ -731,22 +855,27 @@ def get_document_revisions(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    documents = _document_query(db, company_id).all()
-    by_id = {doc.id: doc for doc in documents}
-    if document_id not in by_id:
-        raise HTTPException(status_code=404, detail="Document not found")
+    """The revision history the document belongs to, newest first.
+
+    404 when the caller may not open the document itself. The history is traced through
+    every revision, but a revision the caller may not open is left out of the answer.
+    """
+    visible_document_or_404(db, company_id, current_user, document_id)
+    chain = tenant_query(db, Document, company_id).with_entities(Document.id, Document.previous_revision_id).all()
+    previous_of = {row.id: row.previous_revision_id for row in chain}
     root_id = document_id
     seen = set()
-    while root_id not in seen and by_id[root_id].previous_revision_id in by_id:
+    while root_id not in seen and previous_of.get(root_id) in previous_of:
         seen.add(root_id)
-        root_id = by_id[root_id].previous_revision_id
+        root_id = previous_of[root_id]
     linked = {root_id}
     while True:
-        children = {doc.id for doc in documents if doc.previous_revision_id in linked}
+        children = {doc_id for doc_id, previous_id in previous_of.items() if previous_id in linked}
         if children.issubset(linked):
             break
         linked.update(children)
-    return sorted((by_id[id] for id in linked), key=lambda doc: doc.created_at, reverse=True)
+    documents = _document_query(db, company_id, current_user).filter(Document.id.in_(sorted(linked))).all()
+    return sorted(documents, key=lambda doc: doc.created_at, reverse=True)
 
 
 @router.get("/{document_id}", response_model=DocumentResponse)
@@ -756,7 +885,8 @@ def get_document(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    document = _document_query(db, company_id).filter(Document.id == document_id).first()
+    """One document's metadata. 404 when it does not exist or the caller may not open it."""
+    document = _document_query(db, company_id, current_user).filter(Document.id == document_id).first()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
     return document
@@ -769,11 +899,10 @@ def download_document(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
+    """The document's file, as an attachment. 404 when it does not exist or the caller may not open it."""
     from fastapi.responses import FileResponse, StreamingResponse
 
-    document = db.query(Document).filter(Document.id == document_id, Document.company_id == company_id).first()
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
+    document = visible_document_or_404(db, company_id, current_user, document_id)
 
     # Per-row dispatch on the stored ref: s3:// rows stream from object storage,
     # legacy/local rows keep the exact FileResponse behavior.
@@ -806,17 +935,67 @@ def attach_document_to_work_order(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Attach an unlinked PDF to a live tenant work order; existing history stays bound."""
+    """Attach an unlinked PDF to a live tenant work order; existing history stays bound.
+
+    A document the caller may not open is the same 404 as a missing one, before any other check.
+    """
     try:
-        attach_document_command(db, document_id, payload.work_order_id, company_id, audit)
+        attach_document_command(db, document_id, payload.work_order_id, company_id, audit, viewer=current_user)
         db.commit()
-        return _document_query(db, company_id).filter(Document.id == document_id).one()
+        return _document_query(db, company_id, current_user).filter(Document.id == document_id).one()
     except AuditWriteError as exc:
         db.rollback()
         raise HTTPException(503, "Unable to save audit record") from exc
     except Exception:
         db.rollback()
         raise
+
+
+@router.post("/{document_id}/access-level", response_model=DocumentAccessLevelChangeResponse)
+def change_access_level(
+    document_id: int,
+    payload: DocumentAccessLevelChange,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(DOCUMENT_ACCESS_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Change who may open a document (Admin or Quality), with a required reason.
+
+    Levels: ``standard`` (anyone who can read documents), ``restricted`` (Admin, Manager,
+    Quality, Supervisor), ``export_controlled`` (ONLY users marked export-authorized; no role
+    bypasses it). The caller must be able to open the document now (**404** otherwise, the same
+    as a missing one), so lowering an export_controlled document takes an export-authorized
+    person. **409** when the document is already at that level. Any API token is refused
+    **403** before anything is read. Recorded as a required ``ACCESS_LEVEL_CHANGE`` audit row
+    with the old and new level and the reason, in the same transaction (**503**, nothing saved,
+    if it cannot be written). The response carries ``authorized_user_count``, the company's
+    active export-authorized users: 0 with ``export_controlled`` means nobody can open it yet.
+    """
+    _refuse_api_token_access_level(current_user)
+    new_level = payload.access_level.value
+    authorized = export_authorized_user_count(db, company_id)
+    with required_audit(db, REQUIRED_AUDIT_UNAVAILABLE_DETAIL):
+        document, previous_level = change_document_access_level(
+            db,
+            company_id=company_id,
+            user=current_user,
+            document_id=document_id,
+            access_level=new_level,
+            reason=payload.reason,
+            audit=audit,
+            authorized_user_count=authorized,
+        )
+        db.commit()
+    written = _written_document_query(db, company_id).filter(Document.id == document.id).one()
+    response = DocumentAccessLevelChangeResponse.model_validate(
+        {
+            **DocumentResponse.model_validate(written).model_dump(),
+            "previous_access_level": previous_level,
+            "authorized_user_count": authorized,
+        }
+    )
+    return response
 
 
 @router.delete("/{document_id}")
@@ -838,15 +1017,10 @@ def delete_document(
     permanent reasons are reported before any unlink instruction). Every table that
     holds a foreign key to ``documents.id`` is checked here: on Postgres none of them has
     an ``ON DELETE``, so an unchecked one fails at flush as a 500 that gives no reason.
+
+    A document the caller may not open is the same 404 as a missing one, before any of these.
     """
-    document = (
-        db.query(Document)
-        .filter(Document.id == document_id, Document.company_id == company_id)
-        .with_for_update()
-        .first()
-    )
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
+    document = visible_document_or_404(db, company_id, current_user, document_id, for_update=True)
     if (
         document.previous_revision_id
         or db.query(Document.id)

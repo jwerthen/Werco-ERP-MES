@@ -191,10 +191,10 @@ def audit_user_update(
 ) -> None:
     """Audit only changed public account fields; passwords/hashes are never serialized.
 
-    ``extra_data`` adds markers beside the field diff (e.g. ``floor_pin_cleared_on_promotion``);
-    never a credential value.
+    ``extra_data`` is merged into the row's ``extra_data`` beside ``changes``: markers such as
+    ``floor_pin_cleared_on_promotion``, or a reason. Never a credential value.
     """
-    fields = ("email", "first_name", "last_name", "role", "department", "phone", "is_active")
+    fields = ("email", "first_name", "last_name", "role", "department", "phone", "is_active", "export_authorized")
     changed = [key for key in fields if key in old_values and old_values[key] != getattr(user, key)]
     if not changed:
         return

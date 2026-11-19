@@ -16,6 +16,10 @@ function hasWriteRole(actor: Actor, roles: UserRole[]): boolean {
 export const canWriteJobCosts = (actor: Actor): boolean => hasWriteRole(actor, ['admin', 'manager']);
 export const canPublishDocuments = (actor: Actor): boolean => hasWriteRole(actor, ['admin', 'manager', 'quality']);
 export const canDeleteDocuments = (actor: Actor): boolean => hasWriteRole(actor, ['admin', 'manager']);
+// Document access levels (POST /documents/{id}/access-level) and the access review
+// (GET /documents/access-review) are Admin / Quality. Manager publishes documents but does not
+// decide who may open them. The server also 404s a change to a document the caller cannot view.
+export const canManageDocumentAccess = (actor: Actor): boolean => hasWriteRole(actor, ['admin', 'quality']);
 export const canEditFAIs = (actor: Actor): boolean =>
   hasWriteRole(actor, ['admin', 'manager', 'supervisor', 'quality']);
 // Customer quote writes (edit terms / accept / reject / expire, mark sent, convert to work

@@ -89,7 +89,15 @@ export function HankDocumentPicker({
               onChange(event.target.value, row);
             }}
           >
-            <option value="">{loading ? 'Loading documents…' : 'Select document…'}</option>
+            <option value="">
+              {loading
+                ? 'Loading documents…'
+                : options.length === 0
+                  ? query
+                    ? 'No matching documents available'
+                    : 'No documents available'
+                  : 'Select document…'}
+            </option>
             {options.map(row => (
               <option key={row.id} value={row.id}>
                 {row.document_number} · Rev {row.revision} · {row.title} · {row.status}

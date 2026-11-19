@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
-from sqlalchemy.orm import Session, defaultload, joinedload, selectinload
+from sqlalchemy.orm import Session, aliased, defaultload, joinedload, selectinload
 from sqlalchemy.orm.exc import StaleDataError
 
 from app.api.audit_guard import required_audit
@@ -116,6 +116,12 @@ from app.services.completion_signal_service import (
     emit_work_order_completed_event,
     enqueue_work_order_completion_signals,
     record_parent_children_complete,
+)
+from app.services.document_access import (
+    can_view_document,
+    visible_document_ids,
+    visible_document_or_404,
+    visible_documents_clause,
 )
 from app.services.labor_cost_service import is_labor_cost_rollup_enabled
 from app.services.laser_nest_service import active_laser_nest, sync_laser_nest_from_operation
@@ -681,13 +687,21 @@ def _operation_check_in_state(db: Session, operation: WorkOrderOperation) -> dic
     }
 
 
-def _laser_nest_payload(operation: WorkOrderOperation) -> Optional[dict]:
+def _laser_nest_payload(operation: WorkOrderOperation, viewer: Optional[User]) -> Optional[dict]:
+    """The operation's live laser nest for the floor payloads, or None.
+
+    ``viewer`` is the person reading (``None`` for an unattended crew-station tablet, which
+    sees ``standard`` documents only). A nest PDF the viewer may not open
+    (``app.services.document_access``) is reported as no PDF at all: ``document_id`` /
+    ``document_file_name`` null and ``has_document`` false, the same as a nest without one.
+    """
     sync_laser_nest_from_operation(operation)
     # Soft-delete guard: a soft-deleted manual nest must never surface in the
     # operator queue / kiosk payloads (active_laser_nest returns None for it).
     nest = active_laser_nest(operation)
     if not nest:
         return None
+    document_visible = bool(nest.document_id) and can_view_document(viewer, nest.document)
     return {
         "id": nest.id,
         "nest_name": nest.nest_name,
@@ -702,9 +716,9 @@ def _laser_nest_payload(operation: WorkOrderOperation) -> Optional[dict]:
         # Manual-entry + per-nest PDF fields (mirrors manual_nest_response_dict's
         # document access pattern; .document is the same lazy-load on LaserNest).
         "cnc_number": nest.cnc_number,
-        "document_id": nest.document_id,
-        "has_document": bool(nest.document_id),
-        "document_file_name": nest.document.file_name if nest.document else None,
+        "document_id": nest.document_id if document_visible else None,
+        "has_document": document_visible,
+        "document_file_name": nest.document.file_name if document_visible else None,
     }
 
 
@@ -896,6 +910,7 @@ def _short_count_fields(
 def _kiosk_job_row(
     operation: WorkOrderOperation,
     *,
+    viewer: Optional[User],
     run_order: Optional[int],
     roster: list[dict],
     step_counts: dict,
@@ -982,7 +997,7 @@ def _kiosk_job_row(
         "due_date": work_order.due_date,
         "setup_time_hours": operation.setup_time_hours,
         "run_time_hours": operation.run_time_hours,
-        "laser_nest": _laser_nest_payload(operation),
+        "laser_nest": _laser_nest_payload(operation, viewer),
         # Open, operation-scoped material ties. [] when untied -- render nothing
         # at all for those (see _material_ties_payload).
         "material_ties": _material_ties_payload(ties),
@@ -1177,6 +1192,7 @@ def _resume_open_blocker_payload(
 def _held_job_row(
     operation: WorkOrderOperation,
     *,
+    viewer: Optional[User],
     roster: list[dict],
     step_counts: dict,
     ties: Optional[Sequence[MaterialTieView]],
@@ -1203,7 +1219,9 @@ def _held_job_row(
     caller has to state which audience it is building for rather than inherit
     the permissive default.
     """
-    row = _kiosk_job_row(operation, run_order=None, roster=roster, step_counts=step_counts, ties=ties, acct=acct)
+    row = _kiosk_job_row(
+        operation, viewer=viewer, run_order=None, roster=roster, step_counts=step_counts, ties=ties, acct=acct
+    )
     row["startable"] = False
     row["hold"] = _hold_context_payload(hold, include_free_text=include_hold_free_text, operation=operation)
     return row
@@ -1442,7 +1460,7 @@ def get_my_active_job(
                 # are open entries so typically null, but kept uniform with TimeEntryResponse).
                 "approved": to_utc_iso(entry.approved) if entry.approved else None,
                 "approved_by": entry.approved_by,
-                "laser_nest": _laser_nest_payload(operation) if operation else None,
+                "laser_nest": _laser_nest_payload(operation, current_user) if operation else None,
                 # Open, operation-scoped material ties for THIS job. [] when
                 # untied -- the running panel renders nothing for those.
                 "material_ties": _material_ties_payload(material_ties.get(entry.operation_id)),
@@ -1502,9 +1520,12 @@ def get_operation_documents(
     """Kiosk doc-viewer discovery read: what is viewable for this operation.
 
     Pure read (no state change, no audit): the controlled part drawing (newest
-    approved/released DRAWING Document for the WO's part), the operation's laser
-    nest reference PDF, the nest material, and the part's critical SPC
-    characteristics. Lives under /shop-floor so a badge-minted kiosk-scoped
+    approved/released DRAWING Document for the WO's part that the caller may open),
+    the operation's laser nest reference PDF (null ``document_id`` / ``file_name``
+    when the caller may not open it), the nest material, and the part's critical
+    SPC characteristics. A drawing above the caller's access level
+    (``restricted`` / ``export_controlled``) is skipped, never named: the newest
+    one the caller may open is shown instead, or none. Lives under /shop-floor so a badge-minted kiosk-scoped
     token passes the path fence; any authenticated user may call it (mirrors
     the laser-nest inline preview stance). Bytes are served separately by
     GET /shop-floor/documents/{document_id}/inline.
@@ -1537,17 +1558,27 @@ def get_operation_documents(
         else None
     )
 
-    # Controlled drawing: newest approved/released DRAWING for the part.
-    # released_at DESC NULLS LAST, portably (is_(None).asc() = non-null first,
-    # same trick as the dispatch run_order sort), then id DESC.
+    # Controlled drawing: newest approved/released DRAWING for the part that the caller may
+    # open. released_at DESC NULLS LAST, portably (is_(None).asc() = non-null first,
+    # same trick as the dispatch run_order sort), then id DESC. A drawing that a later
+    # revision supersedes is never picked: when the current revision is above the
+    # caller's access level, the pick must not fall back to the revision it replaced.
     drawing_payload = None
     if part is not None:
+        successor = aliased(Document)
+        superseded = (
+            db.query(successor.id)
+            .filter(successor.company_id == company_id, successor.previous_revision_id == Document.id)
+            .exists()
+        )
         drawing = (
             tenant_query(db, Document, company_id)
             .filter(
                 Document.part_id == part.id,
                 Document.document_type == DocumentType.DRAWING,
                 Document.status.in_(("approved", "released")),
+                visible_documents_clause(current_user),
+                ~superseded,
             )
             .order_by(Document.released_at.is_(None).asc(), Document.released_at.desc(), Document.id.desc())
             .first()
@@ -1564,13 +1595,14 @@ def get_operation_documents(
 
     # Nest tab: soft-delete-guarded, same helper _laser_nest_payload uses.
     nest = active_laser_nest(operation)
+    nest_document_visible = bool(nest and nest.document_id) and can_view_document(current_user, nest.document)
     nest_payload = (
         {
             "laser_nest_id": nest.id,
             "nest_name": nest.nest_name,
             "cnc_number": nest.cnc_number,
-            "document_id": nest.document_id,
-            "file_name": nest.document.file_name if nest.document else None,
+            "document_id": nest.document_id if nest_document_visible else None,
+            "file_name": nest.document.file_name if nest_document_visible else None,
         }
         if nest
         else None
@@ -1640,10 +1672,12 @@ def get_shop_floor_document_inline(
     drawing (the documented laser-nest inline stance). Serving mirrors
     laser_nests.py: S3 stream or local FileResponse, forced inline
     application/pdf.
+
+    Access level first: a document the caller may not open (``restricted`` needs Admin,
+    Manager, Quality or Supervisor; ``export_controlled`` needs the caller's own export
+    authorization) is the same 404, before the drawing / nest checks.
     """
-    document = tenant_query(db, Document, company_id).filter(Document.id == document_id).first()
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
+    document = visible_document_or_404(db, company_id, current_user, document_id)
 
     is_controlled_part_drawing = (
         document.document_type == DocumentType.DRAWING
@@ -2924,9 +2958,12 @@ def get_work_center_queue(
     def _step_counts_for(op: WorkOrderOperation) -> dict:
         return step_counts.get(op.id, {"steps_total": 0, "steps_recorded": 0})
 
+    # The person reading, for the nest-PDF access rule; a station tablet has none (standard only).
+    viewer = principal.user if principal.kind == "user" else None
     queue = [
         _kiosk_job_row(
             op,
+            viewer=viewer,
             run_order=run_positions.get(op.id),
             roster=roster_by_operation.get(op.id, []),
             step_counts=_step_counts_for(op),
@@ -2944,6 +2981,7 @@ def get_work_center_queue(
     held = [
         _held_job_row(
             op,
+            viewer=viewer,
             roster=roster_by_operation.get(op.id, []),
             step_counts=_step_counts_for(op),
             ties=material_ties.get(op.id),
@@ -4129,7 +4167,7 @@ def get_all_operations(
                 "quantity_scrapped": op.quantity_scrapped,
                 # Owner ruling 1 -- see _short_count_fields.
                 **_short_count_fields(op, wo, accounting.get(op.id)),
-                "laser_nest": _laser_nest_payload(op),
+                "laser_nest": _laser_nest_payload(op, current_user),
                 "priority": wo.priority,
                 "due_date": wo.due_date.isoformat() if wo.due_date else None,
                 "customer_name": wo.customer_name,
@@ -5394,7 +5432,7 @@ def get_operation_details(
             "component_quantity": operation.component_quantity,
             "quantity_complete": operation.quantity_complete,
             "quantity_scrapped": operation.quantity_scrapped,
-            "laser_nest": _laser_nest_payload(operation),
+            "laser_nest": _laser_nest_payload(operation, current_user),
             "setup_instructions": operation.setup_instructions,
             "run_instructions": operation.run_instructions,
             "setup_time_hours": operation.setup_time_hours,
@@ -5443,7 +5481,7 @@ def get_operation_details(
                 "component_quantity": op.component_quantity,
                 "quantity_complete": op.quantity_complete,
                 "quantity_scrapped": op.quantity_scrapped,
-                "laser_nest": _laser_nest_payload(op),
+                "laser_nest": _laser_nest_payload(op, current_user),
                 "actual_setup_hours": op.actual_setup_hours,
                 "actual_run_hours": op.actual_run_hours,
                 "actual_start": to_utc_iso(op.actual_start),
@@ -5975,10 +6013,31 @@ def get_operation_steps(
     Read-only; available in any operation/WO state so the kiosk can show the trail
     on held or completed jobs too. ``completeness`` maps step_id -> serial -> satisfied
     for serialized WOs; ``steps_total``/``steps_recorded`` are the required-step chip
-    numbers (the work-center queue carries the same pair per item).
+    numbers (the work-center queue carries the same pair per item). A record's
+    ``attachment_document_id`` is null when the caller may not open that document
+    (its access level).
     """
     operation, work_order = _get_operation_and_work_order(db, operation_id, company_id)
-    return process_sheet_service.build_steps_view(db, company_id, operation, work_order)
+    view = process_sheet_service.build_steps_view(db, company_id, operation, work_order)
+    # A record's photo / file the caller may not open (its access level) is reported as no
+    # attachment id: serialized here, so the ORM row itself is never touched.
+    attached = [
+        record.attachment_document_id
+        for step in view["steps"]
+        for record in step["records"]
+        if record.attachment_document_id is not None
+    ]
+    if attached:
+        visible = visible_document_ids(db, company_id, current_user, attached)
+        for step in view["steps"]:
+            serialized = []
+            for record in step["records"]:
+                row = OperationStepRecordResponse.model_validate(record)
+                if row.attachment_document_id is not None and row.attachment_document_id not in visible:
+                    row.attachment_document_id = None
+                serialized.append(row)
+            step["records"] = serialized
+    return view
 
 
 @router.post(

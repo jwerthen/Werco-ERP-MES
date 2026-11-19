@@ -105,6 +105,21 @@ API_TOKEN_FLOOR_PIN_ADMIN = (
     "not an API token: credential administration is a person's act."
 )
 
+# Restricted document viewing (AS9100D 7.5.3.1 / 7.5.3.2, migration 131). Deciding who may open a
+# document (``POST /documents/{document_id}/access-level``) and who may open export-controlled ones
+# (``PUT /users/{user_id}/export-authorization``) are a person's judgment, so both routes refuse ANY
+# API token, whatever its role or scope, with these texts before they read or write anything.
+# Neither is an MCP tool (``app.mcp.catalog.DOCUMENT_ACCESS_OPERATIONS``): a person's own JWT would
+# otherwise let an agent grant export access or lower an export-controlled drawing's level.
+API_TOKEN_DOCUMENT_ACCESS_LEVEL = (
+    "A document's access level is changed by an Admin or Quality user signed in to the app, not an API token: "
+    "deciding who may open a controlled document is a person's judgment."
+)
+API_TOKEN_EXPORT_AUTHORIZATION = (
+    "Export authorization is granted or revoked by an Admin signed in to the app, not an API token: deciding "
+    "who may open export-controlled documents is a person's judgment."
+)
+
 # Comments and watchers (docs/NOTIFICATIONS_PLAN.md section 3.6; owner decision for work-order
 # comments, 2026-11-16). A comment is a person's own words and a watch is a person's own
 # preference, so every comment / watcher WRITE (``POST``/``PATCH``/``DELETE /comments``,

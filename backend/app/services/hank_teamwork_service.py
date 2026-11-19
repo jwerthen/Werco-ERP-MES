@@ -27,6 +27,7 @@ from app.schemas.hank_teamwork import (
     RoutineResponse,
     RoutineRunResponse,
 )
+from app.services.document_access import visible_documents_clause
 from app.services.hank_task_service import HankTaskService, _digest, _reference
 from app.services.notification_links import hank_handoff
 from app.services.storage_service import delete_ref, get_storage, read_ref_bytes, resolve_upload_dir
@@ -141,7 +142,13 @@ class HankTeamworkService:
 
     def handoff_response(self, row):
         content = HandoffContent.model_validate(row.content_json)
-        docs = tenant_query(self.db, Document, self.company_id).filter(Document.id.in_(content.document_ids)).all()
+        # Only references the reader may open (app.services.document_access); a document above
+        # their access level is left out of document_references (its id stays in document_ids).
+        docs = (
+            tenant_query(self.db, Document, self.company_id)
+            .filter(Document.id.in_(content.document_ids), visible_documents_clause(self.user))
+            .all()
+        )
         editable = self._interactive(write=True) and not self._job(row.work_order_id).is_deleted
         return HandoffResponse(
             id=row.id,
@@ -221,7 +228,12 @@ class HankTeamworkService:
             or 'work_orders:view' not in HankTaskService(self.db, recipient, self.company_id)._permissions()
         ):
             raise HTTPException(422, 'Choose another active employee with work-order access in this company.')
-        docs = tenant_query(self.db, Document, self.company_id).filter(Document.id.in_(command.document_ids)).all()
+        # A document the sender may not open counts as missing: the same 422, nothing disclosed.
+        docs = (
+            tenant_query(self.db, Document, self.company_id)
+            .filter(Document.id.in_(command.document_ids), visible_documents_clause(self.user))
+            .all()
+        )
         if len(docs) != len(command.document_ids) or any(
             (doc.work_order_id and doc.work_order_id != job.id) or (doc.part_id and doc.part_id != job.part_id)
             for doc in docs

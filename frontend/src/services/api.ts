@@ -22,6 +22,14 @@ import type {
   CustomerExportControl,
 } from '../types/exportControl';
 import type { InventoryOwnershipChange, InventoryOwnershipChangeResult, OwnershipType } from '../types/ownership';
+import {
+  normalizeDocumentAccessReview,
+  type DocumentAccessChangeRequest,
+  type DocumentAccessChangeResult,
+  type DocumentAccessLevel,
+  type DocumentAccessReview,
+  type UserExportAuthorizationRequest,
+} from '../types/documentAccess';
 import axios, { AxiosInstance, AxiosError, AxiosRequestConfig } from 'axios';
 import { normalizeAxiosErrorDetail, parseBlobErrorBody } from '../utils/apiError';
 import { floorPinReauthMessage, isFloorPinReauthRequired } from './badgeSignOn';
@@ -3920,7 +3928,7 @@ class ApiService {
   }
 
   // Documents
-  async getDocuments(params?: { part_id?: number; work_order_id?: number; vendor_id?: number; document_type?: string; search?: string; skip?: number; limit?: number }, signal?: AbortSignal) {
+  async getDocuments(params?: { part_id?: number; work_order_id?: number; vendor_id?: number; document_type?: string; access_level?: DocumentAccessLevel; search?: string; skip?: number; limit?: number }, signal?: AbortSignal) {
     if (params?.limit) {
       const response = await this.api.get('/documents/', { params, ...(signal ? { signal } : {}) });
       return response.data;
@@ -3952,6 +3960,12 @@ class ApiService {
     return response.data;
   }
 
+  /**
+   * Upload a document (or, with `previous_revision_id`, its next revision). The form may carry
+   * `access_level`; the server raises it (never lowers it) when the linked part's customer is
+   * export-controlled or the predecessor sits higher, and says so on the response (read it as a
+   * `DocumentUploadResult`; the return stays untyped for the many callers that predate it).
+   */
   async uploadDocument(formData: FormData, signal?: AbortSignal) {
     const response = await this.api.post('/documents/upload', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
@@ -3975,6 +3989,30 @@ class ApiService {
   async deleteDocument(documentId: number) {
     const response = await this.api.delete(`/documents/${documentId}`);
     return response.data;
+  }
+
+  /**
+   * Change a document's access level (AS9100D 7.5.3.1). Admin / Quality, with a required reason
+   * on the audit row; refused 403 to an API token, 409 when the level is unchanged, and 404 when
+   * the caller cannot view the document (so lowering an export-controlled one takes an
+   * export-authorized person). The response carries `authorized_user_count`.
+   */
+  async changeDocumentAccessLevel(
+    documentId: number,
+    data: DocumentAccessChangeRequest
+  ): Promise<DocumentAccessChangeResult> {
+    const response = await this.api.post<DocumentAccessChangeResult>(`/documents/${documentId}/access-level`, data);
+    return response.data;
+  }
+
+  /**
+   * Documents linked (through their part) to an export-controlled customer that are not yet
+   * marked export-controlled, plus a count of part-less documents the review cannot judge.
+   * Admin / Quality.
+   */
+  async getDocumentAccessReview(): Promise<DocumentAccessReview> {
+    const response = await this.api.get('/documents/access-review');
+    return normalizeDocumentAccessReview(response.data);
   }
 
   // Reports
@@ -4415,6 +4453,16 @@ class ApiService {
   /** Lift a floor-PIN lock (5 wrong PINs) without changing the PIN. Same roles as `setUserFloorPin`. */
   async unlockUserFloorPin(userId: number): Promise<void> {
     await this.api.post(`/users/${userId}/floor-pin/unlock`);
+  }
+
+  /**
+   * Grant or revoke a user's export authorization, the only way to open an export-controlled
+   * document. Admin only, with a required reason on the audit row; refused 403 to an API token.
+   * Granting stamps `export_authorized_at` / `_by`; revoking clears them. Returns the user.
+   */
+  async setUserExportAuthorization(userId: number, data: UserExportAuthorizationRequest): Promise<User> {
+    const response = await this.api.put<User>(`/users/${userId}/export-authorization`, data);
+    return response.data;
   }
 
   // Customers

@@ -1,9 +1,22 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import api from '../services/api';
 import { usePermissions } from '../hooks/usePermissions';
-import { canPublishDocuments, canDeleteDocuments } from '../utils/recordWriteAccess';
+import { canPublishDocuments, canDeleteDocuments, canManageDocumentAccess } from '../utils/recordWriteAccess';
 import { useSearchParams } from 'react-router-dom';
 import DocumentDetail from '../components/operations/DocumentDetail';
+import { DocumentAccessBadge } from '../components/documents/DocumentAccessBadge';
+import DocumentAccessReviewPanel from '../components/documents/DocumentAccessReviewPanel';
+import {
+  DOCUMENT_ACCESS_DESCRIPTIONS,
+  DOCUMENT_ACCESS_LABELS,
+  DOCUMENT_ACCESS_LEVELS,
+  documentAccessLevel,
+  isDocumentAccessLevel,
+  accessLevelRaisedNotice,
+  serverRaisedAccessLevel,
+  type DocumentAccessLevel,
+  type DocumentUploadResult,
+} from '../types/documentAccess';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import { Modal } from '../components/ui/Modal';
 import { FormField } from '../components/ui/FormField';
@@ -15,6 +28,7 @@ import {
   TrashIcon,
   MagnifyingGlassIcon,
   DocumentTextIcon,
+  ShieldExclamationIcon,
 } from '@heroicons/react/24/outline';
 
 interface Document {
@@ -33,6 +47,8 @@ interface Document {
   mime_type?: string;
   status: string;
   created_at: string;
+  /** Absent only from an API without migration 131; read through documentAccessLevel(). */
+  access_level?: DocumentAccessLevel;
 }
 
 interface Part {
@@ -91,6 +107,7 @@ export default function Documents() {
   const actor = { role, is_superuser: isSuperuser };
   const canPublish = canPublishDocuments(actor);
   const canDelete = canDeleteDocuments(actor);
+  const canManageAccess = canManageDocumentAccess(actor);
   const { showToast } = useToast();
   const [actionBusy, setActionBusy] = useState(false);
   const [actionError, setActionError] = useState('');
@@ -105,6 +122,21 @@ export default function Documents() {
     },
     [searchParams, setSearchParams]
   );
+  // The access filter and the review panel survive a reload, like the open document.
+  const accessParam = searchParams.get('access');
+  const accessFilter: DocumentAccessLevel | '' = isDocumentAccessLevel(accessParam) ? accessParam : '';
+  const showReview = canManageAccess && searchParams.get('review') === '1';
+  const setParam = useCallback(
+    (key: string, value: string) => {
+      const next = new URLSearchParams(searchParams);
+      if (value) next.set(key, value);
+      else next.delete(key);
+      setSearchParams(next, { replace: true });
+    },
+    [searchParams, setSearchParams]
+  );
+  // Bumped after a save so an open access review re-reads (a changed level can clear a row).
+  const [reviewReloadKey, setReviewReloadKey] = useState(0);
   const [documents, setDocuments] = useState<Document[]>([]);
   const [parts, setParts] = useState<Part[]>([]);
   const [documentTypes, setDocumentTypes] = useState<DocumentType[]>([]);
@@ -124,6 +156,7 @@ export default function Documents() {
     description: '',
     part_id: 0,
     revision: 'A',
+    access_level: 'standard' as DocumentAccessLevel,
     file: null as File | null,
   });
   const partsById = useMemo(() => new Map(parts.map(part => [part.id, part])), [parts]);
@@ -183,6 +216,7 @@ export default function Documents() {
     formData.append('document_type', uploadForm.document_type);
     formData.append('description', uploadForm.description);
     formData.append('revision', uploadForm.revision);
+    formData.append('access_level', uploadForm.access_level);
     // Only a part from the loaded list is ever sent; "no part" sends nothing (company-wide).
     if (partsById.has(uploadForm.part_id)) {
       formData.append('part_id', uploadForm.part_id.toString());
@@ -192,11 +226,26 @@ export default function Documents() {
     setActionBusy(true);
     setActionError('');
     try {
-      await api.uploadDocument(formData);
+      const saved = (await api.uploadDocument(formData)) as DocumentUploadResult;
+      const requested = uploadForm.access_level;
       setShowUploadModal(false);
-      setUploadForm({ title: '', document_type: 'drawing', description: '', part_id: 0, revision: 'A', file: null });
-      showToast('success', 'Document uploaded');
+      setUploadForm({
+        title: '',
+        document_type: 'drawing',
+        description: '',
+        part_id: 0,
+        revision: 'A',
+        access_level: 'standard',
+        file: null,
+      });
+      if (saved && serverRaisedAccessLevel(requested, saved)) {
+        // The upload succeeded, but not at the level asked for: say so until dismissed.
+        showToast('warning', accessLevelRaisedNotice('Document uploaded', requested, saved));
+      } else {
+        showToast('success', 'Document uploaded');
+      }
       loadData();
+      setReviewReloadKey(n => n + 1);
     } catch (err: any) {
       const detail = err.response?.data?.detail;
       setActionError(
@@ -251,9 +300,10 @@ export default function Documents() {
   }, [canDelete, deleteDocTarget, deleteDocPending, showToast, loadData]);
 
   const filteredDocs = useMemo(() => {
-    if (!debouncedSearch) return documents;
+    const leveled = accessFilter ? documents.filter(doc => documentAccessLevel(doc) === accessFilter) : documents;
+    if (!debouncedSearch) return leveled;
     const searchLower = debouncedSearch.toLowerCase();
-    return documents.filter(
+    return leveled.filter(
       doc =>
         doc.document_number.toLowerCase().includes(searchLower) ||
         doc.title.toLowerCase().includes(searchLower) ||
@@ -261,7 +311,7 @@ export default function Documents() {
         doc.part?.part_number.toLowerCase().includes(searchLower) ||
         (doc.part_id ? partsById.get(doc.part_id)?.part_number.toLowerCase().includes(searchLower) : false)
     );
-  }, [documents, debouncedSearch, partsById]);
+  }, [documents, debouncedSearch, partsById, accessFilter]);
   const filteredCount = filteredDocs.length;
 
   const partNumberFor = useCallback(
@@ -296,6 +346,14 @@ export default function Documents() {
         accessor: doc => doc.document_type,
         csv: doc => doc.document_type.replace(/_/g, ' '),
         render: doc => <span className="capitalize">{doc.document_type.replace('_', ' ')}</span>,
+      },
+      {
+        key: 'access',
+        header: 'Access',
+        sortable: true,
+        accessor: doc => DOCUMENT_ACCESS_LEVELS.indexOf(documentAccessLevel(doc)),
+        csv: doc => DOCUMENT_ACCESS_LABELS[documentAccessLevel(doc)],
+        render: doc => <DocumentAccessBadge level={documentAccessLevel(doc)} showStandard />,
       },
       {
         key: 'file',
@@ -380,6 +438,7 @@ export default function Documents() {
         badge={<span className="text-xl">{typeIcons[doc.document_type] || '📄'}</span>}
         fields={[
           { label: 'Type', value: <span className="capitalize">{doc.document_type.replace('_', ' ')}</span> },
+          { label: 'Access', value: <DocumentAccessBadge level={documentAccessLevel(doc)} showStandard /> },
           { label: 'Part', value: partNumberFor(doc) },
           { label: 'File', value: doc.file_name || '-', fullWidth: true },
           { label: 'Size', value: formatFileSize(doc.file_size) },
@@ -413,17 +472,46 @@ export default function Documents() {
   return (
     <div className="space-y-6">
       {detailId > 0 && (
-        <DocumentDetail id={detailId} onClose={() => selectDocument(0)} onSelect={selectDocument} onSaved={loadData} />
+        <DocumentDetail
+          id={detailId}
+          onClose={() => selectDocument(0)}
+          onSelect={selectDocument}
+          onSaved={() => {
+            loadData();
+            setReviewReloadKey(n => n + 1);
+          }}
+        />
       )}
-      <div className="flex justify-between items-center">
+      <div className="flex flex-wrap justify-between items-center gap-3">
         <h1 className="text-2xl font-bold text-white">Documents</h1>
-        {canPublish && (
-          <button onClick={() => setShowUploadModal(true)} className="btn-primary flex items-center">
-            <ArrowUpTrayIcon className="h-5 w-5 mr-2" />
-            Upload Document
-          </button>
-        )}
+        <div className="flex flex-wrap items-center gap-2">
+          {canManageAccess && (
+            <button
+              type="button"
+              onClick={() => setParam('review', showReview ? '' : '1')}
+              className="btn-secondary flex items-center"
+              aria-pressed={showReview}
+            >
+              <ShieldExclamationIcon className="h-5 w-5 mr-2" aria-hidden="true" />
+              Access review
+            </button>
+          )}
+          {canPublish && (
+            <button onClick={() => setShowUploadModal(true)} className="btn-primary flex items-center">
+              <ArrowUpTrayIcon className="h-5 w-5 mr-2" />
+              Upload Document
+            </button>
+          )}
+        </div>
       </div>
+
+      {showReview && (
+        <DocumentAccessReviewPanel
+          onOpenDocument={selectDocument}
+          onClose={() => setParam('review', '')}
+          reloadKey={reviewReloadKey}
+        />
+      )}
 
       {/* Filters */}
       <div className="flex flex-col sm:flex-row gap-4">
@@ -443,6 +531,19 @@ export default function Documents() {
           {documentTypes.map(t => (
             <option key={t.value} value={t.value}>
               {t.label}
+            </option>
+          ))}
+        </select>
+        <select
+          value={accessFilter}
+          onChange={e => setParam('access', e.target.value)}
+          className="input w-full sm:w-48"
+          aria-label="Filter by access level"
+        >
+          <option value="">All access levels</option>
+          {DOCUMENT_ACCESS_LEVELS.map(level => (
+            <option key={level} value={level}>
+              {DOCUMENT_ACCESS_LABELS[level]}
             </option>
           ))}
         </select>
@@ -470,11 +571,15 @@ export default function Documents() {
         mobileCards={renderMobileCard}
         empty={{
           icon: DocumentTextIcon,
-          title: search || filterType ? 'No matching documents' : 'No documents',
+          title: search || filterType || accessFilter ? 'No matching documents' : 'No documents',
           description:
-            search || filterType ? 'Try adjusting your search or type filter.' : 'Upload a document to get started.',
+            search || filterType || accessFilter
+              ? 'Try adjusting your search, type or access filter.'
+              : 'Upload a document to get started.',
           action:
-            search || filterType || !canPublish ? undefined : { label: 'Upload Document', onClick: () => setShowUploadModal(true) },
+            search || filterType || accessFilter || !canPublish
+              ? undefined
+              : { label: 'Upload Document', onClick: () => setShowUploadModal(true) },
         }}
       />
 
@@ -566,6 +671,28 @@ export default function Documents() {
                 {parts.map(p => (
                   <option key={p.id} value={p.id}>
                     {p.part_number} - {p.name}
+                  </option>
+                ))}
+              </select>
+            )}
+          </FormField>
+          <FormField
+            label="Access level"
+            help={`${DOCUMENT_ACCESS_DESCRIPTIONS[uploadForm.access_level]} If the part's customer is export-controlled, the server saves it as ${DOCUMENT_ACCESS_LABELS.export_controlled} whatever is chosen here.`}
+          >
+            {field => (
+              <select
+                {...field}
+                value={uploadForm.access_level}
+                onChange={e => {
+                  const next = e.target.value;
+                  if (isDocumentAccessLevel(next)) setUploadForm({ ...uploadForm, access_level: next });
+                }}
+                className="input"
+              >
+                {DOCUMENT_ACCESS_LEVELS.map(level => (
+                  <option key={level} value={level}>
+                    {DOCUMENT_ACCESS_LABELS[level]}
                   </option>
                 ))}
               </select>

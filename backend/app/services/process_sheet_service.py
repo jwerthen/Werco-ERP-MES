@@ -67,6 +67,7 @@ from app.schemas.process_sheet import (
 )
 from app.schemas.work_order_blocker import WorkOrderBlockerCreate
 from app.services.audit_service import AuditService
+from app.services.document_access import visible_documents_clause
 from app.services.document_numbering import generate_document_number
 from app.services.fai_service import editable_fai, fai_transaction
 from app.services.operational_event_service import OperationalEventService
@@ -848,9 +849,13 @@ def build_step_record(
     attachment_document_id: Optional[int],
     recorded_by: int,
     source: Optional[str],
+    viewer: Any,
     equipment_code: Optional[str] = None,
 ) -> OperationStepRecord:
     """Run the capture validation ladder and return the (unflushed) record row.
+
+    ``viewer`` is the person capturing: an ``attachment_document_id`` they may not open
+    (``app.services.document_access``) is the same 404 as a missing one.
 
     Ladder (order matters — the callers already enforced WO-not-terminal /
     operation-IN_PROGRESS and that the step belongs to the operation):
@@ -961,7 +966,11 @@ def build_step_record(
                 detail=f"{step.step_type.upper()} steps require attachment_document_id "
                 "(upload evidence via the step attachment endpoint first)",
             )
-        document = tenant_query(db, Document, company_id).filter(Document.id == attachment_document_id).first()
+        document = (
+            tenant_query(db, Document, company_id)
+            .filter(Document.id == attachment_document_id, visible_documents_clause(viewer))
+            .first()
+        )
         if not document:
             raise HTTPException(status_code=404, detail="Attachment document not found")
         # Evidence-laundering guard: the referenced document must be exactly what the
@@ -1148,6 +1157,7 @@ def create_step_record(
         attachment_document_id=data.attachment_document_id,
         recorded_by=user.id,
         source=source,
+        viewer=user,
     )
     record.qualification_snapshot = build_qualification_snapshot(db, company_id, user_id=user.id, operation=operation)
     db.add(record)
@@ -1231,6 +1241,7 @@ def supersede_step_record(
         attachment_document_id=data.attachment_document_id,
         recorded_by=user.id,
         source=source,
+        viewer=user,
     )
     replacement.qualification_snapshot = build_qualification_snapshot(
         db, company_id, user_id=user.id, operation=operation
