@@ -517,6 +517,11 @@ class POResponse(POBase):
     # True once the PO is no longer a draft: its flow-down block is frozen and the selection
     # can no longer change. Derived from ``status``; never accepted from a request.
     flowdown_frozen: bool = False
+    # The block frozen when the PO left DRAFT, exactly as stored -- what the supplier was sent,
+    # which can differ from ``quality_clause_codes`` (a retired clause is dropped at the freeze; a
+    # disabled profile freezes ``{"enabled": false}``). Null on a draft (which prints live, so a
+    # snapshot left by an earlier issue is stale) and on a PO issued before migration 128.
+    flowdown_snapshot: Optional[Dict[str, Any]] = None
 
     class Config:
         from_attributes = True
@@ -526,6 +531,8 @@ class POResponse(POBase):
     def derive_flowdown_frozen(self) -> 'POResponse':
         status = getattr(self.status, 'value', self.status)
         self.flowdown_frozen = status is not None and status != POStatus.DRAFT.value
+        if not self.flowdown_frozen:
+            self.flowdown_snapshot = None
         return self
 
 

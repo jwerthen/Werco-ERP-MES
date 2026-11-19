@@ -9,6 +9,7 @@ import EntityPicker from './EntityPicker';
 import SupplierFollowup from './SupplierFollowup';
 import { SupplierApprovalWarnings } from '../suppliers/SupplierApprovalWarnings';
 import { QualityClauseChecklist } from '../purchasing/QualityClauseChecklist';
+import { FrozenFlowdownSummary } from '../purchasing/FrozenFlowdownSummary';
 import type { POQualityClause } from '../../types/poFlowdown';
 import { defaultQualityClauseCodes, sameQualityClauseCodes } from '../../utils/qualityFlowdown';
 
@@ -233,37 +234,23 @@ export default function PurchaseOrderDetail({
                 />
               )}
             </FormField>
-            {flowdownFrozen && storedClauseCodes === null ? (
-              // Issued with no explicit choice: what printed was the catalog defaults AS THEY
-              // WERE at issue, which today's catalog cannot reconstruct — so say so rather than
-              // tick today's defaults and imply they are what the supplier received.
-              <fieldset className="rounded-sm border border-fd-line p-3" data-testid="po-quality-clauses">
-                <legend className="px-1 text-xs font-semibold uppercase tracking-wide text-fd-mute">
-                  Quality flow-down clauses
-                </legend>
-                <p className="text-sm text-fd-mute">
-                  Frozen when the PO was issued. No clauses were chosen on this purchase order, so it carries the
-                  catalog defaults as they stood at issue; the printed purchase order shows exactly what was frozen.
-                </p>
-              </fieldset>
+            {flowdownFrozen ? (
+              // Issued: show what was FROZEN onto the PO (what the supplier was sent), never the
+              // stored codes — the freeze drops a retired clause and a disabled profile prints no
+              // block, so the stored codes can name a clause the supplier never saw.
+              <FrozenFlowdownSummary snapshot={record.flowdown_snapshot} />
             ) : (
               <QualityClauseChecklist
                 clauses={clauses}
                 loadError={clausesError}
-                loadErrorText={
-                  flowdownFrozen
-                    ? 'Quality clauses could not be loaded. Frozen when the PO was issued; the printed purchase order shows them.'
-                    : "Quality clauses could not be loaded. Saving leaves this purchase order's clause selection unchanged."
-                }
+                loadErrorText="Quality clauses could not be loaded. Saving leaves this purchase order's clause selection unchanged."
                 selected={clauseSelection ?? initialClauseCodes ?? []}
                 onChange={setClauseSelection}
-                readOnly={!editable || flowdownFrozen}
+                readOnly={!editable}
                 note={
-                  flowdownFrozen
-                    ? 'Frozen when the PO was issued. The printed purchase order shows the flow-down exactly as frozen.'
-                    : storedClauseCodes === null
-                      ? 'No clauses chosen yet: this draft prints the catalog defaults (checked below) until you change them.'
-                      : undefined
+                  storedClauseCodes === null
+                    ? 'No clauses chosen yet: this draft prints the catalog defaults (checked below) until you change them.'
+                    : undefined
                 }
               />
             )}

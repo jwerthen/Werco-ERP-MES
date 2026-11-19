@@ -87,6 +87,14 @@ export interface POFlowdownFields {
   quality_clause_codes?: string[] | null;
   /** `true` once the PO has left DRAFT: the flow-down was frozen at issue and cannot change. */
   flowdown_frozen?: boolean;
+  /**
+   * What was frozen onto the PO when it was issued — the block the supplier actually received.
+   * A block with `enabled` true lists the clauses that printed (a retired clause was dropped
+   * at freeze, so this can differ from `quality_clause_codes`); `{ enabled: false }` = no block
+   * printed (flow-down disabled at issue); `null` = issued before flow-down was recorded, or
+   * still a draft. `undefined` = an API that does not report it.
+   */
+  flowdown_snapshot?: POFlowdownPrint | { enabled: false } | null;
 }
 
 /** One clause as printed on a purchase order. */

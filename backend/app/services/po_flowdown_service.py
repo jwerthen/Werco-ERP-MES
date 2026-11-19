@@ -25,6 +25,8 @@ drafts, the loaders, PO upload) needs no change. An explicit list, empty include
 buyer's choice. Only ACTIVE clauses print; they print in ``sort_order``, then ``code`` order.
 """
 
+import hashlib
+import json
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -155,6 +157,21 @@ def compute_flowdown_block(executor: Any, company_id: int, selected_codes: Optio
     return build_flowdown_block(profile, clauses, selected_codes)
 
 
+def flowdown_snapshot_sha256(snapshot: Optional[Mapping[str, Any]]) -> Optional[str]:
+    """SHA-256 (hex) of a frozen block's canonical JSON, or ``None`` when there is none.
+
+    Canonical = ``json.dumps(snapshot, sort_keys=True, separators=(",", ":"))`` (ASCII-escaped,
+    the ``json`` default) encoded as UTF-8 -- the same form ``document_delivery_service.digest``
+    uses. The status-change audit row of a PO leaving DRAFT carries it as
+    ``extra_data.flowdown_snapshot_sha256``, so the tamper-evident chain covers what was issued
+    without copying the block into the audit log.
+    """
+    if snapshot is None:
+        return None
+    canonical = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def is_flowdown_frozen(status: Any) -> bool:
     """A PO's clause selection is frozen once it is no longer a draft."""
     member = po_status_member(status)
@@ -214,13 +231,21 @@ def apply_clause_codes_change(db: Session, po: PurchaseOrder, company_id: int, r
     """Set ``po.quality_clause_codes`` from an edit; ``True`` when it changed.
 
     An unchanged value (a client echoing the record back) is a no-op on any PO, so it is never
-    refused and never re-validated (a since-retired code it still carries does not 422). A
-    change is refused 409 once the PO is no longer a DRAFT -- its block was frozen when it left
-    DRAFT -- and otherwise validated (422 naming unknown or retired codes). Call it before the
-    first mutation of the edit so a refusal leaves the row untouched.
+    refused and never re-validated (a since-retired code it still carries does not 422).
+    "Unchanged" is SET equality after strip / de-duplication -- order is not part of the
+    selection (clauses print in catalog order), so the same codes in another order are
+    unchanged and the stored list is left as it is; NULL ("the catalog defaults") and a list,
+    even an empty one, are always different. A change is refused 409 once the PO is no longer a
+    DRAFT -- its block was frozen when it left DRAFT -- and otherwise validated (422 naming
+    unknown or retired codes). Call it before the first mutation of the edit so a refusal leaves
+    the row untouched.
     """
     normalized = normalize_clause_codes(requested)
-    if normalized == po.quality_clause_codes:
+    stored = normalize_clause_codes(po.quality_clause_codes)
+    if normalized is None or stored is None:
+        if normalized is None and stored is None:
+            return False
+    elif set(normalized) == set(stored):
         return False
     if is_flowdown_frozen(po.status):
         raise HTTPException(status_code=409, detail=flowdown_frozen_detail(po.po_number))

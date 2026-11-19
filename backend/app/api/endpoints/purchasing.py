@@ -12,6 +12,7 @@ from app.api.audit_guard import required_audit
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.core.credentials import is_api_token_credential
 from app.db.database import get_db
+from app.db.tenant_filter import tenant_query
 from app.models.part import Part
 from app.models.purchasing import (
     POStatus,
@@ -1092,7 +1093,7 @@ def _reloaded_po_response(db: Session, po_id: int, company_id: int) -> PORespons
     return _po_response(po)
 
 
-def _live_po_or_404(db: Session, po_id: int, company_id: int) -> PurchaseOrder:
+def _live_po_or_404(db: Session, po_id: int, company_id: int, *, lock: bool = False) -> PurchaseOrder:
     """Resolve a purchase order that is workable: this company's, and NOT soft-deleted.
 
     Every PO *write* verb except delete/restore resolves through here, so a soft-deleted
@@ -1107,16 +1108,17 @@ def _live_po_or_404(db: Session, po_id: int, company_id: int) -> PurchaseOrder:
     ``DELETE`` and ``POST .../restore`` deliberately do NOT use this (they need to see the
     deleted row: one to refuse a double delete, the other to undo one), and neither does
     ``GET .../{po_id}``, which already carries its own identical filter.
+
+    ``lock=True`` takes the row lock (``FOR UPDATE``) and re-reads the row under it, so a verb
+    that judges the row's current state (Send) serializes against a concurrent edit.
     """
-    po = (
-        db.query(PurchaseOrder)
-        .filter(
-            PurchaseOrder.id == po_id,
-            PurchaseOrder.company_id == company_id,
-            PurchaseOrder.is_deleted == False,  # noqa: E712
-        )
-        .first()
+    query = tenant_query(db, PurchaseOrder, company_id).filter(
+        PurchaseOrder.id == po_id,
+        PurchaseOrder.is_deleted == False,  # noqa: E712
     )
+    if lock:
+        query = query.with_for_update().populate_existing()
+    po = query.first()
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")
     return po
@@ -1649,8 +1651,11 @@ def send_purchase_order(
     Disqualified on the Approved Supplier List (cancel the order instead).
 
     This records the workflow status and internal event; it does not dispatch vendor email.
-    Soft-deleted POs return 404 -- see ``_live_po_or_404``."""
-    po = _live_po_or_404(db, po_id, company_id)
+    Soft-deleted POs return 404 -- see ``_live_po_or_404``. Sending a DRAFT freezes its
+    supplier quality flow-down block; the audit row records the frozen block's SHA-256."""
+    # Row-locked: a concurrent PUT of the clause selection must land wholly before or after
+    # the send, so the frozen block always matches the PO's stored codes.
+    po = _live_po_or_404(db, po_id, company_id, lock=True)
 
     if po.status not in [POStatus.DRAFT, POStatus.APPROVED]:
         raise HTTPException(status_code=400, detail="Can only send draft or approved POs")
@@ -1676,14 +1681,17 @@ def send_purchase_order(
             "required_date": po.required_date.isoformat() if po.required_date else None,
         },
     )
-    db.flush()
+    db.flush()  # the freeze listener writes ``flowdown_snapshot`` here, when leaving DRAFT
+    send_extra = {"order_date": po.order_date.isoformat()}
+    if old_status == POStatus.DRAFT.value:
+        send_extra["flowdown_snapshot_sha256"] = flowdown.flowdown_snapshot_sha256(po.flowdown_snapshot)
     audit.log_status_change(
         "purchase_order",
         po.id,
         po.po_number,
         old_status=old_status,
         new_status=POStatus.SENT.value,
-        extra_data={"order_date": po.order_date.isoformat()},
+        extra_data=send_extra,
     )
     db.commit()
 

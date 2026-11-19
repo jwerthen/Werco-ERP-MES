@@ -2,8 +2,8 @@
 
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
-(Cursor, Claude Code, a chat bot) gets **787 tools** — 15 hand-written *convenience* tools plus
-**772 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+(Cursor, Claude Code, a chat bot) gets **792 tools** — 15 hand-written *convenience* tools plus
+**777 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
 as the same request from the web app. A **read-only** API token is shown fewer tools, and an
 **AI-external** one fewer still (§4.1, §4.2).
 
@@ -64,6 +64,14 @@ notes}`, where it used to be a bare list of row dicts that arrived wrapped as `{
 Quality tools** (`record_ncr_reverification`, `record_car_effectiveness`; no existing name
 shifted): 15 convenience + **772** generated, 16 shadowed. Both are writes, so the read-only catalog
 is unchanged at 8 convenience + **301** generated, and neither is on the AI-external allowlist.
+
+**Re-checked again on 2026-11-19 after the purchase-order quality flow-down (migration 128) added
+five Purchasing tools** (`get_po_flowdown_profile`, `update_po_flowdown_profile`,
+`list_po_quality_clauses`, `create_po_quality_clause`, `update_po_quality_clause`; no existing name
+shifted): 15 convenience + **777** generated, 16 shadowed. The three writes stay tools (their routes
+do not refuse API tokens). The read-only catalog is 8 convenience + **303** generated, the two new
+reads among them, and none of the five is on the AI-external allowlist. See
+[API.md → Quality flow-down on the purchase order](API.md#quality-flow-down-on-the-purchase-order).
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
 `backend/tests/test_mcp_docs_names.py` checks every tool name this file, `CLAUDE.md` and `API.md`
@@ -257,7 +265,7 @@ routes authenticate every call; in IN-PROCESS mode it uses the real `ErpTokenVer
  "generated_tools":   [{"name": "...", "method": "GET", "path": "/api/v1/...", "tag": "...",
                         "function": "...", "annotations": {...}, "deprecated": false}],
  "shadowed_operations": [["GET", "/api/v1/inventory/"], ...],
- "counts": {"convenience": 15, "generated": 772, "shadowed": 16}
+ "counts": {"convenience": 15, "generated": 777, "shadowed": 16}
 }
 ```
 
@@ -517,7 +525,7 @@ thread and watch-state reads, under `Comments`, stay).
   - a denied tag gets **403** `"Read-only API token cannot access this resource."`;
   - a request that matches no route fails closed with that same 403.
 - **The MCP door** narrows `tools/list` to the tools that only read and carry no denied tag. On
-  2026-11-16 that is 8 convenience + 301 generated tools; `--print-catalog --read-only` prints
+  2026-11-19 that is 8 convenience + 303 generated tools; `--print-catalog --read-only` prints
   them. Calling any other tool by name answers, **before argument validation or dispatch**:
   - **403** `"Read-only API token: this tool writes."` for a tool that writes; the write check
     comes first, so a writing tool under a denied tag gets this text;
@@ -728,7 +736,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `Receiving` (`/receiving`) | Receiving & Inspection, Purchasing | `get_open_purchase_orders`, `receive_material`, `get_inspection_queue`, `inspect_receipt`, `correct_receipt`, `void_receipt`, `print_receiving_label` |
 | `Shipping` (`/shipping`) | Shipping | `get_ready_to_ship`, `create_shipment`, `mark_shipped`, `rate_shop`, `buy_label`, `get_tracking`, `issue_certificate_of_conformance` |
 | `MRP` (`/mrp`) | Material Requirements Planning | `create_mrp_run`, `get_latest_mrp_run`, `get_mrp_actions`, `get_current_shortages`, `process_mrp_action` |
-| `Purchasing` (`/purchasing`) | Purchasing, Parts, Documents | `list_purchase_orders`★, `get_purchase_order`, `create_purchase_order`, `add_po_line`, `send_purchase_order`, `list_vendors`, `create_vendor`, `restore_vendor`, `check_supplier_approval` (the Create PO screen's Approved Supplier List check) |
+| `Purchasing` (`/purchasing`) | Purchasing, Parts, Documents | `list_purchase_orders`★, `get_purchase_order`, `create_purchase_order`, `add_po_line`, `send_purchase_order`, `list_vendors`, `create_vendor`, `restore_vendor`, `check_supplier_approval` (the Create PO screen's Approved Supplier List check); the Quality flow-down tab: `get_po_flowdown_profile`, `update_po_flowdown_profile`, `list_po_quality_clauses`, `create_po_quality_clause`, `update_po_quality_clause` (a PO's own clause choice is a field of `create_purchase_order` / `update_purchase_order`) |
 | `POUpload` (`/po-upload`) | PO Upload | `upload_and_extract_po`, `upload_and_extract_quote`, `upload_and_extract_invoice`, `create_po_from_upload`, `search_vendors` |
 | `SupplierScorecards` (`/supplier-scorecards`) | Supplier Scorecards, Purchasing | `list_scorecards`, `scorecard_dashboard`, `auto_calculate_scorecard`, `create_audit`, `list_vendors`, `list_vendors_reevaluation_due` — the Approved Supplier List tab reads the vendor record; recording an approval and the ASL import (`PUT /purchasing/vendors/{vendor_id}/approval`, `POST /purchasing/vendors/asl-import/preview`, `/commit`) are deliberately **not** tools (§6.1), and neither are the legacy table's two writes. `list_approved_suppliers` still reads the legacy table the page no longer uses |
 | `Traceability` (`/traceability`) | Traceability | `search_lots`, `trace_lot`, `trace_serial` |
@@ -856,7 +864,8 @@ FAI log, Approved Supplier List and equipment-asset / PM-import routes added: **
 together, so fifteen were excluded and the count stayed **764**; the five comment / watcher writes then
 joined the exclusions (twenty) and the three comment reads were added: **767 generated tools**; the
 three report-template routes then made it **770 generated tools**, and on 2026-11-19 the NCR
-re-verification and CAR effectiveness verbs **772**.
+re-verification and CAR effectiveness verbs **772** and the five PO quality flow-down routes
+**777**.
 
 ### 6.2 Naming and the collision policy (`app/mcp/naming.py`)
 

@@ -48,6 +48,7 @@ Shipped modules, grouped by domain:
 ### Purchasing & Supply Chain
 - Vendors, **purchase orders** (create/send), **MRP** (shortage detection and suggested-PO generation), receiving, **supplier scorecards**, and **PO upload** (AI parsing of PO/quote PDFs, single or multi-document batch).
 - **Approved Supplier List** (AS9100D 8.4) on the vendor record — status, approved scopes, approval basis and re-evaluation dates, an update-only import of the QL 7.4 workbook, an overdue re-evaluation list, advisory scope warnings on purchase orders, and a hard refusal of any new PO to a Disqualified supplier.
+- **Supplier quality flow-down** (AS9100D 8.4.3) on the purchase order — a per-company requirements block (document reference, standard text and a Q-clause catalog) printed and emailed with every PO, the clauses chosen per order, and the block frozen onto the PO when it leaves draft so a reprint shows what the supplier was sent.
 - **Material price history** — track inventory unit costs from PO to PO, with price movement filters, per-item charts, supplier/date comparisons, source-PO links, and CSV export. Reads existing committed POs automatically; see [Material Price History](docs/MATERIAL_PRICE_HISTORY.md).
 
 ### Quality & Compliance

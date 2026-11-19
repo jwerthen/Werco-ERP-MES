@@ -79,7 +79,7 @@ export function QualityClauseChecklist({
         {legend}
         {note && <div className="mb-2 text-xs text-fd-mute">{note}</div>}
         <p className="text-sm text-fd-mute">
-          No quality clauses are set up. Quality can add them under Purchasing → Quality flow-down.
+          No quality clauses are set up. Quality can add them under Quality → PO Flow-down.
         </p>
       </fieldset>
     );

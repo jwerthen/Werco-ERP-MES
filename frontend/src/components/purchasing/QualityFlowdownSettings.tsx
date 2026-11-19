@@ -1,7 +1,8 @@
 /**
- * Purchasing → Quality flow-down (AS9100D 8.4.3): the company's supplier-quality flow-down
- * profile and its quality-clause catalog. Mounted only for ADMIN / MANAGER / QUALITY (the
- * server's role set on every write here).
+ * Purchasing → Quality flow-down and Quality → PO Flow-down (AS9100D 8.4.3): the company's
+ * supplier-quality flow-down profile and its quality-clause catalog. Mounted only for ADMIN /
+ * MANAGER / QUALITY (the server's role set on every write here). It appears on both pages
+ * because Quality owns the text but holds no purchasing:view by default.
  *
  * What a purchase order prints: the profile's heading, document reference and standard
  * paragraph, then each clause the PO selected (code — title, clause text under it). A DRAFT

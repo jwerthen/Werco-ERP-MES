@@ -17,7 +17,7 @@ from app.models.part import Part
 from app.models.purchasing import POStatus, PurchaseOrder, PurchaseOrderLine, Vendor
 from app.models.work_order import WorkOrder
 from app.services.operational_event_service import OperationalEventService
-from app.services.po_flowdown_service import resolve_clause_codes
+from app.services.po_flowdown_service import flowdown_snapshot_sha256, resolve_clause_codes
 from app.services.supplier_approval_service import approval_warnings, assert_vendor_not_disqualified
 
 
@@ -201,6 +201,8 @@ def create_purchase_order_command(
                 "action": "reviewed_document_import",
                 "order_date": po.order_date.isoformat() if po.order_date else None,
                 "delivery_status": "not_dispatched",
+                # The flush above froze the PO's quality flow-down (it left DRAFT).
+                "flowdown_snapshot_sha256": flowdown_snapshot_sha256(po.flowdown_snapshot),
             },
         )
     OperationalEventService(db).emit_best_effort(

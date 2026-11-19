@@ -284,6 +284,7 @@ route's own fences still do):
 | **Release** — `POST /work-orders/{id}/release` and `POST /work-orders/bulk-release` (puts DRAFT work on the floor) | Any credential of a user holding Admin / Manager / Supervisor, a standing **API token** included; read-only and AI-external tokens are refused by the global gates, kiosk badge and station tokens by their path fence. Each release's audit row carries `extra_data.credential` | Existing behavior, not an owner ruling: the MCP tool `release_work_order` is an agent's release door, one job per call; bulk release is kept off the MCP catalog only. Whether a standing token should bulk-release is an open owner question |
 | **Dismiss**, snooze and feedback on a recommendation, action cards included | Every authenticated user and every credential | A design decision of the AI governance change; for Dismiss on an action card, confirmed by the owner 2026-11-07 (it does not take the Mark handled gate) — see [AI recommendations (Action Inbox)](#ai-recommendations-action-inbox) |
 | **Moving a work order's due date through Hank** — the `change_due_date` task (`POST /hank/tasks`, `POST /hank/tasks/{id}/execute`; the MCP tools `prepare_task` / `execute_task`) | Any credential of a user holding Admin / Manager / Supervisor with `work_orders:view` + `work_orders:edit`, a **full** API token included; read-only and AI-external tokens are refused by their own gates, as on every write. Each execution's required audit row carries the reason and `via: hank` (and `extra_data.credential` under a token) | Owner decision 2026-11-16: parity with `update_work_order` / `PUT /work-orders/{id}`, which already moves `due_date` for a token. **Open owner follow-up:** may agents move due dates at all? |
+| **Editing the supplier quality flow-down settings or clause catalog** — `PUT /purchasing/flowdown-profile`, `POST /purchasing/quality-clauses`, `PUT /purchasing/quality-clauses/{id}` (the MCP tools `update_po_flowdown_profile`, `create_po_quality_clause`, `update_po_quality_clause`) | Any credential of a user holding Admin / Manager / Quality, a **full** API token included; read-only and AI-external tokens are refused by their own gates. Each write's required audit row carries `extra_data.credential` under a token | An implementation decision of the PO flow-down change (migration `128`, 2026-11-19), not put to the owner; for comparison, the Approved Supplier List writes refuse API tokens. A PO that has left draft keeps the block frozen onto it, so an edit reaches draft POs only. **Open owner question:** should a standing API token edit the supplier quality requirements text at all? See [Purchasing](#purchasing) |
 
 ## Permission Matrix
 
@@ -1763,6 +1764,8 @@ and [the observation architecture](STOCK_OBSERVATION_ARCHITECTURE.md).
 | Delete / restore purchase order (soft) | ✓ | ✓ | | | | | |
 | Record a supplier-approval decision (`PUT /purchasing/vendors/{id}/approval`) | ✓ | ✓ | | | ✓ | | |
 | Import the Approved Supplier List (`POST /purchasing/vendors/asl-import/preview`, `/commit`) | ✓ | ✓ | | | ✓ | | |
+| Edit the supplier quality flow-down settings and clause catalog (`PUT /purchasing/flowdown-profile`, `POST /purchasing/quality-clauses`, `PUT /purchasing/quality-clauses/{id}`) | ✓ | ✓ | | | ✓ | | |
+| Choose a draft PO's quality clauses (`quality_clause_codes` on PO create / `PUT`) | ✓ | ✓ | ✓ | | | | |
 
 Supplier confirmation also rechecks the company's `purchasing:view` and
 `purchasing:create` permissions at save time and refuses read-only company contexts.
@@ -1822,6 +1825,44 @@ Follow-up owners must be active users in the same company with purchasing access
 >   /purchasing/vendors` and the PO upload's create-new-vendor path, and is a row error in the vendor
 >   CSV import and the Import Center vendor batch (`docs/API.md` → Purchasing → *Approved Supplier
 >   List on the vendor record*).
+
+> **Supplier quality flow-down writes are Admin / Manager / Quality (migration `128`, AS9100D
+> 8.4.3, 2026-11-19).** `FLOWDOWN_WRITE_ROLES` in `app/api/endpoints/purchasing.py` gates `PUT
+> /purchasing/flowdown-profile`, `POST /purchasing/quality-clauses` and `PUT
+> /purchasing/quality-clauses/{id}`: the requirements are Quality's document, so Quality sits beside
+> Admin / Manager as on the ASL writes. Superuser / Platform Admin bypass, as elsewhere. The two
+> reads, `GET /purchasing/flowdown-profile` and `GET /purchasing/quality-clauses`, and the PO
+> print data that carries the block are open to any authenticated user in the tenant, like the other
+> purchasing reads. Each write is required-audited (**503**, nothing saved, when the row cannot be
+> written).
+>
+> - **API tokens are not refused** on these writes. That is an implementation decision of this
+>   change, not put to the owner, and it is an open owner question; for comparison, the ASL writes
+>   above refuse API tokens. A full token of an Admin / Manager / Quality user may write, and all
+>   five routes are MCP tools; read-only and AI-external tokens are refused by the global gates. See
+>   [Credential policy for judgment writes](#credential-policy-for-judgment-writes).
+> - **A PO's clause choice rides the PO's own gate.** `quality_clause_codes` on `POST
+>   /purchasing/purchase-orders` and `PUT /purchasing/purchase-orders/{id}` takes the PO create /
+>   edit tier (Admin / Manager / Supervisor), so a Supervisor can pick clauses on a draft but cannot
+>   edit the catalog. Once the PO has left `draft`, changing it is **409** for every role: a state
+>   rule, not a role rule (`docs/API.md` → Purchasing → *Quality flow-down on the purchase order*).
+> - **UI: one editor, two tabs.** The same settings component renders as **Purchasing → Quality
+>   flow-down** (`frontend/src/pages/Purchasing.tsx`) and as **Quality → PO Flow-down**
+>   (`frontend/src/pages/Quality.tsx`, deep link `/quality?tab=flowdown`). Both are gated on
+>   `canManageFlowdown` (Admin / Manager / Quality, or a superuser), and both omit Platform Admin,
+>   matching the other purchasing write controls. `?tab=flowdown` is honored only behind that gate;
+>   any other Quality-page reader stays on the tab they are on.
+> - **Why the Quality page carries it.** `/purchasing` is route- and nav-gated on `purchasing:view`
+>   (`frontend/src/utils/routeAccess.ts`), and the shipped Quality permission set has no
+>   `purchasing:view` (neither `frontend/src/utils/permissions.ts` nor the backend defaults in
+>   `app/models/role_permission.py`). `/quality` is gated on `quality:view`, which Quality holds, so a
+>   Quality user edits the flow-down from Quality → PO Flow-down with no permission change. No route
+>   gate moved and no server gate changed.
+> - **What a Quality user still cannot open by default:** the Purchasing page itself and the PO
+>   print page (`/print/purchase-order`, also `purchasing:view`), so they cannot open a purchase
+>   order to see the block printed on it. An Admin can grant `purchasing:view` to the Quality role
+>   (`PUT /admin/settings/role-permissions/quality`, audited); that also opens every other screen
+>   gated on the permission, such as Purchase Orders, Quotes and Customers.
 
 > **PO status edits: a state rule landed, and the Approve row is still not enforced on `PUT`
 > (2026-11-05).** `PUT /purchasing/purchase-orders/{id}` is `require_role([ADMIN, MANAGER,

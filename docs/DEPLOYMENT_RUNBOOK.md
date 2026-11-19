@@ -294,6 +294,26 @@ statement, writes no row, and adds no environment variable, secret, cron or work
   under, and the migration will not pick which company's record to change.
   See [API.md → Customer Complaints & RMA](API.md#customer-complaints--rma).
 
+**Purchase-order quality flow-down.** Apply **128_po_flowdown** after **127_ncr_car_records**
+through the normal API boot migration path. It is purely additive: two new tenant tables
+(`po_flowdown_profiles`, `po_quality_clauses`) with RLS enabled and revokes from `PUBLIC` / `anon` /
+`authenticated` as in model bootstrap, and two nullable JSON columns on `purchase_orders`
+(`quality_clause_codes`, `flowdown_snapshot`), with no backfill: nothing prints until a person turns
+the block on in **Purchasing → Quality flow-down**, and a PO issued before 128 never prints one.
+Under `SET LOCAL lock_timeout = '5s'` the new foreign keys briefly take SHARE ROW EXCLUSIVE on
+`companies` and `users`, and each column add a brief ACCESS EXCLUSIVE lock on `purchase_orders`. No
+environment variable, secret, cron or worker job is added. Deploy the worker with or after the API
+(new code selects the new columns on every PO load) and the API before the frontend. Every PO's
+email fingerprint changes once at this deploy: a PO email preview prepared before it is refused at
+Send with a 409 asking for a fresh preview, and re-opening the composer for an already-emailed PO
+prepares a new preview instead of the "already sent" replay (harmless; nothing is sent unless someone
+clicks Send). On an
+application rollback keep the migration: before redeploying a pre-128 image, from a checkout of this
+release run `railway run --service werco-api alembic stamp 127_ncr_car_records`. The **downgrade is
+lossy** and not a rollback step: it discards every issued PO's frozen flow-down record. Verification
+steps and the full notes are in
+[Purchase-order quality flow-down](DEPLOYMENT.md#purchase-order-quality-flow-down-migration-128).
+
 **NCR and CAR evidence columns.** Apply **127_ncr_car_records** after **126_qms_company_id** through
 the normal API boot migration path. It adds nullable NCR columns (action taken, customer concession,
 re-verification, disposition stamp) and CAR columns (effectiveness result and stamp, effectiveness due,

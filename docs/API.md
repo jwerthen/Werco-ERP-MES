@@ -9761,14 +9761,19 @@ when an estimate is approved and handed off in Fabrication Quoting (`/fabricatio
 | DELETE | `/purchasing/vendors/{vendor_id}` | Soft-delete a vendor — records the current `is_active` into `is_active_before_delete`, **then** sets `is_active=false`. Guarded, see note below | Admin / Manager |
 | POST | `/purchasing/vendors/{vendor_id}/restore` | Restore a soft-deleted vendor, **preserving the `is_active` it had when it was deleted** — not an unconditional re-activate (see note). **400** if it is not actually deleted. Reachable from **Purchasing → Vendors → Deleted** | Admin / Manager |
 | GET | `/purchasing/purchase-orders` | List purchase orders (filters: `status`, `vendor_id`, `deleted_only`). `deleted_only=true` returns **only** soft-deleted POs — the restore view, see note below. Bounded: `limit` **1–5000, default 5000**, `offset` ≥ 0 | Yes |
-| POST | `/purchasing/purchase-orders` | Create purchase order with its lines. **409** when the vendor is Disqualified on the Approved Supplier List; other ASL findings come back as `supplier_approval_warnings` (see below) | Admin / Manager / Supervisor |
+| POST | `/purchasing/purchase-orders` | Create purchase order with its lines. **409** when the vendor is Disqualified on the Approved Supplier List; other ASL findings come back as `supplier_approval_warnings` (see below). Optional `quality_clause_codes` (**422** naming any code that is not an active clause; see *Quality flow-down on the purchase order* below) | Admin / Manager / Supervisor |
 | GET | `/purchasing/purchase-orders/{po_id}` | Get PO by ID | Yes |
 | PUT | `/purchasing/purchase-orders/{po_id}/supplier-confirmation` | Record acknowledgment, supplier-confirmed date and follow-up owner/due date on sent/partial POs; requires current `expected_updated_at`, stale returns 409. Requested dates remain unchanged | Admin / Manager / Supervisor, plus purchasing view/create permission |
-| PUT | `/purchasing/purchase-orders/{po_id}` | Update purchase order. **404** on a soft-deleted PO; a `status` is held to a transition whitelist — **409** naming the verb that owns the move, **422** on an unknown value or an explicit `null` (see *PO status edits* below); **400** on a `status` change to anything but `closed`/`cancelled` while the vendor is soft-deleted (see note) | Admin / Manager / Supervisor |
+| PUT | `/purchasing/purchase-orders/{po_id}` | Update purchase order. **404** on a soft-deleted PO; a `status` is held to a transition whitelist — **409** naming the verb that owns the move, **422** on an unknown value or an explicit `null` (see *PO status edits* below); **400** on a `status` change to anything but `closed`/`cancelled` while the vendor is soft-deleted (see note). Changing `quality_clause_codes` once the PO has left `draft` is **409** (its flow-down is frozen; see *Quality flow-down on the purchase order* below) | Admin / Manager / Supervisor |
 | POST | `/purchasing/purchase-orders/{po_id}/send` | Issue a PO to the vendor — status → `sent`, stamps `order_date`; only `draft`/`approved` POs (else **400**). **404** on a soft-deleted PO | Admin / Manager |
 | POST | `/purchasing/purchase-orders/{po_id}/lines` | Add a line to a `draft` PO (else **400**) and roll the PO subtotal/total. **404** on a soft-deleted PO | Admin / Manager / Supervisor |
 | DELETE | `/purchasing/purchase-orders/{po_id}` | Soft-delete a purchase order — guarded, see note below | Admin / Manager |
 | POST | `/purchasing/purchase-orders/{po_id}/restore` | Restore a soft-deleted purchase order. **400** if it is not actually deleted, or if its vendor is deleted. Reachable from **Purchasing → Purchase Orders → Deleted** | Admin / Manager |
+| GET | `/purchasing/flowdown-profile` | The company's supplier quality flow-down settings (AS9100D 8.4.3). A company that never saved them gets the unsaved default (`enabled` false, `id` null, `version` 0). See *Quality flow-down on the purchase order* below | Yes |
+| PUT | `/purchasing/flowdown-profile` | Save the flow-down settings: a **full replacement** of `enabled`, `heading`, `document_reference`, `body`, guarded by `version` (**409** when stale). Required audit (**503**, nothing saved, when it cannot be written) | Admin / Manager / Quality |
+| GET | `/purchasing/quality-clauses` | The clause catalog in print order (`sort_order`, then `code`). Retired clauses only with `include_inactive=true` | Yes |
+| POST | `/purchasing/quality-clauses` | Add a clause. **409** on a `code` already used in the company, ignoring case. Required audit (**503**) | Admin / Manager / Quality |
+| PUT | `/purchasing/quality-clauses/{clause_id}` | Edit a clause's `title`, `body`, `default_selected`, `is_active` (false retires it) or `sort_order`; only the fields sent change. `code` is accepted only when it equals the stored code (**409** otherwise). **404** outside the company. Required audit (**503**). No `DELETE` exists | Admin / Manager / Quality |
 
 > Material receiving and incoming inspection are **not** under `/purchasing`. They live under
 > `/receiving` (see below). The duplicate `/purchasing/receiving*` endpoints were removed.
@@ -10409,6 +10414,187 @@ day). The tab reads **every live vendor, switched-off ones included** (`GET
 marking those *Inactive*: the ASL import and **Update approval** both write to them, and a
 Disqualified supplier is often also switched off. The QMS auto-evidence supplier
 card's "approved" count now means approved **on the ASL** (see QMS Standards).
+
+#### Quality flow-down on the purchase order
+
+AS9100D 8.4.3 requires the shop to communicate its quality requirements to its suppliers. Since
+migration `128_po_flowdown`, every purchase order can print a **supplier quality requirements
+block**: a heading, the controlled document it cites, a standard paragraph, and the clauses (short
+codes such as `Q1`) chosen for that order. The company's settings live in `po_flowdown_profiles`
+(one row per company), its clause catalog in `po_quality_clauses`, and each PO carries its own
+clause choice (`quality_clause_codes`) and, once it leaves draft, the frozen block
+(`flowdown_snapshot`). The block is built by one pure function,
+`app/services/po_flowdown_service.py::build_flowdown_block`, for both the live and the frozen case.
+
+> **For the Quality Manager.** Set this up in **Quality → PO Flow-down** (`/quality?tab=flowdown`).
+> The same settings also appear in **Purchasing → Quality flow-down**; both tabs show for Admin,
+> Manager and Quality, and a Quality user reaches only the Quality one by default (no
+> `purchasing:view`; see `docs/RBAC_PERMISSIONS.md` → Purchasing).
+>
+> - **Flow-down profile.** Tick *Print the flow-down block on purchase orders*. *Document
+>   reference* is where your supplier quality requirements document and its current revision go
+>   (for example `SQR-100 Rev C`); *Standard flow-down text* is the paragraph every PO carries
+>   (blank lines start new paragraphs). *Heading* defaults to "Supplier Quality Requirements".
+> - **Quality clauses.** *Add clause* once per Q-code: *Code* (for example `Q1`, unique in the
+>   company ignoring case, fixed once saved), *Title*, *Clause text*, and *Pre-check on new purchase
+>   orders* for clauses that apply to every order. Lower *Sort order* prints first. A clause is
+>   never deleted: *Retire* it to stop offering and printing it.
+> - **What the buyer does.** Create PO and a draft's PO detail show the active clauses as a
+>   checklist, defaults pre-checked; the buyer changes it while the PO is a draft. Once the PO has
+>   left draft, its detail shows the block frozen onto it (heading, reference and the clauses
+>   actually printed), never the stored choice: a clause retired before issue was not printed.
+> - **What the supplier sees.** On the printed and the emailed PO, after the totals and before the
+>   notes: the heading, "Reference: {document reference}", the standard text, then one entry per
+>   selected clause ("Q1 — title" and its text). It is exactly what was frozen when the PO left
+>   draft, so a later edit to the settings or a clause never changes a PO already issued.
+> - **Turn it on before issuing purchase orders.** A PO issued while the block is off freezes "no
+>   block", and turning the block on later does not add one to it; POs issued before this feature
+>   print none either.
+> - **The text is entered in the app, never in the repository.** The settings and clauses are
+>   company data. The repository is public: the real wording of your supplier quality requirements
+>   document and its clauses must not be put in code, test fixtures or these docs. Every example
+>   here (`SQR-100`, `Q1`) is invented.
+
+**`GET /purchasing/flowdown-profile`** — any authenticated user. Returns `{id, enabled, heading,
+document_reference, body, version, updated_by, updated_at}`. A company that never saved the settings
+gets the unsaved default: `enabled` false, `heading` "Supplier Quality Requirements",
+`document_reference` / `body` null, `id` null, `version` 0.
+
+**`PUT /purchasing/flowdown-profile`** — Admin / Manager / Quality.
+
+- **Body, a full replacement:** `enabled` (required), `heading` (1–255 chars; omitted = "Supplier
+  Quality Requirements"), `document_reference` (≤ 100 chars, for example `SQR-100 Rev C`), `body`
+  (≤ 20,000 chars) and `version` (required, ≥ 0). An omitted or blank `document_reference` / `body`
+  is stored as null, so a client must send every field it means to keep.
+- **Version compare-and-swap:** `version` must be the stored version, 0 before the first save (which
+  creates the row at version 1). Anything else is **409** *"The quality flow-down settings were
+  changed by someone else since you loaded them. Reload them and save again."* and nothing changes;
+  so is a concurrent first save.
+- **Audit:** one **required** `po_flowdown_profile` row (CREATE on the first save, then UPDATE with
+  old and new values and versions). If it cannot be written nothing is saved: **503**. A save that
+  changes nothing returns the row with no version bump and no audit row.
+- **Effect:** every DRAFT purchase order prints the new settings at once; no PO that has left draft
+  changes.
+
+**`GET /purchasing/quality-clauses`** — any authenticated user. The catalog in print order
+(`sort_order`, then `code`), each `{id, code, title, body, default_selected, is_active, sort_order,
+created_by, updated_by, created_at, updated_at}`. Retired clauses (`is_active` false) are included
+only with `include_inactive=true`.
+
+**`POST /purchasing/quality-clauses`** — Admin / Manager / Quality. Body: `code` (required, 1–20
+characters after trimming), `title` (required, 1–255), `body` (≤ 20,000; blank = null),
+`default_selected` (default false), `is_active` (default true), `sort_order` (0–1,000,000, default
+0). A `code` already used in the company **ignoring case** is **409** *"A quality clause with code
+'{code}' already exists. Codes are unique (ignoring case); edit that clause."* A retired clause
+still owns its code: reactivate it rather than re-adding it. One **required** `po_quality_clause`
+CREATE audit row (**503**, nothing saved, when it cannot be written).
+
+**`PUT /purchasing/quality-clauses/{clause_id}`** — Admin / Manager / Quality. Only the fields sent
+change: `title`, `body` (null clears it), `default_selected`, `is_active` (false retires the
+clause, true reactivates it) and `sort_order`. An explicit `null` for `title`, `default_selected`,
+`is_active` or `sort_order` is **422**. **`code` is immutable:** the body may carry it only when it
+equals the stored code (after trimming, case included), which is accepted as an echo; any other
+value is **409** *"A quality clause's code cannot be changed once it exists. Retire this clause
+(is_active false) and add a new one under the new code."* **404** for a clause outside the active
+company. A change writes one **required** UPDATE audit row (**503**); an edit that changes nothing
+writes none. There is no `DELETE`.
+
+**The PO's clause choice: `quality_clause_codes`.** Accepted on `POST /purchasing/purchase-orders`
+(`POCreate`, through `create_purchase_order_command`) and `PUT /purchasing/purchase-orders/{po_id}`
+(`POUpdate`).
+
+- **Meaning.** `null` (or omitted on create) = the catalog's **active default-selected** clauses,
+  resolved when the block is built. A list, `[]` included, is the buyer's choice; `[]` prints the
+  block with no clauses. Every PO-creating door that names no codes stores `null`: MRP drafts and
+  the auto-PO job, PO upload, the open-PO loader, and a Hank or AI-applier draft that names none.
+- **Validation (422).** At most 200 codes, each 1–20 characters after trimming. Duplicates are
+  dropped, first-seen order kept. Every code must name an **active** clause of the company, matched
+  exactly as stored (case-sensitive); otherwise **422** *"Unknown or retired quality clause code(s):
+  {codes}. Use the codes of active clauses from GET /purchasing/quality-clauses."* A code whose
+  clause is later retired stays on the PO but no longer prints.
+- **Frozen once the PO leaves draft (409).** On `PUT`, changing the value on a PO whose status is
+  anything but `draft` (`pending_approval` and `approved` included) is **409** *"PO {po_number} has
+  been issued; its quality flow-down is frozen."* Re-sending the stored value unchanged is a no-op
+  on **any** status and is never re-validated, so an echoed record carrying a since-retired code
+  does not 422. "Unchanged" is judged as a **set** after trimming and de-duplication: the same codes
+  in another order are unchanged and the stored order is kept (clauses print in catalog order
+  anyway). `null` and a list, even `[]`, are always different. On a draft, an explicit `null` returns the PO to the catalog defaults. The check runs
+  before the lines or any other field is written, so a refusal leaves the PO untouched. It reads the
+  status before the request's own `status` change, so one `PUT` can set the clauses and move a draft
+  out of `draft`; the block then freezes with the new choice.
+- **Audit.** The create's CREATE row and the `PUT`'s UPDATE row carry the column like any other;
+  a changed choice is also listed in the `purchase_order_updated` event's `changed_fields`.
+- **Response.** `POResponse` (create, `GET .../{po_id}`, `PUT`, `PUT .../supplier-confirmation`)
+  carries `quality_clause_codes` (the stored value, raw: `null` = catalog defaults) and
+  `flowdown_frozen` (true once the status is not `draft`; derived, never accepted from a request)
+  and `flowdown_snapshot`: the block frozen when the PO left draft, exactly as stored, which is what
+  the supplier was sent (`{"enabled": false}` when the flow-down was off at issue). It is `null` on
+  a draft, including one moved back to draft (whose stored snapshot is stale until it re-freezes),
+  and on a PO issued before migration `128`. It can differ from `quality_clause_codes`, because the
+  freeze drops a clause retired before issue, so the PO detail of an issued PO shows the snapshot,
+  never the stored codes. The list read (`GET /purchasing/purchase-orders`) carries none of the
+  three.
+
+**The freeze: one listener, every door.** `flowdown_snapshot` is written only by the
+`before_insert` / `before_update` mapper listeners on `PurchaseOrder` in
+`app/models/purchasing.py`: when a PO is inserted with a status other than `draft`, or its status
+moves from `draft` to anything else. Every door that takes a PO out of draft (`POST .../send`, a
+status `PUT` to `pending_approval` / `approved` / `cancelled`, an accepted document-delivery send,
+the reviewed-import path, the MRP auto-PO job, PO upload, the open-PO loader) flushes through that
+mapper, so none carries a freeze call of its own. The listener computes the block from the
+company's current settings, its active clauses and the PO's `quality_clause_codes`, with Core
+selects on the flush connection scoped to the PO's company. A disabled or missing profile freezes
+`{"enabled": false}`. A PO moved back to `draft` (allowed from `pending_approval` / `approved`) prints
+live again and re-freezes when it next leaves draft. Nothing back-fills a snapshot. `POST
+.../send` takes the PO's row lock before it judges the status (`_live_po_or_404(..., lock=True)`),
+so a concurrent `PUT` of the clause choice lands wholly before or after the send and the frozen
+block always matches the stored codes.
+
+**The issue is in the audit chain as a digest.** The `purchase_order` STATUS_CHANGE row written
+when a PO leaves `draft` through `POST .../send`, through an accepted document-delivery send, or
+through the reviewed-import flip (`create_purchase_order_command` with `ready_for_receiving`)
+carries `extra_data.flowdown_snapshot_sha256`: the SHA-256 (hex) of
+`json.dumps(snapshot, sort_keys=True, separators=(",", ":"))` encoded as UTF-8, computed by
+`po_flowdown_service.flowdown_snapshot_sha256` (`null` if there is no snapshot). The block itself
+is not copied into the audit row. To prove what a PO was issued with, hash its `flowdown_snapshot`
+the same way and compare it with that row, whose integrity the tamper-evident chain covers. A send
+from `approved` carries no digest: that PO froze when it left draft, through the status `PUT`,
+whose `purchase_order` UPDATE row records the changed columns, `flowdown_snapshot` among them.
+
+**What prints: `PurchaseOrderPrintData.quality_flowdown`.** `GET
+/print/purchase-orders/{po_id}/print-data` (any authenticated user) carries the block, or `null`
+for none:
+
+| PO | `quality_flowdown` |
+|---|---|
+| `draft` | The **live** block from today's settings and active catalog and the PO's choice; `null` while the flow-down is disabled |
+| Left draft, with a snapshot | The **snapshot** frozen when it left draft; `null` when that snapshot is `{"enabled": false}` |
+| Left draft, no snapshot (issued before migration `128`) | `null`: no block, and none is ever back-filled, because the supplier was never sent one |
+
+The block is `{enabled: true, heading, document_reference, body, clauses: [{code, title, body}]}`,
+clauses in `sort_order` then `code` order, only active ones that are selected (or default-selected
+when the choice is `null`). The browser print (`PrintPurchaseOrder`) renders it after the totals and
+before the notes as React text: heading, *Reference: …*, the body split into paragraphs on blank
+lines, then each clause as "code — title" with its text.
+
+**The emailed PDF.** The purchase-order email (`POST /document-deliveries/preview`, then `POST
+/document-deliveries/{id}/send`) attaches `build_purchase_order_document`, rendered from the same
+print data, so it carries the same block in the same place. Every value goes through `pdf_escape`
+at the reportlab sink: clause text is stored verbatim and routinely contains `<`, `>` and `&`. The
+delivery fingerprint covers the print data's `quality_flowdown`, so editing the settings or a
+clause after previewing a draft PO's email makes the send **409** *"The document changed after this
+PDF was prepared. Create a fresh preview before sending."* The fingerprint deliberately ignores the
+`flowdown_snapshot` column: the accepted send's own move to `sent` writes it, and counting it would
+turn an identical PDF into a new send. That move freezes the block the email carried.
+
+**Credentials and agents.** The three writes are role-gated only: an **API token** is not refused
+(a full token of an Admin, Manager or Quality user may save the settings and edit clauses; its
+audit rows carry `extra_data.credential`), unlike the Approved Supplier List writes above. That is
+an implementation decision of this change, not put to the owner, and remains an open owner
+question. Read-only and AI-external tokens are refused every write by the global gates. All five routes are
+MCP tools (`get_po_flowdown_profile`, `update_po_flowdown_profile`, `list_po_quality_clauses`,
+`create_po_quality_clause`, `update_po_quality_clause`); the two reads are in the read-only listing
+and none is on the AI-external allowlist. See `docs/RBAC_PERMISSIONS.md` → Purchasing.
 
 ### Supplier Scorecards, Audits & Approved Supplier List
 

@@ -53,6 +53,7 @@ from app.models.company import Company
 from app.models.part import Part
 from app.models.purchasing import POStatus, PurchaseOrder, PurchaseOrderLine, Vendor
 from app.models.user import User, UserRole
+from app.services.po_flowdown_service import flowdown_snapshot_sha256
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 
@@ -466,7 +467,11 @@ def test_send_po_persists_committed_status_change_row(client: TestClient, db_ses
     sent_po = _reload_po(db_session, po.id)
     assert sent_po.status == POStatus.SENT
     assert sent_po.order_date is not None
-    assert row.extra_data == {"order_date": sent_po.order_date.isoformat()}
+    # Sending a DRAFT freezes its quality flow-down; the row carries the frozen block's digest.
+    assert row.extra_data == {
+        "order_date": sent_po.order_date.isoformat(),
+        "flowdown_snapshot_sha256": flowdown_snapshot_sha256(sent_po.flowdown_snapshot),
+    }
 
 
 def test_send_already_sent_po_400_writes_no_row(client: TestClient, db_session: Session):

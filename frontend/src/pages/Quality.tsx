@@ -35,18 +35,23 @@ import { canApproveFAIs, canEditFAIs, canExportRecords } from '../utils/recordWr
 import useUnsavedChanges from '../hooks/useUnsavedChanges';
 import type { FAIPrefillResult } from '../types/processSheet';
 import { ScrapReasonCode, SCRAP_CATEGORIES } from '../types/scrapReason';
+import { QualityFlowdownSettings } from '../components/purchasing/QualityFlowdownSettings';
 import {
   PlusIcon,
   ExclamationTriangleIcon,
   ClipboardDocumentCheckIcon,
   DocumentMagnifyingGlassIcon,
+  ShieldCheckIcon,
   TagIcon,
   XMarkIcon,
   XCircleIcon,
 } from '@heroicons/react/24/outline';
 
-type TabType = 'ncr' | 'car' | 'fai' | 'scrap';
+type TabType = 'ncr' | 'car' | 'fai' | 'scrap' | 'flowdown';
 
+// The tabs every Quality reader gets. 'flowdown' (PO Flow-down) is deliberately NOT here: it
+// is role-gated, so its `?tab=flowdown` deep link is honored by its own effect, which checks
+// the gate first.
 const TAB_IDS: readonly TabType[] = ['ncr', 'car', 'fai', 'scrap'];
 
 const isTabType = (value: string | null): value is TabType =>
@@ -224,6 +229,7 @@ export default function QualityPage() {
    */
   const selectTab = (tab: TabType) => {
     setActiveTab(tab);
+    if (tab === 'flowdown') setFlowdownVisited(true);
     const next = new URLSearchParams(searchParams);
     next.set('tab', tab);
     // REPLACE, not push. A tab is a view of one page, not a destination: pushing would
@@ -317,6 +323,24 @@ export default function QualityPage() {
   const canEditFAI = canEditFAIs({ role, is_superuser: isSuperuser });
   const canApproveFAI = canApproveFAIs({ role, is_superuser: isSuperuser });
   const canExportFAILog = canExportRecords({ role, is_superuser: isSuperuser });
+  // PO Flow-down (AS9100D 8.4.3): the purchase-order quality flow-down profile and clause
+  // catalog, the same QualityFlowdownSettings the Purchasing page's "Quality flow-down" tab
+  // renders. It lives here too because Quality owns the flow-down text but holds no
+  // purchasing:view by default, so the Purchasing route is closed to it. The gate mirrors
+  // Purchasing's canManageFlowdown and the server's require_role([ADMIN, MANAGER, QUALITY])
+  // on every flow-down write; superuser qualifies, PLATFORM_ADMIN omitted (house convention).
+  const canManageFlowdown = role === 'admin' || role === 'manager' || role === 'quality' || !!isSuperuser;
+  // Mounted on first entry, then kept mounted and hidden across tab switches: it holds an
+  // unsaved-changes guarded form, and unmounting it on a tab click would drop an edit unasked.
+  const [flowdownVisited, setFlowdownVisited] = useState(false);
+  // `?tab=flowdown` deep link, honored only behind the gate (a reader without it stays on
+  // whatever tab they are on, rather than landing on an empty or refused panel).
+  useEffect(() => {
+    if (searchParams.get('tab') === 'flowdown' && canManageFlowdown && activeTab !== 'flowdown') {
+      setActiveTab('flowdown');
+      setFlowdownVisited(true);
+    }
+  }, [searchParams, activeTab, canManageFlowdown]);
   // Inspections (the working list) or the FAI log of record — URL-backed like the tab.
   const faiView: FaiView = searchParams.get('fai_view') === 'log' ? 'log' : 'inspections';
   const selectFaiView = (view: FaiView) => {
@@ -1135,12 +1159,13 @@ export default function QualityPage() {
             { id: 'car', label: 'CAR', icon: ClipboardDocumentCheckIcon },
             { id: 'fai', label: 'FAI', icon: DocumentMagnifyingGlassIcon },
             { id: 'scrap', label: 'Scrap Codes', icon: TagIcon },
+            ...(canManageFlowdown ? [{ id: 'flowdown', label: 'PO Flow-down', icon: ShieldCheckIcon }] : []),
           ].map(tab => (
             <button
               key={tab.id}
               role="tab"
               id={`quality-tab-${tab.id}`}
-              aria-controls="quality-panel"
+              aria-controls={tab.id === 'flowdown' ? 'quality-panel-flowdown' : 'quality-panel'}
               aria-selected={activeTab === tab.id}
               tabIndex={activeTab === tab.id ? 0 : -1}
               onClick={() => selectTab(tab.id as TabType)}
@@ -1158,7 +1183,13 @@ export default function QualityPage() {
       </div>
 
       {/* Tab Content */}
-      <div className="card" role="tabpanel" id="quality-panel" aria-labelledby={`quality-tab-${activeTab}`}>
+      <div
+        className="card"
+        role="tabpanel"
+        id="quality-panel"
+        aria-labelledby={`quality-tab-${activeTab}`}
+        hidden={activeTab === 'flowdown'}
+      >
         {/* NCR Tab */}
         {activeTab === 'ncr' && (
           <>
@@ -1475,6 +1506,24 @@ export default function QualityPage() {
           </>
         )}
       </div>
+
+      {/* PO Flow-down tab (AS9100D 8.4.3). Its own panel, mounted on first entry and then kept
+          mounted and hidden — see flowdownVisited. */}
+      {canManageFlowdown && flowdownVisited && (
+        <div
+          className="card"
+          role="tabpanel"
+          id="quality-panel-flowdown"
+          aria-labelledby="quality-tab-flowdown"
+          hidden={activeTab !== 'flowdown'}
+        >
+          <p className="mb-6 text-sm text-slate-400">
+            The supplier quality requirements printed on purchase orders. The same settings appear under Purchasing →
+            Quality flow-down.
+          </p>
+          <QualityFlowdownSettings />
+        </div>
+      )}
 
       {/* Scrap code create/edit modal (Lean Phase 1) */}
       <Modal
