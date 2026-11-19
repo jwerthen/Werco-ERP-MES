@@ -220,6 +220,35 @@ rollback step; it does not undo documents, receipts, production or shipments
 already created by completed actions. Intake-linked Documents cannot be deleted
 through the application because the saved source and receipt must remain valid.
 
+### NCR and CAR evidence columns (migration 127)
+
+Apply **127_ncr_car_records** after **126_qms_company_id** through the normal API boot migration path.
+No environment variable, secret, cron or worker job is added.
+
+- **What it does.** Adds nullable columns only, with no default and no backfill. A pre-127 NCR or CAR
+  simply never recorded them. On `ncrs`: `action_taken`, the customer concession
+  (`concession_reference`, `concession_authorized_by`, `concession_date`), the re-verification
+  (`reverification_result` with CHECK `ck_ncrs_reverification_result`, `reverification_notes`,
+  `reverified_by` FK `fk_ncrs_reverified_by`, `reverified_at`), and `dispositioned_by` (FK
+  `fk_ncrs_dispositioned_by`) / `dispositioned_at`. On `cars`: `effectiveness_result` (CHECK
+  `ck_cars_effectiveness_result`), `effectiveness_verified_by` (FK `fk_cars_effectiveness_verified_by`),
+  `effectiveness_verified_at`, `effectiveness_due`, `human_factors_review`, `similar_nonconformities_review`.
+  Every object is guarded, so a re-run is a no-op.
+- **Locks.** `SET LOCAL lock_timeout = '5s'`. Each table takes a brief exclusive lock (no rewrite, the
+  columns are nullable with no default), and the three FKs briefly take SHARE ROW EXCLUSIVE on `users`.
+  A timeout fails the boot with the database back at `126`; redeploying is safe.
+- **Order.** Run the migration before or with the code that maps these columns (the API boot does).
+  Old code runs safely on the new schema; new code fails on an unmigrated one.
+- **Behavior change to tell Quality before the deploy.** Open NCRs and corrective CARs now need the new
+  evidence to close (see [API.md → Quality](API.md#quality), the "NCR disposition evidence" and "CAR corrective-action
+  evidence" notes). Werco's controlled CAR form gains boxes on the printed PDF, so its form revision
+  should be bumped.
+- **Rollback.** The downgrade drops every recorded re-verification, concession and effectiveness
+  verification. For an application rollback keep the columns: from a checkout of this release run
+  `railway run --service werco-api alembic stamp 126_qms_company_id` before redeploying a pre-127 image.
+- **Verify** after the deploy: an NCR and a CAR detail screen open (their GETs answer 200), and the new
+  NCR re-verification panel and CAR effectiveness panel render.
+
 ### QMS `company_id` repair (migration 126)
 
 Apply **126_qms_company_id** after **125_work_order_comments** through the normal API boot migration
