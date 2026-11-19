@@ -1,4 +1,9 @@
-import type { OwnershipInfo, OwnershipSelection, OwnershipType } from '../types/ownership';
+import type {
+  InventoryOwnershipChangeResult,
+  OwnershipInfo,
+  OwnershipSelection,
+  OwnershipType,
+} from '../types/ownership';
 
 export const COMPANY_OWNERSHIP: OwnershipSelection = {
   ownership: 'company',
@@ -65,4 +70,56 @@ export function sameOwnership(a: OwnershipSelection, b: OwnershipInfo | null | u
     next.owner_customer_id === current.owner_customer_id &&
     next.owner_vendor_id === current.owner_vendor_id
   );
+}
+
+/** At most this many work orders are named in a toast; the rest are counted. */
+const MAX_LISTED_WORK_ORDERS = 5;
+
+function listWorkOrders(numbers: string[]): string {
+  const unique = Array.from(new Set(numbers.filter(Boolean)));
+  if (unique.length <= MAX_LISTED_WORK_ORDERS) return unique.join(', ');
+  return `${unique.slice(0, MAX_LISTED_WORK_ORDERS).join(', ')} and ${unique.length - MAX_LISTED_WORK_ORDERS} more`;
+}
+
+const formatQuantity = (quantity: number) => quantity.toLocaleString(undefined, { maximumFractionDigits: 4 });
+
+export interface OwnershipChangeNotice {
+  type: 'success' | 'warning';
+  message: string;
+}
+
+/**
+ * The toast for a SUCCESSFUL change of ownership. The change always went through; the
+ * question is whether open jobs now need someone's attention:
+ *
+ *  - `open_pinned_ties`, when the row is now customer- or supplier-owned: those jobs are
+ *    pinned to this exact row and a pin consumes its lot whoever owns it, so they will
+ *    use someone else's property at completion. Pins on a row returned to the company
+ *    draw company stock as normal and need no warning.
+ *  - `unpinned_demand.short_by > 0`: company stock was re-owned away and the stock left
+ *    no longer covers the open unpinned demand, so those jobs will come up short.
+ *    Demand the remaining company stock still covers needs no action.
+ *
+ * Either one makes it a `warning` (succeeded, but act on it) naming the work orders;
+ * otherwise a plain success.
+ */
+export function ownershipChangeNotice(result: InventoryOwnershipChangeResult): OwnershipChangeNotice {
+  const parts: string[] = [];
+  const pinned = ownershipOf(result) === 'company' ? [] : (result.open_pinned_ties ?? []);
+  if (pinned.length) {
+    const jobs = Array.from(new Set(pinned.map(tie => tie.work_order_number || `work order #${tie.work_order_id}`)));
+    const target = result.lot_number ? 'this lot' : 'this stock';
+    parts.push(
+      `${jobs.length} open job${jobs.length === 1 ? ' is' : 's are'} pinned to ${target} (${listWorkOrders(jobs)}) ` +
+        'and will still consume it at completion'
+    );
+  }
+  const demand = result.unpinned_demand;
+  if (demand && demand.short_by > 0) {
+    const jobs = listWorkOrders(demand.work_order_numbers ?? []);
+    parts.push(`company stock is now short by ${formatQuantity(demand.short_by)} for ${jobs || 'open jobs'}`);
+  }
+  if (!parts.length) return { type: 'success', message: 'Ownership changed.' };
+  const detail = parts.join('; ');
+  return { type: 'warning', message: `Ownership changed. ${detail.charAt(0).toUpperCase()}${detail.slice(1)}.` };
 }

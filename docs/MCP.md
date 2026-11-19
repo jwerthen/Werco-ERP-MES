@@ -2,8 +2,8 @@
 
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
-(Cursor, Claude Code, a chat bot) gets **792 tools** — 15 hand-written *convenience* tools plus
-**777 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+(Cursor, Claude Code, a chat bot) gets **793 tools** — 15 hand-written *convenience* tools plus
+**778 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
 as the same request from the web app. A **read-only** API token is shown fewer tools, and an
 **AI-external** one fewer still (§4.1, §4.2).
 
@@ -72,6 +72,16 @@ shifted): 15 convenience + **777** generated, 16 shadowed. The three writes stay
 do not refuse API tokens). The read-only catalog is 8 convenience + **303** generated, the two new
 reads among them, and none of the five is on the AI-external allowlist. See
 [API.md → Quality flow-down on the purchase order](API.md#quality-flow-down-on-the-purchase-order).
+
+**Re-checked again on 2026-11-19 after customer- and supplier-owned property (migration 129) added
+one Inventory tool** (`change_inventory_item_ownership`, `POST /inventory/items/{item_id}/ownership`;
+no existing name shifted): 15 convenience + **778** generated, 16 shadowed. It is a write, so the
+read-only catalog is unchanged at 8 convenience + **303** generated, and it is not on the AI-external
+allowlist. It stays a tool because its route does not refuse API tokens (an open owner question;
+see [RBAC → Credential policy for judgment writes](RBAC_PERMISSIONS.md#credential-policy-for-judgment-writes)).
+The same change gave `list_inventory` three filters, `ownership`, `owner_customer_id` and
+`owner_vendor_id` (§7). See
+[API.md → Customer- and supplier-owned property](API.md#customer--and-supplier-owned-property).
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
 `backend/tests/test_mcp_docs_names.py` checks every tool name this file, `CLAUDE.md` and `API.md`
@@ -265,7 +275,7 @@ routes authenticate every call; in IN-PROCESS mode it uses the real `ErpTokenVer
  "generated_tools":   [{"name": "...", "method": "GET", "path": "/api/v1/...", "tag": "...",
                         "function": "...", "annotations": {...}, "deprecated": false}],
  "shadowed_operations": [["GET", "/api/v1/inventory/"], ...],
- "counts": {"convenience": 15, "generated": 777, "shadowed": 16}
+ "counts": {"convenience": 15, "generated": 778, "shadowed": 16}
 }
 ```
 
@@ -731,7 +741,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `Documents` (`/documents`) | Documents, Parts | `list_documents`, `upload_document`, `download_document`, `list_document_types`, `delete_document` |
 | `CustomFields` (`/custom-fields`) | Custom Fields | `list_field_definitions`, `create_field_definition`, `set_custom_field_value`, `get_entity_custom_fields` |
 | `Warehouse` (`/warehouse`) | — hub that mounts the Inventory, Receiving and Shipping pages | see those three rows |
-| `Inventory` (`/inventory`) | Inventory, Parts | `list_inventory`★, `receive_inventory`, `adjust_inventory`, `transfer_inventory`, `list_transactions`, `preview_inventory_combine`, `combine_inventory`, `list_cycle_counts` |
+| `Inventory` (`/inventory`) | Inventory, Parts | `list_inventory`★, `receive_inventory`, `adjust_inventory`, `transfer_inventory`, `change_inventory_item_ownership`, `list_transactions`, `preview_inventory_combine`, `combine_inventory`, `list_cycle_counts` |
 | `Materials` (`/materials`) | Materials & Supplies | `list_materials`, `get_material`, `create_material`, `update_material`, `import_materials_csv` |
 | `Receiving` (`/receiving`) | Receiving & Inspection, Purchasing | `get_open_purchase_orders`, `receive_material`, `get_inspection_queue`, `inspect_receipt`, `correct_receipt`, `void_receipt`, `print_receiving_label` |
 | `Shipping` (`/shipping`) | Shipping | `get_ready_to_ship`, `create_shipment`, `mark_shipped`, `rate_shop`, `buy_label`, `get_tracking`, `issue_certificate_of_conformance` |
@@ -864,8 +874,8 @@ FAI log, Approved Supplier List and equipment-asset / PM-import routes added: **
 together, so fifteen were excluded and the count stayed **764**; the five comment / watcher writes then
 joined the exclusions (twenty) and the three comment reads were added: **767 generated tools**; the
 three report-template routes then made it **770 generated tools**, and on 2026-11-19 the NCR
-re-verification and CAR effectiveness verbs **772** and the five PO quality flow-down routes
-**777**.
+re-verification and CAR effectiveness verbs **772**, the five PO quality flow-down routes
+**777**, and the inventory ownership verb **778**.
 
 ### 6.2 Naming and the collision policy (`app/mcp/naming.py`)
 
@@ -985,7 +995,7 @@ with a 422 that names it, never accepted-and-ignored.
 | `import_laser_nest_package` | `POST /work-orders/laser-nest-packages/standalone/import` or `POST /work-orders/{id}/laser-nest-packages/import` | `work_order_id` (omit for standalone), `file` `{filename, content_base64, content_type?}` **or** `source_path`, `rows` (list → sent as the JSON string the route expects, or a string), `work_center_id`, `due_date` (standalone only), `sheet_match_provenance`, `release` (default `false`) | See [Nest import demotion](#10-nest-import-demotion). Returns `{import, work_order, demoted_to_draft, operations_returned_to_pending, note}`. An API token re-importing onto a laser job whose nest operations have recorded good, scrap, a start or any labor, or whose header already carries good or scrap, gets the route's **403** re-import text (`Re-importing a nest package replaces nests that already have recorded work …`) as an `is_error` result, nothing written (this PR's extension; a person's re-import is unchanged) |
 | `add_laser_nest` | `POST /work-orders/{id}/laser-nests/manual` | `work_order_id`, `cnc_number`, `planned_runs` (required; 1–9,999, the route's own bound, so a larger count is refused by the tool's schema before any call); `nest_name`, `material`, `thickness`, `sheet_size`, `work_center_id`, `material_part_id`, `qty_per_run` (the route's `LaserNestManualCreate`, pinned by a catalog test); `release` (default `false`) | Keys one nest by hand onto an assembly parent (its laser child is found-or-created by the route) or a laser WO. The route **force-sets the laser WO RELEASED** with the new nest READY (recording the release as the caller's when it was a draft or unstamped; an **on-hold** job stays on hold and the `note` says so, naming `work_orders_resume_work_order`); the tool applies §10 to it — a **new** laser WO, or one that was **DRAFT before the call**, comes back DRAFT with PENDING operations; a job already on the floor (released / in progress / on hold before the call) is **never taken off it** (`demoted_to_draft: false` + a `note`). Refuses **409** a job whose nests came from a package import (§10 rule 1, the other direction). Returns `{nest, work_order, demoted_to_draft, ...}` |
 | `get_shop_floor_dashboard` | `GET /shop-floor/dashboard` (+ `GET /shop-floor/dispatch-board`) | `include_dispatch_board` (default `false`) | With the flag: `{"dashboard": …, "dispatch_board": …}` |
-| `list_inventory` | `GET /inventory/` or `GET /inventory/summary` | `summary` (default `false`), `part_id`, `warehouse`, `location_code`, `has_quantity` (default `true`), `limit` (default 200, max 10000), `offset` | `summary=true` → per-part totals |
+| `list_inventory` | `GET /inventory/` or `GET /inventory/summary` | `summary` (default `false`), `part_id`, `warehouse`, `location_code`, `has_quantity` (default `true`), `ownership` (`company` / `customer` / `supplier`), `owner_customer_id`, `owner_vendor_id`, `limit` (default 200, max 10000), `offset` | `summary=true` → per-part totals, with `owned_by_others_on_hand`; with it, only `limit` / `offset` are sent, so the part, location and ownership filters apply to the row list only. Each row names its owner (`ownership`, the owner id, `owner_name`) |
 | `list_purchase_orders` | `GET /purchasing/purchase-orders` | `status`, `vendor_id`, `deleted_only`, `limit` (default 200), `offset` | |
 | `list_quality_ncrs` | `GET /quality/ncr` | `status`, `part_id`, `skip`, `limit` (default 100) | |
 | `list_parts` | `GET /parts/` | `search`, `part_type`, `item_group` (default `engineering`), `active_only`, `include_bom_components`, `include_deleted` (admin), `skip`, `limit` (default 100, max 500) | |

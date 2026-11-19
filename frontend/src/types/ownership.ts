@@ -35,6 +35,53 @@ export interface InventoryOwnershipChange extends OwnershipSelection {
   reason: string;
 }
 
+/** An open work-order tie PINNED to the re-owned row: a pin consumes its lot whoever owns it. */
+export interface OwnershipPinnedTie {
+  allocation_id: number;
+  work_order_id: number;
+  work_order_number: string | null;
+  /** Planned less consumed — what this tie still expects to draw at completion. */
+  outstanding_quantity: number;
+}
+
+/**
+ * Only when COMPANY stock is re-owned away: the part's open UNPINNED demand against the
+ * company stock left to cover it. Automatic (FIFO) consumption no longer reads the
+ * re-owned row, so `short_by` is what those jobs can no longer draw.
+ */
+export interface OwnershipUnpinnedDemand {
+  open_unpinned_demand: number;
+  company_stock_remaining: number;
+  short_by: number;
+  work_order_numbers: string[];
+}
+
+/**
+ * What `POST /inventory/items/{item_id}/ownership` returns: the updated `inventory_items`
+ * row (timestamps UTC ISO-8601 with a trailing `Z`), its resolved `owner_name`, and two
+ * DISCLOSURES that never refuse the change and are also written to the audit row.
+ */
+export interface InventoryOwnershipChangeResult extends OwnershipInfo {
+  id: number;
+  part_id: number;
+  location: string;
+  warehouse: string | null;
+  quantity_on_hand: number;
+  quantity_allocated: number | null;
+  quantity_available: number | null;
+  lot_number: string | null;
+  serial_number: string | null;
+  status: string | null;
+  is_active: boolean | null;
+  received_date: string | null;
+  expiration_date: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  owner_name: string | null;
+  open_pinned_ties: OwnershipPinnedTie[];
+  unpinned_demand: OwnershipUnpinnedDemand | null;
+}
+
 /** A row in the lazily-loaded owner pickers. */
 export interface OwnerOption {
   id: number;

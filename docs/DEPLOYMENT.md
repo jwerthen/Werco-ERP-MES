@@ -220,6 +220,67 @@ rollback step; it does not undo documents, receipts, production or shipments
 already created by completed actions. Intake-linked Documents cannot be deleted
 through the application because the saved source and receipt must remain valid.
 
+### Customer- and supplier-owned property (migration 129)
+
+Apply **129_owned_property** after **128_po_flowdown** through the normal API boot migration path.
+No environment variable, secret, cron or worker job is added.
+
+- **What it does, and no backfill.** `inventory_items`, `tools` and `po_receipts` each gain
+  `ownership` (`varchar(20) NOT NULL`, server default `'company'`, CHECK `ck_<table>_ownership`),
+  `owner_customer_id` (FK `fk_<table>_owner_customer_id` to `customers`) and `owner_vendor_id` (FK
+  `fk_<table>_owner_vendor_id` to `vendors`), and a CHECK `ck_<table>_owner_matches` pairing the kind
+  with its owner. `inventory_items` and `tools` also get an index `ix_<table>_ownership` on
+  `(company_id, ownership)`; `po_receipts` gets none, since nothing filters receipts by owner. No FK
+  has an `ON DELETE`. No `UPDATE` runs: every existing row becomes `company` with both owner columns
+  NULL, which is exactly what every row meant before, so company stock and company receipts behave
+  as they did. All three tables already exist with RLS on, so the revision emits no RLS, `REVOKE` or
+  role statement. Every object is guarded, so a re-run is a no-op.
+- **Locks.** On PostgreSQL 11+ the `NOT NULL` column with a constant default is **metadata-only**
+  (no table rewrite, no NOT NULL scan), and the two nullable owner columns are too. Each FK
+  validates against an all-NULL column (a quick scan) and briefly takes SHARE ROW EXCLUSIVE on
+  `customers` / `vendors` (blocks writes to them, not reads); each CHECK scans its table once; the
+  two indexes are plain `CREATE INDEX`, not `CONCURRENTLY`. Each table is ACCESS EXCLUSIVE until the
+  boot transaction commits, in the order `inventory_items`, `tools`, `po_receipts`, so inventory,
+  tool and receiving reads and writes wait for the boot. The tables are small, so this is brief.
+  `SET LOCAL lock_timeout = '5s'`; a timeout fails the boot with the database back at `128`, and
+  redeploying is safe.
+- **Order.** Run the migration before or with the code that maps the columns (the API boot does).
+  Old code is safe on the new schema: it never selects the columns, and its inserts take the
+  `'company'` default. New code on an un-migrated database fails every inventory, tool and PO receipt
+  load, so deploy the **worker with or after the API**. Deploy the **API before the frontend**: an
+  older API silently ignores the new `ownership` / owner fields, so a customer's material received
+  from the new screens in that window would be filed as company stock with no error, and the
+  ownership route and the list filters do not exist there.
+- **Delivery retries across the deploy still replay.** The `POST /receiving/deliveries` idempotency
+  fingerprint leaves out a line's ownership fields while they hold the company defaults, so a
+  company delivery posted before the deploy and retried after it hashes as it did and replays its
+  stored receipts.
+- **Verify** in a test company, with invented names: receive a few units of a test part as
+  customer-owned (an invented customer) at a location and lot where company stock of that part
+  already sits. Expect a second stock row with a `Customer: <name>` chip on the Inventory page, an
+  unchanged `GET /reports/inventory-value`, and `owned_by_others_on_hand` on that part in
+  `GET /inventory/summary`. Receive a second line as customer-owned with **Requires Inspection**
+  ticked, accept it in the inspection queue, and expect it on a customer-owned row too. Use
+  **Change ownership** to return a row to the company with a reason and find the `inventory` UPDATE
+  row in the Audit Log. On production a read is enough: `SELECT ownership, count(*) FROM
+  inventory_items GROUP BY 1;` returns only `company` right after the deploy, and `SELECT conname
+  FROM pg_constraint WHERE conrelid IN ('inventory_items'::regclass, 'tools'::regclass,
+  'po_receipts'::regclass) AND conname LIKE '%owner%';` returns twelve names: per table
+  `ck_<table>_ownership`, `ck_<table>_owner_matches`, `fk_<table>_owner_customer_id` and
+  `fk_<table>_owner_vendor_id`.
+- **Rollback.** Do not run the downgrade as a rollback step: it drops the columns, discarding which
+  stock rows, tools and PO receipts belong to a customer or supplier, and who. For an application
+  rollback keep the columns: from a checkout of this release run `alembic stamp 128_po_flowdown`
+  before redeploying a pre-129 image (the next forward deploy re-runs 129 as a guarded no-op that
+  keeps the markers), and roll the frontend back with the API, for the silent-drop reason above.
+  **While stamped back, the old code cannot see the markers: it FIFO-draws customer- and
+  supplier-owned rows as company stock, merges receipts into them, and counts them in inventory
+  value, and an owned receipt it accepts out of inspection or releases from its hold lands as
+  company stock.** Before stamping back, export the owned rows (`GET /inventory/?ownership=customer`
+  and `?ownership=supplier`, or the inventory export's `ownership` column) so that anything drawn or
+  merged during the window can be found and corrected, and keep the window short. See
+  [API.md → Customer- and supplier-owned property](API.md#customer--and-supplier-owned-property).
+
 ### Purchase-order quality flow-down (migration 128)
 
 Apply **128_po_flowdown** after **127_ncr_car_records** through the normal API boot migration path.

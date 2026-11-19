@@ -37,9 +37,12 @@ class HankOperationalReport(UTCModel):
 
 
 class HankReceiptLine(ReceiptLineFields):
-    # Deliberately WITHOUT the ownership fields ``ReceiptCreate`` carries (AS9100D 8.5.3):
-    # a Hank-proposed receipt is company stock, and recording someone else's property is
-    # a person's call in the receiving screen. ``extra='forbid'`` refuses the keys outright.
+    # Deliberately WITHOUT the ownership fields ``ReceiptCreate`` carries (AS9100D 8.5.3), so
+    # Hank's receive_delivery task stays company-only and its input schema -- part of the
+    # versioned copilot prompt's tool list -- is unchanged. A person records an owned receipt
+    # in the receiving UI. This narrows Hank's task input only: ``POST /receiving/receive`` and
+    # ``/receiving/deliveries`` accept the ownership fields from any caller the role gate admits,
+    # API tokens included (whether a token may record ownership is an open owner question).
     model_config = ConfigDict(extra='forbid')
     requires_inspection: bool
 

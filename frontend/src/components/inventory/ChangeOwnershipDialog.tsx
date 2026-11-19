@@ -5,7 +5,7 @@ import { Modal } from '../ui/Modal';
 import OwnershipFields from '../ownership/OwnershipFields';
 import OwnershipChip from '../ownership/OwnershipChip';
 import type { OwnerDirectory } from '../../hooks/useOwnerDirectory';
-import type { OwnershipInfo, OwnershipSelection } from '../../types/ownership';
+import type { InventoryOwnershipChangeResult, OwnershipInfo, OwnershipSelection } from '../../types/ownership';
 import {
   isOwnershipComplete,
   ownershipLabel,
@@ -51,7 +51,12 @@ export default function ChangeOwnershipDialog({
   item: OwnershipStockRow;
   directory: OwnerDirectory;
   onClose: () => void;
-  onChanged: (item: OwnershipStockRow) => void;
+  /**
+   * Called once the server has accepted the change, with the response — the updated row
+   * and its two disclosures (`open_pinned_ties`, `unpinned_demand`), which the host must
+   * surface (`ownershipChangeNotice`). Closing the dialog is the host's job.
+   */
+  onChanged: (item: OwnershipStockRow, result: InventoryOwnershipChangeResult) => void;
 }) {
   const [selection, setSelection] = useState<OwnershipSelection>(() => selectionOf(item));
   const [reason, setReason] = useState('');
@@ -79,8 +84,11 @@ export default function ChangeOwnershipDialog({
     setPending(true);
     setError('');
     try {
-      await api.changeInventoryOwnership(item.id, { ...ownershipPayload(selection), reason: reason.trim() });
-      onChanged(item);
+      const result = await api.changeInventoryOwnership(item.id, {
+        ...ownershipPayload(selection),
+        reason: reason.trim(),
+      });
+      onChanged(item, result);
     } catch (err: unknown) {
       setError(apiErrorDetail(err, 'Unable to change ownership. Try again.'));
     } finally {
@@ -129,7 +137,7 @@ export default function ChangeOwnershipDialog({
               {...field}
               className="input w-full"
               rows={2}
-              maxLength={500}
+              maxLength={2000}
               value={reason}
               disabled={pending}
               onChange={event => {

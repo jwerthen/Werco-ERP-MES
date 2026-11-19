@@ -4662,9 +4662,12 @@ def decrement_finished_goods_for_shipment(
     produced quantity into the FG lot on completion; this writes the negative SHIP txn
     and decrements on-hand/available when those finished goods leave on a shipment. The
     decremented row is located by ``company_id + part_id == work_order.part_id +
-    location == FINISHED_GOODS_LOCATION + lot_number == work_order.lot_number`` -- exactly
-    the row the receipt created (the constants are imported, not re-declared, so the two
-    sides stay in lock-step).
+    location == FINISHED_GOODS_LOCATION + lot_number == work_order.lot_number`` + the
+    COMPANY ownership triple, lowest id first -- exactly the key the receipt matches and
+    creates on (the constants and ``ownership_match_clauses`` are shared, not re-declared, so
+    the two sides stay in lock-step). Since migration 129 a re-owned (customer / supplier)
+    row can sit in the same FG slot as the company's; the shop ships its own finished goods,
+    so the decrement never lands on the other owner's row (AS9100D 8.5.3).
 
     Idempotency + concurrency: the caller holds a ``with_for_update`` row lock on the
     shipment when it re-checks status, serializing concurrent double-ship; here we ALSO
@@ -4701,7 +4704,9 @@ def decrement_finished_goods_for_shipment(
             InventoryItem.part_id == work_order.part_id,
             InventoryItem.location == FINISHED_GOODS_LOCATION,
             InventoryItem.lot_number == lot_number,
+            *ownership_match_clauses(COMPANY_OWNERSHIP_KEY),
         )
+        .order_by(InventoryItem.id.asc())
         .first()
         if lot_number
         else None

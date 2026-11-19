@@ -5,11 +5,12 @@ from typing import Dict, List, Optional, Sequence
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, func, or_
+from sqlalchemy import DateTime, and_, func, or_
 from sqlalchemy.orm import Session, joinedload
 
 from app.api.audit_guard import required_audit
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
+from app.core.time_utils import to_utc_iso
 from app.db.database import atomic_transaction, get_db
 from app.db.ledger_filter import LEDGER_QUANTITY_EPSILON, WORK_ORDER_REFERENCE_TYPE, work_order_ledger_filter
 from app.models.company import Company
@@ -1234,10 +1235,17 @@ def change_inventory_item_ownership(
     deactivated, holds no stock, or is already owned that way. The change and its reason
     are written to the audit trail in the same transaction (503 and nothing saved if that
     record cannot be written). No inventory transaction is posted -- ownership is not a
-    quantity movement. Returns the updated row with ``owner_name``.
+    quantity movement.
+
+    Returns the updated row with ``owner_name`` and two disclosures that never refuse the
+    change: ``open_pinned_ties`` (open work-order ties pinned to this exact row -- a pin
+    consumes its lot whoever owns it, so those jobs still draw it) and ``unpinned_demand``
+    (only when company stock is re-owned away: the part's open unpinned demand, the company
+    stock left to cover it, ``short_by`` and the work orders -- automatic consumption no
+    longer draws this row; ``null`` otherwise). Both are recorded on the audit row too.
     """
     with required_audit(db, OWNERSHIP_AUDIT_UNAVAILABLE_DETAIL):
-        item, owner_name = change_inventory_ownership(
+        item, owner_name, disclosure = change_inventory_ownership(
             db,
             company_id,
             item_id,
@@ -1250,7 +1258,13 @@ def change_inventory_item_ownership(
         db.commit()
     db.refresh(item)
     row = jsonable_encoder(item)
+    # Serve UTC with a trailing ``Z`` (store UTC, serve UTC): this dict is hand-built, so its
+    # timestamps go through ``to_utc_iso`` rather than ``jsonable_encoder``'s naive isoformat.
+    for column in InventoryItem.__table__.columns:
+        if isinstance(column.type, DateTime):
+            row[column.key] = to_utc_iso(getattr(item, column.key))
     row["owner_name"] = owner_name
+    row.update(disclosure)
     return row
 
 

@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Optional, Tuple
 
 from fastapi import HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.ledger_filter import LEDGER_QUANTITY_EPSILON
@@ -206,6 +207,20 @@ def owner_name_for(row: Any, names: Dict[Tuple[str, int], str]) -> Optional[str]
     return None
 
 
+def recorded_owner(db: Session, company_id: int, row: Any) -> ResolvedOwner:
+    """The owner a row ALREADY records (a PO receipt carrying its owner to stock), as a
+    ``ResolvedOwner`` with the name read through tombstones.
+
+    No liveness check, on purpose: the owner was resolved when the row was written, and
+    carrying a recorded owner forward (an inspection accept) is a RECORD, not a new selection
+    -- a customer soft-deleted since still owns the material it sent.
+    """
+    key = ownership_key(row)
+    if key[0] == COMPANY:
+        return COMPANY_OWNER
+    return ResolvedOwner(key[0], key[1], key[2], owner_name_for(row, owner_names(db, company_id, [row])))
+
+
 def ownership_label(key: OwnershipKey, owner_name: Optional[str]) -> str:
     """Human words for an ownership triple, for refusals and audit descriptions."""
     kind, customer_id, vendor_id = key
@@ -226,6 +241,90 @@ def _ownership_values(key: OwnershipKey, owner_name: Optional[str]) -> Dict[str,
     }
 
 
+def _open_ties(db: Session, company_id: int, part_id: int) -> list:
+    """OPEN ties on this part's live (not deleted, not terminal) work orders that still expect
+    to draw something, oldest first. The same selection the combine's reservation read makes."""
+    # Imported here: the work-order state service pulls in the completion engine, which
+    # imports this module.
+    from app.models.work_order import WorkOrder
+    from app.models.work_order_material import AllocationStatus, WorkOrderMaterialAllocation
+    from app.services.work_order_state_service import TERMINAL_WO_STATUSES
+
+    rows = (
+        db.query(WorkOrderMaterialAllocation, WorkOrder.work_order_number)
+        .join(WorkOrder, WorkOrder.id == WorkOrderMaterialAllocation.work_order_id)
+        .filter(
+            WorkOrderMaterialAllocation.company_id == company_id,
+            WorkOrderMaterialAllocation.part_id == part_id,
+            WorkOrderMaterialAllocation.status == AllocationStatus.OPEN,
+            WorkOrder.company_id == company_id,
+            WorkOrder.is_deleted == False,  # noqa: E712 -- what can still draw: a selection read
+            WorkOrder.status.notin_(TERMINAL_WO_STATUSES),
+        )
+        .order_by(WorkOrderMaterialAllocation.id.asc())
+        .all()
+    )
+    out = []
+    for allocation, work_order_number in rows:
+        outstanding = float(allocation.qty_planned or 0.0) - float(allocation.qty_consumed or 0.0)
+        if outstanding > LEDGER_QUANTITY_EPSILON:
+            out.append((allocation, work_order_number, outstanding))
+    return out
+
+
+def ownership_change_disclosure(db: Session, company_id: int, item: InventoryItem, old_key: OwnershipKey) -> dict:
+    """What a person re-owning this row should know. DISCLOSURE ONLY -- it never refuses.
+
+    * ``open_pinned_ties`` -- open ties PINNED to this exact row. A pin consumes its lot
+      whoever owns it, so those jobs will still draw this material after the change.
+    * ``unpinned_demand`` -- only when COMPANY stock is re-owned away: the part's open
+      UNPINNED demand against the company stock left to cover it, which automatic (FIFO)
+      consumption now reads without this row. ``None`` otherwise.
+
+    Computed after the change is flushed, so "remaining" already excludes this row.
+    """
+    # Imported here: the consumption engine imports this module (through the completion engine).
+    from app.services.material_consumption_service import AUTO_DRAW_ITEM_CLAUSES
+
+    ties = _open_ties(db, company_id, item.part_id)
+    pinned = [
+        {
+            "allocation_id": allocation.id,
+            "work_order_id": allocation.work_order_id,
+            "work_order_number": work_order_number,
+            "outstanding_quantity": outstanding,
+        }
+        for allocation, work_order_number, outstanding in ties
+        if allocation.pinned_inventory_item_id == item.id
+    ]
+    unpinned_demand = None
+    if old_key[0] == COMPANY and ownership_key(item)[0] != COMPANY:
+        unpinned = [
+            (number, outstanding)
+            for allocation, number, outstanding in ties
+            if allocation.pinned_inventory_item_id is None
+        ]
+        demand = sum(outstanding for _number, outstanding in unpinned)
+        remaining = float(
+            db.query(func.coalesce(func.sum(InventoryItem.quantity_on_hand), 0.0))
+            .filter(
+                InventoryItem.company_id == company_id,
+                InventoryItem.part_id == item.part_id,
+                *AUTO_DRAW_ITEM_CLAUSES,
+                InventoryItem.quantity_on_hand > 0,
+            )
+            .scalar()
+            or 0.0
+        )
+        unpinned_demand = {
+            "open_unpinned_demand": demand,
+            "company_stock_remaining": remaining,
+            "short_by": max(0.0, demand - remaining),
+            "work_order_numbers": sorted({number for number, _outstanding in unpinned if number}),
+        }
+    return {"open_pinned_ties": pinned, "unpinned_demand": unpinned_demand}
+
+
 def change_inventory_ownership(
     db: Session,
     company_id: int,
@@ -236,8 +335,8 @@ def change_inventory_ownership(
     owner_vendor_id: Optional[int],
     reason: str,
     audit: AuditService,
-) -> Tuple[InventoryItem, Optional[str]]:
-    """Re-own one stock row. Flushes, never commits; returns ``(row, new owner name)``.
+) -> Tuple[InventoryItem, Optional[str], dict]:
+    """Re-own one stock row. Flushes, never commits; returns ``(row, new owner name, disclosure)``.
 
     Every refusal is raised before the first mutation:
 
@@ -256,6 +355,11 @@ def change_inventory_ownership(
     The REQUIRED audit row (old -> new, with the reason) is written in the same transaction;
     the caller wraps the call in ``required_audit`` so a lost audit row rolls the change back
     (503).
+
+    The disclosure (``ownership_change_disclosure``: ties pinned to this row, and -- when
+    company stock is re-owned away -- the part's open unpinned demand against the company stock
+    left) rides on the audit row's ``extra_data`` and is returned for the response. It refuses
+    nothing.
     """
     item = (
         db.query(InventoryItem)
@@ -294,6 +398,7 @@ def change_inventory_ownership(
     item.owner_customer_id = new_owner.owner_customer_id
     item.owner_vendor_id = new_owner.owner_vendor_id
     db.flush()
+    disclosure = ownership_change_disclosure(db, company_id, item, old_key)
 
     lot = f" lot {item.lot_number}" if item.lot_number else ""
     audit.log_required(
@@ -315,6 +420,7 @@ def change_inventory_ownership(
             "lot_number": item.lot_number,
             "location": item.location,
             "quantity_on_hand": on_hand,
+            **disclosure,
         },
     )
-    return item, new_owner.owner_name
+    return item, new_owner.owner_name, disclosure

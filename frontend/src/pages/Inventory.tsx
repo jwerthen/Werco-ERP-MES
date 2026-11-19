@@ -36,7 +36,14 @@ import OwnershipFields from '../components/ownership/OwnershipFields';
 import OwnershipChip from '../components/ownership/OwnershipChip';
 import { useOwnerDirectory } from '../hooks/useOwnerDirectory';
 import type { OwnershipInfo, OwnershipSelection, OwnershipType } from '../types/ownership';
-import { COMPANY_OWNERSHIP, isOwnershipComplete, ownershipLabel, ownershipOf, ownershipPayload } from '../utils/ownership';
+import {
+  COMPANY_OWNERSHIP,
+  isOwnershipComplete,
+  ownershipChangeNotice,
+  ownershipLabel,
+  ownershipOf,
+  ownershipPayload,
+} from '../utils/ownership';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import { useAuth } from '../context/AuthContext';
@@ -1287,16 +1294,19 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
 
       {/* Change of ownership — its own reasoned verb, server-GATED and therefore
           NON-optimistic: the row is re-read from the server after success, never
-          patched locally. Same role set as adjust (Admin / Manager / Supervisor). */}
+          patched locally. Same role set as adjust (Admin / Manager / Supervisor).
+          A success that leaves open jobs pinned to someone else's material, or short
+          of company stock, is a WARNING naming those work orders, not a plain success. */}
       {ownershipItem && canAdjust && (
         <ChangeOwnershipDialog
           key={ownershipItem.id}
           item={ownershipItem}
           directory={ownerDirectory}
           onClose={() => setOwnershipItem(null)}
-          onChanged={() => {
+          onChanged={(_item, result) => {
             setOwnershipItem(null);
-            showToast('success', 'Ownership changed.');
+            const notice = ownershipChangeNotice(result);
+            showToast(notice.type, notice.message);
             void loadData();
           }}
         />

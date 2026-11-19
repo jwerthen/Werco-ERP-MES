@@ -23,6 +23,7 @@ from app.services.audit_service import AuditWriteError
 from app.services.export_safety import sanitize_csv_row
 from app.services.inventory_combine_service import source_reservations
 from app.services.material_consumption_service import is_consumable_item
+from app.services.owned_property_service import COMPANY, ownership_key
 
 MANAGE_ROLES = (UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR)
 EXPORT_ROLES = (UserRole.ADMIN, UserRole.MANAGER)
@@ -89,8 +90,8 @@ def _stock_picture(db, company_id, part, rows):
         .all()
     }
     now = datetime.now(timezone.utc)
-    eligible_total, withheld_total = 0.0, 0.0
-    free_by_id, reasons = {}, {}
+    company_eligible_total, withheld_total = 0.0, 0.0
+    free_by_id, reasons, owned_ids = {}, {}, set()
     for row in rows:
         available = max(0.0, float(row.quantity_on_hand or 0) - float(row.quantity_allocated or 0))
         withheld = min(available, max(0.0, reservations.pinned_by_item.get(row.id, 0)))
@@ -98,11 +99,18 @@ def _stock_picture(db, company_id, part, rows):
         reason = _unavailable_reason(row, locations, now)
         free = max(0.0, available - withheld) if reason is None else 0.0
         free_by_id[row.id], reasons[row.id] = free, reason
-        eligible_total += free
-    part_cap = max(0.0, eligible_total - reservations.unpinned_total(withheld_total))
+        if ownership_key(row)[0] == COMPANY:
+            company_eligible_total += free
+        else:
+            owned_ids.add(row.id)
+    # Open UNPINNED ties are covered only by COMPANY stock: the unpinned draw never takes a
+    # customer's or supplier's lot (AS9100D 8.5.3), so owned rows cannot count toward the
+    # part-level cap. An owned row is capped by its own free quantity alone (its pins are
+    # already withheld above). With only company stock this is the pre-129 cap, unchanged.
+    part_cap = max(0.0, company_eligible_total - reservations.unpinned_total(withheld_total))
     result = {}
     for row in rows:
-        free = min(free_by_id[row.id], part_cap)
+        free = free_by_id[row.id] if row.id in owned_ids else min(free_by_id[row.id], part_cap)
         if uom_label(part.unit_of_measure) == "each":
             free = float(int(free))
         result[row.id] = (free, reasons[row.id] or ("No unreserved stock available" if free <= 0 else None))

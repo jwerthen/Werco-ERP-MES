@@ -1,8 +1,9 @@
-"""Coverage for 129_owned_property (the AS9100D 8.5.3 ownership marker on ``inventory_items`` and
-``tools``: ``ownership`` / ``owner_customer_id`` / ``owner_vendor_id``, two named FKs, two CHECKs
-and the ``(company_id, ownership)`` index on each).
+"""Coverage for 129_owned_property (the AS9100D 8.5.3 ownership marker on ``inventory_items``,
+``tools`` and ``po_receipts``: ``ownership`` / ``owner_customer_id`` / ``owner_vendor_id``, two named
+FKs and two CHECKs on each, plus the ``(company_id, ownership)`` index on the first two --
+``po_receipts`` deliberately gets none).
 
-129 is purely additive over two EXISTING tenant tables -- one NOT NULL column with a constant
+129 is purely additive over three EXISTING tenant tables -- one NOT NULL column with a constant
 server default, two nullable FK columns, two CHECKs and an index per table; no table, no data. This
 file covers the MIGRATION (the ownership behavior is tested with the services and the API):
 
@@ -11,7 +12,7 @@ file covers the MIGRATION (the ownership behavior is tested with the services an
 2. **Model / migration lock-step** -- every column (name, type compiled for PostgreSQL,
    nullability, the plain ``'company'`` server default), both FK names, targets and (absent)
    ``ON DELETE``, both CHECK texts (byte-identical to the models, to the PR contract and to
-   ``OwnershipType``) and the index are exactly what ``InventoryItem`` and ``Tool`` declare (the
+   ``OwnershipType``) and the index are exactly what ``InventoryItem``, ``Tool`` and ``POReceipt`` declare (the
    stamped-over hazard).
 3. **A real upgrade -> re-run -> downgrade round-trip** over a disposable SQLite database holding
    legacy rows, child tables and a trigger whose body reads ``inventory_items`` (104's
@@ -46,6 +47,7 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from alembic.script import ScriptDirectory
 from app.models.inventory import OWNER_MATCHES_CHECK, OWNERSHIP_VALUE_CHECK, InventoryItem, OwnershipType
+from app.models.purchasing import POReceipt
 from app.models.tool_management import Tool
 
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -55,8 +57,11 @@ DOWN_REVISION = "128_po_flowdown"
 
 pytestmark = pytest.mark.unit
 
-MODELS = {"inventory_items": InventoryItem, "tools": Tool}
+MODELS = {"inventory_items": InventoryItem, "tools": Tool, "po_receipts": POReceipt}
 TABLES = tuple(MODELS)
+# po_receipts carries the marker (an owned receipt held for inspection keeps its owner) but no
+# ownership index: nothing lists or filters receipts by owner.
+INDEXED_TABLES = ("inventory_items", "tools")
 
 # The PR contract's text, copied here independently of both the migration and the models.
 CONTRACT_OWNERSHIP_CHECK = "ownership IN ('company', 'customer', 'supplier')"
@@ -99,7 +104,7 @@ def _expected_names(table: str) -> dict:
             f"ck_{table}_ownership": CONTRACT_OWNERSHIP_CHECK,
             f"ck_{table}_owner_matches": CONTRACT_OWNER_MATCHES_CHECK,
         },
-        "index": (f"ix_{table}_ownership", ("company_id", "ownership")),
+        "index": (f"ix_{table}_ownership", ("company_id", "ownership")) if table in INDEXED_TABLES else None,
     }
 
 
@@ -211,16 +216,30 @@ def test_the_models_shared_check_constants_equal_the_migration_literals():
     assert OWNER_MATCHES_CHECK == module.OWNER_MATCHES_CHECK_SQL == CONTRACT_OWNER_MATCHES_CHECK
 
 
-def test_both_tables_carry_the_same_check_texts():
+def test_every_table_carries_the_same_check_texts():
     inventory = _model_checks(InventoryItem.__table__)
     tools = _model_checks(Tool.__table__)
+    receipts = _model_checks(POReceipt.__table__)
     for suffix in ("ownership", "owner_matches"):
-        assert inventory[f"ck_inventory_items_{suffix}"] == tools[f"ck_tools_{suffix}"], suffix
-    # The pre-existing CHECK on inventory_items is still declared alongside 129's.
+        assert (
+            inventory[f"ck_inventory_items_{suffix}"]
+            == tools[f"ck_tools_{suffix}"]
+            == receipts[f"ck_po_receipts_{suffix}"]
+        ), suffix
+    # The pre-existing CHECKs are still declared alongside 129's.
     assert "chk_inventory_items_allocated_non_negative" in inventory
+    assert "chk_po_receipts_quantity_accepted_non_negative" in receipts
 
 
-@pytest.mark.parametrize("table", TABLES)
+def test_po_receipts_gets_no_ownership_index():
+    model_indexes = {index.name: index for index in POReceipt.__table__.indexes}
+    assert "ix_po_receipts_ownership" not in model_indexes
+    for index in model_indexes.values():
+        assert not set(NEW_COLUMNS) & {column.name for column in index.columns}, index.name
+    assert next(change for change in _module().TABLE_CHANGES if change.table == "po_receipts").index is None
+
+
+@pytest.mark.parametrize("table", INDEXED_TABLES)
 def test_the_index_matches_the_model(table):
     index_name, index_columns = _expected_names(table)["index"]
     model_indexes = {index.name: index for index in MODELS[table].__table__.indexes}
@@ -235,6 +254,7 @@ def test_the_index_matches_the_model(table):
 # ------------------------------------------------------------- 3. real SQLite round-trip
 
 ALLOCATED_CHECK_SQL = "quantity_allocated >= 0"
+ACCEPTED_CHECK_SQL = "quantity_accepted >= 0"
 
 # The shape of 104's ``tr_stock_observation_insert``: a trigger ON another table whose BODY reads
 # ``inventory_items``. SQLite 3.26+ re-parses it when a batch rebuild renames the copy into place,
@@ -287,12 +307,23 @@ LEGACY_DDL = [
     ),
     "CREATE INDEX ix_tools_tool_id ON tools (tool_id)",
     "CREATE INDEX ix_tools_company_id ON tools (company_id)",
+    (
+        "CREATE TABLE po_receipts (id INTEGER NOT NULL, receipt_number VARCHAR(50) NOT NULL, "
+        "lot_number VARCHAR(100) NOT NULL, quantity_received FLOAT NOT NULL, quantity_accepted FLOAT, "
+        "requires_inspection BOOLEAN, is_deleted BOOLEAN NOT NULL DEFAULT 0, company_id INTEGER NOT NULL, "
+        "PRIMARY KEY (id), "
+        "CONSTRAINT uq_po_receipts_company_receipt_number UNIQUE (company_id, receipt_number), "
+        f"CONSTRAINT chk_po_receipts_quantity_accepted_non_negative CHECK ({ACCEPTED_CHECK_SQL}), "
+        "FOREIGN KEY(company_id) REFERENCES companies (id))"
+    ),
+    "CREATE INDEX ix_po_receipts_company_id ON po_receipts (company_id)",
     # Children: the SQLite rebuild must leave the rows that reference both tables alone.
     (
         "CREATE TABLE inventory_transactions (id INTEGER PRIMARY KEY, "
         "inventory_item_id INTEGER REFERENCES inventory_items (id), quantity FLOAT)"
     ),
     "CREATE TABLE tool_checkouts (id INTEGER PRIMARY KEY, tool_id INTEGER NOT NULL REFERENCES tools (id))",
+    "CREATE TABLE non_conformance_reports (id INTEGER PRIMARY KEY, receipt_id INTEGER REFERENCES po_receipts (id))",
     (
         "CREATE TABLE stock_piece_observations (id INTEGER PRIMARY KEY, company_id INTEGER NOT NULL, "
         "source_inventory_item_id INTEGER NOT NULL)"
@@ -310,6 +341,9 @@ LEGACY_DDL = [
     "INSERT INTO tools VALUES (2, 'T-101', 'Retired gauge', 'GAUGE', 'RETIRED', NULL, NULL, 0, 2)",
     "INSERT INTO inventory_transactions VALUES (1, 1, 10.0), (2, 2, -4.0)",
     "INSERT INTO tool_checkouts VALUES (1, 1)",
+    "INSERT INTO po_receipts VALUES (1, 'RCV-1', 'LOT-1', 10, 10, 0, 0, 1)",
+    "INSERT INTO po_receipts VALUES (2, 'RCV-2', 'LOT-9', 4, 0, 1, 1, 2)",
+    "INSERT INTO non_conformance_reports VALUES (1, 2)",
     "INSERT INTO stock_piece_observations VALUES (1, 1, 1)",
 ]
 
@@ -322,6 +356,10 @@ LEGACY_ROWS_SQL = {
         "SELECT id, tool_id, name, tool_type, status, current_work_center_id, current_user_id, is_active, company_id "
         "FROM tools ORDER BY id"
     ),
+    "po_receipts": (
+        "SELECT id, receipt_number, lot_number, quantity_received, quantity_accepted, requires_inspection, "
+        "is_deleted, company_id FROM po_receipts ORDER BY id"
+    ),
 }
 LEGACY_ROWS = {
     "inventory_items": [
@@ -331,6 +369,10 @@ LEGACY_ROWS = {
     "tools": [
         (1, "T-100", "Synthetic fixture", "FIXTURE", "AVAILABLE", 3, 5, 1, 1),
         (2, "T-101", "Retired gauge", "GAUGE", "RETIRED", None, None, 0, 2),
+    ],
+    "po_receipts": [
+        (1, "RCV-1", "LOT-1", 10.0, 10.0, 0, 0, 1),
+        (2, "RCV-2", "LOT-9", 4.0, 0.0, 1, 1, 2),
     ],
 }
 OWNERSHIP_SQL = "SELECT ownership, owner_customer_id, owner_vendor_id FROM {table} ORDER BY id"
@@ -380,6 +422,8 @@ def _assert_legacy_rows_intact(connection):
     children = connection.exec_driver_sql("SELECT id, inventory_item_id, quantity FROM inventory_transactions")
     assert [tuple(row) for row in children] == [(1, 1, 10.0), (2, 2, -4.0)]
     assert [tuple(row) for row in connection.exec_driver_sql("SELECT id, tool_id FROM tool_checkouts")] == [(1, 1)]
+    ncrs = connection.exec_driver_sql("SELECT id, receipt_id FROM non_conformance_reports")
+    assert [tuple(row) for row in ncrs] == [(1, 2)]
     # The trigger that reads inventory_items is still there, its stored text byte-identical, and the
     # connection's legacy_alter_table is back to what it was (OFF): nothing outlives the migration.
     triggers = connection.exec_driver_sql("SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'trigger'")
@@ -407,8 +451,11 @@ def test_upgrade_adds_every_object_and_backfills_nothing(scratch):
         assert objects["columns"] == before["columns"] | set(NEW_COLUMNS), table
         assert objects["fks"] == sorted(before["fks"] + _new_fk_rows(table)), table
         assert objects["checks"] == {**before["checks"], **expected["checks"]}, table
-        index_name, index_columns = expected["index"]
-        assert objects["indexes"] == {**before["indexes"], index_name: (index_columns, False)}, table
+        if expected["index"] is None:
+            assert objects["indexes"] == before["indexes"], table
+        else:
+            index_name, index_columns = expected["index"]
+            assert objects["indexes"] == {**before["indexes"], index_name: (index_columns, False)}, table
         # Everything that was already there is carried across the SQLite rebuild.
         assert objects["uniques"] == before["uniques"], table
         reflected = {column["name"]: column for column in sa.inspect(connection).get_columns(table)}
@@ -418,6 +465,7 @@ def test_upgrade_adds_every_object_and_backfills_nothing(scratch):
         for name in ("owner_customer_id", "owner_vendor_id"):
             assert reflected[name]["nullable"] is True and reflected[name]["default"] is None, name
     assert legacy["inventory_items"]["checks"] == {"chk_inventory_items_allocated_non_negative": ALLOCATED_CHECK_SQL}
+    assert legacy["po_receipts"]["checks"] == {"chk_po_receipts_quantity_accepted_non_negative": ACCEPTED_CHECK_SQL}
     _assert_legacy_rows_intact(connection)
 
     # No backfill beyond the server default: every existing row -- the inactive / retired / other
@@ -433,6 +481,10 @@ def test_a_pre_129_insert_still_lands_as_company_stock(scratch):
     migration.upgrade()
     connection.exec_driver_sql("INSERT INTO inventory_items (id, part_id, location, company_id) VALUES (3, 1, 'C', 1)")
     connection.exec_driver_sql("INSERT INTO tools (id, tool_id, name, company_id) VALUES (3, 'T-102', 'New', 1)")
+    connection.exec_driver_sql(
+        "INSERT INTO po_receipts (id, receipt_number, lot_number, quantity_received, company_id) "
+        "VALUES (3, 'RCV-3', 'LOT-3', 1, 1)"
+    )
     for table in TABLES:
         assert connection.exec_driver_sql(f"{OWNERSHIP_SQL.format(table=table)}").fetchall()[-1] == (
             "company",
@@ -487,6 +539,11 @@ def test_the_checks_admit_each_kind_with_its_owner_and_refuse_a_mismatch(scratch
         if table == "inventory_items":
             connection.exec_driver_sql(
                 "INSERT INTO inventory_items (part_id, location, company_id, owner_customer_id) VALUES (1, 'X', 1, 10)"
+            )
+        elif table == "po_receipts":
+            connection.exec_driver_sql(
+                "INSERT INTO po_receipts (receipt_number, lot_number, quantity_received, company_id, owner_vendor_id) "
+                "VALUES ('RCV-9', 'L', 1, 1, 20)"
             )
         else:
             connection.exec_driver_sql(
@@ -633,7 +690,17 @@ def test_upgrade_over_a_create_all_schema_emits_nothing(tmp_path):
 
     module = _module()
     engine = sa.create_engine(f"sqlite:///{tmp_path / 'bootstrap.db'}")
-    names = ("companies", "users", "parts", "work_centers", "customers", "vendors", "inventory_items", "tools")
+    names = (
+        "companies",
+        "users",
+        "parts",
+        "work_centers",
+        "customers",
+        "vendors",
+        "inventory_items",
+        "tools",
+        "po_receipts",
+    )
     tables = [Base.metadata.tables[name] for name in names]
     with engine.begin() as conn:
         # Only what 129 touches and what its new FKs reference; other FK targets are irrelevant here.
@@ -689,15 +756,19 @@ def test_offline_upgrade_renders_the_canonical_postgres_ddl():
                 for name, (referred, local) in expected["fks"].items()
             ),
             *(f"ALTER TABLE {table} ADD CONSTRAINT {name} CHECK ({text})" for name, text in expected["checks"].items()),
-            f"CREATE INDEX {expected['index'][0]} ON {table} (company_id, ownership)",
+            *([f"CREATE INDEX {expected['index'][0]} ON {table} (company_id, ownership)"] if expected["index"] else []),
         ]
         # Exactly these, in this order: columns, then the FKs, then the CHECKs, then the index.
         assert _table_statements(statements, table) == ordered, table
-    # inventory_items first, then tools (the lock order the docstring states).
+    # inventory_items first, then tools, then po_receipts (the lock order the docstring states).
     assert max(_indexes_of(statements, "ALTER TABLE inventory_items", "CREATE INDEX ix_inventory_items")) < min(
         _indexes_of(statements, "ALTER TABLE tools", "CREATE INDEX ix_tools")
     )
-    assert len(statements) == 2 + 2 * 8
+    assert max(_indexes_of(statements, "ALTER TABLE tools", "CREATE INDEX ix_tools")) < min(
+        _indexes_of(statements, "ALTER TABLE po_receipts")
+    )
+    assert "ix_po_receipts_ownership" not in "\n".join(statements)
+    assert len(statements) == 2 + 2 * 8 + 7
     assert "ON DELETE" not in sql and "ON UPDATE" not in sql and "CONCURRENTLY" not in sql
     assert "is_deleted" not in sql and "audit_log" not in sql and "CREATE TABLE" not in sql
     assert not re.search(r"\b(UPDATE|INSERT|DELETE)\b", sql), "129 is pure DDL: no backfill"
@@ -713,18 +784,21 @@ def test_offline_downgrade_drops_exactly_what_upgrade_added_in_reverse():
         expected = _expected_names(table)
         ordered = [
             # The index first, then the CHECKs, then the FKs, then the columns -- each in reverse.
-            f"DROP INDEX {expected['index'][0]}",
+            *([f"DROP INDEX {expected['index'][0]}"] if expected["index"] else []),
             *(f"ALTER TABLE {table} DROP CONSTRAINT {name}" for name in reversed(list(expected["checks"]))),
             *(f"ALTER TABLE {table} DROP CONSTRAINT {name}" for name in reversed(list(expected["fks"]))),
             *(f"ALTER TABLE {table} DROP COLUMN {name}" for name in reversed(NEW_COLUMNS)),
         ]
         actual = [s for s in statements if s.startswith((f"ALTER TABLE {table} ", f"DROP INDEX ix_{table}_"))]
         assert actual == ordered, table
-    # Reverse of the upgrade: tools first, then inventory_items.
+    # Reverse of the upgrade: po_receipts first, then tools, then inventory_items.
+    assert max(_indexes_of(statements, "ALTER TABLE po_receipts")) < min(
+        _indexes_of(statements, "ALTER TABLE tools", "DROP INDEX ix_tools")
+    )
     assert max(_indexes_of(statements, "ALTER TABLE tools", "DROP INDEX ix_tools")) < min(
         _indexes_of(statements, "ALTER TABLE inventory_items", "DROP INDEX ix_inventory_items")
     )
-    assert len(statements) == 2 + 2 * 8
+    assert len(statements) == 2 + 2 * 8 + 7
     assert "DROP TABLE" not in sql and "is_deleted" not in sql and "audit_log" not in sql
     assert "supplier_id" not in sql and "chk_inventory_items_allocated_non_negative" not in sql
     assert not re.search(r"\b(UPDATE|INSERT)\b", sql)
@@ -746,4 +820,7 @@ def test_create_all_ddl_carries_the_same_objects_on_postgres(table):
     for name, (referred, local) in expected["fks"].items():
         assert f"CONSTRAINT {name} FOREIGN KEY({local}) REFERENCES {referred} (id)" in ddl, name
         assert f"FOREIGN KEY({local}) REFERENCES {referred} (id) ON DELETE" not in ddl, name
-    assert f"CREATE INDEX {expected['index'][0]} ON {table} (company_id, ownership)" in ddl
+    if expected["index"]:
+        assert f"CREATE INDEX {expected['index'][0]} ON {table} (company_id, ownership)" in ddl
+    else:
+        assert f"ix_{table}_ownership" not in ddl

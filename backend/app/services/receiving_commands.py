@@ -19,34 +19,23 @@ from app.services.owned_property_service import (
     resolve_owner,
 )
 
-# A receipt held for inspection reaches stock later, through ``inspect_receipt`` /
-# ``clear_receipt_inspection``, and ``po_receipts`` has no column to carry an owner across
-# that gap -- so an owned line received for inspection would silently land as company stock.
-# Refused instead (422), before anything is written.
-OWNED_RECEIPT_NEEDS_DOCK_TO_STOCK = (
-    "Customer- or supplier-owned material is received dock-to-stock only: set requires_inspection to false, "
-    "or receive it as company stock and change its ownership after inspection "
-    "(POST /inventory/items/{item_id}/ownership)."
-)
-
 
 def resolve_receipt_owner(db: Session, company_id: int, receipt_in) -> ResolvedOwner:
     """The owner a receipt line names, resolved in this company. Raises before any write.
 
-    422 for an owned line held for inspection (``OWNED_RECEIPT_NEEDS_DOCK_TO_STOCK``) or a
-    kind/owner mismatch; 404 for an owner that is not a live customer / non-deleted vendor
-    of this company. A company line (every line before migration 129) costs no query.
+    422 for a kind/owner mismatch; 404 for an owner that is not a live customer / non-deleted
+    vendor of this company. A company line (every line before migration 129, and every Hank
+    line, whose schema carries no ownership) costs no query. The owner is recorded on the
+    receipt (``po_receipts.ownership`` / ``owner_*``), so a line held for inspection carries it
+    to stock when ``inspect_receipt`` accepts it or ``clear_receipt_inspection`` releases it.
     """
-    owner = resolve_owner(
+    return resolve_owner(
         db,
         company_id,
         getattr(receipt_in, "ownership", None) or COMPANY_OWNER.ownership,
         getattr(receipt_in, "owner_customer_id", None),
         getattr(receipt_in, "owner_vendor_id", None),
     )
-    if not owner.is_company and receipt_in.requires_inspection:
-        raise HTTPException(status_code=422, detail=OWNED_RECEIPT_NEEDS_DOCK_TO_STOCK)
-    return owner
 
 
 def generate_receipt_number(db: Session, company_id: int) -> str:
@@ -219,6 +208,9 @@ def _receive_material(receipt_in, db, current_user, company_id, audit, *, checke
         over_receive_approved_by=(current_user.id if receipt_in.over_receive_approved else None),
         received_by=current_user.id,
         notes=receipt_in.notes,
+        # Who owns the material (AS9100D 8.5.3) -- recorded on the receipt so an inspection
+        # accept or a cleared hold later places it on a stock row of the same owner.
+        **owner.columns(),
     )
     receipt.company_id = company_id
     db.add(receipt)
@@ -345,9 +337,10 @@ def _add_to_inventory(
 
     ``owner`` (already resolved in this company) is part of the merge key: the material
     is added into an existing row only when that row has the same part, location, lot
-    AND owner, and a new row carries it (AS9100D 8.5.3). It defaults to company, which is
-    what the inspection paths (``inspect_receipt`` / ``clear_receipt_inspection``) receive
-    -- an owned line never reaches them (``resolve_receipt_owner``).
+    AND owner, and a new row carries it (AS9100D 8.5.3). Every caller passes the owner the
+    receipt records (``po_receipts.ownership``): dock-to-stock here, and the inspection accept
+    (``inspect_receipt``) and the cleared hold (``clear_receipt_inspection``) through
+    ``owned_property_service.recorded_owner``. It defaults to company.
 
     ``reason_code`` / ``notes`` are optional overrides for the RECEIVE ledger row.
     Both default to None so the two original callers (receive_material's

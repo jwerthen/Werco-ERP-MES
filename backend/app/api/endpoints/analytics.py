@@ -253,7 +253,13 @@ def get_inventory_analytics(
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Get inventory turnover and analytics."""
+    """Inventory turnover and value for the company's OWN stock (Admin / Manager / Supervisor).
+
+    Per-part average inventory value, turnover (cost of goods consumed over the period against
+    that average) and ``summary.total_inventory_value``. Customer- and supplier-owned property
+    held here (AS9100D 8.5.3) is not the company's inventory, so it is left out of every value
+    figure; list it with ``GET /inventory/?ownership=customer`` (or ``supplier``).
+    """
     start, end, calendar = company_period(db, company_id, period, start_date, end_date)
     service = AnalyticsService(db, company_id, zone=calendar.tz, calendar=calendar)
     return service.get_inventory_analytics(start, end, category)

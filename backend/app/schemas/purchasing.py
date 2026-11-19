@@ -610,9 +610,9 @@ class ReceiptLineFields(BaseModel):
 
 class ReceiptCreate(ReceiptLineFields, OwnershipFields):
     """One PO-line receipt. ``ownership`` / ``owner_customer_id`` / ``owner_vendor_id``
-    default to company stock (AS9100D 8.5.3; see ``OwnershipFields``). Customer- or
-    supplier-owned material must be received dock-to-stock (``requires_inspection`` false):
-    the inspection queue has no place to carry the owner, so such a line is refused 422.
+    default to company stock (AS9100D 8.5.3; see ``OwnershipFields``). The owner is recorded
+    on the receipt, so material held for inspection reaches stock under the same owner when
+    it is accepted or its hold is cleared.
     """
 
 
@@ -752,6 +752,11 @@ class ReceiptResponse(UTCModel):
     received_by: Optional[int] = None
     inspected_by: Optional[int] = None
     notes: Optional[str] = None
+    # Who owns the received material (AS9100D 8.5.3, migration 129): company / customer /
+    # supplier, and the owning customer or vendor. Defaults keep a pre-129 row reading as company.
+    ownership: str = "company"
+    owner_customer_id: Optional[int] = None
+    owner_vendor_id: Optional[int] = None
 
     class Config:
         from_attributes = True

@@ -1592,6 +1592,11 @@ def _max_combinable(source_picture: PartStockPicture, reservations: SourceReserv
         return max(0.0, min(source_picture.eligible_available, reservation_cap))
 
     company_budget = (source_picture.eligible_available - source_picture.owned_eligible_available) - unpinned_reserved
+    if company_budget < -LEDGER_QUANTITY_EPSILON:
+        # Company stock is ALREADY short of the open unpinned demand, so ``_combine_blockers``
+        # refuses every quantity -- moving only owned rows still leaves the company remainder
+        # below the demand. Offering the owned rows here would be a number the write refuses.
+        return 0.0
     total = 0.0
     for line in source_picture.lines:
         # The same filter and order ``_plan_lines`` draws with.

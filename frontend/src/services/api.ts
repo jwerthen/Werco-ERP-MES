@@ -21,7 +21,7 @@ import type {
   CustomerContractUpdateInput,
   CustomerExportControl,
 } from '../types/exportControl';
-import type { InventoryOwnershipChange, OwnershipInfo, OwnershipType } from '../types/ownership';
+import type { InventoryOwnershipChange, InventoryOwnershipChangeResult, OwnershipType } from '../types/ownership';
 import axios, { AxiosInstance, AxiosError, AxiosRequestConfig } from 'axios';
 import { normalizeAxiosErrorDetail, parseBlobErrorBody } from '../utils/apiError';
 import { downloadFilename } from '../utils/contentDisposition';
@@ -3439,12 +3439,17 @@ class ApiService {
    * mismatch, 409 for an inactive or zero-quantity row or a no-op ("already ..."), and
    * 503 when the required audit row cannot be written. No ledger row is posted —
    * ownership is not a quantity movement — but the on-hand reads are stale.
+   *
+   * A success carries two disclosures the caller must surface: `open_pinned_ties` (jobs
+   * pinned to this row, which still consume it) and `unpinned_demand` (company stock
+   * re-owned away: what open unpinned demand is now short by). See
+   * `ownershipChangeNotice` in utils/ownership.ts.
    */
   async changeInventoryOwnership(
     itemId: number,
     data: InventoryOwnershipChange
-  ): Promise<OwnershipInfo & { id: number }> {
-    const response = await this.api.post(`/inventory/items/${itemId}/ownership`, data);
+  ): Promise<InventoryOwnershipChangeResult> {
+    const response = await this.api.post<InventoryOwnershipChangeResult>(`/inventory/items/${itemId}/ownership`, data);
     this.invalidateCache('/inventory');
     return response.data;
   }

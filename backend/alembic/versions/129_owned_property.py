@@ -1,4 +1,4 @@
-"""Ownership markers on inventory stock rows and tools (AS9100D 8.5.3 customer / supplier property)
+"""Ownership markers on inventory stock rows, tools and PO receipts (AS9100D 8.5.3 customer / supplier property)
 
 Revision ID: 129_owned_property
 Revises: 128_po_flowdown
@@ -15,6 +15,11 @@ merged on receive, and counted in valuation. This revision adds the marker; the 
 reads it (FIFO skips owned stock, merge keys include ownership, the reasoned change-of-ownership
 verb, valuation excludes it) lives in the services.
 
+``po_receipts`` carries the same marker so a receipt held for inspection keeps its owner until it
+places stock: the receipt records who owns the material when it is received, and the inspection
+accept / clear-hold paths put the material on a stock row of that owner. Without it an owned
+receipt sent to inspection would land as company stock.
+
 Each of ``inventory_items`` and ``tools`` gains, every object guarded on its own:
 
   - ``ownership``          String(20) NOT NULL, server default ``'company'``, plus CHECK
@@ -27,6 +32,10 @@ Each of ``inventory_items`` and ``tools`` gains, every object guarded on its own
     customer and no vendor, a supplier row names a vendor and no customer;
   - index ``ix_<table>_ownership`` on ``(company_id, ownership)``, for the per-company ownership
     filters on the inventory and tool lists.
+
+``po_receipts`` gains the same three columns, FKs and CHECKs (``ck_po_receipts_ownership`` /
+``ck_po_receipts_owner_matches``, ``fk_po_receipts_owner_*``) and NO index: nothing lists or
+filters receipts by owner.
 
 No backfill beyond the server default (deliberate)
 --------------------------------------------------
@@ -45,19 +54,21 @@ probe for owned stock and tools before it deletes rather than surface this FK as
 
 Tenant / compliance shape
 -------------------------
-- ``inventory_items`` and ``tools`` are EXISTING tenant tables: each already carries the
-  TenantMixin non-null ``company_id`` + index, and RLS has been on since ``059``. This revision
+- ``inventory_items``, ``tools`` and ``po_receipts`` are EXISTING tenant tables: each already
+  carries the TenantMixin non-null ``company_id`` + index, and RLS has been on since ``059``. This revision
   creates no table, so the ENABLE-RLS new-table convention does not apply, and it emits no RLS /
   ``REVOKE`` / role-naming statement. Existing grants cover new columns.
-- The new index leads with ``company_id``, so it serves tenant-scoped reads only.
-- Neither table is soft-deletable (``is_active`` / ``status`` are their tombstones); both are
-  untouched. On SQLite the batch rebuild carries every row and every other column, constraint and
-  index across. Nothing here deletes a row.
+- The new indexes lead with ``company_id``, so they serve tenant-scoped reads only.
+- Neither ``inventory_items`` nor ``tools`` is soft-deletable (``is_active`` / ``status`` are their
+  tombstones); ``po_receipts`` is, and its ``is_deleted`` / tombstone columns are untouched. On
+  SQLite the batch rebuild carries every row and every other column, constraint and index across.
+  Nothing here deletes a row.
 
 Lock-step with the models (the stamped-over hazard)
 ---------------------------------------------------
-Every column, FK name, CHECK text and the index are declared on ``InventoryItem``
-(``app/models/inventory.py``) and ``Tool`` (``app/models/tool_management.py``) in the same commit,
+Every column, FK name, CHECK text and index is declared on ``InventoryItem``
+(``app/models/inventory.py``), ``Tool`` (``app/models/tool_management.py``) and ``POReceipt``
+(``app/models/purchasing.py``) in the same commit,
 the CHECK texts built there from one shared constant, so the ``create_all`` -> stamp -> upgrade
 bootstrap builds them from the models and every guard here no-ops. The CHECK texts here are
 literals equal to the PR contract; ``tests/test_migration_129_owned_property.py`` pins them
@@ -82,18 +93,18 @@ Idempotent and reversible
   added and dropped). Each rebuild therefore runs under ``PRAGMA legacy_alter_table = ON``, the
   remedy SQLite documents for its 12-step generalized ALTER TABLE, and the prior value is put
   back after. That pragma is connection-scoped and never persisted; the trigger's stored text is
-  left byte-identical and resolves to the rebuilt table. No trigger is ON either table (a rebuild
-  would silently drop one; the fresh-bootstrap round-trip would show it), and none names
-  ``tools``. PostgreSQL never rebuilds, so the pragma is SQLite-only.
-- Downgrade drops exactly what upgrade added, in reverse: ``tools`` before ``inventory_items``,
-  and within each table the index, then the CHECKs, then the FKs, then the columns. Each drop is
-  guarded.
+  left byte-identical and resolves to the rebuilt table. No trigger is ON any of the three
+  tables (a rebuild would silently drop one; the fresh-bootstrap round-trip would show it), and
+  none names ``tools`` or ``po_receipts``. PostgreSQL never rebuilds, so the pragma is SQLite-only.
+- Downgrade drops exactly what upgrade added, in reverse: ``po_receipts``, then ``tools``, then
+  ``inventory_items``, and within each table the index (where there is one), then the CHECKs,
+  then the FKs, then the columns. Each drop is guarded.
 - ``--sql`` (offline) has no database to inspect, so it renders the canonical path.
 
 Downgrade is LOSSY -- and worse than lossy for owned stock. Read before running it.
 ------------------------------------------------------------------------------------
-Dropping the columns discards which stock rows and tools belong to a customer or supplier, and
-who. Every owned row then reads as company stock to every query: FIFO draws it, a receive merges
+Dropping the columns discards which stock rows, tools and receipts belong to a customer or
+supplier, and who. Every owned row then reads as company stock to every query: FIFO draws it, a receive merges
 into it, valuation counts it. The ownership-change and receipt audit rows still record what was
 set, but nothing re-derives the columns from them.
 
@@ -102,8 +113,11 @@ default, so a CODE rollback does NOT need this downgrade -- it needs a STAMP: fr
 the CURRENT release run ``alembic stamp 128_po_flowdown`` (this revision's ``down_revision``)
 before redeploying the older image. The markers stay, and the next forward upgrade re-runs this
 revision as a guarded no-op that keeps them. Even under a stamp, the OLD code cannot see the
-markers: while it runs, it draws, merges into and values owned rows as company stock. If any
-owned stock exists at rollback time, put those rows on hold for the rollback window.
+markers: while it runs, it draws, merges into and values owned rows as company stock, and an
+owned receipt it accepts out of inspection lands as company stock. If any owned stock exists at
+rollback time, export the owned rows first (``GET /inventory/?ownership=customer`` and
+``?ownership=supplier``, or the inventory export's ``ownership`` column) and keep the rollback
+window short.
 
 Locking / operations note
 -------------------------
@@ -114,11 +128,11 @@ Locking / operations note
 - Each FK validates against an all-NULL column (a quick scan) and takes a SHARE ROW EXCLUSIVE lock
   on ``customers`` / ``vendors``; each CHECK scans its table once (every row is ``'company'`` with
   NULL owners, which passes); the index is a plain ``CREATE INDEX`` (not CONCURRENTLY -- the
-  revision runs inside the migration transaction). Both tables are small, so each scan is brief.
-- Each table takes an ACCESS EXCLUSIVE lock -- ``inventory_items`` first, then ``tools`` -- held to
-  the end of the migration transaction. ``SET LOCAL lock_timeout = '5s'`` bounds every wait when
-  there is DDL to run and is handed back (``SET LOCAL lock_timeout = DEFAULT``) as soon as it is
-  done (precedent 114-117, 122, 127, 128). A timeout rolls the whole migration back cleanly.
+  revision runs inside the migration transaction). The tables are small, so each scan is brief.
+- Each table takes an ACCESS EXCLUSIVE lock -- ``inventory_items`` first, then ``tools``, then
+  ``po_receipts`` -- held to the end of the migration transaction. ``SET LOCAL lock_timeout =
+  '5s'`` bounds every wait when there is DDL to run and is handed back (``SET LOCAL lock_timeout =
+  DEFAULT``) as soon as it is done (precedent 114-117, 122, 127, 128). A timeout rolls the whole migration back cleanly.
 
 Deploy ordering: run BEFORE (or with) the release that maps the columns -- the migration runs at
 API boot (``backend/start.sh``). Old code is safe on the new schema (it never selects the
@@ -130,7 +144,7 @@ Revision id ``129_owned_property`` is 18 chars (<= 32, ``alembic_version.version
 """
 
 from contextlib import contextmanager
-from typing import Callable, Iterator, List, NamedTuple, Tuple
+from typing import Callable, Iterator, List, NamedTuple, Optional, Tuple
 
 import sqlalchemy as sa
 
@@ -144,13 +158,14 @@ depends_on = None
 
 INVENTORY_ITEMS = "inventory_items"
 TOOLS = "tools"
+PO_RECEIPTS = "po_receipts"
 
 # The only server default. A plain string, as on the models (never ``sa.text``, which renders a
 # different DEFAULT on SQLite and breaks the fresh-bootstrap diff).
 DEFAULT_OWNERSHIP = "company"
 
-# Lock-step with the models' shared CHECK constants (the test pins both tables' texts equal to
-# these). Identical on both tables: neither names its table.
+# Lock-step with the models' shared CHECK constants (the test pins every table's texts equal to
+# these). Identical on every table: none names its table.
 OWNERSHIP_CHECK_SQL = "ownership IN ('company', 'customer', 'supplier')"
 OWNER_MATCHES_CHECK_SQL = (
     "(ownership = 'company' AND owner_customer_id IS NULL AND owner_vendor_id IS NULL) OR "
@@ -188,11 +203,11 @@ class _TableChange(NamedTuple):
     foreign_keys: Tuple[Tuple[str, str, str], ...]
     # (constraint name, SQL), in creation order.
     checks: Tuple[Tuple[str, str], ...]
-    # (index name, columns)
-    index: Tuple[str, Tuple[str, ...]]
+    # (index name, columns), or None for a table that gets no ownership index (po_receipts).
+    index: Optional[Tuple[str, Tuple[str, ...]]]
 
 
-def _table_change(table: str) -> _TableChange:
+def _table_change(table: str, *, indexed: bool = True) -> _TableChange:
     return _TableChange(
         table,
         _columns,
@@ -204,12 +219,16 @@ def _table_change(table: str) -> _TableChange:
             (f"ck_{table}_ownership", OWNERSHIP_CHECK_SQL),
             (f"ck_{table}_owner_matches", OWNER_MATCHES_CHECK_SQL),
         ),
-        (f"ix_{table}_ownership", ("company_id", "ownership")),
+        (f"ix_{table}_ownership", ("company_id", "ownership")) if indexed else None,
     )
 
 
 # Upgrade order (the lock order the docstring states); downgrade walks it reversed.
-TABLE_CHANGES: Tuple[_TableChange, ...] = (_table_change(INVENTORY_ITEMS), _table_change(TOOLS))
+TABLE_CHANGES: Tuple[_TableChange, ...] = (
+    _table_change(INVENTORY_ITEMS),
+    _table_change(TOOLS),
+    _table_change(PO_RECEIPTS, indexed=False),
+)
 
 
 def _offline() -> bool:
@@ -296,7 +315,7 @@ def _missing(change: _TableChange, offline: bool) -> _Pending:
         [column for column in change.columns() if offline or not _has_column(table, column.name)],
         [fk for fk in change.foreign_keys if offline or not _has_foreign_key(table, fk[0])],
         [check for check in change.checks if offline or not _has_check_constraint(table, check[0])],
-        offline or not _has_index(table, change.index[0]),
+        change.index is not None and (offline or not _has_index(table, change.index[0])),
     )
 
 
@@ -307,7 +326,7 @@ def _present(change: _TableChange, offline: bool) -> _Pending:
         [column for column in change.columns() if offline or _has_column(table, column.name)],
         [fk for fk in change.foreign_keys if offline or _has_foreign_key(table, fk[0])],
         [check for check in change.checks if offline or _has_check_constraint(table, check[0])],
-        offline or _has_index(table, change.index[0]),
+        change.index is not None and (offline or _has_index(table, change.index[0])),
     )
 
 
@@ -332,7 +351,7 @@ def upgrade() -> None:
                     batch.create_foreign_key(name, referred_table, [local_column], ["id"])
                 for name, sql in work.checks:
                     batch.create_check_constraint(name, sa.text(sql))
-        if work.index:
+        if work.index and work.change.index is not None:
             index_name, index_columns = work.change.index
             op.create_index(index_name, table, list(index_columns), unique=False)
     if postgres:
@@ -340,8 +359,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # LOSSY: discards which stock rows and tools a customer or supplier owns, and every owned row
-    # then reads as company stock. See the module docstring -- a code rollback needs
+    # LOSSY: discards which stock rows, tools and receipts a customer or supplier owns, and every
+    # owned row then reads as company stock. See the module docstring -- a code rollback needs
     # ``alembic stamp 128_po_flowdown``, not this.
     offline = _offline()
     pending = [work for work in (_present(change, offline) for change in reversed(TABLE_CHANGES)) if _has_work(work)]
@@ -353,7 +372,7 @@ def downgrade() -> None:
         op.execute(LOCK_TIMEOUT_SQL)
     for work in pending:
         table = work.change.table
-        if work.index:
+        if work.index and work.change.index is not None:
             # Before the batch: a SQLite rebuild re-creates every surviving index, and this one
             # names ``ownership``.
             op.drop_index(work.change.index[0], table_name=table)
