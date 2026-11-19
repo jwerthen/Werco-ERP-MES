@@ -630,7 +630,7 @@ class TestPerIpPinBudget:
         challenge = badge_login(client, pinned)
         assert challenge.status_code == 401 and challenge.json()["detail"]["code"] == "floor_pin_required"
         assert badge_login(client, badge_only).status_code == 200
-        unknown = client.post(EMPLOYEE_LOGIN, json={"employee_id": "UNKNOWN-9"}, headers=XHR)
+        unknown = client.post(EMPLOYEE_LOGIN, json={"employee_id": "UNKNOWN-NOPE"}, headers=XHR)
         assert unknown.status_code == 401 and unknown.json()["detail"] == "Invalid employee ID"
 
     def test_the_budget_is_spent_at_reservation_so_a_burst_cannot_overshoot_it(self):
