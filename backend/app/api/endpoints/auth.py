@@ -1,10 +1,10 @@
 import hmac
 from datetime import datetime, timedelta
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, NamedTuple, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
-from sqlalchemy import func, or_, update
+from sqlalchemy import and_, false, func, or_, select, true, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -22,12 +22,24 @@ from app.core.floor_pin import (
     AUTH_METHOD_PIN,
     BADGE_AND_PIN_AUTH_METHODS,
     BADGE_ONLY_AUTH_METHODS,
+    FLOOR_PIN_ADMIN_LOCK_FAILURES,
     FLOOR_PIN_LOCKOUT_MINUTES,
-    FLOOR_PIN_MAX_FAILURES,
+    FLOOR_PIN_REAUTH_CODE,
+    FLOOR_PIN_REAUTH_MESSAGE,
+    FLOOR_PIN_RESET_REQUIRED_CODE,
+    FLOOR_PIN_RESET_REQUIRED_MESSAGE,
     badge_last_four,
+    floor_pin_stamp,
+    floor_pin_timed_lock_minutes,
+    pin_session_still_valid,
     verify_floor_pin,
 )
-from app.core.login_throttle import client_ip_from_request, employee_login_throttle, password_login_throttle
+from app.core.login_throttle import (
+    client_ip_from_request,
+    employee_login_throttle,
+    floor_pin_ip_throttle,
+    password_login_throttle,
+)
 from app.core.security import (
     create_access_token,
     create_refresh_token,
@@ -920,75 +932,97 @@ def _find_user_by_employee_id(db: Session, employee_id: str) -> Optional[User]:
 # ONE step, shared by ``POST /auth/employee-login`` and ``POST /auth/kiosk-badge-token`` so
 # the two doors the floor signs in through cannot drift. Each route runs it after its own
 # user resolution and its locked / inactive checks and before its success audit, and hands
-# in how IT records a failure. The step returns the ``amr`` methods the route mints into its
-# tokens.
+# in how IT records a failure. The step returns the ``amr`` methods and, for a verified PIN,
+# the ``pst`` stamp the route mints into its tokens.
 #
-# The limit on guessing is the per-USER PIN lock (5 wrong PINs, 15 minutes), never a per-IP
-# charge: crew stations and kiosks share one egress IP, and one person's PIN typos must not
-# lock badge sign-in for the whole floor (``employee_login_throttle`` still counts unknown
-# badges, as before).
+# Limits on guessing: the per-USER lock tiers (``app.core.floor_pin``: 5 cumulative wrong PINs
+# -> 15 minutes, 10 -> 2 hours, 15 -> admin-locked until an Admin / Manager unlock, set or
+# clear), plus, on the PUBLIC employee-login route only, a per-IP wrong-PIN budget
+# (``floor_pin_ip_throttle``) that blocks only further PIN attempts from that IP -- never
+# badge-only sign-in, the challenge, or unknown-badge handling, and never the shared
+# ``employee_login_throttle``. The station-gated crew mint has no IP charge.
 # ---------------------------------------------------------------------------
 
-# Wrong PIN and a locked PIN answer the same text on both routes, so the response never
+# Wrong PIN and every kind of lock answer the same text on both routes, so the response never
 # says which (or how many tries are left).
 FLOOR_PIN_INVALID_DETAIL = "Invalid badge or PIN"
 FLOOR_PIN_REQUIRED_CODE = "floor_pin_required"
 FLOOR_PIN_REQUIRED_MESSAGE = "Enter your PIN."
 FLOOR_PIN_NOT_SET_CODE = "floor_pin_not_set"
 FLOOR_PIN_NOT_SET_MESSAGE = "No PIN is set for this badge. Ask a supervisor to set one."
-
-# A badge-only session (``amr`` ``["badge"]``) asked to renew -- ``POST /auth/refresh`` or
-# ``POST /auth/switch-company`` -- after the rule changed under it: the user now has a PIN, or
-# the company now requires one. 401 so the client drops the session and signs in again.
-FLOOR_PIN_REAUTH_CODE = "floor_pin_reauth_required"
-FLOOR_PIN_REAUTH_MESSAGE = "Sign in again with your badge and PIN."
+# (``FLOOR_PIN_REAUTH_CODE`` / ``_MESSAGE`` and ``FLOOR_PIN_RESET_REQUIRED_CODE`` / ``_MESSAGE``
+# are imported from ``app.core.floor_pin``: the identity resolver answers the first too.)
+FLOOR_PIN_IP_THROTTLED_DETAIL = "Too many wrong PINs from this network. Try again in about {minutes} minute{plural}."
 
 # The ``error_message`` each failure earns on its audit row. Never the PIN.
 _AUDIT_ERROR_PIN_LOCKED = "PIN locked"
 _AUDIT_ERROR_WRONG_PIN = "Wrong PIN"
 _AUDIT_ERROR_NO_PIN_SET = "No PIN set"
+_AUDIT_ERROR_PIN_RESET_REQUIRED = "PIN reset required"
 _AUDIT_ERROR_PIN_NOW_REQUIRED = "PIN now required"
+_AUDIT_ERROR_PIN_CHANGED = "PIN changed"
+_AUDIT_ERROR_PIN_IP_THROTTLED = "Throttled: too many wrong PINs from this address"
 
 # ``record_failure(error, extra_data)``: write the route's FAILED audit row and commit it.
 _FloorPinFailureRecorder = Callable[[str, Optional[Dict[str, Any]]], None]
 
 
-def _floor_pin_not_locked(now: datetime) -> Any:
-    """SQL: no PIN lock in force at ``now`` (never locked, or the lock has run out)."""
-    return or_(User.floor_pin_locked_until.is_(None), User.floor_pin_locked_until <= now)
+class _FloorPinSignOn(NamedTuple):
+    """What a badge sign-on mints: the ``amr`` methods and, after a verified PIN, the ``pst``."""
+
+    auth_methods: List[str]
+    pin_set_stamp: Optional[int] = None
+
+
+def _floor_pin_open(now: datetime) -> Any:
+    """SQL: the PIN takes attempts -- no timed lock in force at ``now`` and not admin-locked."""
+    return and_(
+        or_(User.floor_pin_locked_until.is_(None), User.floor_pin_locked_until <= now),
+        User.floor_pin_admin_locked == false(),
+    )
 
 
 def _reserve_floor_pin_attempt(db: Session, user_id: int, now: datetime) -> Optional[int]:
-    """Count this attempt BEFORE the PIN is checked; the count including it, or None while locked.
+    """Count this attempt BEFORE the PIN is checked; the cumulative count including it, or None while locked.
 
-    ONE conditional ``UPDATE ... SET n = coalesce(n, 0) + 1 WHERE <not locked> RETURNING n``:
+    ONE conditional ``UPDATE ... SET n = coalesce(n, 0) + 1 WHERE <open> RETURNING n``:
     the guess is spent before bcrypt runs, so racing attempts on one badge each spend their
     own guess (the row lock the UPDATE takes serializes them on Postgres), a crash or a lost
-    audit row afterwards can never give one back, and an attempt that finds a lock in force
-    reserves nothing and is refused without running the KDF. The caller commits the
-    reservation before it verifies; a verified PIN then settles it
+    audit row afterwards can never give one back, and an attempt that finds a lock in force --
+    timed or admin -- reserves nothing and is refused without running the KDF. The caller
+    commits the reservation before it verifies; a verified PIN then settles it
     (:func:`_settle_verified_floor_pin`).
     """
     return db.execute(
         update(User)
-        .where(User.id == user_id, _floor_pin_not_locked(now))
+        .where(User.id == user_id, _floor_pin_open(now))
         .values(floor_pin_failed_attempts=func.coalesce(User.floor_pin_failed_attempts, 0) + 1)
         .returning(User.floor_pin_failed_attempts)
         .execution_options(synchronize_session=False)
     ).scalar_one_or_none()
 
 
-def _lock_floor_pin(db: Session, user_id: int, now: datetime) -> bool:
-    """At the limit: lock the PIN for 15 minutes and reset the counter -- unless a lock is
-    already in force (a racing attempt set it first; it is never extended). True when THIS
-    attempt set the lock."""
+def _lock_floor_pin(db: Session, user_id: int, now: datetime, minutes: int = FLOOR_PIN_LOCKOUT_MINUTES) -> bool:
+    """Start a timed lock of ``minutes`` -- unless a lock (timed or admin) is already in force, which
+    is never extended or shortened. The cumulative counter is NOT reset, so the next tier still
+    escalates. True when THIS attempt set the lock."""
     locked_id = db.execute(
         update(User)
-        .where(User.id == user_id, _floor_pin_not_locked(now))
-        .values(
-            floor_pin_failed_attempts=0,
-            floor_pin_locked_until=now + timedelta(minutes=FLOOR_PIN_LOCKOUT_MINUTES),
-        )
+        .where(User.id == user_id, _floor_pin_open(now))
+        .values(floor_pin_locked_until=now + timedelta(minutes=minutes))
+        .returning(User.id)
+        .execution_options(synchronize_session=False)
+    ).scalar_one_or_none()
+    return locked_id is not None
+
+
+def _admin_lock_floor_pin(db: Session, user_id: int) -> bool:
+    """The last tier: admin-lock the PIN (only an Admin / Manager unlock, set or clear lifts it).
+    True when THIS attempt set it."""
+    locked_id = db.execute(
+        update(User)
+        .where(User.id == user_id, User.floor_pin_admin_locked == false())
+        .values(floor_pin_admin_locked=true())
         .returning(User.id)
         .execution_options(synchronize_session=False)
     ).scalar_one_or_none()
@@ -996,17 +1030,21 @@ def _lock_floor_pin(db: Session, user_id: int, now: datetime) -> bool:
 
 
 def _settle_verified_floor_pin(db: Session, user_id: int, now: datetime) -> bool:
-    """After the right PIN: clear the counter (this attempt's reservation and any earlier wrong
-    PINs) and an expired lock -- only while no lock is in force. False when a racing wrong
-    guess locked the PIN while this one was being verified: the caller refuses it as locked."""
+    """After the right PIN: clear the cumulative counter and an expired lock -- only while the PIN
+    is open. False when a racing wrong guess locked it (timed or admin) while this one was being
+    verified: the caller refuses it as locked."""
     settled_id = db.execute(
         update(User)
-        .where(User.id == user_id, _floor_pin_not_locked(now))
+        .where(User.id == user_id, _floor_pin_open(now))
         .values(floor_pin_failed_attempts=0, floor_pin_locked_until=None)
         .returning(User.id)
         .execution_options(synchronize_session=False)
     ).scalar_one_or_none()
     return settled_id is not None
+
+
+def _floor_pin_admin_locked_now(db: Session, user_id: int) -> bool:
+    return bool(db.execute(select(User.floor_pin_admin_locked).where(User.id == user_id)).scalar())
 
 
 def _floor_pin_sign_on_step(
@@ -1016,60 +1054,97 @@ def _floor_pin_sign_on_step(
     pin: Optional[str],
     company_id: int,
     record_failure: _FloorPinFailureRecorder,
-) -> List[str]:
-    """The floor-PIN step of a badge sign-on. Returns the ``amr`` methods, or raises the refusal.
+    before_pin_attempt: Optional[Callable[[], None]] = None,
+    on_wrong_pin: Optional[Callable[[], None]] = None,
+) -> _FloorPinSignOn:
+    """The floor-PIN step of a badge sign-on. Returns what to mint, or raises the refusal.
 
+    0. A promotion into Admin / Manager / Quality cleared the user's PIN
+       (``floor_pin_reset_required``): **403** ``{"code": "floor_pin_reset_required", ...}`` and a
+       FAILED row "PIN reset required", whatever the company policy, until an Admin sets a new
+       PIN or clears it.
     1. The user has a PIN and the request carries none: **401**
        ``{"code": "floor_pin_required", "message": "Enter your PIN."}``. A challenge, not a
        failure -- no audit row, no counter move, nothing written.
-    2. The user has a PIN and one was given. The attempt is RESERVED first (one conditional
-       ``UPDATE`` counts it unless a lock is in force) and that reservation is COMMITTED, so a
-       lost audit row or a crash never gives a guess back. Then:
-       - a lock in force (nothing reserved): **401** "Invalid badge or PIN" and a FAILED row
-         "PIN locked" -- bcrypt never runs;
-       - a wrong PIN: at the 5th count the PIN locks for 15 minutes and the counter resets
-         (committed before the audit row too); a FAILED row "Wrong PIN" (the locking one
-         flagged ``floor_pin_locked``), then **401** "Invalid badge or PIN";
+    2. The user has a PIN and one was given. ``before_pin_attempt`` runs first (employee-login's
+       per-IP wrong-PIN gate: 429 when that IP spent its budget). The attempt is then RESERVED (one
+       conditional ``UPDATE`` counts it unless a lock is in force) and that reservation is
+       COMMITTED, so a lost audit row or a crash never gives a guess back. Then:
+       - a lock in force -- timed or admin -- (nothing reserved): **401** "Invalid badge or PIN"
+         and a FAILED row "PIN locked" (``floor_pin_admin_locked`` marked when it is the admin
+         lock) -- bcrypt never runs;
+       - a wrong PIN: the CUMULATIVE count decides the tier -- 5 locks for 15 minutes, 10 for 2
+         hours, 15 admin-locks (committed before the audit row too); a FAILED row "Wrong PIN"
+         (the locking one marked ``floor_pin_locked``, plus ``floor_pin_admin_locked`` at tier
+         3), ``on_wrong_pin`` (employee-login charges its per-IP PIN budget), then **401**
+         "Invalid badge or PIN";
        - the right PIN: the counter and any expired lock are cleared -- unless a racing wrong
          guess locked the PIN meanwhile, which is refused as locked -- and the methods are
-         ``["badge", "pin"]`` (the clear commits with the route's success audit).
+         ``["badge", "pin"]`` with the PIN's ``floor_pin_set_at`` as the ``pst`` stamp (the clear
+         commits with the route's success audit).
     3. The user has no PIN: when the company's ``require_floor_pin`` is on, **403**
        ``{"code": "floor_pin_not_set", ...}`` and a FAILED row "No PIN set"; otherwise the
        methods are ``["badge"]`` and a supplied PIN is ignored.
 
-    The PIN counter and lock are their own columns, never ``failed_login_attempts`` /
-    ``locked_until``: a PIN lockout leaves the password login alone. No outcome here charges
-    a per-IP throttle (see the section comment). An empty ``pin`` is the same as none.
+    The PIN counter and locks are their own columns, never ``failed_login_attempts`` /
+    ``locked_until``: a PIN lockout leaves the password login alone. An empty ``pin`` is the
+    same as none. The stored hash is read only inline at the verify call -- never held in a
+    local of this frame, which an error report would record.
     """
     pin = pin or None
+    if user.floor_pin_reset_required:
+        record_failure(_AUDIT_ERROR_PIN_RESET_REQUIRED, None)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": FLOOR_PIN_RESET_REQUIRED_CODE, "message": FLOOR_PIN_RESET_REQUIRED_MESSAGE},
+        )
     if user.floor_pin_hash:
         if pin is None:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail={"code": FLOOR_PIN_REQUIRED_CODE, "message": FLOOR_PIN_REQUIRED_MESSAGE},
             )
+        if before_pin_attempt is not None:
+            before_pin_attempt()
         # Read before the commit below expires the loaded row.
         user_id = user.id
-        stored_hash = user.floor_pin_hash
         now = datetime.utcnow()
         attempts = _reserve_floor_pin_attempt(db, user_id, now)
         if attempts is None:
-            record_failure(_AUDIT_ERROR_PIN_LOCKED, None)
+            record_failure(
+                _AUDIT_ERROR_PIN_LOCKED,
+                {"floor_pin_admin_locked": True} if _floor_pin_admin_locked_now(db, user_id) else None,
+            )
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=FLOOR_PIN_INVALID_DETAIL)
         db.commit()
-        if not verify_floor_pin(pin, stored_hash):
-            locked_now = attempts >= FLOOR_PIN_MAX_FAILURES and _lock_floor_pin(db, user_id, now)
-            if locked_now:
+        # ``user`` was expired by the commit, so this reads the CURRENT hash (and, below, the
+        # matching set time) -- inline, never bound to a local.
+        if not verify_floor_pin(pin, user.floor_pin_hash):
+            lock_marker: Optional[Dict[str, Any]] = None
+            if attempts >= FLOOR_PIN_ADMIN_LOCK_FAILURES:
+                if _admin_lock_floor_pin(db, user_id):
+                    lock_marker = {"floor_pin_locked": True, "floor_pin_admin_locked": True}
+            else:
+                minutes = floor_pin_timed_lock_minutes(attempts)
+                if minutes is not None and _lock_floor_pin(db, user_id, now, minutes):
+                    lock_marker = {"floor_pin_locked": True}
+            if lock_marker is not None:
                 db.commit()
-            record_failure(_AUDIT_ERROR_WRONG_PIN, {"floor_pin_locked": True} if locked_now else None)
+            record_failure(_AUDIT_ERROR_WRONG_PIN, lock_marker)
+            if on_wrong_pin is not None:
+                on_wrong_pin()
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=FLOOR_PIN_INVALID_DETAIL)
+        pin_set_stamp = floor_pin_stamp(user.floor_pin_set_at)
         if not _settle_verified_floor_pin(db, user_id, now):
-            record_failure(_AUDIT_ERROR_PIN_LOCKED, None)
+            record_failure(
+                _AUDIT_ERROR_PIN_LOCKED,
+                {"floor_pin_admin_locked": True} if _floor_pin_admin_locked_now(db, user_id) else None,
+            )
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=FLOOR_PIN_INVALID_DETAIL)
         # The UPDATEs bypassed the loaded row; re-read the two columns inside this transaction
         # so nothing later in the request reads, or a flush writes back, stale values.
         db.refresh(user, attribute_names=["floor_pin_failed_attempts", "floor_pin_locked_until"])
-        return list(BADGE_AND_PIN_AUTH_METHODS)
+        return _FloorPinSignOn(list(BADGE_AND_PIN_AUTH_METHODS), pin_set_stamp)
 
     require_pin = db.query(Company.require_floor_pin).filter(Company.id == company_id).scalar()
     if require_pin:
@@ -1078,25 +1153,41 @@ def _floor_pin_sign_on_step(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={"code": FLOOR_PIN_NOT_SET_CODE, "message": FLOOR_PIN_NOT_SET_MESSAGE},
         )
-    return list(BADGE_ONLY_AUTH_METHODS)
+    return _FloorPinSignOn(list(BADGE_ONLY_AUTH_METHODS))
 
 
-def _badge_session_needs_pin_reauth(db: Session, user: User, auth_methods: Optional[List[str]]) -> bool:
-    """True when a badge session signed in WITHOUT a PIN may no longer be renewed.
+def _session_pin_reauth_reason(
+    db: Session, user: User, auth_methods: Optional[List[str]], pin_set_stamp: Optional[int]
+) -> Optional[str]:
+    """Why a badge session may no longer be renewed (refresh, switch-company), or None.
 
-    The PIN rule is checked at sign-on; without this a 7-day refresh chain would let a
-    badge-only session outlive it. Only a session whose ``amr`` holds ``"badge"`` and not
-    ``"pin"`` is ever refused, and only when the rule NOW asks for a PIN: the user has one,
-    or the user's company (the one whose policy governs their badge sign-on) requires one.
-    A ``["badge", "pin"]`` session and a password session (no ``amr``) are never refused,
-    and neither is a session whose PIN is merely locked: a lock is about guessing, not about
-    a session that already proved the PIN.
+    - A ``["badge", "pin"]`` session ends when its PIN does: "PIN changed" when the user's PIN
+      is gone (cleared, or cleared by a promotion) or was set again since the session verified it
+      (``floor_pin_set_at`` no longer equals the token's ``pst``). A LOCK does not end it -- a
+      lock is about guessing, and this session already proved the PIN.
+    - A ``["badge"]`` session may not outlive the PIN rule: "PIN now required" once the user has
+      a PIN, needs a new one after a promotion (``floor_pin_reset_required``), or the user's
+      company (the one whose policy governs their badge sign-on) requires one.
+    - A password session (no ``amr``) is never refused here.
     """
-    if not auth_methods or AUTH_METHOD_BADGE not in auth_methods or AUTH_METHOD_PIN in auth_methods:
-        return False
-    if user.floor_pin_hash:
-        return True
-    return bool(db.query(Company.require_floor_pin).filter(Company.id == user.company_id).scalar())
+    if not auth_methods or AUTH_METHOD_BADGE not in auth_methods:
+        return None
+    if AUTH_METHOD_PIN in auth_methods:
+        if pin_session_still_valid(user.floor_pin_hash, user.floor_pin_set_at, pin_set_stamp):
+            return None
+        return _AUDIT_ERROR_PIN_CHANGED
+    if user.floor_pin_hash or user.floor_pin_reset_required:
+        return _AUDIT_ERROR_PIN_NOW_REQUIRED
+    if db.query(Company.require_floor_pin).filter(Company.id == user.company_id).scalar():
+        return _AUDIT_ERROR_PIN_NOW_REQUIRED
+    return None
+
+
+def _badge_session_needs_pin_reauth(
+    db: Session, user: User, auth_methods: Optional[List[str]], pin_set_stamp: Optional[int] = None
+) -> bool:
+    """True when a badge session may no longer be renewed (see :func:`_session_pin_reauth_reason`)."""
+    return _session_pin_reauth_reason(db, user, auth_methods, pin_set_stamp) is not None
 
 
 def _pin_reauth_required() -> HTTPException:
@@ -1115,17 +1206,23 @@ def employee_login(request: Request, payload: EmployeeLoginRequest, db: Session 
     **Floor PIN** (``pin``, 4 to 6 digits): required when the user has one. Sent without
     it, the answer is a **401** challenge ``{"code": "floor_pin_required", "message": "Enter
     your PIN."}`` -- resubmit the same badge with ``pin``; the challenge is not a failure and
-    is not counted. A wrong or locked PIN is **401** "Invalid badge or PIN" (5 wrong PINs lock
-    the PIN, not the password login, for 15 minutes). With the company's
-    ``require_floor_pin`` on, a user with no PIN is **403** ``{"code": "floor_pin_not_set"}``.
-    The tokens carry an ``amr`` claim: ``["badge", "pin"]`` when a PIN was verified,
-    ``["badge"]`` otherwise, and every audit row the session writes records it.
+    is not counted. A wrong or locked PIN is **401** "Invalid badge or PIN". Wrong PINs are
+    cumulative per badge until a correct PIN: 5 lock the PIN (never the password login) for 15
+    minutes, 10 for 2 hours, and 15 admin-lock it until an Admin or Manager unlocks, resets or
+    clears it. With the company's ``require_floor_pin`` on, a user with no PIN is **403**
+    ``{"code": "floor_pin_not_set"}``; a user whose PIN a promotion cleared is **403**
+    ``{"code": "floor_pin_reset_required"}`` whatever the policy. The tokens carry an ``amr``
+    claim -- ``["badge", "pin"]`` when a PIN was verified, ``["badge"]`` otherwise -- recorded on
+    every audit row the session writes; a badge+PIN session also carries ``pst`` (the verified
+    PIN's set time) and ends (**401** ``floor_pin_reauth_required`` on its next request or
+    refresh) once that PIN is reset, cleared or cleared by a promotion.
 
     **Rate limited**: 10 requests/minute per IP (slowapi), PLUS a per-IP
     failed-attempt throttle — 8 failures within 15 minutes locks the IP out for
     15 minutes (429). Unknown badges count; successful logins, PIN challenges and wrong
-    PINs never do (the per-user PIN lock is the limit on PIN guessing, so a shared kiosk
-    IP is never locked by one person's PIN typos).
+    PINs never do. Wrong PINs instead charge their OWN per-IP budget: 20 within 15 minutes
+    and further PIN ATTEMPTS from that IP answer **429** for 15 minutes, while badge-only
+    sign-in, the challenge and unknown badges carry on unaffected.
     """
     # Compensating control for the 10/min slowapi limit (see
     # app/core/login_throttle.py): checked BEFORE the user lookup so a
@@ -1213,15 +1310,42 @@ def employee_login(request: Request, payload: EmployeeLoginRequest, db: Session 
         )
         db.commit()
 
-    # Wrong PINs are NOT charged to ``employee_login_throttle``: the per-user PIN lock is the
-    # limit, and a shared kiosk IP must never be locked by one person's PIN typos.
-    auth_methods = _floor_pin_sign_on_step(
+    def _refuse_if_pin_attempts_throttled() -> None:
+        # This IP's wrong-PIN budget (``floor_pin_ip_throttle``) is spent: refuse further PIN
+        # ATTEMPTS only -- before the reservation, so a blocked attempt costs the badge's own
+        # counter nothing. Badge-only sign-in and the challenge never reach this.
+        retry_after = floor_pin_ip_throttle.blocked_retry_after(client_ip)
+        if retry_after is None:
+            return
+        log_auth_event(
+            db,
+            "EMPLOYEE_LOGIN_BLOCKED",
+            user=user,
+            success=False,
+            request=request,
+            error=_AUDIT_ERROR_PIN_IP_THROTTLED,
+        )
+        db.commit()
+        wait_minutes = max(1, round(retry_after / 60))
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=FLOOR_PIN_IP_THROTTLED_DETAIL.format(minutes=wait_minutes, plural="s" if wait_minutes != 1 else ""),
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    # Wrong PINs charge their OWN per-IP budget (``floor_pin_ip_throttle``), never
+    # ``employee_login_throttle``: the shared kiosk IP's badge sign-in is never locked by PIN
+    # typos, while a sweep across badges from one IP still runs out of PIN attempts.
+    sign_on = _floor_pin_sign_on_step(
         db,
         user=user,
         pin=payload.pin,
         company_id=user.company_id,
         record_failure=_record_pin_failure,
+        before_pin_attempt=_refuse_if_pin_attempts_throttled,
+        on_wrong_pin=lambda: floor_pin_ip_throttle.register_failure(client_ip),
     )
+    auth_methods = sign_on.auth_methods
 
     # Reset failed attempts on successful login
     user.failed_login_attempts = 0
@@ -1241,8 +1365,18 @@ def employee_login(request: Request, payload: EmployeeLoginRequest, db: Session 
     db.commit()
     db.refresh(user)
 
-    access_token = create_access_token(subject=user.id, company_id=user.company_id, auth_methods=auth_methods)
-    refresh_token, _, _ = create_refresh_token(subject=user.id, company_id=user.company_id, auth_methods=auth_methods)
+    access_token = create_access_token(
+        subject=user.id,
+        company_id=user.company_id,
+        auth_methods=auth_methods,
+        pin_set_stamp=sign_on.pin_set_stamp,
+    )
+    refresh_token, _, _ = create_refresh_token(
+        subject=user.id,
+        company_id=user.company_id,
+        auth_methods=auth_methods,
+        pin_set_stamp=sign_on.pin_set_stamp,
+    )
 
     return Token(
         access_token=access_token,
@@ -1420,10 +1554,13 @@ def kiosk_badge_token(
     **Floor PIN** (``pin``): the same step as ``POST /auth/employee-login``. A badge whose
     user has a PIN, scanned without one, is a **401** challenge
     ``{"code": "floor_pin_required", "message": "Enter your PIN."}`` -- show the PIN pad and
-    resubmit the badge with ``pin``. A wrong or locked PIN is **401** "Invalid badge or PIN"
-    (5 wrong PINs lock that PIN for 15 minutes). With the company's ``require_floor_pin`` on,
-    a badge with no PIN is **403** ``{"code": "floor_pin_not_set"}``. The token's ``amr``
-    claim is ``["badge", "pin"]`` or ``["badge"]``, recorded on every audit row it writes.
+    resubmit the badge with ``pin``. A wrong or locked PIN is **401** "Invalid badge or PIN";
+    the same cumulative lock tiers apply (5 -> 15 minutes, 10 -> 2 hours, 15 -> admin-locked).
+    This station-gated route charges no per-IP budget. With the company's ``require_floor_pin``
+    on, a badge with no PIN is **403** ``{"code": "floor_pin_not_set"}``; one whose PIN a
+    promotion cleared is **403** ``{"code": "floor_pin_reset_required"}``. The token's ``amr``
+    claim is ``["badge", "pin"]`` or ``["badge"]``, recorded on every audit row it writes; a
+    badge+PIN token also carries ``pst`` and is refused once that PIN changes.
     """
     try:
         user = _find_user_by_employee_id_in_company(db, payload.employee_id, station.company_id)
@@ -1490,14 +1627,15 @@ def kiosk_badge_token(
             extra_data={"badge_user_id": badge_user_id, **(extra_data or {})},
         )
 
-    # The per-user PIN lock is what bounds guessing (no per-IP charge on either route).
-    auth_methods = _floor_pin_sign_on_step(
+    # The per-user lock tiers bound guessing here; this station-gated route charges no IP.
+    sign_on = _floor_pin_sign_on_step(
         db,
         user=user,
         pin=payload.pin,
         company_id=station.company_id,
         record_failure=_record_pin_failure,
     )
+    auth_methods = sign_on.auth_methods
 
     # Commits the success row together with any PIN counter / expired lock the step cleared.
     _audit_kiosk_badge_event(
@@ -1515,6 +1653,7 @@ def kiosk_badge_token(
         expires_delta=timedelta(minutes=KIOSK_BADGE_TOKEN_TTL_MINUTES),
         scope="kiosk",
         auth_methods=auth_methods,
+        pin_set_stamp=sign_on.pin_set_stamp,
     )
 
     return KioskBadgeTokenResponse(
@@ -1531,11 +1670,17 @@ def refresh_token(request: Request, token_request: RefreshTokenRequest, db: Sess
     Refresh an access token using a refresh token.
     Implements token rotation: returns new refresh token each time.
 
-    The new tokens keep the presented token's ``amr`` claim. A badge session that signed in
-    WITHOUT a PIN (``amr`` ``["badge"]``) is refused **401**
+    The new tokens keep the presented token's ``amr`` and ``pst`` claims exactly. A badge
+    session is refused **401**
     ``{"code": "floor_pin_reauth_required", "message": "Sign in again with your badge and PIN."}``
-    -- and nothing is minted -- once the user has a PIN or the company requires one: the
-    person signs in again with badge and PIN. Badge+PIN and password sessions are unaffected.
+    -- with a ``TOKEN_REFRESH_FAILED`` audit row, and nothing minted -- when:
+
+    - it signed in WITHOUT a PIN (``amr`` ``["badge"]``) and the user now has a PIN, needs a new
+      one after a promotion, or the company now requires one ("PIN now required");
+    - it signed in WITH a PIN (``["badge", "pin"]``) and that PIN is gone or was set again since
+      (reset, cleared, cleared by a promotion): ``pst`` no longer matches ("PIN changed").
+
+    A locked PIN does not end a badge+PIN session. Password sessions are unaffected.
     """
     # Verify the refresh token
     payload = verify_refresh_token(token_request.refresh_token)
@@ -1577,18 +1722,21 @@ def refresh_token(request: Request, token_request: RefreshTokenRequest, db: Sess
     # password session, whose rotated tokens stay claim-for-claim what they were). Carried
     # exactly: a refreshed badge session neither loses nor gains "pin".
     token_auth_methods = payload.get("auth_methods")
+    # The verified PIN's set time on a badge+PIN session, carried exactly as ``amr`` is.
+    token_pin_set_stamp = payload.get("pin_set_stamp")
 
-    # A badge-only session may not outlive the PIN rule: once the user has a PIN or the
-    # company requires one, renewing it would hand a badge-only session another 15 minutes
-    # (and another 7-day window) the sign-on step would now refuse. Mint nothing.
-    if _badge_session_needs_pin_reauth(db, user, token_auth_methods):
+    # A badge session may not outlive the PIN rule, nor the PIN it verified: renewing it would
+    # hand it another 15 minutes (and another 7-day window) the sign-on step would now refuse.
+    # Mint nothing.
+    reauth_reason = _session_pin_reauth_reason(db, user, token_auth_methods, token_pin_set_stamp)
+    if reauth_reason is not None:
         log_auth_event(
             db,
             "TOKEN_REFRESH_FAILED",
             user=user,
             success=False,
             request=request,
-            error=_AUDIT_ERROR_PIN_NOW_REQUIRED,
+            error=reauth_reason,
             extra_data={"auth_methods": token_auth_methods},
         )
         db.commit()
@@ -1600,6 +1748,7 @@ def refresh_token(request: Request, token_request: RefreshTokenRequest, db: Sess
         company_id=token_company_id,
         read_only=token_read_only,
         auth_methods=token_auth_methods,
+        pin_set_stamp=token_pin_set_stamp,
     )
 
     # Token rotation: create NEW refresh token (invalidates the old one implicitly)
@@ -1610,6 +1759,7 @@ def refresh_token(request: Request, token_request: RefreshTokenRequest, db: Sess
         company_id=token_company_id,
         read_only=token_read_only,
         auth_methods=token_auth_methods,
+        pin_set_stamp=token_pin_set_stamp,
     )
 
     # AuditService only flushes; commit so the audit row persists before the
@@ -2094,18 +2244,19 @@ def switch_company(
     Switch the active company context (platform admin only).
     Issues new tokens scoped to the target company for read-only browsing.
 
-    The new tokens keep the presented token's ``amr`` claim (how the session signed in),
-    so a switch never changes what the session's audit rows say about the sign-on. Like
-    ``POST /auth/refresh``, it mints nothing for a badge session that signed in without a
-    PIN once the user has a PIN or their company requires one: **401**
-    ``{"code": "floor_pin_reauth_required", ...}``.
+    The new tokens keep the presented token's ``amr`` and ``pst`` claims (how the session
+    signed in), so a switch never changes what the session's audit rows say about the
+    sign-on. Like ``POST /auth/refresh``, it mints nothing -- **401**
+    ``{"code": "floor_pin_reauth_required", ...}`` with a ``COMPANY_SWITCH_FAILED`` audit row --
+    for a badge session that signed in without a PIN once the user has a PIN, needs a new one
+    or the company requires one, nor for a badge+PIN session whose PIN is gone or was set again
+    since. (Every other route answers that 401 from ``get_current_user``; this one runs the
+    check itself so it can write the row.)
     """
-    company = db.query(Company).filter(Company.id == target_company_id, Company.is_active == True).first()
-    if not company:
-        raise HTTPException(status_code=404, detail="Company not found or inactive")
-
     auth_methods = getattr(current_user, "_auth_methods", None)
-    if _badge_session_needs_pin_reauth(db, current_user, auth_methods):
+    pin_set_stamp = getattr(current_user, "_pin_set_stamp", None)
+    reauth_reason = _session_pin_reauth_reason(db, current_user, auth_methods, pin_set_stamp)
+    if reauth_reason is not None:
         # ``current_user`` came through get_current_user, so the row also carries the
         # session's auth_methods through AuditService's fold.
         log_auth_event(
@@ -2114,17 +2265,29 @@ def switch_company(
             user=current_user,
             success=False,
             request=request,
-            error=_AUDIT_ERROR_PIN_NOW_REQUIRED,
+            error=reauth_reason,
         )
         db.commit()
         raise _pin_reauth_required()
 
+    company = db.query(Company).filter(Company.id == target_company_id, Company.is_active == True).first()
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found or inactive")
+
     read_only = company.id != current_user.company_id
     access_token = create_access_token(
-        subject=current_user.id, company_id=company.id, read_only=read_only, auth_methods=auth_methods
+        subject=current_user.id,
+        company_id=company.id,
+        read_only=read_only,
+        auth_methods=auth_methods,
+        pin_set_stamp=pin_set_stamp,
     )
     refresh_token, _, _ = create_refresh_token(
-        subject=current_user.id, company_id=company.id, read_only=read_only, auth_methods=auth_methods
+        subject=current_user.id,
+        company_id=company.id,
+        read_only=read_only,
+        auth_methods=auth_methods,
+        pin_set_stamp=pin_set_stamp,
     )
 
     # AuditService only flushes; commit so the audit row persists before the

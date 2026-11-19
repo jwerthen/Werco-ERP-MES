@@ -146,6 +146,25 @@ PASSWORD_LOGIN_MAX_FAILURES = 60
 PASSWORD_LOGIN_FAILURE_WINDOW_SECONDS = 6 * 60 * 60
 PASSWORD_LOGIN_COOLDOWN_SECONDS = 60 * 60
 
+# --- Wrong floor PINs on POST /auth/employee-login (the PUBLIC badge door) ---
+#
+# 20 wrong PINs / 15 min from one IP, then a 15-minute cooldown, on its OWN counter. What it
+# blocks when it trips is narrow on purpose: only PIN ATTEMPTS from that IP (a request that
+# carries a PIN for a badge that has one) answer 429. Badge-only sign-ins, the PIN challenge
+# and unknown-badge handling never read or charge it, so one floor's PIN typos can at worst
+# pause PIN entry from that egress IP for 15 minutes, never badge sign-in itself, and
+# ``employee_login_throttle``'s budget is untouched.
+#
+# Why it exists beside the per-user lock tiers (``app.core.floor_pin``): those cap guessing per
+# BADGE, but an attacker on the public route rotates across badges. 20 per 15 min bounds the
+# whole IP to ~1,900 guesses a day across every badge instead of the slowapi 10/min ceiling's
+# 14,400. Sized well above honest use: a crew of ~10 people each fumbling a PIN once or twice
+# in a 15-minute shift change stays under it. The station-gated crew mint
+# (``POST /auth/kiosk-badge-token``) has no IP charge at all.
+FLOOR_PIN_IP_MAX_WRONG_PINS = 20
+FLOOR_PIN_IP_WINDOW_SECONDS = 15 * 60
+FLOOR_PIN_IP_COOLDOWN_SECONDS = 15 * 60
+
 
 def client_ip_from_request(request: Request) -> str:
     """Resolve the client IP exactly like the slowapi limiter does.
@@ -323,4 +342,13 @@ password_login_throttle = FailedLoginThrottle(
     max_failures=PASSWORD_LOGIN_MAX_FAILURES,
     window_seconds=PASSWORD_LOGIN_FAILURE_WINDOW_SECONDS,
     cooldown_seconds=PASSWORD_LOGIN_COOLDOWN_SECONDS,
+)
+
+# Its own prefix again: a wrong PIN must never spend the badge route's unknown-badge budget, nor
+# the reverse (see the constants above).
+floor_pin_ip_throttle = FailedLoginThrottle(
+    key_prefix="auth:employee-login:wrong-pin",
+    max_failures=FLOOR_PIN_IP_MAX_WRONG_PINS,
+    window_seconds=FLOOR_PIN_IP_WINDOW_SECONDS,
+    cooldown_seconds=FLOOR_PIN_IP_COOLDOWN_SECONDS,
 )

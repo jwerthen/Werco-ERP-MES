@@ -2661,19 +2661,29 @@ UI controls do not grant API authority. See [API: Documents](API.md#documents).
 > every record that session writes carries `extra_data.auth_methods` `["badge", "pin"]`, which reads
 > as that person's own act. Admin, Manager and Quality are the roles that carry judgment —
 > approvals, dispositions, quality sign-off — so a Manager able to set one of those PINs could
-> record that judgment under a peer's or a superior's identity. Holding the scope to the floor roles
-> means nobody below Admin can take over a judgment-role identity. An Admin already administers
-> every account, so letting an Admin set any tenant PIN grants nothing new.
+> record that judgment under a peer's or a superior's identity. Three rules together mean nobody
+> below Admin can take over a judgment-role identity: the scope (a Manager cannot write such a PIN),
+> the promotion rule below (a PIN a Manager wrote for a floor account does not survive a promotion),
+> and the **session binding** — a `["badge", "pin"]` session carries `pst`, the set time of the PIN
+> it verified, and is refused **401** `floor_pin_reauth_required` on every request, refresh and
+> company switch once that PIN is reset, cleared or cleared by a promotion, so a session a Manager
+> opened with a floor account's PIN cannot outlive that account's promotion. An Admin already
+> administers every account, so letting an Admin set any tenant PIN grants nothing new.
 >
 > **A promotion into a judgment role clears the PIN.** The scope is checked when a PIN is written,
 > so on its own it would let a PIN a Manager chose for an Operator survive that person's promotion.
 > Instead, a role change **into** Admin, Manager or Quality **from any other role**, through
 > `PUT /users/{id}` or `POST /users/{id}/approve`, clears the floor PIN (hash, set date, wrong-PIN
-> count and lock) in the same transaction (`user_provisioning.clear_floor_pin_on_promotion`), and
-> the role change's required audit row carries `extra_data.floor_pin_cleared_on_promotion: true`.
-> The person then needs an Admin to set a new PIN, and until then badge sign-on runs as for anyone
-> with no PIN (refused **403** `floor_pin_not_set` while the company requires one). A move between
-> judgment roles (Manager to Admin), a demotion and a move between floor roles keep the PIN.
+> count and both locks) in the same transaction (`user_provisioning.clear_floor_pin_on_promotion`),
+> and the role change's required audit row carries `extra_data.floor_pin_cleared_on_promotion: true`.
+> If the person **had** a PIN, the promotion also sets `floor_pin_reset_required` (marked
+> `floor_pin_reset_required: true` on the same row): both badge sign-on routes then answer **403**
+> `floor_pin_reset_required` ("Your role changed. Ask an Admin to set a new floor PIN."),
+> **whatever the company policy**, until an Admin sets a new PIN — or clears it, an explicit
+> decision to allow badge-only sign-on. The promotion never quietly downgrades the badge to
+> badge-only, and every existing badge + PIN session of that person ends at its next request. The
+> Users page shows *New PIN needed (role changed)*. A move between judgment roles (Manager to
+> Admin), a demotion and a move between floor roles keep the PIN.
 >
 > All three writes record required audit evidence in the same transaction (`FLOOR_PIN_SET` /
 > `FLOOR_PIN_CLEARED` / `FLOOR_PIN_UNLOCKED`; **503** and rollback on audit loss), never the PIN or
@@ -2681,7 +2691,10 @@ UI controls do not grant API authority. See [API: Documents](API.md#documents).
 > (Platform Admin / superuser too); on a row the caller may not manage, the Manage action reads
 > *Admin only* (or *Platform admin only*), and the server enforces the same rule. Unlocking a
 > password lockout (`POST /users/{id}/unlock`, Admin) does not touch a PIN lock; the floor-PIN
-> unlock or a new PIN clears it. The company policy that makes a PIN mandatory is Admin-only
+> unlock, a new PIN or a clear lifts it, including the **admin lock** at 15 cumulative wrong PINs,
+> which no time lifts (*Locked: needs unlock* on the Users page). Setting or clearing a PIN also
+> ends that person's badge + PIN sessions at their next request; the unlock keeps the PIN and the
+> sessions. The company policy that makes a PIN mandatory is Admin-only
 > ([Admin](#admin)). See `docs/API.md` → Users (Admin) → "Floor PIN".
 >
 > **Tenant provisioning uses one role policy (`services/user_provisioning.py`).**

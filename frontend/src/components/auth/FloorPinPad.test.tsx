@@ -244,3 +244,27 @@ describe('FloorPinPad scan-burst guard', () => {
     expect(props.onSubmit).toHaveBeenCalledWith('0912');
   });
 });
+
+describe('FloorPinPad — a sign-on the server ended (final, the 429 PIN throttle)', () => {
+  const THROTTLED = 'Too many failed sign-in attempts — wait a few minutes';
+
+  it.each(['kiosk', 'desk'] as const)('%s: shows the refusal, takes no PIN, and offers only Back', variant => {
+    const { props } = renderPad({ variant, final: true, error: THROTTLED });
+
+    expect(screen.getByRole('alert')).toHaveTextContent(THROTTLED);
+    expect(input()).toHaveAttribute('readonly');
+    fireEvent.change(input(), { target: { value: '0912' } });
+    expect(input().value).toBe('');
+    expect(screen.queryByRole('button', { name: /sign in/i })).not.toBeInTheDocument();
+    fireEvent.submit(input().closest('form') as HTMLFormElement);
+    expect(props.onSubmit).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+    expect(props.onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('kiosk: the keypad is held too', () => {
+    renderPad({ final: true, error: THROTTLED });
+    expect(key('5')).toBeDisabled();
+  });
+});

@@ -1,7 +1,7 @@
-"""Coverage for 130_floor_pin (the floor PIN for badge / employee-ID sign-on: four PIN columns on
+"""Coverage for 130_floor_pin (the floor PIN for badge / employee-ID sign-on: six PIN columns on
 ``users`` and the ``require_floor_pin`` policy switch on ``companies``).
 
-130 is purely additive over two EXISTING tables -- five plain columns, two of them NOT NULL with a
+130 is purely additive over two EXISTING tables -- seven plain columns, four of them NOT NULL with a
 constant server default; no table, no index, no constraint, no data. This file covers the MIGRATION
 (the PIN step itself is tested with the auth services and the API):
 
@@ -56,20 +56,30 @@ MODELS = {"users": User, "companies": Company}
 TABLES = tuple(MODELS)
 
 # The PR contract, copied here independently of both the migration and the models:
-# name -> (PostgreSQL type, nullable, server default, Python default).
+# name -> (PostgreSQL type, nullable, server default, Python default). A server default is either
+# a plain string (spelled like 054's ``allow_ai_egress``) or ``FALSE_ELEMENT``: ``sa.false()``,
+# which the two later booleans use on model and migration alike (``DEFAULT false`` on PostgreSQL,
+# ``DEFAULT 0`` on SQLite).
 TIMESTAMP = "TIMESTAMP WITHOUT TIME ZONE"
+FALSE_ELEMENT = "sa.false()"
 CONTRACT = {
     "users": {
         "floor_pin_hash": ("VARCHAR(255)", True, None, None),
         "floor_pin_set_at": (TIMESTAMP, True, None, None),
         "floor_pin_failed_attempts": ("INTEGER", False, "0", 0),
         "floor_pin_locked_until": (TIMESTAMP, True, None, None),
+        "floor_pin_admin_locked": ("BOOLEAN", False, FALSE_ELEMENT, False),
+        "floor_pin_reset_required": ("BOOLEAN", False, FALSE_ELEMENT, False),
     },
     "companies": {
         "require_floor_pin": ("BOOLEAN", False, "false", False),
     },
 }
 NEW_COLUMNS = {table: tuple(columns) for table, columns in CONTRACT.items()}
+
+
+def _is_false_element(arg) -> bool:
+    return isinstance(arg, sa.sql.elements.False_)
 
 
 def _module():
@@ -128,6 +138,8 @@ def test_the_migration_declares_the_contract():
             assert column.nullable is nullable, name
             if server_default is None:
                 assert column.server_default is None, name
+            elif server_default == FALSE_ELEMENT:
+                assert _is_false_element(column.server_default.arg), name
             else:
                 # A plain string, never sa.text: the fresh-bootstrap diff compares the rendered DEFAULT.
                 assert isinstance(column.server_default.arg, str), name
@@ -147,6 +159,8 @@ def test_every_column_matches_the_model(table):
         assert model_column.nullable == column.nullable, name
         if column.server_default is None:
             assert model_column.server_default is None, name
+        elif _is_false_element(column.server_default.arg):
+            assert _is_false_element(model_column.server_default.arg), name
         else:
             assert isinstance(model_column.server_default.arg, str), name
             assert model_column.server_default.arg == column.server_default.arg, name
@@ -258,9 +272,10 @@ LEGACY_ROWS = {
     "badge_scans": [(1, 1, 5)],
 }
 USER_PIN_SQL = (
-    "SELECT floor_pin_hash, floor_pin_set_at, floor_pin_failed_attempts, floor_pin_locked_until FROM users ORDER BY id"
+    "SELECT floor_pin_hash, floor_pin_set_at, floor_pin_failed_attempts, floor_pin_locked_until, "
+    "floor_pin_admin_locked, floor_pin_reset_required FROM users ORDER BY id"
 )
-NO_PIN = (None, None, 0, None)
+NO_PIN = (None, None, 0, None, 0, 0)
 
 
 def _policy_through_the_model(connection):
@@ -356,6 +371,9 @@ def test_upgrade_adds_every_column_natively_and_backfills_nothing(scratch):
     assert reflected["floor_pin_set_at"] == ("DATETIME", True, None)
     assert reflected["floor_pin_failed_attempts"] == ("INTEGER", False, "'0'")
     assert reflected["floor_pin_locked_until"] == ("DATETIME", True, None)
+    # sa.false() renders DEFAULT 0 on SQLite: an integer, so no TEXT-'false' artifact to normalize.
+    assert reflected["floor_pin_admin_locked"] == ("BOOLEAN", False, "0")
+    assert reflected["floor_pin_reset_required"] == ("BOOLEAN", False, "0")
     assert reflected["require_floor_pin"] == ("BOOLEAN", False, "'false'")
     # Never rebuilt: the same b-tree, so no child row was cascade-deleted along the way.
     assert _root_pages(connection) == pages
@@ -430,7 +448,14 @@ def test_rerun_is_a_no_op_and_a_partial_schema_recovers_each_column(scratch):
     migration.upgrade()
     assert {table: _objects(connection, table) for table in TABLES} == full
     # Values recorded in the surviving columns are kept; nothing is overwritten or re-derived.
-    assert connection.exec_driver_sql(USER_PIN_SQL).fetchall()[0] == ("bcrypt-hash", "2026-11-19 08:00:00", 2, None)
+    assert connection.exec_driver_sql(USER_PIN_SQL).fetchall()[0] == (
+        "bcrypt-hash",
+        "2026-11-19 08:00:00",
+        2,
+        None,
+        0,
+        0,
+    )
     _assert_legacy_rows_intact(connection)
 
 
@@ -547,6 +572,8 @@ EXPECTED_ADD_COLUMNS = [
     f"ALTER TABLE users ADD COLUMN floor_pin_set_at {TIMESTAMP}",
     "ALTER TABLE users ADD COLUMN floor_pin_failed_attempts INTEGER DEFAULT '0' NOT NULL",
     f"ALTER TABLE users ADD COLUMN floor_pin_locked_until {TIMESTAMP}",
+    "ALTER TABLE users ADD COLUMN floor_pin_admin_locked BOOLEAN DEFAULT false NOT NULL",
+    "ALTER TABLE users ADD COLUMN floor_pin_reset_required BOOLEAN DEFAULT false NOT NULL",
     "ALTER TABLE companies ADD COLUMN require_floor_pin BOOLEAN DEFAULT 'false' NOT NULL",
 ]
 
@@ -562,7 +589,7 @@ def _assert_pure_column_ddl(sql: str):
 
 def test_offline_upgrade_renders_the_canonical_postgres_ddl():
     statements = _render("upgrade")
-    # Exactly these, in this order: the timeout, users' four columns, companies' one, the reset.
+    # Exactly these, in this order: the timeout, users' six columns, companies' one, the reset.
     assert statements == ["SET LOCAL lock_timeout = '5s'", *EXPECTED_ADD_COLUMNS, "SET LOCAL lock_timeout = DEFAULT"]
     _assert_pure_column_ddl("\n".join(statements))
 
@@ -586,6 +613,8 @@ def test_offline_downgrade_drops_exactly_what_upgrade_added_in_reverse():
         "SET LOCAL lock_timeout = '5s'",
         # Reverse of the upgrade: companies first, then users, each table's columns reversed.
         "ALTER TABLE companies DROP COLUMN require_floor_pin",
+        "ALTER TABLE users DROP COLUMN floor_pin_reset_required",
+        "ALTER TABLE users DROP COLUMN floor_pin_admin_locked",
         "ALTER TABLE users DROP COLUMN floor_pin_locked_until",
         "ALTER TABLE users DROP COLUMN floor_pin_failed_attempts",
         "ALTER TABLE users DROP COLUMN floor_pin_set_at",

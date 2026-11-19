@@ -18,6 +18,10 @@ export interface FloorPinUser {
   has_floor_pin?: boolean;
   floor_pin_set_at?: string | null;
   floor_pin_locked_until?: string | null;
+  /** 15 cumulative wrong PINs: no time lifts it — only an unlock, set or clear. */
+  floor_pin_admin_locked?: boolean;
+  /** A promotion into Admin / Manager / Quality cleared the PIN; an Admin must set a new one. */
+  floor_pin_reset_required?: boolean;
 }
 
 /** Who is asking: the signed-in user's role and platform flag. */
@@ -43,6 +47,8 @@ export const MANAGER_FLOOR_PIN_TARGET_ROLES: ReadonlySet<string> = new Set([
  * server's rule on every `/users/{id}/floor-pin` route (which still enforces it):
  * a platform account needs a platform principal; an Admin manages any tenant user; a
  * Manager only Operator, Supervisor, Shipping and Viewer accounts; nobody else any.
+ * By role alone — so a PIN a promotion cleared (`floor_pin_reset_required`, set only by a
+ * promotion INTO Admin / Manager / Quality) is an Admin's to set, as the server says.
  */
 export function floorPinManageRefusal(actor: FloorPinActor | null | undefined, target: FloorPinActor): string | null {
   if (!actor) return 'Admin only';
@@ -56,11 +62,53 @@ export function floorPinManageRefusal(actor: FloorPinActor | null | undefined, t
   return 'Admin only';
 }
 
-/** True while wrong PIN attempts hold the PIN locked (the server's 15-minute lock). */
-export function isFloorPinLocked(user: FloorPinUser, now: number = Date.now()): boolean {
+/** True while a TIMED lock runs (5 wrong PINs → 15 min, 10 → 2 h): `floor_pin_locked_until` in the future. */
+function isTimedLock(user: FloorPinUser, now: number): boolean {
   if (!user.floor_pin_locked_until) return false;
   const until = toDate(user.floor_pin_locked_until);
   return !!until && until.getTime() > now;
+}
+
+/** True while wrong PINs hold the PIN locked: a timed lock in force, or the admin lock (15). */
+export function isFloorPinLocked(user: FloorPinUser, now: number = Date.now()): boolean {
+  return user.floor_pin_admin_locked === true || isTimedLock(user, now);
+}
+
+/** One person's floor-PIN state as the Users page shows it (most urgent first). */
+export interface FloorPinStatus {
+  kind: 'reset_required' | 'admin_locked' | 'locked' | 'set' | 'not_set';
+  /** The headline: also the column's sort / CSV value. */
+  label: string;
+  /** A second line (the lock's end, or when the PIN was set), or null. */
+  detail: string | null;
+  /** Needs someone's attention (drawn amber). */
+  attention: boolean;
+}
+
+export function floorPinStatus(user: FloorPinUser, now: number = Date.now()): FloorPinStatus {
+  if (user.floor_pin_reset_required) {
+    return { kind: 'reset_required', label: 'New PIN needed (role changed)', detail: null, attention: true };
+  }
+  if (user.floor_pin_admin_locked) {
+    return { kind: 'admin_locked', label: 'Locked: needs unlock', detail: null, attention: true };
+  }
+  if (isTimedLock(user, now)) {
+    return {
+      kind: 'locked',
+      label: 'Locked',
+      detail: `until ${formatCentralDateTime(user.floor_pin_locked_until)}`,
+      attention: true,
+    };
+  }
+  if (user.has_floor_pin) {
+    return {
+      kind: 'set',
+      label: 'Set',
+      detail: user.floor_pin_set_at ? formatCentralDateTime(user.floor_pin_set_at) : null,
+      attention: false,
+    };
+  }
+  return { kind: 'not_set', label: 'Not set', detail: null, attention: false };
 }
 
 /**
@@ -79,26 +127,22 @@ export function FloorPinCell({
   manageRefusal?: string | null;
 }) {
   const name = `${user.first_name} ${user.last_name}`;
-  const locked = isFloorPinLocked(user);
+  const status = floorPinStatus(user);
   return (
     <div className="flex items-center gap-2">
       <div className="min-w-0 text-sm">
-        {user.has_floor_pin ? (
-          <>
-            <span className={locked ? 'font-medium text-amber-300' : 'text-slate-200'}>
-              {locked ? 'Locked' : 'Set'}
-            </span>
-            <span className="block text-xs text-slate-400">
-              {locked
-                ? `until ${formatCentralDateTime(user.floor_pin_locked_until)}`
-                : user.floor_pin_set_at
-                  ? formatCentralDateTime(user.floor_pin_set_at)
-                  : null}
-            </span>
-          </>
-        ) : (
-          <span className="text-slate-400">Not set</span>
-        )}
+        <span
+          className={
+            status.attention
+              ? 'font-medium text-amber-300'
+              : status.kind === 'not_set'
+                ? 'text-slate-400'
+                : 'text-slate-200'
+          }
+        >
+          {status.label}
+        </span>
+        {status.detail && <span className="block text-xs text-slate-400">{status.detail}</span>}
       </div>
       {manageRefusal ? (
         <span className="ml-auto shrink-0 text-xs text-slate-500">{manageRefusal}</span>
@@ -132,7 +176,9 @@ interface FloorPinDialogProps {
 const RANGE_TEXT = `${FLOOR_PIN_MIN_LENGTH}–${FLOOR_PIN_MAX_LENGTH} digits`;
 
 /**
- * Users → Floor PIN: set, reset, clear or unlock one person's badge-sign-in PIN
+ * Users → Floor PIN: set, reset, clear or unlock one person's badge-sign-in PIN, and
+ * show the two states that need someone: the admin lock (15 wrong PINs, which no time
+ * lifts) and "new PIN needed" after a promotion cleared the PIN
  * (AS9100D 8.5.2). Admin, or a Manager for Operator / Supervisor / Shipping / Viewer
  * accounts (PUT / DELETE /users/{id}/floor-pin, POST .../floor-pin/unlock).
  *
@@ -169,6 +215,8 @@ export default function FloorPinDialog({ user, onClose, onChanged }: FloorPinDia
   const name = `${user.first_name} ${user.last_name}`;
   const hasPin = !!user.has_floor_pin;
   const locked = isFloorPinLocked(user);
+  const adminLocked = user.floor_pin_admin_locked === true;
+  const resetRequired = user.floor_pin_reset_required === true;
   const busy = saving || clearing || unlocking;
 
   const close = () => {
@@ -274,10 +322,12 @@ export default function FloorPinDialog({ user, onClose, onChanged }: FloorPinDia
             </>
           ) : null}
           <dt className="text-slate-400">PIN</dt>
-          <dd className="text-slate-200">
-            {hasPin
-              ? `Set${user.floor_pin_set_at ? ` ${formatCentralDateTime(user.floor_pin_set_at)}` : ''}`
-              : 'Not set'}
+          <dd className={resetRequired ? 'text-amber-300' : 'text-slate-200'}>
+            {resetRequired
+              ? 'New PIN needed (role changed)'
+              : hasPin
+                ? `Set${user.floor_pin_set_at ? ` ${formatCentralDateTime(user.floor_pin_set_at)}` : ''}`
+                : 'Not set'}
           </dd>
           <dt className="text-slate-400">Lock</dt>
           <dd className={locked ? 'flex flex-wrap items-center gap-x-3 gap-y-1.5 text-amber-300' : 'text-slate-200'}>
@@ -285,7 +335,9 @@ export default function FloorPinDialog({ user, onClose, onChanged }: FloorPinDia
               <>
                 <span className="flex items-center gap-1.5">
                   <LockClosedIcon className="h-4 w-4 shrink-0" aria-hidden="true" />
-                  Locked after wrong PINs until {formatCentralDateTime(user.floor_pin_locked_until)}
+                  {adminLocked
+                    ? 'Locked: needs unlock (too many wrong PINs)'
+                    : `Locked after wrong PINs until ${formatCentralDateTime(user.floor_pin_locked_until)}`}
                 </span>
                 <LoadingButton
                   type="button"

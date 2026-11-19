@@ -6,6 +6,7 @@ import { formatCentralTime } from '../../utils/centralTime';
 import { badgeSignOnErrorMessage, isBadgeSignOnCancelled, signOnWithBadge } from '../../services/badgeSignOn';
 import { useFloorPinPrompt } from '../../hooks/useFloorPinPrompt';
 import { useKioskIdleLogout } from '../../hooks/useKioskIdleLogout';
+import { consumeSignInNotice } from '../../utils/signInNotice';
 
 interface KioskBadgeLoginProps {
   stationLabel: string;
@@ -35,6 +36,9 @@ export default function KioskBadgeLogin({ stationLabel, onLogin }: KioskBadgeLog
   const [value, setValue] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Why the last session ended, when the server ended it (floor_pin_reauth_required):
+  // the API client leaves it for this screen. Shown until the next sign-in attempt.
+  const [notice, setNotice] = useState<string | null>(null);
   // Re-keys the well so the shake replays on every consecutive rejection.
   const [shakeKey, setShakeKey] = useState(0);
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -43,6 +47,11 @@ export default function KioskBadgeLogin({ stationLabel, onLogin }: KioskBadgeLog
     typeof navigator === 'undefined' ? true : navigator.onLine
   );
   const pinPrompt = useFloorPinPrompt();
+
+  useEffect(() => {
+    const message = consumeSignInNotice();
+    if (message) setNotice(message);
+  }, []);
   // The badge the open PIN pad belongs to (shown on the pad).
   const [pinBadge, setPinBadge] = useState<string | null>(null);
 
@@ -71,6 +80,7 @@ export default function KioskBadgeLogin({ stationLabel, onLogin }: KioskBadgeLog
       if (!employeeId || submitting) return;
       setSubmitting(true);
       setError(null);
+      setNotice(null);
       setPinBadge(employeeId);
       try {
         await signOnWithBadge((...pin) => onLogin(employeeId, ...pin), pinPrompt.prompter);
@@ -154,6 +164,15 @@ export default function KioskBadgeLogin({ stationLabel, onLogin }: KioskBadgeLog
               className="animate-kiosk-caret h-9 w-0.5 shrink-0 bg-fd-blue shadow-[0_0_8px_rgba(47,129,247,0.5)]"
             />
           </div>
+
+          {notice && !error && (
+            <div
+              role="status"
+              className="w-full rounded-[4px] border border-fd-amber bg-fd-amber/10 px-4 py-3 text-center text-lg font-semibold text-fd-amber"
+            >
+              {notice}
+            </div>
+          )}
 
           {error && (
             <div

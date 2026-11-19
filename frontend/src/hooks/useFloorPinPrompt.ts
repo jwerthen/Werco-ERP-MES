@@ -9,6 +9,8 @@ export interface FloorPinPromptState {
   verifying: boolean;
   /** Increments on every ask, so the pad clears its digits for each new attempt. */
   attempt: number;
+  /** The sign-on ended on `error` (a 429): the pad shows it, takes no PIN, and only dismisses. */
+  final?: boolean;
 }
 
 export interface UseFloorPinPrompt {
@@ -44,6 +46,8 @@ export function useFloorPinPrompt(): UseFloorPinPrompt {
   // Set by cancel(); cleared when the helper closes the sign-on it belonged to.
   const cancelledRef = useRef(false);
   const attemptRef = useRef(0);
+  // The open ask is a final one (submit is meaningless; only a dismissal answers it).
+  const finalRef = useRef(false);
   const mountedRef = useRef(true);
 
   const settle = useCallback((value: string | null) => {
@@ -63,13 +67,20 @@ export function useFloorPinPrompt(): UseFloorPinPrompt {
         resolverRef.current = resolve;
         openRef.current = true;
         attemptRef.current += 1;
-        setPrompt({ error: request.error, verifying: false, attempt: attemptRef.current });
+        finalRef.current = request.final === true;
+        setPrompt({
+          error: request.error,
+          verifying: false,
+          attempt: attemptRef.current,
+          final: request.final === true,
+        });
       }),
     [settle]
   );
 
   const close = useCallback(() => {
     openRef.current = false;
+    finalRef.current = false;
     cancelledRef.current = false;
     settle(null);
     if (mountedRef.current) setPrompt(null);
@@ -77,7 +88,7 @@ export function useFloorPinPrompt(): UseFloorPinPrompt {
 
   const submit = useCallback(
     (pin: string) => {
-      if (!resolverRef.current) return;
+      if (!resolverRef.current || finalRef.current) return;
       setPrompt(current => (current ? { ...current, verifying: true, error: null } : current));
       settle(pin);
     },

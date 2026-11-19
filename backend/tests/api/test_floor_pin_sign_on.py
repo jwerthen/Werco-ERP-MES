@@ -211,9 +211,11 @@ class TestNoPinPolicyOff:
         pw_access = access_claims(password.json()["access_token"])
         pw_refresh = refresh_claims(password.json()["refresh_token"])
         assert "amr" not in pw_access and "amr" not in pw_refresh
-        # Byte-identical claim SET otherwise: the badge token is the password token plus amr.
-        assert set(access_claims(badge.json()["access_token"])) == set(pw_access) | {"amr"}
-        assert set(refresh_claims(badge.json()["refresh_token"])) == set(pw_refresh) | {"amr"}
+        # Byte-identical claim SET otherwise: the badge+PIN token is the password token plus amr
+        # and pst (the verified PIN's set time, which ends the session when the PIN changes).
+        assert "pst" not in pw_access and "pst" not in pw_refresh
+        assert set(access_claims(badge.json()["access_token"])) == set(pw_access) | {"amr", "pst"}
+        assert set(refresh_claims(badge.json()["refresh_token"])) == set(pw_refresh) | {"amr", "pst"}
 
 
 # ===========================================================================
@@ -428,7 +430,7 @@ class TestAttemptReservation:
 
         assert auth_endpoints._reserve_floor_pin_attempt(db_session, user.id, datetime.utcnow()) == 1
 
-    def test_the_lock_sets_fifteen_minutes_and_resets_the_counter(self, db_session):
+    def test_the_lock_sets_fifteen_minutes_and_keeps_the_cumulative_counter(self, db_session):
         user = make_badge_user(db_session, "FP-6404", pin=PIN)
         user.floor_pin_failed_attempts = FLOOR_PIN_MAX_FAILURES
         db_session.commit()
@@ -437,7 +439,8 @@ class TestAttemptReservation:
         assert auth_endpoints._lock_floor_pin(db_session, user.id, now) is True
 
         user = fresh(db_session, user)
-        assert user.floor_pin_failed_attempts == 0
+        # Review fix (PR #369 findings 3/4): the count is cumulative, so the next tier escalates.
+        assert user.floor_pin_failed_attempts == FLOOR_PIN_MAX_FAILURES
         assert user.floor_pin_locked_until == now + timedelta(minutes=FLOOR_PIN_LOCKOUT_MINUTES)
 
     def test_a_racing_lock_is_never_extended(self, db_session):
@@ -533,7 +536,7 @@ class TestLock:
 
         assert response.status_code == 401 and response.json()["detail"] == INVALID, "the lock is not disclosed"
         user = fresh(db_session, user)
-        assert user.floor_pin_failed_attempts == 0, "the counter resets when the lock is set"
+        assert user.floor_pin_failed_attempts == FLOOR_PIN_MAX_FAILURES, "the count is cumulative across locks"
         window = timedelta(minutes=FLOOR_PIN_LOCKOUT_MINUTES)
         assert before + window <= user.floor_pin_locked_until <= after + window
         rows = audit_rows(db_session, "EMPLOYEE_LOGIN_FAILED")

@@ -29,11 +29,7 @@ import {
 } from '../components/ui';
 import useUnsavedChanges from '../hooks/useUnsavedChanges';
 import { importTimeoutMessage } from '../utils/apiError';
-import FloorPinDialog, {
-  FloorPinCell,
-  floorPinManageRefusal,
-  isFloorPinLocked,
-} from '../components/users/FloorPinDialog';
+import FloorPinDialog, { FloorPinCell, floorPinManageRefusal, floorPinStatus } from '../components/users/FloorPinDialog';
 
 interface UserData {
   id: number;
@@ -54,6 +50,8 @@ interface UserData {
   has_floor_pin?: boolean;
   floor_pin_set_at?: string | null;
   floor_pin_locked_until?: string | null;
+  floor_pin_admin_locked?: boolean;
+  floor_pin_reset_required?: boolean;
 }
 
 // Floor PINs are managed by Admin AND Manager (PUT/DELETE /users/{id}/floor-pin, POST
@@ -62,8 +60,7 @@ interface UserData {
 // Platform principals pass the server's role gate too.
 const FLOOR_PIN_MANAGER_ROLES: ReadonlySet<UserRole> = new Set<UserRole>(['admin', 'manager', 'platform_admin']);
 
-const floorPinLabel = (user: UserData): string =>
-  !user.has_floor_pin ? 'Not set' : isFloorPinLocked(user) ? 'Locked' : 'Set';
+const floorPinLabel = (user: UserData): string => floorPinStatus(user).label;
 
 // A user is locked out of login while locked_until sits in the future (5 failed
 // attempts -> 30-min lock). toDate parses the UTC ISO string (and treats any

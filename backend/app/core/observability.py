@@ -14,7 +14,9 @@ so API and worker events are separable in the same project.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, List, Mapping, Optional, Sequence, Union
+import re
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Union
+from urllib.parse import urlsplit
 
 from app.core.config import settings
 
@@ -30,6 +32,13 @@ logger = logging.getLogger(__name__)
 #     bodies' ``new_password`` / ``current_password`` / ``admin_password``.
 # FastApiIntegration attaches JSON request bodies to error events and the SDK records frame
 # local variables, so without these a PIN reaches Sentry in clear text.
+#   * the hash names: a bcrypt hash of a 4-6 digit PIN IS the PIN to anyone who can run bcrypt
+#     10^4-10^6 times -- ``stored_hash`` / ``hashed`` / ``hashed_password`` frame variables and the
+#     ``floor_pin_hash`` / ``password_hash`` columns;
+#   * ``default_password`` (the import bodies).
+# FastApiIntegration attaches JSON request bodies to error events and the SDK records frame
+# local variables, so without these a PIN reaches Sentry in clear text. The key list cannot see
+# INSIDE a value, so ``scrub_sentry_event`` (``before_send``) covers the rest.
 SENTRY_EXTRA_DENYLIST = (
     "pin",
     "new_pin",
@@ -38,7 +47,137 @@ SENTRY_EXTRA_DENYLIST = (
     "new_password",
     "current_password",
     "admin_password",
+    "default_password",
+    "stored_hash",
+    "hashed",
+    "hashed_password",
+    "floor_pin_hash",
+    "password_hash",
 )
+
+# --- before_send: what a key-only denylist cannot reach ---------------------------------------
+#
+# Three things carry a credential in a VALUE, where the scrubber (which matches dict keys) never
+# looks:
+#   1. raw request-body locals -- ``fastapi.routing``'s ``body_bytes`` and ``app.main``'s
+#      ``limit_json_body_size`` ``body`` hold ``b'{"employee_id": "0042", "pin": "2580"}'`` as a
+#      repr string while the route runs, in every traceback;
+#   2. a bcrypt hash bound to any local under any name;
+#   3. SQLAlchemy's ``[parameters: {...}]`` in an exception message (also turned off at the
+#      source with the engine's ``hide_parameters=True``, ``app/db/database.py``).
+# And on a CREDENTIAL route nothing in the frames or the request body is worth the risk, so every
+# frame variable and the request data are dropped there entirely.
+SENTRY_FILTERED = "[Filtered]"
+_BODY_FRAME_VARS = frozenset({"body_bytes", "body", "raw_body", "json_body", "request_body", "content"})
+_BCRYPT_HASH = re.compile(r"\$2[aby]\$\d\d\$[./A-Za-z0-9]*")
+_SQL_PARAMETERS = re.compile(r"\[parameters: [^\n]*")
+# Paths (after the API prefix) whose request body carries a credential: every ``/auth/`` route,
+# floor-PIN administration, the visitor-tablet and crew-station PIN sign-ins and PIN writes, and
+# the password writes on the users router.
+_CREDENTIAL_ROUTE_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"^/auth/",
+        r"^/users/[^/]+/floor-pin(/.*)?$",
+        r"^/users/[^/]+/reset-password$",
+        r"^/users/change-password$",
+        r"^/visitor-logs/station-login$",
+        r"^/visitor-logs/stations(/[^/]+/reset-pin)?$",
+        r"^/shop-floor/kiosk-stations/station-login$",
+        r"^/shop-floor/kiosk-stations(/[^/]+/reset-pin)?$",
+    )
+)
+
+
+def is_credential_route(path: str) -> bool:
+    """Does this request path carry a credential in its body (see ``_CREDENTIAL_ROUTE_PATTERNS``)?"""
+    prefix = settings.API_V1_PREFIX.rstrip("/")
+    if not path.startswith(prefix + "/"):
+        return False
+    relative = path[len(prefix) :]
+    return any(pattern.search(relative) for pattern in _CREDENTIAL_ROUTE_PATTERNS)
+
+
+def _iter_frames(event: Dict[str, Any]) -> Any:
+    """Every stack frame in the event: exception chains and thread stacks."""
+    for key in ("exception", "threads"):
+        container = event.get(key)
+        values = container.get("values") if isinstance(container, dict) else None
+        for value in values or ():
+            stacktrace = value.get("stacktrace") if isinstance(value, dict) else None
+            frames = stacktrace.get("frames") if isinstance(stacktrace, dict) else None
+            for frame in frames or ():
+                if isinstance(frame, dict):
+                    yield frame
+
+
+def _filter_hashes(value: Any, whole: bool) -> Any:
+    """``value`` with every bcrypt hash removed, at any depth (iterative). ``whole`` replaces a
+    string containing one entirely; otherwise only the hash itself is cut out of it."""
+
+    def clean(text: str) -> str:
+        if not _BCRYPT_HASH.search(text):
+            return text
+        return SENTRY_FILTERED if whole else _BCRYPT_HASH.sub(SENTRY_FILTERED, text)
+
+    if isinstance(value, str):
+        return clean(value)
+    stack = [value]
+    while stack:
+        node = stack.pop()
+        items = node.items() if isinstance(node, dict) else enumerate(node) if isinstance(node, list) else ()
+        for key, item in list(items):
+            if isinstance(item, str):
+                node[key] = clean(item)
+            elif isinstance(item, (dict, list)):
+                stack.append(item)
+    return value
+
+
+def scrub_sentry_event(event: Dict[str, Any], hint: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """``before_send``: remove what the key-based ``EventScrubber`` cannot see (see above).
+
+    For EVERY event: drop the raw-body frame variables (``_BODY_FRAME_VARS``), replace any frame
+    variable holding a bcrypt hash with ``"[Filtered]"``, cut ``[parameters: ...]`` and bcrypt
+    hashes out of exception messages, and cut bcrypt hashes out of the request data and extras.
+    For an event from a CREDENTIAL route (``is_credential_route``): drop every frame variable and
+    the request data entirely. Never raises in practice; if it ever did, the SDK drops the event
+    (its ``before_send`` wrapper keeps no partial result), which is the safe direction.
+    """
+    request = event.get("request")
+    url = request.get("url") if isinstance(request, dict) else None
+    credential_route = isinstance(url, str) and is_credential_route(urlsplit(url).path)
+
+    for frame in _iter_frames(event):
+        frame_vars = frame.get("vars")
+        if not isinstance(frame_vars, dict):
+            continue
+        if credential_route:
+            frame.pop("vars", None)
+            continue
+        for name in _BODY_FRAME_VARS & set(frame_vars):
+            del frame_vars[name]
+        _filter_hashes(frame_vars, whole=True)
+
+    exception = event.get("exception")
+    for value in (exception.get("values") if isinstance(exception, dict) else None) or ():
+        if isinstance(value, dict) and isinstance(value.get("value"), str):
+            message = _SQL_PARAMETERS.sub("[parameters: [Filtered]]", value["value"])
+            value["value"] = _filter_hashes(message, whole=False)
+    logentry = event.get("logentry")
+    if isinstance(logentry, dict):
+        for key in ("message", "formatted"):
+            if isinstance(logentry.get(key), str):
+                logentry[key] = _filter_hashes(_SQL_PARAMETERS.sub("[parameters: [Filtered]]", logentry[key]), False)
+
+    if isinstance(request, dict):
+        if credential_route:
+            request.pop("data", None)
+        elif "data" in request:
+            request["data"] = _filter_hashes(request["data"], whole=False)
+    if "extra" in event:
+        event["extra"] = _filter_hashes(event["extra"], whole=False)
+    return event
 
 
 def build_event_scrubber() -> Any:
@@ -89,8 +228,12 @@ def init_sentry(
             integrations=integrations,
             # Credentials never leave the process: request bodies, extras and frame variables
             # are scrubbed of every key in the SDK default denylist plus SENTRY_EXTRA_DENYLIST
-            # (the floor PIN above all), at any depth.
+            # (the floor PIN above all), at any depth -- then ``scrub_sentry_event`` removes what a
+            # key list cannot see: raw-body locals, bcrypt hashes in any value, SQL parameters,
+            # and on a credential route every frame variable and the request body.
             event_scrubber=build_event_scrubber(),
+            before_send=scrub_sentry_event,
+            before_send_transaction=scrub_sentry_event,
             # PERFORMANCE TRANSACTIONS ONLY -- this is not an error-capture switch. Errors
             # are governed by `sample_rate` (left at its 1.0 default), so every exception is
             # still reported at any value of this. Defaults to 0.1; see the comment on

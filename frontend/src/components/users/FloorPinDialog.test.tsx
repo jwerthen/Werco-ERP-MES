@@ -20,6 +20,7 @@ import FloorPinDialog, {
   FloorPinUser,
   MANAGER_FLOOR_PIN_TARGET_ROLES,
   floorPinManageRefusal,
+  floorPinStatus,
   isFloorPinLocked,
 } from './FloorPinDialog';
 import { ToastProvider } from '../ui/Toast';
@@ -48,6 +49,10 @@ const ROSA: FloorPinUser = {
 const inMinutes = (m: number) => new Date(Date.now() + m * 60_000).toISOString();
 const WITH_PIN: FloorPinUser = { ...ROSA, has_floor_pin: true, floor_pin_set_at: '2026-11-16T15:00:00Z' };
 const LOCKED: FloorPinUser = { ...WITH_PIN, floor_pin_locked_until: inMinutes(12) };
+// 15 cumulative wrong PINs: no time lifts it (whatever floor_pin_locked_until says).
+const ADMIN_LOCKED: FloorPinUser = { ...WITH_PIN, floor_pin_admin_locked: true, floor_pin_locked_until: null };
+// A promotion into Admin / Manager / Quality cleared the PIN.
+const RESET_REQUIRED: FloorPinUser = { ...ROSA, role: 'quality', has_floor_pin: false, floor_pin_reset_required: true };
 
 const httpError = (status: number, detail: unknown) => {
   const err = new Error(`Request failed with status code ${status}`) as Error & {
@@ -401,5 +406,60 @@ describe('floorPinManageRefusal (the client twin of the server rule)', () => {
     }
     expect(floorPinManageRefusal(null, { role: 'operator' })).toBe('Admin only');
     expect(floorPinManageRefusal({ role: 'manager' }, { role: null })).toBe('Admin only');
+  });
+});
+
+describe('the admin lock and the role-change reset (review fixes)', () => {
+  it('an admin-locked PIN reads "Locked: needs unlock" and offers Unlock, which keeps the dialog open', async () => {
+    const { onChanged, onClose } = renderDialog(ADMIN_LOCKED);
+
+    expect(screen.getByText(/Locked: needs unlock/)).toBeInTheDocument();
+    expect(screen.getByText('Setting a new PIN also lifts the lock.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Unlock' }));
+
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+    expect(mockApi.unlockUserFloorPin).toHaveBeenCalledWith(2);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('a role-change reset reads "New PIN needed (role changed)" and offers Set PIN, not Clear', () => {
+    renderDialog(RESET_REQUIRED);
+
+    expect(screen.getByText('New PIN needed (role changed)')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Set PIN' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Clear PIN' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Unlock' })).not.toBeInTheDocument();
+  });
+
+  it('the cell shows both states as needing attention', () => {
+    const { rerender } = render(<FloorPinCell user={ADMIN_LOCKED} onManage={jest.fn()} />);
+    expect(screen.getByText('Locked: needs unlock')).toBeInTheDocument();
+
+    rerender(<FloorPinCell user={RESET_REQUIRED} onManage={jest.fn()} />);
+    expect(screen.getByText('New PIN needed (role changed)')).toBeInTheDocument();
+  });
+
+  it('floorPinStatus ranks the reset, then the admin lock, then a timed lock, then set / not set', () => {
+    const now = Date.parse('2026-11-19T12:00:00Z');
+    const timed = { ...WITH_PIN, floor_pin_locked_until: '2026-11-19T12:05:00Z' };
+    expect(floorPinStatus({ ...timed, floor_pin_admin_locked: true, floor_pin_reset_required: true }, now).kind).toBe(
+      'reset_required'
+    );
+    expect(floorPinStatus({ ...timed, floor_pin_admin_locked: true }, now).kind).toBe('admin_locked');
+    expect(floorPinStatus(timed, now)).toMatchObject({ kind: 'locked', label: 'Locked', attention: true });
+    expect(floorPinStatus(WITH_PIN, now)).toMatchObject({ kind: 'set', label: 'Set', attention: false });
+    expect(floorPinStatus(ROSA, now)).toMatchObject({ kind: 'not_set', label: 'Not set', attention: false });
+  });
+
+  it('isFloorPinLocked counts the admin lock with no end time', () => {
+    expect(isFloorPinLocked(ADMIN_LOCKED)).toBe(true);
+    expect(isFloorPinLocked({ ...ADMIN_LOCKED, floor_pin_admin_locked: false })).toBe(false);
+  });
+
+  it("a Manager may unlock an in-scope admin lock; a role-change reset (Admin / Manager / Quality) is an Admin's", () => {
+    const lockedOperator: FloorPinUser = { ...ADMIN_LOCKED, role: 'operator' };
+    expect(floorPinManageRefusal({ role: 'manager' }, lockedOperator)).toBeNull();
+    expect(floorPinManageRefusal({ role: 'manager' }, RESET_REQUIRED)).toBe('Admin only');
+    expect(floorPinManageRefusal({ role: 'admin' }, RESET_REQUIRED)).toBeNull();
   });
 });

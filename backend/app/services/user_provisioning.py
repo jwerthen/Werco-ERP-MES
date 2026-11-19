@@ -24,8 +24,10 @@ TENANT_ROLES = frozenset(role for role in UserRole if role != UserRole.PLATFORM_
 MANAGER_FLOOR_PIN_TARGET_ROLES = frozenset({UserRole.OPERATOR, UserRole.SUPERVISOR, UserRole.SHIPPING, UserRole.VIEWER})
 FLOOR_PIN_JUDGMENT_ROLES = TENANT_ROLES - MANAGER_FLOOR_PIN_TARGET_ROLES  # admin, manager, quality
 
-# ``extra_data`` marker on the role-change audit row when a promotion cleared the floor PIN.
+# ``extra_data`` markers on the role-change audit row when a promotion cleared the floor PIN, and
+# when it also left the user needing a new one (they had a PIN).
 FLOOR_PIN_CLEARED_ON_PROMOTION_KEY = "floor_pin_cleared_on_promotion"
+FLOOR_PIN_RESET_REQUIRED_KEY = "floor_pin_reset_required"
 
 
 def clear_floor_pin_on_promotion(user: User, previous_role: Optional[UserRole]) -> bool:
@@ -35,19 +37,26 @@ def clear_floor_pin_on_promotion(user: User, previous_role: Optional[UserRole]) 
     a Manager set for an Operator would otherwise survive that person's promotion to Admin,
     Manager or Quality, and the Manager would still know the PIN of someone who now signs
     judgments. So a change from a role outside ``FLOOR_PIN_JUDGMENT_ROLES`` to one inside it
-    clears the hash, the set date, the wrong-PIN count and the lock -- staged on ``user`` for
+    clears the hash, the set date, the wrong-PIN count and the locks -- staged on ``user`` for
     the caller's transaction, which records it on the role change's audit row
-    (``FLOOR_PIN_CLEARED_ON_PROMOTION_KEY``, never a value). The person then needs an Admin to
-    set a new PIN. A change within the judgment roles (Manager to Admin), a demotion, and a
-    user with no PIN state are left alone.
+    (``promotion_pin_markers``, never a value).
+
+    A user who HAD a PIN is NOT downgraded to badge-only: ``floor_pin_reset_required`` is set, so
+    badge sign-on answers 403 ``floor_pin_reset_required`` (whatever the company policy) until an
+    Admin sets a new PIN -- or clears it, an explicit decision to allow badge-only. Their existing
+    badge+PIN sessions end at the next request (the hash they verified is gone). A change within
+    the judgment roles (Manager to Admin), a demotion, and a user with no PIN state are left
+    alone.
     """
     if user.role not in FLOOR_PIN_JUDGMENT_ROLES or previous_role in FLOOR_PIN_JUDGMENT_ROLES:
         return False
+    had_pin = bool(user.floor_pin_hash)
     has_pin_state = (
-        bool(user.floor_pin_hash)
+        had_pin
         or user.floor_pin_set_at is not None
         or bool(user.floor_pin_failed_attempts)
         or user.floor_pin_locked_until is not None
+        or bool(user.floor_pin_admin_locked)
     )
     if not has_pin_state:
         return False
@@ -55,7 +64,18 @@ def clear_floor_pin_on_promotion(user: User, previous_role: Optional[UserRole]) 
     user.floor_pin_set_at = None
     user.floor_pin_failed_attempts = 0
     user.floor_pin_locked_until = None
+    user.floor_pin_admin_locked = False
+    if had_pin:
+        user.floor_pin_reset_required = True
     return True
+
+
+def promotion_pin_markers(user: User) -> dict[str, Any]:
+    """The ``extra_data`` markers for a role change whose promotion cleared the floor PIN."""
+    markers: dict[str, Any] = {FLOOR_PIN_CLEARED_ON_PROMOTION_KEY: True}
+    if user.floor_pin_reset_required:
+        markers[FLOOR_PIN_RESET_REQUIRED_KEY] = True
+    return markers
 
 
 class RequiredSecurityAudit(AuditService):

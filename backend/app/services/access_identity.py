@@ -11,6 +11,12 @@ from typing import Optional, Tuple
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from app.core.floor_pin import (
+    AUTH_METHOD_PIN,
+    FLOOR_PIN_REAUTH_CODE,
+    FLOOR_PIN_REAUTH_MESSAGE,
+    pin_session_still_valid,
+)
 from app.models.company import Company
 from app.models.user import User, UserRole
 
@@ -24,6 +30,9 @@ class AccessIdentity:
     # The token's ``amr`` claim (how the person signed in: ``("badge",)`` or
     # ``("badge", "pin")``); ``None`` for a password session or a token without the claim.
     auth_methods: Optional[Tuple[str, ...]] = None
+    # The token's ``pst`` claim: the ``floor_pin_set_at`` (epoch-microseconds) of the PIN a
+    # ``["badge", "pin"]`` session verified; ``None`` on every other session.
+    pin_set_stamp: Optional[int] = None
 
 
 def _invalid_credentials() -> HTTPException:
@@ -38,14 +47,28 @@ def require_active_company(db: Session, company_id: int, *, allow_inactive: bool
         raise HTTPException(403, "Company is unavailable")
 
 
+def pin_session_reauth_required() -> HTTPException:
+    """401 ``floor_pin_reauth_required``: the session must sign in again with badge and PIN."""
+    return HTTPException(401, {"code": FLOOR_PIN_REAUTH_CODE, "message": FLOOR_PIN_REAUTH_MESSAGE})
+
+
 def resolve_access_identity(
     db: Session,
     payload: dict,
     *,
     allow_inactive_company: bool = False,
     allow_inactive_platform_company: bool = False,
+    check_pin_session: bool = True,
 ) -> AccessIdentity:
-    """Resolve verified claims against the current account and active company."""
+    """Resolve verified claims against the current account and active company.
+
+    A ``["badge", "pin"]`` session ends when its PIN does: if the user's PIN is gone (cleared,
+    or cleared by a promotion) or was set again since the session verified it (the token's
+    ``pst`` no longer equals ``floor_pin_set_at``), the answer is **401**
+    ``floor_pin_reauth_required`` on every request, HTTP and WebSocket alike. A lock does not
+    end it. ``check_pin_session=False`` only for ``POST /auth/switch-company``, which runs the
+    same check itself so it can write its failure audit row.
+    """
     raw_user_id = payload.get("user_id")
     if not isinstance(raw_user_id, (str, int)) or isinstance(raw_user_id, bool):
         raise _invalid_credentials()
@@ -78,4 +101,12 @@ def resolve_access_identity(
     )
     raw_methods = payload.get("auth_methods")
     auth_methods = tuple(raw_methods) if raw_methods else None
-    return AccessIdentity(user, company_id, bool(payload.get("read_only", False)), scope, auth_methods)
+    pin_set_stamp = payload.get("pin_set_stamp")
+    if (
+        check_pin_session
+        and auth_methods
+        and AUTH_METHOD_PIN in auth_methods
+        and not pin_session_still_valid(user.floor_pin_hash, user.floor_pin_set_at, pin_set_stamp)
+    ):
+        raise pin_session_reauth_required()
+    return AccessIdentity(user, company_id, bool(payload.get("read_only", False)), scope, auth_methods, pin_set_stamp)

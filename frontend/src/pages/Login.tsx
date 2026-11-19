@@ -5,7 +5,13 @@ import { getDefaultLandingPath, safeReturnPath } from '../utils/defaultLanding';
 import { Modal } from '../components/ui/Modal';
 import FloorPinPad from '../components/auth/FloorPinPad';
 import { useFloorPinPrompt } from '../hooks/useFloorPinPrompt';
-import { badgeSignOnErrorMessage, isBadgeSignOnCancelled, signOnWithBadge } from '../services/badgeSignOn';
+import {
+  badgeSignOnErrorMessage,
+  FLOOR_PIN_REAUTH_MESSAGE,
+  isBadgeSignOnCancelled,
+  signOnWithBadge,
+} from '../services/badgeSignOn';
+import { consumeSignInNotice, PIN_REAUTH_REASON } from '../utils/signInNotice';
 import {
   ShieldCheckIcon,
   LockClosedIcon,
@@ -60,7 +66,17 @@ export default function Login() {
   const kioskParam = useMemo(() => new URLSearchParams(location.search).get('kiosk'), [location.search]);
   const forceEmployeeMode = kioskParam === '1';
   const idleReturn = new URLSearchParams(location.search).get('reason') === 'idle';
-  const resumeEmployeeMode = idleReturn && new URLSearchParams(location.search).get('mode') === 'employee';
+  // The API client ended a badge session over the floor-PIN rule (floor_pin_reauth_required).
+  const pinReauthReturn = new URLSearchParams(location.search).get('reason') === PIN_REAUTH_REASON;
+  const resumeEmployeeMode =
+    (idleReturn || pinReauthReturn) && new URLSearchParams(location.search).get('mode') === 'employee';
+  // The reason the client left for this screen (shown once), else this page's own copy.
+  const [signInNotice, setSignInNotice] = useState<string | null>(null);
+  useEffect(() => {
+    const notice = consumeSignInNotice();
+    if (notice) setSignInNotice(notice);
+  }, []);
+  const reauthNotice = signInNotice ?? (pinReauthReturn ? FLOOR_PIN_REAUTH_MESSAGE : null);
 
   useEffect(() => {
     if (forceEmployeeMode || resumeEmployeeMode) {
@@ -239,6 +255,14 @@ export default function Login() {
                 check you out of your job.
               </p>
             )}
+            {reauthNotice && (
+              <p
+                role="status"
+                className="mb-5 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-fd-body"
+              >
+                {reauthNotice}
+              </p>
+            )}
 
             {pinPrompt.prompt && (
               <FloorPinPad
@@ -249,6 +273,7 @@ export default function Login() {
                 onSubmit={pinPrompt.submit}
                 onCancel={pinPrompt.cancel}
                 badgeLabel={pinBadge}
+                final={pinPrompt.prompt.final}
               />
             )}
 

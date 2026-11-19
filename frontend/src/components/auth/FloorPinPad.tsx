@@ -22,6 +22,11 @@ export interface FloorPinPadProps {
   badgeLabel?: string | null;
   /** Id for the heading, so a dialog wrapper can point aria-labelledby at it. */
   titleId?: string;
+  /**
+   * The sign-on ended on `error` (a 429 throttle): the pad shows it, takes no PIN, and
+   * offers only Back (which is `onCancel`).
+   */
+  final?: boolean;
 }
 
 const RANGE_TEXT = `${FLOOR_PIN_MIN_LENGTH}–${FLOOR_PIN_MAX_LENGTH} digits`;
@@ -47,6 +52,9 @@ export const SCAN_DISCARDED_HINT = {
  * them out). Keystrokes are timed (`isScanBurst`): a burst faster than a person
  * types is discarded — the field is cleared, nothing is submitted, the rest of the
  * burst and its Enter are swallowed, and a hint says to enter the PIN by hand.
+ *
+ * `final` is the end of a sign-on the server stopped (the 429 PIN throttle): the
+ * refusal stays on the pad, no PIN can be entered, and Back is the only action.
  */
 export default function FloorPinPad({
   variant,
@@ -57,6 +65,7 @@ export default function FloorPinPad({
   onCancel,
   badgeLabel,
   titleId,
+  final = false,
 }: FloorPinPadProps) {
   const [pin, setPin] = useState('');
   const [formatError, setFormatError] = useState<string | null>(null);
@@ -64,6 +73,7 @@ export default function FloorPinPad({
   const [scanDiscarded, setScanDiscarded] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const formRef = useRef<HTMLFormElement | null>(null);
+  const backRef = useRef<HTMLButtonElement | null>(null);
   // Times (ms) of the keystrokes in the current entry, and the end of a discarded burst.
   const keyTimesRef = useRef<number[]>([]);
   const swallowUntilRef = useRef(0);
@@ -80,8 +90,10 @@ export default function FloorPinPad({
     setFormatError(null);
     setScanDiscarded(false);
     keyTimesRef.current = [];
-    inputRef.current?.focus();
-  }, [attempt]);
+    // An ended sign-on takes no PIN: focus its only action instead of the field.
+    if (final) backRef.current?.focus();
+    else inputRef.current?.focus();
+  }, [attempt, final]);
 
   // Time every printable key and Enter that reaches the pad — in the field or on a
   // keypad button (a scanner's Enter on a focused key button would press it). Capture
@@ -119,8 +131,11 @@ export default function FloorPinPad({
   const shownError = scanDiscarded ? null : (formatError ?? error);
   const notice = scanDiscarded ? SCAN_DISCARDED_HINT[variant] : shownError;
 
+  // No keys while a PIN is with the server, and none once the sign-on has ended.
+  const held = verifying || final;
+
   const changePin = (next: string) => {
-    if (verifying) return;
+    if (held) return;
     const digits = next.replace(/\D/g, '').slice(0, FLOOR_PIN_MAX_LENGTH);
     // An emptied field starts a fresh entry for the scan timing.
     if (!digits) keyTimesRef.current = [];
@@ -131,7 +146,7 @@ export default function FloorPinPad({
 
   const handleSubmit = (event?: React.FormEvent) => {
     event?.preventDefault();
-    if (verifying) return;
+    if (held) return;
     if (!isValidFloorPinFormat(pin)) {
       setFormatError(`Enter your PIN (${RANGE_TEXT}).`);
       inputRef.current?.focus();
@@ -176,14 +191,14 @@ export default function FloorPinPad({
           onChange={e => changePin(e.target.value)}
           aria-invalid={shownError ? true : undefined}
           aria-describedby={describedBy}
-          readOnly={verifying}
+          readOnly={held}
           data-testid="floor-pin-input"
           className={`h-16 w-full rounded-[4px] border bg-fd-sunken px-4 text-center font-mono text-[30px] font-bold tracking-[0.5em] text-fd-ink outline-none focus:border-fd-blue ${
             shownError ? 'border-fd-red' : 'border-fd-line-bright'
           }`}
         />
         <p id={hintId} className="text-center font-mono text-[11px] uppercase tracking-[0.12em] text-fd-mute">
-          {verifying ? 'Checking PIN…' : `${RANGE_TEXT} · then Sign in`}
+          {final ? 'Sign-in stopped' : verifying ? 'Checking PIN…' : `${RANGE_TEXT} · then Sign in`}
         </p>
 
         {notice && (
@@ -202,29 +217,40 @@ export default function FloorPinPad({
           value={pin}
           onChange={changePin}
           maxLength={FLOOR_PIN_MAX_LENGTH}
-          disabled={verifying}
+          disabled={held}
           idPrefix="floor-pin-key"
           size="sm"
           allowLeadingZero
         />
 
-        <div className="grid grid-cols-2 gap-2.5">
+        {final ? (
           <button
+            ref={backRef}
             type="button"
             onClick={onCancel}
-            disabled={verifying}
-            className="h-14 rounded-[4px] border border-fd-line bg-fd-sunken font-mono text-base font-bold uppercase tracking-[0.1em] text-fd-body transition-transform duration-150 ease-out active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
+            className="h-14 w-full rounded-[4px] border border-fd-line bg-fd-sunken font-mono text-base font-bold uppercase tracking-[0.1em] text-fd-body transition-transform duration-150 ease-out active:scale-[0.98]"
           >
-            Cancel
+            Back
           </button>
-          <button
-            type="submit"
-            disabled={verifying || pin.length < FLOOR_PIN_MIN_LENGTH}
-            className="h-14 rounded-[4px] bg-fd-blue font-mono text-base font-bold uppercase tracking-[0.1em] text-[#04101f] transition-transform duration-150 ease-out active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {verifying ? 'Checking…' : 'Sign in'}
-          </button>
-        </div>
+        ) : (
+          <div className="grid grid-cols-2 gap-2.5">
+            <button
+              type="button"
+              onClick={onCancel}
+              disabled={verifying}
+              className="h-14 rounded-[4px] border border-fd-line bg-fd-sunken font-mono text-base font-bold uppercase tracking-[0.1em] text-fd-body transition-transform duration-150 ease-out active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={verifying || pin.length < FLOOR_PIN_MIN_LENGTH}
+              className="h-14 rounded-[4px] bg-fd-blue font-mono text-base font-bold uppercase tracking-[0.1em] text-[#04101f] transition-transform duration-150 ease-out active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {verifying ? 'Checking…' : 'Sign in'}
+            </button>
+          </div>
+        )}
       </form>
     );
   }
@@ -274,30 +300,40 @@ export default function FloorPinPad({
           onChange={e => changePin(e.target.value)}
           aria-invalid={shownError ? true : undefined}
           aria-describedby={describedBy}
-          readOnly={verifying}
+          readOnly={held}
           data-testid="floor-pin-input"
           className="w-full font-mono text-xl tracking-[0.4em] text-fd-ink rounded-[3px] px-4 py-2.5 outline-none transition-all min-h-[44px] focus:border-fd-blue"
           style={{ background: 'var(--fd-sunken)', border: '1px solid var(--fd-line)' }}
         />
         <p id={hintId} className="font-mono text-[9.5px] tracking-[0.1em] text-fd-mute mt-1.5">
-          {verifying ? 'Checking PIN…' : `${RANGE_TEXT}. Ask a supervisor if you have forgotten it.`}
+          {final
+            ? 'Sign-in stopped. Go back and try again later.'
+            : verifying
+              ? 'Checking PIN…'
+              : `${RANGE_TEXT}. Ask a supervisor if you have forgotten it.`}
         </p>
       </div>
 
       <div className="flex gap-2">
-        <button type="button" onClick={onCancel} disabled={verifying} className="btn-secondary flex-1">
+        <button ref={backRef} type="button" onClick={onCancel} disabled={verifying} className="btn-secondary flex-1">
           Back
         </button>
-        <button type="submit" disabled={verifying || pin.length < FLOOR_PIN_MIN_LENGTH} className="btn-primary flex-1">
-          {verifying ? (
-            <span className="flex items-center justify-center gap-2">
-              <span className="spinner h-4 w-4" aria-hidden="true" />
-              Checking…
-            </span>
-          ) : (
-            'Sign In'
-          )}
-        </button>
+        {!final && (
+          <button
+            type="submit"
+            disabled={verifying || pin.length < FLOOR_PIN_MIN_LENGTH}
+            className="btn-primary flex-1"
+          >
+            {verifying ? (
+              <span className="flex items-center justify-center gap-2">
+                <span className="spinner h-4 w-4" aria-hidden="true" />
+                Checking…
+              </span>
+            ) : (
+              'Sign In'
+            )}
+          </button>
+        )}
       </div>
     </form>
   );

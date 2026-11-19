@@ -22,15 +22,19 @@ export interface User {
   updated_at: string;
   /**
    * Floor PIN (AS9100D 8.5.2) — the second factor on badge / employee-ID sign-in.
-   * The hash is never serialized; these three say only whether one is set, when,
-   * and whether wrong attempts have locked it. Optional because they ride
-   * UserResponse (admin user lists), not every user-shaped payload.
+   * The hash is never serialized; these say only whether one is set, when, whether
+   * wrong attempts have locked it and whether a role change cleared it. Optional
+   * because they ride UserResponse (admin user lists), not every user-shaped payload.
    */
   has_floor_pin?: boolean;
   /** UTC ISO instant the current PIN was set; null when none is set. */
   floor_pin_set_at?: string | null;
-  /** UTC ISO instant the PIN lock lifts (5 wrong PINs → 15 min); in the past or null = not locked. */
+  /** UTC ISO instant a timed PIN lock lifts (5 wrong PINs → 15 min, 10 → 2 h); past or null = none. */
   floor_pin_locked_until?: string | null;
+  /** 15 cumulative wrong PINs: locked until an Admin / Manager unlocks, sets or clears it. */
+  floor_pin_admin_locked?: boolean;
+  /** A promotion into Admin / Manager / Quality cleared the PIN; badge sign-on is refused until an Admin sets one. */
+  floor_pin_reset_required?: boolean;
 }
 
 export type UserRole = 'platform_admin' | 'admin' | 'manager' | 'supervisor' | 'operator' | 'quality' | 'shipping' | 'viewer';

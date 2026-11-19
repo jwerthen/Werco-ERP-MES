@@ -107,33 +107,56 @@ URL is all the station setup there is.
     submitted, the rest of the burst and its Enter are swallowed — and the pad shows "Badge scanned
     — enter your PIN on the keypad." Without this, the next badge scanned at the station would be
     submitted as a wrong PIN against the person waiting at the pad.
-  - **A wrong or locked PIN** is **401** "Invalid badge or PIN", the same text for both, and the
-    pad stays up for another try. **5 wrong PINs lock that person's PIN for 15 minutes.** Each
-    attempt is counted before the PIN is checked, so attempts racing on one badge (two stations, a
-    scripted burst) each spend a guess, and a locked PIN is refused without being checked. The PIN
-    lock is its own counter, separate from the password lockout: it never locks the person's password
-    login, a password lockout never touches it, and the password **Unlock** (`POST /users/{id}/unlock`)
-    does not clear it. To lift it early, **Unlock** in Users → **Floor PIN** (keeps the PIN) or set a
-    new PIN, either by an Admin or, for Operator / Supervisor / Shipping / Viewer accounts, a Manager;
-    otherwise wait out the 15 minutes. Wrong and locked attempts are audited `EMPLOYEE_LOGIN_FAILED`
-    with `error_message` "Wrong PIN" / "PIN locked" (never the value).
+  - **A wrong or locked PIN** is **401** "Invalid badge or PIN", the same text for a wrong PIN and
+    for every lock, and the pad stays up for another try. **Wrong PINs add up** until the person's
+    next correct PIN (or an unlock, new PIN or clear in Users); a lock does not reset the count, so
+    the locks escalate:
+
+    | Cumulative wrong PINs | Lock |
+    |---|---|
+    | 5 | 15 minutes |
+    | 10 | 2 hours |
+    | 15 | **Admin lock**: no time lifts it. Users → **Floor PIN** shows *Locked: needs unlock* |
+
+    Each attempt is counted before the PIN is checked, so attempts racing on one badge (two
+    stations, a scripted burst) each spend a guess, and a locked PIN is refused without being
+    checked. The PIN lock is its own counter, separate from the password lockout: it never locks the
+    person's password login, a password lockout never touches it, and the password **Unlock**
+    (`POST /users/{id}/unlock`) does not clear it. **Unlock** in Users → **Floor PIN** lifts a timed
+    lock or the admin lock and keeps the PIN; setting a new PIN or clearing it lifts them too. Each
+    is open to an Admin, or to a Manager for Operator / Supervisor / Shipping / Viewer accounts. Wrong
+    and locked attempts are audited `EMPLOYEE_LOGIN_FAILED` with `error_message` "Wrong PIN" / "PIN
+    locked" (never the value).
   - **The policy.** Admin Settings → **Badge Sign-in** → *Require a PIN for badge sign-in* (the
     company's `require_floor_pin`, default **off**). Off, a badge with no PIN signs in on the badge
     alone, as before. On, a badge with no PIN is refused **403** `floor_pin_not_set`, shown on the
     badge screen as "No PIN is set for this badge. Ask a supervisor to set one." (audited "No PIN
     set"). A badge that has a PIN is challenged either way.
+  - **After a promotion.** Promoting a person who had a PIN into Admin, Manager or Quality clears
+    the PIN and flags the account: their badge is refused **403** `floor_pin_reset_required`,
+    "Your role changed. Ask an Admin to set a new floor PIN.", **whatever the policy**, until an
+    Admin sets a new PIN or clears it. Users → **Floor PIN** shows *New PIN needed (role
+    changed)*.
   - **A walked-away pad cancels itself after 60 s** without a touch (never while a PIN is with the
     server), so an abandoned pad cannot hold the station with its badge reader off.
   - **What it records.** The session's tokens carry an `amr` claim, `["badge", "pin"]` or
     `["badge"]`, and every audit row the session writes carries it as `extra_data.auth_methods`
     (see [API.md → Badge sign-on and the floor PIN](API.md#badge-sign-on-and-the-floor-pin-as9100d-852)).
+  - **A badge + PIN session lasts only as long as its PIN.** Its tokens also carry `pst`, the set
+    time of the PIN it verified. Once that PIN is reset, cleared or cleared by a promotion, the
+    session is refused **401** `floor_pin_reauth_required` on its next request. The kiosk then
+    drops the session and lands on the badge screen with "Sign in again with your badge and PIN."
+    A PIN lock does not end a session that already signed in.
 - Rate limit: **10/minute per IP** (raised from 3/minute for the Foundry redesign — a shift
   change cycles several badges through one shared station within a minute; still tight enough
   to keep online employee-id guessing impractical). On top of it, the per-IP failed-attempt throttle
   (**8** failures in **15 minutes** → **429** for 15 minutes) counts failed sign-ins (an unknown
-  badge, a locked or disabled account). **No PIN outcome counts** — not a wrong PIN, the challenge
-  or a locked-PIN attempt: a station's operators share one IP, so one person's PIN typos must never
-  lock badge sign-in for the floor. The per-person PIN lock is the limit on PIN guessing.
+  badge, a locked or disabled account); no PIN outcome counts toward it. **Wrong PINs have their own
+  per-IP budget** on this route: **20** in **15 minutes**, after which only **PIN attempts** from
+  that IP answer **429** for 15 minutes. The pad shows the 429, takes no more PINs and offers only
+  Back. Badge-only sign-ins, the PIN challenge and unknown-badge handling carry on, so a shift's PIN
+  typos can at worst pause PIN entry at that station, never badge sign-in itself. The PIN challenge
+  and a locked-PIN attempt never count.
 
 ## Idle auto-logout
 
@@ -1512,12 +1535,14 @@ every station-login failure write tamper-evident audit rows.
   resends badge + PIN. That holds for **every** scan path — JOIN / LEAVE, the board's badge-first
   sheet, production, count correction, COMPLETE, steps, documents, hold, resume and the report
   recovery — so each crew member enters their own PIN at each scan. A wrong or locked PIN is
-  **401** "Invalid badge or PIN" on the pad (5 wrong lock that person's PIN for 15 minutes, the
-  same lock the desk and solo kiosk count toward); with the company policy on, a badge with no PIN
-  is **403** `floor_pin_not_set`, shown verbatim on the scan screen. **Cancel** returns the
+  **401** "Invalid badge or PIN" on the pad (the same escalating lock tiers the desk and solo kiosk
+  count toward: 5 → 15 minutes, 10 → 2 hours, 15 → admin lock); with the company policy on, a badge
+  with no PIN is **403** `floor_pin_not_set`, and a badge whose PIN a promotion cleared is **403**
+  `floor_pin_reset_required` whatever the policy, each shown verbatim on the scan screen. The mint
+  charges no per-IP wrong-PIN budget (it is station-token-gated). **Cancel** returns the
   operator to the scan screen with nothing written. A badge scanned while the pad is up is
   discarded, not submitted as a PIN (see [Badge login](#badge-login)). The minted operator token carries `amr`
-  `["badge", "pin"]` or `["badge"]`, so every row it writes records how the operator was identified
+  `["badge", "pin"]` (plus `pst`, so it stops working if that PIN is reset within its 5 minutes) or `["badge"]`, so every row it writes records how the operator was identified
   (`extra_data.auth_methods`). PIN failures write `KIOSK_BADGE_TOKEN_FAILED`, station-keyed like
   the rest, plus `extra_data.badge_user_id` (the account whose PIN counter moved; the badge
   resolved, so it is not a mistyped fragment). The PIN value is never logged.
@@ -1783,11 +1808,13 @@ between actions (operator tokens die in ≤5 minutes on their own).
    URL) or, for a suspected-PIN-leak only, use **Reset PIN** on a still-active station
    (PIN reset does not invalidate the already-minted 24 h station token — revoke for that).
 5. A person's **floor PIN** is not the station's: revoking a station touches no one's PIN. For a
-   suspected floor-PIN leak, set a new PIN for that person in Users → **Floor PIN** (it also clears
-   a PIN lock; an Admin, or a Manager for Operator / Supervisor / Shipping / Viewer accounts). That
-   stops new sign-ons with the old PIN, but **a session already signed in with it keeps working**: crew-station operator tokens die in ≤5 minutes and a solo kiosk logs out on
-   idle, while a desk **Badge Only** session can keep refreshing. To end it at once, deactivate the
-   user (the refresh route refuses a disabled account).
+   suspected floor-PIN leak, **set a new PIN** for that person in Users → **Floor PIN** (an Admin,
+   or a Manager for Operator / Supervisor / Shipping / Viewer accounts). That stops new sign-ons
+   with the old PIN **and ends every badge + PIN session that verified it** — desk, solo kiosk and
+   crew-station tokens alike — at its next request (**401** `floor_pin_reauth_required`), because
+   each session's `pst` no longer matches. Clearing the PIN does the same. Don't rely on
+   deactivating the user instead: deactivation only pauses a session, and once the account is
+   reactivated its old refresh tokens, still inside their 7-day window, work again.
 
 ### WebSocket credential boundary
 
@@ -1808,15 +1835,24 @@ work-center/work-order parent; idle connections recheck after 30 seconds. See
 The public `POST /auth/employee-login` (10/minute — see Badge login above) is not used by the
 crew station at all.
 
-**Floor-PIN guessing.** Neither route charges a per-IP throttle for any PIN outcome — not a wrong
-PIN, the `floor_pin_required` challenge or a locked-PIN attempt — because a crew or a kiosk shares
-one egress IP and one person's typos must not lock badge sign-in for everyone behind it. The limit
-is the **per-person PIN lock**: 5 wrong PINs lock that person's PIN for 15 minutes, one counter per
-person across both routes. Each attempt is counted before the PIN is checked (a conditional
-`UPDATE` that reserves the guess and is committed first), so racing attempts on one badge each
-spend their own guess, a lost audit row or a crash never hands one back, and a locked PIN is refused
-without running the hash check. (`POST /auth/employee-login` keeps its per-IP throttle for unknown
-badges; see [Badge login](#badge-login).)
+**Floor-PIN guessing.** Two limits apply, and neither can lock badge sign-in for a whole station:
+
+- **Per person, on both routes:** one cumulative wrong-PIN count across the desk, the solo kiosk
+  and the crew station. 5 wrong PINs lock that person's PIN for 15 minutes, 10 for 2 hours, and 15
+  admin-lock it until an Admin (or a Manager, for an Operator / Supervisor / Shipping / Viewer
+  account) unlocks, resets or clears it. Only a correct PIN or that admin action resets the count,
+  so guessing is capped at 15 tries per PIN between the person's own sign-ins. Each attempt is
+  counted before the PIN is checked (a conditional `UPDATE` that reserves the guess and is committed
+  first), so racing attempts on one badge each spend their own guess, a lost audit row or a crash
+  never hands one back, and a locked PIN is refused without running the hash check.
+- **Per IP, on the public `POST /auth/employee-login` only:** its own wrong-PIN budget, 20 in 15
+  minutes (key prefix `auth:employee-login:wrong-pin`), so a sweep across many badges from one IP
+  runs out of PIN attempts. When it is spent, only PIN attempts from that IP answer **429** for 15
+  minutes; badge-only sign-in, the challenge and unknown badges are unaffected, and the existing
+  unknown-badge throttle's budget is untouched.
+
+The crew station's badge mint charges no IP (it is station-token-gated, and a crew shares one IP);
+the PIN challenge and a locked-PIN attempt never count anywhere.
 
 ## The component's number on a job card
 

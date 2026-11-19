@@ -24,6 +24,8 @@ import type {
 import type { InventoryOwnershipChange, InventoryOwnershipChangeResult, OwnershipType } from '../types/ownership';
 import axios, { AxiosInstance, AxiosError, AxiosRequestConfig } from 'axios';
 import { normalizeAxiosErrorDetail, parseBlobErrorBody } from '../utils/apiError';
+import { floorPinReauthMessage, isFloorPinReauthRequired } from './badgeSignOn';
+import { PIN_REAUTH_REASON, setSignInNotice } from '../utils/signInNotice';
 import { downloadFilename } from '../utils/contentDisposition';
 import { parseProductionCalendar } from '../utils/productionCalendar';
 import {
@@ -482,7 +484,13 @@ class ApiService {
             try {
               await this.refreshAccessToken();
               config.headers['Authorization'] = `Bearer ${this.token}`;
-            } catch {
+            } catch (refreshError) {
+              // The server ended the session (floor_pin_reauth_required): end it here
+              // and don't send a request it would refuse the same way.
+              if (isFloorPinReauthRequired(refreshError)) {
+                this.endSessionForPinReauth(refreshError);
+                throw refreshError;
+              }
               // Refresh failed, will get 401 and redirect to login
             }
           }
@@ -518,6 +526,16 @@ class ApiService {
             originalRequest.url.includes('/auth/employee-login') ||
             originalRequest.url.includes('/auth/refresh'));
 
+        // `floor_pin_reauth_required` (on ANY request): the session's sign-on no longer
+        // meets the floor-PIN rule — a badge + PIN session whose PIN was reset, cleared
+        // or promoted away, or a badge-only one once a PIN is required. Refresh answers
+        // the same code, so never try one: end the session now, on the same path a
+        // refused refresh takes, and say why on the sign-in screen.
+        if (!isAuthEndpoint && isFloorPinReauthRequired(error)) {
+          this.endSessionForPinReauth(error);
+          return Promise.reject(error);
+        }
+
         // If 401 and we haven't already retried and have a refresh token
         if (
           error.response?.status === 401 &&
@@ -547,9 +565,14 @@ class ApiService {
             originalRequest.headers['Authorization'] = `Bearer ${this.token}`;
             return this.api(originalRequest);
           } catch (refreshError) {
-            // Refresh failed, logout and redirect
-            this.logout();
-            this.redirectToLoginUnlessKiosk();
+            // Refresh failed, logout and redirect — with the reason when the server
+            // ended the session over the floor-PIN rule.
+            if (isFloorPinReauthRequired(refreshError)) {
+              this.endSessionForPinReauth(refreshError);
+            } else {
+              this.logout();
+              this.redirectToLoginUnlessKiosk();
+            }
             return Promise.reject(refreshError);
           }
         }
@@ -572,13 +595,26 @@ class ApiService {
    * `isAuthenticated`, so OperatorKiosk falls back to its badge screen without
    * a reload) and let the caller's promise reject.
    */
-  private redirectToLoginUnlessKiosk(): void {
+  private redirectToLoginUnlessKiosk(reasonQuery = ''): void {
     if (window.location.pathname.startsWith('/kiosk')) return;
     // A protected request can finish after logout has already opened login.
     // Preserve its reason/return destination instead of redirecting login to itself.
     if (/^\/login\/?$/i.test(window.location.pathname)) return;
     const returnTo = window.location.pathname + window.location.search + window.location.hash;
-    window.location.href = `/login?returnTo=${encodeURIComponent(returnTo)}`;
+    window.location.href = `/login?${reasonQuery}returnTo=${encodeURIComponent(returnTo)}`;
+  }
+
+  /**
+   * End a session the server refused with `floor_pin_reauth_required`: the refused-
+   * refresh path (logout + redirect, the kiosk staying put on its badge screen) plus
+   * the reason. The message waits in sessionStorage for the sign-in screen (Login, or
+   * the kiosk badge screen); the Login redirect opens Badge Only, since only badge
+   * sessions are ever ended this way.
+   */
+  private endSessionForPinReauth(error: unknown): void {
+    setSignInNotice(floorPinReauthMessage(error));
+    this.logout();
+    this.redirectToLoginUnlessKiosk(`reason=${PIN_REAUTH_REASON}&mode=employee&`);
   }
 
   private async refreshAccessToken(): Promise<void> {

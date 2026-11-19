@@ -5,12 +5,15 @@
  *
  * Pinned here:
  *  - the challenge loop: a 401 `floor_pin_required` asks for a PIN and resends badge +
- *    PIN; a 401 on a PIN-bearing attempt stays on the pad with the refusal text; success
- *    returns the attempt's own result;
+ *    PIN; a 401 on a PIN-bearing attempt stays on the pad with the ONE uniform text
+ *    "Invalid badge or PIN" whatever the server said (no lock tier is ever revealed);
+ *    success returns the attempt's own result;
  *  - cancel throws `BadgeSignOnCancelledError` (and always takes the pad down);
- *  - rethrow semantics: every error that is not the challenge -- 403 `floor_pin_not_set`,
- *    a plain bad badge, 429, a network failure -- reaches the caller UNWRAPPED (same
- *    object), before or after a PIN;
+ *  - rethrow semantics: every error that is not the challenge -- 403 `floor_pin_not_set`
+ *    or `floor_pin_reset_required`, a plain bad badge, a network failure -- reaches the
+ *    caller UNWRAPPED (same object), before or after a PIN; so does a first-try 429;
+ *  - a 429 AFTER a PIN (the per-IP PIN throttle) is shown on the pad as a final ask, then
+ *    ends as `BadgeSignOnEndedError` (a cancellation: the pad already said why);
  *  - a badge-only attempt passes NO argument, so the two real transports
  *    (`api.loginWithEmployeeId`, `kioskStationClient.mintBadgeToken`) send no `pin` key.
  */
@@ -35,15 +38,23 @@ import api from './api';
 import { KioskApiError, mintBadgeToken, setStationToken } from './kioskStationClient';
 import {
   BadgeSignOnCancelledError,
+  BadgeSignOnEndedError,
   FLOOR_PIN_NOT_SET_CODE,
+  FLOOR_PIN_REAUTH_CODE,
+  FLOOR_PIN_REAUTH_MESSAGE,
   FLOOR_PIN_REQUIRED_CODE,
+  FLOOR_PIN_RESET_REQUIRED_CODE,
   FloorPinPrompter,
+  FloorPinRequest,
   INVALID_BADGE_OR_PIN,
   badgeSignOnErrorMessage,
   floorPinErrorCode,
+  floorPinReauthMessage,
   isBadgeSignOnCancelled,
   isFloorPinNotSet,
+  isFloorPinReauthRequired,
   isFloorPinRequired,
+  isFloorPinResetRequired,
   isValidFloorPinFormat,
   signOnWithBadge,
 } from './badgeSignOn';
@@ -53,6 +64,12 @@ const NOT_SET_DETAIL = {
   code: FLOOR_PIN_NOT_SET_CODE,
   message: 'No PIN is set for this badge. Ask a supervisor to set one.',
 };
+const RESET_REQUIRED_DETAIL = {
+  code: FLOOR_PIN_RESET_REQUIRED_CODE,
+  message: 'Your role changed. Ask an Admin to set a new floor PIN.',
+};
+const REAUTH_DETAIL = { code: FLOOR_PIN_REAUTH_CODE, message: 'Sign in again with your badge and PIN.' };
+const THROTTLED = 'Too many failed sign-in attempts — wait a few minutes';
 
 /** An Axios-shaped error (what api.loginWithEmployeeId rejects with). */
 function axiosError(status: number, detail?: unknown): Error & { response: { status: number; data: unknown } } {
@@ -70,8 +87,8 @@ function kioskError(status: number, detail: unknown, message = ''): KioskApiErro
 
 /** A scripted prompter: answers each ask from `answers` in order and records what it was asked. */
 function scriptedPrompter(answers: Array<string | null>) {
-  const asks: Array<{ error: string | null }> = [];
-  const requestPin = jest.fn(async (request: { error: string | null }) => {
+  const asks: FloorPinRequest[] = [];
+  const requestPin = jest.fn(async (request: FloorPinRequest) => {
     asks.push({ ...request });
     if (answers.length === 0) throw new Error('prompter asked more times than scripted');
     return answers.shift() as string | null;
@@ -112,6 +129,24 @@ describe('error classification', () => {
     expect(isFloorPinNotSet(axiosError(403, NOT_SET_DETAIL))).toBe(true);
     expect(isFloorPinNotSet(kioskError(403, NOT_SET_DETAIL))).toBe(true);
     expect(isFloorPinNotSet(axiosError(401, NOT_SET_DETAIL))).toBe(false);
+  });
+
+  it('reads floor_pin_reset_required only on a 403, and shows its message', () => {
+    expect(isFloorPinResetRequired(axiosError(403, RESET_REQUIRED_DETAIL))).toBe(true);
+    expect(isFloorPinResetRequired(kioskError(403, RESET_REQUIRED_DETAIL))).toBe(true);
+    expect(isFloorPinResetRequired(axiosError(401, RESET_REQUIRED_DETAIL))).toBe(false);
+    expect(isFloorPinResetRequired(axiosError(403, NOT_SET_DETAIL))).toBe(false);
+    expect(badgeSignOnErrorMessage(axiosError(403, RESET_REQUIRED_DETAIL), 'fallback')).toBe(
+      RESET_REQUIRED_DETAIL.message
+    );
+  });
+
+  it('reads floor_pin_reauth_required only on a 401, with its message or our own', () => {
+    expect(isFloorPinReauthRequired(axiosError(401, REAUTH_DETAIL))).toBe(true);
+    expect(isFloorPinReauthRequired(axiosError(403, REAUTH_DETAIL))).toBe(false);
+    expect(isFloorPinReauthRequired(axiosError(401, 'Could not validate credentials'))).toBe(false);
+    expect(floorPinReauthMessage(axiosError(401, REAUTH_DETAIL))).toBe(REAUTH_DETAIL.message);
+    expect(floorPinReauthMessage(axiosError(401, { code: FLOOR_PIN_REAUTH_CODE }))).toBe(FLOOR_PIN_REAUTH_MESSAGE);
   });
 
   it('turns a refusal into display text and never renders an object', () => {
@@ -174,6 +209,23 @@ describe('signOnWithBadge', () => {
     expect(close).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ['the challenge again', () => kioskError(401, CHALLENGE_DETAIL, 'Enter your PIN.')],
+    ['a lock-tier text', () => axiosError(401, 'PIN locked for 2 hours')],
+    ['an admin-lock code', () => axiosError(401, { code: 'floor_pin_admin_locked', message: 'Ask an Admin' })],
+  ])('a PIN refused with %s re-asks with the uniform text, never the server one', async (_label, makeError) => {
+    const attempt = jest
+      .fn()
+      .mockRejectedValueOnce(axiosError(401, CHALLENGE_DETAIL))
+      .mockRejectedValueOnce(makeError())
+      .mockResolvedValueOnce('ok');
+    const { prompter, asks } = scriptedPrompter(['1111', '0912']);
+
+    await signOnWithBadge(attempt, prompter);
+
+    expect(asks[1]).toEqual({ error: INVALID_BADGE_OR_PIN });
+  });
+
   it('a 401 with no usable text re-asks with the uniform refusal', async () => {
     const attempt = jest
       .fn()
@@ -213,6 +265,8 @@ describe('signOnWithBadge', () => {
 
   it.each([
     ['403 floor_pin_not_set', () => axiosError(403, NOT_SET_DETAIL)],
+    ['403 floor_pin_reset_required', () => axiosError(403, RESET_REQUIRED_DETAIL)],
+    ['403 kiosk floor_pin_reset_required', () => kioskError(403, RESET_REQUIRED_DETAIL, RESET_REQUIRED_DETAIL.message)],
     ['401 unknown badge', () => axiosError(401, 'Invalid employee ID')],
     ['401 kiosk invalid badge', () => kioskError(401, 'Invalid badge', 'Invalid badge')],
     ['429 throttled', () => axiosError(429, 'Too many failed sign-in attempts')],
@@ -230,7 +284,7 @@ describe('signOnWithBadge', () => {
 
   it.each([
     ['403 floor_pin_not_set', () => kioskError(403, NOT_SET_DETAIL, NOT_SET_DETAIL.message)],
-    ['429 throttled', () => axiosError(429, 'Too many failed sign-in attempts')],
+    ['403 floor_pin_reset_required', () => axiosError(403, RESET_REQUIRED_DETAIL)],
     ['500', () => axiosError(500, 'boom')],
     ['network failure', () => new Error('Network Error')],
   ])('a %s after a PIN ends the sign-on unwrapped and closes the pad', async (_label, makeError) => {
@@ -242,6 +296,37 @@ describe('signOnWithBadge', () => {
 
     expect(requestPin).toHaveBeenCalledTimes(1);
     expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it('a 429 after a PIN is shown on the pad as a final ask, then ends as a cancellation', async () => {
+    const throttled = axiosError(429, THROTTLED);
+    const attempt = jest.fn().mockRejectedValueOnce(axiosError(401, CHALLENGE_DETAIL)).mockRejectedValueOnce(throttled);
+    // The final ask is answered by the person dismissing the pad (null).
+    const { prompter, asks, close } = scriptedPrompter(['0912', null]);
+
+    const caught = await signOnWithBadge(attempt, prompter).catch((err: unknown) => err);
+
+    expect(asks).toEqual([{ error: null }, { error: THROTTLED, final: true }]);
+    expect(attempt).toHaveBeenCalledTimes(2);
+    expect(caught).toBeInstanceOf(BadgeSignOnEndedError);
+    expect(isBadgeSignOnCancelled(caught)).toBe(true);
+    expect((caught as BadgeSignOnEndedError).refusal).toBe(throttled);
+    expect(badgeSignOnErrorMessage(caught, 'fallback')).toBeNull();
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it('a 429 with no text still ends on the pad with our own words, and sends no further PIN', async () => {
+    const attempt = jest
+      .fn()
+      .mockRejectedValueOnce(kioskError(401, CHALLENGE_DETAIL))
+      .mockRejectedValueOnce(kioskError(429, null, ''));
+    // Even a (misbehaving) prompter that answers the final ask with a PIN gets no new attempt.
+    const { prompter, asks } = scriptedPrompter(['0912', '1357']);
+
+    await expect(signOnWithBadge(attempt, prompter)).rejects.toBeInstanceOf(BadgeSignOnEndedError);
+
+    expect(asks[1]).toEqual({ error: 'Too many failed sign-in attempts — wait a few minutes.', final: true });
+    expect(attempt).toHaveBeenCalledTimes(2);
   });
 
   it('closes the pad even when the prompter itself fails', async () => {

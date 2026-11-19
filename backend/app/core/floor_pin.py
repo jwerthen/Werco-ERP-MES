@@ -23,7 +23,8 @@ A PIN is a credential: it is never logged, audited, serialized or echoed in an e
 from __future__ import annotations
 
 import re
-from typing import Annotated, Any, List, Optional
+from datetime import datetime, timezone
+from typing import Annotated, Any, List, Optional, Tuple
 
 from pydantic import BeforeValidator, Field
 
@@ -32,11 +33,78 @@ from app.core.security import get_password_hash, verify_password
 FLOOR_PIN_MIN_LENGTH = 4
 FLOOR_PIN_MAX_LENGTH = 6
 
-# Wrong PINs before the PIN locks, and for how long. Separate counters from the password
-# lockout (``users.failed_login_attempts`` / ``locked_until``), so a PIN lockout never
-# locks the person's password login and a password lockout never touches the PIN.
+# The PIN lock tiers. ``users.floor_pin_failed_attempts`` is CUMULATIVE -- a lock does not reset
+# it; only a correct PIN or an admin unlock / set / clear does -- so the locks escalate:
+#   * at 5 wrong PINs the PIN locks for 15 minutes;
+#   * at 10, for 2 hours;
+#   * at 15 it is ADMIN-locked (``users.floor_pin_admin_locked``): no time lifts it, only an
+#     Admin / Manager unlock, set or clear.
+# That caps guessing at 15 tries per PIN between a person's own correct sign-ins and an admin's
+# attention. Separate counters from the password lockout (``users.failed_login_attempts`` /
+# ``locked_until``), so a PIN lockout never locks the person's password login and a password
+# lockout never touches the PIN.
 FLOOR_PIN_MAX_FAILURES = 5
 FLOOR_PIN_LOCKOUT_MINUTES = 15
+FLOOR_PIN_LONG_LOCK_FAILURES = 10
+FLOOR_PIN_LONG_LOCKOUT_MINUTES = 120
+FLOOR_PIN_ADMIN_LOCK_FAILURES = 15
+# (cumulative wrong PINs, minutes) for the two timed tiers, checked at exactly that count.
+FLOOR_PIN_TIMED_LOCK_TIERS: Tuple[Tuple[int, int], ...] = (
+    (FLOOR_PIN_MAX_FAILURES, FLOOR_PIN_LOCKOUT_MINUTES),
+    (FLOOR_PIN_LONG_LOCK_FAILURES, FLOOR_PIN_LONG_LOCKOUT_MINUTES),
+)
+
+
+def floor_pin_timed_lock_minutes(attempts: int) -> Optional[int]:
+    """The timed lock (minutes) that ``attempts`` cumulative wrong PINs start, or None."""
+    for threshold, minutes in FLOOR_PIN_TIMED_LOCK_TIERS:
+        if attempts == threshold:
+            return minutes
+    return None
+
+
+# Sign-on refusals that are not a challenge or a wrong / locked PIN.
+# A badge+PIN session whose PIN changed since it was verified (reset, cleared, cleared by a
+# promotion): refused 401 on its next request, refresh or company switch. Also a badge-only
+# session once the user has a PIN or the company requires one.
+FLOOR_PIN_REAUTH_CODE = "floor_pin_reauth_required"
+FLOOR_PIN_REAUTH_MESSAGE = "Sign in again with your badge and PIN."
+# A promotion into Admin / Manager / Quality cleared the PIN: badge sign-on is refused (403)
+# until an Admin sets a new PIN or clears it, whatever the company policy.
+FLOOR_PIN_RESET_REQUIRED_CODE = "floor_pin_reset_required"
+FLOOR_PIN_RESET_REQUIRED_MESSAGE = "Your role changed. Ask an Admin to set a new floor PIN."
+
+_EPOCH = datetime(1970, 1, 1)
+
+
+def floor_pin_stamp(set_at: Optional[datetime]) -> int:
+    """``floor_pin_set_at`` as integer epoch-MICROSECONDS -- the token's ``pst`` claim.
+
+    Integer arithmetic (never ``total_seconds()``, a float), so the round trip through a JWT is
+    exact. A naive value is UTC (how the column is written); an aware one is converted. ``None``
+    (a PIN with no recorded set time, which only a direct database write produces) is 0, so the
+    claim still pins the session to that state.
+    """
+    if set_at is None:
+        return 0
+    if set_at.tzinfo is not None:
+        set_at = set_at.astimezone(timezone.utc).replace(tzinfo=None)
+    delta = set_at - _EPOCH
+    return (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
+
+
+def pin_session_still_valid(floor_pin_hash: Optional[str], floor_pin_set_at: Optional[datetime], stamp: Any) -> bool:
+    """Is a ``["badge", "pin"]`` session still backed by the PIN it verified?
+
+    False when the PIN is gone (cleared, or cleared by a promotion), when it was set again
+    since (``floor_pin_set_at`` no longer equals the session's ``pst``), or when the token
+    carries no usable ``pst``. A LOCK does not end the session: a lock is about guessing, and
+    this session already proved the PIN.
+    """
+    if not floor_pin_hash or type(stamp) is not int:
+        return False
+    return floor_pin_stamp(floor_pin_set_at) == stamp
+
 
 # ``amr`` values (see ``app.core.security.AMR_CLAIM``).
 AUTH_METHOD_BADGE = "badge"

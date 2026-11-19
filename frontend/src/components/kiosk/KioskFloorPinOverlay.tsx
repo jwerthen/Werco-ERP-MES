@@ -118,6 +118,7 @@ export default function KioskFloorPinOverlay({ prompt, onSubmit, onCancel, badge
           onCancel={onCancel}
           badgeLabel={badgeLabel}
           titleId={titleId}
+          final={prompt.final}
         />
       </div>
     </div>,

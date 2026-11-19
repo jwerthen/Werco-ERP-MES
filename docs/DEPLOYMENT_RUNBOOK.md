@@ -295,9 +295,10 @@ statement, writes no row, and adds no environment variable, secret, cron or work
   See [API.md → Customer Complaints & RMA](API.md#customer-complaints--rma).
 
 **Floor PIN for badge sign-on.** Apply **130_floor_pin** after **129_owned_property** through the
-normal API boot migration path. It is a catalog-only change with no backfill: four columns on
+normal API boot migration path. It is a catalog-only change with no backfill: six columns on
 `users` (`floor_pin_hash`, `floor_pin_set_at`, `floor_pin_failed_attempts` NOT NULL default `0`,
-`floor_pin_locked_until`) and `require_floor_pin` (NOT NULL default `false`) on `companies`, each
+`floor_pin_locked_until`, and `floor_pin_admin_locked` and `floor_pin_reset_required`, each NOT NULL
+default `false`) and `require_floor_pin` (NOT NULL default `false`) on `companies`, each
 metadata-only on PostgreSQL 11+, with no rewrite, no index and no `UPDATE`. Nobody has a PIN and
 every company is off after it, so badge sign-on is unchanged. Under `SET LOCAL lock_timeout = '5s'`
 it takes a brief ACCESS EXCLUSIVE lock on `users` (read by every authenticated request), then on
@@ -308,8 +309,9 @@ local SQLite database only, the upgrade re-spells the text `'false'` SQLite's `A
 existing companies as `0`, so the ORM does not read every company as requiring PINs; PostgreSQL gets
 no `UPDATE`. Owner order: (1) set people's PINs first (Users → **Floor PIN** column, where *Not
 set* shows who has none; an Admin, or a Manager for Operator / Supervisor / Shipping / Viewer
-accounts only; a promotion into Admin, Manager or Quality clears the person's PIN, and an Admin
-sets a new one). (2) **Before turning the policy on for the first time, rotate
+accounts only; a promotion into Admin, Manager or Quality clears the person's PIN and refuses
+their badge with "Your role changed. Ask an Admin to set a new floor PIN." until an Admin sets a new
+one). (2) **Before turning the policy on for the first time, rotate
 `REFRESH_TOKEN_SECRET_KEY`** on `werco-api` and `werco-worker` (`railway variables set
 REFRESH_TOKEN_SECRET_KEY=<new value> --service werco-api`, and the same for the worker). This signs
 everyone out once. It is needed because a badge session signed in before this deploy carries no
@@ -317,13 +319,16 @@ everyone out once. It is needed because a badge session signed in before this de
 that refreshes at least weekly could survive it indefinitely, and its writes carry no
 `auth_methods`, so they read like password sessions. API, wallboard and crew-station tokens are
 signed with `SECRET_KEY` and keep working. (3) Then turn on Admin Settings → **Badge Sign-in**
-(Admin). A locked PIN is lifted with **Unlock** in the Floor PIN dialog, which keeps the PIN. On an
+(Admin). Wrong PINs add up until a correct one (5 → 15-minute lock, 10 → 2 hours, 15 → locked
+until unlocked); **Unlock** in the Floor PIN dialog lifts any lock and keeps the PIN. For a leaked
+PIN, **set a new PIN**: that ends every badge + PIN session of the person at its next request.
+Deactivating the user only pauses such a session, and reactivating revives its refresh tokens. On an
 application rollback keep the migration: before
 redeploying a pre-130 image, from a checkout of this release run
 `railway run --service werco-api alembic stamp 129_owned_property`. While the older code runs, sign-on
 is badge-only again (no PIN step, whatever the policy says), and after rolling forward the rotation in
 step (2) is needed again. The **downgrade is lossy** and not a
-rollback step: it discards every PIN, PIN lock and company policy. Full notes, the owner runbook and
+rollback step: it discards every PIN, PIN lock, promotion reset flag and company policy. Full notes, the owner runbook and
 verification are in
 [Floor PIN for badge sign-on](DEPLOYMENT.md#floor-pin-for-badge-sign-on-migration-130).
 

@@ -280,7 +280,13 @@ class TestSetResetClear:
         (row,) = audit_rows(db_session, "FLOOR_PIN_SET")
         assert row.resource_type == "user" and row.resource_id == target.id
         assert row.old_values is None and row.new_values is None
-        assert row.extra_data == {"source": "admin_set", "replaced_existing_pin": False, "cleared_pin_lockout": False}
+        assert row.extra_data == {
+            "source": "admin_set",
+            "replaced_existing_pin": False,
+            "cleared_pin_lockout": False,
+            "cleared_pin_admin_lock": False,
+            "cleared_pin_reset_required": False,
+        }
         assert PIN not in row_text(row) and stored_hash not in row_text(row)
 
     def test_the_new_pin_works_at_sign_on(self, client, db_session, admin_headers):
@@ -329,7 +335,13 @@ class TestSetResetClear:
         assert pin_state(db_session, target) == (None, None, 0, None)
         (row,) = audit_rows(db_session, "FLOOR_PIN_CLEARED")
         assert row.resource_id == target.id
-        assert row.extra_data == {"source": "admin_clear", "had_pin": True, "cleared_pin_lockout": True}
+        assert row.extra_data == {
+            "source": "admin_clear",
+            "had_pin": True,
+            "cleared_pin_lockout": True,
+            "cleared_pin_admin_lock": False,
+            "cleared_pin_reset_required": False,
+        }
 
         signed_in = client.post(EMPLOYEE_LOGIN, json={"employee_id": target.employee_id}, headers=XHR)
         assert signed_in.status_code == 200, "a cleared PIN is not asked for (policy off)"
@@ -717,6 +729,7 @@ class TestUnlock:
         assert row.extra_data == {
             "source": "admin_unlock",
             "floor_pin_locked_until": locked_until.isoformat(),
+            "floor_pin_admin_locked": False,
             "floor_pin_failed_attempts": 2,
         }
         assert stored_hash not in row_text(row) and OTHER_PIN not in row_text(row)
@@ -824,24 +837,41 @@ class TestPromotionClearsThePin:
         assert row.extra_data["changes"]["role"]["new"] in (to_role.value, str(to_role))
         assert_no_credential_in(row, stored_hash)
 
-    def test_the_old_pin_no_longer_counts_and_the_badge_alone_is_badge_only(self, client, db_session, admin_headers):
+    def test_the_old_pin_no_longer_counts_and_the_badge_alone_is_refused_until_a_new_pin(
+        self, client, db_session, admin_headers
+    ):
+        """Review decision (PR #369 finding 5): a promotion never downgrades a PIN-protected badge to
+        badge-only. With the policy OFF, the old PIN and the bare badge are both refused 403
+        ``floor_pin_reset_required`` (with a FAILED row each) until an Admin sets a new PIN."""
         target = make_user(db_session, role=UserRole.OPERATOR)
         manager_set_pin(client, db_session, target, lock=False)
         promoted = client.put(f"{API}/users/{target.id}", json={"role": "quality"}, headers=admin_headers)
         assert promoted.status_code == 200, promoted.text
+        assert promoted.json()["floor_pin_reset_required"] is True
+        assert db_session.get(Company, 1).require_floor_pin is False
 
         old_pin = client.post(EMPLOYEE_LOGIN, json={"employee_id": target.employee_id, "pin": OTHER_PIN}, headers=XHR)
         badge_only = client.post(EMPLOYEE_LOGIN, json={"employee_id": target.employee_id}, headers=XHR)
 
         for response in (old_pin, badge_only):
-            assert response.status_code == 200, response.text
-            claims = jwt.decode(response.json()["access_token"], settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
-            assert claims["amr"] == ["badge"], "the old PIN proves nothing any more"
+            assert response.status_code == 403, response.text
+            assert response.json()["detail"] == {
+                "code": "floor_pin_reset_required",
+                "message": "Your role changed. Ask an Admin to set a new floor PIN.",
+            }
+        failed = [
+            row
+            for row in audit_rows(db_session)
+            if row.action == "EMPLOYEE_LOGIN_FAILED" and row.error_message == "PIN reset required"
+        ]
+        assert len(failed) == 2
 
-        db_session.get(Company, 1).require_floor_pin = True
-        db_session.commit()
-        refused = client.post(EMPLOYEE_LOGIN, json={"employee_id": target.employee_id, "pin": OTHER_PIN}, headers=XHR)
-        assert refused.status_code == 403 and refused.json()["detail"]["code"] == "floor_pin_not_set"
+        # An Admin's new PIN lifts it, and the new PIN signs in as badge + PIN.
+        assert client.put(pin_url(target.id), json={"pin": PIN}, headers=admin_headers).status_code == 200
+        signed_in = client.post(EMPLOYEE_LOGIN, json={"employee_id": target.employee_id, "pin": PIN}, headers=XHR)
+        assert signed_in.status_code == 200, signed_in.text
+        claims = jwt.decode(signed_in.json()["access_token"], settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        assert claims["amr"] == ["badge", "pin"]
 
     def test_after_the_promotion_a_manager_cannot_set_a_new_pin_but_an_admin_can(
         self, client, db_session, admin_headers
