@@ -438,24 +438,31 @@ It meets this runbook in three places.
   `GET /work-orders/by-number/{wo_number}` and the `/shop-floor/operations` reads. A PDF above
   `standard` reads as none there (`document_id` and `document_file_name` null, `has_document`
   false), and a work order of a controlled customer is withheld whole by the redaction anyway.
-- **In-app AI never sends an `export_controlled` document to the model.** Copilot document search
-  and Hank's job documents (readiness, knowledge, the shipping packet) leave out every
-  `export_controlled` document for everyone, an export-authorized person included: with the
-  company's `allow_ai_egress` on, those results go to Anthropic, and an export authorization lets a
-  person open a document, not send it to an outside model. `restricted` documents still reach the
-  model for a person who may open them. The other Hank document reads (handoff references, document
-  watches, the attach-document task) only name documents to the person and apply the ordinary rule.
+- **In-app AI never sends an `export_controlled` document to the model.** Everything that goes to
+  the model treats an `export_controlled` document as missing for everyone, an export-authorized
+  person included, and also any document the caller may not open: copilot document search, Hank's
+  job documents (readiness, knowledge, the shipping packet), and Hank chat's reads. In chat the
+  attach-document preview answers **404**, saved Hank tasks and intake files that name such a
+  document are left out of saved work and **404** when read, the intake-file chat tools answer the
+  same **404** (an intake file's extraction is the filed document's content), and a handoff read
+  leaves the document out of its references. With the company's `allow_ai_egress` on, those results
+  go to Anthropic, and an export authorization lets a person open a document, not send it to an
+  outside model. `restricted` documents still reach the model for a person who may open them. A
+  person's own `POST /hank/tasks` and document watches only show documents to the person and keep
+  the ordinary rule.
 - **One meaning of "export-controlled".** The upload raise rule and the access review read the
   same index as the redaction (`export_control_service.build_controlled_index`). A manual upload or
   a Hank intake filing whose linked part **or work order** resolves to a controlled customer is
   stored `export_controlled`, and a raised revision lifts its earlier revisions to that level.
+  Attaching a document to such a work order (`POST /documents/{document_id}/attach-work-order`, or
+  the Hank attach task on execute) raises it and its revision chain the same way.
   `GET /documents/access-review` lists the documents whose **part** resolves to a controlled
   customer but whose level is still below `export_controlled`; it does not read the work order, so
   a work-order-only document is counted as unlinked. Only a positive finding counts: a record whose
   `customer_name` is blank or matches no customer is unlinkable here and is neither raised nor
   listed, unlike the redaction, which withholds it. Marking a customer (above) therefore raises
-  only **future** documents for its parts and work orders. Existing documents keep their level until
-  a person changes it; run the access review after marking a customer.
+  only **future** uploads, filings and attaches for its parts and work orders. Existing documents
+  keep their level until a person changes it; run the access review after marking a customer.
 
 The two document-access writes (`POST /documents/{document_id}/access-level`,
 `PUT /users/{user_id}/export-authorization`) refuse every API token **403** and are not MCP tools,

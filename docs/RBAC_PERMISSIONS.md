@@ -25,7 +25,7 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 - **Writes / state changes** (Create, Edit, Delete, Approve, Release, Send, Adjust, Transfer, Complete, Inspect, …) are enforced **server-side** via the `require_role` dependency on the endpoint. These are the authoritative access controls and match the matrix below.
 - **Operational/domain reads** — the **View** rows for the operational modules below (e.g. Work Orders, Parts, BOMs, Routings, Inventory, Purchasing, Receiving, Customers, Quotes) — are **tenant-scoped** (every query is filtered to the caller's active company via `get_current_company_id`) and are available to **any authenticated user within that tenant**. The list/detail GET endpoints depend on `get_current_user` only and do **not** restrict reads by role. The **View** columns therefore describe the *intended in-app navigation* (which the frontend gates for usability), not a server-enforced read restriction. This is the current intended design: **read-broad / write-restricted**.
 - **Administrative / governance reads are the exception and _are_ enforced server-side:** **Users** (`require_role([ADMIN, MANAGER])`), **Admin Settings** (`ADMIN`), and **Audit Logs** (`require_role([ADMIN, MANAGER])`).
-- **Controlled documents are read-gated server-side by their access level** (migration `131`, AS9100D 7.5.3.1): a `restricted` document opens only for Admin / Manager / Quality / Supervisor, and an `export_controlled` one only for a user export-authorized in their own company, whatever the role. Every path that returns document metadata or bytes answers **404** for a document the caller may not open, and the audit log redacts that document's rows on read. `standard` documents (the default) stay read-broad. See [Documents](#documents).
+- **Controlled documents are read-gated server-side by their access level** (migration `131`, AS9100D 7.5.3.1): a `restricted` document opens only for Admin / Manager / Quality / Supervisor, and an `export_controlled` one only for a user export-authorized in their own company, whatever the role. Every path that returns document metadata or bytes answers **404** for a document the caller may not open, and the audit log redacts the rows that name that document on read. `standard` documents (the default) stay read-broad. See [Documents](#documents).
 - **Advisory stock-piece observation evidence is also server-gated:** its source/history routes require effective `inventory:view`, including company role overrides. This separate register does not change the read-broad gates on existing operational inventory endpoints. Recording requires the existing stock-mutator roles as detailed under Inventory below.
 - **Bulk data export is its own access category, not a domain read, and _is_ enforced server-side** — `require_role([ADMIN, MANAGER])` plus an `EXPORT` audit row on every one of them. See [Bulk data export is not a domain read](#bulk-data-export-is-not-a-domain-read) immediately below, and [Bulk Data Export](#bulk-data-export) in the matrix for the route list.
 
@@ -2603,28 +2603,35 @@ order's relationship, so a foreign-tenant row is never shown.
   crew-station tablet's own station token and an **AI-external** API token see `standard` only,
   everywhere.
 - Reads whose results go to an AI model (copilot document search; Hank's job documents for
-  readiness, knowledge and the shipping packet) leave out `export_controlled` documents for
-  everyone, export-authorized users included.
+  readiness, knowledge and the shipping packet; Hank chat's attach preview, saved-work reads,
+  handoff reads and intake-file tools) treat `export_controlled` documents as missing for
+  everyone, export-authorized users included, as well as any document the caller may not open. A
+  person's own `POST /hank/tasks` keeps the ordinary rule.
 - A document the caller may not open is absent from every list and **404** on every by-id path,
   before any other check: the document list, detail, revisions, download, attach, delete, the kiosk drawing viewer, laser-nest PDFs,
   QMS links, ECO affected documents, process-sheet step attachments, and Hank / copilot document
   reads (an ECO's `affected_documents` and a Hank handoff answer the same **422** they give a
-  missing id). The audit log (`GET /audit/`, Admin / Manager) returns such a document's rows
-  redacted: values, description and identifier hidden, a deleted document judged by its last
-  recorded level, the stored row untouched. Every path is listed in
+  missing id). The audit log (`GET /audit/`, Admin / Manager) returns such a document's rows, and
+  the `hank_intake_file` / `hank_task` rows that name it, redacted: values, description and
+  identifier hidden, a deleted document judged by its last recorded level, the stored row
+  untouched. A `search` matches a redacted row only on what the reader is shown, and is applied
+  before pagination. Every path is listed in
   [API: Restricted and export-controlled documents](API.md#restricted-and-export-controlled-documents-as9100d-7531).
 - Export authorization is granted and revoked only by an Admin, with a reason, through
   `PUT /users/{id}/export-authorization` (see [Users](#users)); deactivating a user revokes it.
   A level applies to the document's whole revision history. Changing it needs the caller to open
   the addressed document, and lowering it needs the caller to open every revision (**409**
   otherwise), so lowering an `export_controlled` document takes an export-authorized Admin or
-  Quality user. Both writes refuse every API token and are not MCP tools
+  Quality user. A writer that changes a chain's level locks the chain and re-walks it until
+  stable (**409**, retry, after 5 walks). Both writes refuse every API token and are not MCP tools
   ([Credential policy](#credential-policy-for-judgment-writes)).
 - Manual upload takes an `access_level` and the server only raises it: to the predecessor
   revision's level, and to `export_controlled` when the linked part's or work order's customer is
   export-controlled; a raised revision lifts its earlier revisions too. Hank intake filing applies
-  the same raise rule. Certificates, labels, bills of lading, laser-nest drawings and step evidence
-  are stored `standard`.
+  the same raise rule, and attaching a document to an export-controlled customer's work order
+  (`POST /documents/{id}/attach-work-order`, or the Hank attach task on execute) raises it and its
+  chain to `export_controlled`, one audited `ACCESS_LEVEL_CHANGE` row per revision. Certificates,
+  labels, bills of lading, laser-nest drawings and step evidence are stored `standard`.
 
 Manual uploads publish as released and record the actual release actor and UTC instant, so
 upload/revision and attachment require Admin / Manager / Quality. Delete retains Admin / Manager.

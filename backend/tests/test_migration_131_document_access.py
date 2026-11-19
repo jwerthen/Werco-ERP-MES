@@ -19,8 +19,8 @@ table, no data. This file covers the MIGRATION (the access rule itself is tested
    ``ON DELETE CASCADE`` and ``SET NULL`` child of ``users``, NO ACTION children of ``documents``,
    both self-referencing FKs and a trigger whose body reads both tables: the SQLite rebuilds carry
    every row, child, legacy column / index / constraint and the trigger across in both directions;
-   nothing is backfilled (every document reads ``'standard'``, no user is authorized -- read
-   through the model's Boolean, which only the SQLite storage normalization makes true); the CHECK
+   nothing is backfilled and no dialect receives an ``UPDATE`` (every document reads
+   ``'standard'``, no user is authorized -- read through the model's Boolean); the CHECK
    and the NOT NULLs are real; a pre-131 insert still lands; a partially built schema recovers each
    missing object independently (a plain column alone without any rebuild); the downgrade removes
    exactly what the upgrade added.
@@ -514,34 +514,29 @@ def test_upgrade_adds_every_object_and_backfills_nothing(scratch):
 
     # No backfill: every document reads the server default and nobody is authorized. DEFAULT 0
     # (sa.false() on SQLite) fills each pre-existing user with the integer 0, which the model's
-    # Boolean reads as False (the SQLite-only normalization is then a no-op), so every
-    # pre-existing user reads NOT authorized.
+    # Boolean reads as False, so every pre-existing user reads NOT authorized.
     assert [row[0] for row in connection.exec_driver_sql(ACCESS_SQL)] == ["standard"] * 3
     assert [tuple(row) for row in connection.exec_driver_sql(EXPORT_SQL)] == [NOT_AUTHORIZED] * 3
     assert _authorized_through_the_model(connection) == [(5, False), (6, False), (7, False)]
 
 
-def test_without_the_normalization_sqlite_would_read_every_user_as_export_authorized(scratch):
-    """The reason the SQLite-only UPDATE is kept: a column added with the TEXT default (an earlier
-    draft of 131, or a hand-run ALTER) stores TEXT 'false' on a pre-existing row, and the model's
-    Boolean reads that as True -- every user would open every export-controlled document on a
-    local dev database. Proven on the raw ALTER; the UPDATE re-spells it as 0."""
+def test_a_text_false_default_would_fail_open_which_is_why_the_default_is_sa_false(scratch):
+    """Why ``export_authorized`` defaults to ``sa.false()``: a column added with the TEXT default
+    ``'false'`` stores that TEXT on a pre-existing row, and the model's Boolean reads it as True --
+    every user would open every export-controlled document. The migration's own column stores 0."""
     connection, _migration = scratch
     connection.exec_driver_sql("ALTER TABLE users ADD COLUMN export_authorized BOOLEAN DEFAULT 'false' NOT NULL")
     assert _authorized_through_the_model(connection) == [(5, True), (6, True), (7, True)]
-    connection.exec_driver_sql(_module().SQLITE_NORMALIZE_EXPORT_AUTHORIZED_SQL)
-    assert _authorized_through_the_model(connection) == [(5, False), (6, False), (7, False)]
 
 
-def test_the_normalization_is_sqlite_only_and_runs_once_right_after_the_column(db_path):
-    normalize = _module().SQLITE_NORMALIZE_EXPORT_AUTHORIZED_SQL
-    assert normalize == "UPDATE users SET export_authorized = 0 WHERE export_authorized = 'false'"
+def test_the_upgrade_writes_no_data_on_any_dialect(db_path):
+    """No backfill and no storage normalization: the SQLite upgrade (its rebuilds' copy aside)
+    and the PostgreSQL rendering carry no UPDATE, and every user still reads NOT authorized."""
     statements = []
-    with _migrating(db_path, statements=statements) as (_connection, migration):
+    with _migrating(db_path, statements=statements) as (connection, migration):
         migration.upgrade()
-        assert statements.count(normalize) == 1
-        migration.upgrade()  # a re-run adds no column, so it re-spells nothing
-        assert statements.count(normalize) == 1
+        assert not any(statement.upper().startswith("UPDATE") for statement in statements), statements
+        assert _authorized_through_the_model(connection) == [(5, False), (6, False), (7, False)]
     assert not any("UPDATE" in statement for statement in _render("upgrade"))
 
 
@@ -660,7 +655,7 @@ def test_rerun_is_a_no_op_and_a_partial_schema_recovers_each_object(scratch):
 def test_a_plain_column_alone_is_added_natively_even_with_foreign_keys_enforced(db_path):
     """Only an FK / CHECK (or a drop) forces a SQLite rebuild. With every other object in place,
     re-adding ``export_authorized`` is a native ALTER -- no rebuild, so no refusal under
-    ``foreign_keys = ON`` -- and the storage normalization still follows it."""
+    ``foreign_keys = ON`` -- and its DEFAULT 0 leaves every user unauthorized."""
     with _migrating(db_path) as (connection, migration):
         migration.upgrade()
         connection.exec_driver_sql("ALTER TABLE users DROP COLUMN export_authorized")

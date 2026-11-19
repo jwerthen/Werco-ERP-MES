@@ -147,24 +147,42 @@ def resolve_upload_access_level(
     return UploadAccessLevel(requested=asked, access_level=level, raised_because=tuple(because))
 
 
+# How many times a chain is re-walked after its locks are granted before the writer gives up.
+CHAIN_LOCK_PASSES = 5
+CHAIN_CHANGED_DETAIL = "The revision history changed while this change was being made; retry."
+
+
 def lock_revision_chain(db: Session, company_id: int, document_id: int) -> List[Document]:
     """Row-lock every revision in ``document_id``'s chain, in ascending id order, and return them.
 
-    One lock order for every writer that changes a chain's level (the access-level verb and a
-    new revision's upload), so two of them on one chain queue rather than deadlock. Refreshed
-    from the database (``populate_existing``) so the levels judged are the locked ones.
+    One lock order for every writer that changes a chain's level (the access-level verb, a new
+    revision's upload, an attach that raises), so two of them on one chain queue rather than
+    deadlock. Refreshed from the database (``populate_existing``) so the levels judged are the
+    locked ones.
+
+    Membership is RE-WALKED after the locks are granted, and any revision found then is locked
+    too, until a walk finds nothing new: under READ COMMITTED a revision committed while this
+    writer waited (an upload holding the chain through its file save) is invisible to the first
+    walk, and a level change that missed it would leave the newest revision at the old level.
+    Each walk is a fresh statement, so it sees what committed during the wait. Gives up with
+    **409** after :data:`CHAIN_LOCK_PASSES` walks that keep finding new members.
     """
-    chain_ids = revision_chain_ids(db, company_id, document_id)
-    if not chain_ids:
-        return []
-    return (
-        tenant_query(db, Document, company_id)
-        .filter(Document.id.in_(chain_ids))
-        .order_by(Document.id)
-        .with_for_update()
-        .populate_existing()
-        .all()
-    )
+    locked: Dict[int, Document] = {}
+    for _ in range(CHAIN_LOCK_PASSES):
+        chain_ids = revision_chain_ids(db, company_id, document_id)
+        new_ids = [doc_id for doc_id in chain_ids if doc_id not in locked]
+        if not new_ids:
+            return [locked[doc_id] for doc_id in chain_ids]
+        for row in (
+            tenant_query(db, Document, company_id)
+            .filter(Document.id.in_(new_ids))
+            .order_by(Document.id)
+            .with_for_update()
+            .populate_existing()
+            .all()
+        ):
+            locked[row.id] = row
+    raise HTTPException(status_code=409, detail=CHAIN_CHANGED_DETAIL)
 
 
 def _audit_chain_level(
@@ -229,6 +247,49 @@ def lift_revision_chain(
         )
         lifted.append(member.id)
     return lifted
+
+
+RAISED_FOR_WORK_ORDER_REASON = "work order customer is export-controlled"
+
+
+def raise_for_work_order_link(
+    db: Session, *, company_id: int, document: Document, work_order_id: int, audit: AuditService
+) -> List[int]:
+    """The raise rule for a document newly linked to a work order (attach): when the work order's
+    customer resolves as export-controlled, raise the document and its revision chain to
+    ``export_controlled``. Never lowers.
+
+    The same rule an upload carrying that ``work_order_id`` applies (:func:`resolve_upload_access_level`),
+    so the two doors to the same end state store the same level. One required
+    ``ACCESS_LEVEL_CHANGE`` row per raised revision, reason ``work order customer is
+    export-controlled``, marked ``chain_change``. Flushes, never commits. Returns the raised ids.
+    """
+    if not links_are_export_controlled(db, company_id, part_id=None, work_order_id=work_order_id):
+        return []
+    level = DocumentAccessLevel.EXPORT_CONTROLLED.value
+    chain = lock_revision_chain(db, company_id, document.id) or [document]
+    raised: List[int] = []
+    for member in chain:
+        if access_level_rank(member.access_level) >= access_level_rank(level):
+            continue
+        previous_level = member.access_level
+        member.access_level = level
+        db.flush()
+        _audit_chain_level(
+            audit,
+            member,
+            previous_level=previous_level,
+            level=level,
+            reason=RAISED_FOR_WORK_ORDER_REASON,
+            chain_change={
+                "trigger": "work_order_link",
+                "work_order_id": work_order_id,
+                "addressed_document_id": document.id,
+                "chain_size": len(chain),
+            },
+        )
+        raised.append(member.id)
+    return raised
 
 
 @dataclass

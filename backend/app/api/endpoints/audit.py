@@ -2,7 +2,9 @@ from datetime import datetime, timedelta
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import desc
+from sqlalchemy import and_, desc
+from sqlalchemy import false as false_
+from sqlalchemy import not_, or_, true
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_company_id, require_platform_admin, require_role
@@ -16,6 +18,7 @@ from app.services.document_access import (
     REDACTED_AUDIT_DESCRIPTION,
     REDACTED_AUDIT_IDENTIFIER,
     REDACTED_AUDIT_VALUES,
+    audit_search_visibility_clause,
     redacted_document_audit_ids,
 )
 
@@ -67,8 +70,14 @@ def list_audit_logs(
     controlled without the reader's own export authorization in this company; for a deleted
     document, its last recorded level) is returned REDACTED: ``old_values`` / ``new_values``
     become ``{"redacted": "document not available to you"}``, ``description`` "Document change
-    (restricted)" and ``resource_identifier`` "Restricted document". The stored row is never
-    changed. A ``search`` that matched only a redacted field does not return the row.
+    (restricted)" and ``resource_identifier`` "Restricted document". That covers ``document``
+    rows and the Hank intake-file and task rows that name such a document (an intake filing's
+    plan and result, an attach task, a watch that saw it arrive). The stored row is never
+    changed.
+
+    ``search`` matches such a row only on what the reader is shown (who did it, and the redacted
+    markers), never on the stored text, and it is applied in the database BEFORE ``offset`` /
+    ``limit``: pages are full, and nothing reveals that hidden text matched.
     """
     query = db.query(AuditLog).filter(AuditLog.company_id == company_id)
 
@@ -89,11 +98,23 @@ def list_audit_logs(
 
     if search:
         search_term = f"%{search}%"
-        query = query.filter(
-            (AuditLog.description.ilike(search_term))
-            | (AuditLog.resource_identifier.ilike(search_term))
-            | (AuditLog.user_name.ilike(search_term))
+        text_match = or_(
+            AuditLog.description.ilike(search_term),
+            AuditLog.resource_identifier.ilike(search_term),
+            AuditLog.user_name.ilike(search_term),
         )
+        visible = audit_search_visibility_clause(db, company_id, current_user)
+        if visible is None:
+            query = query.filter(text_match)
+        else:
+            # A row the reader would see redacted matches only on its redacted projection.
+            folded = search.casefold()
+            marker_match = any(
+                folded in marker.casefold()
+                for marker in (REDACTED_AUDIT_DESCRIPTION, REDACTED_AUDIT_IDENTIFIER, *REDACTED_AUDIT_VALUES.values())
+            )
+            projection_match = or_(AuditLog.user_name.ilike(search_term), true() if marker_match else false_())
+            query = query.filter(or_(and_(visible, text_match), and_(not_(visible), projection_match)))
 
     logs = query.order_by(desc(AuditLog.timestamp)).offset(offset).limit(limit).all()
     redacted = redacted_document_audit_ids(db, company_id, current_user, logs)
@@ -105,7 +126,8 @@ def list_audit_logs(
         row = AuditLogResponse.model_validate(log)
         if log.id in redacted:
             row = _redact(row)
-            # The SQL search ran over the real text; drop a row that matched only what was hidden.
+            # Backstop: the SQL already matched hidden rows on the projection only. A row redacted
+            # here for a reason the SQL could not see is still dropped if only hidden text matched.
             if needle is not None and not any(
                 needle in (value or "").casefold()
                 for value in (row.description, row.resource_identifier, row.user_name)

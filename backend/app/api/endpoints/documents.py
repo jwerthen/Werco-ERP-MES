@@ -975,11 +975,17 @@ def attach_document_to_work_order(
     """Attach an unlinked PDF to a live tenant work order; existing history stays bound.
 
     A document the caller may not open is the same 404 as a missing one, before any other check.
+    When the work order's customer is export-controlled the document is raised to
+    ``export_controlled`` (one ``ACCESS_LEVEL_CHANGE`` audit row, reason "work order customer is
+    export-controlled"), the same level an upload linked to that work order is stored at; the
+    response shows the new ``access_level``.
     """
     try:
         attach_document_command(db, document_id, payload.work_order_id, company_id, audit, viewer=current_user)
         db.commit()
-        return _document_query(db, company_id, current_user).filter(Document.id == document_id).one()
+        # Echoed back even when the attach raised it above what the caller may open (the work
+        # order's customer is export-controlled): the caller just attached it.
+        return _written_document_query(db, company_id).filter(Document.id == document_id).one()
     except AuditWriteError as exc:
         db.rollback()
         raise HTTPException(503, "Unable to save audit record") from exc

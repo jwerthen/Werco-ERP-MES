@@ -17,6 +17,7 @@ from app.models.part import Part
 from app.models.purchasing import POStatus, PurchaseOrder, PurchaseOrderLine, Vendor
 from app.models.work_order import WorkOrder
 from app.services.document_access import visible_document_or_404
+from app.services.document_access_service import raise_for_work_order_link
 from app.services.operational_event_service import OperationalEventService
 from app.services.po_flowdown_service import flowdown_snapshot_sha256, resolve_clause_codes
 from app.services.supplier_approval_service import approval_warnings, assert_vendor_not_disqualified
@@ -268,6 +269,11 @@ def attach_document_command(db, document_id, work_order_id, company_id, audit, *
 
     ``viewer`` is the person the attach is done for. A document they may not open
     (``app.services.document_access``) is the same 404 as a missing one, before any other check.
+
+    The upload raise rule applies here too: when the work order's customer is export-controlled
+    the document (and its revision chain) is raised to ``export_controlled``, with a required
+    ``ACCESS_LEVEL_CHANGE`` audit row per raised revision
+    (``document_access_service.raise_for_work_order_link``). The viewer may then no longer open it.
     """
     document = visible_document_or_404(db, company_id, viewer, document_id, for_update=True)
 
@@ -298,4 +304,5 @@ def attach_document_command(db, document_id, work_order_id, company_id, audit, *
     old_values = _audit_values(document)
     document.work_order_id = work_order_id
     _audit_document(db, audit, document, action="UPDATE", old_values=old_values)
+    raise_for_work_order_link(db, company_id=company_id, document=document, work_order_id=work_order_id, audit=audit)
     return document

@@ -7,6 +7,7 @@ bounded evidence only when needed; it never re-uploads the source to Claude.
 from fastapi import HTTPException
 
 from app.schemas.hank_intake import IntakeExtraction
+from app.services.document_access import model_hidden_record_ids
 from app.services.hank_intake_service import HankIntakeService
 
 READY_STATUSES = frozenset({'awaiting_review', 'planned', 'completed'})
@@ -16,6 +17,11 @@ def _source(db, company_id, user, file_id):
     if type(file_id) is not int or file_id <= 0:
         raise HTTPException(422, 'Choose a saved document from document intake.')
     row = HankIntakeService(db, user, company_id).file(file_id)
+    # An intake file filed as a document the model may not see -- export_controlled, or one the
+    # user may not open (app.services.document_access) -- is missing to chat: its extraction is
+    # that document's content, and nothing of it is sent to the model again.
+    if row.id in model_hidden_record_ids(db, company_id, user, 'hank_intake_file', [row.id]):
+        raise HTTPException(404, 'Intake file not found')
     if row.status not in READY_STATUSES or not row.analysis_json:
         raise HTTPException(409, 'Wait for this document to finish analysis before using it in chat.')
     return row, IntakeExtraction.model_validate(row.analysis_json)

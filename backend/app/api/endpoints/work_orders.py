@@ -13,7 +13,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any, Dict, List, Literal, Optional, Set
+from typing import Any, Dict, Iterable, List, Literal, Optional, Set
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
@@ -895,6 +895,32 @@ def _reconcile_operation_component_quantities(
     return changed
 
 
+def _scope_nest_document(nest: LaserNest, viewer: Any) -> None:
+    """Scope a nest's PDF fields to ``viewer`` for a response, writing nothing.
+
+    has_document / document_file_name are injected as in-memory attrs (not ORM columns), like
+    work_center_name. A PDF the viewer may not open (app.services.document_access) reads as none,
+    as on the shop-floor and laser-nest payloads: has_document false, no file name and a null
+    ``document_id``. ``document_id`` IS a mapped column, so it is hidden with
+    ``set_committed_value``: it marks nothing dirty, so no later flush can write the null back.
+    """
+    document_visible = bool(nest.document_id) and can_view_document(viewer, nest.document)
+    nest.has_document = document_visible
+    nest.document_file_name = nest.document.file_name if document_visible else None
+    if nest.document_id is not None and not document_visible:
+        set_committed_value(nest, "document_id", None)
+
+
+def _scope_operation_nests(operations: Iterable[WorkOrderOperation], viewer: Any) -> None:
+    """The viewer-scoped nest PDF fields for a response that embeds operations without the full
+    enrichment (the work-order PUT and release, the operation POST / PUT). Every response that
+    serializes a nest goes through ``_scope_nest_document``. Writes nothing."""
+    for op in operations:
+        nest = op.laser_nest
+        if nest is not None:
+            _scope_nest_document(nest, viewer)
+
+
 def _enrich_work_order_operations(work_order: WorkOrder, *, db: Session, company_id: int, viewer: Any) -> None:
     """Inject the computed, non-column attributes every work-order response renders.
 
@@ -985,22 +1011,13 @@ def _enrich_work_order_operations(work_order: WorkOrder, *, db: Session, company
         # ``work_order_operation_id`` FK and corrupt traceability.
         # ``set_committed_value`` overrides the loaded value as if it came from
         # the DB -- it marks nothing dirty -- so the guard is safe regardless of
-        # call order. For a live nest, inject has_document / document_file_name
-        # as in-memory attrs (not ORM columns), like work_center_name above. A PDF
-        # ``viewer`` may not open (app.services.document_access) reads as none, as on
-        # the shop-floor and laser-nest payloads: has_document false, no file name and
-        # a null ``document_id``. ``document_id`` IS a mapped column, so it is hidden
-        # with ``set_committed_value`` for the reason given for ``laser_nest`` above:
-        # it marks nothing dirty, so no later flush can write the null back.
+        # call order. For a live nest, the PDF fields are scoped to the viewer
+        # (``_scope_nest_document``).
         nest = active_laser_nest(op)
         if nest is None:
             set_committed_value(op, "laser_nest", None)
         else:
-            document_visible = bool(nest.document_id) and can_view_document(viewer, nest.document)
-            nest.has_document = document_visible
-            nest.document_file_name = nest.document.file_name if document_visible else None
-            if nest.document_id is not None and not document_visible:
-                set_committed_value(nest, "document_id", None)
+            _scope_nest_document(nest, viewer)
 
         if op.component_part_id:
             component = op.component_part
@@ -4766,6 +4783,7 @@ def update_work_order(
         company_id=company_id,
     )
 
+    _scope_operation_nests(work_order.operations, current_user)
     return work_order
 
 
@@ -5232,6 +5250,7 @@ def release_work_order(
             },
             company_id=company_id,
         )
+    _scope_operation_nests(work_order.operations, current_user)
     return work_order
 
 
@@ -6267,6 +6286,7 @@ def add_operation(
     db.add(operation)
     db.commit()
     db.refresh(operation)
+    _scope_operation_nests([operation], current_user)
     return operation
 
 
@@ -6693,6 +6713,7 @@ def update_operation(
             work_center_ids=list(availability_refresh_wc_ids), horizon_days=90
         )
 
+    _scope_operation_nests([operation], current_user)
     return operation
 
 

@@ -39,8 +39,7 @@ today": behavior is unchanged until Quality flags a document or an Admin grants 
 -- each a reasoned, audited act of a person (``POST /documents/{id}/access-level``,
 ``PUT /users/{id}/export-authorization``), never a migration's inference. Nothing here guesses
 which existing documents are export-controlled; the access review lists the candidates.
-``audit_log`` is untouched. PostgreSQL receives no ``UPDATE`` at all; the one SQLite-only
-statement below rewrites how SQLite STORES the default ``false``, never what any row means.
+``audit_log`` is untouched, and no dialect receives an ``UPDATE``.
 
 The server defaults are spelled exactly as on the models. ``access_level`` takes the plain string
 ``'standard'``. ``export_authorized`` takes ``sa.false()`` -- NOT the plain string ``"false"``
@@ -53,18 +52,10 @@ that user export-authorized and open every export-controlled document. ``sa.fals
 and migration use the same expression, so ``create_all`` and the migration chain render the same
 DEFAULT and the fresh-bootstrap diff holds.
 
-SQLite storage normalization (local / test databases only; PostgreSQL is untouched)
-------------------------------------------------------------------------------------
-With ``DEFAULT 0`` a row filled by this revision's ``ADD COLUMN`` (native, or a rebuild's
-``INSERT ... SELECT``, which omits the new column) already stores the integer 0. A SQLite
-database whose ``export_authorized`` column was added with the TEXT default (an earlier draft of
-this revision, or a hand-run ``ALTER``) still holds ``'false'`` -- read as True. So on SQLite
-only, right after ``export_authorized`` is added, the upgrade still runs
-``UPDATE users SET export_authorized = 0 WHERE export_authorized = 'false'``. This is a
-DIALECT-STORAGE FIX, NOT A DATA BACKFILL (``130`` precedent): ``'false'`` and ``0`` are the same
-value; only the TEXT spelling is replaced by the integer the ORM writes. It runs only when this
-upgrade added the column, so a re-run never touches a grant. PostgreSQL stores a real boolean
-either way. ``access_level`` is a String and needs no such fix.
+With ``DEFAULT 0``, a row filled by this revision's ``ADD COLUMN`` on SQLite (native, or a
+rebuild's ``INSERT ... SELECT``, which omits the new column) stores the integer 0, so no SQLite
+storage normalization is needed (an earlier draft carried one; it could only ever run where it
+was a no-op, and was removed). Nothing in the codebase adds this column with a TEXT default.
 
 Tenant / compliance shape
 -------------------------
@@ -213,11 +204,6 @@ ACCESS_LEVEL_CHECK_SQL = "access_level IN ('standard', 'restricted', 'export_con
 # PostgreSQL only, and LOCAL: bounds the wait for each lock, then hands the normal timeout back.
 LOCK_TIMEOUT_SQL = "SET LOCAL lock_timeout = '5s'"
 RESET_LOCK_TIMEOUT_SQL = "SET LOCAL lock_timeout = DEFAULT"
-
-# SQLite only: a dialect-storage fix, NOT a data backfill (module docstring). A column added with
-# the TEXT default leaves rows holding 'false', which SQLAlchemy's SQLite Boolean reads as True;
-# this re-spells that same false as the integer 0 the ORM writes. A no-op under DEFAULT 0.
-SQLITE_NORMALIZE_EXPORT_AUTHORIZED_SQL = "UPDATE users SET export_authorized = 0 WHERE export_authorized = 'false'"
 
 # SQLite only: lets a rebuild's drop + rename survive a trigger whose body names the table (129).
 LEGACY_ALTER_TABLE_PRAGMA = "PRAGMA legacy_alter_table"
@@ -436,10 +422,6 @@ def upgrade() -> None:
                     batch.create_foreign_key(name, referred_table, [local_column], ["id"])
                 for name, sql in work.checks:
                     batch.create_check_constraint(name, sa.text(sql))
-            if table == USERS and _is_sqlite() and any(column.name == "export_authorized" for column in work.columns):
-                # Dialect-storage fix, not a backfill: re-spell SQLite's TEXT 'false' as the integer
-                # 0 (the same false) so the ORM does not read every pre-existing user as authorized.
-                op.execute(SQLITE_NORMALIZE_EXPORT_AUTHORIZED_SQL)
         if work.index:
             index_name, index_columns = work.change.index
             op.create_index(index_name, table, list(index_columns), unique=False)
