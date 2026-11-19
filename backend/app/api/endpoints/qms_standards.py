@@ -111,7 +111,7 @@ def _assert_company_document(
         return
     query = tenant_query(db, Document, company_id).filter(Document.id == document_id)
     if stored_id is None or document_id != stored_id:
-        query = query.filter(visible_documents_clause(user))
+        query = query.filter(visible_documents_clause(user, company_id))
     found = query.with_entities(Document.id).first()
     if found is None:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -977,6 +977,10 @@ def auto_link_standard(
     required audit DELETE row each) and counted in ``total_evidence_retired``. A row a person
     has reviewed (verified it, attached a document or wrote notes) is never retired: it is left
     in place and listed in ``evidence_kept_reviewed``. See ``_retire_unmatched_auto_links``.
+
+    Document-control evidence is counted over ``standard`` documents only, whoever runs this
+    (its stored description says so): restricted and export-controlled documents are left out
+    of what is persisted, so stored counts never depend on who clicked.
     """
     standard = (
         db.query(QMSStandard)
@@ -1012,7 +1016,10 @@ def auto_link_standard(
     kept_reviewed: List[Dict[str, Any]] = []
 
     for clause in clauses:
-        results = discover_evidence_for_clause(db, clause, company_id, viewer=current_user)
+        # Persisted evidence is computed over STANDARD documents only (viewer=None): the stored
+        # counts must not depend on who clicked, nor carry counts of documents a later reader
+        # may not open. The live GET .../auto-evidence stays scoped to its reader.
+        results = discover_evidence_for_clause(db, clause, company_id, viewer=None)
         computed = [r for r in results if not is_evaluation_failed(r)]
         not_computed.extend(
             {"clause_id": clause.id, "clause_number": clause.clause_number, "rule_id": r["_rule_id"]}

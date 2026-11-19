@@ -220,6 +220,80 @@ rollback step; it does not undo documents, receipts, production or shipments
 already created by completed actions. Intake-linked Documents cannot be deleted
 through the application because the saved source and receipt must remain valid.
 
+### Restricted and export-controlled documents (migration 131)
+
+Apply **131_document_access** after **130_floor_pin** through the normal API boot migration path.
+No environment variable, secret, cron or worker job is added.
+
+- **What it does.** On `documents`: `access_level` (`varchar(30) NOT NULL`, server default
+  `'standard'`), CHECK `ck_documents_access_level` (`standard` / `restricted` /
+  `export_controlled`) and index `ix_documents_access_level` on `(company_id, access_level)`. On
+  `users`: `export_authorized` (`boolean NOT NULL`, server default `false`), `export_authorized_at`
+  and `export_authorized_by` (FK `fk_users_export_authorized_by` to `users.id`, no `ON DELETE`).
+  **No backfill**: after the upgrade every document is `standard` and nobody is export-authorized,
+  so nothing changes for anyone until Quality flags documents. It creates no table, so there is no
+  RLS change. Every object is guarded on its own, so a re-run is a no-op.
+- **SQLite (local and test databases only).** SQLite's `ALTER TABLE` cannot add a CHECK or a
+  foreign key, so on SQLite the revision rebuilds `users` and `documents` (copy, drop, rename).
+  Before any DDL it reads `PRAGMA foreign_keys` and, when it is ON, refuses with nothing changed: a
+  rebuild's `DROP TABLE` would cascade-delete or null every row that references the table. The app
+  and `alembic/env.py` leave foreign keys off (SQLite's default), so a normal `alembic upgrade head`
+  on a local database works; a session that turned them on must turn them off and run it again.
+  PostgreSQL never rebuilds.
+- **Locks.** `SET LOCAL lock_timeout = '5s'`. Every `ADD COLUMN` is metadata-only on PostgreSQL 11+.
+  The FK scans `users` once and the CHECK scans `documents` once (every row passes); the index is
+  a plain `CREATE INDEX`. Both tables are held ACCESS EXCLUSIVE until the boot transaction commits,
+  and `users` is read by every authenticated request, so expect a brief stall. Lock order is `users`
+  then `documents`, the order a document request reads them. A timeout fails the boot with the
+  database back at `130`; redeploying is safe.
+- **Order.** Run the migration before or with the code that maps the columns (the API boot does).
+  Old code is safe on the new schema. New code on an un-migrated database fails every sign-in,
+  because every user load selects the new columns, so deploy the **worker with or after the API**.
+  Deploy the API before the frontend: the access badges and filter, **Change access**, **Access
+  review** and the Users page's **Export-authorized** column read fields and call routes the old
+  API does not have.
+- **Owner runbook, after the deploy, in this order.**
+  1. **Grant export authorization first.** An Admin, signed in to the app, opens **Users** and uses
+     **Export-authorized → Grant**, with a reason, for every person who must open ITAR / EAR
+     drawings, including the operators who run those jobs at the kiosk. No API token or agent can
+     do this. The grant counts only in this company: a platform account authorized elsewhere is
+     not authorized here. Deactivating a user revokes it, and reactivation does not restore it.
+  2. **Run the access review.** Quality or an Admin opens **Documents → Access review**. It lists
+     every document whose part belongs to an export-controlled customer (marked under **Customers →
+     Export control**) but is still `standard` or `restricted`, and counts the documents with no
+     part link (work-order-only documents among them), which the server cannot judge.
+  3. **Flag documents.** Open each one and use **Change access**, with a reason
+     (`export_controlled` for ITAR / EAR technical data, `restricted` for internal-only documents).
+     The change applies to every revision of the document, one audit row per revision.
+
+  **Warning:** a document flagged `export_controlled` while nobody is export-authorized cannot be
+  opened by anyone, an Admin included, and lowering it again takes an export-authorized Admin or
+  Quality user who can open every revision. The **Change access** dialog warns when the company
+  has no authorized user. New manual uploads and Hank intake filings are raised automatically when
+  the linked part's or work order's customer is export-controlled. Not covered: certificates,
+  receiving and shipping labels, bills of lading, laser-nest drawings and step evidence are stored
+  `standard`; flag them by hand when they carry controlled data. See
+  [API.md → Restricted and export-controlled documents](API.md#restricted-and-export-controlled-documents-as9100d-7531).
+- **Verify** after the deploy, read-only: `SELECT access_level, count(*) FROM documents GROUP BY 1;`
+  returns only `standard`, `SELECT count(*) FROM users WHERE export_authorized;` returns 0, and the
+  Documents page loads with an **Access** column. Then, in a test company with invented data:
+  change a document to `restricted` and confirm an Operator no longer sees it (its URL is **404**);
+  change one to `export_controlled` and confirm the response's `authorized_user_count` is 0 and
+  that an Admin gets **404**; grant a test user export authorization and confirm they can open it.
+  The Audit Log shows `ACCESS_LEVEL_CHANGE` and `EXPORT_AUTHORIZATION_GRANT` rows with the reasons,
+  and a Manager who is not authorized sees the export-controlled document's rows redacted.
+- **Rollback.** Keep the columns on an ordinary application rollback: from a checkout of this
+  release run `alembic stamp 130_floor_pin` before redeploying a pre-131 image. Levels and grants
+  stay, and the next forward deploy re-runs `131` as a guarded no-op that keeps them. **The stamp
+  rollback is still an exposure:** the old code has no access gate, so while it runs every
+  signed-in user can open every document, `export_controlled` ones included. If any document is
+  flagged, treat the rollback window as an export-control exposure and keep it short. The
+  downgrade is **lossy** and is not a rollback step: it drops every level and every grant, and on a
+  later re-upgrade every document reads `standard`, open to everyone. Before ever running it,
+  export `SELECT id, document_number, access_level FROM documents WHERE access_level <> 'standard';`
+  and `SELECT id, employee_id, export_authorized_at, export_authorized_by FROM users WHERE
+  export_authorized;`, then re-apply both through the verbs.
+
 ### Floor PIN for badge sign-on (migration 130)
 
 Apply **130_floor_pin** after **129_owned_property** through the normal API boot migration path.

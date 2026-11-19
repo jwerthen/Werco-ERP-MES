@@ -25,6 +25,7 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 - **Writes / state changes** (Create, Edit, Delete, Approve, Release, Send, Adjust, Transfer, Complete, Inspect, …) are enforced **server-side** via the `require_role` dependency on the endpoint. These are the authoritative access controls and match the matrix below.
 - **Operational/domain reads** — the **View** rows for the operational modules below (e.g. Work Orders, Parts, BOMs, Routings, Inventory, Purchasing, Receiving, Customers, Quotes) — are **tenant-scoped** (every query is filtered to the caller's active company via `get_current_company_id`) and are available to **any authenticated user within that tenant**. The list/detail GET endpoints depend on `get_current_user` only and do **not** restrict reads by role. The **View** columns therefore describe the *intended in-app navigation* (which the frontend gates for usability), not a server-enforced read restriction. This is the current intended design: **read-broad / write-restricted**.
 - **Administrative / governance reads are the exception and _are_ enforced server-side:** **Users** (`require_role([ADMIN, MANAGER])`), **Admin Settings** (`ADMIN`), and **Audit Logs** (`require_role([ADMIN, MANAGER])`).
+- **Controlled documents are read-gated server-side by their access level** (migration `131`, AS9100D 7.5.3.1): a `restricted` document opens only for Admin / Manager / Quality / Supervisor, and an `export_controlled` one only for a user export-authorized in their own company, whatever the role. Every path that returns document metadata or bytes answers **404** for a document the caller may not open, and the audit log redacts that document's rows on read. `standard` documents (the default) stay read-broad. See [Documents](#documents).
 - **Advisory stock-piece observation evidence is also server-gated:** its source/history routes require effective `inventory:view`, including company role overrides. This separate register does not change the read-broad gates on existing operational inventory endpoints. Recording requires the existing stock-mutator roles as detailed under Inventory below.
 - **Bulk data export is its own access category, not a domain read, and _is_ enforced server-side** — `require_role([ADMIN, MANAGER])` plus an `EXPORT` audit row on every one of them. See [Bulk data export is not a domain read](#bulk-data-export-is-not-a-domain-read) immediately below, and [Bulk Data Export](#bulk-data-export) in the matrix for the route list.
 
@@ -152,7 +153,10 @@ clearing or unlocking a user's floor PIN, `PUT` / `DELETE /users/{user_id}/floor
 `POST /users/{user_id}/floor-pin/unlock`, and the company's badge sign-in PIN policy,
 `PUT /companies/me/floor-pin-policy`; AS9100D 8.5.2): credential administration is a person's act,
 the routes refuse API tokens too, and reading a user's PIN state or the policy stays a tool; see
-[Users](#users). Bulk release (`POST /work-orders/bulk-release`) is excluded as well, so an
+[Users](#users). So are the two document-access writes
+(`POST /documents/{id}/access-level` and `PUT /users/{id}/export-authorization`, migration `131`):
+an agent on a person's JWT must not lower an export-controlled drawing or grant export access. The
+access review stays a tool; see [Documents](#documents). Bulk release (`POST /work-orders/bulk-release`) is excluded as well, so an
 agent releases one job per call; unlike those, the route itself has no API-token refusal — see
 [Work Orders](#work-orders). An agent on an API token
 also gets a 403 the same person would not get in the UI when it tries to mark an AI action card
@@ -184,9 +188,10 @@ the Approved Supplier List change of 2026-11-13 (the supplier-approval rows), an
 decisions of 2026-11-16 for work-order comments (a comment is a person's own words) and of 2026-11-17
 (a standing API token may not complete a maintenance work order with checklist items unticked), and
 the NCR / CAR records change of 2026-11-19 (migration `127`: an NCR's disposition and concession,
-its re-verification, and a CAR's effectiveness verification), and the floor-PIN change of
+its re-verification, and a CAR's effectiveness verification), the floor-PIN change of
 2026-11-19 (migration `130`: setting, clearing or unlocking a badge sign-on PIN, and the company's
-PIN policy, is credential administration, a person's act).
+PIN policy, is credential administration, a person's act), and the restricted document viewing
+change of 2026-11-19 (migration `131`: a document's access level and a user's export authorization).
 This section is the **one list** of those credential rules — what refuses a credential,
 what is deliberately left open (and who decided each), and what is deliberately not refused —
 across the AI governance (ruling 3), floor-gates (ruling 2) and short-count (ruling 1) changes;
@@ -209,7 +214,7 @@ list of credential predicates.
 Writes that apply them — each refused before any write and before any audit row (the 403 texts
 live in `ai_action_applier.py` and `operation_action_gates.py`, for the quality judgments in
 `quality_record_service.py` and `fai_service.py`, for export control
-`app/api/endpoints/customers.py`, for the egress switches, the comment writes and the floor-PIN writes `app/core/credentials.py`, and for the supplier-approval rows
+`app/api/endpoints/customers.py`, for the egress switches, the comment writes, the floor-PIN writes and the document-access writes `app/core/credentials.py`, and for the supplier-approval rows
 `app/services/supplier_approval_service.py` and `app/api/endpoints/purchasing.py`, for the maintenance
 checklist `app/services/maintenance_checklist.py`; where each sits in its route's
 check order is in `docs/API.md` → Work Orders → "Short count at completion" and → AI
@@ -242,6 +247,8 @@ Recommendations):
 | **Posting, editing or deleting a comment, or watching / unwatching a record** — `POST /comments`, `PATCH /comments/{comment_id}`, `DELETE /comments/{comment_id}`, `POST /watchers`, `DELETE /watchers`. Refused in the route's first dependency, before the body is validated or anything is read or written. None of the five is an MCP tool (`catalog.COMMENT_WRITE_OPERATIONS`, part of `EXCLUDED_OPERATIONS`), so a person's own JWT cannot reach them through an agent either. The reads (`GET /comments`, `GET /watchers`, `GET /users/mention-search`) stay open to a token the read gates admit | `is_api_token_credential`, in the `comment_writer` dependency (`app/api/endpoints/comments.py`) | **403** `API_TOKEN_COMMENT_WRITE` (`A comment is a person's own words: an API token cannot post, edit or delete comments or change who is watching a record. Sign in to the app.`) — any token, whatever its role or scope (a read-only or AI-external token meets its own gate's 403 first) | Owner decision 2026-11-16 (work-order comments): a comment is a person's own words, and a watch a person's own preference |
 | **Setting, clearing or unlocking a user's floor PIN, or turning the company's badge sign-in PIN policy on or off** — `PUT /users/{user_id}/floor-pin`, `DELETE /users/{user_id}/floor-pin`, `POST /users/{user_id}/floor-pin/unlock` (Admin, or a Manager for Operator / Supervisor / Shipping / Viewer accounts; see [Users](#users)) and `PUT /companies/me/floor-pin-policy` (Admin). Refused at the top of each route (after the role gate), before the target user or the company is read. None of the four is an MCP tool (`catalog.FLOOR_PIN_OPERATIONS`, part of `EXCLUDED_OPERATIONS`), so a person's own JWT cannot reach them through an agent either. Reading a user's PIN state (`has_floor_pin` on the user record) and the policy (`require_floor_pin` on `GET /companies/me`) is unchanged. The PIN writes' `FLOOR_PIN_SET` / `FLOOR_PIN_CLEARED` / `FLOOR_PIN_UNLOCKED` rows and the policy flip's UPDATE and STATUS_CHANGE rows are **required** evidence (**503**, nothing saved, when one cannot be written) | `is_api_token_credential`, inline at the top of each route | **403** `API_TOKEN_FLOOR_PIN_ADMIN` (`"A floor PIN, and the company's badge-sign-in PIN policy, are set by a person signed in to the app, not an API token: credential administration is a person's act."`) — any token, whatever its role or scope (a read-only or AI-external token meets its own gate's 403 first). A crew-station badge token never reaches these routes (its path fence keeps it on the shop floor) | The floor-PIN change's design (AS9100D 8.5.2, migration `130`, 2026-11-19); not an owner ruling |
 | **Posting a note through Hank** — the `add_note` task, a work-order comment, at `POST /hank/tasks` (prepare) and `POST /hank/tasks/{id}/execute`. Refused before the generic role check and before anything is written, and `GET /hank/capabilities` never offers the kind to a token. **At the MCP door the rule looks past the credential**: `prepare_task` with kind `add_note`, and `execute_task` on an `add_note` task (read first as the caller), answer **403** `"A note is a person's own words: post it from the app, not through an agent."` to an agent on **any** credential, a person's own JWT included (a pre-read that cannot complete is **503**, nothing executed) — `app/mcp/people_only.py` | `is_api_token_credential`, in `hank_task_service._refuse_api_token_for_people_only` over `credentials.PEOPLE_ONLY_HANK_TASK_KINDS` (the MCP package reads the same set) | **403** `API_TOKEN_COMMENT_WRITE` (`A comment is a person's own words: an API token cannot post, edit or delete comments or change who is watching a record. Sign in to the app.`) — any token, whatever its role or scope | Owner decision 2026-11-16 (work-order comments): a comment is a person's own words, so Hank's note takes the comment routes' rule |
+| **Changing a document's access level** — `POST /documents/{id}/access-level` (`standard` / `restricted` / `export_controlled`, applied to the document's whole revision history). Refused before anything is read. Not an MCP tool (`catalog.DOCUMENT_ACCESS_OPERATIONS`, part of `EXCLUDED_OPERATIONS`), so a person's own JWT cannot reach it through an agent either: an agent must not lower an export-controlled drawing to `standard`. The access review (`GET /documents/access-review`, the MCP tool `get_document_access_review`) and every document read stay open to a token the read gates admit | `is_api_token_credential`, inline at the top of the route (after the Admin / Quality role gate) | **403** `API_TOKEN_DOCUMENT_ACCESS_LEVEL` (`A document's access level is changed by an Admin or Quality user signed in to the app, not an API token: deciding who may open a controlled document is a person's judgment.`) — any token, whatever its role or scope (a read-only or AI-external token meets its own gate's 403 first) | Design decision of the restricted document viewing change (2026-11-19, migration `131`), applying the egress-switch reasoning of 2026-11-15; not an owner ruling |
+| **Granting or revoking a user's export authorization** — `PUT /users/{id}/export-authorization`, the only thing that opens an `export_controlled` document. Refused before anything is read. Not an MCP tool (`catalog.DOCUMENT_ACCESS_OPERATIONS`): an agent on a person's JWT must not grant export access, its own user's included. Reading a user's authorization (the user record) stays open | `is_api_token_credential`, inline at the top of the route (after the Admin role gate) | **403** `API_TOKEN_EXPORT_AUTHORIZATION` (`Export authorization is granted or revoked by an Admin signed in to the app, not an API token: deciding who may open export-controlled documents is a person's judgment.`) — any token, whatever its role or scope | The same 2026-11-19 design decision; not an owner ruling |
 
 Deliberately **not** refused:
 
@@ -2568,10 +2575,56 @@ order's relationship, so a foreign-tenant row is never shown.
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
 |------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
-| Read / download (API) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Read / download (API) — `standard` documents; see the access-level table below | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Manual upload / revision and immediate release | ✓ | ✓ | | | ✓ | | |
 | Attach an unlinked PDF to a work order | ✓ | ✓ | | | ✓ | | |
 | Delete an unretained document | ✓ | ✓ | | | | | |
+| Change a document's access level (`POST /documents/{id}/access-level`; reason required; no API token) | ✓ | | | | ✓ | | |
+| Access review (`GET /documents/access-review`) | ✓ | | | | ✓ | | |
+
+**Who may open a document, by access level** (migration `131`, AS9100D 7.5.3.1;
+`app/services/document_access.py`):
+
+| `access_level` | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|---|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| `standard` (default) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `restricted` | ✓ | ✓ | ✓ | | ✓ | | |
+| `export_controlled` | export-authorized only | export-authorized only | export-authorized only | export-authorized only | export-authorized only | export-authorized only | export-authorized only |
+
+- A superuser and a Platform Admin open `restricted` documents (the `require_role` pass-through),
+  but **not** `export_controlled` ones unless export-authorized. No role bypasses export
+  authorization.
+- Export authorization counts only in the user's **own** company. A platform account authorized in
+  its home company that switches into another tenant opens none of that tenant's
+  `export_controlled` documents, and `authorized_user_count` counts only the company's own users.
+- The levels are independent: an export-authorized Operator opens `standard` and
+  `export_controlled` documents but not `restricted` ones.
+- An API token and a crew-station badge token act as their bound user (role and flag). A
+  crew-station tablet's own station token and an **AI-external** API token see `standard` only,
+  everywhere.
+- Reads whose results go to an AI model (copilot document search; Hank's job documents for
+  readiness, knowledge and the shipping packet) leave out `export_controlled` documents for
+  everyone, export-authorized users included.
+- A document the caller may not open is absent from every list and **404** on every by-id path,
+  before any other check: the document list, detail, revisions, download, attach, delete, the kiosk drawing viewer, laser-nest PDFs,
+  QMS links, ECO affected documents, process-sheet step attachments, and Hank / copilot document
+  reads (an ECO's `affected_documents` and a Hank handoff answer the same **422** they give a
+  missing id). The audit log (`GET /audit/`, Admin / Manager) returns such a document's rows
+  redacted: values, description and identifier hidden, a deleted document judged by its last
+  recorded level, the stored row untouched. Every path is listed in
+  [API: Restricted and export-controlled documents](API.md#restricted-and-export-controlled-documents-as9100d-7531).
+- Export authorization is granted and revoked only by an Admin, with a reason, through
+  `PUT /users/{id}/export-authorization` (see [Users](#users)); deactivating a user revokes it.
+  A level applies to the document's whole revision history. Changing it needs the caller to open
+  the addressed document, and lowering it needs the caller to open every revision (**409**
+  otherwise), so lowering an `export_controlled` document takes an export-authorized Admin or
+  Quality user. Both writes refuse every API token and are not MCP tools
+  ([Credential policy](#credential-policy-for-judgment-writes)).
+- Manual upload takes an `access_level` and the server only raises it: to the predecessor
+  revision's level, and to `export_controlled` when the linked part's or work order's customer is
+  export-controlled; a raised revision lifts its earlier revisions too. Hank intake filing applies
+  the same raise rule. Certificates, labels, bills of lading, laser-nest drawings and step evidence
+  are stored `standard`.
 
 Manual uploads publish as released and record the actual release actor and UTC instant, so
 upload/revision and attachment require Admin / Manager / Quality. Delete retains Admin / Manager.
@@ -2607,6 +2660,7 @@ UI controls do not grant API authority. See [API: Documents](API.md#documents).
 | Delete | ✓ | | | | | | |
 | Roles | ✓ | | | | | | |
 | Floor PIN — set / reset / clear / unlock (`PUT` / `DELETE /users/{user_id}/floor-pin`, `POST …/floor-pin/unlock`; signed in — any API token 403). Manager: Operator / Supervisor / Shipping / Viewer accounts only | ✓ | ✓ | | | | | |
+| Grant / revoke export authorization (`PUT /users/{id}/export-authorization`; reason required; no API token) | ✓ | | | | | | |
 | Own profile + notification settings (`/users/me/*`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Mention search (`GET /users/mention-search`, `{id, display_name}` only — see [Comments and watchers](#comments-and-watchers)) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
@@ -2724,11 +2778,25 @@ UI controls do not grant API authority. See [API: Documents](API.md#documents).
 >
 > Creation, update, approval, password reset, activation, deactivation and unlock commit their
 > required evidence atomically (**503** and rollback on audit loss). Deactivation includes every
-> companion API-token revocation audit. Import keeps its per-row transaction/error behavior;
+> companion API-token revocation audit and, for an export-authorized user, the companion
+> `EXPORT_AUTHORIZATION_REVOKE` row. Import keeps its per-row transaction/error behavior;
 > previously accepted rows remain committed, while an audit failure creates no account for that
 > row. `/auth/register` attributes the event to the initiating Admin and targets the new user.
 > Unchanged account updates and unlocks with no lock state do not add audit rows. Other self-service/auth logging retains its existing
 > behavior; the required-audit guarantee is specific to these paths.
+>
+> **Export authorization (migration `131`)** is the only thing that opens an `export_controlled`
+> document (see [Documents](#documents)). `PUT /users/{id}/export-authorization` is Admin-only, takes
+> a required reason, refuses every API token **403** and is not an MCP tool. It follows the same
+> target rules as `PUT /users/{id}` (foreign-company **404**; a stored Platform Admin / superuser
+> target needs a platform principal, **403**), answers **409** on a no-op, stamps who granted it and
+> when (cleared on revoke), and writes a required `EXPORT_AUTHORIZATION_GRANT` /
+> `EXPORT_AUTHORIZATION_REVOKE` audit row (**503** and rollback on loss). There is no self-guard:
+> an Admin may grant their own authorization, and the grant is audited like any other. The flag is
+> not on the create, update or import bodies. The authorization counts only in the user's own
+> company, never in a tenant a platform account switches into. **Deactivation revokes it**: both
+> deactivation verbs clear it with a companion required `EXPORT_AUTHORIZATION_REVOKE` row (reason
+> `user deactivated`), like the API-token sweep, and reactivation restores nothing.
 >
 > Public `/auth/register-public` chooses roles server-side: the empty-install bootstrap creates
 > an active Platform Admin/superuser; later signups create inactive Viewers without superuser

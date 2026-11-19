@@ -1044,7 +1044,7 @@ def get_affected_items(
                     .filter(
                         Document.id.in_(doc_ids),
                         Document.company_id == company_id,
-                        visible_documents_clause(current_user),
+                        visible_documents_clause(current_user, company_id),
                     )
                     .all()
                 )

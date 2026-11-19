@@ -294,6 +294,29 @@ statement, writes no row, and adds no environment variable, secret, cron or work
   under, and the migration will not pick which company's record to change.
   See [API.md → Customer Complaints & RMA](API.md#customer-complaints--rma).
 
+**Restricted and export-controlled documents.** Apply **131_document_access** after
+**130_floor_pin** through the normal API boot migration path. It adds `documents.access_level`
+(`standard` default, CHECK `ck_documents_access_level`, index `ix_documents_access_level`) and
+`users.export_authorized` / `_at` / `_by` (FK `fk_users_export_authorized_by`), with no backfill:
+every document stays `standard` and nobody is authorized, so behavior is unchanged until Quality
+flags documents. On local SQLite it rebuilds both tables and refuses, changing nothing, when
+`PRAGMA foreign_keys` is ON (the app and `alembic/env.py` leave it off). Under
+`SET LOCAL lock_timeout = '5s'` both tables are held ACCESS EXCLUSIVE until the boot commits,
+`users` first, then `documents`; a timeout leaves the database at `130`. No environment variable,
+secret, cron or worker job is added. Deploy the worker with or after the API (new code selects the
+new `users` columns on every sign-in) and the API before the frontend. **Owner order after the
+deploy:** (1) an Admin grants export authorization (**Users → Export-authorized → Grant**) to the
+right people FIRST, operators who run ITAR / EAR jobs included (a grant counts only in its own
+company; deactivation revokes it); (2) Quality runs **Documents → Access review**; (3) flag
+documents with **Change access**, which sets every revision of a document at once. A document
+flagged `export_controlled` while nobody is authorized cannot be opened by anyone. On an application rollback keep the
+columns: from a checkout of this release run `railway run --service werco-api alembic stamp
+130_floor_pin` before redeploying a pre-131 image, and keep that window short, because the old code
+has no access gate and every signed-in user can open every document, export-controlled ones
+included. The **downgrade is lossy** and not a rollback step: it drops every level and grant.
+Verification steps and the full notes are in
+[Restricted and export-controlled documents](DEPLOYMENT.md#restricted-and-export-controlled-documents-migration-131).
+
 **Floor PIN for badge sign-on.** Apply **130_floor_pin** after **129_owned_property** through the
 normal API boot migration path. It is a catalog-only change with no backfill: five columns on
 `users` (`floor_pin_hash`, `floor_pin_set_at`, `floor_pin_failed_attempts` NOT NULL default `0`,

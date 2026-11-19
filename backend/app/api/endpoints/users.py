@@ -88,6 +88,7 @@ from app.services.user_provisioning import (
     require_manageable_user,
     require_tenant_role,
     required_security_audit,
+    revoke_export_authorization_for_deactivation,
 )
 
 router = APIRouter()
@@ -1044,6 +1045,8 @@ def update_user(
                 reason=api_token_service.DEACTIVATION_REVOKE_REASON,
                 audit=required_security_audit(audit),
             )
+            # ...and its export authorization, with a companion audit row; reactivation restores none.
+            revoke_export_authorization_for_deactivation(audit, user)
     db.refresh(user)
     return user
 
@@ -1178,7 +1181,9 @@ def deactivate_user(
     (reason ``user deactivated``, actor = this Admin, one ``API_TOKEN_REVOKED``
     trail each) -- deactivation RETIRES a bot's credential, it never pauses it,
     so a later reactivation restores the account and no token. The response
-    carries how many were revoked.
+    carries how many were revoked. An export authorization is revoked the same way
+    (one ``EXPORT_AUTHORIZATION_REVOKE`` row; ``export_authorization_revoked`` in the
+    response), and reactivation does not restore it.
     """
     if user_id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot deactivate yourself")
@@ -1207,8 +1212,13 @@ def deactivate_user(
             reason=api_token_service.DEACTIVATION_REVOKE_REASON,
             audit=required_security_audit(audit),
         )
+        export_revoked = revoke_export_authorization_for_deactivation(audit, user)
 
-    return {"message": "User deactivated", "api_tokens_revoked": len(revoked)}
+    return {
+        "message": "User deactivated",
+        "api_tokens_revoked": len(revoked),
+        "export_authorization_revoked": export_revoked,
+    }
 
 
 @router.post("/{user_id}/activate")
@@ -1571,10 +1581,12 @@ def set_user_export_authorization(
 ):
     """Grant or revoke a user's export authorization (Admin only), with a required reason.
 
-    An export-authorized user may open ``export_controlled`` documents; nobody else may, whatever
-    their role (Admin, superuser and Platform Admin included). A grant stamps
-    ``export_authorized_at`` / ``export_authorized_by``; a revoke clears them. **409** when the
-    user is already in the requested state. Only a person signed in to the app does this: ANY API
+    An export-authorized user may open ``export_controlled`` documents of their OWN company;
+    nobody else may, whatever their role (Admin, superuser and Platform Admin included), and a
+    platform account's grant never carries into a tenant it switches into. A grant stamps
+    ``export_authorized_at`` / ``export_authorized_by``; a revoke clears them. Deactivating the
+    user revokes it too, and reactivation does not restore it. **409** when the user is already
+    in the requested state (judged on the locked user row). Only a person signed in to the app does this: ANY API
     token is refused **403** before anything is read, and the route is not an MCP tool. The
     target must be in the active company (**404** otherwise), and a platform account needs a
     platform administrator (**403**). Recorded as a required audit row with the old and new value
@@ -1583,7 +1595,15 @@ def set_user_export_authorization(
     """
     if is_api_token_credential(current_user):
         raise HTTPException(status_code=403, detail=API_TOKEN_EXPORT_AUTHORIZATION)
-    user = db.query(User).filter(User.id == user_id, User.company_id == company_id).first()
+    # Row-locked before the no-op check, so two concurrent grants (or a grant racing a
+    # revoke) serialize and the second sees the first's result.
+    user = (
+        db.query(User)
+        .filter(User.id == user_id, User.company_id == company_id)
+        .with_for_update()
+        .populate_existing()
+        .first()
+    )
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     require_manageable_user(current_user, user)

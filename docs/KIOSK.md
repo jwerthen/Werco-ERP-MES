@@ -1224,11 +1224,39 @@ read-only; badge-minted kiosk tokens reach them with zero fence changes — see 
 Shop Floor → "Kiosk doc viewer"):
 
 - `GET /shop-floor/operations/{id}/documents` — discovery: the newest approved/released part
-  **drawing**, the operation's live **nest** reference PDF, the nest **material**, and the
-  **critical dims**.
+  **drawing** the operator may open, the operation's live **nest** reference PDF, the nest
+  **material**, and the **critical dims**.
 - `GET /shop-floor/documents/{id}/inline` — the guarded byte-serving route: only a DRAWING-type
-  document or a live nest's reference PDF in the caller's tenant is served; anything else is a
-  uniform **404**.
+  document or a live nest's reference PDF in the caller's tenant, that the operator may open, is
+  served; anything else is a uniform **404**.
+
+**Only documents the operator may open** (migration `131`, AS9100D 7.5.3.1). Every document
+carries an access level, and both reads apply it as the person at the station: the single-operator
+kiosk's signed-in user, or the crew station's scanned badge (the badge-minted token carries that
+operator's role and export authorization).
+
+- A `standard` drawing (every document's default) opens for every operator, as before.
+- A `restricted` drawing opens only for Admin, Manager, Quality and Supervisor, so an operator
+  never sees it.
+- An `export_controlled` drawing opens only for an operator an Admin has marked
+  **export-authorized** on the Users page. An operator who runs ITAR / EAR jobs needs that grant
+  before the viewer will show the drawing.
+
+A drawing the operator may not open is skipped, never named: discovery offers the newest released
+drawing the operator may open. It never falls back to a **superseded** revision. When the current
+revision is one the operator may not open, the revision it replaced is not shown instead, so the
+DRAWING tab is simply absent. A nest PDF the operator may not open reads as no nest PDF: the NEST
+tab hides and the single-operator kiosk's queue card shows no **PDF** chip. When neither document
+is available the viewer says "No released drawing or nest PDF is available for this operation." A
+PDF that answers 404 once the viewer is open (its level was raised in the meantime, say) shows
+"This document is not available." with no Retry.
+
+**Crew station limit.** The crew station's queue is read with the tablet's own station token,
+which has no person behind it and sees `standard` documents only. Its **View nest / drawing**
+button appears only when the nest PDF is `standard`, so a `restricted` or `export_controlled` nest
+PDF cannot be opened from the crew station, even by an export-authorized operator. Open it from the
+single-operator kiosk or the office. See
+[API.md → Restricted and export-controlled documents](API.md#restricted-and-export-controlled-documents-as9100d-7531).
 
 **Entry points.** Single-operator kiosk: the running panel's **VIEW NEST** button and the queue
 card's **PDF** chip (both land on the NEST tab; the DRAWING tab is available when a released
@@ -1774,7 +1802,8 @@ measurement.
   steps inline. Like every other flow, the 90 s idle reset abandons a half-entered steps
   screen back to the board; a mid-flow 401 (expired badge token) returns to the badge scan.
 - **DOCS (badge-gated).** The job screen's **View nest / drawing** button (present when the
-  operation's nest carries a reference PDF) opens a badge scan — "drawings and nests are
+  operation's nest carries a reference PDF at the `standard` access level, the only level the
+  station's own token sees — see [Drawing / nest viewer](#drawing--nest-viewer)) opens a badge scan — "drawings and nests are
   controlled documents" — then the shared full-screen viewer bound to that badge-minted token
   (see [Drawing / nest viewer](#drawing--nest-viewer)). The job card's inline nest panel is
   info-only (no pre-badge PDF fetch); an expired badge token mid-view renders "Badge session

@@ -38,6 +38,7 @@ from app.schemas.document_access import (
 from app.services.audit_service import AuditService, AuditWriteError
 from app.services.document_access import (
     ACCESS_LEVEL_ORDER,
+    can_view_document,
     export_authorized_user_count,
     visible_document_or_404,
     visible_documents_clause,
@@ -45,6 +46,8 @@ from app.services.document_access import (
 from app.services.document_access_service import (
     change_document_access_level,
     document_access_review,
+    lift_revision_chain,
+    lock_revision_chain,
     resolve_upload_access_level,
 )
 from app.services.document_numbering import generate_document_number as generate_shared_document_number
@@ -90,7 +93,7 @@ def _written_document_query(db: Session, company_id: int):
 
 def _document_query(db: Session, company_id: int, user: User):
     """The active company's documents that ``user`` may open (``app.services.document_access``)."""
-    return _written_document_query(db, company_id).filter(visible_documents_clause(user))
+    return _written_document_query(db, company_id).filter(visible_documents_clause(user, company_id))
 
 
 def _commit_audited_document(db, audit, document, *, action, old_values=None, extra_data=None):
@@ -526,8 +529,11 @@ class DocumentUploadResponse(DocumentResponse):
     access_level_requested: str = DocumentAccessLevel.STANDARD.value
     access_level_raised: bool = False
     # Why, in order: "predecessor_revision" (a revision is never easier to open than the one it
-    # supersedes), "export_controlled_customer" (the linked part's customer is export-controlled).
+    # supersedes), "export_controlled_customer" (the linked part's or work order's customer is
+    # export-controlled).
     access_level_raised_because: List[str] = Field(default_factory=list)
+    # Earlier revisions this upload lifted to its level (a revision history moves together).
+    access_level_lifted_document_ids: List[int] = Field(default_factory=list)
 
 
 class DocumentAccessLevelChangeResponse(DocumentResponse):
@@ -535,6 +541,10 @@ class DocumentAccessLevelChangeResponse(DocumentResponse):
     # Active users of the company who may open an export_controlled document. 0 with an
     # export_controlled level means nobody can open it until someone is authorized.
     authorized_user_count: int
+    # A revision history changes level together: every revision that changed, and how many
+    # revisions the history has (1 for a document with no revisions).
+    changed_document_ids: List[int] = Field(default_factory=list)
+    chain_size: int = 1
 
 
 class WorkOrderDocumentAttachRequest(BaseModel):
@@ -592,7 +602,9 @@ def list_documents(
 
     Only documents whose ``access_level`` the caller may open are listed: ``restricted`` needs
     Admin, Manager, Quality or Supervisor; ``export_controlled`` needs the caller's own export
-    authorization, whatever their role. A document the caller may not open is simply absent.
+    authorization, granted in this company (a platform account's home grant does not carry into
+    another tenant), whatever their role. An AI-external API token sees ``standard`` only. A
+    document the caller may not open is simply absent.
     Filters: part, work order, vendor, document type, access level, and a free-text search over
     number, title and description.
     """
@@ -700,21 +712,26 @@ async def upload_document(
             raise HTTPException(status_code=404, detail="Vendor not found")
 
     previous = None
+    chain: List[Document] = []
     if previous_revision_id:
         # A predecessor the uploader may not open is the same 404 as a missing one.
-        previous = (
-            db.query(Document)
+        if (
+            not db.query(Document.id)
             .filter(
                 Document.id == previous_revision_id,
                 Document.company_id == company_id,
-                visible_documents_clause(current_user),
+                visible_documents_clause(current_user, company_id),
             )
-            .with_for_update()
             .first()
-        )
-        if not previous:
+        ):
             raise HTTPException(status_code=404, detail="Previous document revision not found")
-        # Lock the selected predecessor so concurrent uploads cannot create sibling revisions.
+        # Lock the whole revision chain, in id order (the access-level verb's order), so concurrent
+        # uploads cannot create sibling revisions and a chain lift cannot deadlock against a level
+        # change. The predecessor is re-judged on the locked row.
+        chain = lock_revision_chain(db, company_id, previous_revision_id)
+        previous = next((member for member in chain if member.id == previous_revision_id), None)
+        if previous is None or not can_view_document(current_user, previous):
+            raise HTTPException(status_code=404, detail="Previous document revision not found")
         if (
             db.query(Document.id)
             .filter(Document.company_id == company_id, Document.previous_revision_id == previous.id)
@@ -754,7 +771,12 @@ async def upload_document(
         raise HTTPException(status_code=422, detail="Revision must contain 1–20 characters")
 
     stored_level = resolve_upload_access_level(
-        db, company_id, requested=requested_access_level, part_id=normalized_part_id, previous=previous
+        db,
+        company_id,
+        requested=requested_access_level,
+        part_id=normalized_part_id,
+        work_order_id=normalized_work_order_id,
+        previous=previous,
     )
 
     # Allocate before storing bytes so a numbering failure cannot leave an orphan.
@@ -795,13 +817,27 @@ async def upload_document(
         company_id=company_id,
     )
 
-    extra_data = {"release": True, "content_sha256": hashlib.sha256(content).hexdigest()}
+    extra_data: dict = {"release": True, "content_sha256": hashlib.sha256(content).hexdigest()}
     if stored_level.raised:
         extra_data["access_level_requested"] = stored_level.requested
         extra_data["access_level_raised_because"] = list(stored_level.raised_because)
+    lifted: List[int] = []
     try:
         db.add(document)
-        _commit_audited_document(db, audit, document, action="CREATE", extra_data=extra_data)
+        try:
+            db.flush()
+            # A chain moves together: a revision stored above its history lifts the history.
+            lifted = lift_revision_chain(db, chain=chain, new_document=document, audit=audit) if chain else []
+            if lifted:
+                extra_data["access_level_lifted_document_ids"] = lifted
+            _audit_document(db, audit, document, action="CREATE", extra_data=extra_data)
+            db.commit()
+        except AuditWriteError as exc:
+            db.rollback()
+            raise HTTPException(503, "Unable to save audit record") from exc
+        except Exception:
+            db.rollback()
+            raise
     except Exception:
         # A refused publication must not retain newly uploaded bytes. Earlier
         # revision files are never touched by this compensation.
@@ -816,6 +852,7 @@ async def upload_document(
     response.access_level_requested = stored_level.requested
     response.access_level_raised = stored_level.raised
     response.access_level_raised_because = list(stored_level.raised_because)
+    response.access_level_lifted_document_ids = lifted
     return response
 
 
@@ -964,19 +1001,24 @@ def change_access_level(
 
     Levels: ``standard`` (anyone who can read documents), ``restricted`` (Admin, Manager,
     Quality, Supervisor), ``export_controlled`` (ONLY users marked export-authorized; no role
-    bypasses it). The caller must be able to open the document now (**404** otherwise, the same
-    as a missing one), so lowering an export_controlled document takes an export-authorized
-    person. **409** when the document is already at that level. Any API token is refused
-    **403** before anything is read. Recorded as a required ``ACCESS_LEVEL_CHANGE`` audit row
-    with the old and new level and the reason, in the same transaction (**503**, nothing saved,
-    if it cannot be written). The response carries ``authorized_user_count``, the company's
-    active export-authorized users: 0 with ``export_controlled`` means nobody can open it yet.
+    bypasses it). The level applies to the WHOLE revision history: every earlier and later
+    revision of the document moves with it (``changed_document_ids``, ``chain_size``).
+
+    The caller must be able to open the addressed document now (**404** otherwise, the same as
+    a missing one), so lowering an export_controlled document takes an export-authorized person.
+    Lowering any revision also needs the caller to be able to open EVERY revision (**409**
+    otherwise). **409** when no revision changes. Any API token is refused **403** before
+    anything is read. Recorded as one required ``ACCESS_LEVEL_CHANGE`` audit row per changed
+    revision, each with the old and new level, the reason and a ``chain_change`` marker, in the
+    same transaction (**503**, nothing saved, if one cannot be written). The response carries
+    ``authorized_user_count``, the company's active export-authorized users: 0 with
+    ``export_controlled`` means nobody can open it yet.
     """
     _refuse_api_token_access_level(current_user)
     new_level = payload.access_level.value
     authorized = export_authorized_user_count(db, company_id)
     with required_audit(db, REQUIRED_AUDIT_UNAVAILABLE_DETAIL):
-        document, previous_level = change_document_access_level(
+        change = change_document_access_level(
             db,
             company_id=company_id,
             user=current_user,
@@ -987,12 +1029,14 @@ def change_access_level(
             authorized_user_count=authorized,
         )
         db.commit()
-    written = _written_document_query(db, company_id).filter(Document.id == document.id).one()
+    written = _written_document_query(db, company_id).filter(Document.id == change.document.id).one()
     response = DocumentAccessLevelChangeResponse.model_validate(
         {
             **DocumentResponse.model_validate(written).model_dump(),
-            "previous_access_level": previous_level,
+            "previous_access_level": change.previous_access_level,
             "authorized_user_count": authorized,
+            "changed_document_ids": change.changed_document_ids,
+            "chain_size": change.chain_size,
         }
     )
     return response

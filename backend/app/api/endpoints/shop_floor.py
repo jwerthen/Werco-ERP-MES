@@ -1577,7 +1577,7 @@ def get_operation_documents(
                 Document.part_id == part.id,
                 Document.document_type == DocumentType.DRAWING,
                 Document.status.in_(("approved", "released")),
-                visible_documents_clause(current_user),
+                visible_documents_clause(current_user, company_id),
                 ~superseded,
             )
             .order_by(Document.released_at.is_(None).asc(), Document.released_at.desc(), Document.id.desc())

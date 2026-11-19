@@ -3,26 +3,29 @@
 The read rule is :mod:`app.services.document_access`. This module holds what changes or
 judges a document's ``access_level``:
 
-* :func:`resolve_upload_access_level` -- the manual upload's level: what the uploader asked
-  for, raised (never lowered) to at least the predecessor revision's level, and to
-  ``export_controlled`` when the linked part's customer resolves as export-controlled through
-  ``export_control_service.build_controlled_index`` (the same index the AI-external
-  connector's redaction uses, so "controlled" means one thing in the app).
-* :func:`change_document_access_level` -- ``POST /documents/{id}/access-level``.
+* :func:`resolve_upload_access_level` -- the level a manual upload or a Hank intake filing is
+  stored at: what was asked for, raised (never lowered) to at least the predecessor revision's
+  level, and to ``export_controlled`` when the linked part's or work order's customer resolves
+  as export-controlled through ``export_control_service.build_controlled_index`` (the same
+  index the AI-external connector's redaction uses, so "controlled" means one thing in the app).
+* :func:`lift_revision_chain` -- a new revision stored above its chain's level lifts every
+  earlier revision to it (a chain moves together).
+* :func:`change_document_access_level` -- ``POST /documents/{id}/access-level``, applied to the
+  whole revision chain.
 * :func:`document_access_review` -- ``GET /documents/access-review``: documents whose part's
   customer is export-controlled but whose level is not, plus how many documents have no part
   link and so cannot be judged.
 
 Every OTHER writer of ``documents`` (receiving certificates and labels, carrier labels and
-bills of lading, laser-nest drawings, process-sheet step evidence, Hank intake) stays at the
-``standard`` default: those are system-generated or floor-captured records, and raising them
-is a person's ``POST /documents/{id}/access-level`` (a documented limitation).
+bills of lading, laser-nest drawings, process-sheet step evidence) stays at the ``standard``
+default: those are system-generated or floor-captured records, and raising them is a person's
+``POST /documents/{id}/access-level`` (a documented limitation).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
@@ -33,7 +36,14 @@ from app.models.customer import Customer
 from app.models.document import Document, DocumentAccessLevel
 from app.models.part import Part
 from app.services.audit_service import AuditService
-from app.services.document_access import higher_access_level, visible_document_or_404, visible_documents_clause
+from app.services.document_access import (
+    access_level_rank,
+    can_view_document,
+    higher_access_level,
+    revision_chain_ids,
+    visible_document_or_404,
+    visible_documents_clause,
+)
 from app.services.export_control_redaction import Control
 from app.services.export_control_service import build_controlled_index
 
@@ -42,27 +52,53 @@ RAISED_BY_PREDECESSOR = "predecessor_revision"
 RAISED_BY_EXPORT_CONTROLLED_CUSTOMER = "export_controlled_customer"
 
 ACCESS_LEVEL_UNCHANGED_DETAIL = "The document is already at that access level"
+CHAIN_NOT_VISIBLE_DETAIL = (
+    "Some revisions of this document are not available to you, so its access level cannot be lowered. "
+    "A revision history changes level together; ask someone who can open every revision."
+)
 
 
-def _export_controlled_part_controls(db: Session, company_id: int) -> Dict[int, Control]:
-    """part id -> its control, for the company's parts whose customer resolves as export-controlled.
+def _export_controlled_controls(db: Session, company_id: int, record_type: str) -> Dict[int, Control]:
+    """record id -> its control, for the company's ``record_type`` rows ("part" / "work_order")
+    whose customer resolves as export-controlled.
 
     UNLINKABLE (no customer, or a name no customer carries) is NOT export-controlled here: the
     raise rule and the review act on a positive finding only.
     """
     index = build_controlled_index(db, company_id)
     return {
-        part_id: control
-        for part_id, control in index.controlled.get("part", {}).items()
+        record_id: control
+        for record_id, control in index.controlled.get(record_type, {}).items()
         if control.reason == REASON_EXPORT_CONTROLLED_CUSTOMER
     }
 
 
+def _export_controlled_part_controls(db: Session, company_id: int) -> Dict[int, Control]:
+    return _export_controlled_controls(db, company_id, "part")
+
+
+def links_are_export_controlled(
+    db: Session, company_id: int, *, part_id: Optional[int], work_order_id: Optional[int]
+) -> bool:
+    """True when the linked part's or work order's customer resolves as export-controlled.
+
+    Builds the controlled index once, and only when there is a link to judge.
+    """
+    if not part_id and not work_order_id:
+        return False
+    index = build_controlled_index(db, company_id)
+    for record_type, record_id in (("part", part_id), ("work_order", work_order_id)):
+        if not record_id:
+            continue
+        control = index.controlled.get(record_type, {}).get(int(record_id))
+        if control is not None and control.reason == REASON_EXPORT_CONTROLLED_CUSTOMER:
+            return True
+    return False
+
+
 def part_is_export_controlled(db: Session, company_id: int, part_id: Optional[int]) -> bool:
     """True when ``part_id``'s customer resolves as export-controlled (``build_controlled_index``)."""
-    if not part_id:
-        return False
-    return int(part_id) in _export_controlled_part_controls(db, company_id)
+    return links_are_export_controlled(db, company_id, part_id=part_id, work_order_id=None)
 
 
 @dataclass(frozen=True)
@@ -85,13 +121,15 @@ def resolve_upload_access_level(
     requested: Optional[str],
     part_id: Optional[int],
     previous: Optional[Document],
+    work_order_id: Optional[int] = None,
 ) -> UploadAccessLevel:
-    """The level a manual upload is stored at. Raise-only: the server never stores below ``requested``.
+    """The level a new document is stored at. Raise-only: the server never stores below ``requested``.
 
     * ``requested`` (``None`` = ``standard``);
     * at least ``previous.access_level`` -- a revision is never easier to open than the one it
       supersedes;
-    * ``export_controlled`` when the linked part's customer resolves as export-controlled.
+    * ``export_controlled`` when the linked part's or work order's customer resolves as
+      export-controlled.
     """
     asked = requested or DocumentAccessLevel.STANDARD.value
     level = asked
@@ -101,10 +139,104 @@ def resolve_upload_access_level(
         if inherited != level:
             level = inherited
             because.append(RAISED_BY_PREDECESSOR)
-    if level != DocumentAccessLevel.EXPORT_CONTROLLED.value and part_is_export_controlled(db, company_id, part_id):
+    if level != DocumentAccessLevel.EXPORT_CONTROLLED.value and links_are_export_controlled(
+        db, company_id, part_id=part_id, work_order_id=work_order_id
+    ):
         level = DocumentAccessLevel.EXPORT_CONTROLLED.value
         because.append(RAISED_BY_EXPORT_CONTROLLED_CUSTOMER)
     return UploadAccessLevel(requested=asked, access_level=level, raised_because=tuple(because))
+
+
+def lock_revision_chain(db: Session, company_id: int, document_id: int) -> List[Document]:
+    """Row-lock every revision in ``document_id``'s chain, in ascending id order, and return them.
+
+    One lock order for every writer that changes a chain's level (the access-level verb and a
+    new revision's upload), so two of them on one chain queue rather than deadlock. Refreshed
+    from the database (``populate_existing``) so the levels judged are the locked ones.
+    """
+    chain_ids = revision_chain_ids(db, company_id, document_id)
+    if not chain_ids:
+        return []
+    return (
+        tenant_query(db, Document, company_id)
+        .filter(Document.id.in_(chain_ids))
+        .order_by(Document.id)
+        .with_for_update()
+        .populate_existing()
+        .all()
+    )
+
+
+def _audit_chain_level(
+    audit: AuditService,
+    document: Document,
+    *,
+    previous_level: str,
+    level: str,
+    reason: str,
+    chain_change: Dict[str, Any],
+    authorized_user_count: Optional[int] = None,
+) -> None:
+    extra: Dict[str, Any] = {"reason": reason, "chain_change": chain_change}
+    if authorized_user_count is not None:
+        extra["authorized_user_count"] = authorized_user_count
+    audit.log_required(
+        action="ACCESS_LEVEL_CHANGE",
+        resource_type="document",
+        resource_id=document.id,
+        resource_identifier=document.document_number,
+        description=f"Changed access level of document {document.document_number} from {previous_level} to {level}",
+        old_values={"access_level": previous_level},
+        new_values={"access_level": level},
+        extra_data=extra,
+    )
+
+
+def lift_revision_chain(
+    db: Session,
+    *,
+    chain: Sequence[Document],
+    new_document: Document,
+    audit: AuditService,
+) -> List[int]:
+    """Raise every revision in ``chain`` below ``new_document``'s level up to it. Never lowers.
+
+    A chain moves together, so a new revision stored above its history's level lifts the
+    history with it: one required ``ACCESS_LEVEL_CHANGE`` audit row per lifted revision, marked
+    ``chain_change`` with the new revision that caused it. Flushes, never commits; ``chain``
+    must already be locked (:func:`lock_revision_chain`). Returns the lifted ids.
+    """
+    level = new_document.access_level
+    lifted: List[int] = []
+    members = [member for member in chain if member.id != new_document.id]
+    for member in members:
+        if access_level_rank(member.access_level) >= access_level_rank(level):
+            continue
+        previous_level = member.access_level
+        member.access_level = level
+        db.flush()
+        _audit_chain_level(
+            audit,
+            member,
+            previous_level=previous_level,
+            level=level,
+            reason=f"Raised with new revision {new_document.document_number} rev {new_document.revision}",
+            chain_change={
+                "trigger": "new_revision",
+                "new_document_id": new_document.id,
+                "chain_size": len(members) + 1,
+            },
+        )
+        lifted.append(member.id)
+    return lifted
+
+
+@dataclass
+class AccessLevelChange:
+    document: Document
+    previous_access_level: str
+    changed_document_ids: List[int]
+    chain_size: int
 
 
 def change_document_access_level(
@@ -117,30 +249,55 @@ def change_document_access_level(
     reason: str,
     audit: AuditService,
     authorized_user_count: int,
-) -> Tuple[Document, str]:
-    """Set a document's ``access_level``; returns ``(document, previous_level)``. Flushes, never commits.
+) -> AccessLevelChange:
+    """Set the ``access_level`` of a document AND every revision in its chain. Flushes, never commits.
 
-    404 first when the caller may not open the document (so lowering an ``export_controlled``
-    one takes an export-authorized person), 409 on a no-op, then a REQUIRED audit row carrying
-    the old and new level and the reason -- the caller wraps this in ``required_audit``.
+    In order: **404** when the caller may not open the addressed document (so lowering an
+    ``export_controlled`` one takes an export-authorized person); the chain is locked in id
+    order; **409** when any revision would be LOWERED and the caller may not open every
+    revision; **409** when no revision changes. Then one REQUIRED ``ACCESS_LEVEL_CHANGE`` audit
+    row per changed revision, each with the old and new level, the reason and a
+    ``chain_change`` marker -- the caller wraps this in ``required_audit``.
     """
-    document = visible_document_or_404(db, company_id, user, document_id, for_update=True)
+    visible_document_or_404(db, company_id, user, document_id)
+    chain = lock_revision_chain(db, company_id, document_id)
+    by_id = {member.id: member for member in chain}
+    document = by_id.get(document_id)
+    if document is None or not can_view_document(user, document):
+        # Changed (or deleted) between the visibility read and the lock.
+        raise HTTPException(status_code=404, detail="Document not found")
     previous = document.access_level
-    if previous == access_level:
+    to_change = [member for member in chain if member.access_level != access_level]
+    if not to_change:
         raise HTTPException(status_code=409, detail=ACCESS_LEVEL_UNCHANGED_DETAIL)
-    document.access_level = access_level
-    db.flush()
-    audit.log_required(
-        action="ACCESS_LEVEL_CHANGE",
-        resource_type="document",
-        resource_id=document.id,
-        resource_identifier=document.document_number,
-        description=f"Changed access level of document {document.document_number} from {previous} to {access_level}",
-        old_values={"access_level": previous},
-        new_values={"access_level": access_level},
-        extra_data={"reason": reason, "authorized_user_count": authorized_user_count},
+    lowering = any(access_level_rank(member.access_level) > access_level_rank(access_level) for member in to_change)
+    if lowering and not all(can_view_document(user, member) for member in chain):
+        raise HTTPException(status_code=409, detail=CHAIN_NOT_VISIBLE_DETAIL)
+    changed: List[int] = []
+    for member in to_change:
+        member_previous = member.access_level
+        member.access_level = access_level
+        db.flush()
+        _audit_chain_level(
+            audit,
+            member,
+            previous_level=member_previous,
+            level=access_level,
+            reason=reason,
+            chain_change={
+                "trigger": "access_level_change",
+                "addressed_document_id": document_id,
+                "chain_size": len(chain),
+            },
+            authorized_user_count=authorized_user_count,
+        )
+        changed.append(member.id)
+    return AccessLevelChange(
+        document=document,
+        previous_access_level=previous,
+        changed_document_ids=changed,
+        chain_size=len(chain),
     )
-    return document, previous
 
 
 @dataclass
@@ -180,7 +337,7 @@ def document_access_review(db: Session, company_id: int, user: Any) -> AccessRev
             tenant_query(db, Document, company_id)
             .filter(
                 below,
-                visible_documents_clause(user),
+                visible_documents_clause(user, company_id),
                 Document.part_id.in_(sorted(controlled)),
             )
             .order_by(Document.id)
@@ -227,7 +384,7 @@ def document_access_review(db: Session, company_id: int, user: Any) -> AccessRev
             )
     unlinked = (
         tenant_query(db, Document, company_id)
-        .filter(below, visible_documents_clause(user), Document.part_id.is_(None))
+        .filter(below, visible_documents_clause(user, company_id), Document.part_id.is_(None))
         .count()
     )
     return AccessReview(documents=rows, unlinked_document_count=unlinked)

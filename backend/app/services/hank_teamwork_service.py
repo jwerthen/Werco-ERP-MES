@@ -146,7 +146,7 @@ class HankTeamworkService:
         # their access level is left out of document_references (its id stays in document_ids).
         docs = (
             tenant_query(self.db, Document, self.company_id)
-            .filter(Document.id.in_(content.document_ids), visible_documents_clause(self.user))
+            .filter(Document.id.in_(content.document_ids), visible_documents_clause(self.user, self.company_id))
             .all()
         )
         editable = self._interactive(write=True) and not self._job(row.work_order_id).is_deleted
@@ -231,7 +231,7 @@ class HankTeamworkService:
         # A document the sender may not open counts as missing: the same 422, nothing disclosed.
         docs = (
             tenant_query(self.db, Document, self.company_id)
-            .filter(Document.id.in_(command.document_ids), visible_documents_clause(self.user))
+            .filter(Document.id.in_(command.document_ids), visible_documents_clause(self.user, self.company_id))
             .all()
         )
         if len(docs) != len(command.document_ids) or any(

@@ -33,6 +33,7 @@ jest.mock('../services/api', () => ({
     getDocument: jest.fn(),
     getDocumentRevisions: jest.fn(),
     downloadDocument: jest.fn(),
+    changeDocumentAccessLevel: jest.fn(),
   },
 }));
 const mockedApi = api as jest.Mocked<typeof api>;
@@ -220,4 +221,49 @@ it('an empty review says nothing needs review', async () => {
   const panel = await screen.findByTestId('document-access-review');
   expect((await within(panel).findAllByText('No documents need review')).length).toBeGreaterThan(0);
   expect(within(panel).queryByText(/to review\./)).not.toBeInTheDocument();
+});
+
+it('a chain change from the detail re-reads the access review and the list', async () => {
+  // DWG-801 is in the review (its customer is export-controlled); raising its chain clears it.
+  const reviewRow = {
+    id: 3,
+    document_number: 'DOC-003',
+    revision: 'B',
+    title: 'ITAR drawing',
+    part_number: 'PN-700',
+    customer_name: 'Acme Aero',
+    access_level: 'standard' as const,
+  };
+  mockedApi.getDocumentAccessReview
+    .mockResolvedValueOnce({ documents: [reviewRow], unlinked_count: 0 })
+    .mockResolvedValue({ documents: [], unlinked_count: 0 });
+  const original = { ...rows[2], id: 30, revision: 'A', access_level: 'standard' };
+  mockedApi.getDocument.mockResolvedValue({ ...rows[2], access_level: 'standard', mime_type: 'text/plain' });
+  mockedApi.getDocumentRevisions.mockResolvedValue([{ ...rows[2], access_level: 'standard' }, original]);
+  mockedApi.changeDocumentAccessLevel.mockResolvedValue({
+    ...rows[2],
+    access_level: 'export_controlled',
+    authorized_user_count: 2,
+    changed_document_ids: [3, 30],
+    chain_size: 2,
+  });
+  renderPage('/documents?review=1');
+  const panel = await screen.findByTestId('document-access-review');
+  fireEvent.click(await within(panel).findByRole('button', { name: 'Open DOC-003 Rev B' }));
+
+  const detail = await screen.findByRole('dialog', { name: 'Document preview and revision history' });
+  fireEvent.click(await within(detail).findByRole('button', { name: 'Change access' }));
+  const dialog = await screen.findByRole('dialog', { name: /Change access — DOC-003 Rev B/ });
+  expect(within(dialog).getByTestId('document-access-chain-note')).toHaveTextContent('all 2 revisions');
+  fireEvent.click(within(dialog).getByRole('radio', { name: /Export-controlled/ }));
+  fireEvent.change(within(dialog).getByLabelText(/Reason/), { target: { value: 'ITAR customer' } });
+  const listReads = mockedApi.getDocuments.mock.calls.length;
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save access level' }));
+
+  await waitFor(() => expect(mockedApi.getDocumentAccessReview).toHaveBeenCalledTimes(2));
+  expect(mockedApi.getDocuments.mock.calls.length).toBeGreaterThan(listReads);
+  expect((await within(panel).findAllByText('No documents need review')).length).toBeGreaterThan(0);
+  expect((await screen.findAllByText('DOC-003 is now Export-controlled on all 2 revisions.')).length).toBeGreaterThan(
+    0
+  );
 });

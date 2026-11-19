@@ -2,8 +2,8 @@
 
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
-(Cursor, Claude Code, a chat bot) gets **793 tools** — 15 hand-written *convenience* tools plus
-**778 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+(Cursor, Claude Code, a chat bot) gets **794 tools** — 15 hand-written *convenience* tools plus
+**779 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
 as the same request from the web app. A **read-only** API token is shown fewer tools, and an
 **AI-external** one fewer still (§4.1, §4.2).
 
@@ -91,6 +91,16 @@ administration, a person's act. They add no tool and shift no name. The catalog 
 `change_inventory_item_ownership` (Inventory), from the owned-property change (migration 129). That
 route and the four floor-PIN routes are all writes, so the read-only catalog is unchanged at
 8 convenience + **303** generated, and none of them is on the AI-external allowlist.
+
+**Re-checked again on 2026-11-19 after restricted document viewing (migration 131) added one
+Documents tool**, `get_document_access_review` (no existing name shifted): 15 convenience + **779**
+generated, 16 shadowed, one more than the 778 above. The change's two writes, changing a
+document's access level and granting or revoking a user's export authorization, joined
+`EXCLUDED_OPERATIONS` (§6.1) and add no tool. The new tool carries the denied `Documents` tag, so the read-only catalog is unchanged at
+8 convenience + **303** generated, and it is not on the AI-external allowlist. Every document read
+now answers only what the calling user may open (the user's role and export authorization; see
+[API.md → Restricted and export-controlled documents](API.md#restricted-and-export-controlled-documents-as9100d-7531)),
+so two agents on two users can see different document lists.
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
 `backend/tests/test_mcp_docs_names.py` checks every tool name this file, `CLAUDE.md` and `API.md`
@@ -284,7 +294,7 @@ routes authenticate every call; in IN-PROCESS mode it uses the real `ErpTokenVer
  "generated_tools":   [{"name": "...", "method": "GET", "path": "/api/v1/...", "tag": "...",
                         "function": "...", "annotations": {...}, "deprecated": false}],
  "shadowed_operations": [["GET", "/api/v1/inventory/"], ...],
- "counts": {"convenience": 15, "generated": 778, "shadowed": 16}
+ "counts": {"convenience": 15, "generated": 779, "shadowed": 16}
 }
 ```
 
@@ -747,7 +757,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `Routing` (`/routing`) | Routing, Parts, Process Sheets, Work Centers | `list_routings`, `create_routing`, `routing_add_operation`, `routing_reorder_operations`, `release_routing`, `generate_routing_from_drawing` |
 | `ProcessSheets` (`/process-sheets`) | Process Sheets | `list_process_sheets`, `create_process_sheet`, `add_process_sheet_step`, `release_process_sheet`, `new_process_sheet_revision`, `obsolete_process_sheet` |
 | `EngineeringChanges` (`/engineering-changes`) | Engineering Change Orders | `list_ecos`, `create_eco`, `submit_eco`, `approve_eco`, `get_eco_dashboard`, `get_affected_items` |
-| `Documents` (`/documents`) | Documents, Parts | `list_documents`, `upload_document`, `download_document`, `list_document_types`, `delete_document` |
+| `Documents` (`/documents`) | Documents, Parts | `list_documents`, `upload_document`, `download_document`, `list_document_types`, `delete_document`, `get_document_access_review` (Admin / Quality) — every read returns only the documents the calling user may open; **changing a document's access level is not a tool** (`POST /documents/{document_id}/access-level` is in `EXCLUDED_OPERATIONS`, §6.1, and refuses **403** to every API token) |
 | `CustomFields` (`/custom-fields`) | Custom Fields | `list_field_definitions`, `create_field_definition`, `set_custom_field_value`, `get_entity_custom_fields` |
 | `Warehouse` (`/warehouse`) | — hub that mounts the Inventory, Receiving and Shipping pages | see those three rows |
 | `Inventory` (`/inventory`) | Inventory, Parts | `list_inventory`★, `receive_inventory`, `adjust_inventory`, `transfer_inventory`, `change_inventory_item_ownership`, `list_transactions`, `preview_inventory_combine`, `combine_inventory`, `list_cycle_counts` |
@@ -779,7 +789,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `PrintShippingLabel` (`/print/shipping-label/:id`) | Shipping, Documents | `get_shipment`, `download_document` |
 | `PrintBadges` (`/print/badges`) | Users | `list_users` |
 | `ImportCenter` (`/import-center`) | Import Kit, Purchasing, Users, Work Orders | `get_import_templates`, `download_import_template`, `import_users_csv` — the two Excel-cutover loaders (`POST /work-orders/import`, `POST /purchasing/purchase-orders/import`) are deliberately **not** tools (§6.1) |
-| `Users` (`/users`) | Users | `list_users`, `create_user`, `update_user`, `deactivate_user`, `reset_user_password`, `approve_user`, `unlock_user` — `list_users` shows each user's floor-PIN state; **setting, clearing or unlocking a floor PIN is not a tool**: `PUT` / `DELETE /users/{user_id}/floor-pin` and `POST /users/{user_id}/floor-pin/unlock` are in `EXCLUDED_OPERATIONS` (§6.1) and refuse **403** to every API token |
+| `Users` (`/users`) | Users | `list_users`, `create_user`, `update_user`, `deactivate_user`, `reset_user_password`, `approve_user`, `unlock_user` — `list_users` shows each user's floor-PIN state and export authorization; **setting, clearing or unlocking a floor PIN is not a tool**: `PUT` / `DELETE /users/{user_id}/floor-pin` and `POST /users/{user_id}/floor-pin/unlock` are in `EXCLUDED_OPERATIONS` (§6.1) and refuse **403** to every API token; **nor is granting or revoking export authorization** (`PUT /users/{user_id}/export-authorization` is in `EXCLUDED_OPERATIONS`, §6.1, and refuses **403** to every API token) |
 | `AuditLog` (`/audit-log`) | Audit | `list_audit_logs`, `get_audit_summary`, `verify_audit_integrity`, `get_integrity_status` |
 | `VisitorLog` (`/visitor-log`) | Visitor Logs | `list_visitors`, `manual_entry`, `sign_out`, `export_visitors_csv`, `create_station`, `revoke_station` |
 | `VisitorSignIn` (`/visitor-signin`) | Visitor Logs | `sign_in`, `sign_out` (under the caller's own role; the tablet's shared-PIN station login is unauthenticated plumbing and is not a tool) |
@@ -810,7 +820,7 @@ minus two further, named sets:
   They are listed **by name** rather than skipped silently, so a new route that forgets its
   `security` dependency — even under a tag that already has tools — fails the coverage guard
   (`catalog.unaccounted_operations`, §14) until it is either secured or named there.
-- **`EXCLUDED_OPERATIONS`** — twenty-four operations, none with a convenience twin:
+- **`EXCLUDED_OPERATIONS`** — twenty-six operations, none with a convenience twin:
   - The two Excel-cutover loaders, `POST /work-orders/import` and
     `POST /purchasing/purchase-orders/import` (`migration_import_service`). They record a *past*
     system's state rather than perform a user action: the work-order loader mints work orders
@@ -881,6 +891,16 @@ minus two further, named sets:
     reads stay tools: `list_users` carries each user's PIN state (never the PIN) and
     `get_my_company` the policy. See
     [API.md → Badge sign-on and the floor PIN](API.md#badge-sign-on-and-the-floor-pin-as9100d-852).
+  - The two **document-access writes** (`catalog.DOCUMENT_ACCESS_OPERATIONS`; AS9100D 7.5.3.1,
+    migration 131): `POST /documents/{document_id}/access-level` and
+    `PUT /users/{user_id}/export-authorization`. Deciding who may open a controlled document is a
+    person's judgment. The routes refuse every API token **403**
+    (`app.core.credentials.API_TOKEN_DOCUMENT_ACCESS_LEVEL` / `API_TOKEN_EXPORT_AUTHORIZATION`), and
+    the exclusion closes the door a person's own JWT would leave open: an agent lowering an
+    export-controlled drawing to `standard`, or granting export access, its own user's included.
+    The reads stay tools: `get_document_access_review`, the `access_level` on every document read,
+    and each user's export authorization on `list_users`. See
+    [API.md → Restricted and export-controlled documents](API.md#restricted-and-export-controlled-documents-as9100d-7531).
 
 The `Import Batches` tag also excludes the recoverable Import Center review, receipt,
 correction and commit routes. These wrap the same cutover loaders, including their
@@ -895,8 +915,9 @@ together, so fifteen were excluded and the count stayed **764**; the five commen
 joined the exclusions (twenty) and the three comment reads were added: **767 generated tools**; the
 three report-template routes then made it **770 generated tools**, and on 2026-11-19 the NCR
 re-verification and CAR effectiveness verbs **772**, the five PO quality flow-down routes
-**777**, and the inventory ownership route **778**; the four floor-PIN writes then joined the
-exclusions (twenty-four) with no change to the count.
+**777**, the inventory ownership route (migration 129) **778**, and the document access review
+(migration 131) **779**; the four floor-PIN writes and the two document-access writes joined the
+exclusions (twenty-six) without changing the count.
 
 ### 6.2 Naming and the collision policy (`app/mcp/naming.py`)
 
@@ -1058,7 +1079,7 @@ Every other operation stays generated — including the neighbours of the shadow
 `get_work_order_by_number`, `update_laser_nest`, `get_inventory_summary`, `get_purchase_order`, …) —
 except the operations in `EXCLUDED_OPERATIONS` (§6.1) — the two cutover loaders, AI Accept &
 apply, the two customer export-control writes, the four egress kill-switch writes, the three Approved Supplier
-List writes, the two legacy ASL-table writes, bulk release, the five comment / watcher writes and the four floor-PIN writes — which have no tool and no replacement. Adding a convenience tool whose route is *not* in the shadow set is a build error
+List writes, the two legacy ASL-table writes, bulk release, the five comment / watcher writes, the four floor-PIN writes and the two document-access writes — which have no tool and no replacement. Adding a convenience tool whose route is *not* in the shadow set is a build error
 (`build_registry` refuses a duplicate name) rather than a silent win.
 
 ---
@@ -1410,8 +1431,8 @@ count, in which case there is nothing left to close.
     the unsecured routes; `EXCLUDED_OPERATIONS` are exactly the two loaders, the AI apply route,
     the two customer export-control writes, the four egress kill-switch writes, the three Approved
     Supplier List writes, the two legacy ASL-table writes, bulk release, the five comment / watcher
-    writes and the four floor-PIN writes, the three comment reads stay tools, and the record-only
-    accept stays a tool),
+    writes, the four floor-PIN writes and the two document-access writes, the three comment reads
+    stay tools, and the record-only accept stays a tool),
     names (unique, wire-valid,
     ≤ 64, collisions prefixed, the numeric-suffix fallback proven on synthetic input and unused on
     the live catalog), schemas (`$ref`-free, `additionalProperties: false`, every JSON body's

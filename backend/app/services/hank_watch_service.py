@@ -66,7 +66,7 @@ def _documents(db, company_id, payload, viewer):
     query = tenant_query(db, Document, company_id).filter(
         Document.work_order_id == payload.work_order_id,
         or_(Document.mime_type == 'application/pdf', func.lower(Document.file_name).like('%.pdf')),
-        visible_documents_clause(viewer),
+        visible_documents_clause(viewer, company_id),
     )
     if payload.document_type is not None:
         query = query.filter(Document.document_type == payload.document_type)

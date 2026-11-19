@@ -94,16 +94,30 @@ it.each<[UserRole, boolean]>([
   expect(!!screen.queryByRole('button', { name: 'Change access' })).toBe(allowed);
 });
 
-it('shows the level the server returned and warns when nobody can open the result', async () => {
+const levels = () =>
+  screen.getAllByTestId('document-access-badge').map(badge => badge.getAttribute('data-access-level'));
+
+it('applies the change to every revision the server names, and says how many changed', async () => {
+  // Two revisions in the history: the dialog states the chain before saving, and after the
+  // save the header and BOTH history chips show the level the server returned.
+  const original = { ...doc, id: 1, revision: 'A' };
+  mocked.getDocumentRevisions.mockResolvedValue([doc, original]);
   mocked.changeDocumentAccessLevel.mockResolvedValue({
     ...doc,
     access_level: 'export_controlled',
+    previous_access_level: 'restricted',
     authorized_user_count: 0,
+    changed_document_ids: [2, 1],
+    chain_size: 2,
   });
   render(view());
   await screen.findByTitle('Preview Fixture drawing revision B');
+  expect(levels()).toEqual(['restricted', 'restricted', 'restricted']);
   fireEvent.click(screen.getByRole('button', { name: 'Change access' }));
   const dialog = await screen.findByRole('dialog', { name: /Change access — DWG-2 Rev B/ });
+  expect(within(dialog).getByTestId('document-access-chain-note')).toHaveTextContent(
+    'Applies to all 2 revisions of this document, not just Rev B.'
+  );
   fireEvent.click(within(dialog).getByRole('radio', { name: /Export-controlled/ }));
   fireEvent.change(within(dialog).getByLabelText(/Reason/), { target: { value: 'Customer drawing is ITAR' } });
   fireEvent.click(within(dialog).getByRole('button', { name: 'Save access level' }));
@@ -113,13 +127,35 @@ it('shows the level the server returned and warns when nobody can open the resul
     access_level: 'export_controlled',
     reason: 'Customer drawing is ITAR',
   });
+  expect(levels()).toEqual(['export_controlled', 'export_controlled', 'export_controlled']);
   expect(
-    screen
-      .getAllByTestId('document-access-badge')
-      .some(b => b.getAttribute('data-access-level') === 'export_controlled')
-  ).toBe(true);
-  expect(screen.getByText(/Nobody in the company can open an export-controlled document yet/)).toBeInTheDocument();
+    screen.getByText(/DWG-2 is now Export-controlled on all 2 revisions\. Nobody in the company can open/)
+  ).toBeInTheDocument();
   expect(props.onSaved).toHaveBeenCalledTimes(1);
+});
+
+it('moves only the revisions the server says it changed', async () => {
+  const original = { ...doc, id: 1, revision: 'A', access_level: 'standard' };
+  mocked.getDocumentRevisions.mockResolvedValue([doc, original]);
+  mocked.changeDocumentAccessLevel.mockResolvedValue({
+    ...doc,
+    access_level: 'export_controlled',
+    authorized_user_count: 4,
+    changed_document_ids: [2],
+    chain_size: 2,
+  });
+  render(view());
+  await screen.findByTitle('Preview Fixture drawing revision B');
+  fireEvent.click(screen.getByRole('button', { name: 'Change access' }));
+  const dialog = await screen.findByRole('dialog', { name: /Change access/ });
+  fireEvent.click(within(dialog).getByRole('radio', { name: /Export-controlled/ }));
+  fireEvent.change(within(dialog).getByLabelText(/Reason/), { target: { value: 'ITAR' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save access level' }));
+
+  expect(await screen.findByText('DWG-2 is now Export-controlled: 1 of 2 revisions changed.')).toBeInTheDocument();
+  // Header and Rev B moved; Rev A (standard, so no chip) was not in changed_document_ids.
+  expect(levels()).toEqual(['export_controlled', 'export_controlled']);
+  expect(screen.queryByText(/Nobody in the company/)).not.toBeInTheDocument();
 });
 
 it('a refused change leaves the record at its level', async () => {

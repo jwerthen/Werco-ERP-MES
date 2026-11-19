@@ -1,5 +1,5 @@
 import React, { useEffect, useId, useState } from 'react';
-import { ExclamationTriangleIcon, ShieldExclamationIcon } from '@heroicons/react/24/outline';
+import { ExclamationTriangleIcon, ShieldExclamationIcon, Square2StackIcon } from '@heroicons/react/24/outline';
 import api from '../../services/api';
 import { FormField, LoadingButton, Modal, useToast } from '../ui';
 import { apiErrorDetail } from '../../utils/apiError';
@@ -7,6 +7,7 @@ import {
   DOCUMENT_ACCESS_DESCRIPTIONS,
   DOCUMENT_ACCESS_LABELS,
   DOCUMENT_ACCESS_LEVELS,
+  accessChangeSummary,
   documentAccessLevel,
   type DocumentAccessChangeResult,
   type DocumentAccessFields,
@@ -26,6 +27,11 @@ export function nobodyCanOpen(result: DocumentAccessChangeResult): boolean {
 interface DocumentAccessDialogProps {
   /** The document whose level is being changed; null = closed. */
   document: DocumentAccessFields | null;
+  /**
+   * Revisions in the document's history, when the caller has loaded it (the detail does). The
+   * change applies to the whole chain, so the dialog says how many it will touch.
+   */
+  revisionCount?: number;
   onClose: () => void;
   /** Called with the server's answer after it accepted the change. */
   onChanged: (result: DocumentAccessChangeResult) => void | Promise<void>;
@@ -34,12 +40,20 @@ interface DocumentAccessDialogProps {
 /**
  * Documents → Change access (AS9100D 7.5.3.1). Admin / Quality; the caller gates it.
  *
- * Non-optimistic on purpose: the server owns every refusal (an unchanged level is 409, an API
- * token is 403, a document the caller cannot view is 404), shown here verbatim, and the record
- * reflects only what the server returns. The reason is required and lands on the audit row
- * with the old and new level.
+ * The level belongs to the document, not one revision: the server applies it to the WHOLE revision
+ * chain, and the dialog says so before anything is saved.
+ *
+ * Non-optimistic on purpose: the server owns every refusal (an unchanged level is 409, lowering a
+ * chain with a revision the caller cannot see is 409, an API token is 403, a document the caller
+ * cannot view is 404), shown here verbatim, and the record reflects only what the server returns.
+ * The reason is required and lands on the audit row with the old and new level.
  */
-export default function DocumentAccessDialog({ document, onClose, onChanged }: DocumentAccessDialogProps) {
+export default function DocumentAccessDialog({
+  document,
+  revisionCount,
+  onClose,
+  onChanged,
+}: DocumentAccessDialogProps) {
   const { showToast } = useToast();
   const titleId = useId();
   const current = documentAccessLevel(document);
@@ -80,11 +94,11 @@ export default function DocumentAccessDialog({ document, onClose, onChanged }: D
     setServerError(null);
     try {
       const result = await api.changeDocumentAccessLevel(document.id, { access_level: level, reason: trimmed });
-      const savedLabel = DOCUMENT_ACCESS_LABELS[documentAccessLevel(result)];
+      const summary = accessChangeSummary(document, result);
       if (nobodyCanOpen(result)) {
-        showToast('warning', `${label} is now ${savedLabel}. ${NOBODY_AUTHORIZED_WARNING}`);
+        showToast('warning', `${summary} ${NOBODY_AUTHORIZED_WARNING}`);
       } else {
-        showToast('success', `${label} is now ${savedLabel}.`);
+        showToast('success', summary);
       }
       await onChanged(result);
     } catch (err) {
@@ -145,6 +159,20 @@ export default function DocumentAccessDialog({ document, onClose, onChanged }: D
             </label>
           ))}
         </fieldset>
+
+        <p
+          className="flex items-start gap-2 rounded-[4px] border border-slate-700 px-3 py-2 text-xs text-slate-300"
+          data-testid="document-access-chain-note"
+        >
+          <Square2StackIcon className="mt-px h-4 w-4 shrink-0 text-slate-400" aria-hidden="true" />
+          <span>
+            {revisionCount && revisionCount > 1
+              ? `Applies to all ${revisionCount} revisions of this document, not just Rev ${document.revision}.`
+              : revisionCount === 1
+                ? 'Applies to every revision of this document. It has one revision so far.'
+                : `Applies to every revision of this document, not just Rev ${document.revision}.`}
+          </span>
+        </p>
 
         {level === 'export_controlled' && !unchanged && (
           <p className="flex items-start gap-2 rounded-[4px] border border-fd-amber/40 bg-fd-amber/10 px-3 py-2 text-xs text-fd-amber">

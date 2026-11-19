@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { DocumentTextIcon, ExclamationTriangleIcon } from '@heroicons/react/24/outline';
+import { CheckCircleIcon, DocumentTextIcon, ExclamationTriangleIcon } from '@heroicons/react/24/outline';
 import api from '../../services/api';
 import { usePermissions } from '../../hooks/usePermissions';
 import { canManageDocumentAccess, canPublishDocuments } from '../../utils/recordWriteAccess';
@@ -12,7 +12,9 @@ import { DocumentAccessBadge } from '../documents/DocumentAccessBadge';
 import DocumentAccessDialog, { NOBODY_AUTHORIZED_WARNING, nobodyCanOpen } from '../documents/DocumentAccessDialog';
 import {
   DOCUMENT_ACCESS_LABELS,
+  accessChangeSummary,
   accessLevelRaisedNotice,
+  changedRevisionIds,
   documentAccessLevel,
   serverRaisedAccessLevel,
   type DocumentAccessChangeResult,
@@ -45,8 +47,9 @@ export default function DocumentDetail({
   const [record, setRecord] = useState<any>(null);
   const [notAvailable, setNotAvailable] = useState(false);
   const [showAccessDialog, setShowAccessDialog] = useState(false);
-  // Set when a change left an export-controlled document nobody in the company can open.
-  const [nobodyAuthorized, setNobodyAuthorized] = useState(false);
+  // What the last access change did (how many revisions moved), and whether it left an
+  // export-controlled document nobody in the company can open. Cleared when another document opens.
+  const [accessNotice, setAccessNotice] = useState<{ summary: string; nobodyAuthorized: boolean } | null>(null);
   const [revisions, setRevisions] = useState<any[]>([]);
   const [preview, setPreview] = useState('');
   const [loading, setLoading] = useState(true);
@@ -73,7 +76,7 @@ export default function DocumentDetail({
     setPreview('');
     setShowRevision(false);
     setShowAccessDialog(false);
-    setNobodyAuthorized(false);
+    setAccessNotice(null);
     Promise.all([api.getDocument(id), api.getDocumentRevisions(id)])
       .then(async ([doc, history]) => {
         if (!active) return;
@@ -162,14 +165,15 @@ export default function DocumentDetail({
   const close = () => {
     if (!uploading && confirmDiscard()) onClose();
   };
-  // Non-optimistic: the record shows the level the server returned, nothing presumed.
+  // Non-optimistic: the record and the history chips show the level the server returned, on
+  // exactly the revisions it says it changed (the change applies to the whole chain).
   const handleAccessChanged = (result: DocumentAccessChangeResult) => {
     setShowAccessDialog(false);
-    setNobodyAuthorized(nobodyCanOpen(result));
+    setAccessNotice({ summary: accessChangeSummary(record, result), nobodyAuthorized: nobodyCanOpen(result) });
     setRecord((current: any) => (current ? { ...current, ...result } : current));
-    setRevisions(list =>
-      list.map(doc => (doc.id === result.id ? { ...doc, access_level: documentAccessLevel(result) } : doc))
-    );
+    const changed = new Set(changedRevisionIds(result));
+    const level = documentAccessLevel(result);
+    setRevisions(list => list.map(doc => (changed.has(doc.id) ? { ...doc, access_level: level } : doc)));
     onSaved();
   };
   return (
@@ -219,13 +223,24 @@ export default function DocumentDetail({
               </Button>
             )}
           </div>
-          {nobodyAuthorized && (
+          {accessNotice && (
             <p
               role="status"
-              className="flex items-start gap-2 rounded-[4px] border border-fd-amber/40 bg-fd-amber/10 px-3 py-2 text-sm text-fd-amber"
+              className={`flex items-start gap-2 rounded-[4px] border px-3 py-2 text-sm ${
+                accessNotice.nobodyAuthorized
+                  ? 'border-fd-amber/40 bg-fd-amber/10 text-fd-amber'
+                  : 'border-fd-line text-slate-200'
+              }`}
             >
-              <ExclamationTriangleIcon className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-              <span>{NOBODY_AUTHORIZED_WARNING}</span>
+              {accessNotice.nobodyAuthorized ? (
+                <ExclamationTriangleIcon className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+              ) : (
+                <CheckCircleIcon className="mt-0.5 h-4 w-4 shrink-0 text-emerald-300" aria-hidden="true" />
+              )}
+              <span>
+                {accessNotice.summary}
+                {accessNotice.nobodyAuthorized && ` ${NOBODY_AUTHORIZED_WARNING}`}
+              </span>
             </p>
           )}
           {previewError && (
@@ -324,6 +339,7 @@ export default function DocumentDetail({
       {canManageAccess && showAccessDialog && record && (
         <DocumentAccessDialog
           document={record}
+          revisionCount={revisions.length || undefined}
           onClose={() => setShowAccessDialog(false)}
           onChanged={handleAccessChanged}
         />

@@ -518,7 +518,9 @@ class HankTaskService:
         # The document first: one the user may not open (app.services.document_access) is the
         # same 404 as a missing one, before any other check can say something about it.
         document_rows = self._rows(
-            Document, (Document.id == data['document_id']) & visible_documents_clause(self.user), locked=locked
+            Document,
+            (Document.id == data['document_id']) & visible_documents_clause(self.user, self.company_id),
+            locked=locked,
         )
         if not document_rows:
             raise HTTPException(404, 'Document not found')

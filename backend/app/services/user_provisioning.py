@@ -212,3 +212,39 @@ def audit_user_update(
             **(extra_data or {}),
         },
     )
+
+
+EXPORT_AUTHORIZATION_DEACTIVATION_REASON = "user deactivated"
+
+
+def revoke_export_authorization_for_deactivation(audit: AuditService, user: User) -> bool:
+    """Clear a deactivated user's export authorization, with its companion audit row; True if one was held.
+
+    Called by both user-deactivation verbs inside their security transaction, like the API-token
+    sweep: deactivation RETIRES the grant, it never pauses it, so a later reactivation restores
+    the account and no export authorization. The row is required evidence (``audit_user_update``
+    -> ``log_required``): if it cannot be written the deactivation rolls back too.
+    """
+    if not user.export_authorized and user.export_authorized_at is None and user.export_authorized_by is None:
+        return False
+    old_values = {"export_authorized": bool(user.export_authorized)}
+    revoked_grant = {
+        "export_authorized_at": user.export_authorized_at.isoformat() + "Z" if user.export_authorized_at else None,
+        "export_authorized_by": user.export_authorized_by,
+    }
+    user.export_authorized = False
+    user.export_authorized_at = None
+    user.export_authorized_by = None
+    audit_user_update(
+        audit,
+        user,
+        old_values,
+        action="EXPORT_AUTHORIZATION_REVOKE",
+        description=f"Revoked export authorization for user {user.employee_id} on deactivation",
+        extra_data={
+            "reason": EXPORT_AUTHORIZATION_DEACTIVATION_REASON,
+            "source": "deactivation",
+            "revoked_grant": revoked_grant,
+        },
+    )
+    return True

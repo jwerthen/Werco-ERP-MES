@@ -968,7 +968,7 @@ def build_step_record(
             )
         document = (
             tenant_query(db, Document, company_id)
-            .filter(Document.id == attachment_document_id, visible_documents_clause(viewer))
+            .filter(Document.id == attachment_document_id, visible_documents_clause(viewer, company_id))
             .first()
         )
         if not document:

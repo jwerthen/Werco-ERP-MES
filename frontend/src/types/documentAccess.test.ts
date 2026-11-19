@@ -1,5 +1,7 @@
 import {
+  accessChangeSummary,
   accessLevelRaisedNotice,
+  changedRevisionIds,
   documentAccessLevel,
   normalizeDocumentAccessReview,
   serverRaisedAccessLevel,
@@ -146,5 +148,35 @@ describe('normalizeDocumentAccessReview', () => {
       documents: [],
       unlinked_count: 0,
     });
+  });
+});
+
+describe('chain changes (POST /documents/{id}/access-level)', () => {
+  const doc = { id: 12, document_number: 'DWG-12', revision: 'C', title: 'T', access_level: 'standard' as const };
+  const result = (extra: object) => ({
+    ...doc,
+    access_level: 'restricted' as const,
+    authorized_user_count: 1,
+    ...extra,
+  });
+
+  it('reads the changed revisions from the server, or just the document itself', () => {
+    expect(changedRevisionIds(result({ changed_document_ids: [12, 11, 10] }))).toEqual([12, 11, 10]);
+    expect(changedRevisionIds(result({}))).toEqual([12]);
+    expect(changedRevisionIds(result({ changed_document_ids: [] }))).toEqual([12]);
+  });
+
+  it('summarizes how many revisions changed', () => {
+    expect(accessChangeSummary(doc, result({ changed_document_ids: [12, 11, 10], chain_size: 3 }))).toBe(
+      'DWG-12 is now Restricted on all 3 revisions.'
+    );
+    expect(accessChangeSummary(doc, result({ changed_document_ids: [12, 11], chain_size: 3 }))).toBe(
+      'DWG-12 is now Restricted: 2 of 3 revisions changed.'
+    );
+    expect(accessChangeSummary(doc, result({ changed_document_ids: [12], chain_size: 1 }))).toBe(
+      'DWG-12 is now Restricted (1 revision).'
+    );
+    expect(accessChangeSummary(doc, result({ chain_size: 4 }))).toBe('DWG-12 is now Restricted on all 4 revisions.');
+    expect(accessChangeSummary(doc, result({}))).toBe('DWG-12 Rev C is now Restricted.');
   });
 });

@@ -116,7 +116,11 @@ export interface DocumentAccessChangeRequest {
   reason: string;
 }
 
-/** `POST /documents/{id}/access-level` response: the document after the change. */
+/**
+ * `POST /documents/{id}/access-level` response: the document after the change. The change applies
+ * to the document's WHOLE revision chain, so a level never differs between revisions; lowering is
+ * refused 409 when some revision is not visible to the caller.
+ */
 export interface DocumentAccessChangeResult extends DocumentAccessFields {
   previous_access_level?: DocumentAccessLevel;
   /**
@@ -124,7 +128,45 @@ export interface DocumentAccessChangeResult extends DocumentAccessFields {
    * export-controlled document yet.
    */
   authorized_user_count: number;
+  /** Every revision whose level this change moved (this one included). */
+  changed_document_ids?: number[];
+  /** Revisions in the chain. */
+  chain_size?: number;
   [key: string]: unknown;
+}
+
+/** Ids of the revisions a change moved: the server's list, or just the document itself. */
+export function changedRevisionIds(result: DocumentAccessChangeResult): number[] {
+  const ids = Array.isArray(result.changed_document_ids)
+    ? result.changed_document_ids.filter((id): id is number => typeof id === 'number' && Number.isFinite(id))
+    : [];
+  return ids.length ? ids : [result.id];
+}
+
+const revisions = (count: number) => `${count} revision${count === 1 ? '' : 's'}`;
+
+/**
+ * What a change did, in words: "DWG-12 is now Restricted on all 3 revisions.", or "…: 2 of 3
+ * revisions changed." when some were already there. Counts come only from the server's
+ * `changed_document_ids` / `chain_size`; a response without them names just the revision.
+ */
+export function accessChangeSummary(document: DocumentAccessFields, result: DocumentAccessChangeResult): string {
+  const level = DOCUMENT_ACCESS_LABELS[documentAccessLevel(result)];
+  const changed = Array.isArray(result.changed_document_ids) ? changedRevisionIds(result).length : null;
+  const chain =
+    typeof result.chain_size === 'number' && Number.isFinite(result.chain_size) && result.chain_size > 0
+      ? result.chain_size
+      : null;
+  if (changed === null && chain === null) {
+    return `${document.document_number} Rev ${document.revision} is now ${level}.`;
+  }
+  const total = chain ?? changed ?? 1;
+  if (changed !== null && changed < total) {
+    return `${document.document_number} is now ${level}: ${changed} of ${revisions(total)} changed.`;
+  }
+  return total === 1
+    ? `${document.document_number} is now ${level} (1 revision).`
+    : `${document.document_number} is now ${level} on all ${revisions(total)}.`;
 }
 
 /**

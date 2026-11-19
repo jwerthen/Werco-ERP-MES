@@ -404,9 +404,11 @@ def _query_documents(db: Session, company_id: int, viewer: Optional[Any] = None)
     Counts and example titles / numbers are computed over the documents the person asking
     may open (``app.services.document_access``), so a restricted or export-controlled
     document's title never reaches someone who could not open it, and nor does its count.
-    ``viewer=None`` (no person) counts ``standard`` documents only.
+    ``viewer=None`` (no person) counts ``standard`` documents only, and says so in the
+    description: that is what auto-link PERSISTS, so stored evidence never depends on who
+    clicked and never carries a count of documents some readers may not see.
     """
-    visible = visible_documents_clause(viewer)
+    visible = visible_documents_clause(viewer, company_id)
     procedures = (
         db.query(func.count(Document.id))
         .filter(
@@ -465,7 +467,12 @@ def _query_documents(db: Session, company_id: int, viewer: Optional[Any] = None)
     return dict(
         evidence_type="document",
         title="Document Control (Procedures & Work Instructions)",
-        description=f"{procedures} procedures/WIs ({approved} approved), {total} total documents, {controlled} controlled",
+        description=(
+            f"{procedures} procedures/WIs ({approved} approved), {total} total documents, {controlled} controlled"
+            if viewer is not None
+            else f"{procedures} procedures/WIs ({approved} approved), {total} total standard documents, "
+            f"{controlled} controlled (restricted and export-controlled documents are not counted)"
+        ),
         module_reference="/documents",
         total_count=total,
         recent_count=procedures,

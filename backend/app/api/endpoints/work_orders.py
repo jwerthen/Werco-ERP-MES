@@ -987,9 +987,11 @@ def _enrich_work_order_operations(work_order: WorkOrder, *, db: Session, company
         # the DB -- it marks nothing dirty -- so the guard is safe regardless of
         # call order. For a live nest, inject has_document / document_file_name
         # as in-memory attrs (not ORM columns), like work_center_name above. A PDF
-        # ``viewer`` may not open (app.services.document_access) reads as none:
-        # has_document false, no file name. ``document_id`` is an ORM column and a
-        # bare pointer, so it is left as stored; the bytes are gated where served.
+        # ``viewer`` may not open (app.services.document_access) reads as none, as on
+        # the shop-floor and laser-nest payloads: has_document false, no file name and
+        # a null ``document_id``. ``document_id`` IS a mapped column, so it is hidden
+        # with ``set_committed_value`` for the reason given for ``laser_nest`` above:
+        # it marks nothing dirty, so no later flush can write the null back.
         nest = active_laser_nest(op)
         if nest is None:
             set_committed_value(op, "laser_nest", None)
@@ -997,6 +999,8 @@ def _enrich_work_order_operations(work_order: WorkOrder, *, db: Session, company
             document_visible = bool(nest.document_id) and can_view_document(viewer, nest.document)
             nest.has_document = document_visible
             nest.document_file_name = nest.document.file_name if document_visible else None
+            if nest.document_id is not None and not document_visible:
+                set_committed_value(nest, "document_id", None)
 
         if op.component_part_id:
             component = op.component_part
