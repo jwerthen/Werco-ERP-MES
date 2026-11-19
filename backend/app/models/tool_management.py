@@ -1,13 +1,14 @@
 import enum
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Column, Date, DateTime
+from sqlalchemy import Boolean, CheckConstraint, Column, Date, DateTime
 from sqlalchemy import Enum as SQLEnum
-from sqlalchemy import Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
 from app.db.mixins import TenantMixin
+from app.models.inventory import OWNER_MATCHES_CHECK, OWNERSHIP_VALUE_CHECK, OwnershipType
 
 
 class ToolStatus(str, enum.Enum):
@@ -41,7 +42,14 @@ class Tool(Base, TenantMixin):
     # ``tool_id`` (the user-entered tool / fixture tag) is unique PER COMPANY, never
     # globally; ``ix_tools_tool_id`` stays as a plain lookup index.
     # Lock-step with migration 116_business_keys_per_company.
-    __table_args__ = (UniqueConstraint("company_id", "tool_id", name="uq_tools_company_tool_id"),)
+    __table_args__ = (
+        UniqueConstraint("company_id", "tool_id", name="uq_tools_company_tool_id"),
+        # Lock-step with migration 129_owned_property (AS9100D 8.5.3 owned property): the
+        # same two CHECKs and index ``inventory_items`` carries, over the same columns.
+        CheckConstraint(OWNERSHIP_VALUE_CHECK, name="ck_tools_ownership"),
+        CheckConstraint(OWNER_MATCHES_CHECK, name="ck_tools_owner_matches"),
+        Index("ix_tools_ownership", "company_id", "ownership"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     tool_id = Column(String(50), index=True, nullable=False)
@@ -74,6 +82,14 @@ class Tool(Base, TenantMixin):
 
     notes = Column(Text, nullable=True)
     is_active = Column(Boolean, default=True)
+
+    # Owned property (AS9100D 8.5.3, migration 129): a customer's fixture or a supplier's
+    # gauge held in the crib. ``company`` is the default and what every pre-129 tool is.
+    # Written by ``POST /tools/`` and ``PUT /tools/{id}`` (validated and audited like any
+    # other tool edit); see ``app.models.inventory.OwnershipType``.
+    ownership = Column(String(20), nullable=False, default=OwnershipType.COMPANY.value, server_default="company")
+    owner_customer_id = Column(Integer, ForeignKey("customers.id", name="fk_tools_owner_customer_id"), nullable=True)
+    owner_vendor_id = Column(Integer, ForeignKey("vendors.id", name="fk_tools_owner_vendor_id"), nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

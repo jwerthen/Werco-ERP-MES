@@ -1010,7 +1010,7 @@ active company; another company's customer id answers **404** with the same deta
 | GET | `/customers/{id}/stats` | Parts and assemblies filed under the customer's name, work-order counts by status, and current / past / recent work orders, **from the active company only** (see note) | Yes |
 | POST | `/customers/` | Create. `code` is optional and generated from the name when omitted. **400** `Customer name already exists` / `Customer code already exists` on a duplicate **within the company**. Writes an audit `CREATE` row in the same transaction | Admin / Manager / Supervisor |
 | PUT | `/customers/{id}` | Partial update of a live customer (**404** on a soft-deleted one). A rename onto a name already used in the company is **400** `Customer name already exists`, including when a concurrent rename races past the check. `code` is not updatable. A **rename** writes its audit `UPDATE` row as required evidence: if the row cannot be written, **503** `The audit record for this customer rename could not be saved; nothing was changed. Retry.` and nothing is saved (export control reads a controlled customer's former names from these rows; see [EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md)). Other edits keep a best-effort audit row | Admin / Manager |
-| DELETE | `/customers/{id}` | Soft delete by default (also clears `is_active`). A second soft delete of an already-deleted customer is **400** `Customer is already deleted` and changes nothing. `hard_delete=true` removes the row (a soft-deleted one too), and is refused **400** while parts of the active company carry the customer's name, **400** while a CAR names the customer (`Cannot hard delete: Customer is named on N corrective action report(s); soft delete it instead`), and **400** `Cannot hard delete: Customer has export-control contracts or handling instructions. Soft delete it instead.` while any contract or handling instruction names the customer | Admin / Manager |
+| DELETE | `/customers/{id}` | Soft delete by default (also clears `is_active`). A second soft delete of an already-deleted customer is **400** `Customer is already deleted` and changes nothing. `hard_delete=true` removes the row (a soft-deleted one too), and is refused **400** while parts of the active company carry the customer's name, **400** while a CAR names the customer (`Cannot hard delete: Customer is named on N corrective action report(s); soft delete it instead`), **400** `Cannot hard delete: Customer owns 2 inventory stock rows, 1 tool and 3 PO receipts recorded as customer property. …` (naming whichever counts apply) while any stock row, tool or PO receipt of the active company names the customer as its owner (migration `129`; any quantity, active or not, a voided receipt included). The remedy sentence depends on what blocks: when every blocker can be re-owned it reads `Change their ownership first (POST /inventory/items/{id}/ownership for stock, PUT /tool-management/tools/{id} for tools), or soft delete the customer.`; when a PO receipt, or a deactivated or empty stock row, blocks (none of which can be re-owned) it says to soft delete the customer instead, which keeps them naming their owner, and **400** `Cannot hard delete: Customer has export-control contracts or handling instructions. Soft delete it instead.` while any contract or handling instruction names the customer | Admin / Manager |
 | POST | `/customers/{id}/restore` | Restore a soft-deleted customer (**400** if it is not deleted). Restore always sets `is_active = true` (see note) | Admin / Manager |
 | POST | `/customers/import-csv` | See [Bulk Imports & Templates](#bulk-imports--templates-excel-migration-kit) | Admin / Manager |
 | GET | `/customers/{id}/export-control` | The customer's export-control standing: `controlled` (derived from **every** contract and classified handling instruction it has ever had), `data_classification` (`itar_export_controlled` outranks `cui`), `controlling_contract_id`, `customer_is_deleted`, and every contract with its own `controlling` flag. A soft-deleted customer is readable | Admin (never an API token) |
@@ -1066,7 +1066,8 @@ active company; another company's customer id answers **404** with the same deta
 > work-order numbers and customer POs, and the hard-delete count refused the delete over the other
 > company's parts while disclosing how many it had. Both now read the active company only.
 >
-> The hard-delete check counts parts and CARs (`cars.customer_id`, migration `122`) only. Customer
+> The hard-delete check counts parts, CARs (`cars.customer_id`, migration `122`) and owned stock rows,
+> tools and PO receipts (`owner_customer_id`, migration `129`) only. Customer
 > complaints, RMAs, RFQ quotes, fabrication
 > quotes and the governance tables reference `customers.id` with no `ON DELETE`, so on PostgreSQL a
 > hard delete of a customer they still reference fails with a database error (**500**) rather than
@@ -5963,7 +5964,7 @@ uploads go through text extraction + LLM. See
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| GET | `/tool-management/tools/` | List tools (`status`, `tool_type`, `search`, `include_inactive`) | Yes |
+| GET | `/tool-management/tools/` | List tools (`status`, `tool_type`, `search`, `include_inactive`, `ownership`) | Yes |
 | GET | `/tool-management/tools/dashboard` | Totals, checked-out / replacement-due / inspection-due counts, by type and status | Yes |
 | GET | `/tool-management/tools/checked-out` | Tools currently `in_use` | Yes |
 | GET | `/tool-management/tools/replacement-due` | Tools with ≤ 20% life remaining | Yes |
@@ -6003,6 +6004,27 @@ uploads go through text extraction + LLM. See
 > `extra_data`), on checkout (`checkout_id`, `work_center_id`, `work_order_id`, `condition_out`) and
 > on checkin (`checkout_id`, `condition_in`); and a `tool_usage_log` `log_create` on log-usage,
 > carrying the tool's new life totals.
+
+> **Customer- and supplier-owned tooling (AS9100D 8.5.3, migration `129`).** A tool carries the
+> same three ownership columns as a stock row (see
+> [Inventory → Customer- and supplier-owned property](#customer--and-supplier-owned-property)):
+> `ownership` (`company` / `customer` / `supplier`, default `company`), `owner_customer_id` and
+> `owner_vendor_id`. `POST /tool-management/tools/` accepts them, defaulting to a company tool. On
+> `PUT /tool-management/tools/{id}`, sending `ownership` states the new ownership in full
+> (`{"ownership": "customer", "owner_customer_id": 12}`, or `{"ownership": "company"}` to take it
+> back); sending only `owner_customer_id` or `owner_vendor_id` re-points the owner within the current
+> kind; an explicit `null` on `ownership` is **422**. Only a **change** is resolved, so re-sending a
+> tool's current owner (a customer since soft-deleted, say) does not refuse an unrelated edit. A new
+> owner must be a customer that is not soft-deleted, or a vendor that is not soft-deleted (inactive
+> is accepted), in the active company (**404** otherwise), and a kind/owner mismatch is **422**,
+> both before anything is written. The change is recorded on the edit's own `log_update` row with
+> the old and new values; there is no separate ownership verb for tools and no reason field. Every
+> tool response (list, detail, the due lists, checked-out, history, create, edit) carries the three
+> columns plus `owner_name` (null for a company tool), and `GET /tool-management/tools/` filters on
+> `ownership`. The Tool Management page shows the owner chip and filter and has owner pickers on its
+> create form, but that form still fails **422** for the pre-existing reason below (it sends
+> `tool_number`, not `tool_id`), and the page has no edit form, so until that is fixed a tool's
+> ownership is set through the API.
 
 > **`in_use` is entered only by checkout and left only by checkin**, so the checkout ledger and the
 > tool's status cannot drift apart. `PUT` with `status: in_use` is **409** (use checkout); changing
@@ -10765,7 +10787,7 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 |--------|----------|-------------|---------------|
 | GET | `/receiving/open-pos` | List POs available for receiving (sent/partial); each PO carries `order_date` / `required_date` / `expected_date` plus its open lines | Yes |
 | GET | `/receiving/po/{po_id}` | Get full PO detail for receiving | Yes |
-| POST | `/receiving/receive` | Receive material against a PO line (`lot_number` optional — auto-assigned when blank, see below) | Admin / Manager / Supervisor |
+| POST | `/receiving/receive` | Receive material against a PO line (`lot_number` optional — auto-assigned when blank, see below). Optional `ownership` / `owner_customer_id` / `owner_vendor_id` for customer- or supplier-owned material, recorded on the receipt and carried to stock on dock-to-stock, inspection accept or a cleared hold (see [Customer- and supplier-owned property](#customer--and-supplier-owned-property)); each `/receiving/deliveries` line takes the same | Admin / Manager / Supervisor |
 | POST | `/receiving/deliveries` | Atomically receive multiple lines with a stable request ID; identical retry returns the durable receipt, changed payload is refused. Certificate document IDs are validated against the PO line — every line's before the first line is received, so a bad certificate on any line is refused **422** `Delivery line N: …` with nothing posted. At that point the delivery takes its locks in the order a single receipt does (the receipt-number lock, the PO row, then the certificates in ascending id order), before it inserts anything and before the first audit row takes the audit-chain lock, so it holds no document lock that a document writer (row first, chain lock second) could deadlock against | Admin / Manager / Supervisor, plus receiving view/create permission |
 | POST | `/receiving/certificates` | Upload a real PDF/PNG/JPEG (20 MB maximum), bound to `po_line_id`; optional `receipt_id` attaches it to an existing receipt. Linked certificate bytes cannot be deleted through the document endpoint | Admin / Manager / Supervisor, plus receiving view/create permission |
 | GET | `/receiving/inspection-queue` | List receipts pending inspection (`days_back` optional, bounded 1–3650; **no date cutoff by default** — pending receipts never age out, so the list matches the `/stats` `pending_inspection` count) | Yes |
@@ -10855,7 +10877,11 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 >   `ADJUST`** is appended (`reason_code` `RECEIPT_CORRECTION` / `RECEIPT_VOID`) to move on-hand by the
 >   delta. **AS9100D records integrity: the historical `RECEIVE` transaction is never mutated or
 >   deleted** — reversal is always a new, signed compensating row (like a manual inventory adjustment).
->   `PENDING_INSPECTION` receipts placed no stock, so nothing is adjusted there.
+>   `PENDING_INSPECTION` receipts placed no stock, so nothing is adjusted there. The stock row adjusted
+>   is the exact one the receipt placed, found through its `RECEIVE` ledger row (migration `129`; see
+>   [Customer- and supplier-owned property](#customer--and-supplier-owned-property)); a legacy receipt
+>   with no ledger link falls back to part / location / lot only when exactly one row matches, else
+>   **409**.
 >
 > **State model — allowed only before inspection / while unconsumed.** A receipt is correctable/voidable
 > only while it is **`pending`** (awaiting inspection) or **`not_required`** (dock-to-stock accepted).
@@ -11125,6 +11151,10 @@ the same company/request ID; recovery does not issue again. Conflicting reuse
 returns **409**. Stock eligibility is revalidated under locks; inactive, deleted
 or non-consumable parts, foreign references and inactive recipients cannot be
 selected. Held, expired, nonpickable, allocated and reserved stock is protected.
+Open unpinned work-order ties on the part are covered by **company-owned** stock
+only (migration `129`), because automatic consumption never draws a customer's or
+supplier's lot: that part-level reservation caps checkouts from company rows, while a
+customer- or supplier-owned row is capped by its own free quantity (pins withheld).
 An unavailable or insufficient quantity returns **409**. Required audit failure
 returns **503** and rolls back stock, attribution and ledger effects together.
 
@@ -11147,16 +11177,17 @@ environment variables are required.
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| GET | `/inventory/` | List inventory items (`part_id`, `warehouse`, `location_code`, `has_quantity` — `has_quantity` filters **nonzero**, not positive, so driven-negative lots stay visible; see note below). Bounded: `limit` **1–10000, default 10000**, `offset` ≥ 0 | Yes |
-| GET | `/inventory/summary` | On-hand summary by part, with per-location breakdown (every active row with **nonzero** on-hand, negatives included). Bounded with the identical `limit`/`offset` as `/inventory/` — see note below | Yes |
+| GET | `/inventory/` | List inventory items (`part_id`, `warehouse`, `location_code`, `has_quantity` — `has_quantity` filters **nonzero**, not positive, so driven-negative lots stay visible; see note below — and `ownership`, `owner_customer_id`, `owner_vendor_id`). Each row carries `ownership`, the owner id and `owner_name` (see [Customer- and supplier-owned property](#customer--and-supplier-owned-property)). Bounded: `limit` **1–10000, default 10000**, `offset` ≥ 0 | Yes |
+| GET | `/inventory/summary` | On-hand summary by part, with per-location breakdown (every active row with **nonzero** on-hand, negatives included). `total_on_hand` is physical stock whoever owns it; `owned_by_others_on_hand` is the customer- and supplier-owned part of it, and each location entry carries its row's `ownership`. Bounded with the identical `limit`/`offset` as `/inventory/` — see note below | Yes |
 | GET | `/inventory/low-stock` | Parts at/below reorder point (on-hand summed per part) | Yes |
 | GET | `/inventory/locations` | List warehouse locations / bins | Yes |
 | POST | `/inventory/locations` | Create a location | Admin / Manager |
 | GET | `/inventory/transactions` | Inventory transaction (ledger) history, newest first. Filters: `part_id`, `transaction_type`, `reference_type`, `reference_id`, `work_order_id`, `lot_number`, `start_date`, `end_date`. Offset-paged (`limit` 1–500 default 100, `offset` ≥ 0), **no total count** — see note below | Yes |
-| POST | `/inventory/receive` | Receive inventory into stock | Admin / Manager / Supervisor |
+| POST | `/inventory/receive` | Receive inventory into stock. Optional `ownership` / `owner_customer_id` / `owner_vendor_id` (default company stock) | Admin / Manager / Supervisor |
 | POST | `/inventory/issue` | Issue inventory manually (**deprecated** — see below; **400** if `work_order_number` is sent) | Admin / Manager / Supervisor |
-| POST | `/inventory/transfer` | Transfer inventory between locations | Admin / Manager / Supervisor |
+| POST | `/inventory/transfer` | Transfer inventory between locations. The destination row matches, or is created with, the source row's owner | Admin / Manager / Supervisor |
 | POST | `/inventory/adjust` | Adjust inventory | Admin / Manager / Supervisor |
+| POST | `/inventory/items/{item_id}/ownership` | Change who owns one stock row (company, a customer or a supplier). `reason` required; required audit; no ledger row | Admin / Manager / Supervisor |
 | POST | `/inventory/combine/preview` | What folding one SKU onto another would do — blockers, advisories, per-lot lines, the cost delta. **Pure read (writes nothing)** | Admin / Manager / **Supervisor** |
 | POST | `/inventory/combine` | Fold the source SKU's stock onto the target SKU, as two `ADJUST` ledger rows per lot line netting to **zero** | **Admin / Manager** |
 | GET | `/inventory/cycle-counts` | List cycle counts (optional `status`) | Yes |
@@ -11469,6 +11500,187 @@ See [Cycle counting](ux-workflows/cycle-counting.md) for the workflow and eviden
 > that produces. A count id from another tenant never resolves, so the lock is tenant-scoped too
 > (**404**).
 
+#### Customer- and supplier-owned property
+
+AS9100D 8.5.3 requires the shop to identify, verify, protect and safeguard property that belongs to
+a customer or an external provider while it is in the shop's care. Migration `129` gives every stock
+row (`inventory_items`), every tool (`tools`, see
+[Tool & Fixture Management](#tool--fixture-management-tool-crib)) and every PO receipt
+(`po_receipts`) three columns:
+
+| Field | What it is |
+|-------|------------|
+| `ownership` | `company` (the default, and what every row created before `129` is), `customer` or `supplier`. A string with a CHECK (`ck_<table>_ownership`), not a native enum |
+| `owner_customer_id` | The owning customer. Set on a `customer` row only |
+| `owner_vendor_id` | The owning vendor. Set on a `supplier` row only |
+
+A second CHECK (`ck_<table>_owner_matches`) holds the pairing in the database, and every request
+that sets the fields checks it first: a company row names no owner, a customer row names a customer
+and no vendor, a supplier row names a vendor and no customer. A mismatch is **422** with the same
+text on every route (for example `Customer-owned material needs owner_customer_id naming the
+customer.`). The owner must resolve in the active company before anything is written: a customer
+that is not soft-deleted, or a vendor that is not soft-deleted (an **inactive** vendor is accepted,
+since its tooling can stay in the crib after the relationship ends). Anything else, another
+company's id included, is **404** `Owning customer not found` / `Owning vendor not found`.
+
+**Company stock behaves exactly as before.** Every rule below changes only what happens to a
+`customer` or `supplier` row.
+
+**Recording owned stock.**
+
+* `POST /inventory/receive` takes `ownership`, `owner_customer_id` and `owner_vendor_id`, defaulting
+  to company stock. On owned stock the audit description adds `as customer-owned (<name>) property`
+  (or `supplier-owned`).
+* A PO receipt takes the same three fields: `POST /receiving/receive`, and each line of
+  `POST /receiving/deliveries`, where every line's owner is checked before the delivery writes
+  anything (a refusal reads `Delivery line N: …`). The owner is **recorded on the receipt** and goes
+  to stock with the material: at once for a dock-to-stock receipt, or, for a receipt held for
+  inspection, when `POST /receiving/inspect/{receipt_id}` accepts it or
+  `POST /receiving/receipt/{receipt_id}/clear-inspection` releases it. Either way it lands on a stock
+  row of that owner. Carrying a recorded owner forward is a record, not a new selection, so a
+  customer soft-deleted after the receipt still owns the material it sent. `ReceiptResponse` carries
+  the receipt's `ownership`, `owner_customer_id` and `owner_vendor_id`. A receipt's owner is fixed
+  once recorded: `PATCH /receiving/receipt/{receipt_id}` does not take it, so a wrong owner is fixed
+  on the stock row with the verb below once the material is in stock. API tokens are not refused
+  these fields (an open owner question; see
+  [RBAC → Credential policy for judgment writes](RBAC_PERMISSIONS.md#credential-policy-for-judgment-writes)).
+  The delivery's idempotency fingerprint leaves out a line's ownership fields while they hold the
+  company defaults, so a company delivery hashes exactly as it did before `129`; changing a line's
+  owner on a retry is a different submission (**409**).
+* Hank's `receive_delivery` task stays company-only. Its receipt line omits the three fields and
+  refuses unknown keys, so Hank receives company stock only; the receiving routes themselves take the
+  fields from any caller their role gate admits (above).
+* The finished-goods receipt at work-order completion and the lot-less shortage placeholder are
+  always company stock.
+
+**Ownership is part of every merge key.** A write that adds into an existing row matched on part,
+location and lot also matches `ownership`, `owner_customer_id` and `owner_vendor_id`, or it creates
+a new row: `/inventory/receive`, the PO receipt, `/inventory/transfer`'s destination, the
+finished-goods receipt, and a combine's landing row. Receiving lot `L` as customer-owned where the
+company's lot `L` already sits creates a **second** row at that location. A transfer carries the
+source row's owner to the destination row it matches or creates.
+
+**Correcting or voiding a receipt finds the exact row.** Because a company lot `L` and a customer's
+lot `L` can share one location, `PATCH /receiving/receipt/{receipt_id}` and
+`POST /receiving/receipt/{receipt_id}/void` no longer re-match part, location and lot. They find the
+stock row through the receipt's own `RECEIVE` ledger row (`reference_type='po_receipt'`,
+`reference_number` = the receipt number, and its `inventory_item_id`) and lock it. A legacy receipt
+whose `RECEIVE` row carries no `inventory_item_id` falls back to the part / location / lot match only
+when exactly one row matches. Anything else (no row, two or more, or two linked rows) is the
+existing **409** `Cannot reconcile inventory for this receipt automatically; make a manual inventory
+adjustment.`
+
+**Reading it.**
+
+* `GET /inventory/` filters on `ownership` (`company` / `customer` / `supplier`), `owner_customer_id`
+  and `owner_vendor_id`. Each row carries the three columns plus `owner_name` (null for company
+  stock), resolved for the whole page in at most two tenant-scoped queries. `owner_name` reads
+  through tombstones: a soft-deleted customer still owns the material it owned.
+* `GET /inventory/summary` keeps `total_on_hand` physical and adds `owned_by_others_on_hand`, the
+  customer- and supplier-owned part of it. Each `locations[]` entry carries its row's `ownership`.
+* `GET /exports/inventory/export` adds `ownership` and `owner_name` to its default columns. Each
+  row's `total_value` is kept for every owner, so a reader totalling the company's own stock filters
+  on `ownership = company`.
+* The custom report builder's `inventory` source has an `ownership` field (a `string` field holding
+  `company` / `customer` / `supplier`). It has **no owner-name field**: the name lives in `customers`
+  or `vendors` depending on the kind, and a report field is one mapped column. Use `GET /inventory/`
+  or the export for the name.
+
+**Nothing automatic spends it.** The unpinned FIFO draw (an unpinned material tie, and the BOM
+backflush) takes company-owned stock only (`material_consumption_service.AUTO_DRAW_ITEM_CLAUSES`). A
+customer's or supplier's lot is passed over the way a held lot is; a part whose only stock belongs
+to someone else draws nothing, and the usual shortage is recorded. A tie **pinned** to an owned lot
+still consumes it, because the pin is a person's lot-directed decision. The displays that promise
+what the draw will take use the same predicate: the backflush preview, the tie on-hand on the
+dispatch board and kiosk, material readiness, the nest sheet-stock suggestions and Hank's same-part
+stock check.
+
+**Changing ownership: `POST /inventory/items/{item_id}/ownership` — Admin / Manager / Supervisor**
+(`STOCK_MUTATOR_ROLES`).
+
+Body: `{ownership, owner_customer_id?, owner_vendor_id?, reason}`. The ownership fields state the
+row's **new** ownership in full, so returning a row to the company is
+`{"ownership": "company", "reason": "..."}`. `reason` is required: 1–2000 characters, non-blank
+after trimming (whitespace only is **422**). The whole row is re-owned; to re-own part of it,
+transfer that quantity to its own location first. Every refusal is raised before anything is
+written:
+
+| Status | When |
+|--------|------|
+| **404** `Inventory item not found` | The row is not in the active company |
+| **409** | The row is deactivated: `Inventory item N is deactivated; ownership is changed only on live stock.` |
+| **409** | The row holds no stock, on hand zero or below: `Inventory item N has no stock on hand (Q); ownership is recorded only for material that is physically there.` |
+| **404** / **422** | The new owner does not resolve in the active company, or the kind and owner id do not pair (the rules above) |
+| **409** | The row is already owned that way: `Inventory item N is already customer-owned (<name>); nothing to change.` Refused so no empty audit row is written |
+| **503** | The required audit row could not be written: `The audit record for this ownership change could not be saved; nothing was changed. Retry.` Nothing is saved |
+
+The row is locked `FOR UPDATE`, the lock every quantity mutator takes on it. The change writes a
+required `inventory` `UPDATE` audit row in the same transaction: the old and new `ownership`, owner
+id and owner name in `old_values` / `new_values`, the reason in the description and in `extra_data`
+(beside `part_id`, `lot_number`, `location` and `quantity_on_hand`). No `inventory_transactions` row
+is posted, because ownership is not a quantity movement. The response is the updated row (its
+timestamps served as UTC with a trailing `Z`) with `owner_name` and two disclosures, which never
+refuse the change and are also written to the audit row's `extra_data`:
+
+* `open_pinned_ties` — the open ties (on live, non-terminal work orders, with quantity still to
+  draw) **pinned** to this exact row, each `{allocation_id, work_order_id, work_order_number,
+  outstanding_quantity}`. A pin consumes its lot whoever owns it, so those jobs still draw this
+  material after the change. An empty list when there are none.
+* `unpinned_demand` — `null` unless **company** stock is being re-owned to a customer or supplier.
+  Then it is `{open_unpinned_demand, company_stock_remaining, short_by, work_order_numbers}`: the
+  part's open unpinned tie demand, the company stock automatic consumption can still draw now that
+  this row is excluded, how far short that leaves the jobs, and which work orders they are.
+
+**API tokens are not refused**: a full token held by a user with one of the three
+roles can call it (an implementation decision, not put to the owner; see
+[RBAC → Credential policy for judgment writes](RBAC_PERMISSIONS.md#credential-policy-for-judgment-writes)).
+In the app it is the **Change ownership** row action on the Inventory page; over MCP it is the tool
+`change_inventory_item_ownership`.
+
+**Combine.** Ownership is part of a combine's landing key: material lands only on a target row with
+the same owner, and a new target row carries the source row's owner. Stock lines in the preview
+carry the three columns. A location and lot where the target already holds stock under a different
+owner, and no row of the material's own owner, is refused **409** `target_ownership_mismatch`.
+Owned stock left on the source covers no open tie. See [Combining two SKUs](#combining-two-skus).
+
+**Valuation** counts the company's own stock only: see [Reports](#reports). **A customer that owns
+stock rows, tools or PO receipts cannot be hard-deleted**: see [Customers](#customers).
+
+> **For the Quality Manager (AS9100D 8.5.3).** How customer and supplier property is identified and
+> kept apart today:
+>
+> * **Identified.** Each stock row, tool and PO receipt records whether the material is the
+>   company's, a customer's or a supplier's, and which one, under database CHECKs. The Inventory and Tool Management screens
+>   show a `Customer: <name>` / `Supplier: <name>` chip and filter on it, the receive forms on
+>   Inventory and Receiving take the owner when material arrives, and the inventory list, export and
+>   tool list carry the owner's name.
+> * **Kept apart.** Owned stock never merges into a company row or the reverse, a combine refuses
+>   to mix owners in one location and lot, automatic consumption never draws it, the finished-goods
+>   decrement at shipment takes only the company's row, a receipt correction or void unwinds only
+>   the exact row the receipt stocked, and valuation leaves it out.
+> * **Recorded.** The receipt records whose property it is, and every later change of ownership is
+>   a reasoned, required-audited act naming who changed it, from what, to what, and why. A customer
+>   that owns stock, tools or PO receipts cannot be hard-deleted, and the database refuses a
+>   physical delete of any customer or vendor still named as an owner.
+> * **Verified.** Owned material can go through incoming inspection like any receipt: the receipt
+>   records the owner, and the accepted (or released) quantity reaches stock under that owner.
+> * **Disclosed at the change.** Re-owning a row discloses any open ties pinned to it
+>   (`open_pinned_ties`), and re-owning company stock away also discloses the open jobs that were
+>   counting on it (`unpinned_demand`), on the response and on the audit row.
+>
+> **Not yet done:**
+>
+> * **MRP still counts owned stock as supply.** `mrp_service.get_inventory_summary` nets demand
+>   against every active, available stock row, owned or not, so customer or supplier stock can
+>   suppress a purchase suggestion.
+>   `GET /inventory/low-stock` likewise sums it into on-hand.
+> * **Shortage disclosures do not mention owned stock.** When the FIFO draw comes up short, the
+>   shortage record names held lots it skipped (`held_stock_summary`) but not owned lots it
+>   skipped, so a shortage on a part with customer stock on the rack reads as a bare shortage.
+> * **Nothing reports loss or damage to the owner.** Nothing in the system reports lost, damaged or
+>   unsuitable customer or supplier property to its owner, as the 8.5.3 note requires. Record it on
+>   an NCR and notify the owner outside the system.
+
 #### Combining two SKUs
 
 A materials-numbering recut can leave two part numbers naming the **same physical article** — the
@@ -11495,10 +11707,10 @@ Response:
 | Field | What it is |
 |-------|------------|
 | `source`, `target` | `PartStockSummary` per side: `part_id`, `part_number`, `name`, `part_type`, `unit_of_measure`, `is_active`, `status`, `is_deleted`, `total_on_hand`, `total_allocated`, `total_available`, `total_pinned`, `eligible_available`, and `lines[]` |
-| `lines[]` | Per stock row: `inventory_item_id`, `location`, `warehouse`, `lot_number`, `serial_number`, `quantity_on_hand`, `quantity_allocated`, `quantity_available`, `quantity_pinned`, `quantity_combinable`, `unit_cost`, `status`, `eligible`, `ineligible_reason` |
+| `lines[]` | Per stock row: `inventory_item_id`, `location`, `warehouse`, `lot_number`, `serial_number`, `quantity_on_hand`, `quantity_allocated`, `quantity_available`, `quantity_pinned`, `quantity_combinable`, `unit_cost`, `status`, `eligible`, `ineligible_reason`, and the row's owner: `ownership`, `owner_customer_id`, `owner_vendor_id` |
 | `unit_of_measure_match` | `uom_label(source) == uom_label(target)`, with a **blank on either side counting as a match** — a part stating no unit makes no claim to contradict (the `uom_disagrees` rule). A blank still raises the `unit_of_measure_unstated` advisory |
 | `default_quantity` | The source's full eligible available quantity |
-| `max_combinable_quantity` | The largest quantity that would **not** trip the open-work-order reservation check, so a dialog can offer the safe number instead of a dead end |
+| `max_combinable_quantity` | The largest quantity that would **not** trip the open-work-order reservation check, so a dialog can offer the safe number instead of a dead end. On a source holding customer- or supplier-owned stock it follows the drain order, since only the company stock moved can strand an open job, and it is **0** when the source's company stock is already short of its open unpinned ties, because then every quantity is refused |
 | `reserved_quantity` | Total outstanding demand from open work-order ties naming the source part |
 | `eligible` | `blockers == []`. **A snapshot, never authorization** — see below |
 | `blockers[]`, `advisories[]` | `{code, detail}`. `detail` is verbatim the sentence the write raises, so the dialog can never explain a refusal in words that disagree with the refusal the operator is about to get |
@@ -11585,13 +11797,14 @@ write raises the **first** blocker; the preview renders all of them.
 | `flagged_part_not_acknowledged` | **409** | A part whose number or name reads as a test/housing part is in the combine and was not confirmed. **An acknowledgement gate, not a ban** — "housing" is an ordinary manufacturing word (the Miratech housing is a real production part), so a ban would refuse exactly the legitimate work this shop does. Name the part's id in `acknowledge_flagged_part_ids` and the audit row records the decision. Matching is word-boundary and case-insensitive over `part_number` and `name`, hand-rolled rather than `\b` because `\b` treats `_` as a word character: `TEST_FIXTURE`, `TEST FIXTURE` and `HOUSING-A` flag; `TESTA-500` and `WAREHOUSING` do not |
 | `expected_part_number_mismatch` | **409** | Somebody renumbered one of these parts while the dialog was open. Compared through `normalize_alias_key` (strip + upper), so a case or whitespace difference in what the client echoes back is not treated as somebody else's edit |
 | `source_still_has_stock` | **409** | `deactivate_source: true` but the source would not land at exactly 0 across **ALL** its stock rows, held and quarantined ones included. Deactivating a part that still has material would hide that material from every list in the app while it is physically on a shelf |
-| `target_row_not_available` | **409** | The material would land on a TARGET row that is on hold, quarantined, rejected or deactivated. **This is the one blocker that says the operator's stock is about to become UNUSABLE.** The landing row resolves on `(company, part, location, lot)` and nothing else — no `is_active`, no `status` — so 92 available sheets folded onto a held target row previously returned **200** with an empty `blockers` list, a row at 102 still `on_hold`, and 92 usable sheets nothing in the app could draw. Counted, present, unusable, behind a success toast |
+| `target_row_not_available` | **409** | The material would land on a TARGET row that is on hold, quarantined, rejected or deactivated. **This is the one blocker that says the operator's stock is about to become UNUSABLE.** The landing row resolves on `(company, part, location, lot)` plus, since migration `129`, the owner, and nothing else — no `is_active`, no `status` — so 92 available sheets folded onto a held target row previously returned **200** with an empty `blockers` list, a row at 102 still `on_hold`, and 92 usable sheets nothing in the app could draw. Counted, present, unusable, behind a success toast |
 | `target_serial_mismatch` | **409** | A serialized lot would merge onto a row carrying a different serial, so one serial number would name two units (invariant 5). The comparison is **symmetric** — either side blank while the other is set is refused too, because merging a serialized lot into an anonymous row loses the serial and merging an anonymous lot into a serialized row inflates it. Landing serialized stock on a **new** row is unaffected: it carries the serial across intact |
+| `target_ownership_mismatch` | **409** | AS9100D 8.5.3 (migration `129`). Material lands only on a target row with the **same owner** (company, the same customer, or the same supplier), because ownership is part of the landing key. This refusal fires only when the location and lot the material would land in already hold the target's stock under a **different** owner and no row of the material's own owner: a customer's lot onto the company's lot `L`, or the reverse. Folding it in beside them would read on the target as one lot split between owners. Move the material to its own location or lot, or change one row's ownership (`POST /inventory/items/{item_id}/ownership`), first |
 
 Two of those cannot appear on the preview, because the preview request carries neither input:
 `expected_part_number_mismatch` (there are no expected numbers to compare) and
 `source_still_has_stock` (there is no `deactivate_source` flag). Everything else the write can refuse
-is disclosed there. The target-side pair is computed against the rows the *drain plan* would actually
+is disclosed there. The target-side codes are computed against the rows the *drain plan* would actually
 land on, so a held target row at a location this combine never touches refuses nothing.
 
 Advisories disclose without refusing:
@@ -11640,7 +11853,8 @@ depends on them staying true.
 
 * **Traceability moves with it.** A target stock row that has to be **created** carries the source
   row's `lot_number`, `serial_number`, `cert_number`, `heat_lot`, `supplier_id`, `po_number`,
-  `received_date` and `expiration_date`. The MTR and heat lot follow the physical material — that is
+  `received_date` and `expiration_date`, and its owner (`ownership`, `owner_customer_id`,
+  `owner_vendor_id`). The MTR and heat lot follow the physical material — that is
   the entire point of AS9100D 8.5.2 lot traceability, and a merge that dropped them would launder the
   material's provenance while looking tidy.
 * **Cost is never reblended.** A newly created target row copies the source row's `unit_cost` (the
@@ -11676,7 +11890,9 @@ depends on them staying true.
    the consumption engine can no more draw than this verb can move, so computing the remainder from
    `total_on_hand` let a source with "92 free + 92 on hold" satisfy a 92-unit tie after moving all 92
    free ones away. `max_combinable_quantity` is computed on the **same** basis as the check, or the
-   dialog would offer a number the server then refuses.
+   dialog would offer a number the server then refuses. **Customer- or supplier-owned stock does not
+   count toward that cover**: an open tie draws unpinned, and the unpinned draw never takes an owned
+   lot, so owned stock the combine leaves behind covers no job (migration `129`).
 
 Only demand not already withheld by rule 2 is counted at the part level, so a pin is never charged
 twice.
@@ -11873,7 +12089,7 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 |--------|----------|-------------|---------------|
 | GET | `/reports/production-summary` | Work orders by status, completions and on-time count, hours, produced / scrapped quantity and scrap rate over a rolling `days` window (1–365, default 30, counted back from now) | Yes |
 | GET | `/reports/quality-metrics` | NCR counts by status and source, receiving reject rate, over a rolling `days` window (default 30) | Yes |
-| GET | `/reports/inventory-value` | On-hand value at standard cost, total quantity, distinct parts | Yes |
+| GET | `/reports/inventory-value` | Value of the **company's own** on-hand stock at standard cost (`total_value`), its total quantity and distinct parts; customer- and supplier-owned stock is left out (see note) | Yes |
 | GET | `/reports/vendor-performance` | Per vendor: ordered / received quantity, fill and reject rates, PO count, over a rolling `days` window (default 90; `skip`, `limit` ≤ 500) | Yes |
 | GET | `/reports/work-center-utilization` | Per-work-center utilization over a rolling `days` window (default 30; `skip`, `limit` ≤ 500) | Yes |
 | GET | `/reports/daily-output` | Operations completed and quantity scrapped per **production day** for the last `days` (1–365, default 14) production days, the current one included; an operation counts on the production day its `actual_end` falls in (see "Production days in reports" below) | Yes |
@@ -11903,6 +12119,17 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 > **Corrected 2026-11-13:** this table used to list `GET /reports/work-orders`, `/reports/production`,
 > `/reports/quality` and `POST /reports/custom`, none of which exist. The custom-report runner is
 > `POST /analytics/custom-report`.
+
+> **Inventory value is the company's own stock (migration `129`, AS9100D 8.5.3).** Customer- and
+> supplier-owned property held in the shop is physical stock, but not the company's inventory, so it
+> is left out of every inventory value figure: all three figures of `GET /reports/inventory-value`,
+> `summary.total_inventory_value` and each part's average inventory value (the turnover
+> denominator) on `GET /analytics/inventory-turnover`, and the average inventory value behind the
+> `inventory_turnover` KPI on `GET /analytics/kpis`. On-hand quantities are physical and still
+> include it (`GET /inventory/summary` reports it separately as `owned_by_others_on_hand`), and the
+> inventory export keeps every row's `total_value` beside its `ownership`. A company with no owned
+> stock sees the same figures as before. See
+> [Inventory → Customer- and supplier-owned property](#customer--and-supplier-owned-property).
 
 > **`GET /reports/ship-otd` (Lean Phase 1).** The customer-experienced delivery report: measures
 > `Shipment.ship_date` against the **promise** (`must_ship_by`, falling back to `due_date`), counting
@@ -11934,6 +12161,7 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 | GET | `/analytics/predict/delivery/{work_order_id}` | Predicted completion date + per-operation forecast for one work order | Admin / Manager / Supervisor |
 | GET | `/analytics/predict/capacity` | Capacity utilization forecast by work center, by week | Admin / Manager / Supervisor |
 | GET | `/analytics/predict/inventory-demand` | Predicted stockout dates / reorder urgency by part | Admin / Manager / Supervisor |
+| GET | `/analytics/inventory-turnover` | Inventory turnover: the ten lowest-turnover parts and `summary.total_inventory_value` / `avg_turnover` (`period` / `start_date` / `end_date`, `category`). Values count company-owned stock only (see [Reports](#reports)) | Admin / Manager / Supervisor |
 | GET | `/analytics/data-sources` | Custom-report catalog: every data source and field (name, label, type, enum `options`) | Admin / Manager |
 | POST | `/analytics/custom-report` | Run an ad-hoc report (returns `columns` / `rows` / `row_count` / `truncated` / `notes`) | Admin / Manager |
 | GET | `/analytics/custom-report/templates` | List saved report templates: the caller's own plus every shared one | Yes |
@@ -13425,7 +13653,7 @@ authority as its eventual action:
 | `repeat_job` | `source_work_order_id`, positive `quantity_ordered`, optional `due_date` | Admin/Manager/Supervisor plus effective `work_orders:view` and `work_orders:create`; creates a **draft** through the existing duplicate service |
 | `draft_purchase_order` | `vendor_id`, 1–50 `lines` with `part_id`, positive `quantity_ordered`, nonnegative `unit_price`; optional PO dates/address/method/notes and line date/notes; source imports additionally require the source/version, printed number, line indices and stocking units described above | Admin/Manager/Supervisor plus effective `purchasing:view` and `purchasing:create`; normally creates a **draft**. A reviewed existing-document import can record **sent** for Receiving with Admin/Manager and `purchasing:approve`; never emails a vendor or receives material |
 | `attach_document` | `document_id`, `work_order_id` | Admin/Manager/Quality plus effective `work_orders:view`; links an existing PDF using the document workflow, without approving its contents |
-| `receive_delivery` | `purchase_order_id`, 1–50 receipt lines; each requires `po_line_id`, positive actual `quantity_received` and explicit `requires_inspection`; optional lot/heat/serial/certificate/location/over-receipt details | Admin/Manager/Supervisor plus `receiving:view` + `receiving:create`; canonical atomic delivery/stock posting, with no automatic printing |
+| `receive_delivery` | `purchase_order_id`, 1–50 receipt lines; each requires `po_line_id`, positive actual `quantity_received` and explicit `requires_inspection`; optional lot/heat/serial/certificate/location/over-receipt details. Company stock only: the line takes no `ownership` / owner fields and refuses unknown keys | Admin/Manager/Supervisor plus `receiving:view` + `receiving:create`; canonical atomic delivery/stock posting, with no automatic printing |
 | `report_production` | `operation_id`, nonnegative good/scrap deltas (at least one positive), scrap reason/code when reporting scrap; optional NCR details and reasoned hold | Admin/Manager/Supervisor/Operator/Quality plus `work_orders:view` + `work_orders:complete`; caller must have an open clock on the operation; no implicit job/operation completion. A standing API token may report good only: a scrap delta is refused **403** in the preview, so at preparation (no task saved) and again at execution (the task stays `awaiting_review`, nothing written) — owner decision 2026-11-07, only a person declares scrap |
 | `draft_shipment` | `work_order_id`, positive `quantity_shipped`, optional destination/carrier/package details; `cert_of_conformance` must be false | Admin/Manager/Supervisor/Shipping plus `shipping:view` + `shipping:create` + `work_orders:view`; reserves available completed units in a pending shipment, without dispatch/CoC/carrier purchase |
 | `change_due_date` | `work_order_id`, `new_due_date` (`YYYY-MM-DD`; required, a due date is never cleared), `reason` (stripped, 1–500 characters, no NUL) | Admin/Manager/Supervisor plus `work_orders:view` + `work_orders:edit` (the role set of `PUT /work-orders/{id}`); moves `due_date` only, **never `must_ship_by`**. API tokens are treated like any other credential (a full token may run it) — see below |
@@ -15544,7 +15772,7 @@ What matters from this file's point of view:
   routers with the caller's own bearer token. The router is the boundary: the same `require_role`
   gates, tenant scoping, audit rows, optimistic-locking 409s and per-endpoint size caps apply, and a
   401/403/409/422 comes back verbatim as an `is_error` tool result carrying the server's `detail`.
-- **The catalog is this API.** 772 tools are generated from `app.openapi()` at startup — every
+- **The catalog is this API.** 778 tools are generated from `app.openapi()` at startup — every
   secured operation except the `Authentication`, `Carrier Webhooks`, `Error Logging` (and its router-level `errors` twin) and `WebSocket` tags, the
   unauthenticated health/station-login routes (named one by one in `catalog.PUBLIC_OPERATIONS`) and
   the twenty operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders

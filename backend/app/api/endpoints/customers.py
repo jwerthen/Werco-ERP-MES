@@ -13,10 +13,14 @@ from app.api.deps import get_audit_service, get_current_company_id, get_current_
 from app.core.credentials import is_api_token_credential
 from app.core.time_utils import to_utc_iso
 from app.db.database import get_db
+from app.db.ledger_filter import LEDGER_QUANTITY_EPSILON
 from app.db.tenant_filter import tenant_query
 from app.models.customer import Customer
 from app.models.governance import DataClassification
+from app.models.inventory import InventoryItem
 from app.models.part import Part, PartType
+from app.models.purchasing import POReceipt
+from app.models.tool_management import Tool
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder, WorkOrderStatus
 from app.schemas.base import UTCModel
@@ -689,6 +693,11 @@ def update_customer(
     return customer
 
 
+def _join_words(words: List[str]) -> str:
+    """``a``, ``a and b``, ``a, b and c``."""
+    return words[0] if len(words) == 1 else f"{', '.join(words[:-1])} and {words[-1]}"
+
+
 @router.delete("/{customer_id}")
 def delete_customer(
     customer_id: int,
@@ -732,6 +741,56 @@ def delete_customer(
         car_refusal = car_reference_refusal(car_reference_count(db, company_id, customer_id=customer.id), "Customer")
         if car_refusal is not None:
             raise HTTPException(status_code=400, detail=car_refusal)
+        # Owned property (AS9100D 8.5.3, migration 129): stock rows, tools and PO receipts naming
+        # this customer as owner -- any quantity, any is_active, a voided receipt included. Each
+        # holds an FK to the row, so without this the delete would fail at COMMIT instead; and
+        # the record of whose property the shop holds must keep naming its owner.
+        # Company-scoped counts.
+        owned_stock_rows = (
+            tenant_query(db, InventoryItem, company_id).filter(InventoryItem.owner_customer_id == customer.id).count()
+        )
+        # The rows ``POST /inventory/items/{id}/ownership`` can re-own: live and holding stock.
+        reownable_stock_rows = (
+            tenant_query(db, InventoryItem, company_id)
+            .filter(
+                InventoryItem.owner_customer_id == customer.id,
+                InventoryItem.is_active == True,  # noqa: E712
+                InventoryItem.quantity_on_hand > LEDGER_QUANTITY_EPSILON,
+            )
+            .count()
+        )
+        owned_tools = tenant_query(db, Tool, company_id).filter(Tool.owner_customer_id == customer.id).count()
+        owned_receipts = (
+            tenant_query(db, POReceipt, company_id).filter(POReceipt.owner_customer_id == customer.id).count()
+        )
+        if owned_stock_rows or owned_tools or owned_receipts:
+            blocking = []
+            if owned_stock_rows:
+                blocking.append(f"{owned_stock_rows} inventory stock row{'s' if owned_stock_rows != 1 else ''}")
+            if owned_tools:
+                blocking.append(f"{owned_tools} tool{'s' if owned_tools != 1 else ''}")
+            if owned_receipts:
+                blocking.append(f"{owned_receipts} PO receipt{'s' if owned_receipts != 1 else ''}")
+            if owned_receipts or reownable_stock_rows < owned_stock_rows:
+                # A receipt is a historical record, and a deactivated or empty stock row cannot be
+                # re-owned (the ownership verb refuses it): only a soft delete is open.
+                remedy = (
+                    "Some of these are records whose owner cannot be changed (PO receipts, or stock rows "
+                    "that are deactivated or hold no stock), so soft delete the customer instead; it keeps "
+                    "them naming their owner."
+                )
+            else:
+                remedy = (
+                    "Change their ownership first (POST /inventory/items/{id}/ownership for stock, "
+                    "PUT /tool-management/tools/{id} for tools), or soft delete the customer."
+                )
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Cannot hard delete: Customer owns {_join_words(blocking)} recorded as customer property. "
+                    f"{remedy}"
+                ),
+            )
         # Export control: a customer with a contract or handling instruction keeps its ROW --
         # it is what ties its historical records (work orders, quotes) to its export control,
         # and a hard delete would free its name for another customer to clear them.

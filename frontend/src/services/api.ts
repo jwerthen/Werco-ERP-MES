@@ -21,6 +21,7 @@ import type {
   CustomerContractUpdateInput,
   CustomerExportControl,
 } from '../types/exportControl';
+import type { InventoryOwnershipChange, InventoryOwnershipChangeResult, OwnershipType } from '../types/ownership';
 import axios, { AxiosInstance, AxiosError, AxiosRequestConfig } from 'axios';
 import { normalizeAxiosErrorDetail, parseBlobErrorBody } from '../utils/apiError';
 import { downloadFilename } from '../utils/contentDisposition';
@@ -3354,7 +3355,21 @@ class ApiService {
   }
 
   // Inventory
-  async getInventory(params?: any) {
+  //
+  // Each row carries `ownership` / `owner_customer_id` / `owner_vendor_id` and the
+  // tenant-resolved `owner_name` (AS9100D 8.5.3). `ownership` / `owner_customer_id`
+  // narrow the list server-side; the Inventory page filters its already-loaded rows
+  // client-side instead, so its initial request stays the unfiltered one.
+  async getInventory(params?: {
+    part_id?: number;
+    warehouse?: string;
+    location_code?: string;
+    has_quantity?: boolean;
+    ownership?: OwnershipType;
+    owner_customer_id?: number;
+    limit?: number;
+    offset?: number;
+  }) {
     const response = await this.api.get('/inventory/', { params });
     return response.data;
   }
@@ -3412,6 +3427,30 @@ class ApiService {
 
   async adjustInventory(data: any) {
     const response = await this.api.post('/inventory/adjust', data);
+    return response.data;
+  }
+
+  /**
+   * Change who owns a stock row (company / one customer / one supplier) — its own
+   * reasoned verb, Admin / Manager / Supervisor. `reason` is required.
+   *
+   * Server-GATED, so callers stay NON-optimistic and show `detail` verbatim: 404 for
+   * an owner outside the company (or a deleted customer / vendor), 422 for a kind/owner
+   * mismatch, 409 for an inactive or zero-quantity row or a no-op ("already ..."), and
+   * 503 when the required audit row cannot be written. No ledger row is posted —
+   * ownership is not a quantity movement — but the on-hand reads are stale.
+   *
+   * A success carries two disclosures the caller must surface: `open_pinned_ties` (jobs
+   * pinned to this row, which still consume it) and `unpinned_demand` (company stock
+   * re-owned away: what open unpinned demand is now short by). See
+   * `ownershipChangeNotice` in utils/ownership.ts.
+   */
+  async changeInventoryOwnership(
+    itemId: number,
+    data: InventoryOwnershipChange
+  ): Promise<InventoryOwnershipChangeResult> {
+    const response = await this.api.post<InventoryOwnershipChangeResult>(`/inventory/items/${itemId}/ownership`, data);
+    this.invalidateCache('/inventory');
     return response.data;
   }
 
@@ -4565,6 +4604,11 @@ class ApiService {
     tracking_number?: string;
     notes?: string;
     over_receive_approved?: boolean;
+    // AS9100D 8.5.3 — who owns the received material. Omitted = company. The id
+    // that does not match `ownership` must be null (server CHECK).
+    ownership?: OwnershipType;
+    owner_customer_id?: number | null;
+    owner_vendor_id?: number | null;
   }) {
     const response = await this.api.post('/receiving/receive', data);
     return response.data;
@@ -5207,7 +5251,13 @@ class ApiService {
     return response.data;
   }
 
-  async getTools(params?: { status?: string; tool_type?: string; search?: string; include_inactive?: boolean }) {
+  async getTools(params?: {
+    status?: string;
+    tool_type?: string;
+    search?: string;
+    include_inactive?: boolean;
+    ownership?: OwnershipType;
+  }) {
     const response = await this.api.get('/tool-management/tools/', { params });
     return response.data;
   }

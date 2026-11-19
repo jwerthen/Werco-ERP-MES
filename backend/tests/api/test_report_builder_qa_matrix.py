@@ -51,6 +51,7 @@ from app.core.security import create_access_token
 from app.models.analytics import ReportTemplate
 from app.models.audit_log import AuditLog
 from app.models.company import Company
+from app.models.customer import Customer
 from app.models.inventory import InventoryItem
 from app.models.part import Part, PartType
 from app.models.purchasing import POStatus, PurchaseOrder, Vendor
@@ -187,6 +188,13 @@ def seed_inventory(db: Session, company_id: int, v: Dict[str, Any]) -> Inventory
     part = db.query(Part).filter(Part.company_id == company_id, Part.part_number == part_number).first()
     if part is None:
         part = _part(db, company_id, part_number)
+    # A customer-owned row names its owner (``ck_inventory_items_owner_matches``): one of
+    # this company's customers, so the foreign twin is owned inside company B.
+    if v.get("ownership") == "customer":
+        customer = Customer(name=f"RBQ Owner {_next():05d}", company_id=company_id)
+        db.add(customer)
+        db.flush()
+        v["owner_customer_id"] = customer.id
     item = InventoryItem(part_id=part.id, company_id=company_id, **v)
     db.add(item)
     db.flush()
@@ -300,8 +308,9 @@ CASES: Dict[ReportDataSource, SourceCase] = {
                 "lot_number": ("LOT-Z", "LOT-A"),
                 "unit_cost": (3.5, 1.25),
                 "status": ("quarantine", "available"),
+                "ownership": ("customer", "company"),
             },
-            like={"status": "quar"},
+            like={"status": "quar", "ownership": "cust"},
         ),
         SourceCase(
             source=ReportDataSource.QUALITY,

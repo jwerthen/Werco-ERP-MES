@@ -1,3 +1,5 @@
+import type { OwnershipType } from './ownership';
+
 export interface ReceivingCertificate {
   id: number;
   file_name: string;
@@ -18,6 +20,10 @@ export interface DeliveryLine {
   carrier?: string;
   tracking_number?: string;
   notes?: string;
+  /** AS9100D 8.5.3 — who owns this line's material. Omitted = company (`ReceiptCreate`). */
+  ownership?: OwnershipType;
+  owner_customer_id?: number | null;
+  owner_vendor_id?: number | null;
 }
 export interface DeliverySubmission {
   idempotency_key: string;

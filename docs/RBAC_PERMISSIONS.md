@@ -285,6 +285,7 @@ route's own fences still do):
 | **Dismiss**, snooze and feedback on a recommendation, action cards included | Every authenticated user and every credential | A design decision of the AI governance change; for Dismiss on an action card, confirmed by the owner 2026-11-07 (it does not take the Mark handled gate) — see [AI recommendations (Action Inbox)](#ai-recommendations-action-inbox) |
 | **Moving a work order's due date through Hank** — the `change_due_date` task (`POST /hank/tasks`, `POST /hank/tasks/{id}/execute`; the MCP tools `prepare_task` / `execute_task`) | Any credential of a user holding Admin / Manager / Supervisor with `work_orders:view` + `work_orders:edit`, a **full** API token included; read-only and AI-external tokens are refused by their own gates, as on every write. Each execution's required audit row carries the reason and `via: hank` (and `extra_data.credential` under a token) | Owner decision 2026-11-16: parity with `update_work_order` / `PUT /work-orders/{id}`, which already moves `due_date` for a token. **Open owner follow-up:** may agents move due dates at all? |
 | **Editing the supplier quality flow-down settings or clause catalog** — `PUT /purchasing/flowdown-profile`, `POST /purchasing/quality-clauses`, `PUT /purchasing/quality-clauses/{id}` (the MCP tools `update_po_flowdown_profile`, `create_po_quality_clause`, `update_po_quality_clause`) | Any credential of a user holding Admin / Manager / Quality, a **full** API token included; read-only and AI-external tokens are refused by their own gates. Each write's required audit row carries `extra_data.credential` under a token | An implementation decision of the PO flow-down change (migration `128`, 2026-11-19), not put to the owner; for comparison, the Approved Supplier List writes refuse API tokens. A PO that has left draft keeps the block frozen onto it, so an edit reaches draft POs only. **Open owner question:** should a standing API token edit the supplier quality requirements text at all? See [Purchasing](#purchasing) |
+| **Recording or changing who owns material** (AS9100D 8.5.3) — `POST /inventory/items/{item_id}/ownership` (the MCP tool `change_inventory_item_ownership`) re-owns one stock row as company, customer or supplier property, which decides whether automatic consumption may draw it and whether valuation counts it; `POST /inventory/receive`, `POST /receiving/receive` and the lines of `POST /receiving/deliveries` record the owner at receipt (the receipt carries it to stock through inspection) | Any credential of a user holding Admin / Manager / Supervisor (plus receiving view / create permission on deliveries), a **full** API token included; read-only and AI-external tokens are refused by their own gates. Hank's `receive_delivery` task has no ownership fields, so Hank receives company stock only. The ownership change's required audit row carries the reason, and every audit row written under a token carries `extra_data.credential` | An implementation decision of the owned-property change (migration `129`, 2026-11-19), not put to the owner. **Open owner question:** should a standing API token record or change ownership at all? See [Inventory](#inventory) |
 
 ## Permission Matrix
 
@@ -1474,7 +1475,9 @@ v1 (2026-11-16): comment threads, @mentions and watchers on **work orders only**
 > route-gated on `inventory:view`, which every role holds, and the page offers checkout and checkin
 > to all of them, so the read-only Viewer is the only role that loses anything. Kiosk operator tokens
 > are path-fenced to the shop-floor routes, so there is no kiosk caller. Superuser / Platform Admin
-> bypass, as elsewhere.
+> bypass, as elsewhere. Recording a tool as customer- or supplier-owned (AS9100D 8.5.3, migration
+> `129`) is part of create / edit and takes that same gate; there is no separate ownership verb for
+> tools.
 >
 > **Reads stay open to every role, and are now tenant-scoped.** The history read resolved a tool by
 > bare id, and the dashboard and the checked-out / replacement-due / inspection-due lists aggregated
@@ -1592,6 +1595,7 @@ for setup, retry handling and the initial correction limitations.
 | Issue | ✓ | ✓ | ✓ | | | | |
 | Receive | ✓ | ✓ | ✓ | | | | |
 | Transfer | ✓ | ✓ | ✓ | | | | |
+| Change a stock row's ownership (`POST /inventory/items/{item_id}/ownership`) | ✓ | ✓ | ✓ | | | | |
 | **Preview a SKU combine** | ✓ | ✓ | ✓ | | | | |
 | **Combine two SKUs** (`inventory:combine`) | ✓ | ✓ | | | | | |
 | Create location | ✓ | ✓ | | | | | |
@@ -1652,6 +1656,26 @@ and [the observation architecture](STOCK_OBSERVATION_ARCHITECTURE.md).
 > Admin / Manager / Supervisor (+ Platform Admin, who bypasses `require_role` server-side). Per the
 > [Access enforcement model](#access-enforcement-model) the UI gate remains cosmetic — the server
 > gate is the control.
+
+> **Change a stock row's ownership (AS9100D 8.5.3, migration `129`).** `POST
+> /api/v1/inventory/items/{item_id}/ownership` re-owns one stock row as company, customer or supplier
+> property. Its gate is `require_role(STOCK_MUTATOR_ROLES)` = `[ADMIN, MANAGER, SUPERVISOR]`, the
+> same tier as Adjust / Receive / Transfer. The Inventory page shows the **Change ownership**
+> row action to the roles holding `inventory:adjust`, which resolve to the same three (plus Platform
+> Admin). Every call needs a `reason` and writes a required audit row (**503**, nothing changed, if it
+> cannot). Receiving owned material in the first place uses the existing receive gates
+> (`/inventory/receive`, `POST /receiving/receive`, `/receiving/deliveries`); no role changed.
+>
+> **API tokens are not refused.** A full API token bound to an Admin, Manager or Supervisor can change
+> a row's ownership (the route has no credential check, and it is the MCP tool
+> `change_inventory_item_ownership`), and can record ownership at receipt: `POST /inventory/receive`,
+> `POST /receiving/receive` and each line of `POST /receiving/deliveries` take the ownership fields
+> from any caller their role gate admits. Read-only and AI-external tokens are refused by their own
+> gates. That is an implementation decision of the owned-property change, not put to the owner, and
+> it is an **open owner question**: see
+> [Credential policy for judgment writes](#credential-policy-for-judgment-writes). Hank's
+> `receive_delivery` task, by contrast, can only receive company stock: its line schema has no
+> ownership fields.
 
 > **Combine two SKUs — endpoint mapping, and why the write is NARROWER than Adjust.**
 >

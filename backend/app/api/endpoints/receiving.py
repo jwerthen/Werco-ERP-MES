@@ -75,6 +75,7 @@ from app.schemas.purchasing import (
 )
 from app.services.audit_service import AuditService
 from app.services.operational_event_service import OperationalEventService
+from app.services.owned_property_service import recorded_owner
 from app.services.print_service import PrintEgressDisabledError, PrintService
 from app.services.proxybox_client import ProxyBoxError
 from app.services.receiving_commands import (
@@ -263,6 +264,20 @@ def receive_material(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
+    """Receive material against one PO line (Admin / Manager / Supervisor).
+
+    ``requires_inspection`` false (the default) is dock-to-stock: the receipt is accepted and the
+    material goes straight into inventory. True holds the lot in the inspection queue.
+
+    Ownership (AS9100D 8.5.3): ``ownership`` defaults to ``company``. Material that belongs to
+    a customer or a supplier names its owner in ``owner_customer_id`` / ``owner_vendor_id``; the
+    owner must be a live customer / a non-deleted vendor of this company (404; a kind/owner
+    mismatch is 422), checked before anything is written. The owner is recorded on the receipt
+    and goes with the material to stock -- at once for dock-to-stock, or when an inspection
+    accepts it or its hold is cleared -- onto a stock row of that owner, never merged into
+    another owner's lot. Owned stock is never drawn by automatic consumption and is left out of
+    inventory valuation. The response carries the receipt's ``ownership`` and owner ids.
+    """
     receipt = _receive_material(receipt_in, db, current_user, company_id, audit)
     db.commit()
     db.refresh(receipt)
@@ -604,6 +619,9 @@ def inspect_receipt(
             receipt.receipt_number,
             audit,
             vendor_name,
+            # The owner recorded at receipt time (AS9100D 8.5.3): accepted material lands on a
+            # stock row of that owner, never merged into another owner's lot.
+            owner=recorded_owner(db, company_id, receipt),
         )
         result.inventory_created = True
         result.inventory_item_id = inv_item.id if inv_item else None
@@ -773,6 +791,74 @@ _INSPECTED_STATUSES = (
 _QTY_EPSILON = 1e-6
 
 
+_RECEIPT_STOCK_ROW_UNRESOLVED = (
+    "Cannot reconcile inventory for this receipt automatically; make a manual inventory adjustment."
+)
+
+
+def _receipt_stock_row(
+    db: Session,
+    receipt: POReceipt,
+    po_line: PurchaseOrderLine,
+    *,
+    company_id: int,
+    location_code: str,
+) -> InventoryItem:
+    """The EXACT stock row a dock-to-stock receipt put its material on, locked FOR UPDATE.
+
+    Found through the receipt's own RECEIVE ledger row (``_add_to_inventory`` writes it with
+    ``reference_type='po_receipt'`` and ``reference_number`` = the receipt number), never by
+    re-matching part + location + lot: since migration 129 a company lot L and a customer's
+    lot L can share one location (ownership is part of the merge key), and an unordered
+    match could unwind the other owner's row (AS9100D 8.5.3).
+
+    A receipt whose RECEIVE row carries no ``inventory_item_id`` (predating that linkage)
+    falls back to the old part / location / lot match, but ONLY when exactly one row
+    matches. Anything ambiguous or missing is the existing 409 -- a manual adjustment
+    by a person, never a guess. ``populate_existing`` so the guards below read the row as
+    locked, not a copy cached earlier in the session.
+    """
+    linked_ids = {
+        row[0]
+        for row in db.query(InventoryTransaction.inventory_item_id).filter(
+            InventoryTransaction.company_id == company_id,
+            InventoryTransaction.transaction_type == TransactionType.RECEIVE,
+            InventoryTransaction.reference_type == "po_receipt",
+            InventoryTransaction.reference_number == receipt.receipt_number,
+            InventoryTransaction.inventory_item_id.isnot(None),
+        )
+    }
+    if len(linked_ids) > 1:
+        raise HTTPException(status_code=409, detail=_RECEIPT_STOCK_ROW_UNRESOLVED)
+    if linked_ids:
+        item_id = next(iter(linked_ids))
+    else:
+        candidates = [
+            row[0]
+            for row in db.query(InventoryItem.id)
+            .filter(
+                InventoryItem.company_id == company_id,
+                InventoryItem.part_id == po_line.part_id,
+                InventoryItem.location == location_code,
+                InventoryItem.lot_number == receipt.lot_number,
+            )
+            .limit(2)
+        ]
+        if len(candidates) != 1:
+            raise HTTPException(status_code=409, detail=_RECEIPT_STOCK_ROW_UNRESOLVED)
+        item_id = candidates[0]
+    inv_item = (
+        db.query(InventoryItem)
+        .filter(InventoryItem.id == item_id, InventoryItem.company_id == company_id)
+        .populate_existing()
+        .with_for_update()
+        .first()
+    )
+    if inv_item is None:
+        raise HTTPException(status_code=409, detail=_RECEIPT_STOCK_ROW_UNRESOLVED)
+    return inv_item
+
+
 def _reconcile_receipt_quantity(
     db: Session,
     receipt: POReceipt,
@@ -816,26 +902,12 @@ def _reconcile_receipt_quantity(
     inv_item: Optional[InventoryItem] = None
     location_code: Optional[str] = None
     if inventory_placed and abs(delta) > _QTY_EPSILON:
-        # Re-find the SAME InventoryItem the receive created. The receive path keys
-        # it on (company_id, part_id, location_code, lot_number) where location_code
-        # is receipt.location.code or the "RECV-01" default, and lot_number is the
-        # receipt's (possibly auto-assigned) lot. Warehouse is NOT part of the key.
+        # Re-find the SAME InventoryItem the receive created -- through its RECEIVE ledger
+        # row, locked (``_receipt_stock_row``). ``location_code`` is receipt.location.code
+        # or the "RECV-01" default, as on the receive path; it labels the ledger rows below
+        # and keys the legacy fallback.
         location_code = receipt.location.code if receipt.location else "RECV-01"
-        inv_item = (
-            db.query(InventoryItem)
-            .filter(
-                InventoryItem.company_id == company_id,
-                InventoryItem.part_id == po_line.part_id,
-                InventoryItem.location == location_code,
-                InventoryItem.lot_number == receipt.lot_number,
-            )
-            .first()
-        )
-        if inv_item is None:
-            raise HTTPException(
-                status_code=409,
-                detail="Cannot reconcile inventory for this receipt automatically; make a manual inventory adjustment.",
-            )
+        inv_item = _receipt_stock_row(db, receipt, po_line, company_id=company_id, location_code=location_code)
         if delta < 0:
             to_remove = -delta
             # Only reverse stock that is still on hand AND unallocated/unconsumed.
@@ -1380,6 +1452,8 @@ def clear_receipt_inspection(
         # RECEIPT_CORRECTION stamping the correct/void reconciler already does.
         reason_code="INSPECTION_HOLD_CLEARED",
         notes=(f"Inspection hold cleared on receipt {receipt.receipt_number} " f"(not required): {payload.reason}"),
+        # The owner recorded at receipt time (AS9100D 8.5.3).
+        owner=recorded_owner(db, company_id, receipt),
     )
 
     # Audit (tamper-evident hash chain via the request-scoped AuditService). The

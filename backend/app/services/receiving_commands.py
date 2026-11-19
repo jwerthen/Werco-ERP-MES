@@ -11,6 +11,31 @@ from app.models.inventory import InventoryItem, InventoryLocation, InventoryTran
 from app.models.purchasing import InspectionStatus, POReceipt, POStatus, PurchaseOrder, PurchaseOrderLine, ReceiptStatus
 from app.services.audit_service import AuditService
 from app.services.operational_event_service import OperationalEventService
+from app.services.owned_property_service import (
+    COMPANY_OWNER,
+    ResolvedOwner,
+    ownership_label,
+    ownership_match_clauses,
+    resolve_owner,
+)
+
+
+def resolve_receipt_owner(db: Session, company_id: int, receipt_in) -> ResolvedOwner:
+    """The owner a receipt line names, resolved in this company. Raises before any write.
+
+    422 for a kind/owner mismatch; 404 for an owner that is not a live customer / non-deleted
+    vendor of this company. A company line (every line before migration 129, and every Hank
+    line, whose schema carries no ownership) costs no query. The owner is recorded on the
+    receipt (``po_receipts.ownership`` / ``owner_*``), so a line held for inspection carries it
+    to stock when ``inspect_receipt`` accepts it or ``clear_receipt_inspection`` releases it.
+    """
+    return resolve_owner(
+        db,
+        company_id,
+        getattr(receipt_in, "ownership", None) or COMPANY_OWNER.ownership,
+        getattr(receipt_in, "owner_customer_id", None),
+        getattr(receipt_in, "owner_vendor_id", None),
+    )
 
 
 def generate_receipt_number(db: Session, company_id: int) -> str:
@@ -150,6 +175,10 @@ def _receive_material(receipt_in, db, current_user, company_id, audit, *, checke
     # here — the part flag is only an advisory hint in the receiving UI.
     requires_inspection = receipt_in.requires_inspection
 
+    # Who owns the material (AS9100D 8.5.3), resolved in this company before the receipt
+    # row -- the first write -- exists.
+    owner = resolve_receipt_owner(db, company_id, receipt_in)
+
     receipt_number = generate_receipt_number(db, company_id)
     # Auto-assign the lot from the (unique, company-scoped) receipt number when
     # the receiver left it blank — every receipt still gets a real lot value.
@@ -179,6 +208,9 @@ def _receive_material(receipt_in, db, current_user, company_id, audit, *, checke
         over_receive_approved_by=(current_user.id if receipt_in.over_receive_approved else None),
         received_by=current_user.id,
         notes=receipt_in.notes,
+        # Who owns the material (AS9100D 8.5.3) -- recorded on the receipt so an inspection
+        # accept or a cleared hold later places it on a stock row of the same owner.
+        **owner.columns(),
     )
     receipt.company_id = company_id
     db.add(receipt)
@@ -229,6 +261,7 @@ def _receive_material(receipt_in, db, current_user, company_id, audit, *, checke
             receipt_number,
             audit,
             po.vendor.name if po.vendor else None,
+            owner=owner,
         )
 
     # Audit log (tamper-evident hash chain via the request-scoped AuditService)
@@ -297,8 +330,17 @@ def _add_to_inventory(
     supplier_name: Optional[str] = None,
     reason_code: Optional[str] = None,
     notes: Optional[str] = None,
+    *,
+    owner: ResolvedOwner = COMPANY_OWNER,
 ) -> InventoryItem:
     """Add received material to inventory with full traceability.
+
+    ``owner`` (already resolved in this company) is part of the merge key: the material
+    is added into an existing row only when that row has the same part, location, lot
+    AND owner, and a new row carries it (AS9100D 8.5.3). Every caller passes the owner the
+    receipt records (``po_receipts.ownership``): dock-to-stock here, and the inspection accept
+    (``inspect_receipt``) and the cleared hold (``clear_receipt_inspection``) through
+    ``owned_property_service.recorded_owner``. It defaults to company.
 
     ``reason_code`` / ``notes`` are optional overrides for the RECEIVE ledger row.
     Both default to None so the two original callers (receive_material's
@@ -310,7 +352,7 @@ def _add_to_inventory(
     receive. Same stamping the correct/void reconciler does with RECEIPT_VOID /
     RECEIPT_CORRECTION.
     """
-    # Check for existing inventory at location with same lot (scoped to the company)
+    # Check for existing inventory at location with same lot and owner (scoped to the company)
     existing = (
         db.query(InventoryItem)
         .filter(
@@ -318,10 +360,13 @@ def _add_to_inventory(
             InventoryItem.part_id == part_id,
             InventoryItem.location == location,
             InventoryItem.lot_number == lot_number,
+            *ownership_match_clauses(owner.key),
         )
         .with_for_update()
         .first()
     )
+    # Company stock keeps its pre-129 audit wording; owned property says whose it is.
+    owned_suffix = "" if owner.is_company else f" as {ownership_label(owner.key, owner.owner_name)} property"
 
     if existing:
         old_values = {
@@ -342,6 +387,7 @@ def _add_to_inventory(
             },
             description=(
                 f"Added {quantity} to inventory part {part_id} lot {lot_number} at {location} via {reference}"
+                f"{owned_suffix}"
             ),
         )
     else:
@@ -357,6 +403,7 @@ def _add_to_inventory(
             po_number=reference,
             status="available",
             is_active=True,
+            **owner.columns(),
         )
         inv_item.company_id = company_id
         db.add(inv_item)
@@ -366,7 +413,9 @@ def _add_to_inventory(
             inv_item.id,
             f"{part_id}/{lot_number}@{location}",
             new_values=inv_item,
-            description=(f"Received {quantity} of part {part_id} lot {lot_number} at {location} via {reference}"),
+            description=(
+                f"Received {quantity} of part {part_id} lot {lot_number} at {location} via {reference}{owned_suffix}"
+            ),
         )
 
     # Create transaction record for audit trail

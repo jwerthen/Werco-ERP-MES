@@ -29,7 +29,7 @@ not "reconcile" them into one number: that would break whichever surface lost.
 ``consume_tied_materials_for_work_order`` posts ISSUE rows, audit rows and shortage
 events; it is deliberately NOT imported here. Reads must not write (a queue poll is not
 an actor, has no intent and gives no reason), and the two things this module *does* take
-from the engine -- ``CONSUMABLE_ITEM_CLAUSES`` and ``CONSUMPTION_EPSILON`` -- are
+from the engine -- ``AUTO_DRAW_ITEM_CLAUSES`` and ``CONSUMPTION_EPSILON`` -- are
 imported precisely so the numbers shown here cannot drift from the numbers the engine
 acts on. Sharing the literal is the point; re-declaring it is the bug.
 
@@ -63,8 +63,10 @@ Scope: OPEN and OPERATION-scoped only
   ``HELD_MATERIAL_CONSUMED`` row), so this view reports what is physically there rather
   than zeroing it and inventing a shortage that will not happen.
 * **An UNPINNED tie is scored against the SAME predicate the engine draws with** --
-  ``CONSUMABLE_ITEM_CLAUSES`` splatted in, plus ``quantity_on_hand > 0``, exactly as
-  ``consumable_source_items`` filters. Anything looser promises stock the engine will
+  ``AUTO_DRAW_ITEM_CLAUSES`` (the consumable clauses plus company ownership) splatted in,
+  plus ``quantity_on_hand > 0``, exactly as ``consumable_source_items`` filters. A
+  customer's or supplier's lot is not drawn by FIFO, so it is not counted; a tie PINNED
+  to one still scores against that lot (the pinned leg below). Anything looser promises stock the engine will
   refuse to touch; anything tighter hides stock it WILL take. A **NULL ``status`` counts
   as available** on both sides (``COALESCE(status, 'available')`` in SQL, ``status or
   'available'`` in ``is_consumable_item``) -- the column has a Python-side default and no
@@ -108,9 +110,9 @@ from app.models.work_order_material import AllocationStatus, WorkOrderMaterialAl
 # CONSTANTS AND THE SHARED PREDICATE ONLY -- never the engine's verbs. See the module
 # docstring: this import is what keeps the consumable-lot predicate and the
 # float-comparison threshold shown to an operator identical to the ones consumption acts
-# on. ``CONSUMABLE_ITEM_CLAUSES`` is a tuple of WHERE clauses, not a verb; it can be
+# on. ``AUTO_DRAW_ITEM_CLAUSES`` is a tuple of WHERE clauses, not a verb; it can be
 # splatted into a query but it cannot write anything.
-from app.services.material_consumption_service import CONSUMABLE_ITEM_CLAUSES, CONSUMPTION_EPSILON
+from app.services.material_consumption_service import AUTO_DRAW_ITEM_CLAUSES, CONSUMPTION_EPSILON
 
 # Discriminators for the two legs of the one inventory query. Needed because the legs
 # key on different id spaces -- an ``inventory_items.id`` and a ``parts.id`` of the same
@@ -279,8 +281,9 @@ def _on_hand_by_allocation(
     The two rules are genuinely different questions (module docstring): a PINNED tie is
     scored against its own lot's ``quantity_on_hand`` -- held or inactive included, since
     consumption will draw from it anyway -- while an UNPINNED tie is scored against the
-    sum over lots matching ``CONSUMABLE_ITEM_CLAUSES`` exactly, which counts a NULL
-    ``status`` as available and excludes held / inactive lots.
+    sum over lots matching ``AUTO_DRAW_ITEM_CLAUSES`` exactly, which counts a NULL
+    ``status`` as available and excludes held / inactive lots and lots owned by a
+    customer or supplier.
 
     They are asked as two aggregate legs of one ``UNION ALL`` rather than two round
     trips, because this runs on a queue that polls every 10-15 seconds per station across
@@ -333,7 +336,9 @@ def _on_hand_by_allocation(
                 # and a re-declared copy would now HIDE stock the engine will take --
                 # exactly the display-vs-engine drift this module's docstring exists to
                 # prevent. Sharing the clauses is the point; re-declaring them is the bug.
-                *CONSUMABLE_ITEM_CLAUSES,
+                # AUTO_DRAW (consumable AND company-owned, migration 129): the unpinned draw
+                # never takes a customer's or supplier's lot, so it must not be counted here.
+                *AUTO_DRAW_ITEM_CLAUSES,
                 InventoryItem.quantity_on_hand > 0,
             )
             .group_by(InventoryItem.part_id)

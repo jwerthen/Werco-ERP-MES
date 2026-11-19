@@ -277,6 +277,11 @@ REPORT_SOURCES: Dict[ReportDataSource, ReportSource] = {
                 ReportField("lot_number", "Lot Number", InventoryItem.lot_number),
                 ReportField("unit_cost", "Unit Cost", InventoryItem.unit_cost),
                 ReportField("status", "Status", InventoryItem.status),
+                # Owned property (AS9100D 8.5.3, migration 129): company / customer / supplier.
+                # The owner's NAME is not a field here: it lives in ``customers`` OR
+                # ``vendors`` by kind, and a report field is one mapped column (a row never
+                # carries both). ``GET /inventory/`` and the inventory export carry it.
+                ReportField("ownership", "Ownership", InventoryItem.ownership),
             ),
         ),
         ReportSource(

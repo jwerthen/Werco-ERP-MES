@@ -9,6 +9,7 @@ from sqlalchemy.orm.attributes import get_history
 
 from app.db.database import Base
 from app.db.mixins import SoftDeleteMixin, TenantMixin
+from app.models.inventory import OWNER_MATCHES_CHECK, OWNERSHIP_VALUE_CHECK, OwnershipType
 
 
 class POStatus(str, enum.Enum):
@@ -391,6 +392,11 @@ class POReceipt(Base, SoftDeleteMixin, TenantMixin):
         # migration 080's DELIBERATE EXCLUSIONS.
         CheckConstraint("quantity_accepted >= 0", name="chk_po_receipts_quantity_accepted_non_negative"),
         CheckConstraint("quantity_rejected >= 0", name="chk_po_receipts_quantity_rejected_non_negative"),
+        # Lock-step with migration 129_owned_property: the same two CHECKs inventory_items and
+        # tools carry, from the same shared constants. No ownership index -- nothing filters
+        # receipts by owner.
+        CheckConstraint(OWNERSHIP_VALUE_CHECK, name="ck_po_receipts_ownership"),
+        CheckConstraint(OWNER_MATCHES_CHECK, name="ck_po_receipts_owner_matches"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -438,6 +444,16 @@ class POReceipt(Base, SoftDeleteMixin, TenantMixin):
     # The part master's Part.requires_inspection flag is NOT applied
     # automatically; it is only an advisory hint in the receiving UI.
     requires_inspection = Column(Boolean, default=False)
+
+    # Owned property (AS9100D 8.5.3, migration 129): who owns the material this receipt brought
+    # in, recorded at receipt time and carried onto the stock row whenever the receipt places
+    # stock -- dock-to-stock, an inspection accept, or a cleared inspection hold. ``company`` (the
+    # default, and every pre-129 receipt) is the shop's own stock.
+    ownership = Column(String(20), nullable=False, default=OwnershipType.COMPANY.value, server_default="company")
+    owner_customer_id = Column(
+        Integer, ForeignKey("customers.id", name="fk_po_receipts_owner_customer_id"), nullable=True
+    )
+    owner_vendor_id = Column(Integer, ForeignKey("vendors.id", name="fk_po_receipts_owner_vendor_id"), nullable=True)
 
     # Inspection details
     inspected_by = Column(Integer, ForeignKey("users.id"), nullable=True)

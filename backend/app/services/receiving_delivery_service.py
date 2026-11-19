@@ -114,13 +114,33 @@ def _lock_delivery(db, company_id, purchase_order_id, delivery_lines):
     return frozenset(document_ids)
 
 
+_COMPANY_OWNERSHIP_FIELDS = {"ownership": "company", "owner_customer_id": None, "owner_vendor_id": None}
+
+
+def _digest_payload(body):
+    """The request as the idempotency digest hashes it.
+
+    A line's ownership fields (AS9100D 8.5.3, migration 129) are left out while they hold the
+    company defaults, so a company delivery hashes exactly as it did before those fields
+    existed: one submitted before the deploy and retried after it still replays instead of
+    answering 409 "different submission". An owned line keeps them, so changing a line's owner
+    is a different submission.
+    """
+    payload = body.model_dump(mode='json')
+    for line in payload.get('lines', []):
+        if all(line.get(key) == value for key, value in _COMPANY_OWNERSHIP_FIELDS.items()):
+            for key in _COMPANY_OWNERSHIP_FIELDS:
+                line.pop(key, None)
+    return payload
+
+
 def post_delivery_command(db, user, company_id, body, audit, *, return_created=False):
-    from app.services.receiving_commands import _receive_material
+    from app.services.receiving_commands import _receive_material, resolve_receipt_owner
     from app.services.supplier_followup_service import require_module_write
 
     require_module_write(db, user, company_id, "receiving", "create")
 
-    digest = hashlib.sha256(json.dumps(body.model_dump(mode='json'), sort_keys=True).encode()).hexdigest()
+    digest = hashlib.sha256(json.dumps(_digest_payload(body), sort_keys=True).encode()).hexdigest()
     acquire_generator_lock(db, f"receiving_delivery:{body.idempotency_key}", company_id)
     previous = (
         db.query(ReceivingDeliveryBatch)
@@ -150,6 +170,14 @@ def post_delivery_command(db, user, company_id, body, audit, *, return_created=F
     valid_ids = {row.id for row in lines}
     if any(line.po_line_id not in valid_ids for line in body.lines):
         raise HTTPException(422, "Every delivery line must belong to this purchase order")
+    # Every line's owner (AS9100D 8.5.3) resolves in this company before the batch row -- the
+    # delivery's first write. ``_receive_material`` resolves each again; the reads are cheap
+    # and a company line (every line before migration 129) costs none.
+    for index, line in enumerate(body.lines):
+        try:
+            resolve_receipt_owner(db, company_id, line)
+        except HTTPException as exc:
+            raise _delivery_line_error(index, exc) from exc
     # Before the batch insert and line 1's audit row; see the helper.
     checked_certificate_ids = _lock_delivery(db, company_id, body.purchase_order_id, body.lines)
     batch = ReceivingDeliveryBatch(

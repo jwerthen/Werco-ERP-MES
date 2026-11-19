@@ -20,7 +20,7 @@ from app.models.purchasing import POStatus, PurchaseOrder, PurchaseOrderLine
 from app.models.work_order import WorkOrderOperation
 from app.models.work_order_material import AllocationStatus, WorkOrderMaterialAllocation
 from app.services.completion_inventory_service import _resolve_backflush_demand
-from app.services.material_consumption_service import CONSUMABLE_ITEM_CLAUSES
+from app.services.material_consumption_service import AUTO_DRAW_ITEM_CLAUSES, CONSUMABLE_ITEM_CLAUSES
 
 
 def _day(value):
@@ -174,6 +174,15 @@ def material_readiness(db, company_id: int, orders: list, today: date) -> dict:
         .filter(InventoryItem.company_id == company_id, InventoryItem.part_id.in_(part_ids), *CONSUMABLE_ITEM_CLAUSES)
         .all()
     }
+    # The engine's two draws differ (AS9100D 8.5.3, migration 129): a PIN takes its lot
+    # whoever owns it, while the UNPINNED (FIFO) draw takes company-owned stock only.
+    # ``usable_ids`` scores a pin; an unpinned requirement may only walk these.
+    auto_drawable_ids = {
+        row.id
+        for row in db.query(InventoryItem.id)
+        .filter(InventoryItem.company_id == company_id, InventoryItem.part_id.in_(part_ids), *AUTO_DRAW_ITEM_CLAUSES)
+        .all()
+    }
     stock_left = {
         row.id: (
             max(0, _number(row.quantity_on_hand) - max(0, _number(row.quantity_allocated)))
@@ -216,6 +225,9 @@ def material_readiness(db, company_id: int, orders: list, today: date) -> dict:
             if not incompatible:
                 for lot in stock:
                     if lot.part_id != req["part_id"] or (pin is not None and pin != lot.id):
+                        continue
+                    if pin is None and lot.id not in auto_drawable_ids:
+                        # A customer's or supplier's lot: FIFO never spends it.
                         continue
                     take = min(remaining, stock_left[lot.id])
                     if take > 0:

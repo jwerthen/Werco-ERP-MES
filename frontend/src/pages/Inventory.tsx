@@ -12,6 +12,7 @@ import {
   ExclamationTriangleIcon,
   CubeIcon,
   Squares2X2Icon,
+  TagIcon,
   WrenchScrewdriverIcon,
 } from '@heroicons/react/24/outline';
 import { Modal } from '../components/ui/Modal';
@@ -30,12 +31,27 @@ import StockMovementsPanel from '../components/inventory/StockMovementsPanel';
 import CycleCountsPanel from '../components/inventory/CycleCountsPanel';
 import StockPieceObservationsPanel from '../components/inventory/StockPieceObservationsPanel';
 import CombineInventoryDialog from '../components/inventory/CombineInventoryDialog';
+import ChangeOwnershipDialog from '../components/inventory/ChangeOwnershipDialog';
+import OwnershipFields from '../components/ownership/OwnershipFields';
+import OwnershipChip from '../components/ownership/OwnershipChip';
+import { useOwnerDirectory } from '../hooks/useOwnerDirectory';
+import type { OwnershipInfo, OwnershipSelection, OwnershipType } from '../types/ownership';
+import {
+  COMPANY_OWNERSHIP,
+  isOwnershipComplete,
+  ownershipChangeNotice,
+  ownershipLabel,
+  ownershipOf,
+  ownershipPayload,
+} from '../utils/ownership';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import { useAuth } from '../context/AuthContext';
 import { hasPermission } from '../utils/permissions';
 
-interface InventoryItem {
+// Ownership (AS9100D 8.5.3) rides on every row: `ownership` + the one owner id that
+// matches it, and the tenant-resolved `owner_name`. Absent = company-owned.
+interface InventoryItem extends OwnershipInfo {
   id: number;
   part_id: number;
   part?: { id: number; part_number: string; name: string; part_type?: string };
@@ -57,6 +73,9 @@ interface InventorySummary {
   total_on_hand: number;
   total_allocated: number;
   available: number;
+  // Physical on hand stays in `total_on_hand`; this is how much of it is customer- or
+  // supplier-owned property rather than the company's own stock.
+  owned_by_others_on_hand?: number;
   locations: Array<{ location: string; quantity: number; lot_number?: string }>;
 }
 
@@ -68,10 +87,19 @@ interface InventorySummary {
  */
 type TabType = 'summary' | 'details' | 'receive' | 'movements' | 'counts' | 'observations';
 type InventoryGroup = 'all' | 'parts' | 'materials';
+type OwnershipFilter = 'all' | OwnershipType;
+const parseOwnershipFilter = (value: string | null | undefined): OwnershipFilter =>
+  value === 'company' || value === 'customer' || value === 'supplier' ? value : 'all';
 
 const MATERIAL_TYPES = new Set(['raw_material', 'purchased', 'hardware', 'consumable']);
 const PART_TYPES = new Set(['manufactured', 'assembly']);
 const formatStockQuantity = (quantity: number) => quantity.toLocaleString(undefined, { maximumFractionDigits: 20 });
+
+/** "N customer/supplier-owned" under a part's physical on hand, when any of it is someone else's property. */
+const ownedByOthersNote = (item: InventorySummary) =>
+  item.owned_by_others_on_hand && item.owned_by_others_on_hand > 0 ? (
+    <div className="text-xs font-normal text-fd-amber">{formatStockQuantity(item.owned_by_others_on_hand)} customer/supplier-owned</div>
+  ) : null;
 
 const stockQuantity = (quantity: number) => quantity < 0 ? (
   <span className="text-red-300 font-semibold">{formatStockQuantity(quantity)} <span className="text-xs">Negative stock</span></span>
@@ -122,6 +150,9 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
   const [parts, setParts] = useState<any[]>([]);
   const [locations, setLocations] = useState<any[]>([]);
   const [showLowStockOnly, setShowLowStockOnly] = useState(() => searchParams.get('filter') === 'low_stock');
+  // Client-side over the already-loaded detail rows (like the group and text filters),
+  // so the page's initial requests are unchanged; kept in the URL so it survives reload.
+  const ownershipFilter = parseOwnershipFilter(searchParams.get('ownership'));
   const [filterText, setFilterText] = useState('');
   const debouncedFilterText = useDebouncedValue(filterText, 250);
 
@@ -131,6 +162,10 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
   const [selectedItem, setSelectedItem] = useState<InventoryItem | null>(null);
   const [adjustmentItems, setAdjustmentItems] = useState<InventoryItem[]>([]);
   const [adjustmentForm, setAdjustmentForm] = useState({ inventory_item_id: 0, new_quantity: '', reason_code: '', notes: '' });
+  const [ownershipItem, setOwnershipItem] = useState<InventoryItem | null>(null);
+  // Customer / supplier lists for the ownership pickers — fetched only when a picker
+  // is switched away from company-owned, never on page load.
+  const ownerDirectory = useOwnerDirectory();
 
   const [receiveForm, setReceiveForm] = useState({
     part_id: 0,
@@ -141,6 +176,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
     po_number: '',
     unit_cost: 0,
   });
+  const [receiveOwnership, setReceiveOwnership] = useState<OwnershipSelection>(COMPANY_OWNERSHIP);
   const [transferForm, setTransferForm] = useState({
     inventory_item_id: 0,
     quantity: 0,
@@ -178,13 +214,15 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
     [filterByGroup, getPartType, summary]
   );
   const filteredInventory = useMemo(() => {
-    const grouped = inventory.filter(item => filterByGroup(item.part?.part_type));
+    const grouped = inventory.filter(
+      item => filterByGroup(item.part?.part_type) && (ownershipFilter === 'all' || ownershipOf(item) === ownershipFilter)
+    );
     if (!debouncedFilterText) return grouped;
     const term = debouncedFilterText.toLowerCase();
     return grouped.filter(
       item => item.part?.part_number?.toLowerCase().includes(term) || item.part?.name?.toLowerCase().includes(term)
     );
-  }, [filterByGroup, debouncedFilterText, inventory]);
+  }, [filterByGroup, debouncedFilterText, inventory, ownershipFilter]);
   const groupInventory = useMemo(
     () => inventory.filter(item => filterByGroup(item.part?.part_type)),
     [filterByGroup, inventory]
@@ -256,12 +294,19 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
       setActionError('Select a part and location, enter a positive quantity and a nonnegative unit cost.');
       return;
     }
+    if (!isOwnershipComplete(receiveOwnership)) {
+      setActionError(
+        receiveOwnership.ownership === 'customer' ? 'Choose the customer that owns this stock.' : 'Choose the supplier that owns this stock.'
+      );
+      return;
+    }
     if (actionBusy) return;
     setActionBusy(true);
     setActionError('');
     try {
-      await api.receiveInventory(receiveForm);
+      await api.receiveInventory({ ...receiveForm, ...ownershipPayload(receiveOwnership) });
       setShowReceiveModal(false);
+      setReceiveOwnership(COMPANY_OWNERSHIP);
       setReceiveForm({
         part_id: 0,
         quantity: 0,
@@ -454,7 +499,12 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
         align: 'right',
         className: 'font-medium',
         accessor: item => item.total_on_hand,
-        render: item => stockQuantity(item.total_on_hand),
+        render: item => (
+          <>
+            {stockQuantity(item.total_on_hand)}
+            {ownedByOthersNote(item)}
+          </>
+        ),
       },
       {
         key: 'allocated',
@@ -525,6 +575,16 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
         render: item => item.lot_number || '-',
       },
       {
+        // Company stock renders nothing — only property that is NOT the company's is
+        // labelled. The CSV spells company out so an exported row is never ambiguous.
+        key: 'ownership',
+        header: 'Ownership',
+        sortable: true,
+        accessor: item => ownershipLabel(item) ?? '',
+        csv: item => ownershipLabel(item) ?? 'Company',
+        render: item => <OwnershipChip record={item} />,
+      },
+      {
         key: 'qty',
         header: 'Qty',
         sortable: true,
@@ -580,6 +640,20 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
                 >
                   <ArrowsRightLeftIcon className="h-5 w-5" aria-hidden="true" />
                 </button>}
+                {canAdjust && (
+                  <button
+                    type="button"
+                    onClick={e => {
+                      e.stopPropagation();
+                      setOwnershipItem(item);
+                    }}
+                    className="text-werco-primary hover:text-blue-400"
+                    aria-label="Change ownership"
+                    title="Change ownership"
+                  >
+                    <TagIcon className="h-5 w-5" aria-hidden="true" />
+                  </button>
+                )}
                 {canAdjust && item.quantity_on_hand < 0 && <button type="button" className="text-red-300 underline" onClick={() => openAdjustment([item])}>Resolve adjustment</button>}
                 </div>
               ),
@@ -603,7 +677,12 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
         fields={[
           {
             label: 'On Hand',
-            value: stockQuantity(item.total_on_hand),
+            value: (
+              <>
+                {stockQuantity(item.total_on_hand)}
+                {ownedByOthersNote(item)}
+              </>
+            ),
             className: 'font-medium',
           },
           { label: 'Allocated', value: formatStockQuantity(item.total_allocated) },
@@ -650,6 +729,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
           label: 'Lot #',
           value: item.lot_number || '-',
         },
+        ...(ownershipLabel(item) ? [{ label: 'Ownership', value: <OwnershipChip record={item} />, fullWidth: true }] : []),
         {
           label: 'Qty',
           value: stockQuantity(item.quantity_on_hand),
@@ -677,7 +757,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
         },
       ]}
       actions={
-        canTransfer || (canAdjust && item.quantity_on_hand < 0) ? (
+        canTransfer || canAdjust ? (
           <>
           {canTransfer && <button
             onClick={e => {
@@ -689,6 +769,18 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
           >
             <ArrowsRightLeftIcon className="h-4 w-4" />
             Transfer
+          </button>}
+          {canAdjust && <button
+            type="button"
+            onClick={e => {
+              e.stopPropagation();
+              setOwnershipItem(item);
+            }}
+            className="inline-flex items-center gap-1.5 border border-slate-600 text-slate-200 hover:border-werco-primary hover:text-werco-primary text-sm px-3 py-1 transition-colors"
+            aria-label="Change ownership"
+          >
+            <TagIcon className="h-4 w-4" aria-hidden="true" />
+            Ownership
           </button>}
           {canAdjust && item.quantity_on_hand < 0 && <button type="button" className="text-red-300 underline" onClick={() => openAdjustment([item])}>Resolve adjustment</button>}
           </>
@@ -744,7 +836,12 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
       {pageHeader}
     </>
   );
-  const inventoryFilters = { search: filterText, group: groupFilter, low_stock: showLowStockOnly ? '1' : '' };
+  const inventoryFilters = {
+    search: filterText,
+    group: groupFilter,
+    low_stock: showLowStockOnly ? '1' : '',
+    ownership: ownershipFilter === 'all' ? '' : ownershipFilter,
+  };
   const applyInventoryFilters = (filters: Record<string, string>) => {
     setFilterText(filters.search || '');
     const group = filters.group === 'parts' || filters.group === 'materials' ? filters.group : 'all';
@@ -755,6 +852,15 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
     else next.set('group', group);
     if (filters.low_stock === '1') next.set('filter', 'low_stock');
     else next.delete('filter');
+    const ownership = parseOwnershipFilter(filters.ownership);
+    if (ownership === 'all') next.delete('ownership');
+    else next.set('ownership', ownership);
+    setSearchParams(next);
+  };
+  const setOwnershipFilter = (value: OwnershipFilter) => {
+    const next = new URLSearchParams(searchParams);
+    if (value === 'all') next.delete('ownership');
+    else next.set('ownership', value);
     setSearchParams(next);
   };
   const summaryWorkspace = useTableWorkspace(
@@ -883,6 +989,21 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
                   {chip.label}
                 </button>
               ))}
+              {/* Ownership is a property of a stock ROW, so it filters the detail view;
+                  the summary aggregates rows per part and notes owned stock instead. */}
+              {activeTab === 'details' && (
+                <select
+                  className="input w-auto py-1 text-xs"
+                  aria-label="Filter by ownership"
+                  value={ownershipFilter}
+                  onChange={event => setOwnershipFilter(parseOwnershipFilter(event.target.value))}
+                >
+                  <option value="all">All owners</option>
+                  <option value="company">Company-owned</option>
+                  <option value="customer">Customer-owned</option>
+                  <option value="supplier">Supplier-owned</option>
+                </select>
+              )}
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2 text-sm text-slate-400">
@@ -1129,6 +1250,13 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
               />
             )}
           </FormField>
+          <OwnershipFields
+            value={receiveOwnership}
+            onChange={setReceiveOwnership}
+            directory={ownerDirectory}
+            disabled={actionBusy}
+            className="grid grid-cols-2 gap-4"
+          />
           <div className="flex justify-end gap-3">
             <button type="button" onClick={() => setShowReceiveModal(false)} className="btn-secondary">
               Cancel
@@ -1164,6 +1292,26 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
         </form>
       </Modal>
 
+      {/* Change of ownership — its own reasoned verb, server-GATED and therefore
+          NON-optimistic: the row is re-read from the server after success, never
+          patched locally. Same role set as adjust (Admin / Manager / Supervisor).
+          A success that leaves open jobs pinned to someone else's material, or short
+          of company stock, is a WARNING naming those work orders, not a plain success. */}
+      {ownershipItem && canAdjust && (
+        <ChangeOwnershipDialog
+          key={ownershipItem.id}
+          item={ownershipItem}
+          directory={ownerDirectory}
+          onClose={() => setOwnershipItem(null)}
+          onChanged={(_item, result) => {
+            setOwnershipItem(null);
+            const notice = ownershipChangeNotice(result);
+            showToast(notice.type, notice.message);
+            void loadData();
+          }}
+        />
+      )}
+
       {/* Transfer Modal */}
       <Modal
         open={showTransferModal && !!selectedItem && canTransfer}
@@ -1193,6 +1341,11 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
               <div className="font-medium">{selectedItem.part?.part_number}</div>
               <div className="text-sm text-slate-400">From: {selectedItem.location}</div>
               <div className="text-sm text-slate-400">Available: {selectedItem.quantity_available}</div>
+              {ownershipLabel(selectedItem) && (
+                <div className="mt-1 text-sm text-slate-400">
+                  <OwnershipChip record={selectedItem} /> — ownership moves with the stock.
+                </div>
+              )}
             </div>
             <form onSubmit={handleTransfer} className="space-y-4">
               <FormField label="Quantity to Transfer">

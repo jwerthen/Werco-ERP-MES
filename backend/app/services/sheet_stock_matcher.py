@@ -56,7 +56,7 @@ from app.models.inventory import InventoryItem
 from app.models.laser_nest import LaserNest
 from app.models.part import MATERIAL_SUPPLY_PART_TYPES, Part
 from app.models.work_order_material import AllocationSource, AllocationStatus, WorkOrderMaterialAllocation
-from app.services.material_consumption_service import CONSUMABLE_ITEM_CLAUSES
+from app.services.material_consumption_service import AUTO_DRAW_ITEM_CLAUSES
 from app.services.sheet_stock_spec import (
     alloy_family,
     canonical_alloy,
@@ -395,9 +395,11 @@ def _load_history(db: Session, company_id: int) -> Dict[str, Tuple[int, int]]:
 def _load_on_hand(db: Session, company_id: int, part_ids: Sequence[int]) -> Tuple[Dict[int, float], bool]:
     """Consumable on-hand per part, and whether the read landed.
 
-    ``CONSUMABLE_ITEM_CLAUSES`` is IMPORTED from the consumption engine rather
+    ``AUTO_DRAW_ITEM_CLAUSES`` is IMPORTED from the consumption engine rather
     than re-declared -- the same discipline ``material_tie_view`` follows -- so a
-    number shown here can never promise stock the engine would refuse to draw.
+    number shown here can never promise stock the engine would refuse to draw. The
+    tie a suggestion leads to is unpinned, and the unpinned draw takes company-owned
+    stock only (migration 129), so a customer's or supplier's sheets are not counted.
     """
     if not part_ids:
         return {}, True
@@ -407,7 +409,7 @@ def _load_on_hand(db: Session, company_id: int, part_ids: Sequence[int]) -> Tupl
             .filter(
                 InventoryItem.company_id == company_id,
                 InventoryItem.part_id.in_(list(part_ids)),
-                *CONSUMABLE_ITEM_CLAUSES,
+                *AUTO_DRAW_ITEM_CLAUSES,
             )
             .group_by(InventoryItem.part_id)
             .all()

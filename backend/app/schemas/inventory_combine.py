@@ -120,6 +120,13 @@ class StockLineSchema(UTCModel):
     status: Optional[str] = None
     eligible: bool = False
     ineligible_reason: Optional[str] = None
+    # Who owns the row (AS9100D 8.5.3, migration 129): company / customer / supplier. A
+    # combine moves owned material too, onto a row with the same owner; it refuses
+    # ``target_ownership_mismatch`` rather than fold it onto the target's stock of a
+    # different owner in the same location and lot.
+    ownership: str = "company"
+    owner_customer_id: Optional[int] = None
+    owner_vendor_id: Optional[int] = None
 
 
 class PartStockSummarySchema(UTCModel):
@@ -214,7 +221,7 @@ class InventoryCombinePreviewResponse(UTCModel):
     expected numbers to compare) and ``source_still_has_stock`` (there is no
     ``deactivate_source`` flag). Everything else the write can refuse is listed.
 
-    Three codes joined that list and a client must render them as hard refusals:
+    Four codes joined that list and a client must render them as hard refusals:
 
     * ``target_row_not_available`` -- the material would land on a TARGET row that
       is on hold, quarantined, rejected or deactivated. This is the one blocker
@@ -223,6 +230,9 @@ class InventoryCombinePreviewResponse(UTCModel):
       drawable, and it used to return **200** with an empty ``blockers`` list.
     * ``target_serial_mismatch`` -- a serialized lot would merge onto a row
       carrying a different serial number, so one serial would claim two units.
+    * ``target_ownership_mismatch`` -- the material would land in a location and lot
+      where the target already holds stock of a DIFFERENT owner (company vs customer
+      vs supplier property, AS9100D 8.5.3) and no row of the material's own owner.
     * ``quantity_below_minimum`` -- a sub-epsilon quantity that would move nothing.
       In practice the request schema's ``gt`` bound refuses this first, with a 422.
     """

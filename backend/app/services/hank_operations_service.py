@@ -21,7 +21,7 @@ from app.models.work_order_blocker import WorkOrderBlocker
 from app.models.work_order_material import AllocationStatus, WorkOrderMaterialAllocation
 from app.schemas.hank_operations import HankOperationalCheck, HankOperationalReport
 from app.services.hank_task_service import HankTaskService, _reference
-from app.services.material_consumption_service import CONSUMABLE_ITEM_CLAUSES
+from app.services.material_consumption_service import AUTO_DRAW_ITEM_CLAUSES
 from app.services.material_readiness_service import material_readiness
 from app.services.process_sheet_service import step_counts_for_operations
 from app.services.quality_gate_service import evaluate_completion_quality_exceptions
@@ -406,7 +406,9 @@ class HankOperationsService:
                 .join(Part, Part.id == InventoryItem.part_id)
                 .filter(
                     InventoryItem.part_id.in_([line.part_id for line in lines]),
-                    *CONSUMABLE_ITEM_CLAUSES,
+                    # Company-owned only: a customer's or supplier's lot is not the shop's
+                    # alternative stock to spend (AS9100D 8.5.3, migration 129).
+                    *AUTO_DRAW_ITEM_CLAUSES,
                     Part.company_id == self.company_id,
                     Part.is_deleted.is_(False),
                     Part.is_active.is_(True),

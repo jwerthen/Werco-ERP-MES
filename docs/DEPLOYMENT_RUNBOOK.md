@@ -294,6 +294,30 @@ statement, writes no row, and adds no environment variable, secret, cron or work
   under, and the migration will not pick which company's record to change.
   See [API.md → Customer Complaints & RMA](API.md#customer-complaints--rma).
 
+**Customer- and supplier-owned property.** Apply **129_owned_property** after **128_po_flowdown**
+through the normal API boot migration path. It adds `ownership` (`NOT NULL`, server default
+`'company'`), `owner_customer_id` and `owner_vendor_id`, two CHECKs and two FKs (to `customers` and
+`vendors`, no `ON DELETE`) to `inventory_items`, `tools` and `po_receipts`, plus an ownership index on
+the first two, with no backfill: every existing row becomes `company` with no owner, which is what it
+meant before, so company stock behaves as it did. On PostgreSQL 11+ the column adds are
+metadata-only (no rewrite, no NOT NULL scan). Under `SET LOCAL lock_timeout = '5s'` each table is
+ACCESS EXCLUSIVE until the boot commits (`inventory_items`, `tools`, then `po_receipts`; all small),
+each CHECK scans its table once, and the FKs briefly take SHARE ROW EXCLUSIVE on `customers` and
+`vendors`. No environment variable, secret, cron or worker job is added. Deploy the worker with or
+after the API (new code selects the columns on every inventory, tool and PO receipt load) and the API
+before the frontend (an older API silently ignores the ownership fields, so customer material
+received in that window would be filed as company stock). A company `POST /receiving/deliveries`
+retried across the deploy still replays: its fingerprint leaves out company-default ownership fields.
+On an application rollback keep the columns: before redeploying a pre-129 image, from a checkout of
+this release run `railway run --service werco-api alembic stamp 128_po_flowdown`, and roll the
+frontend back with it. The **downgrade is lossy** and not a rollback step: it discards who owns every
+owned stock row, tool and PO receipt. **While stamped back, the old code treats owned rows as company
+stock: it FIFO-draws them, merges receipts into them and counts them in inventory value, and an owned
+receipt it accepts out of inspection lands as company stock**, so export the owned rows first
+(`GET /inventory/?ownership=customer` / `supplier`, or the inventory export's `ownership` column) and
+keep the window short. Verification steps and the full notes are in
+[Customer- and supplier-owned property](DEPLOYMENT.md#customer--and-supplier-owned-property-migration-129).
+
 **Purchase-order quality flow-down.** Apply **128_po_flowdown** after **127_ncr_car_records**
 through the normal API boot migration path. It is purely additive: two new tenant tables
 (`po_flowdown_profiles`, `po_quality_clauses`) with RLS enabled and revokes from `PUBLIC` / `anon` /
