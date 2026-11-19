@@ -21,6 +21,13 @@ from app.models.purchasing import (
 )
 from app.models.user import User, UserRole
 from app.schemas.import_kit import PurchaseOrderImportResponse
+from app.schemas.po_flowdown import (
+    POFlowdownProfileResponse,
+    POFlowdownProfileUpdate,
+    POQualityClauseCreate,
+    POQualityClauseResponse,
+    POQualityClauseUpdate,
+)
 from app.schemas.purchasing import (
     AslImportResponse,
     POCreate,
@@ -39,6 +46,7 @@ from app.schemas.purchasing import (
     VendorResponse,
     VendorUpdate,
 )
+from app.services import po_flowdown_service as flowdown
 from app.services import supplier_approval_service as asl
 from app.services.audit_service import AuditService
 from app.services.erp_draft_commands import PurchaseOrderNumberConflict, create_purchase_order_command
@@ -62,6 +70,10 @@ API_TOKEN_VENDOR_APPROVAL_REFUSAL = (
     "Approving a supplier is a person's decision: an API token cannot mark a vendor approved. "
     "Sign in to the app to do this."
 )
+
+# Who may edit the supplier quality flow-down settings and clause catalog (AS9100D 8.4.3): the
+# requirements are Quality's document, written down by purchasing management.
+FLOWDOWN_WRITE_ROLES = [UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY]
 
 # Ceiling on the rows ``GET /purchasing/purchase-orders`` will materialize. A
 # generous bound, not a page size: the default filter already excludes
@@ -1546,6 +1558,12 @@ def update_purchase_order(
         raise HTTPException(
             status_code=409, detail="This purchase order changed. Reload the current record before saving."
         )
+    # Supplier quality flow-down selection: validated (422), refused once the PO has left DRAFT
+    # (409, its block is frozen) and set here, before the lines or any other field is touched.
+    # Not part of the blind setattr loop below; the change shows in the audited diff.
+    codes_changed = False
+    if "quality_clause_codes" in update_data:
+        codes_changed = flowdown.apply_clause_codes_change(db, po, company_id, update_data.pop("quality_clause_codes"))
     draft_lines = update_data.pop("lines", None)
     if draft_lines is not None:
         if po.status != POStatus.DRAFT or any(float(line.quantity_received or 0) > 0 for line in po.lines):
@@ -1602,7 +1620,8 @@ def update_purchase_order(
         severity="info" if po.status == previous_status else "medium",
         event_payload={
             "po_number": po.po_number,
-            "changed_fields": [field for field in update_data.keys() if field != "version"],
+            "changed_fields": [field for field in update_data.keys() if field != "version"]
+            + (["quality_clause_codes"] if codes_changed else []),
             "previous_status": (previous_status.value if hasattr(previous_status, "value") else previous_status),
             "status": po.status.value if hasattr(po.status, "value") else po.status,
             "required_date": po.required_date.isoformat() if po.required_date else None,
@@ -1904,3 +1923,120 @@ def update_supplier_confirmation(
 
     po = update_confirmation(db, current_user, company_id, po_id, body, audit)
     return _reloaded_po_response(db, po.id, company_id)
+
+
+# ============ SUPPLIER QUALITY FLOW-DOWN (AS9100D 8.4.3) ============
+#
+# The company's supplier quality requirements block printed on every purchase order: one
+# settings row per company plus a catalog of clauses. A PO's own selection is
+# ``quality_clause_codes`` on the PO; the block it prints is live while it is a DRAFT and frozen
+# into ``flowdown_snapshot`` the moment it leaves DRAFT (``app.models.purchasing``). Editing the
+# settings or a clause therefore changes every DRAFT's printout and no issued PO's.
+
+
+def _profile_response(profile) -> POFlowdownProfileResponse:
+    if profile is None:
+        return POFlowdownProfileResponse()
+    return POFlowdownProfileResponse.model_validate(profile)
+
+
+@router.get("/flowdown-profile", response_model=POFlowdownProfileResponse)
+def get_po_flowdown_profile(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Get the company's purchase-order quality flow-down settings (AS9100D 8.4.3).
+
+    Returns whether the supplier quality requirements block prints on purchase orders, its
+    heading, the controlled document it cites (``document_reference``) and the standard
+    paragraph (``body``). A company that never saved them gets the default unsaved shape:
+    ``enabled`` false, ``id`` null and ``version`` 0. Read-only; pass ``version`` back to
+    ``PUT /purchasing/flowdown-profile``."""
+    return _profile_response(flowdown.get_profile(db, company_id))
+
+
+@router.put("/flowdown-profile", response_model=POFlowdownProfileResponse)
+def update_po_flowdown_profile(
+    body: POFlowdownProfileUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(FLOWDOWN_WRITE_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Save the company's purchase-order quality flow-down settings (Admin, Manager or Quality).
+
+    A full replacement of ``enabled``, ``heading``, ``document_reference`` and ``body``.
+    ``version`` must be the version you read (0 before the first save, which creates the
+    settings); a stale version is **409** and nothing changes. The new settings print on every
+    DRAFT purchase order immediately and on none already issued (each issued PO keeps the block
+    frozen when it left draft). Writes a required audit record: if it cannot be saved the
+    answer is **503** and nothing is changed. A save that changes nothing writes nothing."""
+    values = body.model_dump(exclude={"version"})
+    with required_audit(db, flowdown.PROFILE_AUDIT_UNAVAILABLE):
+        profile = flowdown.save_profile(db, company_id, current_user.id, values, body.version, audit)
+        db.commit()
+    db.refresh(profile)
+    return _profile_response(profile)
+
+
+@router.get("/quality-clauses", response_model=List[POQualityClauseResponse])
+def list_po_quality_clauses(
+    include_inactive: bool = Query(False, description="Include retired clauses (is_active false)"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """List the company's supplier quality clause catalog, in print order (sort_order, then code).
+
+    Each clause has a short ``code`` (what a purchase order's ``quality_clause_codes`` lists), a
+    ``title``, an optional ``body`` and ``default_selected`` (applies to every PO that has not
+    chosen its own clauses). Retired clauses are hidden unless ``include_inactive=true``; only
+    active clauses can be selected on a purchase order."""
+    return flowdown.list_clauses(db, company_id, include_inactive=include_inactive)
+
+
+@router.post("/quality-clauses", response_model=POQualityClauseResponse)
+def create_po_quality_clause(
+    body: POQualityClauseCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(FLOWDOWN_WRITE_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Add a supplier quality clause to the company's catalog (Admin, Manager or Quality).
+
+    ``code`` is unique in the company ignoring case (**409** on a duplicate) and can never be
+    changed afterwards. Clauses are never deleted: retire one with ``is_active`` false through
+    ``PUT /purchasing/quality-clauses/{clause_id}``. Writes a required audit record (**503** and
+    nothing saved if it cannot be written)."""
+    with required_audit(db, flowdown.CLAUSE_AUDIT_UNAVAILABLE):
+        clause = flowdown.create_clause(db, company_id, current_user.id, body.model_dump(), audit)
+        db.commit()
+    db.refresh(clause)
+    return clause
+
+
+@router.put("/quality-clauses/{clause_id}", response_model=POQualityClauseResponse)
+def update_po_quality_clause(
+    clause_id: int,
+    body: POQualityClauseUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(FLOWDOWN_WRITE_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Edit a supplier quality clause (Admin, Manager or Quality); only the fields sent change.
+
+    Editable: ``title``, ``body``, ``default_selected``, ``is_active`` (false retires the clause)
+    and ``sort_order``. ``code`` is immutable: sending the stored code is accepted, a different
+    one is **409**. An edit changes the printout of DRAFT purchase orders only; issued ones keep
+    the block frozen when they left draft. **404** for a clause outside your company. Writes a
+    required audit record (**503** and nothing saved if it cannot be written)."""
+    with required_audit(db, flowdown.CLAUSE_AUDIT_UNAVAILABLE):
+        clause = flowdown.update_clause(
+            db, company_id, clause_id, current_user.id, body.model_dump(exclude_unset=True), audit
+        )
+        db.commit()
+    db.refresh(clause)
+    return clause

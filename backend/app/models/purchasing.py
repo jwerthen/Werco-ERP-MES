@@ -3,8 +3,9 @@ from datetime import datetime
 
 from sqlalchemy import JSON, Boolean, CheckConstraint, Column, Date, DateTime
 from sqlalchemy import Enum as SQLEnum
-from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, event, inspect, select
 from sqlalchemy.orm import relationship
+from sqlalchemy.orm.attributes import get_history
 
 from app.db.database import Base
 from app.db.mixins import SoftDeleteMixin, TenantMixin
@@ -215,6 +216,15 @@ class PurchaseOrder(Base, SoftDeleteMixin, TenantMixin):
 
     notes = Column(Text)
 
+    # Supplier quality flow-down (AS9100D 8.4.3, migration 128; see app.models.po_flowdown).
+    # ``quality_clause_codes``: NULL = the catalog's active default-selected clauses; an explicit
+    # list (empty included) is the buyer's choice. Editable only while the PO is a DRAFT.
+    quality_clause_codes = Column(JSON, nullable=True)
+    # The block as frozen when the PO left DRAFT (or was inserted already issued), written ONLY by
+    # the freeze listeners right after this class. NULL on a PO issued before migration 128, which
+    # then prints no block -- never back-filled.
+    flowdown_snapshot = Column(JSON, nullable=True)
+
     # Approval workflow
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     approved_by = Column(Integer, ForeignKey("users.id"), nullable=True)
@@ -225,6 +235,92 @@ class PurchaseOrder(Base, SoftDeleteMixin, TenantMixin):
 
     vendor = relationship("Vendor", back_populates="purchase_orders")
     lines = relationship("PurchaseOrderLine", back_populates="purchase_order", cascade="all, delete-orphan")
+
+
+def po_status_member(value) -> "POStatus | None":
+    """``value`` as a ``POStatus``: a member, its value (``"sent"``) or its name (``"SENT"``).
+
+    ``None`` (an unset column whose DRAFT default has not been applied yet) stays ``None``, and
+    so does a value that names no status.
+    """
+    if value is None or isinstance(value, POStatus):
+        return value
+    try:
+        return POStatus(value)
+    except ValueError:
+        try:
+            return POStatus[str(value)]
+        except KeyError:
+            return None
+
+
+def _po_flush_value(connection, target: PurchaseOrder, key: str):
+    """``target.<key>`` inside a flush, WITHOUT an ORM load on the session.
+
+    A loaded attribute is read from the instance; an unloaded one on a persistent row (expired
+    by a commit, say) is read with a Core select on the flush connection by primary key -- the
+    row is the one being flushed, and an UPDATE has not been emitted yet, so the database still
+    holds its prior state. A pending row's unset column is ``None`` (its default applies).
+    """
+    state = inspect(target)
+    if key in state.dict:
+        return state.dict[key]
+    if state.key is None:
+        return None
+    table = PurchaseOrder.__table__
+    return connection.execute(select(table.c[key]).where(table.c.id == state.key[1][0])).scalar()
+
+
+def _freeze_flowdown(connection, target: PurchaseOrder) -> None:
+    # Imported here, not at module top: the service imports this module.
+    from app.services.po_flowdown_service import compute_flowdown_block
+
+    target.flowdown_snapshot = compute_flowdown_block(
+        connection,
+        _po_flush_value(connection, target, "company_id"),
+        _po_flush_value(connection, target, "quality_clause_codes"),
+    )
+
+
+@event.listens_for(PurchaseOrder, "before_insert")
+def _freeze_flowdown_on_insert(mapper, connection, target):
+    """A purchase order inserted already issued (an import landing SENT) freezes at birth."""
+    status = po_status_member(_po_flush_value(connection, target, "status"))
+    if status is not None and status != POStatus.DRAFT:
+        _freeze_flowdown(connection, target)
+
+
+@event.listens_for(PurchaseOrder, "before_update")
+def _freeze_flowdown_on_issue(mapper, connection, target):
+    """THE freeze seam: a purchase order whose status moves from DRAFT to anything else.
+
+    Every door that issues a PO -- Send, the status ``PUT``, an accepted document delivery,
+    the reviewed-import path, MRP, PO upload, the open-PO loader -- passes through a flush of
+    this mapper, so none of them carries its own call. The block is computed from the company's
+    profile and active catalog with Core reads on the flush ``connection`` (never an ORM query
+    on the session mid-flush), scoped to the PO's company. A PO moved back to DRAFT renders
+    live again and re-freezes when it next leaves DRAFT.
+    """
+    history = get_history(target, "status")
+    if not history.added:
+        return
+    new_status = po_status_member(history.added[0])
+    if new_status is None or new_status == POStatus.DRAFT:
+        return
+    if history.deleted:
+        old_status = po_status_member(history.deleted[0])
+    else:
+        # The prior value was never loaded before it was overwritten; the row still holds it.
+        table = PurchaseOrder.__table__
+        identity = inspect(target).key
+        if identity is None:
+            return
+        old_status = po_status_member(
+            connection.execute(select(table.c.status).where(table.c.id == identity[1][0])).scalar()
+        )
+    # A NULL stored status is the DRAFT default.
+    if old_status is None or old_status == POStatus.DRAFT:
+        _freeze_flowdown(connection, target)
 
 
 class PurchaseOrderLine(Base, TenantMixin):

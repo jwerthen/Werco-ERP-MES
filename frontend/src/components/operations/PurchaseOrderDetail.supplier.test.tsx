@@ -9,6 +9,8 @@ jest.mock('../../services/api', () => ({
   default: {
     getPurchaseOrder: jest.fn(),
     updateSupplierConfirmation: jest.fn(),
+    // Quality flow-down clause catalog, read with the PO.
+    getPOQualityClauses: jest.fn(),
   },
 }));
 jest.mock('../../hooks/usePermissions', () => ({ __esModule: true, default: () => ({ can: () => true }) }));
@@ -18,6 +20,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   sessionStorage.setItem('user', JSON.stringify({ id: 1, company_id: 1 }));
   (api.getPurchaseOrder as jest.Mock).mockResolvedValue(record);
+  (api.getPOQualityClauses as jest.Mock).mockResolvedValue([]);
 });
 afterEach(() => jest.restoreAllMocks());
 

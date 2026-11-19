@@ -325,7 +325,18 @@ class DocumentDeliveryService:
     def columns(record):
         # Sending status/timestamps are workflow metadata, not PDF content. Their
         # transition after acceptance must not turn an identical PDF into a new send.
-        ignored = {'status', 'created_at', 'updated_at', 'version', 'request_key', 'request_hash'}
+        # ``flowdown_snapshot`` likewise: it is written by the freeze when the PO leaves DRAFT
+        # (the accepted send itself), and the block it holds is already fingerprinted through
+        # the print data's ``quality_flowdown``.
+        ignored = {
+            'status',
+            'created_at',
+            'updated_at',
+            'version',
+            'request_key',
+            'request_hash',
+            'flowdown_snapshot',
+        }
         return {
             column.name: getattr(record, column.name)
             for column in record.__table__.columns

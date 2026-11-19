@@ -29,6 +29,8 @@ jest.mock('../services/api', () => ({
     getDocuments: jest.fn(),
     getDocumentTypes: jest.fn(),
     updateVendor: jest.fn(),
+    // Quality flow-down clauses for the Create PO checklist (read when the modal opens).
+    getPOQualityClauses: jest.fn(),
   },
 }));
 jest.mock('../context/AuthContext', () => ({
@@ -157,6 +159,7 @@ beforeEach(() => {
   mockedApi.updateVendor.mockResolvedValue({});
   mockedApi.checkSupplierApproval.mockResolvedValue(check());
   mockedApi.createPurchaseOrder.mockResolvedValue({ id: 99, supplier_approval_warnings: [] });
+  mockedApi.getPOQualityClauses.mockResolvedValue([]);
 });
 
 describe('Create PO — Approved Supplier List', () => {

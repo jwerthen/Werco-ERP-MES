@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useLocation, useParams } from 'react-router-dom';
 import api from '../services/api';
 import { ErrorState } from '../components/ui';
+import type { POFlowdownPrint } from '../types/poFlowdown';
 
 interface POLinePrintData {
   line_number: number;
@@ -37,6 +38,59 @@ interface PurchaseOrderPrintData {
   notes?: string | null;
   lines: POLinePrintData[];
   printed_at: string;
+  /** Supplier quality flow-down: live on a DRAFT, the frozen snapshot once issued, null = none. */
+  quality_flowdown?: POFlowdownPrint | null;
+}
+
+/** Paragraphs are separated by a blank line; single line breaks inside one are kept. */
+function paragraphs(text: string | null | undefined): string[] {
+  return (text ?? '')
+    .split(/\r?\n\s*\r?\n/)
+    .map(part => part.trim())
+    .filter(Boolean);
+}
+
+/**
+ * The supplier quality requirements block (AS9100D 8.4.3). Everything is rendered as React
+ * text — this is document content the server stores verbatim, never markup. Renders nothing
+ * when the PO carries no block, or a disabled one.
+ */
+function QualityFlowdownBlock({ flowdown }: { flowdown: POFlowdownPrint | null | undefined }) {
+  if (!flowdown || flowdown.enabled === false) return null;
+  const bodyParagraphs = paragraphs(flowdown.body);
+  const clauses = flowdown.clauses ?? [];
+  const heading = flowdown.heading?.trim() || 'Supplier Quality Requirements';
+  return (
+    <section
+      className="border p-3 mt-6 text-sm"
+      aria-labelledby="po-quality-flowdown-heading"
+      data-testid="po-quality-flowdown"
+    >
+      <h3 id="po-quality-flowdown-heading" className="font-semibold mb-1 break-after-avoid">
+        {heading}
+      </h3>
+      {flowdown.document_reference && (
+        <p className="text-xs text-gray-700 mb-2">Reference: {flowdown.document_reference}</p>
+      )}
+      {bodyParagraphs.map((paragraph, idx) => (
+        <p key={idx} className="mb-2 whitespace-pre-line">
+          {paragraph}
+        </p>
+      ))}
+      {clauses.length > 0 && (
+        <ul className="mt-2 space-y-2">
+          {clauses.map(clause => (
+            <li key={clause.code} className="break-inside-avoid">
+              <div className="font-semibold">
+                {clause.code} — {clause.title}
+              </div>
+              {clause.body && <div className="whitespace-pre-line text-gray-800">{clause.body}</div>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
 }
 
 export default function PrintPurchaseOrder() {
@@ -270,6 +324,8 @@ export default function PrintPurchaseOrder() {
           </tbody>
         </table>
       </div>
+
+      <QualityFlowdownBlock flowdown={po.quality_flowdown} />
 
       {po.notes && (
         <div className="border p-3 mt-6 text-sm">

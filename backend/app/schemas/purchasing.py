@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.core.validation import Money, MoneySmall
 from app.models.purchasing import POStatus
 from app.schemas.base import UTCModel
+from app.schemas.po_flowdown import MAX_PO_QUALITY_CLAUSES, QualityClauseCode
 from app.services.supplier_approval_service import AslValueError, parse_bases, parse_scopes, parse_status
 
 
@@ -394,8 +395,20 @@ class POBase(UTCModel):
         return self
 
 
+# Supplier quality flow-down clause selection (AS9100D 8.4.3). Omitted / null = the catalog's
+# active default-selected clauses; a list (empty included) is the buyer's choice. Every code must
+# name an ACTIVE clause of the company (422); duplicates are dropped, first-seen order kept.
+_QUALITY_CLAUSE_CODES_DESCRIPTION = (
+    "Supplier quality clause codes to flow down on this PO (from GET /purchasing/quality-clauses). "
+    "Null = the catalog's default-selected clauses; [] = none. Editable only while the PO is a draft."
+)
+
+
 class POCreate(POBase):
     lines: List[POLineCreate] = Field(default_factory=list)
+    quality_clause_codes: Optional[List[QualityClauseCode]] = Field(
+        None, max_length=MAX_PO_QUALITY_CLAUSES, description=_QUALITY_CLAUSE_CODES_DESCRIPTION
+    )
 
 
 class PODraftLineUpdate(POLineBase):
@@ -417,6 +430,11 @@ class POUpdate(BaseModel):
     # ``purchasing.assert_po_status_edit_allowed`` -- SENT only through the send verb,
     # PARTIAL/RECEIVED only through receiving, and nothing out of CLOSED/CANCELLED.
     status: Optional[POStatus] = None
+    # Changing it on a PO that is no longer a draft is a 409 (its flow-down froze when it left
+    # DRAFT); sending the stored value back unchanged is always accepted.
+    quality_clause_codes: Optional[List[QualityClauseCode]] = Field(
+        None, max_length=MAX_PO_QUALITY_CLAUSES, description=_QUALITY_CLAUSE_CODES_DESCRIPTION
+    )
 
     @field_validator('required_date', 'expected_date', mode='before')
     @classmethod
@@ -494,10 +512,21 @@ class POResponse(POBase):
     # Advisory Approved Supplier List warnings for this vendor and these lines, computed when
     # the response is built (never stored). Empty on a path that does not compute them.
     supplier_approval_warnings: List[SupplierApprovalWarning] = Field(default_factory=list)
+    # The stored clause selection, raw: null = the catalog's default-selected clauses.
+    quality_clause_codes: Optional[List[str]] = None
+    # True once the PO is no longer a draft: its flow-down block is frozen and the selection
+    # can no longer change. Derived from ``status``; never accepted from a request.
+    flowdown_frozen: bool = False
 
     class Config:
         from_attributes = True
         use_enum_values = True
+
+    @model_validator(mode='after')
+    def derive_flowdown_frozen(self) -> 'POResponse':
+        status = getattr(self.status, 'value', self.status)
+        self.flowdown_frozen = status is not None and status != POStatus.DRAFT.value
+        return self
 
 
 class POListResponse(UTCModel):

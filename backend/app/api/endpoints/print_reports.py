@@ -13,6 +13,8 @@ from app.models.purchasing import PurchaseOrder, PurchaseOrderLine
 from app.models.quote import Quote, QuoteLine
 from app.models.user import User
 from app.models.work_order import WorkOrder, WorkOrderOperation
+from app.schemas.po_flowdown import POFlowdownPrint
+from app.services.po_flowdown_service import print_flowdown_block
 
 router = APIRouter()
 
@@ -287,6 +289,10 @@ class PurchaseOrderPrintData(BaseModel):
     total: str
     notes: Optional[str] = None
     lines: List[POLinePrintData]
+    # Supplier quality flow-down (AS9100D 8.4.3), printed between the lines and the notes.
+    # None = no block: the company's flow-down is disabled, or the PO was issued before the
+    # block existed (migration 128) and has no frozen snapshot.
+    quality_flowdown: Optional[POFlowdownPrint] = None
     printed_at: str
 
 
@@ -297,7 +303,12 @@ def get_purchase_order_print_data(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Get all data needed to print a purchase order."""
+    """Get all data needed to print a purchase order.
+
+    ``quality_flowdown`` is the supplier quality requirements block: on a DRAFT, built live from
+    the company's current flow-down settings and clause catalog; on an issued PO, the block
+    frozen when it left draft (so later catalog edits never change it); null when the block is
+    disabled or the PO was issued before flow-down existed."""
     po = (
         db.query(PurchaseOrder)
         # Vendor deliberately unfiltered on soft delete: reprinting a PO must reproduce the
@@ -372,5 +383,11 @@ def get_purchase_order_print_data(
         total=format_currency(po.total),
         notes=po.notes,
         lines=lines,
+        quality_flowdown=_po_flowdown_print(db, po, company_id),
         printed_at=format_date(datetime.now()),
     )
+
+
+def _po_flowdown_print(db: Session, po: PurchaseOrder, company_id: int) -> Optional[POFlowdownPrint]:
+    block = print_flowdown_block(db, po, company_id)
+    return POFlowdownPrint.model_validate(block) if block is not None else None

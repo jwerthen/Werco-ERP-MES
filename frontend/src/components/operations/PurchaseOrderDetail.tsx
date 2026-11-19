@@ -8,6 +8,9 @@ import useUnsavedChanges from '../../hooks/useUnsavedChanges';
 import EntityPicker from './EntityPicker';
 import SupplierFollowup from './SupplierFollowup';
 import { SupplierApprovalWarnings } from '../suppliers/SupplierApprovalWarnings';
+import { QualityClauseChecklist } from '../purchasing/QualityClauseChecklist';
+import type { POQualityClause } from '../../types/poFlowdown';
+import { defaultQualityClauseCodes, sameQualityClauseCodes } from '../../utils/qualityFlowdown';
 
 export default function PurchaseOrderDetail({
   id,
@@ -31,14 +34,49 @@ export default function PurchaseOrderDetail({
   const [attempt, setAttempt] = useState(0);
   const { can } = usePermissions();
   const editable = record?.status === 'draft' && can('purchasing:create');
+  // Quality flow-down clauses (AS9100D 8.4.3). The active catalog is read with the PO; a
+  // failed read (an API that predates the flow-down) only hides the editor — a save then
+  // leaves the PO's stored choice untouched, because the key is sent only when changed.
+  const [clauses, setClauses] = useState<POQualityClause[] | null>(null);
+  const [clausesError, setClausesError] = useState(false);
+  // `null` = untouched: show what the PO stores, or the catalog defaults when it stores none.
+  const [clauseSelection, setClauseSelection] = useState<string[] | null>(null);
+  const storedClauseCodes: string[] | null = Array.isArray(record?.quality_clause_codes)
+    ? record.quality_clause_codes
+    : null;
+  // `flowdown_frozen` is the server's word; the status test covers an API that predates it.
+  const flowdownFrozen: boolean = record ? (record.flowdown_frozen ?? record.status !== 'draft') : false;
+  const initialClauseCodes: string[] | null =
+    storedClauseCodes ?? (clauses ? defaultQualityClauseCodes(clauses) : null);
+  const clauseCodesChanged =
+    clauseSelection !== null &&
+    initialClauseCodes !== null &&
+    !sameQualityClauseCodes(clauseSelection, initialClauseCodes);
   const { confirmDiscard, markSaved } = useUnsavedChanges(
-    supplierDirty || (!!form && JSON.stringify(form) !== original)
+    supplierDirty || clauseCodesChanged || (!!form && JSON.stringify(form) !== original)
   );
+  useEffect(() => {
+    let active = true;
+    setClauses(null);
+    setClausesError(false);
+    Promise.resolve()
+      .then(() => api.getPOQualityClauses())
+      .then(rows => {
+        if (active) setClauses(Array.isArray(rows) ? rows : []);
+      })
+      .catch(() => {
+        if (active) setClausesError(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, [id, attempt]);
   useEffect(() => {
     let active = true;
     setLoading(true);
     setRecord(null);
     setForm(null);
+    setClauseSelection(null);
     setError('');
     api
       .getPurchaseOrder(id)
@@ -99,6 +137,9 @@ export default function PurchaseOrderDetail({
     try {
       await api.updatePurchaseOrder(id, {
         ...form,
+        // Only a CHANGED clause choice is sent: an untouched one leaves the stored value
+        // (including "catalog defaults") exactly as it was.
+        ...(clauseCodesChanged && clauseSelection !== null ? { quality_clause_codes: clauseSelection } : {}),
         version: record.version || 0,
         expected_updated_at: record.updated_at,
       });
@@ -192,6 +233,40 @@ export default function PurchaseOrderDetail({
                 />
               )}
             </FormField>
+            {flowdownFrozen && storedClauseCodes === null ? (
+              // Issued with no explicit choice: what printed was the catalog defaults AS THEY
+              // WERE at issue, which today's catalog cannot reconstruct — so say so rather than
+              // tick today's defaults and imply they are what the supplier received.
+              <fieldset className="rounded-sm border border-fd-line p-3" data-testid="po-quality-clauses">
+                <legend className="px-1 text-xs font-semibold uppercase tracking-wide text-fd-mute">
+                  Quality flow-down clauses
+                </legend>
+                <p className="text-sm text-fd-mute">
+                  Frozen when the PO was issued. No clauses were chosen on this purchase order, so it carries the
+                  catalog defaults as they stood at issue; the printed purchase order shows exactly what was frozen.
+                </p>
+              </fieldset>
+            ) : (
+              <QualityClauseChecklist
+                clauses={clauses}
+                loadError={clausesError}
+                loadErrorText={
+                  flowdownFrozen
+                    ? 'Quality clauses could not be loaded. Frozen when the PO was issued; the printed purchase order shows them.'
+                    : "Quality clauses could not be loaded. Saving leaves this purchase order's clause selection unchanged."
+                }
+                selected={clauseSelection ?? initialClauseCodes ?? []}
+                onChange={setClauseSelection}
+                readOnly={!editable || flowdownFrozen}
+                note={
+                  flowdownFrozen
+                    ? 'Frozen when the PO was issued. The printed purchase order shows the flow-down exactly as frozen.'
+                    : storedClauseCodes === null
+                      ? 'No clauses chosen yet: this draft prints the catalog defaults (checked below) until you change them.'
+                      : undefined
+                }
+              />
+            )}
             <h3 className="font-semibold">Line items</h3>
             {form.lines.map((line: any, index: number) => (
               <div key={line.id || `new-${index}`} className="border border-fd-line rounded p-3 space-y-3">

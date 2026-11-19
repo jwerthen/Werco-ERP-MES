@@ -110,6 +110,13 @@ import type {
   VendorReevaluationDue,
 } from '../types/supplierApproval';
 import type {
+  POFlowdownProfile,
+  POFlowdownProfileUpdate,
+  POQualityClause,
+  POQualityClauseCreate,
+  POQualityClauseUpdate,
+} from '../types/poFlowdown';
+import type {
   MaintenanceAsset,
   MaintenanceAssetInput,
   MaintenanceAssetUpdate,
@@ -3690,6 +3697,44 @@ class ApiService {
 
   async getPurchaseOrderPrintData(poId: number) {
     const response = await this.api.get(`/print/purchase-orders/${poId}/print-data`);
+    return response.data;
+  }
+
+  // ---- Purchase-order quality flow-down (AS9100D 8.4.3) ----
+  // The company's flow-down profile (heading, document reference, standard paragraph) and its
+  // quality-clause catalog. A purchase order prints the profile plus its selected clauses; a
+  // DRAFT prints them live and the block is frozen onto the PO when it is issued.
+
+  // Any purchasing reader. Before the first save this is an unsaved default
+  // (`enabled: false`, `version: 0`).
+  async getPOFlowdownProfile(): Promise<POFlowdownProfile> {
+    const response = await this.api.get<POFlowdownProfile>('/purchasing/flowdown-profile');
+    return response.data;
+  }
+
+  // ADMIN/MANAGER/QUALITY. Server-GATED: 409 on a stale `version`, 503 when the required audit
+  // row cannot be written (nothing saved) — callers stay non-optimistic.
+  async updatePOFlowdownProfile(data: POFlowdownProfileUpdate): Promise<POFlowdownProfile> {
+    const response = await this.api.put<POFlowdownProfile>('/purchasing/flowdown-profile', data);
+    return response.data;
+  }
+
+  // Active clauses by default; `include_inactive: true` adds the retired ones (catalog admin).
+  async getPOQualityClauses(params?: { include_inactive?: boolean }): Promise<POQualityClause[]> {
+    const response = await this.api.get<POQualityClause[]>('/purchasing/quality-clauses', { params });
+    return response.data;
+  }
+
+  // ADMIN/MANAGER/QUALITY, required audit. A duplicate code is a 409.
+  async createPOQualityClause(data: POQualityClauseCreate): Promise<POQualityClause> {
+    const response = await this.api.post<POQualityClause>('/purchasing/quality-clauses', data);
+    return response.data;
+  }
+
+  // ADMIN/MANAGER/QUALITY, required audit. The code is immutable; retire with
+  // `is_active: false` (there is no delete).
+  async updatePOQualityClause(id: number, data: POQualityClauseUpdate): Promise<POQualityClause> {
+    const response = await this.api.put<POQualityClause>(`/purchasing/quality-clauses/${id}`, data);
     return response.data;
   }
 
