@@ -44,7 +44,9 @@ AUTH_METHOD_PIN = "pin"
 BADGE_ONLY_AUTH_METHODS: List[str] = [AUTH_METHOD_BADGE]
 BADGE_AND_PIN_AUTH_METHODS: List[str] = [AUTH_METHOD_BADGE, AUTH_METHOD_PIN]
 
-_DIGITS_ONLY = re.compile(r"^[0-9]+$")
+# ``fullmatch``, never ``match`` with ``$``: ``$`` also matches before a trailing newline, so
+# "2580\n" would pass as digits and then reach ``int()`` in the run check (a 500).
+_DIGITS_ONLY = re.compile(r"[0-9]+")
 
 # Refusal texts. Each names the rule and never the value -- and quotes no example PIN either,
 # so a refused PIN can never appear in the answer even when it happens to be the example.
@@ -56,22 +58,25 @@ PIN_RULE_SEQUENCE = "A floor PIN cannot be a straight run of digits counting up 
 PIN_RULE_BADGE = "A floor PIN cannot be the user's own employee ID or the last digits of their badge."
 
 
-def coerce_pin_input(value: Any) -> Any:
+def coerce_pin_input(pin: Any) -> Any:
     """Turn any non-null JSON value into a string before Pydantic types it.
 
     The app's 422 handler echoes each error's ``input``, so a PIN typed as a JSON number
     (``1234``) or any other non-string would otherwise come back in the response body.
     Coercing means the request schema itself never refuses a PIN value: the sign-on step
     reads a malformed one as a wrong PIN, and the admin routes refuse it with
-    :func:`validate_floor_pin`'s plain text.
+    :func:`validate_floor_pin`'s plain text. (The parameter is named ``pin`` so Sentry's
+    scrubber, which filters frame variables by name, filters it.)
     """
-    if value is None or isinstance(value, str):
-        return value
-    return str(value)
+    if pin is None or isinstance(pin, str):
+        return pin
+    return str(pin)
 
 
 # The request-body type of a PIN. No length / pattern constraint on purpose (see
-# ``coerce_pin_input``): a constraint failure would be a 422 echoing the value.
+# ``coerce_pin_input``): a constraint failure would be a 422 echoing the value. Every model
+# field of this type is also declared ``Field(..., repr=False)``, so the request model's
+# repr -- which Sentry records for a frame's local variables -- never carries the PIN.
 FloorPinInput = Annotated[
     str,
     BeforeValidator(coerce_pin_input),
@@ -136,7 +141,7 @@ def validate_floor_pin(pin: object, *, employee_id: Optional[str]) -> str:
     Rules: digits only, 4 to 6 long; not one digit repeated; not a straight ascending or
     descending run; not the user's own employee-ID digits or their badge's last digits.
     """
-    if not isinstance(pin, str) or not _DIGITS_ONLY.match(pin):
+    if not isinstance(pin, str) or not _DIGITS_ONLY.fullmatch(pin):
         raise FloorPinRuleError(PIN_RULE_DIGITS)
     if not FLOOR_PIN_MIN_LENGTH <= len(pin) <= FLOOR_PIN_MAX_LENGTH:
         raise FloorPinRuleError(PIN_RULE_DIGITS)
@@ -161,7 +166,7 @@ def verify_floor_pin(pin: Optional[str], hashed: Optional[str]) -> bool:
     running bcrypt (which also keeps an oversized value away from the KDF's 72-byte limit);
     an unreadable stored hash reads as a mismatch rather than raising.
     """
-    if not hashed or not isinstance(pin, str) or not _DIGITS_ONLY.match(pin):
+    if not hashed or not isinstance(pin, str) or not _DIGITS_ONLY.fullmatch(pin):
         return False
     if not FLOOR_PIN_MIN_LENGTH <= len(pin) <= FLOOR_PIN_MAX_LENGTH:
         return False

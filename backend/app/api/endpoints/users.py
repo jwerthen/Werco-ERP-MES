@@ -72,10 +72,13 @@ from app.services.user_identity import (
     synthetic_email_for_employee_id,
 )
 from app.services.user_provisioning import (
+    FLOOR_PIN_CLEARED_ON_PROMOTION_KEY,
+    MANAGER_FLOOR_PIN_TARGET_ROLES,
     TENANT_ROLES,
     atomic_security_write,
     audit_user_created,
     audit_user_update,
+    clear_floor_pin_on_promotion,
     create_tenant_user,
     require_manageable_user,
     require_tenant_role,
@@ -149,7 +152,7 @@ class PasswordChange(BaseModel):
 class FloorPinSet(BaseModel):
     """Request body for ``PUT /users/{user_id}/floor-pin``. The PIN is never echoed back."""
 
-    pin: FloorPinInput
+    pin: FloorPinInput = Field(..., repr=False)
 
 
 class UserPhoneUpdate(BaseModel):
@@ -968,6 +971,11 @@ def update_user(
     admin cannot change their OWN role (self role-escalation guard) — editing
     one's own name/email/other fields stays allowed. The change (including any
     role escalation) is recorded in the tamper-evident audit log.
+
+    Promoting a user INTO Admin, Manager or Quality from any other role clears their floor
+    PIN (hash, set date, wrong-PIN count and lock) in the same transaction, recorded as
+    ``floor_pin_cleared_on_promotion`` on the update's audit row; an Admin then sets a new
+    one. Changes among those three roles and demotions keep the PIN.
     """
     user = db.query(User).filter(User.id == user_id, User.company_id == company_id).first()
     if not user:
@@ -1005,7 +1013,11 @@ def update_user(
         for field, value in update_data.items():
             setattr(user, field, value)
 
-        audit_user_update(audit, user, old_values)
+        # A promotion into a judgment role must not keep a PIN a Manager chose (same transaction).
+        pin_cleared = clear_floor_pin_on_promotion(user, old_values["role"])
+        audit_user_update(
+            audit, user, old_values, extra_data={FLOOR_PIN_CLEARED_ON_PROMOTION_KEY: True} if pin_cleared else None
+        )
         if deactivating:
             # Same rule as DELETE /users/{id}: losing is_active retires every live API
             # token the user holds (audited), so a later is_active=true revives none.
@@ -1033,7 +1045,9 @@ def approve_user(
     """Approve a self-registered user and assign their operational role.
 
     Grants a role and activates the account, so the role + is_active transition is
-    recorded in the tamper-evident audit log.
+    recorded in the tamper-evident audit log. Approving into Admin, Manager or Quality
+    clears any floor PIN the pending account carried (``floor_pin_cleared_on_promotion`` on
+    the audit row), the same rule as ``PUT /users/{user_id}``.
     """
     require_tenant_role(approval.role, "Platform admin role cannot be assigned through approval")
 
@@ -1055,6 +1069,7 @@ def approve_user(
         if approval.department is not None:
             user.department = approval.department
         user.is_active = True
+        pin_cleared = clear_floor_pin_on_promotion(user, old_values["role"])
 
         audit_user_update(
             audit,
@@ -1062,6 +1077,7 @@ def approve_user(
             old_values,
             action="approve",
             description=f"Approved user {user.employee_id} as {user.role.value}",
+            extra_data={FLOOR_PIN_CLEARED_ON_PROMOTION_KEY: True} if pin_cleared else None,
         )
     db.refresh(user)
     return user
@@ -1289,7 +1305,15 @@ def unlock_user(
 # ---------------------------------------------------------------------------
 
 _FLOOR_PIN_ROLES = [UserRole.ADMIN, UserRole.MANAGER]
-_ADMIN_FLOOR_PIN_DETAIL = "Only an Admin can set or clear an Admin's floor PIN"
+# The accounts a MANAGER may set, reset, clear or unlock a floor PIN for (one definition, in
+# ``user_provisioning``, shared with the promotion rule in ``update_user`` / ``approve_user``).
+# Every other role -- Admin, Manager, Quality -- carries judgment, and whoever chooses a
+# person's PIN can sign in as that person with their badge, so those PINs need an Admin.
+_MANAGER_FLOOR_PIN_TARGET_ROLES = MANAGER_FLOOR_PIN_TARGET_ROLES
+_MANAGER_FLOOR_PIN_SCOPE_DETAIL = (
+    "A Manager can manage floor PINs only for Operator, Supervisor, Shipping and Viewer accounts. "
+    "Ask an Admin to manage this account's PIN."
+)
 
 
 def _refuse_api_token_floor_pin_admin(current_user: User) -> None:
@@ -1306,18 +1330,21 @@ def _refuse_api_token_floor_pin_admin(current_user: User) -> None:
 def _floor_pin_target_or_404(db: Session, user_id: int, company_id: int, current_user: User) -> User:
     """The target user in the ACTIVE company, after the authority checks, or 404 / 403.
 
-    Mirrors the password-reset / unlock routes: tenant-scoped lookup, then
-    ``require_manageable_user`` (a platform account's credentials are platform authority).
-    One rule more, because a badge plus a PIN the caller chose is a sign-on: a Manager may
-    not set or clear an ADMIN's PIN -- that would let a Manager sign in as the Admin.
+    Mirrors the password-reset / unlock routes: tenant-scoped lookup (another company's user
+    is a 404, never a 403), then ``require_manageable_user`` (a platform account's credentials
+    are platform authority). One rule more, because a badge plus a PIN the caller chose is a
+    sign-on: a MANAGER manages PINs only for Operator / Supervisor / Shipping / Viewer
+    accounts (``_MANAGER_FLOOR_PIN_TARGET_ROLES``), so a Manager can never take over an
+    Admin's, another Manager's or a Quality user's badge identity. An Admin (or a stored
+    platform principal) manages any tenant account's PIN.
     """
     user = db.query(User).filter(User.id == user_id, User.company_id == company_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     require_manageable_user(current_user, user)
     actor_is_admin = current_user.is_superuser or current_user.role in (UserRole.ADMIN, UserRole.PLATFORM_ADMIN)
-    if user.role == UserRole.ADMIN and not actor_is_admin:
-        raise HTTPException(status_code=403, detail=_ADMIN_FLOOR_PIN_DETAIL)
+    if not actor_is_admin and (user.is_superuser or user.role not in _MANAGER_FLOOR_PIN_TARGET_ROLES):
+        raise HTTPException(status_code=403, detail=_MANAGER_FLOOR_PIN_SCOPE_DETAIL)
     return user
 
 
@@ -1340,8 +1367,10 @@ def set_user_floor_pin(
 
     Only a person signed in to the app does this: ANY API token is refused **403** before
     anything is read, and the route is not an MCP tool. The target must be in the active
-    company (**404** otherwise); a platform account needs a platform administrator, and an
-    Admin's PIN needs an Admin (**403**). Recorded as a required ``FLOOR_PIN_SET`` audit row
+    company (**404** otherwise); a platform account needs a platform administrator, and a
+    Manager may manage only Operator, Supervisor, Shipping and Viewer accounts -- an Admin's,
+    a Manager's or a Quality user's PIN needs an Admin (**403**). Recorded as a required
+    ``FLOOR_PIN_SET`` audit row
     -- never the PIN or its hash -- in the same transaction (**503**, nothing saved, if it
     cannot be written). Returns the user record with ``has_floor_pin`` / ``floor_pin_set_at``.
     """
@@ -1395,8 +1424,9 @@ def clear_user_floor_pin(
     lock state is returned unchanged and nothing is recorded.
 
     Same authority as setting a PIN: no API token (**403**), not an MCP tool, the target in
-    the active company (**404**), platform accounts need a platform administrator and an
-    Admin's PIN an Admin (**403**). Recorded as a required ``FLOOR_PIN_CLEARED`` audit row
+    the active company (**404**), platform accounts need a platform administrator, and a
+    Manager may manage only Operator, Supervisor, Shipping and Viewer accounts (**403**).
+    Recorded as a required ``FLOOR_PIN_CLEARED`` audit row
     (**503**, nothing saved, if it cannot be written). Returns the user record.
     """
     _refuse_api_token_floor_pin_admin(current_user)
@@ -1422,6 +1452,62 @@ def clear_user_floor_pin(
             resource_identifier=identifier,
             description=f"Cleared floor PIN for user {identifier}",
             extra_data={"source": "admin_clear", "had_pin": had_pin, "cleared_pin_lockout": cleared_lock},
+        )
+    db.refresh(user)
+    return user
+
+
+@router.post(
+    "/{user_id}/floor-pin/unlock",
+    response_model=UserResponse,
+    summary="Unlock a user's floor PIN after too many wrong tries",
+)
+def unlock_user_floor_pin(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(_FLOOR_PIN_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Lift a floor-PIN lockout early, keeping the PIN (Admin or Manager).
+
+    Five wrong PINs lock a badge's PIN for 15 minutes (``floor_pin_locked_until`` on the user
+    record). This clears the lock and the wrong-PIN count so the person can sign in with
+    their existing PIN right away; the PIN itself is unchanged (to replace it, use
+    ``PUT /users/{user_id}/floor-pin``). A no-op when no lock is in force: **200** with the
+    user record, nothing written, nothing recorded. The password-login lockout is separate
+    (``POST /users/{user_id}/unlock``).
+
+    Same authority as setting a PIN: no API token (**403**), not an MCP tool, the target in
+    the active company (**404**), platform accounts need a platform administrator, and a
+    Manager may manage only Operator, Supervisor, Shipping and Viewer accounts (**403**).
+    Recorded as a required ``FLOOR_PIN_UNLOCKED`` audit row (**503**, nothing saved, if it
+    cannot be written). Returns the user record.
+    """
+    _refuse_api_token_floor_pin_admin(current_user)
+    user = _floor_pin_target_or_404(db, user_id, company_id, current_user)
+
+    now = datetime.utcnow()
+    prior_locked_until = user.floor_pin_locked_until
+    if prior_locked_until is None or prior_locked_until <= now:
+        return user
+
+    prior_attempts = user.floor_pin_failed_attempts or 0
+    identifier = user.employee_id or user.email
+    with atomic_security_write(db):
+        user.floor_pin_failed_attempts = 0
+        user.floor_pin_locked_until = None
+        audit.log_required(
+            action="FLOOR_PIN_UNLOCKED",
+            resource_type="user",
+            resource_id=user.id,
+            resource_identifier=identifier,
+            description=f"Cleared floor PIN lockout for user {identifier}",
+            extra_data={
+                "source": "admin_unlock",
+                "floor_pin_locked_until": prior_locked_until.isoformat(),
+                "floor_pin_failed_attempts": prior_attempts,
+            },
         )
     db.refresh(user)
     return user

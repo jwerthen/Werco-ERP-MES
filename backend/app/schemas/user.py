@@ -221,7 +221,7 @@ class EmployeeLoginRequest(BaseModel):
     )
     # Floor PIN (AS9100D 8.5.2): send it after a 401 ``floor_pin_required`` challenge. Ignored
     # for a user with no PIN. ``POST /auth/employee-logout`` reuses this body and ignores it.
-    pin: Optional[FloorPinInput] = None
+    pin: Optional[FloorPinInput] = Field(None, repr=False)
 
 
 class Token(BaseModel):

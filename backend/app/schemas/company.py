@@ -104,11 +104,14 @@ class CompanyFloorPinPolicyUpdate(BaseModel):
 
 
 class CompanyFloorPinPolicyResponse(CompanyResponse):
-    """The company record after the policy change, plus how many active users have no PIN yet."""
+    """The company record after the policy change, plus how many badge users have no PIN yet."""
 
     users_without_pin: int = Field(
         ...,
-        description="Active users of the company with no floor PIN (refused at badge sign-on while the policy is on)",
+        description=(
+            "Active users of the company with an employee ID and no floor PIN, platform accounts excluded "
+            "(refused at badge sign-on while the policy is on)"
+        ),
     )
 
 

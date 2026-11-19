@@ -29,7 +29,11 @@ import {
 } from '../components/ui';
 import useUnsavedChanges from '../hooks/useUnsavedChanges';
 import { importTimeoutMessage } from '../utils/apiError';
-import FloorPinDialog, { FloorPinCell, isFloorPinLocked } from '../components/users/FloorPinDialog';
+import FloorPinDialog, {
+  FloorPinCell,
+  floorPinManageRefusal,
+  isFloorPinLocked,
+} from '../components/users/FloorPinDialog';
 
 interface UserData {
   id: number;
@@ -45,15 +49,17 @@ interface UserData {
   created_at: string;
   last_login?: string;
   locked_until?: string | null;
+  is_superuser?: boolean;
   // Floor PIN (badge sign-in second factor) — state only, never the PIN.
   has_floor_pin?: boolean;
   floor_pin_set_at?: string | null;
   floor_pin_locked_until?: string | null;
 }
 
-// Floor PINs are set/cleared by Admin AND Manager (PUT/DELETE /users/{id}/floor-pin),
-// unlike every other user write here (Admin only). Platform principals pass the
-// server's role gate too.
+// Floor PINs are managed by Admin AND Manager (PUT/DELETE /users/{id}/floor-pin, POST
+// .../unlock), unlike every other user write here (Admin only) — a Manager only for
+// Operator / Supervisor / Shipping / Viewer accounts (`floorPinManageRefusal` per row).
+// Platform principals pass the server's role gate too.
 const FLOOR_PIN_MANAGER_ROLES: ReadonlySet<UserRole> = new Set<UserRole>(['admin', 'manager', 'platform_admin']);
 
 const floorPinLabel = (user: UserData): string =>
@@ -155,9 +161,12 @@ export default function Users() {
     currentUser?.role === 'admin' || currentUser?.role === 'platform_admin' || currentUser?.is_superuser === true;
   const canManageFloorPins =
     currentUser?.is_superuser === true || (!!currentUser?.role && FLOOR_PIN_MANAGER_ROLES.has(currentUser.role));
-  // The user whose floor PIN dialog is open (null = closed).
-  const [floorPinUser, setFloorPinUser] = useState<UserData | null>(null);
+  // The user whose floor PIN dialog is open (null = closed). Held by id and read from
+  // the loaded list, so a reload (after an unlock, which keeps the dialog open) shows
+  // the server's new state rather than the snapshot the dialog opened with.
+  const [floorPinUserId, setFloorPinUserId] = useState<number | null>(null);
   const [users, setUsers] = useState<UserData[]>([]);
+  const floorPinUser = floorPinUserId == null ? null : (users.find((u) => u.id === floorPinUserId) ?? null);
   const [pendingUsers, setPendingUsers] = useState<UserData[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -257,7 +266,13 @@ export default function Users() {
         header: 'Floor PIN',
         sortable: true,
         accessor: floorPinLabel,
-        render: (u) => <FloorPinCell user={u} onManage={() => setFloorPinUser(u)} />,
+        render: (u) => (
+          <FloorPinCell
+            user={u}
+            onManage={() => setFloorPinUserId(u.id)}
+            manageRefusal={floorPinManageRefusal(currentUser, u)}
+          />
+        ),
       });
     }
 
@@ -320,7 +335,7 @@ export default function Users() {
     }
 
     return cols;
-  }, [canManageUsers, canManageFloorPins]);
+  }, [canManageUsers, canManageFloorPins, currentUser]);
 
   const loadUsers = useCallback(async () => {
     setLoadError(false);
@@ -748,7 +763,13 @@ export default function Users() {
                     {
                       label: 'Floor PIN',
                       fullWidth: true,
-                      value: <FloorPinCell user={user} onManage={() => setFloorPinUser(user)} />,
+                      value: (
+                        <FloorPinCell
+                          user={user}
+                          onManage={() => setFloorPinUserId(user.id)}
+                          manageRefusal={floorPinManageRefusal(currentUser, user)}
+                        />
+                      ),
                     },
                   ]
                 : []),
@@ -815,7 +836,7 @@ export default function Users() {
         )}
       />
 
-      <FloorPinDialog user={floorPinUser} onClose={() => setFloorPinUser(null)} onChanged={loadUsers} />
+      <FloorPinDialog user={floorPinUser} onClose={() => setFloorPinUserId(null)} onChanged={loadUsers} />
 
       {/* Add/Edit User Modal */}
       <Modal

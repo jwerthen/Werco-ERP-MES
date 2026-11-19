@@ -1,6 +1,7 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
 import KioskKeypad from '../kiosk/KioskKeypad';
 import { FLOOR_PIN_MAX_LENGTH, FLOOR_PIN_MIN_LENGTH, isValidFloorPinFormat } from '../../services/badgeSignOn';
+import { isScanBurst, SCAN_TRAILING_QUIET_MS } from '../../utils/scanBurst';
 
 export interface FloorPinPadProps {
   /**
@@ -25,6 +26,12 @@ export interface FloorPinPadProps {
 
 const RANGE_TEXT = `${FLOOR_PIN_MIN_LENGTH}–${FLOOR_PIN_MAX_LENGTH} digits`;
 
+/** Shown when a badge scan landed in the PIN field and was thrown away. */
+export const SCAN_DISCARDED_HINT = {
+  kiosk: 'Badge scanned — enter your PIN on the keypad.',
+  desk: 'Badge scanned — type your PIN instead.',
+} as const;
+
 /**
  * The floor-PIN pad shown when a badge sign-on answers `floor_pin_required`
  * (AS9100D 8.5.2 — the PIN is what makes the badge holder the person who
@@ -33,6 +40,13 @@ const RANGE_TEXT = `${FLOOR_PIN_MIN_LENGTH}–${FLOOR_PIN_MAX_LENGTH} digits`;
  *
  * One component for both surfaces so the two cannot drift: the kiosk wraps it in
  * `KioskFloorPinOverlay`, the desk Login page renders it in place of its form.
+ *
+ * A badge scan is never a PIN. While the pad is up the field has focus and the
+ * page's badge capture is paused, so a keyboard-wedge scan would type its digits
+ * and Enter here and submit them against the waiting operator (five of those lock
+ * them out). Keystrokes are timed (`isScanBurst`): a burst faster than a person
+ * types is discarded — the field is cleared, nothing is submitted, the rest of the
+ * burst and its Enter are swallowed, and a hint says to enter the PIN by hand.
  */
 export default function FloorPinPad({
   variant,
@@ -46,7 +60,13 @@ export default function FloorPinPad({
 }: FloorPinPadProps) {
   const [pin, setPin] = useState('');
   const [formatError, setFormatError] = useState<string | null>(null);
+  // A scan-like burst was just discarded: show the hint until the next keystroke.
+  const [scanDiscarded, setScanDiscarded] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const formRef = useRef<HTMLFormElement | null>(null);
+  // Times (ms) of the keystrokes in the current entry, and the end of a discarded burst.
+  const keyTimesRef = useRef<number[]>([]);
+  const swallowUntilRef = useRef(0);
   const generatedTitleId = useId();
   const headingId = titleId ?? generatedTitleId;
   const inputId = useId();
@@ -58,15 +78,55 @@ export default function FloorPinPad({
   useEffect(() => {
     setPin('');
     setFormatError(null);
+    setScanDiscarded(false);
+    keyTimesRef.current = [];
     inputRef.current?.focus();
   }, [attempt]);
 
-  const shownError = formatError ?? error;
+  // Time every printable key and Enter that reaches the pad — in the field or on a
+  // keypad button (a scanner's Enter on a focused key button would press it). Capture
+  // phase on the form, so a burst is caught before the field or a button acts on it.
+  useEffect(() => {
+    const form = formRef.current;
+    if (!form) return undefined;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.ctrlKey || event.metaKey || event.altKey || event.isComposing) return;
+      const isEnter = event.key === 'Enter';
+      if (!isEnter && event.key.length !== 1) return;
+      const now = Date.now();
+      if (now <= swallowUntilRef.current) {
+        // The tail of a burst already thrown away, its Enter included.
+        event.preventDefault();
+        swallowUntilRef.current = now + SCAN_TRAILING_QUIET_MS;
+        return;
+      }
+      const times = [...keyTimesRef.current, now];
+      if (isScanBurst(times)) {
+        event.preventDefault();
+        swallowUntilRef.current = now + SCAN_TRAILING_QUIET_MS;
+        keyTimesRef.current = [];
+        setPin('');
+        setFormatError(null);
+        setScanDiscarded(true);
+        return;
+      }
+      keyTimesRef.current = isEnter ? [] : times;
+    };
+    form.addEventListener('keydown', handleKeyDown, true);
+    return () => form.removeEventListener('keydown', handleKeyDown, true);
+  }, [variant]);
+
+  const shownError = scanDiscarded ? null : (formatError ?? error);
+  const notice = scanDiscarded ? SCAN_DISCARDED_HINT[variant] : shownError;
 
   const changePin = (next: string) => {
     if (verifying) return;
-    setPin(next.replace(/\D/g, '').slice(0, FLOOR_PIN_MAX_LENGTH));
+    const digits = next.replace(/\D/g, '').slice(0, FLOOR_PIN_MAX_LENGTH);
+    // An emptied field starts a fresh entry for the scan timing.
+    if (!digits) keyTimesRef.current = [];
+    setPin(digits);
     setFormatError(null);
+    setScanDiscarded(false);
   };
 
   const handleSubmit = (event?: React.FormEvent) => {
@@ -81,13 +141,13 @@ export default function FloorPinPad({
     onSubmit(pin);
   };
 
-  const describedBy = shownError ? `${hintId} ${errorId}` : hintId;
+  const describedBy = notice ? `${hintId} ${errorId}` : hintId;
 
   if (kiosk) {
     return (
       // Sized to fit a 1024x768 landscape tablet with the error showing: 58px keys
       // (still well over the 44px touch minimum) rather than the 74px sign-in keys.
-      <form onSubmit={handleSubmit} className="flex flex-col gap-3 p-5" aria-busy={verifying}>
+      <form ref={formRef} onSubmit={handleSubmit} className="flex flex-col gap-3 p-5" aria-busy={verifying}>
         <div>
           <p className="font-mono text-[11px] uppercase tracking-[0.2em] text-fd-blue">Badge sign-in</p>
           <h2 id={headingId} className="mt-2 text-2xl font-bold leading-tight text-fd-ink">
@@ -126,13 +186,15 @@ export default function FloorPinPad({
           {verifying ? 'Checking PIN…' : `${RANGE_TEXT} · then Sign in`}
         </p>
 
-        {shownError && (
+        {notice && (
           <div
             id={errorId}
             role="alert"
-            className="rounded-[4px] border border-fd-red bg-fd-red/10 px-4 py-2.5 text-center text-lg font-semibold text-fd-red"
+            className={`rounded-[4px] border px-4 py-2.5 text-center text-lg font-semibold ${
+              scanDiscarded ? 'border-fd-amber bg-fd-amber/10 text-fd-amber' : 'border-fd-red bg-fd-red/10 text-fd-red'
+            }`}
           >
-            {shownError}
+            {notice}
           </div>
         )}
 
@@ -168,7 +230,7 @@ export default function FloorPinPad({
   }
 
   return (
-    <form onSubmit={handleSubmit} className="flex flex-col gap-[18px]" aria-busy={verifying}>
+    <form ref={formRef} onSubmit={handleSubmit} className="flex flex-col gap-[18px]" aria-busy={verifying}>
       <div>
         <h3 id={headingId} className="text-lg font-semibold text-fd-ink">
           Enter your PIN
@@ -184,9 +246,13 @@ export default function FloorPinPad({
         </p>
       </div>
 
-      {shownError && (
-        <div id={errorId} role="alert" className="alert alert-danger animate-fade-in text-sm">
-          <span>{shownError}</span>
+      {notice && (
+        <div
+          id={errorId}
+          role="alert"
+          className={`alert ${scanDiscarded ? 'alert-warning' : 'alert-danger'} animate-fade-in text-sm`}
+        >
+          <span>{notice}</span>
         </div>
       )}
 

@@ -74,8 +74,8 @@ EGRESS_SWITCH_OPERATIONS: FrozenSet[Tuple[str, str]] = frozenset(
     }
 )
 
-# And the badge-sign-on credential writes (AS9100D 8.5.2): setting or clearing a user's floor
-# PIN and turning the company's "require a PIN for badge sign-in" policy on or off. Credential
+# And the badge-sign-on credential writes (AS9100D 8.5.2): setting, clearing or unlocking a
+# user's floor PIN and turning the company's "require a PIN for badge sign-in" policy on or off. Credential
 # administration is a person's act: the routes refuse every API token
 # (``app.core.credentials.API_TOKEN_FLOOR_PIN_ADMIN``), and a person's own JWT would still reach
 # them through a tool call -- an agent handling a PIN, or switching the sign-on policy -- so none
@@ -85,6 +85,7 @@ FLOOR_PIN_OPERATIONS: FrozenSet[Tuple[str, str]] = frozenset(
     {
         ("PUT", "/api/v1/users/{user_id}/floor-pin"),
         ("DELETE", "/api/v1/users/{user_id}/floor-pin"),
+        ("POST", "/api/v1/users/{user_id}/floor-pin/unlock"),
         ("PUT", "/api/v1/companies/me/floor-pin-policy"),
     }
 )

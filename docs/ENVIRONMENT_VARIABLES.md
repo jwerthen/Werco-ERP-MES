@@ -65,7 +65,7 @@ SUPABASE_DB_PASSWORD=<your-supabase-db-pass>
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `SECRET_KEY` | Yes* | - | JWT signing key. Must be at least 32 characters. Generate with: `python -c "import secrets; print(secrets.token_urlsafe(64))"`. Also signs the display, signin, kiosk and long-lived **API** tokens — rotating it invalidates every API token at once (by design; re-mint them) |
-| `REFRESH_TOKEN_SECRET_KEY` | Yes* | - | Separate key for refresh tokens. Use different value from SECRET_KEY |
+| `REFRESH_TOKEN_SECRET_KEY` | Yes* | - | Separate key for refresh tokens. Use different value from SECRET_KEY. It signs refresh tokens only, so rotating it signs every person out once (each refresh token is refused) while access, API, wallboard display and kiosk tokens keep working; the floor-PIN rollout relies on this ([DEPLOYMENT.md → migration 130](DEPLOYMENT.md#floor-pin-for-badge-sign-on-migration-130)) |
 | `ALGORITHM` | No | `HS256` | JWT algorithm. Options: HS256, HS384, HS512 |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | No | `15` | Access token lifetime in minutes |
 | `REFRESH_TOKEN_EXPIRE_DAYS` | No | `7` | Refresh token lifetime in days |
@@ -794,6 +794,17 @@ AWS_REGION=us-east-1
 > Compare it to the SHA on `main`. (The neighboring `version` field is a hardcoded
 > `1.0.0` kept for backward compatibility with existing monitors; it has never
 > distinguished one deploy from another.)
+
+> **What Sentry never receives.** `init_sentry` (`app/core/observability.py`, used by the API and
+> the worker) hands `sentry_sdk.init` an `EventScrubber` with `recursive=True`, whose denylist is
+> the SDK default (passwords, tokens, authorization headers, cookies, ...) plus
+> `SENTRY_EXTRA_DENYLIST`: `pin`, `new_pin` and `floor_pin` (a floor PIN, and a station or
+> visitor-tablet PIN) and the password names the default misses, `plain_password`, `new_password`,
+> `current_password` and `admin_password`. A key is matched exactly (case-insensitive) at any depth
+> of a request body, an `extra` or a frame's local variables. The floor-PIN request fields are also
+> declared `repr=False`, so a request model's repr never carries the PIN. This is not a setting: it
+> applies whenever `SENTRY_DSN` is set, and `backend/tests/test_sentry_observability_config.py`
+> pins it.
 
 ### External Services
 

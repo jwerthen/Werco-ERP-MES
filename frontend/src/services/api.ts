@@ -4361,7 +4361,8 @@ class ApiService {
   }
 
   /**
-   * Set or reset a user's floor PIN (badge sign-in second factor). Admin/Manager;
+   * Set or reset a user's floor PIN (badge sign-in second factor). Admin, or a Manager
+   * for Operator / Supervisor / Shipping / Viewer accounts;
    * the server refuses 422 with a plain message naming the broken rule (never the
    * PIN), and clears the PIN's failed-attempt count and lock. Returns the user.
    */
@@ -4370,9 +4371,14 @@ class ApiService {
     return response.data;
   }
 
-  /** Remove a user's floor PIN (and its lock). Admin/Manager. */
+  /** Remove a user's floor PIN (and its lock). Same roles as `setUserFloorPin`. */
   async clearUserFloorPin(userId: number): Promise<void> {
     await this.api.delete(`/users/${userId}/floor-pin`);
+  }
+
+  /** Lift a floor-PIN lock (5 wrong PINs) without changing the PIN. Same roles as `setUserFloorPin`. */
+  async unlockUserFloorPin(userId: number): Promise<void> {
+    await this.api.post(`/users/${userId}/floor-pin/unlock`);
   }
 
   // Customers

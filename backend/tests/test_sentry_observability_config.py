@@ -226,6 +226,47 @@ class TestSentryInit:
 
         init_sentry()  # must not raise
 
+    def test_init_hands_the_sdk_the_credential_scrubber(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """FastApiIntegration attaches JSON request bodies to error events: without a scrubber
+        whose denylist names ``pin``, a floor PIN (or a station PIN) reaches Sentry."""
+        from sentry_sdk.scrubber import DEFAULT_DENYLIST, EventScrubber
+
+        scrubber = self._captured_init(monkeypatch)["event_scrubber"]
+        assert isinstance(scrubber, EventScrubber)
+        assert scrubber.recursive is True
+        assert {"pin", "new_pin", "floor_pin"} <= set(scrubber.denylist)
+        assert {key.lower() for key in DEFAULT_DENYLIST} <= set(scrubber.denylist), "the SDK defaults are kept"
+
+    def test_the_configured_scrubber_removes_a_nested_pin(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import json
+
+        from sentry_sdk.utils import AnnotatedValue
+
+        scrubber = self._captured_init(monkeypatch)["event_scrubber"]
+        secret = "830416"
+        event: Dict[str, Any] = {
+            "request": {
+                "data": {
+                    "employee_id": "FP-0001",
+                    "pin": secret,
+                    "station": {"label": "Weld 1", "unlock": {"floor_pin": secret}},
+                    "attempts": [{"new_pin": secret}, {"PIN": secret}],
+                }
+            },
+            "extra": {"body": {"nested": {"pin": secret}}},
+            "exception": {
+                "values": [{"stacktrace": {"frames": [{"vars": {"pin": secret, "plain_password": secret}}]}}]
+            },
+        }
+
+        scrubber.scrub_event(event)
+
+        rendered = json.dumps(event, default=lambda value: value.value if isinstance(value, AnnotatedValue) else None)
+        assert secret not in rendered, rendered
+        # What is not a credential survives.
+        assert event["request"]["data"]["employee_id"] == "FP-0001"
+        assert event["request"]["data"]["station"]["label"] == "Weld 1"
+
     def test_no_dsn_means_no_init(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import sentry_sdk
 

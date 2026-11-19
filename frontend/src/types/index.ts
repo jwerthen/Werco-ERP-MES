@@ -75,12 +75,12 @@ export interface Company {
 
 /**
  * Response from PUT /companies/me/floor-pin-policy: the updated company (so
- * `require_floor_pin` is the server's word) plus how many active users still have
- * no PIN — the people a policy turned ON will refuse at the kiosk.
+ * `require_floor_pin` is the server's word) plus how many active badge users still
+ * have no PIN — the people a policy turned ON will refuse at the kiosk.
  */
 export interface FloorPinPolicyResponse extends Partial<Company> {
   require_floor_pin: boolean;
-  /** Active users of the company with no floor PIN. Absent on an older backend. */
+  /** Active badge-capable users of the company with no floor PIN. Absent on an older backend. */
   users_without_pin?: number | null;
 }
 

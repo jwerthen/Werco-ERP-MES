@@ -100,7 +100,7 @@ class KioskBadgeTokenRequest(BaseModel):
     employee_id: str = Field(..., min_length=1, max_length=50, description="Badge / employee id scanned at the kiosk")
     # Floor PIN (AS9100D 8.5.2): send it with the same badge after a 401 ``floor_pin_required``
     # challenge. Ignored for a badge whose user has no PIN.
-    pin: Optional[FloorPinInput] = None
+    pin: Optional[FloorPinInput] = Field(None, repr=False)
 
 
 class KioskBadgeUser(BaseModel):

@@ -20,6 +20,37 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Keys Sentry must never send, on top of the SDK's ``DEFAULT_DENYLIST`` (which already covers
+# ``password``, ``token``, ``authorization``, cookies ...). The SDK matches a key EXACTLY
+# (case-insensitive), so every name a credential travels under is listed:
+#   * a floor PIN (badge sign-on, the admin set route) and a station / visitor-tablet PIN --
+#     ``pin``; ``new_pin`` / ``floor_pin`` for any route that names it so;
+#   * the password-bearing names the default misses: ``verify_password``'s ``plain_password``
+#     frame variable (a floor PIN passes through it too) and the change / reset / registration
+#     bodies' ``new_password`` / ``current_password`` / ``admin_password``.
+# FastApiIntegration attaches JSON request bodies to error events and the SDK records frame
+# local variables, so without these a PIN reaches Sentry in clear text.
+SENTRY_EXTRA_DENYLIST = (
+    "pin",
+    "new_pin",
+    "floor_pin",
+    "plain_password",
+    "new_password",
+    "current_password",
+    "admin_password",
+)
+
+
+def build_event_scrubber() -> Any:
+    """The ``EventScrubber`` every process hands ``sentry_sdk.init``.
+
+    ``recursive=True`` so a denylisted key is filtered at ANY depth of a request body, an
+    ``extra`` or a frame's variables, not only at the top level.
+    """
+    from sentry_sdk.scrubber import DEFAULT_DENYLIST, EventScrubber
+
+    return EventScrubber(denylist=DEFAULT_DENYLIST + list(SENTRY_EXTRA_DENYLIST), recursive=True)
+
 
 def init_sentry(
     component: str = "api",
@@ -56,6 +87,10 @@ def init_sentry(
         sentry_sdk.init(
             dsn=settings.SENTRY_DSN,
             integrations=integrations,
+            # Credentials never leave the process: request bodies, extras and frame variables
+            # are scrubbed of every key in the SDK default denylist plus SENTRY_EXTRA_DENYLIST
+            # (the floor PIN above all), at any depth.
+            event_scrubber=build_event_scrubber(),
             # PERFORMANCE TRANSACTIONS ONLY -- this is not an error-capture switch. Errors
             # are governed by `sample_rate` (left at its 1.0 default), so every exception is
             # still reported at any value of this. Defaults to 0.1; see the comment on

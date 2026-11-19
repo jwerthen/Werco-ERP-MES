@@ -3,6 +3,7 @@ Company self-registration and self-management endpoints.
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.api.audit_guard import required_audit
@@ -277,10 +278,23 @@ def update_my_company_sms_egress(
 
 
 def _users_without_floor_pin(db: Session, company_id: int) -> int:
-    """Active users of ``company_id`` with no floor PIN -- refused at badge sign-on while the policy is on."""
+    """Badge users of ``company_id`` with no floor PIN -- refused at badge sign-on while the policy is on.
+
+    Counts active accounts that carry an employee ID (a badge to sign in with) and are not
+    platform principals (a superuser / ``platform_admin`` is Werco oversight, not a floor badge
+    this company sets a PIN for).
+    """
     return (
         db.query(User)
-        .filter(User.company_id == company_id, User.is_active == True, User.floor_pin_hash.is_(None))  # noqa: E712
+        .filter(
+            User.company_id == company_id,
+            User.is_active == True,  # noqa: E712
+            User.employee_id.isnot(None),
+            User.employee_id != "",
+            User.floor_pin_hash.is_(None),
+            or_(User.is_superuser == False, User.is_superuser.is_(None)),  # noqa: E712
+            User.role != UserRole.PLATFORM_ADMIN,
+        )
         .count()
     )
 
@@ -303,7 +317,8 @@ def update_my_company_floor_pin_policy(
     and the crew-station badge mint) by a user who has no floor PIN is refused **403**
     ``floor_pin_not_set``; users who have a PIN are challenged for it either way. Turning it
     on while some active users still have no PIN is allowed -- the answer's
-    ``users_without_pin`` says how many would now be refused, so set their PINs first
+    ``users_without_pin`` (active badge users, platform accounts excluded) says how many
+    would now be refused, so set their PINs first
     (``PUT /users/{user_id}/floor-pin``). Off by default.
 
     A person's act: ANY API token is refused **403** before anything is read, and the route is

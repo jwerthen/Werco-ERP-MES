@@ -30,7 +30,7 @@ from app.services.export_safety import sanitize_csv_row
 from app.services.import_service import ImportFileError, parse_import_file
 
 ENTITIES = ('users', 'parts', 'materials', 'customers', 'vendors', 'work-centers', 'work-orders', 'purchase-orders')
-SENSITIVE_COLUMNS = {'password', 'default_password', 'hashed_password'}
+SENSITIVE_COLUMNS = {'password', 'default_password', 'hashed_password', 'floor_pin_hash'}
 ROW_PAGE = 200
 COMMIT_GROUP_LIMIT = 25
 

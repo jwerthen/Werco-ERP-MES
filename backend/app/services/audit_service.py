@@ -349,12 +349,16 @@ class AuditService:
         # For SQLAlchemy models or other objects
         return str(value)
 
-    def _model_to_dict(self, model: Any, exclude_fields: set = None) -> Dict:
-        """Convert SQLAlchemy model to dictionary."""
+    # Credential columns no audit row ever carries, whatever a caller passes as
+    # ``exclude_fields``: the password, its hash, and the floor PIN's hash (migration 130).
+    CREDENTIAL_FIELDS = frozenset({"hashed_password", "password", "floor_pin_hash"})
+
+    def _model_to_dict(self, model: Any, exclude_fields: Optional[set] = None) -> Dict:
+        """Convert SQLAlchemy model to dictionary (never a credential column, see ``CREDENTIAL_FIELDS``)."""
         if model is None:
             return {}
 
-        exclude = exclude_fields or {"hashed_password", "password"}
+        exclude = self.CREDENTIAL_FIELDS | set(exclude_fields or ())
 
         if hasattr(model, "__table__"):
             return {

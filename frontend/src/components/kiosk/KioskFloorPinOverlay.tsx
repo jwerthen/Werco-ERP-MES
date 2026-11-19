@@ -1,4 +1,4 @@
-import React, { useEffect, useId, useRef } from 'react';
+import React, { useEffect, useId, useLayoutEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import FloorPinPad from '../auth/FloorPinPad';
 import type { FloorPinPromptState } from '../../hooks/useFloorPinPrompt';
@@ -35,10 +35,18 @@ export default function KioskFloorPinOverlay({ prompt, onSubmit, onCancel, badge
   const verifying = prompt?.verifying ?? false;
   const stateRef = useRef({ verifying, onCancel });
   stateRef.current = { verifying, onCancel };
+  const restoreFocusRef = useRef<HTMLElement | null>(null);
+
+  // Record where focus was BEFORE the pad takes it. A layout effect runs before every
+  // passive effect, including FloorPinPad's mount effect that focuses the PIN field, so
+  // this sees the element the operator was on; a passive effect here would see the field.
+  useLayoutEffect(() => {
+    if (open) restoreFocusRef.current = document.activeElement as HTMLElement | null;
+  }, [open]);
 
   useEffect(() => {
     if (!open) return undefined;
-    const previouslyFocused = document.activeElement as HTMLElement | null;
+    const previouslyFocused = restoreFocusRef.current;
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {

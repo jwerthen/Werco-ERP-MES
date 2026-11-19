@@ -8,9 +8,9 @@
  * Users.
  *
  * Non-optimistic, unlike the sibling egress switches: the write answers with
- * `users_without_pin` — the active users a policy turned ON will refuse at badge sign-in —
- * and that number is the point of the screen, so the page shows only what the
- * server returned. Turning the policy ON asks first (it can stop people signing
+ * `users_without_pin` — the active badge users a policy turned ON will refuse — and
+ * that number is the point of the screen, so the page shows only what the server
+ * returned. Turning the policy ON asks first (it can stop people signing
  * in); turning it OFF is immediate.
  *
  * RBAC: AdminSettings is route-gated on `admin:settings`; the write
@@ -164,7 +164,7 @@ export default function FloorPinPolicyTab() {
             <ExclamationTriangleIcon className="h-5 w-5 text-amber-500 flex-shrink-0 mt-0.5" aria-hidden="true" />
             <div className="text-sm">
               <p className="font-semibold text-amber-400">
-                {usersWithoutPin} active {usersWithoutPin === 1 ? 'user has' : 'users have'} no floor PIN
+                {usersWithoutPin} active badge {usersWithoutPin === 1 ? 'user has' : 'users have'} no floor PIN
               </p>
               <p className="text-surface-500 mt-0.5">
                 {usersWithoutPin === 1 ? 'That person is' : 'They are'} refused at the kiosk, the crew station and Badge
@@ -179,7 +179,7 @@ export default function FloorPinPolicyTab() {
         )}
         {required && usersWithoutPin === 0 && (
           <p role="status" className="mt-4 text-sm text-surface-500">
-            Every active user has a floor PIN.
+            Every active badge user has a floor PIN.
           </p>
         )}
       </section>

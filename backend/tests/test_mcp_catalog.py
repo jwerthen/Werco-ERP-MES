@@ -150,8 +150,8 @@ class TestMembership:
         # List writes (a supplier-approval decision is a person's judgment), bulk
         # release (release_work_order stays the agent's only release door, one job per
         # call), the five comment / watcher writes (owner decision 2026-11-16: a
-        # comment is a person's own words) and the three badge-sign-on credential writes
-        # (AS9100D 8.5.2: setting or clearing a floor PIN and the company's PIN policy are a
+        # comment is a person's own words) and the four badge-sign-on credential writes
+        # (AS9100D 8.5.2: setting, clearing or unlocking a floor PIN and the company's PIN policy are a
         # person's act) -- nothing else.
         assert set(EXCLUDED_OPERATIONS) == {
             ("POST", "/api/v1/work-orders/import"),
@@ -178,6 +178,7 @@ class TestMembership:
             ("DELETE", "/api/v1/watchers"),
             ("PUT", "/api/v1/users/{user_id}/floor-pin"),
             ("DELETE", "/api/v1/users/{user_id}/floor-pin"),
+            ("POST", "/api/v1/users/{user_id}/floor-pin/unlock"),
             ("PUT", "/api/v1/companies/me/floor-pin-policy"),
         }
         assert EGRESS_SWITCH_OPERATIONS <= set(EXCLUDED_OPERATIONS)
