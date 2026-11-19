@@ -3153,6 +3153,20 @@ class ApiService {
     return response.data;
   }
 
+  /**
+   * Record an NCR's re-verification of reworked / repaired product (Admin / Manager /
+   * Quality). The server stamps who and when and returns the updated NCR; re-recording
+   * overwrites the last one. Server-gated (closed NCR or a disposition other than rework /
+   * repair 409, API token 403), so callers stay non-optimistic.
+   */
+  async recordNcrReverification(
+    ncrId: number,
+    data: import('../types/quality').NCRReverificationRequest
+  ): Promise<import('../types/quality').NCRRecord> {
+    const response = await this.api.post(`/quality/ncr/${ncrId}/reverification`, data);
+    return response.data;
+  }
+
   async getCARs(params?: { status?: string }) {
     const rows: any[] = [];
     for (let skip = 0; ; skip += 500) {
@@ -3181,6 +3195,20 @@ class ApiService {
    */
   async approveCARQuality(id: number): Promise<import('../types/quality').CARRecord> {
     const response = await this.api.post(`/quality/car/${id}/quality-approval`);
+    return response.data;
+  }
+
+  /**
+   * Record a CAR's effectiveness verification (Admin / Manager / Quality). The evidence is
+   * saved as `effectiveness_check`; the server stamps who and when, and `not_effective`
+   * returns the CAR to Corrective Action. Server-gated (not in Verification 409, API token
+   * 403), so callers stay non-optimistic and show the returned record.
+   */
+  async recordCarEffectiveness(
+    carId: number,
+    data: import('../types/quality').CAREffectivenessRequest
+  ): Promise<import('../types/quality').CARRecord> {
+    const response = await this.api.post(`/quality/car/${carId}/effectiveness`, data);
     return response.data;
   }
 

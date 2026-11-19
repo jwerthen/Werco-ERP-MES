@@ -1,12 +1,114 @@
 /**
- * Quality records — the CAR form fields, the FAI record and the FAI log of record.
+ * Quality records — the NCR record, the CAR form fields, the FAI record and the FAI
+ * log of record.
  *
  * Shapes mirror the backend response schemas in `backend/app/schemas/quality.py`
- * (`CARResponse`, `FAIResponse`, `FAICharacteristicResponse`, `FAILogRow`). Money
- * columns are `Numeric(12, 2)` serialized by Pydantic as decimal STRINGS, so the
- * CAR cost fields are typed `string | number` and never summed client-side — the
- * server returns `cost_total`.
+ * (`NCRResponse`, `CARResponse`, `FAIResponse`, `FAICharacteristicResponse`,
+ * `FAILogRow`). Money columns are `Numeric(12, 2)` serialized by Pydantic as decimal
+ * STRINGS, so the CAR cost fields are typed `string | number` and never summed
+ * client-side — the server returns `cost_total`.
  */
+
+export type NCRDisposition = 'pending' | 'use_as_is' | 'rework' | 'repair' | 'scrap' | 'return_to_vendor';
+
+/** Dispositions that need a customer concession reference before the NCR can close (AS9100D 8.7.1). */
+export const NCR_CONCESSION_DISPOSITIONS: ReadonlyArray<NCRDisposition> = ['use_as_is', 'repair'];
+
+/**
+ * Dispositions whose product is re-verified after correction (AS9100D 8.7.1): the only
+ * ones POST /quality/ncr/{id}/reverification accepts, and a conforming result is required
+ * to close them.
+ */
+export const NCR_REVERIFIED_DISPOSITIONS: ReadonlyArray<NCRDisposition> = ['rework', 'repair'];
+
+export type NCRReverificationResult = 'conforming' | 'nonconforming';
+
+export const NCR_REVERIFICATION_RESULTS: ReadonlyArray<{ value: NCRReverificationResult; label: string }> = [
+  { value: 'conforming', label: 'Conforming' },
+  { value: 'nonconforming', label: 'Nonconforming' },
+];
+
+export const ncrReverificationResultLabel = (value?: string | null): string =>
+  NCR_REVERIFICATION_RESULTS.find(result => result.value === value)?.label ?? '';
+
+/** POST /quality/ncr/{id}/reverification. The server stamps who and when. */
+export interface NCRReverificationRequest {
+  result: NCRReverificationResult;
+  /** Required, non-blank (the server strips it), at most 4000 characters. */
+  notes: string;
+}
+
+/** GET /quality/ncr/{id} — the NCR record, plus the disposition records of migration 127. */
+export interface NCRRecord {
+  id: number;
+  version?: number;
+  ncr_number: string;
+  part_id?: number | null;
+  part?: { id: number; part_number: string; name: string } | null;
+  work_order_id?: number | null;
+  lot_number?: string | null;
+  serial_number?: string | null;
+  quantity_affected: string | number;
+  quantity_rejected: string | number;
+  source?: string;
+  status: string;
+  disposition?: NCRDisposition | null;
+  title: string;
+  description: string;
+  root_cause?: string | null;
+  containment_action?: string | null;
+  specification?: string | null;
+  actual_value?: string | null;
+  required_value?: string | null;
+  supplier_name?: string | null;
+  estimated_cost?: Money;
+  actual_cost?: Money;
+  detected_date?: string | null;
+  closed_date?: string | null;
+  car_required?: boolean;
+  car_id?: number | null;
+  created_at?: string;
+  updated_at?: string | null;
+
+  /** What was physically done with the nonconforming product. Required to close. */
+  action_taken?: string | null;
+  /** The customer's deviation / waiver / concession number. Required to close use-as-is or repair. */
+  concession_reference?: string | null;
+  /** Who at the customer authorized the concession. */
+  concession_authorized_by?: string | null;
+  /** When the customer authorized it (a date, never later than today in Central). */
+  concession_date?: string | null;
+  /** Server-stamped by POST /quality/ncr/{id}/reverification; never sent in an update body. */
+  reverification_result?: NCRReverificationResult | null;
+  reverification_notes?: string | null;
+  reverified_by?: number | null;
+  reverified_by_name?: string | null;
+  reverified_at?: string | null;
+  /** Server-stamped whenever the disposition is set (cleared when it goes back to pending). */
+  dispositioned_by?: number | null;
+  dispositioned_by_name?: string | null;
+  dispositioned_at?: string | null;
+}
+
+export type CAREffectivenessResult = 'effective' | 'not_effective';
+
+export const CAR_EFFECTIVENESS_RESULTS: ReadonlyArray<{ value: CAREffectivenessResult; label: string }> = [
+  { value: 'effective', label: 'Effective' },
+  { value: 'not_effective', label: 'Not effective' },
+];
+
+export const carEffectivenessResultLabel = (value?: string | null): string =>
+  CAR_EFFECTIVENESS_RESULTS.find(result => result.value === value)?.label ?? '';
+
+/**
+ * POST /quality/car/{id}/effectiveness. The evidence is written to `effectiveness_check`;
+ * the server stamps who and when, and `not_effective` returns the CAR to Corrective Action.
+ */
+export interface CAREffectivenessRequest {
+  result: CAREffectivenessResult;
+  /** Required, non-blank (the server strips it), at most 4000 characters. */
+  evidence: string;
+}
 
 /** The "Reason for initiation" boxes on Werco's controlled CAR form (one per CAR). */
 export type CARInitiationReason =
@@ -102,6 +204,22 @@ export interface CARRecord {
   quality_approved_by?: number | null;
   quality_approved_by_name?: string | null;
   quality_approved_at?: string | null;
+
+  /** AS9100D 10.2.1 human factors (migration 127). Required to close a corrective CAR. */
+  human_factors_review?: string | null;
+  /** AS9100D 10.2.1 c): where else could this nonconformity exist or occur? Required to close a corrective CAR. */
+  similar_nonconformities_review?: string | null;
+  /** When the follow-up effectiveness check is due. */
+  effectiveness_due?: string | null;
+  /**
+   * Server-stamped by POST /quality/car/{id}/effectiveness; never sent in a body. Its
+   * evidence is `effectiveness_check`, which no update may change once a result is recorded.
+   * Closing a corrective CAR requires `effective`.
+   */
+  effectiveness_result?: CAREffectivenessResult | null;
+  effectiveness_verified_by?: number | null;
+  effectiveness_verified_by_name?: string | null;
+  effectiveness_verified_at?: string | null;
 }
 
 export type FAIStatus = 'pending' | 'in_progress' | 'passed' | 'failed' | 'conditional';

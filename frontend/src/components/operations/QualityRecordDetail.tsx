@@ -6,7 +6,7 @@ import { Modal } from '../ui/Modal';
 import { Button, ConfirmDialog, ErrorState, FormField } from '../ui';
 import usePermissions from '../../hooks/usePermissions';
 import useUnsavedChanges from '../../hooks/useUnsavedChanges';
-import { formatCentralDate, formatCentralDateTime } from '../../utils/centralTime';
+import { formatCentralDate, formatCentralDateTime, getCentralTodayISODate } from '../../utils/centralTime';
 import CarFormFields, {
   BLANK_CAR_FORM_VALUES,
   carFormPayload,
@@ -16,18 +16,46 @@ import CarFormFields, {
 } from '../quality/CarFormFields';
 import CarPdfPreviewModal from '../quality/CarPdfPreviewModal';
 import { carInitiationReasonLabel } from '../../types/quality';
+import { CarEffectivenessPanel, NcrReverificationPanel, stampText } from './QualityRecordVerificationPanels';
 
-const ncrFields = ['containment_action', 'root_cause'];
-const carFields = [
-  'containment_action',
-  'root_cause_analysis',
-  'root_cause',
-  'corrective_action',
-  'preventive_action',
-  'verification_method',
-  'verification_results',
-  'effectiveness_check',
+interface TextFieldSpec {
+  key: string;
+  label?: string;
+  help?: string;
+  /** The server's max_length for the field. */
+  maxLength: number;
+}
+const ncrTextFields: TextFieldSpec[] = [
+  { key: 'containment_action', maxLength: 2000 },
+  { key: 'root_cause', maxLength: 2000 },
+  {
+    key: 'action_taken',
+    help: 'What was physically done with the nonconforming product. Required to close.',
+    maxLength: 4000,
+  },
 ];
+const carTextFields: TextFieldSpec[] = [
+  { key: 'containment_action', maxLength: 2000 },
+  { key: 'root_cause_analysis', maxLength: 2000 },
+  { key: 'root_cause', maxLength: 2000 },
+  {
+    key: 'human_factors_review',
+    help: 'Did fatigue, training, procedure clarity, workload, the work environment or communication contribute?',
+    maxLength: 4000,
+  },
+  {
+    key: 'similar_nonconformities_review',
+    help: 'Where else could this nonconformity exist, or occur?',
+    maxLength: 4000,
+  },
+  { key: 'corrective_action', maxLength: 2000 },
+  { key: 'preventive_action', maxLength: 2000 },
+  { key: 'verification_method', maxLength: 2000 },
+  { key: 'verification_results', maxLength: 2000 },
+  { key: 'effectiveness_check', label: 'Effectiveness evidence reviewed', maxLength: 2000 },
+];
+/** NCR customer-concession inputs (AS9100D 8.7.1): required to close use-as-is or repair. */
+const ncrConcessionFields = ['concession_reference', 'concession_authorized_by', 'concession_date'];
 const statuses = {
   ncr: ['open', 'under_review', 'pending_disposition', 'closed'],
   car: ['open', 'root_cause_analysis', 'corrective_action', 'verification', 'closed'],
@@ -70,18 +98,24 @@ export default function QualityRecordDetail({
   // never on a VOID CAR; the server is still the gate (and refuses an API token).
   const canRecordApproval =
     kind === 'car' && can('quality:approve') && !!record && record.status !== 'void' && !record.quality_approved_at;
+  // The evidence of a recorded effectiveness verification changes only through the
+  // effectiveness action (the server refuses a PUT that changes it, 409).
+  const effectivenessLocked = kind === 'car' && !!record?.effectiveness_result;
+  const textFields = kind === 'ncr' ? ncrTextFields : carTextFields;
 
   const applyRecord = (data: any) => {
     setRecord(data);
-    const fields = kind === 'ncr' ? ncrFields : carFields;
+    const fields = (kind === 'ncr' ? ncrTextFields : carTextFields).map(spec => spec.key);
     const next: any = { status: data.status, ...Object.fromEntries(fields.map(key => [key, data[key] || ''])) };
     if (kind === 'ncr') {
       next.disposition = data.disposition || 'pending';
       next.quantity_rejected = data.quantity_rejected || 0;
+      for (const key of ncrConcessionFields) next[key] = data[key] || '';
     } else {
       next.priority = data.priority;
       next.due_date = data.due_date || '';
       next.verification_due = data.verification_due || '';
+      next.effectiveness_due = data.effectiveness_due || '';
     }
     const nextCar = kind === 'car' ? carFormValuesFromRecord(data) : BLANK_CAR_FORM_VALUES;
     setForm(next);
@@ -119,13 +153,23 @@ export default function QualityRecordDetail({
     setError('');
     setNotice('');
     try {
-      const payload = {
+      // Empty date inputs go out as null: the server's date fields refuse ''.
+      const payload: Record<string, any> = {
         ...form,
         ...(kind === 'car' ? carFormPayload(carForm) : {}),
         version: record.version ?? 0,
         expected_updated_at: record.updated_at,
-        ...(kind === 'car' ? { due_date: form.due_date || null, verification_due: form.verification_due || null } : {}),
+        ...(kind === 'ncr' ? { concession_date: form.concession_date || null } : {}),
+        ...(kind === 'car'
+          ? {
+              due_date: form.due_date || null,
+              verification_due: form.verification_due || null,
+              effectiveness_due: form.effectiveness_due || null,
+            }
+          : {}),
       };
+      // Read-only on screen once a result is recorded, so it never rides the PUT.
+      if (effectivenessLocked) delete payload.effectiveness_check;
       const result = kind === 'ncr' ? await api.updateNCR(id, payload) : await api.updateCAR(id, payload);
       setRecord(result);
       setOriginal(snapshotOf(form, carForm));
@@ -166,6 +210,14 @@ export default function QualityRecordDetail({
       setApproving(false);
       setConfirmApproval(false);
     }
+  };
+  // A re-verification or effectiveness verification was saved (its panel is disabled while
+  // the form is dirty, so replacing the form with the saved record loses no edit).
+  const recorded = (saved: any, message: string) => {
+    applyRecord(saved);
+    setError('');
+    setNotice(message);
+    onSaved();
   };
   const carSummary: Array<[string, React.ReactNode]> =
     kind === 'car' && record
@@ -367,10 +419,20 @@ export default function QualityRecordDetail({
                       />
                     )}
                   </FormField>
+                  <p className="col-span-2 text-xs text-slate-400" data-testid="ncr-disposition-stamp">
+                    {record.dispositioned_at
+                      ? stampText(
+                          'Disposition decided',
+                          record.dispositioned_at,
+                          record.dispositioned_by_name,
+                          record.dispositioned_by
+                        )
+                      : 'Disposition decided: Not recorded'}
+                  </p>
                 </div>
               )}
               {kind === 'car' && (
-                <div className="grid grid-cols-3 gap-3">
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                   <FormField label="Priority (1 highest)">
                     {field => (
                       <input
@@ -384,7 +446,7 @@ export default function QualityRecordDetail({
                       />
                     )}
                   </FormField>
-                  {['due_date', 'verification_due'].map(key => (
+                  {['due_date', 'verification_due', 'effectiveness_due'].map(key => (
                     <FormField key={key} label={label(key)}>
                       {field => (
                         <input
@@ -407,20 +469,97 @@ export default function QualityRecordDetail({
                   record={record}
                 />
               )}
-              {(kind === 'ncr' ? ncrFields : carFields).map(key => (
-                <FormField key={key} label={label(key)}>
-                  {field => (
-                    <textarea
-                      {...field}
-                      className="input"
-                      rows={3}
-                      maxLength={2000}
-                      value={form[key] || ''}
-                      onChange={e => setForm(f => ({ ...f, [key]: e.target.value }))}
-                    />
-                  )}
-                </FormField>
-              ))}
+              {textFields.map(spec => {
+                const locked = spec.key === 'effectiveness_check' && effectivenessLocked;
+                return (
+                  <FormField
+                    key={spec.key}
+                    label={spec.label ?? label(spec.key)}
+                    help={
+                      locked
+                        ? 'Recorded with the effectiveness verification. Record a new verification to change it.'
+                        : spec.help
+                    }
+                  >
+                    {field => (
+                      <textarea
+                        {...field}
+                        className="input"
+                        rows={3}
+                        maxLength={spec.maxLength}
+                        disabled={locked}
+                        value={form[spec.key] || ''}
+                        onChange={e => setForm(f => ({ ...f, [spec.key]: e.target.value }))}
+                      />
+                    )}
+                  </FormField>
+                );
+              })}
+              {kind === 'ncr' && (
+                <fieldset className="space-y-2">
+                  <legend className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                    Customer concession
+                  </legend>
+                  <p className="text-xs text-slate-400">
+                    Required to close a use-as-is or repair disposition: the customer&apos;s deviation, waiver or
+                    concession.
+                  </p>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                    <FormField label="Concession reference">
+                      {field => (
+                        <input
+                          {...field}
+                          className="input"
+                          maxLength={100}
+                          value={form.concession_reference || ''}
+                          onChange={e => setForm(f => ({ ...f, concession_reference: e.target.value }))}
+                        />
+                      )}
+                    </FormField>
+                    <FormField label="Authorized by (customer)">
+                      {field => (
+                        <input
+                          {...field}
+                          className="input"
+                          maxLength={255}
+                          value={form.concession_authorized_by || ''}
+                          onChange={e => setForm(f => ({ ...f, concession_authorized_by: e.target.value }))}
+                        />
+                      )}
+                    </FormField>
+                    <FormField label="Concession date">
+                      {field => (
+                        <input
+                          {...field}
+                          type="date"
+                          className="input"
+                          max={getCentralTodayISODate()}
+                          value={form.concession_date || ''}
+                          onChange={e => setForm(f => ({ ...f, concession_date: e.target.value }))}
+                        />
+                      )}
+                    </FormField>
+                  </div>
+                </fieldset>
+              )}
+              {kind === 'ncr' && (
+                <NcrReverificationPanel
+                  record={record}
+                  canWrite={editable}
+                  dirty={dirty}
+                  busy={saving || approving}
+                  onRecorded={recorded}
+                />
+              )}
+              {kind === 'car' && (
+                <CarEffectivenessPanel
+                  record={record}
+                  canWrite={editable}
+                  dirty={dirty}
+                  busy={saving || approving}
+                  onRecorded={recorded}
+                />
+              )}
               {kind === 'car' && (
                 <CarFormFields
                   values={carForm}
@@ -434,8 +573,10 @@ export default function QualityRecordDetail({
           {form.status === 'closed' && (
             <p className="text-sm text-slate-400">
               {kind === 'ncr'
-                ? 'Closure requires a final disposition and root cause of at least 20 characters.'
-                : 'Closure requires a root cause, corrective action, verification method and verification results.'}
+                ? 'Closure requires a final disposition, a root cause of at least 20 characters and the action taken. Use-as-is and repair also need a customer concession reference; rework and repair need a conforming re-verification.'
+                : !record.car_type || record.car_type === 'corrective'
+                  ? 'Closure requires a root cause, corrective action, verification method, verification results, the human factors and similar nonconformities reviews, and an effective effectiveness verification.'
+                  : 'Closure requires a root cause, corrective action, verification method and verification results.'}
             </p>
           )}
           {error && (

@@ -15,6 +15,12 @@ one bordered grid, top to bottom:
 10. Management Action
 11. Customer Approval | Date | Quality Manager Approval | Date
 
+The ERP adds the AS9100D 10.2 evidence the paper form never had room for, as their own
+boxes in the same grid (migration ``127_ncr_car_records``): a Human Factors Review and a
+Similar Nonconformities Review after row 7, and an Effectiveness Verification (result,
+verified by, date, then the evidence reviewed) after row 10, just above the approvals that
+rely on it.
+
 :func:`build_corrective_action_report_pdf` is a PURE builder: it takes primitives (already
 resolved, tenant-scoped, by ``quality_record_service.car_print_context``), touches no
 database, and returns ``bytes``. reportlab is imported lazily, like ``coc_pdf_service`` and
@@ -97,6 +103,12 @@ def build_corrective_action_report_pdf(
     quality_approved_by: Optional[str],
     quality_approved_date: Optional[str],
     status_label: Optional[str] = None,
+    human_factors_review: Optional[str] = None,
+    similar_nonconformities_review: Optional[str] = None,
+    effectiveness_result: Optional[str] = None,
+    effectiveness_evidence: Optional[str] = None,
+    effectiveness_verified_by: Optional[str] = None,
+    effectiveness_verified_date: Optional[str] = None,
 ) -> bytes:
     """Render one CAR as a PDF in the controlled form's layout.
 
@@ -255,6 +267,20 @@ def build_corrective_action_report_pdf(
         )
     )
 
+    # --- AS9100D 10.2.1 reviews (ERP additions; blank boxes keep room to write in)
+    story.append(
+        text_box(
+            "Human Factors Review (fatigue, training, procedure clarity, workload, environment, communication)",
+            [(None, human_factors_review)],
+        )
+    )
+    story.append(
+        text_box(
+            "Similar Nonconformities Review (where else does this exist, or could it occur?)",
+            [(None, similar_nonconformities_review)],
+        )
+    )
+
     # --- row 8: cost of the corrective action (blank is not zero: an unentered bucket prints blank)
     def money(value: Optional[str]) -> str:
         return f"$ {value}" if value else "$ ________"
@@ -297,6 +323,21 @@ def build_corrective_action_report_pdf(
 
     # --- row 10: management action
     story.append(text_box("Management Action", [(None, management_action)]))
+
+    # --- AS9100D 10.2.1 d effectiveness verification (ERP addition), above the approvals
+    story.append(
+        boxed(
+            [
+                [
+                    field("Effectiveness Verification - Result", effectiveness_result),
+                    field("Verified by", effectiveness_verified_by),
+                    field("Date", effectiveness_verified_date),
+                ]
+            ],
+            [third, third, third],
+        )
+    )
+    story.append(text_box("Evidence Reviewed for Effectiveness", [(None, effectiveness_evidence)]))
 
     # --- row 11: customer approval / date / quality manager approval / date
     quarter = _CONTENT_WIDTH / 4
