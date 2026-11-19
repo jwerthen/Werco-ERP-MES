@@ -41,6 +41,7 @@ import {
 import {
   User,
   Company,
+  FloorPinPolicyResponse,
   Part,
   PartRenumberImpact,
   PartRenumberResult,
@@ -508,9 +509,13 @@ class ApiService {
         // 401 from them means "bad credentials" / "expired refresh" — not an
         // expired session. Let the caller surface that error instead of forcing a
         // logout + hard redirect (which would swallow the login form's message).
+        // /auth/employee-login is one of them too: its 401 is a bad badge or the
+        // floor-PIN challenge (`floor_pin_required`), which the badge sign-on helper
+        // (services/badgeSignOn.ts) answers — never a reason to refresh or sign out.
         const isAuthEndpoint =
           !!originalRequest?.url &&
           (originalRequest.url.includes('/auth/login') ||
+            originalRequest.url.includes('/auth/employee-login') ||
             originalRequest.url.includes('/auth/refresh'));
 
         // If 401 and we haven't already retried and have a refresh token
@@ -778,8 +783,14 @@ class ApiService {
     return response.data;
   }
 
-  async loginWithEmployeeId(employeeId: string): Promise<LoginResponse> {
-    const response = await this.api.post<LoginResponse>('/auth/employee-login', { employee_id: employeeId });
+  /**
+   * Badge / employee-ID sign-in. `pin` is the floor PIN, sent only when answering the
+   * `floor_pin_required` challenge — a badge-only request carries no `pin` key at all.
+   * Callers go through `signOnWithBadge` (services/badgeSignOn.ts), never this directly.
+   */
+  async loginWithEmployeeId(employeeId: string, pin?: string): Promise<LoginResponse> {
+    const body = pin === undefined ? { employee_id: employeeId } : { employee_id: employeeId, pin };
+    const response = await this.api.post<LoginResponse>('/auth/employee-login', body);
     return response.data;
   }
 
@@ -4349,6 +4360,21 @@ class ApiService {
     return response.data;
   }
 
+  /**
+   * Set or reset a user's floor PIN (badge sign-in second factor). Admin/Manager;
+   * the server refuses 422 with a plain message naming the broken rule (never the
+   * PIN), and clears the PIN's failed-attempt count and lock. Returns the user.
+   */
+  async setUserFloorPin(userId: number, pin: string): Promise<User> {
+    const response = await this.api.put<User>(`/users/${userId}/floor-pin`, { pin });
+    return response.data;
+  }
+
+  /** Remove a user's floor PIN (and its lock). Admin/Manager. */
+  async clearUserFloorPin(userId: number): Promise<void> {
+    await this.api.delete(`/users/${userId}/floor-pin`);
+  }
+
   // Customers
   async getCustomers(activeOnly = true, search?: string) {
     const response = await this.api.get('/customers/', { params: { active_only: activeOnly, search } });
@@ -6082,6 +6108,17 @@ class ApiService {
   // boolean. Returns the updated CompanyResponse.
   async updateCompanySmsEgress(allow: boolean): Promise<Company> {
     const response = await this.api.put('/companies/me/sms-egress', { allow_sms_egress: allow });
+    return response.data;
+  }
+
+  // Company floor-PIN policy: require a PIN on every badge / employee-ID sign-in
+  // (AS9100D 8.5.2). ADMIN-only server-side, refused to API tokens, audited.
+  // The response carries `users_without_pin` so the console can say who a
+  // policy turned ON will refuse at the kiosk.
+  async updateCompanyFloorPinPolicy(requireFloorPin: boolean): Promise<FloorPinPolicyResponse> {
+    const response = await this.api.put<FloorPinPolicyResponse>('/companies/me/floor-pin-policy', {
+      require_floor_pin: requireFloorPin,
+    });
     return response.data;
   }
 

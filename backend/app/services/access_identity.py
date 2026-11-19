@@ -6,7 +6,7 @@ in its former company. No transaction or database connection is retained here.
 """
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
@@ -21,6 +21,9 @@ class AccessIdentity:
     company_id: int
     read_only: bool
     scope: Optional[str]
+    # The token's ``amr`` claim (how the person signed in: ``("badge",)`` or
+    # ``("badge", "pin")``); ``None`` for a password session or a token without the claim.
+    auth_methods: Optional[Tuple[str, ...]] = None
 
 
 def _invalid_credentials() -> HTTPException:
@@ -73,4 +76,6 @@ def resolve_access_identity(
     require_active_company(
         db, company_id, allow_inactive=allow_inactive_company or (allow_inactive_platform_company and platform)
     )
-    return AccessIdentity(user, company_id, bool(payload.get("read_only", False)), scope)
+    raw_methods = payload.get("auth_methods")
+    auth_methods = tuple(raw_methods) if raw_methods else None
+    return AccessIdentity(user, company_id, bool(payload.get("read_only", False)), scope, auth_methods)

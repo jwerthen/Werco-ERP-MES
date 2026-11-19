@@ -14,6 +14,11 @@ interface KioskKeypadProps {
    * 'sm' = 58px modal-numpad keys (1c/1d).
    */
   size?: 'sm' | 'md' | 'lg';
+  /**
+   * Keep a leading zero ("0" then "5" stays "05"). Off by default: quantities
+   * collapse "05" to "5". A PIN is a code, not a number — "0912" is four digits.
+   */
+  allowLeadingZero?: boolean;
 }
 
 const KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'clear', '0', 'back'] as const;
@@ -43,6 +48,7 @@ export default function KioskKeypad({
   disabled = false,
   idPrefix = 'kiosk-key',
   size = 'md',
+  allowLeadingZero = false,
 }: KioskKeypadProps) {
   const press = (key: (typeof KEYS)[number]) => {
     if (disabled) return;
@@ -55,8 +61,8 @@ export default function KioskKeypad({
       return;
     }
     if (value.length >= maxLength) return;
-    // No leading zeros pile-up: "0" then "5" becomes "5".
-    onChange(value === '0' ? key : value + key);
+    // No leading zeros pile-up: "0" then "5" becomes "5" (unless the value is a code).
+    onChange(value === '0' && !allowLeadingZero ? key : value + key);
   };
 
   const gap = size === 'sm' ? 'gap-2' : 'gap-2.5';

@@ -3,6 +3,7 @@ from typing import Optional
 
 from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
+from app.core.floor_pin import FloorPinInput
 from app.models.user import UserRole
 from app.schemas.base import UTCModel
 
@@ -218,6 +219,9 @@ class EmployeeLoginRequest(BaseModel):
         pattern=r'^[A-Za-z0-9\-_]+$',
         description="Employee ID or 4-digit badge ID",
     )
+    # Floor PIN (AS9100D 8.5.2): send it after a 401 ``floor_pin_required`` challenge. Ignored
+    # for a user with no PIN. ``POST /auth/employee-logout`` reuses this body and ignores it.
+    pin: Optional[FloorPinInput] = None
 
 
 class Token(BaseModel):

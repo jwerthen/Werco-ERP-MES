@@ -1,12 +1,24 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import KioskKeypad from './KioskKeypad';
+import KioskFloorPinOverlay from './KioskFloorPinOverlay';
 import { MAX_BADGE_LENGTH, useBadgeCapture } from './useBadgeCapture';
 import { formatCentralTime } from '../../utils/centralTime';
+import { badgeSignOnErrorMessage, isBadgeSignOnCancelled, signOnWithBadge } from '../../services/badgeSignOn';
+import { useFloorPinPrompt } from '../../hooks/useFloorPinPrompt';
+import { useKioskIdleLogout } from '../../hooks/useKioskIdleLogout';
 
 interface KioskBadgeLoginProps {
   stationLabel: string;
-  onLogin: (employeeId: string) => Promise<void>;
+  /**
+   * Badge sign-in. Called with the badge alone first; `pin` is passed only when
+   * the server answers with the floor-PIN challenge and the operator enters it.
+   */
+  onLogin: (employeeId: string, pin?: string) => Promise<void>;
 }
+
+// An abandoned PIN pad must not hold the station: the badge reader is off while
+// it is up, so the next operator could not scan in. Walk away and it cancels.
+const PIN_PAD_IDLE_CANCEL_S = 60;
 
 /**
  * Full-screen badge sign-in (Foundry 1a). A keyboard-wedge scanner "types" the
@@ -15,7 +27,9 @@ interface KioskBadgeLoginProps {
  * first). Manual entry works through the on-screen number pad. A rejected scan
  * shakes the entry well and renders the backend detail VERBATIM under it.
  *
- * Badge = identity: one operator per login, no shared accounts.
+ * Badge = identity: one operator per login, no shared accounts. A badge with a
+ * floor PIN (AS9100D 8.5.2) draws the PIN pad over this screen
+ * (`signOnWithBadge`); Cancel — or a minute without a touch — returns here.
  */
 export default function KioskBadgeLogin({ stationLabel, onLogin }: KioskBadgeLoginProps) {
   const [value, setValue] = useState('');
@@ -28,6 +42,15 @@ export default function KioskBadgeLogin({ stationLabel, onLogin }: KioskBadgeLog
   const [browserOnline, setBrowserOnline] = useState(() =>
     typeof navigator === 'undefined' ? true : navigator.onLine
   );
+  const pinPrompt = useFloorPinPrompt();
+  // The badge the open PIN pad belongs to (shown on the pad).
+  const [pinBadge, setPinBadge] = useState<string | null>(null);
+
+  useKioskIdleLogout({
+    enabled: pinPrompt.prompt !== null && !pinPrompt.prompt.verifying,
+    timeoutSeconds: PIN_PAD_IDLE_CANCEL_S,
+    onTimeout: pinPrompt.cancel,
+  });
 
   useEffect(() => {
     const interval = window.setInterval(() => setNowMs(Date.now()), 1000);
@@ -48,22 +71,21 @@ export default function KioskBadgeLogin({ stationLabel, onLogin }: KioskBadgeLog
       if (!employeeId || submitting) return;
       setSubmitting(true);
       setError(null);
+      setPinBadge(employeeId);
       try {
-        await onLogin(employeeId);
+        await signOnWithBadge((...pin) => onLogin(employeeId, ...pin), pinPrompt.prompter);
         setValue('');
       } catch (err: unknown) {
-        const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
-        const message = (err as { message?: unknown })?.message;
-        setError(
-          (typeof detail === 'string' && detail) || (typeof message === 'string' && message) || 'Login failed. Try again.'
-        );
-        setShakeKey((k) => k + 1);
         setValue(''); // clear for a clean re-scan
+        // Cancel on the PIN pad is "back to the badge scan", not a rejection.
+        if (isBadgeSignOnCancelled(err)) return;
+        setError(badgeSignOnErrorMessage(err, 'Login failed. Try again.'));
+        setShakeKey((k) => k + 1);
       } finally {
         setSubmitting(false);
       }
     },
-    [onLogin, submitting]
+    [onLogin, submitting, pinPrompt.prompter]
   );
 
   // Window-level capture: badge scanners type wherever "focus" happens to be.
@@ -185,6 +207,13 @@ export default function KioskBadgeLogin({ stationLabel, onLogin }: KioskBadgeLog
           </p>
         </div>
       </main>
+
+      <KioskFloorPinOverlay
+        prompt={pinPrompt.prompt}
+        onSubmit={pinPrompt.submit}
+        onCancel={pinPrompt.cancel}
+        badgeLabel={pinBadge}
+      />
     </div>
   );
 }

@@ -20,6 +20,17 @@ export interface User {
   company_name?: string;
   created_at: string;
   updated_at: string;
+  /**
+   * Floor PIN (AS9100D 8.5.2) — the second factor on badge / employee-ID sign-in.
+   * The hash is never serialized; these three say only whether one is set, when,
+   * and whether wrong attempts have locked it. Optional because they ride
+   * UserResponse (admin user lists), not every user-shaped payload.
+   */
+  has_floor_pin?: boolean;
+  /** UTC ISO instant the current PIN was set; null when none is set. */
+  floor_pin_set_at?: string | null;
+  /** UTC ISO instant the PIN lock lifts (5 wrong PINs → 15 min); in the past or null = not locked. */
+  floor_pin_locked_until?: string | null;
 }
 
 export type UserRole = 'platform_admin' | 'admin' | 'manager' | 'supervisor' | 'operator' | 'quality' | 'shipping' | 'viewer';
@@ -52,8 +63,25 @@ export interface Company {
    * the column — treat a missing value as OFF.
    */
   allow_sms_egress?: boolean;
+  /**
+   * Company policy: every badge / employee-ID sign-in must carry a floor PIN. When
+   * on, a badge with no PIN is refused (403 `floor_pin_not_set`) until a supervisor
+   * sets one. Optional because older payloads predate the column — missing = off.
+   */
+  require_floor_pin?: boolean;
   created_at?: string;
   updated_at?: string;
+}
+
+/**
+ * Response from PUT /companies/me/floor-pin-policy: the updated company (so
+ * `require_floor_pin` is the server's word) plus how many active users still have
+ * no PIN — the people a policy turned ON will refuse at the kiosk.
+ */
+export interface FloorPinPolicyResponse extends Partial<Company> {
+  require_floor_pin: boolean;
+  /** Active users of the company with no floor PIN. Absent on an older backend. */
+  users_without_pin?: number | null;
 }
 
 export interface WorkCenter {

@@ -16,7 +16,11 @@ interface AuthContextType {
   // `identifier` is an email OR an employee ID -- POST /auth/login resolves either,
   // so this is deliberately not called `email`.
   login: (identifier: string, password: string) => Promise<void>;
-  loginWithEmployeeId: (employeeId: string) => Promise<void>;
+  /**
+   * Badge / employee-ID sign-in. `pin` answers the floor-PIN challenge; callers run
+   * it through `signOnWithBadge` (services/badgeSignOn.ts), which supplies it.
+   */
+  loginWithEmployeeId: (employeeId: string, pin?: string) => Promise<void>;
   logout: () => void;
   logoutWithEmployeeId: (employeeId: string) => Promise<void>;
   extendSession: () => void;
@@ -244,8 +248,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  const loginWithEmployeeId = async (employeeId: string) => {
-    const response = await api.loginWithEmployeeId(employeeId);
+  const loginWithEmployeeId = async (employeeId: string, pin?: string) => {
+    // A badge-only call stays byte-identical to the pre-PIN one (no second argument).
+    const response = await (pin === undefined
+      ? api.loginWithEmployeeId(employeeId)
+      : api.loginWithEmployeeId(employeeId, pin));
     if (response.refresh_token && response.expires_in) {
       api.setTokens(response.access_token, response.refresh_token, response.expires_in);
     } else {

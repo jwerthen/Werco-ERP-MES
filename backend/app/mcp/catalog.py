@@ -74,6 +74,21 @@ EGRESS_SWITCH_OPERATIONS: FrozenSet[Tuple[str, str]] = frozenset(
     }
 )
 
+# And the badge-sign-on credential writes (AS9100D 8.5.2): setting or clearing a user's floor
+# PIN and turning the company's "require a PIN for badge sign-in" policy on or off. Credential
+# administration is a person's act: the routes refuse every API token
+# (``app.core.credentials.API_TOKEN_FLOOR_PIN_ADMIN``), and a person's own JWT would still reach
+# them through a tool call -- an agent handling a PIN, or switching the sign-on policy -- so none
+# is a tool. Reading a user's PIN state (``has_floor_pin`` on the user record) and the company's
+# policy stays a tool. Named on their own so the credential tests walk exactly these routes.
+FLOOR_PIN_OPERATIONS: FrozenSet[Tuple[str, str]] = frozenset(
+    {
+        ("PUT", "/api/v1/users/{user_id}/floor-pin"),
+        ("DELETE", "/api/v1/users/{user_id}/floor-pin"),
+        ("PUT", "/api/v1/companies/me/floor-pin-policy"),
+    }
+)
+
 # And the comment / watcher WRITES (owner decision for work-order comments, 2026-11-16): a
 # comment is a person's own words and a watch a person's own preference. The routes refuse every
 # API token (``app.core.credentials.API_TOKEN_COMMENT_WRITE``), and a person's own JWT would still
@@ -120,6 +135,7 @@ EXCLUDED_OPERATIONS: FrozenSet[Tuple[str, str]] = (
         }
     )
     | EGRESS_SWITCH_OPERATIONS
+    | FLOOR_PIN_OPERATIONS
     | COMMENT_WRITE_OPERATIONS
 )
 

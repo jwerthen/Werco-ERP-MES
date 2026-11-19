@@ -341,6 +341,9 @@ def get_current_user(
         # read these, and fail closed on anything but exactly "full" / False.
         user._api_token_scope = api_token_record.scope
         user._api_token_ai_external = bool(api_token_record.ai_external)
+        # A standing token is not a sign-on: no ``amr``, so ``AuditService`` folds no
+        # ``auth_methods`` into its rows (the ``credential`` marker says what it is).
+        user._auth_methods = None
         _tag_sentry_principal(user)
 
         # Narrowed tokens only; a FULL token is byte-identical to before. Gate order:
@@ -377,6 +380,13 @@ def get_current_user(
     user._api_token_id = None
     user._api_token_scope = None
     user._api_token_ai_external = False
+    # How this person signed in, from the access JWT's ``amr`` claim: ``["badge"]`` or
+    # ``["badge", "pin"]`` on a badge / employee-ID session (``POST /auth/employee-login``,
+    # ``POST /auth/kiosk-badge-token`` and the refreshes / company switches that carry it),
+    # ``None`` on a password session. ``AuditService`` folds it into every row this request
+    # writes (``extra_data.auth_methods``). Set on every request, never left over from the
+    # last one, for the shared-identity-map reason above.
+    user._auth_methods = list(identity.auth_methods) if identity.auth_methods else None
 
     # Attach active company context from JWT (may differ from user.company_id
     # when a platform admin switches to view another company)

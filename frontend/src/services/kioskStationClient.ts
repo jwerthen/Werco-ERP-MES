@@ -238,13 +238,18 @@ export async function getQueue(workCenterId: number): Promise<KioskCrewQueueResp
 /**
  * POST /auth/kiosk-badge-token — auth: station token. Exchanges a badge scan
  * for a 5-minute `scope="kiosk"` operator access token (memory only). A 401
- * here is a bad badge (uniform server message) — it does NOT lock the station.
+ * here is a bad badge (uniform server message) or the floor-PIN challenge
+ * (`detail.code === "floor_pin_required"`) — it does NOT lock the station.
+ *
+ * `pin` is the floor PIN, sent only when answering that challenge (a badge-only
+ * scan carries no `pin` key). The page calls this through `signOnWithBadge`
+ * (services/badgeSignOn.ts), which runs the challenge.
  */
-export async function mintBadgeToken(employeeId: string): Promise<KioskBadgeTokenResponse> {
+export async function mintBadgeToken(employeeId: string, pin?: string): Promise<KioskBadgeTokenResponse> {
   const response = await fetch(`${API_BASE_URL}/auth/kiosk-badge-token`, {
     method: 'POST',
     headers: bearerHeaders(getStationToken()),
-    body: JSON.stringify({ employee_id: employeeId }),
+    body: JSON.stringify(pin === undefined ? { employee_id: employeeId } : { employee_id: employeeId, pin }),
   });
   if (!response.ok) await throwOnError(response);
   return (await response.json()) as KioskBadgeTokenResponse;

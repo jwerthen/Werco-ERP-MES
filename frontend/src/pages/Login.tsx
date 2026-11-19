@@ -3,6 +3,9 @@ import { useNavigate, useLocation, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { getDefaultLandingPath, safeReturnPath } from '../utils/defaultLanding';
 import { Modal } from '../components/ui/Modal';
+import FloorPinPad from '../components/auth/FloorPinPad';
+import { useFloorPinPrompt } from '../hooks/useFloorPinPrompt';
+import { badgeSignOnErrorMessage, isBadgeSignOnCancelled, signOnWithBadge } from '../services/badgeSignOn';
 import {
   ShieldCheckIcon,
   LockClosedIcon,
@@ -18,6 +21,20 @@ const gridTex: React.CSSProperties = {
     'linear-gradient(rgba(36,48,68,.25) 1px,transparent 1px),linear-gradient(90deg,rgba(36,48,68,.25) 1px,transparent 1px)',
   backgroundSize: '28px 28px',
 };
+
+const LOGIN_FAILED = 'Login failed. Please try again.';
+
+/**
+ * The sign-in refusal to show. A string `detail` verbatim; a structured badge
+ * refusal (`floor_pin_not_set`) by its `message` — never the raw object, which
+ * would crash the render.
+ */
+function loginErrorText(err: unknown): string {
+  const detail = (err as { response?: { data?: { detail?: unknown } } } | null)?.response?.data?.detail;
+  if (typeof detail === 'string' && detail) return detail;
+  if (detail && typeof detail === 'object') return badgeSignOnErrorMessage(err, LOGIN_FAILED) ?? LOGIN_FAILED;
+  return LOGIN_FAILED;
+}
 
 export default function Login() {
   // `identifier` is the password mode's sign-in name: POST /auth/login resolves an
@@ -35,6 +52,9 @@ export default function Login() {
   const [loading, setLoading] = useState(false);
   const [focusedField, setFocusedField] = useState<string | null>(null);
   const { login, loginWithEmployeeId } = useAuth();
+  // Badge Only: a badge with a floor PIN draws the PIN step in place of the form.
+  const pinPrompt = useFloorPinPrompt();
+  const [pinBadge, setPinBadge] = useState<string | null>(null);
   const navigate = useNavigate();
   const location = useLocation();
   const kioskParam = useMemo(() => new URLSearchParams(location.search).get('kiosk'), [location.search]);
@@ -64,7 +84,8 @@ export default function Login() {
         const digitsOnly = rawEmployeeId.replace(/\D/g, '');
         const employeeLoginId = /^\d+$/.test(rawEmployeeId) ? digitsOnly.slice(-4).padStart(4, '0') : rawEmployeeId;
 
-        await loginWithEmployeeId(employeeLoginId);
+        setPinBadge(employeeLoginId);
+        await signOnWithBadge((...pin) => loginWithEmployeeId(employeeLoginId, ...pin), pinPrompt.prompter);
       } else {
         await login(identifier, password);
       }
@@ -82,8 +103,10 @@ export default function Login() {
       const requestedPath =
         safeReturnPath(location.state?.from) ?? safeReturnPath(new URLSearchParams(location.search).get('returnTo'));
       navigate(forceEmployeeMode ? landingPath : (requestedPath ?? landingPath), { replace: true });
-    } catch (err: any) {
-      setError(err.response?.data?.detail || 'Login failed. Please try again.');
+    } catch (err: unknown) {
+      // Back on the PIN step = back to the badge field, not a failed sign-in.
+      if (isBadgeSignOnCancelled(err)) return;
+      setError(loginErrorText(err));
     } finally {
       setLoading(false);
     }
@@ -217,7 +240,20 @@ export default function Login() {
               </p>
             )}
 
-            <form onSubmit={handleSubmit} className="flex flex-col gap-[18px]">
+            {pinPrompt.prompt && (
+              <FloorPinPad
+                variant="desk"
+                error={pinPrompt.prompt.error}
+                verifying={pinPrompt.prompt.verifying}
+                attempt={pinPrompt.prompt.attempt}
+                onSubmit={pinPrompt.submit}
+                onCancel={pinPrompt.cancel}
+                badgeLabel={pinBadge}
+              />
+            )}
+
+            {/* Hidden, not unmounted, while the PIN step is up: Back returns to the same form. */}
+            <form onSubmit={handleSubmit} className={pinPrompt.prompt ? 'hidden' : 'flex flex-col gap-[18px]'}>
               {/* Mode toggle */}
               <div
                 className={`grid grid-cols-2 overflow-hidden rounded-[3px] ${forceEmployeeMode ? 'opacity-70 pointer-events-none' : ''}`}
@@ -283,7 +319,7 @@ export default function Login() {
                     Use your employee ID or 4-digit badge ID.
                   </p>
                   <p id="employeeIdBadgeOnlyHint" className="font-mono text-[9.5px] tracking-[0.1em] text-fd-mute mt-1">
-                    No password — your badge signs you in.
+                    No password — your badge signs you in. A badge with a floor PIN asks for it next.
                   </p>
                 </div>
               ) : (

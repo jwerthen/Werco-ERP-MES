@@ -15,6 +15,11 @@
  * what the server returns, surface rejection `detail` VERBATIM. Idle resets
  * half-entered flows back to the crew board (never locks the station); the
  * station locks only explicitly or on a 401 from a station-authed read.
+ *
+ * Every badge mint runs through `signOnWithBadge` (services/badgeSignOn.ts): a
+ * badge with a floor PIN (AS9100D 8.5.2) draws the PIN pad over the station for
+ * that one scan. Cancel leaves the operator on the scan screen; the idle flow
+ * reset and a station lock clear the pad.
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -53,6 +58,9 @@ import KioskNcrFiledScreen from '../components/kiosk/KioskNcrFiledScreen';
 import KioskStepsPanel, { StepsTransport } from '../components/kiosk/KioskStepsPanel';
 import KioskDocViewer, { KioskDocTransport } from '../components/kiosk/KioskDocViewer';
 import { useBadgeCapture } from '../components/kiosk/useBadgeCapture';
+import KioskFloorPinOverlay from '../components/kiosk/KioskFloorPinOverlay';
+import { useFloorPinPrompt } from '../hooks/useFloorPinPrompt';
+import { isBadgeSignOnCancelled, signOnWithBadge } from '../services/badgeSignOn';
 import KioskOneTapLane from '../components/kiosk/KioskOneTapLane';
 import { useOneTapPieces } from '../components/kiosk/useOneTapPieces';
 import { isDefinitiveHttpRefusal } from '../components/kiosk/useOneTapPieces';
@@ -293,6 +301,14 @@ export default function CrewStationKiosk() {
   const [holdReason, setHoldReason] = useState<string | null>(null);
   const [joinEntryType, setJoinEntryType] = useState<'run' | 'setup'>('run');
   const [badgeError, setBadgeError] = useState<string | null>(null);
+  // Floor-PIN challenge for the scan in flight (one at a time — every scan path is busy-gated).
+  const {
+    prompt: floorPinPrompt,
+    prompter: floorPinPrompter,
+    submit: submitFloorPin,
+    cancel: cancelFloorPin,
+  } = useFloorPinPrompt();
+  const [floorPinBadge, setFloorPinBadge] = useState<string | null>(null);
   // Buffer for the board-level scanner (a badge scanned straight at the crew
   // board opens the operator sheet). Cleared on every flow reset so a stray
   // keystroke can't pollute the next scan.
@@ -311,6 +327,7 @@ export default function CrewStationKiosk() {
   }, []);
 
   const lockStation = useCallback((reason?: string) => {
+    cancelFloorPin();
     generationRef.current += 1;
     workstationRequestRef.current += 1;
     kioskClient.clearStationToken();
@@ -328,7 +345,7 @@ export default function CrewStationKiosk() {
     setChoosingWorkstation(false);
     setWorkstations([]);
     setWorkstationError(null);
-  }, []);
+  }, [cancelFloorPin]);
 
   // --- Queue refresh (10s poll + refetch-after-mutate, stale polls discarded) --
   // The generation counter guards against a stale in-flight poll overwriting the
@@ -425,17 +442,23 @@ export default function CrewStationKiosk() {
 
   // --- Idle = flow reset, not logout ------------------------------------------
   const resetToBoard = useCallback(() => {
+    // An open PIN pad goes with the flow: its scan resolves as cancelled, writes nothing.
+    cancelFloorPin();
     setView({ name: 'board' });
     setBadgeError(null);
     setHoldReason(null);
     setJoinEntryType('run');
     setBoardBadgeBuffer('');
-  }, []);
+  }, [cancelFloorPin]);
 
   useKioskIdleLogout({
     // Only armed off the board and never mid-request: an in-flight verb must
-    // not have its screen yanked away underneath the response.
-    enabled: hasToken && view.name !== 'board' && !busy,
+    // not have its screen yanked away underneath the response. A PIN pad waiting
+    // on the operator is not a request in flight — a walked-away pad resets too
+    // (from the board as well), but never while a PIN is with the server.
+    enabled:
+      hasToken &&
+      ((view.name !== 'board' && !busy) || (floorPinPrompt !== null && !floorPinPrompt.verifying)),
     timeoutSeconds: IDLE_FLOW_RESET_S,
     onTimeout: resetToBoard,
   });
@@ -707,6 +730,20 @@ export default function CrewStationKiosk() {
 
   // --- Badge flows ----------------------------------------------------------------
   /**
+   * Every crew-station badge mint. A badge with a floor PIN answers 401
+   * `floor_pin_required`; the pad opens over the station, and the mint is resent
+   * with badge + PIN. Throws `BadgeSignOnCancelledError` when the pad is cancelled
+   * (or cleared by the idle reset / a station lock) — callers return quietly then.
+   */
+  const mintBadge = useCallback(
+    (badgeId: string) => {
+      setFloorPinBadge(badgeId);
+      return signOnWithBadge((...pin) => kioskClient.mintBadgeToken(badgeId, ...pin), floorPinPrompter);
+    },
+    [floorPinPrompter]
+  );
+
+  /**
    * Resolve a view's operation across BOTH lists.
    *
    * The resume views point at a HELD operation, which the server keeps off
@@ -783,7 +820,7 @@ export default function CrewStationKiosk() {
       setBusy(true);
       setBadgeError(null);
       try {
-        const minted = await kioskClient.mintBadgeToken(badgeId);
+        const minted = await mintBadge(badgeId);
         const operator: OperatorSession = { token: minted.access_token, user: minted.user };
         const rosterEntry = (item.roster || []).find((r) => r.user_id === minted.user.id);
         if (rosterEntry) {
@@ -799,13 +836,15 @@ export default function CrewStationKiosk() {
           await joinJob(operator, item, joinEntryType);
         }
       } catch (err) {
+        // PIN pad cancelled (or cleared by an idle reset): back to the scan, nothing to show.
+        if (isBadgeSignOnCancelled(err)) return;
         // Bad badge / gating rejection — verbatim, stay on the scan screen.
         setBadgeError(kioskErrorMessage(err, 'Could not read that badge. Try again.'));
       } finally {
         setBusy(false);
       }
     },
-    [view, findItem, mutationsBlocked, joinJob, joinEntryType]
+    [mintBadge, view, findItem, mutationsBlocked, joinJob, joinEntryType]
   );
 
   /** Badge-first (from the board): open the operator sheet. */
@@ -816,7 +855,7 @@ export default function CrewStationKiosk() {
       setBusy(true);
       setBadgeError(null);
       try {
-        const minted = await kioskClient.mintBadgeToken(id);
+        const minted = await mintBadge(id);
         const operator: OperatorSession = { token: minted.access_token, user: minted.user };
         let openJobs: OperatorOpenJob[] = [];
         try {
@@ -827,13 +866,15 @@ export default function CrewStationKiosk() {
         }
         setView({ name: 'operatorSheet', operator, openJobs });
       } catch (err) {
+        // PIN pad cancelled (or cleared by an idle reset): back to the scan, nothing to show.
+        if (isBadgeSignOnCancelled(err)) return;
         setBadgeError(kioskErrorMessage(err, 'Could not read that badge. Try again.'));
         setView({ name: 'badgeFirst' });
       } finally {
         setBusy(false);
       }
     },
-    [mutationsBlocked]
+    [mintBadge, mutationsBlocked]
   );
 
   // Board-level scanner: a badge scanned at the crew board opens the operator
@@ -926,7 +967,7 @@ export default function CrewStationKiosk() {
       setBusy(true);
       setBadgeError(null);
       try {
-        const minted = await kioskClient.mintBadgeToken(badgeId);
+        const minted = await mintBadge(badgeId);
         const operator: OperatorSession = { token: minted.access_token, user: minted.user };
         if (resume) {
           const { good, scrap, reason, reasonCodeId } = resume;
@@ -963,6 +1004,8 @@ export default function CrewStationKiosk() {
         setView({ name: 'productionQty', operationId, operator });
         if (resume) await bumpAndRefresh();
       } catch (err) {
+        // PIN pad cancelled (or cleared by an idle reset): back to the scan, nothing to show.
+        if (isBadgeSignOnCancelled(err)) return;
         // Verbatim rejection; a `resume` entry stays in the view state for
         // another scan, and any parked one-tap delta stays parked.
         setBadgeError(kioskErrorMessage(err, 'Could not save production. Try again.'));
@@ -970,7 +1013,7 @@ export default function CrewStationKiosk() {
         setBusy(false);
       }
     },
-    [view, findItem, mutationsBlocked, reportRequest, showToast, bumpAndRefresh]
+    [mintBadge, view, findItem, mutationsBlocked, reportRequest, showToast, bumpAndRefresh]
   );
 
   /**
@@ -1032,7 +1075,7 @@ export default function CrewStationKiosk() {
       setBusy(true);
       setBadgeError(null);
       try {
-        const minted = await kioskClient.mintBadgeToken(badgeId);
+        const minted = await mintBadge(badgeId);
         await kioskClient.reduceProduction(minted.access_token, item.operation_id, {
           quantity_delta: quantity,
           reason,
@@ -1047,6 +1090,8 @@ export default function CrewStationKiosk() {
         setView({ name: 'job', operationId: item.operation_id });
         await bumpAndRefresh();
       } catch (err) {
+        // PIN pad cancelled (or cleared by an idle reset): back to the scan, nothing to show.
+        if (isBadgeSignOnCancelled(err)) return;
         // Verbatim rejection (e.g. "You can only remove up to the N piece(s)…");
         // quantity + reason stay in the view state for a re-scan by the right badge.
         setBadgeError(kioskErrorMessage(err, 'Could not correct the count. Try again.'));
@@ -1054,7 +1099,7 @@ export default function CrewStationKiosk() {
         setBusy(false);
       }
     },
-    [view, findItem, mutationsBlocked, showToast, bumpAndRefresh]
+    [mintBadge, view, findItem, mutationsBlocked, showToast, bumpAndRefresh]
   );
 
   /**
@@ -1086,7 +1131,7 @@ export default function CrewStationKiosk() {
       let scrapOnComplete = false;
       let minted: Awaited<ReturnType<typeof kioskClient.mintBadgeToken>> | null = null;
       try {
-        minted = await kioskClient.mintBadgeToken(badgeId);
+        minted = await mintBadge(badgeId);
         const signerId = minted.user.id;
         const signerOnRoster = (item.roster || []).some((entry) => entry.user_id === signerId);
         const scrapFields =
@@ -1183,6 +1228,8 @@ export default function CrewStationKiosk() {
         resetToBoard();
         await bumpAndRefresh();
       } catch (err) {
+        // PIN pad cancelled (or cleared by an idle reset): back to the scan, nothing to show.
+        if (isBadgeSignOnCancelled(err)) return;
         // STEPS_INCOMPLETE (409): required process steps lack conforming
         // records — jump into the steps view (the badge that signed the
         // completion attempt carries the recording identity) and render the
@@ -1236,7 +1283,7 @@ export default function CrewStationKiosk() {
         setBusy(false);
       }
     },
-    [view, findItem, mutationsBlocked, reportRequest, showToast, bumpAndRefresh, resetToBoard]
+    [mintBadge, view, findItem, mutationsBlocked, reportRequest, showToast, bumpAndRefresh, resetToBoard]
   );
 
   /** STEPS — badge scan gates entry; records are made in the scanned operator's name. */
@@ -1247,7 +1294,7 @@ export default function CrewStationKiosk() {
       setBusy(true);
       setBadgeError(null);
       try {
-        const minted = await kioskClient.mintBadgeToken(badgeId);
+        const minted = await mintBadge(badgeId);
         setView({
           name: 'steps',
           operationId,
@@ -1255,12 +1302,14 @@ export default function CrewStationKiosk() {
           missing: missing ?? null,
         });
       } catch (err) {
+        // PIN pad cancelled (or cleared by an idle reset): back to the scan, nothing to show.
+        if (isBadgeSignOnCancelled(err)) return;
         setBadgeError(kioskErrorMessage(err, 'Could not read that badge. Try again.'));
       } finally {
         setBusy(false);
       }
     },
-    [view, mutationsBlocked]
+    [mintBadge, view, mutationsBlocked]
   );
 
   /** DOCS — badge scan gates the viewer (the doc reads need an operator token). */
@@ -1271,15 +1320,17 @@ export default function CrewStationKiosk() {
       setBusy(true);
       setBadgeError(null);
       try {
-        const minted = await kioskClient.mintBadgeToken(badgeId);
+        const minted = await mintBadge(badgeId);
         setView({ name: 'docs', operationId, operator: { token: minted.access_token, user: minted.user } });
       } catch (err) {
+        // PIN pad cancelled (or cleared by an idle reset): back to the scan, nothing to show.
+        if (isBadgeSignOnCancelled(err)) return;
         setBadgeError(kioskErrorMessage(err, 'Could not read that badge. Try again.'));
       } finally {
         setBusy(false);
       }
     },
-    [view, mutationsBlocked]
+    [mintBadge, view, mutationsBlocked]
   );
 
   /** HOLD — reason first, then badge signature. */
@@ -1290,7 +1341,7 @@ export default function CrewStationKiosk() {
       setBusy(true);
       setBadgeError(null);
       try {
-        const minted = await kioskClient.mintBadgeToken(badgeId);
+        const minted = await mintBadge(badgeId);
         await kioskClient.holdOperation(minted.access_token, item.operation_id, {
           category: holdReason,
           severity: 'medium',
@@ -1305,12 +1356,14 @@ export default function CrewStationKiosk() {
         resetToBoard();
         await bumpAndRefresh();
       } catch (err) {
+        // PIN pad cancelled (or cleared by an idle reset): back to the scan, nothing to show.
+        if (isBadgeSignOnCancelled(err)) return;
         setBadgeError(kioskErrorMessage(err, 'Could not place on hold. Try again.'));
       } finally {
         setBusy(false);
       }
     },
-    [view, findItem, holdReason, mutationsBlocked, showToast, bumpAndRefresh, resetToBoard]
+    [mintBadge, view, findItem, holdReason, mutationsBlocked, showToast, bumpAndRefresh, resetToBoard]
   );
 
   /**
@@ -1337,7 +1390,7 @@ export default function CrewStationKiosk() {
       setBusy(true);
       setBadgeError(null);
       try {
-        const minted = await kioskClient.mintBadgeToken(badgeId);
+        const minted = await mintBadge(badgeId);
         const result = await kioskClient.resumeOperation(minted.access_token, item.operation_id);
         const open = stillOpenBlockers(result);
         if (open.length > 0) {
@@ -1361,12 +1414,14 @@ export default function CrewStationKiosk() {
         }
         await bumpAndRefresh();
       } catch (err) {
+        // PIN pad cancelled (or cleared by an idle reset): back to the scan, nothing to show.
+        if (isBadgeSignOnCancelled(err)) return;
         setBadgeError(kioskErrorMessage(err, 'Could not resume. Try again.'));
       } finally {
         setBusy(false);
       }
     },
-    [view, findItem, mutationsBlocked, showToast, bumpAndRefresh, resetToBoard]
+    [mintBadge, view, findItem, mutationsBlocked, showToast, bumpAndRefresh, resetToBoard]
   );
 
   // --- Derived render state ---------------------------------------------------
@@ -1505,6 +1560,13 @@ export default function CrewStationKiosk() {
   // --- Unlocked crew station ------------------------------------------------------
   return (
     <div className="fd-scope-kiosk flex min-h-screen flex-col bg-fd-canvas">
+      {/* Floor-PIN pad for the scan that drew the challenge (portals over everything). */}
+      <KioskFloorPinOverlay
+        prompt={floorPinPrompt}
+        onSubmit={submitFloorPin}
+        onCancel={cancelFloorPin}
+        badgeLabel={floorPinBadge}
+      />
       {/* Station header — always visible */}
       <header className="sticky top-0 z-30 border-b border-fd-line bg-fd-panel px-5 py-3">
         <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-4">
@@ -1753,11 +1815,11 @@ export default function CrewStationKiosk() {
             if (busy) return;
             setBusy(true); setBadgeError(null);
             try {
-              const minted = await kioskClient.mintBadgeToken(badgeId);
+              const minted = await mintBadge(badgeId);
               if (recoveryBadge === 'keyed') await reportRequest.retry(minted.user.id, (operationId, body) => kioskClient.reportProduction(minted.access_token, operationId, body));
               else await oneTap.recover?.(minted.user.id, (operationId, pieces, requestId) => kioskClient.reportProduction(minted.access_token, operationId, { request_id: requestId, quantity_complete_delta: pieces, quantity_scrapped_delta: 0, source: KIOSK_SOURCE }));
               setRecoveryBadge(null); showToast('success', 'Original production report confirmed. Refreshing crew counts.'); await bumpAndRefresh();
-            } catch (err) { setBadgeError(kioskErrorMessage(err, 'Could not confirm the original report. Try again.')); }
+            } catch (err) { if (isBadgeSignOnCancelled(err)) return; setBadgeError(kioskErrorMessage(err, 'Could not confirm the original report. Try again.')); }
             finally { setBusy(false); }
           }} />
         </section>}

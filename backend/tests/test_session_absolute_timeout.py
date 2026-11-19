@@ -137,7 +137,9 @@ class TestRefreshResetsTheWindow:
         window -- so no call site can, however carefully it is written."""
         params = set(inspect.signature(create_refresh_token).parameters)
         assert "absolute_timeout" not in params
-        assert params == {"subject", "session_id", "company_id", "read_only"}
+        # ``auth_methods`` (the badge session's ``amr`` claim, PR D floor PIN) carries HOW the
+        # person signed in across a rotation; it carries no timestamp.
+        assert params == {"subject", "session_id", "company_id", "read_only", "auth_methods"}
 
     def test_reminting_with_the_same_session_id_starts_a_new_window(self, monkeypatch):
         """What ``POST /auth/refresh`` does: mint a new refresh token reusing the
