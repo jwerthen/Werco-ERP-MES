@@ -76,9 +76,11 @@ from app.db.ledger_filter import (
 from app.models.audit_log import AuditLog
 from app.models.bom import BOM, BOMItem
 from app.models.company import Company
+from app.models.customer import Customer
 from app.models.inventory import InventoryItem, InventoryTransaction, TransactionType
 from app.models.operational_event import OperationalEvent
 from app.models.part import Part
+from app.models.purchasing import Vendor
 from app.models.time_entry import TimeEntry, TimeEntryType
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
@@ -108,6 +110,7 @@ from app.services.material_consumption_service import (
     consumable_source_items,
     held_stock_disclosure,
     held_stock_summary,
+    is_auto_drawable_item,
     is_consumable_item,
     shortage_draw_disclosure,
 )
@@ -665,6 +668,61 @@ def test_consumable_predicate_matches_is_consumable_item(db_session: Session, st
     assert (
         sql_says == python_says
     ), f"status={status_value!r} is_active={active_value!r}: SQL said {sql_says}, Python said {python_says}"
+
+
+def _make_owner(db: Session, ownership: str) -> dict:
+    """The owner columns for one ownership kind, creating the owning customer / vendor."""
+    n = _next()
+    if ownership == "customer":
+        customer = Customer(name=f"Owner Customer {n}", code=f"OWNC{n}", company_id=COMPANY_A)
+        db.add(customer)
+        db.flush()
+        return {"ownership": "customer", "owner_customer_id": customer.id, "owner_vendor_id": None}
+    if ownership == "supplier":
+        vendor = Vendor(name=f"Owner Vendor {n}", code=f"OWNV{n}", company_id=COMPANY_A)
+        db.add(vendor)
+        db.flush()
+        return {"ownership": "supplier", "owner_customer_id": None, "owner_vendor_id": vendor.id}
+    return {"ownership": "company", "owner_customer_id": None, "owner_vendor_id": None}
+
+
+@pytest.mark.parametrize("ownership", ["company", "customer", "supplier"])
+@pytest.mark.parametrize("status_value", [None, "available", "on_hold", "quarantine", "rejected"])
+@pytest.mark.parametrize("active_value", [True, False, None])
+def test_auto_draw_predicate_matches_is_auto_drawable_item(db_session: Session, ownership, status_value, active_value):
+    """PARITY: the automatic-draw pair, held together exactly like the consumable pair above.
+
+    ``AUTO_DRAW_ITEM_CLAUSES`` is what the UNPINNED draw (``consumable_source_items``)
+    filters with; ``is_auto_drawable_item`` is its Python twin. Both are the consumable
+    predicate NARROWED to company-owned stock (AS9100D 8.5.3): a customer's or supplier's
+    lot is never taken by FIFO. A disagreement would let a display promise owned stock
+    the engine skips, or hide company stock it takes.
+    """
+    part = make_part(db_session, part_type="purchased")
+    item = make_lot(db_session, part, qty=5, lot=f"AUTO-{_next()}", received_date=days(1))
+    item.status = status_value
+    item.is_active = active_value
+    for column, value in _make_owner(db_session, ownership).items():
+        setattr(item, column, value)
+    db_session.commit()
+    db_session.expire_all()
+
+    item = db_session.get(InventoryItem, item.id)
+    sql_says = [row.id for row in consumable_source_items(db_session, part.id, COMPANY_A)]
+    python_says = [item.id] if is_auto_drawable_item(item) else []
+
+    assert sql_says == python_says, (
+        f"ownership={ownership!r} status={status_value!r} is_active={active_value!r}: "
+        f"SQL said {sql_says}, Python said {python_says}"
+    )
+    # The narrowing is ownership and nothing else: on company stock the auto-draw verdict
+    # IS the consumable verdict, and owned stock is never auto-drawn whatever its status.
+    if ownership == "company":
+        assert is_auto_drawable_item(item) == is_consumable_item(item)
+    else:
+        assert python_says == []
+        # ...while it stays as consumable as its status says, so a PIN of it still works.
+        assert is_consumable_item(item) == (bool(active_value) and (status_value or "available") == "available")
 
 
 def test_held_stock_summary_is_the_exact_complement_of_the_consumable_predicate(db_session: Session):

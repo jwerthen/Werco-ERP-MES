@@ -148,6 +148,7 @@ from app.models.work_order_material import AllocationStatus, WorkOrderMaterialAl
 from app.services.audit_service import AuditService
 from app.services.material_consumption_service import AVAILABLE_ITEM_STATUS, is_consumable_item
 from app.services.operational_event_service import OperationalEventService
+from app.services.owned_property_service import COMPANY, OwnershipKey, ownership_key, ownership_label
 from app.services.sheet_stock_spec import (
     canonical_alloy,
     derive_sheet_spec,
@@ -210,16 +211,27 @@ _BLOCKER_STATUS: Dict[str, int] = {
     "open_work_order_reservation": 409,
     "target_row_not_available": 409,
     "target_serial_mismatch": 409,
+    "target_ownership_mismatch": 409,
     "flagged_part_not_acknowledged": 409,
     "expected_part_number_mismatch": 409,
     "source_still_has_stock": 409,
 }
 
-# The key ``_find_stock_row`` resolves a target row by: ``(location, lot_number)``.
-# Kept as one alias because THREE things have to agree on it -- the drain plan, the
-# ``target_row_not_available`` probe, and the row the write actually increments --
-# and a fourth spelling of the same tuple is how they would drift apart.
-_LandingKey = Tuple[Optional[str], Optional[str]]
+# The key ``_find_stock_row`` resolves a target row by: ``(location, lot_number,
+# ownership, owner_customer_id, owner_vendor_id)`` -- the slot plus WHO OWNS the material
+# (AS9100D 8.5.3, migration 129), so a customer's lot never lands in a company row or the
+# reverse. Kept as one alias because THREE things have to agree on it -- the drain plan,
+# the target-row probes, and the row the write actually increments -- and a fourth
+# spelling of the same tuple is how they would drift apart.
+_LandingKey = Tuple[Optional[str], Optional[str], str, Optional[int], Optional[int]]
+# Just the physical slot, ``(location, lot_number)``: what ``target_ownership_mismatch``
+# compares, because two rows of different owners in one slot is what it refuses to create.
+_SlotKey = Tuple[Optional[str], Optional[str]]
+
+
+def _landing_key(location: Optional[str], lot_number: Optional[str], owner: OwnershipKey) -> _LandingKey:
+    return (location, lot_number, owner[0], owner[1], owner[2])
+
 
 # A transient value for ``combine_number`` that lives only between the header
 # INSERT and the UPDATE that stamps the real number, because the number is minted
@@ -309,9 +321,20 @@ class PlannedLine:
     lot_number: Optional[str] = None
     serial_number: Optional[str] = None
     quantity: float = 0.0
+    ownership: str = COMPANY
+    owner_customer_id: Optional[int] = None
+    owner_vendor_id: Optional[int] = None
+
+    @property
+    def owner(self) -> OwnershipKey:
+        return (self.ownership, self.owner_customer_id, self.owner_vendor_id)
 
     @property
     def landing_key(self) -> _LandingKey:
+        return _landing_key(self.location, self.lot_number, self.owner)
+
+    @property
+    def slot(self) -> _SlotKey:
         return (self.location, self.lot_number)
 
 
@@ -348,6 +371,14 @@ class CombineStockLine:
     # fields the schema declares, so carrying it here costs the wire nothing.
     unavailable_reason: Optional[str] = None
     pinned_work_orders: List[str] = field(default_factory=list)
+    # Who owns the row (AS9100D 8.5.3). Part of the landing key; reported on the preview.
+    ownership: str = COMPANY
+    owner_customer_id: Optional[int] = None
+    owner_vendor_id: Optional[int] = None
+
+    @property
+    def owner(self) -> OwnershipKey:
+        return (self.ownership, self.owner_customer_id, self.owner_vendor_id)
 
 
 @dataclass
@@ -367,6 +398,11 @@ class PartStockPicture:
     total_available: float = 0.0
     total_pinned: float = 0.0
     eligible_available: float = 0.0
+    # The share of ``eligible_available`` on rows a customer or supplier owns. Automatic
+    # (unpinned) consumption never draws it, so the part-level reservation rule leaves it
+    # out of what can cover an open job (``_combine_blockers``, ``_max_combinable``).
+    # Zero on a part with only company stock, where every figure is unchanged.
+    owned_eligible_available: float = 0.0
     lines: List[CombineStockLine] = field(default_factory=list)
 
 
@@ -551,6 +587,7 @@ def _picture_from_rows(
     total_allocated = 0.0
     total_pinned = 0.0
     eligible_available = 0.0
+    owned_eligible_available = 0.0
 
     for item in rows:
         on_hand = float(item.quantity_on_hand or 0.0)
@@ -570,8 +607,11 @@ def _picture_from_rows(
 
         reason = _ineligible_reason(item, combinable, withheld)
         eligible = reason is None
+        owner = ownership_key(item)
         if eligible:
             eligible_available += combinable
+            if owner[0] != COMPANY:
+                owned_eligible_available += combinable
 
         lines.append(
             CombineStockLine(
@@ -592,6 +632,9 @@ def _picture_from_rows(
                 ineligible_reason=reason,
                 unavailable_reason=_unavailable_reason(item),
                 pinned_work_orders=list(pinned_work_orders.get(item.id, ())),
+                ownership=owner[0],
+                owner_customer_id=owner[1],
+                owner_vendor_id=owner[2],
             )
         )
 
@@ -609,6 +652,7 @@ def _picture_from_rows(
         total_available=total_on_hand - total_allocated,
         total_pinned=total_pinned,
         eligible_available=eligible_available,
+        owned_eligible_available=owned_eligible_available,
         lines=lines,
     )
 
@@ -625,6 +669,7 @@ def _stock_line_snapshot(item: InventoryItem) -> CombineStockLine:
     """
     on_hand = float(item.quantity_on_hand or 0.0)
     allocated = float(item.quantity_allocated or 0.0)
+    owner = ownership_key(item)
     return CombineStockLine(
         inventory_item_id=item.id,
         location=item.location,
@@ -638,6 +683,9 @@ def _stock_line_snapshot(item: InventoryItem) -> CombineStockLine:
         status=item.status,
         is_active=bool(item.is_active),
         unavailable_reason=_unavailable_reason(item),
+        ownership=owner[0],
+        owner_customer_id=owner[1],
+        owner_vendor_id=owner[2],
     )
 
 
@@ -1045,6 +1093,9 @@ def _plan_lines(source_picture: PartStockPicture, quantity: float) -> List[Plann
                 lot_number=line.lot_number,
                 serial_number=line.serial_number,
                 quantity=take,
+                ownership=line.ownership,
+                owner_customer_id=line.owner_customer_id,
+                owner_vendor_id=line.owner_vendor_id,
             )
         )
         remaining -= take
@@ -1052,9 +1103,9 @@ def _plan_lines(source_picture: PartStockPicture, quantity: float) -> List[Plann
 
 
 def _landing_keys(planned: Sequence[PlannedLine]) -> List[_LandingKey]:
-    """The distinct ``(location, lot)`` keys the plan would land on, in plan order.
+    """The distinct landing keys the plan would land on, in plan order.
 
-    De-duplicated because two source rows can share a ``(location, lot)`` -- a
+    De-duplicated because two source rows can share a ``(location, lot, owner)`` -- a
     legacy fragmented set does exactly that -- and both would land on the SAME
     target row.
     """
@@ -1066,17 +1117,21 @@ def _landing_keys(planned: Sequence[PlannedLine]) -> List[_LandingKey]:
 
 
 def _landing_rows_from_picture(target_picture: PartStockPicture) -> Dict[_LandingKey, CombineStockLine]:
-    """The target row each ``(location, lot)`` would resolve to, from a read-only picture.
+    """The target row each landing key would resolve to, from a read-only picture.
 
-    Mirrors ``_find_stock_row``: same key, and FIRST match wins because that query
-    orders by ascending id and takes ``.first()``. ``_stock_rows`` hands the picture
-    back in ascending-id order, so "first occurrence" and "lowest id" are the same
-    row -- if that ordering is ever relaxed, this resolver silently starts naming a
+    Mirrors ``_find_stock_row``: same key (slot AND owner), and FIRST match wins because
+    that query orders by ascending id and takes ``.first()``. ``_stock_rows`` hands the
+    picture back in ascending-id order, so "first occurrence" and "lowest id" are the
+    same row -- if that ordering is ever relaxed, this resolver silently starts naming a
     different row than the write increments.
+
+    EVERY target row is mapped, whoever owns it, because ``target_ownership_mismatch``
+    needs to see a slot occupied by a different owner. The write builds the same map from
+    its locked rows plus ``_target_slot_occupants``.
     """
     landing: Dict[_LandingKey, CombineStockLine] = {}
     for line in target_picture.lines:
-        landing.setdefault((line.location, line.lot_number), line)
+        landing.setdefault(_landing_key(line.location, line.lot_number, line.owner), line)
     return landing
 
 
@@ -1212,8 +1267,16 @@ def _combine_blockers(
     #
     # Pinned demand is subtracted out because ``source_picture`` already withheld it
     # at the row -- counting it here as well would charge the same reservation twice.
+    #
+    # Owned stock (AS9100D 8.5.3, migration 129) is taken back out of the remainder: an
+    # open tie draws unpinned, and the unpinned draw never takes a customer's or
+    # supplier's lot, so owned material left behind covers no job. ``owned_left`` is the
+    # owned eligible stock this plan does NOT move; on a source with only company stock it
+    # is exactly 0.0 and the remainder is the pre-129 ``eligible_available - quantity``.
     unpinned_reserved = reservations.unpinned_total(source_picture.total_pinned)
-    remaining_after = source_picture.eligible_available - quantity
+    owned_moved = sum(line.quantity for line in planned if line.ownership != COMPANY)
+    owned_left = source_picture.owned_eligible_available - owned_moved
+    remaining_after = (source_picture.eligible_available - quantity) - owned_left
     if unpinned_reserved > LEDGER_QUANTITY_EPSILON and remaining_after < unpinned_reserved - LEDGER_QUANTITY_EPSILON:
         named = ", ".join(f"{r.work_order_number} ({r.outstanding_quantity:g})" for r in reservations.by_work_order)
         pinned_note = (
@@ -1278,6 +1341,14 @@ def _target_landing_blockers(
     that genuinely needs to move serialized units to a new number lands them on a
     NEW row, which carries the serial across intact and is unaffected by this.
 
+    ``target_ownership_mismatch`` -- AS9100D 8.5.3. Ownership is part of the landing
+    key, so material only ever lands on a target row with the SAME owner. When the slot
+    (location + lot) has no such row but already holds the target's stock under a
+    different owner -- a customer's lot onto the company's lot L, or the reverse -- the
+    combine refuses rather than set a second owner's row beside it, which on the target
+    would read as one lot split between owners. Move the material to its own location or
+    lot, or change one row's ownership (``POST /inventory/items/{id}/ownership``), first.
+
     Only rows a MOVING line would actually land on are considered -- a held target
     row at a location this combine never touches refuses nothing. That is why this
     takes the plan rather than the whole target picture.
@@ -1291,8 +1362,32 @@ def _target_landing_blockers(
             continue
         existing = target_landing.get(key)
         if existing is None:
-            # No row there yet: ``_resolve_target_row`` will CREATE one, available
-            # and carrying the source lot's traceability. Nothing to refuse.
+            occupant = next(
+                (
+                    other
+                    for other_key, other in target_landing.items()
+                    if (other_key[0], other_key[1]) == line.slot and other_key != key
+                ),
+                None,
+            )
+            if occupant is not None:
+                reported.add(key)
+                where = line.location or "(no location)"
+                lot = f" lot {line.lot_number}" if line.lot_number else ""
+                out.append(
+                    CombineDiagnostic(
+                        code="target_ownership_mismatch",
+                        detail=(
+                            f"The material at {where}{lot} is {ownership_label(line.owner, None)} and "
+                            f"'{target.part_number}' already has stock there that is "
+                            f"{ownership_label(occupant.owner, None)}. A combine does not fold one owner's "
+                            "material into a location and lot where the target holds another owner's. Move this "
+                            "material to a different location or lot first, or change one row's ownership."
+                        ),
+                    )
+                )
+            # Otherwise no row there yet: ``_apply_to_target_row`` will CREATE one,
+            # available and carrying the source lot's traceability and owner.
             continue
 
         where = existing.location or "(no location)"
@@ -1484,9 +1579,34 @@ def _max_combinable(source_picture: PartStockPicture, reservations: SourceReserv
     Bounded by the eligible available quantity as well, because that cap is the hard
     one, and the subtraction skips pinned demand for the same reason
     ``_combine_blockers`` does -- ``eligible_available`` is already net of it.
+
+    A source holding customer- or supplier-owned stock (AS9100D 8.5.3) has a cap that
+    depends on drain order, because only the COMPANY stock it moves can strand an open
+    job: the walk below follows ``_plan_lines`` row by row, moving owned rows freely and
+    company rows only while the company remainder still covers the open demand. With
+    only company stock the original closed form is used, unchanged.
     """
-    reservation_cap = source_picture.eligible_available - reservations.unpinned_total(source_picture.total_pinned)
-    return max(0.0, min(source_picture.eligible_available, reservation_cap))
+    unpinned_reserved = reservations.unpinned_total(source_picture.total_pinned)
+    if source_picture.owned_eligible_available <= LEDGER_QUANTITY_EPSILON:
+        reservation_cap = source_picture.eligible_available - unpinned_reserved
+        return max(0.0, min(source_picture.eligible_available, reservation_cap))
+
+    company_budget = (source_picture.eligible_available - source_picture.owned_eligible_available) - unpinned_reserved
+    total = 0.0
+    for line in source_picture.lines:
+        # The same filter and order ``_plan_lines`` draws with.
+        if not line.eligible or line.quantity_combinable <= LEDGER_QUANTITY_EPSILON:
+            continue
+        if line.ownership != COMPANY:
+            total += line.quantity_combinable
+            continue
+        take = min(line.quantity_combinable, max(0.0, company_budget))
+        total += take
+        company_budget -= take
+        if take < line.quantity_combinable - LEDGER_QUANTITY_EPSILON:
+            # Any larger quantity draws more from this company row than the open jobs allow.
+            break
+    return max(0.0, min(source_picture.eligible_available, total))
 
 
 # --------------------------------------------------------------------------- #
@@ -1575,7 +1695,7 @@ def _lock_target_landing_rows(
 
     landing: Dict[_LandingKey, InventoryItem] = {}
     for key in _landing_keys(planned):
-        location, lot_number = key
+        location, lot_number, ownership, owner_customer_id, owner_vendor_id = key
         row = _find_stock_row(
             db,
             company_id=company_id,
@@ -1587,10 +1707,69 @@ def _lock_target_landing_rows(
             location_code=cast(str, location),
             lot_number=lot_number,
             for_update=True,
+            # Ownership is part of the merge key (AS9100D 8.5.3): only a row with the same
+            # owner is a landing site.
+            owner=(ownership, owner_customer_id, owner_vendor_id),
         )
         if row is not None:
             landing[key] = row
     return landing
+
+
+def _target_slot_occupants(
+    db: Session,
+    company_id: int,
+    *,
+    target_part_id: int,
+    planned: Sequence[PlannedLine],
+) -> Dict[_LandingKey, CombineStockLine]:
+    """Every target row in a slot the plan would land in, WHOEVER owns it. No locks.
+
+    The write's half of the occupancy ``target_ownership_mismatch`` reads (the preview
+    sees every target row in its picture). Column-only on purpose: it returns tuples, not
+    ORM instances, so it cannot seed the Session identity map with a target row ahead of
+    a locked read -- the stale-copy hazard ``_lock_target_landing_rows`` documents. A row
+    of a different owner is only ever a reason to REFUSE, never written, so it needs no
+    lock: a concurrent change can only make this read more conservative than the commit.
+    """
+    slots = sorted({line.slot for line in planned}, key=lambda slot: (slot[0] or "", slot[1] or ""))
+    if not slots:
+        return {}
+    columns = (
+        InventoryItem.id,
+        InventoryItem.location,
+        InventoryItem.warehouse,
+        InventoryItem.lot_number,
+        InventoryItem.serial_number,
+        InventoryItem.quantity_on_hand,
+        InventoryItem.quantity_allocated,
+        InventoryItem.unit_cost,
+        InventoryItem.status,
+        InventoryItem.is_active,
+        InventoryItem.ownership,
+        InventoryItem.owner_customer_id,
+        InventoryItem.owner_vendor_id,
+    )
+    wanted = set(slots)
+    occupants: Dict[_LandingKey, CombineStockLine] = {}
+    locations = sorted({slot[0] for slot in slots if slot[0] is not None})
+    rows = (
+        db.query(*columns)
+        .filter(
+            InventoryItem.company_id == company_id,
+            InventoryItem.part_id == target_part_id,
+            InventoryItem.location.in_(locations),
+        )
+        .order_by(InventoryItem.id.asc())
+        .all()
+    )
+    for row in rows:
+        if (row.location, row.lot_number) not in wanted:
+            continue
+        # A Row exposes the same attribute names the snapshot reads off an ORM row.
+        snapshot = _stock_line_snapshot(cast(InventoryItem, row))
+        occupants.setdefault(_landing_key(snapshot.location, snapshot.lot_number, snapshot.owner), snapshot)
+    return occupants
 
 
 def _apply_to_target_row(
@@ -1611,7 +1790,7 @@ def _apply_to_target_row(
 
     WHEN A ROW MUST BE CREATED it carries the source row's traceability wholesale
     -- lot, serial, cert, heat lot, supplier, PO, received and expiration dates --
-    and its ``unit_cost``. The MTR and heat lot follow the physical material
+    its owner (AS9100D 8.5.3) and its ``unit_cost``. The MTR and heat lot follow the physical material
     because that is what AS9100D 8.5.2 lot traceability IS; a merge that dropped
     them would launder the material's provenance.
 
@@ -1644,6 +1823,10 @@ def _apply_to_target_row(
         expiration_date=source_row.expiration_date,
         status=AVAILABLE_ITEM_STATUS,
         is_active=True,
+        # Ownership follows the material (AS9100D 8.5.3), like its traceability.
+        ownership=ownership_key(source_row)[0],
+        owner_customer_id=ownership_key(source_row)[1],
+        owner_vendor_id=ownership_key(source_row)[2],
     )
     created.company_id = company_id
     db.add(created)
@@ -1680,6 +1863,17 @@ def _assert_target_row_still_landable(
                     f"'{target_part.part_number}' already has stock at "
                     f"{existing.location or '(no location)'} that is not available ({reason}). Folding "
                     "usable material onto it would make that material unusable too."
+                ),
+            )
+        )
+
+    if ownership_key(source_row) != ownership_key(existing):
+        raise _refuse(
+            CombineDiagnostic(
+                code="target_ownership_mismatch",
+                detail=(
+                    f"Material that is {ownership_label(ownership_key(source_row), None)} cannot be merged onto a "
+                    f"'{target_part.part_number}' row that is {ownership_label(ownership_key(existing), None)}."
                 ),
             )
         )
@@ -1777,7 +1971,12 @@ def combine_inventory(
         acknowledged_ids=acknowledge_flagged_part_ids,
         reservations=reservations,
         planned=planned,
-        target_landing={key: _stock_line_snapshot(row) for key, row in target_rows_by_key.items()},
+        # The locked same-owner rows, over every row of any owner in the same slots --
+        # the map the preview builds from its whole target picture.
+        target_landing={
+            **_target_slot_occupants(db, company_id, target_part_id=target.id, planned=planned),
+            **{key: _stock_line_snapshot(row) for key, row in target_rows_by_key.items()},
+        },
     )
     if blockers:
         raise _refuse(blockers[0])

@@ -1,7 +1,7 @@
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -10,11 +10,19 @@ from app.api.deps import get_audit_service, get_current_company_id, get_current_
 from app.core.time_utils import to_utc_iso
 from app.db.database import get_db
 from app.db.tenant_filter import tenant_query
+from app.models.inventory import OwnershipType
 from app.models.tool_management import Tool, ToolCheckout, ToolStatus, ToolType, ToolUsageLog
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import WorkOrder
+from app.schemas.owned_property import (
+    OWNER_CUSTOMER_DESCRIPTION,
+    OWNER_VENDOR_DESCRIPTION,
+    OWNERSHIP_DESCRIPTION,
+    OwnershipFields,
+)
 from app.services.audit_service import AuditService
+from app.services.owned_property_service import owner_name_for, owner_names, ownership_key, resolve_owner
 
 router = APIRouter()
 
@@ -56,8 +64,14 @@ _TOOL_EDITABLE_FIELDS = (
     "next_inspection_date",
     "notes",
     "is_active",
+    # Owned property (AS9100D 8.5.3, migration 129). Listed so the audit row carries their
+    # old and new values; ``update_tool`` writes them from the RESOLVED owner, never raw.
+    "ownership",
+    "owner_customer_id",
+    "owner_vendor_id",
 )
-_TOOL_NON_NULLABLE_UPDATE_FIELDS = ("name", "tool_type", "status", "is_active")
+_TOOL_OWNERSHIP_FIELDS = ("ownership", "owner_customer_id", "owner_vendor_id")
+_TOOL_NON_NULLABLE_UPDATE_FIELDS = ("name", "tool_type", "status", "is_active", "ownership")
 
 # What a check-in condition does to the tool. A closed vocabulary: an unknown word is a
 # 422, never silently read as "good". It covers both the API's own words and the ones the
@@ -79,7 +93,10 @@ def _normalize_lower(value: Any) -> Any:
 # ── Pydantic Schemas ──────────────────────────────────────────────────────────
 
 
-class ToolCreate(BaseModel):
+class ToolCreate(OwnershipFields):
+    """A new crib tool. ``ownership`` defaults to company; a customer's fixture or a
+    supplier's gauge names its owner (see ``OwnershipFields``)."""
+
     tool_id: str
     name: str
     tool_type: ToolType = ToolType.OTHER
@@ -119,8 +136,13 @@ class ToolUpdate(BaseModel):
     next_inspection_date: Optional[date] = None
     notes: Optional[str] = None
     is_active: Optional[bool] = None
+    # Owned property (AS9100D 8.5.3). Sending ``ownership`` states the new ownership in full
+    # (an omitted owner id is none); sending only an owner id keeps the current kind.
+    ownership: Optional[OwnershipType] = Field(None, description=OWNERSHIP_DESCRIPTION)
+    owner_customer_id: Optional[int] = Field(None, gt=0, description=OWNER_CUSTOMER_DESCRIPTION)
+    owner_vendor_id: Optional[int] = Field(None, gt=0, description=OWNER_VENDOR_DESCRIPTION)
 
-    @field_validator("tool_type", "status", mode="before")
+    @field_validator("tool_type", "status", "ownership", mode="before")
     @classmethod
     def _normalize_enums(cls, value: Any) -> Any:
         return _normalize_lower(value)
@@ -196,6 +218,10 @@ class ToolResponse(BaseModel):
     inspection_interval_days: Optional[int] = None
     notes: Optional[str] = None
     is_active: bool
+    ownership: str = "company"
+    owner_customer_id: Optional[int] = None
+    owner_vendor_id: Optional[int] = None
+    owner_name: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -266,9 +292,12 @@ def _calc_life_remaining(tool: Tool) -> Optional[float]:
     return round(pct_hours, 1) if pct_hours is not None else (round(pct_cycles, 1) if pct_cycles is not None else None)
 
 
-def _tool_to_dict(tool: Tool) -> dict:
+def _tool_to_dict(tool: Tool, owner_name: Optional[str] = None) -> dict:
+    """One tool as every tool endpoint returns it. ``owner_name`` comes from the caller's
+    batched ``owner_names`` read (``_tools_payload`` / ``_tool_payload``)."""
     life_pct = _calc_life_remaining(tool)
     tool.life_remaining_pct = life_pct
+    owner = ownership_key(tool)
     return {
         "id": tool.id,
         "tool_id": tool.tool_id,
@@ -294,9 +323,24 @@ def _tool_to_dict(tool: Tool) -> dict:
         "inspection_interval_days": tool.inspection_interval_days,
         "notes": tool.notes,
         "is_active": tool.is_active,
+        "ownership": owner[0],
+        "owner_customer_id": owner[1],
+        "owner_vendor_id": owner[2],
+        "owner_name": owner_name,
         "created_at": to_utc_iso(tool.created_at),
         "updated_at": to_utc_iso(tool.updated_at),
     }
+
+
+def _tools_payload(db: Session, company_id: int, tools: list) -> list:
+    """Tools as dicts, with owner names resolved for the whole list in at most two
+    tenant-scoped queries (none for a list of company tools)."""
+    names = owner_names(db, company_id, tools)
+    return [_tool_to_dict(tool, owner_name_for(tool, names)) for tool in tools]
+
+
+def _tool_payload(db: Session, company_id: int, tool: Tool) -> dict:
+    return _tools_payload(db, company_id, [tool])[0]
 
 
 def _checkout_to_dict(co: ToolCheckout) -> dict:
@@ -392,7 +436,7 @@ def list_checked_out(
         )
         .all()
     )
-    return [_tool_to_dict(t) for t in tools]
+    return _tools_payload(db, company_id, tools)
 
 
 @router.get("/tools/replacement-due")
@@ -403,12 +447,12 @@ def list_replacement_due(
 ):
     """Tools with <=20% life remaining"""
     tools = tenant_query(db, Tool, company_id).filter(Tool.is_active == True).all()
-    result = []
+    due = []
     for t in tools:
         pct = _calc_life_remaining(t)
         if pct is not None and pct <= 20:
-            result.append(_tool_to_dict(t))
-    return result
+            due.append(t)
+    return _tools_payload(db, company_id, due)
 
 
 @router.get("/tools/inspection-due")
@@ -429,7 +473,7 @@ def list_inspection_due(
         .order_by(Tool.next_inspection_date)
         .all()
     )
-    return [_tool_to_dict(t) for t in tools]
+    return _tools_payload(db, company_id, tools)
 
 
 # ── CRUD ──────────────────────────────────────────────────────────────────────
@@ -441,11 +485,20 @@ def list_tools(
     tool_type: Optional[str] = None,
     search: Optional[str] = None,
     include_inactive: bool = False,
+    ownership: Optional[OwnershipType] = Query(
+        None, description="Only tools with this ownership: company, customer or supplier."
+    ),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """List tools with optional filters"""
+    """List tools with optional filters.
+
+    Each tool carries ``ownership`` (``company`` / ``customer`` / ``supplier``, AS9100D
+    8.5.3), the owner reference (``owner_customer_id`` / ``owner_vendor_id``) and the
+    owner's name in ``owner_name`` (null for the company's own tools). Filter with
+    ``ownership`` to list the customer- or supplier-owned tooling held in the crib.
+    """
     query = tenant_query(db, Tool, company_id)
     if not include_inactive:
         query = query.filter(Tool.is_active == True)
@@ -461,8 +514,10 @@ def list_tools(
             | (Tool.manufacturer.ilike(search_term))
             | (Tool.serial_number.ilike(search_term))
         )
+    if ownership is not None:
+        query = query.filter(Tool.ownership == ownership.value)
     tools = query.order_by(Tool.tool_id).all()
-    return [_tool_to_dict(t) for t in tools]
+    return _tools_payload(db, company_id, tools)
 
 
 @router.get("/tools/{tool_id}")
@@ -473,7 +528,7 @@ def get_tool(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get single tool by primary key"""
-    return _tool_to_dict(_tool_or_404(db, tool_id, company_id))
+    return _tool_payload(db, company_id, _tool_or_404(db, tool_id, company_id))
 
 
 @router.post("/tools/")
@@ -484,11 +539,19 @@ def create_tool(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Create a new tool. **Role: ADMIN / MANAGER / SUPERVISOR.**"""
+    """Create a new tool. **Role: ADMIN / MANAGER / SUPERVISOR.**
+
+    ``ownership`` defaults to company. A customer's fixture or a supplier's gauge held in
+    the crib (AS9100D 8.5.3) names its owner in ``owner_customer_id`` / ``owner_vendor_id``:
+    a live customer / a non-deleted vendor of this company (404 otherwise; a kind/owner
+    mismatch is 422), checked before anything is written.
+    """
     if tenant_query(db, Tool, company_id).filter(Tool.tool_id == tool_in.tool_id).first():
         raise HTTPException(status_code=400, detail="Tool ID already exists")
+    owner = resolve_owner(db, company_id, tool_in.ownership, tool_in.owner_customer_id, tool_in.owner_vendor_id)
 
     data = tool_in.model_dump()
+    data.update(owner.columns())
 
     # Calculate initial next_inspection_date
     if data.get("inspection_interval_days"):
@@ -511,7 +574,7 @@ def create_tool(
     audit.log_create("tool", tool.id, tool.tool_id, new_values=tool)
     db.commit()
     db.refresh(tool)
-    return _tool_to_dict(tool)
+    return _tool_to_dict(tool, owner.owner_name)
 
 
 @router.put("/tools/{tool_id}")
@@ -531,6 +594,14 @@ def update_tool(
     of a tool that is checked out, is **409**. Retirement has one door too:
     ``status: retired`` here is **409** naming ``DELETE /tools/{id}``, which also clears
     ``is_active`` and refuses a checked-out tool.
+
+    Ownership (AS9100D 8.5.3): sending ``ownership`` states the tool's new ownership in
+    full -- ``{"ownership": "customer", "owner_customer_id": 12}``, or
+    ``{"ownership": "company"}`` to take it back; sending only ``owner_customer_id`` /
+    ``owner_vendor_id`` re-points the owner within the current kind. A new owner must be a
+    live customer / a non-deleted vendor of this company (404); a kind/owner mismatch is
+    422. Both are checked before anything is written, and the change lands on the same
+    audit row as the rest of the edit.
     """
     tool = _tool_or_404(db, tool_id, company_id, for_update=True)
 
@@ -553,10 +624,37 @@ def update_tool(
             detail=f"Tool {tool.tool_id} is checked out. Check it in first: POST /tools/{tool.id}/checkin",
         )
 
+    # The resulting ownership triple, resolved before the first write. Only a CHANGE is
+    # resolved: re-sending a tool's current owner (a customer since soft-deleted, say) must
+    # not refuse an unrelated edit.
+    new_owner = None
+    if any(field in update_data for field in _TOOL_OWNERSHIP_FIELDS):
+        current_kind, current_customer_id, current_vendor_id = ownership_key(tool)
+        if "ownership" in update_data:
+            requested = (
+                update_data["ownership"],
+                update_data.get("owner_customer_id"),
+                update_data.get("owner_vendor_id"),
+            )
+        else:
+            requested = (
+                current_kind,
+                update_data.get("owner_customer_id", current_customer_id),
+                update_data.get("owner_vendor_id", current_vendor_id),
+            )
+        for field in _TOOL_OWNERSHIP_FIELDS:
+            update_data.pop(field, None)
+        requested_key = (getattr(requested[0], "value", requested[0]), requested[1], requested[2])
+        if requested_key != ownership_key(tool):
+            new_owner = resolve_owner(db, company_id, *requested_key)
+
     old_values = {field: getattr(tool, field) for field in _TOOL_EDITABLE_FIELDS}
     for field in _TOOL_EDITABLE_FIELDS:
         if field in update_data:
             setattr(tool, field, update_data[field])
+    if new_owner is not None:
+        for field, value in new_owner.columns().items():
+            setattr(tool, field, value)
     if status_changes:
         tool.status = new_status
 
@@ -575,7 +673,7 @@ def update_tool(
         )
     db.commit()
     db.refresh(tool)
-    return _tool_to_dict(tool)
+    return _tool_payload(db, company_id, tool)
 
 
 @router.delete("/tools/{tool_id}")
@@ -811,7 +909,7 @@ def get_tool_history(
     )
 
     return {
-        "tool": _tool_to_dict(tool),
+        "tool": _tool_payload(db, company_id, tool),
         "checkouts": [_checkout_to_dict(co) for co in checkouts],
         "usage_logs": [_usage_to_dict(ul) for ul in usage_logs],
     }

@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.core.validation import Money, MoneySmall
 from app.models.purchasing import POStatus
 from app.schemas.base import UTCModel
+from app.schemas.owned_property import OwnershipFields
 from app.schemas.po_flowdown import MAX_PO_QUALITY_CLAUSES, QualityClauseCode
 from app.services.supplier_approval_service import AslValueError, parse_bases, parse_scopes, parse_status
 
@@ -567,7 +568,13 @@ class POListResponse(UTCModel):
 
 
 # Receipt schemas
-class ReceiptCreate(BaseModel):
+class ReceiptLineFields(BaseModel):
+    # The receipt line's fields WITHOUT ownership. ``ReceiptCreate`` adds ownership; Hank's
+    # ``receive_delivery`` line (``app.schemas.hank_operations.HankReceiptLine``) extends
+    # this class instead, so the AI-proposed receipt stays company stock and the copilot's
+    # versioned tool schema is unchanged. No docstring on purpose: a subclass's JSON schema
+    # must stay byte-identical to what it was before migration 129.
+
     certificate_document_id: Optional[int] = Field(None, gt=0)
     po_line_id: int = Field(..., gt=0)
     quantity_received: MoneySmall = Field(..., gt=Decimal("0"))
@@ -599,6 +606,14 @@ class ReceiptCreate(BaseModel):
     tracking_number: Optional[str] = Field(None, max_length=100)
     notes: Optional[str] = Field(None, max_length=2000)
     over_receive_approved: bool = False
+
+
+class ReceiptCreate(ReceiptLineFields, OwnershipFields):
+    """One PO-line receipt. ``ownership`` / ``owner_customer_id`` / ``owner_vendor_id``
+    default to company stock (AS9100D 8.5.3; see ``OwnershipFields``). Customer- or
+    supplier-owned material must be received dock-to-stock (``requires_inspection`` false):
+    the inspection queue has no place to carry the owner, so such a line is refused 422.
+    """
 
 
 class DeliveryReceiptCreate(BaseModel):

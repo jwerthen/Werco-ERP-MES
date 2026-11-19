@@ -40,12 +40,14 @@ from sqlalchemy.orm import Session
 
 from app.models.audit_log import AuditLog
 from app.models.company import Company
+from app.models.customer import Customer
 from app.models.inventory import InventoryItem, InventoryTransaction
 from app.models.part import Part
+from app.models.purchasing import Vendor
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.models.work_order_material import AllocationSource, AllocationStatus, WorkOrderMaterialAllocation
-from app.services.material_consumption_service import AVAILABLE_ITEM_STATUS
+from app.services.material_consumption_service import AVAILABLE_ITEM_STATUS, is_auto_drawable_item
 from app.services.material_tie_view import tie_views_for_operations
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
@@ -437,6 +439,63 @@ def test_null_status_lot_is_counted_in_the_unpinned_sum_because_the_engine_draws
 
     assert db_session.get(InventoryItem, null_status.id).status is None, "the fixture must really be NULL"
     assert view.on_hand == 100.0, "7 available + 93 NULL-status; the quarantined 500 is still excluded"
+    assert view.short_by == 0.0
+
+
+def _own(db: Session, item: InventoryItem, ownership: str) -> None:
+    """Re-own ``item`` (customer / supplier creates the owner row); company is a no-op."""
+    n = _next()
+    if ownership == "customer":
+        customer = Customer(name=f"MTV Owner Customer {n}", code=f"MTVC{n}", company_id=item.company_id)
+        db.add(customer)
+        db.flush()
+        item.ownership, item.owner_customer_id = "customer", customer.id
+    elif ownership == "supplier":
+        vendor = Vendor(name=f"MTV Owner Vendor {n}", code=f"MTVV{n}", company_id=item.company_id)
+        db.add(vendor)
+        db.flush()
+        item.ownership, item.owner_vendor_id = "supplier", vendor.id
+    db.commit()
+
+
+@pytest.mark.parametrize("ownership", ["company", "customer", "supplier"])
+@pytest.mark.parametrize("status", [None, AVAILABLE_ITEM_STATUS, "on_hold"])
+def test_unpinned_sum_matches_the_auto_draw_twin_cell_by_cell(db_session: Session, ownership, status):
+    """PARITY: the unpinned on-hand counts a lot exactly when ``is_auto_drawable_item`` says
+    the engine's FIFO draw would take it -- ``AUTO_DRAW_ITEM_CLAUSES`` is imported, not
+    restated. A customer's or supplier's lot (AS9100D 8.5.3) is not drawn by FIFO, so it
+    must not paint a covered chip on the board."""
+    operation = make_operation(db_session)
+    part = make_part(db_session)
+    lot = make_lot(db_session, part, qty=9.0)
+    lot.status = status
+    db_session.commit()
+    _own(db_session, lot, ownership)
+    make_tie(db_session, operation, part, qty_planned=9.0)
+
+    [view] = tie_views_for_operations(db_session, company_id=COMPANY_A, operation_ids=[operation.id])[operation.id]
+
+    db_session.expire_all()
+    expected = 9.0 if is_auto_drawable_item(db_session.get(InventoryItem, lot.id)) else 0.0
+    assert view.on_hand == expected, f"ownership={ownership!r} status={status!r}"
+    if ownership != "company":
+        assert view.on_hand == 0.0, "owned stock never counts toward an unpinned tie"
+
+
+@pytest.mark.parametrize("ownership", ["customer", "supplier"])
+def test_tie_pinned_to_an_owned_lot_is_scored_against_that_lot(db_session: Session, ownership):
+    """The other half: a PIN is a person's lot-directed decision, and the engine consumes a
+    pinned lot whoever owns it, so the pinned leg reads the owned lot's on-hand."""
+    operation = make_operation(db_session)
+    part = make_part(db_session)
+    owned = make_lot(db_session, part, qty=6.0)
+    _own(db_session, owned, ownership)
+    make_lot(db_session, part, qty=50.0)  # company stock the pin excludes
+    make_tie(db_session, operation, part, qty_planned=6.0, pinned=owned)
+
+    [view] = tie_views_for_operations(db_session, company_id=COMPANY_A, operation_ids=[operation.id])[operation.id]
+
+    assert view.on_hand == 6.0
     assert view.short_by == 0.0
 
 

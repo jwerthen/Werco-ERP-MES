@@ -16,7 +16,9 @@ from app.db.database import get_db
 from app.db.tenant_filter import tenant_query
 from app.models.customer import Customer
 from app.models.governance import DataClassification
+from app.models.inventory import InventoryItem
 from app.models.part import Part, PartType
+from app.models.tool_management import Tool
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder, WorkOrderStatus
 from app.schemas.base import UTCModel
@@ -732,6 +734,27 @@ def delete_customer(
         car_refusal = car_reference_refusal(car_reference_count(db, company_id, customer_id=customer.id), "Customer")
         if car_refusal is not None:
             raise HTTPException(status_code=400, detail=car_refusal)
+        # Owned property (AS9100D 8.5.3, migration 129): stock rows and tools naming this
+        # customer as owner, any quantity and any is_active. Each holds an FK to the row, so
+        # without this the delete would fail at COMMIT instead; and the record of whose
+        # property the shop holds must keep naming its owner. Company-scoped counts.
+        owned_stock_rows = (
+            tenant_query(db, InventoryItem, company_id).filter(InventoryItem.owner_customer_id == customer.id).count()
+        )
+        owned_tools = tenant_query(db, Tool, company_id).filter(Tool.owner_customer_id == customer.id).count()
+        if owned_stock_rows or owned_tools:
+            blocking = []
+            if owned_stock_rows:
+                blocking.append(f"{owned_stock_rows} inventory stock row{'s' if owned_stock_rows != 1 else ''}")
+            if owned_tools:
+                blocking.append(f"{owned_tools} tool{'s' if owned_tools != 1 else ''}")
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Cannot hard delete: Customer owns {' and '.join(blocking)} recorded as customer property. "
+                    "Change their ownership first, or soft delete the customer."
+                ),
+            )
         # Export control: a customer with a contract or handling instruction keeps its ROW --
         # it is what ties its historical records (work orders, quotes) to its export control,
         # and a hard delete would free its name for another customer to clear them.

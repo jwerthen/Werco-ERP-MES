@@ -106,6 +106,7 @@ from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
 from app.models.work_order_material import WorkOrderMaterialAllocation
 from app.services.audit_service import AuditService
 from app.services.operational_event_service import OperationalEventService
+from app.services.owned_property_service import COMPANY, COMPANY_OWNERSHIP_KEY, ownership_match_clauses
 from app.services.work_order_state_service import is_laser_dispatch_work_order
 
 logger = logging.getLogger(__name__)
@@ -445,7 +446,10 @@ def receive_finished_goods_for_work_order(
     unit_cost = float(part.standard_cost or 0)
 
     # Match on part + location + lot + company (create if none) so a re-run after a
-    # partial completion would aggregate onto the same FG lot row.
+    # partial completion would aggregate onto the same FG lot row. Finished goods the shop
+    # produced are COMPANY stock (AS9100D 8.5.3, migration 129): the match carries the
+    # company ownership triple so a receipt never adds into a row someone re-owned to a
+    # customer or supplier -- it creates the company row beside it instead.
     inv_item = (
         db.query(InventoryItem)
         .filter(
@@ -453,6 +457,7 @@ def receive_finished_goods_for_work_order(
             InventoryItem.part_id == work_order.part_id,
             InventoryItem.location == FINISHED_GOODS_LOCATION,
             InventoryItem.lot_number == lot_number,
+            *ownership_match_clauses(COMPANY_OWNERSHIP_KEY),
         )
         .first()
     )
@@ -476,6 +481,7 @@ def receive_finished_goods_for_work_order(
             unit_cost=unit_cost,
             received_date=datetime.utcnow(),
             status="available",
+            ownership=COMPANY,
         )
         inv_item.company_id = company_id
         db.add(inv_item)
@@ -2547,6 +2553,8 @@ def _placeholder_stock_row(
         unit_cost=unit_cost,
         received_date=datetime.utcnow(),
         status="available",
+        # A ledger anchor for the shop's own shortfall: company stock, always.
+        ownership=COMPANY,
     )
     item.company_id = company_id
     db.add(item)

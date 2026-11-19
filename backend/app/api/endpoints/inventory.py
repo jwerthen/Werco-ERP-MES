@@ -3,10 +3,12 @@ from datetime import date, datetime, timezone
 from typing import Dict, List, Optional, Sequence
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session, joinedload
 
+from app.api.audit_guard import required_audit
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import atomic_transaction, get_db
 from app.db.ledger_filter import LEDGER_QUANTITY_EPSILON, WORK_ORDER_REFERENCE_TYPE, work_order_ledger_filter
@@ -18,6 +20,7 @@ from app.models.inventory import (
     InventoryItem,
     InventoryLocation,
     InventoryTransaction,
+    OwnershipType,
     TransactionType,
 )
 from app.models.part import Part
@@ -37,6 +40,7 @@ from app.schemas.inventory_combine import (
     OpenReservationSchema,
     PartStockSummarySchema,
 )
+from app.schemas.owned_property import InventoryOwnershipChangeRequest, OwnershipFields
 from app.services.audit_service import AuditService
 from app.services.cycle_count_workspace_service import (
     count_or_404,
@@ -48,6 +52,19 @@ from app.services.cycle_count_workspace_service import (
 )
 from app.services.inventory_combine_service import build_combine_preview, combine_inventory
 from app.services.operational_event_service import OperationalEventService
+from app.services.owned_property_service import (
+    COMPANY,
+    COMPANY_OWNERSHIP_KEY,
+    OWNERSHIP_AUDIT_UNAVAILABLE_DETAIL,
+    OwnershipKey,
+    change_inventory_ownership,
+    owner_name_for,
+    owner_names,
+    ownership_key,
+    ownership_label,
+    ownership_match_clauses,
+    resolve_owner,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -217,9 +234,16 @@ def _find_stock_row(
     location_code: str,
     lot_number: Optional[str],
     for_update: bool = False,
+    owner: OwnershipKey = COMPANY_OWNERSHIP_KEY,
 ) -> Optional[InventoryItem]:
-    """The existing stock row for (part, location, lot), tenant-scoped. Shared by
-    ``/receive`` and ``/transfer``.
+    """The existing stock row for (part, location, lot, OWNER), tenant-scoped. Shared by
+    ``/receive``, ``/transfer`` and the combine's landing rows.
+
+    ``owner`` is the ownership triple (``owned_property_service.OwnershipKey``) and is part
+    of the merge key (AS9100D 8.5.3, migration 129): a customer's lot L never resolves to
+    the company's lot L at the same location, nor the reverse, so the caller creates a
+    second row instead of mixing the two. It defaults to company, which every pre-129 row
+    is, so an owner-unaware caller resolves exactly the row it always did.
 
     ``lot_number`` branches to ``IS NULL`` when the incoming lot is ``None``: the naive
     ``lot_number == None`` comparison compiles to ``lot_number = NULL``, which never
@@ -238,6 +262,7 @@ def _find_stock_row(
         location_code=location_code,
         lot_number=lot_number,
         for_update=for_update,
+        owner=owner,
     ).first()
 
 
@@ -249,6 +274,7 @@ def _stock_row_query(
     location_code: str,
     lot_number: Optional[str],
     for_update: bool = False,
+    owner: OwnershipKey = COMPANY_OWNERSHIP_KEY,
 ):
     """The query behind ``_find_stock_row``, exposed for the dialect-compile test.
 
@@ -276,6 +302,7 @@ def _stock_row_query(
         InventoryItem.part_id == part_id,
         InventoryItem.location == location_code,
         lot_clause,
+        *ownership_match_clauses(owner),
     )
     query = query.order_by(InventoryItem.id.asc())
     if for_update:
@@ -373,7 +400,9 @@ class LocationCreate(BaseModel):
 # stock while writing a positive-quantity ISSUE ledger row with a negative total_cost, a
 # negative receive would remove stock, and a negative transfer would move dest->source
 # against locations/lots the response never named. Direction is the verb, never the sign.
-class ReceiveItemRequest(BaseModel):
+class ReceiveItemRequest(OwnershipFields):
+    """Stock into a location. Ownership defaults to company; see ``OwnershipFields``."""
+
     part_id: int = Field(gt=0)
     quantity: float = Field(gt=0, allow_inf_nan=False)
     location_code: str = Field(min_length=1)
@@ -488,6 +517,20 @@ def create_location(
     return location
 
 
+def _inventory_row(item: InventoryItem, names: Dict) -> Dict:
+    """One stock row as the list endpoints have always serialized it, plus ``owner_name``.
+
+    ``jsonable_encoder`` is exactly what FastAPI applied to the ORM row before this
+    helper existed, so every pre-129 key is unchanged; ``ownership`` /
+    ``owner_customer_id`` / ``owner_vendor_id`` arrive as ordinary columns and
+    ``owner_name`` is resolved from the batched ``owner_names`` map (``None`` for company
+    stock).
+    """
+    row = jsonable_encoder(item)
+    row["owner_name"] = owner_name_for(item, names)
+    return row
+
+
 # Inventory endpoints
 @router.get("/")
 def list_inventory(
@@ -495,18 +538,30 @@ def list_inventory(
     warehouse: Optional[str] = None,
     location_code: Optional[str] = None,
     has_quantity: bool = True,
+    ownership: Optional[OwnershipType] = Query(
+        None, description="Only stock with this ownership: company, customer or supplier."
+    ),
+    owner_customer_id: Optional[int] = Query(None, gt=0, description="Only stock owned by this customer."),
+    owner_vendor_id: Optional[int] = Query(None, gt=0, description="Only stock owned by this vendor."),
     limit: int = Query(MAX_INVENTORY_ROWS, ge=1, le=MAX_INVENTORY_ROWS),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """List inventory lots -- one row per part / location / lot / serial.
+    """List inventory lots -- one row per part / location / lot / serial / owner.
 
     Returns at most ``limit`` rows starting at ``offset``, ordered by part then
     location. Rows past the limit are not returned; page through them with
     ``offset``. ``GET /inventory/summary`` applies the same cap over the same
     rows, so the two agree with each other.
+
+    Each row carries ``ownership`` (``company`` / ``customer`` / ``supplier``, AS9100D
+    8.5.3), the owner reference (``owner_customer_id`` / ``owner_vendor_id``) and the
+    owner's name in ``owner_name`` (null for company stock). Filter with ``ownership``,
+    ``owner_customer_id`` or ``owner_vendor_id``. Customer- and supplier-owned rows are
+    physical stock held for someone else: listed here, never drawn by automatic
+    consumption.
     """
     # `inventory_items` is the highest-cardinality table in the app, so this read
     # is bounded. The default IS the ceiling (MAX_INVENTORY_ROWS): a zero-argument
@@ -535,10 +590,19 @@ def list_inventory(
         # than fail a completion, and a driven-negative lot is a discrepancy someone has
         # to see and fix — filtering it out made it invisible to the one list view.
         query = query.filter(InventoryItem.quantity_on_hand != 0)
+    if ownership is not None:
+        query = query.filter(InventoryItem.ownership == ownership.value)
+    if owner_customer_id is not None:
+        query = query.filter(InventoryItem.owner_customer_id == owner_customer_id)
+    if owner_vendor_id is not None:
+        query = query.filter(InventoryItem.owner_vendor_id == owner_vendor_id)
 
     items = query.order_by(InventoryItem.part_id, InventoryItem.location).offset(offset).limit(limit).all()
     _warn_if_capped(len(items), limit, endpoint="GET /inventory/", company_id=company_id)
-    return items
+    # Owner names for the whole page in at most two tenant-scoped queries (none at all for
+    # a page of company stock).
+    names = owner_names(db, company_id, items)
+    return [_inventory_row(item, names) for item in items]
 
 
 @router.get("/summary")
@@ -555,6 +619,11 @@ def get_inventory_summary(
     ``GET /inventory/`` applies over the same rows, so the two agree. Note the
     cap bounds the LOTS read, not the parts returned: past the limit a part's
     totals reflect only the lots that were read.
+
+    ``total_on_hand`` is PHYSICAL stock, whoever owns it. ``owned_by_others_on_hand`` is
+    the part of it that belongs to a customer or supplier (AS9100D 8.5.3) -- held here,
+    but not the company's and never drawn by automatic consumption. Each location entry
+    carries its row's ``ownership``.
     """
     # The shared cap is deliberate: the Inventory page fetches this and
     # /inventory/ in one Promise.all, so capping one and not the other would let
@@ -590,12 +659,21 @@ def get_inventory_summary(
                 "part_name": item.part.name if item.part else "",
                 "total_on_hand": 0,
                 "total_allocated": 0,
+                "owned_by_others_on_hand": 0,
                 "locations": [],
             }
         by_part[pid]["total_on_hand"] += item.quantity_on_hand
         by_part[pid]["total_allocated"] += item.quantity_allocated
+        item_ownership = ownership_key(item)[0]
+        if item_ownership != COMPANY:
+            by_part[pid]["owned_by_others_on_hand"] += item.quantity_on_hand
         by_part[pid]["locations"].append(
-            {"location": item.location, "quantity": item.quantity_on_hand, "lot_number": item.lot_number}
+            {
+                "location": item.location,
+                "quantity": item.quantity_on_hand,
+                "lot_number": item.lot_number,
+                "ownership": item_ownership,
+            }
         )
 
     result = []
@@ -626,6 +704,15 @@ def receive_inventory(
     policy (``po_upload.py`` / ``bom.py``): "restore it or use a different part
     number". Without the ``is_deleted`` predicate a Manager could create brand-new
     stock and a ledger row against a part the business has deleted.
+
+    **Ownership (AS9100D 8.5.3).** ``ownership`` defaults to ``company``. Receiving a
+    customer's or supplier's property names the owner (``owner_customer_id`` /
+    ``owner_vendor_id``); the owner must be a live customer / a non-deleted vendor of this
+    company (404 otherwise; a kind/owner mismatch is 422), checked before anything is
+    written. Ownership is part of the merge key: receiving lot L as customer-owned where
+    company lot L already sits creates a SECOND row rather than adding into the company's.
+    Owned stock is never drawn by automatic (unpinned) consumption and is left out of
+    inventory valuation.
     """
     # Verify part exists and is not deleted (Part is a SoftDeleteMixin model).
     part = (
@@ -655,9 +742,14 @@ def receive_inventory(
     if not location:
         raise HTTPException(status_code=404, detail="Location not found")
 
-    # Check for existing inventory at this location with same lot (tenant-scoped, so a
-    # matching lot in another company can never be the row we increment). Shared helper:
-    # NULL-safe on a lot-less receive, and row-locked for the increment below.
+    # The owner, resolved in THIS company before anything is locked or written.
+    owner = resolve_owner(
+        db, company_id, receive_in.ownership, receive_in.owner_customer_id, receive_in.owner_vendor_id
+    )
+
+    # Check for existing inventory at this location with same lot AND owner (tenant-scoped,
+    # so a matching lot in another company can never be the row we increment). Shared
+    # helper: NULL-safe on a lot-less receive, and row-locked for the increment below.
     existing = _find_stock_row(
         db,
         company_id=company_id,
@@ -665,6 +757,7 @@ def receive_inventory(
         location_code=receive_in.location_code,
         lot_number=receive_in.lot_number,
         for_update=True,
+        owner=owner.key,
     )
 
     old_quantity_on_hand = existing.quantity_on_hand if existing else None
@@ -688,6 +781,7 @@ def receive_inventory(
                 cert_number=receive_in.cert_number,
                 heat_lot=receive_in.heat_lot,
                 received_date=datetime.utcnow(),
+                **owner.columns(),
             )
             inv_item.company_id = company_id
             db.add(inv_item)
@@ -741,6 +835,8 @@ def receive_inventory(
             description=(
                 f"Received {receive_in.quantity} of part {part.part_number} "
                 f"into {receive_in.location_code}" + (f" lot {receive_in.lot_number}" if receive_in.lot_number else "")
+                # Company stock keeps its pre-129 wording; owned property says whose it is.
+                + ("" if owner.is_company else f" as {ownership_label(owner.key, owner.owner_name)} property")
             ),
         )
         if old_quantity_on_hand is not None:
@@ -876,6 +972,11 @@ def transfer_inventory(
     ``docs/RBAC_PERMISSIONS.md`` (Admin / Manager / Supervisor) and the sibling stock
     mutators. Previously this endpoint took only ``get_current_user``, so the server
     under-enforced its own documented policy.
+
+    Ownership travels with the material: the destination row is matched on the source
+    row's owner as well as its lot (customer-owned stock never lands in a company row at
+    the destination, nor the reverse), and a newly created destination row carries the
+    source's ownership.
     """
     # FOR UPDATE (no-op on SQLite): both the source decrement and the destination
     # increment below are read-modify-writes racing the consumption engine.
@@ -923,6 +1024,7 @@ def transfer_inventory(
         # source row is lot-less (the naive ``lot_number == None`` never matched, so a
         # lot-less transfer always minted a new destination fragment), and row-locked
         # for the increment.
+        source_owner = ownership_key(inv_item)
         dest_inv = _find_stock_row(
             db,
             company_id=company_id,
@@ -930,6 +1032,7 @@ def transfer_inventory(
             location_code=transfer_in.to_location_code,
             lot_number=inv_item.lot_number,
             for_update=True,
+            owner=source_owner,
         )
 
         dest_old_quantity = dest_inv.quantity_on_hand if dest_inv else None
@@ -947,6 +1050,9 @@ def transfer_inventory(
                 serial_number=inv_item.serial_number,
                 unit_cost=inv_item.unit_cost,
                 received_date=inv_item.received_date,
+                ownership=source_owner[0],
+                owner_customer_id=source_owner[1],
+                owner_vendor_id=source_owner[2],
             )
             dest_inv.company_id = company_id
             db.add(dest_inv)
@@ -1097,6 +1203,58 @@ def adjust_inventory(
 
 
 @router.post(
+    "/items/{item_id}/ownership",
+    summary="Change who owns a stock row: company, a customer, or a supplier (reasoned, audited)",
+)
+def change_inventory_item_ownership(
+    item_id: int,
+    change_in: InventoryOwnershipChangeRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(STOCK_MUTATOR_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Record that one stock row belongs to a customer, a supplier, or the company (AS9100D 8.5.3).
+
+    Use it when material already in stock turns out to be someone else's property (or
+    returns to the company's): ``{"ownership": "customer", "owner_customer_id": 12,
+    "reason": "..."}``, ``{"ownership": "supplier", "owner_vendor_id": 4, "reason": "..."}``
+    or ``{"ownership": "company", "reason": "..."}``. The whole row is re-owned; to re-own
+    part of it, transfer that quantity to its own location first. To receive owned
+    material in the first place, pass the same fields to ``POST /inventory/receive``.
+
+    Customer- and supplier-owned stock is never drawn by automatic (unpinned) material
+    consumption or backflush and is left out of inventory valuation; a tie PINNED to the
+    lot still consumes it.
+
+    **Role: ADMIN / MANAGER / SUPERVISOR.** ``reason`` is required. Refusals, all before
+    anything is written: 404 when the row is not this company's or the named customer /
+    vendor is not (a deleted customer or vendor is not found; an inactive vendor is
+    fine); 422 when the ownership kind and owner id do not pair; 409 when the row is
+    deactivated, holds no stock, or is already owned that way. The change and its reason
+    are written to the audit trail in the same transaction (503 and nothing saved if that
+    record cannot be written). No inventory transaction is posted -- ownership is not a
+    quantity movement. Returns the updated row with ``owner_name``.
+    """
+    with required_audit(db, OWNERSHIP_AUDIT_UNAVAILABLE_DETAIL):
+        item, owner_name = change_inventory_ownership(
+            db,
+            company_id,
+            item_id,
+            ownership=change_in.ownership,
+            owner_customer_id=change_in.owner_customer_id,
+            owner_vendor_id=change_in.owner_vendor_id,
+            reason=change_in.reason,
+            audit=audit,
+        )
+        db.commit()
+    db.refresh(item)
+    row = jsonable_encoder(item)
+    row["owner_name"] = owner_name
+    return row
+
+
+@router.post(
     "/combine/preview",
     response_model=InventoryCombinePreviewResponse,
     summary="What would folding one SKU into another do?",
@@ -1210,7 +1368,8 @@ def combine_inventory_endpoint(
       against DRAWABLE stock, not total on-hand: material the engine cannot pull (held,
       quarantined, on a deactivated row, or withheld for a lot-pinned tie) can never
       "cover" a tie, so counting it would let a fold strand a job that was satisfiable
-      before it.
+      before it. Customer- or supplier-owned stock left behind covers no tie either: the
+      unpinned draw never takes it.
     * **409** ``target_row_not_available`` — the stock would land on a target row that is
       on hold, quarantined, rejected or deactivated. The refusal names the location, lot
       and status. Without it the verb quietly turns usable material into unusable
@@ -1220,6 +1379,10 @@ def combine_inventory_endpoint(
       row it would land on carries a different one (checked symmetrically, so a blank on
       either side while the other is set also refuses). Merging them would leave one stock
       row claiming two units under one serial.
+    * **409** ``target_ownership_mismatch`` — the source row is owned by someone other than
+      the target's stock already in that location and lot (customer- or supplier-owned
+      property onto company stock, or the reverse; AS9100D 8.5.3). Material only lands on a
+      target row with the same owner; a new target row carries the source's owner.
     * **409** ``flagged_part_not_acknowledged`` — a part whose number or name reads as a
       test/housing part must be confirmed explicitly via ``acknowledge_flagged_part_ids``.
       An acknowledgement gate, not a ban: "housing" is a real manufacturing word.

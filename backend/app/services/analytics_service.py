@@ -16,7 +16,7 @@ from sqlalchemy.sql.elements import ColumnElement
 from app.core.time_utils import CENTRAL_TIME_ZONE, local_today, local_window, to_local_date
 from app.db.ledger_filter import work_order_ledger_filter
 from app.models.downtime import DowntimeEvent, DowntimePlannedType
-from app.models.inventory import InventoryItem, InventoryTransaction, TransactionType
+from app.models.inventory import InventoryItem, InventoryTransaction, OwnershipType, TransactionType
 from app.models.part import Part
 from app.models.purchasing import InspectionStatus, POReceipt, PurchaseOrder, PurchaseOrderLine, Vendor
 from app.models.quality import NCRStatus, NonConformanceReport
@@ -1261,10 +1261,15 @@ class AnalyticsService:
         # no-op, so the pre-PR-3 value is unchanged.
         cogs = max(0.0, float(cogs))
 
-        # Average inventory value
+        # Average inventory value -- the company's OWN stock only: a customer's or
+        # supplier's property held here is not the company's inventory (AS9100D 8.5.3).
         avg_inventory = (
             self.db.query(func.avg(InventoryItem.quantity_on_hand * InventoryItem.unit_cost))
-            .filter(InventoryItem.company_id == self.company_id, InventoryItem.is_active == True)
+            .filter(
+                InventoryItem.company_id == self.company_id,
+                InventoryItem.is_active == True,
+                InventoryItem.ownership == OwnershipType.COMPANY.value,
+            )
             .scalar()
             or 1
         )  # Avoid division by zero
@@ -1778,13 +1783,19 @@ class AnalyticsService:
         # clamp is a no-op and the pre-PR-3 numbers stand.
         cogs_map = {row.part_id: max(0.0, float(row.cogs or 0)) for row in cogs_by_part}
 
-        # OPTIMIZATION: Bulk query for average inventory value by part
+        # OPTIMIZATION: Bulk query for average inventory value by part. Company-owned
+        # stock only (AS9100D 8.5.3): owned property held for a customer or supplier is
+        # not the company's inventory value.
         avg_inv_by_part = (
             self.db.query(
                 InventoryItem.part_id,
                 func.avg(InventoryItem.quantity_on_hand * InventoryItem.unit_cost).label('avg_inv'),
             )
-            .filter(InventoryItem.company_id == self.company_id, InventoryItem.is_active == True)
+            .filter(
+                InventoryItem.company_id == self.company_id,
+                InventoryItem.is_active == True,
+                InventoryItem.ownership == OwnershipType.COMPANY.value,
+            )
             .group_by(InventoryItem.part_id)
             .all()
         )
@@ -1824,10 +1835,15 @@ class AnalyticsService:
         # Sort by turnover (low first = problem items)
         turnover_data.sort(key=lambda x: x.turnover_ratio)
 
-        # Calculate total inventory value (single query)
+        # Calculate total inventory value (single query) -- company-owned stock only; a
+        # customer's or supplier's property is held here but is not the company's value.
         total_inventory_value = (
             self.db.query(func.sum(InventoryItem.quantity_on_hand * InventoryItem.unit_cost))
-            .filter(InventoryItem.company_id == self.company_id, InventoryItem.is_active == True)
+            .filter(
+                InventoryItem.company_id == self.company_id,
+                InventoryItem.is_active == True,
+                InventoryItem.ownership == OwnershipType.COMPANY.value,
+            )
             .scalar()
             or 0
         )

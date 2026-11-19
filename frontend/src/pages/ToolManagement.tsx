@@ -23,8 +23,15 @@ import {
   Button,
   FormField,
 } from '../components/ui';
+import OwnershipFields from '../components/ownership/OwnershipFields';
+import OwnershipChip from '../components/ownership/OwnershipChip';
+import { useOwnerDirectory } from '../hooks/useOwnerDirectory';
+import type { OwnershipInfo, OwnershipSelection, OwnershipType } from '../types/ownership';
+import { COMPANY_OWNERSHIP, isOwnershipComplete, ownershipLabel, ownershipOf, ownershipPayload } from '../utils/ownership';
 
-interface Tool {
+// A tool or fixture may be customer- or supplier-owned property (AS9100D 8.5.3) —
+// customer-furnished tooling is the classic case. Absent = company-owned.
+interface Tool extends OwnershipInfo {
   id: number;
   tool_number: string;
   name: string;
@@ -78,6 +85,7 @@ export default function ToolManagement() {
   const debouncedSearch = useDebouncedValue(search, 250);
   const [statusFilter, setStatusFilter] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
+  const [ownershipFilter, setOwnershipFilter] = useState<'' | OwnershipType>('');
   const [activeTab, setActiveTab] = useState<Tab>('all');
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showCheckoutModal, setShowCheckoutModal] = useState(false);
@@ -100,6 +108,10 @@ export default function ToolManagement() {
     max_uses: '',
     max_life_hours: '',
   });
+  const [createOwnership, setCreateOwnership] = useState<OwnershipSelection>(COMPANY_OWNERSHIP);
+  // Customer / supplier lists for the create form's owner picker — fetched only when
+  // the picker is switched away from company-owned, never on page load.
+  const ownerDirectory = useOwnerDirectory();
   const [checkoutForm, setCheckoutForm] = useState({ checked_out_to: '', work_order_id: '', notes: '' });
   const [checkinForm, setCheckinForm] = useState({ condition: 'good', notes: '', uses_this_session: '' });
 
@@ -142,6 +154,7 @@ export default function ToolManagement() {
     return tools.filter(t => {
       if (statusFilter && t.status !== statusFilter) return false;
       if (typeFilter && t.tool_type !== typeFilter) return false;
+      if (ownershipFilter && ownershipOf(t) !== ownershipFilter) return false;
       if (debouncedSearch) {
         const s = debouncedSearch.toLowerCase();
         return (
@@ -153,10 +166,18 @@ export default function ToolManagement() {
       }
       return true;
     });
-  }, [tools, statusFilter, typeFilter, debouncedSearch]);
+  }, [tools, statusFilter, typeFilter, ownershipFilter, debouncedSearch]);
 
   const handleCreate = async () => {
     if (actionBusy) return;
+    if (!isOwnershipComplete(createOwnership)) {
+      setActionError(
+        createOwnership.ownership === 'customer'
+          ? 'Choose the customer that owns this tool.'
+          : 'Choose the supplier that owns this tool.'
+      );
+      return;
+    }
     setActionBusy(true);
     setActionError('');
     try {
@@ -165,8 +186,10 @@ export default function ToolManagement() {
         purchase_cost: createForm.purchase_cost ? parseFloat(createForm.purchase_cost) : undefined,
         max_uses: createForm.max_uses ? parseInt(createForm.max_uses) : undefined,
         max_life_hours: createForm.max_life_hours ? parseFloat(createForm.max_life_hours) : undefined,
+        ...ownershipPayload(createOwnership),
       });
       setShowCreateModal(false);
+      setCreateOwnership(COMPANY_OWNERSHIP);
       setCreateForm({
         tool_number: '',
         name: '',
@@ -341,6 +364,15 @@ export default function ToolManagement() {
       render: t => t.location || '-',
     },
     {
+      // Company tooling renders nothing; only property that is not the company's is labelled.
+      key: 'ownership',
+      header: 'Ownership',
+      sortable: true,
+      accessor: t => ownershipLabel(t) ?? '',
+      csv: t => ownershipLabel(t) ?? 'Company',
+      render: t => <OwnershipChip record={t} />,
+    },
+    {
       key: 'uses',
       header: 'Uses',
       sortable: true,
@@ -366,6 +398,7 @@ export default function ToolManagement() {
         { label: 'Type', value: <span className="capitalize">{tool.tool_type?.replace(/_/g, ' ')}</span> },
         { label: 'Location', value: tool.location || '-' },
         { label: 'Uses', value: `${tool.current_uses}${tool.max_uses ? ` / ${tool.max_uses}` : ''}` },
+        ...(ownershipLabel(tool) ? [{ label: 'Ownership', value: <OwnershipChip record={tool} />, fullWidth: true }] : []),
       ]}
       actions={renderRowActions(tool)}
     />
@@ -472,6 +505,17 @@ export default function ToolManagement() {
           <option value="mold">Mold</option>
           <option value="other">Other</option>
         </select>
+        <select
+          value={ownershipFilter}
+          onChange={e => setOwnershipFilter(e.target.value as '' | OwnershipType)}
+          className="px-3 py-2 border border-slate-600 rounded-lg"
+          aria-label="Filter by ownership"
+        >
+          <option value="">All Owners</option>
+          <option value="company">Company-owned</option>
+          <option value="customer">Customer-owned</option>
+          <option value="supplier">Supplier-owned</option>
+        </select>
         <button
           onClick={loadData}
           className="p-2 text-slate-400 hover:text-slate-300"
@@ -495,11 +539,11 @@ export default function ToolManagement() {
         onRetry={() => loadTabData(activeTab)}
         empty={{
           icon: WrenchScrewdriverIcon,
-          title: search.trim() || statusFilter || typeFilter
+          title: search.trim() || statusFilter || typeFilter || ownershipFilter
             ? 'No tools found'
             : activeTab === 'all' ? 'No tools yet' : 'No tools in this view',
           description:
-            search.trim() || statusFilter || typeFilter
+            search.trim() || statusFilter || typeFilter || ownershipFilter
               ? 'No tools match the current filters.'
               : activeTab === 'all'
                 ? 'Add the first tool or fixture to start tracking your crib.'
@@ -529,6 +573,7 @@ export default function ToolManagement() {
                   {detailTool.tool_number} — {detailTool.name}
                 </h3>
                 <StatusBadge status={detailTool.status} />
+                <OwnershipChip record={detailTool} />
               </div>
               <button onClick={() => setShowDetailModal(false)} aria-label="Close">
                 <XMarkIcon className="w-5 h-5" aria-hidden="true" />
@@ -743,6 +788,13 @@ export default function ToolManagement() {
               )}
             </FormField>
           </div>
+          <OwnershipFields
+            value={createOwnership}
+            onChange={setCreateOwnership}
+            directory={ownerDirectory}
+            disabled={actionBusy}
+            labelClassName="block text-sm font-medium text-slate-300 mb-1"
+          />
           <div className="grid grid-cols-3 gap-3">
             <FormField label="Purchase Cost" labelClassName="block text-sm font-medium text-slate-300 mb-1">
               {field => (
@@ -783,7 +835,10 @@ export default function ToolManagement() {
           <Button variant="secondary" onClick={() => setShowCreateModal(false)}>
             Cancel
           </Button>
-          <Button onClick={handleCreate} disabled={actionBusy || !createForm.tool_number || !createForm.name}>
+          <Button
+            onClick={handleCreate}
+            disabled={actionBusy || !createForm.tool_number || !createForm.name || !isOwnershipComplete(createOwnership)}
+          >
             Create
           </Button>
         </div>

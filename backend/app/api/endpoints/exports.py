@@ -27,6 +27,7 @@ from app.services.audit_service import AuditService
 from app.services.company_time import company_zone
 from app.services.export_audit import log_export
 from app.services.export_service import generate_csv, generate_excel
+from app.services.owned_property_service import owner_name_for, owner_names, ownership_key
 
 router = APIRouter()
 
@@ -330,6 +331,10 @@ def export_inventory(
 
     Datetime cells (``received_date`` is a timestamp) are ISO-8601 in the company time
     zone with their UTC offset.
+
+    ``ownership`` (company / customer / supplier, AS9100D 8.5.3) and ``owner_name`` say
+    whose material each row is. ``total_value`` is kept per row for every owner, so a
+    reader totalling the company's own inventory filters on ``ownership = company``.
     """
     zone = company_zone(db, company_id)
     query = (
@@ -361,10 +366,14 @@ def export_inventory(
         "unit_cost",
         "total_value",
         "received_date",
+        "ownership",
+        "owner_name",
     ]
 
     export_columns = columns if columns else default_columns
 
+    # Owner names for the whole export in at most two tenant-scoped queries.
+    names = owner_names(db, company_id, items)
     data = []
     for item in items:
         qty = float(item.quantity_on_hand or 0)
@@ -382,6 +391,8 @@ def export_inventory(
             "unit_cost": cost,
             "total_value": qty * cost,
             "received_date": item.received_date,
+            "ownership": ownership_key(item)[0],
+            "owner_name": owner_name_for(item, names) or "",
         }
         data.append({k: v for k, v in row.items() if k in export_columns})
 

@@ -6,7 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.schemas.base import UTCModel
-from app.schemas.purchasing import ReceiptCreate
+from app.schemas.purchasing import ReceiptLineFields
 from app.schemas.shipping import ShipmentCreate
 from app.schemas.shop_floor_commands import OperationHoldRequest, ProductionReportRequest
 
@@ -36,7 +36,10 @@ class HankOperationalReport(UTCModel):
     draft_text: str | None = None
 
 
-class HankReceiptLine(ReceiptCreate):
+class HankReceiptLine(ReceiptLineFields):
+    # Deliberately WITHOUT the ownership fields ``ReceiptCreate`` carries (AS9100D 8.5.3):
+    # a Hank-proposed receipt is company stock, and recording someone else's property is
+    # a person's call in the receiving screen. ``extra='forbid'`` refuses the keys outright.
     model_config = ConfigDict(extra='forbid')
     requires_inspection: bool
 

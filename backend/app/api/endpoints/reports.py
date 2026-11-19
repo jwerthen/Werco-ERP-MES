@@ -14,7 +14,7 @@ from app.api.date_window import (
 from app.api.deps import get_current_company_id, get_current_user
 from app.core.time_utils import to_local_date, to_utc_iso
 from app.db.database import get_db
-from app.models.inventory import InventoryItem
+from app.models.inventory import InventoryItem, OwnershipType
 from app.models.purchasing import POReceipt, PurchaseOrder
 from app.models.quality import NonConformanceReport
 from app.models.time_entry import TimeEntry
@@ -234,14 +234,22 @@ def get_inventory_value(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Get inventory value summary"""
+    """Get the value of the company's own inventory: total value, quantity and part count.
+
+    Company-owned stock only. Customer- and supplier-owned property held here (AS9100D
+    8.5.3) is not the company's inventory, so it is left out of all three figures; list it
+    with ``GET /inventory/?ownership=customer`` (or ``supplier``).
+    """
     from app.models.part import Part
 
     items = (
         db.query(InventoryItem.part_id, func.sum(InventoryItem.quantity_on_hand).label("qty"), Part.standard_cost)
         .join(Part)
         .filter(
-            InventoryItem.company_id == company_id, InventoryItem.is_active == True, InventoryItem.quantity_on_hand > 0
+            InventoryItem.company_id == company_id,
+            InventoryItem.is_active == True,
+            InventoryItem.quantity_on_hand > 0,
+            InventoryItem.ownership == OwnershipType.COMPANY.value,
         )
         .group_by(InventoryItem.part_id, Part.standard_cost)
         .all()

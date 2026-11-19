@@ -1146,6 +1146,14 @@ _LIST_INVENTORY_SCHEMA: Dict[str, Any] = {
         "warehouse": {"type": "string"},
         "location_code": {"type": "string"},
         "has_quantity": {"type": "boolean", "default": True, "description": "Only rows with stock on hand."},
+        "ownership": {
+            "type": "string",
+            "enum": ["company", "customer", "supplier"],
+            "description": "Only stock with this ownership (customer- and supplier-owned property is never drawn "
+            "by automatic consumption).",
+        },
+        "owner_customer_id": {"type": "integer", "minimum": 1, "description": "Only stock owned by this customer."},
+        "owner_vendor_id": {"type": "integer", "minimum": 1, "description": "Only stock owned by this vendor."},
         "limit": {"type": "integer", "minimum": 1, "maximum": 10000, "default": 200},
         "offset": {"type": "integer", "minimum": 0, "default": 0},
     },
@@ -1158,7 +1166,18 @@ async def _list_inventory(ctx: ToolContext, args: Dict[str, Any]) -> types.CallT
         query = _present(args, "limit", "offset")
     else:
         path = f"{API}/inventory/"
-        query = _present(args, "part_id", "warehouse", "location_code", "has_quantity", "limit", "offset")
+        query = _present(
+            args,
+            "part_id",
+            "warehouse",
+            "location_code",
+            "has_quantity",
+            "ownership",
+            "owner_customer_id",
+            "owner_vendor_id",
+            "limit",
+            "offset",
+        )
     query.setdefault("limit", 200)
     return ctx.finish(await ctx.call("GET", path, query=query), tool="list_inventory", method="GET", path=path)
 
@@ -1366,8 +1385,8 @@ CONVENIENCE_TOOLS: Tuple[ConvenienceTool, ...] = (
     ),
     ConvenienceTool(
         "list_inventory",
-        "GET /api/v1/inventory/ (or /inventory/summary) — Stock rows by part/warehouse/location, or per-part totals "
-        "with summary=true. [Inventory]",
+        "GET /api/v1/inventory/ (or /inventory/summary) — Stock rows by part/warehouse/location/ownership (each "
+        "row names its owner), or per-part totals with summary=true. [Inventory]",
         _strict(_LIST_INVENTORY_SCHEMA),
         _READ,
         _list_inventory,

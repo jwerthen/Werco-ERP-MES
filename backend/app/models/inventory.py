@@ -31,6 +31,34 @@ class LocationType(str, enum.Enum):
     RECEIVING = "receiving"
 
 
+class OwnershipType(str, enum.Enum):
+    """Who owns a stock row (``inventory_items``) or a tool (``tools``) -- AS9100D 8.5.3.
+
+    ``company`` is the shop's own property and the server default, so every row that
+    existed before migration 129 reads as exactly what it always meant. ``customer`` and
+    ``supplier`` are property the shop holds for someone else: the owner is named by
+    ``owner_customer_id`` / ``owner_vendor_id`` respectively (``OWNER_MATCHES_CHECK``).
+
+    Stored as a plain ``String(20)`` with a CHECK rather than a native Postgres enum, so
+    adding a kind later is a CHECK swap, not an ``ALTER TYPE``.
+    """
+
+    COMPANY = "company"
+    CUSTOMER = "customer"
+    SUPPLIER = "supplier"
+
+
+# Lock-step with migration 129_owned_property: the two CHECKs on ``inventory_items`` AND
+# ``tools`` (same column names on both tables, so the same text). Module constants so the
+# two models cannot spell them differently; the migration carries its own frozen copy.
+OWNERSHIP_VALUE_CHECK = "ownership IN ('company', 'customer', 'supplier')"
+OWNER_MATCHES_CHECK = (
+    "(ownership = 'company' AND owner_customer_id IS NULL AND owner_vendor_id IS NULL) OR "
+    "(ownership = 'customer' AND owner_customer_id IS NOT NULL AND owner_vendor_id IS NULL) OR "
+    "(ownership = 'supplier' AND owner_vendor_id IS NOT NULL AND owner_customer_id IS NULL)"
+)
+
+
 class CycleCountStatus(str, enum.Enum):
     SCHEDULED = "scheduled"
     IN_PROGRESS = "in_progress"
@@ -170,6 +198,10 @@ class InventoryItem(Base, TenantMixin):
         # DELIBERATE EXCLUSIONS. quantity_allocated, by contrast, is only ever
         # written as 0 at item creation and never decremented.
         CheckConstraint("quantity_allocated >= 0", name="chk_inventory_items_allocated_non_negative"),
+        # Lock-step with migration 129_owned_property (AS9100D 8.5.3 owned property).
+        CheckConstraint(OWNERSHIP_VALUE_CHECK, name="ck_inventory_items_ownership"),
+        CheckConstraint(OWNER_MATCHES_CHECK, name="ck_inventory_items_owner_matches"),
+        Index("ix_inventory_items_ownership", "company_id", "ownership"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -210,6 +242,20 @@ class InventoryItem(Base, TenantMixin):
     # Status
     status = Column(String(50), default="available")  # available, on_hold, quarantine, rejected
     is_active = Column(Boolean, default=True)
+
+    # Owned property (AS9100D 8.5.3, migration 129). ``company`` (the default, and what
+    # every pre-129 row is) behaves exactly as stock always has. A ``customer`` /
+    # ``supplier`` row is someone else's property: automatic FIFO draws never take it
+    # (``material_consumption_service.AUTO_DRAW_ITEM_CLAUSES``), valuation totals leave it
+    # out, and no merge key lands it in a company row or the reverse. An explicit lot pin
+    # still consumes it. Changed only by ``POST /inventory/items/{id}/ownership``.
+    ownership = Column(String(20), nullable=False, default=OwnershipType.COMPANY.value, server_default="company")
+    owner_customer_id = Column(
+        Integer, ForeignKey("customers.id", name="fk_inventory_items_owner_customer_id"), nullable=True
+    )
+    owner_vendor_id = Column(
+        Integer, ForeignKey("vendors.id", name="fk_inventory_items_owner_vendor_id"), nullable=True
+    )
 
     # Audit fields
     created_at = Column(DateTime, default=datetime.utcnow)

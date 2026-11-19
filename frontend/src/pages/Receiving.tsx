@@ -2,6 +2,10 @@ import ReceiptCertificateManager from '../components/receiving/ReceiptCertificat
 import DeliveryReceiveModal, { DeliveryPO, pendingDelivery } from '../components/receiving/DeliveryReceiveModal';
 import ReceiptCertificateField, { CertificateDownload } from '../components/receiving/ReceiptCertificateField';
 import { ReceivingCertificate } from '../types/receivingDelivery';
+import OwnershipFields from '../components/ownership/OwnershipFields';
+import { useOwnerDirectory } from '../hooks/useOwnerDirectory';
+import type { OwnershipType } from '../types/ownership';
+import { isOwnershipComplete, ownershipPayload } from '../utils/ownership';
 import { PageHeader } from '../components/ui/PageHeader';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { tabKeyboard } from '../components/operations/tabKeyboard';
@@ -112,6 +116,10 @@ interface ReceiveFormData {
   tracking_number: string;
   notes: string;
   over_receive_approved: boolean;
+  // AS9100D 8.5.3 — customer- or supplier-owned property arriving on a PO line.
+  ownership: OwnershipType;
+  owner_customer_id: number | null;
+  owner_vendor_id: number | null;
 }
 
 /**
@@ -128,6 +136,10 @@ interface ReceiveFormData {
  *    certificate against material it does not cover — a false traceability record
  *    (invariant 5), which is worse than the keystroke it saves.
  *  - `serial_numbers` and `notes` describe one specific receipt line.
+ *  - `ownership` and its owner describe who owns THIS material (AS9100D 8.5.3). A
+ *    customer-furnished line on a delivery says nothing about the next part, so a
+ *    sticky owner would silently file the company's own stock as someone else's
+ *    property (or the reverse) — it resets to company-owned with the lot.
  *  - `requires_inspection` was already reset here before this change and keeps its
  *    original owner-requested behaviour: the checkbox ALWAYS starts unchecked, with no
  *    within-session stickiness. A part the part master flags shows an advisory hint
@@ -154,6 +166,9 @@ type PerItemReceiveFields = Pick<
   | 'notes'
   | 'requires_inspection'
   | 'over_receive_approved'
+  | 'ownership'
+  | 'owner_customer_id'
+  | 'owner_vendor_id'
 >;
 
 const BLANK_PER_ITEM_RECEIVE_FIELDS: PerItemReceiveFields = {
@@ -166,6 +181,9 @@ const BLANK_PER_ITEM_RECEIVE_FIELDS: PerItemReceiveFields = {
   notes: '',
   requires_inspection: false,
   over_receive_approved: false,
+  ownership: 'company',
+  owner_customer_id: null,
+  owner_vendor_id: null,
 };
 
 // PO / part context is nullable to match the backend InspectionQueueItem
@@ -322,7 +340,13 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
     tracking_number: '',
     notes: '',
     over_receive_approved: false,
+    ownership: 'company',
+    owner_customer_id: null,
+    owner_vendor_id: null,
   });
+  // Customer / supplier lists for the receipt's ownership picker — fetched only when
+  // a receiver switches a line away from company-owned, never on page load.
+  const ownerDirectory = useOwnerDirectory();
   // Snapshot of formData as populated when the receive modal opened; the
   // unsaved-changes dirty check compares against it (Materials.tsx idiom).
   const [initialFormData, setInitialFormData] = useState<ReceiveFormData | null>(null);
@@ -712,6 +736,15 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
       return;
     }
 
+    if (!isOwnershipComplete(formData)) {
+      setError(
+        formData.ownership === 'customer'
+          ? 'Choose the customer that owns this material.'
+          : 'Choose the supplier that owns this material.'
+      );
+      return;
+    }
+
     const receivedQty = formData.quantity_received;
     const selectedLineId = selectedLine?.line_id;
     const selectedPOId = selectedPO?.po_id;
@@ -725,6 +758,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
         // the lot, so AS9100D traceability is preserved server-side.
         lot_number: formData.lot_number.trim() || undefined,
         location_id: formData.location_id || undefined,
+        ...ownershipPayload(formData),
       });
       setSuccess('Material received successfully');
       // Offer a one-click label print/reprint on the success toast.
@@ -2294,6 +2328,16 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                   />
                 )}
               </FormField>
+
+              <OwnershipFields
+                value={formData}
+                onChange={next => setFormData(previous => ({ ...previous, ...next }))}
+                directory={ownerDirectory}
+                disabled={receivingPending}
+                defaultVendorId={selectedPO?.vendor_id ?? null}
+                labelClassName="block text-sm font-medium text-slate-300 mb-1"
+                className="grid grid-cols-2 gap-4"
+              />
 
               <ReceiptCertificateField
                 key={selectedLine.line_id}

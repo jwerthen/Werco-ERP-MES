@@ -195,7 +195,7 @@ from sqlalchemy.orm.exc import StaleDataError
 from app.db.ledger_filter import BACKFLUSH_REFERENCE_TYPE, OPERATION_REFERENCE_TYPE
 from app.db.tenant_filter import tenant_query
 from app.models.audit_log import AuditLog
-from app.models.inventory import InventoryItem, InventoryTransaction, TransactionType
+from app.models.inventory import InventoryItem, InventoryTransaction, OwnershipType, TransactionType
 from app.models.part import Part
 from app.models.work_order import WorkOrder, WorkOrderOperation
 from app.models.work_order_material import AllocationStatus, WorkOrderMaterialAllocation
@@ -392,6 +392,37 @@ CONSUMABLE_ITEM_CLAUSES = (
 )
 
 
+def is_auto_drawable_item(item: InventoryItem) -> bool:
+    """True when an AUTOMATIC (unpinned, FIFO) draw may take this lot.
+
+    The PYTHON half of ``AUTO_DRAW_ITEM_CLAUSES``; a parity test holds the two together
+    cell by cell. It is ``is_consumable_item`` NARROWED to company-owned stock (AS9100D
+    8.5.3): a customer's or supplier's material on the rack is not the shop's to spend,
+    so FIFO walks past it exactly as it walks past a held lot, and the shortage that
+    results is recorded the usual way. An EXPLICIT pin of an owned lot still consumes it
+    -- the pin is a person's lot-directed decision -- which is why this is a separate
+    predicate and ``is_consumable_item`` (pins, combine, consumable checkout) is untouched.
+
+    ``ownership`` is ``NOT NULL`` with a server default, so there is no legacy NULL shape
+    to read here; an unflushed instance still carrying ``None`` reads as company, the
+    column's own default, exactly as ``status`` does above.
+    """
+    return is_consumable_item(item) and (item.ownership or OwnershipType.COMPANY.value) == OwnershipType.COMPANY.value
+
+
+# THE automatic-draw predicate, in SQL: ``CONSUMABLE_ITEM_CLAUSES`` plus company ownership.
+# Splatted into ``consumable_source_query`` (the tie engine's and the backflush's UNPINNED
+# draw) and into every display that must agree with those draws -- the backflush preview
+# (through ``consumable_source_items``), the tie view's unpinned on-hand, material
+# readiness, the sheet-stock matcher and Hank's same-part stock. Deliberately NOT folded
+# into ``CONSUMABLE_ITEM_CLAUSES``: that tuple (and ``is_consumable_item``) also gates
+# what may be PINNED, combined and checked out, and an owned lot must stay pinnable.
+AUTO_DRAW_ITEM_CLAUSES = (
+    *CONSUMABLE_ITEM_CLAUSES,
+    InventoryItem.ownership == OwnershipType.COMPANY.value,
+)
+
+
 def _fifo_sort_key(item: InventoryItem):
     """The FIFO order as a Python sort key: ``received_date ASC NULLS LAST, id ASC``.
 
@@ -420,6 +451,11 @@ def consumable_source_items(
     received date last (they cannot be ordered by age, so they are the fallback), and
     ``id`` as the deterministic tie-break.
 
+    COMPANY-OWNED stock only (``AUTO_DRAW_ITEM_CLAUSES``, migration 129): a customer's or
+    supplier's lot is skipped like a held one, so a part whose only stock is owned by
+    someone else draws nothing here and the caller records its usual shortage. Every
+    pre-129 row is company-owned, so this narrows nothing that existed before.
+
     ``for_update=True`` is for the two CONSUMING engines (never the preview, which is a
     pure read): it takes ``FOR UPDATE`` row locks on the candidate lots before the
     read-modify-write of ``quantity_on_hand``. Locks are ACQUIRED in ascending-id order
@@ -444,7 +480,10 @@ def consumable_source_query(db: Session, part_id: int, company_id: int, *, for_u
     query = db.query(InventoryItem).filter(
         InventoryItem.company_id == company_id,
         InventoryItem.part_id == part_id,
-        *CONSUMABLE_ITEM_CLAUSES,
+        # AUTO_DRAW, not CONSUMABLE: this is the UNPINNED draw, which never spends a
+        # customer's or supplier's material (AS9100D 8.5.3). A pinned draw reads its one
+        # lot directly and is gated by ``is_consumable_item`` alone.
+        *AUTO_DRAW_ITEM_CLAUSES,
         InventoryItem.quantity_on_hand > 0,
     )
     if for_update:

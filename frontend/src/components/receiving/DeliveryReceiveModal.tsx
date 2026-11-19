@@ -6,10 +6,22 @@ import useUnsavedChanges from '../../hooks/useUnsavedChanges';
 import { workspaceIdentity } from '../../hooks/useWorkspaceRecords';
 import { DeliveryLine, DeliveryOutcome, DeliverySubmission, ReceivingCertificate } from '../../types/receivingDelivery';
 import ReceiptCertificateField, { CertificateDownload } from './ReceiptCertificateField';
+import OwnershipFields from '../ownership/OwnershipFields';
+import { OwnerDirectory, useOwnerDirectory } from '../../hooks/useOwnerDirectory';
+import {
+  COMPANY_OWNERSHIP,
+  isOwnershipComplete,
+  OWNERSHIP_LABELS,
+  ownershipOf,
+  ownershipPayload,
+} from '../../utils/ownership';
+import type { OwnershipSelection } from '../../types/ownership';
 
 export interface DeliveryPO {
   po_id: number;
   po_number: string;
+  /** Pre-selected owner when a line is marked supplier-owned (consigned stock). */
+  vendor_id?: number;
   vendor_name: string;
   lines: {
     line_id: number;
@@ -20,6 +32,22 @@ export interface DeliveryPO {
     is_closed?: boolean;
   }[];
 }
+const lineOwnership = (line: DeliveryLine): OwnershipSelection => ({
+  ownership: ownershipOf(line),
+  owner_customer_id: line.owner_customer_id ?? null,
+  owner_vendor_id: line.owner_vendor_id ?? null,
+});
+
+/** "Company-owned" / "Customer-owned · {name}" for the review step. */
+function ownershipSummary(line: DeliveryLine, directory: OwnerDirectory): string {
+  const selection = lineOwnership(line);
+  if (selection.ownership === 'company') return OWNERSHIP_LABELS.company;
+  const options = selection.ownership === 'customer' ? directory.customers.options : directory.vendors.options;
+  const id = selection.ownership === 'customer' ? selection.owner_customer_id : selection.owner_vendor_id;
+  const name = options?.find(option => option.id === id)?.name;
+  return `${OWNERSHIP_LABELS[selection.ownership]} · ${name || `#${id}`}`;
+}
+
 const pendingKey = () => `werco:pending-delivery:${workspaceIdentity()}`;
 export function pendingDelivery(): { po: DeliveryPO; body: DeliverySubmission } | null {
   try {
@@ -75,6 +103,8 @@ export default function DeliveryReceiveModal({
   const [outcome, setOutcome] = useState<DeliveryOutcome | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  // One lazily-loaded customer / supplier list shared by every line's owner picker.
+  const ownerDirectory = useOwnerDirectory();
   const uploading = Object.values(uploads).some(Boolean);
   const selected = Object.values(rows);
   const { confirmDiscard, markSaved } = useUnsavedChanges(!outcome && (selected.length > 0 || !!packingSlip));
@@ -92,6 +122,7 @@ export default function DeliveryReceiveModal({
           quantity_received: line.quantity_remaining,
           requires_inspection: false,
           over_receive_approved: false,
+          ...COMPANY_OWNERSHIP,
         };
       else delete next[line.line_id];
       return next;
@@ -121,6 +152,10 @@ export default function DeliveryReceiveModal({
       setError('Each selected line needs a positive quantity; explicitly approve any over-receipt.');
       return;
     }
+    if (selected.some(line => !isOwnershipComplete(lineOwnership(line)))) {
+      setError('Choose the owning customer or supplier for each line that is not company-owned.');
+      return;
+    }
     setError('');
     setReview(true);
   };
@@ -131,6 +166,7 @@ export default function DeliveryReceiveModal({
       purchase_order_id: po.po_id,
       lines: selected.map(line => ({
         ...line,
+        ...ownershipPayload(lineOwnership(line)),
         packing_slip_number: packingSlip,
         carrier,
         tracking_number: tracking,
@@ -315,6 +351,13 @@ export default function DeliveryReceiveModal({
                               </FormField>
                             ))}
                           </div>
+                          <OwnershipFields
+                            value={lineOwnership(rows[line.line_id])}
+                            onChange={next => change(line.line_id, next)}
+                            directory={ownerDirectory}
+                            disabled={busy}
+                            defaultVendorId={po.vendor_id ?? null}
+                          />
                           <ReceiptCertificateField
                             lineId={line.line_id}
                             certificate={certificates[line.line_id]}
@@ -369,7 +412,8 @@ export default function DeliveryReceiveModal({
                       <p className="text-sm">
                         Lot {line.lot_number || 'auto-assigned'} · Heat {line.heat_number || 'not provided'} ·{' '}
                         {line.requires_inspection ? 'Hold for inspection' : 'Dock to stock'} ·{' '}
-                        {line.certificate_document_id ? 'Stored certificate linked' : 'No certificate file'}
+                        {line.certificate_document_id ? 'Stored certificate linked' : 'No certificate file'} ·{' '}
+                        {ownershipSummary(line, ownerDirectory)}
                       </p>
                     </li>
                   ))}
