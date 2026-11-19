@@ -166,7 +166,7 @@ AI-external token bound to a **Viewer** user.
 ### Credential policy for judgment writes
 
 A few writes record a **person's judgment** — not just a permitted action — and some of them are
-restricted to certain *credentials*, on top of the role gate. The restrictions have nine sources,
+restricted to certain *credentials*, on top of the role gate. The restrictions have ten sources,
 and each row below names its own: owner ruling 3 of 2026-11-05 (the two AI rows), the owner's
 decision of 2026-11-07 (a standing API token may not declare scrap or close work short), this
 PR's extensions of that decision (scrap reasons, the re-stamp short close and the other count
@@ -177,7 +177,9 @@ disposition and the CAR form's vendor / customer sign-off boxes), and the lead's
 2026-11-15 (an egress kill switch is a person's judgment; a narrowed token's read writes nothing),
 the Approved Supplier List change of 2026-11-13 (the supplier-approval rows), and the owner's
 decisions of 2026-11-16 for work-order comments (a comment is a person's own words) and of 2026-11-17
-(a standing API token may not complete a maintenance work order with checklist items unticked).
+(a standing API token may not complete a maintenance work order with checklist items unticked), and
+the NCR / CAR records change of 2026-11-19 (migration `127`: an NCR's disposition and concession,
+its re-verification, and a CAR's effectiveness verification).
 This section is the **one list** of those credential rules — what refuses a credential,
 what is deliberately left open (and who decided each), and what is deliberately not refused —
 across the AI governance (ruling 3), floor-gates (ruling 2) and short-count (ruling 1) changes;
@@ -221,6 +223,9 @@ Recommendations):
 | **Recording an FAI's customer approval** — `POST /quality/fai/{id}/customer-approval` (the MCP tool `record_fai_customer_approval`). It asserts that a person saw the customer's acceptance | `is_api_token_credential` | **403** `API_TOKEN_CUSTOMER_APPROVAL` (`A standing API token cannot record an FAI's customer approval. A person signed in to the app must record it.`) | Lead's design decision for the FAI log of record (2026-11-13), applying the 2026-11-07 principle; not an owner ruling |
 | **Recording an FAI's final disposition** — `PUT /quality/fai/{id}` setting `status` to `passed`, `failed` or `conditional`. It is the inspection's quality judgment: it stamps the approver and freezes the evidence for good. Refused before the row lock; a token's non-final edits (notes, `in_progress`, inspector, inspection date) are unchanged | `is_api_token_credential` | **403** `API_TOKEN_FAI_DISPOSITION` (`A standing API token cannot record an FAI's final disposition. A person signed in to the app must record it.`) | Review follow-up to the lead's 2026-11-13 decision (the lesser customer approval already refused tokens, so the disposition before it could not stay open); not an owner ruling |
 | **Filling or changing a CAR's vendor or customer approval boxes** — `vendor_approval_name` / `_title` / `_date` and `customer_approval_name` / `_date` on `POST /quality/car` (any non-blank value) or `PUT /quality/car/{id}` (any change, clearing included; re-sending the stored value is no change). The printed controlled form shows them as the vendor's and customer's sign-offs | `is_api_token_credential` | **403** `API_TOKEN_CAR_SIGNOFF` (`A standing API token cannot record or change a CAR's vendor or customer approval. A person signed in to the app must record it.`) | Review follow-up to the lead's 2026-11-13 decision, for the same reason as the FAI customer approval; not an owner ruling |
+| **Changing an NCR's disposition or customer concession** — `PUT /quality/ncr/{id}` (the MCP tool `update_ncr`) changing `disposition` or any of `concession_reference` / `concession_authorized_by` / `concession_date` (clearing included; re-sending the stored values beside another edit is no change). The disposition change stamps `dispositioned_by` with the deciding person (AS9100D 8.7.1 / 8.7.2). A token's other NCR edits, `action_taken` included, are unchanged | `is_api_token_credential` | **403** `API_TOKEN_NCR_JUDGMENT` (`A standing API token cannot record an NCR's disposition or customer concession. A person signed in to the app must record it.`) | Design decision of the NCR / CAR records change (2026-11-19, migration `127`), applying the 2026-11-07 principle as the lead's 2026-11-13 quality-approval decision did; not an owner ruling |
+| **Recording an NCR's re-verification** — `POST /quality/ncr/{id}/reverification` (the MCP tool `record_ncr_reverification`). The stamp names the person who re-verified the reworked or repaired product, and a `conforming` result is what lets a rework / repair NCR close. Refused before the NCR is read | `is_api_token_credential` | **403** `API_TOKEN_NCR_REVERIFICATION` (`A standing API token cannot record an NCR's re-verification. A person signed in to the app must record it.`) | The same 2026-11-19 design decision; not an owner ruling |
+| **Recording a CAR's effectiveness verification** — `POST /quality/car/{id}/effectiveness` (the MCP tool `record_car_effectiveness`). The stamp names the person who judged the corrective action effective or not, an `effective` result is what lets a corrective CAR close, and `not_effective` returns the CAR to corrective action. Refused before the CAR is read | `is_api_token_credential` | **403** `API_TOKEN_CAR_EFFECTIVENESS` (`A standing API token cannot record a CAR's effectiveness verification. A person signed in to the app must record it.`) | The same 2026-11-19 design decision; not an owner ruling |
 | **Recording a supplier-approval decision or loading the Approved Supplier List** — `PUT /purchasing/vendors/{id}/approval`, `POST /purchasing/vendors/asl-import/preview` and `POST /purchasing/vendors/asl-import/commit` (the preview too: it exists only to feed a commit) | `is_api_token_credential` | **403** (`Supplier approval is a person's decision: an API token cannot change the Approved Supplier List. Sign in to the app to do this.`); also not MCP tools (`catalog.EXCLUDED_OPERATIONS`) | Design decision of the Approved Supplier List change (2026-11-13): a supplier approval on the AS9100D 8.4 list is a named person's judgment. Not an owner ruling |
 | **Writing the legacy `approved_supplier_list` table** — `POST /supplier-scorecards/approved-suppliers/` and `PUT /supplier-scorecards/approved-suppliers/{asl_id}` (read-only history since migration 123) | `is_api_token_credential` | **403**, the same text; also not MCP tools (`catalog.EXCLUDED_OPERATIONS`) | Review follow-up of the same change: an agent's "approved" entry there would contradict the vendor's own ASL status. People's use of the two routes is unchanged |
 | **Granting vendor approval by the checkbox** — `POST /purchasing/vendors` with `is_approved: true`, `PUT /purchasing/vendors/{id}` raising `is_approved` from `false` to `true`, and `POST /purchasing/vendors/import-csv` when any row asks for `is_approved` (refused before any row is written, dry run included). A token may still create and edit vendors, re-send `true` on an approved one, and withdraw approval | `is_api_token_credential` | **403** (`Approving a supplier is a person's decision: an API token cannot mark a vendor approved. Sign in to the app to do this.`) | Review follow-up of the same change: the checkbox is the approval that puts a vendor not on the ASL into the Create PO picker. Not an owner ruling |
@@ -247,7 +252,10 @@ Deliberately **not** refused:
 - **Not yet decided (owner question):** a CAR status move through `PUT /quality/car/{id}` to
   `verification` or `closed` stamps `verified_by` / `closed_by` with the token's user, and is not
   refused for a standing API token today. It is the same kind of write as the rows above; whether
-  it gets the same rule is open.
+  it gets the same rule is open. Since migration `127` a token can close a corrective CAR only once
+  a person has recorded an `effective` effectiveness verification, and a `rework` / `repair` NCR
+  only once a person has recorded a `conforming` re-verification; closing either is still not
+  refused as such.
 - Scrap fields that are not production scrap records: `POST /fabrication-quotes/{quote_id}/actuals`
   (the MCP tool `record_actuals`) takes a `scrap_quantity` but stores it as a quoting-calibration
   observation (`FabricationQuoteActual.observation_json`), and a BOM line's `scrap_factor` is a
@@ -2200,6 +2208,8 @@ contract; they do not bypass tenant scoping or the read-only context fence.
 | Final FAI disposition (`passed` / `failed` / `conditional`) | ✓ | ✓ | | | ✓ | | |
 | Record FAI customer approval (`POST /quality/fai/{id}/customer-approval`) | ✓ | ✓ | | | ✓ | | |
 | Record CAR Quality Manager approval (`POST /quality/car/{id}/quality-approval`) | ✓ | ✓ | | | ✓ | | |
+| Record NCR re-verification (`POST /quality/ncr/{id}/reverification`) | ✓ | ✓ | | | ✓ | | |
+| Record CAR effectiveness verification (`POST /quality/car/{id}/effectiveness`) | ✓ | ✓ | | | ✓ | | |
 | Calibration | ✓ | ✓ | | | ✓ | | |
 | Manage scrap reason codes | ✓ | ✓ | | | ✓ | | |
 | Void / restore NCR | ✓ | ✓ | | | ✓ | | |
@@ -2275,7 +2285,7 @@ contract; they do not bypass tenant scoping or the read-only context fence.
 > required `RESTORE` audit row.
 >
 > **NCR / CAR edits — endpoint mapping (the Approve row).** `PUT /quality/ncr/{ncr_id}` (edit,
-> disposition, close, reopen, assign, CAR link), `PUT /quality/car/{car_id}` (edit, verification,
+> disposition, action taken, customer concession, close, reopen, assign, CAR link), `PUT /quality/car/{car_id}` (edit, verification,
 > close, reopen, assign) and `POST /quality/ncr/{ncr_id}/create-car` are enforced **in code** via
 > `require_role(quality_record_service.WRITE_ROLES)` = **Admin / Manager / Quality**, the **Approve**
 > row (the frontend detail screen gates on `quality:approve`, which the same three roles hold).
@@ -2299,6 +2309,25 @@ contract; they do not bypass tenant scoping or the read-only context fence.
 > token filling or changing the form's vendor or customer approval boxes on `POST` / `PUT`. The CAR
 > detail screen shows **Record quality approval** only to `quality:approve` holders, the same three
 > roles by default.
+>
+> **NCR re-verification and CAR effectiveness verification — endpoint mapping.**
+> `POST /quality/ncr/{ncr_id}/reverification` and `POST /quality/car/{car_id}/effectiveness`
+> (migration `127_ncr_car_records`) are enforced **in code** to the **Record NCR re-verification**
+> and **Record CAR effectiveness verification** rows via the same
+> `quality_record_service.WRITE_ROLES` = **Admin / Manager / Quality**; Supervisor, Operator,
+> Shipping and Viewer get **403**. Each server-stamps who recorded it and when (neither is accepted
+> in a request body; no `PUT` carries them), is re-recordable, and commits with a required audit
+> row (**503** with rollback on audit loss). The re-verification is **409** on a CLOSED NCR and
+> unless it is dispositioned `rework` or `repair`; the effectiveness verification is **409** unless the CAR
+> is in `verification`, and a `not_effective` result returns the CAR to `corrective_action`. A
+> standing API token is refused **403** on both whatever its user's role, and so is a token
+> changing an NCR's `disposition` or customer concession through `PUT /quality/ncr/{ncr_id}` (see
+> [Credential policy for judgment writes](#credential-policy-for-judgment-writes)). These records
+> also gate closure (`PUT`, the Approve row): a `rework` / `repair` NCR closes only with a stored
+> `conforming` re-verification, and a corrective CAR only with a stored `effective` result. The
+> detail screen shows **Record re-verification** / **Record effectiveness** only to
+> `quality:approve` holders. See `docs/API.md` → Quality → "NCR disposition evidence" and "CAR
+> corrective-action evidence".
 
 > **Calibration — endpoint mapping (now enforced in code).** `POST /api/v1/calibration/equipment`,
 > `PUT /calibration/equipment/{id}` and `POST /calibration/equipment/{id}/calibrate` are enforced to

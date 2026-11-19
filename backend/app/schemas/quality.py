@@ -156,10 +156,11 @@ class NCRReverificationRequest(BaseModel):
         description="What was re-inspected or re-tested and against which requirement (required)",
     )
 
-    @field_validator('notes')
+    # mode="before": strip first, so max_length judges the stored (stripped) text.
+    @field_validator('notes', mode='before')
     @classmethod
-    def _notes_not_blank(cls, value: str) -> str:
-        return _required_text(value, 'notes')
+    def _notes_not_blank(cls, value: object) -> object:
+        return _required_text(value, 'notes') if isinstance(value, str) else value
 
 
 class CAREffectivenessRequest(BaseModel):
@@ -184,10 +185,11 @@ class CAREffectivenessRequest(BaseModel):
         description="The evidence reviewed for effectiveness (required); stored as the CAR's effectiveness_check",
     )
 
-    @field_validator('evidence')
+    # mode="before": strip first, so max_length judges the stored (stripped) text.
+    @field_validator('evidence', mode='before')
     @classmethod
-    def _evidence_not_blank(cls, value: str) -> str:
-        return _required_text(value, 'evidence')
+    def _evidence_not_blank(cls, value: object) -> object:
+        return _required_text(value, 'evidence') if isinstance(value, str) else value
 
 
 class CARVoidRequest(NCRVoidRequest):
@@ -394,6 +396,15 @@ class CARResponse(UTCModel):
     priority: int
     title: str
     problem_description: str
+
+    @field_validator("car_type", mode="before")
+    @classmethod
+    def _null_type_reads_as_corrective(cls, value: object) -> object:
+        # ``cars.car_type`` has a Python-side default only, so a row written outside the ORM can
+        # hold NULL. NULL has always meant corrective (the closure gate judges it so), and a
+        # required response field must not 500 the read -- or a close that already committed.
+        return CARType.CORRECTIVE if value is None else value
+
     root_cause_analysis: Optional[str]
     root_cause: Optional[str]
     containment_action: Optional[str]

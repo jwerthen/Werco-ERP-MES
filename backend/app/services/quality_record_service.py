@@ -76,6 +76,11 @@ Rules every writer here keeps:
   effectiveness result is recorded, the evidence it reviewed (``effectiveness_check``) is
   part of that record: a ``PUT`` that changes it is 409. ``not_effective`` returns the CAR
   from VERIFICATION to CORRECTIVE_ACTION on the same (STATUS_CHANGE) audit row.
+* **A verification vouches for what it reviewed, and no more.** A ``PUT`` that changes an
+  NCR's disposition clears its re-verification; one that changes a CAR's ``root_cause`` or
+  ``corrective_action`` clears its effectiveness result, verifier and instant (the evidence
+  text stays, unlocked, for the next recording). The cleared values ride old -> new on that
+  request's audit row, and a close in the same request is judged as if already cleared.
 
 Lock order: every row lock (``SELECT ... FOR UPDATE``) and number-generator advisory
 lock is taken BEFORE the first audit row, because the audit chain lock is global.
@@ -85,7 +90,7 @@ import enum
 from contextlib import contextmanager
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 from fastapi import HTTPException
 from sqlalchemy import inspect, or_
@@ -786,7 +791,7 @@ def record_ncr_reverification(
                     f"NCR {ncr.ncr_number} is dispositioned {disposition}."
                 ),
             )
-        tracked = ("reverification_result", "reverification_notes", "reverified_by", "reverified_at")
+        tracked = _NCR_REVERIFICATION_FIELDS
         old = {field: _value(getattr(ncr, field)) for field in tracked}
         ncr.reverification_result = data.result.value
         ncr.reverification_notes = data.notes
@@ -1089,7 +1094,16 @@ def update_car(
     return get_car(db, company_id, car_id)
 
 
-def _check_car_closure(car: CorrectiveActionRequest, requested: Dict[str, Any]) -> None:
+# What a CAR's effectiveness verification reviewed: the cause it found and the action taken
+# against it. Changing either clears the recorded result (and its verifier and instant), so a
+# closed CAR can never name someone as having found effective an action they never reviewed.
+_CAR_EFFECTIVENESS_REVIEWED_FIELDS = ("root_cause", "corrective_action")
+_CAR_EFFECTIVENESS_RESULT_FIELDS = ("effectiveness_result", "effectiveness_verified_by", "effectiveness_verified_at")
+
+
+def _check_car_closure(
+    car: CorrectiveActionRequest, requested: Dict[str, Any], *, clearing_effectiveness: bool = False
+) -> None:
     """422 (before any write) naming the evidence a closing CAR still lacks.
 
     Judged on the MERGED record (the requested value, else the stored one). A corrective CAR
@@ -1112,7 +1126,8 @@ def _check_car_closure(car: CorrectiveActionRequest, requested: Dict[str, Any]) 
             missing.append("human factors review")
         if blank("similar_nonconformities_review"):
             missing.append("similar nonconformities review")
-        if car.effectiveness_result != CAREffectivenessResult.EFFECTIVE:
+        result = None if clearing_effectiveness else car.effectiveness_result
+        if result != CAREffectivenessResult.EFFECTIVE:
             missing.append("an effective effectiveness verification")
     if missing:
         raise HTTPException(status_code=422, detail="Closure requires " + ", ".join(missing))
@@ -1128,7 +1143,10 @@ def _write_car_changes(
     audit: AuditService,
 ) -> None:
     reopening = _guard_final_record(car.status, changes, f"CAR {car.car_number}", CARStatus.CLOSED, CARStatus.VOID)
-    if "effectiveness_check" in changes and car.effectiveness_result is not None:
+    clearing_effectiveness = any(field in changes for field in _CAR_EFFECTIVENESS_REVIEWED_FIELDS) and any(
+        getattr(car, field) is not None for field in _CAR_EFFECTIVENESS_RESULT_FIELDS
+    )
+    if "effectiveness_check" in changes and car.effectiveness_result is not None and not clearing_effectiveness:
         # The evidence a recorded verification reviewed is part of that record: it changes only
         # by recording a new verification, which re-stamps who reviewed it and when.
         raise HTTPException(
@@ -1141,7 +1159,7 @@ def _write_car_changes(
     closing = changes.get("status") == CARStatus.CLOSED
     verifying = changes.get("status") == CARStatus.VERIFICATION
     if closing:
-        _check_car_closure(car, requested)
+        _check_car_closure(car, requested, clearing_effectiveness=clearing_effectiveness)
     if changes.get("assigned_to") is not None:
         _assignable_user_or_404(db, company_id, changes["assigned_to"])
     if (
@@ -1170,6 +1188,7 @@ def _write_car_changes(
         (["verified_by"] if verifying else [])
         + (["closed_date", "closed_by"] if closing or reopening else [])
         + (["customer_name"] if snapshot_customer else [])
+        + (list(_CAR_EFFECTIVENESS_RESULT_FIELDS) if clearing_effectiveness else [])
     )
     tracked = list(changes) + side_fields
     old = {field: _value(getattr(car, field)) for field in tracked}
@@ -1180,6 +1199,9 @@ def _write_car_changes(
         car.customer_name = customer.name if customer is not None else None
     if verifying:
         car.verified_by = user.id
+    if clearing_effectiveness:
+        for field in _CAR_EFFECTIVENESS_RESULT_FIELDS:
+            setattr(car, field, None)
     if closing:
         car.closed_date = date.today()
         car.closed_by = user.id
@@ -1603,7 +1625,7 @@ def _user_namer(
     rows: Sequence[Any],
     selected_fields: Sequence[str],
     stamped_fields: Sequence[str],
-):
+) -> Callable[[Any, str], Optional[str]]:
     """A ``(row, field) -> full name | None`` resolver over every user id ``rows`` name.
 
     A SELECTED field (a client's choice, validated tenant-scoped at write time) resolves only

@@ -231,7 +231,9 @@ export function CarEffectivenessPanel({ record, canWrite, dirty, busy, onRecorde
         options={CAR_EFFECTIVENESS_RESULTS}
         textLabel="Evidence reviewed"
         textHelp="The records, data or follow-up checks that show whether the action worked."
-        defaultText={record.effectiveness_check || ''}
+        // Pre-fill only a draft typed through the form; a recorded verification's evidence
+        // belongs to that verification, so a new one starts blank.
+        defaultText={record.effectiveness_result ? '' : record.effectiveness_check || ''}
         submitLabel="Record"
         pending={pending}
         error={error}

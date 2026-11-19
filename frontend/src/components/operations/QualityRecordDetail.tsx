@@ -52,7 +52,7 @@ const carTextFields: TextFieldSpec[] = [
   { key: 'preventive_action', maxLength: 2000 },
   { key: 'verification_method', maxLength: 2000 },
   { key: 'verification_results', maxLength: 2000 },
-  { key: 'effectiveness_check', label: 'Effectiveness evidence reviewed', maxLength: 2000 },
+  { key: 'effectiveness_check', label: 'Effectiveness evidence reviewed', maxLength: 4000 },
 ];
 /** NCR customer-concession inputs (AS9100D 8.7.1): required to close use-as-is or repair. */
 const ncrConcessionFields = ['concession_reference', 'concession_authorized_by', 'concession_date'];
