@@ -11,6 +11,7 @@ import { toDisplayString } from '../../utils/apiError';
 import {
   MAINTENANCE_FREQUENCY_LABELS,
   MAINTENANCE_PRIORITY_LABELS,
+  checklistLines,
   checklistPayload,
   targetText,
 } from '../../utils/maintenance';
@@ -42,12 +43,6 @@ export const scheduleEditForm = (schedule: MaintenanceSchedule): ScheduleEditFor
   requires_shutdown: !!schedule.requires_shutdown,
   checklist: (schedule.checklist_items ?? []).join('\n'),
 });
-
-const checklistLines = (text: string) =>
-  text
-    .split(/\r?\n/)
-    .map(item => item.trim())
-    .filter(Boolean);
 
 /** Why the form cannot be saved yet, or null when it can. */
 export const scheduleEditProblem = (form: ScheduleEditForm): string | null => {
@@ -84,6 +79,8 @@ export const scheduleEditPayload = (before: ScheduleEditForm, after: ScheduleEdi
     payload.estimated_duration_hours = Number(after.estimated_duration_hours);
   }
   if (after.requires_shutdown !== before.requires_shutdown) payload.requires_shutdown = after.requires_shutdown;
+  // Compared as normalized items: a spacing or bullet edit changes nothing the server would store,
+  // while a change of case or wording is a real edit (the stored spelling is what is shown).
   if (JSON.stringify(checklistLines(after.checklist)) !== JSON.stringify(checklistLines(before.checklist))) {
     payload.checklist = checklistPayload(after.checklist);
   }

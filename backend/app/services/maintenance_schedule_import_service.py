@@ -63,7 +63,13 @@ from app.models.maintenance import (
 from app.models.work_center import WorkCenter
 from app.services.audit_service import AuditService
 from app.services.import_service import ParsedTable, parse_date_field, parse_import_file
-from app.services.maintenance_checklist import API_TOKEN_SCHEDULE_CHECKLIST_REMOVAL, removed_items
+from app.services.maintenance_checklist import (
+    API_TOKEN_SCHEDULE_CHECKLIST_REMOVAL,
+    checklist_item_key,
+    normalize_checklist_item,
+    parse_checklist,
+    removed_items,
+)
 
 TEMPLATE_ENTITY = "maintenance-schedules"
 IMPORT_SOURCE = "pm_import"
@@ -184,30 +190,6 @@ def frequency_label(frequency: MaintenanceFrequency, frequency_days: Optional[in
     if frequency == MaintenanceFrequency.CUSTOM and frequency_days:
         return f"Every {frequency_days} Days"
     return FREQUENCY_LABELS[frequency]
-
-
-def parse_checklist(text: Optional[str]) -> List[str]:
-    """A stored checklist as a list of items, tolerantly.
-
-    The import writes a JSON array of strings; older UI rows hold one item per line. A JSON
-    array of objects contributes each object's ``item`` / ``task`` / ``name`` / ``text``.
-    """
-    if not text or not str(text).strip():
-        return []
-    try:
-        loaded = json.loads(text)
-    except (TypeError, ValueError):
-        loaded = None
-    if isinstance(loaded, list):
-        items: List[str] = []
-        for entry in loaded:
-            if isinstance(entry, dict):
-                entry = next((entry[k] for k in ("item", "task", "name", "text") if entry.get(k)), "")
-            item = _collapse(entry)
-            if item:
-                items.append(item)
-        return items
-    return [line for line in (_collapse(raw.lstrip("-*• \t")) for raw in str(text).splitlines()) if line]
 
 
 def _cell(row: Dict[str, str], columns: Sequence[str]) -> str:
@@ -500,7 +482,9 @@ def _parse_row_values(plan: _RowPlan, row: Dict[str, str]) -> None:
 
 def _plan_row(row_number: int, row: Dict[str, str], targets: _Targets) -> _RowPlan:
     plan = _RowPlan(row=row_number)
-    plan.task = _collapse(_cell(row, TASK_COLUMNS))
+    # Normalized as every checklist reader normalizes it (bullets, spacing), so the stored list
+    # compares equal to what the schedule already holds and a re-run stays a no-op.
+    plan.task = normalize_checklist_item(_cell(row, TASK_COLUMNS))
     schedule_name = _collapse(_cell(row, SCHEDULE_NAME_COLUMNS))
     plan.schedule_name = schedule_name or None
     try:
@@ -579,7 +563,7 @@ def _fill_group(group: _GroupPlan) -> None:
     """Ordered de-duplicated tasks and the schedule-level values (conflicts are row errors)."""
     seen: Dict[str, int] = {}
     for plan in group.rows:
-        task_key = _key(plan.task)
+        task_key = checklist_item_key(plan.task)
         if task_key in seen:
             plan.warnings.append(f"Duplicate of row {seen[task_key]}'s task in this schedule; listed once.")
             continue

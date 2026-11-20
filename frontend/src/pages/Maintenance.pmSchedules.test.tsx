@@ -735,6 +735,57 @@ describe('Maintenance — a refused completion re-reads instead of dead-ending',
   });
 });
 
+describe('Maintenance — checklist items match as the server matches them', () => {
+  it('shows a bulleted, double-spaced work-order item and the schedule’s lower-case step as ONE row', async () => {
+    mockedApi.getMaintenanceWorkOrders.mockResolvedValue([
+      {
+        ...openPmWO,
+        checklist_results: JSON.stringify([
+          { item: '- Grease  bearing', done: false },
+          { item: '1. Check oil', done: false },
+        ]),
+        schedule_checklist_items: ['grease bearing', '1. check oil'],
+      },
+    ]);
+    const dialog = await openCompleteDialog();
+    expect(dialog).toHaveTextContent('Checklist (0 of 2 done)');
+    // Shown once, in the work order's (normalized) spelling; numbering is kept.
+    expect(within(dialog).getAllByRole('checkbox')).toHaveLength(2);
+    expect(within(dialog).getByRole('checkbox', { name: 'Grease bearing' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('checkbox', { name: '1. Check oil' })).toBeInTheDocument();
+    expect(within(dialog).queryByRole('checkbox', { name: 'grease bearing' })).not.toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Grease bearing' }));
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: '1. Check oil' }));
+    expect(within(dialog).queryByLabelText(REASON_LABEL)).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Complete' }));
+    await waitFor(() => expect(mockedApi.completeMaintenanceWorkOrder).toHaveBeenCalledTimes(1));
+    const [, body] = mockedApi.completeMaintenanceWorkOrder.mock.calls[0];
+    expect(JSON.parse(body.checklist_results)).toEqual([
+      { item: 'Grease bearing', done: true },
+      { item: '1. Check oil', done: true },
+    ]);
+    expect(body).not.toHaveProperty('incomplete_checklist_reason');
+  });
+
+  it('keeps a step named twice as two rows, whatever their spelling', async () => {
+    mockedApi.getMaintenanceWorkOrders.mockResolvedValue([
+      {
+        ...openPmWO,
+        checklist_results: JSON.stringify([{ item: '• Grease bearing', done: false }]),
+        schedule_checklist_items: ['grease bearing', 'GREASE  BEARING'],
+      },
+    ]);
+    const dialog = await openCompleteDialog();
+    expect(dialog).toHaveTextContent('Checklist (0 of 2 done)');
+    const copies = within(dialog).getAllByRole('checkbox', { name: 'Grease bearing' });
+    expect(copies).toHaveLength(2);
+    fireEvent.click(copies[0]);
+    expect(dialog).toHaveTextContent('Checklist (1 of 2 done)');
+    expect(within(dialog).getByLabelText(/^Reason for completing with 1 item unticked\b/)).toBeInTheDocument();
+  });
+});
+
 describe('Maintenance — editing a schedule', () => {
   it('PUTs only the fields that changed', async () => {
     renderPage('/maintenance?tab=schedules');

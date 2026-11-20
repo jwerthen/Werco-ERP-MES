@@ -159,7 +159,7 @@ class TestCompletionStampsTheCompanyDay:
     def test_an_evening_completion_is_stamped_and_rolled_forward_from_the_local_day(
         self, client, db_session, planner_headers, frozen_clock
     ):
-        schedule = make_schedule(db_session, next_due=LOCAL_DAY)  # monthly: 30 days
+        schedule = make_schedule(db_session, next_due=LOCAL_DAY)  # monthly: one calendar month
         created = client.post(
             WORK_ORDERS,
             headers=planner_headers,
@@ -172,8 +172,9 @@ class TestCompletionStampsTheCompanyDay:
         done = client.post(f"{WORK_ORDERS}/{wo_id}/complete", headers=planner_headers, json={})
         assert done.status_code == 200, done.text
 
-        expected_next = LOCAL_DAY + timedelta(days=30)
-        assert done.json()["schedule_next_due_date"] == expected_next.isoformat() == "2026-12-31"
+        # One calendar month from the LOCAL day (Dec 1 -> Jan 1); the UTC day would give Jan 2.
+        expected_next = real_date(2027, 1, 1)
+        assert done.json()["schedule_next_due_date"] == expected_next.isoformat() == "2027-01-01"
         # completed_at is still the UTC instant; only the calendar DAY is the company's.
         assert done.json()["completed_at"] == "2026-12-02T02:00:00Z"
 
@@ -187,7 +188,7 @@ class TestCompletionStampsTheCompanyDay:
             .filter(AuditLog.resource_type == "maintenance_schedule", AuditLog.resource_id == schedule.id)
             .all()
         )
-        assert row.new_values == {"last_completed_date": "2026-12-01", "next_due_date": "2026-12-31"}
+        assert row.new_values == {"last_completed_date": "2026-12-01", "next_due_date": "2027-01-01"}
 
     def test_a_company_east_of_utc_is_stamped_its_own_later_day(
         self, client, db_session, planner_headers, frozen_clock
@@ -208,7 +209,8 @@ class TestCompletionStampsTheCompanyDay:
         db_session.expire_all()
         stored = db_session.get(MaintenanceSchedule, schedule.id)
         assert stored.last_completed_date == real_date(2026, 12, 2)
-        assert stored.next_due_date == real_date(2027, 1, 1)
+        # One calendar month from Tokyo's Dec 2; the UTC day (Dec 1) would give Jan 1.
+        assert stored.next_due_date == real_date(2027, 1, 2)
 
 
 class TestReadsUseTheCompanyDay:

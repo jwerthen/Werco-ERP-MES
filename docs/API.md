@@ -5891,7 +5891,8 @@ uploads go through text extraction + LLM. See
 >   `work_center_name`, `asset_id`, `asset_tag`, `asset_name`, `target_type` (`work_center` or
 >   `asset`), `target_code` and `target_name`, tenant-guarded on egress like `work_center_name`.
 >   Schedules also return `checklist_items`, the stored `checklist` parsed tolerantly (a JSON array of
->   strings, or one item per line for older rows).
+>   strings, or one item per line for older rows) with each item's text normalized (*Checklist item
+>   text* under *The PM loop*); `checklist` itself is returned as stored.
 > - The dashboard's counts and cost include asset work orders; its MTBF / MTTR `work_center_metrics`
 >   stay work-center only, and `GET /maintenance/history/{work_center_id}` stays a work-center read
 >   (assets use `/maintenance/assets/{id}/history`).
@@ -6005,6 +6006,10 @@ uploads go through text extraction + LLM. See
 >   a year to some and every two years to others) and is a row error like any unrecognized value.
 > - **Grouping:** rows sharing a target, a frequency (and `frequency_days` for custom) and a schedule
 >   name become **one** schedule whose checklist is the ordered, de-duplicated task list (a JSON array).
+>   Each `task` is normalized as every checklist reader normalizes it (whitespace collapsed, leading
+>   bullets dropped; *Checklist item text* under *The PM loop*), and duplicates are matched on that
+>   text case-insensitively: a repeat is listed once, in its first spelling, with a row warning
+>   (*"Duplicate of row N's task in this schedule; listed once."*).
 >   The default name is *"<target code> <Frequency> PM"* (e.g. *CNC-01 Monthly PM*), so a machine with
 >   monthly and yearly tasks gets two schedules. New schedules are `preventive`; their next due date is
 >   the sheet's, else today (Central).
@@ -6103,8 +6108,16 @@ uploads go through text extraction + LLM. See
 >   the upgrade; see `docs/DEPLOYMENT_RUNBOOK.md` for the pre-deploy check and the remedy.
 > - **Complete** on a work order with a `schedule_id` sets the schedule's `last_completed_date` to the
 >   company's calendar day at the moment of completion and `next_due_date` to that date plus the
->   interval, in fixed days: daily 1, weekly 7, biweekly 14, monthly 30, quarterly 90, semi_annual
->   182, annual 365, custom `frequency_days`. The response's `schedule_next_due_date` is the new date (`null` when no schedule
+>   interval (`app/services/maintenance_interval.py`, the one implementation). Day cadences add days:
+>   daily 1, weekly 7, biweekly 14, custom `frequency_days` (30 for a legacy custom row without one).
+>   Calendar cadences add **calendar months** (owner decision 2026-11-20): monthly 1, quarterly 3,
+>   semi_annual 6, annual 12. A day past the end of a shorter month clamps to its last day (Jan 31 +
+>   1 month is Feb 28, or Feb 29 in a leap year; Feb 29 + 12 months is Feb 28), and the clamp sticks:
+>   a schedule completed on time every month goes Jan 31 → Feb 28 → Mar 28 (holding the original day
+>   of month would need an anchor column; the owner accepted the clamp). These used to be fixed 30 /
+>   90 / 182 / 365 days, so an on-time monthly PM drifted about five days earlier a year and an annual
+>   one landed a day early across a Feb 29. Nothing is recomputed at deploy: an existing
+>   `next_due_date` stays until the schedule's next completion. The response's `schedule_next_due_date` is the new date (`null` when no schedule
 >   was advanced); the schedule's `UPDATE` audit row reads *"… advanced by completing maintenance work
 >   order MWO-…"* with `extra_data.maintenance_work_order_id`. `checklist_results` omitted keeps the
 >   checklist the work order carries; a value, or an explicit `null`, replaces it.
@@ -6141,6 +6154,24 @@ uploads go through text extraction + LLM. See
 >   `status: cancelled`) likewise writes the snapshot from the schedule's current steps, recorded by the
 >   `PUT`'s audit row. A pre-`132` work order completed or cancelled before this deploy keeps no
 >   snapshot (see *Known gaps*).
+> - **Checklist item text (owner decision 2026-11-20).** Every reader of a checklist normalizes each
+>   item's text the same way: a schedule's `checklist` (and its `checklist_items`), a work order's
+>   `checklist_results`, the checklist snapshot, `schedule_checklist_items`, and the PM import's
+>   tasks. Runs of whitespace, non-breaking and other Unicode spaces included, collapse to one space;
+>   the ends are trimmed; leading bullets are dropped -- a glyph (`•` `◦` `▪` `·` `‣` `⁃`), or a `-`
+>   `*` `–` `—` followed by a space. Spelling is changed, never meaning: numbering (*"1. Check oil"*)
+>   and case are kept, and a mark written against a word or number keeps it (*"-X axis"*, *"-40 F"*,
+>   *"\*CRITICAL\*"*). Items then **match case-insensitively**
+>   wherever two lists are compared — completion judging ticks, and both API-token removal guards
+>   below — so *"Check Oil"* ticks *"check oil"*, and a change of spacing, bullet or case is not a
+>   removal. Where two spellings meet, the first one is displayed. The rule is one Python
+>   implementation (`normalize_checklist_item` / `checklist_item_key` in
+>   `app/services/maintenance_checklist.py`) with a TypeScript twin in
+>   `frontend/src/utils/maintenance.ts`, held together by the shared fixture
+>   `frontend/src/utils/__tests__/fixtures/maintenance-checklist-normalization.json`, which pytest and
+>   Jest both run (add a case there, never in one language only). It is applied on read, not by
+>   rewriting stored rows: nothing is backfilled, and the raw `checklist` / `checklist_results`
+>   strings are returned as stored.
 > - **Checklist at completion (owner decision 2026-11-17).** `POST
 >   /maintenance/work-orders/{id}/complete` takes `incomplete_checklist_reason` (string, at most 2000
 >   characters). Completing with **any** checklist item unticked and no non-blank reason is **409**
@@ -6155,7 +6186,8 @@ uploads go through text extraction + LLM. See
 >   - The items judged are those the work order carried plus any in the body's `checklist_results`,
 >     plus — for a PM work order — every item of its **schedule's** checklist as snapshotted when the
 >     work order was opened (*Checklist snapshot* above; the schedule's current checklist for an open
->     work order opened before migration `132`), matched by text. A schedule step left off the work
+>     work order opened before migration `132`), matched on their normalized text, case-insensitively
+>     (*Checklist item text* above). A schedule step left off the work
 >     order (at Start PM, by a create through the API that sent no checklist, or by a later `PUT`) is
 >     still a step of the PM: it needs a tick or a reason. Every maintenance work-order response
 >     carries those steps as `schedule_checklist_items` — the snapshot; `[]` without a schedule; for a
@@ -6164,7 +6196,8 @@ uploads go through text extraction + LLM. See
 >     unticked, after the work order's own items. A standing API token's `PUT
 >     /maintenance/schedules/{id}` that takes items off `checklist` while the schedule has an open
 >     work order **with no checklist snapshot** (opened before migration `132`, so still judged on the
->     schedule's current steps) is **403** `API_TOKEN_SCHEDULE_CHECKLIST_REMOVAL` *"Removing items from
+>     schedule's current steps; a change of spacing, bullet or case removes nothing) is **403**
+>     `API_TOKEN_SCHEDULE_CHECKLIST_REMOVAL` *"Removing items from
 >     the checklist of a PM schedule whose open work order is still judged on the schedule's current
 >     checklist (it was opened before checklist snapshots) must be done by a person signed in to the
 >     app, not an API token."* Adding steps, editing a schedule with no open work order, and —
@@ -6176,8 +6209,9 @@ uploads go through text extraction + LLM. See
 >     token's bound user with `extra_data.credential`. An item is ticked only when the checklist the work order completes with marks
 >     it `"done": true`; a plain-string item, or a line of a one-item-per-line checklist (split on
 >     `\r?\n`, as the page splits it), is unticked. Items count as a **multiset**: a checklist that
->     names one step twice needs both copies ticked, and the audit row lists a text once per unticked
->     copy.
+>     names one step twice needs both copies ticked, and the audit row lists an item once per
+>     unticked copy, in the first spelling met (the completing checklist's, then the stored one's,
+>     then the schedule's).
 >     An item the work order carried that `checklist_results` leaves out — or an explicit `null` that
 >     clears the checklist — counts as **unticked**: dropping a line is not a way to close without
 >     doing it.
@@ -6195,7 +6229,7 @@ uploads go through text extraction + LLM. See
 >   - The dialog reads the work order fresh (`GET /maintenance/work-orders/{id}`) when it opens rather
 >     than using the cached list row (falling back to the row if that read fails). When a completion
 >     is refused **409**, it reloads the page data, re-reads the work order and rebuilds the
->     checklist from it, keeping the technician's ticks (matched by text, as a multiset) and every
+>     checklist from it, keeping the technician's ticks (matched on the normalized text, case-insensitively, as a multiset) and every
 >     other field they typed; any item the record now carries that the dialog did not list appears
 >     unticked, with a warning to tick it or give a reason. After a **400** (the work order was held,
 >     cancelled or completed meanwhile) it reloads the page data. The server's text stays on screen
@@ -6206,7 +6240,8 @@ uploads go through text extraction + LLM. See
 >     (or cancellation) it cannot rewrite the checklist at all, for any role or credential: the work
 >     order is a final record and any change is **409** (*A completed or cancelled work order is a
 >     final record* above), so the ticks the completion recorded stay as recorded. A standing API token
->     whose `PUT` takes items off the checklist (drops, renames or clears them) is **403**
+>     whose `PUT` takes items off the checklist (drops, renames or clears them; a change of spacing,
+>     bullet or case is not a removal) is **403**
 >     `API_TOKEN_CHECKLIST_REMOVAL` *"Removing items from a maintenance work order's checklist must be
 >     done by a person signed in to the app, not an API token."* — otherwise a token could reach the
 >     refused completion in two steps. Ticking or adding items is allowed.
@@ -6221,8 +6256,9 @@ uploads go through text extraction + LLM. See
 >   completion that moved the due dates. A checklist change binds the next work order (*Checklist
 >   snapshot* above).
 > - **Known gaps:** the `maintenance.due` / `maintenance.overdue` notification catalog entries still
->   have no emitter, and *monthly* is a fixed 30 days from the completion date, not a calendar month,
->   so a schedule completed on its due date drifts earlier each month. Work orders opened before
+>   have no emitter. A calendar-month schedule whose completion day is past the end of a shorter month
+>   stays on the clamped day afterwards (Jan 31 → Feb 28 → Mar 28), since nothing records the
+>   original day of month (accepted, above). Work orders opened before
 >   migration `132` carry no checklist snapshot until they complete (never backfilled): while open
 >   they are judged on the schedule's **current** checklist, so a schedule edit or PM import still
 >   changes what they must tick (a token may not take steps away from such a schedule, above); and

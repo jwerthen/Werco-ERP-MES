@@ -53,14 +53,21 @@ class MaintenanceFrequency(str, enum.Enum):
     CUSTOM = "custom"
 
 
+# A PM schedule's interval, read by ``app.services.maintenance_interval.next_due_date`` (the one place
+# a next due date is computed). Day cadences add days; calendar cadences add CALENDAR MONTHS, clamped
+# to the end of a shorter month (owner decision 2026-11-20): monthly used to be a fixed 30 days and
+# annual 365, so an on-time monthly PM drifted about five days earlier every year. ``custom`` adds
+# the schedule's own ``frequency_days``.
 FREQUENCY_DAYS_MAP = {
     MaintenanceFrequency.DAILY: 1,
     MaintenanceFrequency.WEEKLY: 7,
     MaintenanceFrequency.BIWEEKLY: 14,
-    MaintenanceFrequency.MONTHLY: 30,
-    MaintenanceFrequency.QUARTERLY: 90,
-    MaintenanceFrequency.SEMI_ANNUAL: 182,
-    MaintenanceFrequency.ANNUAL: 365,
+}
+FREQUENCY_MONTHS_MAP = {
+    MaintenanceFrequency.MONTHLY: 1,
+    MaintenanceFrequency.QUARTERLY: 3,
+    MaintenanceFrequency.SEMI_ANNUAL: 6,
+    MaintenanceFrequency.ANNUAL: 12,
 }
 
 

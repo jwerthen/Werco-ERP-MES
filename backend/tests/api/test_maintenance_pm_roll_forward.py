@@ -21,12 +21,13 @@ from 6 PM Central. The evening case itself is pinned with a frozen clock in
 """
 
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy.orm import Session
 
 from app.models.audit_log import AuditLog
+from app.models.company import Company
 from app.models.maintenance import (
     MaintenanceFrequency,
     MaintenanceSchedule,
@@ -35,6 +36,7 @@ from app.models.maintenance import (
 )
 from app.models.user import UserRole
 from app.services.company_time import company_today
+from app.services.maintenance_interval import add_months
 from tests.api.test_maintenance_assets import make_asset, make_wc
 from tests.api.test_receiving_compliance import _next, headers_for, make_user
 
@@ -93,6 +95,23 @@ def dashboard(client, headers) -> dict:
     return resp.json()
 
 
+def freeze_company_day(monkeypatch, db: Session, day: date) -> None:
+    """Pin every clock the maintenance endpoint reads to noon Central on ``day`` (company 1 in
+    Chicago), so the completion day -- the base of the next due date -- is ``day``."""
+    # Imported here: test_maintenance_company_day imports this module's helpers at its top.
+    import app.api.endpoints.maintenance as maintenance_endpoints
+    import app.core.time_utils as time_utils
+    from tests.api.test_maintenance_company_day import FrozenDate, FrozenDatetime, _FrozenClock
+
+    company = db.get(Company, 1)
+    company.timezone = "America/Chicago"
+    db.commit()
+    monkeypatch.setattr(_FrozenClock, "instant", datetime(day.year, day.month, day.day, 18, 0, tzinfo=timezone.utc))
+    monkeypatch.setattr(maintenance_endpoints, "datetime", FrozenDatetime)
+    monkeypatch.setattr(maintenance_endpoints, "date", FrozenDate)
+    monkeypatch.setattr(time_utils, "datetime", FrozenDatetime)
+
+
 def schedule_audit_rows(db: Session, schedule_id: int):
     db.expire_all()
     return (
@@ -141,7 +160,9 @@ class TestScheduleToWorkOrderToCompletion:
         assert done.status_code == 200, done.text
 
         today = company_today(db_session, 1)
-        expected_next = today + timedelta(days=30)
+        # Monthly is one CALENDAR month (``add_months`` is pinned date by date in
+        # test_maintenance_interval; the parametrized test below pins the wiring on fixed dates).
+        expected_next = add_months(today, 1)
         assert done.json()["schedule_next_due_date"] == expected_next.isoformat()
         # Omitted checklist_results keeps the checklist the work order was opened with.
         assert done.json()["checklist_results"] == checklist_results
@@ -163,19 +184,30 @@ class TestScheduleToWorkOrderToCompletion:
         }
 
     @pytest.mark.parametrize(
-        "frequency,frequency_days,interval",
+        "frequency,frequency_days,completed_on,expected",
         [
-            (MaintenanceFrequency.ANNUAL, None, 365),
-            (MaintenanceFrequency.CUSTOM, 45, 45),
+            # Calendar cadences add CALENDAR months, clamped to a shorter month's end. Each date is
+            # chosen so the old fixed day counts (30 / 90 / 182 / 365) give a DIFFERENT answer.
+            (MaintenanceFrequency.MONTHLY, None, date(2027, 1, 31), date(2027, 2, 28)),  # 30 days: Mar 2
+            (MaintenanceFrequency.QUARTERLY, None, date(2027, 1, 31), date(2027, 4, 30)),  # 90 days: May 1
+            (MaintenanceFrequency.SEMI_ANNUAL, None, date(2027, 1, 31), date(2027, 7, 31)),  # 182 days: Aug 1
+            (MaintenanceFrequency.ANNUAL, None, date(2027, 3, 1), date(2028, 3, 1)),  # 365 days: Feb 29 2028
+            # Day cadences are unchanged, across a month end too.
+            (MaintenanceFrequency.DAILY, None, date(2027, 1, 31), date(2027, 2, 1)),
+            (MaintenanceFrequency.WEEKLY, None, date(2027, 1, 31), date(2027, 2, 7)),
+            (MaintenanceFrequency.BIWEEKLY, None, date(2027, 1, 31), date(2027, 2, 14)),
+            (MaintenanceFrequency.CUSTOM, 45, date(2027, 1, 31), date(2027, 3, 17)),
         ],
+        ids=lambda value: value.value if isinstance(value, MaintenanceFrequency) else None,
     )
     def test_the_interval_follows_the_schedules_frequency(
-        self, client, db_session, planner_headers, frequency, frequency_days, interval
+        self, client, db_session, planner_headers, monkeypatch, frequency, frequency_days, completed_on, expected
     ):
+        freeze_company_day(monkeypatch, db_session, completed_on)
         asset = make_asset(db_session)
         schedule = make_schedule(
             db_session,
-            next_due=company_today(db_session, 1),
+            next_due=completed_on,
             frequency=frequency,
             frequency_days=frequency_days,
             asset_id=asset.id,
@@ -185,8 +217,12 @@ class TestScheduleToWorkOrderToCompletion:
         # Completing straight from scheduled (no start) advances it too.
         done = client.post(f"{WORK_ORDERS}/{wo['id']}/complete", headers=planner_headers, json={})
         assert done.status_code == 200, done.text
-        expected = company_today(db_session, 1) + timedelta(days=interval)
         assert done.json()["schedule_next_due_date"] == expected.isoformat()
+        rows = schedule_audit_rows(db_session, schedule.id)
+        assert rows[-1].new_values == {
+            "last_completed_date": completed_on.isoformat(),
+            "next_due_date": expected.isoformat(),
+        }
 
     def test_a_work_order_without_a_schedule_advances_nothing(self, client, db_session, planner_headers):
         wc = make_wc(db_session)

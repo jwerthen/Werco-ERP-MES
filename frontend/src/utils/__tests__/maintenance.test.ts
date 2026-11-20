@@ -1,5 +1,6 @@
 import {
   carryChecklistTicks,
+  checklistPayload,
   checklistResultsPayload,
   completionChecklist,
   completionNotesPayload,
@@ -37,6 +38,32 @@ describe('maintenance checklist results', () => {
     ]);
     expect(parseChecklistResults(null)).toEqual([]);
     expect(parseChecklistResults('')).toEqual([]);
+  });
+
+  it('normalizes every item it reads (bullets, whitespace runs) and keeps numbering and case', () => {
+    expect(
+      parseChecklistResults(
+        '[{"item":"- Grease  bearing","done":true},{"item":"1.  Check oil"},"\u2022 Drain\u00a0tank",{"item":" - "}]'
+      )
+    ).toEqual([
+      { item: 'Grease bearing', done: true },
+      { item: '1. Check oil', done: false },
+      { item: 'Drain tank', done: false },
+    ]);
+    expect(parseChecklistResults('* Grease\r\n-40 F check\n  -  ')).toEqual([
+      { item: 'Grease', done: false },
+      { item: '-40 F check', done: false },
+    ]);
+  });
+
+  it('writes normalized items, one per non-blank line', () => {
+    const typed = '\u2022 Drain  tank\r\n1. Check oil\n - \n';
+    expect(JSON.parse(checklistPayload(typed) as string)).toEqual(['Drain tank', '1. Check oil']);
+    expect(JSON.parse(checklistResultsPayload(typed) as string)).toEqual([
+      { item: 'Drain tank', done: false },
+      { item: '1. Check oil', done: false },
+    ]);
+    expect(checklistPayload('- \n*')).toBeNull();
   });
 });
 
@@ -79,6 +106,14 @@ describe('schedule edit payload', () => {
     expect(scheduleEditPayload(before, { ...before, estimated_duration_hours: '2.0' })).toEqual({});
   });
 
+  it('treats a bullet or spacing edit as no change, and a change of case as an edit', () => {
+    const before = scheduleEditForm({ ...schedule, checklist_items: ['Check oil', 'Drain tank'] });
+    expect(scheduleEditPayload(before, { ...before, checklist: '\u2022 Check  oil\n- Drain tank' })).toEqual({});
+    expect(scheduleEditPayload(before, { ...before, checklist: 'Check Oil\nDrain tank' })).toEqual({
+      checklist: JSON.stringify(['Check Oil', 'Drain tank']),
+    });
+  });
+
   it('sends a cleared checklist as null', () => {
     const before = scheduleEditForm(schedule);
     expect(scheduleEditPayload(before, { ...before, checklist: '' })).toEqual({ checklist: null });
@@ -117,6 +152,39 @@ describe('completionChecklist', () => {
         { item: 'Grease bearing', done: false },
       ]
     );
+  });
+
+  it('matches schedule steps by normalized, case-insensitive text, showing the work order’s spelling', () => {
+    expect(
+      completionChecklist(
+        [
+          { item: 'Grease bearing', done: true },
+          { item: '1. Check oil', done: false },
+        ],
+        ['grease  bearing', '- 1. CHECK OIL', '\u2022 Bleed lines']
+      )
+    ).toEqual([
+      { item: 'Grease bearing', done: true },
+      { item: '1. Check oil', done: false },
+      { item: 'Bleed lines', done: false },
+    ]);
+  });
+
+  it('still counts copies across spellings: two on the work order and three on the schedule make three', () => {
+    expect(
+      completionChecklist(
+        [
+          { item: 'Grease bearing', done: true },
+          { item: 'GREASE BEARING', done: false },
+        ],
+        ['grease bearing', 'Grease Bearing', '- grease bearing']
+      )
+    ).toEqual([
+      { item: 'Grease bearing', done: true },
+      { item: 'GREASE BEARING', done: false },
+      // The added copy is named as the server names it: the first spelling met.
+      { item: 'Grease bearing', done: false },
+    ]);
   });
 
   it('leaves a work order with no schedule checklist as it is', () => {
@@ -181,6 +249,18 @@ describe('carryChecklistTicks', () => {
     });
   });
 
+  it('carries a tick across a difference of case or spacing, in the fresh list’s spelling', () => {
+    expect(
+      carryChecklistTicks(
+        [ticked('grease  bearing'), ticked('1. check OIL')],
+        [open('Grease Bearing'), open('1. Check oil')]
+      )
+    ).toEqual({
+      checklist: [ticked('Grease Bearing'), ticked('1. Check oil')],
+      added: 0,
+    });
+  });
+
   it('does not change the lists it is given', () => {
     const previous = [ticked('Drain tank')];
     const fresh = [open('Drain tank')];
@@ -205,5 +285,21 @@ describe('completionNotesPayload', () => {
   it('sends null for emptied notes, which clears them', () => {
     expect(completionNotesPayload('', 'Belt squeals')).toEqual({ notes: null });
     expect(completionNotesPayload('   ', 'Belt squeals')).toEqual({ notes: null });
+  });
+});
+
+describe('parseChecklistResults — whole-checklist edges (server parity)', () => {
+  it('strips a leading byte-order mark and trailing NEL like the server, so JSON stays JSON', () => {
+    expect(parseChecklistResults('﻿[{"item": "Check oil", "done": true}]\u0085')).toEqual([
+      { item: 'Check oil', done: true },
+    ]);
+  });
+
+  it('keeps a dash or star written against a word', () => {
+    expect(parseChecklistResults('["-X axis limit", "- Y axis limit", "*CRITICAL* torque"]').map(e => e.item)).toEqual([
+      '-X axis limit',
+      'Y axis limit',
+      '*CRITICAL* torque',
+    ]);
   });
 });
