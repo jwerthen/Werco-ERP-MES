@@ -17,7 +17,6 @@ from app.core.time_utils import local_today, to_utc_iso
 from app.db.database import get_db
 from app.db.locks import acquire_generator_lock
 from app.models.maintenance import (
-    FREQUENCY_DAYS_MAP,
     OPEN_MAINTENANCE_STATUSES,
     OPEN_SCHEDULE_WORK_ORDER_INDEX,
     MaintenanceAsset,
@@ -46,11 +45,13 @@ from app.services.maintenance_checklist import (
     API_TOKEN_INCOMPLETE_CHECKLIST,
     API_TOKEN_SCHEDULE_CHECKLIST_REMOVAL,
     describe_items,
+    parse_checklist,
     removed_checklist_items,
     removed_items,
     unticked_checklist_items,
 )
-from app.services.maintenance_schedule_import_service import commit_pm_import, parse_checklist, preview_pm_import
+from app.services.maintenance_interval import next_due_date
+from app.services.maintenance_schedule_import_service import commit_pm_import, preview_pm_import
 
 router = APIRouter()
 
@@ -421,8 +422,8 @@ def _generate_wo_number(db: Session, year: int) -> str:
 
 
 def _calc_next_due(frequency: MaintenanceFrequency, frequency_days: Optional[int], from_date: date) -> date:
-    days = FREQUENCY_DAYS_MAP.get(frequency, frequency_days or 30)
-    return from_date + timedelta(days=days)
+    """See ``app.services.maintenance_interval``: calendar months for monthly and longer cadences."""
+    return next_due_date(frequency, frequency_days, from_date)
 
 
 def _same_tenant(row: Any, related: Any) -> Any:
