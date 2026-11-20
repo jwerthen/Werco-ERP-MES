@@ -36,6 +36,7 @@ import FloorPinDialog, {
   floorPinStatus,
   isFloorPinLocked,
 } from '../components/users/FloorPinDialog';
+import ExportAuthorizationDialog, { ExportAuthorizationCell } from '../components/users/ExportAuthorizationDialog';
 
 interface UserData {
   id: number;
@@ -57,6 +58,10 @@ interface UserData {
   floor_pin_set_at?: string | null;
   floor_pin_locked_until?: string | null;
   floor_pin_reset_required?: boolean;
+  // Export authorization (the only way to open an export-controlled document).
+  export_authorized?: boolean;
+  export_authorized_at?: string | null;
+  export_authorized_by?: number | null;
 }
 
 // Floor PINs are managed by Admin AND Manager (PUT/DELETE /users/{id}/floor-pin, POST
@@ -167,6 +172,9 @@ export default function Users() {
   // the loaded list, so a reload (after an unlock, which keeps the dialog open) shows
   // the server's new state rather than the snapshot the dialog opened with.
   const [floorPinUserId, setFloorPinUserId] = useState<number | null>(null);
+  // The user whose export-authorization dialog is open (null = closed). Admin only, like every
+  // other write here (PUT /users/{id}/export-authorization is require_role([ADMIN])).
+  const [exportAuthUser, setExportAuthUser] = useState<UserData | null>(null);
   const [users, setUsers] = useState<UserData[]>([]);
   const floorPinUser = floorPinUserId == null ? null : (users.find((u) => u.id === floorPinUserId) ?? null);
   // Floor PINs locked after repeated wrong PINs, listed above the table. The `floor_pin.lockout`
@@ -211,6 +219,15 @@ export default function Users() {
 
   // A0.4: badge-print selection backed by DataTable's selection prop (Set-based).
   const selectedKeySet = React.useMemo(() => new Set<number>(selectedUserIds), [selectedUserIds]);
+
+  // Who granted an export authorization, by name when the granter is in the loaded list.
+  const grantorName = React.useCallback(
+    (userId: number) => {
+      const grantor = users.find((u) => u.id === userId);
+      return grantor ? `${grantor.first_name} ${grantor.last_name}` : undefined;
+    },
+    [users]
+  );
 
   const userColumns: Array<DataTableColumn<UserData>> = React.useMemo(() => {
     const cols: Array<DataTableColumn<UserData>> = [
@@ -285,6 +302,18 @@ export default function Users() {
       });
     }
 
+    if (canManageUsers) {
+      cols.push({
+        key: 'export_authorized',
+        header: 'Export-authorized',
+        sortable: true,
+        accessor: (u) => (u.export_authorized ? 'Authorized' : 'Not authorized'),
+        render: (u) => (
+          <ExportAuthorizationCell user={u} grantorName={grantorName} onManage={() => setExportAuthUser(u)} />
+        ),
+      });
+    }
+
     // User provisioning is Admin-only on the backend (every write in users.py is
     // require_role([ADMIN])). Only surface the row write-actions to viewers who can
     // actually perform them; managers keep the read-only list (users:view).
@@ -344,7 +373,7 @@ export default function Users() {
     }
 
     return cols;
-  }, [canManageUsers, canManageFloorPins, currentUser]);
+  }, [canManageUsers, canManageFloorPins, currentUser, grantorName]);
 
   const loadUsers = useCallback(async () => {
     setLoadError(false);
@@ -821,6 +850,21 @@ export default function Users() {
                     },
                   ]
                 : []),
+              ...(canManageUsers
+                ? [
+                    {
+                      label: 'Export-authorized',
+                      fullWidth: true,
+                      value: (
+                        <ExportAuthorizationCell
+                          user={user}
+                          grantorName={grantorName}
+                          onManage={() => setExportAuthUser(user)}
+                        />
+                      ),
+                    },
+                  ]
+                : []),
             ]}
             actions={
               <>
@@ -885,6 +929,15 @@ export default function Users() {
       />
 
       <FloorPinDialog user={floorPinUser} onClose={() => setFloorPinUserId(null)} onChanged={loadUsers} />
+
+      {canManageUsers && (
+        <ExportAuthorizationDialog
+          user={exportAuthUser}
+          grantorName={grantorName}
+          onClose={() => setExportAuthUser(null)}
+          onChanged={loadUsers}
+        />
+      )}
 
       {/* Add/Edit User Modal */}
       <Modal

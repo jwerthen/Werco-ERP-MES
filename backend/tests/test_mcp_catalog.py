@@ -29,6 +29,7 @@ import pytest
 from app.main import app
 from app.mcp.catalog import (
     COMMENT_WRITE_OPERATIONS,
+    DOCUMENT_ACCESS_OPERATIONS,
     EGRESS_SWITCH_OPERATIONS,
     EXCLUDED_OPERATIONS,
     EXCLUDED_TAGS,
@@ -150,9 +151,11 @@ class TestMembership:
         # List writes (a supplier-approval decision is a person's judgment), bulk
         # release (release_work_order stays the agent's only release door, one job per
         # call), the five comment / watcher writes (owner decision 2026-11-16: a
-        # comment is a person's own words) and the four badge-sign-on credential writes
+        # comment is a person's own words), the four badge-sign-on credential writes
         # (AS9100D 8.5.2: setting, clearing or unlocking a floor PIN and the company's PIN policy are a
-        # person's act) -- nothing else.
+        # person's act) and the two document-access writes (AS9100D 7.5.3: granting export
+        # authorization and changing a document's access level are a person's judgment) --
+        # nothing else.
         assert set(EXCLUDED_OPERATIONS) == {
             ("POST", "/api/v1/work-orders/import"),
             ("POST", "/api/v1/purchasing/purchase-orders/import"),
@@ -180,8 +183,11 @@ class TestMembership:
             ("DELETE", "/api/v1/users/{user_id}/floor-pin"),
             ("POST", "/api/v1/users/{user_id}/floor-pin/unlock"),
             ("PUT", "/api/v1/companies/me/floor-pin-policy"),
+            ("PUT", "/api/v1/users/{user_id}/export-authorization"),
+            ("POST", "/api/v1/documents/{document_id}/access-level"),
         }
         assert EGRESS_SWITCH_OPERATIONS <= set(EXCLUDED_OPERATIONS)
+        assert DOCUMENT_ACCESS_OPERATIONS <= set(EXCLUDED_OPERATIONS)
         assert COMMENT_WRITE_OPERATIONS <= set(EXCLUDED_OPERATIONS)
         assert FLOOR_PIN_OPERATIONS <= set(EXCLUDED_OPERATIONS)
 

@@ -1,11 +1,34 @@
 import React, { useEffect, useState } from 'react';
+import { CheckCircleIcon, DocumentTextIcon, ExclamationTriangleIcon } from '@heroicons/react/24/outline';
 import api from '../../services/api';
 import { usePermissions } from '../../hooks/usePermissions';
-import { canPublishDocuments } from '../../utils/recordWriteAccess';
+import { canManageDocumentAccess, canPublishDocuments } from '../../utils/recordWriteAccess';
 import useUnsavedChanges from '../../hooks/useUnsavedChanges';
 import { RecordHeader } from '../ui/PageHeader';
 import { Modal } from '../ui/Modal';
-import { Button, ErrorState, FormField } from '../ui';
+import { Button, EmptyState, ErrorState, FormField, useToast } from '../ui';
+import { apiErrorStatus } from '../../utils/apiError';
+import { DocumentAccessBadge } from '../documents/DocumentAccessBadge';
+import DocumentAccessDialog, { NOBODY_AUTHORIZED_WARNING, nobodyCanOpen } from '../documents/DocumentAccessDialog';
+import {
+  DOCUMENT_ACCESS_LABELS,
+  accessChangeSummary,
+  accessLevelRaisedNotice,
+  changedRevisionIds,
+  documentAccessLevel,
+  serverRaisedAccessLevel,
+  type DocumentAccessChangeResult,
+  type DocumentUploadResult,
+} from '../../types/documentAccess';
+
+/**
+ * Every document route answers 404 for a document the caller may not view (never 403), so a 404
+ * cannot tell "deleted" from "not yours to see", and the UI must not guess which.
+ */
+const NOT_AVAILABLE_TITLE = 'Document not available';
+const NOT_AVAILABLE_TEXT = 'This document does not exist or is not available to you.';
+const FILE_NOT_AVAILABLE = 'This file is not available to you.';
+
 export default function DocumentDetail({
   id,
   onClose,
@@ -19,7 +42,14 @@ export default function DocumentDetail({
 }) {
   const { role, isSuperuser } = usePermissions();
   const canPublish = canPublishDocuments({ role, is_superuser: isSuperuser });
+  const canManageAccess = canManageDocumentAccess({ role, is_superuser: isSuperuser });
+  const { showToast } = useToast();
   const [record, setRecord] = useState<any>(null);
+  const [notAvailable, setNotAvailable] = useState(false);
+  const [showAccessDialog, setShowAccessDialog] = useState(false);
+  // What the last access change did (how many revisions moved), and whether it left an
+  // export-controlled document nobody in the company can open. Cleared when another document opens.
+  const [accessNotice, setAccessNotice] = useState<{ summary: string; nobodyAuthorized: boolean } | null>(null);
   const [revisions, setRevisions] = useState<any[]>([]);
   const [preview, setPreview] = useState('');
   const [loading, setLoading] = useState(true);
@@ -40,10 +70,13 @@ export default function DocumentDetail({
     let objectUrl = '';
     setLoading(true);
     setRecord(null);
+    setNotAvailable(false);
     setError('');
     setPreviewError('');
     setPreview('');
     setShowRevision(false);
+    setShowAccessDialog(false);
+    setAccessNotice(null);
     Promise.all([api.getDocument(id), api.getDocumentRevisions(id)])
       .then(async ([doc, history]) => {
         if (!active) return;
@@ -56,13 +89,20 @@ export default function DocumentDetail({
               objectUrl = URL.createObjectURL(new Blob([blob], { type: doc.mime_type }));
               setPreview(objectUrl);
             }
-          } catch {
-            if (active) setPreviewError('Unable to load preview. Retry or download the document.');
+          } catch (err) {
+            if (active)
+              setPreviewError(
+                apiErrorStatus(err) === 404
+                  ? FILE_NOT_AVAILABLE
+                  : 'Unable to load preview. Retry or download the document.'
+              );
           }
         }
       })
       .catch(err => {
-        if (active) setError(err.response?.data?.detail || 'Unable to load document');
+        if (!active) return;
+        if (apiErrorStatus(err) === 404) setNotAvailable(true);
+        else setError(err.response?.data?.detail || 'Unable to load document');
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -81,8 +121,8 @@ export default function DocumentDetail({
       link.download = record.file_name || record.document_number;
       link.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
-    } catch {
-      setPreviewError('Unable to download document. Please retry.');
+    } catch (err) {
+      setPreviewError(apiErrorStatus(err) === 404 ? FILE_NOT_AVAILABLE : 'Unable to download document. Please retry.');
     }
   };
   const uploadRevision = async (e: React.FormEvent) => {
@@ -98,15 +138,21 @@ export default function DocumentDetail({
     data.append('previous_revision_id', String(id));
     data.append('revision', revision.trim());
     data.append('revision_notes', notes.trim());
+    // A revision keeps at least its predecessor's level; ask for exactly that.
+    const requestedLevel = documentAccessLevel(record);
+    data.append('access_level', requestedLevel);
     ['part_id', 'work_order_id', 'vendor_id'].forEach(key => {
       if (record[key]) data.append(key, String(record[key]));
     });
     try {
-      const next = await api.uploadDocument(data);
+      const next = (await api.uploadDocument(data)) as DocumentUploadResult;
       setFile(null);
       setNotes('');
       setRevision('');
       markSaved();
+      if (serverRaisedAccessLevel(requestedLevel, next)) {
+        showToast('warning', accessLevelRaisedNotice(`Revision ${next.revision} saved`, requestedLevel, next));
+      }
       onSaved();
       onSelect(next.id);
     } catch (err: any) {
@@ -118,6 +164,17 @@ export default function DocumentDetail({
   };
   const close = () => {
     if (!uploading && confirmDiscard()) onClose();
+  };
+  // Non-optimistic: the record and the history chips show the level the server returned, on
+  // exactly the revisions it says it changed (the change applies to the whole chain).
+  const handleAccessChanged = (result: DocumentAccessChangeResult) => {
+    setShowAccessDialog(false);
+    setAccessNotice({ summary: accessChangeSummary(record, result), nobodyAuthorized: nobodyCanOpen(result) });
+    setRecord((current: any) => (current ? { ...current, ...result } : current));
+    const changed = new Set(changedRevisionIds(result));
+    const level = documentAccessLevel(result);
+    setRevisions(list => list.map(doc => (changed.has(doc.id) ? { ...doc, access_level: level } : doc)));
+    onSaved();
   };
   return (
     <Modal open ariaLabel="Document preview and revision history" onClose={close} size="2xl" closeOnBackdrop={false}>
@@ -133,12 +190,15 @@ export default function DocumentDetail({
                 { label: 'Revision', value: record.revision },
                 { label: 'Status', value: record.status },
                 { label: 'File', value: record.file_name },
+                { label: 'Access', value: <DocumentAccessBadge level={documentAccessLevel(record)} showStandard /> },
               ]
             : undefined
         }
       />
       {loading ? (
         <p role="status">Loading document and revision history…</p>
+      ) : notAvailable ? (
+        <EmptyState icon={DocumentTextIcon} title={NOT_AVAILABLE_TITLE} description={NOT_AVAILABLE_TEXT} />
       ) : !record ? (
         <ErrorState message={error} onRetry={() => setAttempt(n => n + 1)} />
       ) : (
@@ -157,7 +217,32 @@ export default function DocumentDetail({
                 Upload new revision
               </Button>
             ))}
+            {canManageAccess && (
+              <Button variant="secondary" onClick={() => setShowAccessDialog(true)} disabled={uploading}>
+                Change access
+              </Button>
+            )}
           </div>
+          {accessNotice && (
+            <p
+              role="status"
+              className={`flex items-start gap-2 rounded-[4px] border px-3 py-2 text-sm ${
+                accessNotice.nobodyAuthorized
+                  ? 'border-fd-amber/40 bg-fd-amber/10 text-fd-amber'
+                  : 'border-fd-line text-slate-200'
+              }`}
+            >
+              {accessNotice.nobodyAuthorized ? (
+                <ExclamationTriangleIcon className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+              ) : (
+                <CheckCircleIcon className="mt-0.5 h-4 w-4 shrink-0 text-emerald-300" aria-hidden="true" />
+              )}
+              <span>
+                {accessNotice.summary}
+                {accessNotice.nobodyAuthorized && ` ${NOBODY_AUTHORIZED_WARNING}`}
+              </span>
+            </p>
+          )}
           {previewError && (
             <p role="alert" className="text-red-300">
               {previewError}{' '}
@@ -199,6 +284,7 @@ export default function DocumentDetail({
                   {doc.document_number} · Rev {doc.revision}
                   {doc.id === id ? ' (viewing)' : ''}
                 </button>
+                <DocumentAccessBadge level={documentAccessLevel(doc)} className="ml-2 align-middle" />
                 <p className="text-xs text-slate-400">{doc.created_at}</p>
                 <p className="whitespace-pre-wrap [overflow-wrap:anywhere]">{doc.revision_notes || 'Initial upload'}</p>
               </li>
@@ -207,7 +293,8 @@ export default function DocumentDetail({
           {canPublish && showRevision && (
             <form onSubmit={uploadRevision} className="space-y-3 border-t border-fd-line pt-4">
               <p className="text-sm text-slate-400">
-                The new revision retains this document’s linked records. Previous files remain available in history.
+                The new revision retains this document’s linked records and its access level (
+                {DOCUMENT_ACCESS_LABELS[documentAccessLevel(record)]}). Previous files remain available in history.
               </p>
               <FormField label="New revision" required>
                 {field => (
@@ -248,6 +335,14 @@ export default function DocumentDetail({
             </form>
           )}
         </div>
+      )}
+      {canManageAccess && showAccessDialog && record && (
+        <DocumentAccessDialog
+          document={record}
+          revisionCount={revisions.length || undefined}
+          onClose={() => setShowAccessDialog(false)}
+          onChanged={handleAccessChanged}
+        />
       )}
     </Modal>
   );

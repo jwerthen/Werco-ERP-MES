@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime
+from sqlalchemy import Boolean, CheckConstraint, Column, DateTime
 from sqlalchemy import Enum as SQLEnum
 from sqlalchemy import ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import relationship
@@ -26,6 +26,33 @@ class DocumentType(str, enum.Enum):
     BILL_OF_LADING = "bill_of_lading"  # Purchased LTL freight Bill of Lading
     RECEIVING_LABEL = "receiving_label"  # 4x6 thermal label for received inventory (PDF)
     OTHER = "other"
+
+
+class DocumentAccessLevel(str, enum.Enum):
+    """Who may open a document (AS9100D 7.5.3.1 / 7.5.3.2, migration 131).
+
+    The rule itself lives in ``app.services.document_access`` (one SQL clause and its Python
+    twin); this enum only names the levels.
+
+    * ``standard`` -- anyone who could read documents before migration 131 (the server
+      default, so every pre-131 row reads as exactly what it always meant).
+    * ``restricted`` -- Admin, Manager, Quality and Supervisor, plus superusers and Platform
+      Admins (the pass-through ``require_role`` gives them).
+    * ``export_controlled`` -- ONLY a user whose ``users.export_authorized`` is true. No role
+      bypasses it, Admin, superuser and Platform Admin included.
+
+    Stored as a plain ``String(30)`` with a CHECK rather than a native Postgres enum, so a
+    level added later is a CHECK swap, not an ``ALTER TYPE``.
+    """
+
+    STANDARD = "standard"
+    RESTRICTED = "restricted"
+    EXPORT_CONTROLLED = "export_controlled"
+
+
+# The one spelling of the access-level CHECK (``ck_documents_access_level``). Migration 131
+# carries its own frozen copy of this text; change the two together.
+DOCUMENT_ACCESS_LEVEL_CHECK = "access_level IN ('standard', 'restricted', 'export_controlled')"
 
 
 class Document(Base, TenantMixin):
@@ -63,6 +90,9 @@ class Document(Base, TenantMixin):
         # migration 020; skipped by the create_all+stamp bootstrap): the
         # vendor<->documents association lookups (vendor document lists).
         Index("ix_documents_vendor_id", "vendor_id"),
+        # Lock-step with migration 131_document_access (AS9100D 7.5.3.1 / 7.5.3.2).
+        CheckConstraint(DOCUMENT_ACCESS_LEVEL_CHECK, name="ck_documents_access_level"),
+        Index("ix_documents_access_level", "company_id", "access_level"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -92,6 +122,14 @@ class Document(Base, TenantMixin):
     # Control status (ISO 9001 document control)
     status = Column(String(50), default="draft")  # draft, pending_approval, approved, released, obsolete
     is_controlled = Column(Boolean, default=True)  # Controlled vs uncontrolled copy
+
+    # Who may open it (``DocumentAccessLevel``; the rule is ``app.services.document_access``).
+    access_level = Column(
+        String(30),
+        nullable=False,
+        default=DocumentAccessLevel.STANDARD.value,
+        server_default=DocumentAccessLevel.STANDARD.value,
+    )
 
     # Effectivity
     effective_date = Column(DateTime, nullable=True)

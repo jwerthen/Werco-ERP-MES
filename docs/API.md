@@ -4738,7 +4738,10 @@ environment variable or deployment configuration change is needed.
 > drawing** — optional, with **no approval workflow**, and it **never gates clock-in**. Attach
 > references a Document already uploaded via `POST /documents/upload`; non-PDF documents are
 > rejected with **400**. `GET /laser-nests/{id}/document` serves it `Content-Type: application/pdf`,
-> `Content-Disposition: inline` so the operator can preview it; **404** if none is attached. Kiosk
+> `Content-Disposition: inline` so the operator can preview it; **404** if none is attached, and the
+> same **404** `No document attached` when the caller may not open the PDF (its `access_level`; see
+> Documents → "Restricted and export-controlled documents"). Attach answers **404** first for a
+> document the caller may not open. Kiosk
 > surfaces preview through the fence-safe `GET /shop-floor/documents/{document_id}/inline` twin
 > instead (badge-minted kiosk tokens can't reach `/laser-nests` — see Shop Floor → "Kiosk doc
 > viewer"); this route remains the desktop path. Detach only clears the FK — the Document row and
@@ -7502,7 +7505,11 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 >
 > `part` / `drawing` / `nest` / `material` are each `null` when absent. `drawing` is the newest
 > **approved/released `DRAWING`** Document for the WO's part (`released_at DESC NULLS LAST`, then
-> `id DESC`); `nest` routes through `active_laser_nest` (a soft-deleted nest never appears), and
+> `id DESC`) that the caller may open (its `access_level`, see Documents → "Restricted and
+> export-controlled documents") and that no later revision supersedes: when the current revision is
+> one the caller may not open, the revision it replaced is not offered instead, and `drawing` is
+> `null`. `nest.document_id` / `file_name` are `null` when the caller may not open the nest PDF.
+> `nest` routes through `active_laser_nest` (a soft-deleted nest never appears), and
 > `material` is that nest's material. `critical_dims` are the part's **critical, active**
 > `SPCCharacteristic` rows — rows scoped to this routing operation's number or unscoped
 > (`operation_number` null) are preferred; when none match, all critical rows are returned rather
@@ -7510,9 +7517,10 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 >
 > **Byte serving** (`/documents/{id}/inline`) — the **single kiosk byte-serving route** (the kiosk
 > token fence blocks `/laser-nests/*` and `/documents/*`). Guard: the document must belong to the
-> active company **and** be either `document_type == DRAWING` or the reference PDF of a **live**
-> (non-deleted) laser nest in the same tenant. Any miss — cross-tenant, missing, or a document
-> that is neither — is a uniform **404**, never a 403, so the route leaks no existence
+> active company, the caller must be able to open it (its `access_level`; checked first), **and**
+> it must be either `document_type == DRAWING` or the reference PDF of a **live** (non-deleted)
+> laser nest in the same tenant. Any miss — cross-tenant, missing, above the caller's access, or a
+> document that is neither — is a uniform **404**, never a 403, so the route leaks no existence
 > information. Serves exactly like `GET /laser-nests/{id}/document`: S3 stream or local file,
 > `Content-Type: application/pdf`, `Content-Disposition: inline`.
 
@@ -7528,7 +7536,10 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > (nullable)`, has_document` (bool — true when a reference PDF is attached)`, document_file_name`
 > (nullable) `}`. The attached PDF is served **inline** by `GET /laser-nests/{id}/document` (see Laser
 > Nests above), so `has_document` / `document_file_name` let the kiosk flag that a reference PDF is
-> attached and label it without a second round-trip. Kiosk surfaces now fetch the bytes through the
+> attached and label it without a second round-trip. A PDF the reader may not open (its
+> `access_level`) reads as none: `document_id` / `document_file_name` null, `has_document` false.
+> An unattended crew-station tablet reading its work-center queue with its own station token sees
+> only `standard` PDFs. Kiosk surfaces now fetch the bytes through the
 > fence-safe `GET /shop-floor/documents/{document_id}/inline` instead (same serving, guarded — see
 > "Kiosk doc viewer" above); the `/laser-nests/{id}/document` route remains for desktop callers.
 
@@ -8898,14 +8909,20 @@ new financial approval workflow; automatic work-order completion keeps its exist
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| GET | `/documents/` | List tenant documents | Yes |
+| GET | `/documents/` | List the tenant documents the caller may open; optional `access_level` filter (`standard` / `restricted` / `export_controlled`, anything else **422**) | Yes |
 | GET | `/documents/types/list` | List document types | Yes |
+| GET | `/documents/access-review` | Documents whose part's customer is export-controlled but whose level is not `export_controlled`, plus a count of documents with no part link | Admin / Quality |
 | GET | `/documents/{id}` | Read document metadata | Yes |
 | GET | `/documents/{id}/revisions` | Read retained revision history | Yes |
 | GET | `/documents/{id}/download` | Download the tenant document | Yes |
-| POST | `/documents/upload` | Multipart manual upload/revision, published as released | Admin / Manager / Quality |
-| POST | `/documents/{id}/attach-work-order` | Body `{"work_order_id": id}`; attach an unlinked PDF | Admin / Manager / Quality |
+| POST | `/documents/upload` | Multipart manual upload/revision, published as released; optional `access_level` form field | Admin / Manager / Quality |
+| POST | `/documents/{id}/attach-work-order` | Body `{"work_order_id": id}`; attach an unlinked PDF. Raises it (and its revisions) to `export_controlled` when the work order's customer is export-controlled | Admin / Manager / Quality |
+| POST | `/documents/{id}/access-level` | Body `{"access_level", "reason"}`; change who may open the document and every revision in its history. Refuses any API token **403**; not an MCP tool | Admin / Quality |
 | DELETE | `/documents/{id}` | Delete a document only when no retention reference protects it | Admin / Manager |
+
+Every read and write above is limited to the documents the caller may open: see
+[Restricted and export-controlled documents](#restricted-and-export-controlled-documents-as9100d-7531)
+below.
 
 `part_id` is optional on `POST /documents/upload`. The Documents page's **Upload Document**
 dialog requires a part only for the part-specific types `drawing`, `inspection_plan` and `fai`
@@ -9060,6 +9077,267 @@ record"`) and rolls back the mutation. Upload failure removes only the new uploa
 deletion removes bytes only after the audited metadata transaction commits. Storage cleanup
 failure is logged and may leave an orphan, without removing a prior revision or a live document's
 file. Manual upload audit evidence includes the file hash and release metadata.
+
+#### Restricted and export-controlled documents (AS9100D 7.5.3.1)
+
+Migration `131_document_access` gives every document an `access_level` and every user an
+export authorization. The rule is one module, `app/services/document_access.py`: a SQL clause for
+queries, a Python twin for a document already loaded through a relationship, and
+`visible_document_or_404` for by-id lookups. A parity test holds the clause and its twin together
+over every role, export flag, level and company.
+
+| `access_level` | Who may open it |
+|---|---|
+| `standard` (the default) | Anyone who could read documents before migration 131 |
+| `restricted` | Admin, Manager, Quality and Supervisor, plus a superuser and a Platform Admin |
+| `export_controlled` | **Only** a user whose `export_authorized` is true, and only in that user's **own** company. No role bypasses it: not Admin, not a superuser, not a Platform Admin |
+
+The levels are not a ladder. An export-authorized Operator opens `standard` and
+`export_controlled` documents but not `restricted` ones, and an Admin who is not export-authorized
+opens `standard` and `restricted` ones but not `export_controlled` ones.
+
+- **Export authorization is per company.** It is granted by a company's Admin for that company's
+  documents and counts only while the user is working in their own company (`users.company_id`).
+  A platform account authorized in its home company that switches into another tenant opens no
+  `export_controlled` document there.
+- An API token and a crew-station badge (kiosk operator) token act as the user they are bound to,
+  with that user's role and flag.
+- Two callers see `standard` only, whoever they are: a crew-station tablet's own station token
+  (no person behind it), and an **AI-external** API token, on every path (see
+  [EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md#documents-of-a-controlled-customer-migration-131)).
+- **Reads bound for an AI model never include `export_controlled`,** for anyone, export-authorized
+  or not: copilot document search, Hank's job documents (readiness, knowledge, the shipping
+  packet), and everything Hank chat reads (below). With the company's AI egress on, those results
+  go to Anthropic, and an export authorization lets a person open a document, not send it to an
+  outside model.
+
+After the migration every document is `standard` and nobody is export-authorized, so nothing
+changes until Quality flags documents.
+
+**404, before any other check.** A document the caller may not open is the same **404** as one
+that does not exist or belongs to another company (where a route answers a missing id with a 422,
+it is that same 422), and that check comes first, so no later 400 / 409 / 422 says anything about
+it. The exceptions are listed under *Known residuals* below. In detail:
+
+- `GET /documents/` lists only what the caller may open (the filter is in the query, so a page is a
+  page of openable documents). `GET /documents/{id}` and `GET /documents/{id}/download` are
+  **404** `Document not found`.
+- `GET /documents/{id}/revisions` is **404** when the caller may not open the document asked for.
+  The history is traced through every revision, but a revision the caller may not open is left out
+  of the answer.
+- `POST /documents/{id}/attach-work-order` and `DELETE /documents/{id}` are **404** first, before
+  the PDF, revision-history and retention checks. A revision upload whose `previous_revision_id`
+  names a document the uploader may not open is **404** `Previous document revision not found`.
+- Laser nests: `GET /laser-nests/{id}/document` answers **404** `No document attached` for a PDF the
+  caller may not open, the same as a nest with none, and `POST /laser-nests/{id}/attach-document` is
+  **404** `Document not found` before the PDF check. Every nest response (`PATCH`, attach, detach,
+  restore, the manual nest add, the `laser_nest` object on the kiosk queue, `my-active-job`,
+  `/shop-floor/operations` and `/shop-floor/operations/{id}`, and the work-order responses
+  `GET /work-orders/{id}`, by number, create, duplicate, template use, nest import, `PUT
+  /work-orders/{id}`, release, and the operation `POST` / `PUT`) reports a PDF the caller may not
+  open as no PDF: `document_id` and `document_file_name` null, `has_document` false. The stored link
+  is untouched.
+- Kiosk: `GET /shop-floor/operations/{id}/documents` picks the newest released drawing the caller
+  may open that no later revision supersedes, and nulls the nest's `document_id` / `file_name` when
+  the caller may not open the nest PDF. `GET /shop-floor/documents/{id}/inline` is **404** first. See
+  Shop Floor → "Kiosk doc viewer".
+- Process sheets: a step record's `attachment_document_id` reads null in `GET
+  /shop-floor/operations/{id}/steps` when the caller may not open that document, and capturing or
+  superseding a record with an `attachment_document_id` the operator may not open is **404**
+  `Attachment document not found`.
+- QMS: a `document_id` the caller may not open is **404** `Document not found` on standard and
+  evidence create / update. An update that re-sends the link the row already holds is not
+  re-checked, so a form that echoes an unchanged link does not lock its author out of the row. The
+  live document-control auto-evidence read (`GET .../auto-evidence`) counts, and names examples
+  from, only the documents the asking person may open. Auto-link, which stores its evidence, counts
+  `standard` documents only, whoever runs it, and its stored description says so, so a stored count
+  never depends on who clicked.
+- Engineering changes: an `affected_documents` id the caller may not open is refused with the
+  **same 422** as an id that does not exist. On `PUT /eco/eco/{id}`, ids the ECO already lists are
+  not re-checked. `GET /eco/eco/affected-items/{id}` leaves out documents the caller may not open.
+- Hank and the AI copilot read only the documents the asking person may open. What goes to the
+  model also treats every `export_controlled` document as missing (above): copilot document
+  search, the work order's documents in readiness, knowledge and the shipping packet, and Hank
+  chat's reads. In chat, the attach-document preview is **404** `Document not found`, a saved Hank
+  task or intake file that names such a document is left out of saved work and is **404** when read
+  (`Hank task not found` / `Intake file not found`), the intake-file chat tools answer the same
+  **404**, and a handoff read leaves the document out of `document_references`.
+- Outside chat, the ordinary rule applies: a person's own `POST /hank/tasks` (the attach preview is
+  **404** first for a document they may not open, and opens an `export_controlled` one they are
+  authorized for), handoff responses (a document the reader may not open is left out of
+  `document_references`; the ids stay in `document_ids`, and a handoff naming a document the
+  sender may not open is the same 422 as a missing one), and document watches (the baseline and
+  every check).
+- The audit log is redacted when it is read (below).
+- Ids that only point at a document are not checked against the rule: a receipt's certificate and
+  receiving label, a shipment's carrier label and bill of lading. The file is gated where its bytes
+  are served (`GET /documents/{id}/download`).
+
+**The audit log, redacted at read time.** `GET /audit/` returns a row about a document the reader
+may not open with `old_values` / `new_values` replaced by
+`{"redacted": "document not available to you"}`, `description` "Document change (restricted)" and
+`resource_identifier` "Restricted document". Three kinds of row are judged:
+
+- a `document` row, by the document its `resource_id` names (a `document` row with no resource id
+  is redacted);
+- a `hank_intake_file` row (a filing's plan carries the title, description and reviewed fields, its
+  result the document number), by the document its intake file was filed as and any document its
+  own values name;
+- a `hank_task` row (an attach task carries the document's number and title), by the documents its
+  task names and any document its own values name.
+
+A Hank row's values name a document through a `document_id` key or a `{"type": "document", "id":
+…}` reference, at any depth. Pointer keys such as `certificate_document_id` are not followed. A row
+naming any document the reader may not open is redacted. A deleted document is judged by its last
+recorded level, read from its own audit trail (every document audit row written since migration 131
+carries `access_level`; a document deleted before 131 was `standard`).
+
+Listing without a `search` still returns the redacted rows. With a `search`, the filter runs in the
+database **before** `offset` / `limit`, and a row the reader would see redacted matches only on what
+the reader can see: the actor's name and the redaction markers, never the stored text. Nothing reveals that hidden text matched. Pages are filled in the database, so they are full in
+practice; the one exception is a Hank row redacted only because of a document id inside its own
+values (not its source record), which the route drops after the page is read, so such a page can
+come back one or two rows short. `GET /audit/integrity/record/{sequence_number}`
+hides the identifier the same way. The stored rows are never changed, and the hash chain verifies
+over them as before.
+
+**Upload level and the raise rule.** `POST /documents/upload` takes an optional `access_level`
+form field (`standard`, `restricted` or `export_controlled`; blank means `standard`, anything else
+**422**). The server only ever raises it, never lowers it:
+
+- a revision is stored at least at its predecessor's level;
+- a document whose linked part's **or** linked work order's customer resolves as export-controlled
+  is stored `export_controlled`. "Export-controlled" is the same finding that redacts an
+  AI-external connector (`export_control_service.build_controlled_index`): the record's free-text
+  `customer_name` resolves to a customer with a controlling contract or handling instruction. A
+  vendor link raises nothing, and neither does a part or work order whose customer name is blank
+  or matches no customer.
+
+**A revision history moves together.** A revision stored above its history's level lifts every
+earlier revision to that level (never lowers one), with one required `ACCESS_LEVEL_CHANGE` audit row
+per lifted revision (reason "Raised with new revision …", `chain_change.trigger` `new_revision`).
+The upload locks the whole chain before it judges the predecessor.
+
+**Chain locking.** Every writer that changes a chain's level (the access-level verb, a revision
+upload's lift, an attach that raises) locks the revision chain in id order, then walks the chain
+again and locks any revision it did not see the first time (one committed while it waited), until a
+walk finds nothing new. After 5 walks that keep finding new revisions it gives up with **409** `The
+revision history changed while this change was being made; retry.` and nothing is saved.
+
+The response (`DocumentUploadResponse`) is the document plus `access_level_requested`,
+`access_level_raised`, `access_level_raised_because` (a list in order of `predecessor_revision` and
+`export_controlled_customer`) and `access_level_lifted_document_ids` (the earlier revisions this
+upload lifted). When the level was raised, the upload's `CREATE` audit row also carries
+`access_level_requested` and `access_level_raised_because`, and `access_level_lifted_document_ids`
+when it lifted any. The uploaded document is returned even when the stored level is one the
+uploader cannot open.
+
+**Hank intake filing applies the same raise rule** to the document it files against a part or work
+order (requested level `standard`, no predecessor). When it raises one, the filing's audit row
+carries `access_level_raised_because` and the receipt warns that only export-authorized users can
+open the document.
+
+**Attaching to a work order applies it too.** `POST /documents/{id}/attach-work-order` and the Hank
+`attach_document` task (on execute) raise the document and its revision chain to
+`export_controlled` when the work order's customer resolves as export-controlled, so the attach
+and an upload carrying that `work_order_id` end at the same level. Each raised revision gets a
+required `ACCESS_LEVEL_CHANGE` row (reason `work order customer is export-controlled`,
+`chain_change.trigger` `work_order_link`). The attach response shows the new `access_level`, even
+when the caller may no longer open the document.
+
+**Changing a level: `POST /documents/{id}/access-level`** (Admin / Quality). Body
+`{"access_level": "...", "reason": "..."}`; the reason is required (1–2000 characters, not blank).
+
+The level belongs to the document's **whole revision history**: every earlier and later revision
+moves with the one addressed. The **Change access** dialog says so before anything is saved
+("Applies to all N revisions of this document…").
+
+- Any API token, whatever its role or scope, is refused **403** before anything is read. The route
+  is not an MCP tool, so a person's own JWT cannot reach it through an agent either.
+- The caller must be able to open the addressed document now (**404** otherwise), so lowering an
+  `export_controlled` document takes an Admin or Quality user who is export-authorized. The chain
+  is then locked (see *Chain locking* above; **409** after 5 walks).
+- **409** `Some revisions of this document are not available to you, so its access level cannot be
+  lowered. …` when the change would lower any revision and the caller cannot open every revision.
+- **409** `The document is already at that access level` when no revision changes.
+- One required `ACCESS_LEVEL_CHANGE` audit row **per changed revision**, each with the old and new
+  level, the reason, `authorized_user_count` and a `chain_change` marker (`trigger`
+  `access_level_change`, the addressed document id, `chain_size`), all in the same transaction
+  (**503**, nothing saved, if any cannot be written).
+- The response is the addressed document plus `previous_access_level` (its own former level),
+  `changed_document_ids` (every revision that changed), `chain_size` (1 for a document with no
+  revisions) and `authorized_user_count`: the company's own active export-authorized users.
+  `export_controlled` with `authorized_user_count` 0 means nobody can open the document until an
+  Admin authorizes someone; the UI warns.
+
+Every document audit row (upload, attach, delete, Hank intake filing, and each `ACCESS_LEVEL_CHANGE`)
+records `access_level` among the document's values; that is what the audit-log redaction reads for
+a deleted document.
+
+**Access review: `GET /documents/access-review`** (Admin / Quality; pure read, a tool for an agent
+whose user holds the role). It returns `documents`: every document the caller may open whose
+linked part's customer resolves as export-controlled and whose level is still `standard` or
+`restricted`, each with `document_id`, `document_number`, `revision`, `title`, `document_type`,
+`access_level`, `part_id`, `part_number`, `customer_id`, `customer_name` and `classification`
+(`itar_export_controlled` or `cui`). Also `document_count`, and `unlinked_document_count`: documents
+below `export_controlled` with no part link, which the server cannot judge. A document linked to a
+part whose customer name is blank or matches no customer is neither listed nor counted. Fix a row
+with `POST /documents/{id}/access-level`.
+
+**Known residuals.**
+
+- **The access review judges by part only.** Unlike the raise rule, it does not read the work
+  order: a document linked to a work order and no part is counted in `unlinked_document_count`,
+  even when the work order's customer is export-controlled. New uploads and attaches to such a work
+  order are raised automatically; this matters for documents linked before the customer was
+  marked.
+- **Legacy chains with mixed levels.** A revision upload's own checks read the whole chain. In a
+  history whose revisions already carry different levels, uploading against a predecessor the
+  uploader may open can still answer **409** `A newer revision exists` for a later revision the
+  uploader may not open (and the **422** duplicate-label check walks every ancestor). Since levels
+  move chain-wide, a chain stays uniform once one access-level change has been applied to it.
+- The other writers of `documents` store `standard`: receiving certificates and labels, carrier
+  labels and bills of lading, laser-nest drawings and process-sheet step evidence. A person raises
+  one with `POST /documents/{id}/access-level`.
+- The crew station reads its queue with the tablet's own station token, which sees `standard`
+  only, so a `restricted` or `export_controlled` nest PDF has no **View nest / drawing** button
+  there, even for an export-authorized operator (see
+  [KIOSK.md → Drawing / nest viewer](KIOSK.md#drawing--nest-viewer)).
+
+> **For the Quality Manager (AS9100D 7.5.3.1, ITAR / EAR handling).**
+>
+> - **The three levels.** `standard`: anyone signed in who can read documents. `restricted`:
+>   Admin, Manager, Quality and Supervisor. `export_controlled`: only people an Admin of this
+>   company has marked export-authorized on the Users page; being an Admin does not count, and a
+>   platform account's authorization from another company does not count here. Deactivating a
+>   user revokes their authorization, and reactivating them does not bring it back.
+> - **Order matters.** First have an Admin grant export authorization to the people who must open
+>   ITAR / EAR drawings, including the operators who run those jobs (Users → **Export-authorized** →
+>   **Grant**, with a reason). A document flagged `export_controlled` while nobody is authorized
+>   cannot be opened by anyone, you included.
+> - **Run the access review.** Documents → **Access review** lists every document whose part
+>   belongs to an export-controlled customer but is not yet `export_controlled`. Open each row and
+>   use **Change access**, with a reason. The review judges by part only, and counts the documents
+>   with no part link (work-order-only documents among them); it cannot judge those, so look
+>   through them yourself (the Documents list's access-level filter, set to **Standard**, helps).
+> - **Flag documents.** On upload, choose the access level; the server raises it to
+>   `export_controlled` when the linked part's or work order's customer is export-controlled, and
+>   Hank filing and attaching a document to such a work order do the same. A level belongs to the whole revision history: **Change access**
+>   sets every revision at once, a new revision filed above its history lifts the earlier ones,
+>   and a revision never drops below the one it replaces. You can lower a level only if you can
+>   open every revision. Every change is in the Audit Log as `ACCESS_LEVEL_CHANGE`, one row per
+>   revision, with your reason. A reader who may not open a document sees its audit rows, and the
+>   Hank intake and task rows that name it, redacted.
+> - **AI.** Hank and the AI copilot never send an `export_controlled` document's details to the
+>   model, even for an authorized user; in Hank chat such a document, and saved Hank work that
+>   names it, reads as missing.
+> - **What is not covered.** Certificates, receiving and shipping labels, bills of lading,
+>   laser-nest drawings and step photos are stored `standard`; raise them by hand when they carry
+>   controlled data. Parts and work orders link to customers by name only (`customer_name`), so a
+>   record with a blank or misspelled customer name is never judged: neither the raise rule nor the
+>   review sees it. Keep customer names exact. The customer's own export-control marking is an
+>   Admin's job (Customers → **Export control**). On the floor, an operator sees only what they
+>   may open, and a crew station shows only `standard` nest PDFs (KIOSK.md).
 
 ### QMS Standards & Audit Readiness
 
@@ -13121,15 +13399,16 @@ There is no delete endpoint.
 | POST | `/users/` | Create user | Admin |
 | POST | `/auth/register` | Alternate tenant-user creation path with the same role policy | Admin |
 | POST | `/users/import-csv` | Import CSV/XLSX users; existing dry-run and per-row error contracts apply | Admin |
-| PUT | `/users/{id}` | Update user. `is_active: false` also revokes every live API token the user holds (reason `user deactivated`, audited) — see [API tokens](#api-tokens-bots-and-mcp-clients). A role change into Admin, Manager or Quality from any other role clears the user's floor PIN and, if they had one, requires a new one from an Admin (see the floor PIN note below) | Admin |
+| PUT | `/users/{id}` | Update user. `is_active: false` also revokes every live API token the user holds (reason `user deactivated`, audited) — see [API tokens](#api-tokens-bots-and-mcp-clients) — and the user's export authorization (one `EXPORT_AUTHORIZATION_REVOKE` row). A role change into Admin, Manager or Quality from any other role clears the user's floor PIN and, if they had one, requires a new one from an Admin (see the floor PIN note below) | Admin |
 | POST | `/users/{id}/approve` | Approve a pending tenant account with a tenant role. Approving into Admin, Manager or Quality clears any floor PIN the account carried and, if it had one, requires a new one from an Admin | Admin |
 | POST | `/users/{id}/reset-password` | Reset another account's password | Admin |
 | POST | `/users/{id}/activate` | Reactivate an account, without restoring revoked API tokens | Admin |
-| DELETE | `/users/{id}` | Deactivate user (sets `is_active=false`; cannot deactivate yourself). Revokes every live API token the user holds in the same transaction (reason `user deactivated`, one `API_TOKEN_REVOKED` audit trail each); the response carries `api_tokens_revoked`. Reactivation (`POST /users/{id}/activate`) restores the account, never a token | Admin |
+| DELETE | `/users/{id}` | Deactivate user (sets `is_active=false`; cannot deactivate yourself). Revokes every live API token the user holds in the same transaction (reason `user deactivated`, one `API_TOKEN_REVOKED` audit trail each); the response carries `api_tokens_revoked`. Also revokes the user's export authorization (one `EXPORT_AUTHORIZATION_REVOKE` row, reason `user deactivated`; `export_authorization_revoked` in the response). Reactivation (`POST /users/{id}/activate`) restores the account, never a token or an export authorization | Admin |
 | POST | `/users/{id}/unlock` | Clear failed-login lockout (not a floor-PIN lock — see `POST /users/{user_id}/floor-pin/unlock`) | Admin |
 | PUT | `/users/{user_id}/floor-pin` | Set or reset the user's floor PIN for badge sign-on. Body `{"pin"}` → the user record. Also clears any PIN lock and the wrong-PIN count. See the floor PIN note below | Admin; a Manager for Operator / Supervisor / Shipping / Viewer accounts only. Signed in (any API token **403**; not an MCP tool) |
 | DELETE | `/users/{user_id}/floor-pin` | Clear the user's floor PIN and any PIN lock → the user record. Idempotent | Admin; a Manager for Operator / Supervisor / Shipping / Viewer accounts only. Signed in (any API token **403**; not an MCP tool) |
 | POST | `/users/{user_id}/floor-pin/unlock` | Lift a floor-PIN lock early (every lock also expires on its own) and reset the wrong-PIN count, keeping the PIN → the user record. Idempotent | Admin; a Manager for Operator / Supervisor / Shipping / Viewer accounts only. Signed in (any API token **403**; not an MCP tool) |
+| PUT | `/users/{id}/export-authorization` | Body `{"export_authorized": bool, "reason"}`; grant or revoke the only thing that opens an `export_controlled` document. Refuses any API token **403**; not an MCP tool | Admin |
 | GET | `/users/mention-search` | People to @mention in a comment: active members of the active company by name, `{id, display_name}` only (never email, role or phone). Documented under [Comments and watchers](#comments-and-watchers) | Any signed-in member of the company (a read-only API token is **403**: `Users` tag) |
 
 > **User writes are Admin-only; the list read is Admin / Manager.** `GET /users/` (and
@@ -13172,6 +13451,40 @@ There is no delete endpoint.
 > `UserResponse`** (`app/api/endpoints/users.py`) only — every route serializing it is self-scoped
 > (`GET /users/me`) or Admin/Manager-gated; general user serialization
 > (`app.schemas.user.UserResponse`, the per-domain summaries) still omits lockout state.
+>
+> **`PUT /users/{id}/export-authorization` — who may open export-controlled documents**
+> (AS9100D 7.5.3.1, migration `131`). An export-authorized user may open `export_controlled`
+> documents of their **own** company; nobody else may, whatever their role, Admin, superuser and
+> Platform Admin included, and a platform account's grant never carries into a tenant it switches
+> into (see
+> [Documents → Restricted and export-controlled documents](#restricted-and-export-controlled-documents-as9100d-7531)).
+> Body `{"export_authorized": true|false, "reason": "..."}`; the reason is required (1–2000
+> characters, not blank).
+>
+> - Admin only. Any API token, whatever its role or scope, is refused **403** before anything is
+>   read, and the route is not an MCP tool, so a person's own JWT cannot reach it through an agent.
+> - The target must be in the active company (**404** otherwise), and a stored Platform Admin or
+>   superuser target needs a platform principal (**403**), as on `PUT /users/{id}`.
+> - **409** when the user is already in the requested state, judged on the row-locked user, so two
+>   concurrent grants (or a grant racing a revoke) serialize.
+> - A grant stamps `export_authorized_at` / `export_authorized_by`; a revoke clears both. An Admin
+>   may grant their own authorization; it is audited like any other grant.
+> - A required audit row (`EXPORT_AUTHORIZATION_GRANT` or `EXPORT_AUTHORIZATION_REVOKE`, resource
+>   `user`) with the old and new value and the reason, in the same transaction (**503**, nothing
+>   saved, if it cannot be written). A revoke's row also keeps the grant it ended
+>   (`revoked_grant`: when and by whom).
+>
+> The flag is not on the create, update or import bodies; this verb and deactivation are its only
+> writers. The management `UserResponse` (list, detail, `/users/me` and the write responses) carries
+> `export_authorized`, `export_authorized_at` and `export_authorized_by`. A new user, and every user
+> after the migration, starts unauthorized.
+>
+> **Deactivation revokes it.** Both deactivation verbs (`DELETE /users/{id}` and `PUT /users/{id}`
+> with `is_active: false`) clear the flag and its stamps in the same transaction, with a companion
+> required `EXPORT_AUTHORIZATION_REVOKE` row (reason `user deactivated`, `source: deactivation`,
+> `revoked_grant`), like the API-token sweep. `DELETE /users/{id}` reports it as
+> `export_authorization_revoked`. Reactivation restores the account and no authorization: an Admin
+> grants it again, with a reason.
 
 > **Floor PIN — `PUT` / `DELETE /users/{user_id}/floor-pin`, `POST /users/{user_id}/floor-pin/unlock`
 > (AS9100D 8.5.2, migration `130`).** The second factor on badge sign-on
@@ -13918,7 +14231,7 @@ authority as its eventual action:
 | --- | --- | --- |
 | `repeat_job` | `source_work_order_id`, positive `quantity_ordered`, optional `due_date` | Admin/Manager/Supervisor plus effective `work_orders:view` and `work_orders:create`; creates a **draft** through the existing duplicate service |
 | `draft_purchase_order` | `vendor_id`, 1–50 `lines` with `part_id`, positive `quantity_ordered`, nonnegative `unit_price`; optional PO dates/address/method/notes and line date/notes; source imports additionally require the source/version, printed number, line indices and stocking units described above | Admin/Manager/Supervisor plus effective `purchasing:view` and `purchasing:create`; normally creates a **draft**. A reviewed existing-document import can record **sent** for Receiving with Admin/Manager and `purchasing:approve`; never emails a vendor or receives material |
-| `attach_document` | `document_id`, `work_order_id` | Admin/Manager/Quality plus effective `work_orders:view`; links an existing PDF using the document workflow, without approving its contents |
+| `attach_document` | `document_id`, `work_order_id` | Admin/Manager/Quality plus effective `work_orders:view`; links an existing PDF using the document workflow, without approving its contents. A document the user may not open is **404**; from Hank chat an `export_controlled` one is too. Execution raises the document to `export_controlled` when the work order's customer is export-controlled (Documents → "Restricted and export-controlled documents") |
 | `receive_delivery` | `purchase_order_id`, 1–50 receipt lines; each requires `po_line_id`, positive actual `quantity_received` and explicit `requires_inspection`; optional lot/heat/serial/certificate/location/over-receipt details. Company stock only: the line takes no `ownership` / owner fields and refuses unknown keys | Admin/Manager/Supervisor plus `receiving:view` + `receiving:create`; canonical atomic delivery/stock posting, with no automatic printing |
 | `report_production` | `operation_id`, nonnegative good/scrap deltas (at least one positive), scrap reason/code when reporting scrap; optional NCR details and reasoned hold | Admin/Manager/Supervisor/Operator/Quality plus `work_orders:view` + `work_orders:complete`; caller must have an open clock on the operation; no implicit job/operation completion. A standing API token may report good only: a scrap delta is refused **403** in the preview, so at preparation (no task saved) and again at execution (the task stays `awaiting_review`, nothing written) — owner decision 2026-11-07, only a person declares scrap |
 | `draft_shipment` | `work_order_id`, positive `quantity_shipped`, optional destination/carrier/package details; `cert_of_conformance` must be false | Admin/Manager/Supervisor/Shipping plus `shipping:view` + `shipping:create` + `work_orders:view`; reserves available completed units in a pending shipment, without dispatch/CoC/carrier purchase |
@@ -14851,6 +15164,15 @@ tenants, so the aggregate chain-verification endpoints are **platform-admin only
 > company-scoped Admin verify one record **belonging to their active company**; a record from
 > another tenant returns **404** (not 403, so cross-tenant probing can't confirm the record
 > exists). Platform Admins / superusers may inspect any record.
+>
+> **Rows about a document the reader may not open are redacted** (migration `131`): `document`
+> rows, and `hank_intake_file` / `hank_task` rows that name such a document. On `GET /audit/`,
+> `old_values` / `new_values`, `description` and `resource_identifier` are replaced, and
+> `/integrity/record/{sequence_number}` hides the identifier. A deleted document is judged by its
+> last recorded level. A `search` is applied in the database before `offset` / `limit` and matches
+> a redacted row only on what the reader is shown (the actor and the redaction markers); without a
+> search the redacted rows are listed. Redaction happens on the way out; the stored row and the
+> hash chain are untouched. See Documents → "Restricted and export-controlled documents".
 >
 > **Why the aggregate `/integrity/*` endpoints are Platform-Admin only:** the hash chain is one
 > global sequence spanning every tenant, so its stats/issues (record counts, sequence ranges,
@@ -16109,10 +16431,10 @@ What matters from this file's point of view:
   routers with the caller's own bearer token. The router is the boundary: the same `require_role`
   gates, tenant scoping, audit rows, optimistic-locking 409s and per-endpoint size caps apply, and a
   401/403/409/422 comes back verbatim as an `is_error` tool result carrying the server's `detail`.
-- **The catalog is this API.** 778 tools are generated from `app.openapi()` at startup — every
+- **The catalog is this API.** 779 tools are generated from `app.openapi()` at startup — every
   secured operation except the `Authentication`, `Carrier Webhooks`, `Error Logging` (and its router-level `errors` twin) and `WebSocket` tags, the
   unauthenticated health/station-login routes (named one by one in `catalog.PUBLIC_OPERATIONS`) and
-  the twenty-four operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders
+  the twenty-six operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders
   (`POST /work-orders/import`, `POST /purchasing/purchase-orders/import` — they mint work orders
   RELEASED / IN_PROGRESS and POs SENT, a record of a past system rather than a user action),
   AI Accept & apply (`POST /ai/recommendations/{recommendation_id}/apply` — owner ruling 3: only a
@@ -16130,10 +16452,12 @@ What matters from this file's point of view:
   door, one job per call; this route does not refuse API tokens),
   the five comment / watcher writes (`POST /comments`, `PATCH` / `DELETE /comments/{comment_id}`,
   `POST` / `DELETE /watchers` — owner decision 2026-11-16: a comment is a person's own words; the
-  routes also refuse API tokens, and the three reads stay tools) and the four floor-PIN writes
+  routes also refuse API tokens, and the three reads stay tools), the four floor-PIN writes
   (`PUT` / `DELETE /users/{user_id}/floor-pin`, `POST /users/{user_id}/floor-pin/unlock`,
   `PUT /companies/me/floor-pin-policy` — a badge sign-on credential is a person's act; the routes
-  also refuse API tokens) — plus 15 fixed-name convenience tools that shadow 16
+  also refuse API tokens) and the two document-access writes (`PUT /users/{user_id}/export-authorization`,
+  `POST /documents/{document_id}/access-level` — deciding who may open a controlled document is a
+  person's judgment; the routes also refuse API tokens, and the access review stays a tool) — plus 15 fixed-name convenience tools that shadow 16
   raw routes (`POST /work-orders/`, `PUT /work-orders/{id}`, `POST /work-orders/{id}/release`, the two
   nest-package imports, the manual nest add, `GET /search/`, …) to enforce agent rules the routes do
   not: create/duplicate always land DRAFT, release is a separate explicit tool and the generic update

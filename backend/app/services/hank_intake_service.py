@@ -36,6 +36,7 @@ from app.schemas.hank_intake import (
     IntakeReceipt,
 )
 from app.services.audit_service import AuditService
+from app.services.document_access_service import resolve_upload_access_level
 from app.services.document_numbering import generate_document_number
 from app.services.hank_office_reader import (
     MIME_BY_FORMAT,
@@ -852,6 +853,16 @@ class HankIntakeService:
                 409, 'Another identical file was filed. Review a fresh plan before creating another copy.'
             )
         released = plan.filing_mode == 'release_receipt_certificate'
+        # The upload raise rule: a document filed against a part or work order whose customer is
+        # export-controlled is filed export_controlled (app.services.document_access_service).
+        stored_level = resolve_upload_access_level(
+            self.db,
+            self.company_id,
+            requested=None,
+            part_id=plan.part_id,
+            work_order_id=plan.work_order_id,
+            previous=None,
+        )
         document = Document(
             company_id=self.company_id,
             document_number=generate_document_number(self.db, plan.document_type.value),
@@ -867,6 +878,7 @@ class HankIntakeService:
             file_size=size,
             mime_type=MIME_BY_FORMAT.get(os.path.splitext(row.filename)[1].lower().lstrip('.'), 'application/pdf'),
             status='released' if released else 'draft',
+            access_level=stored_level.access_level,
             created_by=self.user.id,
             released_by=self.user.id if released else None,
             released_at=datetime.utcnow() if released else None,
@@ -883,8 +895,14 @@ class HankIntakeService:
                 'part_id': document.part_id,
                 'work_order_id': document.work_order_id,
                 'vendor_id': document.vendor_id,
+                'access_level': document.access_level,
             },
-            extra_data={'source': 'hank_intake', 'intake_file_id': row.id, 'content_sha256': sha},
+            extra_data={
+                'source': 'hank_intake',
+                'intake_file_id': row.id,
+                'content_sha256': sha,
+                **({'access_level_raised_because': list(stored_level.raised_because)} if stored_level.raised else {}),
+            },
         )
         if released:
             validate_certificate(self.db, self.company_id, records['receipt_line'], document.id, check_storage=False)
@@ -907,7 +925,15 @@ class HankIntakeService:
             references=refs,
             summary=f"{document.document_number} filed as {document.status}"
             + (' and attached to the reviewed receipt.' if released else '.'),
-            warnings=["Document contents and manufacturing approval were not verified by Hank."],
+            warnings=["Document contents and manufacturing approval were not verified by Hank."]
+            + (
+                [
+                    "Filed export_controlled because the linked customer is export-controlled: only "
+                    "export-authorized users can open it."
+                ]
+                if stored_level.raised
+                else []
+            ),
         )
         row.result_json = result.model_dump(mode='json')
         self._transition(row, 'completed', audit, extra={'result': row.result_json})

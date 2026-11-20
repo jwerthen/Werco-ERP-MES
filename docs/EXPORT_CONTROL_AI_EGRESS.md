@@ -422,6 +422,53 @@ and the classification set to something other than `itar_export_controlled` / `c
 reason. Because every contract counts whatever its dates and `active` flag, setting a contract
 inactive or letting it expire does **not** unmark the customer.
 
+### Documents of a controlled customer (migration 131)
+
+Restricted document viewing (AS9100D 7.5.3.1) is a separate control: it decides which **people**
+may open a document, by the document's `access_level` (`standard`, `restricted`,
+`export_controlled`) and the user's export authorization. See
+[API.md → Restricted and export-controlled documents](API.md#restricted-and-export-controlled-documents-as9100d-7531).
+It meets this runbook in three places.
+
+- **AI-external tokens see `standard` documents only, everywhere.** The access rule gives an
+  AI-external credential the `standard` level and nothing else, whatever its bound user's role or
+  export authorization. Nothing under `/documents`, `/laser-nests` or the kiosk document reads is on
+  the allowlist (§5) anyway, so the connector never lists, opens or downloads a document. Some
+  allowlisted reads carry a laser nest's PDF pointer: `GET /work-orders/{work_order_id}` /
+  `GET /work-orders/by-number/{wo_number}` and the `/shop-floor/operations` reads. A PDF above
+  `standard` reads as none there (`document_id` and `document_file_name` null, `has_document`
+  false), and a work order of a controlled customer is withheld whole by the redaction anyway.
+- **In-app AI never sends an `export_controlled` document to the model.** Everything that goes to
+  the model treats an `export_controlled` document as missing for everyone, an export-authorized
+  person included, and also any document the caller may not open: copilot document search, Hank's
+  job documents (readiness, knowledge, the shipping packet), and Hank chat's reads. In chat the
+  attach-document preview answers **404**, saved Hank tasks and intake files that name such a
+  document are left out of saved work and **404** when read, the intake-file chat tools answer the
+  same **404** (an intake file's extraction is the filed document's content), and a handoff read
+  leaves the document out of its references. With the company's `allow_ai_egress` on, those results
+  go to Anthropic, and an export authorization lets a person open a document, not send it to an
+  outside model. `restricted` documents still reach the model for a person who may open them. A
+  person's own `POST /hank/tasks` and document watches only show documents to the person and keep
+  the ordinary rule.
+- **One meaning of "export-controlled".** The upload raise rule and the access review read the
+  same index as the redaction (`export_control_service.build_controlled_index`). A manual upload or
+  a Hank intake filing whose linked part **or work order** resolves to a controlled customer is
+  stored `export_controlled`, and a raised revision lifts its earlier revisions to that level.
+  Attaching a document to such a work order (`POST /documents/{document_id}/attach-work-order`, or
+  the Hank attach task on execute) raises it and its revision chain the same way.
+  `GET /documents/access-review` lists the documents whose **part** resolves to a controlled
+  customer but whose level is still below `export_controlled`; it does not read the work order, so
+  a work-order-only document is counted as unlinked. Only a positive finding counts: a record whose
+  `customer_name` is blank or matches no customer is unlinkable here and is neither raised nor
+  listed, unlike the redaction, which withholds it. Marking a customer (above) therefore raises
+  only **future** uploads, filings and attaches for its parts and work orders. Existing documents
+  keep their level until a person changes it; run the access review after marking a customer.
+
+The two document-access writes (`POST /documents/{document_id}/access-level`,
+`PUT /users/{user_id}/export-authorization`) refuse every API token **403** and are not MCP tools,
+like the contract writes above. Export authorization counts only in the user's own company, and
+deactivating a user revokes it.
+
 ---
 
 ## 7. The ledger: `controlled_access_events`
@@ -588,6 +635,7 @@ Deactivating Werco Assistant revokes its tokens too.
 | No reconcile-on-read for a narrowed token | `is_narrowed_api_token` (`app/core/credentials.py`), checked in both `_reconcile_and_commit` copies (`app/api/endpoints/work_orders.py`, `shop_floor.py`) and before `GET /work-orders/{id}`'s component-quantity re-derivation |
 | Egress switches refuse API tokens | `API_TOKEN_EGRESS_SWITCH` (`app/core/credentials.py`); `companies.py`, `integrations.py`, `receiving.py`; `catalog.EGRESS_SWITCH_OPERATIONS` |
 | UI | `frontend/src/pages/ApiTokens.tsx`, `frontend/src/components/customers/CustomerExportControlPanel.tsx` |
+| Document access levels (a separate control that reads the same index, §6) | `app/services/document_access.py` (the rule; `standard` only for an AI-external credential; `model_visible_documents_clause` for reads bound for the model), `app/services/document_access_service.py` (raise rule, chain lift, access review), migration `131_document_access` |
 | Tests | `backend/tests/api/test_ai_external_token.py` (gates, canary conformance per allowlisted route, ledger, 503, a narrowed token's reconcile-on-read GET writing nothing), `tests/api/test_egress_switch_credentials.py`, `tests/api/test_customer_export_control.py`, `tests/test_export_control_index.py`, `tests/test_export_control_redaction.py`, `tests/test_mcp_ai_external.py` |
 
 Related: [API.md → API tokens](API.md#api-tokens-bots-and-mcp-clients),

@@ -40,6 +40,9 @@ const ZOOM_MIN = 50;
 const ZOOM_MAX = 300;
 const ZOOM_STEP = 25;
 const GENERIC_ERROR = 'Could not load the document.';
+// The document routes answer 404 for a document this operator may not view (restricted or
+// export-controlled), never 403, so the viewer cannot tell that from "removed" and says neither.
+const DOCUMENT_NOT_AVAILABLE = 'This document is not available.';
 
 // ---------------------------------------------------------------------------
 // pdf.js is LAZY — the kiosk bundle must not pay for it until a viewer opens.
@@ -64,10 +67,12 @@ function loadPdfJs(): Promise<typeof import('pdfjs-dist')> {
   return pdfjsPromise;
 }
 
+function errorStatus(err: unknown): unknown {
+  return (err as { status?: unknown })?.status ?? (err as { response?: { status?: unknown } })?.response?.status;
+}
+
 function isAuthExpiry(err: unknown): boolean {
-  const status =
-    (err as { status?: unknown })?.status ?? (err as { response?: { status?: unknown } })?.response?.status;
-  return status === 401;
+  return errorStatus(err) === 401;
 }
 
 /** "0.498 – 0.502 in" / "≥ 0.498 in" / "0.5 in" — honest limits from SPC fields. */
@@ -125,6 +130,8 @@ export default function KioskDocViewer({
     (err: unknown) => (isAuthExpiry(err) && sessionExpiredMessage ? sessionExpiredMessage : kioskErrorMessage(err, GENERIC_ERROR)),
     [sessionExpiredMessage]
   );
+  /** True when the open document's PDF answered 404: not available, so no Retry. */
+  const [blobNotAvailable, setBlobNotAvailable] = useState(false);
 
   // --- Discovery read ---------------------------------------------------------
   const loadDocs = useCallback(async () => {
@@ -167,6 +174,7 @@ export default function KioskDocViewer({
 
   // --- Blob fetch (cached per document id) ------------------------------------
   useEffect(() => {
+    setBlobNotAvailable(false);
     if (currentDocumentId == null) {
       setBlobUrl(null);
       return undefined;
@@ -190,7 +198,9 @@ export default function KioskDocViewer({
         blobCacheRef.current.set(currentDocumentId, url);
         setBlobUrl(url);
       } catch (err) {
-        if (!cancelled) setBlobError(errorFor(err));
+        if (cancelled) return;
+        if (errorStatus(err) === 404) setBlobNotAvailable(true);
+        else setBlobError(errorFor(err));
       }
     })();
     return () => {
@@ -435,7 +445,11 @@ export default function KioskDocViewer({
             </div>
           ) : noDocuments ? (
             <p className="flex h-full items-center justify-center px-6 py-16 text-center text-xl text-fd-mute">
-              No released drawing or nest PDF is attached to this operation.
+              No released drawing or nest PDF is available for this operation.
+            </p>
+          ) : blobNotAvailable ? (
+            <p role="status" className="flex h-full items-center justify-center px-6 py-16 text-center text-xl text-fd-mute">
+              {DOCUMENT_NOT_AVAILABLE}
             </p>
           ) : blobError ? (
             <div role="alert" className="flex h-full flex-col items-center justify-center gap-4 px-6 py-16 text-center">

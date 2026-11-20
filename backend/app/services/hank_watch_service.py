@@ -19,6 +19,7 @@ from app.schemas.hank_tasks import HankTaskPreview, HankTaskResult
 from app.schemas.hank_watches import HankWatchInput
 from app.services import notification_links
 from app.services.audit_service import AuditService
+from app.services.document_access import visible_documents_clause
 from app.services.hank_preference_service import get_hank_preference_values
 from app.services.hank_task_service import HankTaskService, _digest, _reference
 
@@ -56,10 +57,16 @@ def _open_blockers(db, company_id, work_order_id):
     )
 
 
-def _documents(db, company_id, payload):
+def _documents(db, company_id, payload, viewer):
+    """The job's PDF documents the watch's owner may open (app.services.document_access).
+
+    Both the baseline and every check read through this, so no watch fires on, or names, a
+    document above its owner's access level.
+    """
     query = tenant_query(db, Document, company_id).filter(
         Document.work_order_id == payload.work_order_id,
         or_(Document.mime_type == 'application/pdf', func.lower(Document.file_name).like('%.pdf')),
+        visible_documents_clause(viewer, company_id),
     )
     if payload.document_type is not None:
         query = query.filter(Document.document_type == payload.document_type)
@@ -147,7 +154,10 @@ def _evaluate_locked(db, task, owner, audit, now):
     else:
         baseline = task.source_versions_json.get('document_ids', [])
         arrived = (
-            _documents(db, task.company_id, payload).filter(Document.id.notin_(baseline)).order_by(Document.id).first()
+            _documents(db, task.company_id, payload, owner)
+            .filter(Document.id.notin_(baseline))
+            .order_by(Document.id)
+            .first()
         )
         if arrived is not None:
             references.insert(
@@ -273,7 +283,7 @@ class HankWatchService:
         else:
             ids = [
                 row_id
-                for (row_id,) in _documents(self.db, self.company_id, payload)
+                for (row_id,) in _documents(self.db, self.company_id, payload, self.user)
                 .with_entities(Document.id)
                 .order_by(Document.id)
                 .limit(BASELINE_LIMIT + 1)

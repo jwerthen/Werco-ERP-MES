@@ -30,6 +30,7 @@ from app.schemas.work_order import (
     LaserNestUpdate,
 )
 from app.services.audit_service import AuditService, AuditWriteError
+from app.services.document_access import can_view_document, visible_document_or_404
 from app.services.laser_nest_extraction_service import extract_nest_fields_from_pdf
 from app.services.laser_nest_restore_service import restore_laser_nest
 from app.services.laser_nest_service import (
@@ -267,7 +268,7 @@ def update_laser_nest(
     )
     db.commit()
     db.refresh(nest)
-    return LaserNestManualResponse(**manual_nest_response_dict(nest))
+    return LaserNestManualResponse(**manual_nest_response_dict(nest, current_user))
 
 
 @router.post("/{laser_nest_id}/attach-document", response_model=LaserNestManualResponse)
@@ -281,12 +282,12 @@ def attach_laser_nest_document(
 ):
     """Attach an already-uploaded PDF Document (from /documents/upload) to a nest.
 
-    PDF-only: matches the validation used by the work-order-drawing attach path.
+    PDF-only: matches the validation used by the work-order-drawing attach path. A
+    document the caller may not open (its access level) is the same 404 as a missing
+    one, before the PDF check.
     """
     nest = _load_nest(db, laser_nest_id, company_id)
-    document = db.query(Document).filter(Document.id == payload.document_id, Document.company_id == company_id).first()
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
+    document = visible_document_or_404(db, company_id, current_user, payload.document_id)
 
     file_name = document.file_name or ""
     is_pdf = document.mime_type == "application/pdf" or file_name.lower().endswith(".pdf")
@@ -312,7 +313,7 @@ def attach_laser_nest_document(
     )
     db.commit()
     db.refresh(nest)
-    return LaserNestManualResponse(**manual_nest_response_dict(nest))
+    return LaserNestManualResponse(**manual_nest_response_dict(nest, current_user))
 
 
 @router.delete("/{laser_nest_id}/document", response_model=LaserNestManualResponse)
@@ -339,7 +340,7 @@ def detach_laser_nest_document(
     )
     db.commit()
     db.refresh(nest)
-    return LaserNestManualResponse(**manual_nest_response_dict(nest))
+    return LaserNestManualResponse(**manual_nest_response_dict(nest, current_user))
 
 
 @router.get("/{laser_nest_id}/document")
@@ -354,15 +355,26 @@ def get_laser_nest_document(
     Read-only and intentionally available to ANY authenticated user (operators
     must preview the shop drawing), but still strictly tenant-scoped: the nest
     AND the document are both filtered by company_id, so no cross-tenant bytes
-    can be served.
+    can be served. A PDF above the caller's access level (``restricted`` /
+    ``export_controlled``) is the same 404 ``No document attached`` as a nest
+    without one, as the nest payloads report it.
     """
     nest = _load_nest(db, laser_nest_id, company_id)
     if nest.document_id is None:
         raise HTTPException(status_code=404, detail="No document attached")
 
-    document = db.query(Document).filter(Document.id == nest.document_id, Document.company_id == company_id).first()
+    document = (
+        db.query(Document)
+        .filter(
+            Document.id == nest.document_id,
+            Document.company_id == company_id,
+        )
+        .first()
+    )
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
+    if not can_view_document(current_user, document):
+        raise HTTPException(status_code=404, detail="No document attached")
 
     filename = document.file_name or f"laser-nest-{nest.id}.pdf"
     inline_disposition = f'inline; filename="{filename}"'
@@ -402,7 +414,7 @@ def restore_laser_nest_endpoint(
     except AuditWriteError as exc:
         db.rollback()
         raise HTTPException(status_code=503, detail="The restoration audit could not be saved; please retry") from exc
-    response = LaserNestManualResponse(**manual_nest_response_dict(nest))
+    response = LaserNestManualResponse(**manual_nest_response_dict(nest, current_user))
     db.commit()
     return response
 

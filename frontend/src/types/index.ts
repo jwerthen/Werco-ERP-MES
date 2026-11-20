@@ -36,6 +36,16 @@ export interface User {
   floor_pin_locked_until?: string | null;
   /** A promotion into Admin / Manager / Quality cleared the PIN; badge sign-on is refused until an Admin sets one. */
   floor_pin_reset_required?: boolean;
+  /**
+   * Export authorization (AS9100D 7.5.3.1): the ONLY way to open an export-controlled document.
+   * No role bypasses it, Admin included. Set by an Admin with a reason
+   * (PUT /users/{id}/export-authorization); optional because it rides UserResponse.
+   */
+  export_authorized?: boolean;
+  /** UTC ISO instant it was granted; null when not authorized (a revoke clears it). */
+  export_authorized_at?: string | null;
+  /** Id of the user who granted it; null when not authorized. */
+  export_authorized_by?: number | null;
 }
 
 export type UserRole = 'platform_admin' | 'admin' | 'manager' | 'supervisor' | 'operator' | 'quality' | 'shipping' | 'viewer';

@@ -10,7 +10,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import TYPE_CHECKING, Iterable, Optional
+from typing import TYPE_CHECKING, Any, Iterable, Optional
 
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
@@ -23,6 +23,7 @@ from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderType
 from app.models.work_order_material import AllocationSource, AllocationStatus, WorkOrderMaterialAllocation
 from app.services.audit_service import AuditService
+from app.services.document_access import can_view_document
 from app.services.laser_nest_extraction_service import extract_nest_fields_from_pdf
 from app.services.laser_nest_text import (
     normalize_material,
@@ -1242,13 +1243,16 @@ def sync_laser_nest_to_operation(db: Session, nest: LaserNest) -> None:
         _recompute_child_quantity_ordered(db, child_work_order, nest.company_id)
 
 
-def manual_nest_response_dict(nest: LaserNest) -> dict:
+def manual_nest_response_dict(nest: LaserNest, viewer: Any) -> dict:
     """Serialize a nest into the LaserNestManualResponse shape.
 
     Returns the nest id + its backing operation (id + status) so the client can
     render the nest as a clock-in-able operation, plus document attachment state.
+    A nest PDF ``viewer`` may not open (``app.services.document_access``) reads as
+    no PDF: ``document_id`` / ``document_file_name`` null, ``has_document`` false.
     """
     operation = nest.operation
+    document_visible = bool(nest.document_id) and can_view_document(viewer, nest.document)
     return {
         "id": nest.id,
         "nest_name": nest.nest_name,
@@ -1261,9 +1265,9 @@ def manual_nest_response_dict(nest: LaserNest) -> dict:
         "sheet_size": nest.sheet_size,
         "work_order_operation_id": nest.work_order_operation_id,
         "operation_status": operation.status if operation is not None else None,
-        "document_id": nest.document_id,
-        "has_document": bool(nest.document_id),
-        "document_file_name": nest.document.file_name if nest.document else None,
+        "document_id": nest.document_id if document_visible else None,
+        "has_document": document_visible,
+        "document_file_name": nest.document.file_name if document_visible else None,
     }
 
 

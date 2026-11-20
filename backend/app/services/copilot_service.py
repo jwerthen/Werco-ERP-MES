@@ -48,6 +48,7 @@ from app.models.work_order_blocker import WorkOrderBlockerStatus
 from app.schemas.ai_learning import AIEventType, AIInteractionEventCreate
 from app.services.ai_context_service import AIContextService
 from app.services.ai_learning_service import AILearningService
+from app.services.document_access import model_visible_documents_clause
 from app.services.hank_chat_documents import (
     attachment_manifest,
     document_evidence,
@@ -497,7 +498,9 @@ def _tool_search_documents(
             return {"data": {"error": f"{label} must be a positive integer."}, "is_error": True}
 
     raw = query.strip()
-    documents_query = tenant_query(db, Document, company_id)
+    # Only documents the asking user may open (app.services.document_access): a restricted or
+    # export-controlled document's metadata never enters the model for someone who could not open it.
+    documents_query = tenant_query(db, Document, company_id).filter(model_visible_documents_clause(user, company_id))
     if raw:
         term = f"%{_escape_like(raw.lower())}%"
         documents_query = documents_query.filter(

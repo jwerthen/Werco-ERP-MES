@@ -489,7 +489,7 @@ def use_work_order_template(
     created = [created_by_id[work_order_id] for work_order_id in new_work_order_ids]
 
     for work_order in created:
-        _enrich(work_order, db=db, company_id=company_id)
+        _enrich(work_order, db=db, company_id=company_id, viewer=current_user)
 
         # The same broadcast ``POST /work-orders`` and ``POST /work-orders/{id}/duplicate``
         # emit, ONE PER CREATED WORK ORDER. Without it a template-created draft is
@@ -524,7 +524,7 @@ def use_work_order_template(
     )
 
 
-def _enrich(work_order, *, db: Session, company_id: int) -> None:
+def _enrich(work_order, *, db: Session, company_id: int, viewer: User) -> None:
     """Apply the work-orders router's own response enrichment to the created draft.
 
     ``db``/``company_id`` are forwarded because the enrichment now also serves hold
@@ -545,4 +545,4 @@ def _enrich(work_order, *, db: Session, company_id: int) -> None:
     """
     from app.api.endpoints.work_orders import _enrich_work_order_operations
 
-    _enrich_work_order_operations(work_order, db=db, company_id=company_id)
+    _enrich_work_order_operations(work_order, db=db, company_id=company_id, viewer=viewer)

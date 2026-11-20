@@ -90,6 +90,22 @@ FLOOR_PIN_OPERATIONS: FrozenSet[Tuple[str, str]] = frozenset(
     }
 )
 
+# And restricted document viewing (AS9100D 7.5.3.1 / 7.5.3.2, migration 131): granting or revoking
+# a user's export authorization -- the only thing that opens an export_controlled document -- and
+# changing a document's access level. Both are a person's judgment about who may open controlled
+# data: the routes refuse every API token (``app.core.credentials.API_TOKEN_EXPORT_AUTHORIZATION`` /
+# ``API_TOKEN_DOCUMENT_ACCESS_LEVEL``), and, as with the egress switches, a person's own JWT would
+# still reach them through a tool call -- an agent granting itself export access, or lowering an
+# export-controlled drawing to standard -- so neither is a tool. Reading a user's authorization
+# (the user record), a document's level and the access review stay tools. Named on their own so
+# the credential tests walk exactly these routes.
+DOCUMENT_ACCESS_OPERATIONS: FrozenSet[Tuple[str, str]] = frozenset(
+    {
+        ("PUT", "/api/v1/users/{user_id}/export-authorization"),
+        ("POST", "/api/v1/documents/{document_id}/access-level"),
+    }
+)
+
 # And the comment / watcher WRITES (owner decision for work-order comments, 2026-11-16): a
 # comment is a person's own words and a watch a person's own preference. The routes refuse every
 # API token (``app.core.credentials.API_TOKEN_COMMENT_WRITE``), and a person's own JWT would still
@@ -137,6 +153,7 @@ EXCLUDED_OPERATIONS: FrozenSet[Tuple[str, str]] = (
     )
     | EGRESS_SWITCH_OPERATIONS
     | FLOOR_PIN_OPERATIONS
+    | DOCUMENT_ACCESS_OPERATIONS
     | COMMENT_WRITE_OPERATIONS
 )
 

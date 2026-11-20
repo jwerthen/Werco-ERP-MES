@@ -182,6 +182,43 @@ describe('KioskDocViewer', () => {
     expect(screen.queryByText('Critical dims')).not.toBeInTheDocument();
   });
 
+  // Restricted / export-controlled documents (AS9100D 7.5.3.1): discovery skips a document this
+  // operator may not view, and a PDF that 404s anyway (its level changed after discovery) reads
+  // as "not available" with no Retry. The server answers 404, never 403, so the viewer cannot
+  // tell that from "removed" and says neither.
+  it('reads a discovery with no viewable document as nothing available', async () => {
+    const { transport, fetchDocumentBlob } = makeTransport({
+      ...BASE_DOCS,
+      drawing: null,
+      nest: { ...BASE_DOCS.nest!, document_id: null, file_name: null },
+    });
+    render(<KioskDocViewer operationId={31} initialTab="drawing" transport={transport} onBack={jest.fn()} />);
+    expect(
+      await screen.findByText('No released drawing or nest PDF is available for this operation.')
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(fetchDocumentBlob).not.toHaveBeenCalled();
+  });
+
+  it('a 404 on the PDF reads "not available" with no Retry (both transports\' error shapes)', async () => {
+    for (const err of [
+      { response: { status: 404, data: { detail: 'Document not found' } } },
+      Object.assign(new Error('Document not found'), { status: 404 }),
+    ]) {
+      const transport: KioskDocTransport = {
+        fetchOperationDocuments: jest.fn().mockResolvedValue({ ...BASE_DOCS, nest: null }),
+        fetchDocumentBlob: jest.fn().mockRejectedValue(err),
+      };
+      const { unmount } = render(
+        <KioskDocViewer operationId={31} initialTab="drawing" transport={transport} onBack={jest.fn()} />
+      );
+      expect(await screen.findByText('This document is not available.')).toBeInTheDocument();
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /retry/i })).not.toBeInTheDocument();
+      unmount();
+    }
+  });
+
   it('revokes every fetched blob URL on unmount', async () => {
     const revokeSpy = jest.spyOn(window.URL, 'revokeObjectURL');
     const { transport } = makeTransport(BASE_DOCS);

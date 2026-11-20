@@ -38,6 +38,7 @@ from app.schemas.hank_tasks import (
 from app.schemas.purchasing import POCreate
 from app.services import comment_service, notification_links
 from app.services.audit_service import AuditService, AuditWriteError
+from app.services.document_access import model_visible_documents_clause, visible_documents_clause
 from app.services.erp_draft_commands import attach_document_command, create_purchase_order_command
 from app.services.supplier_approval_service import assert_vendor_not_disqualified
 from app.services.work_order_due_date import (
@@ -176,8 +177,12 @@ class _RequiredCreateAudit(AuditService):
 
 
 class HankTaskService:
-    def __init__(self, db, user, company_id):
+    def __init__(self, db, user, company_id, *, model_bound=False):
         self.db, self.user, self.company_id = db, user, company_id
+        # True when the caller hands what this service returns to an AI model (Hank chat): then a
+        # document is judged by the model rule, which never includes export_controlled
+        # (app.services.document_access.model_visible_documents_clause).
+        self.model_bound = model_bound
         token_id = getattr(user, '_api_token_id', None)
         self.credential_key = f'api:{token_id}' if token_id is not None else 'user'
 
@@ -514,11 +519,20 @@ class HankTaskService:
         raise HTTPException(400, UNSUPPORTED_KIND_DETAIL)
 
     def _attach_document_preview(self, data, *, locked=False):
-        work_order = self._work_order(data['work_order_id'], locked=locked)
-        document_rows = self._rows(Document, Document.id == data['document_id'], locked=locked)
+        # The document first: one the user may not open (app.services.document_access) is the
+        # same 404 as a missing one, before any other check can say something about it. From
+        # chat (model_bound) an export_controlled document is missing too: its number, title and
+        # revision would otherwise reach the model in the preview.
+        clause = (
+            model_visible_documents_clause(self.user, self.company_id)
+            if self.model_bound
+            else visible_documents_clause(self.user, self.company_id)
+        )
+        document_rows = self._rows(Document, (Document.id == data['document_id']) & clause, locked=locked)
         if not document_rows:
             raise HTTPException(404, 'Document not found')
         document = document_rows[0]
+        work_order = self._work_order(data['work_order_id'], locked=locked)
         successors = self._rows(Document, Document.previous_revision_id == document.id, locked=locked)
         if document.mime_type != 'application/pdf' and not (document.file_name or '').lower().endswith('.pdf'):
             raise HTTPException(400, 'Only PDF documents can be attached to a work order')
@@ -894,7 +908,7 @@ class HankTaskService:
             # The raw ``audit`` is safe here only because attach_document_command writes its own
             # document audit through log_required.
             document = attach_document_command(
-                self.db, data['document_id'], data['work_order_id'], self.company_id, audit
+                self.db, data['document_id'], data['work_order_id'], self.company_id, audit, viewer=self.user
             )
             work_order = self._work_order(data['work_order_id'])
             receipt = HankTaskResult(

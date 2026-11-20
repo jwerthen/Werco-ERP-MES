@@ -42,6 +42,7 @@ import app.services.notification_dispatch as dispatch
 from app.core.credentials import API_TOKEN_COMMENT_WRITE, READ_ONLY_ROUTE_WRITES_DETAIL
 from app.models.audit_log import AuditLog
 from app.models.comment import Comment, CommentMention, EntityWatcher
+from app.models.document import Document, DocumentType
 from app.models.hank import HankTask
 from app.models.notification import Notification, NotificationLog
 from app.models.operational_event import OperationalEvent
@@ -1004,6 +1005,21 @@ class TestLockStrength:
             data['source_work_order_id'] = test_work_order.id
         if 'work_order_id' in data:
             data['work_order_id'] = test_work_order.id
+        if kind == 'attach_document':
+            # The attach preview resolves the document FIRST (a document the caller may not open
+            # is the same 404 as a missing one, migration 131), so it needs a real, visible PDF to
+            # reach the work-order lock this test is about.
+            document = Document(
+                company_id=test_work_order.company_id,
+                document_number=f"DOC-LOCK-{uuid4().hex[:8]}",
+                title="Lock-strength drawing",
+                document_type=DocumentType.DRAWING,
+                file_name="lock-strength.pdf",
+                mime_type="application/pdf",
+            )
+            db_session.add(document)
+            db_session.commit()
+            data['document_id'] = document.id
         seen = _locked_preview(db_session, test_user, kind, data)
         assert any(table in tables for tables, _ in seen), seen
         assert {clause for _, clause in seen} == {'FOR UPDATE'}, seen

@@ -43,6 +43,9 @@ export default function LaserNestPdfPreview({
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
+  // A 404 is how the server answers a nest PDF this person may not view (restricted or
+  // export-controlled document) as well as a missing one; neither is a failure to retry.
+  const [notAvailable, setNotAvailable] = useState(false);
   // Hold the live object URL in a ref so the cleanup always revokes the current
   // one regardless of render timing.
   const objectUrlRef = useRef<string | null>(null);
@@ -55,6 +58,7 @@ export default function LaserNestPdfPreview({
     let cancelled = false;
     setLoading(true);
     setError(false);
+    setNotAvailable(false);
 
     const load = async () => {
       try {
@@ -66,9 +70,12 @@ export default function LaserNestPdfPreview({
         }
         objectUrlRef.current = url;
         setObjectUrl(url);
-      } catch {
+      } catch (err) {
         if (!cancelled) {
-          setError(true);
+          const status =
+            (err as { status?: unknown })?.status ?? (err as { response?: { status?: unknown } })?.response?.status;
+          if (status === 404) setNotAvailable(true);
+          else setError(true);
           setObjectUrl(null);
         }
       } finally {
@@ -96,6 +103,18 @@ export default function LaserNestPdfPreview({
         className={`flex items-center justify-center text-sm text-fd-mute ${frame}`}
       >
         Loading nest PDF…
+      </div>
+    );
+  }
+
+  if (notAvailable) {
+    return (
+      <div
+        role="status"
+        className={`flex flex-col items-center justify-center gap-2 px-4 text-center text-sm text-fd-mute ${frame}`}
+      >
+        <DocumentTextIcon className="h-8 w-8" aria-hidden="true" />
+        <span>Nest PDF not available.</span>
       </div>
     );
   }

@@ -723,7 +723,11 @@ class TestDeactivation:
 
         response = client.delete(f"{USERS_URL}{test_user.id}", headers=admin_headers)
         assert response.status_code == 200, response.text
-        assert response.json() == {"message": "User deactivated", "api_tokens_revoked": 2}
+        assert response.json() == {
+            "message": "User deactivated",
+            "api_tokens_revoked": 2,
+            "export_authorization_revoked": False,
+        }
 
         for issued in (first, second):
             row = db_session.get(ApiToken, issued["id"])
@@ -803,7 +807,11 @@ class TestDeactivation:
         # Deactivating a user who holds no token is the same verb, reporting zero.
         response = client.delete(f"{USERS_URL}{operator_user.id}", headers=admin_headers)
         assert response.status_code == 200, response.text
-        assert response.json() == {"message": "User deactivated", "api_tokens_revoked": 0}
+        assert response.json() == {
+            "message": "User deactivated",
+            "api_tokens_revoked": 0,
+            "export_authorization_revoked": False,
+        }
 
 
 # --------------------------------------------------------------------------- end to end

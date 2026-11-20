@@ -69,6 +69,21 @@ class User(Base):
     # (403 ``floor_pin_reset_required``) until an Admin sets a new PIN or clears the PIN.
     floor_pin_reset_required = Column(Boolean, nullable=False, default=False, server_default=false())
 
+    # Export authorization (migration 131, AS9100D 7.5.3.1 / 7.5.3.2): the ONLY thing that
+    # opens an ``export_controlled`` document (``app.services.document_access``) -- no role
+    # bypasses it. Written only by ``PUT /users/{id}/export-authorization`` (Admin, a person
+    # in the app, required audit with a reason), which stamps ``_at`` / ``_by`` on a grant and
+    # clears them on a revoke.
+    #
+    # ``server_default=false()``, NOT the plain string ``"false"`` the company switches use: SQLite
+    # stores a string default as the TEXT 'false', which SQLAlchemy's Boolean reads as True, so a
+    # raw INSERT that omits the column would make the user export-authorized (fail open on a
+    # security flag). ``false()`` renders ``false`` on PostgreSQL and ``0`` on SQLite. Lock-step
+    # with migration 131's ``DEFAULT_EXPORT_AUTHORIZED``.
+    export_authorized = Column(Boolean, nullable=False, default=False, server_default=false())
+    export_authorized_at = Column(DateTime, nullable=True)
+    export_authorized_by = Column(Integer, ForeignKey("users.id", name="fk_users_export_authorized_by"), nullable=True)
+
     # Audit fields
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

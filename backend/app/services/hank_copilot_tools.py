@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from app.schemas.hank_tasks import INPUT_SCHEMAS, HankTaskCreate
 from app.services.audit_service import AuditService
+from app.services.document_access import model_hidden_record_ids
 from app.services.hank_briefing_service import HankBriefingService
 
 
@@ -33,7 +34,9 @@ def prepare_task(*, db, company_id, user, kind, input):
         # short audited transaction before another model round: the audit-chain
         # advisory lock must never remain held during external LLM I/O.
         with db.begin_nested():
-            task = HankTaskService(db, user, company_id).prepare(
+            # model_bound: the preview goes back to the model, so an export_controlled document
+            # is answered exactly as a missing one.
+            task = HankTaskService(db, user, company_id, model_bound=True).prepare(
                 payload, AuditService(db, user=user, company_id=company_id)
             )
         # Materialize while locked so expire-on-commit cannot start another read.
@@ -229,6 +232,17 @@ def saved_work(*, db, company_id, user, kind='queue', record_id=None):
 
     if kind == 'queue':
         result = work_queue(db, user, company_id)
+        # Saved work naming a document the model may not see (export_controlled, or one the user
+        # may not open) is left out of what chat reads, as if it did not exist.
+        hidden = {
+            'task': model_hidden_record_ids(
+                db, company_id, user, 'hank_task', [item.id for item in result.items if item.kind == 'task']
+            ),
+            'intake': model_hidden_record_ids(
+                db, company_id, user, 'hank_intake_file', [item.id for item in result.items if item.kind == 'intake']
+            ),
+        }
+        result.items = [item for item in result.items if item.id not in hidden.get(item.kind, set())]
         return {
             'data': result.model_dump(mode='json'),
             'summary': 'checked your saved work queue',
@@ -243,15 +257,21 @@ def saved_work(*, db, company_id, user, kind='queue', record_id=None):
         }
     teamwork = HankTeamworkService(db, user, company_id)
     if kind == 'task':
-        tasks = HankTaskService(db, user, company_id)
-        result = tasks.response(tasks.get(record_id))
+        tasks = HankTaskService(db, user, company_id, model_bound=True)
+        task = tasks.get(record_id)
+        if task.id in model_hidden_record_ids(db, company_id, user, 'hank_task', [task.id]):
+            raise HTTPException(404, 'Hank task not found')
+        result = tasks.response(task)
         url = f'/?hank_task={record_id}'
     elif kind == 'intake':
         intake = HankIntakeService(db, user, company_id)
-        result = intake.response_file(intake.file(record_id))
+        row = intake.file(record_id)
+        if row.id in model_hidden_record_ids(db, company_id, user, 'hank_intake_file', [row.id]):
+            raise HTTPException(404, 'Intake file not found')
+        result = intake.response_file(row)
         url = f'/?hank_work=intake&hank_id={record_id}'
     elif kind == 'handoff':
-        result = teamwork.handoff_response(teamwork.get_handoff(record_id))
+        result = teamwork.handoff_response(teamwork.get_handoff(record_id), model_bound=True)
         url = f'/?hank_work=handoff&hank_id={record_id}'
     elif kind == 'routine':
         result = teamwork.run_response(teamwork.get_run(record_id))
