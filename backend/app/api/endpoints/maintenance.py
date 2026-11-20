@@ -1,6 +1,6 @@
 import json
 import re
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -17,11 +17,14 @@ from app.core.time_utils import local_today, to_utc_iso
 from app.db.database import get_db
 from app.db.locks import acquire_generator_lock
 from app.models.maintenance import (
+    LOG_EVENT_COMPLETED,
+    LOG_EVENT_STARTED,
     OPEN_MAINTENANCE_STATUSES,
     OPEN_SCHEDULE_WORK_ORDER_INDEX,
     MaintenanceAsset,
     MaintenanceFrequency,
     MaintenanceLog,
+    MaintenanceLogEntryType,
     MaintenancePriority,
     MaintenanceSchedule,
     MaintenanceStatus,
@@ -269,19 +272,47 @@ class WorkOrderComplete(BaseModel):
     )
 
 
+# How far back a log entry may be dated (owner decision 2026-11-20), and the clock skew allowed forward.
+LOG_MAX_BACKDATE_DAYS = 30
+_LOG_FUTURE_SKEW = timedelta(minutes=5)
+_LOG_MAX_DESCRIPTION = 4000
+_LOG_MAX_COST = 10_000_000
+
+
 class LogCreate(BaseModel):
+    # With ``maintenance_wo_id`` both may be omitted: the entry takes the work order's target (an
+    # explicit target that differs from the work order's is 409). Without one, exactly one is required.
     work_center_id: Optional[int] = None
     asset_id: Optional[int] = None
     maintenance_wo_id: Optional[int] = None
-    event_type: str = Field(..., min_length=1, max_length=50)
-    description: str = Field(..., min_length=1)
-    cost: float = 0
-    event_date: Optional[datetime] = None
+    event_type: MaintenanceLogEntryType = Field(
+        ...,
+        description=(
+            "inspection, repair, part_replacement, observation or note. 'started' and 'completed' entries "
+            "are written by the work order's Start and Complete verbs only."
+        ),
+    )
+    description: str = Field(..., min_length=1, max_length=_LOG_MAX_DESCRIPTION)
+    cost: float = Field(0, ge=0, le=_LOG_MAX_COST, allow_inf_nan=False)
+    event_date: Optional[datetime] = Field(
+        None,
+        description=(
+            f"When it happened (UTC); defaults to now. At most {LOG_MAX_BACKDATE_DAYS} days back, and not in "
+            "the future."
+        ),
+    )
+
+    @field_validator("description")
+    @classmethod
+    def _description(cls, value: Optional[str]) -> Optional[str]:
+        return _strip_required(value)
 
     @model_validator(mode="after")
     def _one_target(self) -> "LogCreate":
-        if (self.work_center_id is None) == (self.asset_id is None):
-            raise ValueError(_TARGET_BOTH if self.work_center_id is not None else _TARGET_REQUIRED)
+        if self.work_center_id is not None and self.asset_id is not None:
+            raise ValueError(_TARGET_BOTH)
+        if self.maintenance_wo_id is None and self.work_center_id is None and self.asset_id is None:
+            raise ValueError(_TARGET_REQUIRED + " (or a maintenance_wo_id, whose target the entry takes)")
         return self
 
 
@@ -580,7 +611,19 @@ def _serialize_wo_with_derived_overdue(wo: MaintenanceWorkOrder, today: date) ->
     return row
 
 
-def _serialize_log(log: MaintenanceLog) -> dict:
+def _performer_names(db: Session, company_id: int, logs: List[MaintenanceLog]) -> Dict[int, str]:
+    """``{user id: full name}`` for the people who performed ``logs``, in ONE tenant-scoped read: a user
+    of another company (a legacy row) reads as no name, never as the foreign user's."""
+    ids = {log.performed_by for log in logs if log.performed_by is not None}
+    if not ids:
+        return {}
+    rows = (
+        db.query(User.id, User.first_name, User.last_name).filter(User.id.in_(ids), User.company_id == company_id).all()
+    )
+    return {user_id: f"{first} {last}".strip() for user_id, first, last in rows}
+
+
+def _serialize_log(log: MaintenanceLog, names: Optional[Dict[int, str]] = None) -> dict:
     return {
         "id": log.id,
         **_target_fields(log),
@@ -588,10 +631,21 @@ def _serialize_log(log: MaintenanceLog) -> dict:
         "event_type": log.event_type,
         "description": log.description,
         "performed_by": log.performed_by,
+        "performed_by_name": (names or {}).get(log.performed_by) if log.performed_by is not None else None,
         "event_date": to_utc_iso(log.event_date),
         "cost": log.cost,
         "created_at": to_utc_iso(log.created_at),
     }
+
+
+def _serialize_logs(db: Session, company_id: int, logs: List[MaintenanceLog]) -> List[dict]:
+    names = _performer_names(db, company_id, logs)
+    return [_serialize_log(log, names) for log in logs]
+
+
+def _logs_with_targets(db: Session):
+    """A log query that loads each row's target with it (the serializer reads both on every row)."""
+    return db.query(MaintenanceLog).options(joinedload(MaintenanceLog.work_center), joinedload(MaintenanceLog.asset))
 
 
 # ── Schedule Endpoints ────────────────────────────────────────────────────
@@ -946,6 +1000,29 @@ def get_work_order(
     return _serialize_wo(_wo_or_404(db, wo_id, company_id))
 
 
+@router.get("/work-orders/{wo_id}/logs")
+def list_work_order_logs(
+    wo_id: int,
+    limit: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """The maintenance log entries filed against one maintenance work order, newest first
+    (``event_date``): its ``started`` / ``completed`` entries and every entry filed with its
+    ``maintenance_wo_id`` (``POST /maintenance/log``). Each carries ``performed_by_name``. A work order
+    of another company is 404."""
+    wo = _wo_or_404(db, wo_id, company_id)
+    logs = (
+        _logs_with_targets(db)
+        .filter(MaintenanceLog.company_id == company_id, MaintenanceLog.maintenance_wo_id == wo.id)
+        .order_by(MaintenanceLog.event_date.desc(), MaintenanceLog.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return {"maintenance_wo_id": wo.id, "wo_number": wo.wo_number, "logs": _serialize_logs(db, company_id, logs)}
+
+
 @router.post("/work-orders")
 def create_work_order(
     data: WorkOrderCreate,
@@ -1290,7 +1367,7 @@ def start_work_order(
         work_center_id=wo.work_center_id,
         asset_id=wo.asset_id,
         maintenance_wo_id=wo.id,
-        event_type="started",
+        event_type=LOG_EVENT_STARTED,
         description=f"Maintenance work order {wo.wo_number} started",
         performed_by=current_user.id,
         event_date=datetime.utcnow(),
@@ -1471,7 +1548,7 @@ def complete_work_order(
         work_center_id=wo.work_center_id,
         asset_id=wo.asset_id,
         maintenance_wo_id=wo.id,
-        event_type="completed",
+        event_type=LOG_EVENT_COMPLETED,
         description=log_description,
         performed_by=current_user.id,
         event_date=now,
@@ -1803,16 +1880,17 @@ def get_history(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Get full maintenance history for a work center"""
+    """A work center's maintenance history: its log entries, newest first (``event_date``), each with
+    ``performed_by_name``."""
     wc = _work_center_in_company(db, work_center_id, company_id)
 
     logs = (
-        db.query(MaintenanceLog)
+        _logs_with_targets(db)
         .filter(
             MaintenanceLog.company_id == company_id,
             MaintenanceLog.work_center_id == work_center_id,
         )
-        .order_by(MaintenanceLog.event_date.desc())
+        .order_by(MaintenanceLog.event_date.desc(), MaintenanceLog.id.desc())
         .limit(limit)
         .all()
     )
@@ -1820,7 +1898,7 @@ def get_history(
     return {
         "work_center_id": wc.id,
         "work_center_name": wc.name,
-        "logs": [_serialize_log(log) for log in logs],
+        "logs": _serialize_logs(db, company_id, logs),
     }
 
 
@@ -1832,12 +1910,13 @@ def get_maintenance_asset_history(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Full maintenance history (log entries) for an equipment asset, newest first."""
+    """Full maintenance history (log entries) for an equipment asset, newest first, each with
+    ``performed_by_name``."""
     asset = _asset_in_company(db, asset_id, company_id)
     logs = (
-        db.query(MaintenanceLog)
+        _logs_with_targets(db)
         .filter(MaintenanceLog.company_id == company_id, MaintenanceLog.asset_id == asset_id)
-        .order_by(MaintenanceLog.event_date.desc())
+        .order_by(MaintenanceLog.event_date.desc(), MaintenanceLog.id.desc())
         .limit(limit)
         .all()
     )
@@ -1845,7 +1924,7 @@ def get_maintenance_asset_history(
         "asset_id": asset.id,
         "asset_tag": asset.asset_tag,
         "asset_name": asset.name,
-        "logs": [_serialize_log(log) for log in logs],
+        "logs": _serialize_logs(db, company_id, logs),
     }
 
 
@@ -2076,32 +2155,61 @@ def create_log(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Add a maintenance log entry against a work center OR an equipment asset."""
-    _resolve_target(db, company_id, work_center_id=data.work_center_id, asset_id=data.asset_id)
+    """File a maintenance log entry: an inspection, repair, part replacement, observation or note
+    (``event_type``; anything else -- ``started`` and ``completed`` included, which only the work
+    order's Start and Complete write -- is **422**).
 
+    Filed against a maintenance work order (``maintenance_wo_id``, open or finished -- a later note on
+    a completed work order belongs here), the entry takes the work order's target: leave
+    ``work_center_id`` and ``asset_id`` empty, or give the work order's own (a different one is
+    **409**). Without a work order, give exactly one target. ``event_date`` defaults to now and may be
+    at most 30 days back, never in the future (**422**). ``cost`` is 0 or more. A standing API token
+    may file entries; the audit row then carries ``extra_data.credential``."""
+    target_work_center_id, target_asset_id = data.work_center_id, data.asset_id
     if data.maintenance_wo_id is not None:
-        owns_wo = (
-            db.query(MaintenanceWorkOrder.id)
-            .filter(
-                MaintenanceWorkOrder.id == data.maintenance_wo_id,
-                MaintenanceWorkOrder.company_id == company_id,
+        wo = _wo_or_404(db, data.maintenance_wo_id, company_id)
+        given = (data.work_center_id, data.asset_id)
+        if given != (None, None) and given != (wo.work_center_id, wo.asset_id):
+            # The history reads file the entry under its target: an entry naming one machine's work
+            # order against another machine would put that work in the wrong machine's history.
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"A log entry on maintenance work order {wo.wo_number} is filed against that work order's own "
+                    "work center or asset. Leave the work center and asset empty to use it, or file the entry "
+                    "without the work order."
+                ),
             )
-            .first()
-        )
-        if not owns_wo:
-            raise HTTPException(status_code=404, detail="Work order not found")
+        target_work_center_id, target_asset_id = wo.work_center_id, wo.asset_id
+    # Re-resolved inside the tenant even when inherited: a legacy work order pointing at another
+    # company's machine must read as a flat 404, never file history against it.
+    _resolve_target(db, company_id, work_center_id=target_work_center_id, asset_id=target_asset_id)
 
-    # company_id was missing here too; MaintenanceLog.company_id is NOT NULL, so
+    now = datetime.utcnow()
+    event_date = now
+    if data.event_date is not None:
+        event_date = data.event_date
+        if event_date.tzinfo is not None:
+            event_date = event_date.astimezone(timezone.utc).replace(tzinfo=None)
+        if event_date > now + _LOG_FUTURE_SKEW:
+            raise HTTPException(status_code=422, detail="event_date cannot be in the future.")
+        if event_date < now - timedelta(days=LOG_MAX_BACKDATE_DAYS):
+            raise HTTPException(
+                status_code=422,
+                detail=f"event_date can be at most {LOG_MAX_BACKDATE_DAYS} days back.",
+            )
+
+    # company_id was missing here once; MaintenanceLog.company_id is NOT NULL, so
     # every call to this endpoint raised IntegrityError and 500'd.
     log = MaintenanceLog(
         company_id=company_id,
-        work_center_id=data.work_center_id,
-        asset_id=data.asset_id,
+        work_center_id=target_work_center_id,
+        asset_id=target_asset_id,
         maintenance_wo_id=data.maintenance_wo_id,
-        event_type=data.event_type,
+        event_type=data.event_type.value,
         description=data.description,
         performed_by=current_user.id,
-        event_date=data.event_date or datetime.utcnow(),
+        event_date=event_date,
         cost=data.cost,
     )
     db.add(log)
@@ -2109,4 +2217,4 @@ def create_log(
     audit.log_create("maintenance_log", log.id, log.event_type, new_values=log)
     db.commit()
     db.refresh(log)
-    return _serialize_log(log)
+    return _serialize_log(log, _performer_names(db, company_id, [log]))

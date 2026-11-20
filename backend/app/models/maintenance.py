@@ -42,6 +42,27 @@ class MaintenanceStatus(str, enum.Enum):
     ON_HOLD = "on_hold"
 
 
+class MaintenanceLogEntryType(str, enum.Enum):
+    """What a person (or an API token) may file as a maintenance log entry (owner decision 2026-11-20).
+
+    A fixed vocabulary: ``POST /maintenance/log`` refuses anything else (422), so no caller can file a
+    ``started`` or ``completed`` entry -- those the start / complete verbs write themselves
+    (``SERVER_LOG_EVENT_TYPES``). The column stays ``String(50)``, so legacy free-text rows still read.
+    """
+
+    INSPECTION = "inspection"
+    REPAIR = "repair"
+    PART_REPLACEMENT = "part_replacement"
+    OBSERVATION = "observation"
+    NOTE = "note"
+
+
+# The entries only the work-order verbs write: ``POST .../start`` and ``POST .../complete``.
+LOG_EVENT_STARTED = "started"
+LOG_EVENT_COMPLETED = "completed"
+SERVER_LOG_EVENT_TYPES = (LOG_EVENT_STARTED, LOG_EVENT_COMPLETED)
+
+
 class MaintenanceFrequency(str, enum.Enum):
     DAILY = "daily"
     WEEKLY = "weekly"
@@ -287,7 +308,9 @@ class MaintenanceLog(Base, TenantMixin):
     )
     maintenance_wo_id = Column(Integer, ForeignKey("maintenance_work_orders.id"), nullable=True)
 
-    event_type = Column(String(50), nullable=False)  # completed, inspection, repair, part_replacement, observation
+    # A ``MaintenanceLogEntryType`` value, or one of ``SERVER_LOG_EVENT_TYPES``; legacy rows may hold
+    # other text, which still reads.
+    event_type = Column(String(50), nullable=False)
     description = Column(Text, nullable=False)
     performed_by = Column(Integer, ForeignKey("users.id"), nullable=True)
 
