@@ -16,7 +16,7 @@ from sqlalchemy.sql.elements import ColumnElement
 from app.core.time_utils import CENTRAL_TIME_ZONE, local_today, local_window, to_local_date
 from app.db.ledger_filter import work_order_ledger_filter
 from app.models.downtime import DowntimeEvent, DowntimePlannedType
-from app.models.inventory import InventoryItem, InventoryTransaction, OwnershipType, TransactionType
+from app.models.inventory import InventoryItem, InventoryTransaction, TransactionType
 from app.models.part import Part
 from app.models.purchasing import InspectionStatus, POReceipt, PurchaseOrder, PurchaseOrderLine, Vendor
 from app.models.quality import NCRStatus, NonConformanceReport
@@ -55,6 +55,7 @@ from app.services.labor_cost_service import (
     resolve_labor_rates,
     resolve_overhead_rate,
 )
+from app.services.owned_property_service import COMPANY_OWNED_ITEM_CLAUSES
 from app.services.production_calendar import ProductionCalendar
 from app.services.production_calendar_service import (
     attribute_downtime_events,
@@ -1268,7 +1269,7 @@ class AnalyticsService:
             .filter(
                 InventoryItem.company_id == self.company_id,
                 InventoryItem.is_active == True,
-                InventoryItem.ownership == OwnershipType.COMPANY.value,
+                *COMPANY_OWNED_ITEM_CLAUSES,
             )
             .scalar()
             or 1
@@ -1794,7 +1795,7 @@ class AnalyticsService:
             .filter(
                 InventoryItem.company_id == self.company_id,
                 InventoryItem.is_active == True,
-                InventoryItem.ownership == OwnershipType.COMPANY.value,
+                *COMPANY_OWNED_ITEM_CLAUSES,
             )
             .group_by(InventoryItem.part_id)
             .all()
@@ -1842,7 +1843,7 @@ class AnalyticsService:
             .filter(
                 InventoryItem.company_id == self.company_id,
                 InventoryItem.is_active == True,
-                InventoryItem.ownership == OwnershipType.COMPANY.value,
+                *COMPANY_OWNED_ITEM_CLAUSES,
             )
             .scalar()
             or 0

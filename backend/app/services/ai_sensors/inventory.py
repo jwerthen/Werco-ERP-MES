@@ -9,6 +9,7 @@ from app.models.inventory import InventoryItem
 from app.models.part import Part
 from app.services.ai_learning_service import AILearningService
 from app.services.ai_sensors.common import mint_recommendation, recommendation_open
+from app.services.owned_property_service import COMPANY_OWNED_ITEM_CLAUSES
 
 MAX_RECS_PER_RUN = 25
 
@@ -25,6 +26,9 @@ def run_inventory_risk_sensor(db: Session, company_id: int) -> int:
         .filter(
             InventoryItem.company_id == company_id,
             InventoryItem.is_active == True,  # noqa: E712
+            # Company-owned stock only (AS9100D 8.5.3): customer or supplier material on
+            # the rack does not keep a reorder recommendation from being raised.
+            *COMPANY_OWNED_ITEM_CLAUSES,
         )
         .group_by(InventoryItem.part_id)
         .subquery()
