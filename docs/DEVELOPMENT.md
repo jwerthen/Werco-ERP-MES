@@ -1085,9 +1085,9 @@ After bootstrap, normal incremental `alembic upgrade head` is the standard path.
 >
 > - `documents.document_number`, `engineering_change_orders.eco_number`,
 >   `shipments.shipment_number`, `mrp_runs.run_number` and `maintenance_work_orders.wo_number`
->   come from a scan across every company. Only the document and shipment scans run under an
->   install-wide lock, so two concurrent ECO, MRP-run or maintenance creates can still race to
->   one number.
+>   come from a scan across every company. Only the document, shipment and maintenance work-order
+>   scans run under an install-wide lock (maintenance since 2026-11-20), so two concurrent ECO or
+>   MRP-run creates can still race to one number.
 > - `quotes.quote_number` is minted `FAB-<company_id>-<fabrication quote id>-R<revision>`, which
 >   embeds a global primary key.
 > - `rfq_packages.rfq_number` has no writer in `app/` today.

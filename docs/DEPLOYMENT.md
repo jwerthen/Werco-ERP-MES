@@ -220,6 +220,78 @@ rollback step; it does not undo documents, receipts, production or shipments
 already created by completed actions. Intake-linked Documents cannot be deleted
 through the application because the saved source and receipt must remain valid.
 
+### PM record integrity (migration 132)
+
+Apply **132_maintenance_pm_integrity** after **131_document_access** through the normal API boot
+migration path. No environment variable, secret, cron or worker job is added.
+
+- **What it does.** On `maintenance_work_orders`: the nullable `schedule_checklist_snapshot` (Text,
+  no default) and the partial unique index `uq_maintenance_work_orders_open_schedule` on
+  `(company_id, schedule_id)` WHERE `schedule_id IS NOT NULL AND status IN ('SCHEDULED', 'OVERDUE',
+  'IN_PROGRESS', 'ON_HOLD')`, the database backstop for "one open work order per PM schedule".
+  **No backfill**: every existing work order has no snapshot and keeps reading its schedule's live
+  checklist until it completes (see
+  [API.md → Maintenance](API.md#maintenance-pm-schedules-maintenance-work-orders-event-log), *Checklist
+  snapshot*). It creates no table, so there is no RLS change. Each object is guarded on its own, so a
+  re-run is a no-op.
+- **Pre-existing duplicates fail the upgrade (owner decision 2026-11-20).** Before any DDL the
+  revision looks for PM schedules that already hold more than one open work order and, if it finds
+  any, raises naming each company, schedule and work-order number. The boot fails with the database
+  still at `131`, nothing changed, and the old deployment keeps serving. The migration never picks
+  which work order is the real one. **Before deploying, run this read-only check:**
+
+    ```sql
+    SELECT company_id, schedule_id, array_agg(wo_number ORDER BY id), count(*)
+      FROM maintenance_work_orders
+     WHERE schedule_id IS NOT NULL
+       AND status::text IN ('SCHEDULED','OVERDUE','IN_PROGRESS','ON_HOLD')
+     GROUP BY 1, 2 HAVING count(*) > 1;
+    SELECT DISTINCT status::text FROM maintenance_work_orders;  -- confirm uppercase member names
+    ```
+
+  The first query should return no rows. The second should list only uppercase member names
+  (`SCHEDULED`, `OVERDUE`, `IN_PROGRESS`, `ON_HOLD`, `COMPLETED`, `CANCELLED`); the index predicate
+  names those labels, so stop and investigate before deploying if it shows anything else. **Remedy**
+  when the first query returns rows: in the app, cancel or complete the extra work order on each
+  listed schedule (Maintenance → Work Orders; both write the audit trail), then deploy or redeploy.
+  Don't fix it with SQL.
+- **Locks.** `SET LOCAL lock_timeout = '5s'`. The column add is metadata-only on PostgreSQL 11+ and
+  takes a brief ACCESS EXCLUSIVE lock. The index is a plain `CREATE UNIQUE INDEX` (not
+  `CONCURRENTLY`), so writes to `maintenance_work_orders` wait while it builds; the table is small.
+  Both locks are held until the boot transaction commits. A timeout fails the boot with the database
+  back at `131`; redeploying is safe.
+- **Order.** Run the migration before or with the code that maps the column (the API boot does). Old
+  code is safe on the new schema: it ignores the snapshot, and its create already enforces the
+  one-open-work-order rule under the schedule's row lock, so the index refuses nothing it would
+  write. New code on an un-migrated database fails every maintenance work-order load, so deploy the
+  **worker with or after the API**. Deploy the **API before the frontend**: the new Complete dialog
+  omits `notes` when they are unchanged, and the old API wipes a work order's notes when `notes` is
+  omitted.
+- **Behavior change to tell maintenance planners.** A schedule checklist edit or PM import now
+  binds the schedule's next work order. A step added while a work order is open is not required on
+  that work order; a step removed while one is open is still required on it. Completion no longer
+  wipes a work order's notes when the dialog leaves them alone, and maintenance work-order numbers
+  use the company's calendar year.
+- **Verify** after the deploy, read-only:
+  `SELECT indexdef FROM pg_indexes WHERE indexname = 'uq_maintenance_work_orders_open_schedule';`
+  returns one `CREATE UNIQUE INDEX … ON … (company_id, schedule_id) WHERE …` row whose predicate
+  covers `schedule_id IS NOT NULL` and the four open statuses (PostgreSQL normalizes it, typically to
+  `status = ANY (ARRAY['SCHEDULED'::maintenancestatus, …])`, so it will not match the migration's
+  text literally), and `SELECT count(*) FROM
+  maintenance_work_orders WHERE schedule_checklist_snapshot IS NOT NULL;` returns 0 until a PM work
+  order is opened or completed. Then, in a test company with invented data: **Start PM** on a
+  schedule, add a step to the schedule's checklist, open **Complete** on the work order and confirm
+  the new step is not listed; **Start PM** again on the same schedule and confirm the **409** naming
+  the open work order.
+- **Rollback.** Keep the column and index on an ordinary application rollback: from a checkout of
+  this release run `railway run --service werco-api alembic stamp 131_document_access` before
+  redeploying a pre-132 image. While the old code runs, every work order is judged on its schedule's
+  live checklist again, completion wipes notes it is not sent, and work orders it opens carry no
+  snapshot (they behave as pre-132 ones after rolling forward). The next forward deploy re-runs
+  `132` as a guarded no-op that keeps the snapshots. The **downgrade is lossy** and not a rollback
+  step: it drops the index and every snapshot, so every work order reads its schedule's live
+  checklist again, completed ones included.
+
 ### Restricted and export-controlled documents (migration 131)
 
 Apply **131_document_access** after **130_floor_pin** through the normal API boot migration path.

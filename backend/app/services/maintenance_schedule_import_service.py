@@ -25,6 +25,12 @@ and duration / shutdown / priority / next due date set only where the sheet fill
 otherwise a schedule is created (next due date = the sheet's, else today, Central). A
 re-run of the same sheet changes nothing and writes no audit row.
 
+Open work orders: a changed checklist binds the schedule's NEXT work order. An open one opened since
+migration 132 keeps the checklist snapshot it was opened with (a row warning says so); one opened
+before it has no snapshot and is judged on the schedule's current checklist, so the warning says the
+import changes its steps -- and a standing API token whose import takes steps away from such a
+schedule gets a row error (the rule ``PUT /maintenance/schedules/{id}`` applies, 403 there).
+
 All-or-nothing: any row error makes the commit refuse (409) having written nothing. A commit
 writes one REQUIRED audit row per created asset and per created / updated schedule, plus a
 summary row, in the caller's single transaction (``app.api.audit_guard.required_audit``).
@@ -46,15 +52,18 @@ from sqlalchemy.orm import Session
 from app.core.time_utils import central_today
 from app.db.locks import acquire_generator_lock
 from app.models.maintenance import (
+    OPEN_MAINTENANCE_STATUSES,
     MaintenanceAsset,
     MaintenanceFrequency,
     MaintenancePriority,
     MaintenanceSchedule,
     MaintenanceType,
+    MaintenanceWorkOrder,
 )
 from app.models.work_center import WorkCenter
 from app.services.audit_service import AuditService
 from app.services.import_service import ParsedTable, parse_date_field, parse_import_file
+from app.services.maintenance_checklist import API_TOKEN_SCHEDULE_CHECKLIST_REMOVAL, removed_items
 
 TEMPLATE_ENTITY = "maintenance-schedules"
 IMPORT_SOURCE = "pm_import"
@@ -629,9 +638,53 @@ def _target_values(group: _GroupPlan) -> Dict[str, Any]:
 
 
 _ScheduleIndex = Dict[Tuple[str, str, str], List[MaintenanceSchedule]]
+_OpenWorkOrders = Dict[int, List[MaintenanceWorkOrder]]
 
 
-def _diff_group(group: _GroupPlan, active: _ScheduleIndex, inactive: _ScheduleIndex) -> None:
+def _flag_open_work_orders(
+    group: _GroupPlan, open_work_orders: Sequence[MaintenanceWorkOrder], api_token: bool
+) -> None:
+    """What a checklist change does to the schedule's OPEN work orders -- the same probe for the
+    preview and the commit, so the two cannot disagree.
+
+    A work order opened since migration 132 keeps the checklist snapshot it was opened with: the
+    import changes only the next one (a warning, so the planner knows). One opened BEFORE it has no
+    snapshot and is judged on the schedule's current checklist, so the import changes the steps it
+    must tick or explain: a warning for a person, and -- when the import takes steps away -- a row
+    error for a standing API token, exactly as ``PUT /maintenance/schedules/{id}`` refuses it (403
+    ``API_TOKEN_SCHEDULE_CHECKLIST_REMOVAL``). Row errors make the commit refuse (409) before its first
+    write."""
+    change = group.changes.get("checklist")
+    if change is None:
+        return
+    takes_steps_away = bool(removed_items(change["old"] or [], change["new"] or []))
+    for work_order in open_work_orders:
+        if work_order.schedule_checklist_snapshot is not None:
+            group.rows[0].warnings.append(
+                f"Schedule '{group.name}' has open maintenance work order {work_order.wo_number}; it keeps the "
+                "checklist it was opened with, and the new checklist applies from the next work order."
+            )
+        elif api_token and takes_steps_away:
+            for plan in group.rows:
+                plan.errors.append(
+                    f"{API_TOKEN_SCHEDULE_CHECKLIST_REMOVAL} (Open maintenance work order {work_order.wo_number} "
+                    f"on schedule '{group.name}' is judged on the schedule's current checklist.)"
+                )
+        else:
+            group.rows[0].warnings.append(
+                f"Open maintenance work order {work_order.wo_number} was opened before checklist snapshots and is "
+                f"judged on schedule '{group.name}''s current checklist: this import changes the steps it must "
+                "tick or give a reason for."
+            )
+
+
+def _diff_group(
+    group: _GroupPlan,
+    active: _ScheduleIndex,
+    inactive: _ScheduleIndex,
+    open_work_orders: Optional[_OpenWorkOrders] = None,
+    api_token: bool = False,
+) -> None:
     if group.work_center is not None:
         target = (TARGET_WORK_CENTER, str(group.work_center.id))
     elif group.asset is not None:
@@ -659,6 +712,7 @@ def _diff_group(group: _GroupPlan, active: _ScheduleIndex, inactive: _ScheduleIn
     for name, value in _target_values(group).items():
         if before.get(name) != value:
             group.changes[name] = {"old": before.get(name), "new": value}
+    _flag_open_work_orders(group, (open_work_orders or {}).get(hits[0].id, []), api_token)
 
 
 def _name_conflicts(groups: Sequence[_GroupPlan]) -> None:
@@ -685,8 +739,12 @@ def build_plan(
     work_centers: Sequence[WorkCenter],
     assets: Sequence[MaintenanceAsset],
     schedules: Sequence[MaintenanceSchedule],
+    open_work_orders: Sequence[MaintenanceWorkOrder] = (),
+    api_token: bool = False,
 ) -> Tuple[List[_RowPlan], List[_GroupPlan], List[_NewAsset]]:
-    """Validate, resolve, group and diff every sheet row. Pure: writes nothing."""
+    """Validate, resolve, group and diff every sheet row. Pure: writes nothing. ``open_work_orders``
+    are the company's open maintenance work orders on a PM schedule; ``api_token`` is whether a
+    standing API token is importing (see ``_flag_open_work_orders``)."""
     targets = _Targets(work_centers, assets)
     plans = [_plan_row(row_number, row, targets) for row_number, row in table.iter_rows()]
     groups = _group_rows(plans, targets)
@@ -695,9 +753,13 @@ def build_plan(
     _name_conflicts(groups)
     active = _existing_schedules([s for s in schedules if s.is_active])
     inactive = _existing_schedules([s for s in schedules if not s.is_active])
+    open_by_schedule: _OpenWorkOrders = {}
+    for work_order in open_work_orders:
+        if work_order.schedule_id is not None:
+            open_by_schedule.setdefault(work_order.schedule_id, []).append(work_order)
     for group in groups:
         if not any(plan.errors for plan in group.rows):
-            _diff_group(group, active, inactive)
+            _diff_group(group, active, inactive, open_by_schedule, api_token)
     for group in groups:
         failing = [plan.row for plan in group.rows if plan.errors]
         if failing:
@@ -769,17 +831,33 @@ def _load(db: Session, company_id: int, *, lock: bool) -> Dict[str, Any]:
     if lock:
         schedules = schedules.with_for_update().populate_existing()
         assets = assets.with_for_update().populate_existing()
-    return {
+    loaded = {
         "work_centers": db.query(WorkCenter).filter(WorkCenter.company_id == company_id).order_by(WorkCenter.id).all(),
         "assets": assets.order_by(MaintenanceAsset.id).all(),
         "schedules": schedules.order_by(MaintenanceSchedule.id).all(),
     }
+    # Read AFTER the schedules (row-locked on commit): opening a PM work order takes its schedule's row
+    # lock first, so no work order this probe misses can be opened against a schedule being imported.
+    loaded["open_work_orders"] = (
+        db.query(MaintenanceWorkOrder)
+        .filter(
+            MaintenanceWorkOrder.company_id == company_id,
+            MaintenanceWorkOrder.schedule_id.isnot(None),
+            MaintenanceWorkOrder.status.in_(OPEN_MAINTENANCE_STATUSES),
+        )
+        .order_by(MaintenanceWorkOrder.id)
+        .all()
+    )
+    return loaded
 
 
-def preview_pm_import(db: Session, *, company_id: int, filename: Optional[str], content: bytes) -> Dict[str, Any]:
-    """Dry run: parse, resolve, group and diff. Writes nothing (takes no AuditService)."""
+def preview_pm_import(
+    db: Session, *, company_id: int, filename: Optional[str], content: bytes, api_token: bool = False
+) -> Dict[str, Any]:
+    """Dry run: parse, resolve, group and diff. Writes nothing (takes no AuditService). ``api_token``
+    previews the row errors a standing API token's commit would hit."""
     table = parse_pm_file(filename, content)
-    plans, groups, new_assets = build_plan(table, **_load(db, company_id, lock=False))
+    plans, groups, new_assets = build_plan(table, **_load(db, company_id, lock=False), api_token=api_token)
     return _response(filename, source_hash(content), plans, groups, new_assets, committed=False)
 
 
@@ -900,6 +978,7 @@ def commit_pm_import(
     content: bytes,
     expected_source_hash: str,
     audit: AuditService,
+    api_token: bool = False,
 ) -> Dict[str, Any]:
     """Apply the sheet. All-or-nothing; the CALLER commits (inside ``required_audit``).
 
@@ -915,7 +994,7 @@ def commit_pm_import(
         )
     table = parse_pm_file(filename, content)
     acquire_generator_lock(db, "maintenance_schedule_import", company_id)
-    plans, groups, new_assets = build_plan(table, **_load(db, company_id, lock=True))
+    plans, groups, new_assets = build_plan(table, **_load(db, company_id, lock=True), api_token=api_token)
     failing = [plan for plan in plans if plan.errors]
     if failing:
         raise HTTPException(

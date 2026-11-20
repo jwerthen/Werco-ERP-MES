@@ -294,6 +294,37 @@ statement, writes no row, and adds no environment variable, secret, cron or work
   under, and the migration will not pick which company's record to change.
   See [API.md → Customer Complaints & RMA](API.md#customer-complaints--rma).
 
+**PM record integrity.** Apply **132_maintenance_pm_integrity** after **131_document_access**
+through the normal API boot migration path. It adds the nullable `maintenance_work_orders.schedule_checklist_snapshot`
+(no backfill: existing work orders keep reading their schedule's live checklist until they complete)
+and the partial unique index `uq_maintenance_work_orders_open_schedule` on `(company_id,
+schedule_id)` over the open statuses, the database backstop for one open work order per PM
+schedule. **The upgrade fails, naming the work orders, if any schedule already holds two open work
+orders** (owner decision 2026-11-20: fail and fix by hand); the boot then rolls back to `131` and the
+old deployment keeps serving. **Run this read-only check before deploying:**
+
+```sql
+SELECT company_id, schedule_id, array_agg(wo_number ORDER BY id), count(*)
+  FROM maintenance_work_orders
+ WHERE schedule_id IS NOT NULL
+   AND status::text IN ('SCHEDULED','OVERDUE','IN_PROGRESS','ON_HOLD')
+ GROUP BY 1, 2 HAVING count(*) > 1;
+SELECT DISTINCT status::text FROM maintenance_work_orders;  -- confirm uppercase member names
+```
+
+The first should return no rows; the second only uppercase member names (`SCHEDULED`, `OVERDUE`,
+`IN_PROGRESS`, `ON_HOLD`, `COMPLETED`, `CANCELLED`). **Remedy** if the first returns rows: cancel or
+complete the extra work order on each listed schedule in the app (audited), then redeploy; never
+with SQL. Under `SET LOCAL lock_timeout = '5s'` the column add is metadata-only and the index build
+holds writes on the small `maintenance_work_orders` table until the boot commits; a timeout leaves
+the database at `131`. No environment variable, secret, cron or worker job is added. Deploy the
+worker with or after the API (new code selects the new column on every maintenance work-order load)
+and the API before the frontend (the new Complete dialog omits unchanged `notes`, which the old API
+treats as a wipe). On an application rollback keep the migration: from a checkout of this release
+run `railway run --service werco-api alembic stamp 131_document_access` before redeploying a pre-132
+image. The **downgrade is lossy**: it drops every checklist snapshot. Full notes and verification
+are in [PM record integrity](DEPLOYMENT.md#pm-record-integrity-migration-132).
+
 **Restricted and export-controlled documents.** Apply **131_document_access** after
 **130_floor_pin** through the normal API boot migration path. It adds `documents.access_level`
 (`standard` default, CHECK `ck_documents_access_level`, index `ix_documents_access_level`) and

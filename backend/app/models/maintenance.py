@@ -12,7 +12,7 @@ from datetime import datetime
 
 from sqlalchemy import DDL, Boolean, CheckConstraint, Column, Date, DateTime
 from sqlalchemy import Enum as SQLEnum
-from sqlalchemy import Float, ForeignKey, Integer, String, Text, UniqueConstraint, event
+from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, event, text
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
@@ -62,6 +62,29 @@ FREQUENCY_DAYS_MAP = {
     MaintenanceFrequency.SEMI_ANNUAL: 182,
     MaintenanceFrequency.ANNUAL: 365,
 }
+
+
+# A maintenance work order in one of these is still OPEN: its PM schedule takes no second one until it
+# ends (the endpoints' ``_OPEN_STATUSES``, the PM import's open-work-order probe and the partial
+# unique index below all read this one tuple).
+OPEN_MAINTENANCE_STATUSES = (
+    MaintenanceStatus.SCHEDULED,
+    MaintenanceStatus.OVERDUE,
+    MaintenanceStatus.IN_PROGRESS,
+    MaintenanceStatus.ON_HOLD,
+)
+
+# One OPEN maintenance work order per PM schedule, in the database (migration 132). The rule is
+# enforced first by ``create_work_order`` under the schedule's row lock (a 409 naming the open work
+# order); this index is the backstop for any future writer. ``SQLEnum(MaintenanceStatus)`` persists
+# member NAMES, so the predicate names them. Byte-identical in migration ``132_maintenance_pm_integrity``
+# (a test pins it, and that it lists exactly ``OPEN_MAINTENANCE_STATUSES``), and declared for BOTH
+# dialects (the 074/076/087 convention): a ``postgresql_where`` alone would make SQLite build a FULL
+# unique index -- one work order per schedule, ever.
+OPEN_SCHEDULE_WORK_ORDER_INDEX = "uq_maintenance_work_orders_open_schedule"
+OPEN_SCHEDULE_WORK_ORDER_PREDICATE = (
+    "schedule_id IS NOT NULL AND status IN ('SCHEDULED', 'OVERDUE', 'IN_PROGRESS', 'ON_HOLD')"
+)
 
 
 # Exactly one maintenance target per row (byte-identical in migration 124; a test pins it).
@@ -168,7 +191,17 @@ class MaintenanceWorkOrder(Base, TenantMixin):
     """Individual maintenance work order / task"""
 
     __tablename__ = "maintenance_work_orders"
-    __table_args__ = (CheckConstraint(ONE_TARGET_CHECK, name="ck_maintenance_work_orders_one_target"),)
+    __table_args__ = (
+        CheckConstraint(ONE_TARGET_CHECK, name="ck_maintenance_work_orders_one_target"),
+        Index(
+            OPEN_SCHEDULE_WORK_ORDER_INDEX,
+            "company_id",
+            "schedule_id",
+            unique=True,
+            postgresql_where=text(OPEN_SCHEDULE_WORK_ORDER_PREDICATE),
+            sqlite_where=text(OPEN_SCHEDULE_WORK_ORDER_PREDICATE),
+        ),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     schedule_id = Column(Integer, ForeignKey("maintenance_schedules.id"), nullable=True)
@@ -190,6 +223,16 @@ class MaintenanceWorkOrder(Base, TenantMixin):
     title = Column(String(255), nullable=False)
     description = Column(Text)
     checklist_results = Column(Text)  # JSON with completed checklist items
+    # The PM schedule's checklist as it stood when this work order was OPENED (a JSON array of
+    # strings; owner decision 2026-11-20, migration 132). Completion judges these steps, and every
+    # response serves them as ``schedule_checklist_items``, so a later schedule edit or PM import
+    # binds the NEXT work order, never this one or a finished record. ``NULL`` on a work order
+    # without a schedule, and on a work order opened before migration 132: that one keeps the
+    # pre-132 behavior of reading the schedule's live checklist until completing or cancelling it
+    # writes the steps it answered for here (never backfilled -- the list a legacy work order was opened with is unknowable,
+    # and an UPDATE outside AuditService would break invariant 2). ``"[]"`` is a schedule that had
+    # no steps, not a legacy row.
+    schedule_checklist_snapshot = Column(Text, nullable=True)
 
     scheduled_date = Column(Date)
     due_date = Column(Date)

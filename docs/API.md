@@ -5771,17 +5771,17 @@ uploads go through text extraction + LLM. See
 | GET | `/maintenance/schedules` | List PM schedules (`is_active` default true; `work_center_id` or `asset_id` narrows to one target) | Yes |
 | GET | `/maintenance/schedules/{id}` | PM schedule detail | Yes |
 | POST | `/maintenance/schedules` | Create PM schedule on a work center **or** an equipment asset (`next_due_date` left blank is the company's day) | Admin / Manager / Supervisor |
-| PUT | `/maintenance/schedules/{id}` | Update PM schedule (the target is not changed here) | Admin / Manager / Supervisor |
+| PUT | `/maintenance/schedules/{id}` | Update PM schedule (the target is not changed here). A changed `checklist` binds the schedule's **next** work order; an open one keeps the steps it was opened with (see *Checklist snapshot* under *The PM loop*) | Admin / Manager / Supervisor |
 | DELETE | `/maintenance/schedules/{id}` | Deactivate PM schedule (`is_active` → `false`; no soft-delete mixin) | Admin / Manager / Supervisor |
 | POST | `/maintenance/schedules/import/preview` | Dry run of a PM schedule sheet (multipart `file`; template `maintenance-schedules`). Writes nothing | Admin / Manager / Supervisor |
-| POST | `/maintenance/schedules/import/commit` | Apply a previewed PM sheet (multipart `file` + form field `expected_source_hash`). All-or-nothing | Admin / Manager / Supervisor |
+| POST | `/maintenance/schedules/import/commit` | Apply a previewed PM sheet (multipart `file` + form field `expected_source_hash`). All-or-nothing. A changed checklist binds each schedule's next work order (a row warning names an open one) | Admin / Manager / Supervisor |
 | GET | `/maintenance/work-orders` | List maintenance work orders (**pure read**, see below; `asset_id` filter beside `work_center_id`). The derived `overdue` label compares `due_date` with the company's day | Yes |
 | GET | `/maintenance/work-orders/overdue` | Overdue maintenance work orders (**pure read**; `due_date` before the company's day) | Yes |
 | GET | `/maintenance/work-orders/{id}` | Maintenance work order detail | Yes |
-| POST | `/maintenance/work-orders` | Create maintenance work order on a work center **or** an asset (or neither, with a `schedule_id`, to inherit the schedule's target). A `schedule_id` that already has an open work order (`scheduled` / `overdue` / `in_progress` / `on_hold`) is **409** naming it. `scheduled_date` / `due_date` left blank are the company's day | Admin / Manager / Supervisor |
+| POST | `/maintenance/work-orders` | Create maintenance work order on a work center **or** an asset (or neither, with a `schedule_id`, to inherit the schedule's target). A `schedule_id` that already has an open work order (`scheduled` / `overdue` / `in_progress` / `on_hold`) is **409** naming it. With a `schedule_id` the work order snapshots the schedule's checklist, which its completion is judged on. `scheduled_date` / `due_date` left blank are the company's day, and the `wo_number` (`MWO-YYYY-NNNN`) year is the company's calendar year | Admin / Manager / Supervisor |
 | PUT | `/maintenance/work-orders/{id}` | Update an open maintenance work order; `status` among `scheduled`, `overdue`, `on_hold`, `cancelled` only (**409** for `in_progress` / `completed` — use the verbs — for returning a started work order to `scheduled` / `overdue`, for changing `requires_shutdown` once started, and for changing **any** field of a `completed` or `cancelled` work order, a final record; see below). Moving it to `cancelled` settles any downtime event it holds | Admin / Manager / Supervisor |
 | POST | `/maintenance/work-orders/{id}/start` | Start (→ `in_progress`). A work-center work order with `requires_shutdown` opens, adopts or shares a downtime event — never a second open one on the machine | Admin / Manager / Supervisor / Operator |
-| POST | `/maintenance/work-orders/{id}/complete` | Complete (→ `completed`, advances the linked schedule from the company's day — the response adds `schedule_next_due_date`) and resolve the work order's open downtime event. `checklist_results` omitted keeps the work order's checklist. Any checklist item left unticked needs `incomplete_checklist_reason` (**409** without one) and a person: an API token is **403** (see *Checklist at completion* below) | Admin / Manager / Supervisor / Operator |
+| POST | `/maintenance/work-orders/{id}/complete` | Complete (→ `completed`, advances the linked schedule from the company's day — the response adds `schedule_next_due_date`) and resolve the work order's open downtime event. `checklist_results` omitted keeps the work order's checklist, and `notes` omitted keeps its notes (a value replaces them, `null` clears them). Any checklist item left unticked (the work order's own, or a step of its PM schedule's checklist as snapshotted when it was opened) needs `incomplete_checklist_reason` (**409** without one) and a person: an API token is **403** (see *Checklist at completion* below) | Admin / Manager / Supervisor / Operator |
 | GET | `/maintenance/calendar` | Work orders in a date window (**capped at 366 days**) | Yes |
 | GET | `/maintenance/dashboard` | Counts, cost, per-machine MTBF/MTTR (work centers only). `overdue_count` / `due_this_week` count work orders; `schedules_overdue` / `schedules_due_this_week` count due PM schedules no scheduled / overdue / in-progress work order covers, so a PM whose work order is on hold still counts. "Today" is the company's day (see *The PM loop* below) | Yes |
 | GET | `/maintenance/history/{work_center_id}` | Event log for one machine (`limit` 1…5000, default 100) | Yes |
@@ -5852,7 +5852,8 @@ uploads go through text extraction + LLM. See
 > the deactivation logged as the `is_active` flip), `maintenance_work_order` (`CREATE` / `UPDATE`,
 > plus `STATUS_CHANGE` on start and complete — the complete row carries `total_cost`,
 > `downtime_minutes`, `actual_duration_hours`, `schedule_id`, `schedule_next_due_date` and
-> `resolved_downtime_event_ids` in `extra_data`, plus the unticked-checklist fields when the work
+> `resolved_downtime_event_ids` in `extra_data`, and the old and new `notes` in `old_values` /
+> `new_values` when the completion changed them, plus the unticked-checklist fields when the work
 > order closes with part of its checklist undone, and that row is then **required** evidence — see
 > *Checklist at completion* under *The PM loop*), and `maintenance_log` (`CREATE`). A completion
 > that advances a PM schedule also writes that schedule's own `maintenance_schedule` `UPDATE` row. Rows are logged **before** the
@@ -5865,7 +5866,13 @@ uploads go through text extraction + LLM. See
 
 > **`wo_number` allocation stays install-wide on purpose.** `MaintenanceWorkOrder.wo_number` carries
 > a *global* unique constraint, so a per-tenant sequence would hand two companies the same number
-> and the second insert would fail. The scan reads only the highest number, never row content.
+> and the second insert would fail. The scan reads only the numbers, never row content. Since
+> 2026-11-20 the number is `MWO-<year>-<NNNN>` with the **company's** calendar year (it was the
+> server's UTC year, so a work order opened on the evening of Dec 31 Central was numbered in the next
+> year), the allocation runs under an install-wide transaction-scoped advisory lock on PostgreSQL
+> (two simultaneous creates used to read the same highest number, and the second failed the unique
+> constraint), and the next number follows the highest **numeric** suffix of that year. A legacy
+> number whose suffix is not a number is skipped; it used to restart the sequence at `0001`.
 
 > **Equipment assets: a maintenance record targets a work center OR an asset (migration
 > `124_maintenance_assets`).** Equipment that is maintained but is not a production work center — a
@@ -5960,7 +5967,10 @@ uploads go through text extraction + LLM. See
 >   `false` — `title` trimmed, as the request's is, and everything else exactly as stored, other text
 >   not normalized); on a completed or cancelled work order such a request writes nothing (no update,
 >   no audit row) and returns the work order unchanged. Open work orders are unaffected, and the
->   Maintenance page offers no edit on a completed or cancelled row.
+>   Maintenance page offers no edit on a completed or cancelled row. What a final record reports it
+>   was judged on holds too (migration `132`): its `schedule_checklist_items` are the checklist
+>   snapshot it carries, so a later schedule edit or PM import does not change them (*Checklist
+>   snapshot* under *The PM loop*; a record finished without one is in *Known gaps*).
 > - **An operator report cannot double it either.** `POST /downtime/` on a machine a maintenance work
 >   order already holds down (its event is open, the work order in progress or on hold after a start)
 >   is **409** naming the work order and the open event: the stoppage is already being recorded, and
@@ -6020,6 +6030,25 @@ uploads go through text extraction + LLM. See
 >   `extra_data.source = "pm_import"`), plus one `maintenance_schedule_import` IMPORT summary row;
 >   **503** with nothing saved if one cannot be written. Re-running the same sheet changes nothing and
 >   writes no audit row. File-level problems are **400**.
+> - **Open work orders (2026-11-20).** A changed checklist binds each schedule's **next** work order
+>   (*Checklist snapshot* under *The PM loop*). For each open work order (`scheduled` / `overdue` /
+>   `in_progress` / `on_hold`) on a schedule whose checklist the sheet changes, the schedule's first
+>   row carries a warning, in the preview and the commit alike:
+>   - a work order with a checklist snapshot: *"Schedule '…' has open maintenance work order MWO-…;
+>     it keeps the checklist it was opened with, and the new checklist applies from the next work
+>     order."*
+>   - a work order opened before migration `132` (no snapshot), which is still judged on the
+>     schedule's current checklist: *"Open maintenance work order MWO-… was opened before checklist
+>     snapshots and is judged on schedule '…''s current checklist: this import changes the steps it
+>     must tick or give a reason for."* When the importer is a standing **API token** and the sheet
+>     takes steps away (drops, renames or clears them), this is instead a **row error** on every row
+>     of that schedule — the `API_TOKEN_SCHEDULE_CHECKLIST_REMOVAL` text plus *"(Open maintenance work
+>     order MWO-… on schedule '…' is judged on the schedule's current checklist.)"* — so the commit is
+>     **409** with nothing written, the rule `PUT /maintenance/schedules/{id}` applies as a 403. The
+>     preview shows the same row error to a token.
+>
+>   The open work orders are read after the schedules are row-locked, and opening a PM work order
+>   takes its schedule's row lock first, so the commit cannot miss one opened mid-import.
 > - Importing a schedule creates no work order. Nothing generates due PM work orders automatically
 >   today; a planner opens one with **Start PM** (next note).
 
@@ -6027,8 +6056,9 @@ uploads go through text extraction + LLM. See
 >
 > - **"Today" is the company's calendar day.** What each of these reads as today — the dashboard's
 >   counts, the `overdue` label on `GET /maintenance/work-orders` and `/work-orders/overdue`, the
->   blank-field defaults on `POST /maintenance/schedules` and `POST /maintenance/work-orders`, and the
->   date a completion stamps on its PM schedule — is the day on the company's wall clock
+>   blank-field defaults on `POST /maintenance/schedules` and `POST /maintenance/work-orders`, the
+>   year in a new work order's `wo_number`, and the date a completion stamps on its PM schedule — is
+>   the day on the company's wall clock
 >   (`Company.timezone`, America/Chicago when unset or unrecognized), the same day the QMS PM evidence
 >   row reads. It used to be the server's `date.today()`, which on the UTC deployment turns over at
 >   6 PM (CST) / 7 PM (CDT): an evening completion was stamped with tomorrow's date and pushed the next
@@ -6061,8 +6091,16 @@ uploads go through text extraction + LLM. See
 >   work order, MWO-… (on hold). Complete or cancel it before opening another."* — completing either of
 >   two would advance the schedule and leave the other working to a due date it no longer has. A
 >   `completed` or `cancelled` work order does not count. The check runs under a row lock on the
->   schedule, so two simultaneous Start PMs serialize and the second gets the 409. Data that already
->   holds two open work orders on one schedule is not repaired; the 409 names the oldest.
+>   schedule, so two simultaneous Start PMs serialize and the second gets the 409. **The database
+>   holds the same rule** (migration `132`): the partial unique index
+>   `uq_maintenance_work_orders_open_schedule` on `(company_id, schedule_id)` where `schedule_id IS
+>   NOT NULL AND status IN ('SCHEDULED', 'OVERDUE', 'IN_PROGRESS', 'ON_HOLD')` (the enum's stored
+>   member names). It is a backstop for a writer that skips the check: should the insert trip it, the
+>   create still answers the same **409** naming the open work order (or, if none can be read back,
+>   **409** *"The maintenance work order could not be saved because another one was saved at the same
+>   time. Nothing was changed; try again."*), never a 500. Migration `132` refuses to build the index
+>   over data that already holds two open work orders on one schedule, naming them, so none survives
+>   the upgrade; see `docs/DEPLOYMENT_RUNBOOK.md` for the pre-deploy check and the remedy.
 > - **Complete** on a work order with a `schedule_id` sets the schedule's `last_completed_date` to the
 >   company's calendar day at the moment of completion and `next_due_date` to that date plus the
 >   interval, in fixed days: daily 1, weekly 7, biweekly 14, monthly 30, quarterly 90, semi_annual
@@ -6070,6 +6108,39 @@ uploads go through text extraction + LLM. See
 >   was advanced); the schedule's `UPDATE` audit row reads *"… advanced by completing maintenance work
 >   order MWO-…"* with `extra_data.maintenance_work_order_id`. `checklist_results` omitted keeps the
 >   checklist the work order carries; a value, or an explicit `null`, replaces it.
+> - **Completion notes replace (owner decision 2026-11-20).** `notes` on `/complete` follows the same
+>   rule: omitted keeps the notes the work order carries (a planner's, written by `PUT`), a value
+>   replaces them, an explicit `null` (or blank text, stored as `null`) clears them. It used to write
+>   whatever was sent, so a completion that sent no notes wiped the planner's. When the completion
+>   changes them, its `STATUS_CHANGE` audit row carries the old and new text as `old_values.notes` /
+>   `new_values.notes` beside the status. When it replaces or clears notes the work order already
+>   had, that row is **required evidence** -- the replaced text survives nowhere else -- so if it
+>   cannot be written the request is **503** and nothing is saved (as for an unticked checklist,
+>   below); adding notes where there were none keeps the ordinary best-effort row. The Complete dialog pre-fills **Completion
+>   Notes** with the work order's notes and sends them only when changed (trimmed; an emptied field
+>   sends `null`).
+> - **Checklist snapshot (owner decision 2026-11-20, migration `132`).** `POST
+>   /maintenance/work-orders` with a `schedule_id` stores the schedule's checklist as it stands at that
+>   moment in `schedule_checklist_snapshot` (a JSON array of strings, read under the schedule's row
+>   lock; `[]` for a schedule with no steps). Completion judges those steps, and every response serves
+>   them as `schedule_checklist_items`, so an edit of the schedule's checklist (`PUT
+>   /maintenance/schedules/{id}`) or a PM import binds the schedule's **next** work order — never an
+>   open one, and never a completed or cancelled final record. The column is server-written only:
+>   neither the create nor the `PUT` body takes it, and no response returns it under its own name.
+>   Two consequences of the change:
+>   - A step **added** to the schedule while a work order is open is not required on that work order.
+>   - A step **removed** from the schedule while a work order is open is still required on it (a tick
+>     or a reason).
+>
+>   A work order opened before migration `132` has no snapshot (never backfilled: the list it was
+>   opened with is unknowable, and an `UPDATE` outside `AuditService` would break invariant 2). While
+>   it is open it is judged on, and serves, the schedule's **current** checklist, as every work order
+>   was before. Completing it writes the snapshot from the schedule steps that completion judged, so
+>   the finished record stops following later schedule edits from then on; the completion's audit row
+>   then lists those steps in `extra_data.schedule_checklist_snapshot`. Cancelling one (`PUT` with
+>   `status: cancelled`) likewise writes the snapshot from the schedule's current steps, recorded by the
+>   `PUT`'s audit row. A pre-`132` work order completed or cancelled before this deploy keeps no
+>   snapshot (see *Known gaps*).
 > - **Checklist at completion (owner decision 2026-11-17).** `POST
 >   /maintenance/work-orders/{id}/complete` takes `incomplete_checklist_reason` (string, at most 2000
 >   characters). Completing with **any** checklist item unticked and no non-blank reason is **409**
@@ -6082,17 +6153,23 @@ uploads go through text extraction + LLM. See
 >   one never reaches an agent (owner decision 2026-11-17; a token's fully ticked completion is
 >   unchanged; see `docs/RBAC_PERMISSIONS.md` → Credential policy for judgment writes).
 >   - The items judged are those the work order carried plus any in the body's `checklist_results`,
->     plus — for a PM work order — every item of its **schedule's** checklist, matched by text. A
->     schedule step left off the work order (at Start PM, by a create through the API that sent no
->     checklist, or by a later `PUT`) is still a step of the PM: it needs a tick or a reason. Every
->     maintenance work-order response carries those steps as `schedule_checklist_items` (`[]` without
->     a schedule; read whether or not the schedule is still active, exactly as completion reads it),
->     and the Complete dialog lists any it lacks, unticked, after the work order's own items. A
->     standing API token's `PUT /maintenance/schedules/{id}` that takes items off `checklist` while
->     the schedule has an open work order is **403** `API_TOKEN_SCHEDULE_CHECKLIST_REMOVAL` *"Removing
->     items from the checklist of a PM schedule that has an open work order must be done by a person
->     signed in to the app, not an API token."* (adding steps, or editing a schedule with no open work
->     order, is unchanged). An item is ticked only when the checklist the work order completes with marks
+>     plus — for a PM work order — every item of its **schedule's** checklist as snapshotted when the
+>     work order was opened (*Checklist snapshot* above; the schedule's current checklist for an open
+>     work order opened before migration `132`), matched by text. A schedule step left off the work
+>     order (at Start PM, by a create through the API that sent no checklist, or by a later `PUT`) is
+>     still a step of the PM: it needs a tick or a reason. Every maintenance work-order response
+>     carries those steps as `schedule_checklist_items` — the snapshot; `[]` without a schedule; for a
+>     work order with no snapshot, the schedule's current checklist, read whether or not the schedule
+>     is still active, exactly as completion reads it — and the Complete dialog lists any it lacks,
+>     unticked, after the work order's own items. A standing API token's `PUT
+>     /maintenance/schedules/{id}` that takes items off `checklist` while the schedule has an open
+>     work order **with no checklist snapshot** (opened before migration `132`, so still judged on the
+>     schedule's current steps) is **403** `API_TOKEN_SCHEDULE_CHECKLIST_REMOVAL` *"Removing items from
+>     the checklist of a PM schedule whose open work order is still judged on the schedule's current
+>     checklist (it was opened before checklist snapshots) must be done by a person signed in to the
+>     app, not an API token."* Adding steps, editing a schedule with no open work order, and —
+>     since 2026-11-20 — removing steps while the open work order carries a snapshot (the removal binds
+>     the next work order) are allowed to a token. An item is ticked only when the checklist the work order completes with marks
 >     it `"done": true`; a plain-string item, or a line of a one-item-per-line checklist (split on
 >     `\r?\n`, as the page splits it), is unticked. Items count as a **multiset**: a checklist that
 >     names one step twice needs both copies ticked, and the audit row lists a text once per unticked
@@ -6107,9 +6184,18 @@ uploads go through text extraction + LLM. See
 >     could not be saved; nothing was changed. Retry."* and nothing is saved. The `completed` log
 >     entry's description adds *"Checklist: N of M items not ticked (…). Reason: …"*.
 >   - With every item ticked (or no checklist) no reason is needed, one sent is ignored and not
->     recorded, and the audit row stays the ordinary best-effort status-change row.
+>     recorded, and the audit row stays the ordinary best-effort status-change row (unless the
+>     completion replaces existing notes, above).
 >   - The Maintenance page's Complete dialog shows a required reason field whenever an item is
 >     unticked and keeps **Complete** disabled until it is filled; the reason is sent only then.
+>   - The dialog reads the work order fresh (`GET /maintenance/work-orders/{id}`) when it opens rather
+>     than using the cached list row (falling back to the row if that read fails). When a completion
+>     is refused **409**, it reloads the page data, re-reads the work order and rebuilds the
+>     checklist from it, keeping the technician's ticks (matched by text, as a multiset) and every
+>     other field they typed; any item the record now carries that the dialog did not list appears
+>     unticked, with a warning to tick it or give a reason. After a **400** (the work order was held,
+>     cancelled or completed meanwhile) it reloads the page data. The server's text stays on screen
+>     either way.
 >   - `PUT /maintenance/work-orders/{id}` (planning roles) can still rewrite `checklist_results`
 >     before completion; a person's edit is its own audited `maintenance_work_order` `UPDATE` row,
 >     and on a PM work order it cannot take a schedule step off the judged list. **After** completion
@@ -6126,10 +6212,19 @@ uploads go through text extraction + LLM. See
 >   sends **only the fields changed**, so a dialog left open while someone completes the PM cannot put
 >   the old due date back unless the planner changed it. Name and target are not editable there: the
 >   `PUT` never moves a target, and the PM import matches schedules by target + name, so a rename would
->   make the next import create a duplicate.
+>   make the next import create a duplicate. The `PUT` row-locks the schedule (as completion's
+>   roll-forward and Start PM do), so its audit row's `old_values` cannot predate a concurrent
+>   completion that moved the due dates. A checklist change binds the next work order (*Checklist
+>   snapshot* above).
 > - **Known gaps:** the `maintenance.due` / `maintenance.overdue` notification catalog entries still
 >   have no emitter, and *monthly* is a fixed 30 days from the completion date, not a calendar month,
->   so a schedule completed on its due date drifts earlier each month.
+>   so a schedule completed on its due date drifts earlier each month. Work orders opened before
+>   migration `132` carry no checklist snapshot until they complete (never backfilled): while open
+>   they are judged on the schedule's **current** checklist, so a schedule edit or PM import still
+>   changes what they must tick (a token may not take steps away from such a schedule, above); and
+>   one completed or cancelled **before** the `132` deploy keeps reading the
+>   schedule's live checklist in `schedule_checklist_items` for good, so that final record's reported
+>   steps follow later schedule edits.
 
 ### Tool & Fixture Management (tool crib)
 

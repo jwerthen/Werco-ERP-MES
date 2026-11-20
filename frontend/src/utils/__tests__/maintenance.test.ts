@@ -1,6 +1,8 @@
 import {
+  carryChecklistTicks,
   checklistResultsPayload,
   completionChecklist,
+  completionNotesPayload,
   openWorkOrdersBySchedule,
   parseChecklistResults,
 } from '../maintenance';
@@ -121,5 +123,87 @@ describe('completionChecklist', () => {
     const items = [{ item: 'Drain tank', done: false }];
     expect(completionChecklist(items)).toEqual(items);
     expect(completionChecklist(items, [])).toEqual(items);
+  });
+});
+
+describe('carryChecklistTicks', () => {
+  const ticked = (item: string) => ({ item, done: true });
+  const open = (item: string) => ({ item, done: false });
+
+  it('keeps the ticks by item text and counts the items the dialog did not list', () => {
+    expect(
+      carryChecklistTicks(
+        [ticked('Drain tank'), ticked('Check belt')],
+        [open('Drain tank'), open('Check belt'), open('Check oil')]
+      )
+    ).toEqual({ checklist: [ticked('Drain tank'), ticked('Check belt'), open('Check oil')], added: 1 });
+  });
+
+  it('matches repeated items as a multiset: two ticked copies stay ticked when a third arrives', () => {
+    expect(
+      carryChecklistTicks(
+        [ticked('Grease bearing'), ticked('Grease bearing')],
+        [open('Grease bearing'), open('Grease bearing'), open('Grease bearing')]
+      )
+    ).toEqual({ checklist: [ticked('Grease bearing'), ticked('Grease bearing'), open('Grease bearing')], added: 1 });
+  });
+
+  it('matches ticked copies first, so an unticked twin never takes a tick', () => {
+    expect(carryChecklistTicks([open('Grease bearing'), ticked('Grease bearing')], [open('Grease bearing')])).toEqual({
+      checklist: [ticked('Grease bearing')],
+      added: 0,
+    });
+  });
+
+  it('keeps the dialog’s answer on a matched item and the server’s on a new one', () => {
+    expect(carryChecklistTicks([open('Drain tank')], [ticked('Drain tank'), ticked('Check oil')])).toEqual({
+      checklist: [open('Drain tank'), ticked('Check oil')],
+      added: 0,
+    });
+  });
+
+  it('counts as added only the new items still to answer, never one the server holds ticked', () => {
+    expect(
+      carryChecklistTicks(
+        [ticked('Drain tank')],
+        [open('Drain tank'), ticked('Check oil'), open('Bleed lines'), open('Bleed lines')]
+      )
+    ).toEqual({
+      checklist: [ticked('Drain tank'), ticked('Check oil'), open('Bleed lines'), open('Bleed lines')],
+      added: 2,
+    });
+  });
+
+  it('drops items the fresh list no longer carries and reports nothing new', () => {
+    expect(carryChecklistTicks([ticked('Drain tank'), ticked('Check belt')], [open('Check belt')])).toEqual({
+      checklist: [ticked('Check belt')],
+      added: 0,
+    });
+  });
+
+  it('does not change the lists it is given', () => {
+    const previous = [ticked('Drain tank')];
+    const fresh = [open('Drain tank')];
+    carryChecklistTicks(previous, fresh);
+    expect(previous).toEqual([ticked('Drain tank')]);
+    expect(fresh).toEqual([open('Drain tank')]);
+  });
+});
+
+describe('completionNotesPayload', () => {
+  it('omits notes the technician left as they opened (the server keeps them)', () => {
+    expect(completionNotesPayload('Belt squeals', 'Belt squeals')).toEqual({});
+    expect(completionNotesPayload('  Belt squeals \n', 'Belt squeals')).toEqual({});
+    expect(completionNotesPayload('', '')).toEqual({});
+  });
+
+  it('sends changed notes trimmed, replacing the work order’s', () => {
+    expect(completionNotesPayload('  Belt replaced  ', 'Belt squeals')).toEqual({ notes: 'Belt replaced' });
+    expect(completionNotesPayload('First note', '')).toEqual({ notes: 'First note' });
+  });
+
+  it('sends null for emptied notes, which clears them', () => {
+    expect(completionNotesPayload('', 'Belt squeals')).toEqual({ notes: null });
+    expect(completionNotesPayload('   ', 'Belt squeals')).toEqual({ notes: null });
   });
 });
