@@ -186,6 +186,13 @@ async def send_daily_digest_job(ctx):
     return await send_daily_digest_task()
 
 
+async def check_maintenance_due_job(ctx):
+    """Preventive maintenance due (T-7) and overdue alerts (``maintenance.due`` / ``maintenance.overdue``)."""
+    from app.jobs.notification_jobs import check_maintenance_due_task
+
+    return await check_maintenance_due_task()
+
+
 async def check_calibrations_job(ctx):
     """Check calibration due dates job"""
     from app.jobs.notification_jobs import check_calibrations_task
@@ -392,6 +399,9 @@ ALL_CRON_JOBS: List[CronJob] = [
     cron(run_mrp_auto_draft_job, hour=6, minute=0),  # 6 AM daily (MRP AUTO_DRAFT) -- WRITES draft POs/WOs
     cron(send_daily_digest_job, hour=8, minute=0),  # 8 AM daily -- sends email
     cron(check_calibrations_job, hour=7, minute=0),  # 7 AM daily -- sends email
+    # 12:15 UTC = 6:15 AM Central (7:15 in summer): the morning of the company's day it judges
+    # (company_today, not UTC). In-app only by default; email/SMS only where a user opts in.
+    cron(check_maintenance_due_job, hour=12, minute=15),
     cron(check_late_work_orders_job, hour=8, minute=0),  # 8 AM daily -- sends email, no age cap
     cron(check_low_stock_job, hour=7, minute=30),  # 7:30 AM daily -- sends email (aggregated)
     cron(check_quote_expiring_job, hour=9, minute=0),  # 9 AM daily -- sends email
@@ -753,6 +763,7 @@ class WorkerSettings:
         run_scheduling_job,
         send_daily_digest_job,
         check_calibrations_job,
+        check_maintenance_due_job,
         cleanup_old_logs_job,
         cleanup_runtime_metrics_job,
         archive_aged_audit_logs_job,

@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
@@ -53,6 +53,7 @@ from app.services.maintenance_checklist import (
     removed_items,
     unticked_checklist_items,
 )
+from app.services.maintenance_due_service import maintenance_due
 from app.services.maintenance_interval import next_due_date
 from app.services.maintenance_schedule_import_service import commit_pm_import, preview_pm_import
 
@@ -76,15 +77,6 @@ _TERMINAL_STATUSES = (MaintenanceStatus.COMPLETED, MaintenanceStatus.CANCELLED)
 # ...and in one of these it is still open: its PM schedule takes no second one until it ends (the
 # partial unique index ``uq_maintenance_work_orders_open_schedule`` holds the same set, migration 132).
 _OPEN_STATUSES = OPEN_MAINTENANCE_STATUSES
-# ...and in one of these its PM is represented on a dashboard tile by the work order itself
-# (overdue / due this week by the work order's due date, or in progress). An ON-HOLD work order
-# is on no work-order tile, so its schedule keeps counting by the schedule's own due date: a held
-# PM has not been done (owner decision 2026-11-17).
-_COVERING_STATUSES = (
-    MaintenanceStatus.SCHEDULED,
-    MaintenanceStatus.OVERDUE,
-    MaintenanceStatus.IN_PROGRESS,
-)
 
 # Widest calendar window a single request may ask for. Unbounded, the endpoint
 # was one query-string edit away from serializing every maintenance work order
@@ -1723,49 +1715,13 @@ def get_dashboard(
     # ``completed_at`` is a UTC instant: the month starts at the company's local midnight.
     month_start_at, _ = company_window(db, company_id, month_start, today)
 
-    covered_schedule_ids = select(MaintenanceWorkOrder.schedule_id).where(
-        MaintenanceWorkOrder.company_id == company_id,
-        MaintenanceWorkOrder.schedule_id.isnot(None),
-        MaintenanceWorkOrder.status.in_(_COVERING_STATUSES),
-    )
-    unstarted_schedules = db.query(func.count(MaintenanceSchedule.id)).filter(
-        MaintenanceSchedule.company_id == company_id,
-        MaintenanceSchedule.is_active.is_(True),
-        MaintenanceSchedule.next_due_date.isnot(None),
-        MaintenanceSchedule.id.notin_(covered_schedule_ids),
-    )
-    schedules_overdue = unstarted_schedules.filter(MaintenanceSchedule.next_due_date < today).scalar() or 0
-    schedules_due_this_week = (
-        unstarted_schedules.filter(
-            MaintenanceSchedule.next_due_date >= today, MaintenanceSchedule.next_due_date <= week_end
-        ).scalar()
-        or 0
-    )
-
-    # Overdue count
-    overdue_count = (
-        db.query(func.count(MaintenanceWorkOrder.id))
-        .filter(
-            MaintenanceWorkOrder.company_id == company_id,
-            MaintenanceWorkOrder.status.in_([MaintenanceStatus.SCHEDULED, MaintenanceStatus.OVERDUE]),
-            MaintenanceWorkOrder.due_date < today,
-        )
-        .scalar()
-        or 0
-    )
-
-    # Due this week
-    due_this_week = (
-        db.query(func.count(MaintenanceWorkOrder.id))
-        .filter(
-            MaintenanceWorkOrder.company_id == company_id,
-            MaintenanceWorkOrder.status.in_([MaintenanceStatus.SCHEDULED, MaintenanceStatus.OVERDUE]),
-            MaintenanceWorkOrder.due_date >= today,
-            MaintenanceWorkOrder.due_date <= week_end,
-        )
-        .scalar()
-        or 0
-    )
+    # The four due / overdue counts come from the ONE implementation the daily alerts read too
+    # (``app.services.maintenance_due_service``), so a tile and an alert never disagree.
+    due = maintenance_due(db, company_id, today, window_days=(week_end - today).days)
+    schedules_overdue = len(due.schedules_overdue)
+    schedules_due_this_week = len(due.schedules_due)
+    overdue_count = len(due.work_orders_overdue)
+    due_this_week = len(due.work_orders_due)
 
     # Completed this month
     completed_this_month = (

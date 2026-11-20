@@ -972,27 +972,30 @@ _ENTRIES: List[CatalogEntry] = [
         default_channels=frozenset({CHANNEL_IN_APP, CHANNEL_EMAIL}),
         source_event_types=(),  # PR 6 instrumentation
     ),
+    # Both maintenance entries are direct-dispatched by ``check_maintenance_due_job``
+    # (``jobs/notification_jobs.check_maintenance_due_task``), never from an event, to the Maintenance
+    # department plus the Admins (owner decision 2026-11-20).
     CatalogEntry(
         event_key="maintenance.due",
         label="Maintenance due",
-        description="Preventive maintenance is coming due.",
+        description="Preventive maintenance comes due within 7 days (sent once per due date).",
         category=Category.MAINTENANCE,
         severity="warning",
         default_channels=frozenset({CHANNEL_IN_APP}),
-        source_event_types=(),  # PR 6 instrumentation
-        roles=(UserRole.SUPERVISOR,),
+        source_event_types=(),  # direct-dispatched by check_maintenance_due_job
+        roles=(UserRole.ADMIN,),
         departments=("Maintenance",),
     ),
     CatalogEntry(
         event_key="maintenance.overdue",
         label="Maintenance overdue",
-        description="Preventive maintenance is overdue.",
+        description="Preventive maintenance is past its due date.",
         category=Category.MAINTENANCE,
         severity="warning",
         default_channels=frozenset({CHANNEL_IN_APP}),
         recurring=True,
-        source_event_types=(),  # PR 6 instrumentation
-        roles=(UserRole.SUPERVISOR,),
+        source_event_types=(),  # direct-dispatched by check_maintenance_due_job
+        roles=(UserRole.ADMIN,),
         departments=("Maintenance",),
     ),
     CatalogEntry(
