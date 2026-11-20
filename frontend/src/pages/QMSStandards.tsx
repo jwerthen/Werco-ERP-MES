@@ -17,6 +17,7 @@ import { FormField } from '../components/ui/FormField';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { formatCentralDate } from '../utils/centralTime';
 import { useUnsavedChanges } from '../hooks/useUnsavedChanges';
+import ClauseNotesDialog from '../components/qms/ClauseNotesDialog';
 import {
   QMSStandardListResponse,
   QMSStandardResponse,
@@ -226,6 +227,15 @@ export default function QMSStandards() {
     } finally {
       setSaving(false);
     }
+  };
+
+  // Notes only: no status in the body, so the clause's status and last-assessed stamp stay as
+  // they are. Rejects on refusal so the notes dialog can show the reason and keep the text.
+  const handleSaveNotes = async (clauseId: number, compliance_notes: string | null) => {
+    await api.updateQMSClause(clauseId, { compliance_notes });
+    // Awaited, so the dialog stays on "Saving..." until the page holds the saved notes; a reopen
+    // right after a save can then never show (or be re-seeded from) the pre-save text.
+    if (selectedStandard) await loadStandardDetail(selectedStandard.id);
   };
 
   const handleUpdateCompliance = async (clauseId: number, compliance_status: ComplianceStatus, compliance_notes?: string) => {
@@ -744,6 +754,7 @@ export default function QMSStandards() {
                   key={clause.id}
                   clause={clause}
                   onUpdateCompliance={handleUpdateCompliance}
+                  onSaveNotes={handleSaveNotes}
                   onAddEvidence={(clauseId) => { setEvidenceClauseId(clauseId); setShowAddEvidence(true); }}
                   onVerifyEvidence={handleVerifyEvidence}
                   onDeleteEvidence={handleDeleteEvidence}
@@ -1191,17 +1202,20 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
 function ClauseRow({
   clause,
   onUpdateCompliance,
+  onSaveNotes,
   onAddEvidence,
   onVerifyEvidence,
   onDeleteEvidence,
 }: {
   clause: QMSClauseResponse;
   onUpdateCompliance: (id: number, status: ComplianceStatus, notes?: string) => void;
+  onSaveNotes: (clauseId: number, notes: string | null) => Promise<void>;
   onAddEvidence: (clauseId: number) => void;
   onVerifyEvidence: (evidenceId: number) => void;
   onDeleteEvidence: (evidenceId: number) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [notesOpen, setNotesOpen] = useState(false);
   const [autoEvidence, setAutoEvidence] = useState<ClauseAutoEvidenceResponse | null>(null);
   const [discovering, setDiscovering] = useState(false);
 
@@ -1418,13 +1432,34 @@ function ClauseRow({
             <p className="text-xs text-slate-400 italic">No matching ERP/MES records found for this clause.</p>
           )}
 
-          {clause.compliance_notes && (
-            <div className="text-xs text-slate-400">
-              <strong>Notes:</strong> {clause.compliance_notes}
+          <div className="text-xs text-slate-400" data-testid="clause-notes">
+            <div className="flex items-center gap-2 mb-1">
+              <strong>Notes</strong>
+              <button
+                type="button"
+                className="btn btn-ghost btn-xs"
+                onClick={() => setNotesOpen(true)}
+                aria-label={`${clause.compliance_notes ? 'Edit' : 'Add'} notes for clause ${clause.clause_number}`}
+              >
+                {clause.compliance_notes ? 'Edit notes' : 'Add notes'}
+              </button>
             </div>
-          )}
+            {clause.compliance_notes ? (
+              <p className="whitespace-pre-line break-words">{clause.compliance_notes}</p>
+            ) : (
+              <p className="italic">No notes yet.</p>
+            )}
+          </div>
         </div>
       )}
+      <ClauseNotesDialog
+        open={notesOpen}
+        clauseNumber={clause.clause_number}
+        clauseTitle={clause.title}
+        initialNotes={clause.compliance_notes}
+        onSave={notes => onSaveNotes(clause.id, notes)}
+        onClose={() => setNotesOpen(false)}
+      />
     </div>
   );
 }
