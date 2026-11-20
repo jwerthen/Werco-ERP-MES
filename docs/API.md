@@ -9497,6 +9497,27 @@ in `RBAC_PERMISSIONS.md`.
 > read of that standard fail with a 500. To clear such a stored link, `PUT {"parent_clause_id":
 > null}` on the child clause.
 
+> **Compliance notes and the last-assessed stamp:** `PUT /qms-standards/clauses/{clause_id}` sets
+> `last_assessed_date` (now) and `last_assessed_by` (the caller) only when the body carries
+> `compliance_status`. A body without it, such as one that sends `compliance_notes` alone, leaves
+> the status and both stamp fields as they were, and writes an audit `UPDATE` entry (when a value
+> changed) but no status-change entry. `compliance_notes` is at most 5,000 characters (**422** over
+> it), and `null` clears it.
+>
+> **On the QMS Standards page**, an expanded clause shows a **Notes** block: the stored
+> `compliance_notes` with their line breaks kept, or *No notes yet.* when there are none, and an
+> **Edit notes** button (**Add notes** when there are none) that opens a notes dialog. The dialog
+> counts characters against the 5,000-character cap and shows an inline error over it; **Save
+> notes** is enabled only when the text differs from what is stored and is within the cap. Saving
+> sends `PUT /qms-standards/clauses/{clause_id}` with `compliance_notes` only, never the status, so
+> it does not change the clause's compliance status or its last-assessed stamp. Text that is empty
+> or only whitespace is sent as `null`, clearing the notes; any other text is sent as typed. The
+> save is not optimistic: after the server accepts the write the page reloads the standard, and only
+> then does the dialog close, so reopening it always starts from the saved notes. A refusal (the route is Admin / Manager / Quality, so another role
+> gets **403**) is shown inside the dialog, which stays open with what was typed. Cancel, the close
+> button and Escape ask before discarding changed text, a click outside the dialog does not close
+> it, and nothing closes it while a save is in flight.
+
 **Auto-evidence discovery**
 
 | Method | Endpoint | Description | Auth Required |
