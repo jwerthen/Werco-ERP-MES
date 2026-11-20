@@ -42,7 +42,7 @@ class HankReceiptLine(ReceiptLineFields):
     # versioned copilot prompt's tool list -- is unchanged. A person records an owned receipt
     # in the receiving UI. This narrows Hank's task input only: ``POST /receiving/receive`` and
     # ``/receiving/deliveries`` accept the ownership fields from any caller the role gate admits,
-    # API tokens included (whether a token may record ownership is an open owner question).
+    # full API tokens included (owner decision 2026-11-20: a full token may record ownership).
     model_config = ConfigDict(extra='forbid')
     requires_inspection: bool
 
