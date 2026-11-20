@@ -5771,7 +5771,7 @@ uploads go through text extraction + LLM. See
 | GET | `/maintenance/schedules` | List PM schedules (`is_active` default true; `work_center_id` or `asset_id` narrows to one target) | Yes |
 | GET | `/maintenance/schedules/{id}` | PM schedule detail | Yes |
 | POST | `/maintenance/schedules` | Create PM schedule on a work center **or** an equipment asset (`next_due_date` left blank is the company's day) | Admin / Manager / Supervisor |
-| PUT | `/maintenance/schedules/{id}` | Update PM schedule (the target is not changed here) | Admin / Manager / Supervisor |
+| PUT | `/maintenance/schedules/{id}` | Update PM schedule (the target is not changed here). Owner decision 2026-11-20: a full API token may move `next_due_date`, also while the schedule has an open work order; a token's only refusal here is taking `checklist` steps off a schedule that has an open work order (**403**, below) | Admin / Manager / Supervisor |
 | DELETE | `/maintenance/schedules/{id}` | Deactivate PM schedule (`is_active` → `false`; no soft-delete mixin) | Admin / Manager / Supervisor |
 | POST | `/maintenance/schedules/import/preview` | Dry run of a PM schedule sheet (multipart `file`; template `maintenance-schedules`). Writes nothing | Admin / Manager / Supervisor |
 | POST | `/maintenance/schedules/import/commit` | Apply a previewed PM sheet (multipart `file` + form field `expected_source_hash`). All-or-nothing | Admin / Manager / Supervisor |
@@ -6091,9 +6091,12 @@ uploads go through text extraction + LLM. See
 >     standing API token's `PUT /maintenance/schedules/{id}` that takes items off `checklist` while
 >     the schedule has an open work order is **403** `API_TOKEN_SCHEDULE_CHECKLIST_REMOVAL` *"Removing
 >     items from the checklist of a PM schedule that has an open work order must be done by a person
->     signed in to the app, not an API token."* (adding steps, or editing a schedule with no open work
->     order, is unchanged). An item is ticked only when the checklist the work order completes with marks
->     it `"done": true`; a plain-string item, or a line of a one-item-per-line checklist (split on
+>     signed in to the app, not an API token."* (adding steps, editing a schedule with no open work
+>     order, and every other field of one that has an open work order are unchanged. Owner decision
+>     2026-11-20: a full API token may move a PM schedule's `next_due_date`; read-only and
+>     AI-external tokens are refused by their own gates (the read-only gate, and for an AI-external token also the AI-egress gate); the write is attributed to the token's
+>     bound user with `extra_data.credential`). An item is ticked only when the checklist the work
+>     order completes with marks it `"done": true`; a plain-string item, or a line of a one-item-per-line checklist (split on
 >     `\r?\n`, as the page splits it), is unticked. Items count as a **multiset**: a checklist that
 >     names one step twice needs both copies ticked, and the audit row lists a text once per unticked
 >     copy.
@@ -11057,11 +11060,11 @@ PDF was prepared. Create a fresh preview before sending."* The fingerprint delib
 `flowdown_snapshot` column: the accepted send's own move to `sent` writes it, and counting it would
 turn an identical PDF into a new send. That move freezes the block the email carried.
 
-**Credentials and agents.** The three writes are role-gated only: an **API token** is not refused
-(a full token of an Admin, Manager or Quality user may save the settings and edit clauses; its
-audit rows carry `extra_data.credential`), unlike the Approved Supplier List writes above. That is
-an implementation decision of this change, not put to the owner, and remains an open owner
-question. Read-only and AI-external tokens are refused every write by the global gates. All five routes are
+**Credentials and agents.** The three writes are role-gated only: an **API token** is not refused,
+unlike the Approved Supplier List writes above. Owner decision 2026-11-20: a full API token of an
+Admin, Manager or Quality user may save the settings and edit clauses; read-only and AI-external
+tokens are refused by their own gates (the read-only gate, and for an AI-external token also the AI-egress gate); the write is attributed to the token's bound user with
+`extra_data.credential`. All five routes are
 MCP tools (`get_po_flowdown_profile`, `update_po_flowdown_profile`, `list_po_quality_clauses`,
 `create_po_quality_clause`, `update_po_quality_clause`); the two reads are in the read-only listing
 and none is on the AI-external allowlist. See `docs/RBAC_PERMISSIONS.md` → Purchasing.
@@ -11990,7 +11993,9 @@ company's id included, is **404** `Owning customer not found` / `Owning vendor n
   the receipt's `ownership`, `owner_customer_id` and `owner_vendor_id`. A receipt's owner is fixed
   once recorded: `PATCH /receiving/receipt/{receipt_id}` does not take it, so a wrong owner is fixed
   on the stock row with the verb below once the material is in stock. API tokens are not refused
-  these fields (an open owner question; see
+  these fields. Owner decision 2026-11-20: a full API token may record ownership at receipt;
+  read-only and AI-external tokens are refused by their own gates (the read-only gate, and for an AI-external token also the AI-egress gate); the write is attributed to the
+  token's bound user with `extra_data.credential` (see
   [RBAC → Credential policy for judgment writes](RBAC_PERMISSIONS.md#credential-policy-for-judgment-writes)).
   The delivery's idempotency fingerprint leaves out a line's ownership fields while they hold the
   company defaults, so a company delivery hashes exactly as it did before `129`; changing a line's
@@ -12079,8 +12084,9 @@ refuse the change and are also written to the audit row's `extra_data`:
   part's open unpinned tie demand, the company stock automatic consumption can still draw now that
   this row is excluded, how far short that leaves the jobs, and which work orders they are.
 
-**API tokens are not refused**: a full token held by a user with one of the three
-roles can call it (an implementation decision, not put to the owner; see
+**API tokens are not refused.** Owner decision 2026-11-20: a full API token held by a user with one
+of the three roles may change a row's ownership; read-only and AI-external tokens are refused by the
+read-only gate; the write is attributed to the token's bound user with `extra_data.credential` (see
 [RBAC → Credential policy for judgment writes](RBAC_PERMISSIONS.md#credential-policy-for-judgment-writes)).
 In the app it is the **Change ownership** row action on the Inventory page; over MCP it is the tool
 `change_inventory_item_ownership`.
