@@ -399,8 +399,8 @@ ALL_CRON_JOBS: List[CronJob] = [
     cron(run_mrp_auto_draft_job, hour=6, minute=0),  # 6 AM daily (MRP AUTO_DRAFT) -- WRITES draft POs/WOs
     cron(send_daily_digest_job, hour=8, minute=0),  # 8 AM daily -- sends email
     cron(check_calibrations_job, hour=7, minute=0),  # 7 AM daily -- sends email
-    # 12:15 UTC = 6:15 AM Central (7:15 in summer): the morning of the company's day it judges
-    # (company_today, not UTC). In-app only by default; email/SMS only where a user opts in.
+    # Hour 12 in the CONTAINER's zone (above): 12:15 UTC = 6:15 AM Central (7:15 in summer) while TZ
+    # is unset. Which day it judges is the company's (company_today), whatever the hour. In-app only.
     cron(check_maintenance_due_job, hour=12, minute=15),
     cron(check_late_work_orders_job, hour=8, minute=0),  # 8 AM daily -- sends email, no age cap
     cron(check_low_stock_job, hour=7, minute=30),  # 7:30 AM daily -- sends email (aggregated)

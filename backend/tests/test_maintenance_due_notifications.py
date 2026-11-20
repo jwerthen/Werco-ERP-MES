@@ -11,8 +11,10 @@
 
 The task runs against the test session (``SessionLocal`` patched) with the REAL dispatcher, so the
 assertions read the stored ``Notification`` rows; only the Redis dedup reservation is stubbed. Every
-clock the task reads is frozen, and so is each notification's ``created_at`` (a server default
-otherwise), because the once-per-cycle rule compares it with the cycle's start.
+clock the task and the maintenance endpoints read is frozen, and so are the timestamps the
+once-per-cycle rule compares: each notification's ``created_at`` and each delivery log's ``sent_at``
+(server defaults otherwise), and each schedule's and work order's ``updated_at`` (``datetime.utcnow``
+otherwise) -- a change to the record starts a new cycle.
 """
 
 import asyncio
@@ -21,28 +23,30 @@ from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import event
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
+import app.api.endpoints.maintenance as maintenance_endpoints
 import app.core.time_utils as time_utils
 import app.jobs.notification_jobs as notification_jobs
 import app.services.maintenance_due_service as due_service
 import app.services.notification_dispatch as dispatch
 from app.models.company import Company
-from app.models.maintenance import MaintenanceSchedule, MaintenanceStatus, MaintenanceWorkOrder
+from app.models.maintenance import MaintenanceFrequency, MaintenanceSchedule, MaintenanceStatus, MaintenanceWorkOrder
 from app.models.notification import Notification, NotificationLog, NotificationPreference
 from app.models.user import User, UserRole
 from app.services import notification_links
 from tests.api.test_maintenance_assets import make_asset, make_wc
-from tests.api.test_maintenance_company_day import FrozenDatetime, _FrozenClock
+from tests.api.test_maintenance_company_day import FrozenDate, FrozenDatetime, _FrozenClock
 from tests.api.test_maintenance_pm_roll_forward import make_schedule
-from tests.api.test_receiving_compliance import _next
+from tests.api.test_receiving_compliance import _next, headers_for, make_user
 
 pytestmark = [pytest.mark.requires_db]
 
 COMPANY_A = 1
 COMPANY_B = 2
 DUE, OVERDUE = "maintenance.due", "maintenance.overdue"
-# The morning the cron runs: 12:15 UTC is 6:15 AM Central, the same calendar day.
+# The morning the cron runs: hour 12, minute 15 in the worker container's zone -- 12:15 UTC while TZ is
+# unset, which is 6:15 AM Central, the same calendar day.
 D = date(2026, 12, 9)
 
 
@@ -50,36 +54,57 @@ D = date(2026, 12, 9)
 
 
 class Clock:
-    """Every clock the task reads, and the ``created_at`` the dispatcher's rows get."""
+    """Every clock the task and the maintenance endpoints read, and the timestamps rows get."""
 
     def at(self, instant: datetime) -> None:
         _FrozenClock.instant = instant
 
-    def day(self, day: date) -> None:
-        self.at(datetime.combine(day, time(12, 15), tzinfo=timezone.utc))
+    def day(self, day: date, hour: int = 12, minute: int = 15) -> None:
+        """``day`` at ``hour``:``minute`` UTC -- 12:15 is the cron's run; 18:00 is noon Central, when the
+        floor completes or edits a PM, the same company day."""
+        self.at(datetime.combine(day, time(hour, minute), tzinfo=timezone.utc))
+
+
+def _frozen_utc() -> datetime:
+    return _FrozenClock.instant.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 @pytest.fixture
 def clock(monkeypatch, db_session):
     monkeypatch.setattr(_FrozenClock, "instant", datetime.combine(D, time(12, 15), tzinfo=timezone.utc))
     monkeypatch.setattr(time_utils, "datetime", FrozenDatetime)
-
-    def frozen_utc():
-        return _FrozenClock.instant.astimezone(timezone.utc).replace(tzinfo=None)
+    monkeypatch.setattr(maintenance_endpoints, "datetime", FrozenDatetime)
+    monkeypatch.setattr(maintenance_endpoints, "date", FrozenDate)
 
     def stamp_notification(mapper, connection, target):
-        target.created_at = frozen_utc()
+        target.created_at = _frozen_utc()
 
     def stamp_log(mapper, connection, target):
-        target.sent_at = frozen_utc()
+        target.sent_at = _frozen_utc()
 
-    event.listen(Notification, "before_insert", stamp_notification)
-    event.listen(NotificationLog, "before_insert", stamp_log)
+    def stamp_new_record(mapper, connection, target):
+        target.updated_at = _frozen_utc()
+
+    def stamp_changed_record(mapper, connection, target):
+        # Only a real change: ``onupdate`` fires only when an UPDATE is issued.
+        if object_session(target).is_modified(target, include_collections=False):
+            target.updated_at = _frozen_utc()
+
+    listeners = [
+        (Notification, "before_insert", stamp_notification),
+        (NotificationLog, "before_insert", stamp_log),
+        (MaintenanceSchedule, "before_insert", stamp_new_record),
+        (MaintenanceSchedule, "before_update", stamp_changed_record),
+        (MaintenanceWorkOrder, "before_insert", stamp_new_record),
+        (MaintenanceWorkOrder, "before_update", stamp_changed_record),
+    ]
+    for target, name, listener in listeners:
+        event.listen(target, name, listener)
     try:
         yield Clock()
     finally:
-        event.remove(Notification, "before_insert", stamp_notification)
-        event.remove(NotificationLog, "before_insert", stamp_log)
+        for target, name, listener in listeners:
+            event.remove(target, name, listener)
 
 
 class _KeepOpen:
@@ -644,7 +669,8 @@ def test_the_cron_is_registered_once_and_selectable_alone():
 
     matches = [job for job in ALL_CRON_JOBS if job.coroutine is check_maintenance_due_job]
     assert len(matches) == 1
-    # 12:15 UTC: the morning of the company's day in Central time.
+    # Hour 12, minute 15 in the worker container's zone (12:15 UTC while TZ is unset). The day it judges
+    # is each company's own (company_today), whatever the hour.
     assert (matches[0].hour, matches[0].minute) == (12, 15)
     assert WorkerSettings.functions.count(check_maintenance_due_job) == 1
 
@@ -681,3 +707,258 @@ def test_the_catalog_entries():
         assert entry.source_event_types == ()
     assert notification_links.MAINTENANCE_SCHEDULES in notification_links.ALL_LINK_TEMPLATES
     assert notification_links.MAINTENANCE_WORK_ORDERS in notification_links.ALL_LINK_TEMPLATES
+
+
+# --------------------------------------------------------------------------- a change starts a new cycle
+
+WORK_ORDERS = "/api/v1/maintenance/work-orders"
+SCHEDULES = "/api/v1/maintenance/schedules"
+
+
+@pytest.fixture
+def planner(db_session):
+    """A supervisor's headers: plans and completes PM, and is not an alert recipient."""
+    return headers_for(make_user(db_session, role=UserRole.SUPERVISOR, company_id=COMPANY_A))
+
+
+def start_pm(client, headers, pm: MaintenanceSchedule, due: date = None) -> dict:
+    body = {"schedule_id": pm.id, "title": "Synthetic PM"}
+    if due is not None:
+        body["due_date"] = due.isoformat()  # the Maintenance page's Start PM copies the schedule's date
+    created = client.post(WORK_ORDERS, headers=headers, json=body)
+    assert created.status_code == 200, created.text
+    return created.json()
+
+
+def complete_pm(client, headers, pm: MaintenanceSchedule) -> dict:
+    wo = start_pm(client, headers, pm)
+    done = client.post(f"{WORK_ORDERS}/{wo['id']}/complete", headers=headers, json={})
+    assert done.status_code == 200, done.text
+    return done.json()
+
+
+def due_titles(db: Session, related_type: str, related_id: int, user: User):
+    return [
+        row.title
+        for row in alerts(db, event_key=DUE, related_type=related_type, related_id=related_id, user_id=user.id)
+    ]
+
+
+class TestAChangeToTheRecordStartsANewCycle:
+    def test_a_weekly_pm_completed_on_its_due_day_is_announced_once_for_its_next_cycle(
+        self, db_session, run, clock, client, planner
+    ):
+        person = tech(db_session)
+        pm = schedule(db_session, D, frequency=MaintenanceFrequency.WEEKLY)
+        assert run()["due"] == 1  # D: "due today"
+        clock.day(D, 18, 0)
+        assert complete_pm(client, planner, pm)["schedule_next_due_date"] == (D + timedelta(days=7)).isoformat()
+
+        new_per_day = []
+        for offset in range(1, 8):
+            clock.day(D + timedelta(days=offset))
+            new_per_day.append(run()["due"])
+
+        # D+7 is inside the window from D+1 on: the next cycle is announced on D+1, and only then. (By
+        # the cycle-start rule alone the alert from D would have stood in for it: no announcement.)
+        assert new_per_day == [1, 0, 0, 0, 0, 0, 0]
+        assert due_titles(db_session, "MaintenanceSchedule", pm.id, person) == [
+            f"PM due today: {pm.name}",
+            f"PM due in 6 days: {pm.name}",
+        ]
+
+    def test_a_daily_pm_is_announced_once_per_completion(self, db_session, run, clock, client, planner):
+        person = tech(db_session)
+        pm = schedule(db_session, D, frequency=MaintenanceFrequency.DAILY)
+
+        per_day = []
+        for offset in range(10):
+            day = D + timedelta(days=offset)
+            clock.day(day)
+            per_day.append(run()["due"])
+            clock.day(day, 18, 0)
+            complete_pm(client, planner, pm)
+
+        # One per cycle: the cycle-start rule alone would give [1, 0, 0, 0, 0, 0, 0, 0, 1, 0].
+        assert per_day == [1] * 10
+        assert due_titles(db_session, "MaintenanceSchedule", pm.id, person) == [f"PM due today: {pm.name}"] * 10
+
+    def test_a_due_date_moved_earlier_is_announced_again_with_the_new_date(
+        self, db_session, run, clock, client, planner
+    ):
+        person = tech(db_session)
+        pm = schedule(db_session, D + timedelta(days=7))
+        assert run()["due"] == 1
+        clock.day(D, 18, 0)
+        moved = client.put(
+            f"{SCHEDULES}/{pm.id}", headers=planner, json={"next_due_date": (D + timedelta(days=2)).isoformat()}
+        )
+        assert moved.status_code == 200, moved.text
+
+        clock.day(D + timedelta(days=1))
+        assert run()["due"] == 1
+        clock.day(D + timedelta(days=2))
+        assert run()["due"] == 0
+
+        assert due_titles(db_session, "MaintenanceSchedule", pm.id, person) == [
+            f"PM due in 7 days: {pm.name}",
+            f"PM due in 1 day: {pm.name}",
+        ]
+        newest = alerts(db_session, event_key=DUE, related_id=pm.id, user_id=person.id)[-1]
+        assert newest.body.startswith("Due Dec 11, 2026")
+
+    def test_any_schedule_edit_starts_a_new_cycle_even_one_that_leaves_the_due_date_alone(
+        self, db_session, run, clock, client, planner
+    ):
+        """Accepted behavior (owner review 2026-11-20): the rule reads the record's last change, not
+        which field changed, so an edit that moves nothing relevant still re-announces the PM once. A
+        PUT that changes nothing at all writes no UPDATE and starts nothing."""
+        person = tech(db_session)
+        pm = schedule(db_session, D + timedelta(days=5))
+        assert run()["due"] == 1
+
+        clock.day(D, 18, 0)
+        unchanged = client.put(
+            f"{SCHEDULES}/{pm.id}", headers=planner, json={"next_due_date": (D + timedelta(days=5)).isoformat()}
+        )
+        assert unchanged.status_code == 200, unchanged.text
+        clock.day(D + timedelta(days=1))
+        assert run()["due"] == 0
+
+        clock.day(D + timedelta(days=1), 18, 0)
+        edited = client.put(f"{SCHEDULES}/{pm.id}", headers=planner, json={"estimated_duration_hours": 2.5})
+        assert edited.status_code == 200, edited.text
+        clock.day(D + timedelta(days=2))
+        assert run()["due"] == 1
+        clock.day(D + timedelta(days=3))
+        assert run()["due"] == 0
+        assert len(due_titles(db_session, "MaintenanceSchedule", pm.id, person)) == 2
+
+
+class TestStartPmDoesNotAnnounceThePmTwice:
+    def test_a_work_order_opened_after_its_schedules_alert_is_not_announced(
+        self, db_session, run, clock, client, planner
+    ):
+        person = tech(db_session)
+        pm = schedule(db_session, D + timedelta(days=5))
+        assert run()["due"] == 1
+        clock.day(D, 18, 0)
+        wo = start_pm(client, planner, pm, due=D + timedelta(days=5))
+
+        clock.day(D + timedelta(days=1))
+        totals = run()
+
+        # The schedule is now covered by its work order, and the work order borrows the schedule's
+        # alert: by the work order's own record alone it would be announced here.
+        assert totals["due"] == 0
+        assert due_titles(db_session, "MaintenanceWorkOrder", wo["id"], person) == []
+        assert len(due_titles(db_session, "MaintenanceSchedule", pm.id, person)) == 1
+
+    def test_a_work_order_on_a_never_announced_schedule_is_announced(self, db_session, run, clock, client, planner):
+        person = tech(db_session)
+        pm = schedule(db_session, D + timedelta(days=3))
+        clock.day(D, 11, 0)  # Start PM before the morning run: the schedule was never announced
+        wo = start_pm(client, planner, pm, due=D + timedelta(days=3))
+
+        clock.day(D)
+        assert run()["due"] == 1
+        assert due_titles(db_session, "MaintenanceWorkOrder", wo["id"], person) == [
+            f"Maintenance work order due in 3 days: {wo['wo_number']}"
+        ]
+        assert due_titles(db_session, "MaintenanceSchedule", pm.id, person) == []
+
+    def test_a_legacy_work_order_on_another_companys_schedule_does_not_borrow_its_alert(self, db_session, run, clock):
+        person_a, person_b = tech(db_session, COMPANY_A), tech(db_session, COMPANY_B)
+        foreign_pm = schedule(db_session, D + timedelta(days=3), company_id=COMPANY_B)
+        run()
+        assert len(due_titles(db_session, "MaintenanceSchedule", foreign_pm.id, person_b)) == 1
+
+        legacy = work_order(db_session, D + timedelta(days=3), schedule_row=foreign_pm)  # company A's row
+        clock.day(D + timedelta(days=1))
+        run()
+
+        [row] = alerts(db_session, event_key=DUE, related_type="MaintenanceWorkOrder", related_id=legacy.id)
+        assert (row.company_id, row.user_id) == (COMPANY_A, person_a.id)
+        assert foreign_pm.name not in row.title + (row.body or "")
+
+
+class TestOverdueAcrossCycles:
+    def test_an_unread_overdue_alert_holds_back_the_next_cycles_until_read(
+        self, db_session, run, clock, client, planner
+    ):
+        """Documented (accepted) behavior: ``maintenance.overdue`` is recurring and keyed on the
+        schedule, so a recipient who never read cycle 1's overdue alert is not alerted for cycle 2's
+        until they read it."""
+        person = tech(db_session)
+        pm = schedule(db_session, D - timedelta(days=1), frequency=MaintenanceFrequency.WEEKLY)
+        assert run()["overdue"] == 1
+        clock.day(D, 18, 0)
+        complete_pm(client, planner, pm)  # next due D+7
+
+        clock.day(D + timedelta(days=8))  # overdue again: cycle 2
+        assert run()["overdue"] == 1  # the task dispatched it...
+        overdue_rows = alerts(db_session, event_key=OVERDUE, related_id=pm.id, user_id=person.id)
+        assert len(overdue_rows) == 1  # ...and the unread cycle-1 row held back the inbox row
+
+        overdue_rows[0].is_read = True
+        db_session.commit()
+        clock.day(D + timedelta(days=9))
+        run()
+        rows = alerts(db_session, event_key=OVERDUE, related_id=pm.id, user_id=person.id)
+        assert len(rows) == 2 and rows[-1].is_read is False
+        assert rows[-1].body.startswith("Was due Dec 16, 2026 (2 days ago)")
+
+
+class TestTheChangeClockTolerance:
+    @pytest.mark.parametrize(
+        "alert_before_change,re_announced",
+        [(timedelta(seconds=0.6), False), (timedelta(seconds=59), False), (timedelta(minutes=2), True)],
+        ids=["same-second", "59s", "2min"],
+    )
+    def test_an_alert_stamped_up_to_a_minute_before_the_change_still_counts(
+        self, db_session, run, clock, alert_before_change, re_announced
+    ):
+        """``updated_at`` is the app's clock (microseconds), an alert's ``created_at`` the database's
+        (whole seconds on SQLite): an alert written right after a change can read as up to a second --
+        allowed: a minute -- OLDER than the change. Within the minute it still counts; beyond it, it is
+        an earlier cycle's alert."""
+        person = tech(db_session)
+        pm = schedule(db_session, D + timedelta(days=10))
+        change = datetime.combine(D, time(12, 15, 0, 600_000), tzinfo=timezone.utc)
+        clock.at(change)
+        pm.next_due_date = D + timedelta(days=4)
+        db_session.commit()
+        db_session.refresh(pm)
+        assert pm.updated_at == change.replace(tzinfo=None)
+
+        clock.at(change - alert_before_change)
+        assert run()["due"] == 1
+        clock.day(D + timedelta(days=1))
+        assert run()["due"] == (1 if re_announced else 0)
+        assert len(due_titles(db_session, "MaintenanceSchedule", pm.id, person)) == (2 if re_announced else 1)
+
+
+class TestTotalsAndRecipientsFromTheCatalog:
+    def test_a_company_counts_only_when_it_got_an_alert(self, db_session, run, clock):
+        tech(db_session)
+        schedule(db_session, D + timedelta(days=3))
+        assert run() == {"due": 1, "overdue": 0, "companies": 1}
+        assert run() == {"due": 0, "overdue": 0, "companies": 0}
+
+    def test_the_recipients_follow_the_catalog_entry(self, db_session, run, monkeypatch):
+        """One place holds who hears: the catalog entry's departments and roles."""
+        from dataclasses import replace
+
+        from app.services import notification_catalog
+
+        supervisor = make_person(db_session, role=UserRole.SUPERVISOR)
+        planner_dept = make_person(db_session, department="Planning")
+        tech(db_session)
+        widened = replace(
+            notification_catalog.CATALOG[DUE],
+            roles=(UserRole.ADMIN, UserRole.SUPERVISOR),
+            departments=("Maintenance", "Planning"),
+        )
+        monkeypatch.setitem(notification_catalog.CATALOG, DUE, widened)
+        recipients = {user.id for user in notification_jobs.maintenance_alert_recipients(db_session, COMPANY_A)}
+        assert {supervisor.id, planner_dept.id} <= recipients

@@ -76,8 +76,9 @@ QUALITY_CAR_LIST = "/quality?tab=car"
 # item first) AND repairs the stale status for every row it returns. See rule 2 above: a
 # filtered landing that silently shows nothing is worse than the 404 it replaced.
 CALIBRATION_LIST = "/calibration"
-# Record-less: the Maintenance page's Schedules / Work Orders tab (``Maintenance.tsx`` reads ``?tab=``),
-# where the due or overdue PM sits near the top (both lists sort by due date). Reachable by every role
+# Record-less: the Maintenance page's Schedules / Work Orders tab (``Maintenance.tsx`` follows ``?tab=``,
+# also when the page is already open). The Schedules list is ordered by next due date; the Work Orders
+# list shows the due work order among the open ones (it is ordered by scheduled date). Reachable by every role
 # (``/maintenance`` requires ``work_orders:view``, which all roles hold), so rule 4 holds for the
 # Maintenance department and the Admins ``maintenance.due`` / ``maintenance.overdue`` reach.
 MAINTENANCE_SCHEDULES = "/maintenance?tab=schedules"

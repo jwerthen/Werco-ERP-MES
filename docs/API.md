@@ -5784,7 +5784,7 @@ uploads go through text extraction + LLM. See
 | POST | `/maintenance/work-orders/{id}/start` | Start (→ `in_progress`). A work-center work order with `requires_shutdown` opens, adopts or shares a downtime event — never a second open one on the machine | Admin / Manager / Supervisor / Operator |
 | POST | `/maintenance/work-orders/{id}/complete` | Complete (→ `completed`, advances the linked schedule from the company's day — the response adds `schedule_next_due_date`) and resolve the work order's open downtime event. `checklist_results` omitted keeps the work order's checklist, and `notes` omitted keeps its notes (a value replaces them, `null` clears them). Any checklist item left unticked (the work order's own, or a step of its PM schedule's checklist as snapshotted when it was opened) needs `incomplete_checklist_reason` (**409** without one) and a person: an API token is **403** (see *Checklist at completion* below) | Admin / Manager / Supervisor / Operator |
 | GET | `/maintenance/calendar` | Work orders in a date window (**capped at 366 days**) | Yes |
-| GET | `/maintenance/dashboard` | Counts, cost, per-machine MTBF/MTTR (work centers only). `overdue_count` / `due_this_week` count work orders; `schedules_overdue` / `schedules_due_this_week` count due PM schedules no scheduled / overdue / in-progress work order covers, so a PM whose work order is on hold still counts. Those four counts come from `app/services/maintenance_due_service.py`, the one due / overdue rule the daily PM alerts also read. "Today" is the company's day (see *The PM loop* below) | Yes |
+| GET | `/maintenance/dashboard` | Counts, cost, per-machine MTBF/MTTR (work centers only). `overdue_count` / `due_this_week` count work orders; `schedules_overdue` / `schedules_due_this_week` count due PM schedules no scheduled / overdue / in-progress work order covers, so a PM whose work order is on hold still counts. Those four counts come from `app/services/maintenance_due_service.py`, the one rule for these tiles and the daily PM alerts (`/work-orders/overdue` and the QMS evidence card keep their own). "Today" is the company's day (see *The PM loop* below) | Yes |
 | GET | `/maintenance/history/{work_center_id}` | Event log for one machine, newest first, each entry with `performed_by_name` and `filed_via_api_token` (`limit` 1…5000, default 100) | Yes |
 | GET | `/maintenance/assets` | List equipment assets (`include_inactive` default false, `search` on tag / name / type), each with `active_schedule_count` and `open_work_order_count` | Yes |
 | GET | `/maintenance/assets/{id}` | Equipment asset detail | Yes |
@@ -6150,33 +6150,44 @@ uploads go through text extraction + LLM. See
 >   show the sum, the page with a *"N work orders · M PMs not started or on hold"* split. A schedule
 >   on a retired asset still counts until the schedule itself is deactivated. The four due / overdue
 >   counts are computed by `app/services/maintenance_due_service.py` (since 2026-11-20, unchanged in
->   meaning), the same rule the due / overdue alerts below read, so a tile and an alert cannot
->   disagree.
+>   meaning), the one rule for these tiles and the due / overdue alerts below, so a tile and an alert
+>   cannot disagree. `GET /maintenance/work-orders/overdue` and the QMS evidence card
+>   (`auto_evidence_service`) keep their own overdue reads.
 > - **Due and overdue alerts (owner decisions 2026-11-20).** A daily worker cron,
->   `check_maintenance_due_job` (12:15 UTC: 6:15 AM Central, 7:15 AM in summer), checks every active
->   company on the company's own calendar day and sends two catalog events, both direct-dispatched
->   (`docs/NOTIFICATIONS.md`):
+>   `check_maintenance_due_job`, runs at hour 12, minute 15 in the **worker container's** zone:
+>   12:15 UTC (6:15 AM Central, 7:15 in summer) while `TZ` is unset, 12:15 PM Central with
+>   `TZ=America/Chicago`. Whatever the hour, it judges each active company on the company's own
+>   calendar day, and sends two catalog events, both direct-dispatched (`docs/NOTIFICATIONS.md`):
 >   - **`maintenance.overdue`** for every item the overdue tiles count: an active PM schedule past its
 >     `next_due_date` that no `scheduled` / `overdue` / `in_progress` work order covers (a PM whose
 >     work order is on hold included), and every `scheduled` / `overdue` maintenance work order past
 >     its `due_date` (not started). It is `recurring`: a recipient who has an unread alert for the item
 >     gets no new one; once they read it, the next daily run alerts again while the item is still
 >     overdue.
->   - **`maintenance.due`** once per item and due date, when the item comes due within 7 days (today
->     through today + 7, the due-this-week tiles). A run checks for an earlier `maintenance.due` for
->     the item since the start of that 7-day window, so an item that entered the window on a day the
->     job did not run is alerted on the next run, and never twice. A new due date (the next cycle
->     after a completion) gets its own alert.
+>   - **`maintenance.due`** once per **cycle**, for an item due today through today + 7 (the
+>     due-this-week tiles). A cycle starts when the item comes within 7 days of its due date and
+>     **restarts whenever the record changes** (its `updated_at`): a completion that rolls a schedule
+>     forward, or any edit. Moving a due date therefore re-announces the item with the new date, and
+>     an unrelated edit inside the window re-announces it too (accepted). An item that entered the
+>     window on a day the job did not run is announced on the next run. A work order opened from a
+>     schedule that was already announced this cycle is not announced again.
 >
 >   **Recipients:** the company's active users whose `department` is exactly `Maintenance`, plus its
->   active Admins, each once (the catalog entries' roles changed from Supervisor to Admin). **Channels:**
->   in-app by default; email only for a user who turns it on in their notification preferences; never
->   SMS (neither entry is SMS-eligible). **Content:** the schedule's name or the work order's number
->   and title, the due date, the day count, and the machine or asset code (only when the target
->   belongs to the same company). **Links:** `/maintenance?tab=schedules` for a schedule,
->   `/maintenance?tab=work_orders` for a work order (both lists sort by due date). The alerts create
->   no work order. **The cron fires only where the worker's `WORKER_CRON_JOBS` selects it**: see
->   `docs/DEPLOYMENT.md` → PM due and overdue alerts for the owner step.
+>   active Admins, each once (the catalog entries' `departments` and `roles`; the roles changed from
+>   Supervisor to Admin). **Channels: in-app only.** No preference can turn email or SMS on for these
+>   two today: neither is SMS-eligible (`PUT /users/me/notification-preferences` accepts only `sms` and
+>   refuses events that are not), and neither has an email channel. **Content:** the schedule's name or
+>   the work order's number and title, the due date, the day count, and the machine or asset code
+>   (only when the target belongs to the same company). **Links:** `/maintenance?tab=schedules` for a
+>   schedule, `/maintenance?tab=work_orders` for a work order; the page follows `?tab=` also when it is
+>   already open. The Schedules list is ordered by next due date; the Work Orders list by scheduled
+>   date, not due date, so a due work order is among the open ones rather than at the top. The alerts
+>   create no work order. **The cron fires only where the worker's `WORKER_CRON_JOBS` selects it**:
+>   see `docs/DEPLOYMENT.md` → PM due and overdue alerts for the owner step.
+>
+>   **Known limitation:** the recurring overdue alert is keyed on the record, not the cycle. A
+>   recipient who never read a schedule's overdue alert from one cycle gets no overdue alert for that
+>   schedule's next cycle until they read the old one.
 > - **Start PM** (Schedules tab rows and the Dashboard tab's Upcoming cards; planning roles) opens the
 >   work-order form pre-filled from the schedule — title = schedule name, type, priority,
 >   `requires_shutdown`, description, checklist, due date = the schedule's `next_due_date`, scheduled

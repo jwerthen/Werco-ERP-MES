@@ -53,7 +53,7 @@ from app.services.maintenance_checklist import (
     removed_items,
     unticked_checklist_items,
 )
-from app.services.maintenance_due_service import maintenance_due
+from app.services.maintenance_due_service import DUE_WINDOW_DAYS, maintenance_due
 from app.services.maintenance_interval import next_due_date
 from app.services.maintenance_schedule_import_service import commit_pm_import, preview_pm_import
 
@@ -1710,14 +1710,13 @@ def get_dashboard(
     work order is on no work-order count). ``completed_this_month`` counts completions since the
     company-local first of the month."""
     today = company_today(db, company_id)
-    week_end = today + timedelta(days=7)
     month_start = today.replace(day=1)
     # ``completed_at`` is a UTC instant: the month starts at the company's local midnight.
     month_start_at, _ = company_window(db, company_id, month_start, today)
 
-    # The four due / overdue counts come from the ONE implementation the daily alerts read too
+    # The four due / overdue counts come from the same rule the daily due / overdue alerts read
     # (``app.services.maintenance_due_service``), so a tile and an alert never disagree.
-    due = maintenance_due(db, company_id, today, window_days=(week_end - today).days)
+    due = maintenance_due(db, company_id, today, window_days=DUE_WINDOW_DAYS)
     schedules_overdue = len(due.schedules_overdue)
     schedules_due_this_week = len(due.schedules_due)
     overdue_count = len(due.work_orders_overdue)

@@ -20,7 +20,8 @@ selected cron plus active release/heartbeat. See [the current rollout procedure]
 WORKER_DEPLOYMENT_RUNBOOK.md#current-hank-follow-up-release-procedure).
 
 **PM due and overdue alerts (2026-11-20):** the fifteenth cron, `check_maintenance_due_job`
-(12:15 UTC daily), sends `maintenance.due` / `maintenance.overdue`. An allowlist does not pick up a
+(daily at 12:15 container time: 12:15 UTC while `TZ` is unset), sends `maintenance.due` /
+`maintenance.overdue`, in-app only. An allowlist does not pick up a
 new cron, so a worker on the Hank-only allowlist above never runs it: the owner adds it,
 **`WORKER_CRON_JOBS=check_hank_watches_job,check_maintenance_due_job`** (13 of 15 suppressed). The
 current production value is **not verified** here; read it on `werco-worker` → Variables first and
@@ -178,7 +179,7 @@ is set**, so "6 AM" means 06:00 UTC = **01:00 Central**.
 |---|---|---|
 | `run_mrp_auto_draft_job` | 06:00 daily | **Creates draft purchase orders and work orders** for every active company, and emails `mrp.completed` to every active `MANAGER` (only when the run produced actions). Not idempotent — a new `MRPRun` and new drafts every run. **Highest risk.** |
 | `check_late_work_orders_job` | 08:00 daily | **One email per late WO to every supervisor + manager.** No age cap. `wo.late` is `recurring`, but suppression keys off an unread in-app row already existing — on a cold start there are none, so the first run fires in full. |
-| `check_maintenance_due_job` | 12:15 daily | Per active company, on the company's own day: one `maintenance.overdue` per overdue PM schedule (no work order under way) and per unstarted overdue maintenance work order, and one `maintenance.due` per item due within 7 days that has not had one this cycle, to every active user whose `department = 'Maintenance'` plus the Admins. **In-app only by default** (email only where a user opted in; never SMS). On a cold start every overdue item alerts once per recipient; `maintenance.overdue` is `recurring`, so later runs add nothing while that row is unread. Writes no business record. |
+| `check_maintenance_due_job` | 12:15 daily | Per active company, on the company's own day (whatever the container's zone): one `maintenance.overdue` per overdue PM schedule (no work order under way) and per unstarted overdue maintenance work order, and one `maintenance.due` per item due within 7 days not yet announced this cycle (a cycle restarts when the record changes), to every active user whose `department = 'Maintenance'` plus the Admins. **In-app only**: no preference turns email or SMS on for either event. On a cold start every overdue item alerts once per recipient; `maintenance.overdue` is `recurring`, so later runs add nothing while that row is unread. Writes no business record. |
 | `check_calibrations_job` | 07:00 daily | One `calibration.due` per equipment due within 7 days, to every user whose `department = 'Quality'`. Equipment due within **1 day is dispatched twice** (it is in both the 7-day and the 1-day set). Channel is in-app + **digest**, not direct email. |
 | `check_quote_expiring_job` | 09:00 daily | One per quote expiring within 7 days, to `department = 'Sales'` users. **Digest-only** — no direct email. Window-bounded. |
 | `check_low_stock_job` | 07:30 daily | **One aggregated** message per tenant to `department` `Purchasing` + `Inventory`. **Digest-only.** Low blast radius. |
@@ -469,8 +470,8 @@ adding the next:
 3. `check_low_stock_job` — one aggregated message per tenant.
 4. `poll_tracking_job` — no-op while `allow_carrier_egress` is off.
 5. `check_quote_expiring_job`, `check_calibrations_job`, `check_maintenance_due_job` — window-bounded
-   (the maintenance job is in-app only unless a user opted into email; run the overdue counts in
-   `DEPLOYMENT.md` → PM due and overdue alerts first).
+   (the maintenance job is in-app only; run the overdue counts in `DEPLOYMENT.md` → PM due and
+   overdue alerts first).
 6. `send_daily_digest_job`.
 7. `cleanup_old_logs_job` — physical deletes; confirm the 90-day windows are what you want.
 8. `check_late_work_orders_job` — **run the §4 counts first.**

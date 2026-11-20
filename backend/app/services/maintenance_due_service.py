@@ -1,8 +1,10 @@
-"""Which preventive maintenance is due, and which is overdue: the ONE implementation.
+"""Which preventive maintenance is due, and which is overdue: the one rule the dashboard tiles and the
+alerts share.
 
 The Maintenance dashboard's four due / overdue tiles (``GET /maintenance/dashboard``) and the daily
 ``check_maintenance_due_job`` alerts (``maintenance.due`` / ``maintenance.overdue``) both read it, so a
-tile and an alert can never disagree about what is due.
+tile and an alert can never disagree about what is due. (``GET /maintenance/work-orders/overdue`` and the
+QMS evidence card in ``auto_evidence_service`` keep reads of their own, by design.)
 
 Two kinds of item:
 

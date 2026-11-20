@@ -59,10 +59,12 @@ Preserve source/photo bytes and workflow tables on application rollback; see
 
 ## Current PM due-alert release procedure
 
-This release adds the fifteenth cron, **`check_maintenance_due_job`** (12:15 UTC daily: 6:15 AM
-Central, 7:15 in summer), which sends `maintenance.due` (once per item and due date, within 7 days)
-and `maintenance.overdue` (recurring while unread) to the Maintenance department plus the Admins,
-in-app by default. No migration, secret or environment variable is added. **An allowlist does not
+This release adds the fifteenth cron, **`check_maintenance_due_job`**, at 12:15 in the container's
+zone (12:15 UTC = 6:15 AM Central, 7:15 in summer, while `TZ` is unset; 12:15 PM Central with
+`TZ=America/Chicago`; it always judges the company's own day). It sends `maintenance.due` (once per
+cycle, within 7 days of the due date; a cycle restarts when the record changes) and
+`maintenance.overdue` (recurring while unread) to the Maintenance department plus the Admins,
+**in-app only**. No migration, secret or environment variable is added. **An allowlist does not
 pick up a new cron**, so the owner must add it or it never fires.
 
 1. **Read the current value** on `werco-worker` → Variables → `WORKER_CRON_JOBS`. It is **not
@@ -78,7 +80,7 @@ pick up a new cron**, so the owner must add it or it never fires.
    - unset, `all`, or a `-` exclusion value → nothing to do: the job is already armed.
 4. **Verify the startup log** lists `ARQ worker cron:   cron:check_maintenance_due_job -> next run …`
    and, for the two-job allowlist, `13 of 15 cron jobs SUPPRESSED`.
-5. **After the first 12:15 UTC run**, the log reads `Checked preventive maintenance: N overdue and M
+5. **After the first 12:15 run** (container time), the log reads `Checked preventive maintenance: N overdue and M
    due alert(s) across K company(ies)`, and a Maintenance-department user or an Admin sees the
    alerts in the bell, each opening the Maintenance page's Schedules or Work Orders tab.
 6. **To stop it**, remove the name from the allowlist (or use `all,-check_maintenance_due_job` on an
@@ -463,7 +465,7 @@ only emailed by `send_daily_digest_job`, and only to users with a digest prefere
 | `check_late_work_orders_job` | 08:00 daily | in-app **+ direct email** | **L × R messages.** One per late WO, per recipient. No age cap. Cold-start suppression does not apply. | Every active user with role `SUPERVISOR` or `MANAGER` in that tenant. |
 | `run_mrp_auto_draft_job` | 06:00 daily | direct email | **M messages per tenant** — one per manager. Only when the run produced actions. Plus the writes below. | Every active `MANAGER`. |
 | `send_daily_digest_job` | 08:00 daily | direct email | **D emails** — one per user with `digest_enabled` + `DAILY` and at least one queued item in the last 24 h. | Those users. |
-| `check_maintenance_due_job` | 12:15 daily | **in-app**; email only for a user who opted in; never SMS | **One `maintenance.overdue` per overdue item per recipient** on the first run (overdue PM schedules with no work order under way, and unstarted overdue maintenance work orders), plus one `maintenance.due` per item due within 7 days. Later runs: `maintenance.overdue` again only after a recipient has read the previous one; `maintenance.due` never twice for the same due date. | Active users with `department = 'Maintenance'` (exact string) plus the company's active Admins. |
+| `check_maintenance_due_job` | 12:15 daily | **in-app only** (no preference turns email or SMS on) | **One `maintenance.overdue` per overdue item per recipient** on the first run (overdue PM schedules with no work order under way, and unstarted overdue maintenance work orders), plus one `maintenance.due` per item due within 7 days. Later runs: `maintenance.overdue` again only after a recipient has read the previous one; `maintenance.due` once per cycle, where a cycle restarts whenever the record changes (a completion, or any edit, re-announces it). | Active users with `department = 'Maintenance'` (exact string) plus the company's active Admins. |
 | `check_calibrations_job` | 07:00 daily | in-app + **digest** | E in-app rows per Quality user, **plus a second "URGENT" one for anything due within 1 day** (the 7-day and 1-day passes overlap). Email only via the digest job. | Users whose `department = 'Quality'` (exact string). Note the cron passes `department`, so the catalog's `roles=(QUALITY,)` is *not* used here. |
 | `check_quote_expiring_job` | 09:00 daily | **digest only** | Q digest items. No direct email. | Sales-department users. |
 | `check_low_stock_job` | 07:30 daily | **digest only** | **One aggregated message per tenant**, not one per item. Lowest blast radius of the group. | Purchasing + Inventory department users. |
@@ -767,7 +769,7 @@ Order, cheapest and safest first:
 | 3 | `check_low_stock_job` | Next 07:30: **one** aggregated digest item per tenant. No direct emails. |
 | 4 | `poll_tracking_job` | Every :00/:30. No-op while `allow_carrier_egress` is off. Confirm it is not erroring. |
 | 5 | `check_quote_expiring_job`, `check_calibrations_job` | Digest items only, counts matching Q and E from §3.2. |
-| 5a | `check_maintenance_due_job` | Next 12:15 UTC: in-app `maintenance.overdue` / `maintenance.due` rows for the Maintenance department and Admins, matching the counts in [`DEPLOYMENT.md` → PM due and overdue alerts](DEPLOYMENT.md#pm-due-and-overdue-alerts). |
+| 5a | `check_maintenance_due_job` | Next 12:15 (container time): in-app `maintenance.overdue` / `maintenance.due` rows for the Maintenance department and Admins, matching the counts in [`DEPLOYMENT.md` → PM due and overdue alerts](DEPLOYMENT.md#pm-due-and-overdue-alerts). |
 | 6 | `send_daily_digest_job` | **First real email volume: D emails.** Confirm one arrives, is readable, and its links work (needs `FRONTEND_BASE_URL`). |
 | 7 | `cleanup_old_logs_job` | Sunday 02:00. Physical deletes. Confirm the 90-day windows are what you want **before** arming. Audit logs are untouched. |
 | 8 | `check_late_work_orders_job` | **Re-run the `L × R` query the same morning.** This is the big email burst. Consider closing out stale late WOs first. |

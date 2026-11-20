@@ -223,10 +223,12 @@ through the application because the saved source and receipt must remain valid.
 
 ### PM due and overdue alerts
 
-This release adds one worker cron, **`check_maintenance_due_job`** (12:15 UTC daily: 6:15 AM Central,
-7:15 in summer). It sends `maintenance.due` (once per PM item and due date, when it comes within 7
-days) and `maintenance.overdue` (recurring: one unread row per user per item) to each company's
-Maintenance department plus its Admins, in-app by default; see
+This release adds one worker cron, **`check_maintenance_due_job`**, at 12:15 in the worker
+container's zone: 12:15 UTC (6:15 AM Central, 7:15 in summer) while `TZ` is unset, 12:15 PM Central
+with `TZ=America/Chicago`; whatever the hour, it judges each company's own day. It sends
+`maintenance.due` (once per cycle when a PM item comes within 7 days of its due date; a cycle restarts
+when the record changes) and `maintenance.overdue` (recurring: one unread row per user per item) to
+each company's Maintenance department plus its Admins, **in-app only**; see
 [NOTIFICATIONS.md](NOTIFICATIONS.md) and
 [API.md → Maintenance](API.md#maintenance-pm-schedules-maintenance-work-orders-event-log), *Due and
 overdue alerts*. No migration, secret or environment variable is added; deploy the matching API,
@@ -263,7 +265,7 @@ worker and frontend as usual.
   If the overdue counts are large, close out or reschedule stale PM first.
 - **Verify** after the worker redeploy: its startup log lists
   `ARQ worker cron:   cron:check_maintenance_due_job -> next run …` (and, for the two-job allowlist,
-  `13 of 15 cron jobs SUPPRESSED`). After the first 12:15 UTC run the log reads `Checked preventive
+  `13 of 15 cron jobs SUPPRESSED`). After the first 12:15 run (container time) the log reads `Checked preventive
   maintenance: N overdue and M due alert(s) across K company(ies)`, and a Maintenance-department user
   or an Admin sees the alerts in the bell, each opening the Maintenance page's Schedules or Work
   Orders tab. A heartbeat alone does not prove the cron ran.
