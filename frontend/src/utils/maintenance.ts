@@ -53,14 +53,16 @@ export const targetText = (row: Partial<MaintenanceTargetFields>): string => {
 // Python twin uses this exact class. Every run of these becomes one space. (Built with `new RegExp`
 // because the `u` flag cannot be written as a literal under the es5 type-check target; `String.raw`
 // keeps the escapes byte-for-byte those of the Python source.)
-const WHITESPACE_RUN = new RegExp(
-  String.raw`[\t\n\v\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+`,
-  'gu'
-);
-// Leading bullets, after the whitespace collapse: a bullet glyph, or a dash / star that does not start
-// a number (`-40 F` keeps its sign), each with the space after it, as many as there are.
+const WHITESPACE = String.raw`\t\n\v\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff`;
+const WHITESPACE_RUN = new RegExp(`[${WHITESPACE}]+`, 'gu');
+// The same class at the ends of a whole stored checklist, stripped before it is parsed, as the server
+// does (`trim()` and Python's `strip()` strip different sets).
+const WHITESPACE_EDGES = new RegExp(`^[${WHITESPACE}]+|[${WHITESPACE}]+$`, 'gu');
+// Leading bullets, after the whitespace collapse: a bullet glyph, or a dash / star / en dash / em dash
+// FOLLOWED BY A SPACE (or nothing else) — so `-X axis`, `-ve terminal`, `-40 F` and `*CRITICAL*` keep
+// their marks — each with the space after it, as many as there are.
 const LEADING_BULLETS = new RegExp(
-  String.raw`^(?:(?:[\u2022\u25e6\u25aa\u00b7\u2023\u2043]|[-*\u2013\u2014](?![0-9.,])) ?)+`,
+  String.raw`^(?:(?:[\u2022\u25e6\u25aa\u00b7\u2023\u2043]|[-*\u2013\u2014](?= |$)) ?)+`,
   'u'
 );
 // Only spaces are left at the ends after the collapse; `trim()` would strip a wider, different set.
@@ -69,9 +71,10 @@ const END_SPACES = /^ +| +$/g;
 /**
  * A checklist item's text as every reader sees it (owner decision 2026-11-20): whitespace runs
  * (non-breaking spaces included) collapsed to one space, the ends trimmed, leading bullet glyphs
- * (`• ◦ ▪ · ‣ ⁃`, or a dash / star / en dash / em dash that does not start a number) dropped.
- * Idempotent. Spelling, never meaning: numbering ("1. Check oil") and case are kept — case is
- * ignored only when MATCHING ({@link checklistItemKey}).
+ * (`• ◦ ▪ · ‣ ⁃`, or a dash / star / en dash / em dash followed by a space) dropped. Idempotent.
+ * Spelling, never meaning: numbering ("1. Check oil"), a sign or emphasis mark written against a word
+ * ("-X axis", "*CRITICAL*") and case are kept — case is ignored only when MATCHING
+ * ({@link checklistItemKey}).
  *
  * The TypeScript twin of `normalize_checklist_item` in
  * `backend/app/services/maintenance_checklist.py`; the shared fixture
@@ -138,7 +141,7 @@ export interface ChecklistResultItem {
  * `parse_checklist_results` reads them.
  */
 export const parseChecklistResults = (raw?: string | null): ChecklistResultItem[] => {
-  const text = (raw ?? '').trim();
+  const text = (raw ?? '').replace(WHITESPACE_EDGES, '');
   if (!text) return [];
   try {
     const parsed: unknown = JSON.parse(text);

@@ -368,3 +368,25 @@ class TestItemsAreNormalizedOnEveryRead:
             2,
         )
         assert removed_items(parse_checklist(legacy_schedule), ["Check oil", "Grease bearing"]) == []
+
+
+class TestWholeChecklistEdgesAndLineBreaks:
+    """Parser-level rules the item fixture cannot reach (the page's twin strips the same edges)."""
+
+    def test_a_leading_byte_order_mark_does_not_turn_json_into_one_line(self):
+        raw = '﻿[{"item": "Check oil", "done": true}]\u0085'
+        assert parse_checklist_results(raw) == [ChecklistEntry("Check oil", True)]
+
+    def test_a_schedule_checklist_still_splits_on_every_line_separator(self):
+        assert parse_checklist("Check oil\rGrease bearing Drain tank") == [
+            "Check oil",
+            "Grease bearing",
+            "Drain tank",
+        ]
+
+    def test_a_dash_or_star_written_against_a_word_keeps_its_meaning(self):
+        assert parse_checklist('["-X axis limit", "- Y axis limit", "*CRITICAL* torque"]') == [
+            "-X axis limit",
+            "Y axis limit",
+            "*CRITICAL* torque",
+        ]

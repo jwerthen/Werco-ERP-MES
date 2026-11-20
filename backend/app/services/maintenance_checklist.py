@@ -56,24 +56,33 @@ class ChecklistEntry(NamedTuple):
 
 # Spelled out rather than ``\s``, which means different characters in Python and in JavaScript; the
 # TypeScript twin uses this exact class. Every run of these becomes one space.
-_WHITESPACE_RUN = re.compile("[\t\n\v\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+")
-# Leading bullets, after the whitespace collapse: a bullet glyph, or a dash / star that does not start a
-# number (``-40 F`` keeps its sign), each with the space after it, as many as there are.
-_LEADING_BULLETS = re.compile("^(?:(?:[\u2022\u25e6\u25aa\u00b7\u2023\u2043]|[-*\u2013\u2014](?![0-9.,])) ?)+")
+_WHITESPACE = "\t\n\v\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+_WHITESPACE_RUN = re.compile(f"[{_WHITESPACE}]+")
+# The same class at the ends of a whole stored checklist, stripped before it is parsed (``str.strip``
+# and JavaScript's ``trim`` strip different sets: a leading byte-order mark would otherwise make the
+# page read JSON the server reads as one line of text).
+_WHITESPACE_EDGES = re.compile(f"^[{_WHITESPACE}]+|[{_WHITESPACE}]+$")
+# Leading bullets, after the whitespace collapse: a bullet glyph (``\u2022 \u25e6 \u25aa \u00b7 \u2023
+# \u2043``), or a dash / star / en dash / em dash FOLLOWED BY A SPACE (or nothing else) -- so ``-X axis``,
+# ``-ve terminal``, ``-40 F`` and ``*CRITICAL*`` keep their marks -- each with the space after it, as
+# many as there are.
+_LEADING_BULLETS = re.compile("^(?:(?:[\u2022\u25e6\u25aa\u00b7\u2023\u2043]|[-*\u2013\u2014](?= |$)) ?)+")
 
 
 def normalize_checklist_item(text: Any) -> str:
     """A checklist item's text as every reader sees it: whitespace runs collapsed to one space, the
     ends trimmed, leading bullet glyphs dropped. Idempotent. Spelling, never meaning: numbering
-    ("1. Check oil") and case are kept (case is ignored only when MATCHING, see
-    :func:`checklist_item_key`)."""
+    ("1. Check oil"), a sign or emphasis mark written against a word ("-X axis", "*CRITICAL*") and
+    case are kept (case is ignored only when MATCHING, see :func:`checklist_item_key`)."""
     collapsed = _WHITESPACE_RUN.sub(" ", _item_text(text)).strip(" ")
     return _LEADING_BULLETS.sub("", collapsed).strip(" ")
 
 
 def checklist_item_key(text: Any) -> str:
     """What two checklist items are matched on: the normalized text, case-insensitively
-    (``str.lower``, the twin of JavaScript's ``toLowerCase``)."""
+    (``str.lower``, the twin of JavaScript's ``toLowerCase``). The two agree on every letter whose
+    case mapping predates the Unicode version Python ships (14.0 for 3.11); a handful of letters added
+    since lower-case in a newer browser only -- none in any shop checklist."""
     return normalize_checklist_item(text).lower()
 
 
@@ -88,9 +97,15 @@ def _item_text(value: Any) -> str:
     return value if isinstance(value, str) else str(value)
 
 
-# ``\r?\n`` exactly, like the page's reader: ``str.splitlines`` also splits on a lone ``\r`` and
-# other separators, which would make the server see items the dialog does not show.
+# A work order's checklist splits on ``\r?\n`` exactly, like the page's reader: ``str.splitlines`` also
+# splits on a lone ``\r`` and other separators, which would make the server see items the dialog does
+# not show. (A schedule's checklist keeps ``splitlines``: the page never parses it, it shows the
+# server's ``checklist_items``.)
 _LINE_BREAK = re.compile(r"\r?\n")
+
+
+def _strip_edges(text: str) -> str:
+    return _WHITESPACE_EDGES.sub("", text)
 
 
 def parse_checklist(text: Optional[str]) -> List[str]:
@@ -98,7 +113,7 @@ def parse_checklist(text: Optional[str]) -> List[str]:
 
     The import and the page write a JSON array of strings; older UI rows hold one item per line. A
     JSON array of objects contributes each object's ``item`` / ``task`` / ``name`` / ``text``."""
-    if not text or not str(text).strip():
+    if not text or not _strip_edges(str(text)):
         return []
     try:
         loaded = json.loads(text)
@@ -113,13 +128,13 @@ def parse_checklist(text: Optional[str]) -> List[str]:
             if item:
                 items.append(item)
         return items
-    return [item for item in (normalize_checklist_item(line) for line in _LINE_BREAK.split(str(text))) if item]
+    return [item for item in (normalize_checklist_item(line) for line in str(text).splitlines()) if item]
 
 
 def parse_checklist_results(raw: Optional[str]) -> List[ChecklistEntry]:
     """The checklist ``raw`` carries, blank items dropped. Only ``"done": true`` is ticked: a
     plain string item, or a line of text, is an unticked item."""
-    text = (raw or "").strip()
+    text = _strip_edges(raw or "")
     if not text:
         return []
     try:

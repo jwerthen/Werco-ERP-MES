@@ -421,11 +421,6 @@ def _generate_wo_number(db: Session, year: int) -> str:
     return f"{prefix}{highest + 1:04d}"
 
 
-def _calc_next_due(frequency: MaintenanceFrequency, frequency_days: Optional[int], from_date: date) -> date:
-    """See ``app.services.maintenance_interval``: calendar months for monthly and longer cadences."""
-    return next_due_date(frequency, frequency_days, from_date)
-
-
 def _same_tenant(row: Any, related: Any) -> Any:
     """Return ``related`` only when it belongs to the same tenant as ``row``.
 
@@ -1456,7 +1451,7 @@ def complete_work_order(
             "next_due_date": schedule.next_due_date,
         }
         schedule.last_completed_date = today
-        schedule.next_due_date = _calc_next_due(schedule.frequency, schedule.frequency_days, today)
+        schedule.next_due_date = next_due_date(schedule.frequency, schedule.frequency_days, today)
         advanced = schedule
         # Computed once, before the commit: the response must report the date THIS completion
         # wrote, not whatever a re-read after commit finds.

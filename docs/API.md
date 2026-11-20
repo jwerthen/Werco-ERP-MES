@@ -6158,9 +6158,10 @@ uploads go through text extraction + LLM. See
 >   item's text the same way: a schedule's `checklist` (and its `checklist_items`), a work order's
 >   `checklist_results`, the checklist snapshot, `schedule_checklist_items`, and the PM import's
 >   tasks. Runs of whitespace, non-breaking and other Unicode spaces included, collapse to one space;
->   the ends are trimmed; leading bullet glyphs (`•` `◦` `▪` `·` `‣` `⁃`, or a `-` `*` `–` `—` that
->   does not start a number) are dropped. Spelling is changed, never meaning: numbering (*"1. Check
->   oil"*) and case are kept, and *"-40 F"* keeps its sign. Items then **match case-insensitively**
+>   the ends are trimmed; leading bullets are dropped -- a glyph (`•` `◦` `▪` `·` `‣` `⁃`), or a `-`
+>   `*` `–` `—` followed by a space. Spelling is changed, never meaning: numbering (*"1. Check oil"*)
+>   and case are kept, and a mark written against a word or number keeps it (*"-X axis"*, *"-40 F"*,
+>   *"\*CRITICAL\*"*). Items then **match case-insensitively**
 >   wherever two lists are compared — completion judging ticks, and both API-token removal guards
 >   below — so *"Check Oil"* ticks *"check oil"*, and a change of spacing, bullet or case is not a
 >   removal. Where two spellings meet, the first one is displayed. The rule is one Python

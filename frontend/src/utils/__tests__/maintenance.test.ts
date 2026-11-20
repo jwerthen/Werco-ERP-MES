@@ -287,3 +287,19 @@ describe('completionNotesPayload', () => {
     expect(completionNotesPayload('   ', 'Belt squeals')).toEqual({ notes: null });
   });
 });
+
+describe('parseChecklistResults — whole-checklist edges (server parity)', () => {
+  it('strips a leading byte-order mark and trailing NEL like the server, so JSON stays JSON', () => {
+    expect(parseChecklistResults('﻿[{"item": "Check oil", "done": true}]\u0085')).toEqual([
+      { item: 'Check oil', done: true },
+    ]);
+  });
+
+  it('keeps a dash or star written against a word', () => {
+    expect(parseChecklistResults('["-X axis limit", "- Y axis limit", "*CRITICAL* torque"]').map(e => e.item)).toEqual([
+      '-X axis limit',
+      'Y axis limit',
+      '*CRITICAL* torque',
+    ]);
+  });
+});
