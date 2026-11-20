@@ -233,26 +233,38 @@ def test_single_never_performed_schedule_uses_singular_wording(db_session: Sessi
 
 def test_open_linked_work_order_is_not_performance_evidence(db_session: Session):
     """Only a COMPLETED work order evidences a PM. A scheduled or in-progress one linked to
-    the schedule must not turn a never-performed schedule into a performed one."""
+    a schedule must not turn a never-performed schedule into a performed one.
+
+    One OPEN work order per schedule: a PM schedule takes one at a time, and since migration 132
+    the database refuses a second (``uq_maintenance_work_orders_open_schedule``). So the scheduled
+    one and the in-progress one sit on two schedules; the first also carries a cancelled sibling,
+    which is no evidence either."""
     wc = _make_work_center(db_session)
-    schedule = _make_schedule(db_session, wc, next_due=TODAY + timedelta(days=15))
+    scheduled_pm = _make_schedule(db_session, wc, next_due=TODAY + timedelta(days=15))
+    in_progress_pm = _make_schedule(db_session, wc, next_due=TODAY + timedelta(days=15))
     _make_work_order(
-        db_session, wc, status=MaintenanceStatus.SCHEDULED, due_date=TODAY + timedelta(days=15), schedule_id=schedule.id
+        db_session,
+        wc,
+        status=MaintenanceStatus.SCHEDULED,
+        due_date=TODAY + timedelta(days=15),
+        schedule_id=scheduled_pm.id,
     )
+    _make_work_order(db_session, wc, status=MaintenanceStatus.CANCELLED, schedule_id=scheduled_pm.id)
     _make_work_order(
         db_session,
         wc,
         status=MaintenanceStatus.IN_PROGRESS,
         due_date=TODAY + timedelta(days=15),
-        schedule_id=schedule.id,
+        schedule_id=in_progress_pm.id,
     )
-    _make_work_order(db_session, wc, status=MaintenanceStatus.CANCELLED, schedule_id=schedule.id)
 
     result = _query_maintenance(db_session, COMPANY_A, today=TODAY)
 
+    # Both schedules still read never performed: neither open work order counts.
     assert _verdict(result) == ("warning", "not_assessed")
-    assert result["recent_count"] == 1
+    assert result["recent_count"] == 2
     assert result["total_count"] == 3
+    assert "2 never performed" in result["description"]
 
 
 # ---------------------------------------------------------------------------

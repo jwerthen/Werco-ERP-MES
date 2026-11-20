@@ -590,7 +590,10 @@ class TestATokenCannotPutChecklistItemsAway:
 
 class TestTheWorkOrderCarriesItsScheduleSteps:
     """``schedule_checklist_items`` on every work-order read: the Complete dialog builds from it, so
-    it must be exactly what completion judges -- an inactive schedule included."""
+    it must be exactly what completion judges -- an inactive schedule included. Since migration 132
+    that is the snapshot taken when the work order was opened (pinned in detail in
+    ``test_maintenance_pm_integrity``); a work order opened before it reads the schedule's live
+    steps, whether or not the schedule is still active."""
 
     def test_reads_carry_the_schedule_steps_even_after_the_schedule_is_deactivated(self, client, db_session, headers):
         schedule, wo = pm_from_checklisted_schedule(
@@ -604,6 +607,21 @@ class TestTheWorkOrderCarriesItsScheduleSteps:
         # ...and completion judges exactly that list.
         refused = complete(client, headers, wo["id"])
         assert refused.status_code == status.HTTP_409_CONFLICT, refused.text
+        assert "(Check coolant)" in refused.json()["detail"]
+
+    def test_a_legacy_work_order_reads_the_live_steps_of_a_deactivated_schedule(self, client, db_session, headers):
+        schedule, wo = pm_from_checklisted_schedule(
+            client, headers, db_session, checklist_results=checklist(("Lubricate ways", True))
+        )
+        make_legacy(db_session, wo["id"])
+        assert client.delete(f"/api/v1/maintenance/schedules/{schedule.id}", headers=headers).status_code == 200
+        one = client.get(f"{WORK_ORDERS}/{wo['id']}", headers=headers).json()
+        assert one["schedule_checklist_items"] == ["Lubricate ways", "Check coolant"]
+        [listed] = [row for row in client.get(WORK_ORDERS, headers=headers).json() if row["id"] == wo["id"]]
+        assert listed["schedule_checklist_items"] == ["Lubricate ways", "Check coolant"]
+        refused = complete(client, headers, wo["id"])
+        assert refused.status_code == status.HTTP_409_CONFLICT, refused.text
+        assert "(Check coolant)" in refused.json()["detail"]
 
     def test_a_work_order_without_a_schedule_carries_none(self, client, db_session, headers):
         wc = make_wc(db_session)
@@ -618,9 +636,20 @@ class TestTheWorkOrderCarriesItsScheduleSteps:
         assert "(Check coolant)" in refused.json()["detail"]
 
 
+def make_legacy(db: Session, wo_id: int) -> None:
+    """Turn a work order into one opened BEFORE migration 132: no checklist snapshot, so it is
+    judged -- and read -- on its schedule's LIVE checklist. (Every pre-132 row looks like this; the
+    column is never backfilled.)"""
+    db.expire_all()
+    db.get(MaintenanceWorkOrder, wo_id).schedule_checklist_snapshot = None
+    db.commit()
+
+
 class TestATokenCannotEmptyTheScheduleUnderAnOpenWorkOrder:
-    """Completion judges the schedule's steps, so a token emptying them while a work order is open
-    would be the same skip by a third route."""
+    """A work order opened before migration 132 has no checklist snapshot: completion judges it on the
+    schedule's LIVE steps, so a token emptying them while it is open would be the same skip by a third
+    route (403). A work order opened since keeps the steps it was opened with, so the same edit binds
+    only the NEXT work order and a token may make it."""
 
     def put_schedule(self, client, headers, schedule_id, checklist_text):
         return client.put(
@@ -628,13 +657,39 @@ class TestATokenCannotEmptyTheScheduleUnderAnOpenWorkOrder:
         )
 
     @pytest.mark.parametrize("trimmed", [None, "", json.dumps(["Lubricate ways"])], ids=["null", "empty", "dropped"])
-    def test_removing_steps_with_an_open_work_order_is_403(self, client, db_session, headers, token_headers, trimmed):
+    def test_removing_steps_with_a_legacy_open_work_order_is_403(
+        self, client, db_session, headers, token_headers, trimmed
+    ):
         schedule, wo = pm_from_checklisted_schedule(client, headers, db_session, checklist_results=None)
+        make_legacy(db_session, wo["id"])
+        audit_rows = db_session.query(AuditLog).count()
         refused = self.put_schedule(client, token_headers, schedule.id, trimmed)
         assert refused.status_code == status.HTTP_403_FORBIDDEN, refused.text
         assert refused.json()["detail"] == API_TOKEN_SCHEDULE_CHECKLIST_REMOVAL
         db_session.expire_all()
         assert db_session.get(MaintenanceSchedule, schedule.id).checklist == SCHEDULE_CHECKLIST
+        assert db_session.query(AuditLog).count() == audit_rows
+        # ...so the legacy work order still answers for both live steps.
+        assert complete(client, headers, wo["id"]).json()["detail"].startswith("2 of 2 checklist items")
+
+    @pytest.mark.parametrize("trimmed", [None, "", json.dumps(["Lubricate ways"])], ids=["null", "empty", "dropped"])
+    def test_removing_steps_with_a_snapshotted_open_work_order_is_allowed_and_binds_the_next_one(
+        self, client, db_session, headers, token_headers, trimmed
+    ):
+        schedule, wo = pm_from_checklisted_schedule(client, headers, db_session, checklist_results=None)
+        trimmed_ok = self.put_schedule(client, token_headers, schedule.id, trimmed)
+        assert trimmed_ok.status_code == status.HTTP_200_OK, trimmed_ok.text
+        db_session.expire_all()
+        assert db_session.get(MaintenanceSchedule, schedule.id).checklist == trimmed
+        # The open work order keeps the steps it was opened with -- read and judged.
+        one = client.get(f"{WORK_ORDERS}/{wo['id']}", headers=headers).json()
+        assert one["schedule_checklist_items"] == ["Lubricate ways", "Check coolant"]
+        refused = complete(client, token_headers, wo["id"])
+        assert refused.status_code == status.HTTP_403_FORBIDDEN, refused.text
+        assert refused.json()["detail"] == API_TOKEN_INCOMPLETE_CHECKLIST
+        refused = complete(client, headers, wo["id"])
+        assert refused.status_code == status.HTTP_409_CONFLICT, refused.text
+        assert refused.json()["detail"].startswith("2 of 2 checklist items")
 
     def test_a_token_may_add_steps_or_edit_a_schedule_with_no_open_work_order(
         self, client, db_session, headers, token_headers
@@ -653,3 +708,14 @@ class TestATokenCannotEmptyTheScheduleUnderAnOpenWorkOrder:
         schedule, wo = pm_from_checklisted_schedule(client, headers, db_session, checklist_results=None)
         trimmed = self.put_schedule(client, headers, schedule.id, json.dumps(["Lubricate ways"]))
         assert trimmed.status_code == 200, trimmed.text
+
+    def test_a_person_may_trim_the_schedule_under_a_legacy_open_work_order(self, client, db_session, headers):
+        """...and then the legacy work order is judged on what is left (the pre-132 rule)."""
+        schedule, wo = pm_from_checklisted_schedule(client, headers, db_session, checklist_results=None)
+        make_legacy(db_session, wo["id"])
+        trimmed = self.put_schedule(client, headers, schedule.id, json.dumps(["Lubricate ways"]))
+        assert trimmed.status_code == 200, trimmed.text
+        assert client.get(f"{WORK_ORDERS}/{wo['id']}", headers=headers).json()["schedule_checklist_items"] == [
+            "Lubricate ways"
+        ]
+        assert complete(client, headers, wo["id"]).json()["detail"].startswith("1 of 1 checklist items")

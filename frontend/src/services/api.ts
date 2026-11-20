@@ -134,6 +134,7 @@ import type {
   MaintenanceAssetUpdate,
   MaintenanceSchedule,
   MaintenanceScheduleUpdate,
+  MaintenanceWorkOrder,
   MaintenanceWorkOrderCompleted,
   PmImportResponse,
 } from '../types/maintenance';
@@ -5465,8 +5466,8 @@ class ApiService {
     return response.data;
   }
 
-  async getMaintenanceWorkOrder(id: number) {
-    const response = await this.api.get(`/maintenance/work-orders/${id}`);
+  async getMaintenanceWorkOrder(id: number): Promise<MaintenanceWorkOrder> {
+    const response = await this.api.get<MaintenanceWorkOrder>(`/maintenance/work-orders/${id}`);
     return response.data;
   }
 

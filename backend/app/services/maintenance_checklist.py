@@ -27,11 +27,14 @@ API_TOKEN_CHECKLIST_REMOVAL = (
     "Removing items from a maintenance work order's checklist must be done by a person signed in to the app, "
     "not an API token."
 )
-# ...including from the PM SCHEDULE's checklist while a work order is open against it: completion
-# judges the schedule's steps too, so emptying the schedule would be the same skip by a third route.
+# ...including from the PM SCHEDULE's checklist while a work order judged on that live checklist is
+# open against it -- one opened before migration 132, which has no checklist snapshot: emptying the
+# schedule would be the same skip by a third route. (A work order opened since keeps its snapshot, so
+# a schedule edit binds only the next one.)
 API_TOKEN_SCHEDULE_CHECKLIST_REMOVAL = (
-    "Removing items from the checklist of a PM schedule that has an open work order must be done by a person "
-    "signed in to the app, not an API token."
+    "Removing items from the checklist of a PM schedule whose open work order is still judged on the schedule's "
+    "current checklist (it was opened before checklist snapshots) must be done by a person signed in to the app, "
+    "not an API token."
 )
 
 

@@ -30,9 +30,11 @@ import {
   ChecklistResultItem,
   canPerformMaintenance,
   canPlanMaintenance,
+  carryChecklistTicks,
   checklistPayload,
   checklistResultsPayload,
   completionChecklist,
+  completionNotesPayload,
   frequencyText,
   openWorkOrdersBySchedule,
   parseChecklistResults,
@@ -149,6 +151,7 @@ const BLANK_COMPLETE = {
   // Required by the server when any checklist item is left unticked (sent only then).
   incomplete_checklist_reason: '',
 };
+type CompleteForm = typeof BLANK_COMPLETE;
 
 /** `iso` (YYYY-MM-DD) plus `days`, as YYYY-MM-DD. Noon UTC keeps it off any DST edge. */
 const addDaysISO = (iso: string, days: number) => {
@@ -218,13 +221,30 @@ export default function Maintenance() {
   // completing it advances the schedule) and inherits the schedule's target.
   const [woSchedule, setWoSchedule] = useState<MaintenanceSchedule | null>(null);
   const [editSchedule, setEditSchedule] = useState<MaintenanceSchedule | null>(null);
-  const [completeForm, setCompleteForm] = useState(BLANK_COMPLETE);
+  const [completeForm, setCompleteForm] = useState<CompleteForm>(BLANK_COMPLETE);
+  // The form as it opened: blank except the work order's own notes, which completion replaces.
+  const [completeFormBaseline, setCompleteFormBaseline] = useState<CompleteForm>(BLANK_COMPLETE);
   const [completeChecklist, setCompleteChecklist] = useState<ChecklistResultItem[]>([]);
   const [completeChecklistBaseline, setCompleteChecklistBaseline] = useState<ChecklistResultItem[]>([]);
+  // The dialog is built from a fresh read of the work order, not the cached list row; nothing is
+  // shown (and Complete stays off) until that read settles.
+  const [completeLoading, setCompleteLoading] = useState(false);
+  // Set when a refused completion re-read the work order and found checklist items the dialog
+  // did not list.
+  const [completeNotice, setCompleteNotice] = useState('');
+  // Set (to the text saying why) when a retry from this dialog can only be refused again: the
+  // server refused 400 (the work order was held, cancelled or completed meanwhile), or a refused
+  // completion's re-read failed, so the dialog can't show what the server judged. Complete stays
+  // off; Cancel is the way out.
+  const [completeBlocked, setCompleteBlocked] = useState('');
+  // Bumped on every open and close, so a read answering a dialog that has since closed (or been
+  // reopened for another work order) is dropped.
+  const completeReadSeq = useRef(0);
   // Completing with any checklist item unticked needs a written reason (the server refuses 409
   // without one), so Complete waits for it.
   const uncheckedCount = completeChecklist.filter(entry => !entry.done).length;
-  const completeReady = uncheckedCount === 0 || !!completeForm.incomplete_checklist_reason.trim();
+  const checklistAnswered = uncheckedCount === 0 || !!completeForm.incomplete_checklist_reason.trim();
+  const completeReady = !completeLoading && !completeBlocked && checklistAnswered;
 
   const formDirty =
     (showCreateScheduleModal &&
@@ -232,7 +252,7 @@ export default function Maintenance() {
     (showCreateWOModal &&
       (JSON.stringify(woForm) !== JSON.stringify(woBaseline) || (!woSchedule && hasTarget(woTarget)))) ||
     (showCompleteModal &&
-      (JSON.stringify(completeForm) !== JSON.stringify(BLANK_COMPLETE) ||
+      (JSON.stringify(completeForm) !== JSON.stringify(completeFormBaseline) ||
         JSON.stringify(completeChecklist) !== JSON.stringify(completeChecklistBaseline)));
   const { confirmDiscard, markSaved } = useUnsavedChanges(formDirty);
 
@@ -342,31 +362,106 @@ export default function Maintenance() {
     if (actionBusy || !confirmDiscard()) return;
     resetWOModal();
   };
-  const openCompleteModal = useCallback(
+  // A PM work order answers for its schedule's checklist too (the server judges both). The work
+  // order carries the list the server will judge (a snapshot taken when it was opened); an older
+  // API leaves it to the page's (active) schedules.
+  const checklistToComplete = useCallback(
     (wo: MaintenanceWorkOrder) => {
-      // A PM work order answers for its schedule's checklist too (the server judges both). The
-      // work order carries the list the server will judge; an older API leaves it to the page's
-      // (active) schedules.
       const schedule = wo.schedule_id != null ? schedulesById.get(wo.schedule_id) : undefined;
-      const checklist = completionChecklist(
+      return completionChecklist(
         parseChecklistResults(wo.checklist_results),
         wo.schedule_checklist_items ?? schedule?.checklist_items
       );
-      setSelectedWO(wo);
-      setActionError('');
-      setCompleteForm(BLANK_COMPLETE);
-      setCompleteChecklist(checklist);
-      setCompleteChecklistBaseline(checklist);
-      setShowCompleteModal(true);
     },
     [schedulesById]
   );
-  const closeCompleteModal = () => {
-    if (actionBusy || !confirmDiscard()) return;
+  // The work order as the server has it now, or null when it can't be read (the caller decides
+  // what to fall back to). A read of a different record is no answer.
+  const readWorkOrder = useCallback(async (id: number): Promise<MaintenanceWorkOrder | null> => {
+    try {
+      const fresh = await api.getMaintenanceWorkOrder(id);
+      return fresh && typeof fresh === 'object' && fresh.id === id ? fresh : null;
+    } catch {
+      return null;
+    }
+  }, []);
+  const openCompleteModal = useCallback(
+    (wo: MaintenanceWorkOrder) => {
+      const seq = ++completeReadSeq.current;
+      setSelectedWO(wo);
+      setActionError('');
+      setCompleteNotice('');
+      setCompleteBlocked('');
+      setCompleteForm(BLANK_COMPLETE);
+      setCompleteFormBaseline(BLANK_COMPLETE);
+      setCompleteChecklist([]);
+      setCompleteChecklistBaseline([]);
+      setCompleteLoading(true);
+      setShowCompleteModal(true);
+      void readWorkOrder(wo.id).then(fresh => {
+        if (seq !== completeReadSeq.current) return; // closed, or reopened, while reading
+        // The cached list row only when the fresh read failed; the server judges the completion
+        // against its own record either way.
+        const source = fresh ?? wo;
+        const checklist = checklistToComplete(source);
+        const form: CompleteForm = { ...BLANK_COMPLETE, notes: source.notes ?? '' };
+        setSelectedWO(source);
+        setCompleteForm(form);
+        setCompleteFormBaseline(form);
+        setCompleteChecklist(checklist);
+        setCompleteChecklistBaseline(checklist);
+        setCompleteLoading(false);
+      });
+    },
+    [checklistToComplete, readWorkOrder]
+  );
+  const resetCompleteModal = () => {
+    completeReadSeq.current += 1;
     setShowCompleteModal(false);
+    setCompleteLoading(false);
+    setCompleteNotice('');
+    setCompleteBlocked('');
     setCompleteForm(BLANK_COMPLETE);
+    setCompleteFormBaseline(BLANK_COMPLETE);
     setCompleteChecklist([]);
     setCompleteChecklistBaseline([]);
+  };
+  const closeCompleteModal = () => {
+    if (actionBusy || !confirmDiscard()) return;
+    resetCompleteModal();
+  };
+
+  // A refused completion (409) may be the checklist changing under the open dialog: a concurrent
+  // edit of the work order's checklist, or a legacy row whose steps the dialog never listed. Re-read
+  // the work order and rebuild the checklist from it, keeping what the technician ticked (by item
+  // text, as a multiset) and every other field they typed, so the refusal is not a dead end.
+  const reloadRefusedCompletion = async (wo: MaintenanceWorkOrder, answered: ChecklistResultItem[]) => {
+    const seq = completeReadSeq.current;
+    const fresh = await readWorkOrder(wo.id);
+    if (seq !== completeReadSeq.current) return;
+    if (!fresh) {
+      // The checklist on screen may be missing the very items the server refused over, so a retry
+      // from it is not offered.
+      setCompleteBlocked("Couldn't reload this work order to show what changed. Close the dialog and open it again.");
+      return;
+    }
+    const rebuilt = checklistToComplete(fresh);
+    const { checklist, added } = carryChecklistTicks(answered, rebuilt);
+    const freshNotes = fresh.notes ?? '';
+    setSelectedWO(fresh);
+    setCompleteChecklist(checklist);
+    setCompleteChecklistBaseline(rebuilt);
+    // Notes nobody touched follow the record; typed notes are kept. "Touched" is judged the way the
+    // payload judges it (completionNotesPayload): whitespace at the ends is no change.
+    setCompleteForm(form =>
+      form.notes.trim() === completeFormBaseline.notes.trim() ? { ...form, notes: freshNotes } : form
+    );
+    setCompleteFormBaseline(baseline => ({ ...baseline, notes: freshNotes }));
+    setCompleteNotice(
+      added > 0
+        ? `The checklist changed while this was open: ${added} new item${added === 1 ? '' : 's'}. Tick ${added === 1 ? 'it' : 'them'} or give a reason, then Complete again.`
+        : ''
+    );
   };
 
   const isCustom = scheduleForm.frequency === 'custom';
@@ -587,6 +682,7 @@ export default function Maintenance() {
     if (!selectedWO || actionBusy || !completeReady) return;
     setActionBusy(true);
     setActionError('');
+    setCompleteNotice('');
     const number = (value: string) => {
       const parsed = Number.parseFloat(value);
       return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
@@ -595,7 +691,9 @@ export default function Maintenance() {
       const completed = await api.completeMaintenanceWorkOrder(selectedWO.id, {
         // Sent only for a work order that carries a checklist; omitted, the server keeps it.
         ...(completeChecklist.length ? { checklist_results: JSON.stringify(completeChecklist) } : {}),
-        notes: completeForm.notes.trim() || undefined,
+        // The notes REPLACE the work order's: sent only when changed from what the dialog opened
+        // with (null when emptied, which clears them); omitted, the server keeps them.
+        ...completionNotesPayload(completeForm.notes, completeFormBaseline.notes),
         findings: completeForm.findings.trim() || undefined,
         parts_used: completeForm.parts_used.trim() || undefined,
         labor_cost: number(completeForm.labor_cost),
@@ -606,10 +704,7 @@ export default function Maintenance() {
         ...(uncheckedCount > 0 ? { incomplete_checklist_reason: completeForm.incomplete_checklist_reason.trim() } : {}),
       });
       markSaved();
-      setShowCompleteModal(false);
-      setCompleteForm(BLANK_COMPLETE);
-      setCompleteChecklist([]);
-      setCompleteChecklistBaseline([]);
+      resetCompleteModal();
       const nextDue = completed?.schedule_next_due_date;
       const schedule = selectedWO.schedule_id != null ? schedulesById.get(selectedWO.schedule_id) : undefined;
       showToast(
@@ -623,6 +718,15 @@ export default function Maintenance() {
       const message = errorText(err, 'Unable to save. Check your entries and try again.');
       setActionError(message);
       showToast('error', message);
+      const status = err?.response?.status;
+      // 409: refused on the record as it stands (a checklist item the dialog doesn't list, for
+      // one); 400: the work order was held, cancelled or completed meanwhile. Either way the page
+      // re-reads, and the server's words stay on screen. Complete stays off until the re-read of
+      // the work order settles, so a retry is judged against what the server now holds.
+      if (status === 409 || status === 400) void loadData();
+      if (status === 409) await reloadRefusedCompletion(selectedWO, completeChecklist);
+      // A retry would only be refused the same way: Cancel is the way out.
+      if (status === 400) setCompleteBlocked('Close this dialog: the list now shows where this work order stands.');
     } finally {
       setActionBusy(false);
     }
@@ -1708,163 +1812,195 @@ export default function Maintenance() {
           </button>
         </div>
         <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
-          {completingSchedule && (
-            <p className="text-sm text-blue-200 border border-blue-500/30 bg-blue-500/10 rounded-sm p-2">
-              Completing this work order moves PM schedule{' '}
-              <span className="font-medium">{completingSchedule.name}</span> forward: its next due date becomes one
-              interval ({frequencyText(completingSchedule.frequency, completingSchedule.frequency_days).toLowerCase()})
-              from today.
+          {completeLoading ? (
+            <p role="status" className="text-sm text-slate-400">
+              Loading the work order…
             </p>
-          )}
-          {selectedWO?.schedule_id != null && !completingSchedule && (
-            <p className="text-sm text-blue-200 border border-blue-500/30 bg-blue-500/10 rounded-sm p-2">
-              Completing this work order moves its PM schedule’s next due date forward.
-            </p>
-          )}
-          {completeChecklist.length > 0 && (
-            <fieldset className="space-y-1">
-              <legend className="block text-sm font-medium text-slate-300 mb-1">
-                Checklist ({completeChecklist.filter(entry => entry.done).length} of {completeChecklist.length} done)
-              </legend>
-              {completeChecklist.map((entry, index) => (
-                <label key={`${index}-${entry.item}`} className="flex items-start gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    className="mt-0.5"
-                    checked={entry.done}
-                    onChange={e =>
-                      setCompleteChecklist(items =>
-                        items.map((item, i) => (i === index ? { ...item, done: e.target.checked } : item))
-                      )
-                    }
+          ) : (
+            <>
+              {completeBlocked && (
+                <p
+                  role="status"
+                  className="flex items-start gap-2 text-sm text-red-200 border border-red-500/40 bg-red-500/10 rounded-sm p-2"
+                >
+                  <ExclamationTriangleIcon className="w-4 h-4 mt-0.5 shrink-0" aria-hidden="true" />
+                  <span>{completeBlocked}</span>
+                </p>
+              )}
+              {completingSchedule && (
+                <p className="text-sm text-blue-200 border border-blue-500/30 bg-blue-500/10 rounded-sm p-2">
+                  Completing this work order moves PM schedule{' '}
+                  <span className="font-medium">{completingSchedule.name}</span> forward: its next due date becomes one
+                  interval (
+                  {frequencyText(completingSchedule.frequency, completingSchedule.frequency_days).toLowerCase()}) from
+                  today.
+                </p>
+              )}
+              {selectedWO?.schedule_id != null && !completingSchedule && (
+                <p className="text-sm text-blue-200 border border-blue-500/30 bg-blue-500/10 rounded-sm p-2">
+                  Completing this work order moves its PM schedule’s next due date forward.
+                </p>
+              )}
+              {completeNotice && (
+                <p
+                  role="status"
+                  className="flex items-start gap-2 text-sm text-amber-200 border border-amber-500/40 bg-amber-500/10 rounded-sm p-2"
+                >
+                  <ExclamationTriangleIcon className="w-4 h-4 mt-0.5 shrink-0" aria-hidden="true" />
+                  <span>{completeNotice}</span>
+                </p>
+              )}
+              {completeChecklist.length > 0 && (
+                <fieldset className="space-y-1" disabled={actionBusy}>
+                  <legend className="block text-sm font-medium text-slate-300 mb-1">
+                    Checklist ({completeChecklist.filter(entry => entry.done).length} of {completeChecklist.length}{' '}
+                    done)
+                  </legend>
+                  {completeChecklist.map((entry, index) => (
+                    <label key={`${index}-${entry.item}`} className="flex items-start gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        className="mt-0.5"
+                        checked={entry.done}
+                        onChange={e =>
+                          setCompleteChecklist(items =>
+                            items.map((item, i) => (i === index ? { ...item, done: e.target.checked } : item))
+                          )
+                        }
+                      />
+                      <span>{entry.item}</span>
+                    </label>
+                  ))}
+                </fieldset>
+              )}
+              {uncheckedCount > 0 && (
+                <FormField
+                  label={`Reason for completing with ${uncheckedCount} item${uncheckedCount === 1 ? '' : 's'} unticked`}
+                  required
+                  help="Recorded in the audit trail with the unticked items. Tick every item to complete without one."
+                  labelClassName="block text-sm font-medium text-slate-300 mb-1"
+                >
+                  {field => (
+                    <textarea
+                      {...field}
+                      value={completeForm.incomplete_checklist_reason}
+                      onChange={e => setCompleteForm(f => ({ ...f, incomplete_checklist_reason: e.target.value }))}
+                      rows={2}
+                      maxLength={2000}
+                      className="w-full px-3 py-2 border rounded-sm"
+                    />
+                  )}
+                </FormField>
+              )}
+              <FormField
+                label="Completion Notes"
+                help="Saved as the work order’s notes, replacing the ones it has now (shown here). Clear the field to remove them."
+                labelClassName="block text-sm font-medium text-slate-300 mb-1"
+              >
+                {field => (
+                  <textarea
+                    {...field}
+                    value={completeForm.notes}
+                    onChange={e => setCompleteForm(f => ({ ...f, notes: e.target.value }))}
+                    rows={2}
+                    className="w-full px-3 py-2 border rounded-sm"
                   />
-                  <span>{entry.item}</span>
-                </label>
-              ))}
-            </fieldset>
+                )}
+              </FormField>
+              <FormField label="Findings" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                {field => (
+                  <textarea
+                    {...field}
+                    value={completeForm.findings}
+                    onChange={e => setCompleteForm(f => ({ ...f, findings: e.target.value }))}
+                    rows={2}
+                    className="w-full px-3 py-2 border rounded-sm"
+                  />
+                )}
+              </FormField>
+              <FormField label="Parts Used" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                {field => (
+                  <input
+                    {...field}
+                    type="text"
+                    value={completeForm.parts_used}
+                    onChange={e => setCompleteForm(f => ({ ...f, parts_used: e.target.value }))}
+                    className="w-full px-3 py-2 border rounded-sm"
+                  />
+                )}
+              </FormField>
+              <div className="grid grid-cols-2 gap-3">
+                <FormField label="Labor Cost ($)" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                  {field => (
+                    <input
+                      {...field}
+                      type="number"
+                      min={0}
+                      step="0.01"
+                      value={completeForm.labor_cost}
+                      onChange={e => setCompleteForm(f => ({ ...f, labor_cost: e.target.value }))}
+                      className="w-full px-3 py-2 border rounded-sm"
+                    />
+                  )}
+                </FormField>
+                <FormField label="Parts Cost ($)" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                  {field => (
+                    <input
+                      {...field}
+                      type="number"
+                      min={0}
+                      step="0.01"
+                      value={completeForm.parts_cost}
+                      onChange={e => setCompleteForm(f => ({ ...f, parts_cost: e.target.value }))}
+                      className="w-full px-3 py-2 border rounded-sm"
+                    />
+                  )}
+                </FormField>
+                <FormField
+                  label="Downtime (minutes)"
+                  help={
+                    selectedWO?.requires_shutdown && selectedWO?.target_type === 'work_center'
+                      ? 'Leave blank to use the downtime recorded on the machine.'
+                      : undefined
+                  }
+                  labelClassName="block text-sm font-medium text-slate-300 mb-1"
+                >
+                  {field => (
+                    <input
+                      {...field}
+                      type="number"
+                      min={0}
+                      step="1"
+                      value={completeForm.downtime_minutes}
+                      onChange={e => setCompleteForm(f => ({ ...f, downtime_minutes: e.target.value }))}
+                      className="w-full px-3 py-2 border rounded-sm"
+                    />
+                  )}
+                </FormField>
+                <FormField
+                  label="Actual Hours"
+                  help={
+                    completingSchedule
+                      ? `Planned: ${completingSchedule.estimated_duration_hours}h. Leave blank to use the time since it was started.`
+                      : 'Leave blank to use the time since it was started.'
+                  }
+                  labelClassName="block text-sm font-medium text-slate-300 mb-1"
+                >
+                  {field => (
+                    <input
+                      {...field}
+                      type="number"
+                      min={0}
+                      step="0.25"
+                      value={completeForm.actual_duration_hours}
+                      onChange={e => setCompleteForm(f => ({ ...f, actual_duration_hours: e.target.value }))}
+                      className="w-full px-3 py-2 border rounded-sm"
+                    />
+                  )}
+                </FormField>
+              </div>
+            </>
           )}
-          {uncheckedCount > 0 && (
-            <FormField
-              label={`Reason for completing with ${uncheckedCount} item${uncheckedCount === 1 ? '' : 's'} unticked`}
-              required
-              help="Recorded in the audit trail with the unticked items. Tick every item to complete without one."
-              labelClassName="block text-sm font-medium text-slate-300 mb-1"
-            >
-              {field => (
-                <textarea
-                  {...field}
-                  value={completeForm.incomplete_checklist_reason}
-                  onChange={e => setCompleteForm(f => ({ ...f, incomplete_checklist_reason: e.target.value }))}
-                  rows={2}
-                  maxLength={2000}
-                  className="w-full px-3 py-2 border rounded-sm"
-                />
-              )}
-            </FormField>
-          )}
-          <FormField label="Completion Notes" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-            {field => (
-              <textarea
-                {...field}
-                value={completeForm.notes}
-                onChange={e => setCompleteForm(f => ({ ...f, notes: e.target.value }))}
-                rows={2}
-                className="w-full px-3 py-2 border rounded-sm"
-              />
-            )}
-          </FormField>
-          <FormField label="Findings" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-            {field => (
-              <textarea
-                {...field}
-                value={completeForm.findings}
-                onChange={e => setCompleteForm(f => ({ ...f, findings: e.target.value }))}
-                rows={2}
-                className="w-full px-3 py-2 border rounded-sm"
-              />
-            )}
-          </FormField>
-          <FormField label="Parts Used" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-            {field => (
-              <input
-                {...field}
-                type="text"
-                value={completeForm.parts_used}
-                onChange={e => setCompleteForm(f => ({ ...f, parts_used: e.target.value }))}
-                className="w-full px-3 py-2 border rounded-sm"
-              />
-            )}
-          </FormField>
-          <div className="grid grid-cols-2 gap-3">
-            <FormField label="Labor Cost ($)" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-              {field => (
-                <input
-                  {...field}
-                  type="number"
-                  min={0}
-                  step="0.01"
-                  value={completeForm.labor_cost}
-                  onChange={e => setCompleteForm(f => ({ ...f, labor_cost: e.target.value }))}
-                  className="w-full px-3 py-2 border rounded-sm"
-                />
-              )}
-            </FormField>
-            <FormField label="Parts Cost ($)" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-              {field => (
-                <input
-                  {...field}
-                  type="number"
-                  min={0}
-                  step="0.01"
-                  value={completeForm.parts_cost}
-                  onChange={e => setCompleteForm(f => ({ ...f, parts_cost: e.target.value }))}
-                  className="w-full px-3 py-2 border rounded-sm"
-                />
-              )}
-            </FormField>
-            <FormField
-              label="Downtime (minutes)"
-              help={
-                selectedWO?.requires_shutdown && selectedWO?.target_type === 'work_center'
-                  ? 'Leave blank to use the downtime recorded on the machine.'
-                  : undefined
-              }
-              labelClassName="block text-sm font-medium text-slate-300 mb-1"
-            >
-              {field => (
-                <input
-                  {...field}
-                  type="number"
-                  min={0}
-                  step="1"
-                  value={completeForm.downtime_minutes}
-                  onChange={e => setCompleteForm(f => ({ ...f, downtime_minutes: e.target.value }))}
-                  className="w-full px-3 py-2 border rounded-sm"
-                />
-              )}
-            </FormField>
-            <FormField
-              label="Actual Hours"
-              help={
-                completingSchedule
-                  ? `Planned: ${completingSchedule.estimated_duration_hours}h. Leave blank to use the time since it was started.`
-                  : 'Leave blank to use the time since it was started.'
-              }
-              labelClassName="block text-sm font-medium text-slate-300 mb-1"
-            >
-              {field => (
-                <input
-                  {...field}
-                  type="number"
-                  min={0}
-                  step="0.25"
-                  value={completeForm.actual_duration_hours}
-                  onChange={e => setCompleteForm(f => ({ ...f, actual_duration_hours: e.target.value }))}
-                  className="w-full px-3 py-2 border rounded-sm"
-                />
-              )}
-            </FormField>
-          </div>
         </div>
         <div className="flex justify-end gap-2 p-4 border-t border-slate-700">
           <Button variant="secondary" onClick={closeCompleteModal} disabled={actionBusy}>
@@ -1875,7 +2011,12 @@ export default function Maintenance() {
             loading={actionBusy}
             loadingText="Saving…"
             disabled={!completeReady}
-            title={completeReady ? undefined : 'Give a reason for the unticked checklist items, or tick them'}
+            title={
+              completeBlocked ||
+              (completeLoading || checklistAnswered
+                ? undefined
+                : 'Give a reason for the unticked checklist items, or tick them')
+            }
           >
             Complete
           </LoadingButton>

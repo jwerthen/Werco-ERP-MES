@@ -142,6 +142,68 @@ export const completionChecklist = (
   return [...workOrderItems, ...missing];
 };
 
+/** {@link carryChecklistTicks}'s result: the rebuilt checklist and how many of its items are new. */
+export interface ChecklistCarryOver {
+  checklist: ChecklistResultItem[];
+  /**
+   * Items of the fresh list no entry of the previous list matched (counted as a multiset) that
+   * are still unticked — the new items the technician now has to tick or explain. A new item the
+   * server already holds ticked is not counted.
+   */
+  added: number;
+}
+
+/**
+ * Re-applies what the technician had ticked to a checklist re-read from the server (after the
+ * completion was refused because the list changed underneath the open dialog).
+ *
+ * Items are matched by text as a MULTISET, the way the server counts them: two ticked copies of
+ * "Grease bearing" before and three copies now leave two ticked and one new. Within one text the
+ * ticked copies are matched first, so a tick is never lost to an unticked twin. A matched item
+ * keeps the dialog's state (the technician's answer wins over the stored one); an unmatched item
+ * is new and keeps the server's state (and counts in `added` only while unticked). Items the
+ * fresh list no longer carries are dropped.
+ */
+export const carryChecklistTicks = (
+  previous: readonly ChecklistResultItem[],
+  fresh: readonly ChecklistResultItem[]
+): ChecklistCarryOver => {
+  const answered = new Map<string, { ticked: number; unticked: number }>();
+  for (const entry of previous) {
+    const counts = answered.get(entry.item) ?? { ticked: 0, unticked: 0 };
+    if (entry.done) counts.ticked += 1;
+    else counts.unticked += 1;
+    answered.set(entry.item, counts);
+  }
+  let added = 0;
+  const checklist = fresh.map(entry => {
+    const counts = answered.get(entry.item);
+    if (counts && counts.ticked > 0) {
+      counts.ticked -= 1;
+      return { item: entry.item, done: true };
+    }
+    if (counts && counts.unticked > 0) {
+      counts.unticked -= 1;
+      return { item: entry.item, done: false };
+    }
+    if (!entry.done) added += 1;
+    return { item: entry.item, done: entry.done };
+  });
+  return { checklist, added };
+};
+
+/**
+ * The `notes` a completion sends. The dialog opens with the work order's own notes, and the
+ * server REPLACES them with whatever is sent: omitted keeps them, a string replaces them, `null`
+ * clears them. So notes are sent only when the technician changed them (whitespace at the ends
+ * is not a change) — trimmed, or `null` when the field was emptied.
+ */
+export const completionNotesPayload = (notes: string, openedWith: string): { notes?: string | null } => {
+  const text = notes.trim();
+  if (text === openedWith.trim()) return {};
+  return { notes: text || null };
+};
+
 /** The `checklist_results` a work order is opened with: one unticked item per non-blank line. */
 export const checklistResultsPayload = (text: string): string | null => {
   const items = text
