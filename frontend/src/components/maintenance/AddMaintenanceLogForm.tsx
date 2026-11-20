@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import api from '../../services/api';
 import { FormField } from '../ui/FormField';
 import { LoadingButton } from '../ui/LoadingButton';
@@ -10,12 +10,25 @@ import {
   MAINTENANCE_LOG_ENTRY_TYPE_LABELS,
   MAINTENANCE_LOG_MAX_BACKDATE_DAYS,
   MaintenanceLogForm,
+  maintenanceLogCostProblem,
   maintenanceLogFormProblem,
   maintenanceLogPayload,
+  maintenanceLogWhenProblem,
 } from '../../utils/maintenance';
 import type { MaintenanceLogEntry, MaintenanceLogEntryType } from '../../types/maintenance';
 
-const DAY_MS = 24 * 60 * 60 * 1000;
+const MINUTE_MS = 60 * 1000;
+const DAY_MS = 24 * 60 * MINUTE_MS;
+
+/**
+ * Picker guides for the When input, read from the clock when it is focused (the form is
+ * noValidate: the server judges the date against its own clock). The earliest offered minute is
+ * two minutes inside the 30-day limit, so picking it is not a certain refusal by the time it is sent.
+ */
+const pickerBounds = () => ({
+  max: getCentralNowDateTimeLocal(),
+  min: getCentralNowDateTimeLocal(new Date(Date.now() - MAINTENANCE_LOG_MAX_BACKDATE_DAYS * DAY_MS + 2 * MINUTE_MS)),
+});
 
 interface Props {
   /** The work order the entry is filed against; the server takes its target. */
@@ -24,6 +37,8 @@ interface Props {
   onAdded: (entry: MaintenanceLogEntry) => void;
   /** Reports whether the form holds anything typed, for the unsaved-changes guard. */
   onDirtyChange: (dirty: boolean) => void;
+  /** Reports while an entry is being filed, so the dialog cannot be closed under it. */
+  onSavingChange?: (saving: boolean) => void;
 }
 
 /**
@@ -33,35 +48,50 @@ interface Props {
  * the timeline shows the entry only after the server saved it, and a refusal keeps everything typed
  * with the server's words above it.
  */
-export function AddMaintenanceLogForm({ workOrderId, onAdded, onDirtyChange }: Props) {
+export function AddMaintenanceLogForm({ workOrderId, onAdded, onDirtyChange, onSavingChange }: Props) {
   const { showToast } = useToast();
   const [form, setForm] = useState<MaintenanceLogForm>(BLANK_MAINTENANCE_LOG_FORM);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [bounds, setBounds] = useState(pickerBounds);
+  const costInput = useRef<HTMLInputElement>(null);
+  const whenInput = useRef<HTMLInputElement>(null);
+  // Bad input (see MaintenanceLogForm) is part of the form, so it is a problem AND a change.
   const dirty = JSON.stringify(form) !== JSON.stringify(BLANK_MAINTENANCE_LOG_FORM);
   const problem = maintenanceLogFormProblem(form);
-  const costInvalid = !!form.cost.trim() && !(Number(form.cost) >= 0);
+  const costProblem = maintenanceLogCostProblem(form);
+  const whenProblem = maintenanceLogWhenProblem(form);
 
   useEffect(() => {
     onDirtyChange(dirty);
   }, [dirty, onDirtyChange]);
+  useEffect(() => {
+    onSavingChange?.(saving);
+  }, [saving, onSavingChange]);
 
-  // Picker guides only (the form is noValidate): the server judges the date against its own clock.
-  const bounds = useMemo(
-    () => ({
-      max: getCentralNowDateTimeLocal(),
-      min: getCentralNowDateTimeLocal(new Date(Date.now() - MAINTENANCE_LOG_MAX_BACKDATE_DAYS * DAY_MS)),
-    }),
-    []
-  );
+  // An input's bad-input state, read whenever it may have changed: a partly typed date-time does
+  // not always fire `input`, so blur and submit read it again.
+  const syncBadInput = () =>
+    setForm(f => ({
+      ...f,
+      cost_bad_input: costInput.current?.validity.badInput ?? false,
+      when_bad_input: whenInput.current?.validity.badInput ?? false,
+    }));
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (saving || problem) return;
+    if (saving) return;
+    const live: MaintenanceLogForm = {
+      ...form,
+      cost_bad_input: costInput.current?.validity.badInput ?? false,
+      when_bad_input: whenInput.current?.validity.badInput ?? false,
+    };
+    if (live.cost_bad_input !== form.cost_bad_input || live.when_bad_input !== form.when_bad_input) setForm(live);
+    if (maintenanceLogFormProblem(live)) return;
     setSaving(true);
     setError('');
     try {
-      const entry = await api.createMaintenanceLog(maintenanceLogPayload(workOrderId, form));
+      const entry = await api.createMaintenanceLog(maintenanceLogPayload(workOrderId, live));
       setForm(BLANK_MAINTENANCE_LOG_FORM);
       showToast('success', 'Log entry added');
       onAdded(entry);
@@ -103,37 +133,45 @@ export function AddMaintenanceLogForm({ workOrderId, onAdded, onDirtyChange }: P
             </select>
           )}
         </FormField>
-        <FormField
-          label="Cost ($)"
-          error={costInvalid ? 'Cost must be zero or more.' : null}
-          labelClassName={labelClass}
-        >
+        <FormField label="Cost ($)" error={costProblem} labelClassName={labelClass}>
           {field => (
             <input
               {...field}
+              ref={costInput}
               type="number"
               min={0}
               step="0.01"
               className="input w-full"
               value={form.cost}
-              onChange={e => setForm(f => ({ ...f, cost: e.target.value }))}
+              onChange={e => {
+                const { value, validity } = e.currentTarget;
+                setForm(f => ({ ...f, cost: value, cost_bad_input: validity.badInput }));
+              }}
+              onBlur={syncBadInput}
             />
           )}
         </FormField>
         <FormField
           label="When (Central)"
           help={`Leave blank for now. At most ${MAINTENANCE_LOG_MAX_BACKDATE_DAYS} days back.`}
+          error={whenProblem}
           labelClassName={labelClass}
         >
           {field => (
             <input
               {...field}
+              ref={whenInput}
               type="datetime-local"
               className="input w-full"
               min={bounds.min}
               max={bounds.max}
               value={form.when}
-              onChange={e => setForm(f => ({ ...f, when: e.target.value }))}
+              onFocus={() => setBounds(pickerBounds())}
+              onChange={e => {
+                const { value, validity } = e.currentTarget;
+                setForm(f => ({ ...f, when: value, when_bad_input: validity.badInput }));
+              }}
+              onBlur={syncBadInput}
             />
           )}
         </FormField>

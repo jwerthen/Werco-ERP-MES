@@ -220,6 +220,49 @@ rollback step; it does not undo documents, receipts, production or shipments
 already created by completed actions. Intake-linked Documents cannot be deleted
 through the application because the saved source and receipt must remain valid.
 
+### Maintenance log provenance (migration 133)
+
+Apply **133_maintenance_log_provenance** after **132_maintenance_pm_integrity** through the normal API
+boot migration path. No environment variable, secret, cron or worker job is added, and there is no
+pre-deploy check.
+
+- **What it does.** On `maintenance_logs`: the nullable `api_token_id` (integer, no default, no
+  foreign key: API tokens are revoked, never deleted) and the index
+  `ix_maintenance_logs_maintenance_wo_id` on `maintenance_wo_id`, which the new
+  `GET /maintenance/work-orders/{id}/logs` reads by. **No backfill**: every existing entry reads
+  `filed_via_api_token: false`, and for an entry a token filed before this revision the audit row's
+  `extra_data.credential` stays the only record. It creates no table, so there is no RLS change. Each
+  object is guarded on its own, so a re-run is a no-op.
+- **Locks.** `SET LOCAL lock_timeout = '5s'`. The column add is metadata-only on PostgreSQL 11+ and
+  takes a brief ACCESS EXCLUSIVE lock; the index is a plain `CREATE INDEX` (not `CONCURRENTLY`), so
+  writes to `maintenance_logs` wait while it builds, on a small table. Both are held until the boot
+  transaction commits. A timeout fails the boot with the database back at `132`; redeploying is safe.
+- **Order.** Run the migration before or with the code that maps the column (the API boot does). Old
+  code is safe on the new schema: it never reads or writes `api_token_id`. New code on an
+  un-migrated database fails every maintenance log read and write, so deploy the **worker with or
+  after the API** and the **API before the frontend** (the work-order detail view and its log
+  timeline call `GET /maintenance/work-orders/{id}/logs`, which the old API does not have).
+- **Behavior change for API callers (this release).** `POST /maintenance/log` now takes a fixed
+  `event_type` vocabulary (`inspection`, `repair`, `part_replacement`, `observation`, `note`): a
+  script or agent that sent free text, `started` or `completed` gets **422**. An entry on a
+  maintenance work order is filed under that work order's machine or asset (**409** for a different
+  one), `event_date` may be at most 30 days back, and an entry whose audit row cannot be written is
+  not saved (**503**). See
+  [API.md → Maintenance](API.md#maintenance-pm-schedules-maintenance-work-orders-event-log),
+  *Maintenance log entries*.
+- **Verify** after the deploy, read-only: `SELECT column_name FROM information_schema.columns WHERE
+  table_name = 'maintenance_logs' AND column_name = 'api_token_id';` and `SELECT indexname FROM
+  pg_indexes WHERE indexname = 'ix_maintenance_logs_maintenance_wo_id';` each return one row. Then,
+  in a test company with invented data: open a maintenance work order's **Details and log**, add a
+  `note` entry, and confirm it appears in the timeline with your name and that the Audit Log shows a
+  `maintenance_log` CREATE row.
+- **Rollback.** Keep the column and index on an ordinary application rollback: from a checkout of
+  this release run `railway run --service werco-api alembic stamp 132_maintenance_pm_integrity`
+  before redeploying a pre-133 image. Entries a token files while the old code runs are not marked on
+  the entry (their audit rows still carry `extra_data.credential`). The **downgrade is lossy only for
+  provenance**: it drops the index and `api_token_id`, so every entry reads as not token-filed again;
+  the audit rows keep the record.
+
 ### PM record integrity (migration 132)
 
 Apply **132_maintenance_pm_integrity** after **131_document_access** through the normal API boot

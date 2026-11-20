@@ -11,7 +11,7 @@
  *    `/maintenance/history/{id}`, an asset through `/maintenance/assets/{id}/history`.
  */
 import React from 'react';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import api from '../services/api';
 import { ToastProvider } from '../components/ui/Toast';
@@ -291,6 +291,64 @@ describe('Maintenance — a work order’s record and log', () => {
       fireEvent.click(within(reopened).getByRole('button', { name: 'Close dialog' }));
       await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
       expect(mockedApi.createMaintenanceLog).not.toHaveBeenCalled();
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
+  it('cannot be closed while an entry is being filed: X, Escape and the backdrop all hold', async () => {
+    const confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(true);
+    let finish: (entry: MaintenanceLogEntry) => void = () => undefined;
+    mockedApi.createMaintenanceLog.mockReturnValueOnce(
+      new Promise<MaintenanceLogEntry>(resolve => {
+        finish = resolve;
+      })
+    );
+    try {
+      renderPage('/maintenance?tab=work_orders');
+      fireEvent.click(within(await workOrderRow()).getByText('Mill 1 Monthly PM'));
+      const dialog = await screen.findByRole('dialog', { name: /MWO-2026-0041/ });
+      const form = within(dialog).getByRole('form', { name: 'Add log entry' });
+      fireEvent.change(within(form).getByLabelText(/^Description/), { target: { value: 'Belt squeals' } });
+      fireEvent.click(within(form).getByRole('button', { name: 'Add entry' }));
+      await waitFor(() => expect(mockedApi.createMaintenanceLog).toHaveBeenCalledTimes(1));
+
+      const closeButton = within(dialog).getByRole('button', { name: 'Close dialog' });
+      await waitFor(() => expect(closeButton).toBeDisabled());
+      fireEvent.click(closeButton);
+      fireEvent.keyDown(window, { key: 'Escape' });
+      fireEvent.click(dialog.parentElement as HTMLElement);
+      expect(screen.getByRole('dialog', { name: /MWO-2026-0041/ })).toBeInTheDocument();
+      // Nothing offered to discard what the server is about to keep.
+      expect(confirmSpy).not.toHaveBeenCalled();
+
+      await act(async () => finish(logEntry({ id: 13, description: 'Belt squeals' })));
+      await waitFor(() => expect(closeButton).toBeEnabled());
+      // Filed and reset: nothing unsaved is left, so it closes without asking.
+      fireEvent.click(closeButton);
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      expect(confirmSpy).not.toHaveBeenCalled();
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
+  it('closes on a backdrop click when read-only or untouched, and not over a typed entry', async () => {
+    const confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(false);
+    try {
+      renderPage('/maintenance?tab=work_orders');
+      fireEvent.click(within(await workOrderRow()).getByText('Mill 1 Monthly PM'));
+      let dialog = await screen.findByRole('dialog', { name: /MWO-2026-0041/ });
+      fireEvent.click(dialog.parentElement as HTMLElement);
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+
+      fireEvent.click(within(await workOrderRow()).getByText('Mill 1 Monthly PM'));
+      dialog = await screen.findByRole('dialog', { name: /MWO-2026-0041/ });
+      const form = within(dialog).getByRole('form', { name: 'Add log entry' });
+      fireEvent.change(within(form).getByLabelText(/^Description/), { target: { value: 'Half typed' } });
+      fireEvent.click(dialog.parentElement as HTMLElement);
+      expect(screen.getByRole('dialog', { name: /MWO-2026-0041/ })).toBeInTheDocument();
+      expect(within(form).getByLabelText(/^Description/)).toHaveValue('Half typed');
     } finally {
       confirmSpy.mockRestore();
     }

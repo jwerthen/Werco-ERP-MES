@@ -6,8 +6,10 @@ import {
   completionNotesPayload,
   BLANK_MAINTENANCE_LOG_FORM,
   logEventTypeLabel,
+  maintenanceLogCostProblem,
   maintenanceLogFormProblem,
   maintenanceLogPayload,
+  maintenanceLogWhenProblem,
   openWorkOrdersBySchedule,
   parseChecklistResults,
 } from '../maintenance';
@@ -334,6 +336,7 @@ describe('maintenance log entries', () => {
     // 8:30 AM Central on Nov 19, 2026 is CST (UTC-6); Jul 1 is CDT (UTC-5).
     expect(
       maintenanceLogPayload(41, {
+        ...BLANK_MAINTENANCE_LOG_FORM,
         event_type: 'repair',
         description: 'Replaced belt',
         cost: '42.50',
@@ -358,8 +361,35 @@ describe('maintenance log entries', () => {
     expect(maintenanceLogFormProblem({ ...BLANK_MAINTENANCE_LOG_FORM, description: '   ' })).toMatch(/Describe/);
     const ok = { ...BLANK_MAINTENANCE_LOG_FORM, description: 'Checked' };
     expect(maintenanceLogFormProblem(ok)).toBeNull();
-    expect(maintenanceLogFormProblem({ ...ok, cost: '-1' })).toMatch(/Cost/);
-    expect(maintenanceLogFormProblem({ ...ok, cost: 'abc' })).toMatch(/Cost/);
-    expect(maintenanceLogFormProblem({ ...ok, when: 'yesterday' })).toMatch(/date/);
+    expect(maintenanceLogFormProblem({ ...ok, cost: '-1' })).toBe('Cost must be zero or more.');
+    expect(maintenanceLogFormProblem({ ...ok, cost: 'abc' })).toBe('Enter a valid cost, or leave it blank.');
+    expect(maintenanceLogFormProblem({ ...ok, when: 'yesterday' })).toBe(
+      'Enter a complete date and time, or leave it blank for now.'
+    );
+  });
+
+  it('refuses an input the browser reads as blank but holds bad input (12,50; a date with no time)', () => {
+    const ok = { ...BLANK_MAINTENANCE_LOG_FORM, description: 'Checked' };
+    // The value is '' either way: only the flag tells "left blank" from "typed something unreadable".
+    expect(maintenanceLogFormProblem({ ...ok, cost: '', cost_bad_input: true })).toBe(
+      'Enter a valid cost, or leave it blank.'
+    );
+    expect(maintenanceLogCostProblem({ ...ok, cost: '', cost_bad_input: true })).toBe(
+      'Enter a valid cost, or leave it blank.'
+    );
+    expect(maintenanceLogFormProblem({ ...ok, when: '', when_bad_input: true })).toBe(
+      'Enter a complete date and time, or leave it blank for now.'
+    );
+    expect(maintenanceLogWhenProblem({ ...ok, when: '', when_bad_input: true })).toBe(
+      'Enter a complete date and time, or leave it blank for now.'
+    );
+    expect(maintenanceLogCostProblem(ok)).toBeNull();
+    expect(maintenanceLogWhenProblem(ok)).toBeNull();
+    // The flags never reach the request body.
+    expect(maintenanceLogPayload(41, { ...ok, cost_bad_input: true, when_bad_input: true })).toEqual({
+      maintenance_wo_id: 41,
+      event_type: 'note',
+      description: 'Checked',
+    });
   });
 });

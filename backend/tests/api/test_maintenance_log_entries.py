@@ -25,19 +25,24 @@ tenant-scoped user lookup (another company's user reads as null), and a legacy r
 Every fixture is synthetic; assertions read the STORED rows.
 """
 
+import re
 from datetime import datetime as real_datetime
 from datetime import timedelta, timezone
 
 import pytest
 from fastapi import status
-from sqlalchemy.orm import Session
+from sqlalchemy import text
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.orm import Query, Session
 
 import app.api.endpoints.maintenance as maintenance_endpoints
 from app.core.credentials import READ_ONLY_ROUTE_WRITES_DETAIL
 from app.core.export_control import AI_EXTERNAL_ROUTE_DENIED_DETAIL
+from app.core.security import create_access_token
 from app.models.audit_log import AuditLog
 from app.models.maintenance import MaintenanceLog, MaintenanceLogEntryType, MaintenanceStatus, MaintenanceWorkOrder
 from app.models.user import UserRole
+from app.services.audit_service import AuditService, AuditWriteError
 from tests.api.export_control_helpers import bearer, issue_token
 from tests.api.test_maintenance_assets import make_asset, make_wc
 from tests.api.test_maintenance_company_day import FrozenDatetime, _FrozenClock
@@ -267,16 +272,23 @@ class TestTheWorkOrderAndItsTargetStayInTenant:
             assert foreign.json()["wo_number"] not in refused.text
         assert written(db_session) == before
 
-    def test_a_legacy_work_order_on_another_companys_machine_is_404(self, client, db_session, headers):
+    @pytest.mark.parametrize("kind", ["work_center", "asset"])
+    def test_a_legacy_work_order_on_another_companys_machine_is_404(self, client, db_session, headers, kind):
         """``company_id`` is part of no FK, so a pre-fix company-1 work order may point at company 2's
-        machine. The inherited target is re-resolved inside the tenant: never file history against it."""
-        foreign_wc = make_wc(db_session, company_id=2)
+        work center or asset. The inherited target is re-resolved inside the tenant: never file history
+        against it."""
+        if kind == "work_center":
+            foreign = make_wc(db_session, company_id=2)
+            target, leaked = {"work_center_id": foreign.id}, (foreign.name, foreign.code)
+        else:
+            foreign = make_asset(db_session, company_id=2, name="ACME-SECRET press")
+            target, leaked = {"asset_id": foreign.id}, (foreign.name, foreign.asset_tag)
         legacy = MaintenanceWorkOrder(
             company_id=1,
-            work_center_id=foreign_wc.id,
             wo_number=f"MWO-LOG-{_next():05d}",
             title="Legacy corrective",
             status=MaintenanceStatus.IN_PROGRESS,
+            **target,
         )
         db_session.add(legacy)
         db_session.commit()
@@ -285,7 +297,7 @@ class TestTheWorkOrderAndItsTargetStayInTenant:
         refused = file_entry(client, headers, maintenance_wo_id=legacy.id)
 
         assert refused.status_code == status.HTTP_404_NOT_FOUND, refused.text
-        assert foreign_wc.name not in refused.text and foreign_wc.code not in refused.text
+        assert not any(text in refused.text for text in leaked)
         assert written(db_session) == before
 
     @pytest.mark.parametrize("end", ["completed", "cancelled"])
@@ -419,6 +431,16 @@ class TestWhoMayFile:
         [audit] = log_audit_rows(db_session)
         assert audit.extra_data and audit.extra_data.get("credential")
         assert str(token_id) in str(audit.extra_data["credential"])
+
+    def test_an_ai_external_token_cannot_file(self, client, db_session, headers, admin_headers, supervisor):
+        """An AI-external token is read-only whatever its scope: the write gate refuses it first."""
+        wo = wc_wo(client, headers, db_session)
+        _id, token = issue_token(client, admin_headers, supervisor, scope="read_only", ai_external=True)
+        before = written(db_session)
+        refused = file_entry(client, bearer(token), maintenance_wo_id=wo["id"])
+        assert refused.status_code == status.HTTP_403_FORBIDDEN, refused.text
+        assert refused.json()["detail"] == READ_ONLY_ROUTE_WRITES_DETAIL
+        assert written(db_session) == before
 
     def test_a_read_only_token_meets_its_own_gate(self, client, db_session, headers, admin_headers, supervisor):
         wo = wc_wo(client, headers, db_session)
@@ -593,3 +615,217 @@ class TestTheHistoryReads:
         [asset_entry] = reads["asset"].json()["logs"]
         assert (asset_entry["id"], asset_entry["event_type"]) == (legacy_asset.id, "Tire rotation")
         assert asset_entry["performed_by_name"] == full_name(supervisor)
+
+
+# --------------------------------------------------------------------------- provenance and required audit
+
+AUDIT_KEYS = {
+    "event_type",
+    "description",
+    "maintenance_wo_id",
+    "work_center_id",
+    "asset_id",
+    "performed_by",
+    "api_token_id",
+    "event_date",
+    "cost",
+}
+
+
+def history(client, headers, wo: dict):
+    """The history read a work order's entries land in: its work center's or its asset's."""
+    if wo["asset_id"] is not None:
+        return client.get(f"/api/v1/maintenance/assets/{wo['asset_id']}/history", headers=headers)
+    return client.get(f"/api/v1/maintenance/history/{wo['work_center_id']}", headers=headers)
+
+
+def fail_required_audit_for_logs(patch):
+    """``log_required`` raises for the log entry's CREATE row; any other row is written as usual."""
+    real = AuditService.log_required
+
+    def failing(self, action, resource_type, **kwargs):
+        if resource_type == "maintenance_log":
+            raise AuditWriteError("Synthetic required audit failure")
+        return real(self, action, resource_type, **kwargs)
+
+    patch.setattr(AuditService, "log_required", failing)
+
+
+class TestAnEntrySaysWhatFiledIt:
+    @pytest.mark.parametrize("target", ["work_center", "asset"])
+    def test_a_tokens_entry_is_marked_on_every_read_and_a_persons_is_not(
+        self, client, db_session, headers, admin_headers, supervisor, target
+    ):
+        wo = wc_wo(client, headers, db_session) if target == "work_center" else asset_wo(client, headers, db_session)
+        assert client.post(f"{WORK_ORDERS}/{wo['id']}/start", headers=headers).status_code == 200
+        token_id, token = issue_token(client, admin_headers, supervisor)
+        by_token = file_entry(client, bearer(token), maintenance_wo_id=wo["id"], event_type="observation")
+        by_person = file_entry(client, headers, maintenance_wo_id=wo["id"], event_type="note")
+        assert client.post(f"{WORK_ORDERS}/{wo['id']}/complete", headers=headers, json={}).status_code == 200
+
+        assert by_token.status_code == by_person.status_code == 200
+        assert by_token.json()["filed_via_api_token"] is True
+        assert by_person.json()["filed_via_api_token"] is False
+        # Same bound user either way: only the provenance tells them apart.
+        assert by_token.json()["performed_by"] == by_person.json()["performed_by"] == supervisor.id
+        stored = {row.id: row.api_token_id for row in log_rows(db_session)}
+        assert stored[by_token.json()["id"]] == token_id
+        assert stored[by_person.json()["id"]] is None
+
+        expected = {by_token.json()["id"]: True, by_person.json()["id"]: False}
+        for name, response in (
+            ("work order", wo_logs(client, headers, wo["id"])),
+            ("history", history(client, headers, wo)),
+        ):
+            assert response.status_code == 200, (name, response.text)
+            flags = {entry["id"]: entry["filed_via_api_token"] for entry in response.json()["logs"]}
+            for log_id, flag in expected.items():
+                assert flags[log_id] is flag, (name, log_id)
+            verbs = [entry for entry in response.json()["logs"] if entry["event_type"] in ("started", "completed")]
+            assert len(verbs) == 2 and not any(entry["filed_via_api_token"] for entry in verbs), name
+
+    def test_the_audit_row_carries_the_entry_and_its_provenance(
+        self, client, db_session, headers, admin_headers, supervisor, frozen_now
+    ):
+        wo = wc_wo(client, headers, db_session)
+        token_id, token = issue_token(client, admin_headers, supervisor)
+        person = file_entry(client, headers, maintenance_wo_id=wo["id"], event_type="repair", cost=12.5)
+        by_token = file_entry(client, bearer(token), maintenance_wo_id=wo["id"], description="  Belt replaced ")
+        assert person.status_code == by_token.status_code == 200
+
+        rows = {row.resource_id: row for row in log_audit_rows(db_session)}
+        assert rows[person.json()["id"]].new_values == {
+            "event_type": "repair",
+            "description": "Synthetic note",
+            "maintenance_wo_id": wo["id"],
+            "work_center_id": wo["work_center_id"],
+            "asset_id": None,
+            "performed_by": supervisor.id,
+            "api_token_id": None,
+            "event_date": NOW.isoformat() + "Z",
+            "cost": 12.5,
+        }
+        token_row = rows[by_token.json()["id"]]
+        assert set(token_row.new_values) == AUDIT_KEYS
+        assert token_row.new_values["api_token_id"] == token_id
+        assert token_row.new_values["description"] == "Belt replaced"
+        assert token_row.extra_data and token_row.extra_data.get("credential")
+        assert "credential" not in (rows[person.json()["id"]].extra_data or {})
+
+    @pytest.mark.parametrize("filer", ["person", "token"])
+    def test_a_failing_audit_write_saves_nothing(
+        self, client, db_session, headers, admin_headers, supervisor, monkeypatch, filer
+    ):
+        wo = wc_wo(client, headers, db_session)
+        caller = headers if filer == "person" else bearer(issue_token(client, admin_headers, supervisor)[1])
+        before = written(db_session)
+        fail_required_audit_for_logs(monkeypatch)
+
+        failed = file_entry(client, caller, maintenance_wo_id=wo["id"], event_type="inspection")
+
+        assert failed.status_code == status.HTTP_503_SERVICE_UNAVAILABLE, failed.text
+        assert "could not be saved" in failed.json()["detail"]
+        assert written(db_session) == before
+        assert wo_logs(client, headers, wo["id"]).json()["logs"] == []
+
+
+def platform_headers(user, company_id: int) -> dict:
+    """A platform principal's own (non-read-only) access token for a company it is working in."""
+    return bearer(create_access_token(subject=user.id, company_id=company_id))
+
+
+class TestAPlatformPrincipalsEntryShowsTheirName:
+    @pytest.mark.parametrize("kind", ["platform_admin", "superuser"])
+    def test_a_platform_principal_of_another_company_is_named(self, client, db_session, headers, kind):
+        wo = wc_wo(client, headers, db_session)
+        principal = make_user(
+            db_session, role=UserRole.PLATFORM_ADMIN if kind == "platform_admin" else UserRole.OPERATOR, company_id=2
+        )
+        principal.first_name, principal.last_name = "Platform", "Steward"
+        if kind == "superuser":
+            principal.is_superuser = True
+        db_session.commit()
+
+        filed = file_entry(client, platform_headers(principal, 1), maintenance_wo_id=wo["id"], event_type="inspection")
+
+        assert filed.status_code == 200, filed.text
+        assert filed.json()["performed_by_name"] == "Platform Steward"
+        [row] = log_rows(db_session)
+        assert (row.company_id, row.performed_by) == (1, principal.id)
+        [listed] = wo_logs(client, headers, wo["id"]).json()["logs"]
+        assert listed["performed_by_name"] == "Platform Steward"
+        [in_history] = history(client, headers, wo).json()["logs"]
+        assert in_history["performed_by_name"] == "Platform Steward"
+
+    def test_an_ordinary_user_of_another_company_still_reads_as_no_name(self, client, db_session, headers):
+        wo = wc_wo(client, headers, db_session)
+        outsider = make_user(db_session, role=UserRole.ADMIN, company_id=2)
+        outsider.first_name, outsider.last_name = "Acme", "Outsider"
+        db_session.commit()
+        seeded = seed_log(db_session, wo=wo, performed_by=outsider.id)
+        for response in (wo_logs(client, headers, wo["id"]), history(client, headers, wo)):
+            [entry] = response.json()["logs"]
+            assert (entry["id"], entry["performed_by_name"]) == (seeded.id, None)
+            assert "Outsider" not in response.text
+
+
+# --------------------------------------------------------------------------- NULLS LAST
+
+
+def spy_executed_sql(monkeypatch):
+    """Every ``Query.all()`` the request runs, compiled for PostgreSQL, in order."""
+    compiled = []
+    real_all = Query.all
+
+    def all_spy(self):
+        compiled.append(_ws(self.statement.compile(dialect=postgresql.dialect())))
+        return real_all(self)
+
+    monkeypatch.setattr(Query, "all", all_spy)
+    return compiled
+
+
+def _ws(value) -> str:
+    return " ".join(str(value).split())
+
+
+class TestUndatedEntriesSortLast:
+    def reads(self, client, headers, on_wc, on_asset):
+        return {
+            "work order": wo_logs(client, headers, on_wc["id"]),
+            "work center": client.get(f"/api/v1/maintenance/history/{on_wc['work_center_id']}", headers=headers),
+            "asset": client.get(f"/api/v1/maintenance/assets/{on_asset['asset_id']}/history", headers=headers),
+        }
+
+    def test_every_log_read_orders_event_date_desc_nulls_last_then_id(self, client, db_session, headers, monkeypatch):
+        """Asserted on the SQL compiled for PostgreSQL, where a bare ``DESC`` puts NULLs FIRST (SQLite puts
+        them last either way, so only the compiled statement can prove the clause is there)."""
+        on_wc = wc_wo(client, headers, db_session)
+        on_asset = asset_wo(client, headers, db_session)
+        compiled = spy_executed_sql(monkeypatch)
+
+        for name, response in self.reads(client, headers, on_wc, on_asset).items():
+            assert response.status_code == 200, (name, response.text)
+
+        log_reads = [sql for sql in compiled if "FROM maintenance_logs" in sql]
+        assert len(log_reads) == 3, compiled
+        for sql in log_reads:
+            assert re.search(r"ORDER BY \S*event_date DESC NULLS LAST, \S*id DESC", sql), sql
+
+    def test_a_legacy_undated_entry_reads_after_the_dated_ones(self, client, db_session, headers, supervisor):
+        on_wc = wc_wo(client, headers, db_session)
+        on_asset = asset_wo(client, headers, db_session)
+        for wo in (on_wc, on_asset):
+            seed_log(db_session, wo=wo, event_date=NOW - timedelta(days=3), description="older")
+            undated = seed_log(db_session, wo=wo, description="undated legacy entry", event_type="legacy note")
+            seed_log(db_session, wo=wo, event_date=NOW - timedelta(days=1), description="newer")
+            # The ORM lets the column's Python default fire for an explicit None, so the NULL a legacy
+            # row may hold is written the way only raw SQL could have written it.
+            db_session.execute(text("UPDATE maintenance_logs SET event_date = NULL WHERE id = :id"), {"id": undated.id})
+            db_session.commit()
+
+        for name, response in self.reads(client, headers, on_wc, on_asset).items():
+            assert response.status_code == 200, (name, response.text)
+            logs = response.json()["logs"]
+            assert [entry["description"] for entry in logs] == ["newer", "older", "undated legacy entry"], name
+            assert logs[-1]["event_date"] is None

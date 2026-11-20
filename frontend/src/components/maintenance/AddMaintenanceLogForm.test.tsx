@@ -36,14 +36,27 @@ const saved: MaintenanceLogEntry = {
 const renderForm = () => {
   const onAdded = jest.fn();
   const onDirtyChange = jest.fn();
+  const onSavingChange = jest.fn();
   render(
     <ToastProvider>
-      <AddMaintenanceLogForm workOrderId={41} onAdded={onAdded} onDirtyChange={onDirtyChange} />
+      <AddMaintenanceLogForm
+        workOrderId={41}
+        onAdded={onAdded}
+        onDirtyChange={onDirtyChange}
+        onSavingChange={onSavingChange}
+      />
     </ToastProvider>
   );
   const form = screen.getByRole('form', { name: 'Add log entry' });
-  return { form, onAdded, onDirtyChange };
+  return { form, onAdded, onDirtyChange, onSavingChange };
 };
+
+/**
+ * What a browser does that jsdom cannot: an input holding something it cannot read (`12,50` in a
+ * number input, a date picked with the time left blank) reports `validity.badInput` and the value ''.
+ */
+const holdBadInput = (input: HTMLElement, bad = true) =>
+  Object.defineProperty(input, 'validity', { configurable: true, value: { badInput: bad, valid: !bad } });
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -114,6 +127,64 @@ describe('AddMaintenanceLogForm', () => {
     expect(add).toBeDisabled();
     fireEvent.click(add);
     expect(mockedApi.createMaintenanceLog).not.toHaveBeenCalled();
+  });
+
+  it('refuses a date picked with the time left blank, instead of filing it as now', () => {
+    const { form, onDirtyChange } = renderForm();
+    fireEvent.change(within(form).getByLabelText(/^Description/), { target: { value: 'Replaced belt' } });
+    const when = within(form).getByLabelText('When (Central)');
+    fireEvent.change(when, { target: { value: '2026-11-19T08:30' } });
+    // The technician clears the time: the browser now reads the field as '' with bad input.
+    holdBadInput(when);
+    fireEvent.change(when, { target: { value: '' } });
+
+    expect(within(form).getByText('Enter a complete date and time, or leave it blank for now.')).toBeInTheDocument();
+    const add = within(form).getByRole('button', { name: 'Add entry' });
+    expect(add).toBeDisabled();
+    expect(add).toHaveAttribute('title', 'Enter a complete date and time, or leave it blank for now.');
+    fireEvent.click(add);
+    expect(mockedApi.createMaintenanceLog).not.toHaveBeenCalled();
+    expect(onDirtyChange).toHaveBeenLastCalledWith(true);
+  });
+
+  it('counts bad input alone as an unsaved change', () => {
+    const { form, onDirtyChange } = renderForm();
+    const cost = within(form).getByLabelText('Cost ($)');
+    fireEvent.change(cost, { target: { value: '12' } });
+    holdBadInput(cost);
+    fireEvent.change(cost, { target: { value: '' } }); // "12," -- unreadable, so ''
+    expect(within(form).getByText('Enter a valid cost, or leave it blank.')).toBeInTheDocument();
+    expect(onDirtyChange).toHaveBeenLastCalledWith(true);
+  });
+
+  it('re-reads bad input at submit, when the browser fired no change for it', async () => {
+    const { form } = renderForm();
+    fireEvent.change(within(form).getByLabelText(/^Description/), { target: { value: 'Replaced belt' } });
+    // A partly typed date-time that never fired `input`: the form only learns of it on submit.
+    holdBadInput(within(form).getByLabelText('When (Central)'));
+    const add = within(form).getByRole('button', { name: 'Add entry' });
+    expect(add).toBeEnabled();
+    fireEvent.click(add);
+    expect(
+      await within(form).findByText('Enter a complete date and time, or leave it blank for now.')
+    ).toBeInTheDocument();
+    expect(mockedApi.createMaintenanceLog).not.toHaveBeenCalled();
+  });
+
+  it('reports while it is saving, so the dialog can hold still', async () => {
+    let finish: (entry: MaintenanceLogEntry) => void = () => undefined;
+    mockedApi.createMaintenanceLog.mockReturnValueOnce(
+      new Promise<MaintenanceLogEntry>(resolve => {
+        finish = resolve;
+      })
+    );
+    const { form, onSavingChange } = renderForm();
+    expect(onSavingChange).toHaveBeenLastCalledWith(false);
+    fireEvent.change(within(form).getByLabelText(/^Description/), { target: { value: 'Replaced belt' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Add entry' }));
+    await waitFor(() => expect(onSavingChange).toHaveBeenLastCalledWith(true));
+    finish(saved);
+    await waitFor(() => expect(onSavingChange).toHaveBeenLastCalledWith(false));
   });
 
   it.each([

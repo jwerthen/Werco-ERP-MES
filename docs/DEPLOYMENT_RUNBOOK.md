@@ -294,6 +294,23 @@ statement, writes no row, and adds no environment variable, secret, cron or work
   under, and the migration will not pick which company's record to change.
   See [API.md → Customer Complaints & RMA](API.md#customer-complaints--rma).
 
+**Maintenance log provenance.** Apply **133_maintenance_log_provenance** after
+**132_maintenance_pm_integrity** through the normal API boot migration path; no pre-deploy check is
+needed. It adds the nullable `maintenance_logs.api_token_id` (no default, no foreign key, no
+backfill), which records that a standing API token filed an entry and is served as
+`filed_via_api_token`, and the index `ix_maintenance_logs_maintenance_wo_id`. Under
+`SET LOCAL lock_timeout = '5s'` the column add is metadata-only and the index build holds writes on
+the small `maintenance_logs` table until the boot commits; a timeout leaves the database at `132`.
+No environment variable, secret, cron or worker job is added. Deploy the worker with or after the
+API (new code selects the column on every log read) and the API before the frontend (the
+work-order detail view reads the new `GET /maintenance/work-orders/{id}/logs`). In this release
+`POST /maintenance/log` also refuses a free-text, `started` or `completed` `event_type` (**422**),
+so tell anyone scripting log entries. On an application rollback keep the migration: from a
+checkout of this release run `railway run --service werco-api alembic stamp
+132_maintenance_pm_integrity` before redeploying a pre-133 image. The **downgrade is lossy only for
+provenance** (the audit rows' `extra_data.credential` keeps it). Full notes and verification are in
+[Maintenance log provenance](DEPLOYMENT.md#maintenance-log-provenance-migration-133).
+
 **PM record integrity.** Apply **132_maintenance_pm_integrity** after **131_document_access**
 through the normal API boot migration path. It adds the nullable `maintenance_work_orders.schedule_checklist_snapshot`
 (no backfill: existing work orders keep reading their schedule's live checklist until they complete)

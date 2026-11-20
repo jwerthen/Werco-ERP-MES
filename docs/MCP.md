@@ -105,10 +105,15 @@ so two agents on two users can see different document lists.
 **Re-checked again on 2026-11-20 after maintenance log entries added one Preventive Maintenance
 tool**, `list_work_order_logs` (`GET /maintenance/work-orders/{wo_id}/logs`; no existing name
 shifted): 15 convenience + **780** generated, 16 shadowed. It is a read, so the read-only catalog is
-8 convenience + **304** generated, and it is not on the AI-external allowlist (a log entry's
-`description` is free text). `create_log` (`POST /maintenance/log`) stays a tool: the owner decided
-the same day that a standing API token may file log entries (the route never refused one), while
-its `event_type` became a fixed vocabulary that excludes `started` / `completed`; see
+8 convenience + **304** generated. It is not on the AI-external allowlist, fail-closed: log text
+can carry the reason a PM was completed with steps unticked, and text a token or an agent wrote.
+`create_log` (`POST /maintenance/log`) stays a tool, and its `event_type` is now a fixed vocabulary
+that excludes `started` / `completed`. The owner decided on 2026-11-20 that a standing API token
+may file log entries; the entry then records it (`filed_via_api_token`). Keeping `create_log` a
+tool **also lets an agent file an entry on a person's own JWT**, attributed to that person with no
+marker, unlike a work-order comment or Hank's `add_note`, which the door refuses to an agent on any
+credential (§6.1, §4.3). That half was not separately put to the owner and is to be
+confirmed with them. See
 [API.md → Maintenance](API.md#maintenance-pm-schedules-maintenance-work-orders-event-log), *Maintenance
 log entries*.
 
@@ -728,6 +733,14 @@ the person to post the note from the app. A read-only or AI-external token never
 `prepare_task` and `execute_task` are writes, refused by §4.1 first. On a direct API call (not
 through MCP) an API token gets the route's own **403** (§4, "Nor post a Hank note"), while a person's
 own JWT is served exactly as in the app.
+
+**Not people-only: maintenance log entries.** `create_log` (`POST /maintenance/log`) is free text too,
+but it is deliberately **not** on this list. The owner decided on 2026-11-20 that a standing API token
+may file log entries (the entry records it as `filed_via_api_token`), and the tool stays in the
+catalog, so an agent on a person's own JWT may file one as well, attributed to that person with no
+marker. That second half was not separately put to the owner and is to be confirmed with them. See
+[API.md → Maintenance](API.md#maintenance-pm-schedules-maintenance-work-orders-event-log), *Maintenance
+log entries*.
 
 ---
 

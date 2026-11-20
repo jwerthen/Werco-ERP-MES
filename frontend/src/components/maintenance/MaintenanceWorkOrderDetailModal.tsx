@@ -55,10 +55,13 @@ export function MaintenanceWorkOrderDetailModal({
     woId === null ? [] : (await api.getMaintenanceWorkOrderLogs(woId)).logs
   );
   const [formDirty, setFormDirty] = useState(false);
+  // While an entry is being filed the dialog cannot close (the `pending` convention): closing could
+  // not stop the POST, so "Discard?" would be a promise the server breaks.
+  const [formSaving, setFormSaving] = useState(false);
   const { confirmDiscard } = useUnsavedChanges(woId !== null && formDirty);
 
   const close = () => {
-    if (!confirmDiscard()) return;
+    if (formSaving || !confirmDiscard()) return;
     setFormDirty(false);
     onClose();
   };
@@ -94,7 +97,15 @@ export function MaintenanceWorkOrderDetailModal({
     : [];
 
   return (
-    <Modal open={!!workOrder} onClose={close} size="3xl" closeOnBackdrop={false} ariaLabelledBy={titleId}>
+    <Modal
+      open={!!workOrder}
+      onClose={close}
+      size="3xl"
+      // A read-only or untouched view closes on a backdrop click; anything typed needs the X or Escape.
+      closeOnBackdrop={!formDirty && !formSaving}
+      closeOnEscape={!formSaving}
+      ariaLabelledBy={titleId}
+    >
       {workOrder && (
         <div className="space-y-4">
           <div className="flex items-start justify-between gap-3 border-b border-slate-700 pb-3">
@@ -106,7 +117,13 @@ export function MaintenanceWorkOrderDetailModal({
                 <StatusBadge status={workOrder.status} />
               </div>
             </div>
-            <button type="button" onClick={close} aria-label="Close dialog" className="text-slate-400 hover:text-white">
+            <button
+              type="button"
+              onClick={close}
+              disabled={formSaving}
+              aria-label="Close dialog"
+              className="text-slate-400 hover:text-white disabled:opacity-50"
+            >
               <XMarkIcon className="h-5 w-5" aria-hidden="true" />
             </button>
           </div>
@@ -172,6 +189,7 @@ export function MaintenanceWorkOrderDetailModal({
                 workOrderId={workOrder.id}
                 onAdded={onAdded}
                 onDirtyChange={setFormDirty}
+                onSavingChange={setFormSaving}
               />
             )}
             <MaintenanceLogTimeline

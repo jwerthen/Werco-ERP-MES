@@ -140,6 +140,8 @@ export interface MaintenanceLogEntry extends MaintenanceTargetFields {
   event_date: string | null;
   cost: number | null;
   created_at: string | null;
+  /** True when a standing API token filed the entry on the performer's behalf (absent from an older API). */
+  filed_via_api_token?: boolean;
 }
 
 /** GET /maintenance/work-orders/{id}/logs: the work order's entries, newest first. */

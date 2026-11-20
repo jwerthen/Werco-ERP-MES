@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
@@ -615,13 +615,24 @@ def _serialize_wo_with_derived_overdue(wo: MaintenanceWorkOrder, today: date) ->
 
 
 def _performer_names(db: Session, company_id: int, logs: List[MaintenanceLog]) -> Dict[int, str]:
-    """``{user id: full name}`` for the people who performed ``logs``, in ONE tenant-scoped read: a user
-    of another company (a legacy row) reads as no name, never as the foreign user's."""
+    """``{user id: full name}`` for the people who performed ``logs``, in ONE read: users of this
+    company, and platform principals (a platform admin or superuser working in it -- ``require_role``
+    admits them to every maintenance verb). A user of another company (a legacy row) reads as no
+    name, never as the foreign user's."""
     ids = {log.performed_by for log in logs if log.performed_by is not None}
     if not ids:
         return {}
     rows = (
-        db.query(User.id, User.first_name, User.last_name).filter(User.id.in_(ids), User.company_id == company_id).all()
+        db.query(User.id, User.first_name, User.last_name)
+        .filter(
+            User.id.in_(ids),
+            or_(
+                User.company_id == company_id,
+                User.is_superuser.is_(True),
+                User.role == UserRole.PLATFORM_ADMIN,
+            ),
+        )
+        .all()
     )
     return {user_id: f"{first} {last}".strip() for user_id, first, last in rows}
 
@@ -635,6 +646,8 @@ def _serialize_log(log: MaintenanceLog, names: Optional[Dict[int, str]] = None) 
         "description": log.description,
         "performed_by": log.performed_by,
         "performed_by_name": (names or {}).get(log.performed_by) if log.performed_by is not None else None,
+        # A standing API token filed it (the token's bound user is ``performed_by``): the record says so.
+        "filed_via_api_token": log.api_token_id is not None,
         "event_date": to_utc_iso(log.event_date),
         "cost": log.cost,
         "created_at": to_utc_iso(log.created_at),
@@ -1019,7 +1032,7 @@ def list_work_order_logs(
     logs = (
         _logs_with_targets(db)
         .filter(MaintenanceLog.company_id == company_id, MaintenanceLog.maintenance_wo_id == wo.id)
-        .order_by(MaintenanceLog.event_date.desc(), MaintenanceLog.id.desc())
+        .order_by(MaintenanceLog.event_date.desc().nullslast(), MaintenanceLog.id.desc())
         .limit(limit)
         .all()
     )
@@ -1893,7 +1906,7 @@ def get_history(
             MaintenanceLog.company_id == company_id,
             MaintenanceLog.work_center_id == work_center_id,
         )
-        .order_by(MaintenanceLog.event_date.desc(), MaintenanceLog.id.desc())
+        .order_by(MaintenanceLog.event_date.desc().nullslast(), MaintenanceLog.id.desc())
         .limit(limit)
         .all()
     )
@@ -1919,7 +1932,7 @@ def get_maintenance_asset_history(
     logs = (
         _logs_with_targets(db)
         .filter(MaintenanceLog.company_id == company_id, MaintenanceLog.asset_id == asset_id)
-        .order_by(MaintenanceLog.event_date.desc(), MaintenanceLog.id.desc())
+        .order_by(MaintenanceLog.event_date.desc().nullslast(), MaintenanceLog.id.desc())
         .limit(limit)
         .all()
     )
@@ -2167,7 +2180,9 @@ def create_log(
     ``work_center_id`` and ``asset_id`` empty, or give the work order's own (a different one is
     **409**). Without a work order, give exactly one target. ``event_date`` defaults to now and may be
     at most 30 days back, never in the future (**422**). ``cost`` is 0 or more. A standing API token
-    may file entries; the audit row then carries ``extra_data.credential``."""
+    may file entries: the entry then records it (``filed_via_api_token``), and so does the audit row
+    (``extra_data.credential``). The audit row is required evidence (**503**, nothing saved, if it
+    cannot be written)."""
     target_work_center_id, target_asset_id = data.work_center_id, data.asset_id
     if data.maintenance_wo_id is not None:
         wo = _wo_or_404(db, data.maintenance_wo_id, company_id)
@@ -2214,10 +2229,31 @@ def create_log(
         performed_by=current_user.id,
         event_date=event_date,
         cost=data.cost,
+        api_token_id=getattr(current_user, "_api_token_id", None) if is_api_token_credential(current_user) else None,
     )
     db.add(log)
     db.flush()
-    audit.log_create("maintenance_log", log.id, log.event_type, new_values=log)
+    # Required evidence: the entry is part of the maintenance record, and for a token's entry this row
+    # is the second record of what filed it -- so if it cannot be written, nothing is saved (503).
+    with required_audit(db, "The audit record for this maintenance log entry could not be saved; nothing was saved."):
+        audit.log_required(
+            audit.ACTIONS["CREATE"],
+            "maintenance_log",
+            resource_id=log.id,
+            resource_identifier=log.event_type,
+            description=f"Created maintenance_log: {log.event_type}",
+            new_values={
+                "event_type": log.event_type,
+                "description": log.description,
+                "maintenance_wo_id": log.maintenance_wo_id,
+                "work_center_id": log.work_center_id,
+                "asset_id": log.asset_id,
+                "performed_by": log.performed_by,
+                "api_token_id": log.api_token_id,
+                "event_date": to_utc_iso(log.event_date),
+                "cost": log.cost,
+            },
+        )
     db.commit()
     db.refresh(log)
     return _serialize_log(log, _performer_names(db, company_id, [log]))

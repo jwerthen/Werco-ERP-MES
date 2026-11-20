@@ -8,23 +8,27 @@ import { fireEvent, render, screen, within } from '@testing-library/react';
 import { MaintenanceLogTimeline } from './MaintenanceLogTimeline';
 import type { MaintenanceLogEntry } from '../../types/maintenance';
 
-const entry = (overrides: Partial<MaintenanceLogEntry>): MaintenanceLogEntry => ({
-  id: 1,
-  work_center_id: 3,
-  asset_id: null,
-  target_type: 'work_center',
-  target_code: 'MILL-1',
-  target_name: 'Synthetic Mill',
-  maintenance_wo_id: 41,
-  event_type: 'note',
-  description: null,
-  performed_by: 7,
-  performed_by_name: 'Pat Synthetic',
-  event_date: '2026-11-19T14:30:00Z',
-  cost: 0,
-  created_at: '2026-11-19T14:31:00Z',
-  ...overrides,
-});
+/** An entry recorded the moment it happened, unless the override says otherwise. */
+const entry = (overrides: Partial<MaintenanceLogEntry>): MaintenanceLogEntry => {
+  const eventDate = overrides.event_date === undefined ? '2026-11-19T14:30:00Z' : overrides.event_date;
+  return {
+    id: 1,
+    work_center_id: 3,
+    asset_id: null,
+    target_type: 'work_center',
+    target_code: 'MILL-1',
+    target_name: 'Synthetic Mill',
+    maintenance_wo_id: 41,
+    event_type: 'note',
+    description: null,
+    performed_by: 7,
+    performed_by_name: 'Pat Synthetic',
+    cost: 0,
+    created_at: eventDate,
+    ...overrides,
+    event_date: eventDate,
+  };
+};
 
 const NEWEST_FIRST: MaintenanceLogEntry[] = [
   entry({
@@ -81,6 +85,37 @@ describe('MaintenanceLogTimeline', () => {
     expect(items[2]).toHaveTextContent('Belt check by vendor');
     expect(items[2]).toHaveTextContent('Nov 19, 2026, 8:30 AM');
     expect(items[2]).toHaveTextContent('by an unknown user');
+
+    // Entered as it happened: no API-token tag, no separate "recorded" time.
+    for (const item of items) {
+      expect(item).not.toHaveTextContent('via API token');
+      expect(item).not.toHaveTextContent('recorded');
+    }
+  });
+
+  it('tags an entry a standing API token filed, in words a screen reader reads', () => {
+    renderTimeline({
+      logs: [entry({ id: 5, event_type: 'inspection', description: 'Forks checked', filed_via_api_token: true })],
+    });
+    const item = screen.getByRole('listitem');
+    expect(item).toHaveTextContent('by Pat Synthetic');
+    expect(within(item).getByText('via API token')).toBeVisible();
+  });
+
+  it('shows when a backdated entry was recorded, once that is more than five minutes from when it happened', () => {
+    renderTimeline({
+      logs: [
+        // Happened 8:30 AM CST, recorded the next afternoon at 1:00 PM.
+        entry({ id: 6, event_date: '2026-11-19T14:30:00Z', created_at: '2026-11-20T19:00:00Z' }),
+        // Recorded four minutes after: close enough to say nothing.
+        entry({ id: 7, event_date: '2026-11-19T14:30:00Z', created_at: '2026-11-19T14:34:00Z' }),
+      ],
+    });
+    const [backdated, prompt] = screen.getAllByRole('listitem');
+    expect(backdated).toHaveTextContent('Nov 19, 2026, 8:30 AM');
+    expect(backdated).toHaveTextContent('recorded Nov 20, 2026, 1:00 PM');
+    expect(within(backdated).getByText('Nov 20, 2026, 1:00 PM')).toHaveAttribute('dateTime', '2026-11-20T19:00:00Z');
+    expect(prompt).not.toHaveTextContent('recorded');
   });
 
   it('shows a loading line before the first answer', () => {

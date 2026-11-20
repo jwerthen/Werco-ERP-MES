@@ -317,31 +317,56 @@ export const logEventTypeLabel = (eventType: string | null | undefined): string 
   return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 };
 
-/** The add-entry form, as its inputs hold it. `when` is a Central wall clock ("YYYY-MM-DDTHH:mm"), blank = now. */
+/**
+ * The add-entry form, as its inputs hold it. `when` is a Central wall clock ("YYYY-MM-DDTHH:mm"),
+ * blank = now. The two `*_bad_input` flags are the inputs' `validity.badInput`: a number input
+ * holding `12,50` or `1e`, or a date-time with the date picked and the time left blank, reads as
+ * `''` -- indistinguishable from an empty field unless the flag is kept. Kept in the form, they
+ * also make such an input count as an unsaved change.
+ */
 export interface MaintenanceLogForm {
   event_type: MaintenanceLogEntryType;
   description: string;
   cost: string;
+  cost_bad_input: boolean;
   when: string;
+  when_bad_input: boolean;
 }
 
 export const BLANK_MAINTENANCE_LOG_FORM: MaintenanceLogForm = {
   event_type: 'note',
   description: '',
   cost: '',
+  cost_bad_input: false,
   when: '',
+  when_bad_input: false,
+};
+
+/** What is wrong with the cost field, or null (blank is fine: no cost). */
+export const maintenanceLogCostProblem = (form: MaintenanceLogForm): string | null => {
+  if (form.cost_bad_input) return 'Enter a valid cost, or leave it blank.';
+  if (!form.cost.trim()) return null;
+  const cost = Number(form.cost);
+  if (!Number.isFinite(cost)) return 'Enter a valid cost, or leave it blank.';
+  return cost < 0 ? 'Cost must be zero or more.' : null;
+};
+
+/**
+ * What is wrong with the date-time field, or null (blank is fine: now). An incomplete value is
+ * refused rather than read as blank, because an entry filed "now" by mistake can never be edited.
+ */
+export const maintenanceLogWhenProblem = (form: MaintenanceLogForm): string | null => {
+  if (form.when_bad_input || (form.when.trim() && !centralWallClockToUtcISO(form.when))) {
+    return 'Enter a complete date and time, or leave it blank for now.';
+  }
+  return null;
 };
 
 /** Why the add-entry form cannot be sent yet, or null when it can (the server still judges it). */
-export const maintenanceLogFormProblem = (form: MaintenanceLogForm): string | null => {
-  if (!form.description.trim()) return 'Describe what was done or found.';
-  if (form.cost.trim()) {
-    const cost = Number(form.cost);
-    if (!Number.isFinite(cost) || cost < 0) return 'Cost must be zero or more.';
-  }
-  if (form.when.trim() && !centralWallClockToUtcISO(form.when)) return 'Enter a valid date and time.';
-  return null;
-};
+export const maintenanceLogFormProblem = (form: MaintenanceLogForm): string | null =>
+  (form.description.trim() ? null : 'Describe what was done or found.') ??
+  maintenanceLogCostProblem(form) ??
+  maintenanceLogWhenProblem(form);
 
 /**
  * The `POST /maintenance/log` body for an entry on work order `workOrderId`. It names the work

@@ -7,7 +7,7 @@ export interface MaintenanceLogsState {
   loading: boolean;
   /** Display-safe text when the last read failed, else null. */
   error: string | null;
-  /** Re-read the same log (after an entry is added, or from Retry). */
+  /** Re-read the same log (after an entry is added, or from Retry). Ignored once `key` has moved on. */
   reload: () => void;
 }
 
@@ -16,7 +16,9 @@ export interface MaintenanceLogsState {
  * read). A new key clears the list before its read, so one target's entries never show under
  * another's; a reload of the same key keeps the list on screen while it re-reads. Only the latest
  * read's answer is applied, so a slow answer for a dialog since closed or re-pointed is dropped.
- * The list is shown as the server orders it (newest first).
+ * The loader is tied to its key: a `reload` handed out for an earlier key (an add that finishes
+ * after the dialog moved to another record) is ignored rather than re-reading the new key under
+ * the old one. The list is shown as the server orders it (newest first).
  */
 export function useMaintenanceLogs(
   key: string | null,
@@ -26,14 +28,18 @@ export function useMaintenanceLogs(
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const seq = useRef(0);
-  const loadRef = useRef(load);
+  // The current key and the loader rendered with it, always together.
+  const latest = useRef({ key, load });
   const loadedKey = useRef<string | null>(null);
 
   useEffect(() => {
-    loadRef.current = load;
+    latest.current = { key, load };
   });
 
   const read = useCallback((target: string | null) => {
+    // Only the current key may be read: a read asked for any other key is stale.
+    if (target !== latest.current.key) return;
+    const loader = latest.current.load;
     const current = ++seq.current;
     if (target !== loadedKey.current) setLogs([]);
     loadedKey.current = target;
@@ -44,7 +50,7 @@ export function useMaintenanceLogs(
     }
     setLoading(true);
     Promise.resolve()
-      .then(() => loadRef.current())
+      .then(() => loader())
       .then(rows => {
         if (current === seq.current) setLogs(Array.isArray(rows) ? rows : []);
       })
