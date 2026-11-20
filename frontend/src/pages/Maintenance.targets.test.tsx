@@ -288,7 +288,7 @@ describe('Maintenance — work-order actions and roles', () => {
   });
 
   it.each(['supervisor', 'admin'])(
-    'offers a %s no row action on a completed or cancelled work order (the server holds them final)',
+    'offers a %s no row action on a completed or cancelled work order beyond reading it (the server holds them final)',
     async role => {
       mockRole = role;
       const completedWO: MaintenanceWorkOrder = {
@@ -323,7 +323,12 @@ describe('Maintenance — work-order actions and roles', () => {
       for (const wo of [completedWO, cancelledWO]) {
         const row = within(table).getByText(wo.title).closest('tr') as HTMLElement;
         expect(within(row).getByText(wo.wo_number)).toBeInTheDocument();
-        expect(within(row).queryAllByRole('button')).toHaveLength(0);
+        // Reading the record and its log is the only action left on a final work order.
+        expect(
+          within(row)
+            .getAllByRole('button')
+            .map(button => button.getAttribute('aria-label'))
+        ).toEqual([`Details and log for work order ${wo.wo_number}`]);
         // Nowhere on the page -- table or mobile card -- is there an action naming the final record.
         for (const name of [
           `Start work order ${wo.wo_number}`,

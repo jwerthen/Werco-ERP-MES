@@ -292,7 +292,7 @@ class LogCreate(BaseModel):
             "are written by the work order's Start and Complete verbs only."
         ),
     )
-    description: str = Field(..., min_length=1, max_length=_LOG_MAX_DESCRIPTION)
+    description: str = Field(..., min_length=1, description=f"At most {_LOG_MAX_DESCRIPTION} characters once trimmed.")
     cost: float = Field(0, ge=0, le=_LOG_MAX_COST, allow_inf_nan=False)
     event_date: Optional[datetime] = Field(
         None,
@@ -305,7 +305,10 @@ class LogCreate(BaseModel):
     @field_validator("description")
     @classmethod
     def _description(cls, value: Optional[str]) -> Optional[str]:
-        return _strip_required(value)
+        text = _strip_required(value)
+        if text is not None and len(text) > _LOG_MAX_DESCRIPTION:
+            raise ValueError(f"must be at most {_LOG_MAX_DESCRIPTION} characters")
+        return text
 
     @model_validator(mode="after")
     def _one_target(self) -> "LogCreate":

@@ -117,6 +117,66 @@ export interface MaintenanceScheduleUpdate {
   checklist?: string | null;
 }
 
+// ── Maintenance log (history) ──
+
+/** What a person (or an API token) may file as a log entry; `POST /maintenance/log` refuses anything else (422). */
+export type MaintenanceLogEntryType = 'inspection' | 'repair' | 'part_replacement' | 'observation' | 'note';
+
+/** Entries only the work order's Start and Complete verbs write. */
+export type MaintenanceServerLogEventType = 'started' | 'completed';
+
+/**
+ * One maintenance log entry (`_serialize_log`). `event_type` is a filed type, a server-written
+ * `started` / `completed`, or -- on a legacy row -- free text. `event_date` is when it happened (UTC `Z`).
+ */
+export interface MaintenanceLogEntry extends MaintenanceTargetFields {
+  id: number;
+  maintenance_wo_id: number | null;
+  event_type: MaintenanceLogEntryType | MaintenanceServerLogEventType | string;
+  description: string | null;
+  performed_by: number | null;
+  /** The performer's name, read inside the tenant; null for a legacy row whose user it cannot name. */
+  performed_by_name: string | null;
+  event_date: string | null;
+  cost: number | null;
+  created_at: string | null;
+}
+
+/** GET /maintenance/work-orders/{id}/logs: the work order's entries, newest first. */
+export interface MaintenanceWorkOrderLogs {
+  maintenance_wo_id: number;
+  wo_number: string;
+  logs: MaintenanceLogEntry[];
+}
+
+/** GET /maintenance/history/{work_center_id}: a work center's entries, newest first. */
+export interface MaintenanceWorkCenterHistory {
+  work_center_id: number;
+  work_center_name: string;
+  logs: MaintenanceLogEntry[];
+}
+
+/** GET /maintenance/assets/{id}/history: an equipment asset's entries, newest first. */
+export interface MaintenanceAssetHistory {
+  asset_id: number;
+  asset_tag: string;
+  asset_name: string;
+  logs: MaintenanceLogEntry[];
+}
+
+/**
+ * POST /maintenance/log, filed against a maintenance work order. No target is sent: the server
+ * takes the work order's (a different one is 409). `event_date` (UTC) defaults to now on the
+ * server and may be at most 30 days back, never in the future (422); `cost` is 0 or more.
+ */
+export interface MaintenanceLogCreate {
+  maintenance_wo_id: number;
+  event_type: MaintenanceLogEntryType;
+  description: string;
+  cost?: number;
+  event_date?: string;
+}
+
 /** GET /maintenance/dashboard. MTBF / MTTR are work centers only (assets never count). */
 export interface MaintenanceDashboard {
   /** Maintenance WORK ORDERS (scheduled / overdue) whose due date has passed. */

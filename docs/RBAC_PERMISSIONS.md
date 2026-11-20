@@ -191,7 +191,8 @@ the NCR / CAR records change of 2026-11-19 (migration `127`: an NCR's dispositio
 its re-verification, and a CAR's effectiveness verification), the floor-PIN change of
 2026-11-19 (migration `130`: setting, clearing or unlocking a badge sign-on PIN, and the company's
 PIN policy, is credential administration, a person's act), and the restricted document viewing
-change of 2026-11-19 (migration `131`: a document's access level and a user's export authorization).
+change of 2026-11-19 (migration `131`: a document's access level and a user's export authorization),
+and the owner's decision of 2026-11-20 that a standing API token may file a maintenance log entry.
 This section is the **one list** of those credential rules — what refuses a credential,
 what is deliberately left open (and who decided each), and what is deliberately not refused —
 across the AI governance (ruling 3), floor-gates (ruling 2) and short-count (ruling 1) changes;
@@ -301,6 +302,7 @@ route's own fences still do):
 | **Moving a work order's due date through Hank** — the `change_due_date` task (`POST /hank/tasks`, `POST /hank/tasks/{id}/execute`; the MCP tools `prepare_task` / `execute_task`) | Any credential of a user holding Admin / Manager / Supervisor with `work_orders:view` + `work_orders:edit`, a **full** API token included; read-only and AI-external tokens are refused by their own gates, as on every write. Each execution's required audit row carries the reason and `via: hank` (and `extra_data.credential` under a token) | Owner decision 2026-11-16: parity with `update_work_order` / `PUT /work-orders/{id}`, which already moves `due_date` for a token. **Open owner follow-up:** may agents move due dates at all? |
 | **Editing the supplier quality flow-down settings or clause catalog** — `PUT /purchasing/flowdown-profile`, `POST /purchasing/quality-clauses`, `PUT /purchasing/quality-clauses/{id}` (the MCP tools `update_po_flowdown_profile`, `create_po_quality_clause`, `update_po_quality_clause`) | Any credential of a user holding Admin / Manager / Quality, a **full** API token included; read-only and AI-external tokens are refused by their own gates. Each write's required audit row carries `extra_data.credential` under a token | An implementation decision of the PO flow-down change (migration `128`, 2026-11-19), not put to the owner; for comparison, the Approved Supplier List writes refuse API tokens. A PO that has left draft keeps the block frozen onto it, so an edit reaches draft POs only. **Open owner question:** should a standing API token edit the supplier quality requirements text at all? See [Purchasing](#purchasing) |
 | **Recording or changing who owns material** (AS9100D 8.5.3) — `POST /inventory/items/{item_id}/ownership` (the MCP tool `change_inventory_item_ownership`) re-owns one stock row as company, customer or supplier property, which decides whether automatic consumption may draw it and whether valuation counts it; `POST /inventory/receive`, `POST /receiving/receive` and the lines of `POST /receiving/deliveries` record the owner at receipt (the receipt carries it to stock through inspection) | Any credential of a user holding Admin / Manager / Supervisor (plus receiving view / create permission on deliveries), a **full** API token included; read-only and AI-external tokens are refused by their own gates. Hank's `receive_delivery` task has no ownership fields, so Hank receives company stock only. The ownership change's required audit row carries the reason, and every audit row written under a token carries `extra_data.credential` | An implementation decision of the owned-property change (migration `129`, 2026-11-19), not put to the owner. **Open owner question:** should a standing API token record or change ownership at all? See [Inventory](#inventory) |
+| **Filing a maintenance log entry** — `POST /maintenance/log` (the MCP tool `create_log`): an `inspection`, `repair`, `part_replacement`, `observation` or `note`, on a machine or asset or against a maintenance work order (open or finished) | Any credential of a user holding Admin / Manager / Supervisor / Operator, a **full** API token included; read-only and AI-external tokens are refused by their own gates. The entry's `maintenance_log` CREATE audit row carries `extra_data.credential` under a token, and the entry's `performed_by` is the token's user. What a token cannot do through it is fixed by the route for every caller: `started` and `completed` entries are the work order's Start / Complete verbs' own (**422**), and an entry on a work order is filed under that work order's machine or asset (**409** otherwise) | Owner decision 2026-11-20. Note the contrast with work-order comments, which every API token is refused (`API_TOKEN_COMMENT_WRITE`, owner decision 2026-11-16: a comment is a person's own words); the owner decided maintenance log entries the other way. See [Maintenance](#maintenance-pm-schedules-maintenance-work-orders-event-log) |
 
 ## Permission Matrix
 
@@ -1358,14 +1360,14 @@ v1 (2026-11-16): comment threads, @mentions and watchers on **work orders only**
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
 |------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
-| View (schedules, work orders, overdue, calendar, dashboard, history, equipment assets and asset history) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| View (schedules, work orders, a work order's log entries (`GET /maintenance/work-orders/{id}/logs`), overdue, calendar, dashboard, history, equipment assets and asset history) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Create / edit PM schedule (`POST`/`PUT /maintenance/schedules`) | ✓ | ✓ | ✓ | | | | |
 | Deactivate PM schedule (`DELETE /maintenance/schedules/{id}`) | ✓ | ✓ | ✓ | | | | |
 | Import PM schedules (`POST /maintenance/schedules/import/preview`, `/import/commit`; may create equipment assets) | ✓ | ✓ | ✓ | | | | |
 | Create / edit / retire equipment asset (`POST /maintenance/assets`, `PUT`/`DELETE /maintenance/assets/{id}`) | ✓ | ✓ | ✓ | | | | |
 | Create / edit maintenance WO (`POST`/`PUT /maintenance/work-orders`) | ✓ | ✓ | ✓ | | | | |
 | Start / complete maintenance WO (`POST .../{id}/start`, `.../complete`) | ✓ | ✓ | ✓ | ✓ | | | |
-| Add event log entry (`POST /maintenance/log`) | ✓ | ✓ | ✓ | ✓ | | | |
+| Add event log entry (`POST /maintenance/log`; a standing API token of these roles may too — see [Credential policy for judgment writes](#credential-policy-for-judgment-writes)) | ✓ | ✓ | ✓ | ✓ | | | |
 
 > ⚠️ **This table is new because the router had NO role gating at all.** All sixteen handlers were
 > `Depends(get_current_user)`, so a **Viewer could create, start and complete maintenance work
@@ -1432,8 +1434,9 @@ v1 (2026-11-16): comment threads, @mentions and watchers on **work orders only**
 > token alike. Before, only the status was held, so a planning-role `PUT` could re-tick a completed
 > PM's checklist after the fact. Re-sending the record's own value is accepted and writes nothing
 > (no audit row). A later note goes on the record as a `POST /maintenance/log` entry with
-> `maintenance_wo_id` (performing roles, as in the table; dated, signed, audited), never as an edit
-> of the WO. This is a state rule, not a credential policy, so it has no row in the credential table.
+> `maintenance_wo_id` (performing roles, as in the table; dated, signed, audited, and filed under the
+> work order's own machine or asset — a different explicit one is **409**), never as an edit of the
+> WO; the Maintenance page's work-order detail view has an **Add log entry** form for it. This is a state rule, not a credential policy, so it has no row in the credential table.
 > Details in `docs/API.md` → Maintenance → *A completed or cancelled work order is a final record*
 > and *The PM loop*.
 >
