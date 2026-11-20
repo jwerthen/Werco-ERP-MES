@@ -55,6 +55,7 @@ from app.services.inventory_combine_service import build_combine_preview, combin
 from app.services.operational_event_service import OperationalEventService
 from app.services.owned_property_service import (
     COMPANY,
+    COMPANY_OWNED_ITEM_CLAUSES,
     COMPANY_OWNERSHIP_KEY,
     OWNERSHIP_AUDIT_UNAVAILABLE_DETAIL,
     OwnershipKey,
@@ -320,12 +321,18 @@ def get_low_stock_alerts(
 ):
     """Get parts with inventory below reorder point.
 
+    ``quantity_on_hand`` is the COMPANY'S OWN on-hand, summed per part over every active
+    row in any status. Customer- and supplier-owned property held here (AS9100D 8.5.3) is
+    not the shop's supply, so it never keeps a part off this list: a part whose only stock
+    belongs to someone else reads 0 on hand. ``GET /inventory/summary`` still reports the
+    physical total.
+
     Filter is applied in SQL so we don't load the full parts catalog into
     memory. A hard limit bounds the response size (``ge=1`` so a negative value
     cannot reach ``.limit()`` -- PostgreSQL rejects a negative LIMIT and SQLite
     silently treats it as "unbounded"); the frontend paginates display in any case.
     """
-    # Subquery: sum of on-hand quantity per active inventory row, by part.
+    # Subquery: sum of on-hand quantity per active, company-owned inventory row, by part.
     # Tenant-scoped so the aggregate can never sum another company's stock into
     # this company's on-hand figure.
     qty_subq = (
@@ -333,7 +340,7 @@ def get_low_stock_alerts(
             InventoryItem.part_id.label("pid"),
             func.coalesce(func.sum(InventoryItem.quantity_on_hand), 0).label("total_qty"),
         )
-        .filter(InventoryItem.company_id == company_id, InventoryItem.is_active == True)
+        .filter(InventoryItem.company_id == company_id, InventoryItem.is_active == True, *COMPANY_OWNED_ITEM_CLAUSES)
         .group_by(InventoryItem.part_id)
         .subquery()
     )

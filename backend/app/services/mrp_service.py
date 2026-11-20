@@ -20,6 +20,7 @@ from app.models.mrp import MRPAction, MRPRequirement, MRPRun, MRPRunStatus, Plan
 from app.models.part import Part, is_material_supply_part_type
 from app.models.purchasing import POStatus, PurchaseOrder, PurchaseOrderLine
 from app.models.work_order import WorkOrder, WorkOrderStatus
+from app.services.owned_property_service import COMPANY_OWNED_ITEM_CLAUSES
 
 
 class MRPService:
@@ -61,8 +62,19 @@ class MRPService:
         return str(value).strip().lower()
 
     def get_inventory_summary(self, part_id: int) -> Tuple[float, float, float]:
-        """Get inventory quantities for a part: (on_hand, allocated, on_order)"""
-        # On hand from inventory (scoped to this tenant)
+        """Get inventory quantities for a part: (on_hand, allocated, on_order).
+
+        ``on_hand`` and ``allocated`` count COMPANY-OWNED stock only
+        (``COMPANY_OWNED_ITEM_CLAUSES``, AS9100D 8.5.3). A customer's or supplier's
+        material on the rack is not the shop's supply: automatic consumption never draws
+        it, so netting demand against it would suppress the purchase or make action the
+        shop actually needs. Demand for a part whose only stock is owned therefore shows as
+        a shortage. With no owned stock both figures are what they were before migration
+        129. This is the one netting seam: the MRP run and the reviewed supply draft's
+        fingerprint (``mrp_supply_service``) both read it.
+        """
+        # On hand from inventory (scoped to this tenant). The status rule is MRP's own,
+        # kept as it was; only the ownership clause is new.
         on_hand_result = (
             self.db.query(func.sum(InventoryItem.quantity_on_hand))
             .filter(
@@ -70,18 +82,21 @@ class MRPService:
                 InventoryItem.part_id == part_id,
                 InventoryItem.is_active == True,
                 InventoryItem.status == "available",
+                *COMPANY_OWNED_ITEM_CLAUSES,
             )
             .scalar()
             or 0.0
         )
 
-        # Allocated from inventory (scoped to this tenant)
+        # Allocated from inventory (scoped to this tenant). Same ownership rule as on hand:
+        # a reservation on someone else's material does not reduce the shop's own supply.
         allocated_result = (
             self.db.query(func.sum(InventoryItem.quantity_allocated))
             .filter(
                 InventoryItem.company_id == self.company_id,
                 InventoryItem.part_id == part_id,
                 InventoryItem.is_active == True,
+                *COMPANY_OWNED_ITEM_CLAUSES,
             )
             .scalar()
             or 0.0

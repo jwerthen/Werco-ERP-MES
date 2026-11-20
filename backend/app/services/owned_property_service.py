@@ -48,6 +48,31 @@ COMPANY = OwnershipType.COMPANY.value
 CUSTOMER = OwnershipType.CUSTOMER.value
 SUPPLIER = OwnershipType.SUPPLIER.value
 
+# THE "company-owned stock only" clause, in SQL, as a splattable tuple like its siblings. It
+# is the ownership half of ``material_consumption_service.AUTO_DRAW_ITEM_CLAUSES`` (which is
+# built from it), so there is one spelling of "the shop's own stock" in the codebase.
+#
+# Splat it on its own -- not ``AUTO_DRAW_ITEM_CLAUSES`` -- into a reader that counts the
+# company's OWN stock but keeps its own status rule:
+#
+# * planning: ``MRPService.get_inventory_summary`` (on hand and allocated);
+# * reorder / low stock: ``GET /inventory/low-stock``, the ``stock.low`` cron
+#   (``check_low_stock_task``), the operations inbox's ``low_stock`` source, the AI
+#   inventory-risk sensor, the consumable crib's ``low_stock`` filter and ``is_low_stock``,
+#   and the stockout prediction;
+# * valuation: ``GET /reports/inventory-value`` and the analytics inventory value figures.
+#
+# Those readers count held / quarantined stock (low stock) or read ``status`` their own way
+# (MRP), so swapping in ``AUTO_DRAW_ITEM_CLAUSES`` would change what a company with no owned
+# stock sees. With only company stock on the rack this clause matches every row, so those
+# readers answer exactly as they did before migration 129.
+#
+# A customer's or supplier's material is physically there but is not the shop's supply: it
+# covers no MRP demand, keeps no reorder alert quiet and has no value on the shop's books.
+# The physical readers (``GET /inventory/``, ``/inventory/summary``'s ``total_on_hand``, the
+# export) deliberately do NOT use it.
+COMPANY_OWNED_ITEM_CLAUSES = (InventoryItem.ownership == COMPANY,)
+
 # (ownership, owner_customer_id, owner_vendor_id) -- the part of a merge key that names who
 # owns the material.
 OwnershipKey = Tuple[str, Optional[int], Optional[int]]

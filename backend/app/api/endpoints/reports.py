@@ -14,7 +14,7 @@ from app.api.date_window import (
 from app.api.deps import get_current_company_id, get_current_user
 from app.core.time_utils import to_local_date, to_utc_iso
 from app.db.database import get_db
-from app.models.inventory import InventoryItem, OwnershipType
+from app.models.inventory import InventoryItem
 from app.models.purchasing import POReceipt, PurchaseOrder
 from app.models.quality import NonConformanceReport
 from app.models.time_entry import TimeEntry
@@ -23,6 +23,7 @@ from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.schemas.analytics import ShipOTDReportResponse
 from app.services.analytics_service import AnalyticsService
 from app.services.company_time import company_zone
+from app.services.owned_property_service import COMPANY_OWNED_ITEM_CLAUSES
 from app.services.production_calendar import (
     current_production_day,
     production_day,
@@ -249,7 +250,7 @@ def get_inventory_value(
             InventoryItem.company_id == company_id,
             InventoryItem.is_active == True,
             InventoryItem.quantity_on_hand > 0,
-            InventoryItem.ownership == OwnershipType.COMPANY.value,
+            *COMPANY_OWNED_ITEM_CLAUSES,
         )
         .group_by(InventoryItem.part_id, Part.standard_cost)
         .all()

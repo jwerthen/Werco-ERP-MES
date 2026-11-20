@@ -27,9 +27,11 @@ when, and who issued it.
 5. Confirm the quantity available on the Consumables screen. The low-stock badge
    uses the item's existing `reorder_point`; an authorized user can configure it
    through the material API or materials import. The current Materials form has
-   no reorder-point input. The badge compares total active on-hand stock across
-   locations with the threshold, while checkout availability excludes restricted
-   and reserved stock. It does not automatically create a purchase order.
+   no reorder-point input. The badge compares the company's own active on-hand
+   stock across locations with the threshold, while checkout availability
+   excludes restricted and reserved stock. Customer- or supplier-owned stock,
+   such as supplier consignment stock in the crib, is still listed but does not
+   count toward the threshold. It does not automatically create a purchase order.
 
 ## Record a checkout
 

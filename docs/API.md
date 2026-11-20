@@ -11593,7 +11593,7 @@ stock balance. See [Consumables setup and operation](CONSUMABLES.md).
 | Method | Endpoint | Behavior | Server access |
 |---|---|---|---|
 | GET | `/consumables/metadata` | `can_manage`, `can_export`, and a minimal employee list (`id`, `name`, `department`, `is_active`). Includes active employees and inactive historical recipients for filtering. | Authenticated, active company |
-| GET | `/consumables/stock` | `{items, total}` by consumable/location/lot, with on-hand, available quantity, unit, reorder threshold, low-stock and checkout eligibility. Filters `q`, `low_stock`; `skip` ≥ 0, `limit` 1–250 (default 100). Items without stock remain visible. | Authenticated, active company |
+| GET | `/consumables/stock` | `{items, total}` by consumable/location/lot, with on-hand, available quantity, unit, reorder threshold, low-stock and checkout eligibility. Filters `q`, `low_stock`; `skip` ≥ 0, `limit` 1–250 (default 100). Items without stock remain visible. The reorder judgment (the `low_stock` filter, `part_quantity_on_hand`, `is_low_stock`) counts the company's own active stock only; customer- and supplier-owned rows, supplier consignment stock for example, are still listed (see [Customer- and supplier-owned property](#customer--and-supplier-owned-property)). | Authenticated, active company |
 | POST | `/consumables/checkouts` | Record one employee issue atomically; returns 201 and the saved receipt. | Admin, Manager, Supervisor |
 | GET | `/consumables/checkouts` | `{items, total}`, ordered `issued_at DESC, id DESC`; filters `q`, `employee_id`, `part_id`, `date_from`, `date_to`; `skip` ≥ 0, `limit` 1–250 (default 100). | Authenticated, active company |
 | GET | `/consumables/checkouts/export.csv` | Same history filters, all matching rows up to 10,000; 422 if exceeded. CSV includes Central timestamp and `CC-` checkout reference. Audited export. | Admin, Manager |
@@ -11651,7 +11651,7 @@ environment variables are required.
 |--------|----------|-------------|---------------|
 | GET | `/inventory/` | List inventory items (`part_id`, `warehouse`, `location_code`, `has_quantity` — `has_quantity` filters **nonzero**, not positive, so driven-negative lots stay visible; see note below — and `ownership`, `owner_customer_id`, `owner_vendor_id`). Each row carries `ownership`, the owner id and `owner_name` (see [Customer- and supplier-owned property](#customer--and-supplier-owned-property)). Bounded: `limit` **1–10000, default 10000**, `offset` ≥ 0 | Yes |
 | GET | `/inventory/summary` | On-hand summary by part, with per-location breakdown (every active row with **nonzero** on-hand, negatives included). `total_on_hand` is physical stock whoever owns it; `owned_by_others_on_hand` is the customer- and supplier-owned part of it, and each location entry carries its row's `ownership`. Bounded with the identical `limit`/`offset` as `/inventory/` — see note below | Yes |
-| GET | `/inventory/low-stock` | Parts at/below reorder point (on-hand summed per part) | Yes |
+| GET | `/inventory/low-stock` | Parts at/below reorder point. `quantity_on_hand` is the **company's own** on-hand, summed per part over active rows in any status; customer- and supplier-owned stock is not counted, so a part whose only stock is owned reads 0 and is listed (see [Customer- and supplier-owned property](#customer--and-supplier-owned-property)) | Yes |
 | GET | `/inventory/locations` | List warehouse locations / bins | Yes |
 | POST | `/inventory/locations` | Create a location | Admin / Manager |
 | GET | `/inventory/transactions` | Inventory transaction (ledger) history, newest first. Filters: `part_id`, `transaction_type`, `reference_type`, `reference_id`, `work_order_id`, `lot_number`, `start_date`, `end_date`. Offset-paged (`limit` 1–500 default 100, `offset` ≥ 0), **no total count** — see note below | Yes |
@@ -12069,6 +12069,55 @@ what the draw will take use the same predicate: the backflush preview, the tie o
 dispatch board and kiosk, material readiness, the nest sheet-stock suggestions and Hank's same-part
 stock check.
 
+<a id="owned-stock-planning-and-reorder"></a>
+**Planning and reorder count the company's stock only.** A customer's or supplier's material is
+physically there but is not the shop's supply, so it covers no MRP demand and keeps no reorder
+signal quiet. These readers count company-owned rows only:
+
+* MRP netting, `MRPService.get_inventory_summary` (on hand and allocated): every MRP run, so a
+  requirement's `quantity_on_hand` / `quantity_allocated` / `quantity_available` /
+  `quantity_shortage` and the actions built from them, and the supply review's current-shortage
+  recheck and review fingerprint. See [Material Requirements Planning](#material-requirements-planning-mrp).
+* `GET /inventory/low-stock` (a part whose only stock is owned reads 0 on hand and is listed).
+* The `stock.low` digest cron (`check_low_stock_task`).
+* The operations inbox's `low_stock` source, which Hank's shift briefing also reads.
+* The AI `inventory_risk` sensor.
+* The reorder judgment on `GET /consumables/stock` (owned rows are still listed).
+* `current_stock` on `GET /analytics/predict/inventory-demand`.
+
+All of them, and the valuation readers below, use one clause,
+`owned_property_service.COMPANY_OWNED_ITEM_CLAUSES` (`ownership = 'company'`), which is also the
+ownership half of `AUTO_DRAW_ITEM_CLAUSES`. Each reader keeps its own status rule: MRP's on-hand
+counts `available` rows, while the low-stock and reorder readers count every status (`on_hold`,
+`quarantine` and `rejected` included) as they always did. So a company with no owned stock sees
+exactly what it saw before. MRP's open PO and
+work-order supply (`quantity_on_order`) is unchanged, since ownership is recorded at receipt, not on
+a PO line. The physical readers (`GET /inventory/`, `total_on_hand` on `GET /inventory/summary`, the
+inventory export) still count every row.
+
+<a id="owned-stock-mrp-demand-open-decision"></a>
+> **OPEN OWNER DECISION: should a customer-supplied part create MRP demand at all?** Not decided;
+> nothing here recommends an option.
+>
+> **Current behavior.** MRP nets every BOM component's demand against company stock only. A
+> component the customer furnishes, whose stock on the rack is customer-owned, therefore shows a
+> shortage and an action: ORDER for a purchased, raw-material, hardware or consumable part
+> (MANUFACTURE for a manufactured part or assembly), or EXPEDITE in place of either once the order-by
+> date has passed. A planner who sees it marks it reviewed (`POST /mrp/actions/{action_id}/process`)
+> without creating supply. Where the worker runs the 06:00 `run_mrp_auto_draft_job` cron (every cron
+> runs unless `WORKER_CRON_JOBS` excludes it), no person sees it first: an ORDER action becomes a
+> **draft** purchase order, a MANUFACTURE action a draft work order, and an EXPEDITE action sends
+> `mrp.expedite_required`. A customer-furnished part usually has no supplier mapping or purchase
+> history, so that draft purchase order goes to the auto-PO job's no-sourcing fallback, the company's
+> first active vendor. A draft is never sent on its own; a buyer cancels it. The behavior errs toward
+> a visible suggestion rather than a suppressed one.
+>
+> **Options awaiting the owner:**
+>
+> * (a) Keep it.
+> * (b) A per-part "customer-furnished" flag that MRP skips for purchase actions.
+> * (c) Net customer-owned stock only against that same customer's work orders.
+
 **Changing ownership: `POST /inventory/items/{item_id}/ownership` — Admin / Manager / Supervisor**
 (`STOCK_MUTATOR_ROLES`).
 
@@ -12132,7 +12181,10 @@ stock rows, tools or PO receipts cannot be hard-deleted**: see [Customers](#cust
 > * **Kept apart.** Owned stock never merges into a company row or the reverse, a combine refuses
 >   to mix owners in one location and lot, automatic consumption never draws it, the finished-goods
 >   decrement at shipment takes only the company's row, a receipt correction or void unwinds only
->   the exact row the receipt stocked, and valuation leaves it out.
+>   the exact row the receipt stocked, and valuation leaves it out. MRP does not count it as supply,
+>   and the low-stock and reorder checks do not count it as on hand, so it can neither suppress a
+>   purchase suggestion nor keep a reorder alert quiet. (Whether a customer-supplied part should
+>   create MRP demand at all is an [open owner decision](#owned-stock-mrp-demand-open-decision).)
 > * **Recorded.** The receipt records whose property it is, and every later change of ownership is
 >   a reasoned, required-audited act naming who changed it, from what, to what, and why. A customer
 >   that owns stock, tools or PO receipts cannot be hard-deleted, and the database refuses a
@@ -12145,10 +12197,6 @@ stock rows, tools or PO receipts cannot be hard-deleted**: see [Customers](#cust
 >
 > **Not yet done:**
 >
-> * **MRP still counts owned stock as supply.** `mrp_service.get_inventory_summary` nets demand
->   against every active, available stock row, owned or not, so customer or supplier stock can
->   suppress a purchase suggestion.
->   `GET /inventory/low-stock` likewise sums it into on-hand.
 > * **Shortage disclosures do not mention owned stock.** When the FIFO draw comes up short, the
 >   shortage record names held lots it skipped (`held_stock_summary`) but not owned lots it
 >   skipped, so a shortage on a part with customer stock on the rack reads as a bare shortage.
@@ -12400,6 +12448,30 @@ deliberately **not** registered in `notification_catalog.py` — neither are `in
 `get_current_company_id`. Another company's part id behaves as **404**, and its location codes and
 lot numbers are unreachable.
 
+### Material Requirements Planning (MRP)
+
+The `/mrp` routes are not yet listed in this file; the interactive reference at `/docs` (tag
+*Material Requirements Planning*) has them. This section covers how a run counts supply.
+
+**Supply is the company's own stock (migration `129`, AS9100D 8.5.3).** A run nets each part's
+demand against `MRPService.get_inventory_summary`, the one netting seam, which the supply review's
+current-shortage recheck and review fingerprint also read. Its on-hand counts active, `available`,
+**company-owned** rows and its allocated counts active company-owned rows. So on every requirement,
+`quantity_on_hand`, `quantity_allocated` and `quantity_available` (on hand less allocated) are the
+company's own stock, and `quantity_shortage` and the ORDER / MANUFACTURE / EXPEDITE actions follow
+from them. A customer's or supplier's material on the rack covers no demand, so a part whose only
+stock is owned shows its full demand as a shortage. `quantity_on_order` (open PO lines, released and
+in-progress work orders that make the part, and drafts linked to an MRP action) is unchanged, because
+ownership is recorded at receipt, not on a PO line. A company with no owned stock gets the same run
+as before. See
+[Inventory → Customer- and supplier-owned property](#customer--and-supplier-owned-property).
+
+> **OPEN OWNER DECISION: customer-supplied parts.** Whether a part the customer furnishes should
+> create MRP demand at all is not decided. Today it does: the run shows a shortage and an action for
+> it, and where the 06:00 `run_mrp_auto_draft_job` cron runs, that action becomes a draft purchase
+> order without a person seeing it first. The current behavior and the three options are under
+> [Customer- and supplier-owned property](#owned-stock-mrp-demand-open-decision).
+
 ### Traceability
 
 | Method | Endpoint | Description | Auth Required |
@@ -12600,10 +12672,12 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 > is left out of every inventory value figure: all three figures of `GET /reports/inventory-value`,
 > `summary.total_inventory_value` and each part's average inventory value (the turnover
 > denominator) on `GET /analytics/inventory-turnover`, and the average inventory value behind the
-> `inventory_turnover` KPI on `GET /analytics/kpis`. On-hand quantities are physical and still
-> include it (`GET /inventory/summary` reports it separately as `owned_by_others_on_hand`), and the
-> inventory export keeps every row's `total_value` beside its `ownership`. A company with no owned
-> stock sees the same figures as before. See
+> `inventory_turnover` KPI on `GET /analytics/kpis`. Physical on-hand quantities still include it
+> (`GET /inventory/summary` reports it separately as `owned_by_others_on_hand`), and the inventory
+> export keeps every row's `total_value` beside its `ownership`; the planning and reorder figures do
+> not ([Planning and reorder count the company's stock only](#owned-stock-planning-and-reorder)). These
+> figures and those readers share one clause, `owned_property_service.COMPANY_OWNED_ITEM_CLAUSES`. A
+> company with no owned stock sees the same figures as before. See
 > [Inventory → Customer- and supplier-owned property](#customer--and-supplier-owned-property).
 
 > **`GET /reports/ship-otd` (Lean Phase 1).** The customer-experienced delivery report: measures
@@ -12747,7 +12821,9 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 >   `predicted_stockout_date`, `days_until_stockout`, `open_po_quantity`, `next_po_due` and
 >   `urgency` (`critical` ≤ 7 days, `warning` ≤ 14, else `ok`, de-escalated one step when an open PO
 >   lands before the stockout date), plus `critical_count` / `warning_count`. Considers active,
->   non-deleted `purchased` / `raw_material` parts only.
+>   non-deleted `purchased` / `raw_material` parts only. `current_stock` is the company's own
+>   on-hand (active rows, any status): customer- and supplier-owned stock does not push a stockout
+>   date out (see [Planning and reorder](#owned-stock-planning-and-reorder)).
 >
 > **Refusals on `/predict/delivery/{work_order_id}` (new).** A work order belonging to **another
 > company** now returns **404 `{"detail": "Work order not found"}` — byte-identical to the response
