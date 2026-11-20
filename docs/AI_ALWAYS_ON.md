@@ -65,7 +65,8 @@ enabled only while the company's AI egress is on (`GET /api/v1/ai/governance` re
    `work_order_blocker_escalated` event fires only when a card is minted.  
 6. **Domain sensors (Phase 1)**  
    - `at_risk_delivery` — open WOs due within 3 days or already late  
-   - `inventory_risk` — on-hand ≤ reorder point / safety stock  
+   - `inventory_risk` — the company's own on-hand ≤ reorder point / safety stock (customer- and
+     supplier-owned stock is not counted, migration `129`)  
    - `quality_trend` — part scrap rate ≥ 5% over ≥ 3 completed jobs in 30 days  
 
 The job **never applies a recommendation**, makes no LLM call and mutates no ERP record. Every
