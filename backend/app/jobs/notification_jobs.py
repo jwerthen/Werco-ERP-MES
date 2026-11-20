@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from app.core.queue import enqueue_job
@@ -514,10 +514,12 @@ def _target_code(row, company_id: int):
 def _due_alert_already_sent(db, company_id: int, related_type: str, related_id: int, since) -> bool:
     """Whether this PM item's ``maintenance.due`` alert already went out this cycle -- on or after
     ``since``, the company-local start of the day it first came within the window. ``maintenance.due``
-    is not recurring, so without this a daily run would alert every day of the window."""
-    from app.models.notification import Notification
+    is not recurring, so without this a daily run would alert every day of the window. Both records
+    count: the in-app row, and the email / SMS log row (a recipient who turned in-app off and kept
+    email has only the second)."""
+    from app.models.notification import Notification, NotificationLog
 
-    return (
+    in_app = (
         db.query(Notification.id)
         .filter(
             Notification.company_id == company_id,
@@ -527,8 +529,21 @@ def _due_alert_already_sent(db, company_id: int, related_type: str, related_id: 
             Notification.created_at >= since,
         )
         .first()
-        is not None
     )
+    if in_app is not None:
+        return True
+    delivered = (
+        db.query(NotificationLog.id)
+        .filter(
+            NotificationLog.company_id == company_id,
+            NotificationLog.event_type == MAINTENANCE_DUE_EVENT,
+            NotificationLog.related_type == related_type,
+            NotificationLog.related_id == related_id,
+            NotificationLog.sent_at >= since,
+        )
+        .first()
+    )
+    return delivered is not None
 
 
 async def check_maintenance_due_task():
@@ -566,7 +581,9 @@ async def check_maintenance_due_task():
 
                 def cycle_start(due_date):
                     start, _ = company_window(db, cid, due_date - timedelta(days=DUE_WINDOW_DAYS), due_date)
-                    return start
+                    # Aware UTC: ``created_at`` / ``sent_at`` are timestamptz, and a naive parameter
+                    # would be read in the database session's time zone.
+                    return start.replace(tzinfo=timezone.utc)
 
                 for schedule in due.schedules_overdue:
                     days = (today - schedule.next_due_date).days

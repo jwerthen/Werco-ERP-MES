@@ -153,11 +153,12 @@ worker and frontend releases through the existing combined-release path. No new
 environment variable, secret or service is required. The existing production cron
 selection was `none` after quote-nesting retirement; to enable scheduled Hank checks,
 set **`WORKER_CRON_JOBS=check_hank_watches_job`** on the worker and redeploy. This exact
-allowlist enables only the new five-minute check and preserves suppression of all
-13 unrelated schedules. Do not use `all` or restore a retired nesting relay.
+allowlist enables only the new five-minute check and preserves suppression of every
+unrelated schedule. Do not use `all` or restore a retired nesting relay.
 
 Verify the active worker release and fresh generic heartbeat, then verify its startup
-log lists `cron:check_hank_watches_job` and reports **13 of 14** crons suppressed.
+log lists `cron:check_hank_watches_job` and reports **14 of 15** crons suppressed (13 of 15 once
+`check_maintenance_due_job` is added; see [PM due and overdue alerts](#pm-due-and-overdue-alerts)).
 For an explicitly created test follow-up with alerts enabled, verify `last_checked_at`
 advances and a matched condition creates one owner-only in-app notification linked to its receipt.
 Each pass checks at most 100 due watches; it is periodic polling, not an immediate
@@ -219,6 +220,57 @@ deliberate schema downgrade removes Hank workflow evidence and is not an ordinar
 rollback step; it does not undo documents, receipts, production or shipments
 already created by completed actions. Intake-linked Documents cannot be deleted
 through the application because the saved source and receipt must remain valid.
+
+### PM due and overdue alerts
+
+This release adds one worker cron, **`check_maintenance_due_job`** (12:15 UTC daily: 6:15 AM Central,
+7:15 in summer). It sends `maintenance.due` (once per PM item and due date, when it comes within 7
+days) and `maintenance.overdue` (recurring: one unread row per user per item) to each company's
+Maintenance department plus its Admins, in-app by default; see
+[NOTIFICATIONS.md](NOTIFICATIONS.md) and
+[API.md → Maintenance](API.md#maintenance-pm-schedules-maintenance-work-orders-event-log), *Due and
+overdue alerts*. No migration, secret or environment variable is added; deploy the matching API,
+worker and frontend as usual.
+
+- **Owner action at deploy: enable the cron.** Production runs `WORKER_CRON_JOBS` as an allowlist
+  (last documented as the Hank-only `check_hank_watches_job`; **the current value is not verified**
+  here, so read it on `werco-worker` → Variables first). An allowlist never picks up a new cron, so
+  without this step the job never fires. Add it and redeploy the worker:
+  **`WORKER_CRON_JOBS=check_hank_watches_job,check_maintenance_due_job`** for the Hank-only value, or
+  append `,check_maintenance_due_job` to any other allowlist. An unset, `all` or `-` exclusion value
+  already includes it; `none` runs no cron at all.
+- **Before arming, count what the first run sends** (read-only; `current_date` is the database's
+  UTC day, close enough for a count). On the first run every overdue item alerts each recipient once:
+
+    ```sql
+    -- Unstarted maintenance work orders past their due date
+    SELECT company_id, count(*) FROM maintenance_work_orders
+     WHERE status::text IN ('SCHEDULED', 'OVERDUE') AND due_date < current_date
+     GROUP BY 1;
+    -- Active PM schedules past due with no work order under way (a held one does not cover it)
+    SELECT s.company_id, count(*) FROM maintenance_schedules s
+     WHERE s.is_active AND s.next_due_date < current_date
+       AND NOT EXISTS (SELECT 1 FROM maintenance_work_orders w
+                        WHERE w.company_id = s.company_id AND w.schedule_id = s.id
+                          AND w.status::text IN ('SCHEDULED', 'OVERDUE', 'IN_PROGRESS'))
+     GROUP BY 1;
+    -- Recipients per company: Maintenance department plus Admins (a person in both counts once)
+    SELECT company_id, count(*) FROM users
+     WHERE is_active AND (department = 'Maintenance' OR role::text = 'ADMIN')
+     GROUP BY 1;
+    ```
+
+  If the overdue counts are large, close out or reschedule stale PM first.
+- **Verify** after the worker redeploy: its startup log lists
+  `ARQ worker cron:   cron:check_maintenance_due_job -> next run …` (and, for the two-job allowlist,
+  `13 of 15 cron jobs SUPPRESSED`). After the first 12:15 UTC run the log reads `Checked preventive
+  maintenance: N overdue and M due alert(s) across K company(ies)`, and a Maintenance-department user
+  or an Admin sees the alerts in the bell, each opening the Maintenance page's Schedules or Work
+  Orders tab. A heartbeat alone does not prove the cron ran.
+- **Rollback / stop.** Remove the name from the allowlist (or use `all,-check_maintenance_due_job`)
+  and redeploy the worker. An older worker image does not know the name, so **remove it before
+  rolling the worker back**: an unknown name in `WORKER_CRON_JOBS` is a hard startup error. Sent
+  notifications stay.
 
 ### Maintenance log provenance (migration 133)
 

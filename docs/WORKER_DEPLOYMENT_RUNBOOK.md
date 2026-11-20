@@ -20,11 +20,12 @@ Railway project, this document says so and tells you how to get it — it never 
    reads create no rows. There is no new variable, secret or separate service.
 2. On the worker, change the existing production selection from
    `WORKER_CRON_JOBS=none` to **`WORKER_CRON_JOBS=check_hank_watches_job`**. This is an
-   intentional one-job allowlist: keep all 13 unrelated schedules disabled. Do not
+   intentional one-job allowlist: keep every unrelated schedule disabled. Do not
    enable `all`, MRP, or a retired quote-nesting relay.
 3. Verify the exact active release and fresh generic heartbeat, matching API/worker
    Redis target, and startup logs showing only `cron:check_hank_watches_job` selected
-   with **13 of 14 cron jobs suppressed**. The schedule runs every five minutes and
+   with **14 of 15 cron jobs suppressed** in the current release (13 of 15 once
+   `check_maintenance_due_job` is added; see the PM due-alert procedure below). The schedule runs every five minutes and
    processes at most 100 due watches per pass; a heartbeat is not evidence of a
    successful watch check.
 4. Create an explicit personal follow-up through Hank. Verify its last-check time
@@ -44,8 +45,8 @@ Railway project, this document says so and tells you how to get it — it never 
 Apply **110_hank_workflows** after 109, then deploy matching API, worker and
 frontend through the normal release pipeline. Verify the request-driven
 `process_hank_intake_file_job` is registered and the worker shares durable source
-storage and Redis with the API. This adds no cron, secret or environment variable;
-the declared cron count remains **14** and the Hank-only schedule stays unchanged.
+storage and Redis with the API. This adds no cron, secret or environment variable,
+and the Hank-only schedule stays unchanged.
 The job continues to process requested uploads even when cron selection is `none`.
 
 Use a controlled PDF to verify queued analysis reaches employee review, saved
@@ -55,6 +56,33 @@ gate; it never files automatically. Verify same-key upload recovery and Retry
 for queued/failed work. Stale analyzing work becomes retryable after 15 minutes.
 Preserve source/photo bytes and workflow tables on application rollback; see
 [the full rollout](DEPLOYMENT.md#hank-workflows-and-document-intake).
+
+## Current PM due-alert release procedure
+
+This release adds the fifteenth cron, **`check_maintenance_due_job`** (12:15 UTC daily: 6:15 AM
+Central, 7:15 in summer), which sends `maintenance.due` (once per item and due date, within 7 days)
+and `maintenance.overdue` (recurring while unread) to the Maintenance department plus the Admins,
+in-app by default. No migration, secret or environment variable is added. **An allowlist does not
+pick up a new cron**, so the owner must add it or it never fires.
+
+1. **Read the current value** on `werco-worker` → Variables → `WORKER_CRON_JOBS`. It is **not
+   verified here**; the last documented production value is the Hank-only allowlist
+   `check_hank_watches_job`.
+2. **Before arming, count what the first run sends** with the read-only queries in
+   [`DEPLOYMENT.md` → PM due and overdue alerts](DEPLOYMENT.md#pm-due-and-overdue-alerts). On the
+   first run every overdue item alerts each recipient once.
+3. **Add the job** to the value you read and redeploy the worker:
+   - `check_hank_watches_job` → **`check_hank_watches_job,check_maintenance_due_job`**;
+   - any other allowlist → append `,check_maintenance_due_job`;
+   - `none` → no cron runs at all; set `check_maintenance_due_job` only if that is intended;
+   - unset, `all`, or a `-` exclusion value → nothing to do: the job is already armed.
+4. **Verify the startup log** lists `ARQ worker cron:   cron:check_maintenance_due_job -> next run …`
+   and, for the two-job allowlist, `13 of 15 cron jobs SUPPRESSED`.
+5. **After the first 12:15 UTC run**, the log reads `Checked preventive maintenance: N overdue and M
+   due alert(s) across K company(ies)`, and a Maintenance-department user or an Admin sees the
+   alerts in the bell, each opening the Maintenance page's Schedules or Work Orders tab.
+6. **To stop it**, remove the name from the allowlist (or use `all,-check_maintenance_due_job` on an
+   `all` worker) and redeploy. Sent notifications stay.
 
 <a id="current-saved-nesting-release-procedure"></a>
 
@@ -435,6 +463,7 @@ only emailed by `send_daily_digest_job`, and only to users with a digest prefere
 | `check_late_work_orders_job` | 08:00 daily | in-app **+ direct email** | **L × R messages.** One per late WO, per recipient. No age cap. Cold-start suppression does not apply. | Every active user with role `SUPERVISOR` or `MANAGER` in that tenant. |
 | `run_mrp_auto_draft_job` | 06:00 daily | direct email | **M messages per tenant** — one per manager. Only when the run produced actions. Plus the writes below. | Every active `MANAGER`. |
 | `send_daily_digest_job` | 08:00 daily | direct email | **D emails** — one per user with `digest_enabled` + `DAILY` and at least one queued item in the last 24 h. | Those users. |
+| `check_maintenance_due_job` | 12:15 daily | **in-app**; email only for a user who opted in; never SMS | **One `maintenance.overdue` per overdue item per recipient** on the first run (overdue PM schedules with no work order under way, and unstarted overdue maintenance work orders), plus one `maintenance.due` per item due within 7 days. Later runs: `maintenance.overdue` again only after a recipient has read the previous one; `maintenance.due` never twice for the same due date. | Active users with `department = 'Maintenance'` (exact string) plus the company's active Admins. |
 | `check_calibrations_job` | 07:00 daily | in-app + **digest** | E in-app rows per Quality user, **plus a second "URGENT" one for anything due within 1 day** (the 7-day and 1-day passes overlap). Email only via the digest job. | Users whose `department = 'Quality'` (exact string). Note the cron passes `department`, so the catalog's `roles=(QUALITY,)` is *not* used here. |
 | `check_quote_expiring_job` | 09:00 daily | **digest only** | Q digest items. No direct email. | Sales-department users. |
 | `check_low_stock_job` | 07:30 daily | **digest only** | **One aggregated message per tenant**, not one per item. Lowest blast radius of the group. | Purchasing + Inventory department users. |
@@ -653,7 +682,7 @@ easy to miss.
 | `DATABASE_URL` + the `SUPABASE_*` / `POSTGRES_*` set | Every job opens its own DB session. |
 | `SECRET_KEY`, `REFRESH_TOKEN_SECRET_KEY` | Config validation requires them. |
 | `ENVIRONMENT=production` | Arms the fail-fast Redis guard. |
-| ★ **`WORKER_CRON_JOBS=none`** | **Set this now.** Without it, all 14 crons are live the moment the container boots. |
+| ★ **`WORKER_CRON_JOBS=none`** | **Set this now.** Without it, all 15 crons are live the moment the container boots. |
 | ★ `SENTRY_DSN` | Otherwise a crashing cron is a log line nobody reads. Events are tagged `component=worker`. |
 | ★ `FRONTEND_BASE_URL` | Every notification email builds its deep link from it. |
 | `SMTP_*` | Email delivery. |
@@ -683,9 +712,9 @@ Watch the deploy log. **You are looking for exactly this shape:**
 ```
 ARQ worker starting up (environment=production, release=<sha>)
 ARQ worker Redis: redis://<host>:6379/0 [source=REDIS_URL, auth=password] | queue=arq:queue
-ARQ worker cron: 14 of 14 cron jobs SUPPRESSED by WORKER_CRON_JOBS='none': cron:aggregate_ai_learning_job, …
+ARQ worker cron: 15 of 15 cron jobs SUPPRESSED by WORKER_CRON_JOBS='none': cron:aggregate_ai_learning_job, …
 ARQ worker cron: none armed; draining enqueue-driven jobs only
-ARQ worker ready (25 job functions registered)
+ARQ worker ready (27 job functions registered)
 ```
 
 | What you see | Verdict |
@@ -693,7 +722,7 @@ ARQ worker ready (25 job functions registered)
 | The Redis host **matches** what the API reports | **Correct.** This is the whole point of the line. |
 | The Redis host **differs** from the API's | **STOP.** Two different Redis instances — the exact silent failure this cutover exists to prevent. |
 | `RedisConfigurationError … Refusing to start` and a crash loop | `REDIS_URL` is missing or wrong on the worker. Fix and redeploy. Working as designed. |
-| Fewer than `14 of 14 … SUPPRESSED` | `WORKER_CRON_JOBS` is not `none`. **STOP** and set it before crons fire. |
+| Fewer than `15 of 15 … SUPPRESSED` | `WORKER_CRON_JOBS` is not `none`. **STOP** and set it before crons fire. |
 | A uvicorn banner / `Application startup complete` | You are running the API image. **STOP** — this is the second-API-replica trap. |
 | Nothing after "starting up" | The process died before `startup`. Check Sentry (`component:worker`). |
 
@@ -738,6 +767,7 @@ Order, cheapest and safest first:
 | 3 | `check_low_stock_job` | Next 07:30: **one** aggregated digest item per tenant. No direct emails. |
 | 4 | `poll_tracking_job` | Every :00/:30. No-op while `allow_carrier_egress` is off. Confirm it is not erroring. |
 | 5 | `check_quote_expiring_job`, `check_calibrations_job` | Digest items only, counts matching Q and E from §3.2. |
+| 5a | `check_maintenance_due_job` | Next 12:15 UTC: in-app `maintenance.overdue` / `maintenance.due` rows for the Maintenance department and Admins, matching the counts in [`DEPLOYMENT.md` → PM due and overdue alerts](DEPLOYMENT.md#pm-due-and-overdue-alerts). |
 | 6 | `send_daily_digest_job` | **First real email volume: D emails.** Confirm one arrives, is readable, and its links work (needs `FRONTEND_BASE_URL`). |
 | 7 | `cleanup_old_logs_job` | Sunday 02:00. Physical deletes. Confirm the 90-day windows are what you want **before** arming. Audit logs are untouched. |
 | 8 | `check_late_work_orders_job` | **Re-run the `L × R` query the same morning.** This is the big email burst. Consider closing out stale late WOs first. |
@@ -813,16 +843,16 @@ WORKER_CRON_JOBS=all,-run_mrp_auto_draft_job
 Redeploy, then confirm on the startup log — this line is the receipt:
 
 ```
-ARQ worker cron: 1 of 14 cron jobs SUPPRESSED by WORKER_CRON_JOBS='all,-run_mrp_auto_draft_job': cron:run_mrp_auto_draft_job
-ARQ worker cron: 12 job(s) armed, times in UTC
+ARQ worker cron: 1 of 15 cron jobs SUPPRESSED by WORKER_CRON_JOBS='all,-run_mrp_auto_draft_job': cron:run_mrp_auto_draft_job
+ARQ worker cron: 14 job(s) armed, times in UTC
 ```
 
 (`UTC` is whatever the container's zone resolves to — see point 1 below.)
 
 | What you see | Verdict |
 |---|---|
-| `1 of 14 … SUPPRESSED`, naming `cron:run_mrp_auto_draft_job` | **Correct.** |
-| `0 of 14` / no SUPPRESSED line at all | The variable did not take. The cron is still armed. **STOP.** |
+| `1 of 15 … SUPPRESSED`, naming `cron:run_mrp_auto_draft_job` | **Correct.** |
+| `0 of 15` / no SUPPRESSED line at all | The variable did not take. The cron is still armed. **STOP.** |
 | `ValueError: WORKER_CRON_JOBS names unknown cron job(s): -…` and a crash loop | Typo in the excluded name. The refusal is working as designed — an exclusion that matches nothing would have left the job armed. **But while it crash-loops there is NO worker at all, not just that one cron off:** see below. Fix the spelling and redeploy. |
 | `ValueError: … uses all as a cron NAME …` and a crash loop | A stray comma, usually `all,` left behind after deleting the exclusion. Same blast radius as the row above. Delete the comma (or set the value to bare `all`). |
 | More than 1 suppressed | You excluded more than you meant to, or the variable still holds an older allowlist. |
@@ -963,8 +993,8 @@ railway logs --service werco-worker --environment production
 |---|---|
 | Queue name | `arq:queue` (a Redis **sorted set** — `ZCARD`, not `LLEN`) |
 | Job body TTL | ~24 h (`arq:job:<id>`); expired jobs are logged `job … expired` and discarded |
-| Registered job functions | 25 |
-| Declared crons | 14 |
+| Registered job functions | 27 |
+| Declared crons | 15 |
 | Cron timezone | container-local; **UTC unless `TZ` is set** |
 | Sweeper bounds | 24 h max age, 2 min grace, 500 per 5-minute pass |
 | Cron selector | `WORKER_CRON_JOBS` — unset/`all` / `none` / comma-separated names (allowlist) / `-name` exclusions (`all,-run_mrp_auto_draft_job`). The two shapes cannot be mixed; an unknown name, **negated or not**, is a hard startup error |
