@@ -77,8 +77,12 @@ reads among them, and none of the five is on the AI-external allowlist. See
 one Inventory tool** (`change_inventory_item_ownership`, `POST /inventory/items/{item_id}/ownership`;
 no existing name shifted): 15 convenience + **778** generated, 16 shadowed. It is a write, so the
 read-only catalog is unchanged at 8 convenience + **303** generated, and it is not on the AI-external
-allowlist. It stays a tool because its route does not refuse API tokens (an open owner question;
-see [RBAC → Credential policy for judgment writes](RBAC_PERMISSIONS.md#credential-policy-for-judgment-writes)).
+allowlist. It stays a tool because its route does not refuse API tokens (owner decision 2026-11-20:
+a full API token may record or change stock ownership; read-only and AI-external tokens are refused
+by their own gates (the read-only gate, and for an AI-external token also the AI-egress gate); the
+write is attributed to the token's bound user with
+`extra_data.credential`; see
+[RBAC → Credential policy for judgment writes](RBAC_PERMISSIONS.md#credential-policy-for-judgment-writes)).
 The same change gave `list_inventory` three filters, `ownership`, `owner_customer_id` and
 `owner_vendor_id` (§7). See
 [API.md → Customer- and supplier-owned property](API.md#customer--and-supplier-owned-property).
