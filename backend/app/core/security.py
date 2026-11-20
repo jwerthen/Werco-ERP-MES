@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import secrets
 from datetime import datetime, timedelta
-from typing import Any, Optional, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 
 import jwt
 from jwt import InvalidTokenError
@@ -16,6 +16,46 @@ from .config import settings
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+# Authentication-methods-reference claim (RFC 8176 ``amr``): HOW the person signed in.
+# Written ONLY on a badge / employee-ID session -- ``["badge"]``, or ``["badge", "pin"]`` once
+# a floor PIN was verified (``app.core.floor_pin``) -- so a password-login token carries no
+# such claim and stays byte-identical to what it always was. ``POST /auth/refresh`` and
+# ``POST /auth/switch-company`` carry it from the presented token into the new ones, and
+# ``get_current_user`` copies it onto ``user._auth_methods``, which ``AuditService`` folds
+# into every audit row the session writes.
+AMR_CLAIM = "amr"
+# PIN-set stamp (``pst``): on a session whose ``amr`` includes "pin", the ``floor_pin_set_at``
+# of the PIN that was verified, as integer epoch-microseconds (``app.core.floor_pin.floor_pin_stamp``).
+# ``resolve_access_identity``, refresh and switch-company refuse the session once the user's PIN
+# is gone or was set again since (it no longer equals the stamp). Written only when given, so a
+# password or badge-only token is unchanged; carried through refresh and switch-company with ``amr``.
+PIN_SET_CLAIM = "pst"
+# A bound on what the claim may hold; every value this app mints has one or two entries.
+_MAX_AUTH_METHODS = 8
+_MAX_AUTH_METHOD_LENGTH = 32
+
+
+def normalize_pin_set_stamp(value: Any) -> Optional[int]:
+    """The ``pst`` claim as an int, or None when absent or not an integer (a bool is not one)."""
+    return value if type(value) is int else None
+
+
+def normalize_auth_methods(value: Any) -> Optional[List[str]]:
+    """The ``amr`` claim as a list of method names, or ``None`` when absent or malformed.
+
+    The claim is signed by this app, so this is a shape check, not a trust decision: a
+    non-list, an empty list, or a list holding anything but short non-empty strings reads
+    as "no claim" (``None``) -- never a partial list that could under-report the methods.
+    """
+    if not isinstance(value, (list, tuple)) or not value or len(value) > _MAX_AUTH_METHODS:
+        return None
+    methods: List[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item or len(item) > _MAX_AUTH_METHOD_LENGTH:
+            return None
+        methods.append(item)
+    return methods
+
 
 def create_access_token(
     subject: str | Any,
@@ -23,6 +63,8 @@ def create_access_token(
     company_id: Optional[int] = None,
     read_only: bool = False,
     scope: Optional[str] = None,
+    auth_methods: Optional[Sequence[str]] = None,
+    pin_set_stamp: Optional[int] = None,
 ) -> str:
     """Create a short-lived access token (default 15 minutes).
 
@@ -31,6 +73,11 @@ def create_access_token(
     path-fenced by ``get_current_user`` to the shop-floor endpoints (+
     employee-logout) and 403s everywhere else. Tokens without a scope claim
     are unaffected.
+
+    ``auth_methods`` writes the ``amr`` claim (see ``AMR_CLAIM``) and ONLY when given:
+    a call that does not pass it -- password login, company registration -- mints
+    exactly the claims it always did. ``pin_set_stamp`` writes ``pst`` (``PIN_SET_CLAIM``)
+    the same way, for a session whose PIN was verified.
     """
     if expires_delta:
         expire = datetime.utcnow() + expires_delta
@@ -48,6 +95,10 @@ def create_access_token(
         to_encode["cid"] = company_id
     if scope is not None:
         to_encode["scope"] = scope
+    if auth_methods is not None:
+        to_encode[AMR_CLAIM] = list(auth_methods)
+    if pin_set_stamp is not None:
+        to_encode[PIN_SET_CLAIM] = pin_set_stamp
     encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
     return encoded_jwt
 
@@ -57,10 +108,17 @@ def create_refresh_token(
     session_id: Optional[str] = None,
     company_id: Optional[int] = None,
     read_only: bool = False,
+    auth_methods: Optional[Sequence[str]] = None,
+    pin_set_stamp: Optional[int] = None,
 ) -> Tuple[str, str, datetime]:
     """
     Create a longer-lived refresh token (default 7 days).
     Returns: (token, session_id, expiry_time)
+
+    ``auth_methods`` writes the ``amr`` claim only when given (see ``AMR_CLAIM``), so
+    ``POST /auth/refresh`` can hand a badge session's methods to the next access token
+    without a password session's refresh token ever gaining the claim. ``pin_set_stamp``
+    writes ``pst`` (``PIN_SET_CLAIM``) the same way.
     """
     expire = datetime.utcnow() + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
     # Session idle window, NOT a hard ceiling despite the claim name. This function
@@ -86,6 +144,10 @@ def create_refresh_token(
     }
     if company_id is not None:
         to_encode["cid"] = company_id
+    if auth_methods is not None:
+        to_encode[AMR_CLAIM] = list(auth_methods)
+    if pin_set_stamp is not None:
+        to_encode[PIN_SET_CLAIM] = pin_set_stamp
     encoded_jwt = jwt.encode(to_encode, settings.REFRESH_TOKEN_SECRET_KEY, algorithm=settings.ALGORITHM)
     return encoded_jwt, session_id, expire
 
@@ -316,6 +378,9 @@ def verify_token(token: str) -> Optional[dict]:
     ``scope`` is surfaced so ``get_current_user`` can path-fence
     kiosk-scoped operator tokens (``scope == "kiosk"``); ``None`` for every
     token minted without a scope claim.
+
+    ``auth_methods`` is the ``amr`` claim (``normalize_auth_methods``); ``None`` for a
+    password session and every token minted before the claim existed.
     """
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
@@ -326,6 +391,8 @@ def verify_token(token: str) -> Optional[dict]:
             "company_id": payload.get("cid"),  # None for legacy tokens
             "read_only": bool(payload.get("ro", False)),
             "scope": payload.get("scope"),  # None for unscoped tokens
+            "auth_methods": normalize_auth_methods(payload.get(AMR_CLAIM)),  # None without amr
+            "pin_set_stamp": normalize_pin_set_stamp(payload.get(PIN_SET_CLAIM)),  # None without pst
         }
     except InvalidTokenError:
         return None
@@ -354,6 +421,9 @@ def verify_refresh_token(token: str) -> Optional[dict]:
             "absolute_timeout": absolute_timeout_str,
             "company_id": payload.get("cid"),
             "read_only": bool(payload.get("ro", False)),
+            # The badge session's sign-on methods, carried into the rotated tokens.
+            "auth_methods": normalize_auth_methods(payload.get(AMR_CLAIM)),
+            "pin_set_stamp": normalize_pin_set_stamp(payload.get(PIN_SET_CLAIM)),
         }
     except InvalidTokenError:
         return None

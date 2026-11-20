@@ -37,7 +37,10 @@ Response:
 and **verifies the password either way**. `POST /auth/employee-login` is **unchanged** — it remains
 the separate, passwordless badge route the kiosk badge screen and the login page's **Badge Only**
 tab use, with its own rate limit, its own audit actions, and no password field. Nothing moved off
-it; a badge-holder gained a second way in, and nobody lost one.
+it; a badge-holder gained a second way in, and nobody lost one. (The badge route can ask for a
+**floor PIN**, see [Badge sign-on and the floor PIN](#badge-sign-on-and-the-floor-pin-as9100d-852).
+This password route never does: an employee ID plus password here is a password session, with no
+PIN step and no `amr` claim.)
 
 Which identifier was submitted is decided by **`@`**, with no fallback between the two lookups:
 
@@ -269,6 +272,7 @@ its own budget** (`backend/app/core/login_throttle.py`):
 |------|------|------|------|
 | `POST /auth/login` — enumerable identifiers only | `auth:login:failed:<ip>` | **60** failed attempts per **6 hours** (`PASSWORD_LOGIN_*`) | **429** for **1 hour** |
 | `POST /auth/employee-login` — the kiosk badge route, unchanged | `auth:employee-login:failed:<ip>` | **8** failed attempts per **15 minutes** (`EMPLOYEE_LOGIN_*`) | **429** for **15 minutes** |
+| `POST /auth/employee-login` — floor-PIN attempts only (migration `130`) | `auth:employee-login:wrong-pin:<ip>` | **60** per **15 minutes** (`FLOOR_PIN_IP_*`), spent at each PIN attempt and refunded by a correct PIN | **429** for **15 minutes**, on PIN attempts only; badge-only sign-in carries on ([Badge sign-on and the floor PIN](#badge-sign-on-and-the-floor-pin-as9100d-852)) |
 
 Both send a `Retry-After` header (seconds until retry), but the **bodies differ**, because the
 block lengths do:
@@ -293,7 +297,8 @@ split exists to guarantee, and it is the reason not to collapse them back into o
 
 - **Starvation across routes.** `/auth/login` counts **wrong-password** failures — an outcome the
   passwordless badge route cannot even produce — while the kiosk's budget of 8 is sized on the
-  premise that a failure is an *unknown badge*, not a slow scan. Sharing one counter meant ordinary
+  premise that a failure is an *unknown badge*, not a slow scan. (No floor-PIN outcome counts
+  either: a wrong PIN charges the route's separate wrong-PIN counter, below.) Sharing one counter meant ordinary
   password typos on the web login page drained the kiosk's budget, and an empty budget 429s **badge
   sign-in for every operator behind that egress IP**, with no admin reset. The login screen actively
   steers badge-only operators onto the password path, so both routes see the same people from the
@@ -684,6 +689,13 @@ tokens" below), never wider.
 > - **Hank notes (owner decision 2026-11-16).** Hank's `add_note` task posts a work-order comment,
 >   so every API token is refused **403** at `POST /hank/tasks` and `POST /hank/tasks/{id}/execute`
 >   with the comment routes' text, whatever its role or scope. See Hank → "Reviewed task contract".
+> - **Floor PINs and the badge sign-in PIN policy (AS9100D 8.5.2, migration `130`).** Setting,
+>   clearing or unlocking a user's floor PIN (`PUT` / `DELETE /users/{user_id}/floor-pin`,
+>   `POST /users/{user_id}/floor-pin/unlock`) and turning the company's PIN policy on or off
+>   (`PUT /companies/me/floor-pin-policy`) answer **403** to every API token, whatever its role or
+>   scope, before anything is read: credential administration is a person's act. None of the four
+>   is an MCP tool. See
+>   [Badge sign-on and the floor PIN](#badge-sign-on-and-the-floor-pin-as9100d-852).
 > - **Left open.** **Resume Work Order** (`POST /work-orders/{id}/resume`): a token whose user holds
 >   Admin / Manager / Supervisor may lift a work-order hold, audited as that user with
 >   `extra_data.credential` (owner decision 2026-11-07). Dismiss, snooze and feedback on a
@@ -921,7 +933,7 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| POST | `/auth/kiosk-badge-token` | Exchange a badge scan for a 5-min kiosk-scoped operator token. Body `{"employee_id"}` → `{"access_token", "token_type", "expires_in": 300, "user": {"id", "full_name", "employee_id"}}`. Unknown / inactive / locked / foreign-tenant badge → uniform **401** "Invalid badge"; ambiguous badge within the company → **409**, as is a candidate set past the 500-row scan cap (same two causes and same wording as `/auth/login`, company-scoped here). Issuance and failures are audited (`KIOSK_BADGE_TOKEN_ISSUED` / `KIOSK_BADGE_TOKEN_FAILED`) — **including both 409 causes**, which write a `KIOSK_BADGE_TOKEN_FAILED` row carrying the cause in `error_message`; rows are station-keyed (`resource_identifier` = station label) and the scanned badge is deliberately never logged. Rate-limited **30/minute** per IP | Kiosk station token |
+| POST | `/auth/kiosk-badge-token` | Exchange a badge scan for a 5-min kiosk-scoped operator token. Body `{"employee_id", "pin"?}` → `{"access_token", "token_type", "expires_in": 300, "user": {"id", "full_name", "employee_id"}}`. `pin` answers the floor-PIN challenge (**401** `floor_pin_required`, wrong / locked PIN **401** "Invalid badge or PIN", no PIN under the company policy **403** `floor_pin_not_set`; see [Badge sign-on and the floor PIN](#badge-sign-on-and-the-floor-pin-as9100d-852)), and the token carries `amr`. Unknown / inactive / locked / foreign-tenant badge → uniform **401** "Invalid badge"; ambiguous badge within the company → **409**, as is a candidate set past the 500-row scan cap (same two causes and same wording as `/auth/login`, company-scoped here). Issuance and failures are audited (`KIOSK_BADGE_TOKEN_ISSUED` / `KIOSK_BADGE_TOKEN_FAILED`) — **including both 409 causes**, which write a `KIOSK_BADGE_TOKEN_FAILED` row carrying the cause in `error_message`; rows are station-keyed (`resource_identifier` = station label) and the scanned badge is deliberately never logged. Rate-limited **30/minute** per IP | Kiosk station token |
 
 > **`POST /auth/employee-logout` requires authentication** and takes the actor from the **bearer
 > token**, never from the request body. The body (`{"employee_id"}`) is still accepted for wire
@@ -956,6 +968,164 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > isolation, and RBAC apply unchanged. WebSockets require an **unscoped access JWT**: kiosk-scoped
 > operator tokens and station tokens are refused with close code **1008**. See
 > [Real-time Updates](#real-time-updates-websocket) and [docs/KIOSK.md](KIOSK.md).
+
+### Badge sign-on and the floor PIN (AS9100D 8.5.2)
+
+A badge or employee ID is printed on a card, so a session opened with it alone is weak evidence of
+who recorded a completion or an inspection (AS9100D 8.5.2 identification, 7.5.3 records). Migration
+`130` adds an optional per-person **floor PIN** and a per-company policy. The two badge sign-on
+routes run **one shared PIN step** (`_floor_pin_sign_on_step` in `app/api/endpoints/auth.py`), after
+their own badge resolution and locked / inactive checks and before their success audit:
+
+| Method | Endpoint | Body | Auth Required |
+|--------|----------|------|---------------|
+| POST | `/auth/employee-login` | `{"employee_id", "pin"?}` → `Token` (access + refresh) | Public (rate-limited, see [Rate Limiting](#rate-limiting)) |
+| POST | `/auth/kiosk-badge-token` | `{"employee_id", "pin"?}` → 5-minute `scope="kiosk"` token (above) | Kiosk station token |
+
+| The badge's user | Request | Answer | Audit row | The person's PIN count |
+|---|---|---|---|---|
+| Needs a new PIN after a promotion (`floor_pin_reset_required`) | anything | **403** `{"code": "floor_pin_reset_required", "message": "Your role changed. Ask an Admin to set a new floor PIN."}`, **whatever the company policy**, until an Admin sets a new PIN or clears it | FAILED, `PIN reset required` | — |
+| Has a PIN | no `pin` (or `""`) | **401** `{"code": "floor_pin_required", "message": "Enter your PIN."}` — a **challenge**: resubmit the same badge with `pin` | none | not counted |
+| Has a PIN; this IP's PIN budget is spent (`employee-login` only) | a `pin` | **429** `"Too many wrong PINs from this network. Try again in about N minutes."` with `Retry-After` | `EMPLOYEE_LOGIN_BLOCKED`, `Throttled: too many wrong PINs from this address` | not counted |
+| Has a PIN, locked | a `pin` | **401** `"Invalid badge or PIN"` (the PIN is never checked) | FAILED, `PIN locked` | not counted, lock not extended. On `employee-login` the IP's unit stays spent |
+| Has a PIN | wrong `pin` | **401** `"Invalid badge or PIN"` | FAILED, `Wrong PIN` (plus `extra_data.floor_pin_locked: true` on the attempt that reached a tier); a `floor_pin_lockout` event when that lock is 24 hours or more | counted; see the lock tiers below. On `employee-login` the IP's unit stays spent |
+| Has a PIN | right `pin` | Signed in. `amr` = `["badge", "pin"]`, `pst` = that PIN's set time | the route's success row | counted, then settled by a compare-and-set: if nobody else reserved meanwhile, the count and the lock (including one this attempt's own tier boundary set) are cleared; if a racing wrong guess locked the PIN meanwhile, refused as locked. On `employee-login` the IP's unit is refunded |
+| No PIN, company `require_floor_pin` on | anything | **403** `{"code": "floor_pin_not_set", "message": "No PIN is set for this badge. Ask a supervisor to set one."}` | FAILED, `No PIN set` | — |
+| No PIN, policy off | anything (a supplied `pin` is ignored) | Signed in as before. `amr` = `["badge"]` | the route's success row | — |
+
+**The lock tiers.** The wrong-PIN count is **cumulative**: a lock does not reset it; only a correct
+PIN, or `POST /users/{user_id}/floor-pin/unlock` on a lock in force, a new PIN or a clear (by an
+Admin, or by a Manager for an Operator / Supervisor / Shipping / Viewer account; [Users](#users-admin))
+does. Every 5th wrong PIN starts a longer lock (`app/core/floor_pin.py::floor_pin_lock_minutes`), and
+**every lock expires**; none is permanent:
+
+| Cumulative wrong PINs | 5 | 10 | 15 | 20 | 25 | 30, and every further 5 |
+|---|---|---|---|---|---|---|
+| Lock | 15 minutes | 2 hours | 24 hours | 48 hours | 96 hours | 7 days (the cap) |
+
+The attempt that **reaches** a tier sets that tier's lock in the same conditional `UPDATE` that
+counts it, so every concurrent attempt after it is refused: no burst can run past a tier or skip
+one. Every tier answers the same **401** "Invalid badge or PIN", so the response never says which
+tier, or how many tries are left. A lock of **24 hours or more** emits a `floor_pin_lockout`
+OperationalEvent (payload: the user id, the tier and the lock hours; never a PIN or badge number),
+delivered in-app to the company's Admins as `floor_pin.lockout`
+([NOTIFICATIONS.md](NOTIFICATIONS.md#event-catalog)); it links to `/users`, which lists every
+currently locked floor PIN with its end time. The emit is best-effort and never changes the sign-on
+answer.
+
+**The lock-out trade-off.** Badge numbers are printed, so anyone who knows one can lock that
+person's PIN with wrong PINs, for up to 7 days at a time; with the company policy on, badge
+sign-on is then that person's only way in until the lock ends or someone unlocks it. A permanent
+lock would let anyone holding badge numbers lock every PIN holder out, which is why every tier
+expires and the long ones alert the Admins instead.
+
+**The per-IP PIN budget (public `employee-login` only).** The per-person tiers cap guessing per
+badge; an attacker on the public route rotates across badges. So PIN attempts there also spend their
+own per-IP counter (`floor_pin_ip_throttle`, key prefix `auth:employee-login:wrong-pin`): **60 per 15
+minutes**, then a **15-minute** block. Each PIN attempt spends one unit when it is reserved, in one
+atomic step (`try_spend`), so concurrent requests cannot overshoot it; a **correct** PIN refunds its
+unit (`refund`), so correct sign-ins cost nothing and only wrong PINs and attempts against a locked
+PIN stay spent. Once spent, it refuses only **PIN attempts** from that address (a request carrying a
+`pin` for a badge that has one), before the attempt is reserved, so a blocked attempt costs the
+badge's own count nothing. Badge-only sign-in, the PIN challenge and unknown-badge handling never
+read or charge it, and it is separate from the route's unknown-badge throttle (8 per 15 minutes; see
+[Rate Limiting](#rate-limiting)), which no PIN outcome charges. Like the other login throttles it
+fails open when its counter store is unavailable. The station-gated crew mint charges no IP at all.
+
+**What a shop behind one NAT address sees.** Desks and solo kiosks in one building usually share an
+egress address, and so share this budget. Correct sign-ins never spend it, so ordinary use costs
+nothing. If 60 wrong PINs (and attempts against locked PINs) pile up from that address within 15
+minutes, by a bad morning of fumbled PINs or by someone sweeping badges, **PIN sign-in from that
+address pauses for up to 15 minutes**: every badge whose user has a PIN gets the **429** at the desk
+and the solo kiosk. Badges without a PIN (where the policy allows it), password sign-in and the
+crew stations are unaffected.
+
+- **`detail` is an object** for the coded answers (`floor_pin_required`, `floor_pin_not_set`,
+  `floor_pin_reset_required`, and on any session `floor_pin_reauth_required`, below); read
+  `detail.code`, never the HTTP status alone (a 401 without a code is a refusal: an unknown badge,
+  or a wrong or locked PIN). The one client implementation is
+  `frontend/src/services/badgeSignOn.ts` (`signOnWithBadge`). It always shows the one text "Invalid
+  badge or PIN" on a refused PIN, whatever the server sent, and shows a 429 on the pad, which then
+  takes no more PINs and offers only Back. The SPA's axios interceptor treats an `employee-login`
+  401 as an answer, never as a reason to refresh or sign out.
+- **The PIN is a credential.** It is stored only as a bcrypt hash (`users.floor_pin_hash`), never
+  serialized, logged, audited or echoed. The request field coerces any JSON value to a string, so a
+  malformed `pin` is never refused by the schema; it is read as a wrong PIN and counts as one. A 422
+  never echoes a PIN either: the validation handler replaces the value of any `pin` / `new_pin` /
+  `floor_pin` key with `"[redacted]"`, at any depth of an error's `input` (see
+  [Validation Error (422)](#validation-error-422)). The sign-on step never binds the stored hash to a
+  local variable, Sentry events are scrubbed of PINs, hashes, raw request bodies and SQL parameters
+  (see [ENVIRONMENT_VARIABLES.md → Monitoring](ENVIRONMENT_VARIABLES.md#monitoring--error-tracking)),
+  and no audit row carries `floor_pin_hash` (`AuditService` drops it from every model snapshot).
+- **Its own lock, and race-safe.** `floor_pin_failed_attempts` / `floor_pin_locked_until` are
+  separate from the password lockout (`failed_login_attempts` / `locked_until`) in both directions:
+  a PIN lock never locks the person's password login, and `POST /users/{id}/unlock` does not clear
+  a PIN lock. It is one count per person across both routes. Each attempt is **reserved before the
+  PIN is checked**: one conditional `UPDATE` counts it, and sets the tier's lock when the count
+  reaches one, unless a lock is in force; that count is committed before bcrypt runs, so racing
+  attempts on one badge each spend their own guess and a lost audit row or a crash never gives one
+  back. A right PIN then settles by compare-and-set (`WHERE` the count is still the one it
+  reserved): it clears the count and any lock its own attempt set, keeps a racing attempt's count
+  when another reserved meanwhile, and is refused as locked only when one of those locked the PIN.
+  A lock in force is never extended or shortened by later attempts.
+- **Audit rows.** `employee-login` writes `EMPLOYEE_LOGIN_FAILED` / `EMPLOYEE_LOGIN_SUCCESS` (and
+  `EMPLOYEE_LOGIN_BLOCKED` for the per-IP PIN block); the mint writes `KIOSK_BADGE_TOKEN_FAILED` /
+  `KIOSK_BADGE_TOKEN_ISSUED`, station-keyed as before, its PIN failures adding
+  `extra_data.badge_user_id`. Both success rows carry `extra_data.auth_methods`.
+- **Rollout.** After the upgrade no user has a PIN and every company is off, so both routes answer
+  exactly as before. PINs are set by an Admin, or by a Manager for Operator / Supervisor / Shipping
+  / Viewer accounts (`PUT /users/{user_id}/floor-pin`, see [Users](#users-admin)); the policy by an
+  Admin (`PUT /companies/me/floor-pin-policy`, see
+  [Company](#company-self-service)). There is no self-service PIN change, and the PIN is asked at
+  sign-on only, not again at an inspection sign-off.
+
+**The `amr` and `pst` claims.** Both routes mint an RFC 8176 `amr` (authentication methods
+reference) claim: `["badge", "pin"]` when a PIN was verified, `["badge"]` otherwise (on
+`employee-login`, in the access and the refresh token). A `["badge", "pin"]` session also carries
+**`pst`**, the verified PIN's `floor_pin_set_at` as integer epoch-microseconds, which binds the
+session to that PIN (below). Both are written **only** by badge sign-on: `POST /auth/login`
+(password, including an employee ID plus password), registration and company onboarding mint exactly
+the claims they always did. `get_current_user` copies `amr` onto `user._auth_methods`, and
+`AuditService` folds it into every row the session writes (see [Audit Log](#audit-log) →
+`extra_data.auth_methods`).
+
+**Refresh and company switch keep them.** `POST /auth/refresh` and
+`POST /auth/switch-company/{target_company_id}` copy the presented token's `amr` and `pst` into the
+new tokens exactly, so a renewed badge session neither loses nor gains `"pin"`. A badge session's
+`TOKEN_REFRESHED` row carries `extra_data.auth_methods`.
+
+**A badge session ends when the PIN rule no longer backs it.** The answer is **401**
+`{"code": "floor_pin_reauth_required", "message": "Sign in again with your badge and PIN."}` and
+nothing is minted:
+
+- **A `["badge", "pin"]` session is bound to the PIN it verified.** Once that PIN is reset (a new
+  set time), cleared or cleared by a promotion, or when its token carries no usable `pst`, it is
+  refused on **every request**, HTTP and WebSocket alike (`resolve_access_identity`; a WebSocket is
+  closed with **1008** at its next identity check), and on refresh and company switch, which write a `TOKEN_REFRESH_FAILED` /
+  `COMPANY_SWITCH_FAILED` row with `PIN changed`. So **setting a new PIN ends every badge + PIN
+  session of that person at its next request**: that is the remedy for a leaked PIN. A PIN **lock**
+  does not end a session that already proved the PIN.
+- **A `["badge"]` session cannot outlive the rule.** Asking to refresh or switch company once its
+  user **has** a PIN, needs a new one after a promotion, or the user's company **requires** one, it
+  is refused with a `PIN now required` row. Its current access token (≤ 15 minutes) is not revoked;
+  the session ends at its next refresh.
+- A password session is never refused here.
+
+The SPA treats this 401 on **any** request as the end of the session: it signs out without trying a
+refresh and lands on the badge sign-in (the Login page opened on Badge Only, or the kiosk's badge
+screen) with the server's message. Deactivating a user is **not** a substitute for a new PIN: it
+only pauses a session, and once the account is reactivated its refresh tokens, still inside their
+7-day window, work again.
+
+**Sessions signed in before the deploy carry no `amr`.** Their refresh tokens have no claim to copy,
+so they keep refreshing with none: their rows carry no `auth_methods`, and the reauth refusal cannot
+recognize them as badge sessions, even with the policy on, until the person signs out and in again or
+the session lapses (a solo kiosk logs out on idle; a crew-station token lasts 5 minutes). A desk
+Employee-ID session that refreshes at least once a week never lapses, because every refresh restarts
+its 7-day window, so it could outlive the policy indefinitely. Rotating `REFRESH_TOKEN_SECRET_KEY`
+before turning the policy on for the first time ends all of them: every refresh token is refused
+once, everyone signs in again, and the new badge sessions carry `amr` (see
+[DEPLOYMENT.md → Floor PIN for badge sign-on](DEPLOYMENT.md#floor-pin-for-badge-sign-on-migration-130)).
 
 ## Core Endpoints
 
@@ -12951,17 +13121,21 @@ There is no delete endpoint.
 | POST | `/users/` | Create user | Admin |
 | POST | `/auth/register` | Alternate tenant-user creation path with the same role policy | Admin |
 | POST | `/users/import-csv` | Import CSV/XLSX users; existing dry-run and per-row error contracts apply | Admin |
-| PUT | `/users/{id}` | Update user. `is_active: false` also revokes every live API token the user holds (reason `user deactivated`, audited) — see [API tokens](#api-tokens-bots-and-mcp-clients) | Admin |
-| POST | `/users/{id}/approve` | Approve a pending tenant account with a tenant role | Admin |
+| PUT | `/users/{id}` | Update user. `is_active: false` also revokes every live API token the user holds (reason `user deactivated`, audited) — see [API tokens](#api-tokens-bots-and-mcp-clients). A role change into Admin, Manager or Quality from any other role clears the user's floor PIN and, if they had one, requires a new one from an Admin (see the floor PIN note below) | Admin |
+| POST | `/users/{id}/approve` | Approve a pending tenant account with a tenant role. Approving into Admin, Manager or Quality clears any floor PIN the account carried and, if it had one, requires a new one from an Admin | Admin |
 | POST | `/users/{id}/reset-password` | Reset another account's password | Admin |
 | POST | `/users/{id}/activate` | Reactivate an account, without restoring revoked API tokens | Admin |
 | DELETE | `/users/{id}` | Deactivate user (sets `is_active=false`; cannot deactivate yourself). Revokes every live API token the user holds in the same transaction (reason `user deactivated`, one `API_TOKEN_REVOKED` audit trail each); the response carries `api_tokens_revoked`. Reactivation (`POST /users/{id}/activate`) restores the account, never a token | Admin |
-| POST | `/users/{id}/unlock` | Clear failed-login lockout | Admin |
+| POST | `/users/{id}/unlock` | Clear failed-login lockout (not a floor-PIN lock — see `POST /users/{user_id}/floor-pin/unlock`) | Admin |
+| PUT | `/users/{user_id}/floor-pin` | Set or reset the user's floor PIN for badge sign-on. Body `{"pin"}` → the user record. Also clears any PIN lock and the wrong-PIN count. See the floor PIN note below | Admin; a Manager for Operator / Supervisor / Shipping / Viewer accounts only. Signed in (any API token **403**; not an MCP tool) |
+| DELETE | `/users/{user_id}/floor-pin` | Clear the user's floor PIN and any PIN lock → the user record. Idempotent | Admin; a Manager for Operator / Supervisor / Shipping / Viewer accounts only. Signed in (any API token **403**; not an MCP tool) |
+| POST | `/users/{user_id}/floor-pin/unlock` | Lift a floor-PIN lock early (every lock also expires on its own) and reset the wrong-PIN count, keeping the PIN → the user record. Idempotent | Admin; a Manager for Operator / Supervisor / Shipping / Viewer accounts only. Signed in (any API token **403**; not an MCP tool) |
 | GET | `/users/mention-search` | People to @mention in a comment: active members of the active company by name, `{id, display_name}` only (never email, role or phone). Documented under [Comments and watchers](#comments-and-watchers) | Any signed-in member of the company (a read-only API token is **403**: `Users` tag) |
 
 > **User writes are Admin-only; the list read is Admin / Manager.** `GET /users/` (and
 > `GET /users/{id}`) are `require_role([ADMIN, MANAGER])`; `POST` / `PUT` / `DELETE` are
-> `require_role([ADMIN])`. The shared tenant-account policy covers **both** create routes,
+> `require_role([ADMIN])`, except the three floor-PIN routes (Admin, or a Manager within a role
+> scope, below). The shared tenant-account policy covers **both** create routes,
 > update, approval, and CSV/XLSX import. `role = platform_admin` returns **400** on create/update/
 > approval and a per-row error on import, even for a platform caller. Tenant Admin remains an
 > assignable role. Creation derives the active company server-side and forces `is_superuser=false`;
@@ -12998,6 +13172,72 @@ There is no delete endpoint.
 > `UserResponse`** (`app/api/endpoints/users.py`) only — every route serializing it is self-scoped
 > (`GET /users/me`) or Admin/Manager-gated; general user serialization
 > (`app.schemas.user.UserResponse`, the per-domain summaries) still omits lockout state.
+
+> **Floor PIN — `PUT` / `DELETE /users/{user_id}/floor-pin`, `POST /users/{user_id}/floor-pin/unlock`
+> (AS9100D 8.5.2, migration `130`).** The second factor on badge sign-on
+> ([Badge sign-on and the floor PIN](#badge-sign-on-and-the-floor-pin-as9100d-852)). All three are
+> checked in this order: the role gate (`require_role([ADMIN, MANAGER])`; Superuser / Platform Admin
+> pass as everywhere); **any API token 403** with `"A floor PIN, and the company's badge-sign-in PIN
+> policy, are set by a person signed in to the app, not an API token: credential administration is a
+> person's act."` before anything is read; the target in the active company (**404** otherwise); a
+> stored Platform Admin / superuser target needs a platform principal (**403**, as for password
+> reset and unlock); and **a Manager may manage PINs only for Operator, Supervisor, Shipping and
+> Viewer accounts** (**403** `"A Manager can manage floor PINs only for Operator, Supervisor, Shipping
+> and Viewer accounts. Ask an Admin to manage this account's PIN."`). A badge plus a PIN the caller
+> chose is a sign-on, so an Admin's, a Manager's (their own included) or a Quality user's PIN needs
+> an Admin. Together with the promotion rule and the session binding below, nobody below Admin can
+> take over an identity that approves, dispositions or signs off quality. See
+> [RBAC_PERMISSIONS.md → Users](RBAC_PERMISSIONS.md#users).
+>
+> - **PIN rules** (`app/core/floor_pin.py::validate_floor_pin`), each a **422** whose `detail` is
+>   the rule's plain text and never the PIN: digits only, 4 to 6 long (`"A floor PIN must be 4 to 6
+>   digits, with no letters, spaces or symbols."`); not one digit repeated (`"A floor PIN cannot be
+>   the same digit repeated."`); not a straight run up or down such as 1234 or 4321 (`"A floor PIN
+>   cannot be a straight run of digits counting up or down."`); not the user's own employee-ID
+>   digits or their badge's last 4, 5 or 6 digits (`"A floor PIN cannot be the user's own employee
+>   ID or the last digits of their badge."`).
+> - **`PUT`** stores a bcrypt hash, stamps a new `floor_pin_set_at`, and clears the wrong-PIN count,
+>   any PIN lock and the `floor_pin_reset_required` flag. Required audit row
+>   `FLOOR_PIN_SET` (`resource_type=user`; `extra_data`: `source: "admin_set"`,
+>   `replaced_existing_pin`, `cleared_pin_lockout`, `cleared_pin_reset_required`), never the PIN or its hash; **503** `"Unable to save audit
+>   record"` and nothing saved if it cannot be written. The new set time **ends every
+>   `["badge", "pin"]` session of that user** at its next request or refresh (**401**
+>   `floor_pin_reauth_required`): they verified the old PIN.
+> - **`DELETE`** clears the hash, the set date, the count, any lock and the reset flag. From then
+>   on the badge signs in without a PIN, unless the company requires one (then **403**
+>   `floor_pin_not_set` until a new PIN is set); on a promoted user that is an explicit decision to
+>   allow badge-only sign-on. It ends the user's badge + PIN sessions the same way. Required audit
+>   row `FLOOR_PIN_CLEARED` (`had_pin`, `cleared_pin_lockout`, `cleared_pin_reset_required`). A user with no PIN and no lock or reset state is returned
+>   unchanged, with no row.
+> - **`POST …/floor-pin/unlock`** lifts a lock in force (`floor_pin_locked_until` in the future,
+>   any tier) early and resets the wrong-PIN count, keeping the PIN, so the person can sign in with
+>   it at once; sessions that verified it carry on. Every lock also expires on its own; the unlock is
+>   how an Admin answers a `floor_pin.lockout` alert sooner. Required audit row `FLOOR_PIN_UNLOCKED`
+>   (`source: "admin_unlock"`, the prior `floor_pin_locked_until` and `floor_pin_failed_attempts`;
+>   **503**, nothing saved, if it cannot be written). With no lock in force it answers **200** with
+>   the user record and writes nothing (the count is left as it is).
+> - **Response fields.** The inline user-management `UserResponse` (every `/users` route that
+>   returns a user record, `GET /users/me` included) carries `has_floor_pin` (bool),
+>   `floor_pin_set_at`, `floor_pin_locked_until` (UTC `Z`; a future value means a lock in force, and
+>   is always its end) and `floor_pin_reset_required` (bool; a promotion cleared the PIN). Never the
+>   PIN or its hash. The Users page shows them as the **Floor PIN** column for Admin and Manager:
+>   *New PIN needed (role changed)*, *Locked* with its end time, *Set* with the date, or *Not set*.
+>   Above the table it lists every floor PIN currently locked, each with its end time and the way to
+>   unlock it (the `floor_pin.lockout` alert lands there). The Manage action opens the set / reset /
+>   clear dialog, which carries **Unlock** while the PIN is locked; on a row the caller may not
+>   manage, the action is replaced by *Admin only* (or *Platform admin only*).
+> - **A promotion clears the PIN and requires a new one.** A role change into Admin, Manager or
+>   Quality from any other role, on `PUT /users/{id}` or `POST /users/{id}/approve`, clears the
+>   user's floor PIN (hash, set date, wrong-PIN count and any lock) in the same transaction, and
+>   that route's required audit row carries `extra_data.floor_pin_cleared_on_promotion: true`. If the
+>   user **had** a PIN it also sets `floor_pin_reset_required` (marked `floor_pin_reset_required:
+>   true` on the same row): both badge routes then answer **403** `floor_pin_reset_required`
+>   ("Your role changed. Ask an Admin to set a new floor PIN."), **whatever the company policy**,
+>   until an Admin sets a new PIN or clears it, so the promotion never downgrades the badge to
+>   badge-only. The user's existing badge + PIN sessions end at their next request, since the PIN
+>   they verified is gone. A PIN a Manager chose for a floor account therefore never survives into a
+>   judgment role, as a PIN or as a session. A move between those three roles, a demotion and a
+>   move between floor roles keep the PIN.
 
 > **Password-strength policy — enforced server-side on every password-set path.** A password set
 > through `POST /users/` (create), `POST /users/{id}/reset-password`, or the self-service
@@ -13283,10 +13523,11 @@ The active company's own profile and self-managed settings. Mounted under `/comp
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| GET | `/companies/me` | Get the active company (includes `allow_ai_egress`, `allow_sms_egress`, and `user_count`) | Any authenticated user |
+| GET | `/companies/me` | Get the active company (includes `allow_ai_egress`, `allow_sms_egress`, `require_floor_pin`, and `user_count`) | Any authenticated user |
 | PUT | `/companies/me` | Update the active company's settings | Admin |
 | PUT | `/companies/me/ai-egress` | Toggle the company's **AI document-extraction egress kill switch** (`allow_ai_egress`), which also gates every AI-external API token | Admin, signed in (any API token **403**; not an MCP tool) |
 | PUT | `/companies/me/sms-egress` | Toggle the company's **notification-SMS egress kill switch** (`allow_sms_egress`) | Admin, signed in (any API token **403**; not an MCP tool) |
+| PUT | `/companies/me/floor-pin-policy` | Turn the company's **"require a PIN for badge sign-in"** policy (`require_floor_pin`) on or off | Admin, signed in (any API token **403**; not an MCP tool) |
 
 > **`allow_ai_egress` is the AI-egress CUI kill switch (default OFF).** It gates **all** outbound
 > AI document-extraction egress to the Anthropic API (the AI analogue of `allow_carrier_egress` /
@@ -13328,6 +13569,31 @@ The active company's own profile and self-managed settings. Mounted under `/comp
 > configuration and a per-user opt-in with a saved phone number. Exposed in the UI at
 > **Admin Settings → SMS Privacy** (`/admin/settings?tab=smsprivacy`). See
 > [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#sms-channel-twilio).
+
+> **`require_floor_pin` is the badge sign-in PIN policy (default OFF; AS9100D 8.5.2, migration
+> `130`).** On, a badge / employee-ID sign-on (`POST /auth/employee-login` and the crew-station
+> badge mint) by a user with **no** floor PIN is refused **403** `floor_pin_not_set`; a user who has a
+> PIN is challenged for it either way, and password sign-in is unaffected (see
+> [Badge sign-on and the floor PIN](#badge-sign-on-and-the-floor-pin-as9100d-852)).
+> `PUT /companies/me/floor-pin-policy` takes `{ "require_floor_pin": boolean }` and returns the
+> company record (`CompanyResponse`) plus **`users_without_pin`**: how many **active badge users**
+> of the company have no floor PIN, that is active accounts with a non-empty `employee_id`, platform
+> accounts (superuser / Platform Admin) excluded. Turning the policy on while that number is above
+> zero is allowed; set those people's PINs first (`PUT /users/{user_id}/floor-pin`). **Admin-only**
+> (`require_role([ADMIN])`), and it only ever changes the caller's **own active company**. Any API
+> token is refused **403** with `"A floor PIN, and the company's badge-sign-in PIN policy, are set by
+> a person signed in to the app, not an API token: credential administration is a person's act."`
+> before anything is read, and the route is not an MCP tool. A real flip writes two **required**
+> audit rows in its own transaction, an `UPDATE` of `require_floor_pin` (old / new) and a
+> `STATUS_CHANGE` `floor_pin_optional` ↔ `floor_pin_required`; if either cannot be written the flip
+> is rolled back and the answer is **503** `"The audit record for this badge sign-in PIN policy
+> change could not be saved; nothing was changed. Retry."`. Sending the value the company already
+> has writes nothing and still returns the count. Turning it on also ends badge-only sessions at
+> their next refresh (`floor_pin_reauth_required`), but not badge sessions signed in before
+> migration `130`, which carry no `amr`; rotate `REFRESH_TOKEN_SECRET_KEY` before the first turn-on
+> (see [Badge sign-on and the floor PIN](#badge-sign-on-and-the-floor-pin-as9100d-852)). Exposed in the UI at **Admin Settings → Badge
+> Sign-in** (`/admin/settings?tab=floorpin`): interactive for Admin (turning it on asks first and
+> shows the count), read-only for other roles.
 
 #### Egress kill switches are a person's judgment
 
@@ -14644,6 +14910,62 @@ tenants, so the aggregate chain-verification endpoints are **platform-admin only
 > is unaffected because each row is verified by recomputation from **its own stored value** — a row
 > written with `"Op 10"` still verifies as `"Op 10"`. Only the free-text search box sees the shift.
 
+> **`extra_data.auth_methods`: how the person was identified (badge sign-on, migration `130`).**
+> Every row `AuditService` writes for a request made on a badge / employee-ID session carries
+> `extra_data.auth_methods`: `["badge", "pin"]` when the session was opened with the badge **and**
+> the person's floor PIN, `["badge"]` when with the badge alone. It comes from the session token's
+> `amr` claim (`get_current_user` → `user._auth_methods`) and is folded in on every `log_*` helper
+> and `log_required`, the same way as the API-token `credential` marker; on a badge session the
+> session's value always wins the key over anything the route passes. Rows written on a password session,
+> by an API token (those carry `extra_data.credential` instead) or by a system / background actor
+> carry no `auth_methods` and are unchanged. The sign-on rows carry it too (`EMPLOYEE_LOGIN_SUCCESS`,
+> `KIOSK_BADGE_TOKEN_ISSUED`, a badge session's `TOKEN_REFRESHED`). The Audit Log list
+> (`GET /audit/`) does not return `extra_data`, so read it from the table:
+>
+> ```sql
+> SELECT timestamp, action, resource_type, resource_identifier,
+>        extra_data::jsonb -> 'auth_methods' AS auth_methods
+> FROM audit_logs
+> WHERE company_id = <company id> AND user_id = <user id>
+>   AND timestamp >= now() - interval '30 days'
+> ORDER BY timestamp DESC;
+> ```
+>
+> **For the Quality Manager (AS9100D 8.5.2 identification, 7.5.3 records).**
+>
+> - **What `["badge", "pin"]` shows.** The session that wrote the record was opened by someone who
+>   presented that person's badge **and** entered the PIN set for that person: by an Admin, or for
+>   an Operator / Supervisor / Shipping / Viewer account possibly by a Manager. The session is bound
+>   to that PIN: it is refused on every request once the PIN is reset, cleared or cleared by a
+>   promotion, so a row stamped `["badge", "pin"]` was written while the PIN that session verified
+>   was still the person's current PIN. For an Admin, a Manager or a Quality user, that PIN can
+>   only have been chosen by an Admin: a Manager cannot set one, a promotion into those roles clears the PIN the person had (the role change's
+>   audit row carries `floor_pin_cleared_on_promotion: true`) and ends every session that verified
+>   it, and the badge then needs a new PIN from an Admin before it signs in again. The
+>   `FLOOR_PIN_SET` row says who chose each PIN. A badge alone is a printed card anyone holding (or
+>   copying) it can present; the PIN is something the person knows. That makes the row stronger
+>   evidence of who recorded a completion, a step record or an inspection result.
+> - **What it does not show.** It is sign-on evidence, not a signature on that record. The PIN is
+>   asked when a session is opened (at every crew-station badge scan, but once for a solo-kiosk or
+>   desk session) and never again at an inspection sign-off, so it does not prove the person was at
+>   the terminal at the moment of that write: a crew-station operator token lasts 5 minutes, a solo
+>   kiosk session until its idle logout (4 minutes by default), a desk Badge Only session longer. It
+>   does not prove the PIN was kept private. `["badge"]` means no PIN was asked (the person had none
+>   and the company policy was off), not that one failed.
+> - **When it is absent.** No `auth_methods` means a password session, an API token or a system
+>   actor, **or a badge session that was signed in before migration `130` was deployed**. Those
+>   sessions carry no `amr` and keep refreshing without one, so their rows show no `auth_methods`
+>   until the person signs out and signs on again. Do not read an absence on rows written around the
+>   deploy as a password sign-in.
+> - **The surrounding record is audited too:** `FLOOR_PIN_SET` / `FLOOR_PIN_CLEARED` rows (when a
+>   PIN was issued, reset or removed, and by whom; never the PIN), `FLOOR_PIN_UNLOCKED` rows (a lock
+>   lifted early) and the company policy's `UPDATE`
+>   / `STATUS_CHANGE` rows (when PINs were required). Wrong and locked PIN attempts are
+>   `EMPLOYEE_LOGIN_FAILED` / `KIOSK_BADGE_TOKEN_FAILED` rows (`floor_pin_locked` marks the attempt
+>   that started a lock), and a session ended because its PIN changed leaves a
+>   `TOKEN_REFRESH_FAILED` / `COMPANY_SWITCH_FAILED` row `PIN changed` when it tries to renew. See
+>   [Badge sign-on and the floor PIN](#badge-sign-on-and-the-floor-pin-as9100d-852).
+
 ### Visitor Logs
 
 Lobby **visitor sign-in tablet** + admin visitor log (`/api/v1/visitor-logs`). The two write
@@ -14805,8 +15127,9 @@ in that company; a foreign or missing resource is refused before connection.
 Connections retain their original user/company identity. Authorization is rechecked with a fresh
 database session **before each event delivery**, after incoming messages, and after **30 seconds
 of idle time**. Expiry, account disablement/reassignment, company deactivation, loss of platform
-authority for a switched context, or loss of access to the parent resource closes the connection
-before further event delivery. Database-check failure also refuses delivery. Domain broadcasts
+authority for a switched context, loss of access to the parent resource, or, on a badge + PIN
+session, a change to the PIN it verified ([Badge sign-on and the floor PIN](#badge-sign-on-and-the-floor-pin-as9100d-852))
+closes the connection before further event delivery. Database-check failure also refuses delivery. Domain broadcasts
 are tenant-scoped (see **Event delivery** below); a read-only company context can receive these
 read-only channels but cannot use them to mutate records. HTTP logout/switch/platform recovery
 exceptions do not apply here.
@@ -14957,6 +15280,13 @@ becomes `U+FFFD`, and a `NaN` / `Infinity` / `-Infinity` literal (Python's JSON 
 becomes the string `"NaN"` / `"Infinity"` / `"-Infinity"`. Either used to make the 422 a **500** on
 any route, e.g. a `NaN` in `POST /parts/`. The rewrite walks the echo iteratively, so a deeply nested
 body cannot make it fail, and an error with nothing to rewrite is echoed unchanged.
+
+**A PIN is never echoed** (migration `130`). An error whose `loc` ends at a `pin`, `new_pin` or
+`floor_pin` key (case-insensitive) has its `input` replaced by `"[redacted]"`, and so does the value
+of every such key inside an `input` object, at any depth: a missing-field error's `input` is the
+whole body, so `{"pin": "…"}` sent without its `employee_id` would otherwise come straight back. If
+the redaction itself fails, the whole `input` is replaced rather than echoed. Every other error is
+unchanged.
 
 ### Not Found error (404)
 ```json
@@ -15307,7 +15637,14 @@ limit still applies).
 compensating control for its 10/minute limit (raised from 3/minute for shift-change badge cycling
 on a shared kiosk): **8 FAILED attempts from one IP within 15 minutes → 429** ("Too many failed
 sign-in attempts — wait a few minutes") with a `Retry-After` header and a 15-minute cooldown.
-Successful logins never count toward the window; the check runs before any user lookup; each
+An unknown badge and a locked or disabled account count; successful logins and every floor-PIN
+outcome (the challenge, a wrong PIN, a locked PIN) never count toward the window, so one person's
+PIN typos never lock badge sign-in on a shared kiosk IP. Wrong PINs charge their **own** per-IP
+budget instead (60 per 15 minutes, key prefix `auth:employee-login:wrong-pin`, spent at each PIN
+attempt and refunded by a correct one), which when spent pauses PIN sign-in from that address:
+**429** to PIN attempts only; see
+[Badge sign-on and the floor PIN](#badge-sign-on-and-the-floor-pin-as9100d-852). The check
+runs before any user lookup; each
 throttled rejection is audited as `EMPLOYEE_LOGIN_BLOCKED`; a counter-storage outage fails open
 with a logged warning (the 10/minute cap above still applies). Implementation:
 `backend/app/core/login_throttle.py`.
@@ -15775,7 +16112,7 @@ What matters from this file's point of view:
 - **The catalog is this API.** 778 tools are generated from `app.openapi()` at startup — every
   secured operation except the `Authentication`, `Carrier Webhooks`, `Error Logging` (and its router-level `errors` twin) and `WebSocket` tags, the
   unauthenticated health/station-login routes (named one by one in `catalog.PUBLIC_OPERATIONS`) and
-  the twenty operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders
+  the twenty-four operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders
   (`POST /work-orders/import`, `POST /purchasing/purchase-orders/import` — they mint work orders
   RELEASED / IN_PROGRESS and POs SENT, a record of a past system rather than a user action),
   AI Accept & apply (`POST /ai/recommendations/{recommendation_id}/apply` — owner ruling 3: only a
@@ -15790,10 +16127,13 @@ What matters from this file's point of view:
   person's judgment; the routes also refuse API tokens), the two legacy `approved_supplier_list`
   writes (`POST /supplier-scorecards/approved-suppliers/`, `PUT .../approved-suppliers/{asl_id}`),
   bulk release (`POST /work-orders/bulk-release` — `release_work_order` stays an agent's only release
-  door, one job per call; this route does not refuse API tokens) and
+  door, one job per call; this route does not refuse API tokens),
   the five comment / watcher writes (`POST /comments`, `PATCH` / `DELETE /comments/{comment_id}`,
   `POST` / `DELETE /watchers` — owner decision 2026-11-16: a comment is a person's own words; the
-  routes also refuse API tokens, and the three reads stay tools) — plus 15 fixed-name convenience tools that shadow 16
+  routes also refuse API tokens, and the three reads stay tools) and the four floor-PIN writes
+  (`PUT` / `DELETE /users/{user_id}/floor-pin`, `POST /users/{user_id}/floor-pin/unlock`,
+  `PUT /companies/me/floor-pin-policy` — a badge sign-on credential is a person's act; the routes
+  also refuse API tokens) — plus 15 fixed-name convenience tools that shadow 16
   raw routes (`POST /work-orders/`, `PUT /work-orders/{id}`, `POST /work-orders/{id}/release`, the two
   nest-package imports, the manual nest add, `GET /search/`, …) to enforce agent rules the routes do
   not: create/duplicate always land DRAFT, release is a separate explicit tool and the generic update

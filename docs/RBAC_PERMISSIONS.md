@@ -147,7 +147,12 @@ legacy `approved_supplier_list` writes are excluded the same way, and refuse API
 [Purchasing](#purchasing). So are the five comment and watcher writes (`POST` / `PATCH` / `DELETE
 /comments`, `POST` / `DELETE /watchers`; owner decision 2026-11-16, a comment is a person's own
 words): the reads — the thread, the watch state and mention search — stay tools; see
-[Comments and watchers](#comments-and-watchers). Bulk release (`POST /work-orders/bulk-release`) is excluded as well, so an
+[Comments and watchers](#comments-and-watchers). So are the four floor-PIN writes (setting,
+clearing or unlocking a user's floor PIN, `PUT` / `DELETE /users/{user_id}/floor-pin` and
+`POST /users/{user_id}/floor-pin/unlock`, and the company's badge sign-in PIN policy,
+`PUT /companies/me/floor-pin-policy`; AS9100D 8.5.2): credential administration is a person's act,
+the routes refuse API tokens too, and reading a user's PIN state or the policy stays a tool; see
+[Users](#users). Bulk release (`POST /work-orders/bulk-release`) is excluded as well, so an
 agent releases one job per call; unlike those, the route itself has no API-token refusal — see
 [Work Orders](#work-orders). An agent on an API token
 also gets a 403 the same person would not get in the UI when it tries to mark an AI action card
@@ -166,7 +171,7 @@ AI-external token bound to a **Viewer** user.
 ### Credential policy for judgment writes
 
 A few writes record a **person's judgment** — not just a permitted action — and some of them are
-restricted to certain *credentials*, on top of the role gate. The restrictions have ten sources,
+restricted to certain *credentials*, on top of the role gate. The restrictions have eleven sources,
 and each row below names its own: owner ruling 3 of 2026-11-05 (the two AI rows), the owner's
 decision of 2026-11-07 (a standing API token may not declare scrap or close work short), this
 PR's extensions of that decision (scrap reasons, the re-stamp short close and the other count
@@ -179,7 +184,9 @@ the Approved Supplier List change of 2026-11-13 (the supplier-approval rows), an
 decisions of 2026-11-16 for work-order comments (a comment is a person's own words) and of 2026-11-17
 (a standing API token may not complete a maintenance work order with checklist items unticked), and
 the NCR / CAR records change of 2026-11-19 (migration `127`: an NCR's disposition and concession,
-its re-verification, and a CAR's effectiveness verification).
+its re-verification, and a CAR's effectiveness verification), and the floor-PIN change of
+2026-11-19 (migration `130`: setting, clearing or unlocking a badge sign-on PIN, and the company's
+PIN policy, is credential administration, a person's act).
 This section is the **one list** of those credential rules — what refuses a credential,
 what is deliberately left open (and who decided each), and what is deliberately not refused —
 across the AI governance (ruling 3), floor-gates (ruling 2) and short-count (ruling 1) changes;
@@ -202,7 +209,7 @@ list of credential predicates.
 Writes that apply them — each refused before any write and before any audit row (the 403 texts
 live in `ai_action_applier.py` and `operation_action_gates.py`, for the quality judgments in
 `quality_record_service.py` and `fai_service.py`, for export control
-`app/api/endpoints/customers.py`, for the egress switches and the comment writes `app/core/credentials.py`, and for the supplier-approval rows
+`app/api/endpoints/customers.py`, for the egress switches, the comment writes and the floor-PIN writes `app/core/credentials.py`, and for the supplier-approval rows
 `app/services/supplier_approval_service.py` and `app/api/endpoints/purchasing.py`, for the maintenance
 checklist `app/services/maintenance_checklist.py`; where each sits in its route's
 check order is in `docs/API.md` → Work Orders → "Short count at completion" and → AI
@@ -233,6 +240,7 @@ Recommendations):
 | **Taking items off a maintenance work order's checklist** — `PUT /maintenance/work-orders/{id}` whose `checklist_results` drops, renames or clears an item an **open** work order carries (ticking, unticking or adding is unchanged; on a completed or cancelled work order every change is already **409**, for every credential, before this check). Refused before the first write | `is_api_token_credential`, through `maintenance_checklist.removed_checklist_items` | **403** `API_TOKEN_CHECKLIST_REMOVAL` (`Removing items from a maintenance work order's checklist must be done by a person signed in to the app, not an API token.`) | **This PR's extension** of the owner's 2026-11-17 decision: without it a token reaches the refused completion in two steps (PUT the unticked items away, then complete) |
 | **Taking items off a PM schedule's checklist while it has an open work order** — `PUT /maintenance/schedules/{id}` whose `checklist` drops, renames or clears a step while a scheduled / overdue / in-progress / on-hold work order carries the schedule's id (completion judges the schedule's steps too). Adding steps, and editing a schedule with no open work order, are unchanged | `is_api_token_credential`, inline in `update_schedule` | **403** `API_TOKEN_SCHEDULE_CHECKLIST_REMOVAL` (`Removing items from the checklist of a PM schedule that has an open work order must be done by a person signed in to the app, not an API token.`) | **This PR's extension**, for the same reason: the third route to the same skip |
 | **Posting, editing or deleting a comment, or watching / unwatching a record** — `POST /comments`, `PATCH /comments/{comment_id}`, `DELETE /comments/{comment_id}`, `POST /watchers`, `DELETE /watchers`. Refused in the route's first dependency, before the body is validated or anything is read or written. None of the five is an MCP tool (`catalog.COMMENT_WRITE_OPERATIONS`, part of `EXCLUDED_OPERATIONS`), so a person's own JWT cannot reach them through an agent either. The reads (`GET /comments`, `GET /watchers`, `GET /users/mention-search`) stay open to a token the read gates admit | `is_api_token_credential`, in the `comment_writer` dependency (`app/api/endpoints/comments.py`) | **403** `API_TOKEN_COMMENT_WRITE` (`A comment is a person's own words: an API token cannot post, edit or delete comments or change who is watching a record. Sign in to the app.`) — any token, whatever its role or scope (a read-only or AI-external token meets its own gate's 403 first) | Owner decision 2026-11-16 (work-order comments): a comment is a person's own words, and a watch a person's own preference |
+| **Setting, clearing or unlocking a user's floor PIN, or turning the company's badge sign-in PIN policy on or off** — `PUT /users/{user_id}/floor-pin`, `DELETE /users/{user_id}/floor-pin`, `POST /users/{user_id}/floor-pin/unlock` (Admin, or a Manager for Operator / Supervisor / Shipping / Viewer accounts; see [Users](#users)) and `PUT /companies/me/floor-pin-policy` (Admin). Refused at the top of each route (after the role gate), before the target user or the company is read. None of the four is an MCP tool (`catalog.FLOOR_PIN_OPERATIONS`, part of `EXCLUDED_OPERATIONS`), so a person's own JWT cannot reach them through an agent either. Reading a user's PIN state (`has_floor_pin` on the user record) and the policy (`require_floor_pin` on `GET /companies/me`) is unchanged. The PIN writes' `FLOOR_PIN_SET` / `FLOOR_PIN_CLEARED` / `FLOOR_PIN_UNLOCKED` rows and the policy flip's UPDATE and STATUS_CHANGE rows are **required** evidence (**503**, nothing saved, when one cannot be written) | `is_api_token_credential`, inline at the top of each route | **403** `API_TOKEN_FLOOR_PIN_ADMIN` (`"A floor PIN, and the company's badge-sign-in PIN policy, are set by a person signed in to the app, not an API token: credential administration is a person's act."`) — any token, whatever its role or scope (a read-only or AI-external token meets its own gate's 403 first). A crew-station badge token never reaches these routes (its path fence keeps it on the shop floor) | The floor-PIN change's design (AS9100D 8.5.2, migration `130`, 2026-11-19); not an owner ruling |
 | **Posting a note through Hank** — the `add_note` task, a work-order comment, at `POST /hank/tasks` (prepare) and `POST /hank/tasks/{id}/execute`. Refused before the generic role check and before anything is written, and `GET /hank/capabilities` never offers the kind to a token. **At the MCP door the rule looks past the credential**: `prepare_task` with kind `add_note`, and `execute_task` on an `add_note` task (read first as the caller), answer **403** `"A note is a person's own words: post it from the app, not through an agent."` to an agent on **any** credential, a person's own JWT included (a pre-read that cannot complete is **503**, nothing executed) — `app/mcp/people_only.py` | `is_api_token_credential`, in `hank_task_service._refuse_api_token_for_people_only` over `credentials.PEOPLE_ONLY_HANK_TASK_KINDS` (the MCP package reads the same set) | **403** `API_TOKEN_COMMENT_WRITE` (`A comment is a person's own words: an API token cannot post, edit or delete comments or change who is watching a record. Sign in to the app.`) — any token, whatever its role or scope | Owner decision 2026-11-16 (work-order comments): a comment is a person's own words, so Hank's note takes the comment routes' rule |
 
 Deliberately **not** refused:
@@ -2598,6 +2606,7 @@ UI controls do not grant API authority. See [API: Documents](API.md#documents).
 | Edit | ✓ | | | | | | |
 | Delete | ✓ | | | | | | |
 | Roles | ✓ | | | | | | |
+| Floor PIN — set / reset / clear / unlock (`PUT` / `DELETE /users/{user_id}/floor-pin`, `POST …/floor-pin/unlock`; signed in — any API token 403). Manager: Operator / Supervisor / Shipping / Viewer accounts only | ✓ | ✓ | | | | | |
 | Own profile + notification settings (`/users/me/*`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Mention search (`GET /users/mention-search`, `{id, display_name}` only — see [Comments and watchers](#comments-and-watchers)) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
@@ -2629,6 +2638,67 @@ UI controls do not grant API authority. See [API: Documents](API.md#documents).
 > above: `GET /users/` (list) and `GET /users/{id}` are `require_role([ADMIN, MANAGER])`, so a
 > **Supervisor** gets a **failed load** (403), not a read — user records are *not* on the read-broad
 > domain default. Superuser / Platform Admin bypass role checks, as elsewhere.
+>
+> **The one write on another user's account a Manager holds: the floor PIN (AS9100D 8.5.2,
+> migration `130`), for floor accounts only.** `PUT /users/{user_id}/floor-pin` (set or reset),
+> `DELETE /users/{user_id}/floor-pin` (clear) and `POST /users/{user_id}/floor-pin/unlock` (lift a
+> lock, keeping the PIN) are `require_role([ADMIN, MANAGER])`, so a Manager can issue and recover
+> the floor's PINs without holding account administration. Three rules sit on top of the role, in
+> this order:
+> - **Any API token is 403** before anything is read (credential administration is a person's
+>   act; see [Credential policy for judgment writes](#credential-policy-for-judgment-writes)), and
+>   none of the three routes is an MCP tool.
+> - The target must be in the active company (**404**), and a stored Platform Admin / superuser
+>   target needs a stored platform principal (**403**), as for password reset and unlock — a tenant
+>   Admin cannot manage a platform account's PIN either.
+> - **A Manager may manage PINs only for Operator, Supervisor, Shipping and Viewer accounts**
+>   (**403** `"A Manager can manage floor PINs only for Operator, Supervisor, Shipping and Viewer
+>   accounts. Ask an Admin to manage this account's PIN."`). An Admin's, a Manager's (the
+>   Manager's own included) and a Quality user's PIN need an Admin (or a Superuser / Platform
+>   Admin).
+>
+> **Why the scope.** Whoever chooses a person's PIN can sign in as that person with their badge, and
+> every record that session writes carries `extra_data.auth_methods` `["badge", "pin"]`, which reads
+> as that person's own act. Admin, Manager and Quality are the roles that carry judgment —
+> approvals, dispositions, quality sign-off — so a Manager able to set one of those PINs could
+> record that judgment under a peer's or a superior's identity. Three rules together mean nobody
+> below Admin can take over a judgment-role identity: the scope (a Manager cannot write such a PIN),
+> the promotion rule below (a PIN a Manager wrote for a floor account does not survive a promotion),
+> and the **session binding** — a `["badge", "pin"]` session carries `pst`, the set time of the PIN
+> it verified, and is refused **401** `floor_pin_reauth_required` on every request, refresh and
+> company switch once that PIN is reset, cleared or cleared by a promotion, so a session a Manager
+> opened with a floor account's PIN cannot outlive that account's promotion. An Admin already
+> administers every account, so letting an Admin set any tenant PIN grants nothing new.
+>
+> **A promotion into a judgment role clears the PIN.** The scope is checked when a PIN is written,
+> so on its own it would let a PIN a Manager chose for an Operator survive that person's promotion.
+> Instead, a role change **into** Admin, Manager or Quality **from any other role**, through
+> `PUT /users/{id}` or `POST /users/{id}/approve`, clears the floor PIN (hash, set date, wrong-PIN
+> count and any lock) in the same transaction (`user_provisioning.clear_floor_pin_on_promotion`),
+> and the role change's required audit row carries `extra_data.floor_pin_cleared_on_promotion: true`.
+> If the person **had** a PIN, the promotion also sets `floor_pin_reset_required` (marked
+> `floor_pin_reset_required: true` on the same row): both badge sign-on routes then answer **403**
+> `floor_pin_reset_required` ("Your role changed. Ask an Admin to set a new floor PIN."),
+> **whatever the company policy**, until an Admin sets a new PIN — or clears it, an explicit
+> decision to allow badge-only sign-on. The promotion never quietly downgrades the badge to
+> badge-only, and every existing badge + PIN session of that person ends at its next request. The
+> Users page shows *New PIN needed (role changed)*. A move between judgment roles (Manager to
+> Admin), a demotion and a move between floor roles keep the PIN.
+>
+> All three writes record required audit evidence in the same transaction (`FLOOR_PIN_SET` /
+> `FLOOR_PIN_CLEARED` / `FLOOR_PIN_UNLOCKED`; **503** and rollback on audit loss), never the PIN or
+> its hash. The Users page's **Floor PIN** column and its dialog are shown to Admin and Manager
+> (Platform Admin / superuser too); on a row the caller may not manage, the Manage action reads
+> *Admin only* (or *Platform admin only*), and the server enforces the same rule. Unlocking a
+> password lockout (`POST /users/{id}/unlock`, Admin) does not touch a PIN lock; the floor-PIN
+> unlock, a new PIN or a clear lifts it early and resets the wrong-PIN count. Every PIN lock also
+> expires on its own (15 minutes up to a 7-day cap); a lock of 24 hours or more alerts the company's
+> **Admins** in the app (`floor_pin.lockout`, mandatory in-app), and the Users page lists every
+> currently locked floor PIN above the table, with its end time, for Admin and Manager. A Manager
+> can unlock only the accounts in the scope above. Setting or clearing a PIN also
+> ends that person's badge + PIN sessions at their next request; the unlock keeps the PIN and the
+> sessions. The company policy that makes a PIN mandatory is Admin-only
+> ([Admin](#admin)). See `docs/API.md` → Users (Admin) → "Floor PIN".
 >
 > **Tenant provisioning uses one role policy (`services/user_provisioning.py`).**
 > - Both creation routes, update and approval reject `role = platform_admin` with **400**;
@@ -3429,7 +3499,10 @@ and writes an `EXPORT` audit row through `AuditService`:
 >   while clock-in, production and clock-out still accept it — see
 >   [Work Orders](#work-orders).
 >   Outside `/api/v1/shop-floor/*` (+ `POST /auth/employee-logout`) the token is **403**
->   (path-fenced in `get_current_user`). No refresh token is ever minted.
+>   (path-fenced in `get_current_user`). No refresh token is ever minted. The mint runs the floor-PIN
+>   step (migration `130`): a badge whose user has a PIN must be followed by it, and with the
+>   company's PIN policy on a badge with no PIN is refused — an authentication rule, not a role
+>   rule, the same for every role (see [docs/KIOSK.md](KIOSK.md) → Two-tier auth).
 >
 > Station lifecycle (create / reset-PIN / revoke), station-login failures, and badge-token
 > issuance/failures all write tamper-evident audit rows. See [docs/API.md](API.md) →
@@ -3445,11 +3518,20 @@ and writes an `EXPORT` audit row through `AuditService`:
 | AI usage & cost summary (`/ai-usage/summary`) | ✓ | ✓ | | | | | |
 | AI egress kill switch (`PUT /companies/me/ai-egress`; signed in — any API token 403) | ✓ | | | | | | |
 | SMS egress kill switch (`PUT /companies/me/sms-egress`; signed in — any API token 403) | ✓ | | | | | | |
+| Badge sign-in PIN policy (`PUT /companies/me/floor-pin-policy`, `require_floor_pin`; signed in — any API token 403) | ✓ | | | | | | |
 | Wallboard display tokens (`/auth/display-token` issue/list/revoke + setup-code reissue) | ✓ | ✓ | | | | | |
 | API tokens for bots / MCP clients (`/api-tokens` issue/list/revoke) | ✓ | | | | | | |
 | Visitor sign-in stations (`/visitor-logs/stations` create/list/revoke/reset-pin) | ✓ | ✓ | | | | | |
 | Crew kiosk stations (`/shop-floor/kiosk-stations` create/list/revoke/reset-pin) | ✓ | ✓ | | | | | |
 | System | ✓ | | | | | | |
+
+> **Badge sign-in PIN policy (AS9100D 8.5.2, migration `130`).** `PUT /companies/me/floor-pin-policy`
+> is `require_role([ADMIN])`, refuses any API token **403** before anything is read, is not an MCP
+> tool, and only ever changes the caller's own active company. A real flip writes two required audit
+> rows (**503** and rollback on loss). The Admin Settings → **Badge Sign-in** tab is interactive for
+> Admin and read-only for anyone else who can open Admin Settings. Issuing the PINs themselves is
+> Admin, or a Manager for Operator / Supervisor / Shipping / Viewer accounts ([Users](#users)). See
+> `docs/API.md` → Company (self-service).
 
 > **Changing a role's permissions is an audited RBAC change that fails closed (2026-11-05).** The
 > **Settings** row covers every `/admin/settings/*` route in `app/api/endpoints/admin_settings.py`

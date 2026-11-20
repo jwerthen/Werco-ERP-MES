@@ -92,6 +92,19 @@ API_TOKEN_EGRESS_SWITCH = (
     "signed in to the app, not an API token: opening or closing data egress is a person's judgment."
 )
 
+# Badge sign-on credentials (AS9100D 8.5.2): setting, clearing or unlocking a user's floor PIN
+# (``PUT`` / ``DELETE /users/{user_id}/floor-pin``, ``POST .../floor-pin/unlock``) and turning the company's "require a PIN
+# for badge sign-in" policy on or off (``PUT /companies/me/floor-pin-policy``). Credential
+# administration is a person's act, so each of those routes refuses ANY API token, whatever its
+# role or scope, with this text before it reads or writes anything. None of them is an MCP tool
+# (``app.mcp.catalog.FLOOR_PIN_OPERATIONS``): a person's own JWT would otherwise let an agent
+# handle a PIN. A crew-station badge token never reaches them (its path fence keeps it on the
+# shop floor).
+API_TOKEN_FLOOR_PIN_ADMIN = (
+    "A floor PIN, and the company's badge-sign-in PIN policy, are set by a person signed in to the app, "
+    "not an API token: credential administration is a person's act."
+)
+
 # Comments and watchers (docs/NOTIFICATIONS_PLAN.md section 3.6; owner decision for work-order
 # comments, 2026-11-16). A comment is a person's own words and a watch is a person's own
 # preference, so every comment / watcher WRITE (``POST``/``PATCH``/``DELETE /comments``,

@@ -137,7 +137,10 @@ class TestRefreshResetsTheWindow:
         window -- so no call site can, however carefully it is written."""
         params = set(inspect.signature(create_refresh_token).parameters)
         assert "absolute_timeout" not in params
-        assert params == {"subject", "session_id", "company_id", "read_only"}
+        # ``auth_methods`` (the badge session's ``amr`` claim, PR D floor PIN) carries HOW the
+        # person signed in across a rotation; ``pin_set_stamp`` (``pst``) is the verified PIN's SET
+        # time, which ends the session when the PIN changes -- neither is a session-window stamp.
+        assert params == {"subject", "session_id", "company_id", "read_only", "auth_methods", "pin_set_stamp"}
 
     def test_reminting_with_the_same_session_id_starts_a_new_window(self, monkeypatch):
         """What ``POST /auth/refresh`` does: mint a new refresh token reusing the

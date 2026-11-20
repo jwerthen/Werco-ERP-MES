@@ -30,6 +30,12 @@ class Company(Base):
     # in PR 4.
     allow_sms_egress = Column(Boolean, nullable=False, default=False, server_default="false")
 
+    # Badge sign-on policy (migration 130, AS9100D 8.5.2): when ON, a badge / employee-ID
+    # sign-on for a user with no floor PIN is refused 403 ``floor_pin_not_set``. Defaults OFF,
+    # so every existing company signs in exactly as before. Flipped only by
+    # ``PUT /companies/me/floor-pin-policy`` (Admin, never an API token, required audit).
+    require_floor_pin = Column(Boolean, nullable=False, default=False, server_default="false")
+
     # Hierarchy: parent company (e.g., Werco) -> subsidiaries
     parent_company_id = Column(Integer, ForeignKey("companies.id"), nullable=True)
 

@@ -65,7 +65,7 @@ SUPABASE_DB_PASSWORD=<your-supabase-db-pass>
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `SECRET_KEY` | Yes* | - | JWT signing key. Must be at least 32 characters. Generate with: `python -c "import secrets; print(secrets.token_urlsafe(64))"`. Also signs the display, signin, kiosk and long-lived **API** tokens — rotating it invalidates every API token at once (by design; re-mint them) |
-| `REFRESH_TOKEN_SECRET_KEY` | Yes* | - | Separate key for refresh tokens. Use different value from SECRET_KEY |
+| `REFRESH_TOKEN_SECRET_KEY` | Yes* | - | Separate key for refresh tokens. Use different value from SECRET_KEY. It signs refresh tokens only, so rotating it signs every person out once (each refresh token is refused) while access, API, wallboard display and kiosk tokens keep working; the floor-PIN rollout relies on this ([DEPLOYMENT.md → migration 130](DEPLOYMENT.md#floor-pin-for-badge-sign-on-migration-130)) |
 | `ALGORITHM` | No | `HS256` | JWT algorithm. Options: HS256, HS384, HS512 |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | No | `15` | Access token lifetime in minutes |
 | `REFRESH_TOKEN_EXPIRE_DAYS` | No | `7` | Refresh token lifetime in days |
@@ -794,6 +794,58 @@ AWS_REGION=us-east-1
 > Compare it to the SHA on `main`. (The neighboring `version` field is a hardcoded
 > `1.0.0` kept for backward compatibility with existing monitors; it has never
 > distinguished one deploy from another.)
+
+> **What Sentry never receives.** `init_sentry` (`app/core/observability.py`, used by the API and
+> the worker) keeps credentials out of Sentry in four layers, outermost last:
+>
+> 1. **A key denylist.** `sentry_sdk.init` gets an `EventScrubber` with `recursive=True`, whose
+>    denylist is the SDK default (passwords, tokens, authorization headers, cookies, ...) plus
+>    `SENTRY_EXTRA_DENYLIST`: `pin`, `new_pin` and `floor_pin` (a floor PIN, and a station or
+>    visitor-tablet PIN); the password names the default misses (`plain_password`, `new_password`,
+>    `current_password`, `admin_password`, `default_password`); and the hash names `stored_hash`,
+>    `hashed`, `hashed_password`, `floor_pin_hash` and `password_hash`, because the bcrypt hash of a
+>    4–6 digit PIN *is* the PIN to anyone who can run bcrypt a million times. A key is matched
+>    exactly (case-insensitive) at any depth of a request body, an `extra` or a frame's local
+>    variables. The floor-PIN request fields are also declared `repr=False`.
+> 2. **A `before_send` hook on every event** (`scrub_sentry_event`, also `before_send_transaction`)
+>    for what a key list cannot see, because the credential sits *inside a value*:
+>    - frame variables: it drops the raw request-body locals (`body_bytes`, `body`, `raw_body`,
+>      `json_body`, `request_body`, `content`, which hold the body as a repr string such as
+>      `b'{"employee_id": "0042", "pin": "2580"}'`) and any variable whose repr is an object
+>      carrying a credential field (a request model such as `UserCreate(..., password='...')` on
+>      `POST /users/` or `CompanyRegister(..., admin_password='...')` on the public signup), and
+>      replaces any variable holding a bcrypt hash with `[Filtered]`;
+>    - every remaining string, in the frame variables, the exception values, the top-level
+>      message, `logentry` (message, formatted string and params), every breadcrumb's message and
+>      data, the extras and the request data, goes through `scrub_text`.
+> 3. **`scrub_text`** masks the value of every `key=value`, `key: value`, `'key': 'value'` or
+>    `"key": "value"` whose key is a credential name (`password`, `pin`, `secret`, `token`,
+>    `api_key` and their variants, including any name ending in one, such as `access_token`,
+>    `admin_password` or `station_pin`, but not one that merely contains it, such as `token_type`),
+>    keeping the key; removes bcrypt hashes; and cuts SQLAlchemy's `[parameters: ...]` and Postgres's
+>    `Failing row contains (...)`, which prints the whole failing row, `hashed_password` and
+>    `floor_pin_hash` included.
+> 4. **Credential routes** (every `/auth/` path, the floor-PIN routes, the password reset and change,
+>    and the visitor-tablet and crew-station PIN sign-ins and PIN writes): the event loses **every**
+>    frame variable and the request data entirely.
+>
+> Layers 2 and 3 are what cover the password **create** routes too (`POST /users/`,
+> `POST /companies/register`), which are not on the credential-route list. The application's own
+> log lines that can carry a database error (the audit writer, the auth event logger) log only the
+> exception's class and, for a database error, the driver error's class and SQLSTATE
+> (`describe_exception`), never its text, so a logged failure cannot reach Sentry as a breadcrumb
+> carrying a row. It is not a setting: it applies whenever `SENTRY_DSN` is set, and
+> `backend/tests/test_sentry_observability_config.py` and `test_sentry_credential_events.py` pin it.
+>
+> **Debugging note: SQL errors carry no parameter values.** The database engine is created with
+> `hide_parameters=True` (`app/db/database.py`), so a failed statement's message, in logs and in
+> Sentry alike, shows the SQL and `[SQL parameters hidden due to hide_parameters=True]` instead of
+> the values: a failed `UPDATE users SET floor_pin_hash=...` would otherwise carry the PIN's hash.
+> The audit writer's and the auth event logger's error lines go further and show only the
+> exception class, the driver error class and the SQLSTATE (for example `IntegrityError
+> [NotNullViolation] (SQLSTATE 23502)`), and Sentry cuts `Failing row contains (...)` from any
+> message. When chasing a data-dependent SQL error, reproduce it locally with the parameters logged
+> by your own code, not by turning this off in a deployed environment.
 
 ### External Services
 

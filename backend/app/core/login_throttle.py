@@ -146,6 +146,27 @@ PASSWORD_LOGIN_MAX_FAILURES = 60
 PASSWORD_LOGIN_FAILURE_WINDOW_SECONDS = 6 * 60 * 60
 PASSWORD_LOGIN_COOLDOWN_SECONDS = 60 * 60
 
+# --- Floor-PIN attempts on POST /auth/employee-login (the PUBLIC badge door) ---
+#
+# A per-IP budget of 60 NET wrong PINs per 15 minutes, then a 15-minute cooldown, on its OWN
+# counter. Every PIN attempt SPENDS one unit at the moment it is reserved -- before bcrypt, in
+# one atomic step (``try_spend``), so a burst can never run past the budget -- and a CORRECT PIN
+# REFUNDS its unit (``refund``), so honest sign-ins cost the address nothing: only wrong PINs
+# (and attempts against a locked PIN) stay spent.
+#
+# What a spent budget blocks is narrow on purpose: only PIN ATTEMPTS from that address answer
+# 429. Badge-only sign-ins, the PIN challenge and unknown-badge handling never read or charge it,
+# and ``employee_login_throttle``'s budget is untouched.
+#
+# Why 60: a whole shop signs in from ONE NAT address, so the budget is sized for a floor's worth
+# of fumbled PINs on a bad morning (correct sign-ins are free), while still bounding a sweep
+# across badges from one address to ~5,700 guesses a day instead of the slowapi ceiling's
+# 14,400 -- and the per-badge lock tiers (``app.core.floor_pin``) cap each badge regardless.
+# The station-gated crew mint (``POST /auth/kiosk-badge-token``) has no IP charge at all.
+FLOOR_PIN_IP_MAX_WRONG_PINS = 60
+FLOOR_PIN_IP_WINDOW_SECONDS = 15 * 60
+FLOOR_PIN_IP_COOLDOWN_SECONDS = 15 * 60
+
 
 def client_ip_from_request(request: Request) -> str:
     """Resolve the client IP exactly like the slowapi limiter does.
@@ -296,6 +317,77 @@ class FailedLoginThrottle:
             if entry[0] == self._max_failures:
                 entry[1] = now + self._cooldown_seconds
 
+    def try_spend(self, client_ip: str) -> bool:
+        """Spend one unit of this IP's budget, atomically with the check. False = already spent.
+
+        For a budget charged BEFORE the outcome is known (a floor-PIN attempt is charged at
+        reservation, before bcrypt), so concurrent requests cannot all pass a check and then
+        all charge: the increment IS the check. A refused attempt spends nothing and does not
+        extend the cooldown. Reaching the limit re-arms the TTL to the cooldown, exactly as
+        ``register_failure`` does. Fail-open on a storage error (logged), like every method here.
+        """
+        try:
+            client = self._redis_client()
+        except Exception as exc:  # pragma: no cover - bad REDIS_URL
+            self._log_fail_open("client-init", client_ip, exc)
+            return True
+        if client is not None:
+            try:
+                key = self._key(client_ip)
+                count = client.incr(key)
+                if count > self._max_failures:
+                    client.decr(key)  # give the over-budget unit straight back
+                    return False
+                if count == 1:
+                    client.expire(key, self._window_seconds)
+                if count == self._max_failures:
+                    client.expire(key, self._cooldown_seconds)
+                return True
+            except Exception as exc:
+                self._log_fail_open("spend", client_ip, exc)
+                return True
+        now = self._now()
+        with self._lock:
+            self._prune_memory(now)
+            entry = self._memory.get(client_ip)
+            if entry is None:
+                entry = [0, now + self._window_seconds]
+                self._memory[client_ip] = entry
+            if entry[0] >= self._max_failures:
+                return False
+            entry[0] += 1
+            if entry[0] == self._max_failures:
+                entry[1] = now + self._cooldown_seconds
+            return True
+
+    def refund(self, client_ip: str) -> None:
+        """Give back one unit ``try_spend`` took (the attempt turned out to be a correct sign-in).
+
+        Never below zero; a refund that brings the count under the limit lifts the block early.
+        """
+        try:
+            client = self._redis_client()
+        except Exception as exc:  # pragma: no cover - bad REDIS_URL
+            self._log_fail_open("client-init", client_ip, exc)
+            return
+        if client is not None:
+            try:
+                key = self._key(client_ip)
+                if client.decr(key) <= 0:
+                    client.delete(key)
+            except Exception as exc:
+                self._log_fail_open("refund", client_ip, exc)
+            return
+        now = self._now()
+        with self._lock:
+            self._prune_memory(now)
+            entry = self._memory.get(client_ip)
+            if entry is None:
+                return
+            entry[0] -= 1
+            if entry[0] <= 0:
+                del self._memory[client_ip]
+
     def reset(self) -> None:
         """Test hook: clear the in-memory store and drop the Redis client.
 
@@ -323,4 +415,14 @@ password_login_throttle = FailedLoginThrottle(
     max_failures=PASSWORD_LOGIN_MAX_FAILURES,
     window_seconds=PASSWORD_LOGIN_FAILURE_WINDOW_SECONDS,
     cooldown_seconds=PASSWORD_LOGIN_COOLDOWN_SECONDS,
+)
+
+# Its own prefix again: a PIN attempt must never spend the badge route's unknown-badge budget, nor
+# the reverse (see the constants above). Charged with ``try_spend`` / ``refund``, never
+# ``register_failure``.
+floor_pin_ip_throttle = FailedLoginThrottle(
+    key_prefix="auth:employee-login:wrong-pin",
+    max_failures=FLOOR_PIN_IP_MAX_WRONG_PINS,
+    window_seconds=FLOOR_PIN_IP_WINDOW_SECONDS,
+    cooldown_seconds=FLOOR_PIN_IP_COOLDOWN_SECONDS,
 )

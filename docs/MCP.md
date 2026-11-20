@@ -82,6 +82,15 @@ see [RBAC → Credential policy for judgment writes](RBAC_PERMISSIONS.md#credent
 The same change gave `list_inventory` three filters, `ownership`, `owner_customer_id` and
 `owner_vendor_id` (§7). See
 [API.md → Customer- and supplier-owned property](API.md#customer--and-supplier-owned-property).
+
+**Re-checked again on 2026-11-19 after the floor PIN for badge sign-on (migration 130).** Its four
+routes are all writes and all joined `EXCLUDED_OPERATIONS` (§6.1): setting, clearing or unlocking a
+user's floor PIN and turning the company's badge sign-in PIN policy on or off are credential
+administration, a person's act. They add no tool and shift no name. The catalog now reads
+15 convenience + **778** generated, 16 shadowed: the one tool more than the 777 above is
+`change_inventory_item_ownership` (Inventory), from the owned-property change (migration 129). That
+route and the four floor-PIN routes are all writes, so the read-only catalog is unchanged at
+8 convenience + **303** generated, and none of them is on the AI-external allowlist.
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
 `backend/tests/test_mcp_docs_names.py` checks every tool name this file, `CLAUDE.md` and `API.md`
@@ -770,11 +779,11 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `PrintShippingLabel` (`/print/shipping-label/:id`) | Shipping, Documents | `get_shipment`, `download_document` |
 | `PrintBadges` (`/print/badges`) | Users | `list_users` |
 | `ImportCenter` (`/import-center`) | Import Kit, Purchasing, Users, Work Orders | `get_import_templates`, `download_import_template`, `import_users_csv` — the two Excel-cutover loaders (`POST /work-orders/import`, `POST /purchasing/purchase-orders/import`) are deliberately **not** tools (§6.1) |
-| `Users` (`/users`) | Users | `list_users`, `create_user`, `update_user`, `deactivate_user`, `reset_user_password`, `approve_user`, `unlock_user` |
+| `Users` (`/users`) | Users | `list_users`, `create_user`, `update_user`, `deactivate_user`, `reset_user_password`, `approve_user`, `unlock_user` — `list_users` shows each user's floor-PIN state; **setting, clearing or unlocking a floor PIN is not a tool**: `PUT` / `DELETE /users/{user_id}/floor-pin` and `POST /users/{user_id}/floor-pin/unlock` are in `EXCLUDED_OPERATIONS` (§6.1) and refuse **403** to every API token |
 | `AuditLog` (`/audit-log`) | Audit | `list_audit_logs`, `get_audit_summary`, `verify_audit_integrity`, `get_integrity_status` |
 | `VisitorLog` (`/visitor-log`) | Visitor Logs | `list_visitors`, `manual_entry`, `sign_out`, `export_visitors_csv`, `create_station`, `revoke_station` |
 | `VisitorSignIn` (`/visitor-signin`) | Visitor Logs | `sign_in`, `sign_out` (under the caller's own role; the tablet's shared-PIN station login is unauthenticated plumbing and is not a tool) |
-| `AdminSettings` (`/admin/settings`) | Admin Settings, Users, Production Calendar | `list_work_center_rates`, `update_work_center_rate`, `list_work_center_types_admin`, `update_work_center_types_admin`, `get_email_recipients`, `update_email_recipients`, `get_role_permissions`, `update_role_permissions`, `get_audit_log`, `list_users`; Production Calendar tab: `get_production_calendar`, `save_production_calendar_document` (Admin only), `sync_working_calendars_from_shifts` (dry run by default; Admin / Manager / Supervisor), `resolve_production_moment` (which production day and shift an instant belongs to) |
+| `AdminSettings` (`/admin/settings`) | Admin Settings, Users, Production Calendar, Company Management | `list_work_center_rates`, `update_work_center_rate`, `list_work_center_types_admin`, `update_work_center_types_admin`, `get_email_recipients`, `update_email_recipients`, `get_role_permissions`, `update_role_permissions`, `get_audit_log`, `list_users`; Production Calendar tab: `get_production_calendar`, `save_production_calendar_document` (Admin only), `sync_working_calendars_from_shifts` (dry run by default; Admin / Manager / Supervisor), `resolve_production_moment` (which production day and shift an instant belongs to); Badge Sign-in tab: `get_my_company` reads the policy, but **turning it on or off is not a tool** (`PUT /companies/me/floor-pin-policy` is in `EXCLUDED_OPERATIONS`, §6.1, and refuses **403** to every API token) |
 | `PlatformOverview` (`/platform`) | Platform Administration | `platform_overview`, `list_companies`, `company_dashboard`, `browse_company_users` (platform admins only — the route decides) |
 | `CompanyRegister` (`/register-company`) | Company Management | `get_my_company`, `update_my_company` — the public registration form itself is unauthenticated and has no tool; **the AI and SMS egress kill switches are not tools**: `PUT /companies/me/ai-egress` and `PUT /companies/me/sms-egress` are in `EXCLUDED_OPERATIONS` (§6.1) and refuse **403** to every API token, as do the carrier and label-print switches' profile writes (`PUT /admin/settings/shipping-profile`, `PUT /receiving/print-profile`; their `get_shipping_profile` / `get_print_profile` reads stay tools) |
 | `ApiTokens` (`/admin/api-tokens`) | API Tokens | `create_api_token`, `list_api_tokens`, `revoke_api_token` (Admin only; a call authenticated **by** an API token gets the route's 403 fence — §4) |
@@ -801,7 +810,7 @@ minus two further, named sets:
   They are listed **by name** rather than skipped silently, so a new route that forgets its
   `security` dependency — even under a tag that already has tools — fails the coverage guard
   (`catalog.unaccounted_operations`, §14) until it is either secured or named there.
-- **`EXCLUDED_OPERATIONS`** — twenty operations, none with a convenience twin:
+- **`EXCLUDED_OPERATIONS`** — twenty-four operations, none with a convenience twin:
   - The two Excel-cutover loaders, `POST /work-orders/import` and
     `POST /purchasing/purchase-orders/import` (`migration_import_service`). They record a *past*
     system's state rather than perform a user action: the work-order loader mints work orders
@@ -861,6 +870,17 @@ minus two further, named sets:
     own JWT would leave open: an agent posting words in a person's name. The reads stay tools:
     `list_record_comments`, `get_record_watch_state` and `search_mentionable_users`. See
     [API.md → Comments and watchers](API.md#comments-and-watchers).
+  - The four **floor-PIN writes** (`catalog.FLOOR_PIN_OPERATIONS`; AS9100D 8.5.2, migration 130):
+    `PUT /users/{user_id}/floor-pin`, `DELETE /users/{user_id}/floor-pin`,
+    `POST /users/{user_id}/floor-pin/unlock` and `PUT /companies/me/floor-pin-policy`. A floor PIN
+    is the second factor on badge sign-on, so setting, clearing or unlocking one, and turning the
+    company's "require a PIN for badge sign-in" policy on or off, is credential administration: a
+    person's act. The routes refuse every API token **403**
+    (`app.core.credentials.API_TOKEN_FLOOR_PIN_ADMIN`), and the exclusion closes the door a person's
+    own JWT would leave open: an agent handling someone's PIN, or switching the sign-on policy. The
+    reads stay tools: `list_users` carries each user's PIN state (never the PIN) and
+    `get_my_company` the policy. See
+    [API.md → Badge sign-on and the floor PIN](API.md#badge-sign-on-and-the-floor-pin-as9100d-852).
 
 The `Import Batches` tag also excludes the recoverable Import Center review, receipt,
 correction and commit routes. These wrap the same cutover loaders, including their
@@ -875,7 +895,8 @@ together, so fifteen were excluded and the count stayed **764**; the five commen
 joined the exclusions (twenty) and the three comment reads were added: **767 generated tools**; the
 three report-template routes then made it **770 generated tools**, and on 2026-11-19 the NCR
 re-verification and CAR effectiveness verbs **772**, the five PO quality flow-down routes
-**777**, and the inventory ownership verb **778**.
+**777**, and the inventory ownership route **778**; the four floor-PIN writes then joined the
+exclusions (twenty-four) with no change to the count.
 
 ### 6.2 Naming and the collision policy (`app/mcp/naming.py`)
 
@@ -1037,7 +1058,7 @@ Every other operation stays generated — including the neighbours of the shadow
 `get_work_order_by_number`, `update_laser_nest`, `get_inventory_summary`, `get_purchase_order`, …) —
 except the operations in `EXCLUDED_OPERATIONS` (§6.1) — the two cutover loaders, AI Accept &
 apply, the two customer export-control writes, the four egress kill-switch writes, the three Approved Supplier
-List writes, the two legacy ASL-table writes, bulk release and the five comment / watcher writes — which have no tool and no replacement. Adding a convenience tool whose route is *not* in the shadow set is a build error
+List writes, the two legacy ASL-table writes, bulk release, the five comment / watcher writes and the four floor-PIN writes — which have no tool and no replacement. Adding a convenience tool whose route is *not* in the shadow set is a build error
 (`build_registry` refuses a duplicate name) rather than a silent win.
 
 ---
@@ -1388,8 +1409,9 @@ count, in which case there is nothing left to close.
     secured, unshadowed, unexcluded operation is exactly one tool; `PUBLIC_OPERATIONS` names exactly
     the unsecured routes; `EXCLUDED_OPERATIONS` are exactly the two loaders, the AI apply route,
     the two customer export-control writes, the four egress kill-switch writes, the three Approved
-    Supplier List writes, the two legacy ASL-table writes, bulk release and the five comment / watcher
-    writes, the three comment reads stay tools, and the record-only accept stays a tool),
+    Supplier List writes, the two legacy ASL-table writes, bulk release, the five comment / watcher
+    writes and the four floor-PIN writes, the three comment reads stay tools, and the record-only
+    accept stays a tool),
     names (unique, wire-valid,
     ≤ 64, collisions prefixed, the numeric-suffix fallback proven on synthetic input and unused on
     the live catalog), schemas (`$ref`-free, `additionalProperties: false`, every JSON body's

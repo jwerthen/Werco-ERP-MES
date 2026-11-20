@@ -41,6 +41,10 @@ engine = create_engine(
     pool_recycle=settings.DB_POOL_RECYCLE,
     pool_pre_ping=settings.DB_POOL_PRE_PING,
     echo=False,  # SQL query logging disabled for security; enable explicitly if needed
+    # Statement parameters never appear in an exception's message: a failed
+    # ``UPDATE users SET floor_pin_hash=...`` would otherwise carry the PIN's bcrypt hash (which,
+    # for a 4-6 digit PIN, IS the PIN) into logs and Sentry as ``[parameters: {...}]``.
+    hide_parameters=True,
 )
 
 

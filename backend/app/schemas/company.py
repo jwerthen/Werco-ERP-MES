@@ -71,6 +71,8 @@ class CompanyResponse(CompanyBase):
     is_active: bool
     allow_ai_egress: bool
     allow_sms_egress: bool = False
+    # Badge sign-on policy (AS9100D 8.5.2): a badge user with no floor PIN is refused.
+    require_floor_pin: bool = False
     parent_company_id: Optional[int] = None
     created_at: datetime
     updated_at: datetime
@@ -90,6 +92,27 @@ class CompanySMSEgressUpdate(BaseModel):
     """Request body for the dedicated SMS-egress kill-switch toggle."""
 
     allow_sms_egress: bool = Field(..., description="Allow outbound notification SMS egress to Twilio")
+
+
+class CompanyFloorPinPolicyUpdate(BaseModel):
+    """Request body for the badge-sign-on PIN policy toggle."""
+
+    require_floor_pin: bool = Field(
+        ...,
+        description="Require a floor PIN at badge / employee-ID sign-on; a badge user with no PIN is then refused",
+    )
+
+
+class CompanyFloorPinPolicyResponse(CompanyResponse):
+    """The company record after the policy change, plus how many badge users have no PIN yet."""
+
+    users_without_pin: int = Field(
+        ...,
+        description=(
+            "Active users of the company with an employee ID and no floor PIN, platform accounts excluded "
+            "(refused at badge sign-on while the policy is on)"
+        ),
+    )
 
 
 class CompanyListResponse(BaseModel):

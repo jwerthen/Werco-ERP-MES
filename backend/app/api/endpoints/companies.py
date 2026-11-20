@@ -3,6 +3,7 @@ Company self-registration and self-management endpoints.
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.api.audit_guard import required_audit
@@ -14,13 +15,15 @@ from app.api.deps import (
     require_role,
 )
 from app.core.config import settings
-from app.core.credentials import API_TOKEN_EGRESS_SWITCH, is_api_token_credential
+from app.core.credentials import API_TOKEN_EGRESS_SWITCH, API_TOKEN_FLOOR_PIN_ADMIN, is_api_token_credential
 from app.core.security import create_access_token, create_refresh_token
 from app.db.database import get_db
 from app.models.company import Company
 from app.models.user import User, UserRole
 from app.schemas.company import (
     CompanyAIEgressUpdate,
+    CompanyFloorPinPolicyResponse,
+    CompanyFloorPinPolicyUpdate,
     CompanyRegister,
     CompanyResponse,
     CompanySMSEgressUpdate,
@@ -35,6 +38,10 @@ router = APIRouter()
 # What the AI-egress flip answers when its REQUIRED audit rows cannot be written (nothing saved).
 AI_EGRESS_AUDIT_UNAVAILABLE_DETAIL = (
     "The audit record for this AI egress change could not be saved; nothing was changed. Retry."
+)
+# What the floor-PIN policy flip answers when its REQUIRED audit rows cannot be written.
+FLOOR_PIN_POLICY_AUDIT_UNAVAILABLE_DETAIL = (
+    "The audit record for this badge sign-in PIN policy change could not be saved; nothing was changed. Retry."
 )
 
 
@@ -268,3 +275,101 @@ def update_my_company_sms_egress(
     db.commit()
     db.refresh(company)
     return CompanyResponse.model_validate(company)
+
+
+def _users_without_floor_pin(db: Session, company_id: int) -> int:
+    """Badge users of ``company_id`` with no floor PIN -- refused at badge sign-on while the policy is on.
+
+    Counts active accounts that carry an employee ID (a badge to sign in with) and are not
+    platform principals (a superuser / ``platform_admin`` is Werco oversight, not a floor badge
+    this company sets a PIN for).
+    """
+    return (
+        db.query(User)
+        .filter(
+            User.company_id == company_id,
+            User.is_active == True,  # noqa: E712
+            User.employee_id.isnot(None),
+            User.employee_id != "",
+            User.floor_pin_hash.is_(None),
+            or_(User.is_superuser == False, User.is_superuser.is_(None)),  # noqa: E712
+            User.role != UserRole.PLATFORM_ADMIN,
+        )
+        .count()
+    )
+
+
+@router.put(
+    "/me/floor-pin-policy",
+    response_model=CompanyFloorPinPolicyResponse,
+    summary="Require (or stop requiring) a floor PIN at badge sign-in",
+)
+def update_my_company_floor_pin_policy(
+    payload: CompanyFloorPinPolicyUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Turn the active company's "require a PIN for badge sign-in" policy on or off (Admin).
+
+    With ``require_floor_pin`` on, a badge / employee-ID sign-on (``POST /auth/employee-login``
+    and the crew-station badge mint) by a user who has no floor PIN is refused **403**
+    ``floor_pin_not_set``; users who have a PIN are challenged for it either way. Turning it
+    on while some active users still have no PIN is allowed -- the answer's
+    ``users_without_pin`` (active badge users, platform accounts excluded) says how many
+    would now be refused, so set their PINs first
+    (``PUT /users/{user_id}/floor-pin``). Off by default.
+
+    A person's act: ANY API token is refused **403** before anything is read, and the route is
+    not an MCP tool. A real flip writes two REQUIRED audit rows -- the field UPDATE and a
+    security STATUS_CHANGE -- in the same transaction (**503**, nothing changed, if either
+    cannot be written). Setting the value the company already has writes nothing.
+
+    Tenant-safe: only ever changes the caller's OWN active company, never one named in the
+    request.
+    """
+    if is_api_token_credential(current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=API_TOKEN_FLOOR_PIN_ADMIN)
+    company = db.query(Company).filter(Company.id == company_id).first()
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    previous = bool(company.require_floor_pin)
+    if previous != payload.require_floor_pin:
+        identifier = company.name or f"company:{company_id}"
+        with required_audit(db, FLOOR_PIN_POLICY_AUDIT_UNAVAILABLE_DETAIL):
+            company.require_floor_pin = payload.require_floor_pin
+            db.flush()
+            audit.log_required(
+                action=AuditService.ACTIONS["UPDATE"],
+                resource_type="company",
+                resource_id=company.id,
+                resource_identifier=identifier,
+                description="Company badge sign-in PIN policy updated",
+                old_values={"require_floor_pin": previous},
+                new_values={"require_floor_pin": company.require_floor_pin},
+                extra_data={"changes": {"require_floor_pin": {"old": previous, "new": company.require_floor_pin}}},
+            )
+            audit.log_required(
+                action=AuditService.ACTIONS["STATUS_CHANGE"],
+                resource_type="company",
+                resource_id=company.id,
+                resource_identifier=identifier,
+                description=(
+                    "Floor PIN at badge sign-in "
+                    f"{'REQUIRED' if company.require_floor_pin else 'NOT REQUIRED'} for company {company_id}"
+                ),
+                old_values={"status": "floor_pin_required" if previous else "floor_pin_optional"},
+                new_values={"status": "floor_pin_required" if company.require_floor_pin else "floor_pin_optional"},
+            )
+            db.commit()
+        db.refresh(company)
+
+    response = CompanyFloorPinPolicyResponse.model_validate(
+        {
+            **CompanyResponse.model_validate(company).model_dump(),
+            "users_without_pin": _users_without_floor_pin(db, company_id),
+        }
+    )
+    return response

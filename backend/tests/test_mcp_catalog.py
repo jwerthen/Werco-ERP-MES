@@ -32,6 +32,7 @@ from app.mcp.catalog import (
     EGRESS_SWITCH_OPERATIONS,
     EXCLUDED_OPERATIONS,
     EXCLUDED_TAGS,
+    FLOOR_PIN_OPERATIONS,
     JSON_CONTENT_TYPE,
     MAX_DESCRIPTION_CHARS,
     MULTIPART_CONTENT_TYPE,
@@ -148,8 +149,10 @@ class TestMembership:
         # 2026-11-15: an egress switch is a person's judgment), the Approved Supplier
         # List writes (a supplier-approval decision is a person's judgment), bulk
         # release (release_work_order stays the agent's only release door, one job per
-        # call) and the five comment / watcher writes (owner decision 2026-11-16: a
-        # comment is a person's own words) -- nothing else.
+        # call), the five comment / watcher writes (owner decision 2026-11-16: a
+        # comment is a person's own words) and the four badge-sign-on credential writes
+        # (AS9100D 8.5.2: setting, clearing or unlocking a floor PIN and the company's PIN policy are a
+        # person's act) -- nothing else.
         assert set(EXCLUDED_OPERATIONS) == {
             ("POST", "/api/v1/work-orders/import"),
             ("POST", "/api/v1/purchasing/purchase-orders/import"),
@@ -173,9 +176,14 @@ class TestMembership:
             ("DELETE", "/api/v1/comments/{comment_id}"),
             ("POST", "/api/v1/watchers"),
             ("DELETE", "/api/v1/watchers"),
+            ("PUT", "/api/v1/users/{user_id}/floor-pin"),
+            ("DELETE", "/api/v1/users/{user_id}/floor-pin"),
+            ("POST", "/api/v1/users/{user_id}/floor-pin/unlock"),
+            ("PUT", "/api/v1/companies/me/floor-pin-policy"),
         }
         assert EGRESS_SWITCH_OPERATIONS <= set(EXCLUDED_OPERATIONS)
         assert COMMENT_WRITE_OPERATIONS <= set(EXCLUDED_OPERATIONS)
+        assert FLOOR_PIN_OPERATIONS <= set(EXCLUDED_OPERATIONS)
 
     def test_flipping_an_egress_kill_switch_is_never_a_tool(self, catalog):
         """Lead decision 2026-11-15: an egress kill switch is a person's judgment. The routes

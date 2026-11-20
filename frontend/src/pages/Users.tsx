@@ -16,6 +16,7 @@ import {
   CheckCircleIcon,
   ClockIcon,
   IdentificationIcon,
+  LockClosedIcon,
   UsersIcon,
 } from '@heroicons/react/24/outline';
 import { Modal } from '../components/ui/Modal';
@@ -29,6 +30,12 @@ import {
 } from '../components/ui';
 import useUnsavedChanges from '../hooks/useUnsavedChanges';
 import { importTimeoutMessage } from '../utils/apiError';
+import FloorPinDialog, {
+  FloorPinCell,
+  floorPinManageRefusal,
+  floorPinStatus,
+  isFloorPinLocked,
+} from '../components/users/FloorPinDialog';
 
 interface UserData {
   id: number;
@@ -44,7 +51,21 @@ interface UserData {
   created_at: string;
   last_login?: string;
   locked_until?: string | null;
+  is_superuser?: boolean;
+  // Floor PIN (badge sign-in second factor) — state only, never the PIN.
+  has_floor_pin?: boolean;
+  floor_pin_set_at?: string | null;
+  floor_pin_locked_until?: string | null;
+  floor_pin_reset_required?: boolean;
 }
+
+// Floor PINs are managed by Admin AND Manager (PUT/DELETE /users/{id}/floor-pin, POST
+// .../unlock), unlike every other user write here (Admin only) — a Manager only for
+// Operator / Supervisor / Shipping / Viewer accounts (`floorPinManageRefusal` per row).
+// Platform principals pass the server's role gate too.
+const FLOOR_PIN_MANAGER_ROLES: ReadonlySet<UserRole> = new Set<UserRole>(['admin', 'manager', 'platform_admin']);
+
+const floorPinLabel = (user: UserData): string => floorPinStatus(user).label;
 
 // A user is locked out of login while locked_until sits in the future (5 failed
 // attempts -> 30-min lock). toDate parses the UTC ISO string (and treats any
@@ -140,7 +161,21 @@ export default function Users() {
   const approvalMode = searchParams.get('approvals') === 'pending';
   const canApproveUsers =
     currentUser?.role === 'admin' || currentUser?.role === 'platform_admin' || currentUser?.is_superuser === true;
+  const canManageFloorPins =
+    currentUser?.is_superuser === true || (!!currentUser?.role && FLOOR_PIN_MANAGER_ROLES.has(currentUser.role));
+  // The user whose floor PIN dialog is open (null = closed). Held by id and read from
+  // the loaded list, so a reload (after an unlock, which keeps the dialog open) shows
+  // the server's new state rather than the snapshot the dialog opened with.
+  const [floorPinUserId, setFloorPinUserId] = useState<number | null>(null);
   const [users, setUsers] = useState<UserData[]>([]);
+  const floorPinUser = floorPinUserId == null ? null : (users.find((u) => u.id === floorPinUserId) ?? null);
+  // Floor PINs locked after repeated wrong PINs, listed above the table. The `floor_pin.lockout`
+  // notification (Admins, on a lock of 24 h or more) links here record-less (`/users`), so this
+  // is where the person it is about has to be findable without scanning the whole list.
+  const lockedFloorPinUsers = useMemo(
+    () => (canManageFloorPins ? users.filter((u) => isFloorPinLocked(u)) : []),
+    [users, canManageFloorPins]
+  );
   const [pendingUsers, setPendingUsers] = useState<UserData[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -234,6 +269,22 @@ export default function Users() {
       },
     ];
 
+    if (canManageFloorPins) {
+      cols.push({
+        key: 'floor_pin',
+        header: 'Floor PIN',
+        sortable: true,
+        accessor: floorPinLabel,
+        render: (u) => (
+          <FloorPinCell
+            user={u}
+            onManage={() => setFloorPinUserId(u.id)}
+            manageRefusal={floorPinManageRefusal(currentUser, u)}
+          />
+        ),
+      });
+    }
+
     // User provisioning is Admin-only on the backend (every write in users.py is
     // require_role([ADMIN])). Only surface the row write-actions to viewers who can
     // actually perform them; managers keep the read-only list (users:view).
@@ -293,7 +344,7 @@ export default function Users() {
     }
 
     return cols;
-  }, [canManageUsers]);
+  }, [canManageUsers, canManageFloorPins, currentUser]);
 
   const loadUsers = useCallback(async () => {
     setLoadError(false);
@@ -661,6 +712,45 @@ export default function Users() {
         </div>
       )}
 
+      {lockedFloorPinUsers.length > 0 && (
+        <section
+          aria-label="Locked floor PINs"
+          className="card border-amber-500/30 bg-amber-500/5"
+          data-testid="locked-floor-pins"
+        >
+          <h2 className="card-title flex items-center gap-2">
+            <LockClosedIcon className="h-5 w-5 text-amber-300" aria-hidden="true" />
+            {lockedFloorPinUsers.length === 1
+              ? '1 floor PIN is locked after repeated wrong PINs'
+              : `${lockedFloorPinUsers.length} floor PINs are locked after repeated wrong PINs`}
+          </h2>
+          <p className="card-subtitle">
+            The lock lifts on its own at the time shown. Unlock early if the person needs to sign in — or, if they
+            did not make those attempts, set a new PIN.
+          </p>
+          <ul className="mt-3 grid gap-2">
+            {lockedFloorPinUsers.map((u) => (
+              <li
+                key={u.id}
+                className="grid gap-2 rounded-[4px] border border-slate-700 bg-[#101722] px-3 py-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)] sm:items-center"
+              >
+                <div className="min-w-0">
+                  <div className="font-medium text-white">
+                    {u.first_name} {u.last_name}
+                  </div>
+                  <div className="text-xs text-slate-400">ID: {u.employee_id}</div>
+                </div>
+                <FloorPinCell
+                  user={u}
+                  onManage={() => setFloorPinUserId(u.id)}
+                  manageRefusal={floorPinManageRefusal(currentUser, u)}
+                />
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
       <DataTable<UserData>
         columns={userColumns}
         data={users}
@@ -716,6 +806,21 @@ export default function Users() {
                   </span>
                 ),
               },
+              ...(canManageFloorPins
+                ? [
+                    {
+                      label: 'Floor PIN',
+                      fullWidth: true,
+                      value: (
+                        <FloorPinCell
+                          user={user}
+                          onManage={() => setFloorPinUserId(user.id)}
+                          manageRefusal={floorPinManageRefusal(currentUser, user)}
+                        />
+                      ),
+                    },
+                  ]
+                : []),
             ]}
             actions={
               <>
@@ -778,6 +883,8 @@ export default function Users() {
           />
         )}
       />
+
+      <FloorPinDialog user={floorPinUser} onClose={() => setFloorPinUserId(null)} onChanged={loadUsers} />
 
       {/* Add/Edit User Modal */}
       <Modal

@@ -991,6 +991,69 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     return add_cors_headers(response, origin)
 
 
+# Body keys whose VALUES a 422 never echoes (a floor PIN, a station / visitor-tablet PIN). A
+# pydantic error's ``input`` is the offending value -- or, for a missing field, the WHOLE body
+# object -- and this handler returns it verbatim, so ``{"pin": "..."}`` sent without its
+# ``employee_id`` would come straight back, PIN included. Same names as Sentry's extra denylist
+# (``app.core.observability.SENTRY_EXTRA_DENYLIST``) for a PIN.
+_REDACTED_422_KEYS = frozenset({"pin", "new_pin", "floor_pin"})
+_REDACTED_422_VALUE = "[redacted]"
+
+
+def _is_redacted_422_key(key: Any) -> bool:
+    return isinstance(key, str) and key.lower() in _REDACTED_422_KEYS
+
+
+def _redact_credential_keys(value: Any) -> tuple[Any, bool]:
+    """``value`` with every credential key's value replaced at any depth, and whether any was.
+
+    Iterative, for the reason the docstring below gives: a deep body must not become a
+    ``RecursionError``. Builds a copy (the error dicts belong to pydantic) and keeps key order.
+    """
+    if not isinstance(value, (dict, list)):
+        return value, False
+    changed = False
+    holder: list[Any] = [None]
+    stack: list[tuple[Any, Any, Any]] = [(value, holder, 0)]
+    while stack:
+        source, parent, slot = stack.pop()
+        if isinstance(source, dict):
+            copied: Any = {}
+            for key, item in source.items():
+                if _is_redacted_422_key(key):
+                    copied[key] = _REDACTED_422_VALUE
+                    changed = True
+                elif isinstance(item, (dict, list)):
+                    copied[key] = None  # placeholder keeps the key order; filled when popped
+                    stack.append((item, copied, key))
+                else:
+                    copied[key] = item
+        else:
+            copied = list(source)
+            for index, item in enumerate(source):
+                if isinstance(item, (dict, list)):
+                    stack.append((item, copied, index))
+        parent[slot] = copied
+    return holder[0], changed
+
+
+def _redact_credential_input(error: Any) -> Any:
+    """Never echo a PIN: redact ``input`` when it IS a PIN field's value, or the PIN keys inside it.
+
+    Fails closed: if the walk raises, the whole ``input`` is replaced rather than echoed.
+    """
+    if not isinstance(error, dict) or "input" not in error:
+        return error
+    try:
+        loc = error.get("loc")
+        if isinstance(loc, (list, tuple)) and loc and _is_redacted_422_key(loc[-1]):
+            return {**error, "input": _REDACTED_422_VALUE}
+        redacted, changed = _redact_credential_keys(error["input"])
+        return {**error, "input": redacted} if changed else error
+    except Exception:  # deliberately broad -- a 422 must neither become a 500 nor echo a PIN
+        return {**error, "input": _REDACTED_422_VALUE}
+
+
 def _encodable_validation_errors(errors: Sequence[Any]) -> list[Any]:
     """``exc.errors()`` made safe for ``jsonable_encoder`` and the JSON response.
 
@@ -1015,11 +1078,16 @@ def _encodable_validation_errors(errors: Sequence[Any]) -> list[Any]:
     ``RecursionError`` -- a 422 turned into a 500, an ERROR line and a Sentry event, for an
     unauthenticated caller. And this function must never be the thing that fails: if the
     scrub raises anyway, the error is passed through as it was before the scrub existed.
+
+    A PIN is never echoed (``_redact_credential_input``): an error whose ``loc`` ends at a PIN
+    key has its ``input`` replaced by ``"[redacted]"``, and so does every PIN key inside an
+    ``input`` object, at any depth. Every other error is passed through untouched.
     """
     safe: list[Any] = []
     for error in errors:
         if isinstance(error, dict) and isinstance(error.get("input"), (bytes, bytearray)):
             error = {**error, "input": bytes(error["input"]).decode("utf-8", "replace")}
+        error = _redact_credential_input(error)
         try:
             if contains_unrenderable(error):
                 error = make_renderable(error)

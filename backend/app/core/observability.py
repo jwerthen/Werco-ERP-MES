@@ -14,11 +14,260 @@ so API and worker events are separable in the same project.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, List, Mapping, Optional, Sequence, Union
+import re
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Union
+from urllib.parse import urlsplit
 
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Keys Sentry must never send, on top of the SDK's ``DEFAULT_DENYLIST`` (which already covers
+# ``password``, ``token``, ``authorization``, cookies ...). The SDK matches a key EXACTLY
+# (case-insensitive), so every name a credential travels under is listed:
+#   * a floor PIN (badge sign-on, the admin set route) and a station / visitor-tablet PIN --
+#     ``pin``; ``new_pin`` / ``floor_pin`` for any route that names it so;
+#   * the password-bearing names the default misses: ``verify_password``'s ``plain_password``
+#     frame variable (a floor PIN passes through it too) and the change / reset / registration
+#     bodies' ``new_password`` / ``current_password`` / ``admin_password``.
+# FastApiIntegration attaches JSON request bodies to error events and the SDK records frame
+# local variables, so without these a PIN reaches Sentry in clear text.
+#   * the hash names: a bcrypt hash of a 4-6 digit PIN IS the PIN to anyone who can run bcrypt
+#     10^4-10^6 times -- ``stored_hash`` / ``hashed`` / ``hashed_password`` frame variables and the
+#     ``floor_pin_hash`` / ``password_hash`` columns;
+#   * ``default_password`` (the import bodies).
+# FastApiIntegration attaches JSON request bodies to error events and the SDK records frame
+# local variables, so without these a PIN reaches Sentry in clear text. The key list cannot see
+# INSIDE a value, so ``scrub_sentry_event`` (``before_send``) covers the rest.
+SENTRY_EXTRA_DENYLIST = (
+    "pin",
+    "new_pin",
+    "floor_pin",
+    "plain_password",
+    "new_password",
+    "current_password",
+    "admin_password",
+    "default_password",
+    "stored_hash",
+    "hashed",
+    "hashed_password",
+    "floor_pin_hash",
+    "password_hash",
+)
+
+# --- before_send: what a key-only denylist cannot reach ---------------------------------------
+#
+# The scrubber above matches dict KEYS. A credential also travels inside VALUES, where it never
+# looks:
+#   1. raw request-body locals -- ``fastapi.routing``'s ``body_bytes`` and ``app.main``'s
+#      ``limit_json_body_size`` ``body`` hold ``b'{"employee_id": "0042", "pin": "2580"}'`` as a
+#      repr string while the route runs, in every traceback;
+#   2. the repr of a request model in a frame variable -- ``UserCreate(email=..., password='...')``
+#      on ``POST /users/``, ``CompanyRegister(..., admin_password='...')`` on the public signup;
+#   3. ``key=value`` / ``"key": "value"`` text inside any string: an exception message, a log
+#      message or its params, a breadcrumb, an extra;
+#   4. a bcrypt hash anywhere (a hash of a 4-6 digit PIN IS the PIN to anyone who can run bcrypt);
+#   5. SQLAlchemy's ``[parameters: {...}]`` and Postgres's ``Failing row contains (...)`` (which
+#      prints the whole row, ``hashed_password`` and ``floor_pin_hash`` included) in an error text.
+# And on a CREDENTIAL route nothing in the frames or the request body is worth the risk, so every
+# frame variable and the request data are dropped there entirely.
+SENTRY_FILTERED = "[Filtered]"
+_BODY_FRAME_VARS = frozenset({"body_bytes", "body", "raw_body", "json_body", "request_body", "content"})
+_BCRYPT_HASH = re.compile(r"\$2[aby]\$\d\d\$[./A-Za-z0-9]*")
+_SQL_PARAMETERS = re.compile(r"\[parameters: [^\n]*")
+_FAILING_ROW = re.compile(r"(Failing row contains )\([^\n]*")
+# Credential field names. A name ENDING in one of them counts too (``access_token``,
+# ``admin_password``, ``station_pin``); one that merely contains it does not (``spin``,
+# ``pinned_inventory_item_id``, ``token_type``).
+_CREDENTIAL_KEYWORDS = (
+    "password|new_password|current_password|plain_password|default_password|hashed_password|"
+    "password_hash|pin|new_pin|floor_pin|floor_pin_hash|secret|token|api_key"
+)
+_CREDENTIAL_KEY = r"(?<![A-Za-z0-9_])(?:[A-Za-z0-9]+_)*(?:" + _CREDENTIAL_KEYWORDS + r")"
+# ``key=value``, ``key: value``, ``'key': 'value'``, ``"key": "value"`` -- the value quoted (to its
+# closing quote, escapes included) or bare (to the next quote, comma, paren, brace or space).
+_CREDENTIAL_ASSIGNMENT = re.compile(
+    r"(?P<key>" + _CREDENTIAL_KEY + r")(?P<kq>['\"]?)(?P<sep>\s*[=:]\s*)"
+    r"(?P<value>b?'(?:[^'\\]|\\.)*'|b?\"(?:[^\"\\]|\\.)*\"|[^'\",)\s}\]]+)",
+    re.IGNORECASE,
+)
+# A frame variable whose repr is a model / dataclass instance carrying such a field
+# (``UserCreate(..., password='...')``): the whole variable goes.
+_OBJECT_REPR = re.compile(r"^<?[A-Za-z_][\w.]*\(")
+_CREDENTIAL_FIELD_IN_REPR = re.compile(r"[(,\s]" + _CREDENTIAL_KEY + r"\s*=", re.IGNORECASE)
+# Paths (after the API prefix) whose request body carries a credential: every ``/auth/`` route,
+# floor-PIN administration, the visitor-tablet and crew-station PIN sign-ins and PIN writes, and
+# the password writes on the users router.
+_CREDENTIAL_ROUTE_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"^/auth/",
+        r"^/users/[^/]+/floor-pin(/.*)?$",
+        r"^/users/[^/]+/reset-password$",
+        r"^/users/change-password$",
+        r"^/visitor-logs/station-login$",
+        r"^/visitor-logs/stations(/[^/]+/reset-pin)?$",
+        r"^/shop-floor/kiosk-stations/station-login$",
+        r"^/shop-floor/kiosk-stations(/[^/]+/reset-pin)?$",
+    )
+)
+
+
+def describe_exception(exc: BaseException) -> str:
+    """An exception for a log line: its class and, for a database error, the driver error's class
+    and SQLSTATE -- NEVER its text.
+
+    A database error's text is not safe to log: Postgres's ``DETAIL: Failing row contains (...)``
+    prints the whole row (on ``users``, ``hashed_password`` and ``floor_pin_hash``), and a driver
+    without ``hide_parameters`` adds the bound values. Logged text reaches Sentry as a breadcrumb
+    or an event, so the log line carries only what identifies the failure.
+    """
+    name = type(exc).__name__
+    orig = getattr(exc, "orig", None)
+    if orig is None:
+        return name
+    code = getattr(orig, "pgcode", None) or getattr(orig, "sqlstate", None)
+    detail = f"{name} [{type(orig).__name__}]"
+    return f"{detail} (SQLSTATE {code})" if code else detail
+
+
+def is_credential_route(path: str) -> bool:
+    """Does this request path carry a credential in its body (see ``_CREDENTIAL_ROUTE_PATTERNS``)?"""
+    prefix = settings.API_V1_PREFIX.rstrip("/")
+    if not path.startswith(prefix + "/"):
+        return False
+    relative = path[len(prefix) :]
+    return any(pattern.search(relative) for pattern in _CREDENTIAL_ROUTE_PATTERNS)
+
+
+def _iter_frames(event: Dict[str, Any]) -> Any:
+    """Every stack frame in the event: exception chains and thread stacks."""
+    for key in ("exception", "threads"):
+        container = event.get(key)
+        values = container.get("values") if isinstance(container, dict) else None
+        for value in values or ():
+            stacktrace = value.get("stacktrace") if isinstance(value, dict) else None
+            frames = stacktrace.get("frames") if isinstance(stacktrace, dict) else None
+            for frame in frames or ():
+                if isinstance(frame, dict):
+                    yield frame
+
+
+def _mask_value(match: "re.Match[str]") -> str:
+    value = match.group("value")
+    prefix = "b" if value[:1] in ("b", "B") and value[1:2] in ("'", '"') else ""
+    quote = value[len(prefix)] if value[len(prefix) : len(prefix) + 1] in ("'", '"') else ""
+    return f"{match.group('key')}{match.group('kq')}{match.group('sep')}{prefix}{quote}{SENTRY_FILTERED}{quote}"
+
+
+def scrub_text(text: str) -> str:
+    """One string with every credential VALUE cut out: SQL parameters, a ``Failing row contains``
+    row, bcrypt hashes, and ``key=value`` / ``"key": "value"`` for every credential key (the key
+    is kept, so the text still says what was there)."""
+    text = _SQL_PARAMETERS.sub("[parameters: " + SENTRY_FILTERED + "]", text)
+    text = _FAILING_ROW.sub(r"\1(" + SENTRY_FILTERED + ")", text)
+    text = _BCRYPT_HASH.sub(SENTRY_FILTERED, text)
+    return _CREDENTIAL_ASSIGNMENT.sub(_mask_value, text)
+
+
+def _scrub_strings(value: Any, whole_on_hash: bool = False) -> Any:
+    """``value`` with every string run through ``scrub_text``, at any depth (iterative).
+
+    ``whole_on_hash`` (frame variables) replaces a string holding a bcrypt hash entirely rather
+    than cutting just the hash out of it.
+    """
+
+    def clean(text: str) -> str:
+        if whole_on_hash and _BCRYPT_HASH.search(text):
+            return SENTRY_FILTERED
+        return scrub_text(text)
+
+    if isinstance(value, str):
+        return clean(value)
+    stack = [value]
+    while stack:
+        node = stack.pop()
+        items = node.items() if isinstance(node, dict) else enumerate(node) if isinstance(node, list) else ()
+        for key, item in list(items):
+            if isinstance(item, str):
+                node[key] = clean(item)
+            elif isinstance(item, (dict, list)):
+                stack.append(item)
+    return value
+
+
+def _is_credential_bearing_repr(value: Any) -> bool:
+    return isinstance(value, str) and bool(_OBJECT_REPR.match(value)) and bool(_CREDENTIAL_FIELD_IN_REPR.search(value))
+
+
+def scrub_sentry_event(event: Dict[str, Any], hint: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """``before_send``: remove what the key-based ``EventScrubber`` cannot see (see above).
+
+    For EVERY event:
+      * frame variables -- drop the raw-body ones (``_BODY_FRAME_VARS``) and any whose repr is an
+        object carrying a credential field; replace one holding a bcrypt hash with
+        ``"[Filtered]"``; run ``scrub_text`` over every other string, at any depth;
+      * exception values, the top-level message, ``logentry.message`` / ``formatted`` /
+        ``params``, every breadcrumb's ``message`` and ``data``, the extras and the request
+        data -- ``scrub_text`` over every string.
+    For an event from a CREDENTIAL route (``is_credential_route``): drop every frame variable and
+    the request data entirely. Never raises in practice; if it ever did, the SDK drops the event
+    (its ``before_send`` wrapper keeps no partial result), which is the safe direction.
+    """
+    request = event.get("request")
+    url = request.get("url") if isinstance(request, dict) else None
+    credential_route = isinstance(url, str) and is_credential_route(urlsplit(url).path)
+
+    for frame in _iter_frames(event):
+        frame_vars = frame.get("vars")
+        if not isinstance(frame_vars, dict):
+            continue
+        if credential_route:
+            frame.pop("vars", None)
+            continue
+        for name in list(frame_vars):
+            if name in _BODY_FRAME_VARS or _is_credential_bearing_repr(frame_vars[name]):
+                del frame_vars[name]
+        _scrub_strings(frame_vars, whole_on_hash=True)
+
+    exception = event.get("exception")
+    for value in (exception.get("values") if isinstance(exception, dict) else None) or ():
+        if isinstance(value, dict) and isinstance(value.get("value"), str):
+            value["value"] = scrub_text(value["value"])
+    if isinstance(event.get("message"), str):
+        event["message"] = scrub_text(event["message"])
+    logentry = event.get("logentry")
+    if isinstance(logentry, dict):
+        for key in ("message", "formatted", "params"):
+            if key in logentry:
+                logentry[key] = _scrub_strings(logentry[key])
+    breadcrumbs = event.get("breadcrumbs")
+    crumbs = breadcrumbs.get("values") if isinstance(breadcrumbs, dict) else breadcrumbs
+    for crumb in crumbs if isinstance(crumbs, list) else ():
+        if isinstance(crumb, dict):
+            for key in ("message", "data"):
+                if key in crumb:
+                    crumb[key] = _scrub_strings(crumb[key])
+
+    if isinstance(request, dict):
+        if credential_route:
+            request.pop("data", None)
+        elif "data" in request:
+            request["data"] = _scrub_strings(request["data"])
+    if "extra" in event:
+        event["extra"] = _scrub_strings(event["extra"])
+    return event
+
+
+def build_event_scrubber() -> Any:
+    """The ``EventScrubber`` every process hands ``sentry_sdk.init``.
+
+    ``recursive=True`` so a denylisted key is filtered at ANY depth of a request body, an
+    ``extra`` or a frame's variables, not only at the top level.
+    """
+    from sentry_sdk.scrubber import DEFAULT_DENYLIST, EventScrubber
+
+    return EventScrubber(denylist=DEFAULT_DENYLIST + list(SENTRY_EXTRA_DENYLIST), recursive=True)
 
 
 def init_sentry(
@@ -56,6 +305,14 @@ def init_sentry(
         sentry_sdk.init(
             dsn=settings.SENTRY_DSN,
             integrations=integrations,
+            # Credentials never leave the process: request bodies, extras and frame variables
+            # are scrubbed of every key in the SDK default denylist plus SENTRY_EXTRA_DENYLIST
+            # (the floor PIN above all), at any depth -- then ``scrub_sentry_event`` removes what a
+            # key list cannot see: raw-body locals, bcrypt hashes in any value, SQL parameters,
+            # and on a credential route every frame variable and the request body.
+            event_scrubber=build_event_scrubber(),
+            before_send=scrub_sentry_event,
+            before_send_transaction=scrub_sentry_event,
             # PERFORMANCE TRANSACTIONS ONLY -- this is not an error-capture switch. Errors
             # are governed by `sample_rate` (left at its 1.0 default), so every exception is
             # still reported at any value of this. Defaults to 0.1; see the comment on

@@ -22,6 +22,8 @@ from app.api.deps import (
     get_current_user,
     require_role,
 )
+from app.core.credentials import API_TOKEN_FLOOR_PIN_ADMIN, is_api_token_credential
+from app.core.floor_pin import FloorPinInput, FloorPinRuleError, hash_floor_pin, validate_floor_pin
 from app.core.security import get_password_hash, verify_password
 from app.db.database import get_db
 from app.models.company import Company
@@ -70,11 +72,14 @@ from app.services.user_identity import (
     synthetic_email_for_employee_id,
 )
 from app.services.user_provisioning import (
+    MANAGER_FLOOR_PIN_TARGET_ROLES,
     TENANT_ROLES,
     atomic_security_write,
     audit_user_created,
     audit_user_update,
+    clear_floor_pin_on_promotion,
     create_tenant_user,
+    promotion_pin_markers,
     require_manageable_user,
     require_tenant_role,
     required_security_audit,
@@ -144,6 +149,12 @@ class PasswordChange(BaseModel):
         return validate_password_strength(v)
 
 
+class FloorPinSet(BaseModel):
+    """Request body for ``PUT /users/{user_id}/floor-pin``. The PIN is never echoed back."""
+
+    pin: FloorPinInput = Field(..., repr=False)
+
+
 class UserPhoneUpdate(BaseModel):
     """Self-service phone number change. ``None``/empty clears the number."""
 
@@ -162,6 +173,10 @@ class UserResponse(UTCModel):
     the admin Users page can surface a failed-login lockout and offer the
     ``POST /users/{id}/unlock`` action; on the self routes a user only ever sees their
     own lock state, which the login error already discloses.
+
+    The floor-PIN state (``has_floor_pin`` / ``floor_pin_set_at`` / ``floor_pin_locked_until``)
+    rides here for the same reason as ``locked_until``: it is credential state for the admin
+    Floor PIN section. Never the PIN or its hash.
 
     Inherits ``UTCModel`` so the datetime fields (``created_at`` / ``updated_at`` /
     ``last_login`` / ``locked_until``) serialize as UTC ISO-8601 with a trailing ``Z``
@@ -185,6 +200,14 @@ class UserResponse(UTCModel):
     updated_at: Optional[datetime] = None
     last_login: Optional[datetime] = None
     locked_until: Optional[datetime] = None
+    # Floor PIN for badge / employee-ID sign-on (AS9100D 8.5.2). ``floor_pin_locked_until`` in
+    # the future means 5 wrong PINs locked it; a new PIN (``PUT .../floor-pin``) clears it.
+    has_floor_pin: bool = False
+    floor_pin_set_at: Optional[datetime] = None
+    floor_pin_locked_until: Optional[datetime] = None
+    # A promotion into Admin / Manager / Quality cleared the PIN: badge sign-on is refused until an
+    # Admin sets a new PIN or clears it.
+    floor_pin_reset_required: bool = False
 
 
 class UserCsvImportError(BaseModel):
@@ -951,6 +974,15 @@ def update_user(
     admin cannot change their OWN role (self role-escalation guard) — editing
     one's own name/email/other fields stays allowed. The change (including any
     role escalation) is recorded in the tamper-evident audit log.
+
+    Promoting a user INTO Admin, Manager or Quality from any other role clears their floor
+    PIN (hash, set date, wrong-PIN count and locks) in the same transaction, recorded as
+    ``floor_pin_cleared_on_promotion`` on the update's audit row. A user who HAD a PIN is also
+    flagged ``floor_pin_reset_required`` (marked on the row too): their badge sign-on is refused
+    **403** ``floor_pin_reset_required`` -- never downgraded to badge-only -- and their existing
+    badge+PIN sessions end at the next request, until an Admin sets a new PIN (or clears it, an
+    explicit decision to allow badge-only). Changes among those three roles and demotions keep
+    the PIN.
     """
     user = db.query(User).filter(User.id == user_id, User.company_id == company_id).first()
     if not user:
@@ -988,7 +1020,9 @@ def update_user(
         for field, value in update_data.items():
             setattr(user, field, value)
 
-        audit_user_update(audit, user, old_values)
+        # A promotion into a judgment role must not keep a PIN a Manager chose (same transaction).
+        pin_cleared = clear_floor_pin_on_promotion(user, old_values["role"])
+        audit_user_update(audit, user, old_values, extra_data=promotion_pin_markers(user) if pin_cleared else None)
         if deactivating:
             # Same rule as DELETE /users/{id}: losing is_active retires every live API
             # token the user holds (audited), so a later is_active=true revives none.
@@ -1016,7 +1050,10 @@ def approve_user(
     """Approve a self-registered user and assign their operational role.
 
     Grants a role and activates the account, so the role + is_active transition is
-    recorded in the tamper-evident audit log.
+    recorded in the tamper-evident audit log. Approving into Admin, Manager or Quality
+    clears any floor PIN the pending account carried (``floor_pin_cleared_on_promotion`` on
+    the audit row) and, when it had one, sets ``floor_pin_reset_required`` -- the same rule as
+    ``PUT /users/{user_id}``.
     """
     require_tenant_role(approval.role, "Platform admin role cannot be assigned through approval")
 
@@ -1038,6 +1075,7 @@ def approve_user(
         if approval.department is not None:
             user.department = approval.department
         user.is_active = True
+        pin_cleared = clear_floor_pin_on_promotion(user, old_values["role"])
 
         audit_user_update(
             audit,
@@ -1045,6 +1083,7 @@ def approve_user(
             old_values,
             action="approve",
             description=f"Approved user {user.employee_id} as {user.role.value}",
+            extra_data=promotion_pin_markers(user) if pin_cleared else None,
         )
     db.refresh(user)
     return user
@@ -1263,3 +1302,239 @@ def unlock_user(
             )
 
     return {"message": "User unlocked"}
+
+
+# ---------------------------------------------------------------------------
+# Floor PIN administration (AS9100D 8.5.2): the second factor on badge / employee-ID
+# sign-on. ``app.core.floor_pin`` holds the rules and the hashing; the sign-on step is in
+# ``app.api.endpoints.auth``. A PIN is a credential: never logged, audited or returned.
+# ---------------------------------------------------------------------------
+
+_FLOOR_PIN_ROLES = [UserRole.ADMIN, UserRole.MANAGER]
+# The accounts a MANAGER may set, reset, clear or unlock a floor PIN for (one definition, in
+# ``user_provisioning``, shared with the promotion rule in ``update_user`` / ``approve_user``).
+# Every other role -- Admin, Manager, Quality -- carries judgment, and whoever chooses a
+# person's PIN can sign in as that person with their badge, so those PINs need an Admin.
+_MANAGER_FLOOR_PIN_TARGET_ROLES = MANAGER_FLOOR_PIN_TARGET_ROLES
+_MANAGER_FLOOR_PIN_SCOPE_DETAIL = (
+    "A Manager can manage floor PINs only for Operator, Supervisor, Shipping and Viewer accounts. "
+    "Ask an Admin to manage this account's PIN."
+)
+
+
+def _refuse_api_token_floor_pin_admin(current_user: User) -> None:
+    """403 for ANY API token on a floor-PIN route, before anything is read or written.
+
+    Credential administration is a person's act -- an Admin or Manager signed in to the app,
+    never a standing machine credential, whatever its role or scope. A crew-station badge
+    token never reaches these routes (its path fence keeps it on the shop floor).
+    """
+    if is_api_token_credential(current_user):
+        raise HTTPException(status_code=403, detail=API_TOKEN_FLOOR_PIN_ADMIN)
+
+
+def _floor_pin_target_or_404(db: Session, user_id: int, company_id: int, current_user: User) -> User:
+    """The target user in the ACTIVE company, after the authority checks, or 404 / 403.
+
+    Mirrors the password-reset / unlock routes: tenant-scoped lookup (another company's user
+    is a 404, never a 403), then ``require_manageable_user`` (a platform account's credentials
+    are platform authority). One rule more, because a badge plus a PIN the caller chose is a
+    sign-on: a MANAGER manages PINs only for Operator / Supervisor / Shipping / Viewer
+    accounts (``_MANAGER_FLOOR_PIN_TARGET_ROLES``), so a Manager can never take over an
+    Admin's, another Manager's or a Quality user's badge identity. An Admin (or a stored
+    platform principal) manages any tenant account's PIN.
+    """
+    user = db.query(User).filter(User.id == user_id, User.company_id == company_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    require_manageable_user(current_user, user)
+    actor_is_admin = current_user.is_superuser or current_user.role in (UserRole.ADMIN, UserRole.PLATFORM_ADMIN)
+    if not actor_is_admin and (user.is_superuser or user.role not in _MANAGER_FLOOR_PIN_TARGET_ROLES):
+        raise HTTPException(status_code=403, detail=_MANAGER_FLOOR_PIN_SCOPE_DETAIL)
+    return user
+
+
+@router.put("/{user_id}/floor-pin", response_model=UserResponse, summary="Set or reset a user's floor PIN")
+def set_user_floor_pin(
+    user_id: int,
+    payload: FloorPinSet,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(_FLOOR_PIN_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Set or replace the floor PIN a user must enter at badge / employee-ID sign-on (Admin or Manager).
+
+    The PIN is 4 to 6 digits and may not be one digit repeated (0000), a straight run up or
+    down (1234, 4321), or the user's own employee ID / the last digits of their badge; a
+    broken rule is **422** naming the rule (never the PIN). Setting a PIN also clears the
+    wrong-PIN count and any PIN lock, and the ``floor_pin_reset_required`` flag a promotion
+    left. From then on ``POST /auth/employee-login``
+    and the crew-station badge mint challenge that badge for the PIN, and every existing
+    ``["badge", "pin"]`` session of this user -- it verified the OLD PIN -- is refused **401**
+    ``floor_pin_reauth_required`` at its next request or refresh.
+
+    Only a person signed in to the app does this: ANY API token is refused **403** before
+    anything is read, and the route is not an MCP tool. The target must be in the active
+    company (**404** otherwise); a platform account needs a platform administrator, and a
+    Manager may manage only Operator, Supervisor, Shipping and Viewer accounts -- an Admin's,
+    a Manager's or a Quality user's PIN needs an Admin (**403**). Recorded as a required
+    ``FLOOR_PIN_SET`` audit row
+    -- never the PIN or its hash -- in the same transaction (**503**, nothing saved, if it
+    cannot be written). Returns the user record with ``has_floor_pin`` / ``floor_pin_set_at``.
+    """
+    _refuse_api_token_floor_pin_admin(current_user)
+    user = _floor_pin_target_or_404(db, user_id, company_id, current_user)
+    try:
+        pin = validate_floor_pin(payload.pin, employee_id=user.employee_id)
+    except FloorPinRuleError as exc:
+        # The rule's own text; the value is never part of it.
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    now = datetime.utcnow()
+    replaced_existing = user.has_floor_pin
+    cleared_lock = user.floor_pin_locked_until is not None and user.floor_pin_locked_until > now
+    cleared_reset_required = bool(user.floor_pin_reset_required)
+    identifier = user.employee_id or user.email
+    with atomic_security_write(db):
+        user.floor_pin_hash = hash_floor_pin(pin)
+        # A new set time is what ends every session that verified the old PIN (their ``pst``).
+        user.floor_pin_set_at = now
+        user.floor_pin_failed_attempts = 0
+        user.floor_pin_locked_until = None
+        user.floor_pin_reset_required = False
+        # No old/new values: the PIN hash must never enter the audit log.
+        audit.log_required(
+            action="FLOOR_PIN_SET",
+            resource_type="user",
+            resource_id=user.id,
+            resource_identifier=identifier,
+            description=f"{'Reset' if replaced_existing else 'Set'} floor PIN for user {identifier}",
+            extra_data={
+                "source": "admin_set",
+                "replaced_existing_pin": replaced_existing,
+                "cleared_pin_lockout": cleared_lock,
+                "cleared_pin_reset_required": cleared_reset_required,
+            },
+        )
+    db.refresh(user)
+    return user
+
+
+@router.delete("/{user_id}/floor-pin", response_model=UserResponse, summary="Clear a user's floor PIN")
+def clear_user_floor_pin(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(_FLOOR_PIN_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Remove a user's floor PIN, and with it every PIN lock and the reset flag (Admin or Manager).
+
+    Afterwards the badge signs in without a PIN -- unless the company requires one
+    (``require_floor_pin``), in which case badge sign-on is refused **403**
+    ``floor_pin_not_set`` until a new PIN is set. Clearing also lifts any PIN lock and the
+    ``floor_pin_reset_required`` flag a promotion left: an explicit decision to
+    let that person sign in on the badge alone. Every existing ``["badge", "pin"]`` session of
+    the user is refused **401** ``floor_pin_reauth_required`` at its next request or refresh.
+    Idempotent: a user with no PIN and no PIN lock or reset state is returned unchanged and
+    nothing is recorded.
+
+    Same authority as setting a PIN: no API token (**403**), not an MCP tool, the target in
+    the active company (**404**), platform accounts need a platform administrator, and a
+    Manager may manage only Operator, Supervisor, Shipping and Viewer accounts (**403**).
+    Recorded as a required ``FLOOR_PIN_CLEARED`` audit row
+    (**503**, nothing saved, if it cannot be written). Returns the user record.
+    """
+    _refuse_api_token_floor_pin_admin(current_user)
+    user = _floor_pin_target_or_404(db, user_id, company_id, current_user)
+
+    had_pin = user.has_floor_pin
+    had_lock_state = bool(user.floor_pin_failed_attempts) or user.floor_pin_locked_until is not None
+    had_reset_required = bool(user.floor_pin_reset_required)
+    if not had_pin and not had_lock_state and not had_reset_required and user.floor_pin_set_at is None:
+        return user
+
+    now = datetime.utcnow()
+    cleared_lock = user.floor_pin_locked_until is not None and user.floor_pin_locked_until > now
+    identifier = user.employee_id or user.email
+    with atomic_security_write(db):
+        user.floor_pin_hash = None
+        user.floor_pin_set_at = None
+        user.floor_pin_failed_attempts = 0
+        user.floor_pin_locked_until = None
+        user.floor_pin_reset_required = False
+        audit.log_required(
+            action="FLOOR_PIN_CLEARED",
+            resource_type="user",
+            resource_id=user.id,
+            resource_identifier=identifier,
+            description=f"Cleared floor PIN for user {identifier}",
+            extra_data={
+                "source": "admin_clear",
+                "had_pin": had_pin,
+                "cleared_pin_lockout": cleared_lock,
+                "cleared_pin_reset_required": had_reset_required,
+            },
+        )
+    db.refresh(user)
+    return user
+
+
+@router.post(
+    "/{user_id}/floor-pin/unlock",
+    response_model=UserResponse,
+    summary="Unlock a user's floor PIN after too many wrong tries",
+)
+def unlock_user_floor_pin(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(_FLOOR_PIN_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Lift a floor-PIN lock, keeping the PIN (Admin or Manager).
+
+    Wrong PINs are cumulative until a correct PIN, and every 5th locks the badge's PIN for longer
+    (``floor_pin_locked_until``): 15 minutes, 2 hours, 24 hours, 48 hours, 96 hours, then 7 days
+    per further 5. Every lock expires on its own; one of 24 hours or more alerts the company's
+    Admins (``floor_pin_lockout``), and this is how they lift it early. It clears the lock and
+    the wrong-PIN count so the person can sign in with their existing PIN right away; the PIN
+    itself is unchanged and sessions that verified it carry on (to replace it, use
+    ``PUT /users/{user_id}/floor-pin``). A no-op when no lock is in force: **200** with the user
+    record, nothing written, nothing recorded. The password-login lockout is separate
+    (``POST /users/{user_id}/unlock``).
+
+    Same authority as setting a PIN: no API token (**403**), not an MCP tool, the target in
+    the active company (**404**), platform accounts need a platform administrator, and a
+    Manager may manage only Operator, Supervisor, Shipping and Viewer accounts (**403**).
+    Recorded as a required ``FLOOR_PIN_UNLOCKED`` audit row (**503**, nothing saved, if it
+    cannot be written). Returns the user record.
+    """
+    _refuse_api_token_floor_pin_admin(current_user)
+    user = _floor_pin_target_or_404(db, user_id, company_id, current_user)
+
+    now = datetime.utcnow()
+    prior_locked_until = user.floor_pin_locked_until
+    if prior_locked_until is None or prior_locked_until <= now:
+        return user
+
+    prior_attempts = user.floor_pin_failed_attempts or 0
+    identifier = user.employee_id or user.email
+    with atomic_security_write(db):
+        user.floor_pin_failed_attempts = 0
+        user.floor_pin_locked_until = None
+        audit.log_required(
+            action="FLOOR_PIN_UNLOCKED",
+            resource_type="user",
+            resource_id=user.id,
+            resource_identifier=identifier,
+            description=f"Cleared floor PIN lockout for user {identifier}",
+            extra_data={
+                "source": "admin_unlock",
+                "floor_pin_locked_until": prior_locked_until.isoformat(),
+                "floor_pin_failed_attempts": prior_attempts,
+            },
+        )
+    db.refresh(user)
+    return user

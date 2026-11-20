@@ -17,6 +17,7 @@ from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.core.floor_pin import FloorPinInput
 from app.schemas.base import UTCModel
 
 # Shared PIN policy: 4–8 digits, numeric only (same policy as signin stations).
@@ -97,6 +98,9 @@ class KioskStationListResponse(BaseModel):
 
 class KioskBadgeTokenRequest(BaseModel):
     employee_id: str = Field(..., min_length=1, max_length=50, description="Badge / employee id scanned at the kiosk")
+    # Floor PIN (AS9100D 8.5.2): send it with the same badge after a 401 ``floor_pin_required``
+    # challenge. Ignored for a badge whose user has no PIN.
+    pin: Optional[FloorPinInput] = Field(None, repr=False)
 
 
 class KioskBadgeUser(BaseModel):

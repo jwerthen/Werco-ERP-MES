@@ -17,7 +17,7 @@ import hashlib
 import json
 import zlib
 from datetime import datetime
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import Request
 from sqlalchemy import desc, inspect, text
@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.logging import get_correlation_id, get_logger
+from app.core.observability import describe_exception
 from app.models.audit_log import AuditLog
 from app.models.user import User
 
@@ -221,6 +222,13 @@ class AuditService:
     # this" on every row, through this service, never by a direct write.
     CREDENTIAL_KEY = "credential"
 
+    # ``extra_data`` key under which every row written on a BADGE / employee-ID session
+    # carries how the person was identified: ``["badge"]``, or ``["badge", "pin"]`` once a
+    # floor PIN was verified (AS9100D 8.5.2 / 7.5.3). Read from ``user._auth_methods``,
+    # which ``get_current_user`` copies off the access JWT's ``amr`` claim; absent on a
+    # password session and on an API token, so those rows are unchanged.
+    AUTH_METHODS_KEY = "auth_methods"
+
     def __init__(
         self,
         db: Session,
@@ -239,6 +247,10 @@ class AuditService:
         # Set only when ``get_current_user`` resolved the actor from an API token
         # (``user._api_token_id``); None for every interactive / system actor.
         self._credential = self._resolve_credential(user)
+        # Set only when ``get_current_user`` resolved the actor from a badge-session JWT
+        # (``user._auth_methods``); None for a password session, an API token and every
+        # system actor.
+        self._auth_methods = self._resolve_auth_methods(user)
 
     @staticmethod
     def _resolve_company_id(user: Optional[User], explicit: Optional[int] = None) -> Optional[int]:
@@ -278,11 +290,32 @@ class AuditService:
             "label": getattr(user, "_api_token_label", None),
         }
 
+    @staticmethod
+    def _resolve_auth_methods(user: Optional[User]) -> Optional[List[str]]:
+        """The session's sign-on methods (``amr``), or None for a password / token / system actor."""
+        methods = getattr(user, "_auth_methods", None) if user is not None else None
+        # Only a real list of names ``get_current_user`` set; anything else (unset, empty, a
+        # stand-in object) folds nothing, so a row is never stamped with a made-up method.
+        if not isinstance(methods, (list, tuple)) or not methods:
+            return None
+        if not all(isinstance(method, str) for method in methods):
+            return None
+        return list(methods)
+
     def _with_credential(self, extra_data: Optional[Dict]) -> Optional[Dict]:
-        """Fold the credential marker into a row's ``extra_data`` (the marker always wins the key)."""
-        if self._credential is None:
+        """Fold the credential marker and the sign-on methods into a row's ``extra_data``.
+
+        Each marker always wins its key, and a row whose actor carries neither is returned
+        exactly as given.
+        """
+        if self._credential is None and self._auth_methods is None:
             return extra_data
-        return {**(extra_data or {}), self.CREDENTIAL_KEY: dict(self._credential)}
+        folded = dict(extra_data or {})
+        if self._credential is not None:
+            folded[self.CREDENTIAL_KEY] = dict(self._credential)
+        if self._auth_methods is not None:
+            folded[self.AUTH_METHODS_KEY] = list(self._auth_methods)
+        return folded
 
     def _get_ip_address(self) -> Optional[str]:
         """Extract IP address from request."""
@@ -317,12 +350,16 @@ class AuditService:
         # For SQLAlchemy models or other objects
         return str(value)
 
-    def _model_to_dict(self, model: Any, exclude_fields: set = None) -> Dict:
-        """Convert SQLAlchemy model to dictionary."""
+    # Credential columns no audit row ever carries, whatever a caller passes as
+    # ``exclude_fields``: the password, its hash, and the floor PIN's hash (migration 130).
+    CREDENTIAL_FIELDS = frozenset({"hashed_password", "password", "floor_pin_hash"})
+
+    def _model_to_dict(self, model: Any, exclude_fields: Optional[set] = None) -> Dict:
+        """Convert SQLAlchemy model to dictionary (never a credential column, see ``CREDENTIAL_FIELDS``)."""
         if model is None:
             return {}
 
-        exclude = exclude_fields or {"hashed_password", "password"}
+        exclude = self.CREDENTIAL_FIELDS | set(exclude_fields or ())
 
         if hasattr(model, "__table__"):
             return {
@@ -466,7 +503,7 @@ class AuditService:
             nested.commit()
         except Exception as exc:
             nested.rollback()
-            logger.error(f"Could not resync audit sequence '{_AUDIT_SEQUENCE_NAME}': {exc}")
+            logger.error("Could not resync audit sequence '%s': %s", _AUDIT_SEQUENCE_NAME, describe_exception(exc))
 
     def _get_next_sequence_and_previous_hash(self) -> Tuple[int, Optional[str]]:
         """
@@ -711,10 +748,15 @@ class AuditService:
             # retried above, and the paused-mode ``nextval`` / resync. So do the audit's own
             # Python-side failures (the ``except Exception`` below), including one inside the
             # INSERT savepoint, which is rolled back first.
-            logger.error(f"Failed to create audit log; the database error aborts the transaction: {e}")
+            # The class and SQLSTATE only, never the text: a database error's text can print the
+            # whole failing row (``Failing row contains (...)`` -- on ``users``, the password and
+            # PIN hashes), and a logged line reaches Sentry as a breadcrumb.
+            logger.error(
+                "Failed to create audit log; the database error aborts the transaction: %s", describe_exception(e)
+            )
             raise
         except Exception as e:
-            logger.error(f"Failed to create audit log: {e}")
+            logger.error("Failed to create audit log: %s", describe_exception(e))
             # Don't raise - audit logging should not break the main operation
             return None
 

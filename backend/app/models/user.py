@@ -4,7 +4,7 @@ from typing import Optional
 
 from sqlalchemy import Boolean, Column, DateTime
 from sqlalchemy import Enum as SQLEnum
-from sqlalchemy import ForeignKey, Index, Integer, String, UniqueConstraint
+from sqlalchemy import ForeignKey, Index, Integer, String, UniqueConstraint, false
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
@@ -52,6 +52,23 @@ class User(Base):
     failed_login_attempts = Column(Integer, default=0)
     locked_until = Column(DateTime, nullable=True)
 
+    # Floor PIN (migration 130, AS9100D 8.5.2 / 7.5.3): the second factor on badge /
+    # employee-ID sign-on (``POST /auth/employee-login``, ``POST /auth/kiosk-badge-token``).
+    # ``floor_pin_hash`` is a bcrypt hash made by ``app.core.floor_pin.hash_floor_pin`` and is
+    # never serialized, logged or audited -- the admin schema exposes only ``has_floor_pin``.
+    # The failed-attempt counter and lock are SEPARATE from ``failed_login_attempts`` /
+    # ``locked_until`` above, so a PIN lockout never locks the person's password login.
+    floor_pin_hash = Column(String(255), nullable=True)
+    floor_pin_set_at = Column(DateTime, nullable=True)
+    # Wrong PINs since the last correct PIN or admin unlock / set / clear. CUMULATIVE: a lock
+    # does not reset it, so every 5th starts a longer, always-expiring lock (5 -> 15 minutes ...
+    # 30+ -> 7 days; ``app.core.floor_pin.floor_pin_lock_minutes``).
+    floor_pin_failed_attempts = Column(Integer, nullable=False, default=0, server_default="0")
+    floor_pin_locked_until = Column(DateTime, nullable=True)
+    # Set when a promotion into Admin / Manager / Quality cleared a PIN: badge sign-on is refused
+    # (403 ``floor_pin_reset_required``) until an Admin sets a new PIN or clears the PIN.
+    floor_pin_reset_required = Column(Boolean, nullable=False, default=False, server_default=false())
+
     # Audit fields
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -74,3 +91,8 @@ class User(Base):
     @property
     def company_name(self) -> Optional[str]:
         return self.company.name if self.company else None
+
+    @property
+    def has_floor_pin(self) -> bool:
+        """True when a floor PIN is set (the admin schema's view of ``floor_pin_hash``)."""
+        return bool(self.floor_pin_hash)
