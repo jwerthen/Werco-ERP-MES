@@ -235,16 +235,25 @@ class TestAHeldPmIsStillDue:
         assert (body["schedules_overdue"], body["schedules_due_this_week"]) == (0, 0)
         assert body[tile] == 1  # the PM is on the work order's tile instead -- once
 
-    def test_a_held_work_order_beside_one_being_worked_does_not_double_count(self, client, db_session, headers):
-        """Legacy data can hold two open work orders on one schedule. If one is being worked the
-        PM is represented by it; the held one must not ALSO put the schedule in the count."""
+    def test_a_held_pm_cancelled_and_reopened_is_counted_once(self, client, db_session, headers):
+        """The reachable form of "a held work order beside one being worked". Two OPEN work orders
+        on one schedule can no longer exist (``uq_maintenance_work_orders_open_schedule``, migration
+        132 -- pinned in ``test_maintenance_pm_integrity``), so a held PM is replaced by cancelling
+        it and opening the next one. The schedule is then represented by the new work order being
+        worked, once; the cancelled one puts nothing back in the schedule count."""
         today = company_today(db_session, 1)
         schedule = make_schedule(db_session, next_due=today - timedelta(days=2))
-        make_raw_wo(db_session, company_id=1, schedule_id=schedule.id, status=MaintenanceStatus.ON_HOLD)
-        make_raw_wo(db_session, company_id=1, schedule_id=schedule.id, status=MaintenanceStatus.IN_PROGRESS)
+        held = make_raw_wo(db_session, company_id=1, schedule_id=schedule.id, status=MaintenanceStatus.ON_HOLD)
+        assert dashboard(client, headers)["schedules_overdue"] == 1  # the held PM is still due
+
+        cancelled = client.put(f"{WORK_ORDERS}/{held.id}", headers=headers, json={"status": "cancelled"})
+        assert cancelled.status_code == 200, cancelled.text
+        reopened = start_pm(client, headers, schedule.id)
+        assert reopened.status_code == 200, reopened.text
+        assert client.post(f"{WORK_ORDERS}/{reopened.json()['id']}/start", headers=headers).status_code == 200
 
         body = dashboard(client, headers)
-        assert (body["schedules_overdue"], body["in_progress"]) == (0, 1)
+        assert (body["schedules_overdue"], body["schedules_due_this_week"], body["in_progress"]) == (0, 0, 1)
 
     def test_another_companys_held_work_order_changes_nothing_here(self, client, db_session, headers):
         """Company 2's in-progress row naming company 1's schedule never covers it (pinned in

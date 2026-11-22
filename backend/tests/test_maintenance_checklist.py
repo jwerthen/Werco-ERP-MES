@@ -13,7 +13,10 @@ import pytest
 
 from app.services.maintenance_checklist import (
     ChecklistEntry,
+    checklist_item_key,
     describe_items,
+    normalize_checklist_item,
+    parse_checklist,
     parse_checklist_results,
     removed_checklist_items,
     removed_items,
@@ -56,8 +59,9 @@ class TestParseChecklistResults:
 
     def test_a_lone_carriage_return_does_not_split_a_line(self):
         """Lines split on ``\\r?\\n`` exactly, like the page's ``/\\r?\\n/``. ``str.splitlines``
-        would also split here, and the server would count two items the dialog shows as one."""
-        assert parse_checklist_results("Drain tank\rCheck belt") == [ChecklistEntry("Drain tank\rCheck belt", False)]
+        would also split here, and the server would count two items the dialog shows as one. The lone
+        ``\\r`` is whitespace, so the normalizer collapses it to one space: still ONE item."""
+        assert parse_checklist_results("Drain tank\rCheck belt") == [ChecklistEntry("Drain tank Check belt", False)]
 
     @pytest.mark.parametrize(
         "raw",
@@ -152,11 +156,18 @@ class TestUntickedChecklistItems:
         stored_strings = json.dumps(["Drain tank", "Check belt"])
         assert unticked_checklist_items(stored_strings, checklist(("Drain tank", True))) == (["Check belt"], 2)
 
-    def test_matching_is_case_sensitive_text(self):
-        """Items are matched by their text: a renamed item is a different item, so the old one is
-        dropped (unticked) and the new one counts on its own."""
+    def test_matching_ignores_case(self):
+        """Owner decision 2026-11-20: items match on their normalized text CASE-INSENSITIVELY, so
+        "drain tank" ticks "Drain tank" -- one item, ticked."""
         stored = checklist(("Drain tank", False))
         completed = checklist(("drain tank", True))
+        assert unticked_checklist_items(stored, completed) == ([], 1)
+
+    def test_a_real_rename_is_still_a_different_item(self):
+        """Case and spacing are not a rename; different words are: the old item is dropped
+        (unticked) and the new one counts on its own."""
+        stored = checklist(("Drain tank", False))
+        completed = checklist(("Drain tanks", True))
         assert unticked_checklist_items(stored, completed) == (["Drain tank"], 2)
 
 
@@ -257,3 +268,125 @@ class TestRemovedItemsAndDescribe:
     def test_describe_items_summarizes_a_long_list(self):
         assert describe_items(["a", "b"]) == "a; b"
         assert describe_items([str(n) for n in range(12)], limit=10) == "0; 1; 2; 3; 4; 5; 6; 7; 8; 9; and 2 more"
+
+
+class TestItemsAreNormalizedOnEveryRead:
+    """Owner decision 2026-11-20: every reader normalizes item text (whitespace runs, leading bullets)
+    and items MATCH case-insensitively, keeping the first spelling for display. Spelling, never
+    meaning. The per-string contract is the shared fixture (test_maintenance_checklist_normalization_
+    parity); these pin what the readers and matchers do with it."""
+
+    def test_the_schedule_reader_agrees_across_json_objects_and_lines(self):
+        expected = ["Check oil", "Grease bearing", "1. Drain tank", "-40 F cold start"]
+        as_strings = json.dumps(["- Check oil", "Grease\u00a0 bearing", "1. Drain tank", "-40 F cold start"])
+        as_objects = json.dumps(
+            [
+                {"item": "\u2022 Check oil"},
+                {"task": "Grease  bearing"},
+                {"name": "1. Drain tank"},
+                {"text": "-40 F cold start"},
+            ]
+        )
+        as_lines = "- Check oil\r\n  Grease\tbearing\n\n* 1. Drain tank\n-40 F cold start\n"
+        assert parse_checklist(as_strings) == parse_checklist(as_objects) == parse_checklist(as_lines) == expected
+
+    def test_the_work_order_reader_agrees_with_the_schedule_reader(self):
+        raw = json.dumps([{"item": "- Check  oil", "done": True}, "\u2022 Grease bearing"])
+        assert parse_checklist_results(raw) == [
+            ChecklistEntry("Check oil", True),
+            ChecklistEntry("Grease bearing", False),
+        ]
+        assert [
+            entry.item for entry in parse_checklist_results("- Check  oil\n\u2022 Grease bearing")
+        ] == parse_checklist("- Check  oil\n\u2022 Grease bearing")
+
+    @pytest.mark.parametrize(
+        "raw,item",
+        [
+            ("1. Check oil", "1. Check oil"),
+            ("2) Grease bearing", "2) Grease bearing"),
+            ("-40 F cold start", "-40 F cold start"),
+            ("- -40 F cold start", "-40 F cold start"),
+            ("Check oil - both sides", "Check oil - both sides"),
+        ],
+    )
+    def test_numbering_and_a_signed_number_are_kept(self, raw, item):
+        assert normalize_checklist_item(raw) == item
+        assert parse_checklist(json.dumps([raw])) == [item]
+        assert [entry.item for entry in parse_checklist_results(json.dumps([raw]))] == [item]
+
+    def test_case_is_kept_for_display_and_ignored_for_matching(self):
+        assert normalize_checklist_item("CHECK OIL") == "CHECK OIL"
+        assert checklist_item_key("CHECK OIL") == checklist_item_key("- check  oil") == "check oil"
+
+    def test_a_case_and_spacing_variant_ticks_the_step(self):
+        stored = checklist(("Check Oil", False))
+        completed = checklist(("- check  OIL", True))
+        assert unticked_checklist_items(stored, completed) == ([], 1)
+        assert unticked_checklist_items(None, completed, ["\u2022 CHECK oil"]) == ([], 1)
+
+    def test_the_multiset_holds_after_normalization(self):
+        """Two copies of one step, spelled two ways, one ticked: still one unticked copy."""
+        completed = checklist(("Grease bearing", True), ("- grease  BEARING", False))
+        assert unticked_checklist_items(completed, completed) == (["Grease bearing"], 2)
+        assert unticked_checklist_items(
+            None, checklist(("grease bearing", True)), ["Grease bearing", "GREASE BEARING"]
+        ) == (
+            ["grease bearing"],
+            2,
+        )
+
+    def test_the_first_spelling_met_is_the_one_displayed(self):
+        """The completed checklist's spelling, then the stored one's, then the required list's."""
+        assert unticked_checklist_items(checklist(("CHECK OIL", False)), None, ["check oil"]) == (["CHECK OIL"], 1)
+        assert unticked_checklist_items(
+            checklist(("CHECK OIL", False)), checklist(("Check Oil", False)), ["check oil"]
+        ) == (["Check Oil"], 1)
+        assert unticked_checklist_items(None, None, ["- check  oil", "CHECK OIL"]) == (["check oil", "check oil"], 2)
+
+    def test_removed_items_ignores_spacing_bullets_and_case(self):
+        before = ["Check oil", "Grease bearing", "Drain tank"]
+        assert removed_items(before, ["- check  OIL", "\u2022 GREASE bearing", "drain\u00a0tank"]) == []
+        # A real removal is still one, named as it was spelled before.
+        assert removed_items(before, ["CHECK OIL", "grease bearing"]) == ["Drain tank"]
+        # ...and the multiset still counts copies.
+        assert removed_items(["Grease bearing", "Grease bearing"], ["GREASE  BEARING"]) == ["Grease bearing"]
+
+    def test_removed_checklist_items_ignores_spacing_bullets_and_case(self):
+        stored = checklist(("Check oil", False), ("Grease bearing", True))
+        assert removed_checklist_items(stored, checklist(("- CHECK  oil", True), ("grease bearing", False))) == []
+
+    def test_a_legacy_stored_row_matches_as_it_is(self):
+        """Rows stored before normalization (stray spacing, bullets, other case) are read through the
+        normalizer: they match the normalized steps with no rewrite of the stored text."""
+        legacy_schedule = "  - Check   oil \n\u2022Grease bearing\n"
+        legacy_work_order = json.dumps(
+            [{"item": "  check OIL ", "done": True}, {"item": "* grease bearing", "done": True}]
+        )
+        assert unticked_checklist_items(legacy_work_order, legacy_work_order, parse_checklist(legacy_schedule)) == (
+            [],
+            2,
+        )
+        assert removed_items(parse_checklist(legacy_schedule), ["Check oil", "Grease bearing"]) == []
+
+
+class TestWholeChecklistEdgesAndLineBreaks:
+    """Parser-level rules the item fixture cannot reach (the page's twin strips the same edges)."""
+
+    def test_a_leading_byte_order_mark_does_not_turn_json_into_one_line(self):
+        raw = '﻿[{"item": "Check oil", "done": true}]\u0085'
+        assert parse_checklist_results(raw) == [ChecklistEntry("Check oil", True)]
+
+    def test_a_schedule_checklist_still_splits_on_every_line_separator(self):
+        assert parse_checklist("Check oil\rGrease bearing Drain tank") == [
+            "Check oil",
+            "Grease bearing",
+            "Drain tank",
+        ]
+
+    def test_a_dash_or_star_written_against_a_word_keeps_its_meaning(self):
+        assert parse_checklist('["-X axis limit", "- Y axis limit", "*CRITICAL* torque"]') == [
+            "-X axis limit",
+            "Y axis limit",
+            "*CRITICAL* torque",
+        ]

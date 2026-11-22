@@ -74,6 +74,7 @@ from app.models.maintenance import (
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.services.company_time import company_today
+from app.services.maintenance_interval import add_months
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 
@@ -486,7 +487,7 @@ def test_complete_still_advances_the_callers_own_schedule(client: TestClient, db
     completion_day = company_today(db_session, COMPANY_B)
     stored = fresh(db_session, MaintenanceSchedule, own_schedule.id)
     assert stored.last_completed_date == completion_day
-    assert stored.next_due_date == completion_day + timedelta(days=30)
+    assert stored.next_due_date == add_months(completion_day, 1)  # monthly: one calendar month
 
 
 # ===========================================================================

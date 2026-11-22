@@ -1,3 +1,5 @@
+import json
+import re
 from datetime import date, datetime, timedelta
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
@@ -13,8 +15,10 @@ from app.api.deps import get_audit_service, get_current_company_id, get_current_
 from app.core.credentials import is_api_token_credential
 from app.core.time_utils import local_today, to_utc_iso
 from app.db.database import get_db
+from app.db.locks import acquire_generator_lock
 from app.models.maintenance import (
-    FREQUENCY_DAYS_MAP,
+    OPEN_MAINTENANCE_STATUSES,
+    OPEN_SCHEDULE_WORK_ORDER_INDEX,
     MaintenanceAsset,
     MaintenanceFrequency,
     MaintenanceLog,
@@ -41,11 +45,13 @@ from app.services.maintenance_checklist import (
     API_TOKEN_INCOMPLETE_CHECKLIST,
     API_TOKEN_SCHEDULE_CHECKLIST_REMOVAL,
     describe_items,
+    parse_checklist,
     removed_checklist_items,
     removed_items,
     unticked_checklist_items,
 )
-from app.services.maintenance_schedule_import_service import commit_pm_import, parse_checklist, preview_pm_import
+from app.services.maintenance_interval import next_due_date
+from app.services.maintenance_schedule_import_service import commit_pm_import, preview_pm_import
 
 router = APIRouter()
 
@@ -64,13 +70,9 @@ _PERFORMING_ROLES = [UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR, User
 
 # A maintenance work order in one of these is over: any downtime it holds open is settled.
 _TERMINAL_STATUSES = (MaintenanceStatus.COMPLETED, MaintenanceStatus.CANCELLED)
-# ...and in one of these it is still open: its PM schedule takes no second one until it ends.
-_OPEN_STATUSES = (
-    MaintenanceStatus.SCHEDULED,
-    MaintenanceStatus.OVERDUE,
-    MaintenanceStatus.IN_PROGRESS,
-    MaintenanceStatus.ON_HOLD,
-)
+# ...and in one of these it is still open: its PM schedule takes no second one until it ends (the
+# partial unique index ``uq_maintenance_work_orders_open_schedule`` holds the same set, migration 132).
+_OPEN_STATUSES = OPEN_MAINTENANCE_STATUSES
 # ...and in one of these its PM is represented on a dashboard tile by the work order itself
 # (overdue / due this week by the work order's due date, or in progress). An ON-HOLD work order
 # is on no work-order tile, so its schedule keeps counting by the schedule's own due date: a held
@@ -229,7 +231,23 @@ class WorkOrderComplete(BaseModel):
     # checklist_results it is sent and never copies one); a value -- or an explicit null -- replaces it.
     checklist_results: Optional[str] = None
     findings: Optional[str] = None
-    notes: Optional[str] = None
+    # Same rule (owner decision 2026-11-20: completion notes REPLACE): omitted keeps the notes the work
+    # order already carries (a planner's, written by PUT), a value replaces them, an explicit null
+    # clears them. A change is recorded, old and new, in the completion's audit row.
+    notes: Optional[str] = Field(
+        None,
+        description=(
+            "Replaces the work order's notes. Omit to keep the notes it already carries; send null (or blank "
+            "text) to clear them. A change is recorded (old and new) in the completion's audit row."
+        ),
+    )
+
+    @field_validator("notes")
+    @classmethod
+    def _blank_notes_clear(cls, value: Optional[str]) -> Optional[str]:
+        # Blank text is "no notes", stored as NULL, not as an empty string.
+        return value if value is None or value.strip() else None
+
     parts_used: Optional[str] = None
     labor_cost: float = 0
     parts_cost: float = 0
@@ -321,7 +339,9 @@ def _schedule_or_404(db: Session, schedule_id: int, company_id: int, *, for_upda
         MaintenanceSchedule.id == schedule_id, MaintenanceSchedule.company_id == company_id
     )
     if for_update:
-        query = query.with_for_update()
+        # ``populate_existing``: the locked read must be the row as it is now, not a copy an earlier
+        # read left in the session (the snapshot and the schedule edit's ``old_values`` read it).
+        query = query.with_for_update().populate_existing()
     schedule = query.first()
     if not schedule:
         raise HTTPException(status_code=404, detail="Schedule not found")
@@ -343,52 +363,62 @@ def _wo_or_404(db: Session, wo_id: int, company_id: int, *, for_update: bool = F
     return wo
 
 
-def _open_work_order_for_schedule(db: Session, company_id: int, schedule_id: int) -> Optional[MaintenanceWorkOrder]:
+def _open_work_order_for_schedule(
+    db: Session, company_id: int, schedule_id: int, *, judging_live_checklist: bool = False
+) -> Optional[MaintenanceWorkOrder]:
     """The schedule's open maintenance work order (scheduled / overdue / in progress / on hold),
-    tenant-scoped; the oldest when legacy data holds more than one. A completed or cancelled work
+    tenant-scoped; the oldest if legacy data holds more than one (migration 132 refuses to install
+    its unique index over such data, so none survives an upgrade). A completed or cancelled work
     order -- the module's terminal records; maintenance work orders have no soft delete -- never
-    counts."""
-    return (
-        db.query(MaintenanceWorkOrder)
-        .filter(
-            MaintenanceWorkOrder.company_id == company_id,
-            MaintenanceWorkOrder.schedule_id == schedule_id,
-            MaintenanceWorkOrder.status.in_(_OPEN_STATUSES),
-        )
-        .order_by(MaintenanceWorkOrder.id)
-        .first()
+    counts.
+
+    ``judging_live_checklist`` narrows it to an open work order with NO checklist snapshot: one
+    opened before migration 132, which completion still judges on the schedule's CURRENT checklist,
+    so an edit to the schedule's steps changes what it must tick."""
+    query = db.query(MaintenanceWorkOrder).filter(
+        MaintenanceWorkOrder.company_id == company_id,
+        MaintenanceWorkOrder.schedule_id == schedule_id,
+        MaintenanceWorkOrder.status.in_(_OPEN_STATUSES),
     )
+    if judging_live_checklist:
+        query = query.filter(MaintenanceWorkOrder.schedule_checklist_snapshot.is_(None))
+    return query.order_by(MaintenanceWorkOrder.id).first()
 
 
-def _generate_wo_number(db: Session) -> str:
-    """Allocate the next MWO number.
+_WO_NUMBER_LOCK = "maintenance_work_order_number"
+# ASCII digits only: ``str.isdigit`` also accepts e.g. a superscript two, which ``int`` then refuses.
+_WO_NUMBER_SUFFIX = re.compile(r"[0-9]+")
+# The unique constraints a new maintenance work order can hit (the partial index's name on PostgreSQL;
+# SQLite names the columns instead).
+_OPEN_SCHEDULE_CONFLICT_MARKERS = (OPEN_SCHEDULE_WORK_ORDER_INDEX, "maintenance_work_orders.schedule_id")
+_WO_NUMBER_CONFLICT_MARKERS = ("maintenance_work_orders_wo_number", "maintenance_work_orders.wo_number")
+
+
+def _generate_wo_number(db: Session, year: int) -> str:
+    """Allocate the next MWO number for ``year`` -- the COMPANY's calendar year (the caller passes
+    ``company_today(...).year``), so a work order opened on the evening of Dec 31 in Central time is
+    numbered in the year it was opened, not the server's UTC year.
 
     This scan is deliberately NOT tenant-scoped: ``MaintenanceWorkOrder.wo_number``
     carries a GLOBAL unique constraint, so a per-tenant sequence would hand two
     companies the same number and the second insert would fail. It reads only the
-    highest number, never any other tenant's row content.
+    numbers, never any other tenant's row content. For the same reason the allocation is
+    serialized install-wide (a transaction-scoped advisory lock on PostgreSQL, released at the
+    commit): two simultaneous creates would otherwise read the same highest number and the second
+    insert would fail the unique constraint. Lock order: the PM schedule's row lock (taken first
+    by ``create_work_order``), then this lock, then the audit chain.
+
+    The next number follows the highest NUMERIC suffix of the year; a legacy number whose suffix is
+    not a number is skipped (it used to restart the sequence at 0001, colliding with the first).
     """
-    year = datetime.utcnow().year
+    acquire_generator_lock(db, _WO_NUMBER_LOCK)
     prefix = f"MWO-{year}-"
-    last = (
-        db.query(MaintenanceWorkOrder)
-        .filter(MaintenanceWorkOrder.wo_number.like(f"{prefix}%"))
-        .order_by(MaintenanceWorkOrder.id.desc())
-        .first()
-    )
-    if last:
-        try:
-            seq = int(last.wo_number.split("-")[-1]) + 1
-        except ValueError:
-            seq = 1
-    else:
-        seq = 1
-    return f"{prefix}{seq:04d}"
-
-
-def _calc_next_due(frequency: MaintenanceFrequency, frequency_days: Optional[int], from_date: date) -> date:
-    days = FREQUENCY_DAYS_MAP.get(frequency, frequency_days or 30)
-    return from_date + timedelta(days=days)
+    highest = 0
+    for (number,) in db.query(MaintenanceWorkOrder.wo_number).filter(MaintenanceWorkOrder.wo_number.like(f"{prefix}%")):
+        suffix = number[len(prefix) :]
+        if _WO_NUMBER_SUFFIX.fullmatch(suffix):
+            highest = max(highest, int(suffix))
+    return f"{prefix}{highest + 1:04d}"
 
 
 def _same_tenant(row: Any, related: Any) -> Any:
@@ -469,9 +499,34 @@ def _serialize_schedule(s: MaintenanceSchedule) -> dict:
     }
 
 
-def _schedule_checklist_items(wo: MaintenanceWorkOrder) -> List[str]:
-    """The tenant-guarded PM schedule's checklist items (``[]`` without a schedule)."""
-    schedule = _same_tenant(wo, wo.schedule) if wo.schedule_id is not None else None
+def _open_work_order_conflict(schedule_name: str, open_wo: MaintenanceWorkOrder) -> HTTPException:
+    """The 409 for a second open work order on one PM schedule (the check under the schedule's row
+    lock and the database backstop answer the same)."""
+    return HTTPException(
+        status_code=409,
+        detail=(
+            f"PM schedule '{schedule_name}' already has an open maintenance work order, "
+            f"{open_wo.wo_number} ({MaintenanceStatus(open_wo.status).value.replace('_', ' ')}). "
+            "Complete or cancel it before opening another."
+        ),
+    )
+
+
+def _schedule_checklist_items(wo: MaintenanceWorkOrder, schedule: Optional[MaintenanceSchedule] = None) -> List[str]:
+    """The PM schedule steps this work order answers for (``[]`` without a schedule) -- the ONE
+    choice every read and completion's judgment make, so the two cannot disagree.
+
+    The snapshot taken when the work order was opened (migration 132), so a later schedule edit or
+    PM import never changes what an open work order is judged on, nor what a finished one reports.
+    A work order opened before migration 132 has no snapshot and reads the tenant-guarded
+    schedule's CURRENT checklist, as every work order did before, until ``/complete`` (or a cancel)
+    writes the steps it answered for (a known limitation for those completed or cancelled before
+    then: never backfilled). ``schedule`` is that schedule already resolved -- row-locked and
+    tenant-scoped -- by a caller that holds it; otherwise the relationship is read, tenant-guarded."""
+    if wo.schedule_checklist_snapshot is not None:
+        return parse_checklist(wo.schedule_checklist_snapshot)
+    if schedule is None and wo.schedule_id is not None:
+        schedule = _same_tenant(wo, wo.schedule)
     return parse_checklist(schedule.checklist) if schedule is not None else []
 
 
@@ -487,9 +542,10 @@ def _serialize_wo(wo: MaintenanceWorkOrder) -> dict:
         "title": wo.title,
         "description": wo.description,
         "checklist_results": wo.checklist_results,
-        # The PM schedule's checklist, which completion also judges (a step the work order no longer
-        # carries still needs a tick or a reason). Read whether or not the schedule is still active,
-        # exactly as completion reads it, so the Complete dialog lists the same steps the server will.
+        # The PM schedule's checklist as snapshotted when the work order was opened (the live one for
+        # a pre-132 work order), which completion also judges (a step the work order no longer carries
+        # still needs a tick or a reason) -- exactly as completion reads it, so the Complete dialog
+        # lists the same steps the server will.
         "schedule_checklist_items": _schedule_checklist_items(wo),
         "scheduled_date": wo.scheduled_date.isoformat() if wo.scheduled_date else None,
         "due_date": wo.due_date.isoformat() if wo.due_date else None,
@@ -596,7 +652,13 @@ def preview_pm_schedule_import(
     ``source_hash``, which the commit must echo back."""
     content = _read_upload(file)
     try:
-        return preview_pm_import(db, company_id=company_id, filename=file.filename, content=content)
+        return preview_pm_import(
+            db,
+            company_id=company_id,
+            filename=file.filename,
+            content=content,
+            api_token=is_api_token_credential(current_user),
+        )
     except ImportFileError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -619,7 +681,13 @@ def commit_pm_schedule_import(
     ``expected_source_hash`` is the preview's ``source_hash`` (409 if the file differs).
     ALL-OR-NOTHING: any row error refuses 409 with the row errors and writes nothing. Each
     created asset and each created / updated schedule writes a required audit row, plus one
-    summary row; a re-run of the same sheet changes nothing and writes no audit row."""
+    summary row; a re-run of the same sheet changes nothing and writes no audit row.
+
+    A changed checklist binds each schedule's NEXT work order: an open one keeps the checklist it was
+    opened with (a row warning names it). An open work order opened before checklist snapshots
+    existed is judged on the schedule's current checklist, so the warning says the import changes
+    its steps, and a standing API token whose import takes steps away from such a schedule gets a
+    row error (so the commit is 409)."""
     content = _read_upload(file)
     try:
         with required_audit(db, "The audit record for the PM schedule import could not be saved; nothing was changed."):
@@ -630,6 +698,7 @@ def commit_pm_schedule_import(
                 content=content,
                 expected_source_hash=expected_source_hash,
                 audit=audit,
+                api_token=is_api_token_credential(current_user),
             )
             db.commit()
     except ImportFileError as exc:
@@ -711,18 +780,23 @@ def update_schedule(
     audit: AuditService = Depends(get_audit_service),
 ):
     """Update a PM schedule (enum fields 422 on an unknown value; a schedule left on
-    ``custom`` must carry ``frequency_days``). The target is not changed here. A standing API token
-    that takes items off ``checklist`` while the schedule has an open work order is **403**."""
-    schedule = _schedule_or_404(db, schedule_id, company_id)
+    ``custom`` must carry ``frequency_days``). The target is not changed here. A changed ``checklist``
+    binds the NEXT work order: an open one keeps the steps it was opened with. The exception is an
+    open work order opened before checklist snapshots existed (migration 132), which is still judged
+    on the schedule's current steps -- a standing API token that takes items off ``checklist`` while
+    the schedule has such a work order is **403**."""
+    # Row-locked (a no-op on SQLite), like completion's roll-forward and Start PM: the audit row's
+    # ``old_values`` then cannot predate a concurrent completion that moved the due dates.
+    schedule = _schedule_or_404(db, schedule_id, company_id, for_update=True)
 
     update_data = data.model_dump(exclude_unset=True)
     if (
         "checklist" in update_data
         and is_api_token_credential(current_user)
         and removed_items(parse_checklist(schedule.checklist), parse_checklist(update_data["checklist"]))
-        and _open_work_order_for_schedule(db, company_id, schedule.id) is not None
+        and _open_work_order_for_schedule(db, company_id, schedule.id, judging_live_checklist=True) is not None
     ):
-        # Completion judges the schedule's steps: emptying them under an open work order is a skip.
+        # That work order is judged on the schedule's live steps: emptying them under it is a skip.
         raise HTTPException(status_code=403, detail=API_TOKEN_SCHEDULE_CHECKLIST_REMOVAL)
     frequency = update_data.get("frequency", schedule.frequency)
     frequency_days = update_data["frequency_days"] if "frequency_days" in update_data else schedule.frequency_days
@@ -889,7 +963,12 @@ def create_work_order(
     ONE open work order at a time: while one is scheduled, overdue, in progress or on hold, a
     second with the same ``schedule_id`` is **409** naming it (a completed or cancelled one does
     not count). ``requires_shutdown`` on a WORK-CENTER work order means starting it records
-    machine downtime (an asset never does). Defaulted dates are the company's day."""
+    machine downtime (an asset never does). Defaulted dates are the company's day, and the
+    ``wo_number`` year is the company's calendar year.
+
+    A PM work order snapshots its schedule's checklist as it stands now: completion judges those
+    steps (and every response serves them as ``schedule_checklist_items``), so a later edit or import
+    of the schedule's checklist binds the next work order, not this one."""
     # A foreign schedule_id would otherwise be accepted verbatim, and
     # complete_work_order writes last_completed_date / next_due_date straight
     # onto whatever schedule it points at -- a cross-tenant write laundered
@@ -921,17 +1000,10 @@ def create_work_order(
         if open_wo is not None:
             # Two open work orders on one PM: completing either advances the schedule, so the
             # other would be performed (or reported overdue) against a due date it no longer has.
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"PM schedule '{schedule.name}' already has an open maintenance work order, "
-                    f"{open_wo.wo_number} ({MaintenanceStatus(open_wo.status).value.replace('_', ' ')}). "
-                    "Complete or cancel it before opening another."
-                ),
-            )
+            raise _open_work_order_conflict(schedule.name, open_wo)
 
     today = company_today(db, company_id)
-    wo_number = _generate_wo_number(db)
+    wo_number = _generate_wo_number(db, today.year)
 
     wo = MaintenanceWorkOrder(
         schedule_id=data.schedule_id,
@@ -944,6 +1016,9 @@ def create_work_order(
         title=data.title,
         description=data.description,
         checklist_results=data.checklist_results,
+        # Read under the schedule's row lock, so it is the checklist no concurrent edit or import
+        # changed between this read and the commit.
+        schedule_checklist_snapshot=json.dumps(parse_checklist(schedule.checklist)) if schedule is not None else None,
         scheduled_date=data.scheduled_date or today,
         due_date=data.due_date or data.scheduled_date or today,
         requires_shutdown=data.requires_shutdown,
@@ -951,7 +1026,32 @@ def create_work_order(
     )
     wo.company_id = company_id
     db.add(wo)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        # The database backstop (``uq_maintenance_work_orders_open_schedule``) for the open-work-order
+        # rule checked above: on PostgreSQL the schedule's row lock makes that check authoritative,
+        # so this fires only for a writer that skipped it. Same 409 as the check. A ``wo_number``
+        # collision (the advisory lock makes one impossible on PostgreSQL) is a retryable 409; any
+        # other violation -- an unknown ``assigned_to`` -- is not a conflict and is re-raised.
+        message = str(getattr(exc, "orig", exc))
+        open_schedule_conflict = any(marker in message for marker in _OPEN_SCHEDULE_CONFLICT_MARKERS)
+        if not open_schedule_conflict and not any(marker in message for marker in _WO_NUMBER_CONFLICT_MARKERS):
+            raise
+        db.rollback()
+        open_wo = (
+            _open_work_order_for_schedule(db, company_id, data.schedule_id)
+            if open_schedule_conflict and data.schedule_id is not None
+            else None
+        )
+        if open_wo is not None:
+            name = open_wo.schedule.name if open_wo.schedule is not None else str(data.schedule_id)
+            raise _open_work_order_conflict(name, open_wo) from exc
+        raise HTTPException(
+            status_code=409,
+            detail="The maintenance work order could not be saved because another one was saved at the same time. "
+            "Nothing was changed; try again.",
+        ) from exc
     audit.log_create("maintenance_work_order", wo.id, wo.wo_number, new_values=wo)
     db.commit()
     db.refresh(wo)
@@ -1105,10 +1205,30 @@ def update_work_order(
     ):
         # Else a token could PUT the unticked steps away and then complete without a person's reason.
         raise HTTPException(status_code=403, detail=API_TOKEN_CHECKLIST_REMOVAL)
+    # Cancelling a work order opened before migration 132 (no checklist snapshot) freezes the schedule
+    # steps it answered for, so the final record stops following later schedule edits -- as completing
+    # one does. The schedule row is locked after the work order (completion's order) and before any
+    # audit row (the downtime settlement below writes some).
+    freeze_schedule: Optional[MaintenanceSchedule] = None
+    if (
+        update_data.get("status") == MaintenanceStatus.CANCELLED
+        and wo.schedule_checklist_snapshot is None
+        and wo.schedule_id is not None
+    ):
+        freeze_schedule = (
+            db.query(MaintenanceSchedule)
+            .filter(MaintenanceSchedule.id == wo.schedule_id, MaintenanceSchedule.company_id == company_id)
+            .with_for_update()
+            .populate_existing()
+            .first()
+        )
     old_values = {c.key: getattr(wo, c.key) for c in wo.__table__.columns}
 
     for field, value in update_data.items():
         setattr(wo, field, value)
+    if freeze_schedule is not None:
+        # Recorded by the ``log_update`` below (NULL -> the steps).
+        wo.schedule_checklist_snapshot = json.dumps(_schedule_checklist_items(wo, freeze_schedule))
 
     # Open until now (a final record returned above): a move to cancelled settles its downtime.
     if wo.status in _TERMINAL_STATUSES:
@@ -1250,12 +1370,15 @@ def complete_work_order(
         data.checklist_results if "checklist_results" in data.model_fields_set else wo.checklist_results
     )
     # A PM work order also answers for its schedule's checklist: a step dropped from the work order
-    # (at Start PM, or by a PUT) is still a step of the PM.
-    unticked, checklist_total = unticked_checklist_items(
-        wo.checklist_results,
-        completed_checklist,
-        parse_checklist(schedule.checklist) if schedule is not None else (),
+    # (at Start PM, or by a PUT) is still a step of the PM. The steps as snapshotted when the work
+    # order was opened (a work order opened before migration 132 reads the locked schedule's current
+    # ones, as it always did). With no in-tenant schedule, a legacy row answers for none.
+    schedule_steps = (
+        _schedule_checklist_items(wo, schedule)
+        if wo.schedule_checklist_snapshot is not None or schedule is not None
+        else []
     )
+    unticked, checklist_total = unticked_checklist_items(wo.checklist_results, completed_checklist, schedule_steps)
     checklist_reason = (data.incomplete_checklist_reason or "").strip()
     if unticked and is_api_token_credential(current_user):
         # Whatever reason it sends: only a person records why PM steps were skipped.
@@ -1274,13 +1397,23 @@ def complete_work_order(
     # The company's calendar day at the same instant as ``completed_at``.
     today = local_today(company_zone(db, company_id), now)
     old_status = wo.status.value if hasattr(wo.status, "value") else wo.status
+    old_notes = wo.notes
     wo.status = MaintenanceStatus.COMPLETED
     wo.completed_at = now
     wo.completed_by = current_user.id
     if "checklist_results" in data.model_fields_set:
         wo.checklist_results = data.checklist_results
     wo.findings = data.findings
-    wo.notes = data.notes
+    snapshot_written_at_completion = wo.schedule_checklist_snapshot is None and schedule is not None
+    if snapshot_written_at_completion:
+        # A work order opened before migration 132: freeze the schedule steps this completion judged,
+        # so the finished record stops following later schedule edits from here on.
+        wo.schedule_checklist_snapshot = json.dumps(schedule_steps)
+    if "notes" in data.model_fields_set:
+        # Replace (or, with an explicit null, clear); omitted keeps the planner's notes. The text it
+        # replaces is kept in the completion's audit row below.
+        wo.notes = data.notes
+    notes_changed = wo.notes != old_notes
     wo.parts_used = data.parts_used
     wo.labor_cost = data.labor_cost
     wo.parts_cost = data.parts_cost
@@ -1318,7 +1451,7 @@ def complete_work_order(
             "next_due_date": schedule.next_due_date,
         }
         schedule.last_completed_date = today
-        schedule.next_due_date = _calc_next_due(schedule.frequency, schedule.frequency_days, today)
+        schedule.next_due_date = next_due_date(schedule.frequency, schedule.frequency_days, today)
         advanced = schedule
         # Computed once, before the commit: the response must report the date THIS completion
         # wrote, not whatever a re-read after commit finds.
@@ -1346,6 +1479,12 @@ def complete_work_order(
     )
     db.add(log)
     db.flush()
+    status_old_values: Dict[str, Any] = {"status": old_status}
+    status_new_values: Dict[str, Any] = {"status": MaintenanceStatus.COMPLETED.value}
+    if notes_changed:
+        # The notes this completion replaced survive only here.
+        status_old_values["notes"] = old_notes
+        status_new_values["notes"] = wo.notes
     completion_extra: Dict[str, Any] = {
         "total_cost": wo.total_cost,
         "downtime_minutes": wo.downtime_minutes,
@@ -1354,9 +1493,13 @@ def complete_work_order(
         "schedule_next_due_date": advanced_due,
         "resolved_downtime_event_ids": [event.id for event in resolved],
     }
+    if snapshot_written_at_completion:
+        completion_extra["schedule_checklist_snapshot"] = schedule_steps
+    status_description = (
+        f"Changed maintenance_work_order status: {wo.wo_number} from '{old_status}' to "
+        f"'{MaintenanceStatus.COMPLETED.value}'"
+    )
     if unticked:
-        # A completion with part of its checklist undone: the reason is the only record of WHY,
-        # so the row is required evidence -- if it cannot be written, nothing is saved (503).
         completion_extra.update(
             {
                 "checklist_item_count": checklist_total,
@@ -1364,6 +1507,12 @@ def complete_work_order(
                 "incomplete_checklist_reason": checklist_reason,
             }
         )
+        status_description += f" with {len(unticked)} of {checklist_total} checklist items not ticked"
+    # Required evidence -- if it cannot be written, nothing is saved (503) -- when it is the only record
+    # of something: WHY part of the checklist was left undone, or notes this completion replaced or
+    # cleared (their text survives nowhere else).
+    replaced_notes = notes_changed and bool(old_notes)
+    if unticked or replaced_notes:
         with required_audit(
             db,
             f"The audit record for completing maintenance work order {wo.wo_number} could not be saved; "
@@ -1374,22 +1523,21 @@ def complete_work_order(
                 "maintenance_work_order",
                 resource_id=wo.id,
                 resource_identifier=wo.wo_number,
-                description=(
-                    f"Changed maintenance_work_order status: {wo.wo_number} from '{old_status}' to "
-                    f"'{MaintenanceStatus.COMPLETED.value}' with {len(unticked)} of {checklist_total} "
-                    "checklist items not ticked"
-                ),
-                old_values={"status": old_status},
-                new_values={"status": MaintenanceStatus.COMPLETED.value},
+                description=status_description,
+                old_values=status_old_values,
+                new_values=status_new_values,
                 extra_data=completion_extra,
             )
     else:
-        audit.log_status_change(
-            "maintenance_work_order",
-            wo.id,
-            wo.wo_number,
-            old_status,
-            MaintenanceStatus.COMPLETED.value,
+        # ``log_status_change``'s row, plus the notes when the completion added them.
+        audit.log(
+            action=audit.ACTIONS["STATUS_CHANGE"],
+            resource_type="maintenance_work_order",
+            resource_id=wo.id,
+            resource_identifier=wo.wo_number,
+            description=status_description,
+            old_values=status_old_values,
+            new_values=status_new_values,
             extra_data=completion_extra,
         )
     if advanced is not None:

@@ -8,12 +8,16 @@
  *  - Completing a PM work order ticks its checklist and reports the schedule's new due date. With
  *    any item left unticked the dialog asks for a reason (the server refuses 409 without one) and
  *    sends it, trimmed — only then.
+ *  - The Complete dialog is built from a fresh read of the work order (not the cached list row),
+ *    opens with the work order's notes (which completion REPLACES — sent only when changed, null
+ *    when emptied), and re-reads the work order after a 409 so a checklist that changed underneath
+ *    it can be answered instead of being a dead end; a 400 re-reads the page.
  *  - "Edit" opens the schedule dialog and PUTs only the fields that changed (never a target).
  *  - The Overdue / Due This Week tiles add the PM schedules nobody has started, or whose work order
  *    is on hold.
  */
 import React from 'react';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import api from '../services/api';
 import { ToastProvider } from '../components/ui/Toast';
@@ -26,6 +30,7 @@ jest.mock('../services/api', () => ({
     getMaintenanceDashboard: jest.fn(),
     getMaintenanceSchedules: jest.fn(),
     getMaintenanceWorkOrders: jest.fn(),
+    getMaintenanceWorkOrder: jest.fn(),
     getMaintenanceAssets: jest.fn(),
     getWorkCenters: jest.fn(),
     createMaintenanceWorkOrder: jest.fn(),
@@ -137,6 +142,15 @@ beforeEach(() => {
     schedule_next_due_date: '2027-11-16',
   });
   mockedApi.updateMaintenanceSchedule.mockResolvedValue(millPm);
+  // The Complete dialog's fresh read answers with the row the list serves, unless a test says
+  // otherwise. Calling the list mock's implementation directly records no list call.
+  mockedApi.getMaintenanceWorkOrder.mockImplementation(async (id: number) => {
+    const listRows = mockedApi.getMaintenanceWorkOrders.getMockImplementation();
+    const rows: MaintenanceWorkOrder[] = listRows ? await listRows() : [];
+    const row = rows.find(wo => wo.id === id);
+    if (!row) throw new Error(`no work order ${id}`);
+    return row;
+  });
 });
 
 describe('Maintenance — Start PM from a schedule', () => {
@@ -221,13 +235,21 @@ describe('Maintenance — Start PM from a schedule', () => {
 });
 
 const REASON_LABEL = /^Reason for completing with/;
+const NOTES_LABEL = /^Completion Notes/;
+
+/** The Complete dialog opens on a fresh read of the work order; its fields appear once that settles. */
+const settledCompleteDialog = async () => {
+  const dialog = await screen.findByRole('dialog');
+  await within(dialog).findByLabelText(NOTES_LABEL);
+  return dialog;
+};
 
 const openCompleteDialog = async () => {
   renderPage('/maintenance?tab=work_orders');
   const table = await screen.findByTestId('data-table');
   await waitFor(() => expect(within(table).getByText('PM: Compressor Annual PM')).toBeInTheDocument());
   fireEvent.click(within(table).getByRole('button', { name: 'Complete work order MWO-2026-0041' }));
-  return screen.findByRole('dialog');
+  return settledCompleteDialog();
 };
 
 describe('Maintenance — completing a PM work order', () => {
@@ -262,7 +284,7 @@ describe('Maintenance — completing a PM work order', () => {
     renderPage('/maintenance?tab=work_orders');
     const table = await screen.findByTestId('data-table');
     fireEvent.click(await within(table).findByRole('button', { name: 'Complete work order MWO-2026-0041' }));
-    const dialog = await screen.findByRole('dialog');
+    const dialog = await settledCompleteDialog();
     expect(dialog).not.toHaveTextContent('Checklist (');
     expect(within(dialog).queryByLabelText(REASON_LABEL)).not.toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole('button', { name: 'Complete' }));
@@ -354,6 +376,10 @@ describe('Maintenance — completing with checklist items unticked', () => {
       '1 of 2 checklist items on maintenance work order MWO-2026-0041 are not ticked.'
     );
     expect(screen.getByRole('dialog')).toBeInTheDocument();
+    // The refusal re-reads the work order; the checklist did not change, so no "changed" notice.
+    await waitFor(() => expect(mockedApi.getMaintenanceWorkOrder).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Complete' })).toBeEnabled());
+    expect(dialog).not.toHaveTextContent('The checklist changed while this was open');
     // What was entered survives the refusal, so the retry is one click.
     expect(within(dialog).getByLabelText(REASON_LABEL)).toHaveValue('Belt on order');
     expect(within(dialog).getByRole('checkbox', { name: 'Drain tank' })).toBeChecked();
@@ -406,7 +432,7 @@ describe('Maintenance — a PM answers for its schedule’s checklist', () => {
     renderPage('/maintenance?tab=work_orders');
     const table = await screen.findByTestId('data-table');
     fireEvent.click(await within(table).findByRole('button', { name: 'Complete work order MWO-2026-0041' }));
-    const dialog = await screen.findByRole('dialog');
+    const dialog = await settledCompleteDialog();
     expect(dialog).toHaveTextContent('Checklist (0 of 3 done)');
     expect(within(dialog).getByRole('checkbox', { name: 'Check oil' })).not.toBeChecked();
   });
@@ -418,6 +444,345 @@ describe('Maintenance — a PM answers for its schedule’s checklist', () => {
     ]);
     const dialog = await openCompleteDialog();
     expect(dialog).toHaveTextContent('Checklist (0 of 2 done)');
+  });
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(res => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
+const clickCompleteFor41 = async () => {
+  const table = await screen.findByTestId('data-table');
+  fireEvent.click(await within(table).findByRole('button', { name: 'Complete work order MWO-2026-0041' }));
+};
+
+/** Ticks both of openPmWO's items, clicks Complete, and returns the body sent. */
+const completeWithEveryItemTicked = async (dialog: HTMLElement) => {
+  fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Drain tank' }));
+  fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Check belt' }));
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Complete' }));
+  await waitFor(() => expect(mockedApi.completeMaintenanceWorkOrder).toHaveBeenCalledTimes(1));
+  return mockedApi.completeMaintenanceWorkOrder.mock.calls[0][1];
+};
+
+describe('Maintenance — the Complete dialog reads the work order fresh', () => {
+  it('offers nothing to answer until the read settles, then builds the dialog from it, not the cached row', async () => {
+    const read = deferred<MaintenanceWorkOrder>();
+    mockedApi.getMaintenanceWorkOrder.mockReturnValueOnce(read.promise);
+    renderPage('/maintenance?tab=work_orders');
+    await clickCompleteFor41();
+    const dialog = await screen.findByRole('dialog');
+    expect(mockedApi.getMaintenanceWorkOrder).toHaveBeenCalledWith(41);
+    expect(within(dialog).getByText('Loading the work order…')).toHaveAttribute('role', 'status');
+    expect(within(dialog).queryByRole('checkbox')).not.toBeInTheDocument();
+    const complete = within(dialog).getByRole('button', { name: 'Complete' });
+    expect(complete).toBeDisabled();
+    fireEvent.click(complete);
+    expect(mockedApi.completeMaintenanceWorkOrder).not.toHaveBeenCalled();
+
+    // The record has moved on since the list was read: a step ticked, a schedule step added, notes.
+    await act(async () => {
+      read.resolve({
+        ...openPmWO,
+        checklist_results: JSON.stringify([
+          { item: 'Drain tank', done: true },
+          { item: 'Check belt', done: false },
+        ]),
+        schedule_checklist_items: ['Drain tank', 'Check belt', 'Bleed lines'],
+        notes: 'Tank drained Tuesday',
+      });
+    });
+    expect(within(dialog).queryByText('Loading the work order…')).not.toBeInTheDocument();
+    expect(dialog).toHaveTextContent('Checklist (1 of 3 done)');
+    expect(within(dialog).getByRole('checkbox', { name: 'Drain tank' })).toBeChecked();
+    expect(within(dialog).getByRole('checkbox', { name: 'Bleed lines' })).not.toBeChecked();
+    expect(within(dialog).getByLabelText(NOTES_LABEL)).toHaveValue('Tank drained Tuesday');
+  });
+
+  it('falls back to the cached row when the read fails', async () => {
+    mockedApi.getMaintenanceWorkOrder.mockRejectedValueOnce(new Error('network down'));
+    const dialog = await openCompleteDialog();
+    expect(dialog).toHaveTextContent('Checklist (0 of 2 done)');
+    expect(within(dialog).getByLabelText(NOTES_LABEL)).toHaveValue('');
+    const body = await completeWithEveryItemTicked(dialog);
+    expect(JSON.parse(body.checklist_results)).toEqual([
+      { item: 'Drain tank', done: true },
+      { item: 'Check belt', done: true },
+    ]);
+  });
+
+  it('drops a read that answers after its dialog was closed and reopened', async () => {
+    const first = deferred<MaintenanceWorkOrder>();
+    const second = deferred<MaintenanceWorkOrder>();
+    mockedApi.getMaintenanceWorkOrder.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    renderPage('/maintenance?tab=work_orders');
+    await clickCompleteFor41();
+    let dialog = await screen.findByRole('dialog');
+    // Nothing to lose yet, so closing does not ask.
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+
+    await clickCompleteFor41();
+    dialog = await screen.findByRole('dialog');
+    await act(async () => {
+      second.resolve({ ...openPmWO, notes: 'From the second read' });
+    });
+    expect(within(dialog).getByLabelText(NOTES_LABEL)).toHaveValue('From the second read');
+    await act(async () => {
+      first.resolve({ ...openPmWO, checklist_results: null, notes: 'From the first read' });
+    });
+    expect(within(dialog).getByLabelText(NOTES_LABEL)).toHaveValue('From the second read');
+    expect(dialog).toHaveTextContent('Checklist (0 of 2 done)');
+  });
+});
+
+describe('Maintenance — completion notes replace the work order’s', () => {
+  beforeEach(() => {
+    mockedApi.getMaintenanceWorkOrders.mockResolvedValue([{ ...openPmWO, notes: 'Belt squeals at startup' }]);
+  });
+
+  it('opens with the work order’s notes, says they are replaced, and is not an unsaved change', async () => {
+    const confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(false);
+    try {
+      const dialog = await openCompleteDialog();
+      expect(within(dialog).getByLabelText(NOTES_LABEL)).toHaveValue('Belt squeals at startup');
+      expect(within(dialog).getByLabelText(NOTES_LABEL)).toHaveAccessibleDescription(
+        'Saved as the work order’s notes, replacing the ones it has now (shown here). Clear the field to remove them.'
+      );
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+      expect(confirmSpy).not.toHaveBeenCalled();
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
+  it('sends no notes when they were left as they opened (the server keeps them)', async () => {
+    const dialog = await openCompleteDialog();
+    const body = await completeWithEveryItemTicked(dialog);
+    expect(body).not.toHaveProperty('notes');
+  });
+
+  it('sends edited notes, trimmed', async () => {
+    const dialog = await openCompleteDialog();
+    fireEvent.change(within(dialog).getByLabelText(NOTES_LABEL), {
+      target: { value: '  Belt replaced; squeal gone  ' },
+    });
+    const body = await completeWithEveryItemTicked(dialog);
+    expect(body.notes).toBe('Belt replaced; squeal gone');
+  });
+
+  it('sends null for emptied notes, which clears them', async () => {
+    const dialog = await openCompleteDialog();
+    fireEvent.change(within(dialog).getByLabelText(NOTES_LABEL), { target: { value: '   ' } });
+    const body = await completeWithEveryItemTicked(dialog);
+    expect(body).toHaveProperty('notes', null);
+  });
+});
+
+describe('Maintenance — a refused completion re-reads instead of dead-ending', () => {
+  it('409: adds the new step unticked, keeps what was ticked and typed, warns, and re-reads the page', async () => {
+    const detail =
+      '1 of 3 checklist items on maintenance work order MWO-2026-0041 are not ticked. Tick them, or give a reason for completing without them.';
+    mockedApi.getMaintenanceWorkOrder
+      .mockResolvedValueOnce(openPmWO)
+      .mockResolvedValueOnce({ ...openPmWO, schedule_checklist_items: ['Drain tank', 'Check belt', 'Check oil'] });
+    mockedApi.completeMaintenanceWorkOrder.mockRejectedValueOnce({ response: { status: 409, data: { detail } } });
+    const dialog = await openCompleteDialog();
+    expect(mockedApi.getMaintenanceWorkOrders).toHaveBeenCalledTimes(1);
+    fireEvent.change(within(dialog).getByLabelText('Findings'), { target: { value: 'Belt glazed' } });
+    fireEvent.change(within(dialog).getByLabelText('Labor Cost ($)'), { target: { value: '45' } });
+    fireEvent.change(within(dialog).getByLabelText(NOTES_LABEL), { target: { value: 'Swapped the belt' } });
+    const firstBody = await completeWithEveryItemTicked(dialog);
+    expect(firstBody).not.toHaveProperty('incomplete_checklist_reason');
+
+    // The server's words stay, and the dialog now lists what the server judges.
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('1 of 3 checklist items');
+    expect(
+      await within(dialog).findByText(
+        'The checklist changed while this was open: 1 new item. Tick it or give a reason, then Complete again.'
+      )
+    ).toBeInTheDocument();
+    expect(mockedApi.getMaintenanceWorkOrder).toHaveBeenCalledTimes(2);
+    expect(dialog).toHaveTextContent('Checklist (2 of 3 done)');
+    expect(within(dialog).getByRole('checkbox', { name: 'Drain tank' })).toBeChecked();
+    expect(within(dialog).getByRole('checkbox', { name: 'Check belt' })).toBeChecked();
+    expect(within(dialog).getByRole('checkbox', { name: 'Check oil' })).not.toBeChecked();
+    expect(within(dialog).getByLabelText(/^Reason for completing with 1 item unticked\b/)).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Complete' })).toBeDisabled();
+    expect(within(dialog).getByLabelText('Findings')).toHaveValue('Belt glazed');
+    expect(within(dialog).getByLabelText('Labor Cost ($)')).toHaveValue(45);
+    expect(within(dialog).getByLabelText(NOTES_LABEL)).toHaveValue('Swapped the belt');
+    await waitFor(() => expect(mockedApi.getMaintenanceWorkOrders).toHaveBeenCalledTimes(2));
+
+    // Answering the new step clears the reason; the retry carries all three.
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Check oil' }));
+    expect(within(dialog).queryByLabelText(REASON_LABEL)).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Complete' }));
+    await waitFor(() => expect(mockedApi.completeMaintenanceWorkOrder).toHaveBeenCalledTimes(2));
+    const retry = mockedApi.completeMaintenanceWorkOrder.mock.calls[1][1];
+    expect(JSON.parse(retry.checklist_results)).toEqual([
+      { item: 'Drain tank', done: true },
+      { item: 'Check belt', done: true },
+      { item: 'Check oil', done: true },
+    ]);
+    expect(retry).toMatchObject({ findings: 'Belt glazed', labor_cost: 45, notes: 'Swapped the belt' });
+    expect(retry).not.toHaveProperty('incomplete_checklist_reason');
+    expect(await screen.findByText(/MWO-2026-0041 completed/)).toBeInTheDocument();
+  });
+
+  it('409: notes with only end-whitespace edits follow the re-read record, and a new item the server holds ticked is not flagged', async () => {
+    const detail = 'Maintenance work order MWO-2026-0041 changed while it was open.';
+    mockedApi.getMaintenanceWorkOrders.mockResolvedValue([{ ...openPmWO, notes: 'Belt squeals' }]);
+    mockedApi.getMaintenanceWorkOrder
+      .mockResolvedValueOnce({ ...openPmWO, notes: 'Belt squeals' })
+      .mockResolvedValueOnce({
+        ...openPmWO,
+        checklist_results: JSON.stringify([
+          { item: 'Drain tank', done: false },
+          { item: 'Check belt', done: false },
+          { item: 'Check oil', done: true },
+        ]),
+        notes: 'Belt squeals; day shift checked it',
+      });
+    mockedApi.completeMaintenanceWorkOrder.mockRejectedValueOnce({ response: { status: 409, data: { detail } } });
+    const dialog = await openCompleteDialog();
+    // Trailing whitespace is no change to the notes (the payload rule): they were left alone.
+    fireEvent.change(within(dialog).getByLabelText(NOTES_LABEL), { target: { value: 'Belt squeals   ' } });
+    const firstBody = await completeWithEveryItemTicked(dialog);
+    expect(firstBody).not.toHaveProperty('notes');
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(detail);
+    await waitFor(() =>
+      expect(within(dialog).getByLabelText(NOTES_LABEL)).toHaveValue('Belt squeals; day shift checked it')
+    );
+    // The one new item is already ticked on the server: nothing to answer, so no "changed" notice.
+    expect(dialog).toHaveTextContent('Checklist (3 of 3 done)');
+    expect(within(dialog).getByRole('checkbox', { name: 'Check oil' })).toBeChecked();
+    expect(dialog).not.toHaveTextContent('The checklist changed while this was open');
+    expect(within(dialog).queryByLabelText(REASON_LABEL)).not.toBeInTheDocument();
+
+    const complete = within(dialog).getByRole('button', { name: 'Complete' });
+    await waitFor(() => expect(complete).toBeEnabled());
+    fireEvent.click(complete);
+    await waitFor(() => expect(mockedApi.completeMaintenanceWorkOrder).toHaveBeenCalledTimes(2));
+    expect(mockedApi.completeMaintenanceWorkOrder.mock.calls[1][1]).not.toHaveProperty('notes');
+  });
+
+  it('409: when the re-read fails, says so and offers no retry from a checklist that may be incomplete', async () => {
+    const detail =
+      '1 of 3 checklist items on maintenance work order MWO-2026-0041 are not ticked. Tick them, or give a reason for completing without them.';
+    mockedApi.getMaintenanceWorkOrder.mockResolvedValueOnce(openPmWO).mockRejectedValueOnce(new Error('network down'));
+    mockedApi.completeMaintenanceWorkOrder.mockRejectedValueOnce({ response: { status: 409, data: { detail } } });
+    const dialog = await openCompleteDialog();
+    await completeWithEveryItemTicked(dialog);
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('1 of 3 checklist items');
+    expect(
+      await within(dialog).findByText(
+        "Couldn't reload this work order to show what changed. Close the dialog and open it again."
+      )
+    ).toBeInTheDocument();
+    const complete = within(dialog).getByRole('button', { name: 'Complete' });
+    expect(complete).toBeDisabled();
+    expect(complete).toHaveAttribute(
+      'title',
+      "Couldn't reload this work order to show what changed. Close the dialog and open it again."
+    );
+    fireEvent.click(complete);
+    expect(mockedApi.completeMaintenanceWorkOrder).toHaveBeenCalledTimes(1);
+    expect(dialog).not.toHaveTextContent('The checklist changed while this was open');
+    expect(within(dialog).getByRole('button', { name: 'Cancel' })).toBeEnabled();
+    await waitFor(() => expect(mockedApi.getMaintenanceWorkOrders).toHaveBeenCalledTimes(2));
+  });
+
+  it('400: re-reads the page, keeps the server’s words on screen, and turns Complete off', async () => {
+    const detail = 'Maintenance work order MWO-2026-0041 is on_hold; only an in-progress work order can be completed.';
+    mockedApi.completeMaintenanceWorkOrder.mockRejectedValueOnce({ response: { status: 400, data: { detail } } });
+    const confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(true);
+    try {
+      const dialog = await openCompleteDialog();
+      await completeWithEveryItemTicked(dialog);
+
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent(detail);
+      await waitFor(() => expect(mockedApi.getMaintenanceWorkOrders).toHaveBeenCalledTimes(2));
+      expect(screen.getByRole('dialog')).toBeInTheDocument();
+      expect(dialog).toHaveTextContent('Close this dialog: the list now shows where this work order stands.');
+      expect(dialog).not.toHaveTextContent('The checklist changed while this was open');
+      // Only a 409 re-reads the work order itself.
+      expect(mockedApi.getMaintenanceWorkOrder).toHaveBeenCalledTimes(1);
+
+      // A retry would be refused the same way: Complete is off, Cancel is the way out.
+      const complete = within(dialog).getByRole('button', { name: 'Complete' });
+      await waitFor(() => expect(complete).toBeDisabled());
+      fireEvent.click(complete);
+      expect(mockedApi.completeMaintenanceWorkOrder).toHaveBeenCalledTimes(1);
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+
+      // Reopening starts clean: the block belonged to that refusal, not to the work order.
+      await clickCompleteFor41();
+      const reopened = await settledCompleteDialog();
+      expect(reopened).not.toHaveTextContent('Close this dialog');
+      expect(within(reopened).queryByRole('alert')).not.toBeInTheDocument();
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+});
+
+describe('Maintenance — checklist items match as the server matches them', () => {
+  it('shows a bulleted, double-spaced work-order item and the schedule’s lower-case step as ONE row', async () => {
+    mockedApi.getMaintenanceWorkOrders.mockResolvedValue([
+      {
+        ...openPmWO,
+        checklist_results: JSON.stringify([
+          { item: '- Grease  bearing', done: false },
+          { item: '1. Check oil', done: false },
+        ]),
+        schedule_checklist_items: ['grease bearing', '1. check oil'],
+      },
+    ]);
+    const dialog = await openCompleteDialog();
+    expect(dialog).toHaveTextContent('Checklist (0 of 2 done)');
+    // Shown once, in the work order's (normalized) spelling; numbering is kept.
+    expect(within(dialog).getAllByRole('checkbox')).toHaveLength(2);
+    expect(within(dialog).getByRole('checkbox', { name: 'Grease bearing' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('checkbox', { name: '1. Check oil' })).toBeInTheDocument();
+    expect(within(dialog).queryByRole('checkbox', { name: 'grease bearing' })).not.toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Grease bearing' }));
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: '1. Check oil' }));
+    expect(within(dialog).queryByLabelText(REASON_LABEL)).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Complete' }));
+    await waitFor(() => expect(mockedApi.completeMaintenanceWorkOrder).toHaveBeenCalledTimes(1));
+    const [, body] = mockedApi.completeMaintenanceWorkOrder.mock.calls[0];
+    expect(JSON.parse(body.checklist_results)).toEqual([
+      { item: 'Grease bearing', done: true },
+      { item: '1. Check oil', done: true },
+    ]);
+    expect(body).not.toHaveProperty('incomplete_checklist_reason');
+  });
+
+  it('keeps a step named twice as two rows, whatever their spelling', async () => {
+    mockedApi.getMaintenanceWorkOrders.mockResolvedValue([
+      {
+        ...openPmWO,
+        checklist_results: JSON.stringify([{ item: '• Grease bearing', done: false }]),
+        schedule_checklist_items: ['grease bearing', 'GREASE  BEARING'],
+      },
+    ]);
+    const dialog = await openCompleteDialog();
+    expect(dialog).toHaveTextContent('Checklist (0 of 2 done)');
+    const copies = within(dialog).getAllByRole('checkbox', { name: 'Grease bearing' });
+    expect(copies).toHaveLength(2);
+    fireEvent.click(copies[0]);
+    expect(dialog).toHaveTextContent('Checklist (1 of 2 done)');
+    expect(within(dialog).getByLabelText(/^Reason for completing with 1 item unticked\b/)).toBeInTheDocument();
   });
 });
 
@@ -569,7 +934,7 @@ describe('Maintenance — unsaved-changes guards', () => {
     const table = await screen.findByTestId('data-table');
     const openComplete = async () => {
       fireEvent.click(await within(table).findByRole('button', { name: 'Complete work order MWO-2026-0041' }));
-      return screen.findByRole('dialog');
+      return settledCompleteDialog();
     };
 
     let dialog = await openComplete();

@@ -30,8 +30,9 @@ Not covered here, on purpose:
   ``test_maintenance_checklist_completion.py``). Decision (3)'s positive case was already pinned
   by ``test_qms_evidence_required_audit.py::test_row_written_under_an_api_token_carries_the_credential_marker``;
   it is repeated here so all four decisions sit together.
-* The one token refusal on the schedule ``PUT`` -- taking checklist steps off a schedule with an
-  open work order (owner decision 2026-11-17) -- is ``test_maintenance_checklist_completion.py``'s.
+* The one token refusal on the schedule ``PUT`` -- taking checklist steps off a schedule whose open
+  work order has no checklist snapshot (owner decision 2026-11-17, narrowed by migration 132) -- is
+  ``test_maintenance_checklist_completion.py``'s.
   It is not a due-date refusal: case (4) moves the date with a PM work order open too.
 
 Every name here is invented.

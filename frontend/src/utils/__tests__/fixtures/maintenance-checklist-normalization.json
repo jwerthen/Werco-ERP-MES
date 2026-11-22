@@ -1,0 +1,320 @@
+{
+  "_comment": "Checklist item normalization parity: backend/app/services/maintenance_checklist.py (normalize_checklist_item, checklist_item_key) and frontend/src/utils/maintenance.ts (normalizeChecklistItem, checklistItemKey) must both produce `normalized` and `key` for every `input`. Run by backend/tests/test_maintenance_checklist_normalization_parity.py and frontend/src/utils/__tests__/maintenance.normalization.parity.test.ts. Add a case here, never in only one language.",
+  "cases": [
+    {
+      "input": "Check oil level",
+      "normalized": "Check oil level",
+      "key": "check oil level"
+    },
+    {
+      "input": "  Check oil level  ",
+      "normalized": "Check oil level",
+      "key": "check oil level"
+    },
+    {
+      "input": "Check  oil\tlevel",
+      "normalized": "Check oil level",
+      "key": "check oil level"
+    },
+    {
+      "input": "Check\u00a0oil\u2009level",
+      "normalized": "Check oil level",
+      "key": "check oil level"
+    },
+    {
+      "input": "\ufeffCheck oil",
+      "normalized": "Check oil",
+      "key": "check oil"
+    },
+    {
+      "input": "- Check oil",
+      "normalized": "Check oil",
+      "key": "check oil"
+    },
+    {
+      "input": "-Check oil",
+      "normalized": "-Check oil",
+      "key": "-check oil"
+    },
+    {
+      "input": "* Check oil",
+      "normalized": "Check oil",
+      "key": "check oil"
+    },
+    {
+      "input": "*Check oil",
+      "normalized": "*Check oil",
+      "key": "*check oil"
+    },
+    {
+      "input": "\u2022 Check oil",
+      "normalized": "Check oil",
+      "key": "check oil"
+    },
+    {
+      "input": "\u2022Check oil",
+      "normalized": "Check oil",
+      "key": "check oil"
+    },
+    {
+      "input": "\u25e6 Check oil",
+      "normalized": "Check oil",
+      "key": "check oil"
+    },
+    {
+      "input": "\u25aa Check oil",
+      "normalized": "Check oil",
+      "key": "check oil"
+    },
+    {
+      "input": "\u00b7 Check oil",
+      "normalized": "Check oil",
+      "key": "check oil"
+    },
+    {
+      "input": "\u2023 Check oil",
+      "normalized": "Check oil",
+      "key": "check oil"
+    },
+    {
+      "input": "\u2043 Check oil",
+      "normalized": "Check oil",
+      "key": "check oil"
+    },
+    {
+      "input": "\u2013 Check oil",
+      "normalized": "Check oil",
+      "key": "check oil"
+    },
+    {
+      "input": "\u2014 Check oil",
+      "normalized": "Check oil",
+      "key": "check oil"
+    },
+    {
+      "input": "- - Check oil",
+      "normalized": "Check oil",
+      "key": "check oil"
+    },
+    {
+      "input": "-  \u2022  Check oil",
+      "normalized": "Check oil",
+      "key": "check oil"
+    },
+    {
+      "input": "-40 F to 120 F range check",
+      "normalized": "-40 F to 120 F range check",
+      "key": "-40 f to 120 f range check"
+    },
+    {
+      "input": "- -40 F to 120 F range check",
+      "normalized": "-40 F to 120 F range check",
+      "key": "-40 f to 120 f range check"
+    },
+    {
+      "input": "-.5 mm gap",
+      "normalized": "-.5 mm gap",
+      "key": "-.5 mm gap"
+    },
+    {
+      "input": "-,5 mm gap",
+      "normalized": "-,5 mm gap",
+      "key": "-,5 mm gap"
+    },
+    {
+      "input": "*5 times*",
+      "normalized": "*5 times*",
+      "key": "*5 times*"
+    },
+    {
+      "input": "1. Check oil",
+      "normalized": "1. Check oil",
+      "key": "1. check oil"
+    },
+    {
+      "input": "1) Check oil",
+      "normalized": "1) Check oil",
+      "key": "1) check oil"
+    },
+    {
+      "input": "a. Check oil",
+      "normalized": "a. Check oil",
+      "key": "a. check oil"
+    },
+    {
+      "input": "Check oil - both sides",
+      "normalized": "Check oil - both sides",
+      "key": "check oil - both sides"
+    },
+    {
+      "input": "Check oil \u2022 left",
+      "normalized": "Check oil \u2022 left",
+      "key": "check oil \u2022 left"
+    },
+    {
+      "input": "CHECK OIL",
+      "normalized": "CHECK OIL",
+      "key": "check oil"
+    },
+    {
+      "input": "Grease Bearing #2",
+      "normalized": "Grease Bearing #2",
+      "key": "grease bearing #2"
+    },
+    {
+      "input": "",
+      "normalized": "",
+      "key": ""
+    },
+    {
+      "input": "   ",
+      "normalized": "",
+      "key": ""
+    },
+    {
+      "input": "-",
+      "normalized": "",
+      "key": ""
+    },
+    {
+      "input": "- ",
+      "normalized": "",
+      "key": ""
+    },
+    {
+      "input": "\u2022",
+      "normalized": "",
+      "key": ""
+    },
+    {
+      "input": "* * *",
+      "normalized": "",
+      "key": ""
+    },
+    {
+      "input": "\t\n",
+      "normalized": "",
+      "key": ""
+    },
+    {
+      "input": "\u00d6lstand pr\u00fcfen",
+      "normalized": "\u00d6lstand pr\u00fcfen",
+      "key": "\u00f6lstand pr\u00fcfen"
+    },
+    {
+      "input": "\u03a3\u03a5\u03a3\u03a4\u0397\u039c\u0391",
+      "normalized": "\u03a3\u03a5\u03a3\u03a4\u0397\u039c\u0391",
+      "key": "\u03c3\u03c5\u03c3\u03c4\u03b7\u03bc\u03b1"
+    },
+    {
+      "input": "Line one\r\nLine two",
+      "normalized": "Line one Line two",
+      "key": "line one line two"
+    },
+    {
+      "input": "Check\u2028oil",
+      "normalized": "Check oil",
+      "key": "check oil"
+    },
+    {
+      "input": "Check\u3000oil",
+      "normalized": "Check oil",
+      "key": "check oil"
+    },
+    {
+      "input": "Check\u0085oil",
+      "normalized": "Check oil",
+      "key": "check oil"
+    },
+    {
+      "input": "Check\u202foil",
+      "normalized": "Check oil",
+      "key": "check oil"
+    },
+    {
+      "input": "-X axis overtravel limit test",
+      "normalized": "-X axis overtravel limit test",
+      "key": "-x axis overtravel limit test"
+    },
+    {
+      "input": "- X axis overtravel limit test",
+      "normalized": "X axis overtravel limit test",
+      "key": "x axis overtravel limit test"
+    },
+    {
+      "input": "+X axis overtravel limit test",
+      "normalized": "+X axis overtravel limit test",
+      "key": "+x axis overtravel limit test"
+    },
+    {
+      "input": "-B axis brake check",
+      "normalized": "-B axis brake check",
+      "key": "-b axis brake check"
+    },
+    {
+      "input": "-ve battery terminal clean",
+      "normalized": "-ve battery terminal clean",
+      "key": "-ve battery terminal clean"
+    },
+    {
+      "input": "**Verify LOTO applied**",
+      "normalized": "**Verify LOTO applied**",
+      "key": "**verify loto applied**"
+    },
+    {
+      "input": "*CRITICAL* torque spindle nut",
+      "normalized": "*CRITICAL* torque spindle nut",
+      "key": "*critical* torque spindle nut"
+    },
+    {
+      "input": "* *CRITICAL* torque spindle nut",
+      "normalized": "*CRITICAL* torque spindle nut",
+      "key": "*critical* torque spindle nut"
+    },
+    {
+      "input": "-\u00bd in gap",
+      "normalized": "-\u00bd in gap",
+      "key": "-\u00bd in gap"
+    },
+    {
+      "input": "\u2014Check oil",
+      "normalized": "\u2014Check oil",
+      "key": "\u2014check oil"
+    },
+    {
+      "input": "-\t",
+      "normalized": "",
+      "key": ""
+    },
+    {
+      "input": "\u039f\u0394\u039f\u03a3",
+      "normalized": "\u039f\u0394\u039f\u03a3",
+      "key": "\u03bf\u03b4\u03bf\u03c2"
+    },
+    {
+      "input": "\u0130stanbul plant",
+      "normalized": "\u0130stanbul plant",
+      "key": "i\u0307stanbul plant"
+    },
+    {
+      "input": "Stra\u00dfe \u1e9e",
+      "normalized": "Stra\u00dfe \u1e9e",
+      "key": "stra\u00dfe \u00df"
+    },
+    {
+      "input": "\ud801\udc00 astral letter",
+      "normalized": "\ud801\udc00 astral letter",
+      "key": "\ud801\udc28 astral letter"
+    },
+    {
+      "input": "Check oil\u0085",
+      "normalized": "Check oil",
+      "key": "check oil"
+    },
+    {
+      "input": "\u0085Check oil",
+      "normalized": "Check oil",
+      "key": "check oil"
+    }
+  ]
+}
