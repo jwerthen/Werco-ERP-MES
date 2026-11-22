@@ -252,6 +252,9 @@ def _part_to_response(part: Part) -> Optional[PartResponse]:
             # disagreeing about whether a part auto-consumes its BOM is exactly the kind
             # of divergence nobody notices until material has moved.
             backflush_components=bool(part.backflush_components),
+            # Same load-bearing reason: a list that reported a stale ``False`` here would show a
+            # customer-supplied part as one MRP plans purchases for.
+            customer_supplied=bool(part.customer_supplied),
             supply_scope=part.supply_scope,
             is_active=part.is_active if part.is_active is not None else True,
             status=part.status or "active",

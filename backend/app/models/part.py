@@ -153,6 +153,16 @@ class Part(Base, SoftDeleteMixin, TenantMixin):
     # OFF so it never double-counts material a shop issues manually.
     backflush_components = Column(Boolean, nullable=False, server_default="false", default=False)
 
+    # Customer-supplied (customer-furnished) part, AS9100D 8.5.3. When True the customer
+    # furnishes this part, so MRP creates NO demand for it (owner decision 2026-11-22): the
+    # BOM explosion skips it (no requirement, no action, no recursion into its own BOM), and
+    # every door that turns an MRP action into supply refuses it. Lock-step with migration
+    # 134_part_customer_supplied. Like ``backflush_components`` it is set only through
+    # ``PUT /parts/{id}`` / ``PUT /materials/{id}`` (audited by ``log_update``) -- never on
+    # create or import. It says nothing about stock ownership: who owns a stock row is the
+    # row's own ``ownership`` column, and this flag is never inferred from it.
+    customer_supplied = Column(Boolean, nullable=False, server_default="false", default=False)
+
     # Status
     is_active = Column(Boolean, default=True)
     status = Column(String(50), default="active")  # active, obsolete, pending_approval

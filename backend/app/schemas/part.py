@@ -108,6 +108,17 @@ class PartUpdate(BaseModel):
             "check reports blockers — see GET /parts/{part_id}/backflush-readiness."
         ),
     )
+    # Same posture as ``backflush_components``: on PartUpdate and PartResponse only, so no
+    # create path and no importer can set it. Owner decision 2026-11-22: a customer-supplied
+    # part creates no MRP demand. Changing it is recorded by the update handlers' ``log_update``.
+    customer_supplied: Optional[bool] = Field(
+        None,
+        description=(
+            "The customer furnishes this part (AS9100D 8.5.3). When true, MRP creates no demand "
+            "for it: no requirement, no ORDER / MANUFACTURE / EXPEDITE action, no draft purchase "
+            "order or work order, and its own BOM is not exploded. Not inferred from stock ownership."
+        ),
+    )
     name: Optional[str] = Field(None, min_length=2, max_length=255)
     revision: Optional[str] = Field(None, min_length=1, max_length=20, pattern=r'^[A-Z0-9]+$')
     description: Optional[str] = Field(None, max_length=2000)
@@ -157,6 +168,14 @@ class PartUpdate(BaseModel):
             return parse_scope(v)
         except AslValueError as exc:
             raise ValueError(str(exc)) from exc
+
+    @field_validator('customer_supplied')
+    @classmethod
+    def customer_supplied_not_null(cls, v: Optional[bool]) -> Optional[bool]:
+        """An explicit ``null`` is 422, as for ``backflush_components``: the column is NOT NULL."""
+        if v is None:
+            raise ValueError('customer_supplied must be true or false, not null')
+        return v
 
     @field_validator('backflush_components')
     @classmethod
@@ -208,6 +227,9 @@ class PartResponse(PartBase):
     # ``except Exception: return None`` can never make a part VANISH from a list because
     # of it -- a required field with no default would do exactly that.
     backflush_components: bool = False
+    # Read-only here (not on PartBase/PartCreate); see PartUpdate.customer_supplied. Defaulted
+    # for the same reason as ``backflush_components``.
+    customer_supplied: bool = False
     # Read-only here (not on PartBase/PartCreate); see PartUpdate.supply_scope.
     supply_scope: Optional[str] = None
     is_active: bool

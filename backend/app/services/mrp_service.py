@@ -23,6 +23,24 @@ from app.models.work_order import WorkOrder, WorkOrderStatus
 from app.services.owned_property_service import COMPANY_OWNED_ITEM_CLAUSES
 
 
+def is_customer_supplied(part) -> bool:
+    """THE customer-supplied predicate for planning (owner decision 2026-11-22).
+
+    A customer-supplied (customer-furnished) part creates no MRP demand: the BOM explosion
+    skips it, and every door that turns an MRP action into supply -- the auto-draft cron
+    (``MRPAutoService.process_actions``) and the reviewed draft / purchase batch
+    (``MRPSupplyService.review``) -- refuses it with ``CUSTOMER_SUPPLIED_SUPPLY_DETAIL``. It
+    reads the part's own flag only, never stock ownership.
+    """
+    return bool(getattr(part, "customer_supplied", False))
+
+
+CUSTOMER_SUPPLIED_SUPPLY_DETAIL = (
+    "This part is customer-supplied: the customer furnishes it, so MRP does not plan supply for it. "
+    "Clear the part's customer-supplied flag first if the shop now buys or makes it."
+)
+
+
 class MRPService:
     def __init__(self, db: Session, company_id: int):
         """Create an MRP service scoped to a single tenant.
@@ -232,6 +250,11 @@ class MRPService:
 
             part = item.component_part
             if not part:
+                continue
+            # A customer-supplied component creates no demand (owner decision 2026-11-22): no
+            # requirement, so no shortage and no action, and no recursion -- if the customer
+            # furnishes a subassembly, the shop neither buys nor makes what is inside it.
+            if is_customer_supplied(part):
                 continue
 
             # Calculate extended quantity with scrap
