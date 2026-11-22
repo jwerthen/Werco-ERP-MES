@@ -146,6 +146,22 @@ export interface Part {
    * reports blockers) — so any UI for it must stay NON-optimistic.
    */
   backflush_components: boolean;
+  /**
+   * The customer furnishes this part (customer property, AS9100D 8.5.3), so MRP
+   * creates NO demand for it: no requirement, no ORDER / MANUFACTURE / EXPEDITE
+   * action, no draft purchase order or work order, and its own BOM is not
+   * exploded. Not inferred from stock ownership (a stock row's `ownership` is a
+   * separate fact).
+   *
+   * Like `backflush_components` it is on every part read and on `PartUpdate`, and
+   * NOT on create — so it is settable only from the Materials and PartEdit EDIT
+   * forms. Unlike `backflush_components` it is OPTIONAL here, on purpose: the SPA
+   * and the API deploy separately, so a response from an API that predates the
+   * column does not carry it. Absent means UNKNOWN, never false — the edit forms
+   * hide their checkbox and never send the key rather than risk writing `false`
+   * over a flag set elsewhere.
+   */
+  customer_supplied?: boolean;
   is_active: boolean;
   status: string;
   customer_name?: string;

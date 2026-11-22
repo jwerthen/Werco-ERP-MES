@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useId, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import { Part, PartType } from '../types';
@@ -17,6 +17,10 @@ const EMPTY_FORM = {
   standard_cost: 0,
   is_critical: false,
   requires_inspection: true,
+  // The LOADED value, never a default: undefined until the part is read, and still
+  // undefined when the part carries no boolean (an API that predates the column) --
+  // then the checkbox is hidden and the key is never sent. See buildUpdatePayload.
+  customer_supplied: undefined as boolean | undefined,
   customer_name: '',
   customer_part_number: '',
   drawing_number: '',
@@ -35,6 +39,7 @@ export default function PartEdit() {
   const [form, setForm] = useState(EMPTY_FORM);
   // Snapshot of the values the form opened with, so an untouched edit form is not "dirty".
   const [initialForm, setInitialForm] = useState(EMPTY_FORM);
+  const customerSuppliedHelpId = useId();
 
   useEffect(() => {
     api.getPart(partId)
@@ -48,6 +53,7 @@ export default function PartEdit() {
           standard_cost: data.standard_cost,
           is_critical: data.is_critical,
           requires_inspection: data.requires_inspection,
+          customer_supplied: typeof data.customer_supplied === 'boolean' ? data.customer_supplied : undefined,
           customer_name: data.customer_name || '',
           customer_part_number: data.customer_part_number || '',
           drawing_number: data.drawing_number || '',
@@ -110,10 +116,21 @@ export default function PartEdit() {
    * reached. A DELIBERATE reclassification still sends it, and still meets both
    * (400 if the target is not manufactured/assembly, 409 while unfinished work orders
    * tie this part as material).
+   *
+   * `customer_supplied` follows the same omit-when-unchanged rule, for a different
+   * reason: it is sent only when the planner changed it, and only as a real boolean
+   * (`null` is a 422). Re-sending the loaded value on every save would let a page
+   * opened before somebody set the flag elsewhere (the API, the Materials screen)
+   * clear it on a save that touched nothing but the description -- and MRP would
+   * quietly start planning purchases for a part the customer furnishes.
    */
   const buildUpdatePayload = (): PartUpdate => {
-    const { part_type, ...rest } = form;
-    return part_type === initialForm.part_type ? rest : { ...rest, part_type };
+    const { part_type, customer_supplied, ...rest } = form;
+    const payload: PartUpdate = part_type === initialForm.part_type ? rest : { ...rest, part_type };
+    if (typeof customer_supplied === 'boolean' && customer_supplied !== initialForm.customer_supplied) {
+      payload.customer_supplied = customer_supplied;
+    }
+    return payload;
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -276,7 +293,7 @@ export default function PartEdit() {
         {/* Quality */}
         <div className="card">
           <h2 className="text-base font-semibold text-white mb-4">Quality (AS9100D)</h2>
-          <div className="flex gap-6">
+          <div className="flex flex-wrap items-start gap-x-6 gap-y-3">
             <label className="flex items-center gap-2">
               <input
                 type="checkbox"
@@ -297,6 +314,23 @@ export default function PartEdit() {
               />
               <span className="text-sm">Requires Inspection</span>
             </label>
+            {typeof initialForm.customer_supplied === 'boolean' && (
+              <div className="max-w-xs">
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={form.customer_supplied === true}
+                    onChange={e => setForm(p => ({ ...p, customer_supplied: e.target.checked }))}
+                    className="rounded border-slate-600 text-werco-navy-600"
+                    aria-describedby={customerSuppliedHelpId}
+                  />
+                  <span className="text-sm">Customer-supplied</span>
+                </label>
+                <p id={customerSuppliedHelpId} className="mt-1 ml-6 text-xs text-slate-500">
+                  The customer furnishes this part, so MRP will not plan purchases or work orders for it.
+                </p>
+              </div>
+            )}
           </div>
         </div>
 

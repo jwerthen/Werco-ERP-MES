@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import { Part, PartType } from '../types';
@@ -41,6 +41,14 @@ type MaterialForm = {
   description: string;
   standard_cost: number;
   requires_inspection: boolean;
+  /**
+   * EDIT-ONLY, and `undefined` whenever it is unknown. Never on BLANK_FORM: the
+   * server's PartCreate drops the key, so a create-mode checkbox would silently do
+   * nothing. On edit it is the LOADED value, never a default — undefined when the
+   * row carries no boolean (an API that predates the column), and then the checkbox
+   * is hidden and the key is never sent.
+   */
+  customer_supplied?: boolean;
   version?: number;
 };
 
@@ -68,6 +76,20 @@ const UOM_OPTIONS = [
 const typeLabel = (partType: string) => (
   MATERIAL_SUPPLY_PART_TYPE_OPTIONS.find(option => option.value === partType)?.label || partType.replace('_', ' ')
 );
+
+const CUSTOMER_SUPPLIED_HELP = 'The customer furnishes this item, so MRP will not plan purchases or work orders for it.';
+
+/** Read-only marker on a list row. Rendered only for a real `true`, never for an unknown value. */
+function CustomerSuppliedChip() {
+  return (
+    <span
+      className="ml-2 inline-block whitespace-nowrap rounded-sm border border-fd-cyan/50 bg-fd-cyan/10 px-1.5 py-0.5 align-middle font-mono text-[10px] uppercase tracking-wider text-fd-cyan"
+      title={CUSTOMER_SUPPLIED_HELP}
+    >
+      Customer-supplied
+    </span>
+  );
+}
 
 export default function MaterialsPage() {
   const { showToast } = useToast();
@@ -178,6 +200,10 @@ export default function MaterialsPage() {
   const [activationTarget, setActivationTarget] = useState<Part | null>(null);
   const [form, setForm] = useState<MaterialForm>(BLANK_FORM);
   const [initialForm, setInitialForm] = useState<MaterialForm>(BLANK_FORM);
+  const customerSuppliedHelpId = useId();
+  // Edit mode only, and only when the row carried a real boolean. Create never shows
+  // it (PartCreate drops the key), and an unknown value is not shown as "off".
+  const showCustomerSupplied = editingMaterial !== null && typeof initialForm.customer_supplied === 'boolean';
 
   const isFormDirty = useMemo(
     () => showModal && JSON.stringify(form) !== JSON.stringify(initialForm),
@@ -281,6 +307,7 @@ export default function MaterialsPage() {
       description: material.description || '',
       standard_cost: Number(material.standard_cost || 0),
       requires_inspection: material.requires_inspection,
+      customer_supplied: typeof material.customer_supplied === 'boolean' ? material.customer_supplied : undefined,
       version: material.version || 0,
     };
     setForm(next);
@@ -306,6 +333,9 @@ export default function MaterialsPage() {
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
+    // Pulled out of the create spread below: the server's PartCreate would drop it
+    // anyway, and the create payload should not even appear to carry it.
+    const { customer_supplied: customerSupplied, ...createFields } = form;
     setSaving(true);
     try {
       if (editingMaterial) {
@@ -327,6 +357,15 @@ export default function MaterialsPage() {
         // Listed explicitly rather than spread-minus-omit: on a blind-setattr endpoint
         // an allowlist is the safe direction, so a field added to the form later has to
         // be named here before it can reach the update.
+        //
+        // `customer_supplied` is sent ONLY when the operator changed it from the value
+        // the form opened with, and only as a real boolean (`null` is a 422). The list
+        // row this form was opened from can be stale -- the flag may have been set
+        // through the API or PartEdit since -- so re-sending the loaded value on a
+        // plain name save would quietly turn MRP planning back on for a part the
+        // customer furnishes. Unchanged means absent, and absent means "leave it".
+        const customerSuppliedChanged =
+          typeof customerSupplied === 'boolean' && customerSupplied !== initialForm.customer_supplied;
         const updated = await api.updateMaterial(editingMaterial.id, {
           version: form.version ?? 0,
           name: form.name,
@@ -335,11 +374,12 @@ export default function MaterialsPage() {
           description: form.description,
           standard_cost: form.standard_cost,
           requires_inspection: form.requires_inspection,
+          ...(customerSuppliedChanged ? { customer_supplied: customerSupplied } : {}),
         });
         setMaterials(prev => prev.map(material => material.id === updated.id ? updated : material));
         showToast('success', `Updated ${updated.part_number}`);
       } else {
-        const created = await api.createMaterial({ ...form, revision: 'A', is_critical: false });
+        const created = await api.createMaterial({ ...createFields, revision: 'A', is_critical: false });
         setMaterials(prev => [created, ...prev].sort((a, b) => a.part_number.localeCompare(b.part_number)));
         showToast('success', `Created ${created.part_number}`);
       }
@@ -402,7 +442,10 @@ export default function MaterialsPage() {
       csv: material => material.description ? `${material.name} — ${material.description}` : material.name,
       render: material => (
         <div>
-          <div className="text-sm text-white">{material.name}</div>
+          <div className="text-sm text-white">
+            {material.name}
+            {material.customer_supplied === true && <CustomerSuppliedChip />}
+          </div>
           {material.description && <div className="text-xs text-slate-500 line-clamp-1">{material.description}</div>}
         </div>
       ),
@@ -508,6 +551,7 @@ export default function MaterialsPage() {
         { label: 'UOM', value: material.unit_of_measure || '—' },
         { label: 'Cost', value: `$${Number(material.standard_cost || 0).toFixed(2)}` },
         { label: 'Inspection', value: material.requires_inspection ? 'Required' : 'Not required' },
+        ...(material.customer_supplied === true ? [{ label: 'Customer-supplied', value: 'Yes' }] : []),
         ...(material.description ? [{ label: 'Description', value: material.description, fullWidth: true }] : []),
       ]}
       actions={(
@@ -796,6 +840,24 @@ export default function MaterialsPage() {
                 />
                 Requires receiving inspection
               </label>
+
+              {showCustomerSupplied && (
+                <div>
+                  <label className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={form.customer_supplied === true}
+                      onChange={event => setForm(prev => ({ ...prev, customer_supplied: event.target.checked }))}
+                      className="rounded border-slate-600 text-werco-navy-600"
+                      aria-describedby={customerSuppliedHelpId}
+                    />
+                    Customer-supplied
+                  </label>
+                  <p id={customerSuppliedHelpId} className="mt-1 ml-6 text-xs text-slate-500">
+                    {CUSTOMER_SUPPLIED_HELP}
+                  </p>
+                </div>
+              )}
 
               <div className="flex justify-end gap-3 pt-2">
                 <button type="button" onClick={requestCloseModal} className="btn-secondary" disabled={saving}>
