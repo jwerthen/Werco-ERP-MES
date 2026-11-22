@@ -56,8 +56,16 @@ import {
 } from '../components/maintenance/MaintenanceTargetField';
 import { MaintenanceAssetsPanel } from '../components/maintenance/MaintenanceAssetsPanel';
 import { PmScheduleImportWizard } from '../components/maintenance/PmScheduleImportWizard';
+import { MaintenanceWorkOrderDetailModal } from '../components/maintenance/MaintenanceWorkOrderDetailModal';
+import {
+  MaintenanceHistoryModal,
+  MaintenanceHistoryTarget,
+  historyTargetFor,
+} from '../components/maintenance/MaintenanceHistoryModal';
 import {
   ArrowUpTrayIcon,
+  ClipboardDocumentListIcon,
+  ClockIcon,
   PlusIcon,
   MagnifyingGlassIcon,
   XMarkIcon,
@@ -208,6 +216,10 @@ export default function Maintenance() {
   const [showImport, setShowImport] = useState(false);
   const [selectedWO, setSelectedWO] = useState<MaintenanceWorkOrder | null>(null);
   const [cancelTarget, setCancelTarget] = useState<MaintenanceWorkOrder | null>(null);
+  // The work order whose record and log are open (row click, or its Details action).
+  const [detailWO, setDetailWO] = useState<MaintenanceWorkOrder | null>(null);
+  // The work center or asset whose maintenance history is open (a schedule row's History action).
+  const [historyTarget, setHistoryTarget] = useState<MaintenanceHistoryTarget | null>(null);
   const [deactivateTarget, setDeactivateTarget] = useState<MaintenanceSchedule | null>(null);
   const [deactivating, setDeactivating] = useState(false);
 
@@ -640,10 +652,29 @@ export default function Maintenance() {
   );
 
   const scheduleRowActions = useCallback(
-    (s: MaintenanceSchedule) =>
-      canPlan && s.is_active ? (
+    (s: MaintenanceSchedule) => {
+      // Reading a target's history is open to everyone who can see the schedule.
+      const history = historyTargetFor(s);
+      const historyButton = history ? (
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={e => {
+            e.stopPropagation();
+            setHistoryTarget(history);
+          }}
+          className="inline-flex items-center"
+          aria-label={`Maintenance history for ${history.label} (schedule ${s.name})`}
+        >
+          <ClockIcon className="w-4 h-4 mr-1" aria-hidden="true" />
+          History
+        </Button>
+      ) : null;
+      if (!(canPlan && s.is_active)) return historyButton;
+      return (
         <div className="flex flex-wrap gap-1">
           {startPmControl(s)}
+          {historyButton}
           <Button
             variant="secondary"
             size="sm"
@@ -669,7 +700,8 @@ export default function Maintenance() {
             Deactivate
           </Button>
         </div>
-      ) : null,
+      );
+    },
     [canPlan, startPmControl]
   );
 
@@ -733,70 +765,86 @@ export default function Maintenance() {
   };
 
   const woRowActions = useCallback(
-    (wo: MaintenanceWorkOrder) =>
-      canPerform ? (
-        <div className="flex gap-1">
-          {STARTABLE_STATUSES.has(wo.status) && (
-            <button
-              type="button"
-              onClick={e => {
-                e.stopPropagation();
-                void handleStart(wo);
-              }}
-              disabled={actionBusy}
-              className="text-xs px-2 py-1 bg-blue-600 text-white rounded-sm hover:bg-blue-700 disabled:opacity-60"
-              title="Start"
-              aria-label={`Start work order ${wo.wo_number}`}
-            >
-              <PlayIcon className="w-4 h-4" aria-hidden="true" />
-            </button>
-          )}
-          {wo.status === 'in_progress' && (
-            <button
-              type="button"
-              onClick={e => {
-                e.stopPropagation();
-                openCompleteModal(wo);
-              }}
-              className="text-xs px-2 py-1 bg-green-600 text-white rounded-sm hover:bg-green-700"
-              title="Complete"
-              aria-label={`Complete work order ${wo.wo_number}`}
-            >
-              <CheckCircleIcon className="w-4 h-4" aria-hidden="true" />
-            </button>
-          )}
-          {canPlan && wo.status === 'in_progress' && (
-            <button
-              type="button"
-              onClick={e => {
-                e.stopPropagation();
-                void handleSetStatus(wo, 'on_hold');
-              }}
-              disabled={actionBusy}
-              className="text-xs px-2 py-1 bg-amber-600 text-white rounded-sm hover:bg-amber-700 disabled:opacity-60"
-              title="Put on hold"
-              aria-label={`Put work order ${wo.wo_number} on hold`}
-            >
-              <PauseIcon className="w-4 h-4" aria-hidden="true" />
-            </button>
-          )}
-          {canPlan && CANCELLABLE_STATUSES.has(wo.status) && (
-            <button
-              type="button"
-              onClick={e => {
-                e.stopPropagation();
-                setCancelTarget(wo);
-              }}
-              disabled={actionBusy}
-              className="text-xs px-2 py-1 bg-slate-600 text-white rounded-sm hover:bg-red-700 disabled:opacity-60"
-              title="Cancel work order"
-              aria-label={`Cancel work order ${wo.wo_number}`}
-            >
-              <NoSymbolIcon className="w-4 h-4" aria-hidden="true" />
-            </button>
-          )}
-        </div>
-      ) : null,
+    (wo: MaintenanceWorkOrder) => (
+      <div className="flex gap-1">
+        {/* The record and its log are open to everyone who can see the work order. */}
+        <button
+          type="button"
+          onClick={e => {
+            e.stopPropagation();
+            setDetailWO(wo);
+          }}
+          className="text-xs px-2 py-1 bg-slate-700 text-white rounded-sm hover:bg-slate-600"
+          title="Details and log"
+          aria-label={`Details and log for work order ${wo.wo_number}`}
+        >
+          <ClipboardDocumentListIcon className="w-4 h-4" aria-hidden="true" />
+        </button>
+        {canPerform && (
+          <>
+            {STARTABLE_STATUSES.has(wo.status) && (
+              <button
+                type="button"
+                onClick={e => {
+                  e.stopPropagation();
+                  void handleStart(wo);
+                }}
+                disabled={actionBusy}
+                className="text-xs px-2 py-1 bg-blue-600 text-white rounded-sm hover:bg-blue-700 disabled:opacity-60"
+                title="Start"
+                aria-label={`Start work order ${wo.wo_number}`}
+              >
+                <PlayIcon className="w-4 h-4" aria-hidden="true" />
+              </button>
+            )}
+            {wo.status === 'in_progress' && (
+              <button
+                type="button"
+                onClick={e => {
+                  e.stopPropagation();
+                  openCompleteModal(wo);
+                }}
+                className="text-xs px-2 py-1 bg-green-600 text-white rounded-sm hover:bg-green-700"
+                title="Complete"
+                aria-label={`Complete work order ${wo.wo_number}`}
+              >
+                <CheckCircleIcon className="w-4 h-4" aria-hidden="true" />
+              </button>
+            )}
+            {canPlan && wo.status === 'in_progress' && (
+              <button
+                type="button"
+                onClick={e => {
+                  e.stopPropagation();
+                  void handleSetStatus(wo, 'on_hold');
+                }}
+                disabled={actionBusy}
+                className="text-xs px-2 py-1 bg-amber-600 text-white rounded-sm hover:bg-amber-700 disabled:opacity-60"
+                title="Put on hold"
+                aria-label={`Put work order ${wo.wo_number} on hold`}
+              >
+                <PauseIcon className="w-4 h-4" aria-hidden="true" />
+              </button>
+            )}
+            {canPlan && CANCELLABLE_STATUSES.has(wo.status) && (
+              <button
+                type="button"
+                onClick={e => {
+                  e.stopPropagation();
+                  setCancelTarget(wo);
+                }}
+                disabled={actionBusy}
+                className="text-xs px-2 py-1 bg-slate-600 text-white rounded-sm hover:bg-red-700 disabled:opacity-60"
+                title="Cancel work order"
+                aria-label={`Cancel work order ${wo.wo_number}`}
+              >
+                <NoSymbolIcon className="w-4 h-4" aria-hidden="true" />
+              </button>
+            )}
+          </>
+        )}
+      </div>
+    ),
     [actionBusy, canPerform, canPlan, handleSetStatus, handleStart, openCompleteModal]
   );
 
@@ -884,9 +932,9 @@ export default function Maintenance() {
             '-'
           ),
       },
-      ...(canPerform ? [{ key: 'actions', header: 'Actions', render: woRowActions }] : []),
+      { key: 'actions', header: 'Actions', render: woRowActions },
     ],
-    [canPerform, schedulesById, woRowActions]
+    [schedulesById, woRowActions]
   );
 
   const renderWOCard = useCallback(
@@ -901,14 +949,11 @@ export default function Maintenance() {
           { label: 'Scheduled', value: wo.scheduled_date ? formatCentralDate(wo.scheduled_date) : '-' },
           { label: 'Due', value: wo.due_date ? formatCentralDate(wo.due_date) : '-' },
         ]}
-        actions={
-          canPerform && (STARTABLE_STATUSES.has(wo.status) || wo.status === 'in_progress')
-            ? (woRowActions(wo) ?? undefined)
-            : undefined
-        }
+        onClick={() => setDetailWO(wo)}
+        actions={woRowActions(wo)}
       />
     ),
-    [canPerform, woRowActions]
+    [woRowActions]
   );
 
   // ---- Schedules tab columns ----
@@ -1006,9 +1051,9 @@ export default function Maintenance() {
             <XMarkIcon className="w-5 h-5 text-slate-400" aria-label="Inactive" />
           ),
       },
-      ...(canPlan ? [{ key: 'actions', header: 'Actions', render: scheduleRowActions }] : []),
+      { key: 'actions', header: 'Actions', render: scheduleRowActions },
     ],
-    [canPlan, scheduleRowActions]
+    [scheduleRowActions]
   );
 
   const renderScheduleCard = useCallback(
@@ -1362,6 +1407,7 @@ export default function Maintenance() {
             defaultSort={{ key: 'scheduled', dir: 'desc' }}
             pageSize={25}
             csvExport={{ filename: 'maintenance-work-orders' }}
+            onRowClick={setDetailWO}
             mobileCards={renderWOCard}
             empty={{
               icon: PlusIcon,
@@ -1379,6 +1425,17 @@ export default function Maintenance() {
 
       {/* Equipment assets Tab */}
       {activeTab === 'assets' && <MaintenanceAssetsPanel canEdit={canPlan} onChanged={loadAssets} />}
+
+      <MaintenanceWorkOrderDetailModal
+        workOrder={detailWO}
+        scheduleName={detailWO?.schedule_id != null ? schedulesById.get(detailWO.schedule_id)?.name : null}
+        scheduleChecklistItems={
+          detailWO?.schedule_id != null ? schedulesById.get(detailWO.schedule_id)?.checklist_items : undefined
+        }
+        canAddLog={canPerform}
+        onClose={() => setDetailWO(null)}
+      />
+      <MaintenanceHistoryModal target={historyTarget} onClose={() => setHistoryTarget(null)} />
 
       {showImport && (
         <PmScheduleImportWizard

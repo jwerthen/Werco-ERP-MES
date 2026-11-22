@@ -130,12 +130,17 @@ import type {
 } from '../types/poFlowdown';
 import type {
   MaintenanceAsset,
+  MaintenanceAssetHistory,
   MaintenanceAssetInput,
   MaintenanceAssetUpdate,
+  MaintenanceLogCreate,
+  MaintenanceLogEntry,
   MaintenanceSchedule,
   MaintenanceScheduleUpdate,
   MaintenanceWorkOrder,
+  MaintenanceWorkCenterHistory,
   MaintenanceWorkOrderCompleted,
+  MaintenanceWorkOrderLogs,
   PmImportResponse,
 } from '../types/maintenance';
 import {
@@ -5471,6 +5476,12 @@ class ApiService {
     return response.data;
   }
 
+  /** The log entries filed against one maintenance work order, newest first. */
+  async getMaintenanceWorkOrderLogs(id: number, limit?: number): Promise<MaintenanceWorkOrderLogs> {
+    const response = await this.api.get<MaintenanceWorkOrderLogs>(`/maintenance/work-orders/${id}/logs`, { params: { limit } });
+    return response.data;
+  }
+
   async createMaintenanceWorkOrder(data: any) {
     const response = await this.api.post('/maintenance/work-orders', data);
     return response.data;
@@ -5507,13 +5518,15 @@ class ApiService {
     return response.data;
   }
 
-  async getMaintenanceHistory(work_center_id: number, limit?: number) {
-    const response = await this.api.get(`/maintenance/history/${work_center_id}`, { params: { limit } });
+  /** A work center's maintenance log entries, newest first. */
+  async getMaintenanceHistory(work_center_id: number, limit?: number): Promise<MaintenanceWorkCenterHistory> {
+    const response = await this.api.get<MaintenanceWorkCenterHistory>(`/maintenance/history/${work_center_id}`, { params: { limit } });
     return response.data;
   }
 
-  async createMaintenanceLog(data: any) {
-    const response = await this.api.post('/maintenance/log', data);
+  /** File a log entry against a maintenance work order (no target: the server takes the work order's). */
+  async createMaintenanceLog(data: MaintenanceLogCreate): Promise<MaintenanceLogEntry> {
+    const response = await this.api.post<MaintenanceLogEntry>('/maintenance/log', data);
     return response.data;
   }
 
@@ -5541,8 +5554,9 @@ class ApiService {
     return response.data;
   }
 
-  async getMaintenanceAssetHistory(id: number, limit?: number) {
-    const response = await this.api.get(`/maintenance/assets/${id}/history`, { params: { limit } });
+  /** An equipment asset's maintenance log entries, newest first. */
+  async getMaintenanceAssetHistory(id: number, limit?: number): Promise<MaintenanceAssetHistory> {
+    const response = await this.api.get<MaintenanceAssetHistory>(`/maintenance/assets/${id}/history`, { params: { limit } });
     return response.data;
   }
 

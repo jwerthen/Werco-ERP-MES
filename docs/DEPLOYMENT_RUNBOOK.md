@@ -295,18 +295,35 @@ statement, writes no row, and adds no environment variable, secret, cron or work
   See [API.md → Customer Complaints & RMA](API.md#customer-complaints--rma).
 
 **Customer-supplied parts.** Apply **134_part_customer_supplied** after
-**132_maintenance_pm_integrity** through the normal API boot migration path. It adds
+**133_maintenance_log_provenance** through the normal API boot migration path. It adds
 `parts.customer_supplied` (`boolean NOT NULL`, server default `false`; no backfill on PostgreSQL, so
 every existing part reads `false` and no MRP run changes until a person flags a part). A flagged part
 creates no MRP demand (owner decision 2026-11-22). Under `SET LOCAL lock_timeout = '5s'` the column
 add is metadata-only but briefly takes ACCESS EXCLUSIVE on `parts`; a timeout leaves the database at
-`132`. No environment variable, secret, cron or worker job is added. Deploy the worker with or after
+`133`. No environment variable, secret, cron or worker job is added. Deploy the worker with or after
 the API (new code selects the column on every part load) and the API before the frontend (an older
 API drops the field the new **Customer-supplied** checkbox sends). On an application rollback keep
 the migration: from a checkout of this release run `railway run --service werco-api alembic stamp
-132_maintenance_pm_integrity` before redeploying a pre-134 image. The **downgrade is lossy**: it drops
+133_maintenance_log_provenance` before redeploying a pre-134 image. The **downgrade is lossy**: it drops
 every flag. Full notes and verification are in
 [Customer-supplied parts](DEPLOYMENT.md#customer-supplied-parts-migration-134).
+
+**Maintenance log provenance.** Apply **133_maintenance_log_provenance** after
+**132_maintenance_pm_integrity** through the normal API boot migration path; no pre-deploy check is
+needed. It adds the nullable `maintenance_logs.api_token_id` (no default, no foreign key, no
+backfill), which records that a standing API token filed an entry and is served as
+`filed_via_api_token`, and the index `ix_maintenance_logs_maintenance_wo_id`. Under
+`SET LOCAL lock_timeout = '5s'` the column add is metadata-only and the index build holds writes on
+the small `maintenance_logs` table until the boot commits; a timeout leaves the database at `132`.
+No environment variable, secret, cron or worker job is added. Deploy the worker with or after the
+API (new code selects the column on every log read) and the API before the frontend (the
+work-order detail view reads the new `GET /maintenance/work-orders/{id}/logs`). In this release
+`POST /maintenance/log` also refuses a free-text, `started` or `completed` `event_type` (**422**),
+so tell anyone scripting log entries. On an application rollback keep the migration: from a
+checkout of this release run `railway run --service werco-api alembic stamp
+132_maintenance_pm_integrity` before redeploying a pre-133 image. The **downgrade is lossy only for
+provenance** (the audit rows' `extra_data.credential` keeps it). Full notes and verification are in
+[Maintenance log provenance](DEPLOYMENT.md#maintenance-log-provenance-migration-133).
 
 **PM record integrity.** Apply **132_maintenance_pm_integrity** after **131_document_access**
 through the normal API boot migration path. It adds the nullable `maintenance_work_orders.schedule_checklist_snapshot`

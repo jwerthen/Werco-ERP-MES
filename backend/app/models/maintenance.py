@@ -42,6 +42,27 @@ class MaintenanceStatus(str, enum.Enum):
     ON_HOLD = "on_hold"
 
 
+class MaintenanceLogEntryType(str, enum.Enum):
+    """What a person (or an API token) may file as a maintenance log entry (owner decision 2026-11-20).
+
+    A fixed vocabulary: ``POST /maintenance/log`` refuses anything else (422), so no caller can file a
+    ``started`` or ``completed`` entry -- those the start / complete verbs write themselves
+    (``SERVER_LOG_EVENT_TYPES``). The column stays ``String(50)``, so legacy free-text rows still read.
+    """
+
+    INSPECTION = "inspection"
+    REPAIR = "repair"
+    PART_REPLACEMENT = "part_replacement"
+    OBSERVATION = "observation"
+    NOTE = "note"
+
+
+# The entries only the work-order verbs write: ``POST .../start`` and ``POST .../complete``.
+LOG_EVENT_STARTED = "started"
+LOG_EVENT_COMPLETED = "completed"
+SERVER_LOG_EVENT_TYPES = (LOG_EVENT_STARTED, LOG_EVENT_COMPLETED)
+
+
 class MaintenanceFrequency(str, enum.Enum):
     DAILY = "daily"
     WEEKLY = "weekly"
@@ -285,11 +306,19 @@ class MaintenanceLog(Base, TenantMixin):
         nullable=True,
         index=True,
     )
-    maintenance_wo_id = Column(Integer, ForeignKey("maintenance_work_orders.id"), nullable=True)
+    # Indexed (migration 133): ``GET /maintenance/work-orders/{id}/logs`` reads one work order's entries.
+    maintenance_wo_id = Column(Integer, ForeignKey("maintenance_work_orders.id"), nullable=True, index=True)
 
-    event_type = Column(String(50), nullable=False)  # completed, inspection, repair, part_replacement, observation
+    # A ``MaintenanceLogEntryType`` value, or one of ``SERVER_LOG_EVENT_TYPES``; legacy rows may hold
+    # other text, which still reads.
+    event_type = Column(String(50), nullable=False)
     description = Column(Text, nullable=False)
     performed_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    # The ``api_tokens`` row a standing API token filed this entry with (migration 133); NULL when a
+    # person -- or the work order's own Start / Complete -- wrote it, and on every older row (the audit
+    # row's ``extra_data.credential`` is the record for those). An identifier, no foreign key: tokens
+    # are revoked, never deleted. Served as ``filed_via_api_token`` so the record says what wrote it.
+    api_token_id = Column(Integer, nullable=True)
 
     event_date = Column(DateTime, default=datetime.utcnow)
     cost = Column(Float, default=0)

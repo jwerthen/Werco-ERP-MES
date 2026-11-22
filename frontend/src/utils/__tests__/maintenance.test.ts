@@ -4,6 +4,12 @@ import {
   checklistResultsPayload,
   completionChecklist,
   completionNotesPayload,
+  BLANK_MAINTENANCE_LOG_FORM,
+  logEventTypeLabel,
+  maintenanceLogCostProblem,
+  maintenanceLogFormProblem,
+  maintenanceLogPayload,
+  maintenanceLogWhenProblem,
   openWorkOrdersBySchedule,
   parseChecklistResults,
 } from '../maintenance';
@@ -301,5 +307,89 @@ describe('parseChecklistResults — whole-checklist edges (server parity)', () =
       'Y axis limit',
       '*CRITICAL* torque',
     ]);
+  });
+});
+
+describe('maintenance log entries', () => {
+  it('labels the filed types, the server-written ones, and legacy free text', () => {
+    expect(logEventTypeLabel('part_replacement')).toBe('Part replacement');
+    expect(logEventTypeLabel('inspection')).toBe('Inspection');
+    expect(logEventTypeLabel('started')).toBe('Started');
+    expect(logEventTypeLabel('completed')).toBe('Completed');
+    expect(logEventTypeLabel('belt_swap by vendor')).toBe('Belt swap by vendor');
+    expect(logEventTypeLabel('  ')).toBe('Entry');
+    expect(logEventTypeLabel(null)).toBe('Entry');
+  });
+
+  it('names the work order and no target, trims the description, and leaves cost and date to the server when blank', () => {
+    const payload = maintenanceLogPayload(41, {
+      ...BLANK_MAINTENANCE_LOG_FORM,
+      event_type: 'observation',
+      description: '  Belt glazed  ',
+    });
+    expect(payload).toEqual({ maintenance_wo_id: 41, event_type: 'observation', description: 'Belt glazed' });
+    expect(payload).not.toHaveProperty('work_center_id');
+    expect(payload).not.toHaveProperty('asset_id');
+  });
+
+  it('sends a cost and a Central wall-clock date (as UTC) only when given', () => {
+    // 8:30 AM Central on Nov 19, 2026 is CST (UTC-6); Jul 1 is CDT (UTC-5).
+    expect(
+      maintenanceLogPayload(41, {
+        ...BLANK_MAINTENANCE_LOG_FORM,
+        event_type: 'repair',
+        description: 'Replaced belt',
+        cost: '42.50',
+        when: '2026-11-19T08:30',
+      })
+    ).toEqual({
+      maintenance_wo_id: 41,
+      event_type: 'repair',
+      description: 'Replaced belt',
+      cost: 42.5,
+      event_date: '2026-11-19T14:30:00.000Z',
+    });
+    expect(
+      maintenanceLogPayload(41, { ...BLANK_MAINTENANCE_LOG_FORM, description: 'x', when: '2026-07-01T08:30' })
+        .event_date
+    ).toBe('2026-07-01T13:30:00.000Z');
+    expect(maintenanceLogPayload(41, { ...BLANK_MAINTENANCE_LOG_FORM, description: 'x', cost: '0' }).cost).toBe(0);
+  });
+
+  it('holds the form back until it has a description, a non-negative cost and a readable date', () => {
+    expect(maintenanceLogFormProblem(BLANK_MAINTENANCE_LOG_FORM)).toMatch(/Describe/);
+    expect(maintenanceLogFormProblem({ ...BLANK_MAINTENANCE_LOG_FORM, description: '   ' })).toMatch(/Describe/);
+    const ok = { ...BLANK_MAINTENANCE_LOG_FORM, description: 'Checked' };
+    expect(maintenanceLogFormProblem(ok)).toBeNull();
+    expect(maintenanceLogFormProblem({ ...ok, cost: '-1' })).toBe('Cost must be zero or more.');
+    expect(maintenanceLogFormProblem({ ...ok, cost: 'abc' })).toBe('Enter a valid cost, or leave it blank.');
+    expect(maintenanceLogFormProblem({ ...ok, when: 'yesterday' })).toBe(
+      'Enter a complete date and time, or leave it blank for now.'
+    );
+  });
+
+  it('refuses an input the browser reads as blank but holds bad input (12,50; a date with no time)', () => {
+    const ok = { ...BLANK_MAINTENANCE_LOG_FORM, description: 'Checked' };
+    // The value is '' either way: only the flag tells "left blank" from "typed something unreadable".
+    expect(maintenanceLogFormProblem({ ...ok, cost: '', cost_bad_input: true })).toBe(
+      'Enter a valid cost, or leave it blank.'
+    );
+    expect(maintenanceLogCostProblem({ ...ok, cost: '', cost_bad_input: true })).toBe(
+      'Enter a valid cost, or leave it blank.'
+    );
+    expect(maintenanceLogFormProblem({ ...ok, when: '', when_bad_input: true })).toBe(
+      'Enter a complete date and time, or leave it blank for now.'
+    );
+    expect(maintenanceLogWhenProblem({ ...ok, when: '', when_bad_input: true })).toBe(
+      'Enter a complete date and time, or leave it blank for now.'
+    );
+    expect(maintenanceLogCostProblem(ok)).toBeNull();
+    expect(maintenanceLogWhenProblem(ok)).toBeNull();
+    // The flags never reach the request body.
+    expect(maintenanceLogPayload(41, { ...ok, cost_bad_input: true, when_bad_input: true })).toEqual({
+      maintenance_wo_id: 41,
+      event_type: 'note',
+      description: 'Checked',
+    });
   });
 });

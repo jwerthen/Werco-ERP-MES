@@ -1,7 +1,7 @@
 """Add parts.customer_supplied: a customer-supplied part creates no MRP demand
 
 Revision ID: 134_part_customer_supplied
-Revises: 132_maintenance_pm_integrity
+Revises: 133_maintenance_log_provenance
 Create Date: 2026-11-22
 
 Context
@@ -123,7 +123,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision = "134_part_customer_supplied"
-down_revision = "132_maintenance_pm_integrity"
+down_revision = "133_maintenance_log_provenance"
 branch_labels = None
 depends_on = None
 

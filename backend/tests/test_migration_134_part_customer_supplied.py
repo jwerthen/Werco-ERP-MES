@@ -51,7 +51,7 @@ pytestmark = [pytest.mark.unit]
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MIGRATION_FILE = os.path.join(BACKEND_DIR, "alembic", "versions", "134_part_customer_supplied.py")
 REVISION = "134_part_customer_supplied"
-DOWN_REVISION = "132_maintenance_pm_integrity"
+DOWN_REVISION = "133_maintenance_log_provenance"
 TABLE = "parts"
 COLUMN = "customer_supplied"
 

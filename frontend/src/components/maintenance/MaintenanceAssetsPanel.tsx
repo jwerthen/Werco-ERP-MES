@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { PlusIcon, WrenchScrewdriverIcon } from '@heroicons/react/24/outline';
+import { ClockIcon, PlusIcon, WrenchScrewdriverIcon } from '@heroicons/react/24/outline';
 import api from '../../services/api';
 import { Modal } from '../ui/Modal';
 import { FormField } from '../ui/FormField';
@@ -14,6 +14,7 @@ import useUnsavedChanges from '../../hooks/useUnsavedChanges';
 import { useDebouncedValue } from '../../hooks/useDebouncedValue';
 import { toDisplayString } from '../../utils/apiError';
 import type { MaintenanceAsset, MaintenanceAssetInput } from '../../types/maintenance';
+import { MaintenanceHistoryModal, MaintenanceHistoryTarget } from './MaintenanceHistoryModal';
 
 interface Props {
   /** Planning roles (ADMIN / MANAGER / SUPERVISOR) may add, edit and retire assets. */
@@ -70,6 +71,8 @@ export function MaintenanceAssetsPanel({ canEdit, onChanged }: Props) {
   const [formError, setFormError] = useState('');
   const [retireTarget, setRetireTarget] = useState<MaintenanceAsset | null>(null);
   const [retiring, setRetiring] = useState(false);
+  // The asset whose maintenance history is open; reading it is open to every role.
+  const [historyTarget, setHistoryTarget] = useState<MaintenanceHistoryTarget | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -186,38 +189,51 @@ export function MaintenanceAssetsPanel({ canEdit, onChanged }: Props) {
     }
   };
 
-  const actions = (asset: MaintenanceAsset) =>
-    canEdit ? (
-      <div className="flex justify-end gap-2" role="presentation" onClick={e => e.stopPropagation()}>
-        <Button
-          variant="secondary"
-          size="sm"
-          onClick={() => openEdit(asset)}
-          aria-label={`Edit asset ${asset.asset_tag}`}
-        >
-          Edit
-        </Button>
-        {asset.is_active ? (
+  const actions = (asset: MaintenanceAsset) => (
+    <div className="flex justify-end gap-2" role="presentation" onClick={e => e.stopPropagation()}>
+      <Button
+        variant="secondary"
+        size="sm"
+        onClick={() => setHistoryTarget({ kind: 'asset', id: asset.id, label: `${asset.asset_tag} · ${asset.name}` })}
+        className="inline-flex items-center"
+        aria-label={`Maintenance history for asset ${asset.asset_tag}`}
+      >
+        <ClockIcon className="mr-1 h-4 w-4" aria-hidden="true" />
+        History
+      </Button>
+      {canEdit && (
+        <>
           <Button
-            variant="ghost"
+            variant="secondary"
             size="sm"
-            onClick={() => setRetireTarget(asset)}
-            aria-label={`Retire asset ${asset.asset_tag}`}
+            onClick={() => openEdit(asset)}
+            aria-label={`Edit asset ${asset.asset_tag}`}
           >
-            Retire
+            Edit
           </Button>
-        ) : (
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => reactivate(asset)}
-            aria-label={`Reactivate asset ${asset.asset_tag}`}
-          >
-            Reactivate
-          </Button>
-        )}
-      </div>
-    ) : null;
+          {asset.is_active ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setRetireTarget(asset)}
+              aria-label={`Retire asset ${asset.asset_tag}`}
+            >
+              Retire
+            </Button>
+          ) : (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => reactivate(asset)}
+              aria-label={`Reactivate asset ${asset.asset_tag}`}
+            >
+              Reactivate
+            </Button>
+          )}
+        </>
+      )}
+    </div>
+  );
 
   const columns: Array<DataTableColumn<MaintenanceAsset>> = [
     {
@@ -256,7 +272,7 @@ export function MaintenanceAssetsPanel({ canEdit, onChanged }: Props) {
       accessor: asset => (asset.is_active ? 'active' : 'retired'),
       render: asset => <StatusBadge status={asset.is_active ? 'active' : 'retired'} colorMap={ACTIVE_COLORS} />,
     },
-    ...(canEdit ? [{ key: 'actions', header: 'Actions', align: 'right' as const, render: actions }] : []),
+    { key: 'actions', header: 'Actions', align: 'right' as const, render: actions },
   ];
 
   const textField = (key: keyof AssetForm, label: string, required = false, maxLength = 100) => (
@@ -324,7 +340,7 @@ export function MaintenanceAssetsPanel({ canEdit, onChanged }: Props) {
               { label: 'PM schedules', value: asset.active_schedule_count },
               { label: 'Open WOs', value: asset.open_work_order_count },
             ]}
-            actions={actions(asset) ?? undefined}
+            actions={actions(asset)}
           />
         )}
         empty={{
@@ -391,6 +407,8 @@ export function MaintenanceAssetsPanel({ canEdit, onChanged }: Props) {
           </div>
         </form>
       </Modal>
+
+      <MaintenanceHistoryModal target={historyTarget} onClose={() => setHistoryTarget(null)} />
 
       <ConfirmDialog
         open={retireTarget !== null}
