@@ -191,7 +191,7 @@ Severity: ℹ info · ⚠ warning · 🔴 critical. Channels shown are **default
 | coc.generation_failed | exists | Shipping, Quality | ⚠ | in-app | | |
 | eco.submitted | `submit_eco` (**instrument**) | approver roles | ⚠ | in-app+email | | |
 | eco.approved / eco.rejected / eco.implemented | ECO routes (**instrument**) | submitter, watchers | ℹ | in-app+email | | |
-| maintenance.due / maintenance.overdue | cron (**new**; re-notify §3.1) | Maintenance, supervisors | ⚠ | in-app | | |
+| maintenance.due / maintenance.overdue | cron (**new**; re-notify §3.1) | Maintenance department plus Admins (owner decision 2026-11-20; planned as Maintenance, supervisors) | ⚠ | in-app | | |
 | downtime.started | `create_downtime_event` | supervisors, managers | 🔴 | in-app | ✔ | |
 | downtime.resolved | `resolve_downtime_event` | same | ℹ | in-app | | |
 | comment.mention | comment create | mentioned user | ℹ | in-app+email | | ✔ |

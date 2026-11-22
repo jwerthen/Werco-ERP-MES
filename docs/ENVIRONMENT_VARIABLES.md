@@ -524,7 +524,7 @@ variables to claim physical verification or bypass the explicit observation work
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `WORKER_CRON_JOBS` | No | all | Which scheduled jobs the worker registers. Unset or `all` → every cron (14 of them). `none` → no crons; the worker still drains enqueue-driven jobs (notifications, webhooks, labels, completion signals, Hank PDF intake). A comma-separated list of job names arms **exactly** those (allowlist). A `-` prefix **excludes** a job from the full set (denylist): `all,-run_mrp_auto_draft_job`. The two shapes may not be mixed. **An unrecognised name is a hard startup error, not a silent skip — a negated one included.** `none` is the correct value for a first-ever boot — several crons write or email in bulk on their first run. Full syntax below |
+| `WORKER_CRON_JOBS` | No | all | Which scheduled jobs the worker registers. Unset or `all` → every cron (15 of them). `none` → no crons; the worker still drains enqueue-driven jobs (notifications, webhooks, labels, completion signals, Hank PDF intake). A comma-separated list of job names arms **exactly** those (allowlist). A `-` prefix **excludes** a job from the full set (denylist): `all,-run_mrp_auto_draft_job`. The two shapes may not be mixed. **An unrecognised name is a hard startup error, not a silent skip — a negated one included.** `none` is the correct value for a first-ever boot — several crons write or email in bulk on their first run. Full syntax below |
 | `TZ` | No | UTC | Container timezone. ARQ resolves cron times in the container's local zone, so unset means `hour=6` fires at **06:00 UTC = 01:00 Central**. Set `TZ=America/Chicago` for shop-local schedules |
 
 #### `WORKER_CRON_JOBS` syntax
@@ -545,8 +545,8 @@ everything and subtract the ones you don't (denylist, `-` prefix).
 | `-cron:run_mrp_auto_draft_job` | Identical again. Both spellings work for exclusions exactly as they already do for inclusions: arq names crons `cron:<coroutine name>` and the startup log prints **that** form, so whichever one you copied has to work. |
 | `-a,-b` | Subtracts both. Excluding every cron is legal and simply means `none`. |
 
-**Why the `-` form exists.** Turning one cron off with an allowlist means listing the other
-eleven — which **freezes the set**. A cron added to `ALL_CRON_JOBS` in a later release then
+**Why the `-` form exists.** Turning one cron off with an allowlist means listing all the
+others — which **freezes the set**. A cron added to `ALL_CRON_JOBS` in a later release then
 silently never registers on that worker: "I enabled the cron and nothing happened", the exact
 failure this selector exists to eliminate, just delayed until the next deploy. A denylist
 subtracts from whatever the release declares, so new crons arrive armed.
@@ -898,7 +898,11 @@ Preparing a task through chat still uses the configured chat model and company A
 Opt-in work-order follow-ups also work without an LLM and reuse migration108. Scheduled
 checks use the existing worker selector: production rollout explicitly changes `none` to
 `WORKER_CRON_JOBS=check_hank_watches_job`, enabling only the new five-minute check and keeping
-all other schedules disabled. This is an existing variable, not a new setting. Deploy
+all other schedules disabled. This is an existing variable, not a new setting. The PM due and
+overdue alerts (2026-11-20) are a new cron, `check_maintenance_due_job`, that such an allowlist
+does not pick up: add it, `WORKER_CRON_JOBS=check_hank_watches_job,check_maintenance_due_job`
+(the current production value is not verified here; read it first). See
+[PM due and overdue alerts](DEPLOYMENT.md#pm-due-and-overdue-alerts). Deploy
 matching API/worker/frontend releases; see [Hank follow-up deployment](DEPLOYMENT.md#hank-follow-up-worker).
 Manual **Check now** remains available when scheduling is disabled.
 Personal preferences require additive migration 109 after 108 and matching API/worker/frontend

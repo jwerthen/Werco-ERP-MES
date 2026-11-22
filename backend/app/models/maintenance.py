@@ -102,6 +102,18 @@ OPEN_MAINTENANCE_STATUSES = (
     MaintenanceStatus.ON_HOLD,
 )
 
+# ...and in one of these a PM is represented on the dashboard tiles and in the due / overdue alerts by
+# the work order itself (by its due date, or as in progress). An ON-HOLD work order is on no work-order
+# tile, so its schedule keeps counting by the schedule's own due date: a held PM has not been done
+# (owner decision 2026-11-17). ``app.services.maintenance_due_service`` reads both tuples.
+COVERING_MAINTENANCE_STATUSES = (
+    MaintenanceStatus.SCHEDULED,
+    MaintenanceStatus.OVERDUE,
+    MaintenanceStatus.IN_PROGRESS,
+)
+# A work order in one of these is due (or overdue) by its own ``due_date``: not started yet.
+DUE_WORK_ORDER_STATUSES = (MaintenanceStatus.SCHEDULED, MaintenanceStatus.OVERDUE)
+
 # One OPEN maintenance work order per PM schedule, in the database (migration 132). The rule is
 # enforced first by ``create_work_order`` under the schedule's row lock (a 409 naming the open work
 # order); this index is the backstop for any future writer. ``SQLEnum(MaintenanceStatus)`` persists
