@@ -2,8 +2,8 @@
 
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
-(Cursor, Claude Code, a chat bot) gets **794 tools** — 15 hand-written *convenience* tools plus
-**779 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+(Cursor, Claude Code, a chat bot) gets **795 tools** — 15 hand-written *convenience* tools plus
+**780 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
 as the same request from the web app. A **read-only** API token is shown fewer tools, and an
 **AI-external** one fewer still (§4.1, §4.2).
 
@@ -105,6 +105,22 @@ document's access level and granting or revoking a user's export authorization, 
 now answers only what the calling user may open (the user's role and export authorization; see
 [API.md → Restricted and export-controlled documents](API.md#restricted-and-export-controlled-documents-as9100d-7531)),
 so two agents on two users can see different document lists.
+
+**Re-checked again on 2026-11-20 after maintenance log entries added one Preventive Maintenance
+tool**, `list_work_order_logs` (`GET /maintenance/work-orders/{wo_id}/logs`; no existing name
+shifted): 15 convenience + **780** generated, 16 shadowed. It is a read, so the read-only catalog is
+8 convenience + **304** generated. It is not on the AI-external allowlist, fail-closed: log text
+can carry the reason a PM was completed with steps unticked, and text a token or an agent wrote.
+`create_log` (`POST /maintenance/log`) stays a tool, and its `event_type` is now a fixed vocabulary
+that excludes `started` / `completed`. The owner decided on 2026-11-20 that a standing API token
+may file log entries; the entry then records it (`filed_via_api_token`). Keeping `create_log` a
+tool **also lets an agent file an entry on a person's own JWT**, attributed to that person with no
+marker, unlike a work-order comment or Hank's `add_note`, which the door refuses to an agent on any
+credential (§6.1, §4.3). That half was not separately put to the owner and is to be
+confirmed with them. See
+[API.md → Maintenance](API.md#maintenance-pm-schedules-maintenance-work-orders-event-log), *Maintenance
+log entries*.
+
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
 `backend/tests/test_mcp_docs_names.py` checks every tool name this file, `CLAUDE.md` and `API.md`
@@ -722,6 +738,14 @@ the person to post the note from the app. A read-only or AI-external token never
 through MCP) an API token gets the route's own **403** (§4, "Nor post a Hank note"), while a person's
 own JWT is served exactly as in the app.
 
+**Not people-only: maintenance log entries.** `create_log` (`POST /maintenance/log`) is free text too,
+but it is deliberately **not** on this list. The owner decided on 2026-11-20 that a standing API token
+may file log entries (the entry records it as `filed_via_api_token`), and the tool stays in the
+catalog, so an agent on a person's own JWT may file one as well, attributed to that person with no
+marker. That second half was not separately put to the owner and is to be confirmed with them. See
+[API.md → Maintenance](API.md#maintenance-pm-schedules-maintenance-work-orders-event-log), *Maintenance
+log entries*.
+
 ---
 
 ## 5. Program map — every SPA page → OpenAPI tag(s) → tools
@@ -749,7 +773,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `TvPair` (`/tv`) | Authentication (display tokens) | *No tool* — the `Authentication` tag is excluded on purpose; issue/revoke display tokens from the UI (`WALLBOARD.md`) |
 | `WorkCenters` (`/work-centers`) | Work Centers | `list_work_centers`★, `create_work_center`, `update_work_center`, `update_work_center_status`, `delete_work_center`, `list_work_center_types` |
 | `Scheduling` (`/scheduling`) | Scheduling, Work Centers, Work Orders | `get_scheduled_jobs`, `schedule_work_order`, `schedule_work_order_earliest`, `run_scheduling`, `get_capacity_heatmap`, `get_scheduling_conflicts`, `unschedule_work_order` |
-| `Maintenance` (`/maintenance`) | Preventive Maintenance | `list_schedules`, `create_schedule`, `preventive_maintenance_list_work_orders`, `preventive_maintenance_create_work_order`, `preventive_maintenance_start_work_order`, `preventive_maintenance_complete_work_order`, `get_calendar`, `list_maintenance_assets`, `create_maintenance_asset`, `update_maintenance_asset`, `retire_maintenance_asset`, `get_maintenance_asset_history`, `preview_pm_schedule_import`, `commit_pm_schedule_import` |
+| `Maintenance` (`/maintenance`) | Preventive Maintenance | `list_schedules`, `create_schedule`, `preventive_maintenance_list_work_orders`, `preventive_maintenance_create_work_order`, `preventive_maintenance_start_work_order`, `preventive_maintenance_complete_work_order`, `get_calendar`, `list_maintenance_assets`, `create_maintenance_asset`, `update_maintenance_asset`, `retire_maintenance_asset`, `get_maintenance_asset_history`, `preview_pm_schedule_import`, `commit_pm_schedule_import`, `list_work_order_logs` (a work order's log timeline), `create_log` (**Add log entry**), `get_history` (a work center's log) |
 | `DowntimeTracking` (`/downtime`) | Downtime Tracking, Work Centers | `list_downtime_events`, `create_downtime_event`, `resolve_downtime_event`, `get_downtime_summary`, `list_reason_codes` |
 | `OEE` (`/oee`) | OEE Tracking, Work Centers, Production Calendar | `get_oee_dashboard`, `list_oee_records`, `get_oee_trends`, `auto_calculate_oee`, `get_six_big_losses`, `get_production_calendar` (the shift choices: OEE writes name a defined shift by its id, and a record's date is a production day) |
 | `JobCosting` (`/job-costing`) | Job Costing, Work Orders | `list_job_costs`, `get_job_cost`, `get_summary`, `add_entry` (incl. subcontract entries), `calculate_costs`, `variance_report` |

@@ -5778,20 +5778,21 @@ uploads go through text extraction + LLM. See
 | GET | `/maintenance/work-orders` | List maintenance work orders (**pure read**, see below; `asset_id` filter beside `work_center_id`). The derived `overdue` label compares `due_date` with the company's day | Yes |
 | GET | `/maintenance/work-orders/overdue` | Overdue maintenance work orders (**pure read**; `due_date` before the company's day) | Yes |
 | GET | `/maintenance/work-orders/{id}` | Maintenance work order detail | Yes |
+| GET | `/maintenance/work-orders/{id}/logs` | Log entries filed against one maintenance work order (its `started` / `completed` entries and every `POST /maintenance/log` entry carrying its `maintenance_wo_id`), newest first, each with `performed_by_name` and `filed_via_api_token` (`limit` 1…500, default 100). A work order of another company is **404**. Not on the AI-external allowlist (see *Maintenance log entries* below) | Yes |
 | POST | `/maintenance/work-orders` | Create maintenance work order on a work center **or** an asset (or neither, with a `schedule_id`, to inherit the schedule's target). A `schedule_id` that already has an open work order (`scheduled` / `overdue` / `in_progress` / `on_hold`) is **409** naming it. With a `schedule_id` the work order snapshots the schedule's checklist, which its completion is judged on. `scheduled_date` / `due_date` left blank are the company's day, and the `wo_number` (`MWO-YYYY-NNNN`) year is the company's calendar year | Admin / Manager / Supervisor |
 | PUT | `/maintenance/work-orders/{id}` | Update an open maintenance work order; `status` among `scheduled`, `overdue`, `on_hold`, `cancelled` only (**409** for `in_progress` / `completed` — use the verbs — for returning a started work order to `scheduled` / `overdue`, for changing `requires_shutdown` once started, and for changing **any** field of a `completed` or `cancelled` work order, a final record; see below). Moving it to `cancelled` settles any downtime event it holds | Admin / Manager / Supervisor |
 | POST | `/maintenance/work-orders/{id}/start` | Start (→ `in_progress`). A work-center work order with `requires_shutdown` opens, adopts or shares a downtime event — never a second open one on the machine | Admin / Manager / Supervisor / Operator |
 | POST | `/maintenance/work-orders/{id}/complete` | Complete (→ `completed`, advances the linked schedule from the company's day — the response adds `schedule_next_due_date`) and resolve the work order's open downtime event. `checklist_results` omitted keeps the work order's checklist, and `notes` omitted keeps its notes (a value replaces them, `null` clears them). Any checklist item left unticked (the work order's own, or a step of its PM schedule's checklist as snapshotted when it was opened) needs `incomplete_checklist_reason` (**409** without one) and a person: an API token is **403** (see *Checklist at completion* below) | Admin / Manager / Supervisor / Operator |
 | GET | `/maintenance/calendar` | Work orders in a date window (**capped at 366 days**) | Yes |
 | GET | `/maintenance/dashboard` | Counts, cost, per-machine MTBF/MTTR (work centers only). `overdue_count` / `due_this_week` count work orders; `schedules_overdue` / `schedules_due_this_week` count due PM schedules no scheduled / overdue / in-progress work order covers, so a PM whose work order is on hold still counts. "Today" is the company's day (see *The PM loop* below) | Yes |
-| GET | `/maintenance/history/{work_center_id}` | Event log for one machine (`limit` 1…5000, default 100) | Yes |
+| GET | `/maintenance/history/{work_center_id}` | Event log for one machine, newest first, each entry with `performed_by_name` and `filed_via_api_token` (`limit` 1…5000, default 100) | Yes |
 | GET | `/maintenance/assets` | List equipment assets (`include_inactive` default false, `search` on tag / name / type), each with `active_schedule_count` and `open_work_order_count` | Yes |
 | GET | `/maintenance/assets/{id}` | Equipment asset detail | Yes |
-| GET | `/maintenance/assets/{id}/history` | Event log for one asset, newest first (`limit` 1…5000, default 100) | Yes |
+| GET | `/maintenance/assets/{id}/history` | Event log for one asset, newest first, each entry with `performed_by_name` and `filed_via_api_token` (`limit` 1…5000, default 100) | Yes |
 | POST | `/maintenance/assets` | Register an equipment asset. **409** on a tag the company already uses (ignoring case) | Admin / Manager / Supervisor |
 | PUT | `/maintenance/assets/{id}` | Edit an asset; `version` required (**409** if stale); only the fields sent change | Admin / Manager / Supervisor |
 | DELETE | `/maintenance/assets/{id}` | Retire an asset (`is_active` → `false`; never a physical delete) | Admin / Manager / Supervisor |
-| POST | `/maintenance/log` | Add a maintenance event log entry on a work center **or** an asset | Admin / Manager / Supervisor / Operator |
+| POST | `/maintenance/log` | File a maintenance log entry: `event_type` `inspection`, `repair`, `part_replacement`, `observation` or `note` (**422** otherwise; `started` / `completed` are the Start / Complete verbs' own). With `maintenance_wo_id` the entry takes the work order's work center or asset (a different one is **409**); without one, exactly one of `work_center_id` / `asset_id`. `event_date` at most 30 days back, never in the future. A standing API token may file entries, and the entry records it (`filed_via_api_token`). The audit row is required (**503**, nothing saved). See *Maintenance log entries* below | Admin / Manager / Supervisor / Operator |
 
 > ⚠️ **Three write paths were returning 500 in production, two of them *after* committing.**
 > `MaintenanceLog` carries `TenantMixin`'s NOT NULL `company_id` (migration `026` drops the interim
@@ -5855,8 +5856,8 @@ uploads go through text extraction + LLM. See
 > `resolved_downtime_event_ids` in `extra_data`, and the old and new `notes` in `old_values` /
 > `new_values` when the completion changed them, plus the unticked-checklist fields when the work
 > order closes with part of its checklist undone, and that row is then **required** evidence — see
-> *Checklist at completion* under *The PM loop*), and `maintenance_log` (`CREATE`). A completion
-> that advances a PM schedule also writes that schedule's own `maintenance_schedule` `UPDATE` row. Rows are logged **before** the
+> *Checklist at completion* under *The PM loop*), and `maintenance_log` (`CREATE`, **required**
+> evidence since 2026-11-20 — see *Maintenance log entries*). A completion that advances a PM schedule also writes that schedule's own `maintenance_schedule` `UPDATE` row. Rows are logged **before** the
 > terminal commit so they commit atomically with the change.
 
 > **`GET /maintenance/calendar` refuses a window wider than 366 days (400)**, and refuses
@@ -5959,11 +5960,11 @@ uploads go through text extraction + LLM. See
 >   Until then only the status was held, so a planning role or a token could re-tick a completed PM's
 >   checklist after the fact: the very steps `/complete` demands a written reason to leave unticked
 >   (*Checklist at completion* below). `notes` is refused too, because `/complete` writes them as part
->   of the completion record; a later note is `POST /maintenance/log` naming the work order's machine
->   or asset and its `maintenance_wo_id` — a dated `maintenance_logs` row signed by its author
->   (`performed_by`), with its own audit row — not an edit of the record. (The server does not yet
->   check that the log's machine or asset is the work order's, and the Maintenance page has no
->   log-entry form; both are open follow-ups.) A value identical to the record's is an echo, not a
+>   of the completion record; a later note is `POST /maintenance/log` with the work order's
+>   `maintenance_wo_id` — a dated `maintenance_logs` row signed by its author (`performed_by`), filed
+>   under the work order's own machine or asset, with its own audit row — not an edit of the record.
+>   On the Maintenance page that is **Add log entry** in the work order's detail view (*Maintenance
+>   log entries* below). A value identical to the record's is an echo, not a
 >   change, and is accepted (enums by value, `requires_shutdown` by truth — a legacy `null` reads as
 >   `false` — `title` trimmed, as the request's is, and everything else exactly as stored, other text
 >   not normalized); on a completed or cancelled work order such a request writes nothing (no update,
@@ -5986,6 +5987,72 @@ uploads go through text extraction + LLM. See
 > - **Schedule target.** `POST /maintenance/work-orders` with a `schedule_id` and an explicit
 >   `work_center_id` / `asset_id` that is not the schedule's is **409** — completing the work order
 >   advances that schedule's due date. Leave both empty to inherit the schedule's target.
+
+> **Maintenance log entries: `POST /maintenance/log` and the log reads (owner decisions
+> 2026-11-20).** A log entry is a dated `maintenance_logs` row signed by its author (`performed_by`):
+> an inspection, repair, part replacement, observation or note against a machine or an asset,
+> optionally filed against a maintenance work order. Its `maintenance_log` CREATE audit row is
+> **required** evidence: if it cannot be written the request is **503** *"The audit record for this
+> maintenance log entry could not be saved; nothing was saved."* and no entry is saved.
+>
+> - **`event_type` is a fixed vocabulary:** `inspection`, `repair`, `part_replacement`,
+>   `observation`, `note`. Anything else is **422**, `started` and `completed` included: those entries
+>   are written only by the work order's `/start` and `/complete` verbs, so no caller can file a
+>   "completed" entry that no completion produced. The column is still free text (`String(50)`), so a
+>   legacy row with any other value reads as stored.
+> - **A work order's entry takes the work order's target.** With `maintenance_wo_id` (an open or a
+>   finished work order: a later note on a completed one belongs here), leave `work_center_id` and
+>   `asset_id` empty, or give the work order's own. A different one is **409** *"A log entry on
+>   maintenance work order MWO-… is filed against that work order's own work center or asset. Leave
+>   the work center and asset empty to use it, or file the entry without the work order."*, because
+>   the history reads file each entry under its target and the work would land in the wrong machine's
+>   history. A `maintenance_wo_id` of another company is **404** *"Work order not found"*. The
+>   inherited target is still resolved inside the caller's company, so a legacy work order whose
+>   target belongs to another company is a flat **404** too, never history filed against a foreign
+>   machine. Without a work order, exactly one of `work_center_id` / `asset_id` is required
+>   (**422**, both or neither).
+> - **Date, cost, description.** `event_date` (UTC; a value carrying an offset is converted) defaults
+>   to now, may be at most 30 days back (**422** *"event_date can be at most 30 days back."*) and not
+>   in the future (**422** *"event_date cannot be in the future."*; five minutes of clock skew is
+>   allowed). `cost` is 0 to 10,000,000. `description` is trimmed, required (blank is **422**) and
+>   at most 4000 characters.
+> - **Who may file one.** Admin / Manager / Supervisor / Operator, the performing tier. A read-only or
+>   AI-external token is refused by its own gate (**403**), as on any write. A standing (full) API
+>   token may file entries (owner decision 2026-11-20), and the entry itself records that it did
+>   (migration `133`): `maintenance_logs.api_token_id` holds the token's row, every log payload
+>   serves it as `filed_via_api_token: true`, and the Maintenance page's timeline tags the entry
+>   *via API token*. `performed_by` is still the token's bound user, and the audit row also carries
+>   `extra_data.credential`. An entry a token filed before migration `133` reads
+>   `filed_via_api_token: false`; for those the audit row's `extra_data.credential` is the only
+>   record of the token (never backfilled).
+>   - **An MCP agent on a person's own JWT** is covered by the same decision: `create_log` stays an
+>     MCP tool, and the entry is attributed to that person (`performed_by`, `filed_via_api_token:
+>     false`, no credential marker), indistinguishable from one the person filed in the app. That is
+>     unlike a work-order comment and Hank's `add_note`, which are people-only for an agent on any
+>     credential. This half was not separately put to the owner and is to be confirmed with them.
+> - **Reads.** `GET /maintenance/work-orders/{id}/logs` (any authenticated role; the MCP tool
+>   `list_work_order_logs`) returns `{maintenance_wo_id, wo_number, logs[]}`: the work order's own
+>   `started` / `completed` entries and every entry filed with its `maintenance_wo_id`, newest first
+>   by `event_date` (an entry with none last), then id, `limit` 1…500 (default 100). A work order of
+>   another company is **404**. The two history reads, `GET /maintenance/history/{work_center_id}`
+>   and `GET /maintenance/assets/{id}/history`, use the same order. Every log payload (those three
+>   reads and the `POST` response) carries `filed_via_api_token` and `performed_by_name`: the
+>   author's full name when the author is a user of the caller's company or a platform principal (a
+>   Platform Admin or superuser working in it, whom every maintenance role gate admits), `null` for
+>   a user of another company (a legacy row) or when no author is recorded.
+>   - **Not on the AI-external allowlist, fail-closed.** Log text can carry what an AI-external token
+>     must not be handed by default: a `completed` entry's description includes the reason a PM was
+>     completed with checklist steps unticked, and entries may be text a token or an agent wrote. It
+>     is not a promise that no maintenance free text reaches such a token: `GET
+>     /maintenance/work-orders/{id}` is allowlisted and serves a work order's `notes` and `findings`.
+> - **Maintenance page.** On the Work Orders tab a row click, or the row's **Details and log** button,
+>   opens the work order's detail view: the record, its log timeline, and an **Add log entry** form
+>   for Admin / Manager / Supervisor / Operator that sends `maintenance_wo_id` and no target. Rows on
+>   the Schedules and Assets tabs have a **History** action for the machine's or asset's log. The
+>   timeline shows each entry's author, *via API token* where a token filed it, and *recorded …*
+>   when the entry was saved more than five minutes apart from its `event_date` (a backdated entry).
+>   The form refuses a half-filled date and time or an invalid cost before sending, rather than read
+>   it as blank ("now", or no cost): a saved entry cannot be edited.
 
 > **PM schedule import — `POST /maintenance/schedules/import/preview` then `/commit`** (Admin /
 > Manager / Supervisor). Template `maintenance-schedules`, **one row per task**; `.xlsx` or `.csv`

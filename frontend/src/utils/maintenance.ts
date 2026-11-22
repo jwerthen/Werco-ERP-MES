@@ -4,8 +4,11 @@
  * of them, so an unknown value is a 422 rather than a silently stored string.
  */
 
+import { centralWallClockToUtcISO } from './centralTime';
 import type {
   MaintenanceFrequency,
+  MaintenanceLogCreate,
+  MaintenanceLogEntryType,
   MaintenancePriority,
   MaintenanceTargetFields,
   MaintenanceType,
@@ -278,4 +281,107 @@ export const openWorkOrdersBySchedule = <T extends { schedule_id?: number | null
     }
   }
   return bySchedule;
+};
+
+// ── Maintenance log entries ──
+
+/** What a person files as a log entry, in menu order (the server's `MaintenanceLogEntryType`). */
+export const MAINTENANCE_LOG_ENTRY_TYPE_LABELS: Record<MaintenanceLogEntryType, string> = {
+  inspection: 'Inspection',
+  repair: 'Repair',
+  part_replacement: 'Part replacement',
+  observation: 'Observation',
+  note: 'Note',
+};
+
+/** The entries only the work order's Start / Complete verbs write. */
+const SERVER_LOG_EVENT_LABELS: Record<string, string> = {
+  started: 'Started',
+  completed: 'Completed',
+};
+
+/** How far back a log entry may be dated (the server's `LOG_MAX_BACKDATE_DAYS`; older is 422). */
+export const MAINTENANCE_LOG_MAX_BACKDATE_DAYS = 30;
+
+/**
+ * A log entry's event type as a label. The five filed types and the server's `started` /
+ * `completed` have fixed labels; a legacy free-text value is shown as written, underscores
+ * spaced and the first letter capitalized, so an old row still reads.
+ */
+export const logEventTypeLabel = (eventType: string | null | undefined): string => {
+  const raw = (eventType ?? '').trim();
+  if (!raw) return 'Entry';
+  const known = (MAINTENANCE_LOG_ENTRY_TYPE_LABELS as Record<string, string>)[raw] ?? SERVER_LOG_EVENT_LABELS[raw];
+  if (known) return known;
+  const spaced = raw.replace(/_/g, ' ');
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+};
+
+/**
+ * The add-entry form, as its inputs hold it. `when` is a Central wall clock ("YYYY-MM-DDTHH:mm"),
+ * blank = now. The two `*_bad_input` flags are the inputs' `validity.badInput`: a number input
+ * holding `12,50` or `1e`, or a date-time with the date picked and the time left blank, reads as
+ * `''` -- indistinguishable from an empty field unless the flag is kept. Kept in the form, they
+ * also make such an input count as an unsaved change.
+ */
+export interface MaintenanceLogForm {
+  event_type: MaintenanceLogEntryType;
+  description: string;
+  cost: string;
+  cost_bad_input: boolean;
+  when: string;
+  when_bad_input: boolean;
+}
+
+export const BLANK_MAINTENANCE_LOG_FORM: MaintenanceLogForm = {
+  event_type: 'note',
+  description: '',
+  cost: '',
+  cost_bad_input: false,
+  when: '',
+  when_bad_input: false,
+};
+
+/** What is wrong with the cost field, or null (blank is fine: no cost). */
+export const maintenanceLogCostProblem = (form: MaintenanceLogForm): string | null => {
+  if (form.cost_bad_input) return 'Enter a valid cost, or leave it blank.';
+  if (!form.cost.trim()) return null;
+  const cost = Number(form.cost);
+  if (!Number.isFinite(cost)) return 'Enter a valid cost, or leave it blank.';
+  return cost < 0 ? 'Cost must be zero or more.' : null;
+};
+
+/**
+ * What is wrong with the date-time field, or null (blank is fine: now). An incomplete value is
+ * refused rather than read as blank, because an entry filed "now" by mistake can never be edited.
+ */
+export const maintenanceLogWhenProblem = (form: MaintenanceLogForm): string | null => {
+  if (form.when_bad_input || (form.when.trim() && !centralWallClockToUtcISO(form.when))) {
+    return 'Enter a complete date and time, or leave it blank for now.';
+  }
+  return null;
+};
+
+/** Why the add-entry form cannot be sent yet, or null when it can (the server still judges it). */
+export const maintenanceLogFormProblem = (form: MaintenanceLogForm): string | null =>
+  (form.description.trim() ? null : 'Describe what was done or found.') ??
+  maintenanceLogCostProblem(form) ??
+  maintenanceLogWhenProblem(form);
+
+/**
+ * The `POST /maintenance/log` body for an entry on work order `workOrderId`. It names the work
+ * order and NO target (the server files it against the work order's own). The description is
+ * trimmed; `cost` and `event_date` are sent only when given -- the date read as a Central wall
+ * clock and sent as UTC -- so a blank date means "now" on the server's clock.
+ */
+export const maintenanceLogPayload = (workOrderId: number, form: MaintenanceLogForm): MaintenanceLogCreate => {
+  const payload: MaintenanceLogCreate = {
+    maintenance_wo_id: workOrderId,
+    event_type: form.event_type,
+    description: form.description.trim(),
+  };
+  if (form.cost.trim()) payload.cost = Number(form.cost);
+  const eventDate = form.when.trim() ? centralWallClockToUtcISO(form.when) : null;
+  if (eventDate) payload.event_date = eventDate;
+  return payload;
 };

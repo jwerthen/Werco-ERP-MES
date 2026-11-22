@@ -191,7 +191,9 @@ the NCR / CAR records change of 2026-11-19 (migration `127`: an NCR's dispositio
 its re-verification, and a CAR's effectiveness verification), the floor-PIN change of
 2026-11-19 (migration `130`: setting, clearing or unlocking a badge sign-on PIN, and the company's
 PIN policy, is credential administration, a person's act), and the restricted document viewing
-change of 2026-11-19 (migration `131`: a document's access level and a user's export authorization).
+change of 2026-11-19 (migration `131`: a document's access level and a user's export authorization),
+and the owner's decision of 2026-11-20 that a standing API token may file a maintenance log entry
+(an MCP agent on a person's own JWT too, a half not separately put to the owner).
 This section is the **one list** of those credential rules — what refuses a credential,
 what is deliberately left open (and who decided each), and what is deliberately not refused —
 across the AI governance (ruling 3), floor-gates (ruling 2) and short-count (ruling 1) changes;
@@ -303,6 +305,7 @@ route's own fences still do):
 | **Recording or changing who owns material** (AS9100D 8.5.3) — `POST /inventory/items/{item_id}/ownership` (the MCP tool `change_inventory_item_ownership`) re-owns one stock row as company, customer or supplier property, which decides whether automatic consumption may draw it and whether valuation counts it; `POST /inventory/receive`, `POST /receiving/receive` and the lines of `POST /receiving/deliveries` record the owner at receipt (the receipt carries it to stock through inspection) | Any credential of a user holding Admin / Manager / Supervisor (plus receiving view / create permission on deliveries), a **full** API token included; read-only and AI-external tokens are refused by their own gates. Hank's `receive_delivery` task has no ownership fields, so Hank receives company stock only. The ownership change's required audit row carries the reason, and every audit row written under a token carries `extra_data.credential` | Owner decision 2026-11-20: a full API token may record or change stock ownership, through the ownership verb and at receipt; read-only and AI-external tokens are refused by their own gates (the read-only gate, and for an AI-external token also the AI-egress gate); the write is attributed to the token's bound user with `extra_data.credential`. (Until then it was an implementation decision of the owned-property change, migration `129`, 2026-11-19.) Hank's company-only receipt narrows Hank's task input, not the credential policy. See [Inventory](#inventory) |
 | **Verifying QMS clause evidence** — `PUT /qms-standards/evidence/{evidence_id}` with `is_verified` (the MCP tool `update_evidence`). A Verify stamps `verified_by` with the caller's user id and `verified_date`; a verified link is never retired by auto-link and counts as verified evidence in audit readiness | Any credential of a user holding Admin / Manager / Quality, a **full** API token included; read-only and AI-external tokens are refused by their own gates (the read-only gate, and for an AI-external token also the AI-egress gate). The route's `UPDATE` audit row is required evidence (**503**, nothing saved, when it cannot be written), lists the `is_verified` change, and carries `extra_data.credential` under a token | Owner decision 2026-11-20: a full API token may verify QMS clause evidence; read-only and AI-external tokens are refused by their own gates (the read-only gate, and for an AI-external token also the AI-egress gate); the write is attributed to the token's bound user with `extra_data.credential`. `verified_by` names that user too, so the audit row's `extra_data.credential` is what tells a token's Verify from the person's own |
 | **Moving a PM schedule's next due date** — `PUT /maintenance/schedules/{schedule_id}` with `next_due_date` (the MCP tool `update_schedule`), including while the schedule has an open work order. The date also moves through the PM import's commit (`POST /maintenance/schedules/import/commit`, the MCP tool `commit_pm_schedule_import`, already open to tokens: see [Maintenance](#maintenance-pm-schedules-maintenance-work-orders-event-log)) and through the roll-forward when `POST /maintenance/work-orders/{wo_id}/complete` (the MCP tool `preventive_maintenance_complete_work_order`) completes a work order carrying a `schedule_id` | Any credential of a user holding Admin / Manager / Supervisor (completion also Operator), a **full** API token included; read-only and AI-external tokens are refused by their own gates (the read-only gate, and for an AI-external token also the AI-egress gate). A token's only refusals on these routes are the checklist rows above: taking steps off a schedule whose open work order has no checklist snapshot (on the import, a row error), and completing with checklist items unticked. The direct edit's `maintenance_schedule` UPDATE row is best-effort (as is the completion roll-forward's; the import's is required) and carries `extra_data.credential` under a token | Owner decision 2026-11-20: a full API token may move a PM schedule's `next_due_date`; read-only and AI-external tokens are refused by their own gates (the read-only gate, and for an AI-external token also the AI-egress gate); the write is attributed to the token's bound user with `extra_data.credential` |
+| **Filing a maintenance log entry** — `POST /maintenance/log` (the MCP tool `create_log`): an `inspection`, `repair`, `part_replacement`, `observation` or `note`, on a machine or asset or against a maintenance work order (open or finished) | Any credential of a user holding Admin / Manager / Supervisor / Operator, a **full** API token included, and an MCP agent on a person's own JWT (`create_log` stays a tool); read-only and AI-external tokens are refused by their own gates. The entry's `performed_by` is the credential's user. **A token's entry says so on the record itself** (migration `133`): `maintenance_logs.api_token_id` is set, every log read serves `filed_via_api_token: true`, and the Maintenance timeline tags it *via API token*; its audit row also carries `extra_data.credential` (the only token record for an entry filed before `133`). An agent's entry on a person's JWT carries no marker and is attributed to that person. The `maintenance_log` CREATE audit row is **required** evidence (**503**, nothing saved). What any caller cannot do through it is fixed by the route: `started` and `completed` entries are the work order's Start / Complete verbs' own (**422**), and an entry on a work order is filed under that work order's machine or asset (**409** otherwise) | Owner decision 2026-11-20 for standing API tokens. **The MCP-agent-on-a-person's-JWT half was not separately put to the owner** (to be confirmed with them): it follows from `create_log` remaining a tool. Note the contrast with work-order comments, which every API token is refused (`API_TOKEN_COMMENT_WRITE`), and with comments and Hank's `add_note`, which the MCP door refuses to an agent on any credential (owner decision 2026-11-16: a comment is a person's own words); maintenance log entries are decided the other way on both counts. See [Maintenance](#maintenance-pm-schedules-maintenance-work-orders-event-log) |
 
 ## Permission Matrix
 
@@ -1360,14 +1363,14 @@ v1 (2026-11-16): comment threads, @mentions and watchers on **work orders only**
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
 |------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
-| View (schedules, work orders, overdue, calendar, dashboard, history, equipment assets and asset history) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| View (schedules, work orders, a work order's log entries (`GET /maintenance/work-orders/{id}/logs`), overdue, calendar, dashboard, history, equipment assets and asset history) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Create / edit PM schedule (`POST`/`PUT /maintenance/schedules`) | ✓ | ✓ | ✓ | | | | |
 | Deactivate PM schedule (`DELETE /maintenance/schedules/{id}`) | ✓ | ✓ | ✓ | | | | |
 | Import PM schedules (`POST /maintenance/schedules/import/preview`, `/import/commit`; may create equipment assets) | ✓ | ✓ | ✓ | | | | |
 | Create / edit / retire equipment asset (`POST /maintenance/assets`, `PUT`/`DELETE /maintenance/assets/{id}`) | ✓ | ✓ | ✓ | | | | |
 | Create / edit maintenance WO (`POST`/`PUT /maintenance/work-orders`) | ✓ | ✓ | ✓ | | | | |
 | Start / complete maintenance WO (`POST .../{id}/start`, `.../complete`) | ✓ | ✓ | ✓ | ✓ | | | |
-| Add event log entry (`POST /maintenance/log`) | ✓ | ✓ | ✓ | ✓ | | | |
+| Add event log entry (`POST /maintenance/log`; a standing API token of these roles may too — see [Credential policy for judgment writes](#credential-policy-for-judgment-writes)) | ✓ | ✓ | ✓ | ✓ | | | |
 
 > ⚠️ **This table is new because the router had NO role gating at all.** All sixteen handlers were
 > `Depends(get_current_user)`, so a **Viewer could create, start and complete maintenance work
@@ -1434,8 +1437,9 @@ v1 (2026-11-16): comment threads, @mentions and watchers on **work orders only**
 > token alike. Before, only the status was held, so a planning-role `PUT` could re-tick a completed
 > PM's checklist after the fact. Re-sending the record's own value is accepted and writes nothing
 > (no audit row). A later note goes on the record as a `POST /maintenance/log` entry with
-> `maintenance_wo_id` (performing roles, as in the table; dated, signed, audited), never as an edit
-> of the WO. This is a state rule, not a credential policy, so it has no row in the credential table.
+> `maintenance_wo_id` (performing roles, as in the table; dated, signed, audited, and filed under the
+> work order's own machine or asset — a different explicit one is **409**), never as an edit of the
+> WO; the Maintenance page's work-order detail view has an **Add log entry** form for it. This is a state rule, not a credential policy, so it has no row in the credential table.
 > Details in `docs/API.md` → Maintenance → *A completed or cancelled work order is a final record*
 > and *The PM loop*.
 >
@@ -1458,7 +1462,8 @@ v1 (2026-11-16): comment threads, @mentions and watchers on **work orders only**
 > unaudited status write from two GETs.
 
 > **Every state change writes a tamper-evident `audit_log` row** — `maintenance_schedule`,
-> `maintenance_work_order` (with `STATUS_CHANGE` on start and complete) and `maintenance_log`. The
+> `maintenance_work_order` (with `STATUS_CHANGE` on start and complete) and `maintenance_log` (required
+> evidence since 2026-11-20: a log entry whose audit row cannot be written is not saved, **503**). The
 > router previously wrote none, so who started or closed a PM job was unrecoverable, and PM records
 > are AS9100D-auditable quality records.
 

@@ -11,6 +11,7 @@ jest.mock('../../services/api', () => ({
     createMaintenanceAsset: jest.fn(),
     updateMaintenanceAsset: jest.fn(),
     retireMaintenanceAsset: jest.fn(),
+    getMaintenanceAssetHistory: jest.fn(),
   },
 }));
 const mockedApi = api as jest.Mocked<typeof api>;
@@ -36,6 +37,29 @@ const desktop = () => screen.getByTestId('data-table');
 beforeEach(() => {
   jest.clearAllMocks();
   mockedApi.getMaintenanceAssets.mockResolvedValue([forklift]);
+  mockedApi.getMaintenanceAssetHistory.mockResolvedValue({
+    asset_id: 4,
+    asset_tag: 'FL-01',
+    asset_name: 'Forklift 1',
+    logs: [
+      {
+        id: 21,
+        work_center_id: null,
+        asset_id: 4,
+        target_type: 'asset',
+        target_code: 'FL-01',
+        target_name: 'Forklift 1',
+        maintenance_wo_id: 50,
+        event_type: 'inspection',
+        description: 'Forks checked for cracks',
+        performed_by: 7,
+        performed_by_name: 'Pat Synthetic',
+        event_date: '2026-11-19T14:30:00Z',
+        cost: 0,
+        created_at: '2026-11-19T14:30:00Z',
+      },
+    ],
+  });
 });
 
 describe('MaintenanceAssetsPanel', () => {
@@ -111,5 +135,18 @@ describe('MaintenanceAssetsPanel', () => {
     await waitFor(() => expect(within(desktop()).getByText('FL-01')).toBeInTheDocument());
     expect(screen.queryByRole('button', { name: /New Asset/ })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Edit asset/ })).not.toBeInTheDocument();
+  });
+
+  it('opens an asset’s maintenance history for any role, read-only', async () => {
+    render(<MaintenanceAssetsPanel canEdit={false} onChanged={jest.fn()} />);
+    await waitFor(() => expect(within(desktop()).getByText('FL-01')).toBeInTheDocument());
+    fireEvent.click(within(desktop()).getByRole('button', { name: 'Maintenance history for asset FL-01' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Maintenance history: FL-01 · Forklift 1' });
+    expect(mockedApi.getMaintenanceAssetHistory).toHaveBeenCalledWith(4);
+    const log = await within(dialog).findByRole('list', { name: 'Maintenance history for FL-01 · Forklift 1' });
+    expect(log).toHaveTextContent('Inspection');
+    expect(log).toHaveTextContent('Forks checked for cracks');
+    expect(log).toHaveTextContent('by Pat Synthetic');
+    expect(within(dialog).queryByRole('form')).not.toBeInTheDocument();
   });
 });
