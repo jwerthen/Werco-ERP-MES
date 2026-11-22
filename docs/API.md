@@ -4789,7 +4789,7 @@ environment variable or deployment configuration change is needed.
 | GET | `/parts/` | List all parts | Yes |
 | POST | `/parts/` | Create part | Yes |
 | GET | `/parts/{id}` | Get part by ID | Yes |
-| PUT | `/parts/{id}` | Update part — resolves **any** part in the company, engineering or material/supply. (**409** when it turns `backflush_components` on and the part's readiness check reports blockers, and **409** when it reclassifies a material part into a produced one while an **unfinished** work order still ties it — see below). Also sets `supply_scope` (see [Part Schema](#part-schema)) | Admin / Manager / Supervisor |
+| PUT | `/parts/{id}` | Update part — resolves **any** part in the company, engineering or material/supply. (**409** when it turns `backflush_components` on and the part's readiness check reports blockers, and **409** when it reclassifies a material part into a produced one while an **unfinished** work order still ties it — see below). Also sets `supply_scope` and `customer_supplied` (see [Part Schema](#part-schema)) | Admin / Manager / Supervisor |
 | DELETE | `/parts/{id}` | Delete part (soft delete — restorable). `hard_delete=true` is refused **400** while work orders, BOMs or BOM lines reference the part, or while a CAR names it (`Cannot hard delete: Part is named on N corrective action report(s); soft delete it instead`; `DELETE /materials/{id}?hard_delete=true` applies the same CAR check) | Admin |
 | POST | `/parts/{id}/restore` | Restore a soft-deleted part, **returning it to the `is_active` it had when it was deleted** — not an unconditional re-activate, and an unknowable prior value comes back **inactive**. **400** if it is not actually deleted. See note below | Admin / Manager |
 | POST | `/parts/{id}/deactivate` | Take a part out of use — `is_active=false` + `status='obsolete'`. **Not** a delete; `is_deleted` is never written. Reason required. **409** if it still has stock and `acknowledge_remaining_stock` was not set | **Admin / Manager** |
@@ -5093,6 +5093,7 @@ environment variable or deployment configuration change is needed.
   "unit_of_measure": "EA",
   "material_type": "ST-304",
   "backflush_components": false,
+  "customer_supplied": false,
   "is_active": true,
   "created_at": "2024-01-01T10:00:00Z"
 }
@@ -5219,6 +5220,21 @@ environment variable or deployment configuration change is needed.
 > by a create. Either the scope slug (`raw_material_metallics`) or the QL 7.4 label (*Raw Material -
 > Metallics*) is accepted and stored as the slug; anything else is **422** (a row error on the import).
 > An explicit `null` clears it. No screen edits it yet.
+
+> **`customer_supplied` — the customer furnishes this part** (`parts.customer_supplied`, migration
+> `134_part_customer_supplied`; boolean, default `false`; AS9100D 8.5.3). When it is `true`, MRP
+> creates no demand for the part (owner decision 2026-11-22): see
+> [MRP → Customer-supplied parts](#customer-supplied-parts-mrp). `PartResponse` returns it on every
+> part and material read, the list helper included. Like `backflush_components` it is on `PartUpdate`
+> and `PartResponse` only: `POST /parts/` and `POST /materials/` drop the key, neither CSV importer
+> reads it, and a part is always created `false`. It is set or cleared through `PUT /parts/{id}` or
+> `PUT /materials/{id}` under those routes' existing Admin / Manager / Supervisor gate, with no gate or
+> refusal of its own, and the handler's `log_update` row records the change (`resource_type="part"`
+> through either door). An explicit `null` is **422**. It is never inferred from stock ownership:
+> who owns a stock row is still that row's `ownership` (see
+> [Customer- and supplier-owned property](#customer--and-supplier-owned-property)), so flagging a part
+> changes no stock row, and receiving customer-owned stock does not flag its part. In the app it is
+> the **Customer-supplied** checkbox on the Part and Materials edit forms (edit mode only).
 
 ### BOM (Bill of Materials)
 
@@ -12227,28 +12243,26 @@ work-order supply (`quantity_on_order`) is unchanged, since ownership is recorde
 a PO line. The physical readers (`GET /inventory/`, `total_on_hand` on `GET /inventory/summary`, the
 inventory export) still count every row.
 
+<a id="owned-stock-customer-supplied-parts"></a>
 <a id="owned-stock-mrp-demand-open-decision"></a>
-> **OPEN OWNER DECISION: should a customer-supplied part create MRP demand at all?** Not decided;
-> nothing here recommends an option.
+> **Customer-supplied parts create no MRP demand (owner decision 2026-11-22).** A part the customer
+> furnishes is identified on the **part**, by `parts.customer_supplied` (migration `134`, set on
+> `PUT /parts/{id}` / `PUT /materials/{id}`; see [Part Schema](#part-schema)), never inferred from who
+> owns its stock. MRP raises no requirement or action for a flagged component, and no MRP supply door
+> turns an older action for it into a purchase order, a work order or an expedite. See
+> [MRP → Customer-supplied parts](#customer-supplied-parts-mrp).
 >
-> **Current behavior.** MRP nets every BOM component's demand against company stock only. A
-> component the customer furnishes, whose stock on the rack is customer-owned, therefore shows a
-> shortage and an action: ORDER for a purchased, raw-material, hardware or consumable part
-> (MANUFACTURE for a manufactured part or assembly), or EXPEDITE in place of either once the order-by
-> date has passed. A planner who sees it marks it reviewed (`POST /mrp/actions/{action_id}/process`)
-> without creating supply. Where the worker runs the 06:00 `run_mrp_auto_draft_job` cron (every cron
-> runs unless `WORKER_CRON_JOBS` excludes it), no person sees it first: an ORDER action becomes a
-> **draft** purchase order, a MANUFACTURE action a draft work order, and an EXPEDITE action sends
-> `mrp.expedite_required`. A customer-furnished part usually has no supplier mapping or purchase
-> history, so that draft purchase order goes to the auto-PO job's no-sourcing fallback, the company's
-> first active vendor. A draft is never sent on its own; a buyer cancels it. The behavior errs toward
-> a visible suggestion rather than a suppressed one.
+> **The flag and the netting rule are separate.** Netting is unchanged: an **unflagged** part still
+> nets against company-owned stock only. So a part the customer furnishes that nobody has flagged
+> still shows a shortage and an action even with the customer's material on the rack, and where the
+> 06:00 `run_mrp_auto_draft_job` cron runs, that action can still become a draft purchase order (to
+> the company's first active vendor when the part has no sourcing) or a draft work order. Flagging
+> the part is what stops it.
 >
-> **Options awaiting the owner:**
->
-> * (a) Keep it.
-> * (b) A per-part "customer-furnished" flag that MRP skips for purchase actions.
-> * (c) Net customer-owned stock only against that same customer's work orders.
+> **Not changed:** nothing outside MRP reads the flag. The low-stock and reorder readers above, the
+> AI `inventory_risk` sensor included, treat a flagged part like any other, so a flagged part with a
+> reorder point can still be reported low. That is a deliberate scope limit, pending an owner
+> decision.
 
 **Changing ownership: `POST /inventory/items/{item_id}/ownership` — Admin / Manager / Supervisor**
 (`STOCK_MUTATOR_ROLES`).
@@ -12309,14 +12323,15 @@ stock rows, tools or PO receipts cannot be hard-deleted**: see [Customers](#cust
 >   company's, a customer's or a supplier's, and which one, under database CHECKs. The Inventory and Tool Management screens
 >   show a `Customer: <name>` / `Supplier: <name>` chip and filter on it, the receive forms on
 >   Inventory and Receiving take the owner when material arrives, and the inventory list, export and
->   tool list carry the owner's name.
+>   tool list carry the owner's name. A part the customer furnishes is identified per part, by its
+>   **Customer-supplied** flag (`customer_supplied`), and creates no MRP demand
+>   ([Customer-supplied parts](#owned-stock-customer-supplied-parts)).
 > * **Kept apart.** Owned stock never merges into a company row or the reverse, a combine refuses
 >   to mix owners in one location and lot, automatic consumption never draws it, the finished-goods
 >   decrement at shipment takes only the company's row, a receipt correction or void unwinds only
 >   the exact row the receipt stocked, and valuation leaves it out. MRP does not count it as supply,
 >   and the low-stock and reorder checks do not count it as on hand, so it can neither suppress a
->   purchase suggestion nor keep a reorder alert quiet. (Whether a customer-supplied part should
->   create MRP demand at all is an [open owner decision](#owned-stock-mrp-demand-open-decision).)
+>   purchase suggestion nor keep a reorder alert quiet.
 > * **Recorded.** The receipt records whose property it is, and every later change of ownership is
 >   a reasoned, required-audited act naming who changed it, from what, to what, and why. A customer
 >   that owns stock, tools or PO receipts cannot be hard-deleted, and the database refuses a
@@ -12583,7 +12598,8 @@ lot numbers are unreachable.
 ### Material Requirements Planning (MRP)
 
 The `/mrp` routes are not yet listed in this file; the interactive reference at `/docs` (tag
-*Material Requirements Planning*) has them. This section covers how a run counts supply.
+*Material Requirements Planning*) has them. This section covers how a run counts supply and which
+parts it plans.
 
 **Supply is the company's own stock (migration `129`, AS9100D 8.5.3).** A run nets each part's
 demand against `MRPService.get_inventory_summary`, the one netting seam, which the supply review's
@@ -12598,11 +12614,41 @@ ownership is recorded at receipt, not on a PO line. A company with no owned stoc
 as before. See
 [Inventory → Customer- and supplier-owned property](#customer--and-supplier-owned-property).
 
-> **OPEN OWNER DECISION: customer-supplied parts.** Whether a part the customer furnishes should
-> create MRP demand at all is not decided. Today it does: the run shows a shortage and an action for
-> it, and where the 06:00 `run_mrp_auto_draft_job` cron runs, that action becomes a draft purchase
-> order without a person seeing it first. The current behavior and the three options are under
-> [Customer- and supplier-owned property](#owned-stock-mrp-demand-open-decision).
+<a id="customer-supplied-parts-mrp"></a>
+**Customer-supplied parts create no demand (owner decision 2026-11-22, migration `134`).** A part
+whose `customer_supplied` flag is set (see [Part Schema](#part-schema)) is one the customer
+furnishes, so MRP plans no supply for it:
+
+* **No demand.** The BOM explosion (`MRPService.explode_bom_for_mrp`) skips a flagged component. It
+  gets no requirement, so no shortage and no ORDER / MANUFACTURE / EXPEDITE action, and MRP does not
+  recurse into its own BOM, so a customer-furnished subassembly's children create nothing either.
+  The flag is read where the part is a component: a work order *for* a flagged part still explodes
+  that part's BOM.
+* **No supply from an older action.** A fresh run raises no action for a flagged part. An action
+  minted before the part was flagged can still be open, so every door that turns an MRP action into
+  supply refuses a flagged part with one text, `mrp_service.CUSTOMER_SUPPLIED_SUPPLY_DETAIL`:
+  *"This part is customer-supplied: the customer furnishes it, so MRP does not plan supply for it.
+  Clear the part's customer-supplied flag first if the shop now buys or makes it."*
+  * The auto-draft cron (`run_mrp_auto_draft_job` → `MRPAutoService.process_actions`) creates no
+    purchase order or work order and sends no `mrp.expedite_required` for it. It writes the text to
+    the action's `error_message`, counts it among the job's errors and leaves the action unprocessed,
+    so the auto-PO job's first-active-vendor fallback is never reached for a flagged part.
+  * The reviewed supply draft: `GET /mrp/actions/{action_id}/supply-review` returns the text as
+    `blocked_reason` (checked before the newer-run and covered-shortage reasons), and
+    `POST /mrp/actions/{action_id}/supply-draft` refuses **409**
+    `{"message": "<the text>", "code": "MRP_REVIEW_STALE"}`.
+  * The purchase batch (`GET /mrp/purchase-batch/review`, `POST /mrp/purchase-batch/drafts`)
+    reviews each line through the same path, so a flagged line carries the same `blocked_reason`
+    and the batch is refused **409** with the same body before any draft is created.
+
+  Until a newer run replaces it, such an action is still listed (the run's actions,
+  `GET /mrp/shortages`, the operations inbox's `mrp_shortage` source). Marking it reviewed
+  (`POST /mrp/actions/{action_id}/process`) is unchanged.
+
+Netting is unchanged for an unflagged part: a part the customer furnishes that nobody has flagged
+still shows its demand as a shortage against company stock, which is why the flag exists. See
+[Customer- and supplier-owned property](#owned-stock-customer-supplied-parts) for how the flag
+relates to stock ownership and what it does not change.
 
 ### Traceability
 
