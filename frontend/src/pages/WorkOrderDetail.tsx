@@ -49,6 +49,7 @@ import {
   useToast,
   statusColor,
   Button,
+  ComboBox,
   FormField,
   InputDialog,
   LoadingButton,
@@ -201,6 +202,7 @@ const INSTRUCTIONS_LABEL = 'special instructions';
 const DUE_DATE_LABEL = 'due date';
 const UNIT_NUMBER_LABEL = 'unit #';
 const CUSTOMER_PO_LABEL = 'customer PO';
+const CUSTOMER_LABEL = 'customer';
 
 function describeChangedFields(
   current: Record<string, string>,
@@ -555,6 +557,9 @@ export default function WorkOrderDetail() {
   // verbal or a blanket order), so it is editable at any status, like unit #. The
   // server applies no status gate to it either.
   const canEditCustomerPo = canCorrectCount;
+  // Customer, same tier and same posture as the PO: it is often settled after the
+  // job is raised, and PUT /work-orders/{id} applies no status gate to it.
+  const canEditCustomer = canCorrectCount;
   // Start / Resume Work Order / Hold Work Order are all ADMIN/MANAGER/SUPERVISOR
   // on the backend (`POST /work-orders/{id}/start`, `POST /work-orders/{id}/resume`,
   // and the `PUT /work-orders/{id}` status write) — exactly what work_orders:edit
@@ -771,6 +776,14 @@ export default function WorkOrderDetail() {
   const [customerPoDraft, setCustomerPoDraft] = useState('');
   const [savingCustomerPo, setSavingCustomerPo] = useState(false);
   const [customerPoBaseline, setCustomerPoBaseline] = useState('');
+  // Customer inline edit — picks from the company's customer list (loaded when
+  // the editor opens), same lost-update guard as the PO.
+  const [customerEditing, setCustomerEditing] = useState(false);
+  const [customerDraft, setCustomerDraft] = useState('');
+  const [savingCustomer, setSavingCustomer] = useState(false);
+  const [customerBaseline, setCustomerBaseline] = useState('');
+  const [customerNames, setCustomerNames] = useState<string[] | null>(null);
+  const [customerNamesError, setCustomerNamesError] = useState(false);
   // Inline Notes / Special Instructions edit (pencil in the panel header).
   // Deliberately NOT gated on work-order status — draft, released, in progress,
   // on hold, complete, closed and cancelled are all editable. That is the point:
@@ -810,6 +823,7 @@ export default function WorkOrderDetail() {
     | { kind: 'due_date'; fields: string; due_date: string }
     | { kind: 'unit_number'; fields: string; unit_number: string }
     | { kind: 'customer_po'; fields: string; customer_po: string }
+    | { kind: 'customer_name'; fields: string; customer_name: string }
     | null
   >(null);
   // Active work centers (laser-first order) for the per-nest reassign selects,
@@ -1566,6 +1580,65 @@ export default function WorkOrderDetail() {
     await performCustomerPoSave();
   };
 
+  // --- Inline customer edit ------------------------------------------------
+  // Picks from the customer master (GET /customers/names), never free text, so a
+  // work order's customer always names a real customer record — the same rule the
+  // create form enforces. A customer not yet in the list is added on the Customers
+  // page first. The PO is left as it is: it is a separate field with its own editor.
+  const customerServerValue = workOrder?.customer_name ?? '';
+
+  const startCustomerEdit = () => {
+    setCustomerDraft(customerServerValue);
+    setCustomerBaseline(customerServerValue);
+    setCustomerEditing(true);
+    setCustomerNamesError(false);
+    api
+      .getCustomerNames()
+      .then((rows) => setCustomerNames(rows.map((row) => row.name)))
+      .catch(() => setCustomerNamesError(true));
+  };
+
+  // The work order's current customer is always an option, even when it is not
+  // (or no longer) in the master list — a legacy free-text name must still read as
+  // the selection rather than blanking the picker.
+  const customerOptions = useMemo(() => {
+    const names = new Set(customerNames ?? []);
+    if (customerServerValue) names.add(customerServerValue);
+    return Array.from(names)
+      .sort((a, b) => a.localeCompare(b))
+      .map((name) => ({ value: name, label: name }));
+  }, [customerNames, customerServerValue]);
+
+  const performCustomerSave = async () => {
+    setSavingCustomer(true);
+    try {
+      const next = customerDraft.trim();
+      await saveWorkOrderPatch(
+        { customer_name: next || null },
+        {
+          successMessage: next ? `Customer set to ${next}` : 'Customer cleared',
+          failureMessage: 'Failed to update customer',
+          onSuccess: () => setCustomerEditing(false),
+        }
+      );
+    } finally {
+      setSavingCustomer(false);
+    }
+  };
+
+  const handleCustomerSave = async () => {
+    if (!workOrder || savingCustomer) return;
+    if (customerServerValue !== customerBaseline) {
+      setFieldConflict({
+        kind: 'customer_name',
+        customer_name: customerServerValue,
+        fields: CUSTOMER_LABEL,
+      });
+      return;
+    }
+    await performCustomerSave();
+  };
+
   // --- Operation sequencing mode -------------------------------------------
   // `sequential_operations` decides which rule promotes an operation to READY:
   // walk the routing in order (an operation unlocks only once every
@@ -1769,7 +1842,9 @@ export default function WorkOrderDetail() {
         ? savingUnitNumber
         : fieldConflict?.kind === 'customer_po'
           ? savingCustomerPo
-          : savingNotes;
+          : fieldConflict?.kind === 'customer_name'
+            ? savingCustomer
+            : savingNotes;
 
   // Confirmed overwrite, for whichever editor raised the conflict. Adopting the
   // server's value as the new baseline is what makes this confirmation cover
@@ -1796,6 +1871,9 @@ export default function WorkOrderDetail() {
     } else if (fieldConflict.kind === 'customer_po') {
       setCustomerPoBaseline(fieldConflict.customer_po);
       await performCustomerPoSave();
+    } else if (fieldConflict.kind === 'customer_name') {
+      setCustomerBaseline(fieldConflict.customer_name);
+      await performCustomerSave();
     }
     // Closed either way. On success the editor is gone; on failure the error
     // toast carries the reason and the editor is still open holding the draft,
@@ -2495,7 +2573,66 @@ export default function WorkOrderDetail() {
           iconBg="bg-fd-cyan/15"
           iconColor="text-fd-cyan"
           label="Customer"
-          value={workOrder.customer_name || '-'}
+          value={
+            customerEditing ? (
+              <span className="flex flex-col gap-1">
+                {/* Same layout as the customer-PO editor: buttons above, the picker
+                    on its own full-width row (the tile is ~110px wide). */}
+                <span className="flex justify-end gap-1">
+                  <button
+                    type="button"
+                    onClick={handleCustomerSave}
+                    disabled={savingCustomer || customerNames === null}
+                    aria-label="Save customer"
+                    className="text-fd-green hover:text-fd-green/80 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <CheckIcon className="h-4 w-4" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCustomerEditing(false)}
+                    disabled={savingCustomer}
+                    aria-label="Cancel customer edit"
+                    className="text-fd-mute hover:text-fd-red disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <XMarkIcon className="h-4 w-4" />
+                  </button>
+                </span>
+                {customerNamesError ? (
+                  <span className="text-xs font-normal text-fd-red">Could not load customers.</span>
+                ) : customerNames === null ? (
+                  <span className="text-xs font-normal text-fd-mute">Loading customers…</span>
+                ) : (
+                  <ComboBox
+                    id="wo-customer-edit"
+                    ariaLabel="Customer"
+                    options={customerOptions}
+                    value={customerDraft}
+                    onChange={setCustomerDraft}
+                    emptyOptionLabel="No customer"
+                    placeholder="Search customers"
+                    noResultsLabel="No matching customer. Add it on the Customers page first."
+                    disabled={savingCustomer}
+                    className="input w-full !px-1.5 !py-0.5 !text-sm font-normal"
+                  />
+                )}
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5">
+                {workOrder.customer_name || '-'}
+                {canEditCustomer && (
+                  <button
+                    type="button"
+                    onClick={startCustomerEdit}
+                    aria-label={workOrder.customer_name?.trim() ? 'Edit customer' : 'Add customer'}
+                    className="text-fd-mute hover:text-fd-blue"
+                  >
+                    <PencilSquareIcon className="h-4 w-4" />
+                  </button>
+                )}
+              </span>
+            )
+          }
         />
         <MiniStat
           icon={IdentificationIcon}
@@ -4277,7 +4414,9 @@ export default function WorkOrderDetail() {
               ? 'Unit # changed by someone else'
               : fieldConflict?.kind === 'customer_po'
                 ? 'Customer PO changed by someone else'
-                : 'Notes changed by someone else'
+                : fieldConflict?.kind === 'customer_name'
+                  ? 'Customer changed by someone else'
+                  : 'Notes changed by someone else'
         }
         message={
           fieldConflict
