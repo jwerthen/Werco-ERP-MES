@@ -61,7 +61,9 @@ export function MiniStat({
           {label}
         </p>
       </div>
-      <p className={`stat-value !text-xl critical-text ${valueColor || ''}`}>{value}</p>
+      {/* A <div>, not a <p>: `value` may hold an inline editor (WorkOrderDetail's
+          customer PO), whose autocomplete renders block elements a <p> cannot hold. */}
+      <div className={`stat-value !text-xl critical-text ${valueColor || ''}`}>{value}</div>
       {subtitle && <p className="text-[10px] text-slate-400 leading-tight critical-text">{subtitle}</p>}
     </div>
   );
