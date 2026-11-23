@@ -14,7 +14,7 @@
 
 import React from 'react';
 import { act, render, screen, fireEvent, within } from '@testing-library/react';
-import { MemoryRouter, Routes, Route } from 'react-router-dom';
+import { Link, MemoryRouter, Routes, Route } from 'react-router-dom';
 import api from '../services/api';
 import WorkOrderDetail from './WorkOrderDetail';
 import { ToastProvider } from '../components/ui';
@@ -240,6 +240,39 @@ describe('WorkOrderDetail inline customer edit', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Edit customer' }));
     expect(await screen.findByText('Could not load customers.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Save customer' })).toBeDisabled();
+  });
+
+  it('closes every open header editor when the route moves to another work order', async () => {
+    // The route keeps the page mounted across an :id change (e.g. after Duplicate), so
+    // an editor left open would carry this order's draft onto the next one and Save
+    // would write it there.
+    mockedApi.getWorkOrder.mockImplementation(async (id: number) =>
+      makeWorkOrder({ id, work_order_number: `WO-00${id}` })
+    );
+    render(
+      <ToastProvider>
+        <MemoryRouter initialEntries={['/work-orders/42']}>
+          <Link to="/work-orders/43">next</Link>
+          <Routes>
+            <Route path="/work-orders/:id" element={<WorkOrderDetail />} />
+          </Routes>
+        </MemoryRouter>
+      </ToastProvider>
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit customer' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit customer PO' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit unit #' }));
+    expect(await screen.findByRole('combobox', { name: 'Customer' })).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('link', { name: 'next' }));
+    });
+
+    expect(await screen.findAllByText('WO-0043')).not.toHaveLength(0);
+    expect(screen.queryByRole('combobox', { name: 'Customer' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Customer PO')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Unit #')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Edit customer' })).toBeInTheDocument();
   });
 
   it('stays editable on a completed work order', async () => {

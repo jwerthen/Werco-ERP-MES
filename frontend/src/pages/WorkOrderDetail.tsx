@@ -958,6 +958,10 @@ export default function WorkOrderDetail() {
     // PREVIOUS work order's draft text onto the next one — and Save would write
     // it there. Drafts themselves need no reset; startNotesEdit re-seeds them.
     setNotesEditing(false);
+    // The other inline header editors carry a draft the same way (start* re-seeds it).
+    setUnitNumberEditing(false);
+    setCustomerPoEditing(false);
+    setCustomerEditing(false);
     setFieldConflict(null);
     setWorkOrderDocuments([]);
     setSecondaryErrors({ materials: false, blockers: false, documents: false, documentChoices: false });
