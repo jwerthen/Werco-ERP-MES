@@ -200,7 +200,7 @@ describe('WorkOrderDetail inline customer-PO edit', () => {
   });
 
   it('offers "Add customer PO" on a work order that has none', async () => {
-    mockedApi.getWorkOrder.mockResolvedValue(makeWorkOrder({ customer_po: null }));
+    mockedApi.getWorkOrder.mockResolvedValue(makeWorkOrder({ customer_po: undefined }));
     const input = await openCustomerPoEditor('Add customer PO');
     expect(input).toHaveValue('');
     fireEvent.change(input, { target: { value: MY_DRAFT } });
