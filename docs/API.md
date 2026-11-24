@@ -13263,7 +13263,9 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 > not dispositioned, or dispositioned -- scrap and return-to-vendor included -- and not CLOSED;
 > VOID never counts), `fai_not_passed` (the latest first article per work order and part is not
 > PASSED, nor CONDITIONAL with the customer's approval on record) and `open_blocker` (an OPEN / ACKNOWLEDGED `quality_hold` blocker). An
-> unsigned inspection point is information only, not an exception. With items open:
+> unsigned inspection point is information only, not an exception (it stays so now that the
+> in-process inspection sign-off exists; promoting it to a ship-time exception is an open decision).
+> With items open:
 > - `POST /shipping/{shipment_id}/ship` answers **409** with `detail = {code:
 >   "release_exceptions_open", message, release_exceptions}` unless the JSON body is
 >   `{"acknowledge_exceptions": true, "reason": "..."}` (reason 3–1000 characters, no other keys)

@@ -364,9 +364,11 @@ def shipment_release_exceptions(
       rule the completion gate uses, ``latest_fai_exceptions_by_work_order``);
     * ``open_blocker`` -- an OPEN / ACKNOWLEDGED ``quality_hold`` blocker on the job.
 
-    An unsigned inspection point is deliberately NOT an exception here (information
-    only until inspection sign-off has a screen). Work orders with nothing open are
-    absent from the result.
+    An unsigned inspection point is deliberately NOT an exception here: information
+    only. Inspection sign-off now has its screen (``POST /shop-floor/operations/{id}/inspection``,
+    on Work Order Detail and the shop-floor list), but making an unsigned point hold a
+    shipment is a separate decision nobody has taken, so the rule is unchanged. Work orders
+    with nothing open are absent from the result.
     """
     ids = sorted({int(i) for i in work_order_ids if i is not None})
     if not ids:
