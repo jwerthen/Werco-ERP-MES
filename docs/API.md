@@ -4107,6 +4107,10 @@ mixed**:
 | GET | `/laser-nests/{id}/document` | Serve the attached PDF **inline** for operator preview | Yes (any authenticated user) |
 | DELETE | `/laser-nests/{id}` | Soft-delete the nest; its operation goes `ON_HOLD` | Admin / Manager / Supervisor |
 | POST | `/laser-nests/{id}/restore` | Restore a cancelled nest and its planned runs, retaining the original operation and drawing | Admin / Manager / Supervisor |
+| GET | `/laser-nests/untied` | Nests with no sheet tied: open nests plus nests completed in a window, each with its job, program number, sheet descriptor, the sheet matcher's answer and, when it is safe to offer, the exact body for the existing tie endpoint. Pure read. See "Untied nests" below | Admin / Manager / Supervisor |
+| GET | `/laser-nests/untied/coverage` | Per company-local month: completed nests and how many had a sheet tied. Pure read | Admin / Manager / Supervisor |
+| GET | `/laser-nests/untied/sheet-report` | Completed untied nests grouped by sheet spec, with sheets burned, the matched stock part and any open cycle count on it. Pure read | Admin / Manager / Supervisor |
+| GET | `/laser-nests/work-orders/{work_order_id}/tie-summary` | "N of M nests have no sheet tied" for one job (its own nests plus its laser child jobs'). **404** `Work order not found` for a missing, deleted or other-company job. Pure read | Admin / Manager / Supervisor |
 
 Restoration returns `LaserNestManualResponse`. The work-order operation response includes
 `cancelled_nest_id` on a held, cancelled nest (otherwise null), allowing Operations / Routing to show **Nest cancelled**
@@ -4749,6 +4753,90 @@ environment variable or deployment configuration change is needed.
 > per-row toil this feature exists to remove, and the same planner is already looking at the one
 > sheet they are describing — adding a proposal there would spend the safety budget of an
 > auto-fill to save a single search.
+
+> **Untied nests (`/laser-nests/untied…`, `…/work-orders/{id}/tie-summary`).** A nest can still be
+> imported or keyed with no sheet tied, and then its operation completes with no stock deducted.
+> Four GET routes make that visible to the office. All four are **pure reads**
+> (`services/untied_nest_service.py`): no ledger row, no audit row, no event, no tie, no cycle count —
+> a test counts `audit_log`, `inventory_transactions` and `operational_events` before and after. All
+> four are `require_role([ADMIN, MANAGER, SUPERVISOR])`, the same trio that may tie a sheet, and
+> tenant-scoped. The dispatch board, the kiosk and the crew station never call them and show no
+> untied marker (the floor payloads' `material_tie` stays `null` for an untied row, unchanged).
+>
+> Definitions, shared by every route:
+>
+> - **nest operation** — a `work_order_operations` row a live (not soft-deleted) `laser_nests` row
+>   points at, on a non-deleted work order;
+> - **tied** — an operation-scoped `work_order_material_allocations` row names it in any status
+>   but `cancelled` (`open`, or the reserved `closed`, which nothing writes today). A
+>   **work-order-scoped** tie on the same laser job does **not** make a nest tied; it is reported as
+>   `job_level_tie_count`, because tying the nest as well could draw the sheet twice;
+> - **open** — the operation is not COMPLETE and its work order is not terminal;
+> - **completed** — the operation is COMPLETE; its instant is `actual_end`, or `updated_at` when no
+>   `actual_end` was stamped.
+>
+> **`GET /laser-nests/untied`** — query `status` (`open` | `completed` | `all`, default `all`),
+> `work_order_id` (the laser job itself, or an assembly job's `laser_cutting` children),
+> `work_center_id`, `completed_from` / `completed_to` (company-local dates, **422** `Start date must
+> be on or before end date` when reversed; with neither given the completed window is the **last 90
+> days**, except that a `work_order_id` filter applies **no** default window, so the list counts the
+> same nests as that job's tie summary), `limit` (1–500, default 100), `offset`. Response
+> `UntiedNestListResponse` `{items, total, limit, offset, completed_from, completed_to,
+> matcher_available}`; open rows first (job number, sequence, nest), then completed rows newest first.
+> Each row carries the job and its parent, operation, work center, `nest_name`, `cnc_number` (the
+> program number), the three descriptors plus a display `sheet_descriptor`, `planned_runs`,
+> `runs_complete`, `runs_scrapped`, `completed_at` (null while open), `is_completed`,
+> `job_level_tie_count`, and:
+>
+> | Field | Meaning |
+> |---|---|
+> | `suggestion` | The sheet matcher's answer (`services/sheet_stock_matcher.py`, the same matcher as the import preview): `{status: matched \| ambiguous \| unmatched, candidate, candidates (up to 5), diagnostic}`; each candidate carries its own `on_hand` / `on_hand_known`. The package-level stock projection is left out (a running total across jobs means nothing). `null` only when the matcher failed, and then the response's `matcher_available` is `false`; the matcher runs inside a savepoint, so its failure never costs the read its rows |
+> | `tieable` / `tie_blocked_reason` | `false` with `Work order {n} is {status}; a sheet can no longer be tied to it.` when the laser job is in a terminal status, because the tie endpoint refuses a finished job. A completed nest on a still-open job **is** tieable |
+> | `proposed_tie` | Set only when the matcher picked exactly one part **and** the row is tieable: `{work_order_id, part_id, work_order_operation_id, source: "nest", qty_per_run: 1.0, qty_planned: planned_runs}`, the nest import's tie shape with no lot pinned. Drop `work_order_id` into the path and post the rest to the existing `POST /work-orders/{work_order_id}/material-allocations`; that route's own gates and refusals apply unchanged. Never set for an ambiguous match |
+> | `counted_since_completion_part_ids` | Candidate parts with a cycle count **completed** after this nest completed (one batched read). That count already corrected on-hand for the sheets the nest burned, so tying the nest to one of these parts would deduct them again when the job completes. A warning for the client, never a refusal |
+>
+> A tie on a nest whose operation is already COMPLETE is consumed by the work-order completion
+> reconcile (the self-heal), since the operation's own completion has passed.
+>
+> **`GET /laser-nests/untied/coverage`** — query `months` (1–24, default 6). Response
+> `{months: [{month: "YYYY-MM", completed_nests, tied_nests, untied_nests, tied_percent}],
+> completed_nests, tied_nests, tied_percent}`: company-local calendar months, oldest first, the
+> current month included, empty months included with `tied_percent: null`.
+>
+> **`GET /laser-nests/untied/sheet-report`** — query `completed_from` / `completed_to` (company-local
+> dates; default the last 90 days). Groups the completed untied nests by the matcher's spec key
+> (grade, thickness, size), so `48x96` and `96 X 48` share a group; the group's label is its most
+> common normalized spelling. **The grouping is approximate**: it reads free-text descriptors. Each
+> group: `spec_key`, the descriptors and `sheet_descriptor`, `nest_count`, `sheets_burned` (good plus
+> scrapped runs, assuming one sheet per run), `tieable_nest_count` / `tieable_sheets_burned` (the
+> part on still-open jobs, which a tie from the worklist still corrects), `work_order_count`,
+> `work_order_numbers` (up to 10), `first_completed_at` / `last_completed_at`, `suggestion`, and
+> `open_cycle_counts` (`scheduled` or `in_progress` counts already scoped to the matched part, or to
+> the top shortlist part when the match was ambiguous). Totals `nest_count`, `sheets_burned`,
+> `tieable_sheets_burned`; groups most sheets burned first. At most 5,000 nests are read, and
+> `truncated: true` says so. **Only `sheets_burned − tieable_sheets_burned` is correctable by a count
+> alone**: counting the tieable sheets and then tying them deducts them twice. Starting a count is
+> the existing `POST /inventory/cycle-counts` (one `part_id` per count). Nothing here posts a
+> back-dated ledger row; attributing a sheet to a nest after its job closed is not built.
+>
+> **`GET /laser-nests/work-orders/{work_order_id}/tie-summary`** — `{work_order_id,
+> work_order_number, nest_count, tied_count, untied_count, job_level_tie_count, message, untied}`,
+> counting the job's own nests plus those of its `laser_cutting` children. `message` is `N of M nests
+> have no sheet tied` (`1 of 1 nest has no sheet tied` in the singular), or `null` when none is
+> untied; a job with no nests answers `nest_count: 0`, not an error. `untied` lists up to 200 rows
+> `{laser_nest_id, work_order_operation_id, work_order_id, work_order_number, operation_number,
+> cnc_number, nest_name, operation_status}`. **404** `Work order not found` for a missing, deleted or
+> other-company job.
+>
+> **In the app.** Work Order Detail's Material Ties panel shows the summary's `message` (Admin,
+> Manager, Supervisor only), and **Release warns and never refuses**: clicking Release re-reads the
+> summary and, when a nest is untied, asks "Release with untied nests?" (**Release anyway** / **Not
+> yet**). A failed re-read releases as before. `POST /work-orders/{id}/release` itself is unchanged.
+> The office page **Untied Laser Nests** (`/laser-nests/untied`, Production section, gated on
+> `work_orders:edit`) shows the coverage tiles, the worklist with **Tie this sheet** (posting
+> `proposed_tie`) or **Choose sheet** (the planner picks a shortlist part; nothing preselected), and
+> the sheet report with **Start cycle count**. Ties and counts are non-optimistic: the list reloads
+> after a success, and a refusal is shown verbatim in the dialog.
 >
 > **Manual nest edit (`PATCH /laser-nests/{id}`).** All-optional body (`cnc_number`, `nest_name`,
 > `planned_runs`, `material`, `thickness`, `sheet_size`). A `planned_runs` change **reverse-syncs**

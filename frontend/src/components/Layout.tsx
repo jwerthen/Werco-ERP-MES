@@ -68,6 +68,7 @@ import {
   UserGroupIcon,
   QueueListIcon,
   ScaleIcon,
+  ScissorsIcon,
   LightBulbIcon,
   KeyIcon,
 } from '@heroicons/react/24/outline';
@@ -133,6 +134,14 @@ const navSections: NavSection[] = [
       // operator/kiosk navs are already streamlined below.
       { name: 'Dispatch Board', href: '/dispatch', icon: QueueListIcon },
       { name: 'Work Orders', href: '/work-orders', icon: ClipboardDocumentListIcon },
+      // Laser nests with no sheet tied. Same gate as the route and the endpoints
+      // (laser_nests.py -> ADMIN / MANAGER / SUPERVISOR = work_orders:edit).
+      {
+        name: 'Untied Laser Nests',
+        href: '/laser-nests/untied',
+        icon: ScissorsIcon,
+        permission: 'work_orders:edit',
+      },
       { name: 'Maintenance', href: '/maintenance', icon: WrenchIcon2 },
       { name: 'Continuous Improvement', href: '/continuous-improvement', icon: LightBulbIcon },
       { name: 'Tool Management', href: '/tool-management', icon: WrenchScrewdriverIcon },
