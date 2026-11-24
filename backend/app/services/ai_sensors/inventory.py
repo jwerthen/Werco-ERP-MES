@@ -2,63 +2,31 @@
 
 from __future__ import annotations
 
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.models.inventory import InventoryItem
-from app.models.part import Part
 from app.services.ai_learning_service import AILearningService
 from app.services.ai_sensors.common import mint_recommendation, recommendation_open
-from app.services.owned_property_service import COMPANY_OWNED_ITEM_CLAUSES
+from app.services.low_stock_service import low_stock_parts
 
 MAX_RECS_PER_RUN = 25
 
 
 def run_inventory_risk_sensor(db: Session, company_id: int) -> int:
-    """Mint recommend-only items for parts at or below reorder point / safety stock."""
+    """Mint recommend-only items for low parts -- the one low-stock rule
+    (``low_stock_service.low_stock_parts``: at or below the reorder point, company-owned stock
+    only), so the sensor raises exactly the parts the Inventory low-stock view lists. A part with
+    only a safety stock and no reorder point is no longer a trigger (it was, here alone)."""
     learning = AILearningService(db)
 
-    on_hand_sq = (
-        db.query(
-            InventoryItem.part_id.label("part_id"),
-            func.coalesce(func.sum(InventoryItem.quantity_on_hand), 0.0).label("on_hand"),
-        )
-        .filter(
-            InventoryItem.company_id == company_id,
-            InventoryItem.is_active == True,  # noqa: E712
-            # Company-owned stock only (AS9100D 8.5.3): customer or supplier material on
-            # the rack does not keep a reorder recommendation from being raised.
-            *COMPANY_OWNED_ITEM_CLAUSES,
-        )
-        .group_by(InventoryItem.part_id)
-        .subquery()
-    )
-
-    rows = (
-        db.query(Part, on_hand_sq.c.on_hand)
-        .outerjoin(on_hand_sq, on_hand_sq.c.part_id == Part.id)
-        .filter(
-            Part.company_id == company_id,
-            Part.is_active == True,  # noqa: E712
-            Part.is_deleted == False,  # noqa: E712
-            # Only parts that have an explicit reorder threshold
-            (Part.reorder_point > 0) | (Part.safety_stock > 0),
-        )
-        .order_by(Part.part_number.asc())
-        .limit(200)
-        .all()
-    )
-
     created = 0
-    for part, on_hand in rows:
+    for row in low_stock_parts(db, company_id, limit=200):
         if created >= MAX_RECS_PER_RUN:
             break
-        stock = float(on_hand or 0.0)
-        threshold = float(part.reorder_point or 0.0)
+        part = row.part
+        stock = row.quantity_on_hand
+        threshold = row.reorder_point
         safety = float(part.safety_stock or 0.0)
-        trigger = max(threshold, safety)
-        if trigger <= 0 or stock > trigger:
-            continue
+        trigger = threshold
 
         if recommendation_open(
             learning,

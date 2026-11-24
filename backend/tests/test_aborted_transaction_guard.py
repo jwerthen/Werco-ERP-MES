@@ -1166,7 +1166,7 @@ def _job_failures(caplog, company_id: int) -> list:
     [
         ("notification_jobs", "check_calibrations_task", "app.models.calibration:Equipment"),
         ("notification_jobs", "check_late_work_orders_task", "app.models.work_order:WorkOrder"),
-        ("notification_jobs", "check_low_stock_task", "app.models.inventory:InventoryItem"),
+        ("notification_jobs", "check_low_stock_task", "app.models.part:Part"),
         ("notification_jobs", "check_quote_expiring_task", "app.models.quote:Quote"),
         ("shipping_jobs", "poll_tracking_task", "app.models.carrier_account:CompanyShippingProfile"),
     ],

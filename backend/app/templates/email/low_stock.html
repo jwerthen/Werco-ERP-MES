@@ -1,12 +1,14 @@
 {% extends "base.html" %}
 
-{# CUI-safe: item COUNT only -- no part descriptions or quantities. #}
+{# Counts only -- no part numbers or names (docs/NOTIFICATIONS.md section 11.1). #}
 {% block content %}
 <h2>Low Stock Alert</h2>
 
 <div class="alert alert-warning">
-    <strong>{{ count }}</strong> item(s) are at or below their reorder point.
+    <strong>{{ count }}</strong> part(s) are at or below their reorder point.
+    {% if out_of_stock %}<br><strong>{{ out_of_stock }}</strong> out of stock.{% endif %}
+    {% if critical %}<br><strong>{{ critical }}</strong> at or below safety stock.{% endif %}
 </div>
 
-<p>Log in to Werco to review inventory and create purchase orders.</p>
+<p>Log in to Werco to review the low-stock list and replenishment.</p>
 {% endblock %}

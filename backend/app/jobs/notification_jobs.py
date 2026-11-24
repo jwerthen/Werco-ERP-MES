@@ -225,9 +225,9 @@ async def check_calibrations_task():
                 if not gauges:
                     continue
 
+                # Dispatched even to an empty audience: dispatch_direct also reaches any people an
+                # Admin added under Email Recipients for the event.
                 recipients = calibration_alert_recipients(db, cid)
-                if not recipients:
-                    continue
 
                 for cal in gauges:
                     days = (cal.next_calibration_date - today).days
@@ -367,39 +367,37 @@ async def check_late_work_orders_task():
 
 
 async def check_low_stock_task():
-    """Check for low stock items and notify Purchasing/Inventory (per tenant)."""
+    """Tell Purchasing and Inventory how many parts are low, once a day per tenant.
+
+    The count is the one low-stock rule (``low_stock_service``): parts, not stock rows, at or
+    below a reorder point above zero, company-owned stock only -- so it matches the Inventory
+    page's low-stock list, which the alert links to. Recipients are the ``stock.low`` catalog
+    audience. The body names no part (docs/NOTIFICATIONS.md section 11.1): a count, how many are
+    out of stock, and how many are at or below safety stock."""
     db = SessionLocal()
     try:
-        from app.models.inventory import InventoryItem
-        from app.models.part import Part
-        from app.services.owned_property_service import COMPANY_OWNED_ITEM_CLAUSES
+        from app.services.low_stock_service import low_stock_parts
+        from app.services.notification_dispatch import catalog_audience_for
 
         total_low_stock = 0
 
         for cid in _active_company_ids(db):
             try:
-                low_stock = (
-                    db.query(InventoryItem)
-                    .join(Part, InventoryItem.part_id == Part.id)
-                    .filter(
-                        InventoryItem.company_id == cid,
-                        Part.company_id == cid,
-                        Part.is_deleted == False,
-                        InventoryItem.quantity_on_hand <= Part.reorder_point,
-                        # A customer's or supplier's stock row is not the shop's to reorder
-                        # (AS9100D 8.5.3): only company-owned rows are counted.
-                        *COMPANY_OWNED_ITEM_CLAUSES,
-                    )
-                    .all()
-                )
-
-                if not low_stock:
+                low = low_stock_parts(db, cid)
+                if not low:
                     continue
 
-                purchasing_users = get_notification_recipients(db, department="Purchasing", company_id=cid)
-                inventory_users = get_notification_recipients(db, department="Inventory", company_id=cid)
-                recipients = purchasing_users + inventory_users
+                recipients = catalog_audience_for(db, "stock.low", cid)
 
+                count = len(low)
+                out = sum(1 for row in low if row.out_of_stock)
+                critical = sum(1 for row in low if row.is_critical)
+                noun = "part is" if count == 1 else "parts are"
+                body = f"{count} {noun} at or below the reorder point"
+                if out:
+                    body += f"; {out} out of stock"
+                if critical:
+                    body += f"; {critical} at or below safety stock"
                 await dispatch_direct(
                     db,
                     event_key="stock.low",
@@ -407,20 +405,25 @@ async def check_low_stock_task():
                     recipients=recipients,
                     related_type=None,
                     related_id=None,
-                    title=f"Low Stock Alert: {len(low_stock)} items below reorder point",
-                    body=f"{len(low_stock)} item(s) are at or below their reorder point.",
-                    link=links.INVENTORY_LIST,
+                    title=f"Low stock: {count} {'part' if count == 1 else 'parts'} at or below reorder point",
+                    body=body + ".",
+                    link=links.INVENTORY_LOW_STOCK,
                     template="low_stock",
-                    context={"count": len(low_stock), "link_path": links.INVENTORY_LIST},
+                    context={
+                        "count": count,
+                        "out_of_stock": out,
+                        "critical": critical,
+                        "link_path": links.INVENTORY_LOW_STOCK,
+                    },
                 )
 
-                total_low_stock += len(low_stock)
+                total_low_stock += count
             except Exception as e:
                 logger.error(f"Low stock digest failed for company {cid}: {e}")
                 # Reset the shared session, or every later tenant inherits this one's failed transaction.
                 reset_session_after_failure(db, f"the low stock digest for company {cid}")
 
-        logger.info(f"Low stock check: {total_low_stock} items")
+        logger.info(f"Low stock check: {total_low_stock} parts")
         return {"low_stock_items": total_low_stock}
 
     except Exception as e:

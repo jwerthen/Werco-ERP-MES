@@ -12,6 +12,12 @@ Calibration (step 1):
   * recipients come from the catalog entry: a Quality-ROLE user whose Department says something
     else is reached, as is a Quality-department user of another role; nobody else is;
   * the day is the company's (``company_today``), not the UTC date.
+
+Low stock (step 2): the cron's count, ``GET /inventory/low-stock``, the inbox ``low_stock``
+source and the AI inventory sensor all name the SAME parts -- a part with no stock row at all
+(out of stock) and one exactly at its point are low; one above it, one with reorder point 0 (even
+with a safety stock and an empty bin) and a deleted one are not. The alert counts parts, names
+none, and links to the filtered Inventory list.
 """
 
 import asyncio
@@ -24,6 +30,17 @@ import app.jobs.notification_jobs as notification_jobs
 import app.services.company_time as company_time
 from app.models.calibration import CalibrationStatus, Equipment
 from app.models.user import UserRole
+from app.services import notification_links as links
+from app.services.ai_sensors.inventory import run_inventory_risk_sensor
+from app.services.low_stock_service import low_stock_count
+from tests.api.test_backflush_lot_policy import make_user
+from tests.api.test_owned_property_planning import (
+    _inbox_low_stock,
+    _lot,
+    _low_stock_alerts,
+    _reorder_part,
+    _risk_recs,
+)
 from tests.test_notification_jobs_tenant_isolation import COMPANY_A, _make_user, _next
 
 pytestmark = [pytest.mark.requires_db]
@@ -145,3 +162,54 @@ def test_calibration_alerts_judge_the_company_day_not_the_utc_day(db_session: Se
     calls = _record(monkeypatch, db_session)
     asyncio.run(notification_jobs.check_calibrations_task())
     assert next(c for c in calls if c["related_id"] == gauge.id)["event_key"] == "calibration.overdue"
+
+
+# ---------------------------------------------------------------------------
+# Low stock: one rule, four readers
+# ---------------------------------------------------------------------------
+
+
+def test_every_low_stock_reader_names_the_same_parts(client, db_session: Session, monkeypatch):
+    buyer = make_user(db_session, role=UserRole.MANAGER)
+    buyer.department = "Purchasing"
+    db_session.commit()
+    empty_bin = _reorder_part(db_session, reorder_point=10, safety_stock=2)  # no stock row at all
+    at_point = _reorder_part(db_session, reorder_point=10)
+    _lot(db_session, at_point, 6)
+    _lot(db_session, at_point, 4, status_="on_hold")
+    above = _reorder_part(db_session, reorder_point=10)
+    _lot(db_session, above, 11)
+    safety_only = _reorder_part(db_session, reorder_point=0, safety_stock=5)  # empty, but no point
+    deleted = _reorder_part(db_session, reorder_point=10)
+    deleted.is_deleted = True
+    db_session.commit()
+    low = {empty_bin.id, at_point.id}
+    never = {above.id, safety_only.id, deleted.id}
+
+    alerts = _low_stock_alerts(client, buyer)
+    assert low <= set(alerts) and not (never & set(alerts))
+    assert alerts[empty_bin.id]["out_of_stock"] is True and alerts[empty_bin.id]["quantity_on_hand"] == 0
+    assert alerts[at_point.id]["out_of_stock"] is False and alerts[at_point.id]["shortage"] == 0
+
+    inbox = _inbox_low_stock(db_session, buyer)
+    assert low <= set(inbox) and not (never & set(inbox))
+
+    run_inventory_risk_sensor(db_session, COMPANY_A)
+    db_session.commit()
+    for part in (empty_bin, at_point):
+        assert len(_risk_recs(db_session, part)) == 1
+    for part in (above, safety_only, deleted):
+        assert _risk_recs(db_session, part) == []
+
+    calls = _record(monkeypatch, db_session)
+    result = asyncio.run(notification_jobs.check_low_stock_task())
+    count = low_stock_count(db_session, COMPANY_A)
+    assert count == len(alerts) and result["low_stock_items"] == count
+    (call,) = [c for c in calls if c["company_id"] == COMPANY_A]
+    assert call["event_key"] == "stock.low"
+    assert call["title"] == f"Low stock: {count} parts at or below reorder point"
+    assert "out of stock" in call["body"]
+    assert call["link"] == links.INVENTORY_LOW_STOCK
+    assert buyer.id in {u.id for u in call["recipients"]}
+    for part in (empty_bin, at_point):
+        assert part.part_number not in call["title"] + call["body"], "section 11.1: the alert names no part"

@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Sequence
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field
-from sqlalchemy import DateTime, and_, func, or_
+from sqlalchemy import DateTime, and_, or_
 from sqlalchemy.orm import Session, joinedload
 
 from app.api.audit_guard import required_audit
@@ -52,10 +52,10 @@ from app.services.cycle_count_workspace_service import (
     workspace_list,
 )
 from app.services.inventory_combine_service import build_combine_preview, combine_inventory
+from app.services.low_stock_service import low_stock_parts
 from app.services.operational_event_service import OperationalEventService
 from app.services.owned_property_service import (
     COMPANY,
-    COMPANY_OWNED_ITEM_CLAUSES,
     COMPANY_OWNERSHIP_KEY,
     OWNERSHIP_AUDIT_UNAVAILABLE_DETAIL,
     OwnershipKey,
@@ -319,74 +319,35 @@ def get_low_stock_alerts(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Get parts with inventory below reorder point.
+    """Get parts at or below their reorder point -- the one low-stock rule.
 
-    ``quantity_on_hand`` is the COMPANY'S OWN on-hand, summed per part over every active
-    row in any status. Customer- and supplier-owned property held here (AS9100D 8.5.3) is
-    not the shop's supply, so it never keeps a part off this list: a part whose only stock
-    belongs to someone else reads 0 on hand. ``GET /inventory/summary`` still reports the
-    physical total.
+    ``app.services.low_stock_service.low_stock_parts`` decides: a live part with a reorder
+    point above zero whose COMPANY-OWNED on-hand, summed per part over every active row in any
+    status, is at or below it. A part with no stock row at all reads 0 on hand and is listed
+    (``out_of_stock: true``), so the Inventory low-stock view can show parts that have no stock
+    row to filter. Customer- and supplier-owned property held here (AS9100D 8.5.3) is not the
+    shop's supply, so it never keeps a part off this list; ``GET /inventory/summary`` still
+    reports the physical total. The ``stock.low`` alert, the operations inbox and the AI
+    inventory sensor read the same rule, so their counts agree with this list.
 
-    Filter is applied in SQL so we don't load the full parts catalog into
-    memory. A hard limit bounds the response size (``ge=1`` so a negative value
-    cannot reach ``.limit()`` -- PostgreSQL rejects a negative LIMIT and SQLite
-    silently treats it as "unbounded"); the frontend paginates display in any case.
+    Critical first (at or below safety stock), then by shortage. ``limit`` bounds the response
+    (``ge=1`` so a negative value cannot reach ``.limit()``).
     """
-    # Subquery: sum of on-hand quantity per active, company-owned inventory row, by part.
-    # Tenant-scoped so the aggregate can never sum another company's stock into
-    # this company's on-hand figure.
-    qty_subq = (
-        db.query(
-            InventoryItem.part_id.label("pid"),
-            func.coalesce(func.sum(InventoryItem.quantity_on_hand), 0).label("total_qty"),
-        )
-        .filter(InventoryItem.company_id == company_id, InventoryItem.is_active == True, *COMPANY_OWNED_ITEM_CLAUSES)
-        .group_by(InventoryItem.part_id)
-        .subquery()
-    )
-
-    total_qty_col = func.coalesce(qty_subq.c.total_qty, 0)
-
-    rows = (
-        db.query(Part, total_qty_col.label("total_qty"))
-        .outerjoin(qty_subq, Part.id == qty_subq.c.pid)
-        .filter(
-            Part.company_id == company_id,
-            # Part is the one SoftDeleteMixin model this module touches. Deleting a
-            # part also clears is_active, so the predicate below is belt-and-braces
-            # today -- but is_active is an operational flag anyone can toggle back,
-            # while is_deleted is the deletion record. Filter on the real one too, so
-            # a restored-to-active-but-still-deleted part can't reappear as a
-            # purchasing signal.
-            Part.is_deleted == False,
-            Part.is_active == True,
-            Part.reorder_point > 0,
-            total_qty_col <= Part.reorder_point,
-        )
-        .limit(limit)
-        .all()
-    )
-
-    alerts = []
-    for part, total_qty in rows:
-        total_qty = float(total_qty or 0)
-        alerts.append(
-            {
-                "part_id": part.id,
-                "part_number": part.part_number,
-                "part_name": part.name,
-                "quantity_on_hand": total_qty,
-                "reorder_point": part.reorder_point,
-                "reorder_quantity": part.reorder_quantity,
-                "safety_stock": part.safety_stock,
-                "shortage": part.reorder_point - total_qty,
-                "is_critical": total_qty <= (part.safety_stock or 0),
-            }
-        )
-
-    # Sort by critical first, then by shortage
-    alerts.sort(key=lambda x: (not x["is_critical"], -x["shortage"]))
-    return alerts
+    return [
+        {
+            "part_id": row.part.id,
+            "part_number": row.part.part_number,
+            "part_name": row.part.name,
+            "quantity_on_hand": row.quantity_on_hand,
+            "reorder_point": row.part.reorder_point,
+            "reorder_quantity": row.part.reorder_quantity,
+            "safety_stock": row.part.safety_stock,
+            "shortage": row.shortage,
+            "is_critical": row.is_critical,
+            "out_of_stock": row.out_of_stock,
+        }
+        for row in low_stock_parts(db, company_id, limit=limit)
+    ]
 
 
 # Pydantic schemas
