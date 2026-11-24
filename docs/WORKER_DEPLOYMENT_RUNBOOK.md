@@ -5,6 +5,15 @@ the shop opens. **Read §1 and §3 before you touch anything.** Every command be
 copy-pasteable. Every step has a stop condition. Where a fact can only come from the live
 Railway project, this document says so and tells you how to get it — it never guesses.
 
+> **2026-11-23: what each cron does, and whether it is safe to arm, is in ONE table --
+> `WORKER_SERVICE.md` §2.** It supersedes the per-cron descriptions below where they differ.
+> In particular: `run_mrp_auto_draft_job` was replaced by `run_mrp_review_job` (REVIEW mode;
+> no cron creates purchase orders or work orders), `check_late_work_orders_job` now sends one
+> daily summary per Supervisor / Manager instead of one message per late job, the calibration
+> job reaches the Quality role and covers overdue gauges, `stock.low` reaches the bell, and the
+> digest goes to every active user with queued items. A `WORKER_CRON_JOBS` value that still
+> names `run_mrp_auto_draft_job` refuses to boot -- rename it to `run_mrp_review_job`.
+
 > **Scope and history.** The initial-cutover sections below preserve the original
 > Redis/backlog investigation and staged cron procedure. They are not a statement
 > that the current production worker is absent. `WORKER_SERVICE.md` describes its
@@ -145,9 +154,9 @@ current-release readiness remains required for new runs.
 2. Deploy the API fix first, alone. Verify `job_queue_redis` on `/health/ready` (§5.1).
 3. Create the worker with `WORKER_CRON_JOBS=none`. It drains only request-driven jobs.
 4. Arm crons one at a time, in the order in §5.6, cheapest first.
-5. `run_mrp_auto_draft_job` is **last**. It creates draft purchase orders and work orders in
-   production. `check_late_work_orders_job` is second-to-last: it emails one message per
-   late work order to every supervisor and manager, with no age cap.
+5. `run_mrp_review_job` is **last** (see `WORKER_SERVICE.md` §2 for what it needs first). It
+   drafts nothing. `check_late_work_orders_job` sends one summary a day per supervisor and
+   manager.
 6. Emails sent and drafts created are **not reversible**. Everything else is.
 
 ---
@@ -462,25 +471,24 @@ only emailed by `send_daily_digest_job`, and only to users with a digest prefere
 
 | Job | Schedule | Channel | Volume on day one | Who |
 |---|---|---|---|---|
-| `check_late_work_orders_job` | 08:00 daily | in-app **+ direct email** | **L × R messages.** One per late WO, per recipient. No age cap. Cold-start suppression does not apply. | Every active user with role `SUPERVISOR` or `MANAGER` in that tenant. |
-| `run_mrp_auto_draft_job` | 06:00 daily | direct email | **M messages per tenant** — one per manager. Only when the run produced actions. Plus the writes below. | Every active `MANAGER`. |
-| `send_daily_digest_job` | 08:00 daily | direct email | **D emails** — one per user with `digest_enabled` + `DAILY` and at least one queued item in the last 24 h. | Those users. |
+| `check_late_work_orders_job` | 08:00 daily | in-app **+ direct email** | **R messages per tenant** — one summary per recipient per company day (total, ten most overdue, link). A second run the same day sends nothing. | Every active user with role `SUPERVISOR` or `MANAGER` in that tenant, plus anyone an Admin selected under Email Recipients. |
+| `run_mrp_review_job` | 06:00 daily | direct email | **M messages per tenant** — `mrp.review_needed`, one per manager. Only when the run produced actions. Writes a new `MRPRun`; drafts nothing. | Every active `MANAGER`. |
+| `send_daily_digest_job` | 08:00 daily | direct email | **D emails** — one per active, deliverable user with at least one queued item in the last 24 h (no saved preference row = digest on; a saved opt-out is honoured). | Those users. |
 | `check_maintenance_due_job` | 12:15 daily | **in-app only** (no preference turns email or SMS on) | **One `maintenance.overdue` per overdue item per recipient** on the first run (overdue PM schedules with no work order under way, and unstarted overdue maintenance work orders), plus one `maintenance.due` per item due within 7 days. Later runs: `maintenance.overdue` again only after a recipient has read the previous one; `maintenance.due` once per cycle, where a cycle restarts whenever the record changes (a completion, or any edit, re-announces it). | Active users with `department = 'Maintenance'` (exact string) plus the company's active Admins. |
-| `check_calibrations_job` | 07:00 daily | in-app + **digest** | E in-app rows per Quality user, **plus a second "URGENT" one for anything due within 1 day** (the 7-day and 1-day passes overlap). Email only via the digest job. | Users whose `department = 'Quality'` (exact string). Note the cron passes `department`, so the catalog's `roles=(QUALITY,)` is *not* used here. |
+| `check_calibrations_job` | 07:00 daily | in-app + **digest** | One row per gauge per Quality person: `calibration.overdue` (recurring) for an overdue gauge, else `calibration.due` for one due today or within 7 days. Email only via the digest job. | The catalog audience: role `QUALITY` or `department = 'Quality'`. |
 | `check_quote_expiring_job` | 09:00 daily | **digest only** | Q digest items. No direct email. | Sales-department users. |
-| `check_low_stock_job` | 07:30 daily | **digest only** | **One aggregated message per tenant**, not one per item. Lowest blast radius of the group. | Purchasing + Inventory department users. |
+| `check_low_stock_job` | 07:30 daily | in-app + digest | **One count per tenant** (parts at or below reorder point, the Inventory list's rule), not one per item. Lowest blast radius of the group. | Purchasing + Inventory department users. |
 
 **SMS:** no cron sends SMS unless a user has explicitly opted a channel in, the catalog entry
 is `sms_eligible`, the user has a phone on file, **and** `Company.allow_sms_egress` is ON
 (default **off**, enforced fail-closed). Confirm it is off in §4.6 and SMS is a non-issue.
 
-#### Group 4 — THE ONE THAT WRITES BUSINESS RECORDS
+#### Group 4 — MRP
 
-`run_mrp_auto_draft_job` (06:00 daily) runs MRP in `AUTO_DRAFT` mode for **every active
-company** and calls `MRPAutoService.process_actions`, which **creates draft purchase orders
-and draft work orders**. It is **not idempotent** — each run creates a new `MRPRun` and a new
-set of drafts. Arm it last, deliberately, and only when someone is available to review what
-it produced the same morning.
+`run_mrp_review_job` (06:00 daily) runs MRP in **REVIEW** mode for every active company: a new
+`MRPRun` and the `mrp.review_needed` notice. It **creates no purchase order and no work order**
+(it replaced `run_mrp_auto_draft_job` on 2026-11-23; a guard test fails if any cron path
+constructs either). Arm it last, once `WORKER_SERVICE.md` §2's prerequisites are met.
 
 #### Request-enqueued jobs (not crons) — these run as soon as the worker starts
 
@@ -775,10 +783,10 @@ Order, cheapest and safest first:
 | 8 | `check_late_work_orders_job` | **Re-run the `L × R` query the same morning.** This is the big email burst. Consider closing out stale late WOs first. |
 | 9 | `aggregate_ai_learning_job` | New `AIRecommendation` rows; watch for a secondary wave of notifications from the events it emits. |
 | 10 | `archive_aged_audit_logs_job` | **Only after §8 (durable storage).** Then confirm the NDJSON file actually persists. |
-| 11 | `run_mrp_auto_draft_job` | **Last, deliberately, on a morning someone can review the output.** Immediately after: `SELECT count(*) FROM purchase_orders WHERE status='DRAFT' AND created_at > now() - interval '2 hours';` and the same for work orders. |
+| 11 | `run_mrp_review_job` | **Last.** Immediately after: one new `mrp_runs` row per company and no new draft purchase orders or work orders. |
 
 Once every cron is wanted: `WORKER_CRON_JOBS=all`, or unset it. If some cron is deliberately
-**not** wanted — MRP auto-draft is the live example — that is `all,-<job>`, not an allowlist of
+**not** wanted — the MRP review pass is the live example — that is `all,-<job>`, not an allowlist of
 the others. §6.4.
 
 ---
@@ -803,9 +811,8 @@ next merge to `main` will recreate the deploy.
   mid-run leaves whatever it had already committed; there is no partial-transaction state.
 - **ARQ re-runs cancelled jobs.** `retry_jobs` defaults to true and `max_tries` to 5, so a job
   killed by a shutdown signal is **re-queued and executed again from the start** on the next
-  worker boot. For an idempotent job that is fine. For `run_mrp_auto_draft_job` it means
-  **another set of draft POs and WOs.** This is the strongest argument for arming MRP last and
-  never restarting the worker mid-MRP-run.
+  worker boot. For an idempotent job that is fine. For `run_mrp_review_job` it means another
+  MRP run that morning (no drafts).
 - **Notifications are crash-safe.** `dispatch_notification_task` commits the notification rows
   and the `notified_at` marker in one transaction; a crash before commit leaves
   `notified_at IS NULL` and the sweeper re-picks it (within 24 h).
@@ -819,8 +826,8 @@ Once you cross these, no rollback undoes them:
 | Step | Irreversible effect |
 |---|---|
 | §5.6 #6 `send_daily_digest_job` | **Emails sent.** Cannot be recalled. |
-| §5.6 #8 `check_late_work_orders_job` | **`L × R` emails sent** to staff. Cannot be recalled. |
-| §5.6 #11 `run_mrp_auto_draft_job` | **Draft POs and WOs created**, plus emails to managers. They can be deleted afterwards (soft-delete), but the records existed, are audited, and were visible to users. |
+| §5.6 #8 `check_late_work_orders_job` | **One summary email per recipient** sent. Cannot be recalled. |
+| §5.6 #11 `run_mrp_review_job` | A new MRP run and emails to managers. No purchase orders or work orders. |
 | §5.6 #7 `cleanup_old_logs_job` | **Physical DELETEs** of job records, notification logs, and read notifications older than 90 days. Not soft deletes. Not recoverable except from a database backup. (Audit logs are untouched.) |
 | §5.6 #9 `aggregate_ai_learning_job` | Writes recommendations and emits events; the notifications those produce are sent. |
 | §2.4 purge command | Queued jobs deleted permanently. |
@@ -832,20 +839,20 @@ Everything before step 6 in §5.6 is reversible: stop the worker, delete the row
 
 ### 6.4 Turning ONE cron off, without freezing the rest
 
-The live case: **stop the daily MRP auto-draft pass.** It creates draft purchase orders and
-work orders for every active company every day, and someone has to triage them (§8.6). Leaving
-it off is a supported, permanent configuration.
+The live case: **keep the daily MRP review pass off** until review state carries over between
+runs (§8.6). It drafts nothing, but each morning's run resets "reviewed" marks. Leaving it off
+is a supported, permanent configuration.
 
 **The value.** On `werco-worker` → Variables:
 
 ```
-WORKER_CRON_JOBS=all,-run_mrp_auto_draft_job
+WORKER_CRON_JOBS=all,-run_mrp_review_job
 ```
 
 Redeploy, then confirm on the startup log — this line is the receipt:
 
 ```
-ARQ worker cron: 1 of 15 cron jobs SUPPRESSED by WORKER_CRON_JOBS='all,-run_mrp_auto_draft_job': cron:run_mrp_auto_draft_job
+ARQ worker cron: 1 of 15 cron jobs SUPPRESSED by WORKER_CRON_JOBS='all,-run_mrp_review_job': cron:run_mrp_review_job
 ARQ worker cron: 14 job(s) armed, times in UTC
 ```
 
@@ -853,7 +860,7 @@ ARQ worker cron: 14 job(s) armed, times in UTC
 
 | What you see | Verdict |
 |---|---|
-| `1 of 15 … SUPPRESSED`, naming `cron:run_mrp_auto_draft_job` | **Correct.** |
+| `1 of 15 … SUPPRESSED`, naming `cron:run_mrp_review_job` | **Correct.** |
 | `0 of 15` / no SUPPRESSED line at all | The variable did not take. The cron is still armed. **STOP.** |
 | `ValueError: WORKER_CRON_JOBS names unknown cron job(s): -…` and a crash loop | Typo in the excluded name. The refusal is working as designed — an exclusion that matches nothing would have left the job armed. **But while it crash-loops there is NO worker at all, not just that one cron off:** see below. Fix the spelling and redeploy. |
 | `ValueError: … uses all as a cron NAME …` and a crash loop | A stray comma, usually `all,` left behind after deleting the exclusion. Same blast radius as the row above. Delete the comma (or set the value to bare `all`). |
@@ -884,14 +891,14 @@ future crons arrive armed. That is the whole reason exclusion exists.
    cron is **01:00 Central**. If you are timing this change around a business day, that is the
    window you are actually moving — and if you set `TZ=America/Chicago` later, every cron time
    in this runbook shifts.
-2. **This disables the SCHEDULE, not the capability.** `run_mrp_auto_draft_job` stays in
+2. **This disables the SCHEDULE, not the capability.** `run_mrp_review_job` stays in
    `WorkerSettings.functions`, so the worker still knows how to run it; only the timed trigger
    is gone. A one-off pass can still be enqueued by name against the running worker:
 
    ```bash
    railway ssh --service werco-worker --environment production --project "$RAILWAY_PROJECT_ID" \
      python -c "import asyncio; from app.core.queue import enqueue_job; \
-                print(asyncio.run(enqueue_job('run_mrp_auto_draft_job')))"
+                print(asyncio.run(enqueue_job('run_mrp_review_job')))"
    ```
 
    **Same blast radius as one cron firing** — every active tenant, real draft POs/WOs, real
@@ -946,10 +953,9 @@ startup log alone does not establish nesting readiness.
 5. **Whether the late-WO burst is acceptable at all.** If `L` is large because the shop has a
    long tail of stale released work orders, consider cleaning those up before arming
    `check_late_work_orders_job` rather than emailing 300 alerts about them.
-6. **Whether `run_mrp_auto_draft_job` should run at all.** It is `AUTO_DRAFT`, not
-   `AUTO_SUBMIT`, so nothing is sent to a supplier — but it creates records daily that someone
-   must triage. If no one owns that triage, leave it off indefinitely: that is
-   `WORKER_CRON_JOBS=all,-run_mrp_auto_draft_job`, **not** an allowlist of the other thirteen.
+6. **When `run_mrp_review_job` should run.** It drafts nothing, but each morning's run resets
+   "reviewed" marks until review state carries over (plan mrp/6 step 2). Until then leave it off:
+   `WORKER_CRON_JOBS=all,-run_mrp_review_job`, **not** an allowlist of the other thirteen.
    Leaving it off is a supported, permanent configuration — §6.4 has the procedure, the
    receipt to look for in the log, and what MRP does and does not still do without it.
 7. **Replicas.** `numReplicas = 1` is in the config and must stay there. The cron scheduler is
@@ -988,7 +994,7 @@ railway logs --service werco-worker --environment production
 #   Railway -> werco-worker -> Variables -> WORKER_CRON_JOBS=none -> redeploy
 
 # Kill ONE cron, keep the rest (and keep future crons arriving armed) -- see §6.4
-#   Railway -> werco-worker -> Variables -> WORKER_CRON_JOBS=all,-run_mrp_auto_draft_job -> redeploy
+#   Railway -> werco-worker -> Variables -> WORKER_CRON_JOBS=all,-run_mrp_review_job -> redeploy
 ```
 
 | Fact | Value |
@@ -999,10 +1005,10 @@ railway logs --service werco-worker --environment production
 | Declared crons | 15 |
 | Cron timezone | container-local; **UTC unless `TZ` is set** |
 | Sweeper bounds | 24 h max age, 2 min grace, 500 per 5-minute pass |
-| Cron selector | `WORKER_CRON_JOBS` — unset/`all` / `none` / comma-separated names (allowlist) / `-name` exclusions (`all,-run_mrp_auto_draft_job`). The two shapes cannot be mixed; an unknown name, **negated or not**, is a hard startup error |
+| Cron selector | `WORKER_CRON_JOBS` — unset/`all` / `none` / comma-separated names (allowlist) / `-name` exclusions (`all,-run_mrp_review_job`). The two shapes cannot be mixed; an unknown name, **negated or not**, is a hard startup error |
 | Worker start command | `arq app.worker.WorkerSettings` |
 | Worker healthcheck | **none, by design** — the worker serves no HTTP |
 
 ### Browser performance retention
 
-The daily `cleanup_runtime_metrics_job` deletes anonymous runtime measurements older than 30 days. An explicit cron allowlist must include it; exclusion policies such as `all,-run_mrp_auto_draft_job` include it automatically. The job does not email, modify business documents or delete audit records.
+The daily `cleanup_runtime_metrics_job` deletes anonymous runtime measurements older than 30 days. An explicit cron allowlist must include it; exclusion policies such as `all,-run_mrp_review_job` include it automatically. The job does not email, modify business documents or delete audit records.

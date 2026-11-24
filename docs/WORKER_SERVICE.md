@@ -175,23 +175,29 @@ is no separate enable step. Fifteen are declared. Times are the container's loca
 arq defaults to `datetime.now().astimezone().tzinfo`, which on Railway is **UTC unless `TZ`
 is set**, so "6 AM" means 06:00 UTC = **01:00 Central**.
 
-| Cron | When | What it does on its FIRST run |
-|---|---|---|
-| `run_mrp_auto_draft_job` | 06:00 daily | **Creates draft purchase orders and work orders** for every active company, and emails `mrp.completed` to every active `MANAGER` (only when the run produced actions). Not idempotent — a new `MRPRun` and new drafts every run. **Highest risk.** |
-| `check_late_work_orders_job` | 08:00 daily | **One email per late WO to every supervisor + manager.** No age cap. `wo.late` is `recurring`, but suppression keys off an unread in-app row already existing — on a cold start there are none, so the first run fires in full. |
-| `check_maintenance_due_job` | 12:15 daily | Per active company, on the company's own day (whatever the container's zone): one `maintenance.overdue` per overdue PM schedule (no work order under way) and per unstarted overdue maintenance work order, and one `maintenance.due` per item due within 7 days not yet announced this cycle (a cycle restarts when the record changes), to every active user whose `department = 'Maintenance'` plus the Admins. **In-app only**: no preference turns email or SMS on for either event. On a cold start every overdue item alerts once per recipient; `maintenance.overdue` is `recurring`, so later runs add nothing while that row is unread. Writes no business record. |
-| `check_calibrations_job` | 07:00 daily | One `calibration.due` per equipment due within 7 days, to every user whose `department = 'Quality'`. Equipment due within **1 day is dispatched twice** (it is in both the 7-day and the 1-day set). Channel is in-app + **digest**, not direct email. |
-| `check_quote_expiring_job` | 09:00 daily | One per quote expiring within 7 days, to `department = 'Sales'` users. **Digest-only** — no direct email. Window-bounded. |
-| `check_low_stock_job` | 07:30 daily | **One aggregated** message per tenant to `department` `Purchasing` + `Inventory`. **Digest-only.** Low blast radius. |
-| `send_daily_digest_job` | 08:00 daily | One digest email per opted-in user. |
-| `aggregate_ai_learning_job` | 05:30 daily | Writes `AIRecommendation` rows and emits `work_order_blocker_escalated` events, which re-enter the outbox and generate more notifications. Never applies a recommendation and makes no LLM call (the auto-execute agent was removed 2026-11-05). |
-| `run_oee_auto_calc_job` | 02:30 daily | Writes whole-day `OEERecord`s (`calculation_source='auto'`) for each company's **previous production day only** (`current_production_day − 1` on its production calendar, the company-local calendar day when none is configured; migration 120); never overwrites `manual`. No backfill. Quiet. |
-| `cleanup_runtime_metrics_job` | Daily 02:15 | **Physical DELETEs**: anonymous browser performance samples older than 30 days. No business records or audit logs. |
-| `cleanup_old_logs_job` | Sun 02:00 | **Physical DELETEs**: completed jobs, notification logs, read notifications >90 d. Audit logs explicitly excluded. |
-| `archive_aged_audit_logs_job` | 1st of month 03:00 | Exports aged audit rows to NDJSON in `AUDIT_ARCHIVE_DIR`. **Never deletes.** Needs a durable volume — see §8. |
-| `poll_tracking_job` | every 30 min | Outbound carrier traffic, gated on `allow_carrier_egress` (default off). |
-| `relay_pending_notifications_job` | every 5 min | Re-enqueues events with `notified_at IS NULL`. **Safely bounded** — see below. |
-| `check_hank_watches_job` | every 5 min | Checks at most 100 due, explicitly saved personal watches in short independent transactions. A match records a terminal receipt and, when the owner's current Hank preference enables alerts, one private in-app notice; no email/SMS or business record execution. |
+**This is the one authoritative table** of what each cron does and whether it is safe to arm
+(revised 2026-11-23 with plans mrp/6 step 1 and alerts_health/2 steps 1-5). Nothing is armed
+by this change: production runs `WORKER_CRON_JOBS=none`, and arming is the owner's step. Other
+sections and `WORKER_DEPLOYMENT_RUNBOOK.md` give the procedure; where they disagree with this
+table, this table wins.
+
+| Cron | When (container zone) | What it does | Safe to arm now? | What it needs first |
+|---|---|---|---|---|
+| `relay_pending_notifications_job` | every 5 min | Re-enqueues catalog events whose after-commit enqueue was lost (`notified_at IS NULL`). Bounded: 24 h floor, 2 min grace, 500 a pass. | **Yes** | Nothing. |
+| `check_hank_watches_job` | every 5 min | Checks at most 100 saved personal watches; a match is one private in-app notice. No email, no business write. | **Yes** | Migration 109 (already applied). |
+| `run_oee_auto_calc_job` | 02:30 daily | Writes each company's previous production day of OEE (`calculation_source='auto'`); never overwrites `manual`. | **Yes** | Nothing. |
+| `cleanup_runtime_metrics_job` | 02:15 daily | Physically deletes anonymous browser performance samples older than 30 days. | **Yes** | Nothing. |
+| `poll_tracking_job` | every 30 min | Carrier tracking poll; does nothing while `allow_carrier_egress` is off (the default). | **Yes** | Carrier egress on, for it to do anything. |
+| `check_calibrations_job` | 07:00 daily | Per in-service gauge, on the company's day (`company_today`): `calibration.overdue` once past its date (recurring: one unread row per person), else `calibration.due` when due today or within 7 days (URGENT today/tomorrow). Reaches the **Quality role and the Quality department** (catalog audience). In-app + digest. | **Yes** | Quality people set up (role Quality, or Department "Quality"). |
+| `check_maintenance_due_job` | 12:15 daily | `maintenance.overdue` / `maintenance.due` on the company's day to the Maintenance department + Admins. In-app only. | **Yes** | Run the overdue counts in `DEPLOYMENT.md` → PM due and overdue alerts. |
+| `check_low_stock_job` | 07:30 daily | One `stock.low` count per company: parts (not rows) at or below a reorder point above zero, company-owned stock only -- the same list as `GET /inventory/low-stock` and the Inventory low-stock view, which it links to. Names no part. In-app (the bell) + digest, to the Purchasing and Inventory departments. | **Yes** | Reorder points maintained on the parts that matter, or it counts little; buyers' Department set to Purchasing / Inventory. |
+| `check_late_work_orders_job` | 08:00 daily | **One `wo.late` summary per Supervisor / Manager per company day**: total, the ten most overdue (WO number + days late) and a link to the Work Orders overdue view. Late = `must_ship_by`, else `due_date`, before `company_today`, for released / in-progress / held jobs. In-app + email. A second run the same day sends nothing. | **Yes** | Nothing blocking. Known gap: the linked overdue view still judges `due_date` only and includes drafts, so its count can differ from the summary's until the one-definition-of-late work lands. |
+| `send_daily_digest_job` | 08:00 daily | One email per **active, deliverable user with queued digest items** (no saved preference row = defaults; a saved opt-out is honoured). Lists each event's label, title, body and link. | **After an owner decision** | Owner accepts that people who never opted in now get it (they have queued items because the catalog defaults include the digest). Set `FRONTEND_BASE_URL` so its links work. |
+| `check_quote_expiring_job` | 09:00 daily | One `quote.expiring` per SENT quote expiring within 7 days, to the Sales department, digest-only. Unchanged. | **Leave off** | Quoting is not in use; harmless if armed. |
+| `aggregate_ai_learning_job` | 05:30 daily | Writes recommend-only `AIRecommendation` rows (incl. low-stock ones, now on the one low-stock rule) and `work_order_blocker_escalated` events; never applies anything, no LLM call. | **Not reviewed in this change** | Review the recommendation volume before arming. |
+| `cleanup_old_logs_job` | Sun 02:00 | Physically deletes completed jobs, notification logs and read notifications older than 90 days. Never audit logs. | **After an owner decision** | Confirm the 90-day windows. |
+| `archive_aged_audit_logs_job` | 1st of month 03:00 | Exports aged audit rows to NDJSON in `AUDIT_ARCHIVE_DIR`; never deletes. | **No** | A durable volume or object storage for `AUDIT_ARCHIVE_DIR` (see §8). |
+| `run_mrp_review_job` | 06:00 daily | MRP in **REVIEW mode only**: a new `MRPRun` per company and `mrp.review_needed` to Managers when it has actions. **Creates no purchase order and no work order** -- a guard test fails if any cron path constructs either. Replaced `run_mrp_auto_draft_job` (2026-11-23); a `WORKER_CRON_JOBS` value naming the old job now refuses to boot. | **Not yet** | Review state carrying over between runs (plan mrp/6 step 2) -- today "reviewed" marks and inbox items reset with each morning's run -- and the MRP demand / netting fixes, or the morning list is wrong. Set `TZ` (06:00 is 01:00 Central while the container runs UTC). |
 
 Hank checks run through `asyncio.to_thread`; their database sessions are created and
 closed in that thread, keeping synchronous database work off ARQ's event loop.
@@ -233,9 +239,9 @@ allowlist), or start from everything and subtract the ones you don't (a denylist
   webhooks, labels, completion signals), which correspond to something a user actually did.
   **This is the correct value for the first boot.**
 - comma-separated job names → arms exactly those, one at a time, in the order listed.
-- `-<name>` → **excludes** that cron from the full set. `all,-run_mrp_auto_draft_job` and the
-  bare `-run_mrp_auto_draft_job` are the same thing: a spec made only of exclusions implies
-  `all` as its base. `-cron:run_mrp_auto_draft_job` works too — arq names crons
+- `-<name>` → **excludes** that cron from the full set. `all,-run_mrp_review_job` and the
+  bare `-run_mrp_review_job` are the same thing: a spec made only of exclusions implies
+  `all` as its base. `-cron:run_mrp_review_job` works too — arq names crons
   `cron:<coroutine name>` and the startup log prints **that** form, so both spellings are
   accepted for exclusions exactly as they already are for inclusions.
 
@@ -249,7 +255,7 @@ armed and the operator's variable does not rot.
 An unknown name is a hard error at startup, not a silent skip — **and that includes a negated
 one**: excluding a cron that does not exist means the job you meant to silence is still armed.
 Two more shapes are refused rather than guessed: **mixing** inclusions with exclusions
-(`poll_tracking_job,-run_mrp_auto_draft_job` reads either as "only the tracking poll" or as
+(`poll_tracking_job,-run_mrp_review_job` reads either as "only the tracking poll" or as
 "everything except MRP", and those differ by most of the schedule), and `none` combined with an
 exclusion. `all` is the one positive token allowed alongside exclusions, as the explicit base.
 Excluding *every* cron is legal and simply means `none`. Full syntax, error text and
@@ -259,7 +265,7 @@ case/whitespace rules: `docs/ENVIRONMENT_VARIABLES.md` → Background worker (AR
 > **The `SUPPRESSED` log line reads correctly for either shape.** It diffs the registered
 > crons against `ALL_CRON_JOBS` by object identity, and the denylist path filters that same
 > list rather than rebuilding it, so what it prints is exact:
-> `ARQ worker cron: 1 of 15 cron jobs SUPPRESSED by WORKER_CRON_JOBS='all,-run_mrp_auto_draft_job': cron:run_mrp_auto_draft_job`
+> `ARQ worker cron: 1 of 15 cron jobs SUPPRESSED by WORKER_CRON_JOBS='all,-run_mrp_review_job': cron:run_mrp_review_job`
 
 ---
 
@@ -467,18 +473,18 @@ adding the next:
 
 1. `relay_pending_notifications_job` — bounded by design (24 h floor, 500/pass).
 2. `run_oee_auto_calc_job` — writes each company's previous production day of OEE only, no email.
-3. `check_low_stock_job` — one aggregated message per tenant.
+3. `check_low_stock_job` — one count per tenant (the one low-stock rule).
 4. `poll_tracking_job` — no-op while `allow_carrier_egress` is off.
 5. `check_quote_expiring_job`, `check_calibrations_job`, `check_maintenance_due_job` — window-bounded
    (the maintenance job is in-app only; run the overdue counts in `DEPLOYMENT.md` → PM due and
    overdue alerts first).
 6. `send_daily_digest_job`.
 7. `cleanup_old_logs_job` — physical deletes; confirm the 90-day windows are what you want.
-8. `check_late_work_orders_job` — **run the §4 counts first.**
+8. `check_late_work_orders_job` — one summary per Supervisor / Manager per day.
 9. `aggregate_ai_learning_job`.
 10. `archive_aged_audit_logs_job` — **only after §8.**
-11. `run_mrp_auto_draft_job` — **last, and only deliberately.** It creates draft POs and
-    work orders in production.
+11. `run_mrp_review_job` — **last**, once the prerequisites in the §2 table are met. It drafts
+    nothing; it writes a new MRP run each morning and notifies Managers.
 
 Then, once all are wanted: `WORKER_CRON_JOBS=all` (or unset it).
 
@@ -486,7 +492,7 @@ Then, once all are wanted: `WORKER_CRON_JOBS=all` (or unset it).
 the remaining jobs stay whatever the current release declares:
 
 ```
-WORKER_CRON_JOBS=all,-run_mrp_auto_draft_job    # everything except the MRP auto-draft pass
+WORKER_CRON_JOBS=all,-run_mrp_review_job    # everything except the MRP review pass
 ```
 
 Listing the remaining jobs by name would work today and rot at the next release that adds a
@@ -544,8 +550,8 @@ the rest, set `WORKER_CRON_JOBS=all,-<job>` and redeploy — no allowlist, so th
 crons stay whatever the release declares. Nothing about the worker is required for the API to
 serve — the API logs its queue target and carries on without one.
 
-**Not reversible:** draft POs and work orders created by `run_mrp_auto_draft_job`, and
-emails already sent. Both are why the order in §5.6 puts MRP last.
+**Not reversible:** emails already sent, and the MRP runs and notices `run_mrp_review_job`
+wrote. No cron creates purchase orders or work orders any more.
 
 ---
 
@@ -558,8 +564,8 @@ emails already sent. Both are why the order in §5.6 puts MRP last.
   a lost archive, not lost audit data — but it is still a compliance artifact.
 - **`TZ`.** Decide whether the crons should run on Central or UTC.
 - **Two replicas would double every cron.** `numReplicas = 1` is in the config; do not raise
-  it. Two processes each run the full schedule — MRP AUTO_DRAFT would create two sets of
-  drafts per day.
+  it. Two processes each run the full schedule — two MRP runs a morning, and every alert job
+  racing its own dedupe.
 - **The repo-root `railway.toml` hazard.** Because the worker's config file sits at the repo
   root, any service that has an empty Root Directory *and* is ever deployed from the repo
   root would read it and start running arq. CI deploys `werco-api` from `backend/` and
