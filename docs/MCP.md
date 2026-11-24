@@ -135,7 +135,8 @@ read-only catalog is unchanged at 8 convenience + **304** generated, and it was 
 AI-external allowlist.
 
 **Re-checked again on 2026-11-23 after the self-service password change left the catalog**:
-`change_own_password` (`POST /users/change-password`) joined `EXCLUDED_OPERATIONS` (§6.1) as a
+the tool generated from `POST /users/change-password` (named after its route function, change own
+password) is gone: the route joined `EXCLUDED_OPERATIONS` (§6.1) as a
 people-only write, so 15 convenience + **779** generated (one fewer than the 780 above), 16 shadowed. It was a write, so the
 read-only catalog is unchanged at 8 convenience + **304** generated.
 
