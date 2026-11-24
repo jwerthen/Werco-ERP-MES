@@ -203,6 +203,13 @@ import {
   CopilotStreamHandlers,
 } from '../types/copilot';
 import type { HankBriefing } from '../types/hank';
+import type {
+  LaborReviewListParams,
+  LaborReviewListResponse,
+  SetClockOutRequest,
+  SetClockOutResponse,
+  TimeEntryApprovalResult,
+} from '../types/laborReview';
 import type { HankCapabilities, HankTask, HankTaskCreate, HankTaskCommand, HankTaskList } from '../types/hankTasks';
 import type { HankWatchCreate } from '../types/hankWatches';
 import type { HankPreferencesCommand, HankPreferencesResponse, HankPreferencesUpdate } from '../types/hankPreferences';
@@ -2244,6 +2251,56 @@ class ApiService {
 
   async clockOut(timeEntryId: number, data: { quantity_produced: number; quantity_scrapped?: number; scrap_reason?: string; scrap_reason_code_id?: number; notes?: string; source?: string }) {
     const response = await this.api.post(`/shop-floor/clock-out/${timeEntryId}`, data);
+    this.invalidateDashboardCache();
+    return response.data;
+  }
+
+  // --- Labor Review (/shop-floor/time-entries) -------------------------------
+
+  /**
+   * GET /shop-floor/time-entries — time entries by production day with review flags,
+   * server-paged. Admin / Manager / Supervisor / Quality. Pure read.
+   */
+  async listLaborReviewEntries(params: LaborReviewListParams = {}): Promise<LaborReviewListResponse> {
+    const response = await this.api.get<LaborReviewListResponse>('/shop-floor/time-entries', { params });
+    return response.data;
+  }
+
+  /**
+   * POST /shop-floor/time-entries/{id}/approve — sign off a CLOSED time entry (not your own).
+   * Admin / Manager / Supervisor / Quality; 409 while the entry is still clocked in. With
+   * `version`, 409 when the entry changed since it was read.
+   */
+  async approveTimeEntry(timeEntryId: number, version?: number): Promise<TimeEntryApprovalResult> {
+    const response = await this.api.post<TimeEntryApprovalResult>(
+      `/shop-floor/time-entries/${timeEntryId}/approve`,
+      version === undefined ? undefined : { version }
+    );
+    this.invalidateCache('/shop-floor/time-entries');
+    return response.data;
+  }
+
+  /** POST /shop-floor/time-entries/{id}/unapprove — clear an approval (not your own); `version` as approve. */
+  async unapproveTimeEntry(timeEntryId: number, version?: number): Promise<TimeEntryApprovalResult> {
+    const response = await this.api.post<TimeEntryApprovalResult>(
+      `/shop-floor/time-entries/${timeEntryId}/unapprove`,
+      version === undefined ? undefined : { version }
+    );
+    this.invalidateCache('/shop-floor/time-entries');
+    return response.data;
+  }
+
+  /**
+   * POST /shop-floor/time-entries/{id}/set-clock-out — close or correct another person's
+   * UNAPPROVED entry at a stated time with a reason (hours only). Admin / Manager /
+   * Supervisor; version-checked (409 stale).
+   */
+  async setTimeEntryClockOut(timeEntryId: number, data: SetClockOutRequest): Promise<SetClockOutResponse> {
+    const response = await this.api.post<SetClockOutResponse>(
+      `/shop-floor/time-entries/${timeEntryId}/set-clock-out`,
+      data
+    );
+    this.invalidateCache('/shop-floor/time-entries');
     this.invalidateDashboardCache();
     return response.data;
   }

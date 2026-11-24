@@ -72,6 +72,10 @@ KIOSK_TOKEN_EXACT_PATHS = (
 KIOSK_TOKEN_DENIED_PREFIXES = (
     "/api/v1/shop-floor/kiosk-stations",
     "/api/v1/shop-floor/dispatch-board",
+    # Labor Review: the list read, approve / unapprove and the supervisor set-clock-out are
+    # a desk workflow. The whole subtree is denied, so a new labor-review route is fenced
+    # by default (the approve / unapprove suffix test below predates it and stays).
+    "/api/v1/shop-floor/time-entries",
 )
 _KIOSK_DENIED_APPROVAL_MARKER = "/time-entries/"
 _KIOSK_DENIED_APPROVAL_SUFFIXES = ("/approve", "/unapprove")

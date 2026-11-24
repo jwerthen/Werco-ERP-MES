@@ -36,6 +36,7 @@ from app.mcp.catalog import (
     FLOOR_PIN_OPERATIONS,
     INSPECTION_SIGN_OFF_OPERATIONS,
     JSON_CONTENT_TYPE,
+    LABOR_JUDGMENT_OPERATIONS,
     MAX_DESCRIPTION_CHARS,
     MULTIPART_CONTENT_TYPE,
     PUBLIC_OPERATIONS,
@@ -156,9 +157,10 @@ class TestMembership:
         # (AS9100D 8.5.2: setting, clearing or unlocking a floor PIN and the company's PIN policy are a
         # person's act) and the two document-access writes (AS9100D 7.5.3: granting export
         # authorization and changing a document's access level are a person's judgment), the
-        # self-service password change (a person's act in their own session) and the in-process
+        # self-service password change (a person's act in their own session), the in-process
         # inspection sign-off (AS9100D 8.6: signing that an inspection was performed is a person's
-        # judgment, like an FAI final disposition) -- nothing else.
+        # judgment, like an FAI final disposition) and the three labor judgments (approve / unapprove
+        # a time entry, set another person's clock-out) -- nothing else.
         assert set(EXCLUDED_OPERATIONS) == {
             ("POST", "/api/v1/work-orders/import"),
             ("POST", "/api/v1/purchasing/purchase-orders/import"),
@@ -190,9 +192,14 @@ class TestMembership:
             ("POST", "/api/v1/documents/{document_id}/access-level"),
             ("POST", "/api/v1/users/change-password"),
             ("POST", "/api/v1/shop-floor/operations/{operation_id}/inspection"),
+            # The labor judgments (Labor Review): approve, unapprove, set another person's clock-out.
+            ("POST", "/api/v1/shop-floor/time-entries/{time_entry_id}/approve"),
+            ("POST", "/api/v1/shop-floor/time-entries/{time_entry_id}/unapprove"),
+            ("POST", "/api/v1/shop-floor/time-entries/{time_entry_id}/set-clock-out"),
         }
         assert EGRESS_SWITCH_OPERATIONS <= set(EXCLUDED_OPERATIONS)
         assert INSPECTION_SIGN_OFF_OPERATIONS <= set(EXCLUDED_OPERATIONS)
+        assert LABOR_JUDGMENT_OPERATIONS <= set(EXCLUDED_OPERATIONS)
         assert DOCUMENT_ACCESS_OPERATIONS <= set(EXCLUDED_OPERATIONS)
         assert COMMENT_WRITE_OPERATIONS <= set(EXCLUDED_OPERATIONS)
         assert FLOOR_PIN_OPERATIONS <= set(EXCLUDED_OPERATIONS)

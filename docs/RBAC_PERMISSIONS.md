@@ -175,7 +175,7 @@ AI-external token bound to a **Viewer** user.
 ### Credential policy for judgment writes
 
 A few writes record a **person's judgment** — not just a permitted action — and some of them are
-restricted to certain *credentials*, on top of the role gate. The restrictions have eleven sources,
+restricted to certain *credentials*, on top of the role gate. The restrictions have twelve sources,
 and each row below names its own: owner ruling 3 of 2026-11-05 (the two AI rows), the owner's
 decision of 2026-11-07 (a standing API token may not declare scrap or close work short), this
 PR's extensions of that decision (scrap reasons, the re-stamp short close and the other count
@@ -193,10 +193,12 @@ its re-verification, and a CAR's effectiveness verification), the floor-PIN chan
 PIN policy, is credential administration, a person's act), and the restricted document viewing
 change of 2026-11-19 (migration `131`: a document's access level and a user's export authorization),
 and the owner's decision of 2026-11-20 that a standing API token may file a maintenance log entry
-(an MCP agent on a person's own JWT too, a half not separately put to the owner), and the in-process
+(an MCP agent on a person's own JWT too, a half not separately put to the owner), the in-process
 inspection sign-off change of 2026-11-23 (signing that an inspection was performed is a person's
 judgment, as an FAI final disposition is; a default taken from the improvement plan, not an owner
-ruling).
+ruling), and the Labor Review build of 2026-11-23 (approving labor, clearing an approval and setting
+another person's clock-out are a person's judgment; the plan's recommended defaults, not owner
+rulings).
 This section is the **one list** of those credential rules — what refuses a credential,
 what is deliberately left open (and who decided each), and what is deliberately not refused —
 across the AI governance (ruling 3), floor-gates (ruling 2) and short-count (ruling 1) changes;
@@ -256,6 +258,7 @@ Recommendations):
 | **Granting or revoking a user's export authorization** — `PUT /users/{id}/export-authorization`, the only thing that opens an `export_controlled` document. Refused before anything is read. Not an MCP tool (`catalog.DOCUMENT_ACCESS_OPERATIONS`): an agent on a person's JWT must not grant export access, its own user's included. Reading a user's authorization (the user record) stays open | `is_api_token_credential`, inline at the top of the route (after the Admin role gate) | **403** `API_TOKEN_EXPORT_AUTHORIZATION` (`Export authorization is granted or revoked by an Admin signed in to the app, not an API token: deciding who may open export-controlled documents is a person's judgment.`) — any token, whatever its role or scope | The same 2026-11-19 design decision; not an owner ruling |
 | **Changing your own password** — `POST /users/change-password` (any signed-in person, My Settings → Password). Refused before the body's passwords are read. Not an MCP tool (`catalog.PASSWORD_OPERATIONS`, part of `EXCLUDED_OPERATIONS`): an agent on a person's own JWT must not change that person's password. The change, its `password_changed_at` stamp and the `PASSWORD_CHANGE` audit row are one transaction — the audit row is **required** evidence (**503**, nothing saved). It does not end the person's other signed-in sessions (refresh does not read `password_changed_at`; they last until sign-out or the 7-day idle window) | `is_interactive_person`, inline at the top of the route | **403** `PASSWORD_CHANGE_PEOPLE_ONLY` (`Your password is changed by you, signed in to the app: an API token or a shop-floor badge or station token cannot change a password.`) — every API token whatever its role or scope, and every crew-station badge or station token | The self-service password change's design (2026-11-23); not an owner ruling |
 | **Signing off an in-process inspection** — `POST /shop-floor/operations/{operation_id}/inspection`, the only writer of `WorkOrderOperation.inspection_complete` (the generic `PUT /work-orders/operations/{id}` refuses the field **422**). It records that an inspection was performed, under the signer's name, as a **required** `MARK_OPERATION_INSPECTED` audit row (**503**, nothing signed, when it cannot be written). Refused after the role gate and before the operation is read, so a token cannot probe whether an id exists. Not an MCP tool (`catalog.INSPECTION_SIGN_OFF_OPERATIONS`, part of `EXCLUDED_OPERATIONS`), so a person's own JWT cannot reach it through an agent either. A crew-station badge token, which passes `is_api_token_credential`, is refused **403** by the kiosk path fence instead (`deps._is_kiosk_scope_allowed_path`), as labor approval is, whatever badge was scanned. The operation reads carrying `requires_inspection` / `inspection_complete` / `inspection_type` stay open | `is_api_token_credential`, inline at the top of the route (after the role gate) | **403** `API_TOKEN_INSPECTION_SIGN_OFF` (`An inspection is signed off by a person signed in to the app, not an API token: recording that an inspection was performed is a person's judgment.`) — any token, whatever its role or scope (a read-only or AI-external token meets its own gate's 403 first) | The inspection sign-off change (2026-11-23): the improvement plan's recommended default, matching the FAI final disposition; not an owner ruling. Fencing the badge token off is the same change's review follow-up |
+| **Approving labor, clearing an approval, and setting another person's clock-out** — `POST /shop-floor/time-entries/{id}/approve`, `POST /shop-floor/time-entries/{id}/unapprove` and `POST /shop-floor/time-entries/{id}/set-clock-out` (Labor Review). Refused before the entry is read. None of the three is an MCP tool (`catalog.LABOR_JUDGMENT_OPERATIONS`, part of `EXCLUDED_OPERATIONS`), so a person's own JWT cannot reach them through an agent either; the list read `GET /shop-floor/time-entries` stays a tool. A **crew-station badge token is refused too** — the kiosk path fence denies the whole `/shop-floor/time-entries` subtree (`deps.KIOSK_TOKEN_DENIED_PREFIXES`), and each route re-checks the token scope | `is_api_token_credential`, then the kiosk scope, in `shop_floor._refuse_labor_judgment_credential` | **403** `LABOR_JUDGMENT_API_TOKEN_DETAIL` (`Approving labor, clearing an approval and setting a clock-out are a person's judgment: an API token cannot do them. Sign in to the app.`) — any token, whatever its role or scope; a badge token gets the path fence's 403 | Labor Review build (2026-11-23), applying the plan's recommended answer to the open owner question (labor_review/2: an API token may not approve or unapprove labor) and the recommended default for the unanswered decision D5 (the clock-out verb is for Admin / Manager / Supervisor signed in as themselves); not an owner ruling |
 
 Deliberately **not** refused:
 
@@ -351,6 +354,8 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 | Hold / resume operation (shop-floor verb) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Resolve / dismiss the blocker behind a hold | ✓ | ✓ | ✓ | | | | |
 | Approve labor (TimeEntry) | ✓ | ✓ | ✓ | | ✓ | | |
+| Labor Review list (`GET /shop-floor/time-entries`) | ✓ | ✓ | ✓ | | ✓ | | |
+| Set another person's clock-out (`POST /shop-floor/time-entries/{id}/set-clock-out`) | ✓ | ✓ | ✓ | | | | |
 | View material ties | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Tie / edit / untie material | ✓ | ✓ | ✓ | | | | |
 | View untied laser nests, tie coverage, the untied-sheet report and a job's tie summary (`GET /laser-nests/untied`, `/untied/coverage`, `/untied/sheet-report`, `/laser-nests/work-orders/{id}/tie-summary`) | ✓ | ✓ | ✓ | | | | |
@@ -415,7 +420,26 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > addition to the role gate, **self-approval is
 > forbidden**: a user cannot approve or unapprove their **own** TimeEntry (segregation of duties for
 > the labor-cost gate) — that returns **403** even for an approver-role user. A cross-tenant id returns
-> **404**. Both actions are audited (`time_entry_approve` / `time_entry_unapprove`).
+> **404**. Both actions are audited (`time_entry_approve` / `time_entry_unapprove`). Since Labor Review
+> (2026-11-23): approve refuses **409** an entry that is still clocked in (close the clock first;
+> unapprove stays open); both take an optional body `{"version": n}` and refuse **409** when the entry
+> changed since the approver read it; and both refuse every standing API token and every kiosk badge
+> **403** and are no longer MCP tools — see the Credential policy row above.
+>
+> **Labor Review — endpoint mapping (2026-11-23).** `GET /api/v1/shop-floor/time-entries` (the list
+> behind the `/labor-review` page) is `require_role([ADMIN, MANAGER, SUPERVISOR, QUALITY])`, the same set
+> as approval; a kiosk badge is **403** (the path fence denies the whole `/shop-floor/time-entries`
+> subtree), while a full API token may read it (MCP tool `list_time_entries`).
+> `POST /api/v1/shop-floor/time-entries/{id}/set-clock-out` is `require_role([ADMIN, MANAGER, SUPERVISOR])`
+> — **Quality may review and approve labor but not set a clock-out** — and, like approval, forbids the
+> caller's **own** entry (**403**), refuses an **approved** entry (**409**), and refuses every API token
+> and kiosk badge (**403**). It changes hours only; when the work order has a job cost it also rebuilds
+> that job cost's time-entry labor lines with a required `RECALCULATE` audit row, a deliberate exception
+> to job-cost writes otherwise being Admin / Manager only. The SPA gates the `/labor-review` route and
+> its nav entry (Production → Shop Floor → Labor Review) on `quality:inspect`, which the default role
+> map grants to exactly that set; the Close clock / Correct actions appear only where the server's
+> `can_set_clock_out` says so, and the dashboard's Live Shop Activity **Close clock** link is shown to
+> Admin / Manager / Supervisor (a client-side copy of the server's role set) on someone else's entry.
 
 > **Start operation — both start verbs are role-gated** (the office verb since `feat/work-center-op-pool`,
 > the shop-floor verb since owner decision P0.4, 2026-11-13).

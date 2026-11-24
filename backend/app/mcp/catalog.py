@@ -146,6 +146,20 @@ INSPECTION_SIGN_OFF_OPERATIONS: FrozenSet[Tuple[str, str]] = frozenset(
     }
 )
 
+# And the labor judgments (Labor Review, 2026-11-23): approving a time entry, clearing its
+# approval, and setting another person's clock-out are a person's judgment at the desk. The
+# routes refuse every API token (``app.services.labor_review_service.LABOR_JUDGMENT_API_TOKEN_DETAIL``)
+# and every kiosk badge, and a person's own JWT would still reach them through a tool call, so
+# none is a tool. The list read ``GET /shop-floor/time-entries`` stays a tool. Named on their
+# own so the credential tests walk exactly these routes.
+LABOR_JUDGMENT_OPERATIONS: FrozenSet[Tuple[str, str]] = frozenset(
+    {
+        ("POST", "/api/v1/shop-floor/time-entries/{time_entry_id}/approve"),
+        ("POST", "/api/v1/shop-floor/time-entries/{time_entry_id}/unapprove"),
+        ("POST", "/api/v1/shop-floor/time-entries/{time_entry_id}/set-clock-out"),
+    }
+)
+
 # And the Approved Supplier List writes (AS9100D 8.4): recording a supplier-approval
 # decision and loading the controlled QL 7.4 list are a named person's judgment, so they
 # are app actions only (the routes also refuse API tokens). The import preview goes with
@@ -181,6 +195,7 @@ EXCLUDED_OPERATIONS: FrozenSet[Tuple[str, str]] = (
     | DOCUMENT_ACCESS_OPERATIONS
     | COMMENT_WRITE_OPERATIONS
     | INSPECTION_SIGN_OFF_OPERATIONS
+    | LABOR_JUDGMENT_OPERATIONS
 )
 
 # Every operation in the document that declares NO ``security`` block, BY NAME. None
