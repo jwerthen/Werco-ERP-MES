@@ -37,6 +37,7 @@ import FloorPinDialog, {
   isFloorPinLocked,
 } from '../components/users/FloorPinDialog';
 import ExportAuthorizationDialog, { ExportAuthorizationCell } from '../components/users/ExportAuthorizationDialog';
+import { FALLBACK_DEPARTMENTS, type UserDepartments } from '../types/userDepartments';
 
 interface UserData {
   id: number;
@@ -198,6 +199,12 @@ export default function Users() {
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState<UserCsvImportResult | null>(null);
   const [approvalRoles, setApprovalRoles] = useState<Record<number, UserRole>>({});
+  // Department picked on each pending-approval row ('' = keep what the person registered with).
+  const [approvalDepartments, setApprovalDepartments] = useState<Record<number, string>>({});
+  // The Department pick list + users whose stored value is not on it (GET /users/departments,
+  // Admin only — the same gate as every user write here).
+  const [departmentInfo, setDepartmentInfo] = useState<UserDepartments | null>(null);
+  const departmentOptions = departmentInfo?.departments ?? FALLBACK_DEPARTMENTS;
   const [approvingUserIds, setApprovingUserIds] = useState<Record<number, boolean>>({});
   // A0.4: selection for the badge print sheet.
   const [selectedUserIds, setSelectedUserIds] = useState<number[]>([]);
@@ -400,11 +407,37 @@ export default function Users() {
     loadUsers();
   }, [loadUsers]);
 
+  const loadDepartments = useCallback(async () => {
+    if (!canApproveUsers) return;
+    try {
+      setDepartmentInfo(await api.getUserDepartments());
+    } catch (err) {
+      // The form falls back to the shipped list; the correction panel just stays hidden.
+      console.error('Failed to load departments:', err);
+    }
+  }, [canApproveUsers]);
+
+  useEffect(() => {
+    void loadDepartments();
+  }, [loadDepartments]);
+
   useEffect(() => {
     if (approvalMode) {
       setShowInactive(true);
     }
   }, [approvalMode]);
+
+  useEffect(() => {
+    setApprovalDepartments((current) => {
+      const next = { ...current };
+      pendingUsers.forEach((user) => {
+        if (next[user.id] === undefined) {
+          next[user.id] = user.department && departmentOptions.includes(user.department) ? user.department : '';
+        }
+      });
+      return next;
+    });
+  }, [pendingUsers, departmentOptions]);
 
   useEffect(() => {
     setApprovalRoles((current) => {
@@ -434,6 +467,7 @@ export default function Users() {
       setShowModal(false);
       resetForm();
       loadUsers();
+      void loadDepartments();
     } catch (err: any) {
       showToast('error', getApiErrorMessage(err, 'Failed to save user'));
     }
@@ -483,9 +517,11 @@ export default function Users() {
     try {
       await api.approveUser(user.id, {
         role: approvalRoles[user.id] || 'operator',
-        department: user.department || undefined,
+        // Blank keeps what the person registered with (the server leaves it untouched).
+        department: approvalDepartments[user.id] || undefined,
       });
       await loadUsers();
+      void loadDepartments();
     } catch (err: any) {
       showToast('error', getApiErrorMessage(err, 'Failed to approve user'));
     } finally {
@@ -555,6 +591,7 @@ export default function Users() {
       setImportDefaultPassword('');
       if (result.created_count > 0) {
         await loadUsers();
+        void loadDepartments();
       }
     } catch (err: any) {
       // This modal commits directly (no dry run), so an Axios timeout means the server
@@ -702,7 +739,7 @@ export default function Users() {
             {pendingUsers.map((user) => (
               <div
                 key={user.id}
-                className="grid gap-3 rounded-[4px] border border-slate-700 bg-[#101722] p-4 lg:grid-cols-[minmax(0,1fr)_180px_120px] lg:items-center"
+                className="grid gap-3 rounded-[4px] border border-slate-700 bg-[#101722] p-4 lg:grid-cols-[minmax(0,1fr)_180px_180px_120px] lg:items-center"
               >
                 <div className="min-w-0">
                   <div className="font-medium text-white">{user.first_name} {user.last_name}</div>
@@ -710,6 +747,9 @@ export default function Users() {
                     <span>{user.email}</span>
                     <span>ID: {user.employee_id}</span>
                     <span>Requested {formatCentralDate(user.created_at)}</span>
+                    {user.department && !departmentOptions.includes(user.department) && (
+                      <span className="text-amber-300">Registered department “{user.department}” is not on the list</span>
+                    )}
                   </div>
                 </div>
                 <select
@@ -725,6 +765,22 @@ export default function Users() {
                 >
                   {approvableRoles.map((role) => (
                     <option key={role} value={role}>{roleLabels[role]}</option>
+                  ))}
+                </select>
+                <select
+                  value={approvalDepartments[user.id] ?? ''}
+                  onChange={(e) =>
+                    setApprovalDepartments((current) => ({
+                      ...current,
+                      [user.id]: e.target.value,
+                    }))
+                  }
+                  className="input h-10"
+                  aria-label={`Approval department for ${user.first_name} ${user.last_name}`}
+                >
+                  <option value="">{user.department ? 'Keep registered department' : 'No department'}</option>
+                  {departmentOptions.map((department) => (
+                    <option key={department} value={department}>{department}</option>
                   ))}
                 </select>
                 <button
@@ -774,6 +830,54 @@ export default function Users() {
                   onManage={() => setFloorPinUserId(u.id)}
                   manageRefusal={floorPinManageRefusal(currentUser, u)}
                 />
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {canManageUsers && departmentInfo && departmentInfo.unlisted.length > 0 && (
+        <section
+          aria-label="Departments to correct"
+          className="card border-amber-500/30 bg-amber-500/5"
+          data-testid="unlisted-departments"
+        >
+          <h2 className="card-title">
+            {departmentInfo.unlisted.length === 1
+              ? '1 user has a department that is not on the list'
+              : `${departmentInfo.unlisted.length} users have a department that is not on the list`}
+          </h2>
+          <p className="card-subtitle">
+            Department-based alerts match the list exactly, so these people are missed until a listed department is
+            picked: {departmentOptions.join(', ')}.
+          </p>
+          <ul className="mt-3 grid gap-2">
+            {departmentInfo.unlisted.map((u) => (
+              <li
+                key={u.id}
+                className="grid gap-2 rounded-[4px] border border-slate-700 bg-[#101722] px-3 py-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-center"
+              >
+                <div className="min-w-0">
+                  <div className="font-medium text-white">
+                    {u.name}
+                    {!u.is_active && <span className="ml-2 text-xs text-slate-400">(inactive)</span>}
+                  </div>
+                  <div className="text-xs text-slate-400">ID: {u.employee_id}</div>
+                </div>
+                <div className="text-sm text-amber-300 break-words">“{u.department}”</div>
+                <button
+                  type="button"
+                  className="btn-secondary btn-sm"
+                  aria-label={`Pick a department for ${u.name}`}
+                  onClick={() => {
+                    if (!u.is_active) setShowInactive(true);
+                    const nextParams = new URLSearchParams(searchParams);
+                    nextParams.set('id', String(u.id));
+                    setSearchParams(nextParams, { replace: true });
+                  }}
+                >
+                  Pick department
+                </button>
               </li>
             ))}
           </ul>
@@ -1049,15 +1153,33 @@ export default function Users() {
                     </select>
                   )}
                 </FormField>
-                <FormField label="Department">
+                <FormField
+                  label="Department"
+                  help={
+                    formData.department && !departmentOptions.includes(formData.department)
+                      ? 'This department is not on the list, so department-based alerts do not reach this person. Pick one to fix it.'
+                      : 'Department-based alerts (for example low stock to Purchasing) go to the people in that department.'
+                  }
+                >
                   {(field) => (
-                    <input
+                    <select
                       {...field}
-                      type="text"
                       value={formData.department}
                       onChange={(e) => setFormData({ ...formData, department: e.target.value })}
                       className="input"
-                    />
+                    >
+                      <option value="">No department</option>
+                      {departmentOptions.map((department) => (
+                        <option key={department} value={department}>
+                          {department}
+                        </option>
+                      ))}
+                      {/* A legacy value stays selectable until someone picks a listed one: the
+                          server accepts re-sending the current stored value unchanged. */}
+                      {formData.department && !departmentOptions.includes(formData.department) && (
+                        <option value={formData.department}>{formData.department} (not on the list)</option>
+                      )}
+                    </select>
                   )}
                 </FormField>
               </div>
@@ -1153,6 +1275,7 @@ export default function Users() {
                 <p className="font-medium text-slate-100 mb-1">CSV columns</p>
                 <p>Required: employee_id, first_name, last_name</p>
                 <p>Optional: email, password, role, department</p>
+                <p className="mt-1">department, when given, must be one of: {departmentOptions.join(', ')}.</p>
                 <p className="mt-1">
                   Operators can omit passwords and use employee-ID login only. For non-operators, provide a password
                   in CSV or set a default password.

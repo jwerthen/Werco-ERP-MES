@@ -14,11 +14,11 @@ const mockedApi = api as jest.Mocked<typeof api>;
 
 const data: EmailRecipientsSettings = {
   users: [
-    { id: 1, name: 'Ashley Werthen', email: 'awerthen@wercomfg.com', is_active: true, email_deliverable: true },
-    { id: 2, name: 'Jon Werthen', email: 'jwerthen@wercomfg.com', is_active: true, email_deliverable: true },
-    { id: 3, name: 'Jon Werthen Jr.', email: 'jmw@wercomfg.com', is_active: true, email_deliverable: true },
+    { id: 1, name: 'Avery Stone', email: 'avery@example.test', is_active: true, email_deliverable: true },
+    { id: 2, name: 'Jordan Reyes', email: 'jordan@example.test', is_active: true, email_deliverable: true },
+    { id: 3, name: 'Jordan Reyes Jr.', email: 'jordan.jr@example.test', is_active: true, email_deliverable: true },
     { id: 4, name: 'Another User', email: 'another@example.test', is_active: true, email_deliverable: true },
-    { id: 5, name: 'Badge Only', email: 'badge@users.werco.com', is_active: true, email_deliverable: false },
+    { id: 5, name: 'Badge Only', email: 'badge@users.example.test', is_active: true, email_deliverable: false },
   ],
   events: [
     {
@@ -29,6 +29,10 @@ const data: EmailRecipientsSettings = {
       user_ids: [1, 2, 3],
       is_custom: false,
       missing_default_emails: [],
+      audience_source: 'selected',
+      reaches_user_ids: [1, 2, 3],
+      depends_on_record: false,
+      reaches_nobody: false,
     },
     {
       event_key: 'receipt.created',
@@ -38,6 +42,10 @@ const data: EmailRecipientsSettings = {
       user_ids: [1, 2, 3],
       is_custom: false,
       missing_default_emails: [],
+      audience_source: 'selected',
+      reaches_user_ids: [1, 2, 3],
+      depends_on_record: true,
+      reaches_nobody: false,
     },
     {
       event_key: 'ncr.created',
@@ -47,6 +55,10 @@ const data: EmailRecipientsSettings = {
       user_ids: null,
       is_custom: false,
       missing_default_emails: [],
+      audience_source: 'automatic',
+      reaches_user_ids: [],
+      depends_on_record: false,
+      reaches_nobody: true,
     },
   ],
 };
@@ -74,9 +86,9 @@ it('opens from Admin Settings and checks exactly the three requested recipients'
   renderTab();
   expect(await screen.findByLabelText('Email type')).toHaveValue('wo.completed');
   expect(screen.getAllByRole('checkbox', { checked: true })).toHaveLength(3);
-  expect(screen.getByRole('checkbox', { name: /Ashley Werthen/ })).toBeChecked();
-  expect(screen.getByRole('checkbox', { name: /Jon Werthen \(/ })).toBeChecked();
-  expect(screen.getByRole('checkbox', { name: /Jon Werthen Jr/ })).toBeChecked();
+  expect(screen.getByRole('checkbox', { name: /Avery Stone/ })).toBeChecked();
+  expect(screen.getByRole('checkbox', { name: /Jordan Reyes \(/ })).toBeChecked();
+  expect(screen.getByRole('checkbox', { name: /Jordan Reyes Jr/ })).toBeChecked();
   expect(screen.getByRole('checkbox', { name: /Another User/ })).not.toBeChecked();
   expect(screen.getByRole('checkbox', { name: /Badge Only/ })).toBeDisabled();
   expect(screen.getByRole('button', { name: 'Save recipients' })).toBeDisabled();
@@ -88,7 +100,7 @@ it('keeps unsaved selections separate for each email and saves only the current 
   fireEvent.click(screen.getByRole('checkbox', { name: /Another User/ }));
   fireEvent.change(screen.getByLabelText('Email type'), { target: { value: 'receipt.created' } });
   expect(screen.getByRole('checkbox', { name: /Another User/ })).not.toBeChecked();
-  fireEvent.click(screen.getByRole('checkbox', { name: /Jon Werthen Jr/ }));
+  fireEvent.click(screen.getByRole('checkbox', { name: /Jordan Reyes Jr/ }));
   fireEvent.click(screen.getByRole('button', { name: 'Save recipients' }));
   await waitFor(() => expect(mockedApi.updateEmailRecipients).toHaveBeenCalledWith('receipt.created', [1, 2]));
   await waitFor(() => expect(screen.getByLabelText('Email type')).toBeEnabled());
@@ -122,7 +134,28 @@ it('lets an admin replace an automatic audience with specific recipients', async
   await screen.findByLabelText('Email type');
   fireEvent.change(screen.getByLabelText('Email type'), { target: { value: 'ncr.created' } });
   fireEvent.click(screen.getByRole('button', { name: 'Choose specific recipients' }));
-  fireEvent.click(screen.getByRole('checkbox', { name: /Ashley Werthen/ }));
+  fireEvent.click(screen.getByRole('checkbox', { name: /Avery Stone/ }));
   fireEvent.click(screen.getByRole('button', { name: 'Save recipients' }));
   await waitFor(() => expect(mockedApi.updateEmailRecipients).toHaveBeenCalledWith('ncr.created', [1]));
+});
+
+it('shows who each email reaches now and flags one that reaches nobody', async () => {
+  renderTab();
+  await screen.findByLabelText('Email type');
+  const reach = screen.getByTestId('email-reach');
+  expect(reach).toHaveTextContent('saved recipient list');
+  expect(reach).toHaveTextContent('Avery Stone, Jordan Reyes, Jordan Reyes Jr.');
+  expect(reach).not.toHaveTextContent('Reaches nobody');
+  // The page-level summary names every email type that reaches nobody.
+  expect(screen.getByText(/1 email type reaches nobody/)).toHaveTextContent('NCR created');
+  expect(screen.getByRole('option', { name: 'NCR created (reaches nobody)' })).toBeInTheDocument();
+
+  fireEvent.change(screen.getByLabelText('Email type'), { target: { value: 'receipt.created' } });
+  expect(screen.getByTestId('email-reach')).toHaveTextContent('plus the record’s own people');
+
+  fireEvent.change(screen.getByLabelText('Email type'), { target: { value: 'ncr.created' } });
+  const nobody = screen.getByTestId('email-reach');
+  expect(nobody).toHaveTextContent('Reaches nobody');
+  expect(nobody).toHaveTextContent('chosen automatically by role and department');
+  expect(nobody).toHaveTextContent('No one with a deliverable email address');
 });
