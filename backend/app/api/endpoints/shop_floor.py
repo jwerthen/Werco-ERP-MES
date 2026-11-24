@@ -10,7 +10,6 @@ from typing import Optional, Sequence, Union
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, aliased, defaultload, joinedload, selectinload
@@ -30,7 +29,7 @@ from app.api.deps import (
 )
 from app.core.cache import invalidate_work_centers_cache
 from app.core.config import settings
-from app.core.credentials import is_api_token_credential, is_narrowed_api_token
+from app.core.credentials import API_TOKEN_INSPECTION_SIGN_OFF, is_api_token_credential, is_narrowed_api_token
 from app.core.observability import report_absorbed_exception
 from app.core.realtime import safe_broadcast
 from app.core.time_utils import CENTRAL_TIME_ZONE, to_utc_iso
@@ -86,7 +85,13 @@ from app.schemas.process_sheet import (
     QualityHoldResponse,
     StepAttachmentResponse,
 )
-from app.schemas.shop_floor_commands import OperationCompleteRequest, OperationHoldRequest, ProductionReportRequest
+from app.schemas.shop_floor_commands import (
+    OperationCompleteRequest,
+    OperationHoldRequest,
+    OperationInspectionRequest,
+    OperationInspectionResponse,
+    ProductionReportRequest,
+)
 from app.schemas.time_entry import ClockIn, ClockOut, ProductionReductionRequest, TimeEntryResponse
 from app.schemas.wallboard import WallboardResponse
 from app.services import (
@@ -209,19 +214,6 @@ from app.services.work_order_state_service import (
     upstream_figures_by_operation,
     validate_operation_quantity,
 )
-
-
-class OperationInspectionRequest(BaseModel):
-    """Record an operation as inspected (QG-2 writer).
-
-    ``inspection_type`` optionally records WHICH inspection cleared the gate
-    (first_article / in_process / final); ``notes`` carries inspector commentary.
-    Both land in the audit row so the inspection sign-off is traceable.
-    """
-
-    inspection_type: Optional[str] = Field(default=None, max_length=100)
-    notes: Optional[str] = Field(default=None, max_length=2000)
-
 
 router = APIRouter()
 
@@ -5820,7 +5812,12 @@ def resume_operation(
     }
 
 
-@router.post("/operations/{operation_id}/inspection")
+INSPECTION_AUDIT_UNAVAILABLE = (
+    "The audit record for this inspection sign-off could not be saved; nothing was signed off. Retry."
+)
+
+
+@router.post("/operations/{operation_id}/inspection", response_model=OperationInspectionResponse)
 def mark_operation_inspected(
     operation_id: int,
     inspection_data: OperationInspectionRequest,
@@ -5832,90 +5829,103 @@ def mark_operation_inspected(
     # Request-scoped (B8): the chain row must carry the caller's ip/user_agent.
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Record an operation's inspection as complete (QG-2 writer).
+    """Sign off an operation's in-process inspection (QG-2 writer).
 
-    Before Batch 4 NOTHING set ``WorkOrderOperation.inspection_complete = True``, so
-    the inspection quality gate (QG-1) could warn but never CLEAR -- the warning was
-    not actionable. This audited writer closes that loop: it flips
-    ``inspection_complete`` true, records who/when, and writes a tamper-evident
-    ``audit_log`` row, so a subsequent completion stops raising the
-    ``inspection_incomplete`` exception.
+    The ONLY writer of ``WorkOrderOperation.inspection_complete`` (the generic operation
+    ``PUT`` refuses the field). Flips it true and writes a REQUIRED ``MARK_OPERATION_INSPECTED``
+    audit row in the same transaction -- the audit row is the record of who signed and when,
+    since the operation carries no inspected-by / inspected-at column -- so a later completion
+    stops raising the ``inspection_incomplete`` exception. If the audit row cannot be written
+    nothing is saved (503).
 
-    Tenant-scoped (operation must belong to the active company) and RBAC-gated to
-    ADMIN / MANAGER / SUPERVISOR / QUALITY -- the roles that perform / sign off
-    inspection in this repo's role model (there is no separate INSPECTOR role).
+    Tenant-scoped (the operation must belong to the active company, on a work order that is not
+    deleted -- 404 otherwise) and RBAC-gated to ADMIN / MANAGER / SUPERVISOR / QUALITY, the roles
+    that perform or sign off inspection (there is no separate INSPECTOR role). A standing API
+    token is refused 403 before anything is read: signing an inspection is a person's judgment,
+    as an FAI final disposition is. Signing an operation that is already signed is allowed and
+    records a further audit row; nothing ever clears the flag.
 
     FAI-pass auto-wire is DEFERRED: the FAI/NCR tables carry no ``operation_id`` FK,
     so an FAI passing cannot be linked back to a specific operation without a schema
-    change (database-migration-specialist). In warn-and-record mode the manual writer
-    is sufficient (nothing is blocked); the auto-wire is flagged as a follow-up.
+    change. In warn-and-record mode the manual writer is sufficient (nothing is blocked).
     """
+    if is_api_token_credential(current_user):
+        raise HTTPException(status_code=403, detail=API_TOKEN_INSPECTION_SIGN_OFF)
+
     operation = (
         db.query(WorkOrderOperation)
         .options(joinedload(WorkOrderOperation.work_order))
         .filter(WorkOrderOperation.id == operation_id, WorkOrderOperation.company_id == company_id)
         .first()
     )
-    if not operation:
+    work_order = operation.work_order if operation else None
+    # A deleted work order's operations are not signable: the tombstone hides the job everywhere
+    # else, and a sign-off on it would be evidence for work nobody can see.
+    if not operation or not work_order or work_order.is_deleted:
         raise HTTPException(status_code=404, detail="Operation not found")
 
-    work_order = operation.work_order
     was_complete = bool(operation.inspection_complete)
+    old_type = operation.inspection_type
     operation.inspection_complete = True
     if inspection_data.inspection_type:
         operation.inspection_type = inspection_data.inspection_type
     operation.updated_at = datetime.utcnow()
 
-    # Tamper-evident audit row for the inspection sign-off (who/when/what). Flushed
-    # (not committed) by AuditService.log so it commits atomically with the flag below.
+    # Tamper-evident audit row for the inspection sign-off (who/when/what). REQUIRED: flushed
+    # (not committed) so it commits atomically with the flag, and a failure rolls both back.
     note_suffix = f". Notes: {inspection_data.notes}" if inspection_data.notes else ""
     type_suffix = f" ({inspection_data.inspection_type})" if inspection_data.inspection_type else ""
-    audit.log(
-        action="MARK_OPERATION_INSPECTED",
-        resource_type="work_order_operation",
-        resource_id=operation.id,
-        resource_identifier=operation.operation_number,
-        description=(
-            f"Recorded inspection complete{type_suffix} for operation {operation.operation_number}"
-            + (f" on WO {work_order.work_order_number}" if work_order else "")
-            + note_suffix
-        ),
-        new_values={"inspection_complete": True},
-        old_values={"inspection_complete": was_complete},
-    )
+    with required_audit(db, INSPECTION_AUDIT_UNAVAILABLE):
+        entry = audit.log_required(
+            action="MARK_OPERATION_INSPECTED",
+            resource_type="work_order_operation",
+            resource_id=operation.id,
+            resource_identifier=operation.operation_number,
+            description=(
+                f"Recorded inspection complete{type_suffix} for operation {operation.operation_number}"
+                f" on WO {work_order.work_order_number}" + note_suffix
+            ),
+            new_values={"inspection_complete": True, "inspection_type": operation.inspection_type},
+            old_values={"inspection_complete": was_complete, "inspection_type": old_type},
+            extra_data={
+                "work_order_id": work_order.id,
+                "work_order_number": work_order.work_order_number,
+                "notes": inspection_data.notes,
+            },
+        )
+    signed_off_at = entry.timestamp or datetime.utcnow()
 
-    if work_order:
-        # Read before the emit, so reporting a failed emit never touches the session again.
-        signal_context = {
-            "company_id": company_id,
-            "user_id": current_user.id,
-            "work_order_id": work_order.id,
-            "operation_id": operation.id,
-        }
-        try:
-            OperationalEventService(db).emit(
-                company_id=company_id,
-                event_type="operation_inspected",
-                source_module="shop_floor",
-                entity_type="work_order_operation",
-                entity_id=operation.id,
-                work_order_id=work_order.id,
-                operation_id=operation.id,
-                user_id=current_user.id,
-                severity="info",
-                event_payload={
-                    "work_order_number": work_order.work_order_number,
-                    "operation_name": operation.name,
-                    "inspection_type": inspection_data.inspection_type,
-                },
-            )
-        except Exception as exc:  # signal emission must not break the write -- but it must be seen
-            report_absorbed_exception(
-                logger,
-                "operation_inspected signal emit failed; the inspection sign-off continues",
-                exc,
-                context=signal_context,
-            )
+    # Read before the emit, so reporting a failed emit never touches the session again.
+    signal_context = {
+        "company_id": company_id,
+        "user_id": current_user.id,
+        "work_order_id": work_order.id,
+        "operation_id": operation.id,
+    }
+    try:
+        OperationalEventService(db).emit(
+            company_id=company_id,
+            event_type="operation_inspected",
+            source_module="shop_floor",
+            entity_type="work_order_operation",
+            entity_id=operation.id,
+            work_order_id=work_order.id,
+            operation_id=operation.id,
+            user_id=current_user.id,
+            severity="info",
+            event_payload={
+                "work_order_number": work_order.work_order_number,
+                "operation_name": operation.name,
+                "inspection_type": inspection_data.inspection_type,
+            },
+        )
+    except Exception as exc:  # signal emission must not break the write -- but it must be seen
+        report_absorbed_exception(
+            logger,
+            "operation_inspected signal emit failed; the inspection sign-off continues",
+            exc,
+            context=signal_context,
+        )
 
     db.commit()
     db.refresh(operation)
@@ -5926,18 +5936,23 @@ def mark_operation_inspected(
             operation.work_center_id,
             {
                 "event": "operation_inspected",
-                "work_order_id": work_order.id if work_order else None,
+                "work_order_id": work_order.id,
                 "operation_id": operation.id,
             },
             company_id=company_id,
         )
 
-    return {
-        "message": "Operation inspection recorded",
-        "operation_id": operation.id,
-        "inspection_complete": operation.inspection_complete,
-        "inspection_type": operation.inspection_type,
-    }
+    return OperationInspectionResponse(
+        message="Operation inspection recorded",
+        operation_id=operation.id,
+        work_order_id=work_order.id,
+        requires_inspection=bool(operation.requires_inspection),
+        inspection_complete=bool(operation.inspection_complete),
+        inspection_type=operation.inspection_type,
+        signed_off_by_id=current_user.id,
+        signed_off_by_name=current_user.full_name,
+        signed_off_at=signed_off_at,
+    )
 
 
 # ============================================================================

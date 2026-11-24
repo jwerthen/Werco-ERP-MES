@@ -120,6 +120,18 @@ API_TOKEN_EXPORT_AUTHORIZATION = (
     "who may open export-controlled documents is a person's judgment."
 )
 
+# In-process inspection sign-off (``POST /shop-floor/operations/{operation_id}/inspection``,
+# AS9100D 8.6). Signing that an inspection was performed is quality evidence someone has to have
+# done, the same judgment as an FAI final disposition, so the route refuses ANY API token,
+# whatever its role or scope, with this text before it reads or writes anything. It is not an MCP
+# tool (``app.mcp.catalog.INSPECTION_SIGN_OFF_OPERATIONS``). A crew-station badge token never
+# reaches it: the route is Admin / Manager / Supervisor / Quality, and the kiosk carries no
+# supervisor verbs.
+API_TOKEN_INSPECTION_SIGN_OFF = (
+    "An inspection is signed off by a person signed in to the app, not an API token: recording that an "
+    "inspection was performed is a person's judgment."
+)
+
 # Comments and watchers (docs/NOTIFICATIONS_PLAN.md section 3.6; owner decision for work-order
 # comments, 2026-11-16). A comment is a person's own words and a watch is a person's own
 # preference, so every comment / watcher WRITE (``POST``/``PATCH``/``DELETE /comments``,
