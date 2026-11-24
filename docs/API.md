@@ -13865,6 +13865,7 @@ roles). See [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#sms-channel-twilio).
 | GET | `/users/me/notification-preferences` | Your **effective** per-event channel matrix | Any authenticated user (self) |
 | PUT | `/users/me/notification-preferences` | Save your **SMS** opt-ins (audited) | Any authenticated user (self) |
 | POST | `/users/me/test-sms` | Send a test SMS to your own number — **`3/minute` per IP + `3/hour` per user** | Any authenticated user (self) |
+| POST | `/users/change-password` | Change your own password (My Settings → Password). Required audit; does not end other sessions — see [Changing your own password](#users-admin) above | Any signed-in person (self). Every API token and badge / station token **403**; not an MCP tool |
 
 > **`PUT /users/me/phone`** — body `{ "phone": "512-555-0100" }` (or `{ "phone": null }` / `""` to
 > clear); `phone` is `max_length` 32. The number is parsed against `SMS_DEFAULT_REGION` (default
