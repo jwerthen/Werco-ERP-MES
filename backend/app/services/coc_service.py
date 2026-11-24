@@ -32,6 +32,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.time_utils import resolve_zone, to_local_date, to_utc_iso
+from app.models.audit_log import AuditLog
 from app.models.company import Company
 from app.models.customer import Customer
 from app.models.part import Part
@@ -40,6 +41,7 @@ from app.models.user import User
 from app.models.work_order import WorkOrder
 from app.services.audit_service import AuditService
 from app.services.coc_pdf_service import DEFAULT_COC_STATEMENT, build_certificate_of_conformance_pdf
+from app.services.operational_event_service import OperationalEventService
 from app.services.process_sheet_service import parse_serial_numbers
 
 logger = logging.getLogger(__name__)
@@ -133,8 +135,13 @@ def generate_coc_for_shipment(
     company_id: int,
     user_id: int,
     audit: AuditService,
+    accepted_exceptions: Optional[List[dict]] = None,
 ) -> CertificateOfConformance:
     """Mint (or return the existing) CoC for a shipment. Idempotent; does NOT commit.
+
+    ``accepted_exceptions`` (shipping/2) are the open quality items the issuer accepted
+    on a manual issue over them; they are frozen into the snapshot as
+    ``accepted_release_exceptions`` (never printed on the customer's certificate).
 
     Captures a frozen snapshot of the certified facts (resolved from the work order,
     part, and customer) plus the resolved issuer name and ISO dates into
@@ -199,6 +206,8 @@ def generate_coc_for_shipment(
         "company_address": getattr(company, "address", None),
         "company_phone": getattr(company, "phone", None),
     }
+    if accepted_exceptions:
+        snapshot["accepted_release_exceptions"] = list(accepted_exceptions)
 
     coc = CertificateOfConformance(
         coc_number=coc_number,
@@ -252,6 +261,86 @@ def generate_coc_for_shipment(
     shipment.cert_of_conformance = True
 
     return coc
+
+
+COC_WITHHELD_AUDIT_ACTION = "COC_WITHHELD"
+COC_WITHHELD_EVENT_TYPE = "coc_withheld"
+COC_ISSUED_OVER_EXCEPTIONS_AUDIT_ACTION = "COC_ISSUED_OVER_EXCEPTIONS"
+
+
+def record_coc_withheld(
+    db: Session,
+    *,
+    shipment: Shipment,
+    work_order: WorkOrder,
+    exceptions: List[dict],
+    company_id: int,
+    user_id: int,
+    audit: AuditService,
+) -> None:
+    """Record that a required CoC was NOT auto-issued on ship because quality items are open.
+
+    REQUIRED evidence (``log_required``): the caller wraps it in ``required_audit`` so the
+    ship rolls back (503) rather than land with no record of why no certificate was
+    issued. The ``coc_withheld`` OperationalEvent is a best-effort signal on top. Joins
+    the caller's unit of work; never commits.
+    """
+    codes = [exc.get("code") for exc in exceptions]
+    audit.log_required(
+        COC_WITHHELD_AUDIT_ACTION,
+        "shipment",
+        resource_id=shipment.id,
+        resource_identifier=shipment.shipment_number,
+        description=(
+            f"Certificate of Conformance withheld for shipment {shipment.shipment_number} "
+            f"(WO {work_order.work_order_number}): {len(exceptions)} open quality item(s), Quality to issue"
+        ),
+        new_values={"coc_withheld": True, "release_exceptions": codes},
+        extra_data={
+            "work_order_id": work_order.id,
+            "work_order_number": work_order.work_order_number,
+            "release_exceptions": exceptions,
+        },
+        company_id=company_id,
+    )
+    OperationalEventService(db).emit_best_effort(
+        company_id=company_id,
+        event_type=COC_WITHHELD_EVENT_TYPE,
+        source_module="shipping",
+        entity_type="shipment",
+        entity_id=shipment.id,
+        work_order_id=work_order.id,
+        user_id=user_id,
+        severity="warning",
+        event_payload={
+            "shipment_number": shipment.shipment_number,
+            "work_order_number": work_order.work_order_number,
+            "release_exception_codes": codes,
+        },
+    )
+
+
+def withheld_shipment_ids(db: Session, company_id: int, shipment_ids) -> set:
+    """Shipments whose automatic CoC was withheld on ship, from the audit trail (one query).
+
+    The caller pairs it with "no CoC issued yet": once Quality issues the certificate the
+    shipment is no longer waiting on one, though the withheld row stays in the trail.
+    """
+    ids = sorted({int(i) for i in shipment_ids if i is not None})
+    if not ids:
+        return set()
+    rows = (
+        db.query(AuditLog.resource_id)
+        .filter(
+            AuditLog.company_id == company_id,
+            AuditLog.resource_type == "shipment",
+            AuditLog.action == COC_WITHHELD_AUDIT_ACTION,
+            AuditLog.resource_id.in_(ids),
+        )
+        .distinct()
+        .all()
+    )
+    return {row[0] for row in rows}
 
 
 def render_coc_pdf(coc: CertificateOfConformance, db: Optional[Session] = None) -> bytes:

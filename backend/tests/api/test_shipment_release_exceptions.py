@@ -6,7 +6,7 @@ scrap and return-to-vendor never), the latest first article not accepted, and op
 quality-hold blockers. Served on ready-to-ship rows and ``GET /shipping/{id}``.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 
 import pytest
 from fastapi import status
@@ -152,3 +152,152 @@ def test_ready_to_ship_and_detail_serve_the_chips(client: TestClient, db_session
     detail = client.get(f"/api/v1/shipping/{shipment.id}", headers=headers_for(user))
     assert detail.status_code == status.HTTP_200_OK
     assert [e["code"] for e in detail.json()["release_exceptions"]] == ["open_ncr"]
+
+
+# ---------------------------------------------------------------------------
+# Step 2: the automatic certificate is withheld; a manual issue accepts the items.
+# ---------------------------------------------------------------------------
+
+API_TOKENS_URL = "/api/v1/api-tokens/"
+
+
+def _token_headers(client: TestClient, db: Session, user) -> dict:
+    from app.models.user import UserRole
+
+    admin = make_user(db, role=UserRole.ADMIN, company_id=user.company_id)
+    issued = client.post(API_TOKENS_URL, json={"user_id": user.id, "label": "coc probe"}, headers=headers_for(admin))
+    assert issued.status_code == 201, issued.text
+    return {"Authorization": f"Bearer {issued.json()['token']}", "X-Requested-With": "XMLHttpRequest"}
+
+
+def _audit(db: Session, action: str):
+    from app.models.audit_log import AuditLog
+
+    db.expire_all()
+    return db.query(AuditLog).filter(AuditLog.company_id == COMPANY_A, AuditLog.action == action).all()
+
+
+def _ship_with_open_ncr(db: Session, *, cert: bool = True):
+    from app.models.shipping import ShipmentStatus
+
+    wo = make_wo(db, make_part(db))
+    ncr = make_ncr(db, wo, status_=NCRStatus.OPEN, disposition=NCRDisposition.PENDING)
+    shipment = make_shipment(db, wo, quantity_shipped=4, cert_of_conformance=cert, status_=ShipmentStatus.PENDING)
+    db.commit()
+    return wo, ncr, shipment
+
+
+def _accept(client: TestClient, db: Session, shipment, user):
+    return client.post(
+        f"/api/v1/shipping/{shipment.id}/ship",
+        json={"acknowledge_exceptions": True, "reason": "Customer accepted per deviation D-1"},
+        headers=headers_for(user),
+    )
+
+
+def _ship(client: TestClient, shipment, user):
+    return client.post(f"/api/v1/shipping/{shipment.id}/ship", headers=headers_for(user))
+
+
+def test_ship_withholds_the_automatic_coc_and_records_why(client: TestClient, db_session: Session):
+    from app.models.operational_event import OperationalEvent
+    from app.models.user import UserRole
+    from tests.api.test_coc_generation_batch11c import _coc_rows
+
+    manager = make_user(db_session, role=UserRole.MANAGER)
+    wo, ncr, shipment = _ship_with_open_ncr(db_session)
+
+    resp = _ship(client, shipment, manager)
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    body = resp.json()
+    assert body["coc_withheld"] is True
+    assert [e["reference_id"] for e in body["release_exceptions"]] == [ncr.id]
+
+    assert _coc_rows(db_session, shipment.id) == []
+    rows = [r for r in _audit(db_session, "COC_WITHHELD") if r.resource_id == shipment.id]
+    assert len(rows) == 1 and rows[0].resource_type == "shipment"
+    assert rows[0].extra_data["release_exceptions"][0]["code"] == "open_ncr"
+    events = (
+        db_session.query(OperationalEvent)
+        .filter(OperationalEvent.event_type == "coc_withheld", OperationalEvent.entity_id == shipment.id)
+        .all()
+    )
+    assert len(events) == 1
+
+    listed = {r["id"]: r for r in client.get("/api/v1/shipping/", headers=headers_for(manager)).json()}
+    assert listed[shipment.id]["coc_withheld"] is True
+    detail = client.get(f"/api/v1/shipping/{shipment.id}", headers=headers_for(manager)).json()
+    assert detail["coc_withheld"] is True and detail["coc_number"] is None
+
+
+def test_clean_job_still_auto_issues(client: TestClient, db_session: Session):
+    from app.models.user import UserRole
+    from tests.api.test_coc_generation_batch11c import _coc_rows
+
+    manager = make_user(db_session, role=UserRole.MANAGER)
+    wo = make_wo(db_session, make_part(db_session))
+    shipment = make_shipment(db_session, wo, cert_of_conformance=True)
+    db_session.commit()
+    resp = _ship(client, shipment, manager)
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    assert resp.json()["coc_withheld"] is False
+    assert len(_coc_rows(db_session, shipment.id)) == 1
+
+
+def test_manual_issue_over_open_items_needs_acceptance_and_records_it(client: TestClient, db_session: Session):
+    import json
+
+    from app.models.user import UserRole
+
+    manager = make_user(db_session, role=UserRole.MANAGER)
+    quality = make_user(db_session, role=UserRole.QUALITY)
+    wo, ncr, shipment = _ship_with_open_ncr(db_session)
+    _ship_over(client, db_session, shipment, manager)
+
+    url = f"/api/v1/shipping/{shipment.id}/coc"
+    refused = client.post(url, headers=headers_for(quality))
+    assert refused.status_code == status.HTTP_409_CONFLICT, refused.text
+    detail = refused.json()["detail"]
+    assert detail["code"] == "release_exceptions_open"
+    assert [e["reference_id"] for e in detail["release_exceptions"]] == [ncr.id]
+
+    no_reason = client.post(url, json={"acknowledge_exceptions": True, "reason": " "}, headers=headers_for(quality))
+    assert no_reason.status_code == 422, no_reason.text
+
+    ok = client.post(
+        url, json={"acknowledge_exceptions": True, "reason": "Rework verified at final"}, headers=headers_for(quality)
+    )
+    assert ok.status_code == status.HTTP_200_OK, ok.text
+    rows = _audit(db_session, "COC_ISSUED_OVER_EXCEPTIONS")
+    assert len(rows) == 1
+    assert rows[0].extra_data["reason"] == "Rework verified at final"
+    assert rows[0].extra_data["release_exceptions"][0]["reference_id"] == ncr.id
+
+    from app.models.shipping import CertificateOfConformance
+
+    coc = db_session.query(CertificateOfConformance).filter_by(shipment_id=shipment.id).one()
+    assert json.loads(coc.content_snapshot)["accepted_release_exceptions"][0]["code"] == "open_ncr"
+    listed = {r["id"]: r for r in client.get("/api/v1/shipping/", headers=headers_for(quality)).json()}
+    assert listed[shipment.id]["coc_withheld"] is False
+    assert listed[shipment.id]["coc_number"] == coc.coc_number
+
+
+def test_api_token_refused_on_issue(client: TestClient, db_session: Session):
+    from app.models.shipping import ShipmentStatus
+    from app.models.user import UserRole
+    from tests.api.test_coc_generation_batch11c import _coc_rows
+
+    quality = make_user(db_session, role=UserRole.QUALITY)
+    wo = make_wo(db_session, make_part(db_session))
+    shipment = make_shipment(db_session, wo, status_=ShipmentStatus.SHIPPED, ship_date=date.today())
+    db_session.commit()
+    resp = client.post(f"/api/v1/shipping/{shipment.id}/coc", headers=_token_headers(client, db_session, quality))
+    assert resp.status_code == status.HTTP_403_FORBIDDEN, resp.text
+    assert "API token" in resp.json()["detail"]
+    assert _coc_rows(db_session, shipment.id) == []
+
+
+def _ship_over(client: TestClient, db: Session, shipment, user):
+    resp = _ship(client, shipment, user)
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    return resp

@@ -149,6 +149,13 @@ EXCLUDED_OPERATIONS: FrozenSet[Tuple[str, str]] = (
             # work on the floor. Excluded rather than shadowed, because no convenience tool
             # calls this route.
             ("POST", "/api/v1/work-orders/bulk-release"),
+            # Issuing a Certificate of Conformance states that the shipped parts conform, and
+            # over open quality items it accepts them with a reason: a named person's quality
+            # judgment (shipping/2). The route refuses every API token
+            # (``shipment_release_service.API_TOKEN_COC_ISSUE``); a person's own JWT would
+            # still reach it through a tool call. Reading and downloading the certificate stay
+            # tools.
+            ("POST", "/api/v1/shipping/{shipment_id}/coc"),
         }
     )
     | EGRESS_SWITCH_OPERATIONS

@@ -185,6 +185,8 @@ class TestMembership:
             ("PUT", "/api/v1/companies/me/floor-pin-policy"),
             ("PUT", "/api/v1/users/{user_id}/export-authorization"),
             ("POST", "/api/v1/documents/{document_id}/access-level"),
+            # Issuing a Certificate of Conformance (shipping/2): a person's conformance judgment.
+            ("POST", "/api/v1/shipping/{shipment_id}/coc"),
         }
         assert EGRESS_SWITCH_OPERATIONS <= set(EXCLUDED_OPERATIONS)
         assert DOCUMENT_ACCESS_OPERATIONS <= set(EXCLUDED_OPERATIONS)
