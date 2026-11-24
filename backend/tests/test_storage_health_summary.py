@@ -186,8 +186,8 @@ class TestStorageOnHealthDetailed:
 @pytest.mark.api
 @pytest.mark.requires_db
 class TestStorageOnSetupHealth:
-    def test_setup_health_carries_storage(self, client: TestClient, auth_headers: dict, s3_settings):
-        response = client.get("/api/v1/setup/health", headers=auth_headers)
+    def test_setup_health_carries_storage(self, client: TestClient, admin_headers: dict, s3_settings):
+        response = client.get("/api/v1/setup/health", headers=admin_headers)
 
         assert response.status_code == status.HTTP_200_OK
         storage = response.json()["storage"]
@@ -195,6 +195,40 @@ class TestStorageOnSetupHealth:
         assert storage["bucket"] == "fictional-docs-bucket"
         assert storage["durability"] == "durable"
         _assert_no_secret(response.json())
+
+    @pytest.mark.parametrize("headers_fixture", ["operator_headers", "supervisor_headers", "manager_headers"])
+    def test_non_admin_gets_no_storage_location(self, client: TestClient, request, headers_fixture, s3_settings):
+        response = client.get("/api/v1/setup/health", headers=request.getfixturevalue(headers_fixture))
+
+        assert response.status_code == status.HTTP_200_OK
+        storage = response.json()["storage"]
+        assert storage["backend"] == "s3" and storage["durability"] == "durable"
+        assert storage["bucket"] is None and storage["endpoint_host"] is None and storage["region"] is None
+        assert "fictional-docs-bucket" not in response.text
+        assert "objects.example.test" not in response.text
+
+    def test_admin_api_token_gets_no_storage_location(
+        self, client: TestClient, admin_headers: dict, admin_user, s3_settings
+    ):
+        for scope in ("full", "read_only"):
+            minted = client.post(
+                "/api/v1/api-tokens/",
+                json={
+                    "user_id": admin_user.id,
+                    "label": f"fictional {scope} bot",
+                    "scope": scope,
+                    "ai_external": False,
+                },
+                headers=admin_headers,
+            )
+            assert minted.status_code == 201, minted.text
+            token = minted.json()["token"]
+            response = client.get("/api/v1/setup/health", headers={"Authorization": f"Bearer {token}"})
+
+            assert response.status_code == status.HTTP_200_OK, response.text
+            storage = response.json()["storage"]
+            assert storage["bucket"] is None and storage["endpoint_host"] is None and storage["region"] is None
+            assert "fictional-docs-bucket" not in response.text
 
     def test_setup_health_storage_null_on_read_failure(self, client: TestClient, auth_headers: dict, monkeypatch):
         from app.api.endpoints import setup as setup_endpoint
@@ -363,10 +397,10 @@ class TestSetupHealthStorageContract:
         assert "fictional-docs-bucket" not in response.text
 
     def test_matches_the_health_detailed_summary_except_the_location(
-        self, client: TestClient, auth_headers: dict, s3_settings
+        self, client: TestClient, admin_headers: dict, s3_settings
     ):
         detailed = client.get("/health/detailed").json()["checks"]["storage"]
-        setup = client.get("/api/v1/setup/health", headers=auth_headers).json()["storage"]
+        setup = client.get("/api/v1/setup/health", headers=admin_headers).json()["storage"]
         assert setup["bucket"] == "fictional-docs-bucket"
         assert setup["endpoint_host"] == "objects.example.test"
         assert setup["region"] == "us-east-2"

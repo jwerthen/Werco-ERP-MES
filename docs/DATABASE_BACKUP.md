@@ -158,8 +158,9 @@ Stored references are read per row, so switching the backend does not move old f
 only; the worker reads its own environment.
 
 - **Setup Wizard** (`/setup`) → **Document Storage** panel, for any signed-in user. It
-  shows the backend, the bucket and endpoint host for `s3`, and for `local` whether the
-  upload folder sits on a mounted volume.
+  shows the backend, the bucket and endpoint host for `s3` (to an Admin signed in to the
+  app; other roles and API tokens see the backend without the location), and for `local`
+  whether the upload folder sits on a mounted volume.
 - `curl -s <api>/health/detailed | jq .checks.storage` (no sign-in). This shows the
   backend, `durability` and any `warning`, but never the bucket, host or region.
 

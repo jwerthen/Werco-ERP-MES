@@ -29,6 +29,12 @@ const local = (overrides: Partial<StorageStatus> = {}): StorageStatus => ({
 });
 
 describe('StorageStatusPanel', () => {
+  it('does not guess a location the server withheld', () => {
+    render(<StorageStatusPanel storage={{ ...s3, bucket: null, endpoint_host: null, region: null }} />);
+    expect(screen.getByText('Location shown to Admins only')).toBeInTheDocument();
+    expect(screen.queryByText(/AWS S3/)).not.toBeInTheDocument();
+  });
+
   it('names the bucket and endpoint host for object storage', () => {
     render(<StorageStatusPanel storage={s3} />);
     expect(screen.getByText('Object storage')).toBeInTheDocument();

@@ -37,6 +37,8 @@ function yesNo(value: boolean | null, yes: string, no: string, unknown = 'Could 
 }
 
 function objectStorageTarget(storage: StorageStatus): string {
+  // The server withholds the whole location from anyone but an Admin in their own session.
+  if (!storage.bucket && !storage.endpoint_host && !storage.region) return 'Location shown to Admins only';
   const where = storage.endpoint_host ?? `AWS S3${storage.region ? ` (${storage.region})` : ''}`;
   return storage.bucket ? `${storage.bucket} @ ${where}` : where;
 }
