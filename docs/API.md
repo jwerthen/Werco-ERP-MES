@@ -11048,8 +11048,7 @@ that creates a PO:
   MRP supply review's supplier list, and the MRP auto-PO vendor picker (`AUTO_DRAFT` only, never scheduled),
   never offer or choose a Disqualified vendor. The picker does not **re-route** either: a part whose
   only supplier on record (supplier-part mapping or purchase history) is Disqualified is not handed to
-  the "first active vendor" fallback, which would draft it to an unrelated supplier. The auto-PO job
-  writes no purchase order for it and records the reason on the MRP action (*"{Vendor} is Disqualified
+  another vendor. The auto-PO pass writes no purchase order for it and records the reason on the MRP action (*"{Vendor} is Disqualified
   on the Approved Supplier List and is the only supplier this part is sourced from …; MRP does not pick
   another supplier for it. Choose one on the MRP supply review."*). There is no "first active vendor"
   fallback any more (removed 2026-11-23): a part with no sourcing at all gets no draft either, and its
@@ -11058,8 +11057,8 @@ that creates a PO:
 - The open-PO Excel loader (`POST /purchasing/purchase-orders/import`), as that purchase order's row
   error with the same text.
 
-**An existing PO cannot move toward issue either.** A PO raised before its vendor was Disqualified (the
-6 AM MRP auto-draft, a buyer's draft) is refused **409** *"{Vendor} is Disqualified on the Approved
+**An existing PO cannot move toward issue either.** A PO raised before its vendor was Disqualified (an
+MRP AUTO_DRAFT pass, a buyer's draft) is refused **409** *"{Vendor} is Disqualified on the Approved
 Supplier List; purchase order {PO} {cannot be sent | cannot be approved | cannot be submitted for
 approval | cannot have lines added or changed | cannot be emailed}. Cancel it, or record a new approval
 decision for the supplier first."* on `POST .../send`, a `PUT` to `approved` / `pending_approval`, a
@@ -11906,7 +11905,7 @@ environment variables are required.
 |--------|----------|-------------|---------------|
 | GET | `/inventory/` | List inventory items (`part_id`, `warehouse`, `location_code`, `has_quantity` — `has_quantity` filters **nonzero**, not positive, so driven-negative lots stay visible; see note below — and `ownership`, `owner_customer_id`, `owner_vendor_id`). Each row carries `ownership`, the owner id and `owner_name` (see [Customer- and supplier-owned property](#customer--and-supplier-owned-property)). Bounded: `limit` **1–10000, default 10000**, `offset` ≥ 0 | Yes |
 | GET | `/inventory/summary` | On-hand summary by part, with per-location breakdown (every active row with **nonzero** on-hand, negatives included). `total_on_hand` is physical stock whoever owns it; `owned_by_others_on_hand` is the customer- and supplier-owned part of it, and each location entry carries its row's `ownership`. Bounded with the identical `limit`/`offset` as `/inventory/` — see note below | Yes |
-| GET | `/inventory/low-stock` | Parts at/below reorder point -- the one low-stock rule (`low_stock_service`), shared with the `stock.low` alert, the operations inbox and the AI inventory sensor. Each row also carries `out_of_stock` (a part with no stock row at all is listed at 0 on hand). `quantity_on_hand` is the **company's own** on-hand, summed per part over active rows in any status; customer- and supplier-owned stock is not counted, so a part whose only stock is owned reads 0 and is listed (see [Customer- and supplier-owned property](#customer--and-supplier-owned-property)) | Yes |
+| GET | `/inventory/low-stock` | Live parts with a reorder point above zero whose on-hand is at or below it -- the one low-stock rule (`low_stock_service`), shared with the `stock.low` alert, the operations inbox and the AI inventory sensor. Sorted critical first (on hand at or below safety stock), then by largest shortage, then part number. Each row also carries `out_of_stock` (a part with no stock row at all is listed at 0 on hand). `quantity_on_hand` is the **company's own** on-hand, summed per part over active rows in any status; customer- and supplier-owned stock is not counted, so a part whose only stock is owned reads 0 and is listed (see [Customer- and supplier-owned property](#customer--and-supplier-owned-property)) | Yes |
 | GET | `/inventory/locations` | List warehouse locations / bins | Yes |
 | POST | `/inventory/locations` | Create a location | Admin / Manager |
 | GET | `/inventory/transactions` | Inventory transaction (ledger) history, newest first. Filters: `part_id`, `transaction_type`, `reference_type`, `reference_id`, `work_order_id`, `lot_number`, `start_date`, `end_date`. Offset-paged (`limit` 1–500 default 100, `offset` ≥ 0), **no total count** — see note below | Yes |
@@ -12334,7 +12333,7 @@ signal quiet. These readers count company-owned rows only:
   `quantity_shortage` and the actions built from them, and the supply review's current-shortage
   recheck and review fingerprint. See [Material Requirements Planning](#material-requirements-planning-mrp).
 * `GET /inventory/low-stock` (a part whose only stock is owned reads 0 on hand and is listed).
-* The `stock.low` digest cron (`check_low_stock_task`).
+* The `stock.low` cron (`check_low_stock_task`), through the shared `low_stock_service` rule.
 * The operations inbox's `low_stock` source, which Hank's shift briefing also reads.
 * The AI `inventory_risk` sensor.
 * The reorder judgment on `GET /consumables/stock` (owned rows are still listed).

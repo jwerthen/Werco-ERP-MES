@@ -662,10 +662,10 @@ is skipped — the `notified_at` marker still bounds duplicates).
     required parameter is what closes it; a defaulted parameter here is how the two halves drifted
     in the first place. [docs/API.md](API.md#user-self-service-my-settings) states the same
     guarantee on the endpoint.
-- **Digest** — a `DigestQueue` row; the daily digest cron (8:00) is unchanged in PR 1. **The digest
-  email itself does not carry the deliverability gate above** — `send_daily_digest_task` sends
-  inline to `user.email` with no check and writes no `NotificationLog` row at all (see
-  [Known limitations](#known-limitations-carried-to-later-prs)).
+- **Digest** — a `DigestQueue` row, mailed by the daily digest cron (8:00). Since 2026-11-23
+  `send_daily_digest_task` applies the same deliverability gate (`email_deliverable_for_user`)
+  before mailing, so a badge-only placeholder address is skipped, and it records each digest as an
+  `email.daily_digest` `NotificationLog` claim before sending.
 - **SMS** — live over Twilio as of PR 4. The leg fires only when **all** of the following hold:
   the catalog entry is `sms_eligible`, the user has explicitly enabled `sms` for that event
   (no catalog entry ships `sms` in its defaults, so this is always an opt-in), recurring
@@ -1332,11 +1332,9 @@ Surfaced by the PR-1 adversarial review; each is safe in PR 1 and has a designat
   **admin delivery-failure view in PR 3**, which is the only consumer of a "failed" filter. (An
   *undeliverable placeholder* address is already recorded `sent=False` with a reason at fan-out time
   — that is a separate rule, see [Channels](#channels).)
-- **The daily digest email is not deliverability-gated** — `jobs/email_jobs.py::send_daily_digest_task`
-  sends inline to `user.email` with no `is_synthetic_email` check and writes **no** `NotificationLog`
-  row, so a badge-only user who has queued digest items is still mailed into the void and leaves no
-  delivery record either way. It is the second per-user mail sender and needs the same guard; the
-  `_fan_out` email leg above is the only one carrying it today.
+- ~~**The daily digest email is not deliverability-gated**~~ — **resolved 2026-11-23.**
+  `send_daily_digest_task` now skips a recipient whose address fails `email_deliverable_for_user`,
+  and every digest send is recorded as an `email.daily_digest` `NotificationLog` claim.
 - **Recurring re-notify suppression is keyed on an unread in-app row** — a recipient who (via the PR-3
   preferences UI) turns *in-app off but email on* for a recurring event would escape suppression. Not
   reachable in PR 1 (no preference-write endpoint; `wo.late` defaults include in-app). **PR 3** must
@@ -1355,14 +1353,13 @@ Surfaced by the PR-1 adversarial review; each is safe in PR 1 and has a designat
   (`dispatch_direct` forwards `sms_detail` to `_fan_out` alongside `sms_identifier`; both reach
   `build_sms_body` and both are re-vetted there, so a direct caller can pass a classifier and have
   it behave exactly as on the outbox path.)
-- **The daily digest email renders none of its queued events** (pre-existing; not a dispatcher
-  bug). `send_daily_digest_task` groups `DigestQueue` rows by `event_type`, which `_fan_out` writes
-  as the catalog `event_key` (`wo.late`), but `templates/email/daily_digest.html` tests the retired
-  SCREAMING_CASE keys (`events.WO_LATE`, `events.LOW_STOCK`, `events.WO_COMPLETED`) and reads
-  fields (`wo_number`, `part_number`) that `event_data` doesn't carry — so every `{% if %}` is
-  false and a recipient gets a greeting and a button. The template's dead `/dashboard` button was
-  repointed at `/` on 2026-08-07 (there is no `/dashboard` route; the dashboard is `path="/"`); the
-  key mismatch was **not** fixed and needs its own change.
+- ~~**The daily digest email renders none of its queued events**~~ — **resolved 2026-11-23**:
+  `templates/email/daily_digest.html` now renders one section per queued catalog key (its label,
+  then each item's title, body and absolute link via `FRONTEND_BASE_URL`), built by
+  `email_jobs._digest_sections`, so a new digest event needs no template change. History: the
+  template used to test the retired SCREAMING_CASE keys (`events.WO_LATE`, `events.LOW_STOCK`,
+  `events.WO_COMPLETED`) and read fields `event_data` doesn't carry, while `_fan_out` queues the
+  catalog `event_key` (`wo.late`), so a recipient got a greeting and a button and nothing else.
 
 ## Deferred / roadmap
 

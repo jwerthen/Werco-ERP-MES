@@ -386,20 +386,21 @@ Migration `072` also backfilled `notified_at = created_at` on all rows that exis
 ran, so all pre-`072` history is permanently excluded. **On first boot the sweeper picks at
 most 500 events, drawn only from the trailing 24 hours.**
 
-**Fact 2 — the daily crons are the storm risk.** They enumerate *current* state with no age
-cap. `wo.late` is marked `recurring`, but the suppression that stops it re-notifying keys off
-*an unread in-app row already existing*. On a cold start none exist, **so the first run fires
-in full.**
+**Fact 2 — the daily crons enumerate current state.** They have no age cap. Since 2026-11-23
+`wo.late` is one summary per recipient per company day rather than one message per late job, so
+its first run is bounded by the number of Supervisors and Managers, not by the backlog of late
+work. The per-gauge calibration alerts are still one row per gauge per Quality person.
 
 ### 3.2 Measure the blast before you arm anything
 
 Run these in the Supabase SQL editor. Write the numbers down; §3.3 uses them.
 
 ```sql
--- L : late work orders per tenant (drives check_late_work_orders_job)
+-- L : late work orders per tenant (the total the wo.late summary reports; promise date is
+-- must_ship_by, else due_date; current_date is UTC here, the job uses the company's own day)
 SELECT company_id, count(*) AS late_wos FROM work_orders
- WHERE is_deleted = false AND due_date < current_date
-   AND status IN ('RELEASED','IN_PROGRESS') GROUP BY 1;
+ WHERE is_deleted = false AND COALESCE(must_ship_by, due_date) < current_date
+   AND status IN ('RELEASED','IN_PROGRESS','ON_HOLD') GROUP BY 1;
 
 -- R : email recipients for late-WO alerts, per tenant (role stores the enum NAME)
 SELECT company_id, count(*) AS supervisors_and_managers FROM users
@@ -409,19 +410,24 @@ SELECT company_id, count(*) AS supervisors_and_managers FROM users
 SELECT company_id, count(*) AS managers FROM users
  WHERE is_active AND role = 'MANAGER' GROUP BY 1;
 
--- D : users who will receive a daily digest email
-SELECT count(*) AS digest_users FROM notification_preferences p
-  JOIN users u ON u.id = p.user_id
- WHERE p.digest_enabled AND p.digest_frequency = 'DAILY' AND u.is_active;
+-- D : users who would receive a daily digest email today: active users with unprocessed
+-- digest items from the last 24 h, less anyone whose saved preference turned it off.
+-- (No saved preference row = digest on. Placeholder badge-only addresses are skipped by the
+-- job and are not excluded here, so this is an upper bound.)
+SELECT count(DISTINCT q.user_id) AS digest_users FROM digest_queue q
+  JOIN users u ON u.id = q.user_id AND u.company_id = q.company_id
+  LEFT JOIN notification_preferences p ON p.user_id = q.user_id AND p.company_id = q.company_id
+ WHERE NOT q.processed AND q.created_at >= now() - interval '1 day' AND u.is_active
+   AND (p.id IS NULL OR (p.digest_enabled AND COALESCE(p.digest_frequency, 'DAILY') = 'DAILY'));
 
--- E : equipment due for calibration within 7 days (digest-only, see below).
--- Anything ALSO within 1 day is dispatched twice -- the cron runs a 7-day pass and a
--- separate 1-day "URGENT" pass over the overlapping set. Count that overlap separately:
+-- E : in-service gauges overdue or due within 7 days (in-app + digest, see below).
+-- Each gauge gets at most one alert per run: calibration.overdue once past its date,
+-- else calibration.due.
 SELECT company_id,
-       count(*) AS due_7d,
-       count(*) FILTER (WHERE next_calibration_date <= current_date + 1) AS also_due_1d
+       count(*) FILTER (WHERE next_calibration_date < current_date) AS overdue,
+       count(*) FILTER (WHERE next_calibration_date >= current_date) AS due_7d
   FROM equipment
- WHERE status = 'ACTIVE' AND next_calibration_date > current_date
+ WHERE is_active AND status IN ('ACTIVE','DUE','OVERDUE')
    AND next_calibration_date <= current_date + 7 GROUP BY 1;
 
 -- Q : quotes expiring within 7 days (digest-only). valid_until is a DATE column.
@@ -436,9 +442,9 @@ SELECT count(*) AS total_pending,
 FROM operational_events WHERE notified_at IS NULL;
 ```
 
-**The number that matters most: `L × R` is how many emails `check_late_work_orders_job` sends
-on day one.** If you have 60 late work orders and 5 supervisors/managers, that is **300
-emails in one burst**, all to your own staff.
+**`check_late_work_orders_job` sends `R` emails a day** (one summary per Supervisor / Manager,
+plus anyone an Admin selected under Email Recipients), whatever `L` is. `L` is the total each
+summary reports; it lists the ten most overdue.
 
 ### 3.3 Per-job blast radius
 
@@ -467,7 +473,8 @@ this deliberately (§8).
 
 Channel routing comes from `backend/app/services/notification_catalog.py`. Several of these
 route to **digest**, not to direct email — meaning they land in the daily digest queue and are
-only emailed by `send_daily_digest_job`, and only to users with a digest preference row.
+only emailed by `send_daily_digest_job`, to each active, deliverable user with queued items (no
+saved preference row = digest on; a saved opt-out is honoured).
 
 | Job | Schedule | Channel | Volume on day one | Who |
 |---|---|---|---|---|
@@ -774,13 +781,13 @@ Order, cheapest and safest first:
 |---|---|---|
 | 1 | `relay_pending_notifications_job` | Every 5 min: `relay sweeper re-enqueued N pending notification events`. `operational_events` pending count trends to 0 within the 24 h window. |
 | 2 | `run_oee_auto_calc_job` | Next 02:30: new `oee_records` rows with `calculation_source='auto'` for yesterday, and **no** `manual` rows changed. |
-| 3 | `check_low_stock_job` | Next 07:30: **one** aggregated digest item per tenant. No direct emails. |
+| 3 | `check_low_stock_job` | Next 07:30: **one** `stock.low` count per recipient per tenant, in the bell and the digest queue. No direct emails. |
 | 4 | `poll_tracking_job` | Every :00/:30. No-op while `allow_carrier_egress` is off. Confirm it is not erroring. |
-| 5 | `check_quote_expiring_job`, `check_calibrations_job` | Digest items only, counts matching Q and E from §3.2. |
+| 5 | `check_quote_expiring_job`, `check_calibrations_job` | Quotes: digest items only, matching Q. Calibration: in-app + digest rows, one per gauge per Quality person, matching E from §3.2. (`WORKER_SERVICE.md` §2 says leave the quote job off.) |
 | 5a | `check_maintenance_due_job` | Next 12:15 (container time): in-app `maintenance.overdue` / `maintenance.due` rows for the Maintenance department and Admins, matching the counts in [`DEPLOYMENT.md` → PM due and overdue alerts](DEPLOYMENT.md#pm-due-and-overdue-alerts). |
 | 6 | `send_daily_digest_job` | **First real email volume: D emails.** Confirm one arrives, is readable, and its links work (needs `FRONTEND_BASE_URL`). |
 | 7 | `cleanup_old_logs_job` | Sunday 02:00. Physical deletes. Confirm the 90-day windows are what you want **before** arming. Audit logs are untouched. |
-| 8 | `check_late_work_orders_job` | **Re-run the `L × R` query the same morning.** This is the big email burst. Consider closing out stale late WOs first. |
+| 8 | `check_late_work_orders_job` | `R` summary emails, one per Supervisor / Manager. Re-run the `L` query the same morning; consider closing out stale late WOs first so the summary's total means something. |
 | 9 | `aggregate_ai_learning_job` | New `AIRecommendation` rows; watch for a secondary wave of notifications from the events it emits. |
 | 10 | `archive_aged_audit_logs_job` | **Only after §8 (durable storage).** Then confirm the NDJSON file actually persists. |
 | 11 | `run_mrp_review_job` | **Last.** Immediately after: one new `mrp_runs` row per company and no new draft purchase orders or work orders. |
