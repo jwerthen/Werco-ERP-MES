@@ -86,14 +86,18 @@ from tests.api.export_control_helpers import (
     CANARY,
     CLEAR_CUSTOMER_CODE,
     CLEAR_TEXT,
+    NUMERIC_CANARIES,
     World,
     bearer,
     contains_canary,
     contains_numeric_canary,
+    could_occur_in_iso_timestamp,
     find_record,
+    iso_timestamp_containing,
     issue_token,
     make_viewer,
     seed_world,
+    without_known_instants,
 )
 from tests.api.kiosk_test_helpers import user_headers
 
@@ -414,8 +418,8 @@ class TestRedactedRecords:
             grand_total=5000.0,
             lead_time_min_days=5,
             lead_time_max_days=9,
-            confidence_detail={"bend_radius_guess": 0.0625111, "profile_inches": 3.141592},
-            assumptions=[{"feature": "hole", "assumed_inches": 0.3125987, "assumed_mm": 7.94}],
+            confidence_detail={"bend_radius_guess": 0.0625111, "profile_inches": 3.1415927},
+            assumptions=[{"feature": "hole", "assumed_inches": 0.3125987, "assumed_mm": 7.9375013}],
             missing_specs=[{"field": "flange", "guess_in": 1.4142135}],
             company_id=world.company_id,
         )
@@ -435,7 +439,20 @@ class TestRedactedRecords:
             )
         )
         db_session.commit()
-        dimensions = (b"7329.15287", b"4321.98765", b"0.3125987", b"7.94", b"1.4142135", b"3.141592", b"0.0625111")
+        dimensions = (
+            b"7329.15287",
+            b"4321.98765",
+            b"0.3125987",
+            b"7.9375013",
+            b"1.4142135",
+            b"3.1415927",
+            b"0.0625111",
+        )
+        # The byte search below is only sound if no run-varying text in the response (the
+        # quote's created_at / updated_at instants) can contain a needle by chance. b"7.94" and
+        # b"3.141592" could, and b"7.94" did on 2026-11-24: refuse such a needle on every run.
+        chance_prone = [value for value in dimensions if could_occur_in_iso_timestamp(value)]
+        assert chance_prone == [], f"a timestamp can contain {chance_prone}: use 7+ fractional digits"
         url = f"{API}/quotes/{world.itar_quote.id}"
         person = client.get(url, headers=auth_headers)
         assert person.status_code == 200 and person.json()["ai_estimate"] is not None
@@ -2173,3 +2190,138 @@ class TestMiddlewareMessages:
     async def test_bodyless_statuses_pass(self):
         sent = await _drive([{"type": "http.response.start", "status": 204, "headers": []}], marker=_marker())
         assert sent[0]["status"] == 204
+
+
+@pytest.mark.unit
+class TestChanceMatchGuard:
+    """The guard behind every absence check over raw response bytes in this file.
+
+    On 2026-11-24 ``test_a_legacy_ai_estimates_dimensions_are_withheld_as_numbers`` failed on
+    main with ``[b'7.94'] == []``: nothing leaked, the quote's ``created_at`` was
+    ``...00:51:37.94....Z`` and its text contains ``7.94``. A red main skips the deploy."""
+
+    @pytest.mark.parametrize("needle", [b"7.94", b"3.141592"], ids=["incident-7.94", "profile-3.141592"])
+    def test_the_retired_needles_are_flagged_with_a_real_timestamp_containing_them(self, needle):
+        instant = iso_timestamp_containing(needle)
+        assert instant is not None and could_occur_in_iso_timestamp(needle)
+        assert needle in instant.encode()
+        datetime.fromisoformat(instant.removesuffix("Z"))  # a real instant, not just the right shape
+
+    def test_the_incident_instant_itself_contains_the_old_needle(self):
+        assert b"7.94" in b'"created_at":"2026-11-24T00:51:37.940000Z"'
+        assert iso_timestamp_containing(b"37.94") is not None
+
+    @pytest.mark.parametrize(
+        "needle",
+        [b"7.9375013", b"3.1415927", b"7329.15287", b"4321.98765", b"0.3125987", b"1.4142135", b"0.0625111"],
+    )
+    def test_the_dimension_needles_cannot_occur_in_any_timestamp(self, needle):
+        assert iso_timestamp_containing(needle) is None and not could_occur_in_iso_timestamp(needle)
+
+    def test_the_numeric_and_text_canaries_cannot_occur_in_any_timestamp(self):
+        for needle in (*NUMERIC_CANARIES, CANARY.encode(), CANARY.lower().encode()):
+            assert not could_occur_in_iso_timestamp(needle), needle
+
+    def test_a_short_digit_run_is_flagged_because_a_microsecond_field_can_hold_it(self):
+        for needle in (b"999", b"830416", b"13", b"7.9"):
+            instant = iso_timestamp_containing(needle)
+            assert instant is not None and needle in instant.encode(), needle
+        for needle in (b"7777777", b"98765.", b"2026-13", b"24:00:00"):
+            assert iso_timestamp_containing(needle) is None, needle
+
+    @pytest.mark.parametrize(
+        "needle",
+        [b"-31T", b"02-29T", b"2028-02-29", b"12-31T23:59:59.999999", b"9999-", b"0001-01-01", b"1-3"],
+    )
+    def test_date_shaped_needles_are_flagged_at_any_year_month_or_day(self, needle):
+        # The year, month and day are free digits too: a needle the 2026-11 calendar cannot
+        # hold (November has no 31st, 2026 is not a leap year) still occurs on some other date.
+        instant = iso_timestamp_containing(needle)
+        assert instant is not None and could_occur_in_iso_timestamp(needle), needle
+        assert needle in instant.encode()
+        datetime.fromisoformat(instant.removesuffix("Z"))
+
+    @pytest.mark.parametrize("needle", [b"02-30T", b"04-31T", b"0000-", b"-00-", b"-32T", b"T24:", b":60."])
+    def test_impossible_date_and_time_needles_are_not_flagged(self, needle):
+        assert iso_timestamp_containing(needle) is None, needle
+
+    @pytest.mark.parametrize("needle", [b"6-11-24 15", b"-24 15:15:22.8", b"31 23", b"02-29 00:00"])
+    def test_a_needle_spanning_the_str_datetime_space_separator_is_flagged(self, needle):
+        # ``str(datetime)`` writes a space where ``isoformat()`` writes ``T``; both are decided.
+        instant = iso_timestamp_containing(needle)
+        assert instant is not None and could_occur_in_iso_timestamp(needle), needle
+        assert needle in instant.encode() and " " in instant
+        datetime.fromisoformat(instant.removesuffix("Z"))
+        # The instant matcher agrees with the guard: that same space-separated instant is a
+        # real instant, refused while unaccounted for and removed whole once it is named.
+        with pytest.raises(AssertionError, match="did not account for"):
+            without_known_instants(f'"at":"{instant}"')
+        assert without_known_instants(f'"at":"{instant}"', instant) == '"at":"<instant>"'
+
+    @pytest.mark.parametrize("needle", [b"24 1T", b"-32 00", b" 24:", b"2026 11"])
+    def test_a_space_outside_the_separator_slot_is_not_flagged(self, needle):
+        assert iso_timestamp_containing(needle) is None, needle
+
+    def test_without_known_instants_removes_exactly_the_known_instants(self):
+        known = ("2026-11-24T15:15:22.123456Z", "2026-11-24 15:15:23.654321")
+        text = f'{{"at":"{known[0]}","raw":"{known[1]}","pin":"830416"}}'
+        assert without_known_instants(text, *known) == '{"at":"<instant>","raw":"<instant>","pin":"830416"}'
+        # A secret glued onto a known instant is not hidden with it.
+        assert "830416" in without_known_instants(f"{known[0]}830416", known[0])
+
+    def test_text_with_no_instants_is_returned_unchanged(self):
+        text = '{"id":7,"pin_set":true,"due_date":"2026-12-24","n":830416}'
+        assert without_known_instants(text) == text
+        assert without_known_instants(text, "2026-11-24T15:15:22.123456Z") == text
+
+    def test_a_secret_as_the_fraction_of_an_unknown_instant_shaped_string_fails(self):
+        # The form a blanket instant stripper would hide: a real-looking instant whose fraction
+        # IS the PIN. It is not one the test accounted for, so it fails on every run.
+        known = "2026-11-24T15:15:22.123456Z"
+        text = f'{{"at":"{known}","leak":"2026-11-24T15:15:22.830416Z"}}'
+        with pytest.raises(AssertionError, match=r"2026-11-24T15:15:22\.830416Z"):
+            without_known_instants(text, known)
+        # A fraction no clock writes leaves a real fraction-less instant behind: also refused.
+        with pytest.raises(AssertionError, match="did not account for"):
+            without_known_instants("2026-11-24T15:15:22.1234567830416Z")
+
+    @pytest.mark.parametrize(
+        "instant",
+        [
+            "2026-11-24T15:15:22.830416Z",
+            "2026-11-24 15:15:22.830416Z",
+            "2026-11-24T15:15:22.830416+05:30",
+            "2026-11-24 15:15:22.830416-06:00",
+            "2026-11-24T15:15:22.830416",
+            "2026-11-24T15:15:22.8Z",
+            "2026-11-24T15:15:22.83+00:00",
+            "2026-11-24 15:15:22.83041",
+            "2026-11-24T15:15:22Z",
+            "2026-11-24 15:15:22",
+            "2028-02-29T23:59:59.999999Z",
+            "2026-11-24T15:15:22.123456+99:99",
+        ],
+    )
+    def test_an_unaccounted_real_instant_fails_in_every_spelling(self, instant):
+        datetime.fromisoformat(instant.removesuffix("Z").removesuffix("+99:99"))  # a real instant
+        with pytest.raises(AssertionError, match="did not account for"):
+            without_known_instants(f'{{"at":"{instant}","n":1}}')
+        assert without_known_instants(f'{{"at":"{instant}","n":1}}', instant) == '{"at":"<instant>","n":1}'
+
+    @pytest.mark.parametrize(
+        "impossible",
+        [
+            "2026-13-45T99:99:99.830416Z",
+            "2026-02-30T10:00:00.830416",
+            "2026-11-24T24:00:00.830416",
+            "2026-11-24T10:00:60.830416",
+            "2026-11-24 10:60:00.830416Z",
+            "2026-02-29T10:00:00.830416Z",
+            "0000-01-01T00:00:00.830416Z",
+        ],
+    )
+    def test_an_impossible_instant_is_neither_removed_nor_refused_and_stays_searchable(self, impossible):
+        # Only what the guard says a clock can write counts as an instant, so a secret written
+        # inside text that merely has an instant's SHAPE is still searched.
+        assert iso_timestamp_containing(impossible.removesuffix("Z").encode()) is None
+        assert "830416" in without_known_instants(f'{{"at":"{impossible}"}}'), impossible

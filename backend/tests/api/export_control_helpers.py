@@ -13,14 +13,19 @@ canary: they are business identifiers the owner allowed through.
 
 from __future__ import annotations
 
+import itertools
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, Dict, Optional, Tuple
 
 from fastapi.testclient import TestClient
+from sqlalchemy import DateTime
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import Session
 
+from app.core.time_utils import to_utc_iso
 from app.models.customer import Customer
 from app.models.downtime import DowntimeEvent
 from app.models.governance import CustomerContract
@@ -664,6 +669,170 @@ def contains_canary(raw: bytes, canary: str = CANARY) -> bool:
 
 def contains_numeric_canary(raw: bytes) -> bool:
     return any(marker in raw.lower() for marker in NUMERIC_CANARIES)
+
+
+# ---------------------------------------------------------------------------
+# Absence checks over raw response bytes vs. the clock
+# ---------------------------------------------------------------------------
+# A check that a literal is ABSENT from a serialized response is only sound when nothing
+# else in that response can contain the literal by chance. Every response here carries
+# server-clock instants ("2026-11-24T00:51:37.940123Z"), whose digits change on every run.
+# On 2026-11-24 the needle b"7.94" matched such an instant (seconds 37, microseconds 94....)
+# and failed a redaction test about one run in a thousand although nothing had leaked.
+# The helpers below make that class of chance match impossible rather than unlikely.
+
+# Every slot of an ISO-8601 instant with microseconds. The date/time separator slot takes
+# either ``T`` (``isoformat()``) or a space (``str(datetime)``), so a needle that spans the
+# separator is decided for both spellings. A shorter fraction, a fraction-less instant or a
+# ``Z`` / offset suffix only removes positions a numeric needle could use, so this one
+# template covers them for any needle made of digits, ``-``, ``T``, space, ``:`` and ``.``.
+_ISO_TEMPLATE = "dddd-dd-ddTdd:dd:dd.dddddd"
+_ISO_SEPARATOR = 10  # index of the ``T`` slot; a space is accepted there too
+_ISO_BASE_YEAR = 2026
+# (start, end, allowed values) for each numeric field. Day is listed as 1..31 here; whether
+# a day exists in its month and year is the one cross-field rule, checked by ``_is_real_date``.
+_ISO_FIELDS = (
+    (0, 4, range(1, 10000)),
+    (5, 7, range(1, 13)),
+    (8, 10, range(1, 32)),
+    (11, 13, range(24)),
+    (14, 16, range(60)),
+    (17, 19, range(60)),
+    (20, 26, None),  # microseconds: every six-digit string is valid, so free digits are any digit
+)
+# The same two separators as the template. A match is only a CANDIDATE: ``without_known_instants``
+# counts it as a real instant when its fields pass the same ranges and ``_is_real_date`` the
+# guard uses, so text no clock can write is never treated as an instant.
+_ISO_INSTANT = re.compile(
+    r"(?<!\d)(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.\d{1,6})?(?!\d)(Z|[+-](\d{2}):(\d{2}))?"
+)
+_DAYS_IN_MONTH = (31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)  # February at its leap-year most
+
+
+def _is_real_date(year: int, month: int, day: int) -> bool:
+    if day > _DAYS_IN_MONTH[month - 1]:
+        return False
+    if (month, day) != (2, 29):
+        return True
+    return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+
+
+def _fits_slot(slot: str, ch: str) -> bool:
+    if slot == "d":
+        return ch.isdigit()
+    if slot == "T":
+        return ch in ("T", " ")
+    return ch == slot
+
+
+def _field_values(pattern: str, allowed: range) -> list:
+    """Values of ``allowed`` whose zero-padded text agrees with ``pattern`` (``?`` = any digit)."""
+    width = len(pattern)
+    if set(pattern) == {"?"}:
+        return list(allowed)
+    return [v for v in allowed if all(p in ("?", c) for p, c in zip(pattern, f"{v:0{width}d}"))]
+
+
+def iso_timestamp_containing(needle: bytes) -> Optional[str]:
+    """A real ``YYYY-MM-DDTHH:MM:SS.ffffffZ`` instant whose text contains ``needle``, or None.
+
+    Constructive and exact over every slot of that shape, the date included: it lays the
+    needle over each offset of the template, and every digit the needle does not cover is
+    free -- the year (0001-9999), month, day, hour, minute, second and microseconds alike.
+    Each field takes only values in its range that agree with the covered digits, and the
+    year/month/day combination must be a real date (so ``-31T`` finds a 31-day month and
+    ``02-29T`` a leap year). The separator slot matches ``T`` or a space, and the returned
+    instant uses whichever the needle wrote there (``T`` when the needle does not reach it).
+    The result is checked with ``datetime.fromisoformat``. None therefore means no instant of
+    this shape, with either separator, at any date or time, can contain the needle.
+    """
+    text = needle.decode("ascii")
+    for start in range(len(_ISO_TEMPLATE) - len(text) + 1):
+        slots = _ISO_TEMPLATE[start : start + len(text)]
+        if not all(_fits_slot(slot, ch) for slot, ch in zip(slots, text)):
+            continue
+        pattern = "?" * start + text + "?" * (len(_ISO_TEMPLATE) - start - len(text))
+        separator = " " if pattern[_ISO_SEPARATOR] == " " else "T"
+        years, months, days, hours, minutes, seconds = (
+            _field_values(pattern[lo:hi], allowed) for lo, hi, allowed in _ISO_FIELDS[:6]
+        )
+        micro = pattern[20:26].replace("?", "0")
+        if not (hours and minutes and seconds):
+            continue
+        # Prefer years near today's so a returned instant reads naturally.
+        years.sort(key=lambda year: abs(year - _ISO_BASE_YEAR))
+        for month, day in itertools.product(months, days):
+            year = next((y for y in years if _is_real_date(y, month, day)), None)
+            if year is None:
+                continue
+            instant = (
+                f"{year:04d}-{month:02d}-{day:02d}{separator}"
+                f"{hours[0]:02d}:{minutes[0]:02d}:{seconds[0]:02d}.{micro}"
+            )
+            datetime.fromisoformat(instant)  # a real instant, by construction
+            assert text in instant, (text, instant)
+            return instant + "Z"
+    return None
+
+
+def could_occur_in_iso_timestamp(needle: bytes) -> bool:
+    """True when some real ISO-8601 instant with microseconds contains ``needle``.
+
+    Assert this is False for every needle of an absence check over raw response bytes:
+    a needle that fails it would match a timestamp by chance on some run. Seven or more
+    fractional digits, or three or more integer digits before a ``.``, can never fit. The
+    answer is exact for every slot of the instant, date fields included (``-31T`` and
+    ``02-29T`` are flagged), with either separator (``T`` or the space ``str(datetime)``
+    writes), for needles made of the characters such an instant contains. It decides ISO
+    instants only: other run-varying content in the same output (random tokens, epoch
+    numbers, elapsed durations) needs its own argument.
+    """
+    return iso_timestamp_containing(needle) is not None
+
+
+def _is_real_instant(fields: Tuple[str, ...]) -> bool:
+    """True when the year..second texts are each in the guard's range and form a real date."""
+    values = [int(text) for text in fields]
+    if not all(value in allowed for value, (_, _, allowed) in zip(values, _ISO_FIELDS[:6])):
+        return False
+    return _is_real_date(values[0], values[1], values[2])
+
+
+def instant_strings(row: Any) -> Tuple[str, ...]:
+    """Every non-null ``DateTime`` column of the ORM ``row``, serialized the way the API
+    serializes it (``to_utc_iso``), for ``without_known_instants``. Read the row back from the
+    database AFTER the request, so an instant the request stamped is the one it wrote."""
+    attributes = sa_inspect(type(row)).column_attrs
+    values = (getattr(row, attr.key) for attr in attributes if isinstance(attr.columns[0].type, DateTime))
+    return tuple(to_utc_iso(value) for value in values if value is not None)
+
+
+def without_known_instants(text: str, *instants: str) -> str:
+    """``text`` with each of the exact ``instants`` replaced by ``<instant>``, for an absence
+    check whose needle cannot be made timestamp-proof (a six-digit PIN is exactly a
+    microsecond field's shape).
+
+    Pass every instant the output legitimately carries, as the exact text it is written in
+    (``instant_strings`` for a response built from a row, ``value.isoformat()`` for an audit
+    row's ``str``-dumped datetime). After the replacement NO real instant may remain: one does
+    -- the product started writing another, or a secret was written as the fraction of an
+    instant-shaped string ("2026-11-24T15:15:22.830416Z" when the PIN is 830416) -- and this
+    fails on EVERY run, naming it, rather than trusting it blindly. "Real" uses the same
+    ranges as ``could_occur_in_iso_timestamp`` (fields in range, the date exists, ``T`` or
+    space, 0-6 fraction digits, ``Z`` / offset / no suffix), so text that only has an
+    instant's shape ("2026-13-45T99:99:99.830416Z") is neither replaced nor refused: it stays
+    in the text and is searched like any other text.
+
+    The one form that still gets through is the secret being the true microseconds of a real
+    timestamp the test accounted for. That is the chance match itself (one run in a million
+    per instant for a six-digit needle), not a leak, and no reading of the text can tell them
+    apart.
+    """
+    for instant in instants:
+        text = text.replace(instant, "<instant>")
+    unaccounted = [m.group(0) for m in _ISO_INSTANT.finditer(text) if _is_real_instant(m.groups()[:6])]
+    assert not unaccounted, f"instants the test did not account for: {unaccounted}"
+    return text
 
 
 def find_record(payload: Any, *, key: str, value: Any) -> Optional[Dict[str, Any]]:

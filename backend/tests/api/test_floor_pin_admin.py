@@ -55,7 +55,7 @@ from app.models.audit_log import AuditLog
 from app.models.company import Company
 from app.models.user import User, UserRole
 from app.services.audit_service import AuditService, AuditWriteError
-from tests.api.export_control_helpers import issue_token
+from tests.api.export_control_helpers import instant_strings, issue_token, without_known_instants
 from tests.api.kiosk_test_helpers import ensure_company
 from tests.conftest import TEST_PASSWORD_HASH
 
@@ -130,6 +130,11 @@ def pin_state(db: Session, user: User) -> tuple:
     db.expire_all()
     row = db.get(User, user.id)
     return (row.floor_pin_hash, row.floor_pin_set_at, row.floor_pin_failed_attempts, row.floor_pin_locked_until)
+
+
+def fresh_user(db: Session, user: User) -> User:
+    db.expire_all()
+    return db.get(User, user.id)
 
 
 def audit_rows(db: Session, action: Optional[str] = None) -> List[AuditLog]:
@@ -275,7 +280,11 @@ class TestSetResetClear:
         assert "floor_pin_hash" not in body
         stored_hash, set_at, attempts, locked_until = pin_state(db_session, target)
         assert stored_hash and verify_floor_pin(PIN, stored_hash)
-        assert PIN not in response.text and stored_hash not in response.text
+        # The body's instants (created_at, updated_at, floor_pin_set_at) end in six-digit
+        # microsecond fields, the PIN's own shape. Remove exactly the ones the user row holds,
+        # read back after the request; any other instant in the body fails the test outright.
+        body_text = without_known_instants(response.text, *instant_strings(fresh_user(db_session, target)))
+        assert PIN not in body_text and stored_hash not in response.text
         assert set_at is not None and attempts == 0 and locked_until is None
         (row,) = audit_rows(db_session, "FLOOR_PIN_SET")
         assert row.resource_type == "user" and row.resource_id == target.id
@@ -729,7 +738,10 @@ class TestUnlock:
             "floor_pin_locked_until": locked_until.isoformat(),
             "floor_pin_failed_attempts": 2,
         }
-        assert stored_hash not in row_text(row) and OTHER_PIN not in row_text(row)
+        # floor_pin_locked_until is asserted exactly above and is the row's one instant; its
+        # microseconds could equal the PIN. Any other instant in the row fails the test outright.
+        audit_text = without_known_instants(row_text(row), locked_until.isoformat())
+        assert stored_hash not in row_text(row) and OTHER_PIN not in audit_text
 
         signed_in = client.post(EMPLOYEE_LOGIN, json={"employee_id": target.employee_id, "pin": OTHER_PIN}, headers=XHR)
         assert signed_in.status_code == 200, "the existing PIN works again at once"
