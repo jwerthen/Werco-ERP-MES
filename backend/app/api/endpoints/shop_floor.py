@@ -6,7 +6,7 @@ import os
 from collections import defaultdict
 from dataclasses import replace
 from datetime import date, datetime, timezone
-from typing import Optional, Sequence, Union
+from typing import Literal, Optional, Sequence, Union
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
@@ -30,7 +30,7 @@ from app.api.deps import (
 )
 from app.core.cache import invalidate_work_centers_cache
 from app.core.config import settings
-from app.core.credentials import is_api_token_credential, is_narrowed_api_token
+from app.core.credentials import KIOSK_TOKEN_SCOPE, is_api_token_credential, is_narrowed_api_token
 from app.core.observability import report_absorbed_exception
 from app.core.realtime import safe_broadcast
 from app.core.time_utils import CENTRAL_TIME_ZONE, to_utc_iso
@@ -77,6 +77,12 @@ from app.schemas.kiosk_station import (
     KioskWorkCenterListResponse,
     KioskWorkCenterSelection,
 )
+from app.schemas.labor_review import (
+    LaborReviewFlag,
+    LaborReviewListResponse,
+    SetClockOutRequest,
+    SetClockOutResponse,
+)
 from app.schemas.process_sheet import (
     OperationStepRecordCreate,
     OperationStepRecordResponse,
@@ -93,6 +99,7 @@ from app.services import (
     dispatch_plan_service,
     dispatch_service,
     kiosk_station_service,
+    labor_review_service,
     operation_hold_view,
     process_sheet_service,
 )
@@ -124,6 +131,14 @@ from app.services.document_access import (
     visible_documents_clause,
 )
 from app.services.labor_cost_service import is_labor_cost_rollup_enabled
+from app.services.labor_review_service import (
+    LABOR_JUDGMENT_API_TOKEN_DETAIL,
+    LABOR_REVIEW_KIOSK_DETAIL,
+    LABOR_REVIEW_ROLES,
+    OPEN_ENTRY_APPROVAL_DETAIL,
+    SET_CLOCK_OUT_ROLES,
+    STALE_TIME_ENTRY_DETAIL,
+)
 from app.services.laser_nest_service import active_laser_nest, sync_laser_nest_from_operation
 from app.services.material_tie_view import MaterialTieView, tie_views_for_operations
 from app.services.operation_action_gates import (
@@ -2608,6 +2623,11 @@ def _set_time_entry_approval(
         if time_entry.approved is not None:
             # Idempotent: already approved -> return current state (no second audit row).
             return time_entry
+        # labor_review/2 step 1: an entry that is still clocked in cannot be signed off --
+        # its owner's later clock-out would rewrite approved labor. Unapprove stays open
+        # for an open entry approved before this rule, so it can be cleaned up.
+        if time_entry.clock_out is None:
+            raise HTTPException(status_code=409, detail=OPEN_ENTRY_APPROVAL_DETAIL)
         time_entry.approved = datetime.utcnow()
         time_entry.approved_by = current_user.id
         action = "time_entry_approve"
@@ -2646,10 +2666,103 @@ def _set_time_entry_approval(
         db.rollback()
         raise HTTPException(
             status_code=409,
-            detail="This time entry was modified concurrently. Refresh and retry.",
+            detail=STALE_TIME_ENTRY_DETAIL,
         ) from exc
     db.refresh(time_entry)
     return time_entry
+
+
+def _refuse_labor_judgment_credential(current_user: User) -> None:
+    """Approve, unapprove and set-clock-out are a person's judgment, made at the desk.
+
+    A standing API token is refused 403 (any role, any scope), and so is a badge-minted
+    kiosk token (the path fence in ``deps.get_current_user`` refuses it first; this is the
+    second layer, so the rule does not rest on a path string alone).
+    """
+    if is_api_token_credential(current_user):
+        raise HTTPException(status_code=403, detail=LABOR_JUDGMENT_API_TOKEN_DETAIL)
+    _refuse_kiosk_badge(current_user)
+
+
+def _refuse_kiosk_badge(current_user: User) -> None:
+    if getattr(current_user, "_token_scope", None) == KIOSK_TOKEN_SCOPE:
+        raise HTTPException(status_code=403, detail=LABOR_REVIEW_KIOSK_DETAIL)
+
+
+@router.get("/time-entries", response_model=LaborReviewListResponse)
+def list_time_entries(
+    start_date: Optional[date] = Query(None, description="First production day (inclusive)."),
+    end_date: Optional[date] = Query(None, description="Last production day (inclusive)."),
+    user_id: Optional[int] = Query(None, description="Only this employee's entries."),
+    work_center_id: Optional[int] = Query(None),
+    work_order_id: Optional[int] = Query(None),
+    status: Optional[Literal["open", "closed"]] = Query(None, description="open = still clocked in."),
+    approved: Optional[bool] = Query(None),
+    flag: Optional[LaborReviewFlag] = Query(None, description="Only entries carrying this review flag."),
+    flagged_only: bool = Query(False, description="Only entries carrying at least one review flag."),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(LABOR_REVIEW_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+):
+    """List time entries for Labor Review, newest clock-in first, with review flags.
+
+    Entries are attributed to PRODUCTION days by the company's production calendar (an entry
+    belongs to the shift it overlaps most). No dates reads the last 7 production days, or,
+    with ``status=open``, every entry still clocked in whenever it started; a range is at most
+    62 production days (422 above it, or when reversed). Flags: ``open_past_shift_end`` (still
+    clocked in after the shift it started in ended), ``long_entry`` (over 12 hours),
+    ``overlap`` (the same person has another labor entry at the same time), ``open_on_closed_work``
+    (still clocked in on a completed operation or a finished work order), ``long_zero_pieces``
+    (a run or rework entry of 4 hours or more that booked no pieces and no scrap) and
+    ``backfill`` (a paper back-entry or import). Admin, Manager, Supervisor and Quality.
+    Read-only: writes nothing.
+    """
+    _refuse_kiosk_badge(current_user)
+    return labor_review_service.list_time_entries(
+        db,
+        company_id,
+        current_user,
+        start_date=start_date,
+        end_date=end_date,
+        user_id=user_id,
+        work_center_id=work_center_id,
+        work_order_id=work_order_id,
+        status=status,
+        approved=approved,
+        flag=flag,
+        flagged_only=flagged_only,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.post("/time-entries/{time_entry_id}/set-clock-out", response_model=SetClockOutResponse)
+def set_time_entry_clock_out(
+    time_entry_id: int,
+    payload: SetClockOutRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(SET_CLOCK_OUT_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Set another person's clock-out on an unapproved time entry, with a reason (hours only).
+
+    Closes an entry left clocked in, or corrects a closed one, at the time the person actually
+    stopped. It never changes pieces, scrap or reasons. Admin, Manager and Supervisor, signed in
+    to the app as themselves: an API token and a kiosk badge are refused 403. Refused, before
+    anything is written: 404 not found; 403 the caller's own entry; 409 an approved entry
+    (clear its approval first); 409 a stale ``version``; 422 a clock-out at or before the
+    clock-in, or in the future. The operation's and work order's stored hours move by the
+    change in this entry's hours when they came from time entries, and are left alone when
+    they did not (``hours.applied`` / ``hours.skipped_reason`` say which); an existing job
+    cost's labor lines are regenerated. The audit row (old and new clock-out, duration,
+    hours, the reason) is required: 503 and nothing saved when it cannot be written. Not an
+    MCP tool.
+    """
+    _refuse_labor_judgment_credential(current_user)
+    return labor_review_service.set_clock_out(db, company_id, current_user, audit, time_entry_id, payload)
 
 
 @router.post("/time-entries/{time_entry_id}/approve", response_model=TimeEntryResponse)
@@ -2665,8 +2778,11 @@ def approve_time_entry(
     Sets ``approved`` (now) + ``approved_by`` (the approver). Role-gated to
     ADMIN / MANAGER / SUPERVISOR / QUALITY; forbids self-approval; tenant-scoped; respects the
     optimistic-lock ``version`` column; audited. Approval is what the opt-in
-    ``REQUIRE_APPROVED_LABOR_FOR_COST`` flag keys on for the labor-cost legs.
+    ``REQUIRE_APPROVED_LABOR_FOR_COST`` flag keys on for the labor-cost legs. An entry still
+    clocked in is refused 409 (close the clock first). A standing API token and a kiosk badge
+    are refused 403: approval is a person's judgment. Not an MCP tool.
     """
+    _refuse_labor_judgment_credential(current_user)
     return _set_time_entry_approval(
         time_entry_id,
         approve=True,
@@ -2688,8 +2804,10 @@ def unapprove_time_entry(
     """Clear approval on a shop-floor TimeEntry (G5-A).
 
     Clears ``approved`` + ``approved_by``. Same role gate / self-approval ban /
-    tenant scope / optimistic-lock handling / audit as approve.
+    tenant scope / optimistic-lock handling / audit and credential refusals as approve. An
+    entry still clocked in may be unapproved (an approval made before that was refused).
     """
+    _refuse_labor_judgment_credential(current_user)
     return _set_time_entry_approval(
         time_entry_id,
         approve=False,
@@ -3584,6 +3702,9 @@ def shop_floor_dashboard(
         nest = active_laser_nest(entry.operation) if entry.operation else None
         assignment = {
             "time_entry_id": entry.id,
+            # Labor Review: the entry's optimistic-lock version, so the Live Shop Activity
+            # "Close clock" link can send POST /time-entries/{id}/set-clock-out without a re-read.
+            "time_entry_version": int(entry.version or 1),
             "clock_in": to_utc_iso(entry.clock_in),
             "entry_type": entry.entry_type.value if hasattr(entry.entry_type, "value") else entry.entry_type,
             "user": {
