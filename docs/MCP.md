@@ -2,8 +2,8 @@
 
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
-(Cursor, Claude Code, a chat bot) gets **795 tools** — 15 hand-written *convenience* tools plus
-**780 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+(Cursor, Claude Code, a chat bot) gets **794 tools** — 15 hand-written *convenience* tools plus
+**779 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
 as the same request from the web app. A **read-only** API token is shown fewer tools, and an
 **AI-external** one fewer still (§4.1, §4.2).
 
@@ -746,6 +746,15 @@ marker. That second half was not separately put to the owner and is to be confir
 [API.md → Maintenance](API.md#maintenance-pm-schedules-maintenance-work-orders-event-log), *Maintenance
 log entries*.
 
+**Re-checked again on 2026-11-23 after Labor Review.** It adds one Shop Floor tool,
+`list_time_entries` (`GET /shop-floor/time-entries`, the Labor Review list), and takes two away: the
+labor approve and unapprove routes (`POST /shop-floor/time-entries/{time_entry_id}/approve` and
+`…/unapprove`) joined `EXCLUDED_OPERATIONS` (§6.1) together with the new set-clock-out write, so
+approving labor is no longer an agent action. No existing name shifted: 15 convenience + **779**
+generated, 16 shadowed, one fewer than the 780 above. `list_time_entries` is a read, so the
+read-only catalog is 8 convenience + **305** generated. It is not on the AI-external allowlist. See
+[API.md → Labor Review](API.md#labor-review).
+
 ---
 
 ## 5. Program map — every SPA page → OpenAPI tag(s) → tools
@@ -765,6 +774,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `WorkOrderNew` (`/work-orders/new`) | Work Orders, Parts, Bill of Materials, Routing, Customers, Setup & Readiness, Work Centers | `create_work_order`★, `preview_work_order_operations`, `get_routing_by_part`, `list_customer_names`, `get_part_readiness`, `list_work_centers`★ |
 | `WorkOrderDetail` (`/work-orders/:id`) | Work Orders, Work Order Materials, Laser Nests, Work Order Blockers, Documents, Shop Floor, Comments, Users | `get_work_order`★, `add_operation`★, `update_work_order`★, `release_work_order`★, `duplicate_work_order`★, `add_laser_nest`★, `work_orders_start_work_order`, `work_orders_resume_work_order`, `work_orders_complete_work_order`, `work_orders_complete_operation`, `work_orders_update_operation`, `update_laser_nest`, `delete_laser_nest`, `list_material_allocations`, `create_work_order_blocker`, `attach_document_to_work_order`, `list_record_comments`, `get_record_watch_state`, `search_mentionable_users` (the Comments panel's reads; **posting, editing or deleting a comment and watching are not tools**: the five writes are in `EXCLUDED_OPERATIONS`, §6.1) |
 | `ShopFloor` (`/shop-floor`) | Shop Floor, Work Order Blockers, Work Centers, Work Orders | `get_shop_floor_dashboard`★, `get_all_operations`, `get_active_shop_users`, `list_work_order_blockers`, `resolve_work_order_blocker` |
+| `LaborReview` (`/labor-review`) | Shop Floor | `list_time_entries` — **Approve, Unapprove and Close clock are not tools**: the three labor judgments are in `EXCLUDED_OPERATIONS` (§6.1) and refuse **403** to every API token |
 | `ShopFloorSimple` (`/shop-floor/operations`) | Shop Floor, Scanner, Work Centers, Work Orders | `get_all_operations`, `shop_floor_start_operation`, `shop_floor_complete_operation`, `put_operation_on_hold`, `shop_floor_resume_operation`, `lookup_barcode`, `resolve_action` |
 | `OperatorKiosk` (`/kiosk`) | Shop Floor | `clock_in`, `clock_out`, `get_my_active_job`, `get_work_center_queue`, `get_operation_steps`, `record_operation_step`, `report_operation_production`, `shop_floor_complete_operation` — under the caller's own user token (kiosk badge tokens are refused) |
 | `CrewStationKiosk` (`/kiosk?station=`) | Shop Floor | Same routes as above; station administration is `create_kiosk_station`, `list_kiosk_stations`, `revoke_kiosk_station`, `reset_kiosk_station_pin`. The station PIN login itself is unauthenticated plumbing and is not a tool |
@@ -929,6 +939,14 @@ minus two further, named sets:
     The reads stay tools: `get_document_access_review`, the `access_level` on every document read,
     and each user's export authorization on `list_users`. See
     [API.md → Restricted and export-controlled documents](API.md#restricted-and-export-controlled-documents-as9100d-7531).
+  - The three **labor judgments** (`catalog.LABOR_JUDGMENT_OPERATIONS`; Labor Review, 2026-11-23):
+    `POST /shop-floor/time-entries/{time_entry_id}/approve`, `…/unapprove` and `…/set-clock-out`.
+    Approving a time entry, clearing its approval and setting another person's clock-out are a
+    person's judgment at the desk. The routes refuse every API token **403**
+    (`app.services.labor_review_service.LABOR_JUDGMENT_API_TOKEN_DETAIL`) and every kiosk badge, and
+    the exclusion closes the door a person's own JWT would leave open. Approve and unapprove were
+    tools before this change and are not any more. The read stays a tool: `list_time_entries`. See
+    [API.md → Labor Review](API.md#labor-review).
 
 The `Import Batches` tag also excludes the recoverable Import Center review, receipt,
 correction and commit routes. These wrap the same cutover loaders, including their
@@ -945,7 +963,9 @@ three report-template routes then made it **770 generated tools**, and on 2026-1
 re-verification and CAR effectiveness verbs **772**, the five PO quality flow-down routes
 **777**, the inventory ownership route (migration 129) **778**, and the document access review
 (migration 131) **779**; the four floor-PIN writes and the two document-access writes joined the
-exclusions (twenty-six) without changing the count.
+exclusions (twenty-six) without changing the count. On 2026-11-20 the maintenance log read made it
+**780**; on 2026-11-23 Labor Review added one read and moved the two labor-approval tools into the
+exclusions with the new set-clock-out write (twenty-nine): **779 generated tools**.
 
 ### 6.2 Naming and the collision policy (`app/mcp/naming.py`)
 

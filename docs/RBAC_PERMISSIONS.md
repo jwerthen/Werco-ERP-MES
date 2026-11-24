@@ -394,7 +394,26 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > addition to the role gate, **self-approval is
 > forbidden**: a user cannot approve or unapprove their **own** TimeEntry (segregation of duties for
 > the labor-cost gate) — that returns **403** even for an approver-role user. A cross-tenant id returns
-> **404**. Both actions are audited (`time_entry_approve` / `time_entry_unapprove`).
+> **404**. Both actions are audited (`time_entry_approve` / `time_entry_unapprove`). Since Labor Review
+> (2026-11-23): approve refuses **409** an entry that is still clocked in (close the clock first;
+> unapprove stays open); both take an optional body `{"version": n}` and refuse **409** when the entry
+> changed since the approver read it; and both refuse every standing API token and every kiosk badge
+> **403** and are no longer MCP tools — see the Credential policy row above.
+>
+> **Labor Review — endpoint mapping (2026-11-23).** `GET /api/v1/shop-floor/time-entries` (the list
+> behind the `/labor-review` page) is `require_role([ADMIN, MANAGER, SUPERVISOR, QUALITY])`, the same set
+> as approval; a kiosk badge is **403** (the path fence denies the whole `/shop-floor/time-entries`
+> subtree), while a full API token may read it (MCP tool `list_time_entries`).
+> `POST /api/v1/shop-floor/time-entries/{id}/set-clock-out` is `require_role([ADMIN, MANAGER, SUPERVISOR])`
+> — **Quality may review and approve labor but not set a clock-out** — and, like approval, forbids the
+> caller's **own** entry (**403**), refuses an **approved** entry (**409**), and refuses every API token
+> and kiosk badge (**403**). It changes hours only; when the work order has a job cost it also rebuilds
+> that job cost's time-entry labor lines with a required `RECALCULATE` audit row, a deliberate exception
+> to job-cost writes otherwise being Admin / Manager only. The SPA gates the `/labor-review` route and
+> its nav entry (Production → Shop Floor → Labor Review) on `quality:inspect`, which the default role
+> map grants to exactly that set; the Close clock / Correct actions appear only where the server's
+> `can_set_clock_out` says so, and the dashboard's Live Shop Activity **Close clock** link is shown to
+> Admin / Manager / Supervisor (a client-side copy of the server's role set) on someone else's entry.
 
 > **Start operation — both start verbs are role-gated** (the office verb since `feat/work-center-op-pool`,
 > the shop-floor verb since owner decision P0.4, 2026-11-13).

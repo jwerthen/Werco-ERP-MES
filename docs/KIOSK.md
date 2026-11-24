@@ -1552,7 +1552,9 @@ every station-login failure write tamper-evident audit rows.
   MANAGER/ADMIN badges: the station lifecycle endpoints (`/shop-floor/kiosk-stations/*` — a
   scanned manager badge must not be able to reset a station PIN from the shared terminal), the
   labor-approval pair (`/shop-floor/time-entries/{id}/approve|unapprove` — G5-A approval is
-  a desktop supervisor workflow), and the manager dispatch tools
+  a desktop supervisor workflow; since Labor Review, 2026-11-23, the whole
+  `/shop-floor/time-entries` subtree is denied, which also covers the Labor Review list and the
+  supervisor set-clock-out, and each of those routes re-checks the token scope), and the manager dispatch tools
   (`GET /shop-floor/dispatch-board` and every route under it — a prefix rule, so the work-order
   plan routes are covered too — and `PUT /shop-floor/work-centers/{id}/run-order` — reading
   the whole shop's board, or dictating what every machine runs next, is a desk workflow). The
