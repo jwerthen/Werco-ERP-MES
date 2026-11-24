@@ -15,8 +15,10 @@ Gates detected (audit findings QG-1, QG-3, BLK-2):
   read/reconcile path, QG-4).
 * ``open_ncr`` (QG-3): a non-closed/non-void NCR (or one whose disposition is still
   PENDING) linked to this work order, company-scoped.
-* ``fai_not_passed`` (QG-3): a First Article Inspection linked to this work order
-  that is not in a PASSED state, company-scoped. The data model has no "FAI
+* ``fai_not_passed`` (QG-3): the LATEST First Article Inspection per part linked to
+  this work order is not accepted (PASSED, or CONDITIONAL with the customer's
+  approval on record), company-scoped. A superseded FAI (an earlier FAILED or open one
+  followed by a newer one for the same part) is ignored. The data model has no "FAI
   required" flag (no operation_id / required marker on the FAI row), so this only
   fires when an FAI EXISTS and is not passed -- documented limitation.
 * ``open_blocker`` (BLK-2): an OPEN/ACKNOWLEDGED ``WorkOrderBlocker`` on the
@@ -28,7 +30,8 @@ Detection is strictly read-only -- it never mutates a row.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from datetime import datetime
+from typing import Iterable, Optional
 
 from sqlalchemy.orm import Session
 
@@ -43,6 +46,8 @@ from app.models.user import User
 from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.models.work_order_blocker import WorkOrderBlocker, WorkOrderBlockerStatus
 from app.services.audit_service import AuditService
+from app.services.fai_service import CUSTOMER_APPROVABLE_STATUSES
+from app.services.fai_service import FINAL_STATUSES as FAI_FINAL_STATUSES
 from app.services.operational_event_service import OperationalEventService
 
 # G1: imported from work_order_state_service. No circular import: that module imports
@@ -61,8 +66,11 @@ QUALITY_EXCEPTION_EVENT_TYPE = "quality_exception_on_completion"
 # left at PENDING -- counts as an unresolved quality hold.
 _RESOLVED_NCR_STATUSES = (NCRStatus.CLOSED, NCRStatus.VOID)
 
-# FAI states that count as "passed" for the gate. Anything else (PENDING /
-# IN_PROGRESS / FAILED / CONDITIONAL) is treated as not-passed.
+# FAI acceptance for the gate is judged on the LATEST first article per (work order,
+# part) -- see ``fai_is_accepted``. The status meanings come from ``fai_service`` rather
+# than being restated here: PASSED is accepted outright; a status the customer may
+# approve (CONDITIONAL) is accepted only once ``customer_approved`` is on record; FAILED
+# is final and answered by raising a NEW FAI, which then becomes the latest.
 _PASSED_FAI_STATUSES = (FAIStatus.PASSED,)
 
 # Blocker states that are still "open" for the gate.
@@ -121,6 +129,86 @@ def evaluate_inspection_exception(operation: WorkOrderOperation) -> Optional[Qua
     return None
 
 
+def fai_is_accepted(fai: FirstArticleInspection) -> bool:
+    """True when this first article clears the gate.
+
+    PASSED clears. A status a customer may approve that is not PASSED (CONDITIONAL)
+    clears only with the customer's approval on record -- recorded through the
+    existing ``POST /quality/fai/{id}/customer-approval`` verb. Everything else
+    (PENDING / IN_PROGRESS / FAILED, or CONDITIONAL with no customer approval) does not.
+    """
+    status_ = fai.status
+    if status_ in _PASSED_FAI_STATUSES:
+        return True
+    if status_ in CUSTOMER_APPROVABLE_STATUSES and status_ in FAI_FINAL_STATUSES:
+        return bool(fai.customer_approved)
+    return False
+
+
+def latest_fais_by_work_order(
+    db: Session, company_id: int, work_order_ids: Iterable[int]
+) -> dict[int, list[FirstArticleInspection]]:
+    """The newest FAI per (work order, part) for each work order, in ONE query.
+
+    A failed first article is frozen and answered by raising a new one, so only the
+    newest record per part speaks for the job: an earlier FAILED or still-open FAI
+    followed by a newer one is superseded. Grouped by the FAI's OWN ``part_id`` -- an
+    FAI raised against a component part of an assembly job is judged apart from the
+    job's top-level part. "Newest" is ``created_at`` with ``id`` breaking ties (and
+    standing in for a NULL ``created_at``). Tenant-scoped.
+    """
+    ids = sorted({int(i) for i in work_order_ids if i is not None})
+    if not ids:
+        return {}
+    rows = (
+        db.query(FirstArticleInspection)
+        .filter(
+            FirstArticleInspection.company_id == company_id,
+            FirstArticleInspection.work_order_id.in_(ids),
+        )
+        .all()
+    )
+    latest: dict[tuple[int, Optional[int]], FirstArticleInspection] = {}
+    for fai in rows:
+        key = (fai.work_order_id, fai.part_id)
+        current = latest.get(key)
+        if current is None or _fai_sort_key(fai) > _fai_sort_key(current):
+            latest[key] = fai
+    grouped: dict[int, list[FirstArticleInspection]] = {}
+    for (wo_id, _part_id), fai in sorted(latest.items(), key=lambda item: item[1].id):
+        grouped.setdefault(wo_id, []).append(fai)
+    return grouped
+
+
+def latest_fai_exceptions_by_work_order(
+    db: Session, company_id: int, work_order_ids: Iterable[int]
+) -> dict[int, list[QualityException]]:
+    """``fai_not_passed`` for each work order whose latest FAI for a part is not accepted."""
+    result: dict[int, list[QualityException]] = {}
+    for wo_id, fais in latest_fais_by_work_order(db, company_id, work_order_ids).items():
+        for fai in fais:
+            if fai_is_accepted(fai):
+                continue
+            detail = f"status={_enum_value(fai.status)}"
+            if fai.status in CUSTOMER_APPROVABLE_STATUSES and fai.status not in _PASSED_FAI_STATUSES:
+                detail += ", customer approval not recorded"
+            result.setdefault(wo_id, []).append(
+                QualityException(
+                    code="fai_not_passed",
+                    severity="high",
+                    message=(f"First Article Inspection {fai.fai_number} on this work order is not passed ({detail})."),
+                    reference_type="fai",
+                    reference_id=fai.id,
+                )
+            )
+    return result
+
+
+def _fai_sort_key(fai: FirstArticleInspection) -> tuple:
+    created = fai.created_at
+    return (created is not None, created or datetime.min, fai.id or 0)
+
+
 def evaluate_completion_quality_exceptions(
     db: Session,
     work_order: WorkOrder,
@@ -175,32 +263,11 @@ def evaluate_completion_quality_exceptions(
                 )
             )
 
-    # QG-3: FAI linked to this work order that is not PASSED, company-scoped.
-    # Limitation: the FAI model carries no "FAI required" flag and no operation_id,
-    # so we can only detect an EXISTING non-passed FAI -- a missing-but-required FAI
-    # is not detectable here. Documented in the module docstring and the report.
-    fais = (
-        db.query(FirstArticleInspection)
-        .filter(
-            FirstArticleInspection.company_id == company_id,
-            FirstArticleInspection.work_order_id == work_order.id,
-        )
-        .all()
-    )
-    for fai in fais:
-        if fai.status not in _PASSED_FAI_STATUSES:
-            exceptions.append(
-                QualityException(
-                    code="fai_not_passed",
-                    severity="high",
-                    message=(
-                        f"First Article Inspection {fai.fai_number} on this work order "
-                        f"is not passed (status={_enum_value(fai.status)})."
-                    ),
-                    reference_type="fai",
-                    reference_id=fai.id,
-                )
-            )
+    # QG-3: the LATEST FAI per part on this work order that is not accepted, company-
+    # scoped. Limitation: the FAI model carries no "FAI required" flag and no
+    # operation_id, so we can only detect an EXISTING non-accepted FAI -- a missing-
+    # but-required FAI is not detectable here. Documented in the module docstring.
+    exceptions.extend(latest_fai_exceptions_by_work_order(db, company_id, [work_order.id]).get(work_order.id, []))
 
     # BLK-2: open/acknowledged blockers on this operation or work order.
     blocker_query = db.query(WorkOrderBlocker).filter(
