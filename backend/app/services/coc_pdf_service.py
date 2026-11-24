@@ -48,11 +48,18 @@ def build_certificate_of_conformance_pdf(
     conformance_statement: Optional[str],
     issued_by_name: Optional[str],
     issued_at: Optional[str],
+    company_name: Optional[str] = None,
+    company_address: Optional[str] = None,
+    company_phone: Optional[str] = None,
+    po_line_item: Optional[str] = None,
+    unit_number: Optional[str] = None,
 ) -> bytes:
     """Build a Certificate of Conformance PDF from frozen-snapshot facts.
 
     Returns the rendered PDF as ``bytes``. All optional fields are omitted from
-    the rendered document when falsy (mirrors ``quote_pdf_service``).
+    the rendered document when falsy (mirrors ``quote_pdf_service``). ``company_*`` is
+    the issuing company's letterhead (from the Company record, never hard-coded -- the
+    ``car_pdf_service`` pattern); ``issued_at`` is the printed issue DATE as given.
     """
     try:
         from reportlab.lib import colors
@@ -75,6 +82,16 @@ def build_certificate_of_conformance_pdf(
     styles = getSampleStyleSheet()
     story: List[Any] = []
 
+    # Letterhead: the issuing company (from the Company record), above the title.
+    if company_name:
+        story.append(Paragraph(f"<b>{pdf_escape(company_name)}</b>", styles["Heading2"]))
+        for line in (company_address or "").splitlines():
+            if line.strip():
+                story.append(Paragraph(pdf_escape(line.strip()), styles["Normal"]))
+        if company_phone:
+            story.append(Paragraph(f"Phone {pdf_escape(company_phone)}", styles["Normal"]))
+        story.append(Spacer(1, 8))
+
     # Title
     story.append(Paragraph("<b>Certificate of Conformance</b>", styles["Title"]))
     story.append(Spacer(1, 8))
@@ -94,11 +111,15 @@ def build_certificate_of_conformance_pdf(
         story.append(Paragraph(f"<b>Customer:</b> {pdf_escape(customer_name)}", styles["Normal"]))
     if customer_po:
         story.append(Paragraph(f"<b>Customer PO:</b> {pdf_escape(customer_po)}", styles["Normal"]))
+    if po_line_item:
+        story.append(Paragraph(f"<b>PO Line:</b> {pdf_escape(po_line_item)}", styles["Normal"]))
     story.append(Spacer(1, 12))
 
     # Product block
     if work_order_number:
         story.append(Paragraph(f"<b>Work Order:</b> {pdf_escape(work_order_number)}", styles["Normal"]))
+    if unit_number:
+        story.append(Paragraph(f"<b>Unit Number:</b> {pdf_escape(unit_number)}", styles["Normal"]))
     if part_number or part_name:
         # Escaped as one composed value; the em dash separator is ours and is not markup.
         part_display = part_number or ""

@@ -2,8 +2,8 @@
 
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
-(Cursor, Claude Code, a chat bot) gets **798 tools** — 15 hand-written *convenience* tools plus
-**783 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+(Cursor, Claude Code, a chat bot) gets **797 tools** — 16 hand-written *convenience* tools plus
+**781 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
 as the same request from the web app. A **read-only** API token is shown fewer tools, and an
 **AI-external** one fewer still (§4.1, §4.2).
 
@@ -184,6 +184,13 @@ generated, 16 shadowed, one fewer than the 784 above. `list_time_entries` is a r
 read-only catalog is 8 convenience + **310** generated. It is not on the AI-external allowlist. See
 [API.md → Labor Review](API.md#labor-review).
 
+**Re-checked again on 2026-11-23 after shipping over open quality items (shipping/2)**: issuing a
+Certificate of Conformance (`POST /shipping/{id}/coc`) left the catalog (`EXCLUDED_OPERATIONS`,
+§6.1), and `mark_shipped` became a **convenience** tool under the same name (§7), shadowing its raw
+route (§8), so an agent can ship but can never send the acknowledgment that accepts open quality
+items: 16 convenience + **781** generated, 17 shadowed, two fewer generated than the 783 above. No existing name shifted. Both routes are
+writes, so the read-only catalog is unchanged at 8 convenience + **310** generated.
+
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
 `backend/tests/test_mcp_docs_names.py` checks every tool name this file, `CLAUDE.md` and `API.md`
@@ -265,7 +272,7 @@ backend/app/mcp/
   auth.py         AuthContext; TokenSource (static -> refresh -> password login); ErpTokenVerifier
                   (an access JWT by signature, an API token by its api_tokens row)
   executor.py     InProcessExecutor (httpx.ASGITransport into app) / RemoteExecutor (HTTPS)
-  convenience.py  the 15 hand-written tools + SHADOWED_OPERATIONS (16 raw routes they replace)
+  convenience.py  the 16 hand-written tools + SHADOWED_OPERATIONS (17 raw routes they replace)
   people_only.py  people_only_refusal(): Hank task kinds an agent never runs, on any credential (§4.3)
   server.py       build_server(): registry, per-call auth, jsonschema validation, dispatch
   http.py         McpDoor + mount_mcp(app): the Streamable HTTP door at WERCO_MCP_HTTP_PATH
@@ -856,7 +863,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `Inventory` (`/inventory`) | Inventory, Parts | `list_inventory`★, `receive_inventory`, `adjust_inventory`, `transfer_inventory`, `change_inventory_item_ownership`, `list_transactions`, `preview_inventory_combine`, `combine_inventory`, `list_cycle_counts` |
 | `Materials` (`/materials`) | Materials & Supplies | `list_materials`, `get_material`, `create_material`, `update_material`, `import_materials_csv` |
 | `Receiving` (`/receiving`) | Receiving & Inspection, Purchasing | `get_open_purchase_orders`, `receive_material`, `get_inspection_queue`, `inspect_receipt`, `correct_receipt`, `void_receipt`, `print_receiving_label` |
-| `Shipping` (`/shipping`) | Shipping | `get_ready_to_ship`, `create_shipment`, `mark_shipped`, `rate_shop`, `buy_label`, `get_tracking`, `issue_certificate_of_conformance` |
+| `Shipping` (`/shipping`) | Shipping | `get_ready_to_ship`, `create_shipment`, `mark_shipped`, `rate_shop`, `buy_label`, `get_tracking`, `get_certificate_of_conformance`, `download_certificate_of_conformance_pdf` (issuing a certificate is a person's act in the app, not a tool) |
 | `MRP` (`/mrp`) | Material Requirements Planning | `create_mrp_run`, `get_latest_mrp_run`, `get_mrp_actions`, `get_current_shortages`, `process_mrp_action` |
 | `Purchasing` (`/purchasing`) | Purchasing, Parts, Documents | `list_purchase_orders`★, `get_purchase_order`, `create_purchase_order`, `add_po_line`, `send_purchase_order`, `list_vendors`, `create_vendor`, `restore_vendor`, `check_supplier_approval` (the Create PO screen's Approved Supplier List check); the Quality flow-down tab: `get_po_flowdown_profile`, `update_po_flowdown_profile`, `list_po_quality_clauses`, `create_po_quality_clause`, `update_po_quality_clause` (a PO's own clause choice is a field of `create_purchase_order` / `update_purchase_order`) |
 | `POUpload` (`/po-upload`) | PO Upload | `upload_and_extract_po`, `upload_and_extract_quote`, `upload_and_extract_invoice`, `create_po_from_upload`, `search_vendors` |
@@ -1009,6 +1016,15 @@ minus two further, named sets:
     the exclusion closes the door a person's own JWT would leave open. Approve and unapprove were
     tools before this change and are not any more. The read stays a tool: `list_time_entries`. See
     [API.md → Labor Review](API.md#labor-review).
+  - **Issuing a Certificate of Conformance**, `POST /shipping/{shipment_id}/coc` (shipping/2,
+    2026-11-23). The certificate states that the shipped parts conform, and over open quality
+    items it accepts them with a reason: a named person's quality judgment. The route refuses every
+    API token **403** (`shipment_release_service.API_TOKEN_COC_ISSUE`), and the exclusion closes the
+    door a person's own JWT would leave open. The reads stay tools:
+    `get_certificate_of_conformance` and `download_certificate_of_conformance_pdf`. Its sibling,
+    shipping over open items, is handled the other way: the ship route is **shadowed** by the
+    `mark_shipped` convenience tool, which never sends the acknowledgment (§7, §8). See
+    [API.md → Shipping](API.md#shipping).
 
 The `Import Batches` tag also excludes the recoverable Import Center review, receipt,
 correction and commit routes. These wrap the same cutover loaders, including their
@@ -1030,7 +1046,8 @@ exclusions (twenty-six) without changing the count. On 2026-11-20 maintenance lo
 exclusions (twenty-eight) and company creation was deleted with its route, while Department pick
 list, the Sheet Gaps list, the four untied laser-nest reads and System Health were added (**784**);
 then Labor Review added one read and moved the two labor-approval tools into the exclusions with the
-new set-clock-out write (thirty-one): **783 generated tools**.
+new set-clock-out write (thirty-one): **783**; the CoC issue then joined the exclusions
+(thirty-two) and the ship route was shadowed by `mark_shipped` (17 shadowed): **781 generated tools**.
 
 ### 6.2 Naming and the collision policy (`app/mcp/naming.py`)
 
@@ -1130,7 +1147,7 @@ function name containing `delete`/`void`/`cancel`/`purge`/`reset`/`hard`; `idemp
 
 ## 7. The convenience tools (fixed names)
 
-Fifteen hand-written tools, listed **first** in `tools/list` (then the generated catalog sorted by
+Sixteen hand-written tools, listed **first** in `tools/list` (then the generated catalog sorted by
 name). Each one reaches data exactly like a generated tool — an HTTP request through the executor
 as the caller — and each **shadows** the raw route(s) it fronts (§8), so there is exactly one door
 to those routes and the rules below cannot be bypassed by calling the raw twin. Every convenience
@@ -1154,6 +1171,7 @@ with a 422 that names it, never accepted-and-ignored.
 | `list_purchase_orders` | `GET /purchasing/purchase-orders` | `status`, `vendor_id`, `deleted_only`, `limit` (default 200), `offset` | |
 | `list_quality_ncrs` | `GET /quality/ncr` | `status`, `part_id`, `skip`, `limit` (default 100) | |
 | `list_parts` | `GET /parts/` | `search`, `part_type`, `item_group` (default `engineering`), `active_only`, `include_bom_components`, `include_deleted` (admin), `skip`, `limit` (default 100, max 500) | |
+| `mark_shipped` | `POST /shipping/{id}/ship` | `shipment_id` (required), `tracking_number` | Ships with **no request body, ever**: the acknowledgment that accepts open quality items (an open NCR, a first article not passed, a quality hold) is a person's decision in the app. A job with open items comes back as the route's **409** listing them, as an `is_error` result |
 
 **Operation-name guard (`add_operation`).** An operation is a short shop-floor step (`Laser`,
 `Brake`, `Weld`, `Deburr`), never a file. A name is refused — **422, not rewritten** — when it
@@ -1165,7 +1183,7 @@ contains `/` or `\`, ends with `.dxf` / `.dwg` / `.nc` / `.pdf` (case-insensitiv
 
 ## 8. Shadowed raw operations
 
-These 16 `(METHOD, path)` pairs are **dropped from the generated catalog**; the convenience tool is
+These 17 `(METHOD, path)` pairs are **dropped from the generated catalog**; the convenience tool is
 the only door to them (`convenience.SHADOWED_OPERATIONS`):
 
 | Raw operation | Replaced by |
@@ -1186,6 +1204,7 @@ the only door to them (`convenience.SHADOWED_OPERATIONS`):
 | `GET /api/v1/purchasing/purchase-orders` | `list_purchase_orders` |
 | `GET /api/v1/quality/ncr` | `list_quality_ncrs` |
 | `GET /api/v1/parts/` | `list_parts` |
+| `POST /api/v1/shipping/{shipment_id}/ship` | `mark_shipped` |
 
 Every other operation stays generated — including the neighbours of the shadowed ones
 (`work_orders_start_work_order`, `work_orders_update_operation`, `preview_laser_nest_package_import`,

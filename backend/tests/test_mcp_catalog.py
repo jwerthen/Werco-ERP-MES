@@ -159,8 +159,9 @@ class TestMembership:
         # authorization and changing a document's access level are a person's judgment), the
         # self-service password change (a person's act in their own session), the in-process
         # inspection sign-off (AS9100D 8.6: signing that an inspection was performed is a person's
-        # judgment, like an FAI final disposition) and the three labor judgments (approve / unapprove
-        # a time entry, set another person's clock-out) -- nothing else.
+        # judgment, like an FAI final disposition), the three labor judgments (approve / unapprove
+        # a time entry, set another person's clock-out) and issuing a Certificate of Conformance
+        # (a person's conformance judgment) -- nothing else.
         assert set(EXCLUDED_OPERATIONS) == {
             ("POST", "/api/v1/work-orders/import"),
             ("POST", "/api/v1/purchasing/purchase-orders/import"),
@@ -196,6 +197,8 @@ class TestMembership:
             ("POST", "/api/v1/shop-floor/time-entries/{time_entry_id}/approve"),
             ("POST", "/api/v1/shop-floor/time-entries/{time_entry_id}/unapprove"),
             ("POST", "/api/v1/shop-floor/time-entries/{time_entry_id}/set-clock-out"),
+            # Issuing a Certificate of Conformance (shipping/2): a person's conformance judgment.
+            ("POST", "/api/v1/shipping/{shipment_id}/coc"),
         }
         assert EGRESS_SWITCH_OPERATIONS <= set(EXCLUDED_OPERATIONS)
         assert INSPECTION_SIGN_OFF_OPERATIONS <= set(EXCLUDED_OPERATIONS)
@@ -231,6 +234,18 @@ class TestMembership:
             assert key not in by_key, key
         assert "mark_operation_inspected" not in set(by_key.values())
         assert ("GET", "/api/v1/shop-floor/operations/{operation_id}") in by_key
+
+    def test_shipping_over_open_quality_items_has_no_tool_door(self, catalog):
+        """shipping/2: accepting open quality items is a person's judgment. Issuing the CoC is
+        excluded outright; the ship route stays an agent action only through the convenience
+        ``mark_shipped``, whose schema has no acknowledgment and which sends no body, so a job
+        with open items comes back as the route's 409. The raw twin is shadowed."""
+        ship = ("POST", "/api/v1/shipping/{shipment_id}/ship")
+        assert ship in SHADOWED_OPERATIONS
+        assert ship not in {tool.key for tool in catalog}
+        tool = next(tool for tool in CONVENIENCE_TOOLS if tool.name == "mark_shipped")
+        assert set(tool.input_schema["properties"]) == {"shipment_id", "tracking_number"}
+        assert tool.input_schema.get("additionalProperties") is False
 
     def test_writing_a_comment_or_changing_a_watch_is_never_a_tool(self, catalog):
         """Owner decision 2026-11-16: a comment is a person's own words. The routes refuse every

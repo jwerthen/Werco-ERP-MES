@@ -325,7 +325,7 @@ Findings: QG-1, QG-2, QG-3, QG-4, QG-5, BLK-1, BLK-2, BLK-4.
 > **Gates (codes):**
 > - `inspection_incomplete` (QG-1) — `operation.requires_inspection and not operation.inspection_complete`. Evaluated off the already-loaded operation row (no extra query); this is the one gate cheap enough to also run on the reconcile/read path.
 > - `open_ncr` (QG-3) — an NCR on the WO whose status is not `CLOSED`/`VOID`, or whose disposition is still `PENDING`. Company-scoped.
-> - `fai_not_passed` (QG-3) — a First Article Inspection on the WO whose status is not `PASSED`. Company-scoped.
+> - `fai_not_passed` (QG-3) — a First Article Inspection on the WO whose status is not `PASSED`. Company-scoped. *(Superseded 2026-11-23: only the latest FAI per part on the WO is judged, and `CONDITIONAL` with the customer's approval on record also clears it — see `docs/API.md` → Work Orders, "Quality gates on completion".)*
 > - `open_blocker` (BLK-2) — an `OPEN`/`ACKNOWLEDGED` `WorkOrderBlocker` on the operation or work order. Company-scoped.
 >
 > **QG-2 — the missing `inspection_complete` writer shipped.** New audited, tenant-scoped, RBAC-gated

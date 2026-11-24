@@ -524,7 +524,7 @@ class TestPrintCatalogInProcess:
         payload = json.loads(text)
         assert set(payload) == CATALOG_KEYS
         assert payload["server"] == SERVER_NAME
-        assert payload["counts"]["convenience"] == 15
+        assert payload["counts"]["convenience"] == 16
         assert payload["counts"]["generated"] > 600
         assert payload["counts"]["shadowed"] == len(payload["shadowed_operations"])
         assert payload["counts"]["generated"] == len(payload["generated_tools"])
@@ -563,7 +563,7 @@ class TestPrintCatalogInProcess:
             sys.stdout = saved_stdout
 
         assert exc_info.value.code == 0
-        assert json.loads(buffer.getvalue())["counts"]["convenience"] == 15
+        assert json.loads(buffer.getvalue())["counts"]["convenience"] == 16
 
 
 class TestServeStdio:
@@ -711,7 +711,7 @@ class TestPrintCatalogSubprocess:
         payload = json.loads(stdout)
         assert set(payload) == CATALOG_KEYS
         assert payload["server"] == SERVER_NAME
-        assert payload["counts"]["convenience"] == 15
+        assert payload["counts"]["convenience"] == 16
         assert payload["counts"]["generated"] > 600
         assert payload["counts"]["generated"] == len(payload["generated_tools"])
         assert payload["counts"]["shadowed"] == len(payload["shadowed_operations"])

@@ -71,8 +71,29 @@ class ShipmentResponse(UTCModel):
     quantity_shipped: float
     ship_date: Optional[date] = None
     created_at: datetime
+    # The issued, numbered Certificate of Conformance (None until one is issued).
+    coc_number: Optional[str] = None
+    coc_issued_at: Optional[datetime] = None
+    # True when the automatic CoC was withheld on ship over open quality items and no
+    # certificate has been issued since ("CoC withheld, Quality to issue").
+    coc_withheld: bool = False
 
     model_config = ConfigDict(from_attributes=True, use_enum_values=True)
+
+
+class ReleaseExceptionAcknowledgment(BaseModel):
+    """Accepting the open quality items on a job (shipping/2).
+
+    Sent with ``POST /shipping/{id}/ship`` to ship over them, and with
+    ``POST /shipping/{id}/coc`` to issue a certificate over them. Only Admin, Manager or
+    Quality may acknowledge, never a standing API token, and ``reason`` is required
+    whenever ``acknowledge_exceptions`` is true. Absent or false changes nothing.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    acknowledge_exceptions: bool = False
+    reason: Optional[str] = Field(default=None, max_length=1000)
 
 
 # ---------------------------------------------------------------------------

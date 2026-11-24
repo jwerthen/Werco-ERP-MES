@@ -26,12 +26,14 @@ Design rules (mirror ``completion_inventory_service``):
 import json
 import logging
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.core.time_utils import to_utc_iso
+from app.core.time_utils import resolve_zone, to_local_date, to_utc_iso
+from app.models.audit_log import AuditLog
+from app.models.company import Company
 from app.models.customer import Customer
 from app.models.part import Part
 from app.models.shipping import CertificateOfConformance, Shipment
@@ -39,6 +41,7 @@ from app.models.user import User
 from app.models.work_order import WorkOrder
 from app.services.audit_service import AuditService
 from app.services.coc_pdf_service import DEFAULT_COC_STATEMENT, build_certificate_of_conformance_pdf
+from app.services.operational_event_service import OperationalEventService
 from app.services.process_sheet_service import parse_serial_numbers
 
 logger = logging.getLogger(__name__)
@@ -54,6 +57,22 @@ def _existing_coc(db: Session, shipment_id: int, company_id: int) -> Optional[Ce
         )
         .first()
     )
+
+
+def cocs_by_shipment(db: Session, company_id: int, shipment_ids) -> dict:
+    """The issued CoC for each shipment id, in ONE tenant-scoped query ({shipment_id: CoC})."""
+    ids = sorted({int(i) for i in shipment_ids if i is not None})
+    if not ids:
+        return {}
+    rows = (
+        db.query(CertificateOfConformance)
+        .filter(
+            CertificateOfConformance.company_id == company_id,
+            CertificateOfConformance.shipment_id.in_(ids),
+        )
+        .all()
+    )
+    return {row.shipment_id: row for row in rows}
 
 
 def _resolve_work_order(db: Session, shipment: Shipment, company_id: int) -> Optional[WorkOrder]:
@@ -116,8 +135,42 @@ def generate_coc_for_shipment(
     company_id: int,
     user_id: int,
     audit: AuditService,
+    accepted_exceptions: Optional[List[dict]] = None,
 ) -> CertificateOfConformance:
     """Mint (or return the existing) CoC for a shipment. Idempotent; does NOT commit.
+
+    Thin wrapper over :func:`issue_coc_for_shipment` for callers that do not need to
+    know whether THIS call created the row.
+    """
+    coc, _created = issue_coc_for_shipment(
+        db,
+        shipment=shipment,
+        company_id=company_id,
+        user_id=user_id,
+        audit=audit,
+        accepted_exceptions=accepted_exceptions,
+    )
+    return coc
+
+
+def issue_coc_for_shipment(
+    db: Session,
+    *,
+    shipment: Shipment,
+    company_id: int,
+    user_id: int,
+    audit: AuditService,
+    accepted_exceptions: Optional[List[dict]] = None,
+) -> Tuple[CertificateOfConformance, bool]:
+    """Mint (or return the existing) CoC for a shipment, and say whether THIS call minted it.
+
+    ``created`` is False when a certificate already existed or a concurrent issuer won the
+    ``uq_coc_company_shipment`` race; the caller must then not record its own acceptance
+    against someone else's certificate. Idempotent; does NOT commit.
+
+    ``accepted_exceptions`` (shipping/2) are the open quality items the issuer accepted
+    on a manual issue over them; they are frozen into the snapshot as
+    ``accepted_release_exceptions`` (never printed on the customer's certificate).
 
     Captures a frozen snapshot of the certified facts (resolved from the work order,
     part, and customer) plus the resolved issuer name and ISO dates into
@@ -126,7 +179,7 @@ def generate_coc_for_shipment(
     """
     existing = _existing_coc(db, shipment.id, company_id)
     if existing is not None:
-        return existing
+        return existing, False
 
     wo = _resolve_work_order(db, shipment, company_id)
     part: Optional[Part] = None
@@ -154,6 +207,8 @@ def generate_coc_for_shipment(
 
     issued_at = datetime.utcnow()
     ship_date_iso = shipment.ship_date.isoformat() if getattr(shipment, "ship_date", None) else None
+    company = db.get(Company, company_id)
+    issued_date = to_local_date(issued_at, resolve_zone(getattr(company, "timezone", None)))
 
     snapshot = {
         "coc_number": coc_number,
@@ -170,7 +225,18 @@ def generate_coc_for_shipment(
         "issued_by_name": issued_by_name,
         "ship_date": ship_date_iso,
         "issued_at": to_utc_iso(issued_at),
+        # Added with the company letterhead (shipping/1 step 3). Frozen so the certificate
+        # the customer holds never changes when the company record or zone is edited later;
+        # snapshots issued before these keys existed fall back to the live Company row.
+        "issued_date": issued_date.isoformat() if issued_date else None,
+        "po_line_item": getattr(wo, "po_line_item", None) if wo else None,
+        "unit_number": getattr(wo, "unit_number", None) if wo else None,
+        "company_name": getattr(company, "name", None),
+        "company_address": getattr(company, "address", None),
+        "company_phone": getattr(company, "phone", None),
     }
+    if accepted_exceptions:
+        snapshot["accepted_release_exceptions"] = list(accepted_exceptions)
 
     coc = CertificateOfConformance(
         coc_number=coc_number,
@@ -207,7 +273,7 @@ def generate_coc_for_shipment(
         nested.rollback()
         winner = _existing_coc(db, shipment.id, company_id)
         if winner is not None:
-            return winner
+            return winner, False
         # Re-raise if the collision wasn't the shipment-uniqueness race we expected.
         raise
 
@@ -223,7 +289,87 @@ def generate_coc_for_shipment(
     # the CoC flag (and a later re-ship's coc_required check short-circuits to True).
     shipment.cert_of_conformance = True
 
-    return coc
+    return coc, True
+
+
+COC_WITHHELD_AUDIT_ACTION = "COC_WITHHELD"
+COC_WITHHELD_EVENT_TYPE = "coc_withheld"
+COC_ISSUED_OVER_EXCEPTIONS_AUDIT_ACTION = "COC_ISSUED_OVER_EXCEPTIONS"
+
+
+def record_coc_withheld(
+    db: Session,
+    *,
+    shipment: Shipment,
+    work_order: WorkOrder,
+    exceptions: List[dict],
+    company_id: int,
+    user_id: int,
+    audit: AuditService,
+) -> None:
+    """Record that a required CoC was NOT auto-issued on ship because quality items are open.
+
+    REQUIRED evidence (``log_required``): the caller wraps it in ``required_audit`` so the
+    ship rolls back (503) rather than land with no record of why no certificate was
+    issued. The ``coc_withheld`` OperationalEvent is a best-effort signal on top. Joins
+    the caller's unit of work; never commits.
+    """
+    codes = [exc.get("code") for exc in exceptions]
+    audit.log_required(
+        COC_WITHHELD_AUDIT_ACTION,
+        "shipment",
+        resource_id=shipment.id,
+        resource_identifier=shipment.shipment_number,
+        description=(
+            f"Certificate of Conformance withheld for shipment {shipment.shipment_number} "
+            f"(WO {work_order.work_order_number}): {len(exceptions)} open quality item(s), Quality to issue"
+        ),
+        new_values={"coc_withheld": True, "release_exceptions": codes},
+        extra_data={
+            "work_order_id": work_order.id,
+            "work_order_number": work_order.work_order_number,
+            "release_exceptions": exceptions,
+        },
+        company_id=company_id,
+    )
+    OperationalEventService(db).emit_best_effort(
+        company_id=company_id,
+        event_type=COC_WITHHELD_EVENT_TYPE,
+        source_module="shipping",
+        entity_type="shipment",
+        entity_id=shipment.id,
+        work_order_id=work_order.id,
+        user_id=user_id,
+        severity="warning",
+        event_payload={
+            "shipment_number": shipment.shipment_number,
+            "work_order_number": work_order.work_order_number,
+            "release_exception_codes": codes,
+        },
+    )
+
+
+def withheld_shipment_ids(db: Session, company_id: int, shipment_ids) -> set:
+    """Shipments whose automatic CoC was withheld on ship, from the audit trail (one query).
+
+    The caller pairs it with "no CoC issued yet": once Quality issues the certificate the
+    shipment is no longer waiting on one, though the withheld row stays in the trail.
+    """
+    ids = sorted({int(i) for i in shipment_ids if i is not None})
+    if not ids:
+        return set()
+    rows = (
+        db.query(AuditLog.resource_id)
+        .filter(
+            AuditLog.company_id == company_id,
+            AuditLog.resource_type == "shipment",
+            AuditLog.action == COC_WITHHELD_AUDIT_ACTION,
+            AuditLog.resource_id.in_(ids),
+        )
+        .distinct()
+        .all()
+    )
+    return {row[0] for row in rows}
 
 
 def render_coc_pdf(coc: CertificateOfConformance, db: Optional[Session] = None) -> bytes:
@@ -231,8 +377,10 @@ def render_coc_pdf(coc: CertificateOfConformance, db: Optional[Session] = None) 
 
     Prefers ``content_snapshot`` (the immutable JSON captured at issue time, incl. the
     resolved ``issued_by_name``); falls back to the row's denormalized columns when the
-    snapshot is absent or unparseable. ``db`` is accepted for signature symmetry but is
-    not required -- the snapshot is self-contained by design.
+    snapshot is absent or unparseable. A snapshot issued before the letterhead keys
+    existed has no company header or company-local issue date: with ``db`` those two are
+    read from the issuing company's live row (tenant: ``coc.company_id``); without it the
+    header is omitted and the issue date is the shop-zone (Central) date of ``issued_at``.
     """
     snapshot: dict = {}
     if coc.content_snapshot:
@@ -251,7 +399,22 @@ def render_coc_pdf(coc: CertificateOfConformance, db: Optional[Session] = None) 
     if not isinstance(serial_numbers, list):
         serial_numbers = _parse_serial_numbers(coc.serial_numbers)
 
+    company = None
+    if db is not None and snapshot.get("company_name") is None:
+        company = db.get(Company, coc.company_id)
+    issued_date = snapshot.get("issued_date")
+    if issued_date is None and coc.issued_at is not None:
+        if company is None and db is not None:
+            company = db.get(Company, coc.company_id)
+        local = to_local_date(coc.issued_at, resolve_zone(getattr(company, "timezone", None)))
+        issued_date = local.isoformat() if local else None
+
     return build_certificate_of_conformance_pdf(
+        company_name=snapshot.get("company_name") or getattr(company, "name", None),
+        company_address=snapshot.get("company_address") or getattr(company, "address", None),
+        company_phone=snapshot.get("company_phone") or getattr(company, "phone", None),
+        po_line_item=snapshot.get("po_line_item"),
+        unit_number=snapshot.get("unit_number"),
         coc_number=_fact("coc_number", coc.coc_number),
         customer_name=_fact("customer_name", coc.customer_name),
         customer_po=_fact("customer_po", coc.customer_po),
@@ -265,5 +428,5 @@ def render_coc_pdf(coc: CertificateOfConformance, db: Optional[Session] = None) 
         ship_date=snapshot.get("ship_date"),
         conformance_statement=_fact("conformance_statement", coc.conformance_statement),
         issued_by_name=snapshot.get("issued_by_name"),
-        issued_at=_fact("issued_at", to_utc_iso(coc.issued_at)),
+        issued_at=issued_date,
     )

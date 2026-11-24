@@ -178,6 +178,11 @@ def build_coc_with(value: str) -> bytes:
         conformance_statement=None,
         issued_by_name=value,
         issued_at="2026-07-30T12:00:00Z",
+        company_name=value,
+        company_address=f"{value}\nSecond line {value}",
+        company_phone=value,
+        po_line_item=value,
+        unit_number=value,
     )
 
 

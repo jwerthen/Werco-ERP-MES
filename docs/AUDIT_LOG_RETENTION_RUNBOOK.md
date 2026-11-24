@@ -435,6 +435,12 @@ application and must be performed by a DBA with explicit sign-off.
    `tr_audit_log_no_delete` to "make the delete work." Removal is achieved by dropping a table
    partition at the storage layer, which is a DDL operation outside the row-DML the triggers guard —
    not by row `DELETE`.
+6. **No screen state still reads the rows.** The Shipping list's "CoC withheld, Quality to issue"
+   (`coc_withheld` on the shipment reads) is derived from `COC_WITHHELD` audit rows
+   (`coc_service.withheld_shipment_ids`). Dropping a range that holds the row of a shipment still
+   awaiting its certificate silently clears that prompt. Check for withheld shipments without a
+   certificate in the range first, until a column replaces this read (planned with certificate
+   reissue).
 
 ### After removal
 

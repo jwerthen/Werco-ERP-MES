@@ -2,12 +2,14 @@ from datetime import date, datetime
 from io import BytesIO
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
+from app.api.audit_guard import required_audit
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
+from app.core.credentials import is_api_token_credential
 from app.core.realtime import safe_broadcast
 from app.core.time_utils import to_utc_iso
 from app.core.websocket import broadcast_dashboard_update, broadcast_work_order_update
@@ -31,6 +33,7 @@ from app.schemas.shipping import (
     BuyLabelResponse,
     RateQuoteResponse,
     RateShopRequest,
+    ReleaseExceptionAcknowledgment,
     SchedulePickupRequest,
     SchedulePickupResponse,
     ShipmentCreate,
@@ -48,9 +51,14 @@ from app.services.carriers.exceptions import (
     NotSupportedError,
 )
 from app.services.coc_service import (
+    COC_ISSUED_OVER_EXCEPTIONS_AUDIT_ACTION,
     coc_required_for_shipment,
+    cocs_by_shipment,
     generate_coc_for_shipment,
+    issue_coc_for_shipment,
+    record_coc_withheld,
     render_coc_pdf,
+    withheld_shipment_ids,
 )
 from app.services.completion_inventory_service import (
     decrement_finished_goods_for_shipment,
@@ -58,11 +66,22 @@ from app.services.completion_inventory_service import (
 )
 from app.services.completion_signal_service import enqueue_work_order_completion_signals
 from app.services.operational_event_service import OperationalEventService
+from app.services.process_sheet_service import parse_serial_numbers
+from app.services.quality_gate_service import shipment_release_exceptions
 from app.services.shipment_commands import (
     _allocated_quantity,
     create_shipment_command,
 )
 from app.services.shipment_commands import generate_shipment_number as _generate_shipment_number
+from app.services.shipment_release_service import (
+    API_TOKEN_COC_ISSUE,
+    COC_OVER_EXCEPTIONS_MESSAGE,
+    QUALITY_SHIP_ONLY_OVER_EXCEPTIONS,
+    SHIP_OVER_EXCEPTIONS_MESSAGE,
+    is_quality_only_shipper,
+    record_ship_over_exceptions,
+    require_release_acknowledgment,
+)
 from app.services.shipping_service import ShippingService
 
 router = APIRouter()
@@ -78,6 +97,19 @@ def generate_shipment_number(db: Session) -> str:
 # to ADMIN / MANAGER / SUPERVISOR / SHIPPING -- the same set that may complete a
 # shipment. read-only views (rate quotes, tracking) stay open to any tenant user.
 CARRIER_WRITE_ROLES = [UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR, UserRole.SHIPPING]
+
+COC_WITHHELD_AUDIT_UNAVAILABLE = (
+    "The record of the withheld Certificate of Conformance could not be saved; the shipment was not shipped. Retry."
+)
+SHIP_ACCEPTANCE_AUDIT_UNAVAILABLE = (
+    "The record of the accepted quality items could not be saved; the shipment was not shipped. Retry."
+)
+COC_ACCEPTANCE_AUDIT_UNAVAILABLE = (
+    "The record of the accepted quality items could not be saved; no certificate was issued. Retry."
+)
+COC_NOT_SHIPPED_DETAIL = (
+    "A Certificate of Conformance is issued only for a shipment that has shipped. Mark the shipment shipped first."
+)
 
 
 def _map_carrier_error(exc: CarrierError) -> HTTPException:
@@ -141,27 +173,40 @@ def list_shipments(
         query = query.filter(Shipment.status == status)
 
     shipments = query.order_by(Shipment.created_at.desc()).offset(skip).limit(limit).all()
+    cocs = cocs_by_shipment(db, company_id, [s.id for s in shipments])
+    withheld = withheld_shipment_ids(db, company_id, [s.id for s in shipments if s.id not in cocs])
 
-    result = []
-    for s in shipments:
-        result.append(
-            ShipmentResponse(
-                id=s.id,
-                shipment_number=s.shipment_number,
-                work_order_id=s.work_order_id,
-                work_order_number=s.work_order.work_order_number if s.work_order else None,
-                customer_name=s.work_order.customer_name if s.work_order else None,
-                part_number=s.work_order.part.part_number if s.work_order and s.work_order.part else None,
-                status=s.status.value if hasattr(s.status, 'value') else s.status,
-                ship_to_name=s.ship_to_name,
-                carrier=s.carrier,
-                tracking_number=s.tracking_number,
-                quantity_shipped=s.quantity_shipped,
-                ship_date=s.ship_date,
-                created_at=s.created_at,
-            )
-        )
-    return result
+    return [_shipment_response(s, cocs.get(s.id), s.id in withheld) for s in shipments]
+
+
+def _shipment_response(shipment: Shipment, coc: Optional[CertificateOfConformance], withheld: bool) -> ShipmentResponse:
+    """The one ShipmentResponse builder (list, create, update), so the CoC fields never drift."""
+    wo = shipment.work_order
+    return ShipmentResponse(
+        id=shipment.id,
+        shipment_number=shipment.shipment_number,
+        work_order_id=shipment.work_order_id,
+        work_order_number=wo.work_order_number if wo else None,
+        customer_name=wo.customer_name if wo else None,
+        part_number=wo.part.part_number if wo and wo.part else None,
+        status=shipment.status.value if hasattr(shipment.status, 'value') else shipment.status,
+        ship_to_name=shipment.ship_to_name,
+        carrier=shipment.carrier,
+        tracking_number=shipment.tracking_number,
+        quantity_shipped=shipment.quantity_shipped,
+        ship_date=shipment.ship_date,
+        created_at=shipment.created_at,
+        coc_number=coc.coc_number if coc else None,
+        coc_issued_at=coc.issued_at if coc else None,
+        coc_withheld=coc is None and withheld,
+    )
+
+
+def _shipment_response_for(db: Session, company_id: int, shipment: Shipment) -> ShipmentResponse:
+    """Single-shipment response with its CoC number / withheld state read the same way the list reads them."""
+    coc = cocs_by_shipment(db, company_id, [shipment.id]).get(shipment.id)
+    withheld = coc is None and shipment.id in withheld_shipment_ids(db, company_id, [shipment.id])
+    return _shipment_response(shipment, coc, withheld)
 
 
 @router.get("/ready-to-ship")
@@ -193,12 +238,18 @@ def get_ready_to_ship(
         .order_by(WorkOrder.due_date)
         .all()
     )
+    remaining_by_wo = {
+        wo.id: max(0, float(wo.quantity_complete or 0) - float(allocations.get(wo.id) or 0)) for wo in work_orders
+    }
+    open_items = shipment_release_exceptions(
+        db, company_id, [wo_id for wo_id, remaining in remaining_by_wo.items() if remaining > 0]
+    )
     result = []
     for wo in work_orders:
         completed = float(wo.quantity_complete or 0)
         allocated = float(allocations.get(wo.id) or 0)
         shipped = float(dispatched.get(wo.id) or 0)
-        remaining = max(0, completed - allocated)
+        remaining = remaining_by_wo[wo.id]
         if remaining > 0:
             result.append(
                 {
@@ -212,6 +263,8 @@ def get_ready_to_ship(
                     "quantity_reserved": max(0, allocated - shipped),
                     "quantity_remaining": remaining,
                     "due_date": wo.due_date.isoformat() if wo.due_date else None,
+                    # Read only (shipping/2): open quality items that withhold the automatic CoC.
+                    "release_exceptions": [exc.as_dict() for exc in open_items.get(wo.id, [])],
                 }
             )
     return result
@@ -235,6 +288,9 @@ def get_shipment(
     if not shipment:
         raise HTTPException(status_code=404, detail="Shipment not found")
 
+    coc = cocs_by_shipment(db, company_id, [shipment.id]).get(shipment.id)
+    wo = shipment.work_order
+    part = wo.part if wo else None
     return {
         "id": shipment.id,
         "shipment_number": shipment.shipment_number,
@@ -250,6 +306,14 @@ def get_shipment(
         "status": shipment.status.value if hasattr(shipment.status, 'value') else shipment.status,
         "ship_to_name": shipment.ship_to_name,
         "ship_to_address": shipment.ship_to_address,
+        "ship_to_city": shipment.ship_to_city,
+        "ship_to_state": shipment.ship_to_state,
+        "ship_to_zip": shipment.ship_to_zip,
+        # Order facts the packing slip prints (shipping/1 step 2).
+        "po_line_item": wo.po_line_item if wo else None,
+        "unit_number": wo.unit_number if wo else None,
+        "part_revision": part.revision if part else None,
+        "serial_numbers": parse_serial_numbers(wo.serial_numbers) if wo else [],
         "carrier": shipment.carrier,
         "tracking_number": shipment.tracking_number,
         "quantity_shipped": shipment.quantity_shipped,
@@ -259,6 +323,16 @@ def get_shipment(
         "cert_of_conformance": shipment.cert_of_conformance,
         "packing_notes": shipment.packing_notes,
         "created_at": to_utc_iso(shipment.created_at),
+        "coc_number": coc.coc_number if coc else None,
+        "coc_issued_at": to_utc_iso(coc.issued_at) if coc else None,
+        "coc_withheld": coc is None and shipment.id in withheld_shipment_ids(db, company_id, [shipment.id]),
+        # (``and`` short-circuits: the audit-log read runs only when no certificate exists.)
+        "release_exceptions": [
+            exc.as_dict()
+            for exc in shipment_release_exceptions(db, company_id, [shipment.work_order_id]).get(
+                shipment.work_order_id, []
+            )
+        ],
     }
 
 
@@ -272,44 +346,39 @@ def create_shipment(
 ):
     """Create a new shipment"""
     shipment = create_shipment_command(db, current_user, company_id, shipment_in, audit)
-    wo = db.get(WorkOrder, shipment.work_order_id)
     db.commit()
     db.refresh(shipment)
 
-    return ShipmentResponse(
-        id=shipment.id,
-        shipment_number=shipment.shipment_number,
-        work_order_id=shipment.work_order_id,
-        work_order_number=wo.work_order_number,
-        customer_name=wo.customer_name,
-        part_number=wo.part.part_number if wo.part else None,
-        status=shipment.status.value,
-        ship_to_name=shipment.ship_to_name,
-        carrier=shipment.carrier,
-        tracking_number=shipment.tracking_number,
-        quantity_shipped=shipment.quantity_shipped,
-        ship_date=shipment.ship_date,
-        created_at=shipment.created_at,
-    )
+    return _shipment_response_for(db, company_id, shipment)
 
 
 @router.post("/{shipment_id}/ship")
 def mark_shipped(
     shipment_id: int,
     tracking_number: Optional[str] = None,
+    acknowledgment: Optional[ReleaseExceptionAcknowledgment] = Body(None),
     db: Session = Depends(get_db),
     # RBAC (docs/RBAC_PERMISSIONS.md -> Shipping -> "Complete"): marking a shipment shipped
     # is the terminal shipping action that CLOSES the work order, so it is gated to the
     # documented Shipping-Complete role set (ADMIN / MANAGER / SUPERVISOR / SHIPPING). This
     # is an intentional behavior change: non-privileged tenant users now get 403 (previously
     # any authenticated user could close a WO by shipping).
+    # shipping/2: QUALITY is admitted only to accept open quality items (refused 403 on a
+    # job with nothing open -- see is_quality_only_shipper).
     current_user: User = Depends(
-        require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR, UserRole.SHIPPING])
+        require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR, UserRole.SHIPPING, UserRole.QUALITY])
     ),
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Mark shipment as shipped"""
+    """Mark a shipment shipped (closes the work order once fully shipped).
+
+    When the job has open quality items (the shipment's ``release_exceptions``) this
+    answers 409 listing them unless the body carries ``acknowledge_exceptions: true`` and
+    a ``reason`` from Admin, Manager or Quality (never a standing API token). The
+    acceptance is required audit evidence, and the required certificate is then withheld
+    for Quality to issue. Shipping and Supervisor ship a job with nothing open.
+    """
     # G2: lock the shipment row while we re-check status + write the offsetting FG
     # decrement, so a concurrent double-ship can't both pass the idempotency guard and
     # double-decrement on-hand. (with_for_update is a no-op on SQLite used by tests.)
@@ -368,6 +437,17 @@ def mark_shipped(
             status_code=409,
             detail="This shipment exceeds the remaining completed quantity. Edit or cancel the pending shipment first.",
         )
+
+    # shipping/2: open quality items on the job (read before any write).
+    release_exceptions = (
+        [exc.as_dict() for exc in shipment_release_exceptions(db, company_id, [wo.id]).get(wo.id, [])] if wo else []
+    )
+    coc_withheld = False
+    acceptance_reason = require_release_acknowledgment(
+        current_user, acknowledgment, release_exceptions, message=SHIP_OVER_EXCEPTIONS_MESSAGE
+    )
+    if not release_exceptions and is_quality_only_shipper(current_user):
+        raise HTTPException(status_code=403, detail=QUALITY_SHIP_ONLY_OVER_EXCEPTIONS)
 
     shipment.status = ShipmentStatus.SHIPPED
     shipment.ship_date = date.today()
@@ -476,7 +556,35 @@ def mark_shipped(
         # generation is BEST-EFFORT and idempotent (DB-enforced per shipment): a failure
         # here must never fail the ship, so it is wrapped and recorded as a warning
         # OperationalEvent (mirrors the warn-and-record posture of the FG/over-ship guards).
-        if coc_required_for_shipment(db, work_order=wo, shipment=shipment, company_id=company_id):
+        if release_exceptions and acceptance_reason is not None:
+            with required_audit(db, SHIP_ACCEPTANCE_AUDIT_UNAVAILABLE):
+                record_ship_over_exceptions(
+                    audit,
+                    shipment=shipment,
+                    work_order=wo,
+                    exceptions=release_exceptions,
+                    reason=acceptance_reason,
+                    company_id=company_id,
+                )
+
+        coc_required = coc_required_for_shipment(db, work_order=wo, shipment=shipment, company_id=company_id)
+        if coc_required and release_exceptions:
+            # shipping/2: open quality items on the job -- the certificate states the parts
+            # conform, so it is NOT issued automatically under the shipper's name. Quality
+            # issues it (POST /coc, accepting the items). Required evidence: no record of
+            # why no certificate went out means no ship.
+            with required_audit(db, COC_WITHHELD_AUDIT_UNAVAILABLE):
+                record_coc_withheld(
+                    db,
+                    shipment=shipment,
+                    work_order=wo,
+                    exceptions=release_exceptions,
+                    company_id=company_id,
+                    user_id=current_user.id,
+                    audit=audit,
+                )
+            coc_withheld = True
+        elif coc_required:
             try:
                 generate_coc_for_shipment(
                     db,
@@ -525,7 +633,12 @@ def mark_shipped(
         )
         enqueue_work_order_completion_signals(work_order_id=wo.id, company_id=company_id, status="CLOSED")
 
-    return {"message": "Shipment marked as shipped", "shipment_number": shipment.shipment_number}
+    return {
+        "message": "Shipment marked as shipped",
+        "shipment_number": shipment.shipment_number,
+        "coc_withheld": coc_withheld,
+        "release_exceptions": release_exceptions,
+    }
 
 
 @router.put("/{shipment_id}", response_model=ShipmentResponse)
@@ -604,22 +717,7 @@ def update_shipment(
     db.commit()
     db.refresh(shipment)
 
-    wo = shipment.work_order
-    return ShipmentResponse(
-        id=shipment.id,
-        shipment_number=shipment.shipment_number,
-        work_order_id=shipment.work_order_id,
-        work_order_number=wo.work_order_number if wo else None,
-        customer_name=wo.customer_name if wo else None,
-        part_number=wo.part.part_number if wo and wo.part else None,
-        status=shipment.status.value if hasattr(shipment.status, 'value') else shipment.status,
-        ship_to_name=shipment.ship_to_name,
-        carrier=shipment.carrier,
-        tracking_number=shipment.tracking_number,
-        quantity_shipped=shipment.quantity_shipped,
-        ship_date=shipment.ship_date,
-        created_at=shipment.created_at,
-    )
+    return _shipment_response_for(db, company_id, shipment)
 
 
 def _coc_for_shipment(db: Session, shipment_id: int, company_id: int) -> Optional[CertificateOfConformance]:
@@ -637,27 +735,77 @@ def _coc_for_shipment(db: Session, shipment_id: int, company_id: int) -> Optiona
 @router.post("/{shipment_id}/coc", response_model=CertificateOfConformanceResponse)
 def issue_certificate_of_conformance(
     shipment_id: int,
+    acknowledgment: Optional[ReleaseExceptionAcknowledgment] = Body(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Issue (or return the existing) Certificate of Conformance for a shipment.
+    """Issue (or return the existing) Certificate of Conformance for a shipped shipment.
 
-    Idempotent: re-issuing returns the same CoC without a second audit row. RBAC is
-    restricted to ADMIN / MANAGER / QUALITY (quality artifact). Tenant-scoped.
+    Idempotent: re-issuing returns the same CoC without a second audit row. ADMIN /
+    MANAGER / QUALITY only, and never a standing API token (403): the certificate states
+    the parts conform, a person's judgment. 409 until the shipment has shipped. When the
+    job has open quality items (``release_exceptions`` on the shipment) the body must
+    carry ``acknowledge_exceptions: true`` and a ``reason`` (else 409 listing them); the
+    accepted items are frozen into the certificate's snapshot and written as required
+    audit evidence. Tenant-scoped.
     """
+    if is_api_token_credential(current_user):
+        raise HTTPException(status_code=403, detail=API_TOKEN_COC_ISSUE)
     shipment = db.query(Shipment).filter(Shipment.id == shipment_id, Shipment.company_id == company_id).first()
     if not shipment:
         raise HTTPException(status_code=404, detail="Shipment not found")
+    existing = _coc_for_shipment(db, shipment.id, company_id)
+    if existing is not None:
+        return CertificateOfConformanceResponse.model_validate(existing)
+    if shipment.status not in (ShipmentStatus.SHIPPED, ShipmentStatus.DELIVERED):
+        # The certificate freezes the shipped quantity and ship date, so it is issued only
+        # for what actually left the building.
+        raise HTTPException(status_code=409, detail=COC_NOT_SHIPPED_DETAIL)
 
-    coc = generate_coc_for_shipment(
+    exceptions = [
+        exc.as_dict()
+        for exc in shipment_release_exceptions(db, company_id, [shipment.work_order_id]).get(shipment.work_order_id, [])
+    ]
+    reason = require_release_acknowledgment(
+        current_user, acknowledgment, exceptions, message=COC_OVER_EXCEPTIONS_MESSAGE
+    )
+
+    coc, created = issue_coc_for_shipment(
         db,
         shipment=shipment,
         company_id=company_id,
         user_id=current_user.id,
         audit=audit,
+        accepted_exceptions=exceptions or None,
     )
+    if not created:
+        # A concurrent issuer won the uq_coc_company_shipment race: hand back THEIR
+        # certificate, exactly as the early ``existing`` branch does. Recording this
+        # caller's acceptance against it would name two issuers for one certificate.
+        return CertificateOfConformanceResponse.model_validate(coc)
+    if exceptions:
+        with required_audit(db, COC_ACCEPTANCE_AUDIT_UNAVAILABLE):
+            audit.log_required(
+                COC_ISSUED_OVER_EXCEPTIONS_AUDIT_ACTION,
+                "certificate_of_conformance",
+                resource_id=coc.id,
+                resource_identifier=coc.coc_number,
+                description=(
+                    f"Issued Certificate of Conformance {coc.coc_number} for shipment {shipment.shipment_number} "
+                    f"accepting {len(exceptions)} open quality item(s)"
+                ),
+                new_values={"accepted_release_exceptions": [exc["code"] for exc in exceptions]},
+                extra_data={
+                    "shipment_id": shipment.id,
+                    "shipment_number": shipment.shipment_number,
+                    "work_order_id": shipment.work_order_id,
+                    "release_exceptions": exceptions,
+                    "reason": reason,
+                },
+                company_id=company_id,
+            )
     db.commit()
     db.refresh(coc)
     return CertificateOfConformanceResponse.model_validate(coc)
