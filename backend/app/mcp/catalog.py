@@ -90,6 +90,18 @@ FLOOR_PIN_OPERATIONS: FrozenSet[Tuple[str, str]] = frozenset(
     }
 )
 
+# And the self-service password change (``POST /users/change-password``): changing a password is a
+# person's act in their own session. The route refuses every credential that is not an interactive
+# person (``app.core.credentials.PASSWORD_CHANGE_PEOPLE_ONLY``) -- API tokens and badge / station
+# tokens -- and a person's own JWT would still reach it through a tool call (an agent, possibly
+# following text injected through ERP data, changing the person's password and locking them out),
+# so it is not a tool. Named on its own so the credential tests walk exactly this route.
+PASSWORD_OPERATIONS: FrozenSet[Tuple[str, str]] = frozenset(
+    {
+        ("POST", "/api/v1/users/change-password"),
+    }
+)
+
 # And restricted document viewing (AS9100D 7.5.3.1 / 7.5.3.2, migration 131): granting or revoking
 # a user's export authorization -- the only thing that opens an export_controlled document -- and
 # changing a document's access level. Both are a person's judgment about who may open controlled
@@ -153,6 +165,7 @@ EXCLUDED_OPERATIONS: FrozenSet[Tuple[str, str]] = (
     )
     | EGRESS_SWITCH_OPERATIONS
     | FLOOR_PIN_OPERATIONS
+    | PASSWORD_OPERATIONS
     | DOCUMENT_ACCESS_OPERATIONS
     | COMMENT_WRITE_OPERATIONS
 )

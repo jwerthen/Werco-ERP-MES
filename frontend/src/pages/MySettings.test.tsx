@@ -19,11 +19,16 @@ jest.mock('../components/settings/SmsSettingsSection', () => ({
   default: () => <div data-testid="sms-settings-section" />,
 }));
 
+jest.mock('../components/settings/PasswordSettingsSection', () => ({
+  __esModule: true,
+  default: () => <div data-testid="password-settings-section" />,
+}));
+
 const renderPage = () =>
   render(
     <MemoryRouter>
       <MySettings />
-    </MemoryRouter>,
+    </MemoryRouter>
   );
 
 describe('MySettings', () => {
@@ -34,13 +39,16 @@ describe('MySettings', () => {
     expect(screen.getByTestId('sms-settings-section')).toBeInTheDocument();
   });
 
+  it('mounts the Password section', () => {
+    renderPage();
+
+    expect(screen.getByTestId('password-settings-section')).toBeInTheDocument();
+  });
+
   it('cross-links back to the notification inbox', () => {
     renderPage();
 
-    expect(screen.getByRole('link', { name: /view notifications/i })).toHaveAttribute(
-      'href',
-      '/notifications',
-    );
+    expect(screen.getByRole('link', { name: /view notifications/i })).toHaveAttribute('href', '/notifications');
   });
 
   it('resolves a real page title from routeMeta', () => {

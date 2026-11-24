@@ -2,8 +2,8 @@
 
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
-(Cursor, Claude Code, a chat bot) gets **795 tools** — 15 hand-written *convenience* tools plus
-**780 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+(Cursor, Claude Code, a chat bot) gets **794 tools** — 15 hand-written *convenience* tools plus
+**779 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
 as the same request from the web app. A **read-only** API token is shown fewer tools, and an
 **AI-external** one fewer still (§4.1, §4.2).
 
@@ -133,6 +133,11 @@ generated, and it is not on the AI-external allowlist. See
 15 convenience + **780** generated, 16 shadowed, one fewer than the 781 above. It was a write, so the
 read-only catalog is unchanged at 8 convenience + **304** generated, and it was never on the
 AI-external allowlist.
+
+**Re-checked again on 2026-11-23 after the self-service password change left the catalog**:
+`change_own_password` (`POST /users/change-password`) joined `EXCLUDED_OPERATIONS` (§6.1) as a
+people-only write, so 15 convenience + **779** generated (one fewer than the 780 above), 16 shadowed. It was a write, so the
+read-only catalog is unchanged at 8 convenience + **304** generated.
 
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
@@ -772,7 +777,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `Dashboard` (`/`) | Dashboard, Shop Floor, Scheduling, Calibration, Inventory, Quality Management | `get_shop_floor_dashboard`★, `get_capacity_heatmap`, `get_equipment_due_soon`, `get_low_stock_alerts`, `get_quality_summary`, `get_my_dashboard_layout`, `save_my_dashboard_layout`, `reset_my_dashboard_layout` (the caller's own saved layout; an API token reads it but is refused **403** on save / reset — [API.md → Personal dashboard layout](API.md#personal-dashboard-layout)) |
 | `ActionInbox` (`/action-inbox`) | AI Learning, Setup & Readiness | `list_ai_recommendations`, `accept_ai_recommendation` (record-only; on an action card it needs a role that could apply the action and is refused for an API token), `dismiss_ai_recommendation`, `snooze_ai_recommendation`, `get_setup_health` — **Accept & apply is not a tool**: `POST /ai/recommendations/{recommendation_id}/apply` is in `EXCLUDED_OPERATIONS` (§6.1) |
 | `Notifications` (`/notifications`) | Notifications | `list_notifications`, `get_unread_count`, `mark_notification_read`, `mark_all_read` |
-| `MySettings` (`/settings`) | Users (self-service) | `get_current_user_info`, `get_my_notification_preferences`, `update_my_notification_preferences`, `update_my_phone`, `send_test_sms`, `change_own_password` |
+| `MySettings` (`/settings`) | Users (self-service) | `get_current_user_info`, `get_my_notification_preferences`, `update_my_notification_preferences`, `update_my_phone`, `send_test_sms` — **changing your own password is not a tool**: `POST /users/change-password` is in `EXCLUDED_OPERATIONS` (§6.1) and refuses every API token and badge / station token |
 | `SetupWizard` (`/setup`) | Setup & Readiness | `get_setup_health`, `get_part_readiness` |
 | `WorkOrders` (`/work-orders`) | Work Orders, Work Order Templates | `work_orders_list_work_orders`, `get_work_order_by_number`, `update_work_order_priority`, `work_orders_delete_work_order`, `work_orders_restore_work_order`, `list_work_order_templates`, `use_work_order_template`, `release_work_order`★ — **bulk release is not a tool**: `POST /work-orders/bulk-release` is in `EXCLUDED_OPERATIONS` (§6.1), so release one job per call |
 | `WorkOrderNew` (`/work-orders/new`) | Work Orders, Parts, Bill of Materials, Routing, Customers, Setup & Readiness, Work Centers | `create_work_order`★, `preview_work_order_operations`, `get_routing_by_part`, `list_customer_names`, `get_part_readiness`, `list_work_centers`★ |

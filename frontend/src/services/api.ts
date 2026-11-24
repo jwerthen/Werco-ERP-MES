@@ -196,6 +196,7 @@ import type { HankCapabilities, HankTask, HankTaskCreate, HankTaskCommand, HankT
 import type { HankWatchCreate } from '../types/hankWatches';
 import type { HankPreferencesCommand, HankPreferencesResponse, HankPreferencesUpdate } from '../types/hankPreferences';
 import type { DashboardLayoutCommand, DashboardLayoutResponse, DashboardLayoutSave } from '../types/dashboardLayout';
+import type { ChangeOwnPasswordRequest, ChangeOwnPasswordResponse } from '../types/password';
 import type { HankEvidence, HankHandoff, HankHandoffCreate, HankHandoffList, HankRoutine, HankRoutineValues, HankRoutineRun, HankRoutineAdvance, HankWorkQueue, HankWorkState } from '../types/hankWork';
 import type { HankIntakeBatch, HankIntakeBatchList, HankIntakeFile, HankIntakePlan, HankIntakeReceivingDraft, HankIntakePurchaseOrderDraft, HankSourcePreview } from '../types/hankIntake';
 import {
@@ -4425,6 +4426,12 @@ class ApiService {
 
   async approveUser(userId: number, data: { role: string; department?: string }) {
     const response = await this.api.post(`/users/${userId}/approve`, data);
+    return response.data;
+  }
+
+  /** Change the signed-in person's own password. Never optimistic: the server may refuse (400/403/422/503). */
+  async changeOwnPassword(data: ChangeOwnPasswordRequest): Promise<ChangeOwnPasswordResponse> {
+    const response = await this.api.post<ChangeOwnPasswordResponse>('/users/change-password', data);
     return response.data;
   }
 

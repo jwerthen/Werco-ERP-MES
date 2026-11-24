@@ -13968,6 +13968,18 @@ There is no delete endpoint.
 > password fails only that row, `reason` = `"Weak password: …"`); operator **auto-generated**
 > passwords (for badge/employee-ID logins) satisfy the policy by construction and are **exempt**.
 
+> **Changing your own password — `POST /users/change-password`** (body `current_password`,
+> `new_password`; any signed-in person, on My Settings → Password). People only: every API token
+> and every crew-station badge or station token is refused **403** `PASSWORD_CHANGE_PEOPLE_ONLY`
+> before the body's passwords are read, and the route is not an MCP tool (`EXCLUDED_OPERATIONS`).
+> **400** `Current password is incorrect`; **422** on the policy above. The new hash,
+> `password_changed_at` (also stamped by the admin `POST /users/{id}/reset-password`) and the
+> `PASSWORD_CHANGE` audit row (`extra_data.source = "self_service"`, no password or hash) commit
+> as one transaction: an audit write that fails rolls the change back (**503**
+> `Unable to save audit record`). The change does **not** end other signed-in sessions:
+> `POST /auth/refresh` does not read `password_changed_at`, so another session keeps refreshing
+> until it signs out or sits unused for the 7-day idle window.
+
 ### User self-service (My Settings)
 
 Self-scoped profile + notification settings for the signed-in user. **No role gate beyond
@@ -13982,6 +13994,7 @@ roles). See [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#sms-channel-twilio).
 | GET | `/users/me/notification-preferences` | Your **effective** per-event channel matrix | Any authenticated user (self) |
 | PUT | `/users/me/notification-preferences` | Save your **SMS** opt-ins (audited) | Any authenticated user (self) |
 | POST | `/users/me/test-sms` | Send a test SMS to your own number — **`3/minute` per IP + `3/hour` per user** | Any authenticated user (self) |
+| POST | `/users/change-password` | Change your own password (My Settings → Password). Required audit; does not end other sessions — see [Changing your own password](#users-admin) above | Any signed-in person (self). Every API token and badge / station token **403**; not an MCP tool |
 
 > **`PUT /users/me/phone`** — body `{ "phone": "512-555-0100" }` (or `{ "phone": null }` / `""` to
 > clear); `phone` is `max_length` 32. The number is parsed against `SMS_DEFAULT_REGION` (default

@@ -25,7 +25,9 @@ from app.api.deps import (
 from app.core.credentials import (
     API_TOKEN_EXPORT_AUTHORIZATION,
     API_TOKEN_FLOOR_PIN_ADMIN,
+    PASSWORD_CHANGE_PEOPLE_ONLY,
     is_api_token_credential,
+    is_interactive_person,
 )
 from app.core.floor_pin import FloorPinInput, FloorPinRuleError, hash_floor_pin, validate_floor_pin
 from app.core.security import get_password_hash, verify_password
@@ -1180,6 +1182,7 @@ def reset_user_password(
 
     with atomic_security_write(db):
         user.hashed_password = get_password_hash(password_data.new_password)
+        user.password_changed_at = datetime.utcnow()
         # No old/new values: the password hash must never enter the audit log.
         audit.log_required(
             action=AuditService.ACTIONS["PASSWORD_CHANGE"],
@@ -1200,26 +1203,40 @@ def change_own_password(
     current_user: User = Depends(get_current_user),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Change own password.
+    """Change your own password (any signed-in person, in their own session).
 
-    CMMC AU-family event: the self-service change is recorded in the tamper-evident
-    audit log, mirroring the admin reset path. The new password/hash is deliberately
-    NEVER included in the record.
+    Refused 403 to an API token and to a badge / station token (``PASSWORD_CHANGE_PEOPLE_ONLY``)
+    before the body's passwords are read. 400 when the current password is wrong; 422 when the
+    new password fails the policy (12 or more characters, no common substring).
+
+    The change, its ``password_changed_at`` stamp and the ``PASSWORD_CHANGE`` audit row
+    (``extra_data.source = "self_service"``) commit as one transaction, the same
+    ``atomic_security_write`` + ``log_required`` shape as the admin reset: a lost audit
+    write rolls the change back (503 ``Unable to save audit record``). The new
+    password/hash is deliberately NEVER included in the record.
+
+    Changing the password does NOT end other signed-in sessions. ``POST /auth/refresh`` does
+    not read ``password_changed_at``, so another session keeps refreshing until it signs out
+    or sits unused for the 7-day idle window. Ending other sessions on a password change is
+    a separate authentication change, not made here.
     """
+    if not is_interactive_person(current_user):
+        raise HTTPException(status_code=403, detail=PASSWORD_CHANGE_PEOPLE_ONLY)
     if not verify_password(password_data.current_password, current_user.hashed_password):
         raise HTTPException(status_code=400, detail="Current password is incorrect")
 
-    current_user.hashed_password = get_password_hash(password_data.new_password)
-    # No old/new values: the password hash must never enter the audit log.
-    audit.log(
-        action=AuditService.ACTIONS["PASSWORD_CHANGE"],
-        resource_type="user",
-        resource_id=current_user.id,
-        resource_identifier=current_user.employee_id,
-        description=f"Changed own password for user {current_user.employee_id}",
-        extra_data={"source": "self_service"},
-    )
-    db.commit()
+    with atomic_security_write(db):
+        current_user.hashed_password = get_password_hash(password_data.new_password)
+        current_user.password_changed_at = datetime.utcnow()
+        # No old/new values: the password hash must never enter the audit log.
+        audit.log_required(
+            action=AuditService.ACTIONS["PASSWORD_CHANGE"],
+            resource_type="user",
+            resource_id=current_user.id,
+            resource_identifier=current_user.employee_id,
+            description=f"Changed own password for user {current_user.employee_id}",
+            extra_data={"source": "self_service"},
+        )
 
     return {"message": "Password changed successfully"}
 

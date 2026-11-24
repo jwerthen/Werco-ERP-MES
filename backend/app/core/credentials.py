@@ -105,6 +105,19 @@ API_TOKEN_FLOOR_PIN_ADMIN = (
     "not an API token: credential administration is a person's act."
 )
 
+# Self-service password change (``POST /users/change-password``). A person changes their own
+# password signed in to the app in their own session -- never through a standing API token, and
+# never from a crew-station badge token or station token. The route refuses every credential that
+# is not ``is_interactive_person`` 403 with this text before it reads the body's passwords. (A
+# badge token is already turned away by its shop-floor path fence in ``get_current_user``; the
+# explicit check keeps the rule in one place rather than resting on a fence elsewhere.) Not an MCP
+# tool (``app.mcp.catalog.PASSWORD_OPERATIONS``): a person's own JWT would otherwise let an agent
+# change that person's password.
+PASSWORD_CHANGE_PEOPLE_ONLY = (
+    "Your password is changed by you, signed in to the app: an API token or a shop-floor badge or station "
+    "token cannot change a password."
+)
+
 # Restricted document viewing (AS9100D 7.5.3.1 / 7.5.3.2, migration 131). Deciding who may open a
 # document (``POST /documents/{document_id}/access-level``) and who may open export-controlled ones
 # (``PUT /users/{user_id}/export-authorization``) are a person's judgment, so both routes refuse ANY
