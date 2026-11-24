@@ -31,7 +31,8 @@ from typing import List, Optional
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.core.time_utils import to_utc_iso
+from app.core.time_utils import resolve_zone, to_local_date, to_utc_iso
+from app.models.company import Company
 from app.models.customer import Customer
 from app.models.part import Part
 from app.models.shipping import CertificateOfConformance, Shipment
@@ -170,6 +171,8 @@ def generate_coc_for_shipment(
 
     issued_at = datetime.utcnow()
     ship_date_iso = shipment.ship_date.isoformat() if getattr(shipment, "ship_date", None) else None
+    company = db.get(Company, company_id)
+    issued_date = to_local_date(issued_at, resolve_zone(getattr(company, "timezone", None)))
 
     snapshot = {
         "coc_number": coc_number,
@@ -186,6 +189,15 @@ def generate_coc_for_shipment(
         "issued_by_name": issued_by_name,
         "ship_date": ship_date_iso,
         "issued_at": to_utc_iso(issued_at),
+        # Added with the company letterhead (shipping/1 step 3). Frozen so the certificate
+        # the customer holds never changes when the company record or zone is edited later;
+        # snapshots issued before these keys existed fall back to the live Company row.
+        "issued_date": issued_date.isoformat() if issued_date else None,
+        "po_line_item": getattr(wo, "po_line_item", None) if wo else None,
+        "unit_number": getattr(wo, "unit_number", None) if wo else None,
+        "company_name": getattr(company, "name", None),
+        "company_address": getattr(company, "address", None),
+        "company_phone": getattr(company, "phone", None),
     }
 
     coc = CertificateOfConformance(
@@ -247,8 +259,10 @@ def render_coc_pdf(coc: CertificateOfConformance, db: Optional[Session] = None) 
 
     Prefers ``content_snapshot`` (the immutable JSON captured at issue time, incl. the
     resolved ``issued_by_name``); falls back to the row's denormalized columns when the
-    snapshot is absent or unparseable. ``db`` is accepted for signature symmetry but is
-    not required -- the snapshot is self-contained by design.
+    snapshot is absent or unparseable. A snapshot issued before the letterhead keys
+    existed has no company header or company-local issue date: with ``db`` those two are
+    read from the issuing company's live row (tenant: ``coc.company_id``); without it the
+    header is omitted and the issue date is the shop-zone (Central) date of ``issued_at``.
     """
     snapshot: dict = {}
     if coc.content_snapshot:
@@ -267,7 +281,22 @@ def render_coc_pdf(coc: CertificateOfConformance, db: Optional[Session] = None) 
     if not isinstance(serial_numbers, list):
         serial_numbers = _parse_serial_numbers(coc.serial_numbers)
 
+    company = None
+    if db is not None and snapshot.get("company_name") is None:
+        company = db.get(Company, coc.company_id)
+    issued_date = snapshot.get("issued_date")
+    if issued_date is None and coc.issued_at is not None:
+        if company is None and db is not None:
+            company = db.get(Company, coc.company_id)
+        local = to_local_date(coc.issued_at, resolve_zone(getattr(company, "timezone", None)))
+        issued_date = local.isoformat() if local else None
+
     return build_certificate_of_conformance_pdf(
+        company_name=snapshot.get("company_name") or getattr(company, "name", None),
+        company_address=snapshot.get("company_address") or getattr(company, "address", None),
+        company_phone=snapshot.get("company_phone") or getattr(company, "phone", None),
+        po_line_item=snapshot.get("po_line_item"),
+        unit_number=snapshot.get("unit_number"),
         coc_number=_fact("coc_number", coc.coc_number),
         customer_name=_fact("customer_name", coc.customer_name),
         customer_po=_fact("customer_po", coc.customer_po),
@@ -281,5 +310,5 @@ def render_coc_pdf(coc: CertificateOfConformance, db: Optional[Session] = None) 
         ship_date=snapshot.get("ship_date"),
         conformance_statement=_fact("conformance_statement", coc.conformance_statement),
         issued_by_name=snapshot.get("issued_by_name"),
-        issued_at=_fact("issued_at", to_utc_iso(coc.issued_at)),
+        issued_at=issued_date,
     )

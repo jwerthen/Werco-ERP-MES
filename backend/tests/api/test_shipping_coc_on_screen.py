@@ -100,3 +100,83 @@ def test_detail_carries_order_facts_for_the_packing_slip(client: TestClient, db_
     assert detail["part_revision"] == part.revision
     assert detail["serial_numbers"] == ["SN-1", "SN-2"]
     assert (detail["ship_to_city"], detail["ship_to_state"], detail["ship_to_zip"]) == ("Springfield", "IL", "62701")
+
+
+def _render_facts(coc, db):
+    from unittest.mock import patch
+
+    from app.services import coc_service
+
+    captured = {}
+    real = coc_service.build_certificate_of_conformance_pdf
+
+    def spy(**kwargs):
+        captured.update(kwargs)
+        return real(**kwargs)
+
+    with patch("app.services.coc_service.build_certificate_of_conformance_pdf", side_effect=spy):
+        pdf = coc_service.render_coc_pdf(coc, db)
+    return captured, pdf
+
+
+def test_issued_pdf_carries_company_letterhead_and_order_facts(db_session: Session):
+    import json
+
+    from app.models.company import Company
+
+    user = make_user(db_session)
+    company = db_session.get(Company, COMPANY_A)
+    company.name = "Fictional Precision Works"
+    company.address = "100 Example Rd\nSpringfield, IL 62701"
+    company.phone = "555-0100"
+    part = make_part(db_session)
+    wo = make_wo(db_session, part)
+    wo.po_line_item = "2"
+    wo.unit_number = "U-7"
+    shipment = make_shipment(db_session, wo, status_=ShipmentStatus.SHIPPED, ship_date=date.today())
+    coc = generate_coc_for_shipment(
+        db_session, shipment=shipment, company_id=COMPANY_A, user_id=user.id, audit=AuditService(db_session, user)
+    )
+    db_session.commit()
+
+    snap = json.loads(coc.content_snapshot)
+    assert snap["company_name"] == "Fictional Precision Works"
+    assert snap["po_line_item"] == "2"
+    assert snap["unit_number"] == "U-7"
+    assert len(snap["issued_date"]) == 10  # a company-local calendar date, not a UTC timestamp
+
+    # Frozen: renaming the company later does not change the issued certificate.
+    company.name = "Renamed Co"
+    db_session.flush()
+    facts, pdf = _render_facts(coc, db_session)
+    assert pdf.startswith(b"%PDF")
+    assert facts["company_name"] == "Fictional Precision Works"
+    assert facts["company_address"].startswith("100 Example Rd")
+    assert facts["po_line_item"] == "2"
+    assert facts["unit_number"] == "U-7"
+    assert facts["issued_at"] == snap["issued_date"]
+
+
+def test_pre_letterhead_snapshot_falls_back_to_live_company(db_session: Session):
+    import json
+
+    from app.models.company import Company
+
+    user = make_user(db_session)
+    company = db_session.get(Company, COMPANY_A)
+    company.name = "Fictional Precision Works"
+    part = make_part(db_session)
+    wo = make_wo(db_session, part)
+    shipment = make_shipment(db_session, wo, status_=ShipmentStatus.SHIPPED, ship_date=date.today())
+    coc = generate_coc_for_shipment(
+        db_session, shipment=shipment, company_id=COMPANY_A, user_id=user.id, audit=AuditService(db_session, user)
+    )
+    legacy = json.loads(coc.content_snapshot)
+    for key in ("company_name", "company_address", "company_phone", "issued_date", "po_line_item", "unit_number"):
+        legacy.pop(key, None)
+    coc.content_snapshot = json.dumps(legacy)
+    db_session.commit()
+
+    facts, _pdf = _render_facts(coc, db_session)
+    assert facts["company_name"] == "Fictional Precision Works"
+    assert facts["issued_at"] and "T" not in facts["issued_at"]
