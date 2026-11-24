@@ -21,25 +21,13 @@ import { KeyIcon } from '@heroicons/react/24/outline';
 import api from '../../services/api';
 import { FormField, LoadingButton, useToast } from '../ui';
 import { useUnsavedChanges } from '../../hooks/useUnsavedChanges';
-import { toDisplayString } from '../../utils/apiError';
+import { apiErrorDetail } from '../../utils/apiError';
 import { changeOwnPasswordSchema, type ChangeOwnPasswordFormData } from '../../validation/schemas';
 
 const EMPTY_FORM: ChangeOwnPasswordFormData = {
   current_password: '',
   new_password: '',
   confirm_password: '',
-};
-
-interface ApiErrorLike {
-  response?: { data?: { detail?: unknown } };
-  message?: string;
-}
-
-const serverDetail = (err: unknown): string => {
-  const e = err as ApiErrorLike;
-  const detail = e?.response?.data?.detail;
-  if (detail !== undefined && detail !== null && detail !== '') return toDisplayString(detail);
-  return e?.message || 'Failed to change your password';
 };
 
 export default function PasswordSettingsSection() {
@@ -68,7 +56,7 @@ export default function PasswordSettingsSection() {
       reset(EMPTY_FORM);
       showToast('success', 'Password changed. Use the new password the next time you sign in.');
     } catch (err) {
-      const message = serverDetail(err);
+      const message = apiErrorDetail(err, 'Failed to change your password');
       setServerError(message);
       showToast('error', message);
     } finally {

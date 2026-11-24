@@ -1158,8 +1158,10 @@ def change_own_password(
     write rolls the change back (503 ``Unable to save audit record``). The new
     password/hash is deliberately NEVER included in the record.
 
-    Access tokens are stateless, so other signed-in sessions keep working until their
-    access token expires (up to 15 minutes).
+    Changing the password does NOT end other signed-in sessions. ``POST /auth/refresh`` does
+    not read ``password_changed_at``, so another session keeps refreshing until it signs out
+    or sits unused for the 7-day idle window. Ending other sessions on a password change is
+    a separate authentication change, not made here.
     """
     if not is_interactive_person(current_user):
         raise HTTPException(status_code=403, detail=PASSWORD_CHANGE_PEOPLE_ONLY)

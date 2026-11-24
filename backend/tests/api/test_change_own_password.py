@@ -450,3 +450,22 @@ class TestMcpExclusion:
             excluded_operations=set(EXCLUDED_OPERATIONS) - set(PASSWORD_OPERATIONS),
         )
         assert set(PASSWORD_OPERATIONS) <= {tool.key for tool in without}
+
+
+class TestPublishedDescription:
+    """The route's docstring is its OpenAPI description at /docs: it must not promise that other
+    sessions die within an access-token lifetime, because refresh never reads password_changed_at."""
+
+    def test_description_does_not_claim_other_sessions_end(self):
+        description = app.openapi()["paths"][URL]["post"]["description"]
+        assert "15 minutes" not in description
+        assert "does NOT end other signed-in sessions" in description
+        assert "7-day idle window" in description
+
+    def test_refresh_path_really_does_not_read_password_changed_at(self):
+        """Pins the fact the description relies on; change both together."""
+        import inspect
+
+        from app.api.endpoints import auth
+
+        assert "password_changed_at" not in inspect.getsource(auth)
