@@ -2831,8 +2831,9 @@ UI controls do not grant API authority. See [API: Documents](API.md#documents).
 > Public `/auth/register-public` chooses roles server-side: the empty-install bootstrap creates
 > an active Platform Admin/superuser; later signups create inactive Viewers without superuser
 > authority. Accepted creation requires an atomic registration audit (**503** on loss); ordinary
-> duplicate/refusal responses remain uniform. Both company-onboarding routes create a tenant
-> Admin without superuser authority and atomically record company/user creation. Platform company
+> duplicate/refusal responses remain uniform. The one company-onboarding route,
+> platform-admin `POST /platform/companies` (there is no public company self-registration since
+> 2026-11-23), creates a tenant Admin without superuser authority and atomically record company/user creation. Platform company
 > updates, including activation, require a target-company audit in the same transaction (**503**
 > and rollback on loss). See [API: onboarding](API.md#company-onboarding-and-platform-administration).
 >
@@ -2843,8 +2844,9 @@ UI controls do not grant API authority. See [API: Documents](API.md#documents).
 > character-class requirements**: the uppercase / lowercase / number / special-char rules were removed
 > on 2026-07-29 in favor of length + blocklist per NIST SP 800-63B §5.1.1.2, and the blocklist was
 > expanded in the same change. The same policy also governs
-> the **first-admin `admin_password`** on the two company-creation paths — the unauthenticated
-> `POST /companies/register` (company self-registration) and platform-admin `POST /platform/companies`.
+> the **first-admin `admin_password`** on platform-admin `POST /platform/companies`, the only
+> company-onboarding route (the unauthenticated `POST /companies/register` self-registration route
+> was removed on 2026-11-23).
 > The user CSV import applies it per row to user-supplied passwords; operator auto-generated (badge)
 > passwords are exempt. See `docs/API.md` → Users.
 >

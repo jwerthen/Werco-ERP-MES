@@ -339,9 +339,10 @@ ALLOWED_HOSTS=api.werco.com,erp.werco.com,*.up.railway.app,healthcheck.railway.a
 E2E. **It is hard-disabled against a production database** so weak credentials never land in a
 CUI environment (CMMC/AS9100D): the CLI seeder exits with an error when `ENVIRONMENT=production`
 **or when the resolved database URL targets the Supabase production Postgres** (so a local shell
-with `DATABASE_URL` pointed at prod refuses too), unless the override below is set. Production tenants are bootstrapped through the
-company-onboarding flow (`POST /api/v1/companies/register`), which enforces the
-password-strength policy on the admin password.
+with `DATABASE_URL` pointed at prod refuses too), unless the override below is set. A production install is bootstrapped through the
+empty-install first-user registration (`POST /api/v1/auth/register-public` on a database with
+zero users, which creates the Werco company and an active Platform Admin), which enforces the
+password-strength policy. There is no public company self-registration route.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
@@ -813,7 +814,7 @@ AWS_REGION=us-east-1
 >      `json_body`, `request_body`, `content`, which hold the body as a repr string such as
 >      `b'{"employee_id": "0042", "pin": "2580"}'`) and any variable whose repr is an object
 >      carrying a credential field (a request model such as `UserCreate(..., password='...')` on
->      `POST /users/` or `CompanyRegister(..., admin_password='...')` on the public signup), and
+>      `POST /users/` or `CompanyCreate(..., admin_password='...')` on `POST /platform/companies`), and
 >      replaces any variable holding a bcrypt hash with `[Filtered]`;
 >    - every remaining string, in the frame variables, the exception values, the top-level
 >      message, `logentry` (message, formatted string and params), every breadcrumb's message and
@@ -830,7 +831,7 @@ AWS_REGION=us-east-1
 >    frame variable and the request data entirely.
 >
 > Layers 2 and 3 are what cover the password **create** routes too (`POST /users/`,
-> `POST /companies/register`), which are not on the credential-route list. The application's own
+> `POST /platform/companies`), which are not on the credential-route list. The application's own
 > log lines that can carry a database error (the audit writer, the auth event logger) log only the
 > exception's class and, for a database error, the driver error's class and SQLSTATE
 > (`describe_exception`), never its text, so a logged failure cannot reach Sentry as a breadcrumb
