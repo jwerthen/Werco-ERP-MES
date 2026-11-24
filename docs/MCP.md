@@ -920,7 +920,7 @@ minus two further, named sets:
   They are listed **by name** rather than skipped silently, so a new route that forgets its
   `security` dependency — even under a tag that already has tools — fails the coverage guard
   (`catalog.unaccounted_operations`, §14) until it is either secured or named there.
-- **`EXCLUDED_OPERATIONS`** — twenty-seven operations, none with a convenience twin:
+- **`EXCLUDED_OPERATIONS`** — thirty-two operations, none with a convenience twin:
   - The two Excel-cutover loaders, `POST /work-orders/import` and
     `POST /purchasing/purchase-orders/import` (`migration_import_service`). They record a *past*
     system's state rather than perform a user action: the work-order loader mints work orders
@@ -1001,6 +1001,13 @@ minus two further, named sets:
     The reads stay tools: `get_document_access_review`, the `access_level` on every document read,
     and each user's export authorization on `list_users`. See
     [API.md → Restricted and export-controlled documents](API.md#restricted-and-export-controlled-documents-as9100d-7531).
+  - The **self-service password change** (`catalog.PASSWORD_OPERATIONS`, 2026-11-23):
+    `POST /users/change-password`. Changing your own password is a person's act in their own
+    session. The route refuses every API token and every badge / station token **403**
+    (`app.core.credentials.PASSWORD_CHANGE_PEOPLE_ONLY`), and the exclusion closes the door a
+    person's own JWT would leave open: an agent, possibly following text injected through ERP data,
+    changing the person's password and locking them out. See
+    [RBAC_PERMISSIONS.md → Credential policy for judgment writes](RBAC_PERMISSIONS.md#credential-policy-for-judgment-writes).
   - The **in-process inspection sign-off** (`catalog.INSPECTION_SIGN_OFF_OPERATIONS`; AS9100D
     8.6): `POST /shop-floor/operations/{operation_id}/inspection`. Recording that an inspection was
     performed is a person's judgment, as an FAI final disposition is. The route refuses every API
