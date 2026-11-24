@@ -316,6 +316,11 @@ class ApiService {
     return response.data;
   }
 
+  /** Admin > System Health: worker heartbeat, cron jobs and the notification backlog (Admin only, read-only). */
+  async getSystemHealth(): Promise<import('../types/systemHealth').SystemHealth> {
+    return (await this.api.get('/admin/system-health')).data;
+  }
+
   async getRuntimeMetricSummary(params: { days?: number; page?: number; device?: string; release?: string; route?: string }): Promise<import('../types/runtimeMetrics').RuntimeMetricSummary> {
     return (await this.api.get('/runtime-metrics/summary', { params })).data;
   }
