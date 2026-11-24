@@ -106,8 +106,10 @@ describe('EXTRA_WIDGETS eligibility', () => {
     expect(eligibleIds('shipping')).toEqual(expect.arrayContaining(['shipping_outlook', 'work_orders_overdue']));
     expect(eligibleIds('shipping')).not.toContain('quality_pulse');
     expect(eligibleIds('shipping')).not.toContain('inspection_queue');
-    // quality has receiving:view and quality:view but not shipping:view.
-    expect(eligibleIds('quality')).toEqual(expect.arrayContaining(['quality_pulse', 'inspection_queue']));
-    expect(eligibleIds('quality')).not.toContain('shipping_outlook');
+    // quality has receiving:view, quality:view and shipping:view (granted so Quality can see
+    // open quality items on shipments and issue a withheld CoC).
+    expect(eligibleIds('quality')).toEqual(
+      expect.arrayContaining(['quality_pulse', 'inspection_queue', 'shipping_outlook'])
+    );
   });
 });
