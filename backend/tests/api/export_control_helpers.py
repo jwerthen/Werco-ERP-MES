@@ -21,8 +21,11 @@ from decimal import Decimal
 from typing import Any, Dict, Optional, Tuple
 
 from fastapi.testclient import TestClient
+from sqlalchemy import DateTime
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import Session
 
+from app.core.time_utils import to_utc_iso
 from app.models.customer import Customer
 from app.models.downtime import DowntimeEvent
 from app.models.governance import CustomerContract
@@ -676,7 +679,7 @@ def contains_numeric_canary(raw: bytes) -> bool:
 # server-clock instants ("2026-11-24T00:51:37.940123Z"), whose digits change on every run.
 # On 2026-11-24 the needle b"7.94" matched such an instant (seconds 37, microseconds 94....)
 # and failed a redaction test about one run in a thousand although nothing had leaked.
-# The two helpers below make that class of chance match impossible rather than unlikely.
+# The helpers below make that class of chance match impossible rather than unlikely.
 
 # Every slot of an ISO-8601 instant with microseconds. The date/time separator slot takes
 # either ``T`` (``isoformat()``) or a space (``str(datetime)``), so a needle that spans the
@@ -697,9 +700,9 @@ _ISO_FIELDS = (
     (17, 19, range(60)),
     (20, 26, None),  # microseconds: every six-digit string is valid, so free digits are any digit
 )
-# The same two separators as the template. A match is only a CANDIDATE: ``strip_iso_instants``
-# removes it when its fields pass the same ranges and ``_is_real_date`` the guard uses, so the
-# stripper never removes text the guard says no clock can write.
+# The same two separators as the template. A match is only a CANDIDATE: ``without_known_instants``
+# counts it as a real instant when its fields pass the same ranges and ``_is_real_date`` the
+# guard uses, so text no clock can write is never treated as an instant.
 _ISO_INSTANT = re.compile(
     r"(?<!\d)(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.\d{1,6})?(?!\d)(Z|[+-](\d{2}):(\d{2}))?"
 )
@@ -795,33 +798,41 @@ def _is_real_instant(fields: Tuple[str, ...]) -> bool:
     return _is_real_date(values[0], values[1], values[2])
 
 
-def _strip_real_instant(match: "re.Match[str]") -> str:
-    if not _is_real_instant(match.groups()[:6]):
-        return match.group(0)  # no clock writes it: leave it, so it is still searched
-    offset_hours, offset_minutes = match.group(8), match.group(9)
-    if offset_hours is not None and not (int(offset_hours) < 24 and int(offset_minutes) < 60):
-        # The instant is real but the offset is not one: remove the instant, keep the rest.
-        return "<instant>" + match.group(7)
-    return "<instant>"
+def instant_strings(row: Any) -> Tuple[str, ...]:
+    """Every non-null ``DateTime`` column of the ORM ``row``, serialized the way the API
+    serializes it (``to_utc_iso``), for ``without_known_instants``. Read the row back from the
+    database AFTER the request, so an instant the request stamped is the one it wrote."""
+    attributes = sa_inspect(type(row)).column_attrs
+    values = (getattr(row, attr.key) for attr in attributes if isinstance(attr.columns[0].type, DateTime))
+    return tuple(to_utc_iso(value) for value in values if value is not None)
 
 
-def strip_iso_instants(text: str) -> str:
-    """``text`` with every whole, REAL ISO-8601 instant removed, for an absence check whose
-    needle cannot be made timestamp-proof (a six-digit PIN is exactly a microsecond field's shape).
+def without_known_instants(text: str, *instants: str) -> str:
+    """``text`` with each of the exact ``instants`` replaced by ``<instant>``, for an absence
+    check whose needle cannot be made timestamp-proof (a six-digit PIN is exactly a
+    microsecond field's shape).
 
-    Whole instants with either separator go (``T`` or a space, the two the guard decides),
-    with ``Z``, a ``+HH:MM`` / ``-HH:MM`` offset or no suffix, and with 1 to 6 fraction digits
-    or none. Only text a clock could write goes: every field must be in the range
-    ``could_occur_in_iso_timestamp`` uses and the date must exist, so an impossible instant
-    ("2026-13-45T99:99:99.830416Z", February 30th, hour 24, second 60) stays in the text and
-    is still searched. So does a secret written next to an instant, or a fraction longer than
-    six digits (which no clock writes).
+    Pass every instant the output legitimately carries, as the exact text it is written in
+    (``instant_strings`` for a response built from a row, ``value.isoformat()`` for an audit
+    row's ``str``-dumped datetime). After the replacement NO real instant may remain: one does
+    -- the product started writing another, or a secret was written as the fraction of an
+    instant-shaped string ("2026-11-24T15:15:22.830416Z" when the PIN is 830416) -- and this
+    fails on EVERY run, naming it, rather than trusting it blindly. "Real" uses the same
+    ranges as ``could_occur_in_iso_timestamp`` (fields in range, the date exists, ``T`` or
+    space, 0-6 fraction digits, ``Z`` / offset / no suffix), so text that only has an
+    instant's shape ("2026-13-45T99:99:99.830416Z") is neither replaced nor refused: it stays
+    in the text and is searched like any other text.
 
-    The one trade left: a secret written AS the fraction of a real instant-shaped string
-    ("2026-11-24T15:15:22.830416Z" when the PIN is 830416) is removed with it, because that is
-    exactly what a chance match looks like and the two cannot be told apart from the text.
+    The one form that still gets through is the secret being the true microseconds of a real
+    timestamp the test accounted for. That is the chance match itself (one run in a million
+    per instant for a six-digit needle), not a leak, and no reading of the text can tell them
+    apart.
     """
-    return _ISO_INSTANT.sub(_strip_real_instant, text)
+    for instant in instants:
+        text = text.replace(instant, "<instant>")
+    unaccounted = [m.group(0) for m in _ISO_INSTANT.finditer(text) if _is_real_instant(m.groups()[:6])]
+    assert not unaccounted, f"instants the test did not account for: {unaccounted}"
+    return text
 
 
 def find_record(payload: Any, *, key: str, value: Any) -> Optional[Dict[str, Any]]:

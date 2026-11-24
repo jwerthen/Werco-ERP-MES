@@ -97,7 +97,7 @@ from tests.api.export_control_helpers import (
     issue_token,
     make_viewer,
     seed_world,
-    strip_iso_instants,
+    without_known_instants,
 )
 from tests.api.kiosk_test_helpers import user_headers
 
@@ -2252,38 +2252,38 @@ class TestChanceMatchGuard:
         assert instant is not None and could_occur_in_iso_timestamp(needle), needle
         assert needle in instant.encode() and " " in instant
         datetime.fromisoformat(instant.removesuffix("Z"))
-        # The stripper agrees with the guard: it removes that same space-separated instant whole.
-        assert needle.decode() not in strip_iso_instants(f'"at":"{instant}"')
+        # The instant matcher agrees with the guard: that same space-separated instant is a
+        # real instant, refused while unaccounted for and removed whole once it is named.
+        with pytest.raises(AssertionError, match="did not account for"):
+            without_known_instants(f'"at":"{instant}"')
+        assert without_known_instants(f'"at":"{instant}"', instant) == '"at":"<instant>"'
 
     @pytest.mark.parametrize("needle", [b"24 1T", b"-32 00", b" 24:", b"2026 11"])
     def test_a_space_outside_the_separator_slot_is_not_flagged(self, needle):
         assert iso_timestamp_containing(needle) is None, needle
 
-    def test_strip_iso_instants_removes_whole_instants_only(self):
-        text = '{"at":"2026-11-24T15:15:22.830416Z","raw":"2026-11-24 15:15:22.830416","pin":"830416"}'
-        stripped = strip_iso_instants(text)
-        assert "2026-11-24" not in stripped and stripped.count("830416") == 1
-        # A secret glued onto an instant, or a fraction no clock writes, is not hidden.
-        assert "830416" in strip_iso_instants("2026-11-24T15:15:22.123456Z830416")
-        assert "830416" in strip_iso_instants("2026-11-24T15:15:22.1234567830416Z")
+    def test_without_known_instants_removes_exactly_the_known_instants(self):
+        known = ("2026-11-24T15:15:22.123456Z", "2026-11-24 15:15:23.654321")
+        text = f'{{"at":"{known[0]}","raw":"{known[1]}","pin":"830416"}}'
+        assert without_known_instants(text, *known) == '{"at":"<instant>","raw":"<instant>","pin":"830416"}'
+        # A secret glued onto a known instant is not hidden with it.
+        assert "830416" in without_known_instants(f"{known[0]}830416", known[0])
 
-    @pytest.mark.parametrize(
-        "impossible",
-        [
-            "2026-13-45T99:99:99.830416Z",
-            "2026-02-30T10:00:00.830416",
-            "2026-11-24T24:00:00.830416",
-            "2026-11-24T10:00:60.830416",
-            "2026-11-24 10:60:00.830416Z",
-            "2026-02-29T10:00:00.830416Z",
-            "0000-01-01T00:00:00.830416Z",
-        ],
-    )
-    def test_strip_iso_instants_leaves_an_impossible_instant_in_the_text(self, impossible):
-        # The stripper removes only what the guard says a clock can write, so a secret written
-        # inside text that merely has an instant's SHAPE is still searched.
-        assert iso_timestamp_containing(impossible.removesuffix("Z").encode()) is None
-        assert "830416" in strip_iso_instants(f'{{"at":"{impossible}"}}'), impossible
+    def test_text_with_no_instants_is_returned_unchanged(self):
+        text = '{"id":7,"pin_set":true,"due_date":"2026-12-24","n":830416}'
+        assert without_known_instants(text) == text
+        assert without_known_instants(text, "2026-11-24T15:15:22.123456Z") == text
+
+    def test_a_secret_as_the_fraction_of_an_unknown_instant_shaped_string_fails(self):
+        # The form a blanket instant stripper would hide: a real-looking instant whose fraction
+        # IS the PIN. It is not one the test accounted for, so it fails on every run.
+        known = "2026-11-24T15:15:22.123456Z"
+        text = f'{{"at":"{known}","leak":"2026-11-24T15:15:22.830416Z"}}'
+        with pytest.raises(AssertionError, match=r"2026-11-24T15:15:22\.830416Z"):
+            without_known_instants(text, known)
+        # A fraction no clock writes leaves a real fraction-less instant behind: also refused.
+        with pytest.raises(AssertionError, match="did not account for"):
+            without_known_instants("2026-11-24T15:15:22.1234567830416Z")
 
     @pytest.mark.parametrize(
         "instant",
@@ -2299,11 +2299,29 @@ class TestChanceMatchGuard:
             "2026-11-24T15:15:22Z",
             "2026-11-24 15:15:22",
             "2028-02-29T23:59:59.999999Z",
+            "2026-11-24T15:15:22.123456+99:99",
         ],
     )
-    def test_strip_iso_instants_removes_a_real_instant_in_every_accepted_spelling(self, instant):
-        datetime.fromisoformat(instant.removesuffix("Z"))  # a real instant
-        assert strip_iso_instants(f'{{"at":"{instant}","n":1}}') == '{"at":"<instant>","n":1}', instant
+    def test_an_unaccounted_real_instant_fails_in_every_spelling(self, instant):
+        datetime.fromisoformat(instant.removesuffix("Z").removesuffix("+99:99"))  # a real instant
+        with pytest.raises(AssertionError, match="did not account for"):
+            without_known_instants(f'{{"at":"{instant}","n":1}}')
+        assert without_known_instants(f'{{"at":"{instant}","n":1}}', instant) == '{"at":"<instant>","n":1}'
 
-    def test_strip_iso_instants_keeps_an_impossible_offset_but_removes_the_real_instant(self):
-        assert strip_iso_instants("2026-11-24T15:15:22.123456+99:99") == "<instant>+99:99"
+    @pytest.mark.parametrize(
+        "impossible",
+        [
+            "2026-13-45T99:99:99.830416Z",
+            "2026-02-30T10:00:00.830416",
+            "2026-11-24T24:00:00.830416",
+            "2026-11-24T10:00:60.830416",
+            "2026-11-24 10:60:00.830416Z",
+            "2026-02-29T10:00:00.830416Z",
+            "0000-01-01T00:00:00.830416Z",
+        ],
+    )
+    def test_an_impossible_instant_is_neither_removed_nor_refused_and_stays_searchable(self, impossible):
+        # Only what the guard says a clock can write counts as an instant, so a secret written
+        # inside text that merely has an instant's SHAPE is still searched.
+        assert iso_timestamp_containing(impossible.removesuffix("Z").encode()) is None
+        assert "830416" in without_known_instants(f'{{"at":"{impossible}"}}'), impossible
