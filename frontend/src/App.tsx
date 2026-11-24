@@ -72,6 +72,7 @@ const Traceability = lazyWithRetry(() => import('./pages/Traceability'));
 const PrintPackingSlip = lazyWithRetry(() => import('./pages/PrintPackingSlip'));
 const PrintShippingLabel = lazyWithRetry(() => import('./pages/PrintShippingLabel'));
 const AuditLog = lazyWithRetry(() => import('./pages/AuditLog'));
+const LaborReview = lazyWithRetry(() => import('./pages/LaborReview'));
 const FabricationQuoting = lazyWithRetry(() => import('./pages/FabricationQuoting'));
 const AdminSettings = lazyWithRetry(() => import('./pages/AdminSettings'));
 const ApiTokens = lazyWithRetry(() => import('./pages/ApiTokens'));
@@ -1057,6 +1058,22 @@ function AppRoutes() {
               <Layout>
                 <LazyRoute>
                   <Traceability />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+
+        {/* Labor Review — time-entry review / approval / close a forgotten clock.
+            Gated in routeAccess on quality:inspect = Admin / Manager / Supervisor / Quality,
+            the GET /shop-floor/time-entries role set. */}
+        <Route
+          path="/labor-review"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <LaborReview />
                 </LazyRoute>
               </Layout>
             </PrivateRoute>

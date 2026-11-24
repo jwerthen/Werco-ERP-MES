@@ -23,6 +23,10 @@ const routeAccessRequirements: RouteAccessRequirement[] = [
   { prefix: '/print/packing-slip', permission: 'shipping:view' },
   { prefix: '/print/shipping-label', permission: 'shipping:view' },
   { prefix: '/shop-floor', permission: 'work_orders:view' },
+  // Labor Review reads GET /shop-floor/time-entries, require_role ADMIN / MANAGER / SUPERVISOR /
+  // QUALITY server-side. quality:inspect is held by exactly that set (the same tier
+  // customer complaints use), so an Operator / Viewer / Shipping deep link is refused here.
+  { prefix: '/labor-review', permission: 'quality:inspect' },
   { prefix: '/hank-engineering', allOf: ['parts:create', 'boms:create', 'routings:create'] },
   { prefix: '/parts', permission: 'parts:view' },
   // The unit-mismatch worklist is gated ADMIN / MANAGER / SUPERVISOR server-side

@@ -126,6 +126,9 @@ const navSections: NavSection[] = [
           { name: 'Time Clock', href: '/shop-floor', icon: WrenchScrewdriverIcon },
           { name: 'Operations', href: '/shop-floor/operations', icon: ClipboardDocumentListIcon },
           { name: 'Downtime', href: '/downtime', icon: StopIcon },
+          // Same gate as the route (routeAccess: quality:inspect = Admin / Manager /
+          // Supervisor / Quality), the GET /shop-floor/time-entries role set.
+          { name: 'Labor Review', href: '/labor-review', icon: ClipboardDocumentCheckIcon, permission: 'quality:inspect' },
         ],
       },
       { name: 'Scheduling', href: '/scheduling', icon: CalendarDaysIcon },

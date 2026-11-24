@@ -44,6 +44,12 @@ describe('getRouteTitle', () => {
     expect(getBreadcrumbParent('/fabrication-quotes')).toBeNull();
   });
 
+  it('titles Labor Review regardless of its filter params', () => {
+    expect(getRouteTitle(loc('/labor-review'))).toBe('Labor Review');
+    expect(getRouteTitle(loc('/labor-review', '?status=open&flag=overlap&page=2'))).toBe('Labor Review');
+    expect(getBreadcrumbParent('/labor-review')).toBeNull();
+  });
+
   it('resolves the BOM unit-mismatch sub-route ahead of the bare /bom title', () => {
     expect(getRouteTitle(loc('/bom'))).toBe('Bill of Materials');
     expect(getRouteTitle(loc('/bom/uom-mismatches'))).toBe('BOM Unit Mismatches');

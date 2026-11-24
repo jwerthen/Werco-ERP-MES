@@ -1,9 +1,13 @@
-import React, { useMemo } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { UserGroupIcon } from '@heroicons/react/24/outline';
 import { CockpitPanel } from '../../../cockpit';
-import { EmptyState } from '../../../ui';
-import type { ActiveAssignment } from '../../../../types';
+import { EmptyState, useToast } from '../../../ui';
+import { SetClockOutDialog, describeHoursResult } from '../../../laborReview/SetClockOutDialog';
+import type { SetClockOutTarget } from '../../../laborReview/SetClockOutDialog';
+import { useAuth } from '../../../../context/AuthContext';
+import type { ActiveAssignment, UserRole } from '../../../../types';
+import type { SetClockOutResponse } from '../../../../types/laborReview';
 import { formatCentralDate, formatCentralTime, isDateBeforeTodayInCentral } from '../../../../utils/centralTime';
 import { formatOperationLabel, hasOperationNumber } from '../../../../utils/operationLabel';
 import { operationTargetQuantity } from '../../../../utils/operationQuantity';
@@ -19,13 +23,46 @@ import {
 } from './shared';
 
 /**
+ * The roles `POST /shop-floor/time-entries/{id}/set-clock-out` admits (SET_CLOCK_OUT_ROLES in
+ * labor_review_service.py; a superuser passes require_role too). Quality may review labor but
+ * may not set a clock-out, so it is deliberately absent.
+ */
+const CLOSE_CLOCK_ROLES: ReadonlySet<UserRole> = new Set<UserRole>([
+  'platform_admin',
+  'admin',
+  'manager',
+  'supervisor',
+]);
+
+export function canCloseClocks(user: { role?: UserRole; is_superuser?: boolean } | null | undefined): boolean {
+  return !!user && (user.is_superuser === true || (!!user.role && CLOSE_CLOCK_ROLES.has(user.role)));
+}
+
+/**
  * Live Shop Activity — active jobs by work center. Group anchors `#wc-live-<id>` and row
  * anchors `#assign-<time_entry_id>` are the cross-link targets of Work Center Status and
  * the presence chips.
  */
 export function LiveActivityPanel() {
   const { data, openOperation } = useCoreDashboard();
-  const { nowMs, isVisible, canOpen } = useDashboardWidgetEnv();
+  const { nowMs, isVisible, canOpen, refresh } = useDashboardWidgetEnv();
+  const { user } = useAuth();
+  const { showToast } = useToast();
+  const viewerMayCloseClocks = canCloseClocks(user);
+  const [clockTarget, setClockTarget] = useState<SetClockOutTarget | null>(null);
+  const handleClockSaved = useCallback(
+    (response: SetClockOutResponse) => {
+      setClockTarget(null);
+      const name = response.entry.employee_name || 'the operator';
+      const note = describeHoursResult(response.hours);
+      if (!response.changed) showToast('info', 'Nothing was changed.');
+      else if (note?.warn) showToast('warning', `Clock closed for ${name}. ${note.text}`);
+      else showToast('success', `Clock closed for ${name}.`);
+      // The heartbeat is what lists who is clocked in: re-read it (forced, a user action).
+      refresh(true);
+    },
+    [refresh, showToast]
+  );
   const activeAssignments = useMemo(() => sortActiveAssignments(data?.active_assignments), [data?.active_assignments]);
   const assignmentsByWorkCenter = useMemo(() => {
     return activeAssignments.reduce<Record<string, ActiveAssignment[]>>((groups, assignment) => {
@@ -65,6 +102,13 @@ export function LiveActivityPanel() {
                       nowMs={nowMs}
                       canOpenWorkOrder={canOpen(`/work-orders/${assignment.work_order.id}`)}
                       onOpenOperation={() => openOperation(assignment)}
+                      onCloseClock={
+                        viewerMayCloseClocks &&
+                        assignment.user.id !== user?.id &&
+                        typeof assignment.time_entry_version === 'number'
+                          ? () => setClockTarget(assignmentClockTarget(assignment))
+                          : undefined
+                      }
                     />
                   ))}
                 </div>
@@ -88,8 +132,37 @@ export function LiveActivityPanel() {
           }
         />
       )}
+      {clockTarget && (
+        <SetClockOutDialog
+          key={`${clockTarget.id}:${clockTarget.version}`}
+          open
+          target={clockTarget}
+          onClose={() => setClockTarget(null)}
+          onSaved={handleClockSaved}
+        />
+      )}
     </CockpitPanel>
   );
+}
+
+function assignmentClockTarget(assignment: ActiveAssignment): SetClockOutTarget {
+  return {
+    id: assignment.time_entry_id,
+    version: assignment.time_entry_version ?? 1,
+    employeeName: assignment.user.name || getOperatorDisplayName(assignment.user),
+    clockIn: assignment.clock_in,
+    clockOut: null,
+    shiftEnd: null,
+    jobLabel: [
+      assignment.work_order.work_order_number,
+      hasOperationNumber(assignment.operation.operation_number)
+        ? formatOperationLabel(assignment.operation.operation_number)
+        : null,
+      assignment.operation.name,
+    ]
+      .filter(Boolean)
+      .join(' · '),
+  };
 }
 
 function ActiveAssignmentRow({
@@ -97,11 +170,14 @@ function ActiveAssignmentRow({
   nowMs,
   canOpenWorkOrder,
   onOpenOperation,
+  onCloseClock,
 }: {
   assignment: ActiveAssignment;
   nowMs: number;
   canOpenWorkOrder: boolean;
   onOpenOperation: () => void;
+  /** Offered only to Admin / Manager / Supervisor, never on the viewer's own entry. */
+  onCloseClock?: () => void;
 }) {
   // Progress here is OPERATION-scoped, because a row IS one assignment to one
   // operation. It must print the same fraction Dispatch, the WO routing table and
@@ -190,6 +266,16 @@ function ActiveAssignmentRow({
         <span className="ml-auto flex-shrink-0 text-xs text-slate-400 tabular-nums">
           {formatElapsed(assignment.clock_in, nowMs)}
         </span>
+        {onCloseClock && (
+          <button
+            type="button"
+            onClick={onCloseClock}
+            aria-label={`Close clock for ${assignment.user.name || getOperatorDisplayName(assignment.user)}`}
+            className="flex-shrink-0 rounded-sm border border-fd-line px-1.5 py-0.5 text-[10px] font-medium text-fd-link hover:bg-slate-800/60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-fd-blue"
+          >
+            Close clock
+          </button>
+        )}
       </div>
       {/* Line 2: job identity + progress */}
       <div className="mt-0.5 flex items-center gap-2">

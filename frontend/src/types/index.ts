@@ -1652,6 +1652,12 @@ export interface SignedInUserStatus {
 
 export interface ActiveAssignment {
   time_entry_id: number;
+  /**
+   * The time entry's optimistic-lock version, for the Live Shop Activity "Close clock"
+   * action (POST /shop-floor/time-entries/{id}/set-clock-out). Optional for deploy skew:
+   * an older API omits it, and the action is then not offered.
+   */
+  time_entry_version?: number;
   clock_in: string;
   entry_type: TimeEntryType;
   user: {

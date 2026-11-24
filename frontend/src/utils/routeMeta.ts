@@ -33,6 +33,7 @@ export const routeTitles: Record<string, string> = {
   // Production
   '/shop-floor': 'Time Clock',
   '/shop-floor/operations': 'Operations',
+  '/labor-review': 'Labor Review',
   '/downtime': 'Downtime',
   '/scheduling': 'Scheduling',
   '/dispatch': 'Dispatch Board',
