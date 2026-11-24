@@ -814,7 +814,7 @@ AWS_REGION=us-east-1
 >      `json_body`, `request_body`, `content`, which hold the body as a repr string such as
 >      `b'{"employee_id": "0042", "pin": "2580"}'`) and any variable whose repr is an object
 >      carrying a credential field (a request model such as `UserCreate(..., password='...')` on
->      `POST /users/` or `CompanyCreate(..., admin_password='...')` on `POST /platform/companies`), and
+>      `POST /users/`), and
 >      replaces any variable holding a bcrypt hash with `[Filtered]`;
 >    - every remaining string, in the frame variables, the exception values, the top-level
 >      message, `logentry` (message, formatted string and params), every breadcrumb's message and
@@ -830,8 +830,8 @@ AWS_REGION=us-east-1
 >    and the visitor-tablet and crew-station PIN sign-ins and PIN writes): the event loses **every**
 >    frame variable and the request data entirely.
 >
-> Layers 2 and 3 are what cover the password **create** routes too (`POST /users/`,
-> `POST /platform/companies`), which are not on the credential-route list. The application's own
+> Layers 2 and 3 are what cover the password **create** route too (`POST /users/`), which is not
+> on the credential-route list. The application's own
 > log lines that can carry a database error (the audit writer, the auth event logger) log only the
 > exception's class and, for a database error, the driver error's class and SQLSTATE
 > (`describe_exception`), never its text, so a logged failure cannot reach Sentry as a breadcrumb

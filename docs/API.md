@@ -1084,7 +1084,7 @@ reference) claim: `["badge", "pin"]` when a PIN was verified, `["badge"]` otherw
 `employee-login`, in the access and the refresh token). A `["badge", "pin"]` session also carries
 **`pst`**, the verified PIN's `floor_pin_set_at` as integer epoch-microseconds, which binds the
 session to that PIN (below). Both are written **only** by badge sign-on: `POST /auth/login`
-(password, including an employee ID plus password), registration and company onboarding mint exactly
+(password, including an employee ID plus password) and registration mint exactly
 the claims they always did. `get_current_user` copies `amr` onto `user._auth_methods`, and
 `AuditService` folds it into every row the session writes (see [Audit Log](#audit-log) →
 `extra_data.auth_methods`).
@@ -13830,11 +13830,9 @@ There is no delete endpoint.
 > minimum is unchanged and is additionally enforced as `Field(min_length=12)` on the request schemas.
 > The **same policy** — the shared `validate_password_strength` (`app/schemas/user.py`) —
 > also governs `POST /auth/register` (admin create), public self-registration
-> `POST /auth/register-public`, and the **first-admin `admin_password`** on platform-admin
-> `POST /platform/companies` (which previously had **no** strength check at all — it now enforces
-> the full policy, so no first-admin can be seeded with a weak password). The former unauthenticated
-> company self-registration route `POST /companies/register` was **removed** on 2026-11-23 and now
-> answers 404. The user CSV import
+> `POST /auth/register-public`. Both company-creation routes were **removed** on 2026-11-23: the
+> unauthenticated self-registration route `POST /companies/register` (now 404) and platform-admin
+> `POST /platform/companies` (now 405), so no first-admin `admin_password` path remains. The user CSV import
 > (`POST /users/import-csv`) applies the same check to **user-supplied** passwords **per row** (a weak
 > password fails only that row, `reason` = `"Weak password: …"`); operator **auto-generated**
 > passwords (for badge/employee-ID logins) satisfy the policy by construction and are **exempt**.
@@ -14192,19 +14190,19 @@ There is **no public company self-registration**. Werco is the only company on t
 `CompanyRegister` request schema, its rate-limit entry and the SPA page `/register-company` were
 deleted; the path now answers **404** and is absent from OpenAPI and the MCP catalog.
 
-`POST /platform/companies` requires a stored Platform Admin/superuser (`require_platform_admin`;
-a tenant Admin gets **403**). It creates a new company and its initial **tenant Admin**, explicitly
-without superuser authority, through `services/company_onboarding.onboard_company`. Company, seeded
-setup, initial account, and required company/user `CREATE` audit rows commit together; audit
-failure returns **503** and rolls back the whole onboarding transaction. Creation is attributed to
-the initiating platform user.
+There is **no platform-admin company creation** either (owner decision 2026-11-23, "Delete it
+too"). `POST /platform/companies`, its `CompanyCreate` request schema and
+`services/company_onboarding.py` (`onboard_company`) were deleted, along with the Platform Overview
+**Add Company** button and the `create_company` MCP tool. A `POST` to that path now answers **405**;
+`GET /platform/companies` at the same path still lists companies, and every other `/platform` route
+(get, update, users, dashboard, overview) and platform-admin company context switching are unchanged.
 
-The only other code path that constructs a `Company` row is the empty-install first-user bootstrap
+The **only** code path that constructs a `Company` row is the empty-install first-user bootstrap
 in `POST /auth/register-public` (documented under Authentication): only when the install has
 **zero users**, it creates the `werco` company (or reuses it if it already exists) and makes the
 registrant an active **Platform Admin with superuser authority**. Once any user exists, the same
 route only creates an inactive VIEWER in the Werco company, pending approval.
-`backend/tests/test_company_creation_doors_guard.py` pins both doors and fails CI on a new one.
+`backend/tests/test_company_creation_doors_guard.py` pins that single door and fails CI on a new one.
 
 `PUT /platform/companies/{company_id}` requires platform authority and records changed fields,
 including activation/deactivation, in a required `UPDATE` audit row scoped to the **target company**.

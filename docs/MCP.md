@@ -2,8 +2,8 @@
 
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
-(Cursor, Claude Code, a chat bot) gets **795 tools** — 15 hand-written *convenience* tools plus
-**780 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+(Cursor, Claude Code, a chat bot) gets **794 tools** — 15 hand-written *convenience* tools plus
+**779 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
 as the same request from the web app. A **read-only** API token is shown fewer tools, and an
 **AI-external** one fewer still (§4.1, §4.2).
 
@@ -120,6 +120,12 @@ credential (§6.1, §4.3). That half was not separately put to the owner and is 
 confirmed with them. See
 [API.md → Maintenance](API.md#maintenance-pm-schedules-maintenance-work-orders-event-log), *Maintenance
 log entries*.
+
+**Re-checked again on 2026-11-23 after platform-admin company creation was deleted.**
+`create_company` (`POST /platform/companies`) is gone with its route; no other name shifted:
+15 convenience + **779** generated, 16 shadowed, one fewer than the 780 above. It was a write, so the
+read-only catalog is unchanged at 8 convenience + **304** generated, and it was never on the
+AI-external allowlist.
 
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
