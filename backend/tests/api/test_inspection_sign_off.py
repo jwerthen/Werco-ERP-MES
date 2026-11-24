@@ -216,3 +216,267 @@ def test_shop_floor_list_row_reports_whether_the_inspection_is_signed(client: Te
     assert signed.status_code == status.HTTP_200_OK, signed.text
 
     assert _row()["inspection_complete"] is True
+
+
+# ---------------------------------------------------------------------------
+# Refusals: roles, every kind of standing token, tenant, validation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("role", [UserRole.OPERATOR, UserRole.SHIPPING, UserRole.VIEWER])
+def test_roles_outside_the_route_are_refused_and_nothing_is_written(client: TestClient, db_session: Session, role):
+    caller = make_user(db_session, role=role)
+    _, op = _inspection_point(db_session)
+    audit_before = db_session.query(AuditLog).count()
+
+    resp = client.post(URL.format(op_id=op.id), json={"notes": "looks fine"}, headers=headers_for(caller))
+
+    assert resp.status_code == status.HTTP_403_FORBIDDEN, resp.text
+    db_session.expire_all()
+    assert db_session.get(WorkOrderOperation, op.id).inspection_complete is False
+    assert db_session.query(AuditLog).count() == audit_before
+
+
+@pytest.mark.parametrize(
+    "token_role, mint_extra",
+    [
+        (UserRole.ADMIN, {}),
+        (UserRole.SUPERVISOR, {}),
+        (UserRole.QUALITY, {"scope": "read_only"}),
+    ],
+    ids=["full-admin-token", "full-supervisor-token", "read-only-quality-token"],
+)
+def test_every_standing_api_token_is_refused(client: TestClient, db_session: Session, token_role, mint_extra):
+    """Whatever the token's role or scope, a standing token never signs an inspection."""
+    admin = make_user(db_session, role=UserRole.ADMIN)
+    holder = make_user(db_session, role=token_role)
+    _, op = _inspection_point(db_session)
+    _, token = issue_token(client, headers_for(admin), holder, **mint_extra)
+    audit_before = db_session.query(AuditLog).count()
+
+    resp = client.post(URL.format(op_id=op.id), json={"inspection_type": "final"}, headers=bearer(token))
+
+    assert resp.status_code == status.HTTP_403_FORBIDDEN, resp.text
+    db_session.expire_all()
+    refreshed = db_session.get(WorkOrderOperation, op.id)
+    assert refreshed.inspection_complete is False
+    assert refreshed.inspection_type is None
+    assert db_session.query(AuditLog).count() == audit_before
+
+
+def _kiosk_badge_token(user) -> str:
+    from app.core.security import create_access_token
+
+    return create_access_token(subject=user.id, company_id=user.company_id, scope="kiosk")
+
+
+def test_crew_station_badge_of_an_operator_is_refused_by_role(client: TestClient, db_session: Session):
+    operator = make_user(db_session, role=UserRole.OPERATOR)
+    _, op = _inspection_point(db_session)
+
+    resp = client.post(URL.format(op_id=op.id), json={}, headers=bearer(_kiosk_badge_token(operator)))
+
+    assert resp.status_code == status.HTTP_403_FORBIDDEN, resp.text
+    db_session.expire_all()
+    assert db_session.get(WorkOrderOperation, op.id).inspection_complete is False
+    assert _sign_off_rows(db_session, op.id) == []
+
+
+def test_crew_station_badge_of_a_supervisor_is_a_person_and_may_sign(client: TestClient, db_session: Session):
+    """Pins CURRENT behaviour: a badge-minted kiosk token is a person, not an API token.
+
+    The kiosk path fence admits every ``/api/v1/shop-floor`` path except kiosk-station admin,
+    the dispatch board, labor approval and run order, and the badge token carries the badge
+    holder's live role, so a Supervisor or Quality badge scanned at a crew station CAN sign off
+    an inspection, attributed to that person. If the owner decides the sign-off is a desk-only
+    verb (as labor approval is), add it to the kiosk deny list and flip this test.
+    """
+    supervisor = make_user(db_session, role=UserRole.SUPERVISOR)
+    _, op = _inspection_point(db_session)
+
+    resp = client.post(URL.format(op_id=op.id), json={}, headers=bearer(_kiosk_badge_token(supervisor)))
+
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    rows = _sign_off_rows(db_session, op.id)
+    assert len(rows) == 1 and rows[0].user_id == supervisor.id
+
+
+def test_other_tenant_gets_404_with_no_row_change_no_audit_and_no_event(client: TestClient, db_session: Session):
+    from tests.api.test_completion_quality_gates_batch4 import COMPANY_B
+
+    outsider = make_user(db_session, role=UserRole.QUALITY, company_id=COMPANY_B)
+    _, op = _inspection_point(db_session)
+    version = op.version
+    audit_before = db_session.query(AuditLog).count()
+
+    resp = client.post(URL.format(op_id=op.id), json={"inspection_type": "final"}, headers=headers_for(outsider))
+
+    assert resp.status_code == status.HTTP_404_NOT_FOUND, resp.text
+    assert resp.json()["detail"] == "Operation not found"
+    db_session.expire_all()
+    refreshed = db_session.get(WorkOrderOperation, op.id)
+    assert refreshed.inspection_complete is False
+    assert refreshed.inspection_type is None
+    assert refreshed.version == version
+    assert db_session.query(AuditLog).count() == audit_before
+    assert db_session.query(OperationalEvent).filter(OperationalEvent.operation_id == op.id).count() == 0
+
+
+def test_missing_operation_is_404(client: TestClient, db_session: Session):
+    quality = make_user(db_session, role=UserRole.QUALITY)
+    resp = client.post(URL.format(op_id=987654), json={}, headers=headers_for(quality))
+    assert resp.status_code == status.HTTP_404_NOT_FOUND, resp.text
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{"notes": "x" * 2001}, {"inspection_type": "t" * 101}],
+    ids=["notes-too-long", "type-too-long"],
+)
+def test_overlong_fields_are_422_and_sign_nothing(client: TestClient, db_session: Session, body):
+    quality = make_user(db_session, role=UserRole.QUALITY)
+    _, op = _inspection_point(db_session)
+
+    resp = client.post(URL.format(op_id=op.id), json=body, headers=headers_for(quality))
+
+    assert resp.status_code == 422, resp.text
+    db_session.expire_all()
+    assert db_session.get(WorkOrderOperation, op.id).inspection_complete is False
+    assert _sign_off_rows(db_session, op.id) == []
+
+
+# ---------------------------------------------------------------------------
+# What a sign-off records
+# ---------------------------------------------------------------------------
+
+
+def test_sign_off_records_type_change_and_emits_the_operational_event(client: TestClient, db_session: Session):
+    quality = make_user(db_session, role=UserRole.QUALITY)
+    wo, op = _inspection_point(db_session)
+
+    resp = client.post(URL.format(op_id=op.id), json={"inspection_type": "first_article"}, headers=headers_for(quality))
+
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    (row,) = _sign_off_rows(db_session, op.id)
+    assert row.old_values["inspection_type"] is None
+    assert row.new_values["inspection_type"] == "first_article"
+    assert row.extra_data["work_order_number"] == wo.work_order_number
+    events = (
+        db_session.query(OperationalEvent)
+        .filter(OperationalEvent.event_type == "operation_inspected", OperationalEvent.operation_id == op.id)
+        .all()
+    )
+    assert len(events) == 1
+    assert events[0].user_id == quality.id
+    assert events[0].company_id == quality.company_id
+
+
+def test_sign_off_without_a_type_keeps_the_planned_type(client: TestClient, db_session: Session):
+    quality = make_user(db_session, role=UserRole.QUALITY)
+    _, op = _inspection_point(db_session)
+    op.inspection_type = "final"
+    db_session.commit()
+
+    resp = client.post(URL.format(op_id=op.id), json={}, headers=headers_for(quality))
+
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    assert resp.json()["inspection_type"] == "final"
+    (row,) = _sign_off_rows(db_session, op.id)
+    assert row.old_values["inspection_type"] == row.new_values["inspection_type"] == "final"
+
+
+def test_sign_off_bumps_the_operation_version_so_a_stale_update_is_409(client: TestClient, db_session: Session):
+    """The sign-off is a real write to a version-locked row: an editor holding the pre-sign-off
+    version cannot then blind-overwrite the operation."""
+    quality = make_user(db_session, role=UserRole.QUALITY)
+    supervisor = make_user(db_session, role=UserRole.SUPERVISOR)
+    _, op = _inspection_point(db_session)
+    stale_version = op.version
+
+    signed = client.post(URL.format(op_id=op.id), json={}, headers=headers_for(quality))
+    assert signed.status_code == status.HTTP_200_OK, signed.text
+    db_session.expire_all()
+    assert db_session.get(WorkOrderOperation, op.id).version > stale_version
+
+    stale = client.put(
+        f"/api/v1/work-orders/operations/{op.id}",
+        json={"version": stale_version, "requires_inspection": False},
+        headers=headers_for(supervisor),
+    )
+    assert stale.status_code == status.HTTP_409_CONFLICT, stale.text
+    db_session.expire_all()
+    refreshed = db_session.get(WorkOrderOperation, op.id)
+    assert refreshed.requires_inspection is True
+    assert refreshed.inspection_complete is True
+
+
+# ---------------------------------------------------------------------------
+# The generic operation PUT never writes the flag
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("value", [False, None, "true"], ids=["false", "null", "string"])
+def test_generic_update_refuses_inspection_complete_whatever_its_value(client: TestClient, db_session: Session, value):
+    supervisor = make_user(db_session, role=UserRole.SUPERVISOR)
+    _, op = _inspection_point(db_session)
+    op.inspection_complete = True  # signed earlier; a PUT must not be able to clear it either
+    db_session.commit()
+    version = op.version
+
+    resp = client.put(
+        f"/api/v1/work-orders/operations/{op.id}",
+        json={"version": version, "inspection_complete": value},
+        headers=headers_for(supervisor),
+    )
+
+    assert resp.status_code == 422, resp.text
+    assert INSPECTION_COMPLETE_NOT_UPDATABLE in resp.text
+    db_session.expire_all()
+    refreshed = db_session.get(WorkOrderOperation, op.id)
+    assert refreshed.inspection_complete is True
+    assert refreshed.version == version
+
+
+def test_generic_update_still_sets_requires_inspection_and_leaves_the_sign_off_alone(
+    client: TestClient, db_session: Session
+):
+    supervisor = make_user(db_session, role=UserRole.SUPERVISOR)
+    _, op = _inspection_point(db_session)
+
+    resp = client.put(
+        f"/api/v1/work-orders/operations/{op.id}",
+        json={"version": op.version, "requires_inspection": False},
+        headers=headers_for(supervisor),
+    )
+
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    db_session.expire_all()
+    refreshed = db_session.get(WorkOrderOperation, op.id)
+    assert refreshed.requires_inspection is False
+    assert refreshed.inspection_complete is False
+    assert _sign_off_rows(db_session, op.id) == []
+
+
+# ---------------------------------------------------------------------------
+# Reads never sign
+# ---------------------------------------------------------------------------
+
+
+def test_operation_reads_never_sign_or_write_a_sign_off_row(client: TestClient, db_session: Session):
+    quality = make_user(db_session, role=UserRole.QUALITY)
+    _, op = _inspection_point(db_session)
+
+    detail = client.get(f"/api/v1/shop-floor/operations/{op.id}", headers=headers_for(quality))
+    listing = client.get("/api/v1/shop-floor/operations", headers=headers_for(quality))
+
+    assert detail.status_code == listing.status_code == status.HTTP_200_OK
+    assert detail.json()["operation"]["inspection_complete"] is False
+    db_session.expire_all()
+    assert db_session.get(WorkOrderOperation, op.id).inspection_complete is False
+    assert _sign_off_rows(db_session, op.id) == []
+    assert (
+        db_session.query(OperationalEvent)
+        .filter(OperationalEvent.event_type == "operation_inspected", OperationalEvent.operation_id == op.id)
+        .count()
+        == 0
+    )

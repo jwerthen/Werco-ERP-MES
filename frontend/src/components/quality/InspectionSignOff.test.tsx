@@ -156,4 +156,70 @@ describe('InspectionSignOffControl', () => {
     expect(screen.getByText('inspection required')).toBeInTheDocument();
     expect(onSignedOff).not.toHaveBeenCalled();
   });
+
+  it('refuses Escape and a second submit while the request is in flight', async () => {
+    let resolve!: (value: OperationInspectionResponse) => void;
+    mocked.signOffOperationInspection.mockReturnValue(new Promise(r => (resolve = r)));
+    renderControl();
+
+    fireEvent.click(screen.getByRole('button', { name: /sign off inspection/i }));
+    const dialog = screen.getByRole('dialog');
+    const submit = within(dialog).getByRole('button', { name: 'Sign off' });
+    fireEvent.click(submit);
+    fireEvent.click(submit);
+    fireEvent.submit(submit.closest('form') as HTMLFormElement);
+    fireEvent.keyDown(window, { key: 'Escape' });
+
+    expect(mocked.signOffOperationInspection).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    expect(within(dialog).getByLabelText('Notes (optional)')).toBeDisabled();
+
+    resolve(signed);
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+
+  it('Cancel closes the dialog without calling the server', () => {
+    const { onSignedOff } = renderControl();
+
+    fireEvent.click(screen.getByRole('button', { name: /sign off inspection/i }));
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Cancel' }));
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(mocked.signOffOperationInspection).not.toHaveBeenCalled();
+    expect(onSignedOff).not.toHaveBeenCalled();
+    expect(screen.getByText('inspection required')).toBeInTheDocument();
+  });
+
+  it('a refused sign-off can be retried from the same dialog', async () => {
+    mocked.signOffOperationInspection
+      .mockRejectedValueOnce({ response: { status: 503, data: { detail: 'nothing was signed off. Retry.' } } })
+      .mockResolvedValueOnce(signed);
+    const { onSignedOff } = renderControl();
+
+    fireEvent.click(screen.getByRole('button', { name: /sign off inspection/i }));
+    const dialog = screen.getByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText('Notes (optional)'), { target: { value: 'bore ok' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Sign off' }));
+    expect(await screen.findByText(/nothing was signed off\. Retry\./)).toBeInTheDocument();
+
+    // The notes survive the refusal, so the retry sends the same evidence.
+    expect(within(screen.getByRole('dialog')).getByLabelText('Notes (optional)')).toHaveValue('bore ok');
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Sign off' }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(mocked.signOffOperationInspection).toHaveBeenLastCalledWith(501, {
+      inspection_type: 'in_process',
+      notes: 'bore ok',
+    });
+    expect(screen.getByText('inspected')).toBeInTheDocument();
+    expect(onSignedOff).toHaveBeenCalledTimes(1);
+  });
+
+  it('labels the notes field and caps it at the server limit', () => {
+    renderControl();
+    fireEvent.click(screen.getByRole('button', { name: /sign off inspection/i }));
+    const notes = within(screen.getByRole('dialog')).getByLabelText('Notes (optional)');
+    expect(notes).toHaveAttribute('maxLength', '2000');
+    expect(screen.getByRole('dialog')).toHaveAccessibleName('Sign off inspection');
+  });
 });

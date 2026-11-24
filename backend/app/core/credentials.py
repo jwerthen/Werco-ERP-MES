@@ -124,9 +124,11 @@ API_TOKEN_EXPORT_AUTHORIZATION = (
 # AS9100D 8.6). Signing that an inspection was performed is quality evidence someone has to have
 # done, the same judgment as an FAI final disposition, so the route refuses ANY API token,
 # whatever its role or scope, with this text before it reads or writes anything. It is not an MCP
-# tool (``app.mcp.catalog.INSPECTION_SIGN_OFF_OPERATIONS``). A crew-station badge token never
-# reaches it: the route is Admin / Manager / Supervisor / Quality, and the kiosk carries no
-# supervisor verbs.
+# tool (``app.mcp.catalog.INSPECTION_SIGN_OFF_OPERATIONS``). A crew-station badge token is a
+# person, not an API token, and the kiosk path fence admits this ``/shop-floor`` path, so an
+# Admin / Manager / Supervisor / Quality badge scanned at a crew station CAN sign off (attributed
+# to the badge holder); an Operator badge is refused by the route's roles. Pinned by
+# ``tests/api/test_inspection_sign_off.py``.
 API_TOKEN_INSPECTION_SIGN_OFF = (
     "An inspection is signed off by a person signed in to the app, not an API token: recording that an "
     "inspection was performed is a person's judgment."
