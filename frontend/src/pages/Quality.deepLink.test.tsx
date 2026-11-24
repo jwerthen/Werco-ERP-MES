@@ -24,8 +24,9 @@ import QualityPage from './Quality';
 import api from '../services/api';
 import { ToastProvider } from '../components/ui/Toast';
 
+const mockPermissions = { role: 'quality' };
 jest.mock('../hooks/usePermissions', () => ({
-  usePermissions: () => ({ role: 'quality', isSuperuser: false, can: () => true, canAny: () => true }),
+  usePermissions: () => ({ role: mockPermissions.role, isSuperuser: false, can: () => true, canAny: () => true }),
 }));
 
 jest.mock('../services/api', () => ({
@@ -39,6 +40,8 @@ jest.mock('../services/api', () => ({
     getFAI: jest.fn(),
     // The FAI detail's inspector picker.
     getAssignmentPeople: jest.fn().mockResolvedValue([]),
+    // The Sheet Gaps tab (work orders missing process sheets).
+    getProcessSheetGaps: jest.fn(),
   },
 }));
 
@@ -103,6 +106,8 @@ const isActive = (label: string) => tabButton(label).className.includes('border-
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockPermissions.role = 'quality';
+  mockedApi.getProcessSheetGaps.mockResolvedValue({ total: 0, items: [] });
   mockedApi.getNCRs.mockResolvedValue([] as any);
   mockedApi.getCARs.mockResolvedValue([] as any);
   mockedApi.getFAIs.mockResolvedValue([FAI_ROW] as any);
@@ -146,6 +151,22 @@ describe('?tab= landing', () => {
     // Give the sync effect a chance to fight back; it must not.
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(isActive('CAR')).toBe(true);
+  });
+});
+
+describe('?tab=sheetgaps (role-gated)', () => {
+  test('lands Quality on the work orders missing process sheets', async () => {
+    renderAt('/quality?tab=sheetgaps');
+    await waitFor(() => expect(isActive('Sheet Gaps')).toBe(true));
+    await waitFor(() => expect(mockedApi.getProcessSheetGaps).toHaveBeenCalled());
+  });
+
+  test('is not offered, and the deep link is ignored, for a role the server refuses', async () => {
+    mockPermissions.role = 'supervisor';
+    renderAt('/quality?tab=sheetgaps');
+    await waitFor(() => expect(isActive('NCR')).toBe(true));
+    expect(screen.queryByRole('tab', { name: 'Sheet Gaps' })).not.toBeInTheDocument();
+    expect(mockedApi.getProcessSheetGaps).not.toHaveBeenCalled();
   });
 });
 

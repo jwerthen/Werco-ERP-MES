@@ -246,6 +246,7 @@ import {
   VisitorLogResponse,
   VisitorManualEntryRequest,
 } from '../types/visitor';
+import type { WorkOrderOperationsPreview, WorkOrderProcessSheetGapResponse } from '../types/workOrderProcessSheet';
 import {
   KioskStationCreate,
   KioskStationListResponse,
@@ -2994,9 +2995,25 @@ class ApiService {
     return response.data;
   }
 
-  async previewWorkOrderOperations(partId: number, quantity: number = 1) {
-    const response = await this.api.get(`/work-orders/preview-operations/${partId}`, {
+  /**
+   * The operations `POST /work-orders` would copy from the part's released routing.
+   * Each row carries `routing_operation_id` (send it back on the supplied operation so
+   * the step keeps its process sheet) and the attached sheet. Pure read.
+   */
+  async previewWorkOrderOperations(partId: number, quantity: number = 1): Promise<WorkOrderOperationsPreview> {
+    const response = await this.api.get<WorkOrderOperationsPreview>(`/work-orders/preview-operations/${partId}`, {
       params: { quantity }
+    });
+    return response.data;
+  }
+
+  /**
+   * Quality's worklist: live work orders whose part's released routing carries process
+   * sheets but whose operations hold no snapshotted step. ADMIN/MANAGER/QUALITY. Pure read.
+   */
+  async getProcessSheetGaps(limit: number = 200): Promise<WorkOrderProcessSheetGapResponse> {
+    const response = await this.api.get<WorkOrderProcessSheetGapResponse>('/work-orders/process-sheet-gaps', {
+      params: { limit },
     });
     return response.data;
   }

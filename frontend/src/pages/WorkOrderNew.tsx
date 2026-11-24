@@ -14,7 +14,13 @@ import {
   MagnifyingGlassIcon,
   XMarkIcon,
 } from '@heroicons/react/24/outline';
-import { Breadcrumbs, SelectField, SelectOption, ErrorState, useToast, FormField } from '../components/ui';
+import { Breadcrumbs, SelectField, SelectOption, ErrorState, useToast, FormField, ConfirmDialog } from '../components/ui';
+import { formatOperationLabel } from '../utils/operationLabel';
+import {
+  isRoutingOperationUnmatchedDetail,
+  type WorkOrderOperationPreviewRow,
+  type WorkOrderOperationsPreview,
+} from '../types/workOrderProcessSheet';
 import { getBreadcrumbParent } from '../utils/routeMeta';
 import useUnsavedChanges from '../hooks/useUnsavedChanges';
 import CustomerPOAutocomplete from '../components/workorders/CustomerPOAutocomplete';
@@ -93,6 +99,7 @@ interface RoutingOperation {
   work_instructions?: string;
   setup_instructions?: string;
   is_inspection_point?: boolean;
+  process_sheet_id?: number | null;
 }
 
 interface Routing {
@@ -120,7 +127,46 @@ interface OperationPreview {
   run_instructions?: string;
   requires_inspection?: boolean;
   fromRouting: boolean;
+  // wo_change/2: the routing operation this row was copied from, sent back on create so
+  // the step keeps its process sheet. Matched BY ID on the server, never by sequence or
+  // name. Absent on a hand-added row (and on rows from a draft saved before this field).
+  routing_operation_id?: number;
+  process_sheet_id?: number | null;
+  process_sheet_number?: string | null;
+  process_sheet_released?: boolean | null;
 }
+
+/**
+ * One step of the part's released routing as the server would copy it today. Used to
+ * tell the planner which sheet-bearing steps a supplied operation list leaves out, and
+ * which restored-draft links no longer name a step on the released routing.
+ */
+interface RoutedStepRef {
+  routing_operation_id: number;
+  operation_number: string;
+  sequence: number;
+  name: string;
+  component_part_id: number | null;
+  process_sheet_id: number | null;
+  process_sheet_number: string | null;
+}
+
+const routedStepsFromPreview = (preview: WorkOrderOperationsPreview | null | undefined): RoutedStepRef[] =>
+  (preview?.operations_preview || [])
+    .filter((row): row is WorkOrderOperationPreviewRow & { routing_operation_id: number } =>
+      typeof row.routing_operation_id === 'number')
+    .map((row, index) => ({
+      routing_operation_id: row.routing_operation_id,
+      operation_number: row.operation_number ?? String((index + 1) * 10),
+      sequence: row.sequence ?? (index + 1) * 10,
+      name: row.name,
+      component_part_id: row.component_part_id ?? null,
+      process_sheet_id: row.process_sheet_id ?? null,
+      process_sheet_number: row.process_sheet_number ?? null,
+    }));
+
+const sheetLabel = (number: string | null | undefined, id: number | null | undefined) =>
+  number ? number : id != null ? `#${id}` : '';
 
 interface CustomerOption {
   id: number;
@@ -132,6 +178,29 @@ interface PartReadiness {
   blockers: string[];
   warnings: string[];
   checks: Record<string, string>;
+}
+
+/** The process sheet a row carries (or why it carries none it should). */
+function OperationSheetChip({ op, stale }: { op: OperationPreview; stale: boolean }) {
+  if (stale) {
+    return (
+      <span className="mt-1 inline-block border border-red-500/40 px-1.5 py-0.5 text-[11px] text-red-300">
+        Routing link no longer valid
+      </span>
+    );
+  }
+  if (op.routing_operation_id == null || (op.process_sheet_id == null && !op.process_sheet_number)) return null;
+  const label = sheetLabel(op.process_sheet_number, op.process_sheet_id);
+  return (
+    <span
+      className={`mt-1 inline-block border px-1.5 py-0.5 text-[11px] ${
+        op.process_sheet_released === false ? 'border-amber-500/40 text-amber-300' : 'border-slate-600 text-slate-300'
+      }`}
+    >
+      Process sheet {label}
+      {op.process_sheet_released === false ? ' — no released revision' : ''}
+    </span>
+  );
 }
 
 export default function WorkOrderNew() {
@@ -149,6 +218,13 @@ export default function WorkOrderNew() {
   const [showManualEntry, setShowManualEntry] = useState(false);
   const [operationsOverridden, setOperationsOverridden] = useState(false);
   const [routingLoadError, setRoutingLoadError] = useState('');
+  // Today's released routing steps for the selected part (null = not loaded/unknown).
+  const [routedSteps, setRoutedSteps] = useState<RoutedStepRef[] | null>(null);
+  const [linkCheckError, setLinkCheckError] = useState('');
+  const [restoredFromDraft, setRestoredFromDraft] = useState(false);
+  // Routing-operation ids the server refused (409 ROUTING_OPERATION_UNMATCHED).
+  const [serverUnmatchedIds, setServerUnmatchedIds] = useState<Set<number>>(() => new Set());
+  const [confirmReload, setConfirmReload] = useState(false);
   const partRequestRef = useRef(0);
   const submitPendingRef = useRef(false);
   const [customerOptions, setCustomerOptions] = useState<CustomerOption[]>([]);
@@ -200,6 +276,21 @@ export default function WorkOrderNew() {
   );
   const { confirmDiscard, markSaved } = useUnsavedChanges(isFormDirty);
 
+  // A restored draft's routing links are checked against TODAY's released routing, never
+  // trusted and never silently dropped: a link that no longer names a step is shown to the
+  // planner (unlink or reload), and the server would refuse it 409 anyway.
+  const checkRoutingLinks = (partId: number, quantity: number, requestId: number) => {
+    setLinkCheckError('');
+    Promise.resolve().then(() => api.previewWorkOrderOperations(partId, quantity)).then(preview => {
+      if (requestId === partRequestRef.current) setRoutedSteps(routedStepsFromPreview(preview));
+    }).catch(() => {
+      if (requestId === partRequestRef.current) {
+        setRoutedSteps(null);
+        setLinkCheckError('Could not check the restored operations against the released routing. Retry before creating the work order.');
+      }
+    });
+  };
+
   const draftValue = { form, operations, operationsOverridden, showManualEntry, serialsText };
   const draft = useResumableDraft({ namespace: 'work-orders', value: draftValue, dirty: isFormDirty,
     enabled: true,
@@ -212,6 +303,7 @@ export default function WorkOrderNew() {
     restore: saved => {
       const requestId = ++partRequestRef.current;
       setLoadingRouting(false); setRoutingLoadError(''); setRouting(null);
+      setRoutedSteps(null); setLinkCheckError(''); setServerUnmatchedIds(new Set()); setRestoredFromDraft(true);
       setForm({ ...initialForm, ...saved.form }); setOperations(saved.operations);
       // Restored operations are an explicit reviewed snapshot. Preserve removed
       // operations instead of silently reloading today's released routing.
@@ -227,6 +319,7 @@ export default function WorkOrderNew() {
         }).catch(() => {
           if (requestId === partRequestRef.current) setRoutingLoadError('Could not verify the restored part. Retry before creating the work order.');
         }).finally(() => { if (requestId === partRequestRef.current) setLoadingRouting(false); });
+        checkRoutingLinks(saved.form.part_id, saved.form.quantity_ordered || 1, requestId);
       }
     },
   });
@@ -540,6 +633,10 @@ export default function WorkOrderNew() {
     const isCurrent = () => requestId === partRequestRef.current;
     setOperationsOverridden(false);
     setRoutingLoadError('');
+    setRoutedSteps(null);
+    setLinkCheckError('');
+    setServerUnmatchedIds(new Set());
+    setRestoredFromDraft(false);
     const selectedPart = parts.find(p => p.id === partId);
     const partCustomerName = selectedPart?.customer_name || '';
     setForm((prev) => ({
@@ -578,16 +675,20 @@ export default function WorkOrderNew() {
         const previewRes = await api.previewWorkOrderOperations(partId, form.quantity_ordered);
         if (!isCurrent()) return;
         if (previewRes && previewRes.operations_preview?.length > 0) {
-          // Create a fake routing object to indicate we have operations
-          setRouting({ id: 0, part_id: partId, revision: 'BOM', status: 'released', operations: [] } as any);
-          const ops: OperationPreview[] = previewRes.operations_preview.map((op: any, index: number) => ({
+          // A stand-in routing object to indicate we have operations. An assembly with no
+          // BOM previews its own released routing (revision '' picks that banner text).
+          setRouting({ id: 0, part_id: partId, revision: previewRes.bom_found ? 'BOM' : '', status: 'released', operations: [] });
+          setRoutedSteps(routedStepsFromPreview(previewRes));
+          const ops: OperationPreview[] = previewRes.operations_preview.map((op, index) => ({
             quantity_per_assembly: (op.component_quantity || form.quantity_ordered) / form.quantity_ordered,
-            sequence: (index + 1) * 10,
+            // The server reports the sequence and number the routed create would assign
+            // (10, 20, ... on this path); the index fallback covers an older API.
+            sequence: op.sequence ?? (index + 1) * 10,
             // IDENTIFIER, not a label. This used to mint `Op ${seq}`, so every
             // screen that renders the column under its own `Op #` header printed
             // the prefix twice ("Op Op 10" on the kiosk). The prefix belongs to
             // the view (`formatOperationLabel`), never to the stored value.
-            operation_number: String((index + 1) * 10),
+            operation_number: op.operation_number ?? String((index + 1) * 10),
             name: op.name,
             work_center_id: op.work_center_id,
             work_center_name: op.work_center_name || '',
@@ -598,8 +699,12 @@ export default function WorkOrderNew() {
             run_instructions: op.run_instructions || '',
             requires_inspection: Boolean(op.requires_inspection),
             fromRouting: true,
-            component_part_id: op.component_part_id,
-            component_quantity: op.component_quantity
+            component_part_id: op.component_part_id ?? undefined,
+            component_quantity: op.component_quantity ?? undefined,
+            routing_operation_id: op.routing_operation_id,
+            process_sheet_id: op.process_sheet_id ?? null,
+            process_sheet_number: op.process_sheet_number ?? null,
+            process_sheet_released: op.process_sheet_released ?? null,
           }));
           setOperations(ops);
         } else if (previewRes?.bom_found === false) {
@@ -611,10 +716,33 @@ export default function WorkOrderNew() {
         }
       } else {
         // For non-assemblies, use the standard routing lookup
-        const routingRes = await api.getRoutingByPart(partId);
+        // The preview carries each step's sheet number and released flag, which the
+        // routing read does not. It is advisory here: if it fails, the rows still link
+        // by the routing operation's own id and keep their sheet on create.
+        const [routingRes, previewRes] = await Promise.all([
+          api.getRoutingByPart(partId),
+          Promise.resolve().then(() => api.previewWorkOrderOperations(partId, form.quantity_ordered)).catch(() => null),
+        ]);
         if (!isCurrent()) return;
+        const previewById = new Map<number, WorkOrderOperationPreviewRow>();
+        (previewRes?.operations_preview || []).forEach(row => {
+          if (typeof row.routing_operation_id === 'number') previewById.set(row.routing_operation_id, row);
+        });
         if (routingRes && routingRes.operations?.length > 0) {
           setRouting(routingRes);
+          setRoutedSteps(
+            previewById.size > 0
+              ? routedStepsFromPreview(previewRes)
+              : (routingRes.operations as RoutingOperation[]).map(op => ({
+                  routing_operation_id: op.id,
+                  operation_number: op.operation_number || String(op.sequence),
+                  sequence: op.sequence,
+                  name: op.name,
+                  component_part_id: null,
+                  process_sheet_id: op.process_sheet_id ?? null,
+                  process_sheet_number: null,
+                }))
+          );
           const ops: OperationPreview[] = routingRes.operations
             .filter((op: RoutingOperation) => op.work_center)
             .map((op: RoutingOperation) => ({
@@ -633,7 +761,11 @@ export default function WorkOrderNew() {
               setup_instructions: op.setup_instructions || '',
               run_instructions: op.work_instructions || '',
               requires_inspection: Boolean(op.is_inspection_point),
-              fromRouting: true
+              fromRouting: true,
+              routing_operation_id: op.id,
+              process_sheet_id: previewById.get(op.id)?.process_sheet_id ?? op.process_sheet_id ?? null,
+              process_sheet_number: previewById.get(op.id)?.process_sheet_number ?? null,
+              process_sheet_released: previewById.get(op.id)?.process_sheet_released ?? null,
             }));
           setOperations(ops);
         } else {
@@ -757,6 +889,48 @@ export default function WorkOrderNew() {
   const hasManualOperations = operations.length > 0 && (operationsOverridden || showManualEntry || operations.some(op => !op.fromRouting));
   const manualOperationsAreValid = hasManualOperations
     && operations.every(op => op.name.trim().length > 0 && op.work_center_id > 0);
+  // ── Process-sheet links (wo_change/2) ────────────────────────────────────
+  // A supplied row keeps its step's process sheet only while it is linked to that
+  // routing operation by id. These are derived from the rows and today's routing, so a
+  // removal, a restored draft and a hand-added row all land in the same warnings.
+  const routedStepById = useMemo(
+    () => new Map((routedSteps || []).map(step => [step.routing_operation_id, step])),
+    [routedSteps]
+  );
+  const staleLinkedOperations = useMemo(() => operations.filter(op => {
+    if (op.routing_operation_id == null) return false;
+    if (serverUnmatchedIds.has(op.routing_operation_id)) return true;
+    if (routedSteps === null) return false;
+    const step = routedStepById.get(op.routing_operation_id);
+    if (!step) return true;
+    // A component's step must stay on that component; the job part's own step has none.
+    return step.component_part_id !== null && (op.component_part_id ?? null) !== step.component_part_id;
+  }), [operations, serverUnmatchedIds, routedSteps, routedStepById]);
+  const missingSheetSteps = useMemo(() => {
+    if (!hasManualOperations || !routedSteps) return [];
+    const carried = new Set(
+      operations.map(op => op.routing_operation_id).filter((id): id is number => typeof id === 'number')
+    );
+    return routedSteps.filter(step => step.process_sheet_id != null && !carried.has(step.routing_operation_id));
+  }, [hasManualOperations, routedSteps, operations]);
+  const unreleasedSheetOperations = operations.filter(op => op.routing_operation_id != null
+    && op.process_sheet_released === false && !staleLinkedOperations.includes(op));
+
+  const unlinkStaleOperations = () => {
+    const staleIds = new Set(staleLinkedOperations.map(op => op.routing_operation_id));
+    setOperations(ops => ops.map(op => (op.routing_operation_id != null && staleIds.has(op.routing_operation_id)
+      ? {
+          ...op,
+          routing_operation_id: undefined,
+          process_sheet_id: null,
+          process_sheet_number: null,
+          process_sheet_released: null,
+          fromRouting: false,
+        }
+      : op)));
+    setServerUnmatchedIds(new Set());
+  };
+
   const readinessBlockers = partReadiness?.blockers || [];
   const blockingReadinessMessages = readinessBlockers.filter((message) => (
     !(isMissingRoutingBlocker(message) && manualOperationsAreValid)
@@ -786,6 +960,14 @@ export default function WorkOrderNew() {
     }
     if (hasManualOperations && !manualOperationsAreValid) {
       showToast('error', 'Please complete every manual operation with an operation name and work center.');
+      return;
+    }
+    if (hasManualOperations && staleLinkedOperations.length > 0) {
+      showToast('error', 'Some operations are linked to a routing step that is no longer on the released routing. Unlink them or reload the routing first.');
+      return;
+    }
+    if (hasManualOperations && restoredFromDraft && routedSteps === null) {
+      showToast('error', 'The restored operations have not been checked against the released routing yet. Retry the check first.');
       return;
     }
     if (serialErrors.length > 0) {
@@ -847,6 +1029,8 @@ export default function WorkOrderNew() {
           component_part_id: op.component_part_id,
           component_quantity: op.component_quantity,
           operation_group: op.operation_group,
+          // Keeps the step's process sheet. Omitted (undefined) on a hand-added row.
+          routing_operation_id: op.routing_operation_id,
           status: 'pending'
         }));
       } else {
@@ -861,6 +1045,10 @@ export default function WorkOrderNew() {
       // Surface the server refusal VERBATIM. A 422 arrives as Pydantic's
       // structured array — join its messages instead of showing "[object …]".
       const detail = err.response?.data?.detail;
+      if (isRoutingOperationUnmatchedDetail(detail)) {
+        // Mark the refused rows so the planner sees which ones to unlink or reload.
+        setServerUnmatchedIds(new Set(detail.operations.map(op => op.routing_operation_id)));
+      }
       const message =
         typeof detail === 'string' && detail.trim()
           ? detail
@@ -868,7 +1056,11 @@ export default function WorkOrderNew() {
             ? detail
                 .map((d: any) => (typeof d?.msg === 'string' ? d.msg : JSON.stringify(d)))
                 .join('; ')
-            : 'Failed to create work order';
+            // Structured 409s (ROUTING_OPERATION_UNMATCHED, PROCESS_SHEET_UNAVAILABLE)
+            // carry their human text in `detail.detail`.
+            : detail && typeof detail === 'object' && typeof detail.detail === 'string' && detail.detail.trim()
+              ? detail.detail
+              : 'Failed to create work order';
       showToast('error', message);
     } finally {
       submitPendingRef.current = false;
@@ -1304,6 +1496,83 @@ export default function WorkOrderNew() {
         {operationsOverridden && operations.length === 0 && (
           <p role="alert" className="text-amber-300">All preview operations were removed. Add an operation to continue.</p>
         )}
+        {linkCheckError && (
+          <div role="alert" className="card border border-red-500/40 p-4">
+            <p>{linkCheckError}</p>
+            <button
+              type="button"
+              className="btn-secondary mt-2"
+              onClick={() => checkRoutingLinks(form.part_id, form.quantity_ordered || 1, partRequestRef.current)}
+            >
+              Retry routing check
+            </button>
+          </div>
+        )}
+        {hasManualOperations && staleLinkedOperations.length > 0 && (
+          <div role="alert" data-testid="wo-stale-routing-links" className="bg-fd-panel border border-red-500/40 p-4">
+            <div className="flex items-start gap-3">
+              <ExclamationTriangleIcon className="h-5 w-5 text-red-300 mt-0.5 flex-shrink-0" />
+              <div className="min-w-0">
+                <div className="font-semibold text-white">Operations linked to a routing step that is no longer released</div>
+                <p className="mt-1 text-sm text-slate-300">
+                  These operations were copied from a routing step that is not on the part&apos;s released routing today,
+                  so the work order cannot be created with them linked. Unlink them to keep them as hand-entered steps
+                  (with no process-sheet checks), or reload the operations from the released routing.
+                </p>
+                <ul className="mt-2 space-y-0.5 text-sm text-slate-200">
+                  {staleLinkedOperations.map((op, index) => (
+                    <li key={`${op.routing_operation_id}-${index}`}>
+                      {formatOperationLabel(op.operation_number, op.sequence)} — {op.name || 'Unnamed operation'}
+                    </li>
+                  ))}
+                </ul>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button type="button" className="btn-secondary btn-sm" onClick={unlinkStaleOperations}>
+                    Unlink these operations
+                  </button>
+                  <button type="button" className="btn-secondary btn-sm" onClick={() => setConfirmReload(true)}>
+                    Reload from released routing
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+        {missingSheetSteps.length > 0 && (
+          <div role="alert" data-testid="wo-missing-sheet-steps" className="bg-fd-panel border border-amber-500/30 p-4">
+            <div className="flex items-start gap-3">
+              <ExclamationTriangleIcon className="h-5 w-5 text-amber-300 mt-0.5 flex-shrink-0" />
+              <div className="min-w-0">
+                <div className="font-semibold text-white">Process-sheet steps left off this work order</div>
+                <p className="mt-1 text-sm text-slate-300">
+                  These released routing steps carry process sheets, but no operation below is linked to them, so their
+                  required checks will not appear at the kiosk. The work order can still be created; the left-off steps are
+                  recorded on its creation record.
+                </p>
+                <ul className="mt-2 space-y-0.5 text-sm text-slate-200">
+                  {missingSheetSteps.map(step => (
+                    <li key={step.routing_operation_id}>
+                      {formatOperationLabel(step.operation_number, step.sequence)} — {step.name} (sheet{' '}
+                      {sheetLabel(step.process_sheet_number, step.process_sheet_id)})
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          </div>
+        )}
+        {unreleasedSheetOperations.length > 0 && (
+          <div role="alert" className="bg-fd-panel border border-amber-500/30 p-4 text-sm text-slate-300">
+            <div className="font-semibold text-white">Process sheet not released</div>
+            <p className="mt-1">
+              Creating this work order will be refused until Quality releases a revision of:{' '}
+              {unreleasedSheetOperations
+                .map(op => `sheet ${sheetLabel(op.process_sheet_number, op.process_sheet_id)} (${formatOperationLabel(op.operation_number, op.sequence)})`)
+                .join(', ')}
+              .
+            </p>
+          </div>
+        )}
         {/* Operations Card */}
         <div className="card">
           <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
@@ -1339,9 +1608,11 @@ export default function WorkOrderNew() {
               <div className="flex items-center gap-2 mb-4 p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-emerald-400">
                 <CheckCircleIcon className="h-5 w-5 flex-shrink-0" />
                 <span className="text-sm font-medium">
-                  {routing.revision === 'BOM' 
+                  {routing.revision === 'BOM'
                     ? `Auto-populated from BOM component routings (${operations.length} operations)`
-                    : `Auto-populated from routing Rev ${routing.revision} (${operations.length} operations)`
+                    : routing.revision === ''
+                      ? `Auto-populated from the part's released routing (${operations.length} operations)`
+                      : `Auto-populated from routing Rev ${routing.revision} (${operations.length} operations)`
                   }
                 </span>
               </div>
@@ -1380,6 +1651,7 @@ export default function WorkOrderNew() {
                               placeholder="Operation name"
                               aria-label="Operation name"
                             />
+                            <OperationSheetChip op={op} stale={staleLinkedOperations.includes(op)} />
                           </td>
                           <td>
                             <SelectField
@@ -1482,7 +1754,9 @@ export default function WorkOrderNew() {
               <div className="flex items-center gap-2 mb-4 p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl text-amber-400">
                 <ExclamationTriangleIcon className="h-5 w-5 flex-shrink-0" />
                 <span className="text-sm">
-                  No released routing found for this part. Add operations manually.
+                  {restoredFromDraft && operations.length > 0
+                    ? 'Operations restored from your saved draft. Their routing links are checked against the part\'s released routing today.'
+                    : 'No released routing found for this part. Add operations manually.'}
                 </span>
               </div>
 
@@ -1531,6 +1805,7 @@ export default function WorkOrderNew() {
                                 required
                                 aria-label="Operation name"
                               />
+                              <OperationSheetChip op={op} stale={staleLinkedOperations.includes(op)} />
                             </td>
                             <td>
                               <SelectField
@@ -1623,6 +1898,19 @@ export default function WorkOrderNew() {
             </>
           )}
         </div>
+
+        <ConfirmDialog
+          open={confirmReload}
+          title="Reload operations from the released routing?"
+          message="This replaces every operation below with the part's released routing as it is today. Your edits to the operations are discarded."
+          confirmLabel="Reload operations"
+          variant="warning"
+          onCancel={() => setConfirmReload(false)}
+          onConfirm={() => {
+            setConfirmReload(false);
+            void handlePartChange(form.part_id);
+          }}
+        />
 
         {/* Actions */}
         <div className="flex flex-wrap justify-end gap-3">
