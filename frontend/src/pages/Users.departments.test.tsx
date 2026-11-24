@@ -156,3 +156,39 @@ it('approves a pending account with the department picked on its row', async () 
     expect(mockedApi.approveUser).toHaveBeenCalledWith(7, { role: 'operator', department: 'Production' })
   );
 });
+
+it('keeps the form open and shows the server reason when a department is refused', async () => {
+  const detail =
+    'Department must be one of: Purchasing, Inventory, Sales, Quality, Maintenance, Shipping, Production, Other (or left blank).';
+  mockedApi.updateUser.mockRejectedValue({ response: { status: 422, data: { detail } } });
+  renderUsers();
+  const panel = await screen.findByTestId('unlisted-departments');
+  fireEvent.click(within(panel).getByRole('button', { name: 'Pick a department for Rosa Vega' }));
+  const select = await screen.findByLabelText('Department');
+  fireEvent.change(select, { target: { value: 'Quality' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Update' }));
+
+  // Non-optimistic: the refusal is shown verbatim and the form (with the pick) stays up.
+  expect(await screen.findByText(detail)).toBeInTheDocument();
+  expect(screen.getByLabelText('Department')).toHaveValue('Quality');
+  // A refused save does not re-read the correction list as if it had worked.
+  expect(mockedApi.getUserDepartments).toHaveBeenCalledTimes(1);
+});
+
+it('still offers a pick list, never free text, when the department list cannot be loaded', async () => {
+  const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+  mockedApi.getUserDepartments.mockRejectedValue(new Error('network down'));
+  renderUsers();
+  expect((await screen.findAllByText(/Rosa/)).length).toBeGreaterThan(0);
+  // The correction panel needs the server's answer, so it stays hidden.
+  expect(screen.queryByTestId('unlisted-departments')).toBeNull();
+
+  fireEvent.click(screen.getAllByRole('button', { name: /Add User/ })[0]);
+  const select = await screen.findByLabelText('Department');
+  expect(select.tagName).toBe('SELECT');
+  const options = within(select)
+    .getAllByRole('option')
+    .map(option => option.textContent);
+  expect(options).toEqual(['No department', ...DEPARTMENTS.departments]);
+  consoleError.mockRestore();
+});

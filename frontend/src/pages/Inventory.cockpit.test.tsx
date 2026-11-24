@@ -165,3 +165,25 @@ test('the low-stock view also lists a part that is completely out of stock', asy
   expect(screen.getAllByText('OUT OF STOCK').length).toBeGreaterThan(0);
   expect(screen.getAllByText('LOW STOCK').length).toBeGreaterThan(0);
 });
+
+test('a low-stock part that has a summary row is listed once, not twice', async () => {
+  mockedApi.getLowStockAlerts.mockResolvedValue([outOfStock, ...lowStock]);
+  mockedApi.getParts.mockResolvedValue([
+    ...parts,
+    { id: 9, part_number: 'PN-900', name: 'Gusset', part_type: 'manufactured' },
+  ] as any);
+  render(
+    <MemoryRouter initialEntries={['/warehouse?tab=inventory&filter=low_stock']}>
+      <InventoryPage />
+    </MemoryRouter>
+  );
+
+  expect(await screen.findByText(/Showing 2 low stock/i)).toBeInTheDocument();
+  const table = screen.getByRole('table');
+  // Header row plus exactly one row per low part: PN-700 from the summary, PN-900 from the
+  // low-stock payload (it has no stock row at all).
+  const bodyRows = within(table).getAllByRole('row').slice(1);
+  expect(bodyRows).toHaveLength(2);
+  expect(within(table).getAllByText('PN-700')).toHaveLength(1);
+  expect(within(table).getAllByText('PN-900')).toHaveLength(1);
+});
