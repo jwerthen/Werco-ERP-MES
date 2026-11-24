@@ -31,7 +31,7 @@ from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.services.job_costing_service import recalculate_totals
-from tests.api.export_control_helpers import could_occur_in_iso_timestamp
+from tests.api.export_control_helpers import could_occur_in_iso_timestamp, strip_iso_instants
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 
@@ -337,6 +337,14 @@ def test_a_foreign_tenant_job_cost_on_this_work_orders_id_is_never_disclosed(cli
     needles = ("98765.", "197530.")
     assert not [n for n in needles if could_occur_in_iso_timestamp(n.encode())], "needle fits in a timestamp"
     assert not [n for n in needles if n in by_number.text] and "FOREIGN" not in by_number.text
+    # The breadth "999" had: an amount written as a whole number or with a thousands separator.
+    # A bare five/six-digit run fits a microsecond field, so these are searched with every whole
+    # instant removed. What is left holds no other run that long by chance: ids, version and
+    # quantities are small, the due date is a date only (four-digit runs), and the work-order
+    # number's padded counter ("P13-WO-000nn") counts this module's rows, never near 98765.
+    bare_needles = ("98765", "197530", "98,765", "197,530")
+    without_instants = strip_iso_instants(by_number.text)
+    assert not [n for n in bare_needles if n in without_instants]
 
 
 def test_another_company_cannot_read_this_work_orders_cost(client, db_session):

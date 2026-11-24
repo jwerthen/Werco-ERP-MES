@@ -518,9 +518,11 @@ failed on main with `[b'7.94'] == []` because the quote's `created_at` was `...0
 nothing had leaked, but the red job skipped the production deploy. Pick a needle no timestamp
 can hold (7+ fractional digits, or 3+ integer digits before a `.`) and assert it with
 `could_occur_in_iso_timestamp` from `tests/api/export_control_helpers.py`, so a short needle
-fails on every run rather than one run in a thousand. Where the needle's shape is fixed (a
-six-digit PIN), search `strip_iso_instants(text)` instead; on the frontend, blank or pin the
-clock-driven cell rather than dropping the check.
+fails on every run rather than one run in a thousand. That helper decides ISO instants only
+(`T` or space separator): output that also carries random tokens, epoch numbers or elapsed
+durations needs its own argument that the needle cannot occur in those. Where the needle's
+shape is fixed (a six-digit PIN), search `strip_iso_instants(text)` instead; on the frontend,
+blank or pin the clock-driven cell rather than dropping the check.
 
 ### Frontend Testing
 

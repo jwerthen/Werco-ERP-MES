@@ -2245,6 +2245,20 @@ class TestChanceMatchGuard:
     def test_impossible_date_and_time_needles_are_not_flagged(self, needle):
         assert iso_timestamp_containing(needle) is None, needle
 
+    @pytest.mark.parametrize("needle", [b"6-11-24 15", b"-24 15:15:22.8", b"31 23", b"02-29 00:00"])
+    def test_a_needle_spanning_the_str_datetime_space_separator_is_flagged(self, needle):
+        # ``str(datetime)`` writes a space where ``isoformat()`` writes ``T``; both are decided.
+        instant = iso_timestamp_containing(needle)
+        assert instant is not None and could_occur_in_iso_timestamp(needle), needle
+        assert needle in instant.encode() and " " in instant
+        datetime.fromisoformat(instant.removesuffix("Z"))
+        # The stripper agrees with the guard: it removes that same space-separated instant whole.
+        assert needle.decode() not in strip_iso_instants(f'"at":"{instant}"')
+
+    @pytest.mark.parametrize("needle", [b"24 1T", b"-32 00", b" 24:", b"2026 11"])
+    def test_a_space_outside_the_separator_slot_is_not_flagged(self, needle):
+        assert iso_timestamp_containing(needle) is None, needle
+
     def test_strip_iso_instants_removes_whole_instants_only(self):
         text = '{"at":"2026-11-24T15:15:22.830416Z","raw":"2026-11-24 15:15:22.830416","pin":"830416"}'
         stripped = strip_iso_instants(text)

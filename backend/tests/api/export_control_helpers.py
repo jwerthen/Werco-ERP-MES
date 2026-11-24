@@ -678,14 +678,16 @@ def contains_numeric_canary(raw: bytes) -> bool:
 # and failed a redaction test about one run in a thousand although nothing had leaked.
 # The two helpers below make that class of chance match impossible rather than unlikely.
 
-# Every slot of an ISO-8601 instant with microseconds. A shorter fraction, a fraction-less
-# instant, a space separator (``str(datetime)``) or a ``Z`` / offset suffix only removes or
-# renames positions a numeric needle could use, so this one template covers them for any
-# needle made of digits, ``-``, ``T``, ``:`` and ``.``.
+# Every slot of an ISO-8601 instant with microseconds. The date/time separator slot takes
+# either ``T`` (``isoformat()``) or a space (``str(datetime)``), so a needle that spans the
+# separator is decided for both spellings. A shorter fraction, a fraction-less instant or a
+# ``Z`` / offset suffix only removes positions a numeric needle could use, so this one
+# template covers them for any needle made of digits, ``-``, ``T``, space, ``:`` and ``.``.
 _ISO_TEMPLATE = "dddd-dd-ddTdd:dd:dd.dddddd"
+_ISO_SEPARATOR = 10  # index of the ``T`` slot; a space is accepted there too
 _ISO_BASE_YEAR = 2026
 # (start, end, allowed values) for each numeric field. Day is listed as 1..31 here; whether
-# a day exists in its month and year is the one cross-field rule, checked with ``date``.
+# a day exists in its month and year is the one cross-field rule, checked by ``_is_real_date``.
 _ISO_FIELDS = (
     (0, 4, range(1, 10000)),
     (5, 7, range(1, 13)),
@@ -695,7 +697,25 @@ _ISO_FIELDS = (
     (17, 19, range(60)),
     (20, 26, None),  # microseconds: every six-digit string is valid, so free digits are any digit
 )
+# The same two separators as the template: whatever the guard decides, the stripper removes.
 _ISO_INSTANT = re.compile(r"(?<!\d)\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?!\d)(?:Z|[+-]\d{2}:\d{2})?")
+_DAYS_IN_MONTH = (31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)  # February at its leap-year most
+
+
+def _is_real_date(year: int, month: int, day: int) -> bool:
+    if day > _DAYS_IN_MONTH[month - 1]:
+        return False
+    if (month, day) != (2, 29):
+        return True
+    return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+
+
+def _fits_slot(slot: str, ch: str) -> bool:
+    if slot == "d":
+        return ch.isdigit()
+    if slot == "T":
+        return ch in ("T", " ")
+    return ch == slot
 
 
 def _field_values(pattern: str, allowed: range) -> list:
@@ -714,15 +734,18 @@ def iso_timestamp_containing(needle: bytes) -> Optional[str]:
     free -- the year (0001-9999), month, day, hour, minute, second and microseconds alike.
     Each field takes only values in its range that agree with the covered digits, and the
     year/month/day combination must be a real date (so ``-31T`` finds a 31-day month and
-    ``02-29T`` a leap year). The result is checked with ``datetime.fromisoformat``. None
-    therefore means no instant of this shape, at any date or time, can contain the needle.
+    ``02-29T`` a leap year). The separator slot matches ``T`` or a space, and the returned
+    instant uses whichever the needle wrote there (``T`` when the needle does not reach it).
+    The result is checked with ``datetime.fromisoformat``. None therefore means no instant of
+    this shape, with either separator, at any date or time, can contain the needle.
     """
     text = needle.decode("ascii")
     for start in range(len(_ISO_TEMPLATE) - len(text) + 1):
         slots = _ISO_TEMPLATE[start : start + len(text)]
-        if not all(ch.isdigit() if slot == "d" else ch == slot for slot, ch in zip(slots, text)):
+        if not all(_fits_slot(slot, ch) for slot, ch in zip(slots, text)):
             continue
         pattern = "?" * start + text + "?" * (len(_ISO_TEMPLATE) - start - len(text))
+        separator = " " if pattern[_ISO_SEPARATOR] == " " else "T"
         years, months, days, hours, minutes, seconds = (
             _field_values(pattern[lo:hi], allowed) for lo, hi, allowed in _ISO_FIELDS[:6]
         )
@@ -732,27 +755,17 @@ def iso_timestamp_containing(needle: bytes) -> Optional[str]:
         # Prefer years near today's so a returned instant reads naturally.
         years.sort(key=lambda year: abs(year - _ISO_BASE_YEAR))
         for month, day in itertools.product(months, days):
-            if day > _DAYS_IN_MONTH[month - 1]:
-                continue
             year = next((y for y in years if _is_real_date(y, month, day)), None)
             if year is None:
                 continue
-            instant = f"{year:04d}-{month:02d}-{day:02d}T{hours[0]:02d}:{minutes[0]:02d}:{seconds[0]:02d}.{micro}"
+            instant = (
+                f"{year:04d}-{month:02d}-{day:02d}{separator}"
+                f"{hours[0]:02d}:{minutes[0]:02d}:{seconds[0]:02d}.{micro}"
+            )
             datetime.fromisoformat(instant)  # a real instant, by construction
             assert text in instant, (text, instant)
             return instant + "Z"
     return None
-
-
-_DAYS_IN_MONTH = (31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)  # February at its leap-year most
-
-
-def _is_real_date(year: int, month: int, day: int) -> bool:
-    if day > _DAYS_IN_MONTH[month - 1]:
-        return False
-    if (month, day) != (2, 29):
-        return True
-    return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
 
 
 def could_occur_in_iso_timestamp(needle: bytes) -> bool:
@@ -762,7 +775,10 @@ def could_occur_in_iso_timestamp(needle: bytes) -> bool:
     a needle that fails it would match a timestamp by chance on some run. Seven or more
     fractional digits, or three or more integer digits before a ``.``, can never fit. The
     answer is exact for every slot of the instant, date fields included (``-31T`` and
-    ``02-29T`` are flagged), for needles made of the characters such an instant contains.
+    ``02-29T`` are flagged), with either separator (``T`` or the space ``str(datetime)``
+    writes), for needles made of the characters such an instant contains. It decides ISO
+    instants only: other run-varying content in the same output (random tokens, epoch
+    numbers, elapsed durations) needs its own argument.
     """
     return iso_timestamp_containing(needle) is not None
 
@@ -771,6 +787,7 @@ def strip_iso_instants(text: str) -> str:
     """``text`` with every whole ISO-8601 instant removed, for an absence check whose needle
     cannot be made timestamp-proof (a six-digit PIN is exactly a microsecond field's shape).
 
+    Whole instants with either separator go (``T`` or a space, the two the guard decides).
     Only complete instants go: a secret written next to one, or a fraction longer than six
     digits (which no clock writes), stays in the text and is still caught.
     """
