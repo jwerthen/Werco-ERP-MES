@@ -22,7 +22,8 @@ export interface WorkerHealth {
 export interface CronRunResult {
   started_at: string | null;
   finished_at: string | null;
-  outcome: 'success' | 'failed';
+  /** 'running' = started and not finished normally; long after its start it means the run was cut off. */
+  outcome: 'success' | 'failed' | 'running';
   /** Exception class name only on a failure. */
   error_type: string | null;
   /** Flat numeric/boolean values the job returned. */

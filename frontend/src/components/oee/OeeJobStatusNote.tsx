@@ -53,9 +53,11 @@ export default function OeeJobStatusNote() {
       job is <strong className="text-fd-ink">{job.armed ? 'switched on' : 'switched off'}</strong>
       {job.schedule ? ` (${job.schedule})` : ''}
       {lastRun
-        ? `; its last run ${lastRun.outcome === 'success' ? 'succeeded' : 'failed'} at ${formatCentralDateTime(
-            lastRun.finished_at ?? lastRun.started_at
-          )}`
+        ? lastRun.outcome === 'running'
+          ? `; its last run started at ${formatCentralDateTime(lastRun.started_at)} and has not finished`
+          : `; its last run ${lastRun.outcome === 'success' ? 'succeeded' : 'failed'} at ${formatCentralDateTime(
+              lastRun.finished_at ?? lastRun.started_at
+            )}`
         : '; no run has been recorded'}
       .{' '}
       <Link to="/admin/settings?tab=health" className="text-werco-400 underline">

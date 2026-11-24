@@ -182,7 +182,9 @@ the every-5-minute crons catch up the skipped hour in a quick burst (each run is
 on the fall-back night the every-5-minute crons pause for the repeated hour.
 
 Admin Settings → **System Health** (`GET /admin/system-health`) shows which of these the
-running worker armed, each one's next run and how its last run went.
+running worker armed, each one's next run and how its last run went. A run is marked `running`
+when it starts and replaced by its result when it ends; one still `running` long after its start was
+cut off (worker stopped or redeployed mid-run, which arq fails without an end-of-job hook).
 
 | Cron | When | What it does on its FIRST run |
 |---|---|---|

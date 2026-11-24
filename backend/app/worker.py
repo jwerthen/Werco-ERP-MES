@@ -40,7 +40,14 @@ from arq.cron import CronJob
 from app.core.config import settings
 from app.core.observability import init_sentry
 from app.core.queue import RedisProfile, assert_redis_configured, get_redis_settings, redis_config_warnings
-from app.core.worker_schedule import SHOP_TIMEZONE, SHOP_TIMEZONE_NAME, publish_cron_registry, record_cron_run
+from app.core.worker_schedule import (
+    SHOP_TIMEZONE,
+    SHOP_TIMEZONE_NAME,
+    keep_cron_results,
+    publish_cron_registry,
+    record_cron_run,
+    record_cron_start,
+)
 
 # Import for side effects: attaches the transactional-outbox SQLAlchemy Session listeners
 # in the worker process so operational events committed here (e.g. cron writes) also tee
@@ -417,6 +424,7 @@ ALL_CRON_JOBS: List[CronJob] = [
     cron(relay_pending_notifications_job, minute=set(range(0, 60, 5))),
     cron(check_hank_watches_job, minute=set(range(0, 60, 5))),
 ]
+keep_cron_results(ALL_CRON_JOBS)  # arq.cron() keeps no result; record_cron_run reads it back
 
 
 def select_cron_jobs(spec: str = None, available: Sequence[CronJob] = None) -> List[CronJob]:
@@ -793,6 +801,7 @@ class WorkerSettings:
     on_startup = startup
     on_shutdown = shutdown
     # Records each cron run's start, finish, outcome and counts for GET /admin/system-health.
+    on_job_start = record_cron_start
     after_job_end = record_cron_run
 
     # Cron hours are shop time (America/Chicago), not the container's zone.

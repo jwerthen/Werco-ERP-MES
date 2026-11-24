@@ -136,6 +136,32 @@ test('an armed job whose last run failed says so, in Central time', async () => 
   expect(screen.getByText(/its last run failed at .*2:30/)).toBeInTheDocument();
 });
 
+test('a run that started and never finished is not reported as a result', async () => {
+  asRole('admin');
+  mockApi.getSystemHealth.mockResolvedValue(
+    health({
+      cron_jobs: [
+        {
+          name: 'run_oee_auto_calc_job',
+          armed: true,
+          schedule: 'Daily 02:30',
+          next_run_at: '2026-11-24T08:30:00Z',
+          last_run: {
+            started_at: '2026-11-23T08:30:00Z',
+            finished_at: null,
+            outcome: 'running',
+            error_type: null,
+            counts: {},
+          },
+        },
+      ],
+    })
+  );
+  renderNote();
+  expect(await screen.findByText(/its last run started at .*2:30.* and has not finished/)).toBeInTheDocument();
+  expect(screen.queryByText(/succeeded|failed at/)).not.toBeInTheDocument();
+});
+
 test('a superuser is treated as an admin, matching AdminRoute', async () => {
   mockUseAuth.mockReturnValue({ user: { role: 'manager', is_superuser: true } as User } as ReturnType<typeof useAuth>);
   mockApi.getSystemHealth.mockResolvedValue(health());

@@ -33,6 +33,7 @@ const ARMED_COLORS: Record<string, string> = {
 const RESULT_COLORS: Record<string, string> = {
   success: variantClass.green,
   failed: variantClass.red,
+  running: variantClass.amber,
 };
 
 const WORKER_LABEL: Record<WorkerStatus, string> = {
@@ -295,7 +296,8 @@ export default function SystemHealthTab() {
         )}
         <p className="mt-2 text-xs text-fd-mute">
           &quot;Unknown&quot; means no worker is running or Redis could not be read. Next run is shown only for armed
-          jobs while the worker is running. Only scheduled runs are recorded.
+          jobs while the worker is running. Only scheduled runs are recorded. &quot;Running&quot; long after its start
+          means the run was cut off (worker stopped or redeployed mid-run) and never finished.
         </p>
       </div>
 

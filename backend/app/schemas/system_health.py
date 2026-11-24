@@ -22,7 +22,9 @@ class WorkerHealth(UTCModel):
 class CronRunResult(UTCModel):
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
-    outcome: Literal["success", "failed"]
+    # "running": the run started and has not finished normally. Long after its start it means the
+    # run was cut off (worker killed or redeployed mid-run), which arq never reports as an end.
+    outcome: Literal["success", "failed", "running"]
     # The exception CLASS only on a failure; details are in the worker log / Sentry.
     error_type: Optional[str] = None
     # Flat numeric/boolean values the job returned (e.g. {"enqueued": 3}).

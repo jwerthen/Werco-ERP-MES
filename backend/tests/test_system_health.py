@@ -48,6 +48,7 @@ class TestShopTimeSchedule:
 
         assert WorkerSettings.timezone == CHICAGO
         assert WorkerSettings.after_job_end is record_cron_run
+        assert WorkerSettings.on_job_start is worker_schedule.record_cron_start
 
     def test_each_cron_keeps_its_intended_local_hour(self):
         from app.worker import ALL_CRON_JOBS

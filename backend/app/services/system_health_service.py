@@ -166,7 +166,7 @@ def _worker_health(state: WorkerState, now: datetime) -> WorkerHealth:
 
 
 def _run_result(record: Optional[Dict[str, Any]]) -> Optional[CronRunResult]:
-    if not record or record.get("outcome") not in ("success", "failed"):
+    if not record or record.get("outcome") not in ("success", "failed", "running"):
         return None
     counts = record.get("counts") if isinstance(record.get("counts"), dict) else {}
     clean = {k: v for k, v in counts.items() if isinstance(k, str) and (isinstance(v, (bool, int, float)) and v == v)}

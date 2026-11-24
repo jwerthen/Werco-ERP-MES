@@ -124,6 +124,180 @@ class TestHookAgainstRealArqResults:
         assert job.last_run.started_at == datetime(2025, 12, 9, 13, 0, tzinfo=timezone.utc)
 
 
+# --------------------------------------------------------------------------- arq's real run_job path
+
+
+class _Pipeline:
+    def __init__(self, redis):
+        self.redis = redis
+        self.calls = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def __getattr__(self, name):
+        def queue(*args, **kwargs):
+            self.calls.append((name, args, kwargs))
+
+        return queue
+
+    async def execute(self):
+        return [await getattr(self.redis, name)(*args, **kwargs) for name, args, kwargs in self.calls]
+
+
+class _ArqRedis(_ResultStore):
+    """Just enough Redis for ``arq.worker.Worker.run_job`` plus both System Health hooks."""
+
+    def __init__(self):
+        super().__init__()
+        self.hset_log = []
+
+    def pipeline(self, transaction=True):
+        return _Pipeline(self)
+
+    async def hset(self, key, field, value):
+        self.hset_log.append(json.loads(value))
+        await super().hset(key, field, value)
+
+    async def set(self, key, value, px=None, **kwargs):
+        self.values[key] = value
+
+    async def setex(self, key, ttl, value):
+        self.values[key] = value
+
+    async def incr(self, key):
+        self.values[key] = int(self.values.get(key) or 0) + 1
+        return self.values[key]
+
+    async def expire(self, *args, **kwargs):
+        return True
+
+    async def pexpire(self, *args, **kwargs):
+        return True
+
+    async def zrem(self, *args, **kwargs):
+        return 0
+
+    async def zincrby(self, *args, **kwargs):
+        return 0
+
+    async def delete(self, *keys):
+        for key in keys:
+            self.values.pop(key, None)
+
+
+async def _check_calibrations_stub(ctx):
+    return {"due": 3}
+
+
+async def _ran_through_arq(cron_job, *, keep_results: bool):
+    """Run ``cron_job`` once through arq's own ``Worker.run_job`` with the worker's real hooks."""
+    from arq.constants import job_key_prefix
+    from arq.jobs import serialize_job
+    from arq.worker import Worker
+
+    from app.core.worker_schedule import keep_cron_results, record_cron_start
+    from app.worker import WorkerSettings
+
+    if keep_results:
+        keep_cron_results([cron_job])
+    redis = _ArqRedis()
+    job_id = f"{cron_job.name}:1765285200000"
+    redis.values[job_key_prefix + job_id] = serialize_job(cron_job.name, (), {}, 1, int(time.time() * 1000))
+    worker = Worker(
+        cron_jobs=[cron_job],
+        redis_pool=redis,
+        handle_signals=False,
+        on_job_start=record_cron_start,
+        after_job_end=record_cron_run,
+        keep_result=WorkerSettings.keep_result,  # the worker-wide value a cron's own 0 overrides
+    )
+    worker.ctx["redis"] = redis
+    await worker.run_job(job_id, int(time.time() * 1000))
+    return redis
+
+
+@pytest.mark.unit
+class TestHookOnArqsRealRunPath:
+    """The hooks against arq's real ``run_job``: a hand-built result record cannot show that arq
+    never WRITES one for a ``cron()`` job (``keep_result=0`` per function beats the worker's)."""
+
+    @staticmethod
+    def _cron():
+        from arq import cron
+
+        return cron(_check_calibrations_stub, name="cron:check_calibrations_job", hour=7, minute=0)
+
+    def test_every_cron_in_the_table_keeps_its_result(self):
+        from app.worker import ALL_CRON_JOBS
+
+        assert ALL_CRON_JOBS
+        assert all((job.keep_result_s or 0) > 0 or job.keep_result_forever for job in ALL_CRON_JOBS)
+
+    def test_a_bare_arq_cron_keeps_no_result_so_nothing_would_be_recorded(self):
+        redis = asyncio.run(_ran_through_arq(self._cron(), keep_results=False))
+        stored = json.loads(redis.hashes[CRON_LAST_RUN_KEY]["check_calibrations_job"])
+        assert stored["outcome"] == "running"  # only the start hook got anything to write
+
+    def test_a_kept_cron_run_is_recorded_with_its_counts(self):
+        redis = asyncio.run(_ran_through_arq(self._cron(), keep_results=True))
+        stored = json.loads(redis.hashes[CRON_LAST_RUN_KEY]["check_calibrations_job"])
+        assert stored["outcome"] == "success"
+        assert stored["counts"] == {"due": 3}
+        assert [entry["outcome"] for entry in redis.hset_log] == ["running", "success"]
+
+    def test_a_run_cut_off_mid_run_reads_as_running_not_the_previous_success(self):
+        from arq.constants import job_key_prefix, retry_key_prefix
+        from arq.jobs import serialize_job
+        from arq.worker import Worker
+
+        cron_job = self._cron()
+        redis = asyncio.run(_ran_through_arq(cron_job, keep_results=True))  # yesterday: success
+        # Today's run starts, then the worker dies; arq redelivers it past max_tries=1 and fails it
+        # in finish_failed_job, which never calls after_job_end.
+        job_id = f"{cron_job.name}:1765371600000"
+
+        async def cut_off():
+            from app.core.worker_schedule import record_cron_start
+
+            await record_cron_start({"job_id": job_id, "redis": redis})
+            redis.values[job_key_prefix + job_id] = serialize_job(cron_job.name, (), {}, 1, int(time.time() * 1000))
+            redis.values[retry_key_prefix + job_id] = 1  # the killed attempt
+            worker = Worker(
+                cron_jobs=[cron_job],
+                redis_pool=redis,
+                handle_signals=False,
+                on_job_start=record_cron_start,
+                after_job_end=record_cron_run,
+            )
+            worker.ctx["redis"] = redis
+            await worker.run_job(job_id, int(time.time() * 1000))
+
+        asyncio.run(cut_off())
+        stored = json.loads(redis.hashes[CRON_LAST_RUN_KEY]["check_calibrations_job"])
+        assert stored["outcome"] == "running"
+        assert stored["job_id"] == job_id
+
+    def test_a_running_record_reaches_the_endpoint(self, db_session):
+        last_runs = {
+            "check_calibrations_job": {
+                "job_id": "cron:check_calibrations_job:1",
+                "started_at": "2025-12-09T13:00:00+00:00",
+                "finished_at": None,
+                "outcome": "running",
+                "error_type": None,
+                "counts": {},
+            }
+        }
+        response = build_system_health(db_session, 1, WorkerState(available=True, last_runs=last_runs))
+        (job,) = response.cron_jobs
+        assert job.last_run is not None and job.last_run.outcome == "running"
+        assert job.last_run.finished_at is None
+
+
 # --------------------------------------------------------------------------- the Redis read is bounded
 
 

@@ -59,9 +59,9 @@ Preserve source/photo bytes and workflow tables on application rollback; see
 
 ## Current PM due-alert release procedure
 
-This release adds the fifteenth cron, **`check_maintenance_due_job`**, at 12:15 in the container's
-zone (12:15 UTC = 6:15 AM Central, 7:15 in summer, while `TZ` is unset; 12:15 PM Central with
-`TZ=America/Chicago`; it always judges the company's own day). It sends `maintenance.due` (once per
+This release adds the fifteenth cron, **`check_maintenance_due_job`**, at 06:15 shop time
+(America/Chicago, pinned in code by `WorkerSettings.timezone`, so `TZ` does not move it; it always
+judges the company's own day). It sends `maintenance.due` (once per
 cycle, within 7 days of the due date; a cycle restarts when the record changes) and
 `maintenance.overdue` (recurring while unread) to the Maintenance department plus the Admins,
 **in-app only**. No migration, secret or environment variable is added. **An allowlist does not
@@ -80,7 +80,7 @@ pick up a new cron**, so the owner must add it or it never fires.
    - unset, `all`, or a `-` exclusion value → nothing to do: the job is already armed.
 4. **Verify the startup log** lists `ARQ worker cron:   cron:check_maintenance_due_job -> next run …`
    and, for the two-job allowlist, `13 of 15 cron jobs SUPPRESSED`.
-5. **After the first 12:15 run** (container time), the log reads `Checked preventive maintenance: N overdue and M
+5. **After the first 06:15 run** (shop time), the log reads `Checked preventive maintenance: N overdue and M
    due alert(s) across K company(ies)`, and a Maintenance-department user or an Admin sees the
    alerts in the bell, each opening the Maintenance page's Schedules or Work Orders tab.
 6. **To stop it**, remove the name from the allowlist (or use `all,-check_maintenance_due_job` on an
@@ -433,9 +433,9 @@ emails in one burst**, all to your own staff.
 
 ### 3.3 Per-job blast radius
 
-Times are the container's local zone. ARQ defaults to the container's timezone, which on
-Railway is **UTC unless you set `TZ`** — so "6 AM" means 06:00 UTC = **01:00 Central**. Decide
-this deliberately (§8).
+Times are **shop time (America/Chicago)**, daylight saving included. `WorkerSettings.timezone`
+pins arq's cron zone in code, so the container's `TZ` does not move any cron hour — "6 AM" is
+6 AM at the shop. `TZ` affects only log timestamps and other local-time reads in the process.
 
 #### Group 1 — SAFE. Idempotent, no message to any human.
 
@@ -449,7 +449,7 @@ this deliberately (§8).
 
 | Job | Schedule | What it does on first run | Contacts anyone? |
 |---|---|---|---|
-| `cleanup_old_logs_job` | Sun 02:00 | **Physical DELETEs**: completed `Job` rows and `NotificationLog` rows older than 90 days; read `Notification` rows older than 90 days; unread notifications of deactivated users. **Audit logs are explicitly excluded** and are never touched. | No. |
+| `cleanup_old_logs_job` | Mon 02:00 (arq weekday 0) | **Physical DELETEs**: completed `Job` rows and `NotificationLog` rows older than 90 days; read `Notification` rows older than 90 days; unread notifications of deactivated users. **Audit logs are explicitly excluded** and are never touched. | No. |
 | `archive_aged_audit_logs_job` | 1st of month, 03:00 | Exports audit rows past their retention window to NDJSON in `AUDIT_ARCHIVE_DIR`. **Exports only — never deletes.** Needs durable storage or the export vanishes with the container (§8). | No. |
 | `aggregate_ai_learning_job` | 05:30 daily | Writes `AIRecommendation` rows and emits `work_order_blocker_escalated` events — **which re-enter the notification outbox and generate further notifications.** At most one escalation card per blocker (a pending, snoozed, accepted or dismissed one suppresses another); skipped when escalating would change nothing or the work order is terminal or deleted; the event fires only when a card is minted. Never applies a recommendation and makes no LLM call. | Indirectly, via the events it emits. |
 | `check_hank_watches_job` | every 5 min | Checks at most 100 due personal watches. Rechecks live owner/company/access and current alert preference, commits each task independently, and saves a terminal receipt with any enabled notification atomically. | Only the watch owner, in-app once on a matched condition when alerts are enabled; no email/SMS. |
@@ -465,7 +465,7 @@ only emailed by `send_daily_digest_job`, and only to users with a digest prefere
 | `check_late_work_orders_job` | 08:00 daily | in-app **+ direct email** | **L × R messages.** One per late WO, per recipient. No age cap. Cold-start suppression does not apply. | Every active user with role `SUPERVISOR` or `MANAGER` in that tenant. |
 | `run_mrp_auto_draft_job` | 06:00 daily | direct email | **M messages per tenant** — one per manager. Only when the run produced actions. Plus the writes below. | Every active `MANAGER`. |
 | `send_daily_digest_job` | 08:00 daily | direct email | **D emails** — one per user with `digest_enabled` + `DAILY` and at least one queued item in the last 24 h. | Those users. |
-| `check_maintenance_due_job` | 12:15 daily | **in-app only** (no preference turns email or SMS on) | **One `maintenance.overdue` per overdue item per recipient** on the first run (overdue PM schedules with no work order under way, and unstarted overdue maintenance work orders), plus one `maintenance.due` per item due within 7 days. Later runs: `maintenance.overdue` again only after a recipient has read the previous one; `maintenance.due` once per cycle, where a cycle restarts whenever the record changes (a completion, or any edit, re-announces it). | Active users with `department = 'Maintenance'` (exact string) plus the company's active Admins. |
+| `check_maintenance_due_job` | 06:15 daily | **in-app only** (no preference turns email or SMS on) | **One `maintenance.overdue` per overdue item per recipient** on the first run (overdue PM schedules with no work order under way, and unstarted overdue maintenance work orders), plus one `maintenance.due` per item due within 7 days. Later runs: `maintenance.overdue` again only after a recipient has read the previous one; `maintenance.due` once per cycle, where a cycle restarts whenever the record changes (a completion, or any edit, re-announces it). | Active users with `department = 'Maintenance'` (exact string) plus the company's active Admins. |
 | `check_calibrations_job` | 07:00 daily | in-app + **digest** | E in-app rows per Quality user, **plus a second "URGENT" one for anything due within 1 day** (the 7-day and 1-day passes overlap). Email only via the digest job. | Users whose `department = 'Quality'` (exact string). Note the cron passes `department`, so the catalog's `roles=(QUALITY,)` is *not* used here. |
 | `check_quote_expiring_job` | 09:00 daily | **digest only** | Q digest items. No direct email. | Sales-department users. |
 | `check_low_stock_job` | 07:30 daily | **digest only** | **One aggregated message per tenant**, not one per item. Lowest blast radius of the group. | Purchasing + Inventory department users. |
@@ -589,8 +589,9 @@ run, and the sweeper's safety floor is not in place.
 railway variables --service werco-api --environment production --project "$RAILWAY_PROJECT_ID" | grep -i '^TZ'
 ```
 
-Unset ⇒ UTC ⇒ every "6 AM" cron runs at **01:00 Central**. Decide now (§8); it is easier to set
-`TZ` before the first cron than to explain a 1 a.m. MRP run.
+Informational only. Cron hours are pinned to America/Chicago in code (`WorkerSettings.timezone`),
+so `TZ` does not change when any cron fires; it changes only log timestamps and other local-time
+reads in the process. Nothing to decide here before arming.
 
 ### 4.9 Build the worker image locally once
 
@@ -694,7 +695,7 @@ easy to miss.
 | `ANTHROPIC_API_KEY` | `process_hank_intake_file_job` (saved Hank PDF intake). `aggregate_ai_learning_job` makes no LLM calls. |
 | ★ `AUDIT_ARCHIVE_DIR` | Only when you arm the monthly archive cron — and only pointing at durable storage (§8). |
 | `TWILIO_*`, `SMS_DEFAULT_REGION` | Only if SMS is in use. |
-| ★ `TZ` | Unset ⇒ UTC ⇒ "6 AM" is 01:00 Central. |
+| `TZ` | Log timestamps only. Cron hours are pinned to America/Chicago in code and ignore it. |
 
 ### 5.4 Stage 3 — confirm the two traps are closed, then deploy
 
@@ -769,9 +770,9 @@ Order, cheapest and safest first:
 | 3 | `check_low_stock_job` | Next 07:30: **one** aggregated digest item per tenant. No direct emails. |
 | 4 | `poll_tracking_job` | Every :00/:30. No-op while `allow_carrier_egress` is off. Confirm it is not erroring. |
 | 5 | `check_quote_expiring_job`, `check_calibrations_job` | Digest items only, counts matching Q and E from §3.2. |
-| 5a | `check_maintenance_due_job` | Next 12:15 (container time): in-app `maintenance.overdue` / `maintenance.due` rows for the Maintenance department and Admins, matching the counts in [`DEPLOYMENT.md` → PM due and overdue alerts](DEPLOYMENT.md#pm-due-and-overdue-alerts). |
+| 5a | `check_maintenance_due_job` | Next 06:15 (shop time): in-app `maintenance.overdue` / `maintenance.due` rows for the Maintenance department and Admins, matching the counts in [`DEPLOYMENT.md` → PM due and overdue alerts](DEPLOYMENT.md#pm-due-and-overdue-alerts). |
 | 6 | `send_daily_digest_job` | **First real email volume: D emails.** Confirm one arrives, is readable, and its links work (needs `FRONTEND_BASE_URL`). |
-| 7 | `cleanup_old_logs_job` | Sunday 02:00. Physical deletes. Confirm the 90-day windows are what you want **before** arming. Audit logs are untouched. |
+| 7 | `cleanup_old_logs_job` | Monday 02:00 (arq weekday 0 is Monday). Physical deletes. Confirm the 90-day windows are what you want **before** arming. Audit logs are untouched. |
 | 8 | `check_late_work_orders_job` | **Re-run the `L × R` query the same morning.** This is the big email burst. Consider closing out stale late WOs first. |
 | 9 | `aggregate_ai_learning_job` | New `AIRecommendation` rows; watch for a secondary wave of notifications from the events it emits. |
 | 10 | `archive_aged_audit_logs_job` | **Only after §8 (durable storage).** Then confirm the NDJSON file actually persists. |
@@ -846,10 +847,10 @@ Redeploy, then confirm on the startup log — this line is the receipt:
 
 ```
 ARQ worker cron: 1 of 15 cron jobs SUPPRESSED by WORKER_CRON_JOBS='all,-run_mrp_auto_draft_job': cron:run_mrp_auto_draft_job
-ARQ worker cron: 14 job(s) armed, times in UTC
+ARQ worker cron: 14 job(s) armed, times in America/Chicago
 ```
 
-(`UTC` is whatever the container's zone resolves to — see point 1 below.)
+(The zone is pinned in code — see point 1 below.)
 
 | What you see | Verdict |
 |---|---|
@@ -880,10 +881,9 @@ future crons arrive armed. That is the whole reason exclusion exists.
 
 **Two things that are not obvious:**
 
-1. **Crons fire on container-local time, which is UTC unless `TZ` is set.** So the "6 AM" MRP
-   cron is **01:00 Central**. If you are timing this change around a business day, that is the
-   window you are actually moving — and if you set `TZ=America/Chicago` later, every cron time
-   in this runbook shifts.
+1. **Crons fire on shop time (America/Chicago), pinned in code.** The "6 AM" MRP cron is 6 AM
+   Central, daylight saving included, whatever the container's `TZ`. If you are timing this
+   change around a business day, that is the window you are moving.
 2. **This disables the SCHEDULE, not the capability.** `run_mrp_auto_draft_job` stays in
    `WorkerSettings.functions`, so the worker still knows how to run it; only the timed trigger
    is gone. A one-off pass can still be enqueued by name against the running worker:
@@ -941,8 +941,8 @@ startup log alone does not establish nesting readiness.
    disk they vanish with the container. Attach a volume or point it at object storage **before**
    arming that cron. It only exports and never deletes, so a lost export is a lost archive, not
    lost audit data — but it is still a compliance artifact you are supposed to have.
-4. **Timezone.** UTC or Central? Unset means UTC, i.e. MRP at 01:00 Central and the late-WO
-   email blast at 03:00 Central. Set `TZ=America/Chicago` if you want shop-local times.
+4. **Timezone.** Already decided in code: cron hours are shop time (America/Chicago), so MRP
+   runs at 06:00 Central and the late-WO email burst at 08:00 Central. `TZ` does not change this.
 5. **Whether the late-WO burst is acceptable at all.** If `L` is large because the shop has a
    long tail of stale released work orders, consider cleaning those up before arming
    `check_late_work_orders_job` rather than emailing 300 alerts about them.
@@ -997,7 +997,7 @@ railway logs --service werco-worker --environment production
 | Job body TTL | ~24 h (`arq:job:<id>`); expired jobs are logged `job … expired` and discarded |
 | Registered job functions | 27 |
 | Declared crons | 15 |
-| Cron timezone | container-local; **UTC unless `TZ` is set** |
+| Cron timezone | America/Chicago, pinned by `WorkerSettings.timezone` (`TZ` does not move it) |
 | Sweeper bounds | 24 h max age, 2 min grace, 500 per 5-minute pass |
 | Cron selector | `WORKER_CRON_JOBS` — unset/`all` / `none` / comma-separated names (allowlist) / `-name` exclusions (`all,-run_mrp_auto_draft_job`). The two shapes cannot be mixed; an unknown name, **negated or not**, is a hard startup error |
 | Worker start command | `arq app.worker.WorkerSettings` |

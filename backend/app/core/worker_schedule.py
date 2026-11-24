@@ -10,8 +10,11 @@ does not, each in its OWN Redis key so the heartbeat payload stays byte-identica
   heartbeat to decide whether "armed" is current or merely last-known.
 * ``CRON_LAST_RUN_KEY`` -- a no-expiry hash, one field per cron name, written by the worker's ONE
   ``after_job_end`` hook (``record_cron_run``) from arq's own result record: start, finish, outcome
-  and the numeric counts the job returned. arq keeps its result for an hour (``keep_result``); this
-  keeps the last one per cron until the next run replaces it.
+  and the numeric counts the job returned. arq keeps its result for an hour (``keep_cron_results``
+  -- ``arq.cron()`` otherwise keeps NONE); this keeps the last one per cron until the next run
+  replaces it. The ``on_job_start`` hook (``record_cron_start``) first writes outcome ``running``,
+  so a run arq never finishes normally (worker killed mid-run, then "max tries exceeded", which
+  skips ``after_job_end``) reads as started-and-unfinished, never as the previous run's result.
 
 Both writers are best-effort: a Redis failure here is logged and never fails a job or the startup.
 Both readers (``app.services.system_health_service``) treat a missing or malformed value as
@@ -41,6 +44,10 @@ CRON_REGISTRY_KEY = "werco:worker:cron_registry"
 CRON_LAST_RUN_KEY = "werco:worker:cron_last_run"
 # The pinned heartbeat (app.core.worker_runtime.publish_identity) -- read here, never written.
 RUNTIME_HEARTBEAT_PATTERN = "werco:worker:runtime:*"
+
+# How long arq keeps a cron's result record. ``record_cron_run`` reads it back right after the run,
+# so this only needs to outlive the hook; an hour matches the worker-wide ``keep_result``.
+CRON_RESULT_KEEP_SECONDS = 3600
 
 REGISTRY_VERSION = 1
 _SCHEDULE_FIELDS = ("month", "day", "weekday", "hour", "minute", "second")
@@ -225,6 +232,49 @@ def build_run_record(info: Any) -> Dict[str, Any]:
         "counts": summarize_counts(result) if success else {},
     }
     return record
+
+
+def keep_cron_results(jobs: Iterable[Any], seconds: int = CRON_RESULT_KEEP_SECONDS) -> None:
+    """Make arq store each cron's result, which ``record_cron_run`` reads back.
+
+    ``arq.cron()`` defaults every cron to ``keep_result=0``, and a per-function 0 wins over the
+    worker-wide ``WorkerSettings.keep_result`` (arq 0.28 ``Worker.run_job``: ``result_timeout_s =
+    function.keep_result_s`` whenever that is not None). Left alone, no cron result is ever
+    written, ``Job.result_info()`` returns None and no run is ever recorded. Mutates the jobs in
+    place so the cron table itself (order, schedule) is untouched. A cron that already asks for a
+    positive TTL or to be kept forever keeps it.
+    """
+    for job in jobs:
+        if not getattr(job, "keep_result_forever", None) and not (getattr(job, "keep_result_s", None) or 0) > 0:
+            job.keep_result_s = seconds
+
+
+async def record_cron_start(ctx: Mapping[str, Any]) -> None:
+    """The worker's ``on_job_start`` hook: mark a CRON run as started (outcome ``running``).
+
+    ``record_cron_run`` replaces this when the run ends normally. arq skips ``after_job_end`` when
+    a run is cut off -- a worker killed or redeployed mid-run is redelivered and fails as "max tries
+    exceeded" in ``finish_failed_job``, which returns before that hook -- so without this a cut-off
+    run would leave the PREVIOUS run's success showing. Now it shows as a run that started and
+    never finished. Never raises.
+    """
+    job_id = ctx.get("job_id")
+    redis = ctx.get("redis")
+    if redis is None or not isinstance(job_id, str) or not job_id.startswith("cron:"):
+        return
+    name = cron_display_name(job_id.rsplit(":", 1)[0])
+    record = {
+        "job_id": job_id,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "finished_at": None,
+        "outcome": "running",
+        "error_type": None,
+        "counts": {},
+    }
+    try:
+        await redis.hset(CRON_LAST_RUN_KEY, name, json.dumps(record))
+    except Exception:
+        logger.warning("Worker cron start record could not be written for %s", name)
 
 
 async def record_cron_run(ctx: Mapping[str, Any]) -> None:

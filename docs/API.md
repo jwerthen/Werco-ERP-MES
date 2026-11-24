@@ -14063,6 +14063,7 @@ table and no environment variable.
 | GET | `/admin/settings/role-permissions/{role}` | One role's effective permissions and `is_customized` | Admin |
 | PUT | `/admin/settings/role-permissions/{role}` | Replace a role's permissions with a company override (body: JSON array of permission keys). **400** on an unknown role or permission; **503** if its required audit row cannot be written (see note) | Admin |
 | POST | `/admin/settings/role-permissions/{role}/reset` | Drop the company override so the role reverts to its defaults; a role with no override is a no-op. **503** as above | Admin |
+| GET | `/admin/system-health` | Read-only System Health: worker alive (heartbeat age), every cron job with armed / off (`null` = unknown), schedule in shop time (America/Chicago), next run, last run and result (`success` / `failed` / `running` -- `running` long after its start means the run was cut off), plus the active company's un-notified event backlog, queued digest items and failed emails (7 days). Writes nothing; Redis unavailable reads as `unknown`, never an error. Crons are armed only by the worker's `WORKER_CRON_JOBS` | Admin |
 
 > **Settings-audit tenancy:** `GET /admin/settings/audit-log` reads the `SettingsAuditLog` trail
 > (admin / quote-config changes) and is **scoped to the caller's active company**
