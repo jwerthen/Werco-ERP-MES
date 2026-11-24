@@ -110,6 +110,20 @@ def test_no_route_serves_the_deleted_self_registration_path():
 
 
 @pytest.mark.unit
+def test_companies_module_docstring_names_only_served_company_creation_doors():
+    """The companies module tells a reader where companies come from; every door it names must exist."""
+    import re
+
+    from app.api.endpoints import companies
+
+    named = set(re.findall(r"``POST (/[^`]+)``", companies.__doc__ or ""))
+    assert named == {"/platform/companies", "/auth/register-public"}
+    served = {(r.path, m) for r in app.routes if isinstance(r, APIRoute) for m in r.methods}
+    for path in named:
+        assert (f"/api/v1{path}", "POST") in served, path
+
+
+@pytest.mark.unit
 def test_register_public_is_the_only_unauthenticated_company_constructor():
     routes = _routes_for("register_public", "endpoints.auth")
     assert [(r.path, sorted(r.methods)) for r in routes] == [("/api/v1/auth/register-public", ["POST"])]
