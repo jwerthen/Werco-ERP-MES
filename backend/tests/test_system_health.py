@@ -229,9 +229,42 @@ class TestSystemHealthEndpoint:
         calib = jobs["check_calibrations_job"]
         assert calib["armed"] is True and calib["schedule"] == "Daily 07:00"
         assert calib["next_run_at"].endswith("Z")
-        assert calib["last_run"]["outcome"] == "success" and calib["last_run"]["counts"] == {"due": 1}
+        assert calib["last_run"]["outcome"] == "success"
+        # The job's counts span every company on the install: a tenant Admin never sees them.
+        assert calib["last_run"]["counts"] == {}
         assert jobs["run_mrp_review_job"]["armed"] is False
         assert jobs["run_mrp_review_job"]["next_run_at"] is None
+
+    def test_tenant_admin_never_sees_install_wide_run_counts(self, client, admin_headers, monkeypatch):
+        """Another company's activity, folded into a cron's install-wide return value, must not
+        change what this company's Admin sees: outcome and timing only, counts withheld."""
+        now = datetime.now(timezone.utc)
+        quiet = _alive_state(now)
+        busy = _alive_state(now)
+        busy.last_runs["check_calibrations_job"] = build_run_record(
+            _result(result={"calibrations_due": 41, "calibrations_overdue": 9, "companies": 6})
+        )
+        seen = []
+        for state in (quiet, busy):
+            monkeypatch.setattr("app.api.endpoints.system_health.read_worker_state", lambda state=state: state)
+            body = client.get(URL, headers=admin_headers).json()
+            calib = {job["name"]: job for job in body["cron_jobs"]}["check_calibrations_job"]
+            assert calib["last_run"]["counts"] == {}
+            seen.append({k: v for k, v in calib["last_run"].items() if k not in ("started_at", "finished_at")})
+        assert seen[0] == seen[1]
+
+    def test_platform_principal_sees_run_counts(self, db_session, monkeypatch):
+        from app.api.endpoints.system_health import get_system_health
+        from app.models.user import UserRole
+
+        now = datetime.now(timezone.utc)
+        monkeypatch.setattr("app.api.endpoints.system_health.read_worker_state", lambda: _alive_state(now))
+        platform = SimpleNamespace(role=UserRole.PLATFORM_ADMIN, is_superuser=False)
+        tenant = SimpleNamespace(role=UserRole.ADMIN, is_superuser=False)
+        by_name = {j.name: j for j in get_system_health(db=db_session, current_user=platform, company_id=1).cron_jobs}
+        assert by_name["check_calibrations_job"].last_run.counts == {"due": 1}
+        by_name = {j.name: j for j in get_system_health(db=db_session, current_user=tenant, company_id=1).cron_jobs}
+        assert by_name["check_calibrations_job"].last_run.counts == {}
 
     @pytest.mark.parametrize("headers_fixture", ["manager_headers", "supervisor_headers", "operator_headers"])
     def test_non_admins_are_refused(self, client, request, headers_fixture, monkeypatch):

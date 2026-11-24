@@ -165,10 +165,13 @@ def _worker_health(state: WorkerState, now: datetime) -> WorkerHealth:
     )
 
 
-def _run_result(record: Optional[Dict[str, Any]]) -> Optional[CronRunResult]:
+def _run_result(record: Optional[Dict[str, Any]], include_counts: bool) -> Optional[CronRunResult]:
     if not record or record.get("outcome") not in ("success", "failed", "running"):
         return None
-    counts = record.get("counts") if isinstance(record.get("counts"), dict) else {}
+    # A cron's counts are what the job RETURNED, and the jobs fan out over every company on the
+    # install: "late_work_orders: 37" or "companies: 6" counts other tenants. Outcome and timing are
+    # install-wide but tenant-neutral; the counts go to a platform principal only.
+    counts = record.get("counts") if include_counts and isinstance(record.get("counts"), dict) else {}
     clean = {k: v for k, v in counts.items() if isinstance(k, str) and (isinstance(v, (bool, int, float)) and v == v)}
     error_type = record.get("error_type")
     return CronRunResult(
@@ -180,7 +183,7 @@ def _run_result(record: Optional[Dict[str, Any]]) -> Optional[CronRunResult]:
     )
 
 
-def _cron_jobs(state: WorkerState, worker: WorkerHealth, now: datetime) -> List[CronJobHealth]:
+def _cron_jobs(state: WorkerState, worker: WorkerHealth, now: datetime, include_counts: bool) -> List[CronJobHealth]:
     registry = state.registry or {}
     tz_name = registry.get("timezone") if isinstance(registry.get("timezone"), str) else None
     live = worker.status == "alive"
@@ -198,13 +201,15 @@ def _cron_jobs(state: WorkerState, worker: WorkerHealth, now: datetime) -> List[
                 armed=armed,
                 schedule=describe_schedule(entry),
                 next_run_at=next_run(entry, tz_name, now) if armed and tz_name else None,
-                last_run=_run_result(state.last_runs.get(name)),
+                last_run=_run_result(state.last_runs.get(name), include_counts),
             )
         )
     # A cron with a recorded run but missing from the registry (an older worker, or one removed
     # since) is still shown -- its last run is real evidence.
     for name in sorted(set(state.last_runs) - seen):
-        jobs.append(CronJobHealth(name=name, armed=None, last_run=_run_result(state.last_runs.get(name))))
+        jobs.append(
+            CronJobHealth(name=name, armed=None, last_run=_run_result(state.last_runs.get(name), include_counts))
+        )
     return jobs
 
 
@@ -257,9 +262,18 @@ def company_backlog(db: Session, company_id: int, now: datetime) -> CompanyBackl
 
 
 def build_system_health(
-    db: Session, company_id: int, state: WorkerState, now: Optional[datetime] = None
+    db: Session,
+    company_id: int,
+    state: WorkerState,
+    now: Optional[datetime] = None,
+    *,
+    include_run_counts: bool = False,
 ) -> SystemHealthResponse:
-    """Assemble the response from an already-read ``WorkerState`` (pure; testable without Redis)."""
+    """Assemble the response from an already-read ``WorkerState`` (pure; testable without Redis).
+
+    ``include_run_counts`` is True only for a platform principal: a cron's last-run counts are
+    install-wide (every company the job fanned out over), so a tenant Admin gets ``counts == {}``.
+    """
     now = now or datetime.now(timezone.utc)
     worker = _worker_health(state, now)
     registry = state.registry or {}
@@ -272,6 +286,6 @@ def build_system_health(
         schedule_timezone=tz_name if isinstance(tz_name, str) else None,
         schedule_published_at=_parse_instant(registry.get("published_at")),
         cron_spec=cron_spec if isinstance(cron_spec, str) else None,
-        cron_jobs=_cron_jobs(state, worker, now),
+        cron_jobs=_cron_jobs(state, worker, now, include_run_counts),
         backlog=company_backlog(db, company_id, now),
     )

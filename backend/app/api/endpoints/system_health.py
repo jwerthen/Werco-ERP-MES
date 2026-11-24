@@ -7,6 +7,7 @@ from app.api.deps import get_current_company_id, require_role
 from app.db.database import get_db
 from app.models.user import User, UserRole
 from app.schemas.system_health import SystemHealthResponse
+from app.services.api_token_service import is_platform_principal
 from app.services.system_health_service import build_system_health, read_worker_state
 
 router = APIRouter()
@@ -26,5 +27,9 @@ def get_system_health(
     Admin only. A pure read: writes nothing and switches nothing on. When Redis cannot be read the
     worker status is "unknown" and every job's armed state is null -- never an error.
     Scheduled jobs are switched on by the worker's WORKER_CRON_JOBS setting, not here.
+    A job's last-run outcome and timing are install-wide; its counts (what the job returned, summed
+    over every company) are shown to a platform administrator only and are empty for a tenant Admin.
     """
-    return build_system_health(db, company_id, read_worker_state())
+    return build_system_health(
+        db, company_id, read_worker_state(), include_run_counts=is_platform_principal(current_user)
+    )

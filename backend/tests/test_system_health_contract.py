@@ -116,7 +116,9 @@ class TestHookAgainstRealArqResults:
         _store_real_result(store, self.JOB_ID, success=True, result={"due": 2})
         asyncio.run(record_cron_run({"job_id": self.JOB_ID, "redis": store}))
         last_runs = {name: json.loads(value) for name, value in store.hashes[CRON_LAST_RUN_KEY].items()}
-        response = build_system_health(db_session, 1, WorkerState(available=True, last_runs=last_runs))
+        response = build_system_health(
+            db_session, 1, WorkerState(available=True, last_runs=last_runs), include_run_counts=True
+        )
         (job,) = response.cron_jobs
         assert job.name == "check_calibrations_job"
         assert job.armed is None  # not in any registry
