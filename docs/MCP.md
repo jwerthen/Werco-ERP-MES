@@ -121,6 +121,17 @@ confirmed with them. See
 [API.md → Maintenance](API.md#maintenance-pm-schedules-maintenance-work-orders-event-log), *Maintenance
 log entries*.
 
+**Re-checked again on 2026-11-23 after the in-process inspection sign-off left the catalog.**
+`POST /shop-floor/operations/{operation_id}/inspection` joined `EXCLUDED_OPERATIONS` (§6.1), so the
+tool generated from it (named after its route function, mark operation inspected) is gone:
+15 convenience + **779** generated, 16 shadowed, one fewer
+than the 780 above. No other name shifted. The route is a write, so the read-only catalog is
+unchanged, and it was not on the AI-external allowlist. The same change removed `inspection_complete`
+from `WorkOrderOperationUpdate`, so `work_orders_update_operation` no longer takes that argument
+(sending it is a 422). The reads that carry `inspection_complete` (`get_work_order`, the
+shop-floor operation reads) are unchanged. See
+[API.md → Inspection Schema](API.md#inspection-schema).
+
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
 `backend/tests/test_mcp_docs_names.py` checks every tool name this file, `CLAUDE.md` and `API.md`
@@ -848,7 +859,7 @@ minus two further, named sets:
   They are listed **by name** rather than skipped silently, so a new route that forgets its
   `security` dependency — even under a tag that already has tools — fails the coverage guard
   (`catalog.unaccounted_operations`, §14) until it is either secured or named there.
-- **`EXCLUDED_OPERATIONS`** — twenty-six operations, none with a convenience twin:
+- **`EXCLUDED_OPERATIONS`** — twenty-seven operations, none with a convenience twin:
   - The two Excel-cutover loaders, `POST /work-orders/import` and
     `POST /purchasing/purchase-orders/import` (`migration_import_service`). They record a *past*
     system's state rather than perform a user action: the work-order loader mints work orders
@@ -929,6 +940,13 @@ minus two further, named sets:
     The reads stay tools: `get_document_access_review`, the `access_level` on every document read,
     and each user's export authorization on `list_users`. See
     [API.md → Restricted and export-controlled documents](API.md#restricted-and-export-controlled-documents-as9100d-7531).
+  - The **in-process inspection sign-off** (`catalog.INSPECTION_SIGN_OFF_OPERATIONS`; AS9100D
+    8.6): `POST /shop-floor/operations/{operation_id}/inspection`. Recording that an inspection was
+    performed is a person's judgment, as an FAI final disposition is. The route refuses every API
+    token **403** (`app.core.credentials.API_TOKEN_INSPECTION_SIGN_OFF`), and the exclusion closes
+    the door a person's own JWT would leave open: an agent signing an inspection nobody did. The
+    operation reads that carry `requires_inspection` / `inspection_complete` stay tools. See
+    [API.md → Inspection Schema](API.md#inspection-schema).
 
 The `Import Batches` tag also excludes the recoverable Import Center review, receipt,
 correction and commit routes. These wrap the same cutover loaders, including their
@@ -945,7 +963,8 @@ three report-template routes then made it **770 generated tools**, and on 2026-1
 re-verification and CAR effectiveness verbs **772**, the five PO quality flow-down routes
 **777**, the inventory ownership route (migration 129) **778**, and the document access review
 (migration 131) **779**; the four floor-PIN writes and the two document-access writes joined the
-exclusions (twenty-six) without changing the count.
+exclusions (twenty-six) without changing the count. On 2026-11-20 maintenance log entries made it
+**780**, and on 2026-11-23 the inspection sign-off joined the exclusions (twenty-seven): **779**.
 
 ### 6.2 Naming and the collision policy (`app/mcp/naming.py`)
 

@@ -945,19 +945,23 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 
 > **Path fence.** A `scope="kiosk"` operator token is honored only on `/api/v1/shop-floor/*` and
 > `POST /api/v1/auth/employee-logout`; `get_current_user` rejects it with **403** everywhere else
-> (the token is valid — it just cannot reach the resource). Three shop-floor carve-outs are also
+> (the token is valid — it just cannot reach the resource). Four shop-floor carve-outs are also
 > **denied** to kiosk-scoped tokens regardless of role: `/shop-floor/kiosk-stations/*` (station
-> lifecycle admin), `/shop-floor/time-entries/{id}/approve|unapprove` (G5-A labor approval), and the
+> lifecycle admin), `/shop-floor/time-entries/{id}/approve|unapprove` (G5-A labor approval), the
 > manager dispatch tools — `GET /shop-floor/dispatch-board` and everything under it (a **prefix**
 > rule, so the three work-order-plan routes under `/shop-floor/dispatch-board/…` are denied too)
 > plus `PUT /shop-floor/work-centers/{id}/run-order` (a shared crew terminal must not read the whole
-> shop's board or dictate what every machine runs next). Operators keep **reading** their `RUN`
+> shop's board or dictate what every machine runs next) — and the in-process inspection sign-off
+> `POST /shop-floor/operations/{id}/inspection` (a desk verb, like labor approval: a 5-minute badge
+> token left live on a shared terminal must not let the next person sign an inspection in a Quality
+> or Supervisor's name). The other operation verbs (start, complete, detail) stay allowed. Operators keep **reading** their `RUN`
 > chips and the planner's dispatch notice: the work-center-queue and my-active-job endpoints are
 > different paths and stay allowed.
 >
 > **`PUT /shop-floor/operations/{id}/resume` is allowed, and that now matters.** It is inside the
 > fence prefix, matches none of the deny rules (the `kiosk-stations` / `dispatch-board` prefixes, the
-> `/time-entries/…/approve|unapprove` suffixes, the `/work-centers/…/run-order` suffix), and the
+> `/time-entries/…/approve|unapprove` suffixes, the `/work-centers/…/run-order` and
+> `/operations/…/inspection` suffixes), and the
 > endpoint carries no `require_role` — so a badge-scanned **Operator** can take a job off hold from
 > the shared terminal. That was incidental until the queue read began surfacing held work (see Shop
 > Floor → "Held work"): the kiosk can *place* a hold and had no way back, so an accidental hold had
@@ -1324,7 +1328,7 @@ company-scoped.
 | POST | `/work-orders/{id}/complete` | Force-complete a work order (privileged override), booking `quantity_complete` as its finished count — the header is **set** to it. **409** if the WO is CANCELLED or an open operation is on hold. **403** for an API token sending a `quantity_scrapped` above the header's recorded scrap (owner decision 2026-11-07: only a person declares scrap), and first among the quantity refusals for an API token completing short or above what the floor recorded. **409** when `quantity_complete` exceeds what the floor recorded (naming the binding operation) unless `quantity_override_reason` is sent, and **400** above what can still exist once declared shorts and covered scrap are out, even with a reason; **409** when the shortfall below the order is not covered by floor-reported scrap or `quantity_scrapped` (with a reason); **503** (nothing saved) when the required audit row cannot be written. See "Short count at completion" below | Admin / Manager / Supervisor / Quality |
 | POST | `/work-orders/{id}/duplicate` | **Duplicate a work order** — copy its *plan* (operations, laser nests, open material ties, re-snapshotted process-sheet steps) onto a new **DRAFT** WO. Body `{quantity_ordered, due_date}`; **201** returning an **envelope**, not a bare work order. See "Duplicating a work order" below | Admin / Manager / Supervisor |
 | POST | `/work-orders/{id}/operations` | Add an operation to a work order | Admin / Manager / Supervisor |
-| PUT | `/work-orders/operations/{id}` | Update an operation (body now also accepts `work_center_id` — move the operation to another work center; see note below). **409** if it sets `status` to COMPLETE on a not-yet-complete operation — completion goes through the completion endpoints (see "Terminal-state lock"). **409** with the start gate's text if it sets `status` to IN_PROGRESS on an operation of a draft, on-hold or complete / closed / cancelled work order, and **409** "release first" if it sets `status` to READY on a draft — both before any field is written; re-sending the operation's current status is not a transition. **409** with the same text when it **raises** `quantity_complete` on an operation that is (or this write leaves) PENDING / READY of a draft or on-hold work order. These start-gate refusals answer **before** the open-operation count 409s below, so a not-started operation of a draft or held job always gets "release first" / "Resume Work Order", never a count text naming doors that job keeps shut. **404** `Work order not found` when the operation's work order is soft-deleted (see "Draft and on-hold work orders refuse every start"). **On a COMPLETE operation, changing `quantity_complete` or `status`, or lowering `quantity_scrapped`, returns 409** — those are the completion record; correct the good count with `…/reduce-production`, which can reopen the operation (re-sending the stored values, and every other field, is still accepted; scrap found after the close may be **added** with a reason, as required audit evidence, but only into units still unaccounted — a rise past that is 409). On an open operation, raising `quantity_complete` above the good ceiling or the floor's labor record returns 409; an API token may not change the counts or the scrap reason (403 — a `quantity_scrapped` rise or a reason change gets the scrap text, owner decision 2026-11-07). See "Short count at completion" | Admin / Manager / Supervisor |
+| PUT | `/work-orders/operations/{id}` | Update an operation (body now also accepts `work_center_id` — move the operation to another work center; see note below). **409** if it sets `status` to COMPLETE on a not-yet-complete operation — completion goes through the completion endpoints (see "Terminal-state lock"). **409** with the start gate's text if it sets `status` to IN_PROGRESS on an operation of a draft, on-hold or complete / closed / cancelled work order, and **409** "release first" if it sets `status` to READY on a draft — both before any field is written; re-sending the operation's current status is not a transition. **409** with the same text when it **raises** `quantity_complete` on an operation that is (or this write leaves) PENDING / READY of a draft or on-hold work order. These start-gate refusals answer **before** the open-operation count 409s below, so a not-started operation of a draft or held job always gets "release first" / "Resume Work Order", never a count text naming doors that job keeps shut. **404** `Work order not found` when the operation's work order is soft-deleted (see "Draft and on-hold work orders refuse every start"). **On a COMPLETE operation, changing `quantity_complete` or `status`, or lowering `quantity_scrapped`, returns 409** — those are the completion record; correct the good count with `…/reduce-production`, which can reopen the operation (re-sending the stored values, and every other field, is still accepted; scrap found after the close may be **added** with a reason, as required audit evidence, but only into units still unaccounted — a rise past that is 409). On an open operation, raising `quantity_complete` above the good ceiling or the floor's labor record returns 409; an API token may not change the counts or the scrap reason (403 — a `quantity_scrapped` rise or a reason change gets the scrap text, owner decision 2026-11-07). See "Short count at completion". **`inspection_complete` is not an updatable field:** a body that contains the key, with any value (`true`, `false`, `null`), is refused **422** (`inspection_complete cannot be set by an operation update. Sign off the inspection with POST /api/v1/shop-floor/operations/{operation_id}/inspection, which records who signed and when.`) rather than silently ignored — the sign-off verb is the flag's only writer (Shop Floor → "Inspection Schema"). `requires_inspection` is still accepted, and setting it signs nothing | Admin / Manager / Supervisor |
 | POST | `/work-orders/operations/{id}/start` | Start an operation (**office** verb — operators start work through `PUT /shop-floor/operations/{id}/start` and the kiosk, which stay operator-open). Refused before any write, in the shop-floor twin's order: **400** already complete / already in progress (it never re-opens or re-stamps one), **404** work order missing or soft-deleted, **409** draft / on-hold / terminal work order, **409** operation on hold (starting does not lift a hold), **400** predecessors | Admin / Manager / Supervisor / Quality |
 | POST | `/work-orders/operations/{id}/complete` | Record an operation's good and scrap **totals** from the office. It **closes only when good + scrap cover every unit that reached the operation**; otherwise it saves progress and stays open (a submit that changes nothing is a **200** "No change" that writes nothing). 409 if the parent WO is terminal; **409 for a READY operation on a draft or on-hold WO** — completing it would start it. Query params `quantity_scrapped` (a total that never lowers), `scrap_reason` / `scrap_reason_code_id`, `quantity_override_reason`, `acknowledge_open_entries` — see "Short count at completion" below. **403** for an API token raising the scrap total (owner decision 2026-11-07: only a person declares scrap). **Office** verb — the shop-floor twin is the operator path | Admin / Manager / Supervisor / Quality |
 | POST | `/work-orders/operations/{id}/reduce-production` | Supervisor/office over-count correction — walk back good-count across **any** operator's **unapproved** labor on the operation (an operation nobody ever clocked in to has its desk-entered good lowered directly, up to that count); **a COMPLETE operation is correctable here** (unlike the operator's twin), a terminal WO is not; no clock-in required. A correction that would leave a COMPLETE operation short is **409** unless the body sends `reopen_operation: true`, which returns it to in progress (see note below). A standing API token is **403** on every correction | Admin / Manager / Supervisor |
@@ -6707,7 +6711,7 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 |--------|----------|-------------|---------------|
 | GET | `/shop-floor/dashboard` | Shop floor dashboard | Yes |
 | GET | `/shop-floor/my-active-job` | Get current user's active job, incl. the job's written guidance (WO notes/special instructions + the operation's description/setup/run text). Top-level **`dispatch_notices`** (always present, `[]` when not clocked in): the newest planner dispatch notice per work center where the caller holds an open **labor** entry — see "Floor dispatch notices" below | Yes |
-| GET | `/shop-floor/operations` | List not-complete/cancelled operations for the desktop shop-floor pages (paginated, max 200/page; filters `work_center_id` / `status` / `search` / `due_today` — work orders due on the **company's calendar date**, not the server's UTC date, since 2026-11-13) — rows in the **canonical dispatch order**, each carrying the advisory `run_order` display rank (see "Desktop parity" under the Dispatch run order note below). An **`ON_HOLD` row additionally carries `hold`** — `{ held_at, held_by_user_id, held_by_name, blocker }`, from the same batched pure-read `operation_hold_view` the kiosk `held` list uses, so the desk page and the floor cannot tell two stories about one hold. The key is **absent on every other row** (unheld payloads stay byte-identical), every field inside is nullable, and `blocker: null` covers ordinary nest holds (including a category or note saved on the hold event) and bare holds, which still carries `held_by_name` / `held_at`: reason and attribution are INDEPENDENT. **Free text (`title` / `note`) rides this response** — every caller is an identified `get_current_user` session, never a crew-station principal, so the station withholding rule does not apply and `free_text_withheld` is `false`. **Only when filtered to one `work_center_id`**, the envelope also carries `dispatch_notices` (0- or 1-item list, that machine's newest dispatch notice) and `server_time` (UTC `Z`); an unfiltered list carries neither key — see "Floor dispatch notices" below. Every row also carries **`start_blocked_reason`** (the work-order start refusal text for a draft / on-hold / terminal work order, else `null`) and **`work_order_status`**; `can_check_in` is `false` whenever `start_blocked_reason` is set, and `blocked_by_previous_operations` is unchanged. `null` is not a "startable" claim — the write verb decides at the moment of the action. `GET /shop-floor/operations/{id}` carries the same two keys on `operation` and on each `all_operations[]` entry (see Work Orders → "Draft and on-hold work orders refuse every start") | Yes |
+| GET | `/shop-floor/operations` | List not-complete/cancelled operations for the desktop shop-floor pages (paginated, max 200/page; filters `work_center_id` / `status` / `search` / `due_today` — work orders due on the **company's calendar date**, not the server's UTC date, since 2026-11-13) — rows in the **canonical dispatch order**, each carrying the advisory `run_order` display rank (see "Desktop parity" under the Dispatch run order note below). An **`ON_HOLD` row additionally carries `hold`** — `{ held_at, held_by_user_id, held_by_name, blocker }`, from the same batched pure-read `operation_hold_view` the kiosk `held` list uses, so the desk page and the floor cannot tell two stories about one hold. The key is **absent on every other row** (unheld payloads stay byte-identical), every field inside is nullable, and `blocker: null` covers ordinary nest holds (including a category or note saved on the hold event) and bare holds, which still carries `held_by_name` / `held_at`: reason and attribution are INDEPENDENT. **Free text (`title` / `note`) rides this response** — every caller is an identified `get_current_user` session, never a crew-station principal, so the station withholding rule does not apply and `free_text_withheld` is `false`. **Only when filtered to one `work_center_id`**, the envelope also carries `dispatch_notices` (0- or 1-item list, that machine's newest dispatch notice) and `server_time` (UTC `Z`); an unfiltered list carries neither key — see "Floor dispatch notices" below. Every row also carries **`start_blocked_reason`** (the work-order start refusal text for a draft / on-hold / terminal work order, else `null`) and **`work_order_status`**; `can_check_in` is `false` whenever `start_blocked_reason` is set, and `blocked_by_previous_operations` is unchanged. `null` is not a "startable" claim — the write verb decides at the moment of the action. `GET /shop-floor/operations/{id}` carries the same two keys on `operation` and on each `all_operations[]` entry (see Work Orders → "Draft and on-hold work orders refuse every start"). Every row also carries the in-process inspection state: `requires_inspection`, **`inspection_complete`** (whether the sign-off below has been recorded) and **`inspection_type`** (the planned kind, e.g. `final` from a routing inspection point, or `null`) — the desk row reads them to show "Inspection required" / "Inspected" without a per-row detail read | Yes |
 | GET | `/shop-floor/operations/{id}/documents` | Kiosk doc-viewer discovery: the operation's controlled part drawing, live nest reference PDF, nest material, and critical SPC characteristics (see note below) | Yes |
 | GET | `/shop-floor/documents/{id}/inline` | Serve a kiosk-viewable document PDF inline — DRAWING-type or live-nest-referenced only, tenant-scoped, uniform **404** on any miss (see note below) | Yes |
 | POST | `/shop-floor/clock-in` | Clock in to operation (starts a PENDING / READY one). Refusal order, all before any write: **400** already clocked in, **404** operation, **400** operation not on that work order, **400** wrong work center, **404** work order missing or soft-deleted, **409** draft / on-hold / terminal work order, **400** `Operation is not ready to start` (incl. an operation-level hold), **400** predecessors. A back-entry (`source = "backfill"`) is refused exactly like a live clock-in | Yes |
@@ -6718,7 +6722,7 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 | POST | `/shop-floor/operations/{id}/complete` | **Close** an operation at the good count the floor already recorded — there is no partial branch, so a **200** always means COMPLETE. Viewer / Shipping get **403** `Insufficient permissions` before the operation is read or the body validated (owner decision P0.4, 2026-11-13). Refused **409**, writing nothing, while recorded good + scrap leave any received unit unaccounted (declare the lost pieces with `quantity_scrapped` + a reason, or leave it open), **403** for an API token declaring scrap (owner decision 2026-11-07: only a person declares scrap) or closing short, **409** for a READY operation on a draft or on-hold work order (completing it would start it); an IN_PROGRESS one stays completable under the same rules. See "Floor completion contract" below | Admin / Manager / Supervisor / Operator / Quality |
 | PUT | `/shop-floor/operations/{id}/hold` | Put an operation on hold and close open time entries. For a live laser nest, optional category/severity/note are saved on the hold event and **do not create a blocker**; Resume/Clear Hold is sufficient. Non-nest categorized holds retain their structured blocker behavior. Cancelled nests return **409** and must be restored first | Yes |
 | PUT | `/shop-floor/operations/{id}/resume` | Take an operation **off** hold. **Restores, never promotes**: `IN_PROGRESS` if it ever started, else `PENDING` — lifted to `READY` only where the shared promotion rule would grant it (parent WO released and non-terminal, no incomplete predecessor — which predecessors count is the work order's `sequential_operations` setting: cross-work-center only on a pool, any earlier-sequence operation on a routing), so `pending` is a normal success status. **409** if the operation backs a **cancelled (soft-deleted) laser nest** — that is a tombstone, not a hold; **400** if it is not `ON_HOLD`; cross-tenant id → **404**. Deliberately does **not** resolve the blocker that caused the hold (that stays with the blocker resolve/dismiss flow); the response carries `open_blockers` so the caller can warn (BLK-4) — each `{ id, category, severity, status, has_note, free_text_withheld }`, plus the caller-supplied `title` **only** for a non-station caller (withheld from a badge-minted crew-station token, same rule as `held`). Each `PENDING → READY` flip it does cause emits `operation_ready` (`user_id: null`). Audited **`STATUS_CHANGE`** (old→new status; `extra_data.transition = "resume_operation"`). Reachable by a badge-minted kiosk token — see "Held work" below | Yes |
-| POST | `/shop-floor/operations/{id}/inspection` | Record operation inspection complete (sets `inspection_complete`) | Admin / Manager / Supervisor / Quality |
+| POST | `/shop-floor/operations/{id}/inspection` | Sign off an operation's in-process inspection — the **only** writer of `inspection_complete`. A person only: any standing API token is **403** before anything is read, and a crew-station badge token is **403** by the kiosk path fence. **404** for a missing or other-company operation, or one whose work order is soft-deleted. The `MARK_OPERATION_INSPECTED` audit row is required evidence (**503**, nothing signed, when it cannot be written). Not an MCP tool. See "Inspection Schema" below | Admin / Manager / Supervisor / Quality |
 | POST | `/shop-floor/time-entries/{id}/approve` | Approve a TimeEntry (sets `approved` / `approved_by`) | Admin / Manager / Supervisor / Quality |
 | POST | `/shop-floor/time-entries/{id}/unapprove` | Clear approval on a TimeEntry | Admin / Manager / Supervisor / Quality |
 | GET | `/shop-floor/work-center-queue/{id}` | Get work center queue, each row carrying the live crew `roster` and the manager-set `run_order`, **plus a separate `held` list** of the work center's `ON_HOLD` operations (`held_truncated` when capped). Every row also carries the job's written guidance — see "Written job guidance on operator reads" for the five keys and the station-disclosure decision (see notes below). Top-level **`dispatch_notice`**: this machine's newest planner dispatch notice (12 h window) or `null` — see "Floor dispatch notices" below. Rows in **both** `queue` and `held` carry **`work_order_status`** and **`start_blocked_reason`** (static server text, so a crew-station token gets it too). A READY operation of an on-hold work order stays in `queue` with the reason — a work-order hold does not move rows onto `held` | User **or** kiosk station token |
@@ -8163,10 +8167,16 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 
 #### Inspection Schema
 
-`POST /shop-floor/operations/{id}/inspection` records an operation's inspection as complete. It sets
-`inspection_complete = True` (clearing the `inspection_incomplete` gate above), records who/when in a
-tamper-evident audit row, and is **tenant-scoped** + role-gated to **Admin / Manager / Supervisor /
-Quality** (there is no separate Inspector role). Both fields are optional:
+`POST /shop-floor/operations/{id}/inspection` signs off an operation's in-process inspection. It sets
+`inspection_complete = True` (clearing the `inspection_incomplete` gate above) and is the **only**
+writer of that flag: `PUT /work-orders/operations/{id}` refuses the field (below). It is
+**tenant-scoped** and role-gated to **Admin / Manager / Supervisor / Quality** (there is no separate
+Inspector role). In the app the control is the **Sign off** button beside the "Inspection required"
+chip on Work Order Detail operation rows and on the Shop Floor (`/shop-floor/operations`) operation
+cards, offered to those four roles only where `requires_inspection` is true and the inspection is not
+yet signed.
+
+Both fields are optional; `{}` is a valid sign-off:
 
 ```json
 {
@@ -8174,6 +8184,57 @@ Quality** (there is no separate Inspector role). Both fields are optional:
   "notes": "All critical characteristics within tolerance"
 }
 ```
+
+`inspection_type` is free text (≤ 100 characters; the app offers `in_process` / `first_article` /
+`final`). When it is omitted the operation keeps the type it already has — a routing inspection point
+stamps `final` — so the app sends it only when the signer picks a different one. `notes` is ≤ 2000
+characters. Over-length fields are **422** and sign nothing.
+
+Refusals, in the order they are checked, each before anything is written:
+
+- **403** for a crew-station badge token (`scope="kiosk"`), of any role: the kiosk path fence denies
+  `/shop-floor/operations/{id}/inspection`, as it does labor approval (see Authentication → Path fence).
+- **403** (role gate) for Operator / Shipping / Viewer.
+- **403** for any standing API token, whatever its role or scope, before the operation is read (so a
+  token cannot probe whether an id exists): `An inspection is signed off by a person signed in to the
+  app, not an API token: recording that an inspection was performed is a person's judgment.`
+  (`API_TOKEN_INSPECTION_SIGN_OFF`; see
+  [RBAC → Credential policy for judgment writes](RBAC_PERMISSIONS.md#credential-policy-for-judgment-writes)).
+- **404** `Operation not found` for a missing or other-company operation, and for one whose work order
+  is soft-deleted.
+- **503** `The audit record for this inspection sign-off could not be saved; nothing was signed off.
+  Retry.` — the `MARK_OPERATION_INSPECTED` audit row is **required** evidence, written in the same
+  transaction (old / new `inspection_complete` and `inspection_type`, plus `extra_data`
+  `{work_order_id, work_order_number, notes}`); if it cannot be written the flag is not saved.
+
+On success it also emits the `operation_inspected` operational event and a shop-floor websocket
+broadcast `{event: "operation_inspected", work_order_id, operation_id}`, and bumps the operation's
+`version` (a later operation `PUT` carrying the pre-sign-off version gets the usual **409**). The
+**200** body:
+
+```json
+{
+  "message": "Operation inspection recorded",
+  "operation_id": 412,
+  "work_order_id": 87,
+  "requires_inspection": true,
+  "inspection_complete": true,
+  "inspection_type": "final",
+  "signed_off_by_id": 15,
+  "signed_off_by_name": "Dana Reyes",
+  "signed_off_at": "2026-11-23T15:04:05.123456Z"
+}
+```
+
+`signed_off_by_*` / `signed_off_at` describe **this** sign-off and come from the audit row it just
+wrote. The operation has no inspected-by / inspected-at column, so no operation read carries them; the
+app shows who signed and when only in the session that signed, and the audit log is the lasting record.
+
+Signing an operation that is already signed is accepted and writes a further audit row (old
+`inspection_complete: true`); nothing clears the flag. The verb also accepts an operation that is not
+an inspection point (`requires_inspection: false`) and any operation or work-order status; the app
+offers it on neither a signed operation nor a non-inspection-point one (nor, on Work Order Detail, on a
+cancelled laser nest's operation).
 
 #### Time-entry approval
 
@@ -16698,7 +16759,7 @@ What matters from this file's point of view:
 - **The catalog is this API.** 779 tools are generated from `app.openapi()` at startup — every
   secured operation except the `Authentication`, `Carrier Webhooks`, `Error Logging` (and its router-level `errors` twin) and `WebSocket` tags, the
   unauthenticated health/station-login routes (named one by one in `catalog.PUBLIC_OPERATIONS`) and
-  the twenty-six operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders
+  the twenty-seven operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders
   (`POST /work-orders/import`, `POST /purchasing/purchase-orders/import` — they mint work orders
   RELEASED / IN_PROGRESS and POs SENT, a record of a past system rather than a user action),
   AI Accept & apply (`POST /ai/recommendations/{recommendation_id}/apply` — owner ruling 3: only a
@@ -16721,7 +16782,10 @@ What matters from this file's point of view:
   `PUT /companies/me/floor-pin-policy` — a badge sign-on credential is a person's act; the routes
   also refuse API tokens) and the two document-access writes (`PUT /users/{user_id}/export-authorization`,
   `POST /documents/{document_id}/access-level` — deciding who may open a controlled document is a
-  person's judgment; the routes also refuse API tokens, and the access review stays a tool) — plus 15 fixed-name convenience tools that shadow 16
+  person's judgment; the routes also refuse API tokens, and the access review stays a tool) and the
+  in-process inspection sign-off (`POST /shop-floor/operations/{operation_id}/inspection` — recording
+  that an inspection was performed is a person's judgment; the route also refuses API tokens, and the
+  operation reads carrying `inspection_complete` stay tools) — plus 15 fixed-name convenience tools that shadow 16
   raw routes (`POST /work-orders/`, `PUT /work-orders/{id}`, `POST /work-orders/{id}/release`, the two
   nest-package imports, the manual nest add, `GET /search/`, …) to enforce agent rules the routes do
   not: create/duplicate always land DRAFT, release is a separate explicit tool and the generic update
