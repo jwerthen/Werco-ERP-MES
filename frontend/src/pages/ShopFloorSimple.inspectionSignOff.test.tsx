@@ -69,6 +69,8 @@ const op = (inspectionComplete: boolean) => ({
   run_instructions: null,
   requires_inspection: true,
   inspection_complete: inspectionComplete,
+  // A routing inspection point is stamped "final"; the sign-off must keep it.
+  inspection_type: 'final',
 });
 
 function renderShopFloor() {
@@ -115,7 +117,7 @@ describe('ShopFloorSimple inspection sign-off', () => {
       work_order_id: 42,
       requires_inspection: true,
       inspection_complete: true,
-      inspection_type: 'in_process',
+      inspection_type: 'final',
       signed_off_by_id: 1,
       signed_off_by_name: 'Robin Vale',
       signed_off_at: '2026-11-23T15:04:05Z',
@@ -129,7 +131,7 @@ describe('ShopFloorSimple inspection sign-off', () => {
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Sign off' }));
 
     await waitFor(() => expect(mockedApi.getShopFloorOperations.mock.calls.length).toBeGreaterThan(loadsBefore));
-    expect(mockedApi.signOffOperationInspection).toHaveBeenCalledWith(303, { inspection_type: 'in_process' });
+    expect(mockedApi.signOffOperationInspection).toHaveBeenCalledWith(303, {});
     await waitFor(() =>
       expect(within(screen.getByTestId('shop-floor-inspection-303')).getByText('inspected')).toBeInTheDocument()
     );

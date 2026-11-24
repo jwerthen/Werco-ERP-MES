@@ -3105,7 +3105,9 @@ export default function WorkOrderDetail() {
                                 operationLabel={`${operationLabel(op)} \u2014 ${op.name}`}
                                 requiresInspection={Boolean(op.requires_inspection)}
                                 inspectionComplete={Boolean(op.inspection_complete)}
-                                canSignOff={canSignOff}
+                                inspectionType={op.inspection_type}
+                                /* A cancelled nest keeps its chip but is not signable. */
+                                canSignOff={canSignOff && !cancelledNest}
                                 onSignedOff={() => loadWorkOrder()}
                               />
                             </div>

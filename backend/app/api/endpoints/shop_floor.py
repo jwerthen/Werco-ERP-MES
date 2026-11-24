@@ -4173,6 +4173,9 @@ def get_all_operations(
                 # desk row can show "Inspection required" vs "Inspected" without a
                 # per-row detail read.
                 "inspection_complete": bool(op.inspection_complete),
+                # The planned inspection kind (a routing inspection point stamps "final"), so
+                # the sign-off dialog can keep it rather than relabel it.
+                "inspection_type": op.inspection_type,
                 # Present on ON_HOLD rows only (see above); the key is absent
                 # everywhere else rather than sent as null.
                 **({"hold": hold_payload} if hold_payload is not None else {}),

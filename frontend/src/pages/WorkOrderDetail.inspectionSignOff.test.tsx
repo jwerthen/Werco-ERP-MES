@@ -65,6 +65,8 @@ const inspectionOp = (inspectionComplete: boolean) => ({
   estimated_hours: 1,
   requires_inspection: true,
   inspection_complete: inspectionComplete,
+  // A routing inspection point is stamped "final"; the sign-off must keep it.
+  inspection_type: 'final',
 });
 
 const plainOp = {
@@ -151,7 +153,7 @@ describe('WorkOrderDetail inspection sign-off', () => {
       work_order_id: 42,
       requires_inspection: true,
       inspection_complete: true,
-      inspection_type: 'in_process',
+      inspection_type: 'final',
       signed_off_by_id: 1,
       signed_off_by_name: 'Robin Vale',
       signed_off_at: '2026-11-23T15:04:05Z',
@@ -164,9 +166,20 @@ describe('WorkOrderDetail inspection sign-off', () => {
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Sign off' }));
 
     await waitFor(() => expect(mockedApi.getWorkOrder.mock.calls.length).toBeGreaterThan(readsBefore));
-    expect(mockedApi.signOffOperationInspection).toHaveBeenCalledWith(71, { inspection_type: 'in_process' });
+    expect(mockedApi.signOffOperationInspection).toHaveBeenCalledWith(71, {});
     const row = (await screen.findByText('Deburr')).closest('tr') as HTMLElement;
     await waitFor(() => expect(within(row).getByText('inspected')).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: /Sign off inspection/ })).not.toBeInTheDocument();
+  });
+
+  it('keeps the chip but offers no Sign off on a cancelled nest', async () => {
+    mockedApi.getWorkOrder.mockResolvedValue({
+      ...workOrder(false),
+      operations: [{ ...inspectionOp(false), cancelled_nest_id: 9 }, plainOp],
+    });
+    renderDetail();
+    const row = (await screen.findByText('Deburr')).closest('tr') as HTMLElement;
+    expect(within(row).getByText('inspection required')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Sign off inspection/ })).not.toBeInTheDocument();
   });
 });

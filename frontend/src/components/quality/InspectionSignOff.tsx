@@ -64,12 +64,34 @@ const INSPECTION_TYPES: { value: string; label: string }[] = [
 
 const NOTES_MAX = 2000;
 
+/**
+ * The type the dialog starts at, and the options it offers. The server overwrites
+ * `inspection_type` whenever one is sent, and a routing inspection point is stamped
+ * `final`, so the dialog starts at the operation's own planned type (offering it even
+ * when it is not one of the three listed) and falls back to In-process only when the
+ * operation has none.
+ */
+export function inspectionTypeOptions(currentType: string | null | undefined): {
+  initial: string;
+  options: { value: string; label: string }[];
+} {
+  const current = currentType?.trim() || '';
+  if (!current) return { initial: 'in_process', options: INSPECTION_TYPES };
+  const known = INSPECTION_TYPES.some(t => t.value === current);
+  const options = (known ? INSPECTION_TYPES : [...INSPECTION_TYPES, { value: current, label: current }]).map(t =>
+    t.value === current ? { ...t, label: `${t.label} (planned)` } : t
+  );
+  return { initial: current, options };
+}
+
 export interface InspectionSignOffControlProps {
   operationId: number;
   /** Human label for the dialog title, e.g. "Op 20 — Deburr". */
   operationLabel: string;
   requiresInspection: boolean;
   inspectionComplete: boolean;
+  /** The operation's planned `inspection_type` (a routing inspection point carries `final`). */
+  inspectionType?: string | null;
   /** Role gate — pass `canSignOffInspection(user)`. */
   canSignOff: boolean;
   /** Called after a 200 so the caller re-reads its rows. */
@@ -87,15 +109,17 @@ export function InspectionSignOffControl({
   operationLabel,
   requiresInspection,
   inspectionComplete,
+  inspectionType: currentType,
   canSignOff,
   onSignedOff,
   size = 'sm',
 }: InspectionSignOffControlProps) {
+  const { initial: initialType, options: typeOptions } = inspectionTypeOptions(currentType);
   const { showToast } = useToast();
   const titleId = useId();
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
-  const [inspectionType, setInspectionType] = useState('in_process');
+  const [inspectionType, setInspectionType] = useState(initialType);
   const [notes, setNotes] = useState('');
   const [signed, setSigned] = useState<OperationInspectionResponse | null>(null);
 
@@ -103,7 +127,7 @@ export function InspectionSignOffControl({
   if (!requiresInspection && !complete) return null;
 
   const openDialog = () => {
-    setInspectionType('in_process');
+    setInspectionType(initialType);
     setNotes('');
     setOpen(true);
   };
@@ -118,8 +142,11 @@ export function InspectionSignOffControl({
     setPending(true);
     try {
       const trimmed = notes.trim();
+      // Send a type only when it changes the operation's own: an unchanged one is left
+      // for the server to keep, so the audit row records no relabel.
+      const changesType = inspectionType && inspectionType !== (currentType?.trim() || '');
       const result = await api.signOffOperationInspection(operationId, {
-        ...(inspectionType ? { inspection_type: inspectionType } : {}),
+        ...(changesType ? { inspection_type: inspectionType } : {}),
         ...(trimmed ? { notes: trimmed } : {}),
       });
       setSigned(result);
@@ -180,7 +207,7 @@ export function InspectionSignOffControl({
                 disabled={pending}
                 onChange={e => setInspectionType(e.target.value)}
               >
-                {INSPECTION_TYPES.map(t => (
+                {typeOptions.map(t => (
                   <option key={t.value} value={t.value}>
                     {t.label}
                   </option>

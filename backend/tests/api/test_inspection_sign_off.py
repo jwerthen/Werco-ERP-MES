@@ -218,6 +218,20 @@ def test_shop_floor_list_row_reports_whether_the_inspection_is_signed(client: Te
     assert _row()["inspection_complete"] is True
 
 
+def test_shop_floor_list_row_carries_the_planned_inspection_type(client: TestClient, db_session: Session):
+    """The row serves ``inspection_type`` so the dialog can keep a routing's planned type."""
+    quality = make_user(db_session, role=UserRole.QUALITY)
+    _, op = _inspection_point(db_session)
+    op.inspection_type = "final"
+    db_session.commit()
+
+    resp = client.get("/api/v1/shop-floor/operations", headers=headers_for(quality))
+
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    row = next(r for r in resp.json()["operations"] if r["id"] == op.id)
+    assert row["inspection_type"] == "final"
+
+
 # ---------------------------------------------------------------------------
 # Refusals: roles, every kind of standing token, tenant, validation
 # ---------------------------------------------------------------------------
@@ -282,23 +296,42 @@ def test_crew_station_badge_of_an_operator_is_refused_by_role(client: TestClient
     assert _sign_off_rows(db_session, op.id) == []
 
 
-def test_crew_station_badge_of_a_supervisor_is_a_person_and_may_sign(client: TestClient, db_session: Session):
-    """Pins CURRENT behaviour: a badge-minted kiosk token is a person, not an API token.
+@pytest.mark.parametrize(
+    "role",
+    [UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR, UserRole.QUALITY],
+    ids=lambda r: r.value,
+)
+def test_crew_station_badge_of_a_signing_role_is_fenced_off_the_desk_verb(
+    client: TestClient, db_session: Session, role
+):
+    """The sign-off is a desk verb, as labor approval is: the kiosk path fence refuses it.
 
-    The kiosk path fence admits every ``/api/v1/shop-floor`` path except kiosk-station admin,
-    the dispatch board, labor approval and run order, and the badge token carries the badge
-    holder's live role, so a Supervisor or Quality badge scanned at a crew station CAN sign off
-    an inspection, attributed to that person. If the owner decides the sign-off is a desk-only
-    verb (as labor approval is), add it to the kiosk deny list and flip this test.
+    A badge token carries its holder's live role, so without the fence a Supervisor or Quality
+    badge left live on a shared crew terminal would let whoever stands there next sign an
+    inspection in that person's name. The fence answers 403 before the route runs.
     """
-    supervisor = make_user(db_session, role=UserRole.SUPERVISOR)
+    from app.api.deps import _is_kiosk_scope_allowed_path
+
+    signer = make_user(db_session, role=role)
     _, op = _inspection_point(db_session)
+    path = URL.format(op_id=op.id)
+    assert _is_kiosk_scope_allowed_path(path) is False
 
-    resp = client.post(URL.format(op_id=op.id), json={}, headers=bearer(_kiosk_badge_token(supervisor)))
+    resp = client.post(path, json={}, headers=bearer(_kiosk_badge_token(signer)))
 
-    assert resp.status_code == status.HTTP_200_OK, resp.text
-    rows = _sign_off_rows(db_session, op.id)
-    assert len(rows) == 1 and rows[0].user_id == supervisor.id
+    assert resp.status_code == status.HTTP_403_FORBIDDEN, resp.text
+    db_session.expire_all()
+    assert db_session.get(WorkOrderOperation, op.id).inspection_complete is False
+    assert _sign_off_rows(db_session, op.id) == []
+
+
+def test_kiosk_fence_still_admits_the_other_operation_verbs():
+    """The inspection carve-out is suffix-exact: the floor's own operation verbs stay reachable."""
+    from app.api.deps import _is_kiosk_scope_allowed_path
+
+    assert _is_kiosk_scope_allowed_path("/api/v1/shop-floor/operations/7/start") is True
+    assert _is_kiosk_scope_allowed_path("/api/v1/shop-floor/operations/7/complete") is True
+    assert _is_kiosk_scope_allowed_path("/api/v1/shop-floor/operations/7") is True
 
 
 def test_other_tenant_gets_404_with_no_row_change_no_audit_and_no_event(client: TestClient, db_session: Session):

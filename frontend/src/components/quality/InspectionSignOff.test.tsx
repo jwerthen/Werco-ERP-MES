@@ -137,6 +137,47 @@ describe('InspectionSignOffControl', () => {
     );
   });
 
+  it('keeps a planned final inspection final: the default sends no type', async () => {
+    mocked.signOffOperationInspection.mockResolvedValue({ ...signed, inspection_type: 'final' });
+    renderControl({ inspectionType: 'final' });
+
+    fireEvent.click(screen.getByRole('button', { name: /sign off inspection/i }));
+    const dialog = screen.getByRole('dialog');
+    const select = within(dialog).getByLabelText('Inspection type');
+    expect(select).toHaveValue('final');
+    expect(within(dialog).getByRole('option', { name: 'Final (planned)' })).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Sign off' }));
+
+    await waitFor(() => expect(mocked.signOffOperationInspection).toHaveBeenCalledWith(501, {}));
+  });
+
+  it('sends the type only when the signer changes the planned one', async () => {
+    mocked.signOffOperationInspection.mockResolvedValue(signed);
+    renderControl({ inspectionType: 'final' });
+
+    fireEvent.click(screen.getByRole('button', { name: /sign off inspection/i }));
+    const dialog = screen.getByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText('Inspection type'), { target: { value: 'in_process' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Sign off' }));
+
+    await waitFor(() =>
+      expect(mocked.signOffOperationInspection).toHaveBeenCalledWith(501, { inspection_type: 'in_process' })
+    );
+  });
+
+  it('offers and keeps a planned type that is not one of the three listed', async () => {
+    mocked.signOffOperationInspection.mockResolvedValue(signed);
+    renderControl({ inspectionType: 'CMM layout' });
+
+    fireEvent.click(screen.getByRole('button', { name: /sign off inspection/i }));
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByLabelText('Inspection type')).toHaveValue('CMM layout');
+    expect(within(dialog).getByRole('option', { name: 'CMM layout (planned)' })).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Sign off' }));
+
+    await waitFor(() => expect(mocked.signOffOperationInspection).toHaveBeenCalledWith(501, {}));
+  });
+
   it('keeps the dialog open and shows the server text on a refusal', async () => {
     mocked.signOffOperationInspection.mockRejectedValue({
       response: {

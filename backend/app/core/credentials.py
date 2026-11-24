@@ -125,9 +125,9 @@ API_TOKEN_EXPORT_AUTHORIZATION = (
 # done, the same judgment as an FAI final disposition, so the route refuses ANY API token,
 # whatever its role or scope, with this text before it reads or writes anything. It is not an MCP
 # tool (``app.mcp.catalog.INSPECTION_SIGN_OFF_OPERATIONS``). A crew-station badge token is a
-# person, not an API token, and the kiosk path fence admits this ``/shop-floor`` path, so an
-# Admin / Manager / Supervisor / Quality badge scanned at a crew station CAN sign off (attributed
-# to the badge holder); an Operator badge is refused by the route's roles. Pinned by
+# person, not an API token, but the sign-off is a desk verb: the kiosk path fence
+# (``deps._is_kiosk_scope_allowed_path``) refuses this path to every badge token, as it does labor
+# approval, so no crew-station badge of any role can sign off. Pinned by
 # ``tests/api/test_inspection_sign_off.py``.
 API_TOKEN_INSPECTION_SIGN_OFF = (
     "An inspection is signed off by a person signed in to the app, not an API token: recording that an "

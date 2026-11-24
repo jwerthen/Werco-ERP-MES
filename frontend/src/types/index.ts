@@ -364,6 +364,8 @@ export interface WorkOrderOperation extends OperationShortCountFields {
   quantity_scrapped: number;
   requires_inspection: boolean;
   inspection_complete: boolean;
+  /** Planned inspection kind (`final` from a routing inspection point); kept by the sign-off unless changed. */
+  inspection_type?: string | null;
   scheduled_start?: string;
   scheduled_end?: string;
   actual_start?: string;

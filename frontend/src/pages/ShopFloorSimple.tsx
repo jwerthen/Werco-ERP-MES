@@ -118,6 +118,8 @@ interface Operation extends OperationShortCountFields {
    * because the SPA and the API deploy independently: absent reads as unsigned.
    */
   inspection_complete?: boolean;
+  /** Planned inspection kind; the sign-off keeps it unless the signer changes it. */
+  inspection_type?: string | null;
   can_check_in?: boolean;
   blocked_by_previous_operations?: boolean;
   /**
@@ -2362,6 +2364,7 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
                         operationLabel={`${op.work_order_number} \u00b7 ${formatOperationLabel(op.operation_number)} \u2014 ${op.operation_name}`}
                         requiresInspection={Boolean(op.requires_inspection)}
                         inspectionComplete={Boolean(op.inspection_complete)}
+                        inspectionType={op.inspection_type}
                         canSignOff={canSignOff}
                         onSignedOff={() => loadOperations()}
                       />
