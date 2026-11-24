@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -19,6 +19,7 @@ from app.schemas.notification import (
     UnreadCountResponse,
 )
 from app.services.notification_catalog import CATALOG
+from app.services.notification_delivery_status import failed_delivery_clause
 
 router = APIRouter()
 
@@ -205,13 +206,6 @@ def list_notification_logs(
     if status == "sent":
         query = query.filter(NotificationLog.sent == True)
     elif status == "failed":
-        query = query.filter(NotificationLog.sent == False).filter(
-            (NotificationLog.provider_status.is_(None))
-            | (NotificationLog.provider_status.notin_(['queued', 'sending', 'retrying']))
-            | (
-                (NotificationLog.provider_status == 'sending')
-                & (NotificationLog.sent_at < datetime.utcnow() - timedelta(minutes=10))
-            )
-        )
+        query = query.filter(failed_delivery_clause(datetime.utcnow()))
 
     return query.order_by(NotificationLog.sent_at.desc(), NotificationLog.id.desc()).limit(limit).all()

@@ -40,6 +40,7 @@ from arq.cron import CronJob
 from app.core.config import settings
 from app.core.observability import init_sentry
 from app.core.queue import RedisProfile, assert_redis_configured, get_redis_settings, redis_config_warnings
+from app.core.worker_schedule import SHOP_TIMEZONE, SHOP_TIMEZONE_NAME, publish_cron_registry, record_cron_run
 
 # Import for side effects: attaches the transactional-outbox SQLAlchemy Session listeners
 # in the worker process so operational events committed here (e.g. cron writes) also tee
@@ -392,16 +393,16 @@ async def dispatch_notification_direct_job(
 # ============================================================================
 
 # Every entry here fires automatically once a worker process is running. The comment on each
-# line is the schedule in the CONTAINER's local timezone -- arq defaults to
-# `datetime.now().astimezone().tzinfo`, which on Railway is UTC unless TZ is set, so "6 AM"
-# means 06:00 UTC (01:00 Central) until somebody sets TZ. See docs/WORKER_SERVICE.md.
+# line is the schedule in SHOP time: WorkerSettings.timezone pins arq to America/Chicago
+# (app.core.worker_schedule.SHOP_TIMEZONE), so "6 AM" is 6 AM at the shop whatever the
+# container's TZ, daylight saving included. See docs/WORKER_SERVICE.md.
 ALL_CRON_JOBS: List[CronJob] = [
     cron(run_mrp_auto_draft_job, hour=6, minute=0),  # 6 AM daily (MRP AUTO_DRAFT) -- WRITES draft POs/WOs
     cron(send_daily_digest_job, hour=8, minute=0),  # 8 AM daily -- sends email
     cron(check_calibrations_job, hour=7, minute=0),  # 7 AM daily -- sends email
-    # Hour 12 in the CONTAINER's zone (above): 12:15 UTC = 6:15 AM Central (7:15 in summer) while TZ
-    # is unset. Which day it judges is the company's (company_today), whatever the hour. In-app only.
-    cron(check_maintenance_due_job, hour=12, minute=15),
+    # 6:15 AM shop time (it ran at 12:15 UTC before the zone was pinned). Which day it judges is the
+    # company's (company_today), whatever the hour. In-app only.
+    cron(check_maintenance_due_job, hour=6, minute=15),
     cron(check_late_work_orders_job, hour=8, minute=0),  # 8 AM daily -- sends email, no age cap
     cron(check_low_stock_job, hour=7, minute=30),  # 7:30 AM daily -- sends email (aggregated)
     cron(check_quote_expiring_job, hour=9, minute=0),  # 9 AM daily -- sends email
@@ -640,13 +641,13 @@ def describe_cron_schedule(jobs: Sequence[CronJob], now: datetime = None) -> Lis
     """One ``name -> next run`` line per registered cron, for the startup log.
 
     Computed with arq's own ``next_cron`` against COPIES of each job's schedule fields; the
-    ``CronJob`` objects are never mutated, so arq's own scheduling is untouched. ``now`` is
-    timezone-aware in the container's local zone, matching how arq itself resolves its
-    default timezone -- so the printed times are the times that will actually happen.
+    ``CronJob`` objects are never mutated, so arq's own scheduling is untouched. ``now``
+    defaults to the current time in the shop zone arq is pinned to (``WorkerSettings.timezone``)
+    -- so the printed times are the times that will actually happen.
     """
     from arq.cron import next_cron
 
-    reference = now or datetime.now().astimezone()
+    reference = now or datetime.now(SHOP_TIMEZONE)
     lines: List[str] = []
     for job in jobs:
         try:
@@ -704,8 +705,7 @@ async def startup(ctx):
             ", ".join(sorted(suppressed)),
         )
     if registered:
-        local_zone = datetime.now().astimezone().tzname()
-        logger.info("ARQ worker cron: %d job(s) armed, times in %s", len(registered), local_zone)
+        logger.info("ARQ worker cron: %d job(s) armed, times in %s", len(registered), SHOP_TIMEZONE_NAME)
         for line in describe_cron_schedule(registered):
             logger.info("ARQ worker cron:   %s", line)
     else:
@@ -714,6 +714,9 @@ async def startup(ctx):
     from app.core.worker_runtime import start_runtime_heartbeat
 
     await start_runtime_heartbeat(ctx)
+    # A SEPARATE key from the pinned heartbeat: which crons are armed and their schedules, for
+    # GET /admin/system-health. Best-effort -- never fails startup.
+    await publish_cron_registry(ctx.get("redis"), ALL_CRON_JOBS, registered)
     logger.info("ARQ worker ready (%d job functions registered)", len(WorkerSettings.functions))
 
 
@@ -789,6 +792,11 @@ class WorkerSettings:
     # Lifecycle
     on_startup = startup
     on_shutdown = shutdown
+    # Records each cron run's start, finish, outcome and counts for GET /admin/system-health.
+    after_job_end = record_cron_run
+
+    # Cron hours are shop time (America/Chicago), not the container's zone.
+    timezone = SHOP_TIMEZONE
 
     # Worker settings
     max_jobs = 10
