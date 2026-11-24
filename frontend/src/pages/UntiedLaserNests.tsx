@@ -504,12 +504,22 @@ export default function UntiedLaserNests() {
               </span>
             );
           }
+          const counted =
+            row.proposed_tie != null &&
+            (row.counted_since_completion_part_ids ?? []).includes(row.proposed_tie.part_id);
           if (row.proposed_tie) {
             return (
-              <Button size="sm" onClick={() => setTieTarget(row)}>
-                <LinkIcon className="mr-1 h-4 w-4" aria-hidden="true" />
-                Tie this sheet
-              </Button>
+              <span className="inline-flex flex-col items-end gap-1">
+                <Button size="sm" onClick={() => setTieTarget(row)}>
+                  <LinkIcon className="mr-1 h-4 w-4" aria-hidden="true" />
+                  Tie this sheet
+                </Button>
+                {counted && (
+                  <span data-testid="untied-row-counted" className="max-w-[14rem] text-right text-[11px] text-fd-amber">
+                    Counted since this nest completed — tying may deduct twice
+                  </span>
+                )}
+              </span>
             );
           }
           if (tieOptions(row).length > 0) {
@@ -576,6 +586,24 @@ export default function UntiedLaserNests() {
         sortable: true,
         accessor: group => group.sheets_burned,
         render: group => <span className="font-mono tabular-nums text-fd-amber">{formatQty(group.sheets_burned)}</span>,
+      },
+      {
+        key: 'tieable',
+        header: 'Still tieable',
+        align: 'right',
+        sortable: true,
+        accessor: group => group.tieable_sheets_burned ?? 0,
+        render: group =>
+          (group.tieable_sheets_burned ?? 0) > 0 ? (
+            <span
+              className="font-mono tabular-nums text-fd-body"
+              title="Sheets on jobs still open: tie these from the worklist rather than counting them"
+            >
+              {formatQty(group.tieable_sheets_burned ?? 0)}
+            </span>
+          ) : (
+            <span className="text-fd-mute">—</span>
+          ),
       },
       {
         key: 'jobs',
@@ -771,7 +799,8 @@ export default function UntiedLaserNests() {
         </div>
         <p className="mt-2 text-[11px] text-fd-mute">
           Open nests are always listed. Completed nests are limited to the window
-          {coverageWindow ? ` (${coverageWindow})` : ''}; with no dates set it is the last 90 days.
+          {coverageWindow ? ` (${coverageWindow})` : ''}; with no dates set it is the last 90 days, or every completion
+          when the list is filtered to one work order.
         </p>
       </div>
 

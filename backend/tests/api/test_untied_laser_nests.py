@@ -2,8 +2,8 @@
 
 Pinned here:
 
-1. A nest is UNTIED when no OPEN operation-scoped tie names its operation; a CANCELLED
-   tie does not count, a soft-deleted nest and another tenant's nest never surface.
+1. A nest is UNTIED when no live (OPEN or the reserved CLOSED) operation-scoped tie names
+   its operation; a CANCELLED tie does not count, a soft-deleted nest and another tenant's nest never surface.
 2. Open nests and nests completed inside the window are listed; a nest completed before
    the window is not. A nest on a finished job is listed but not tieable.
 3. ``proposed_tie`` is the exact body the EXISTING tie endpoint accepts, and posting it
@@ -773,3 +773,139 @@ class TestAccess:
             db_session.query(CycleCount).count(),
         ) == before
         assert db_session.get(WorkOrderOperation, operation.id).status == OperationStatus.PENDING
+
+
+class TestReviewFixes:
+    """Second-review fixes: the count-versus-tie split, the job filter's window, the savepoint."""
+
+    def test_sheet_report_splits_sheets_still_tieable_on_open_jobs(self, client: TestClient, db_session: Session):
+        manager = make_user(db_session, role=UserRole.MANAGER)
+        make_sheet(db_session, part_number="0.500-60X120-A36")
+        now = datetime.utcnow()
+        make_nest(
+            db_session,
+            thickness="0.500",
+            op_status=OperationStatus.COMPLETE,
+            completed_at=now,
+            quantity_complete=4,
+        )
+        make_nest(
+            db_session,
+            thickness="0.500",
+            op_status=OperationStatus.COMPLETE,
+            wo_status=WorkOrderStatus.COMPLETE,
+            completed_at=now,
+            quantity_complete=2,
+        )
+        payload = client.get(REPORT_URL, headers=user_headers(manager)).json()
+        group = next(g for g in payload["groups"] if g["thickness"] == "0.500")
+        assert group["sheets_burned"] == 6.0
+        assert group["tieable_nest_count"] == 1
+        assert group["tieable_sheets_burned"] == 4.0
+        assert payload["tieable_sheets_burned"] == 4.0
+
+    def test_worklist_flags_a_part_counted_after_the_nest_completed(self, client: TestClient, db_session: Session):
+        manager = make_user(db_session, role=UserRole.MANAGER)
+        counted = make_sheet(db_session, part_number="0.625-60X120-A36")
+        earlier = make_sheet(db_session, part_number="0.750-60X120-A36")
+        now = datetime.utcnow()
+        _, counted_op, _ = make_nest(
+            db_session,
+            thickness="0.625",
+            op_status=OperationStatus.COMPLETE,
+            completed_at=now - timedelta(days=3),
+            quantity_complete=4,
+        )
+        _, earlier_op, _ = make_nest(
+            db_session,
+            thickness="0.750",
+            op_status=OperationStatus.COMPLETE,
+            completed_at=now - timedelta(days=3),
+            quantity_complete=4,
+        )
+        for part, completed_at in ((counted, now - timedelta(days=1)), (earlier, now - timedelta(days=5))):
+            db_session.add(
+                CycleCount(
+                    count_number=f"CC-TEST-{_next():03d}",
+                    part_id=part.id,
+                    scheduled_date=completed_at.date(),
+                    status=CycleCountStatus.COMPLETED,
+                    completed_at=completed_at,
+                    company_id=COMPANY_A,
+                )
+            )
+        db_session.commit()
+
+        payload = client.get(LIST_URL, headers=user_headers(manager)).json()
+        assert _row(payload, counted_op.id)["counted_since_completion_part_ids"] == [counted.id]
+        assert _row(payload, earlier_op.id)["counted_since_completion_part_ids"] == []
+
+    def test_job_filter_lists_old_completions_and_only_laser_children(self, client: TestClient, db_session: Session):
+        manager = make_user(db_session, role=UserRole.MANAGER)
+        wc = make_work_center(db_session)
+        assembly, _ = make_wo_with_operation(db_session, work_center=wc)
+        _, old_op, _ = make_nest(
+            db_session,
+            parent=assembly,
+            op_status=OperationStatus.COMPLETE,
+            completed_at=datetime.utcnow() - timedelta(days=200),
+            quantity_complete=3,
+        )
+        production_child, stray_op, _ = make_nest(db_session, parent=assembly)
+        production_child.work_order_type = WorkOrderType.PRODUCTION.value
+        db_session.commit()
+        headers = user_headers(manager)
+
+        payload = client.get(LIST_URL, params={"work_order_id": assembly.id}, headers=headers).json()
+        assert _ids(payload) == {old_op.id}
+        assert payload["completed_from"] is None
+        summary = client.get(f"{BASE}/work-orders/{assembly.id}/tie-summary", headers=headers).json()
+        assert summary["untied_count"] == len(payload["items"])
+        # Without the job filter the 90-day default still applies.
+        assert old_op.id not in _ids(client.get(LIST_URL, headers=headers).json())
+
+    def test_a_closed_tie_counts_as_tied(self, client: TestClient, db_session: Session):
+        manager = make_user(db_session, role=UserRole.MANAGER)
+        sheet = make_sheet(db_session)
+        _, op, _ = make_nest(db_session)
+        tie(db_session, op, sheet, status_=AllocationStatus.CLOSED)
+        assert op.id not in _ids(client.get(LIST_URL, headers=user_headers(manager)).json())
+
+    def test_open_rows_page_in_job_order_not_by_last_write(self, client: TestClient, db_session: Session):
+        manager = make_user(db_session, role=UserRole.MANAGER)
+        first_wo, _, _ = make_nest(db_session)
+        second_wo, second_op, _ = make_nest(db_session)
+        second_op.updated_at = datetime.utcnow() + timedelta(hours=1)
+        db_session.commit()
+        numbers = [
+            row["work_order_number"]
+            for row in client.get(LIST_URL, params={"status": "open"}, headers=user_headers(manager)).json()["items"]
+        ]
+        assert numbers == sorted(numbers)
+        assert {first_wo.work_order_number, second_wo.work_order_number} <= set(numbers)
+
+    def test_matcher_runs_inside_a_savepoint(self, client: TestClient, db_session: Session, monkeypatch):
+        """A database error in the matcher must roll back only its savepoint (Postgres aborts otherwise)."""
+        from sqlalchemy import text
+
+        from app.services import untied_nest_service
+
+        seen = []
+
+        def _db_error(db, **_kwargs):
+            seen.append(db.in_nested_transaction())
+            db.execute(text("SELECT * FROM no_such_table_for_untied_nests"))
+
+        monkeypatch.setattr(untied_nest_service, "match_sheet_parts", _db_error)
+        manager = make_user(db_session, role=UserRole.MANAGER)
+        _, op, _ = make_nest(db_session)
+        make_nest(db_session, op_status=OperationStatus.COMPLETE, completed_at=datetime.utcnow(), quantity_complete=1)
+        headers = user_headers(manager)
+
+        payload = client.get(LIST_URL, headers=headers).json()
+        assert payload["matcher_available"] is False
+        assert _row(payload, op.id)["job_level_tie_count"] == 0
+        report = client.get(REPORT_URL, headers=headers)
+        assert report.status_code == status.HTTP_200_OK
+        assert report.json()["matcher_available"] is False
+        assert seen and all(seen)

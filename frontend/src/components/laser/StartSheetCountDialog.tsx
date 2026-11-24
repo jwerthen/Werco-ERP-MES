@@ -58,10 +58,15 @@ export function StartSheetCountDialog({ group, onClose, onStarted }: StartSheetC
         group.first_completed_at && group.last_completed_at
           ? ` between ${formatCentralDate(group.first_completed_at)} and ${formatCentralDate(group.last_completed_at)}`
           : '';
+      const tieable = group.tieable_sheets_burned ?? 0;
       setNotes(
         `Untied laser nests: ${group.nest_count} nest${group.nest_count === 1 ? '' : 's'} of ${
           group.sheet_descriptor
-        } completed${window} with no sheet tied (${formatQty(group.sheets_burned)} sheets burned, not deducted).`
+        } completed${window} with no sheet tied (${formatQty(group.sheets_burned)} sheets burned, not deducted).` +
+          (tieable > 0
+            ? ` ${formatQty(tieable)} of those sheets are on jobs still open and may yet be tied; if they are, ` +
+              'their deduction posts when the job completes, so do not also book them as missing here.'
+            : '')
       );
     } else {
       setNotes('');
@@ -115,6 +120,20 @@ export function StartSheetCountDialog({ group, onClose, onStarted }: StartSheetC
               in Inventory → Cycle Counts, which is what corrects on-hand. No back-dated deduction is posted for these
               nests.
             </p>
+
+            {(group.tieable_sheets_burned ?? 0) > 0 && (
+              <div
+                role="alert"
+                data-testid="start-sheet-count-tieable-warning"
+                className="rounded-sm border border-fd-amber/50 bg-fd-amber/10 px-3 py-2 text-sm text-fd-amber"
+              >
+                {formatQty(group.tieable_sheets_burned ?? 0)} of the {formatQty(group.sheets_burned)} sheets are on
+                {(group.tieable_nest_count ?? 0) === 1 ? ' a nest' : ` ${group.tieable_nest_count ?? 0} nests`} whose
+                job is still open. Tie those from the worklist instead: a tie is deducted when the job completes, so
+                counting them as well would deduct them twice. A count alone corrects the other{' '}
+                {formatQty(group.sheets_burned - (group.tieable_sheets_burned ?? 0))}.
+              </div>
+            )}
 
             {options.length === 0 ? (
               <p className="text-sm text-fd-mute">

@@ -91,6 +91,9 @@ export function TieNestSheetDialog({ row, onClose, onTied }: TieNestSheetDialogP
   };
 
   const qtyPlanned = row ? buildNestTie(row, 0).qty_planned : 0;
+  const countedIds = row?.counted_since_completion_part_ids ?? [];
+  const countedParts = options.filter(option => countedIds.includes(option.part_id));
+  const selectedCounted = selectedPartId != null && countedIds.includes(selectedPartId);
 
   return (
     <Modal
@@ -132,6 +135,19 @@ export function TieNestSheetDialog({ row, onClose, onTied }: TieNestSheetDialogP
                 This job already has {row.job_level_tie_count} whole-work-order material tie
                 {row.job_level_tie_count === 1 ? '' : 's'}. If that tie is this sheet, tying the nest as well would draw
                 it twice — check the job&apos;s Material Ties first.
+              </div>
+            )}
+
+            {countedParts.length > 0 && (selectedPartId == null || selectedCounted) && (
+              <div
+                role="alert"
+                data-testid="tie-nest-counted-warning"
+                className="rounded-sm border border-fd-amber/50 bg-fd-amber/10 px-3 py-2 text-sm text-fd-amber"
+              >
+                {countedParts.map(part => part.part_number).join(', ')} {countedParts.length === 1 ? 'was' : 'were'}{' '}
+                cycle counted after this nest completed. That count already corrected on-hand for the sheets this nest
+                burned; tying it now would deduct them again when the job completes. Tie it only if the count did not
+                include these sheets.
               </div>
             )}
 

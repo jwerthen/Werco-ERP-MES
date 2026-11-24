@@ -19,8 +19,11 @@ Definitions used throughout:
 
 * a **nest operation** is a ``work_order_operations`` row with a live (not soft-deleted)
   ``laser_nests`` row pointing at it, on a non-deleted work order;
-* it is **tied** when an OPEN, operation-scoped ``work_order_material_allocations`` row
-  names it. A CANCELLED tie does not count. A work-order-scoped tie on the same laser job
+* it is **tied** when a live (not CANCELLED), operation-scoped ``work_order_material_allocations``
+  row names it. ``CANCELLED`` is the tie tombstone; ``OPEN`` is the only other state written
+  today, and a fully consumed tie stays OPEN. The reserved ``CLOSED`` state counts as tied
+  so that a future "close once consumed" writer cannot make every consumed nest read as
+  untied (``_LIVE_TIE_STATUSES``). A work-order-scoped tie on the same laser job
   does not make the nest tied either, but is reported (``job_level_tie_count``) because
   tying the nest as well could draw the sheet twice;
 * **open** means the operation is not COMPLETE and its work order is not terminal;
@@ -86,6 +89,11 @@ MAX_SUMMARY_UNTIED_ROWS = 200
 
 _OPEN_COUNT_STATUSES = (CycleCountStatus.SCHEDULED, CycleCountStatus.IN_PROGRESS)
 
+# A tie is live -- the nest counts as tied -- in any state but its CANCELLED tombstone.
+# CLOSED is reserved (never written today; see ``AllocationStatus``), and a tie closed
+# after it was consumed must still count, or consumed nests would surface as untied.
+_LIVE_TIE_STATUSES = (AllocationStatus.OPEN, AllocationStatus.CLOSED)
+
 
 # ---------------------------------------------------------------------------
 # Shared query pieces
@@ -98,11 +106,26 @@ def _completion_instant():
 
 
 def _has_open_operation_tie(company_id: int):
-    """EXISTS an OPEN operation-scoped tie on the outer ``WorkOrderOperation`` row."""
+    """EXISTS a live (not CANCELLED) operation-scoped tie on the outer ``WorkOrderOperation`` row."""
     return exists().where(
         WorkOrderMaterialAllocation.company_id == company_id,
         WorkOrderMaterialAllocation.work_order_operation_id == WorkOrderOperation.id,
-        WorkOrderMaterialAllocation.status == AllocationStatus.OPEN,
+        WorkOrderMaterialAllocation.status.in_(_LIVE_TIE_STATUSES),
+    )
+
+
+def _laser_job_scope(work_order_id: int):
+    """The laser job itself, or the LASER_CUTTING children of an assembly parent.
+
+    One predicate for the worklist's ``work_order_id`` filter and the Work Order Detail
+    summary, so the strip's figure and the list it links to count the same nests.
+    """
+    return or_(
+        WorkOrder.id == work_order_id,
+        and_(
+            WorkOrder.parent_work_order_id == work_order_id,
+            WorkOrder.work_order_type == WorkOrderType.LASER_CUTTING.value,
+        ),
     )
 
 
@@ -141,14 +164,16 @@ def _completed_clause(window_start: Optional[datetime], window_end: Optional[dat
 
 
 def resolve_completed_window(
-    window_start: Optional[datetime], window_end: Optional[datetime]
+    window_start: Optional[datetime], window_end: Optional[datetime], *, apply_default: bool = True
 ) -> Tuple[Optional[datetime], Optional[datetime]]:
     """Default an unbounded completed-nest window to the last 90 days.
 
     The router turns the caller's company-local dates into the naive-UTC ``[start, end)``
     (``app.api.date_window.company_date_window``); this only fills the default.
+    ``apply_default=False`` leaves an unbounded window unbounded (the worklist filtered to
+    one job, so it lists every nest the job's summary counts, whatever its age).
     """
-    if window_start is None and window_end is None:
+    if apply_default and window_start is None and window_end is None:
         window_start = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=DEFAULT_COMPLETED_WINDOW_DAYS)
     return window_start, window_end
 
@@ -173,7 +198,7 @@ def _job_level_tie_counts(db: Session, company_id: int, work_order_ids: Iterable
         .filter(
             WorkOrderMaterialAllocation.work_order_id.in_(ids),
             WorkOrderMaterialAllocation.work_order_operation_id.is_(None),
-            WorkOrderMaterialAllocation.status == AllocationStatus.OPEN,
+            WorkOrderMaterialAllocation.status.in_(_LIVE_TIE_STATUSES),
         )
         .group_by(WorkOrderMaterialAllocation.work_order_id)
         .all()
@@ -228,7 +253,11 @@ def _match(db: Session, company_id: int, rows: List[dict]) -> Tuple[Dict[str, Sh
     if not rows:
         return {}, True
     try:
-        raw = match_sheet_parts(db, company_id=company_id, nests=rows)
+        # A SAVEPOINT, so a database error inside the matcher (a statement timeout, say)
+        # rolls back only the matcher's statements. On Postgres an uncontained error aborts
+        # the whole transaction and every later read on this session would fail.
+        with db.begin_nested():
+            raw = match_sheet_parts(db, company_id=company_id, nests=rows)
     except Exception:  # noqa: BLE001 - suggestions are advisory; the list must still load
         logger.warning("untied-nest read: sheet matcher failed; rows returned without suggestions", exc_info=True)
         return {}, False
@@ -252,8 +281,10 @@ class UntiedNestFilters:
 
 
 def list_untied_nests(db: Session, company_id: int, filters: UntiedNestFilters) -> UntiedNestListResponse:
-    """Nest operations with no OPEN operation tie: open ones plus completed ones in the window."""
-    window_start, window_end = resolve_completed_window(filters.completed_from, filters.completed_to)
+    """Nest operations with no live operation tie: open ones plus completed ones in the window."""
+    window_start, window_end = resolve_completed_window(
+        filters.completed_from, filters.completed_to, apply_default=filters.work_order_id is None
+    )
     parent = aliased(WorkOrder)
 
     query = _nest_operation_query(db, company_id).filter(~_has_open_operation_tie(company_id))
@@ -265,18 +296,17 @@ def list_untied_nests(db: Session, company_id: int, filters: UntiedNestFilters) 
         query = query.filter(or_(_open_clause(), _completed_clause(window_start, window_end)))
     if filters.work_order_id is not None:
         # The laser job itself, or the assembly parent whose laser child carries the nest.
-        query = query.filter(
-            or_(
-                WorkOrder.id == filters.work_order_id,
-                WorkOrder.parent_work_order_id == filters.work_order_id,
-            )
-        )
+        query = query.filter(_laser_job_scope(filters.work_order_id))
     if filters.work_center_id is not None:
         query = query.filter(WorkOrderOperation.work_center_id == filters.work_center_id)
 
     total = query.with_entities(func.count(LaserNest.id)).scalar() or 0
 
     is_complete = case((WorkOrderOperation.status == OperationStatus.COMPLETE, 1), else_=0)
+    # Completed rows newest first; open rows carry no instant here (NULL), so they fall
+    # through to the stable job / sequence / nest keys and a clock-in or count on an open
+    # nest cannot move it across a page boundary.
+    completed_instant = case((WorkOrderOperation.status == OperationStatus.COMPLETE, _completion_instant()), else_=None)
     rows = (
         query.outerjoin(
             parent,
@@ -295,7 +325,7 @@ def list_untied_nests(db: Session, company_id: int, filters: UntiedNestFilters) 
         )
         .order_by(
             is_complete.asc(),
-            _completion_instant().desc(),
+            completed_instant.desc(),
             WorkOrder.work_order_number.asc(),
             WorkOrderOperation.sequence.asc(),
             LaserNest.id.asc(),
@@ -317,6 +347,18 @@ def list_untied_nests(db: Session, company_id: int, filters: UntiedNestFilters) 
     ]
     suggestions, matcher_available = _match(db, company_id, matcher_rows)
     job_ties = _job_level_tie_counts(db, company_id, (wo.id for _n, _o, wo, _p, _w in rows))
+    counted_after = _last_completed_count_by_part(
+        db,
+        company_id,
+        {
+            candidate.part_id
+            for _n, operation, work_order, _p, _w in rows
+            if operation.status == OperationStatus.COMPLETE and work_order.status not in TERMINAL_WO_STATUSES
+            for suggestion in [suggestions.get(str(operation.id))]
+            if suggestion is not None
+            for candidate in suggestion.candidates
+        },
+    )
 
     items: List[UntiedNestRow] = []
     for nest, operation, work_order, parent_number, work_center_name in rows:
@@ -338,6 +380,14 @@ def list_untied_nests(db: Session, company_id: int, filters: UntiedNestFilters) 
                 qty_planned=float(nest.planned_runs or 1),
             )
         completed = operation.status == OperationStatus.COMPLETE
+        completed_at = (operation.actual_end or operation.updated_at) if completed else None
+        counted_part_ids: List[int] = []
+        if completed and not terminal and suggestion is not None and completed_at is not None:
+            counted_part_ids = [
+                c.part_id
+                for c in suggestion.candidates
+                if counted_after.get(c.part_id) is not None and counted_after[c.part_id] > completed_at
+            ]
         items.append(
             UntiedNestRow(
                 laser_nest_id=nest.id,
@@ -361,13 +411,14 @@ def list_untied_nests(db: Session, company_id: int, filters: UntiedNestFilters) 
                 planned_runs=float(nest.planned_runs or 0),
                 runs_complete=float(operation.quantity_complete or 0),
                 runs_scrapped=float(operation.quantity_scrapped or 0),
-                completed_at=(operation.actual_end or operation.updated_at) if completed else None,
+                completed_at=completed_at,
                 is_completed=completed,
                 job_level_tie_count=job_ties.get(work_order.id, 0),
                 tieable=not terminal,
                 tie_blocked_reason=blocked_reason,
                 suggestion=suggestion,
                 proposed_tie=proposed,
+                counted_since_completion_part_ids=counted_part_ids,
             )
         )
 
@@ -464,9 +515,35 @@ class _GroupAccumulator:
     triples: Counter = field(default_factory=Counter)
     nest_count: int = 0
     sheets_burned: float = 0.0
+    tieable_nest_count: int = 0
+    tieable_sheets_burned: float = 0.0
     work_orders: Dict[str, datetime] = field(default_factory=dict)
     first: Optional[datetime] = None
     last: Optional[datetime] = None
+
+
+def _last_completed_count_by_part(db: Session, company_id: int, part_ids: Iterable[int]) -> Dict[int, datetime]:
+    """Latest COMPLETED part-scoped cycle count per part (one batched read).
+
+    A count completed after an untied nest completed has already corrected on-hand for
+    the sheets that nest burned; tying the nest afterwards would deduct them again when
+    its job completes. The worklist flags that, it never refuses it.
+    """
+    ids = sorted(set(part_ids))
+    if not ids:
+        return {}
+    rows = (
+        tenant_query(db, CycleCount, company_id)
+        .with_entities(CycleCount.part_id, func.max(CycleCount.completed_at))
+        .filter(
+            CycleCount.part_id.in_(ids),
+            CycleCount.status == CycleCountStatus.COMPLETED,
+            CycleCount.completed_at.isnot(None),
+        )
+        .group_by(CycleCount.part_id)
+        .all()
+    )
+    return {part_id: completed_at for part_id, completed_at in rows if completed_at is not None}
 
 
 def _open_counts_by_part(db: Session, company_id: int, part_ids: Sequence[int]) -> Dict[int, List[OpenCycleCountRef]]:
@@ -517,6 +594,7 @@ def untied_sheet_report(
             WorkOrderOperation.quantity_complete,
             WorkOrderOperation.quantity_scrapped,
             WorkOrder.work_order_number,
+            WorkOrder.status,
             instant,
         )
         .filter(_completed_clause(window_start, window_end), ~_has_open_operation_tie(company_id))
@@ -528,12 +606,18 @@ def untied_sheet_report(
     rows = rows[:SHEET_REPORT_MAX_ROWS]
 
     groups: Dict[str, _GroupAccumulator] = {}
-    for material, thickness, sheet_size, good, scrapped, wo_number, completed_at in rows:
+    for material, thickness, sheet_size, good, scrapped, wo_number, wo_status, completed_at in rows:
         key = spec_key(material, thickness, sheet_size)
         group = groups.setdefault(key, _GroupAccumulator())
         group.triples[normalize_nest_descriptors(material, thickness, sheet_size)] += 1
         group.nest_count += 1
-        group.sheets_burned += float(good or 0) + float(scrapped or 0)
+        burned = float(good or 0) + float(scrapped or 0)
+        group.sheets_burned += burned
+        if wo_status not in TERMINAL_WO_STATUSES:
+            # Still tieable from the worklist: a tie, consumed when the job completes,
+            # corrects these. Counting them as well would deduct them twice.
+            group.tieable_nest_count += 1
+            group.tieable_sheets_burned += burned
         if completed_at is not None:
             previous = group.work_orders.get(wo_number)
             if previous is None or completed_at > previous:
@@ -585,6 +669,8 @@ def untied_sheet_report(
                 sheet_descriptor=" / ".join(value or "?" for value in (material, thickness, sheet_size)),
                 nest_count=group.nest_count,
                 sheets_burned=group.sheets_burned,
+                tieable_nest_count=group.tieable_nest_count,
+                tieable_sheets_burned=group.tieable_sheets_burned,
                 work_order_count=len(group.work_orders),
                 work_order_numbers=[number for number, _ in ordered_wos[:MAX_GROUP_WORK_ORDER_NUMBERS]],
                 first_completed_at=group.first,
@@ -599,6 +685,7 @@ def untied_sheet_report(
         groups=out,
         nest_count=sum(g.nest_count for g in out),
         sheets_burned=sum(g.sheets_burned for g in out),
+        tieable_sheets_burned=sum(g.tieable_sheets_burned for g in out),
         completed_from=window_start,
         completed_to=window_end,
         truncated=truncated,
@@ -625,13 +712,7 @@ def work_order_nest_tie_summary(db: Session, company_id: int, work_order: WorkOr
     answers ``nest_count: 0`` -- not an error, so the client can call it for any job.
     """
     tied_flag = case((_has_open_operation_tie(company_id), 1), else_=0)
-    scope = or_(
-        WorkOrder.id == work_order.id,
-        and_(
-            WorkOrder.parent_work_order_id == work_order.id,
-            WorkOrder.work_order_type == WorkOrderType.LASER_CUTTING.value,
-        ),
-    )
+    scope = _laser_job_scope(work_order.id)
     rows = (
         _nest_operation_query(
             db,

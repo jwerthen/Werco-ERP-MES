@@ -15,6 +15,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import api from '../services/api';
 import WorkOrderDetail from './WorkOrderDetail';
+import { NestTieSummaryNotice } from '../components/laser/NestTieSummaryNotice';
 import { ToastProvider } from '../components/ui';
 import type { WorkOrderNestTieSummary } from '../types/untiedNests';
 
@@ -179,6 +180,22 @@ describe('WorkOrderDetail — untied laser nests', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   });
 
+  it('still warns when Release is clicked before the page read resolved', async () => {
+    mockedApi.getWorkOrderNestTieSummary
+      .mockImplementationOnce(() => new Promise<WorkOrderNestTieSummary>(() => undefined))
+      .mockResolvedValue(summary());
+    renderDetail();
+    await screen.findAllByText('Laser Cut');
+    expect(screen.queryByTestId('wo-nest-tie-summary')).not.toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(releaseButton());
+    });
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toHaveTextContent('2 of 3 nests have no sheet tied');
+    expect(mockedApi.releaseWorkOrder).not.toHaveBeenCalled();
+  });
+
   it('releases straight away once every nest is tied (re-read at click time)', async () => {
     mockedApi.getWorkOrderNestTieSummary
       .mockResolvedValueOnce(summary())
@@ -265,5 +282,29 @@ describe('WorkOrderDetail — untied laser nests', () => {
     await screen.findAllByText('Laser Cut');
     expect(mockedApi.getWorkOrderNestTieSummary).not.toHaveBeenCalled();
     expect(screen.queryByTestId('wo-nest-tie-summary')).not.toBeInTheDocument();
+  });
+});
+
+describe('NestTieSummaryNotice', () => {
+  it('counts "+N more" from the true total, not the capped row list', () => {
+    const rows = Array.from({ length: 200 }, (_, index) => ({
+      ...summary().untied[0],
+      laser_nest_id: index + 1,
+      cnc_number: `CNC-${index + 1}`,
+    }));
+    render(
+      <MemoryRouter>
+        <NestTieSummaryNotice
+          summary={summary({
+            nest_count: 400,
+            tied_count: 50,
+            untied_count: 350,
+            message: '350 of 400 nests have no sheet tied',
+            untied: rows,
+          })}
+        />
+      </MemoryRouter>
+    );
+    expect(screen.getByText('+344 more')).toBeInTheDocument();
   });
 });

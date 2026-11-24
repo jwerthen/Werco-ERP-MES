@@ -209,6 +209,26 @@ describe('UntiedLaserNests — worklist', () => {
     expect(within(dialog).getByRole('alert')).toHaveTextContent(/draw it twice/i);
   });
 
+  it('warns that a part counted since the nest completed would be deducted twice', async () => {
+    mockedApi.getUntiedLaserNests.mockResolvedValue(
+      listOf([
+        row({
+          operation_status: 'complete',
+          is_completed: true,
+          completed_at: '2026-11-01T15:00:00Z',
+          counted_since_completion_part_ids: [501],
+        }),
+      ])
+    );
+    renderPage();
+    expect(await screen.findByTestId('untied-row-counted')).toHaveTextContent(/deduct twice/i);
+    fireEvent.click(screen.getByRole('button', { name: /tie this sheet/i }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByTestId('tie-nest-counted-warning')).toHaveTextContent(
+      /SHT-A36-250 was cycle counted after this nest completed/
+    );
+  });
+
   it('makes the planner pick a shortlist part for an ambiguous match', async () => {
     mockedApi.getUntiedLaserNests.mockResolvedValue(
       listOf([
@@ -323,6 +343,25 @@ describe('UntiedLaserNests — sheet report', () => {
       expect.objectContaining({ part_id: 501, scheduled_date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/) })
     );
     await waitFor(() => expect(mockedApi.getUntiedSheetReport).toHaveBeenCalledTimes(2));
+  });
+
+  it('tells the counter which sheets a tie still corrects on open jobs', async () => {
+    const tieable: UntiedSheetReportResponse = {
+      ...REPORT,
+      groups: [{ ...REPORT.groups[0], tieable_nest_count: 1, tieable_sheets_burned: 4 }, REPORT.groups[1]],
+      tieable_sheets_burned: 4,
+    };
+    mockedApi.getUntiedSheetReport.mockResolvedValue(tieable);
+    renderPage('/laser-nests/untied?view=sheets');
+
+    fireEvent.click((await screen.findAllByRole('button', { name: /start cycle count/i }))[0]);
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByTestId('start-sheet-count-tieable-warning')).toHaveTextContent(
+      /4 of the 9 sheets .* counting them as well would deduct them twice\. A count alone corrects the other 5/
+    );
+    expect((within(dialog).getByRole('textbox', { name: /notes/i }) as HTMLTextAreaElement).value).toContain(
+      '4 of those sheets are on jobs still open'
+    );
   });
 
   it('shows a cycle-count refusal verbatim and keeps the dialog open', async () => {

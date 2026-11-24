@@ -95,7 +95,8 @@ export interface NestTieSummaryNoticeProps {
 export function NestTieSummaryNotice({ summary }: NestTieSummaryNoticeProps) {
   if (!summary || summary.untied_count <= 0 || summary.nest_count <= 0) return null;
   const preview = summary.untied.slice(0, 6);
-  const remaining = summary.untied.length - preview.length;
+  // `untied` is capped server-side (200 rows); `untied_count` is the true total.
+  const remaining = summary.untied_count - preview.length;
   return (
     <div
       role="status"

@@ -63,7 +63,7 @@ class ProposedNestTie(UTCModel):
 
 
 class UntiedNestRow(UTCModel):
-    """One laser nest operation that carries no OPEN operation-scoped material tie."""
+    """One laser nest operation that carries no live (not cancelled) operation-scoped material tie."""
 
     laser_nest_id: int
     work_order_operation_id: int
@@ -102,6 +102,14 @@ class UntiedNestRow(UTCModel):
     )
     proposed_tie: Optional[ProposedNestTie] = Field(
         None, description="Set only when the matcher identified one part AND the nest is tieable"
+    )
+    counted_since_completion_part_ids: List[int] = Field(
+        default_factory=list,
+        description=(
+            "Candidate parts with a cycle count COMPLETED after this nest completed. That count already "
+            "corrected on-hand for the sheets the nest burned; tying the nest to one of these parts would "
+            "deduct them again when its job completes. A warning, never a refusal."
+        ),
     )
 
 
@@ -147,6 +155,17 @@ class UntiedSheetGroup(UTCModel):
     sheet_descriptor: str
     nest_count: int
     sheets_burned: float = Field(..., description="Runs completed + scrapped across the group, one sheet per run")
+    tieable_nest_count: int = Field(
+        0, description="Nests in the group whose laser job is still open, so they can still be tied from the worklist"
+    )
+    tieable_sheets_burned: float = Field(
+        0.0,
+        description=(
+            "Of sheets_burned, the sheets on still-open jobs. A tie corrects these when the job completes; "
+            "count them as well and they are deducted twice. Only sheets_burned - tieable_sheets_burned is "
+            "correctable by a count alone."
+        ),
+    )
     work_order_count: int
     work_order_numbers: List[str] = Field(..., description="Up to 10, most recent first")
     first_completed_at: Optional[datetime] = None
@@ -162,6 +181,7 @@ class UntiedSheetReportResponse(UTCModel):
     groups: List[UntiedSheetGroup] = Field(..., description="Most sheets burned first")
     nest_count: int
     sheets_burned: float
+    tieable_sheets_burned: float = 0.0
     completed_from: Optional[datetime] = None
     completed_to: Optional[datetime] = None
     truncated: bool = Field(False, description="True when more completed untied nests existed than were read")

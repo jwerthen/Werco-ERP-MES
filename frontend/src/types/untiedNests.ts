@@ -92,6 +92,13 @@ export interface UntiedNestRow {
   suggestion: SheetSuggestionView | null;
   /** Set only when the matcher identified one part AND the nest is tieable. */
   proposed_tie: ProposedNestTie | null;
+  /**
+   * Candidate parts with a cycle count COMPLETED after this nest completed: that
+   * count already corrected on-hand for its sheets, so tying the nest to one of
+   * them deducts the sheets again when the job completes. A warning, never a
+   * refusal. Optional only so an older API without the field still renders.
+   */
+  counted_since_completion_part_ids?: number[];
 }
 
 export interface UntiedNestListResponse {
@@ -152,6 +159,13 @@ export interface UntiedSheetGroup {
   nest_count: number;
   /** Runs completed + scrapped across the group, one sheet per run. */
   sheets_burned: number;
+  /** Nests in the group whose laser job is still open (still tieable from the worklist). */
+  tieable_nest_count?: number;
+  /**
+   * Of `sheets_burned`, the sheets on still-open jobs. A tie corrects these when
+   * the job completes; counting them as well deducts them twice.
+   */
+  tieable_sheets_burned?: number;
   work_order_count: number;
   /** Up to 10, most recent first. */
   work_order_numbers: string[];
@@ -167,6 +181,8 @@ export interface UntiedSheetReportResponse {
   groups: UntiedSheetGroup[];
   nest_count: number;
   sheets_burned: number;
+  /** Of `sheets_burned`, the sheets on still-open (still tieable) jobs. */
+  tieable_sheets_burned?: number;
   completed_from: string | null;
   completed_to: string | null;
   /** True when more completed untied nests existed than were read. */
