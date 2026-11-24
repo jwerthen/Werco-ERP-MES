@@ -175,7 +175,7 @@ AI-external token bound to a **Viewer** user.
 ### Credential policy for judgment writes
 
 A few writes record a **person's judgment** — not just a permitted action — and some of them are
-restricted to certain *credentials*, on top of the role gate. The restrictions have twelve sources,
+restricted to certain *credentials*, on top of the role gate. The restrictions have fifteen sources,
 and each row below names its own: owner ruling 3 of 2026-11-05 (the two AI rows), the owner's
 decision of 2026-11-07 (a standing API token may not declare scrap or close work short), this
 PR's extensions of that decision (scrap reasons, the re-stamp short close and the other count
@@ -196,9 +196,12 @@ and the owner's decision of 2026-11-20 that a standing API token may file a main
 (an MCP agent on a person's own JWT too, a half not separately put to the owner), the in-process
 inspection sign-off change of 2026-11-23 (signing that an inspection was performed is a person's
 judgment, as an FAI final disposition is; a default taken from the improvement plan, not an owner
-ruling), and the Labor Review build of 2026-11-23 (approving labor, clearing an approval and setting
+ruling), the Labor Review build of 2026-11-23 (approving labor, clearing an approval and setting
 another person's clock-out are a person's judgment; the plan's recommended defaults, not owner
-rulings).
+rulings), the self-service password change of 2026-11-23 (a person changes their own password in
+their own session; its design, not an owner ruling), and the shipping/2 change of 2026-11-23
+(accepting open quality items at ship and issuing a Certificate of Conformance are a named person's
+conformance judgment).
 This section is the **one list** of those credential rules — what refuses a credential,
 what is deliberately left open (and who decided each), and what is deliberately not refused —
 across the AI governance (ruling 3), floor-gates (ruling 2) and short-count (ruling 1) changes;
@@ -221,7 +224,7 @@ list of credential predicates.
 Writes that apply them — each refused before any write and before any audit row (the 403 texts
 live in `ai_action_applier.py` and `operation_action_gates.py`, for the quality judgments in
 `quality_record_service.py` and `fai_service.py`, for export control
-`app/api/endpoints/customers.py`, for the egress switches, the comment writes, the floor-PIN writes, the document-access writes and the inspection sign-off `app/core/credentials.py`, and for the supplier-approval rows
+`app/api/endpoints/customers.py`, for the egress switches, the comment writes, the floor-PIN writes, the document-access writes, the inspection sign-off and the password change `app/core/credentials.py`, for the labor judgments `app/services/labor_review_service.py`, for the Certificate of Conformance `app/services/shipment_release_service.py`, and for the supplier-approval rows
 `app/services/supplier_approval_service.py` and `app/api/endpoints/purchasing.py`, for the maintenance
 checklist `app/services/maintenance_checklist.py`; where each sits in its route's
 check order is in `docs/API.md` → Work Orders → "Short count at completion" and → AI
