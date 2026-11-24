@@ -215,7 +215,7 @@ class TestUsersAPI:
         user_id = me_response.json()["id"]
         version = me_response.json().get("version", 0)
 
-        update_data = {"department": "Engineering", "version": version}
+        update_data = {"department": "Quality", "version": version}
         response = client.put(f"/api/v1/users/{user_id}", headers=auth_headers, json=update_data)
         # User may or may not be able to update themselves depending on implementation
         assert response.status_code in [status.HTTP_200_OK, status.HTTP_403_FORBIDDEN]
@@ -224,8 +224,8 @@ class TestUsersAPI:
         """Test admin can import multiple users from CSV."""
         csv_content = (
             "employee_id,first_name,last_name,role,department\n"
-            "EMP-CSV-001,Jane,Doe,operator,Fabrication\n"
-            "EMP-CSV-002,John,Smith,supervisor,Assembly\n"
+            "EMP-CSV-001,Jane,Doe,operator,Production\n"
+            "EMP-CSV-002,John,Smith,supervisor,production\n"
         )
         response = client.post(
             "/api/v1/users/import-csv",

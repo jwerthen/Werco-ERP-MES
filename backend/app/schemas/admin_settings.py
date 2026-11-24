@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field, StrictInt
 
@@ -60,6 +60,15 @@ class EmailRecipientEvent(BaseModel):
     user_ids: Optional[List[int]]
     is_custom: bool
     missing_default_emails: List[str]
+    # Who the email ACTUALLY reaches today (notification_email_recipients._email_reach):
+    # "selected" = the saved / shipped list above; "automatic" = the catalog roles and departments
+    # with each person's own email choice applied. Deliverable addresses only.
+    audience_source: Literal["selected", "automatic"] = "automatic"
+    reaches_user_ids: List[int] = Field(default_factory=list)
+    # True when the event also reaches people derived from the record (e.g. its creator) that a
+    # preview cannot list; such an event is never flagged reaches_nobody.
+    depends_on_record: bool = False
+    reaches_nobody: bool = False
 
 
 class EmailRecipientsResponse(BaseModel):

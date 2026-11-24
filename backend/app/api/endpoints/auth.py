@@ -1826,6 +1826,16 @@ def logout(request: Request, db: Session = Depends(get_db), current_user: User =
     return {"message": "Logged out successfully"}
 
 
+def _department_or_422(value):
+    """The pick-list spelling of a department (``app.services.user_departments``), or 422 with the list."""
+    from app.services.user_departments import canonical_department
+
+    try:
+        return canonical_department(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.post("/register", response_model=UserResponse)
 def register(
     request: Request,
@@ -1846,7 +1856,7 @@ def register(
             last_name=user_in.last_name,
             password=user_in.password,
             role=user_in.role,
-            department=user_in.department,
+            department=_department_or_422(user_in.department),
             created_by=current_user.id,
         )
         audit_user_created(audit, user, source="admin_register", authentication=True)

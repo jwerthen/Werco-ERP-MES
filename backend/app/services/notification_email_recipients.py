@@ -130,6 +130,48 @@ def email_recipient_overrides(db: Session, company_id: int) -> dict[str, set[int
     return overrides
 
 
+def _email_reach(db: Session, company_id: int, users: list):
+    """Who each email event ACTUALLY reaches today, for the Admin Email Recipients preview.
+
+    Mirrors ``notification_dispatch._fan_out``'s email leg: a selected list (saved, or Werco's
+    shipped default) is exclusive and ignores personal preferences; otherwise the automatic
+    audience is the catalog entry's roles OR departments (``catalog_audience``), each person's
+    saved channel choice applied, and only deliverable addresses count. An entry with a
+    record-derived resolver (e.g. the work order's creator) can also reach people this preview
+    cannot list without a record: ``depends_on_record`` says so, and such an event is never
+    flagged ``reaches_nobody``. Reads only; one query per table."""
+    from app.models.notification import NotificationPreference
+    from app.services.notification_dispatch import catalog_audience, channels_from_pref
+
+    by_id = {user.id: user for user in users}
+    prefs = {
+        row.user_id: row
+        for row in db.query(NotificationPreference).filter(NotificationPreference.company_id == company_id).all()
+    }
+
+    def reach(entry, selected_ids: Optional[list]) -> dict:
+        if selected_ids is not None:
+            people = [by_id[i] for i in selected_ids if i in by_id and by_id[i].is_active]
+            source = "selected"
+        else:
+            people = [
+                user
+                for user in catalog_audience(db, entry, company_id)
+                if CHANNEL_EMAIL in channels_from_pref(prefs.get(user.id), entry, email_deliverable=deliverable(user))
+            ]
+            source = "automatic"
+        reaches = sorted(user.id for user in people if deliverable(user))
+        depends_on_record = selected_ids is None and entry.resolver is not None
+        return {
+            "audience_source": source,
+            "reaches_user_ids": reaches,
+            "depends_on_record": depends_on_record,
+            "reaches_nobody": not reaches and not depends_on_record,
+        }
+
+    return reach
+
+
 def email_settings_response(db: Session, company_id: int) -> dict:
     # Load the company directory and settings once for the entire matrix.
     users = (
@@ -145,6 +187,7 @@ def email_settings_response(db: Session, company_id: int) -> dict:
         .all()
     }
     company = db.query(Company).filter(Company.id == company_id).first()
+    reach = _email_reach(db, company_id, users)
     events = []
     for key, entry in EMAIL_EVENTS.items():
         saved = settings.get(setting_key(key))
@@ -153,6 +196,7 @@ def email_settings_response(db: Session, company_id: int) -> dict:
         ids = _saved_ids(saved) if saved else sorted(user.id for user in matched) if emails else None
         events.append(
             {
+                **reach(entry, ids),
                 "event_key": key,
                 "label": entry.label,
                 "description": entry.description,
