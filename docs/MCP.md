@@ -2,8 +2,8 @@
 
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
-(Cursor, Claude Code, a chat bot) gets **795 tools** — 15 hand-written *convenience* tools plus
-**780 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+(Cursor, Claude Code, a chat bot) gets **796 tools** — 15 hand-written *convenience* tools plus
+**781 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
 as the same request from the web app. A **read-only** API token is shown fewer tools, and an
 **AI-external** one fewer still (§4.1, §4.2).
 
@@ -120,6 +120,15 @@ credential (§6.1, §4.3). That half was not separately put to the owner and is 
 confirmed with them. See
 [API.md → Maintenance](API.md#maintenance-pm-schedules-maintenance-work-orders-event-log), *Maintenance
 log entries*.
+
+**Re-checked again on 2026-11-23 after the Sheet Gaps list added one Work Orders tool**,
+`list_process_sheet_gaps` (`GET /work-orders/process-sheet-gaps`, Admin / Manager / Quality; no
+existing name shifted): 15 convenience + **781** generated, 16 shadowed. It is a read, so the
+read-only catalog is 8 convenience + **305** generated. It is not on the AI-external allowlist. The
+same change added an optional routing-operation link to each supplied operation on
+`POST /work-orders/`; `create_work_order` sends no operations, so the convenience tool is unchanged
+and always takes the routed path. See
+[API.md → Work Orders](API.md#work-orders), "Process sheets on supplied operations".
 
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
@@ -314,7 +323,7 @@ routes authenticate every call; in IN-PROCESS mode it uses the real `ErpTokenVer
  "generated_tools":   [{"name": "...", "method": "GET", "path": "/api/v1/...", "tag": "...",
                         "function": "...", "annotations": {...}, "deprecated": false}],
  "shadowed_operations": [["GET", "/api/v1/inventory/"], ...],
- "counts": {"convenience": 15, "generated": 779, "shadowed": 16}
+ "counts": {"convenience": 15, "generated": 781, "shadowed": 16}
 }
 ```
 

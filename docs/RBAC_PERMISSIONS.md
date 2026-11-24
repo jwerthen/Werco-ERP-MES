@@ -350,6 +350,24 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 | View work order templates | ✓ | ✓ | ✓ | | | | |
 | Save / rename / delete a work order template | ✓ | ✓ | ✓ | | | | |
 | Use a work order template (creates DRAFT WOs — up to 20 per call) | ✓ | ✓ | ✓ | | | | |
+| View the Sheet Gaps list (`GET /work-orders/process-sheet-gaps`) | ✓ | ✓ | | | ✓ | | |
+
+> **Sheet Gaps — endpoint mapping (wo_change/2).** `GET /api/v1/work-orders/process-sheet-gaps`
+> lists live work orders whose part's released routing carries process sheets but whose operations
+> hold none of the sheet steps. It is gated `require_role([ADMIN, MANAGER, QUALITY])` — **narrower
+> than View**, and Supervisor is deliberately not in it — and scoped to the active company through
+> `get_current_company_id`. It is a pure read, so it is open to an API token holding one of those
+> roles and is the ordinary MCP tool `list_process_sheet_gaps` (in the read-only catalog). The
+> Quality page's **Sheet Gaps** tab and its `?tab=sheetgaps` deep link use the same set (Admin,
+> Manager, Quality, superuser); any other role stays on the NCR tab. Superuser / Platform Admin bypass
+> the role check, as elsewhere.
+>
+> **New Work Order keeps process sheets — no role change.** `POST /api/v1/work-orders/` stays Admin /
+> Manager / Supervisor; the new optional `routing_operation_id` on each supplied operation changes
+> what the create snapshots, not who may create. `GET /api/v1/work-orders/preview-operations/{part_id}`
+> stays open to any authenticated user in the active company. Neither route gained a credential
+> refusal (the MCP `create_work_order` convenience tool sends no operations, so it always takes the
+> routed path). See `docs/API.md` → Work Orders → "Process sheets on supplied operations".
 
 > **Delete — code now matches the matrix (Admin + Manager).** `DELETE /api/v1/work-orders/{id}`
 > (`app/api/endpoints/work_orders.py`) was previously gated **stricter than this matrix** —
