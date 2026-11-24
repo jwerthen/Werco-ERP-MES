@@ -60,6 +60,7 @@ from app.services.completion_inventory_service import (
 from app.services.completion_signal_service import enqueue_work_order_completion_signals
 from app.services.operational_event_service import OperationalEventService
 from app.services.process_sheet_service import parse_serial_numbers
+from app.services.quality_gate_service import shipment_release_exceptions
 from app.services.shipment_commands import (
     _allocated_quantity,
     create_shipment_command,
@@ -203,6 +204,10 @@ def get_ready_to_ship(
         .order_by(WorkOrder.due_date)
         .all()
     )
+    shippable_ids = [
+        wo.id for wo in work_orders if float(wo.quantity_complete or 0) - float(allocations.get(wo.id) or 0) > 0
+    ]
+    open_items = shipment_release_exceptions(db, company_id, shippable_ids)
     result = []
     for wo in work_orders:
         completed = float(wo.quantity_complete or 0)
@@ -222,6 +227,8 @@ def get_ready_to_ship(
                     "quantity_reserved": max(0, allocated - shipped),
                     "quantity_remaining": remaining,
                     "due_date": wo.due_date.isoformat() if wo.due_date else None,
+                    # Read only (shipping/2): open quality items that withhold the automatic CoC.
+                    "release_exceptions": [exc.as_dict() for exc in open_items.get(wo.id, [])],
                 }
             )
     return result
@@ -282,6 +289,12 @@ def get_shipment(
         "created_at": to_utc_iso(shipment.created_at),
         "coc_number": coc.coc_number if coc else None,
         "coc_issued_at": to_utc_iso(coc.issued_at) if coc else None,
+        "release_exceptions": [
+            exc.as_dict()
+            for exc in shipment_release_exceptions(db, company_id, [shipment.work_order_id]).get(
+                shipment.work_order_id, []
+            )
+        ],
     }
 
 

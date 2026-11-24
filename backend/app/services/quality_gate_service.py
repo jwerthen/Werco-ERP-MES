@@ -44,7 +44,7 @@ from app.models.quality import (
 )
 from app.models.user import User
 from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus
-from app.models.work_order_blocker import WorkOrderBlocker, WorkOrderBlockerStatus
+from app.models.work_order_blocker import WorkOrderBlocker, WorkOrderBlockerCategory, WorkOrderBlockerStatus
 from app.services.audit_service import AuditService
 from app.services.fai_service import CUSTOMER_APPROVABLE_STATUSES
 from app.services.fai_service import FINAL_STATUSES as FAI_FINAL_STATUSES
@@ -316,6 +316,111 @@ def evaluate_completion_quality_exceptions(
             )
 
     return exceptions
+
+
+# ---------------------------------------------------------------------------
+# Shipment release check (shipping/2). A narrower rule than the completion gate: it
+# asks "is anything open that should stop this job's certificate going out
+# automatically", not "was every gate satisfied when the work finished".
+# ---------------------------------------------------------------------------
+
+# Dispositions that send the pieces back into (or keep them in) the shipped product, so
+# the NCR counts until it is CLOSED. SCRAP and RETURN_TO_VENDOR take the pieces out of
+# the shipment, so an NCR so dispositioned never holds the certificate back, even while
+# its paperwork is still open.
+_SHIP_IN_PRODUCT_DISPOSITIONS = (NCRDisposition.REWORK, NCRDisposition.REPAIR, NCRDisposition.USE_AS_IS)
+
+SHIPMENT_RELEASE_EXCEPTION_CODES = ("open_ncr", "fai_not_passed", "open_blocker")
+
+
+def ncr_holds_shipment(ncr: NonConformanceReport) -> bool:
+    """True when this NCR holds a shipment's automatic certificate back.
+
+    VOID never counts. An NCR not yet dispositioned (PENDING / NULL) counts whatever its
+    status. Rework, repair or use-as-is counts until the NCR is CLOSED. Scrap and
+    return-to-vendor never count -- the pieces are not in the shipment.
+    """
+    if ncr.status == NCRStatus.VOID:
+        return False
+    if ncr.disposition is None or ncr.disposition == NCRDisposition.PENDING:
+        return True
+    if ncr.disposition in _SHIP_IN_PRODUCT_DISPOSITIONS:
+        return ncr.status != NCRStatus.CLOSED
+    return False
+
+
+def shipment_release_exceptions(
+    db: Session, company_id: int, work_order_ids: Iterable[int]
+) -> dict[int, list[QualityException]]:
+    """Open quality items that withhold a shipment's automatic CoC, per work order.
+
+    Read only, tenant-scoped, three queries for any number of work orders:
+
+    * ``open_ncr`` -- an NCR on the job that ``ncr_holds_shipment``;
+    * ``fai_not_passed`` -- the latest first article per part is not accepted (the same
+      rule the completion gate uses, ``latest_fai_exceptions_by_work_order``);
+    * ``open_blocker`` -- an OPEN / ACKNOWLEDGED ``quality_hold`` blocker on the job.
+
+    An unsigned inspection point is deliberately NOT an exception here (information
+    only until inspection sign-off has a screen). Work orders with nothing open are
+    absent from the result.
+    """
+    ids = sorted({int(i) for i in work_order_ids if i is not None})
+    if not ids:
+        return {}
+    result: dict[int, list[QualityException]] = {}
+
+    ncrs = (
+        db.query(NonConformanceReport)
+        .filter(
+            NonConformanceReport.company_id == company_id,
+            NonConformanceReport.work_order_id.in_(ids),
+            NonConformanceReport.is_deleted == False,  # noqa: E712
+        )
+        .order_by(NonConformanceReport.id)
+        .all()
+    )
+    for ncr in ncrs:
+        if not ncr_holds_shipment(ncr):
+            continue
+        result.setdefault(ncr.work_order_id, []).append(
+            QualityException(
+                code="open_ncr",
+                severity="high",
+                message=(
+                    f"NCR {ncr.ncr_number} on this work order is open "
+                    f"(status={_enum_value(ncr.status)}, disposition={_enum_value(ncr.disposition) or 'pending'})."
+                ),
+                reference_type="ncr",
+                reference_id=ncr.id,
+            )
+        )
+
+    for wo_id, fai_excs in latest_fai_exceptions_by_work_order(db, company_id, ids).items():
+        result.setdefault(wo_id, []).extend(fai_excs)
+
+    blockers = (
+        db.query(WorkOrderBlocker)
+        .filter(
+            WorkOrderBlocker.company_id == company_id,
+            WorkOrderBlocker.work_order_id.in_(ids),
+            WorkOrderBlocker.category == WorkOrderBlockerCategory.QUALITY_HOLD.value,
+            WorkOrderBlocker.status.in_(_OPEN_BLOCKER_STATUSES),
+        )
+        .order_by(WorkOrderBlocker.id)
+        .all()
+    )
+    for blocker in blockers:
+        result.setdefault(blocker.work_order_id, []).append(
+            QualityException(
+                code="open_blocker",
+                severity=str(blocker.severity or "medium"),
+                message=f"Quality hold '{blocker.title}' is still {_enum_value(blocker.status)} on this work order.",
+                reference_type="work_order_blocker",
+                reference_id=blocker.id,
+            )
+        )
+    return result
 
 
 def record_completion_quality_exceptions(
