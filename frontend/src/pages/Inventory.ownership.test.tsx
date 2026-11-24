@@ -256,6 +256,40 @@ it('will not send a customer-owned receipt without its customer', async () => {
   expect(mockedApi.receiveInventory).not.toHaveBeenCalled();
 });
 
+it('sends heat and cert trimmed on a manual receive, and omits them when blank', async () => {
+  mount();
+  let dialog = await openReceive();
+  fireEvent.change(within(dialog).getByRole('textbox', { name: /^Heat/ }), { target: { value: '  H-9931 ' } });
+  fireEvent.change(within(dialog).getByRole('textbox', { name: /^Cert/ }), { target: { value: 'MTR-55' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Receive' }));
+  await waitFor(() =>
+    expect(mockedApi.receiveInventory).toHaveBeenCalledWith(
+      expect.objectContaining({ part_id: 7, heat_lot: 'H-9931', cert_number: 'MTR-55' })
+    )
+  );
+
+  dialog = await openReceive();
+  fireEvent.change(within(dialog).getByRole('textbox', { name: /^Heat/ }), { target: { value: '   ' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Receive' }));
+  await waitFor(() => expect(mockedApi.receiveInventory).toHaveBeenCalledTimes(2));
+  const second = mockedApi.receiveInventory.mock.calls[1][0];
+  expect(second.heat_lot).toBeUndefined();
+  expect(second.cert_number).toBeUndefined();
+});
+
+it('shows each stock row’s heat in the detail table', async () => {
+  mockedApi.getInventory.mockResolvedValue([
+    { ...stock[0], heat_lot: 'H-9931', cert_number: 'MTR-55' },
+    stock[1],
+  ] as never);
+  mount();
+  const table = await openDetails();
+
+  expect(within(table).getByRole('columnheader', { name: /Heat/ })).toBeInTheDocument();
+  const heatRow = within(table).getByText('LOT-CO').closest('tr')!;
+  expect(within(heatRow).getByText('H-9931')).toBeInTheDocument();
+});
+
 it('changes a row’s ownership through the reasoned dialog and re-reads the page from the server', async () => {
   mount();
   const table = await openDetails();

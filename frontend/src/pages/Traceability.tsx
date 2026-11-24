@@ -2,7 +2,11 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import { ErrorState } from '../components/ui';
+import { CertificateDownload } from '../components/receiving/ReceiptCertificateField';
+import { usePermissions } from '../hooks/usePermissions';
+import { canAccessPath } from '../utils/routeAccess';
 import { formatCentralDate, formatCentralDateTime } from '../utils/centralTime';
+import type { TraceHistoryItem, TraceSearchResult } from '../types/traceability';
 import {
   MagnifyingGlassIcon,
   DocumentMagnifyingGlassIcon,
@@ -14,30 +18,28 @@ import {
   ArrowRightIcon,
 } from '@heroicons/react/24/outline';
 
-interface LotHistoryItem {
-  timestamp: string;
-  event_type: string;
+interface LotHistoryItem extends TraceHistoryItem {
   description: string;
-  quantity?: number;
-  location?: string;
-  reference?: string;
-  user?: string;
-  details?: Record<string, any>;
 }
 
+/**
+ * What the page renders: a lot trace, or a serial trace normalized onto the same
+ * shape (a serial trace carries no supplier, PO, heat or certificate document).
+ */
 interface LotTrace {
-  lot_number: string;
-  serial_number?: string;
-  part_id?: number;
-  part_number?: string;
-  part_name?: string;
-  supplier_name?: string;
-  po_number?: string;
-  received_date?: string;
-  cert_number?: string;
-  heat_lot?: string;
+  lot_number?: string | null;
+  serial_number?: string | null;
+  part_id?: number | null;
+  part_number?: string | null;
+  part_name?: string | null;
+  supplier_name?: string | null;
+  po_number?: string | null;
+  received_date?: string | null;
+  cert_number?: string | null;
+  heat_lot?: string | null;
+  certificate_document_id?: number | null;
   current_quantity: number;
-  current_location?: string;
+  current_location?: string | null;
   status: string;
   work_orders_used: string[];
   shipments: string[];
@@ -45,13 +47,30 @@ interface LotTrace {
   history: LotHistoryItem[];
 }
 
-interface SearchResult {
-  type: string;
-  number: string;
-  part_number?: string;
-  part_name?: string;
-  quantity?: number;
-  location?: string;
+/** Either API response, before the page fills the lists it may leave out. */
+type TraceSource = Omit<LotTrace, 'current_quantity' | 'work_orders_used' | 'shipments' | 'ncrs' | 'history'> & {
+  current_quantity?: number;
+  work_orders_used?: string[];
+  shipments?: string[];
+  ncrs?: string[];
+  history?: TraceHistoryItem[];
+};
+
+type SearchResult = Pick<TraceSearchResult, 'type' | 'number'> & Partial<TraceSearchResult>;
+
+/** A `received` history event's details carry the receipt's heat / cert as plain strings. */
+const detailText = (details: TraceHistoryItem['details'], key: string): string | null => {
+  const value = details?.[key];
+  return typeof value === 'string' && value.trim() ? value : null;
+};
+
+function HeatCertLine({ details }: { details: TraceHistoryItem['details'] }) {
+  const parts = [
+    detailText(details, 'heat_number') && `Heat ${detailText(details, 'heat_number')}`,
+    detailText(details, 'cert_number') && `Cert ${detailText(details, 'cert_number')}`,
+  ].filter(Boolean);
+  if (parts.length === 0) return null;
+  return <p className="text-xs text-slate-400 mt-1 font-mono truncate">{parts.join(' · ')}</p>;
 }
 
 const eventTypeIcons: Record<string, React.ReactNode> = {
@@ -75,6 +94,8 @@ export default function Traceability() {
   const [searched, setSearched] = useState(false);
   const requestId = useRef(0);
   const [retry, setRetry] = useState(0);
+  const { can } = usePermissions();
+  const canOpenDocuments = canAccessPath('/documents', can);
   const query = searchParams.get('q') || '';
   const selectedNumber = searchParams.get('number');
   const selectedType = searchParams.get('type') || 'lot';
@@ -92,16 +113,16 @@ export default function Traceability() {
     setLotTrace(null);
     setSearched(true);
     const run = async () => {
-      const results = query ? await api.searchLots(query) : [];
+      const results: SearchResult[] = query ? await api.searchLots(query) : [];
       if (id !== requestId.current) return;
       setSearchResults(results);
-      const result = selectedNumber
-        ? { number: selectedNumber, type: selectedType }
+      const result: SearchResult | null = selectedNumber
+        ? { number: selectedNumber, type: selectedType === 'serial' ? 'serial' : 'lot' }
         : results.length === 1
           ? results[0]
           : null;
       if (result) {
-        const trace =
+        const trace: TraceSource =
           result.type === 'serial' ? await api.traceSerial(result.number) : await api.traceLot(result.number);
         if (id !== requestId.current) return;
         setLotTrace({
@@ -110,7 +131,7 @@ export default function Traceability() {
           work_orders_used: trace.work_orders_used || [],
           shipments: trace.shipments || [],
           ncrs: trace.ncrs || [],
-          history: (trace.history || []).map((item: any) => ({
+          history: (trace.history || []).map(item => ({
             ...item,
             description: item.description || item.event_type.replace(/_/g, ' '),
           })),
@@ -241,10 +262,17 @@ export default function Traceability() {
                   <div className="min-w-0">
                     <span className="font-mono font-medium tabular-nums">{r.number}</span>
                     {r.part_number && <span className="text-slate-400 ml-2 truncate">- {r.part_number}</span>}
+                    {(r.heat_lot || r.cert_number) && (
+                      <span className="block text-xs text-slate-400 font-mono truncate">
+                        {[r.heat_lot && `Heat ${r.heat_lot}`, r.cert_number && `Cert ${r.cert_number}`]
+                          .filter(Boolean)
+                          .join(' · ')}
+                      </span>
+                    )}
                   </div>
                 </div>
                 <div className="text-sm text-slate-400 flex-shrink-0 tabular-nums">
-                  {r.quantity !== undefined && <span>Qty: {r.quantity}</span>}
+                  {r.quantity !== undefined && r.quantity !== null && <span>Qty: {r.quantity}</span>}
                   {r.location && <span className="ml-4">@ {r.location}</span>}
                 </div>
               </button>
@@ -329,22 +357,29 @@ export default function Traceability() {
               </div>
               <div className="min-w-0">
                 <span className="block text-[10px] uppercase tracking-wide text-slate-500">Cert Number</span>
-                <p className="font-mono text-sm tabular-nums truncate">
-                  {lotTrace.cert_number ? (
-                    <Link
-                      className="underline text-fd-link"
-                      to={`/documents?search=${encodeURIComponent(lotTrace.cert_number)}`}
-                    >
-                      {lotTrace.cert_number}
-                    </Link>
-                  ) : (
-                    '-'
-                  )}
-                </p>
+                <p className="font-mono text-sm tabular-nums truncate">{lotTrace.cert_number || '-'}</p>
               </div>
               <div className="min-w-0">
                 <span className="block text-[10px] uppercase tracking-wide text-slate-500">Heat Lot</span>
                 <p className="font-mono text-sm tabular-nums truncate">{lotTrace.heat_lot || '-'}</p>
+              </div>
+              <div className="min-w-0">
+                <span className="block text-[10px] uppercase tracking-wide text-slate-500">Certificate File</span>
+                {lotTrace.certificate_document_id ? (
+                  <div className="flex flex-wrap items-center gap-2 mt-0.5">
+                    <CertificateDownload documentId={lotTrace.certificate_document_id} />
+                    {canOpenDocuments && (
+                      <Link
+                        className="text-sm underline text-fd-link"
+                        to={`/documents?document=${lotTrace.certificate_document_id}`}
+                      >
+                        Open document record
+                      </Link>
+                    )}
+                  </div>
+                ) : (
+                  <p className="font-medium text-sm">-</p>
+                )}
               </div>
               <div className="min-w-0">
                 <span className="block text-[10px] uppercase tracking-wide text-slate-500">Received Date</span>
@@ -451,6 +486,7 @@ export default function Traceability() {
                             })}
                           </span>
                         </div>
+                        {item.event_type === 'received' && <HeatCertLine details={item.details} />}
                         {item.user && <p className="text-xs text-slate-400 mt-1 truncate">By: {item.user}</p>}
                         {item.location && <p className="text-xs text-slate-400 truncate">Location: {item.location}</p>}
                       </div>

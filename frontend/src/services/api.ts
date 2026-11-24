@@ -204,6 +204,8 @@ import {
   WorkOrderImportResponse,
 } from '../types/importKit';
 import { RoutingImportResponse } from '../types/engineering';
+import type { LotTraceResponse, SerialTraceResponse, TraceSearchResult } from '../types/traceability';
+import type { ReceiveInventoryRequest } from '../types/inventoryReceive';
 import {
   NotificationCatalogEntry,
   NotificationItem,
@@ -3471,7 +3473,7 @@ class ApiService {
     return response.data;
   }
 
-  async receiveInventory(data: any) {
+  async receiveInventory(data: ReceiveInventoryRequest) {
     const response = await this.api.post('/inventory/receive', data);
     return response.data;
   }
@@ -4597,18 +4599,20 @@ class ApiService {
   }
 
   // Traceability
-  async traceLot(lotNumber: string) {
-    const response = await this.api.get(`/traceability/lot/${encodeURIComponent(lotNumber)}`);
+  async traceLot(lotNumber: string): Promise<LotTraceResponse> {
+    const response = await this.api.get<LotTraceResponse>(`/traceability/lot/${encodeURIComponent(lotNumber)}`);
     return response.data;
   }
 
-  async traceSerial(serialNumber: string) {
-    const response = await this.api.get(`/traceability/serial/${encodeURIComponent(serialNumber)}`);
+  async traceSerial(serialNumber: string): Promise<SerialTraceResponse> {
+    const response = await this.api.get<SerialTraceResponse>(
+      `/traceability/serial/${encodeURIComponent(serialNumber)}`
+    );
     return response.data;
   }
 
-  async searchLots(query: string) {
-    const response = await this.api.get('/traceability/search', { params: { q: query } });
+  async searchLots(query: string): Promise<TraceSearchResult[]> {
+    const response = await this.api.get<TraceSearchResult[]>('/traceability/search', { params: { q: query } });
     return response.data;
   }
 
