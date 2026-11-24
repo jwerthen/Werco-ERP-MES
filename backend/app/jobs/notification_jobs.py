@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from app.core.queue import enqueue_job
@@ -463,6 +463,266 @@ async def check_quote_expiring_task():
 
     except Exception as e:
         logger.error(f"Quote expiry check job failed: {e}")
+        raise
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Preventive maintenance: due (T-7) and overdue alerts (owner decision 2026-11-20)
+# ---------------------------------------------------------------------------
+
+MAINTENANCE_DUE_EVENT = "maintenance.due"
+CHANGE_CLOCK_TOLERANCE = timedelta(minutes=1)
+MAINTENANCE_OVERDUE_EVENT = "maintenance.overdue"
+
+
+def maintenance_alert_recipients(db, company_id: int) -> list:
+    """Who hears about due and overdue PM: the company's active users in the catalog entry's departments
+    (Maintenance) plus its active users in the entry's roles (Admin) -- owner decision 2026-11-20, held in
+    ONE place, ``notification_catalog`` -- each once."""
+    from app.services.notification_catalog import get_entry
+
+    entry = get_entry(MAINTENANCE_DUE_EVENT)
+    recipients: dict = {}
+    for department in entry.departments:
+        for user in get_notification_recipients(db, department=department, company_id=company_id):
+            recipients.setdefault(user.id, user)
+    for role in entry.roles:
+        for user in get_notification_recipients(db, role=role, company_id=company_id):
+            recipients.setdefault(user.id, user)
+    return list(recipients.values())
+
+
+def _alert_date(value) -> str:
+    return f"{value:%b} {value.day}, {value.year}"
+
+
+def _days_word(days: int) -> str:
+    return f"{days} day" if days == 1 else f"{days} days"
+
+
+def _due_phrase(due_date, today) -> str:
+    days = (due_date - today).days
+    if days == 0:
+        return "due today"
+    return f"due in {_days_word(days)}"
+
+
+def _target_code(row, company_id: int):
+    """The record's machine or asset code -- only when it belongs to the same company (a legacy row
+    may point at another tenant's machine, whose code must not be read out)."""
+    for related in (row.asset, row.work_center):
+        if related is not None and related.company_id == company_id:
+            return getattr(related, "asset_tag", None) or getattr(related, "code", None)
+    return None
+
+
+def _as_utc(value):
+    """A naive-UTC column value (``updated_at``) as an aware UTC instant; ``None`` stays ``None``."""
+    if value is None:
+        return None
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+def _due_alert_already_sent(db, company_id: int, refs) -> bool:
+    """Whether a ``maintenance.due`` alert already went out for this cycle of a PM item.
+
+    ``refs`` are ``(related_type, related_id, since)``: an alert on that record on or after ``since``
+    counts. ``since`` is the later of the cycle's start (the company-local start of the day the item
+    came within the window) and the record's last change (``updated_at``) -- so a completion that rolls
+    a schedule forward, or an edit that moves a due date, starts a new cycle even inside the window,
+    and an alert from an earlier cycle never stands in for this one. Both records count: the in-app
+    row and the email / SMS log row."""
+    from sqlalchemy import and_, or_
+
+    from app.models.notification import Notification, NotificationLog
+
+    if not refs:
+        return False
+    in_app = (
+        db.query(Notification.id)
+        .filter(
+            Notification.company_id == company_id,
+            Notification.event_key == MAINTENANCE_DUE_EVENT,
+            or_(
+                *(
+                    and_(
+                        Notification.related_type == related_type,
+                        Notification.related_id == related_id,
+                        Notification.created_at >= since,
+                    )
+                    for related_type, related_id, since in refs
+                )
+            ),
+        )
+        .first()
+    )
+    if in_app is not None:
+        return True
+    delivered = (
+        db.query(NotificationLog.id)
+        .filter(
+            NotificationLog.company_id == company_id,
+            NotificationLog.event_type == MAINTENANCE_DUE_EVENT,
+            or_(
+                *(
+                    and_(
+                        NotificationLog.related_type == related_type,
+                        NotificationLog.related_id == related_id,
+                        NotificationLog.sent_at >= since,
+                    )
+                    for related_type, related_id, since in refs
+                )
+            ),
+        )
+        .first()
+    )
+    return delivered is not None
+
+
+async def check_maintenance_due_task():
+    """Alert the Maintenance department and the Admins about due and overdue preventive maintenance,
+    per tenant, on the company's own calendar day (owner decision 2026-11-20).
+
+    * ``maintenance.overdue`` -- every PM schedule and maintenance work order past its due date (what
+      the dashboard's overdue tiles count). Recurring: a recipient with an unread alert for the item
+      is not alerted again until they read it, so a standing overdue PM is one inbox row, not one a
+      day.
+    * ``maintenance.due`` -- each item once per due cycle, when it first comes within 7 days of its
+      due date (T-7; the dashboard's due-this-week tiles). An item that entered the window while the
+      job was not running is alerted on the next run. A completion that rolls a schedule forward, or
+      an edit that moves a due date, starts a new cycle; a work order opened from a schedule already
+      announced this cycle is not announced again.
+
+    In-app only: neither catalog entry is email- or SMS-eligible today.
+
+    What counts comes from ``app.services.maintenance_due_service`` -- the dashboard's own rule -- so
+    a tile and an alert never disagree. Links land on the Maintenance page's Schedules or Work Orders
+    tab. Fires only when ``check_maintenance_due_job`` is enabled in the worker
+    (``WORKER_CRON_JOBS``). A recurring overdue alert is keyed on the schedule, so a recipient who
+    never read last cycle's overdue alert for a schedule is not re-alerted for the next cycle's until
+    they read it (the catalog's recurring rule)."""
+    db = SessionLocal()
+    try:
+        from app.services.company_time import company_today, company_window
+        from app.services.maintenance_due_service import DUE_WINDOW_DAYS, maintenance_due
+
+        totals = {"due": 0, "overdue": 0, "companies": 0}
+        for cid in _active_company_ids(db):
+            try:
+                today = company_today(db, cid)
+                due = maintenance_due(db, cid, today, window_days=DUE_WINDOW_DAYS)
+                if due.empty:
+                    continue
+                recipients = maintenance_alert_recipients(db, cid)
+                if not recipients:
+                    continue
+                sent_before = totals["due"] + totals["overdue"]
+
+                def cycle_start(due_date):
+                    start, _ = company_window(db, cid, due_date - timedelta(days=DUE_WINDOW_DAYS), due_date)
+                    # Aware UTC: ``created_at`` / ``sent_at`` are timestamptz, and a naive parameter
+                    # would be read in the database session's time zone.
+                    return start.replace(tzinfo=timezone.utc)
+
+                for schedule in due.schedules_overdue:
+                    days = (today - schedule.next_due_date).days
+                    code = _target_code(schedule, cid)
+                    await dispatch_direct(
+                        db,
+                        event_key=MAINTENANCE_OVERDUE_EVENT,
+                        company_id=cid,
+                        recipients=recipients,
+                        related_type="MaintenanceSchedule",
+                        related_id=schedule.id,
+                        title=f"PM overdue: {schedule.name}",
+                        body=(
+                            f"Was due {_alert_date(schedule.next_due_date)} ({_days_word(days)} ago)"
+                            + (f" on {code}" if code else "")
+                            + ". No work order is under way for it."
+                        ),
+                        link=links.MAINTENANCE_SCHEDULES,
+                    )
+                    totals["overdue"] += 1
+                for wo in due.work_orders_overdue:
+                    days = (today - wo.due_date).days
+                    await dispatch_direct(
+                        db,
+                        event_key=MAINTENANCE_OVERDUE_EVENT,
+                        company_id=cid,
+                        recipients=recipients,
+                        related_type="MaintenanceWorkOrder",
+                        related_id=wo.id,
+                        title=f"Maintenance work order overdue: {wo.wo_number}",
+                        body=f"{wo.title}: was due {_alert_date(wo.due_date)} ({_days_word(days)} ago) and is not started.",
+                        link=links.MAINTENANCE_WORK_ORDERS,
+                    )
+                    totals["overdue"] += 1
+
+                def since(due_date, record):
+                    start = cycle_start(due_date)
+                    changed = _as_utc(record.updated_at)
+                    if changed is None:
+                        return start
+                    # ``updated_at`` is the app's clock, ``created_at`` / ``sent_at`` the database's
+                    # (second precision on SQLite): a minute's tolerance keeps an alert written right
+                    # after a change from reading as older than it.
+                    return max(start, changed - CHANGE_CLOCK_TOLERANCE)
+
+                for schedule in due.schedules_due:
+                    if _due_alert_already_sent(
+                        db, cid, [("MaintenanceSchedule", schedule.id, since(schedule.next_due_date, schedule))]
+                    ):
+                        continue
+                    code = _target_code(schedule, cid)
+                    await dispatch_direct(
+                        db,
+                        event_key=MAINTENANCE_DUE_EVENT,
+                        company_id=cid,
+                        recipients=recipients,
+                        related_type="MaintenanceSchedule",
+                        related_id=schedule.id,
+                        title=f"PM {_due_phrase(schedule.next_due_date, today)}: {schedule.name}",
+                        body=f"Due {_alert_date(schedule.next_due_date)}" + (f" on {code}" if code else "") + ".",
+                        link=links.MAINTENANCE_SCHEDULES,
+                    )
+                    totals["due"] += 1
+                for wo in due.work_orders_due:
+                    refs = [("MaintenanceWorkOrder", wo.id, since(wo.due_date, wo))]
+                    schedule = wo.schedule if wo.schedule_id is not None else None
+                    if schedule is not None and schedule.company_id == cid:
+                        # Opened from a schedule already announced this cycle (Start PM copies the
+                        # schedule's due date): the PM was announced; don't announce it twice.
+                        refs.append(("MaintenanceSchedule", schedule.id, since(wo.due_date, schedule)))
+                    if _due_alert_already_sent(db, cid, refs):
+                        continue
+                    await dispatch_direct(
+                        db,
+                        event_key=MAINTENANCE_DUE_EVENT,
+                        company_id=cid,
+                        recipients=recipients,
+                        related_type="MaintenanceWorkOrder",
+                        related_id=wo.id,
+                        title=f"Maintenance work order {_due_phrase(wo.due_date, today)}: {wo.wo_number}",
+                        body=f"{wo.title}: due {_alert_date(wo.due_date)}.",
+                        link=links.MAINTENANCE_WORK_ORDERS,
+                    )
+                    totals["due"] += 1
+                if totals["due"] + totals["overdue"] > sent_before:
+                    totals["companies"] += 1
+            except Exception as e:
+                logger.error(f"Maintenance due/overdue alerts failed for company {cid}: {e}")
+                # Reset the shared session, or every later tenant inherits this one's failed transaction.
+                reset_session_after_failure(db, f"the maintenance due/overdue alerts for company {cid}")
+
+        logger.info(
+            f"Checked preventive maintenance: {totals['overdue']} overdue and {totals['due']} due alert(s) "
+            f"across {totals['companies']} company(ies)"
+        )
+        return totals
+    except Exception as e:
+        logger.error(f"Maintenance due check job failed: {e}")
         raise
     finally:
         db.close()

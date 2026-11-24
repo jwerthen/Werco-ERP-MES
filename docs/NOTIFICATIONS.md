@@ -326,8 +326,35 @@ but **only entries whose source is wired today actually fire**; the rest are **d
 
 **Direct-dispatch** (crons / MRP / scheduling call `dispatch_direct`):
 `calibration.due`, `wo.late`, `stock.low`, `quote.expiring` (the four recurring crons in
-`notification_jobs.py`); `mrp.completed`, `mrp.review_needed` (`mrp_jobs.py`), `mrp.expedite_required`
-(`mrp_auto_service.py`), `capacity.overload` (`scheduling_jobs.py`).
+`notification_jobs.py`); `maintenance.due`, `maintenance.overdue` (`check_maintenance_due_job`, also
+in `notification_jobs.py`, since 2026-11-20); `mrp.completed`, `mrp.review_needed` (`mrp_jobs.py`),
+`mrp.expedite_required` (`mrp_auto_service.py`), `capacity.overload` (`scheduling_jobs.py`).
+
+> **`maintenance.due` / `maintenance.overdue` — wired 2026-11-20 (owner decisions).** Both are sent by
+> the daily worker cron `check_maintenance_due_job` (`check_maintenance_due_task` in
+> `jobs/notification_jobs.py`), never from an operational event, so `source_event_types` stays empty.
+> It runs at 12:15 in the worker container's zone: 12:15 UTC (6:15 AM Central, 7:15 in summer) while
+> `TZ` is unset, 12:15 PM Central with `TZ=America/Chicago`. Each active company is judged on its own
+> calendar day whatever the hour, and what is due or overdue comes from
+> `services/maintenance_due_service.py`, the one rule for these alerts and the Maintenance dashboard's
+> tiles (`GET /maintenance/work-orders/overdue` and `auto_evidence_service` keep their own).
+>
+> | | `maintenance.due` | `maintenance.overdue` |
+> |---|---|---|
+> | Fires for | Each uncovered active PM schedule and each unstarted (`scheduled` / `overdue`) maintenance work order due today through 7 days ahead (T-7) | Each uncovered active PM schedule and each unstarted maintenance work order past its due date. "Uncovered": no `scheduled` / `overdue` / `in_progress` work order on the schedule; a PM whose work order is on hold counts |
+> | Cadence | **Once per cycle.** Not `recurring`. A cycle starts when the item comes within 7 days of its due date and restarts whenever the record changes (`updated_at`): a completion rolling a schedule forward, or any edit, so a moved due date is re-announced with the new date (an unrelated edit re-announces too; accepted). The job looks for an existing `maintenance.due` in-app row or email / SMS log row for the item since the later of the company-local start of the window and the record's last change, so a missed day is caught up on the next run. A work order opened from a schedule already announced this cycle is not announced again | **`recurring`**: one unread in-app row per user per item; after it is read, the next daily run alerts again while the item is still overdue |
+> | Recipients | The company's active users with `department = 'Maintenance'` (exact string) plus its active Admins, each once. The catalog's `roles` changed from `SUPERVISOR` to `ADMIN` to match | Same |
+> | Channels | **In-app only.** Neither entry has an email channel or is SMS-eligible, and `PUT /users/me/notification-preferences` accepts only `sms` and refuses non-SMS-eligible events, so no preference turns email or SMS on | Same |
+> | Content | Title and body composed by the job: schedule name or work-order number and title, due date, day count, and the machine or asset code only when it belongs to the same company. No customer or part data | Same |
+> | Link | `/maintenance?tab=schedules` (a schedule) or `/maintenance?tab=work_orders` (a work order) | Same |
+>
+> **Known limitation:** `recurring` suppression keys on the record (`related_type`, `related_id`), not
+> the cycle, so a recipient who never read a schedule's overdue alert from one cycle gets no overdue
+> alert for that schedule's next cycle until they read the old one.
+>
+> The cron fires only when the worker's `WORKER_CRON_JOBS` selects it. A production worker running an
+> allowlist must add `check_maintenance_due_job` (see `docs/DEPLOYMENT.md` → PM due and overdue
+> alerts).
 
 > **`stock.low` counts company-owned stock rows only (migration `129`, AS9100D 8.5.3).**
 > `check_low_stock_task` counts, per company, the stock rows at or below their part's
@@ -501,8 +528,9 @@ it is driven by the direct bridge, not the outbox tee.)
 - **PR 6 instrumentation** (the emitting domain isn't wired yet): `wo.deleted`, `scrap.recorded`,
   `ncr.voided`, `cert.expiring`, `cert.expired`, `complaint.received`, `complaint.status_changed`,
   `rma.approved`, `rma.received`, `po.deleted`, `vendor.deactivated`, `quote.sent`, `quote.accepted`,
-  `shipment.delivery_exception`, `eco.submitted/approved/rejected/implemented`, `maintenance.due`,
-  `maintenance.overdue`, `account.locked`, `import.completed`, `import.failed`.
+  `shipment.delivery_exception`, `eco.submitted/approved/rejected/implemented`, `account.locked`,
+  `import.completed`, `import.failed`. (`maintenance.due` and `maintenance.overdue` left this list on
+  2026-11-20; they are direct-dispatched, above.)
 - **PR 5 comments** (`comment.mention`, `comment.added`) were dormant here until **2026-11-16**;
   they are now wired for work orders — see the outbox-driven list above.
 
@@ -675,6 +703,7 @@ pattern is an existing list page plus a param that page already reads (`pages/Pu
 | `entity_type="work_center"` — `dispatch.changed` (Dispatch v2), which deliberately carries no `work_order_id` | `/shop-floor/operations` — record-less | The shop-floor operations list, in dispatch order. Its recipients are operators clocked in at the machine; `/shop-floor` needs `work_orders:view`, which every role holds (rule 4). |
 | `entity_type="user"` — `floor_pin.lockout` (migration `130`) | `/users` — record-less (`USERS_ADMIN`) | The Users page, which lists every currently locked floor PIN above the table with its end time and **Unlock**. Its only recipients are Admins, who all reach `/users`. |
 | `calibration.due` — both the 7-day and 1-day cron windows | `/calibration` — record-less and **deliberately unfiltered** | `?filter=due` reads as more helpful and is provably empty: the cron selects `Equipment.status == ACTIVE`, while `GET /calibration/equipment?status=due` filters the **persisted** status column *before* `update_equipment_status` recomputes it — so the rows that trigger the notification are exactly the rows that filter excludes. The unfiltered list sorts by `next_calibration_date` ascending (due item first) and repairs the stale status for every row it returns. |
+| `maintenance.due` / `maintenance.overdue` (`check_maintenance_due_job`, 2026-11-20) | `/maintenance?tab=schedules` for a PM schedule, `/maintenance?tab=work_orders` for a maintenance work order — record-less (`MAINTENANCE_SCHEDULES` / `MAINTENANCE_WORK_ORDERS`) | `Maintenance.tsx` follows `?tab=`, also when the page is already open (a notification clicked from the bell while on it). The Schedules list is ordered by next due date, so a due schedule sits near the top; the Work Orders list is ordered by scheduled date, so a due work order is among the open ones, not necessarily first. `/maintenance` needs `work_orders:view`, which every role holds, so every recipient (Maintenance department, Admins) can open it (rule 4). |
 | `quote.expiring` (cron) | `/quotes?id={id}` | `Quotes.tsx` selects the quote with a `GET /quotes/{id}` fallback — needed because the list excludes `CONVERTED`/`EXPIRED`, i.e. exactly the quote you were warned about. |
 | `wo.late`, `stock.low`, `mrp.completed` / `mrp.review_needed`, `capacity.overload`, `mrp.expedite_required`, `visitor.check_in` (all `dispatch_direct`) | `/work-orders/{id}`, `/inventory`, `/mrp`, `/scheduling`, `/parts/{id}`, `/visitor-log` — **values unchanged** | Already resolved; moved into the registry so the guard test covers them and the no-inline-literal grep can be total. |
 | everything else — any `entity_type` with no branch, plus every still-dormant catalog entry | **`None`** | The row renders as a non-navigating button. This is the correct default, not an omission. |
@@ -1329,4 +1358,5 @@ PR 1 is the foundation; the remaining PRs (see [NOTIFICATIONS_PLAN.md §10](NOTI
   Still deferred: the other record types, the kiosk, attachments and reactions — see
   [NOTIFICATIONS_PLAN.md §3.6](NOTIFICATIONS_PLAN.md#36-comments--mentions--watchers).
 - **PR 6 — Event coverage**: instrument the dormant domains (quotes, complaints/RMA, ECO,
-  maintenance, delivery exceptions, account lockout, cert-expiry cron) so their catalog rows fire.
+  delivery exceptions, account lockout, cert-expiry cron) so their catalog rows fire. Maintenance is
+  done: `maintenance.due` / `maintenance.overdue` were wired on 2026-11-20 (above).

@@ -198,6 +198,16 @@ export default function Maintenance() {
     next.set('tab', tab);
     setSearchParams(next, { replace: true });
   };
+  // Follow `?tab=` after mount too. A notification link (`maintenance.due` / `.overdue`) clicked while
+  // this page is already open changes only the query string, which the initializer above never sees
+  // again (the bug `Quality.tsx` documents). Keyed on the URL alone, so a tab click -- which sets the
+  // state and the URL together -- is never undone in between.
+  useEffect(() => {
+    if (isTab(urlTab) && urlTab !== activeTab) {
+      initialTabChosen.current = true;
+      setActiveTabState(urlTab);
+    }
+  }, [urlTab]);
 
   const [actionBusy, setActionBusy] = useState(false);
   const [actionError, setActionError] = useState('');

@@ -58,8 +58,8 @@ completed ERP actions. See [Hank task storage](DEPLOYMENT.md#hank-task-storage).
 set. Scheduled checks require changing the worker's existing production
 `WORKER_CRON_JOBS=none` to **`check_hank_watches_job`**, preserving every other disabled
 cron. No new variable or secret is introduced. Verify exact active release, fresh
-generic heartbeat, the one selected five-minute cron, and **13 of 14** suppressed
-crons. Verify one opted-in watch's check timestamp and owner-only in-app outcome;
+generic heartbeat, the one selected five-minute cron, and **14 of 15** suppressed
+crons (13 of 15 once `check_maintenance_due_job` is added). Verify one opted-in watch's check timestamp and owner-only in-app outcome;
 heartbeat health alone does not prove checks ran. **Check now** works independently
 of scheduling. Restore `none` to suspend scheduled checks while retaining evidence.
 See [Hank follow-up worker](DEPLOYMENT.md#hank-follow-up-worker).
@@ -307,6 +307,22 @@ the migration: from a checkout of this release run `railway run --service werco-
 133_maintenance_log_provenance` before redeploying a pre-134 image. The **downgrade is lossy**: it drops
 every flag. Full notes and verification are in
 [Customer-supplied parts](DEPLOYMENT.md#customer-supplied-parts-migration-134).
+
+**PM due and overdue alerts.** This release adds the worker cron **`check_maintenance_due_job`**
+(12:15 daily in the container's zone: 12:15 UTC while `TZ` is unset; it judges each company's own
+day), which sends `maintenance.due` (once per cycle within 7 days of the due date; a cycle restarts
+when the record changes) and `maintenance.overdue` (recurring), in-app only, to each company's
+Maintenance department plus its Admins.
+No migration, secret or environment variable is added. **Owner action at deploy:** production runs
+`WORKER_CRON_JOBS` as an allowlist (last documented as `check_hank_watches_job`; **the current value
+is not verified** — read it on `werco-worker` → Variables first), and an allowlist never picks up a
+new cron, so the job never fires until it is added: set
+**`WORKER_CRON_JOBS=check_hank_watches_job,check_maintenance_due_job`** (or append the name to
+whatever allowlist is there) and redeploy the worker. Count the first run's overdue alerts first.
+Verify the worker's startup log lists `cron:check_maintenance_due_job -> next run …` (and `13 of 15
+cron jobs SUPPRESSED` for the two-job value). Before rolling the worker back to an older image,
+remove the name: an unknown name is a hard startup error. Counts, verification and stop steps are in
+[PM due and overdue alerts](DEPLOYMENT.md#pm-due-and-overdue-alerts).
 
 **Maintenance log provenance.** Apply **133_maintenance_log_provenance** after
 **132_maintenance_pm_integrity** through the normal API boot migration path; no pre-deploy check is

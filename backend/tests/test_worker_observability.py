@@ -240,6 +240,7 @@ class TestTheCronInventoryIsStable:
             "poll_tracking_job",
             "relay_pending_notifications_job",
             "check_hank_watches_job",
+            "check_maintenance_due_job",
         }
 
 
@@ -686,8 +687,8 @@ class TestTheOwnersMrpCutover:
         selected = select_cron_jobs(OWNER_EXCLUSION_VALUE)
         names = {job.name.removeprefix("cron:") for job in selected}
 
-        assert len(selected) == 13
-        assert len(ALL_CRON_JOBS) == 14
+        assert len(selected) == 14
+        assert len(ALL_CRON_JOBS) == 15
         assert "run_mrp_auto_draft_job" not in names
         assert names == {
             "send_daily_digest_job",
@@ -703,6 +704,7 @@ class TestTheOwnersMrpCutover:
             "poll_tracking_job",
             "relay_pending_notifications_job",
             "check_hank_watches_job",
+            "check_maintenance_due_job",
         }
 
     def test_exclusion_follows_new_jobs_while_legacy_allowlist_stays_frozen(self):
@@ -715,6 +717,7 @@ class TestTheOwnersMrpCutover:
         assert {job.name for job in by_exclusion} - {job.name for job in by_allowlist} == {
             "cron:cleanup_runtime_metrics_job",
             "cron:check_hank_watches_job",
+            "cron:check_maintenance_due_job",
         }
         assert {id(job) for job in by_allowlist} < {id(job) for job in by_exclusion}
 
@@ -729,7 +732,7 @@ class TestTheOwnersMrpCutover:
 
         worker = importlib.reload(worker)
         try:
-            assert len(worker.WorkerSettings.cron_jobs) == 13
+            assert len(worker.WorkerSettings.cron_jobs) == 14
             assert MRP_CRON not in [job.name for job in worker.WorkerSettings.cron_jobs]
             assert worker.run_mrp_auto_draft_job in worker.WorkerSettings.functions
         finally:
@@ -752,9 +755,9 @@ class TestTheOwnersMrpCutover:
                 await worker.startup({})
             text = caplog.text
 
-            assert "1 of 14 cron jobs SUPPRESSED" in text
+            assert "1 of 15 cron jobs SUPPRESSED" in text
             assert repr(OWNER_EXCLUSION_VALUE) in text
-            assert "13 job(s) armed" in text
+            assert "14 job(s) armed" in text
             # Once, in the SUPPRESSED warning -- never among the armed "next run" lines.
             assert text.count(MRP_CRON) == 1
             assert "cron:poll_tracking_job -> next run" in text

@@ -12,15 +12,25 @@ CI/CD worker upload path is active (verified 2026-09-08). The original cutover a
 below is historical; it does not establish current cron settings. Each worker release
 requires the identity gate in [§6](#shared-worker-release-verification).
 
-**Hank follow-up rollout:** the current worker declares **14** crons. Production
+**Hank follow-up rollout:** the current worker declares **15** crons. Production
 previously selected `none` after quote-nesting retirement. Enable Hank with the exact
-allowlist **`WORKER_CRON_JOBS=check_hank_watches_job`**; it keeps all 13 unrelated
-schedules disabled. Deploy matching API/worker/frontend releases and verify the
+allowlist **`WORKER_CRON_JOBS=check_hank_watches_job`**; it keeps every unrelated
+schedule disabled (14 of 15 suppressed). Deploy matching API/worker/frontend releases and verify the
 selected cron plus active release/heartbeat. See [the current rollout procedure](
 WORKER_DEPLOYMENT_RUNBOOK.md#current-hank-follow-up-release-procedure).
 
+**PM due and overdue alerts (2026-11-20):** the fifteenth cron, `check_maintenance_due_job`
+(daily at 12:15 container time: 12:15 UTC while `TZ` is unset), sends `maintenance.due` /
+`maintenance.overdue`, in-app only. An allowlist does not pick up a
+new cron, so a worker on the Hank-only allowlist above never runs it: the owner adds it,
+**`WORKER_CRON_JOBS=check_hank_watches_job,check_maintenance_due_job`** (13 of 15 suppressed). The
+current production value is **not verified** here; read it on `werco-worker` → Variables first and
+add the job to whatever it holds (a `none` value means no cron runs at all; an `all` or `-` exclusion
+value already includes it). See [the release procedure](
+WORKER_DEPLOYMENT_RUNBOOK.md#current-pm-due-alert-release-procedure).
+
 **Smart intake is request-driven:** `process_hank_intake_file_job` is an additional
-queue function, not a fifteenth cron. It analyzes one durably submitted PDF through
+queue function, not a cron. It analyzes one durably submitted PDF through
 `asyncio.to_thread`, with separate claim/result transactions and no open session
 during storage/model I/O. It rechecks current employee/company authority before
 saving results and never files the PDF automatically. The job remains registered
@@ -161,7 +171,7 @@ and destroys the parity guard outright. Named here, deliberately not fixed.
 ## 2. The blast radius — read before arming any cron
 
 **Every cron in `WorkerSettings.cron_jobs` fires the moment a worker process runs.** There
-is no separate enable step. Fourteen are declared. Times are the container's local zone —
+is no separate enable step. Fifteen are declared. Times are the container's local zone —
 arq defaults to `datetime.now().astimezone().tzinfo`, which on Railway is **UTC unless `TZ`
 is set**, so "6 AM" means 06:00 UTC = **01:00 Central**.
 
@@ -169,6 +179,7 @@ is set**, so "6 AM" means 06:00 UTC = **01:00 Central**.
 |---|---|---|
 | `run_mrp_auto_draft_job` | 06:00 daily | **Creates draft purchase orders and work orders** for every active company, and emails `mrp.completed` to every active `MANAGER` (only when the run produced actions). Not idempotent — a new `MRPRun` and new drafts every run. **Highest risk.** |
 | `check_late_work_orders_job` | 08:00 daily | **One email per late WO to every supervisor + manager.** No age cap. `wo.late` is `recurring`, but suppression keys off an unread in-app row already existing — on a cold start there are none, so the first run fires in full. |
+| `check_maintenance_due_job` | 12:15 daily | Per active company, on the company's own day (whatever the container's zone): one `maintenance.overdue` per overdue PM schedule (no work order under way) and per unstarted overdue maintenance work order, and one `maintenance.due` per item due within 7 days not yet announced this cycle (a cycle restarts when the record changes), to every active user whose `department = 'Maintenance'` plus the Admins. **In-app only**: no preference turns email or SMS on for either event. On a cold start every overdue item alerts once per recipient; `maintenance.overdue` is `recurring`, so later runs add nothing while that row is unread. Writes no business record. |
 | `check_calibrations_job` | 07:00 daily | One `calibration.due` per equipment due within 7 days, to every user whose `department = 'Quality'`. Equipment due within **1 day is dispatched twice** (it is in both the 7-day and the 1-day set). Channel is in-app + **digest**, not direct email. |
 | `check_quote_expiring_job` | 09:00 daily | One per quote expiring within 7 days, to `department = 'Sales'` users. **Digest-only** — no direct email. Window-bounded. |
 | `check_low_stock_job` | 07:30 daily | **One aggregated** message per tenant to `department` `Purchasing` + `Inventory`. **Digest-only.** Low blast radius. |
@@ -248,7 +259,7 @@ case/whitespace rules: `docs/ENVIRONMENT_VARIABLES.md` → Background worker (AR
 > **The `SUPPRESSED` log line reads correctly for either shape.** It diffs the registered
 > crons against `ALL_CRON_JOBS` by object identity, and the denylist path filters that same
 > list rather than rebuilding it, so what it prints is exact:
-> `ARQ worker cron: 1 of 14 cron jobs SUPPRESSED by WORKER_CRON_JOBS='all,-run_mrp_auto_draft_job': cron:run_mrp_auto_draft_job`
+> `ARQ worker cron: 1 of 15 cron jobs SUPPRESSED by WORKER_CRON_JOBS='all,-run_mrp_auto_draft_job': cron:run_mrp_auto_draft_job`
 
 ---
 
@@ -440,9 +451,9 @@ With `WORKER_CRON_JOBS=none`, enable the deploy and watch the log. You should se
 ```
 ARQ worker starting up (environment=production, release=<sha>)
 ARQ worker Redis: redis://<host>:6379/0 [source=REDIS_URL, auth=password] | queue=arq:queue
-ARQ worker cron: 14 of 14 cron jobs SUPPRESSED by WORKER_CRON_JOBS='none': ...
+ARQ worker cron: 15 of 15 cron jobs SUPPRESSED by WORKER_CRON_JOBS='none': ...
 ARQ worker cron: none armed; draining enqueue-driven jobs only
-ARQ worker ready (25 job functions registered)
+ARQ worker ready (27 job functions registered)
 ```
 
 The Redis line is the whole point: it must name the **same host** the API reports. The
@@ -458,7 +469,9 @@ adding the next:
 2. `run_oee_auto_calc_job` — writes each company's previous production day of OEE only, no email.
 3. `check_low_stock_job` — one aggregated message per tenant.
 4. `poll_tracking_job` — no-op while `allow_carrier_egress` is off.
-5. `check_quote_expiring_job`, `check_calibrations_job` — window-bounded.
+5. `check_quote_expiring_job`, `check_calibrations_job`, `check_maintenance_due_job` — window-bounded
+   (the maintenance job is in-app only; run the overdue counts in `DEPLOYMENT.md` → PM due and
+   overdue alerts first).
 6. `send_daily_digest_job`.
 7. `cleanup_old_logs_job` — physical deletes; confirm the 90-day windows are what you want.
 8. `check_late_work_orders_job` — **run the §4 counts first.**
