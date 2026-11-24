@@ -116,7 +116,7 @@ curl https://werco-api-production-xxxx.up.railway.app/health
 ### Access Application
 Open browser to: https://werco-frontend-production-xxxx.up.railway.app
 
-Log in with the admin account you created via company-onboarding in step 6.
+Log in with the admin account you created through the empty-install first-user registration in step 6.
 
 > **Not the demo seed.** The `admin@werco.com` / `admin123` (and `password123`) accounts come
 > from `scripts/seed_data.py` and are for **local / dev / demo / CI / E2E only** — seeding is

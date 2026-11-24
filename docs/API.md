@@ -14122,8 +14122,8 @@ The active company's own profile and self-managed settings. Mounted under `/comp
 > (Claude-plugin brief P0.3, 2026-11-13). While it is OFF, such a token is refused **403** on every
 > API route and at the MCP door, `initialize` and `tools/list` included. Turning it ON therefore
 > also opens that connector: do it only once the empowered official has cleared it
-> ([docs/EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md)). New companies are
-> created **OFF**; existing companies were grandfathered **ON**. The toggle is **Admin-only**
+> ([docs/EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md)). A new company row
+> (only the empty-install bootstrap creates one) starts **OFF**; existing companies were grandfathered **ON**. The toggle is **Admin-only**
 > (`require_role([ADMIN])`), matching the sibling `allow_carrier_egress` / `allow_print_egress`
 > controls. It is exposed in the UI at
 > **Admin Settings → AI Privacy** (`/admin/settings?tab=aiprivacy`) — interactive for Admin
