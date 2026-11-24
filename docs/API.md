@@ -6154,9 +6154,9 @@ uploads go through text extraction + LLM. See
 >   cannot disagree. `GET /maintenance/work-orders/overdue` and the QMS evidence card
 >   (`auto_evidence_service`) keep their own overdue reads.
 > - **Due and overdue alerts (owner decisions 2026-11-20).** A daily worker cron,
->   `check_maintenance_due_job`, runs at hour 12, minute 15 in the **worker container's** zone:
->   12:15 UTC (6:15 AM Central, 7:15 in summer) while `TZ` is unset, 12:15 PM Central with
->   `TZ=America/Chicago`. Whatever the hour, it judges each active company on the company's own
+>   `check_maintenance_due_job`, runs at 06:15 **shop time** (America/Chicago, pinned in code by
+>   `WorkerSettings.timezone` since 2026-11-23, so `TZ` does not move it; it ran at 12:15 UTC
+>   before). Whatever the hour, it judges each active company on the company's own
 >   calendar day, and sends two catalog events, both direct-dispatched (`docs/NOTIFICATIONS.md`):
 >   - **`maintenance.overdue`** for every item the overdue tiles count: an active PM schedule past its
 >     `next_due_date` that no `scheduled` / `overdue` / `in_progress` work order covers (a PM whose

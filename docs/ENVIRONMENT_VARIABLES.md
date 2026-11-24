@@ -525,7 +525,7 @@ variables to claim physical verification or bypass the explicit observation work
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `WORKER_CRON_JOBS` | No | all | Which scheduled jobs the worker registers. Unset or `all` → every cron (15 of them). `none` → no crons; the worker still drains enqueue-driven jobs (notifications, webhooks, labels, completion signals, Hank PDF intake). A comma-separated list of job names arms **exactly** those (allowlist). A `-` prefix **excludes** a job from the full set (denylist): `all,-run_mrp_auto_draft_job`. The two shapes may not be mixed. **An unrecognised name is a hard startup error, not a silent skip — a negated one included.** `none` is the correct value for a first-ever boot — several crons write or email in bulk on their first run. Full syntax below |
-| `TZ` | No | UTC | Container timezone. ARQ resolves cron times in the container's local zone, so unset means `hour=6` fires at **06:00 UTC = 01:00 Central**. Set `TZ=America/Chicago` for shop-local schedules |
+| `TZ` | No | UTC | Container timezone. **Does not move any cron**: since 2026-11-23 `WorkerSettings.timezone` pins arq's cron zone to America/Chicago in code (`app.core.worker_schedule.SHOP_TIMEZONE`), so `hour=6` fires at 06:00 Central, daylight saving included, whatever `TZ` is. `TZ` affects only log timestamps and other local-time reads in the process |
 
 #### `WORKER_CRON_JOBS` syntax
 
@@ -586,8 +586,9 @@ WORKER_CRON_JOBS=all,-run_mrp_auto_draft_job
 
 This disables the **schedule**, not the capability: `run_mrp_auto_draft_job` stays in
 `WorkerSettings.functions` and can still be enqueued for a one-off run. Note also that the
-crons fire on **container-local time, which is UTC unless `TZ` is set**, so the 06:00 MRP cron
-is 01:00 Central. See `docs/WORKER_DEPLOYMENT_RUNBOOK.md` §6.4 for the full procedure and what
+crons fire on **shop time (America/Chicago), pinned in code**, so the 06:00 MRP cron is 06:00
+Central whatever `TZ` is. Admin Settings → System Health (`GET /admin/system-health`) shows which
+crons the running worker armed under the current value. See `docs/WORKER_DEPLOYMENT_RUNBOOK.md` §6.4 for the full procedure and what
 MRP does and does not still do with the cron off.
 
 The worker also needs the API's `DATABASE_URL`, `SECRET_KEY`, `REFRESH_TOKEN_SECRET_KEY`,

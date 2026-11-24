@@ -333,8 +333,8 @@ in `notification_jobs.py`, since 2026-11-20); `mrp.completed`, `mrp.review_neede
 > **`maintenance.due` / `maintenance.overdue` — wired 2026-11-20 (owner decisions).** Both are sent by
 > the daily worker cron `check_maintenance_due_job` (`check_maintenance_due_task` in
 > `jobs/notification_jobs.py`), never from an operational event, so `source_event_types` stays empty.
-> It runs at 12:15 in the worker container's zone: 12:15 UTC (6:15 AM Central, 7:15 in summer) while
-> `TZ` is unset, 12:15 PM Central with `TZ=America/Chicago`. Each active company is judged on its own
+> It runs at 06:15 shop time (America/Chicago, pinned in code by `WorkerSettings.timezone` since
+> 2026-11-23, so `TZ` does not move it; it ran at 12:15 UTC before). Each active company is judged on its own
 > calendar day whatever the hour, and what is due or overdue comes from
 > `services/maintenance_due_service.py`, the one rule for these alerts and the Maintenance dashboard's
 > tiles (`GET /maintenance/work-orders/overdue` and `auto_evidence_service` keep their own).

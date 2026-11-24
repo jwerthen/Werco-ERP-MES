@@ -295,8 +295,8 @@ statement, writes no row, and adds no environment variable, secret, cron or work
   See [API.md → Customer Complaints & RMA](API.md#customer-complaints--rma).
 
 **PM due and overdue alerts.** This release adds the worker cron **`check_maintenance_due_job`**
-(12:15 daily in the container's zone: 12:15 UTC while `TZ` is unset; it judges each company's own
-day), which sends `maintenance.due` (once per cycle within 7 days of the due date; a cycle restarts
+(06:15 daily shop time, America/Chicago, pinned in code since 2026-11-23; it judges each
+company's own day), which sends `maintenance.due` (once per cycle within 7 days of the due date; a cycle restarts
 when the record changes) and `maintenance.overdue` (recurring), in-app only, to each company's
 Maintenance department plus its Admins.
 No migration, secret or environment variable is added. **Owner action at deploy:** production runs
