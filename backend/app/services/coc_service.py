@@ -56,6 +56,22 @@ def _existing_coc(db: Session, shipment_id: int, company_id: int) -> Optional[Ce
     )
 
 
+def cocs_by_shipment(db: Session, company_id: int, shipment_ids) -> dict:
+    """The issued CoC for each shipment id, in ONE tenant-scoped query ({shipment_id: CoC})."""
+    ids = sorted({int(i) for i in shipment_ids if i is not None})
+    if not ids:
+        return {}
+    rows = (
+        db.query(CertificateOfConformance)
+        .filter(
+            CertificateOfConformance.company_id == company_id,
+            CertificateOfConformance.shipment_id.in_(ids),
+        )
+        .all()
+    )
+    return {row.shipment_id: row for row in rows}
+
+
 def _resolve_work_order(db: Session, shipment: Shipment, company_id: int) -> Optional[WorkOrder]:
     """Resolve the shipment's work order, tenant-scoped (relationship is not company-filtered)."""
     wo = getattr(shipment, "work_order", None)

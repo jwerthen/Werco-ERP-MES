@@ -49,6 +49,7 @@ from app.services.carriers.exceptions import (
 )
 from app.services.coc_service import (
     coc_required_for_shipment,
+    cocs_by_shipment,
     generate_coc_for_shipment,
     render_coc_pdf,
 )
@@ -78,6 +79,10 @@ def generate_shipment_number(db: Session) -> str:
 # to ADMIN / MANAGER / SUPERVISOR / SHIPPING -- the same set that may complete a
 # shipment. read-only views (rate quotes, tracking) stay open to any tenant user.
 CARRIER_WRITE_ROLES = [UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR, UserRole.SHIPPING]
+
+COC_NOT_SHIPPED_DETAIL = (
+    "A Certificate of Conformance is issued only for a shipment that has shipped. Mark the shipment shipped first."
+)
 
 
 def _map_carrier_error(exc: CarrierError) -> HTTPException:
@@ -141,9 +146,11 @@ def list_shipments(
         query = query.filter(Shipment.status == status)
 
     shipments = query.order_by(Shipment.created_at.desc()).offset(skip).limit(limit).all()
+    cocs = cocs_by_shipment(db, company_id, [s.id for s in shipments])
 
     result = []
     for s in shipments:
+        coc = cocs.get(s.id)
         result.append(
             ShipmentResponse(
                 id=s.id,
@@ -159,6 +166,8 @@ def list_shipments(
                 quantity_shipped=s.quantity_shipped,
                 ship_date=s.ship_date,
                 created_at=s.created_at,
+                coc_number=coc.coc_number if coc else None,
+                coc_issued_at=coc.issued_at if coc else None,
             )
         )
     return result
@@ -235,6 +244,7 @@ def get_shipment(
     if not shipment:
         raise HTTPException(status_code=404, detail="Shipment not found")
 
+    coc = cocs_by_shipment(db, company_id, [shipment.id]).get(shipment.id)
     return {
         "id": shipment.id,
         "shipment_number": shipment.shipment_number,
@@ -259,6 +269,8 @@ def get_shipment(
         "cert_of_conformance": shipment.cert_of_conformance,
         "packing_notes": shipment.packing_notes,
         "created_at": to_utc_iso(shipment.created_at),
+        "coc_number": coc.coc_number if coc else None,
+        "coc_issued_at": to_utc_iso(coc.issued_at) if coc else None,
     }
 
 
@@ -650,6 +662,11 @@ def issue_certificate_of_conformance(
     shipment = db.query(Shipment).filter(Shipment.id == shipment_id, Shipment.company_id == company_id).first()
     if not shipment:
         raise HTTPException(status_code=404, detail="Shipment not found")
+    if shipment.status not in (ShipmentStatus.SHIPPED, ShipmentStatus.DELIVERED):
+        # The certificate freezes the shipped quantity and ship date, so it is issued only
+        # for what actually left the building. An existing certificate is still returned.
+        if _coc_for_shipment(db, shipment.id, company_id) is None:
+            raise HTTPException(status_code=409, detail=COC_NOT_SHIPPED_DETAIL)
 
     coc = generate_coc_for_shipment(
         db,

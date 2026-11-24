@@ -71,6 +71,9 @@ class ShipmentResponse(UTCModel):
     quantity_shipped: float
     ship_date: Optional[date] = None
     created_at: datetime
+    # The issued, numbered Certificate of Conformance (None until one is issued).
+    coc_number: Optional[str] = None
+    coc_issued_at: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True, use_enum_values=True)
 
