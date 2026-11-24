@@ -251,17 +251,19 @@ def _map(db: Session, part, vendor: Vendor) -> None:
 
 
 def test_mrp_auto_picker_skips_a_disqualified_vendor_at_every_priority(db_session):
-    """The 6 AM auto-draft job picks a supplier with nobody looking: by supplier-part mapping,
-    then by PO history, then the first active vendor. None of the three may land on a
-    Disqualified vendor; a Conditional one stays pickable (a warning on the PO, not a gate)."""
+    """An AUTO_DRAFT pass picks a supplier with nobody looking: by supplier-part mapping, then by
+    PO history. Neither may land on a Disqualified vendor; a Conditional one stays pickable (a
+    warning on the PO, not a gate). There is no third priority: a part with no sourcing gets
+    no supplier, however many active vendors exist."""
     service = MRPAutoService(db_session, company_id=1)
 
-    # Priority 3 (the fallback, a part with no sourcing) -- a disqualified vendor created
-    # first is still skipped.
+    # No sourcing -- no supplier, not the first active vendor (the removed fallback).
     disqualified = make_vendor(db_session, approval_status="disqualified")
     fresh_part = make_part(db_session)
     assert service._get_preferred_vendor(fresh_part.id) is None
     conditional = make_vendor(db_session, approval_status="conditional")
+    assert service._get_preferred_vendor(fresh_part.id) is None
+    _map(db_session, fresh_part, conditional)
     assert service._get_preferred_vendor(fresh_part.id).id == conditional.id
 
     # Priority 1 -- a mapping to the disqualified vendor is passed over for another MAPPED one.
@@ -282,10 +284,10 @@ def test_mrp_auto_picker_skips_a_disqualified_vendor_at_every_priority(db_sessio
 
 @pytest.mark.parametrize("sourcing", ["mapping", "history"])
 def test_mrp_auto_draft_never_reroutes_a_part_whose_only_supplier_is_disqualified(db_session, sourcing):
-    """Priority 3's "first active vendor" has no ORDER BY and no scope or approval filter. A part
-    whose only supplier on record was Disqualified must NOT fall through to it -- that drafts the
-    part to an unrelated supplier (a calibration lab, say) as a normal-looking PO, silently. The
-    action records why instead, and no purchase order is written; a buyer picks the supplier."""
+    """A part whose only supplier on record was Disqualified must not be drafted to some other
+    active vendor (a calibration lab, say) as a normal-looking PO. The action records which
+    supplier the ASL stopped instead, and no purchase order is written; a buyer picks the
+    supplier."""
     from app.models.mrp import MRPRun, PlanningAction
     from app.services.mrp_auto_service import DisqualifiedSourcingError, MRPAutoMode
 

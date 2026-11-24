@@ -1,6 +1,20 @@
 """
 MRP Auto-Processing Service
-Handles automatic creation of POs and WOs from MRP actions
+
+Drafts purchase orders from MRP ORDER actions and flags EXPEDITE actions. It is NOT scheduled:
+the 06:00 cron runs MRP in REVIEW mode only (``run_mrp_review_job``), because nothing in this
+system executes supply without a named person's Accept (standing ruling). This service is
+reachable only through an explicitly enqueued ``run_mrp_job(mode="AUTO_DRAFT")``, which nothing
+in the repo enqueues today.
+
+Deliberately absent (removed 2026-11-23, plan mrp/6 step 1):
+
+* an AUTO_SUBMIT mode that wrote purchase orders as SENT and work orders as RELEASED;
+* a work-order creator -- it wrote a ``wo_number`` column that does not exist, and the reviewed
+  door (``MRPSupplyService``, behind ``POST /mrp/actions/{id}/supply-draft``) is the one way a
+  MANUFACTURE recommendation becomes a work order; MANUFACTURE actions are left for review;
+* the "first active vendor" fallback for a part with no supplier mapping and no purchase history:
+  such an ORDER action is left with an error asking a buyer to choose the supplier.
 """
 
 import asyncio
@@ -17,8 +31,8 @@ from app.models.part import Part
 from app.models.purchasing import POStatus, PurchaseOrder, PurchaseOrderLine, Vendor
 from app.models.supplier_part import SupplierPartMapping
 from app.models.user import User
-from app.models.work_order import WorkOrder, WorkOrderStatus
 from app.services.audit_service import AuditService
+from app.services.mrp_service import CUSTOMER_SUPPLIED_SUPPLY_DETAIL, is_customer_supplied
 from app.services.supplier_approval_service import approval_warnings, not_disqualified_clause
 
 logger = logging.getLogger(__name__)
@@ -31,9 +45,16 @@ _expedite_tasks: Set[asyncio.Task] = set()
 class MRPAutoMode:
     """MRP Auto-processing modes"""
 
-    REVIEW = "REVIEW"  # Generate actions, require manual approval
-    AUTO_DRAFT = "AUTO_DRAFT"  # Auto-create POs/WOs in draft status
-    AUTO_SUBMIT = "AUTO_SUBMIT"  # Auto-create and release POs/WOs (requires admin)
+    REVIEW = "REVIEW"  # Generate actions, require manual approval (the only scheduled mode)
+    AUTO_DRAFT = "AUTO_DRAFT"  # Draft POs for ORDER actions; MANUFACTURE is left for review
+
+    ALL = frozenset({REVIEW, AUTO_DRAFT})
+
+
+NO_SOURCING_DETAIL = (
+    "This part has no supplier-part mapping and no purchase history, so MRP does not pick a supplier "
+    "for it. Choose one on the MRP supply review."
+)
 
 
 class DisqualifiedSourcingError(ValueError):
@@ -63,13 +84,16 @@ class MRPAutoService:
 
         Args:
             actions: List of MRP actions to process
-            mode: Processing mode (REVIEW, AUTO_DRAFT, AUTO_SUBMIT)
+            mode: Processing mode (REVIEW or AUTO_DRAFT; anything else is refused)
             user_id: User ID for audit (None = system user)
 
         Returns:
-            Dict with counts of processed actions
+            Dict with counts of processed actions. ``manufacture_left_for_review`` counts the
+            MANUFACTURE actions this pass deliberately did not turn into work orders.
         """
-        results = {"pos_created": 0, "wos_created": 0, "actions_processed": 0, "errors": 0}
+        if mode not in MRPAutoMode.ALL:
+            raise ValueError(f"Unknown MRP auto-processing mode {mode!r}; use REVIEW or AUTO_DRAFT")
+        results = {"pos_created": 0, "manufacture_left_for_review": 0, "actions_processed": 0, "errors": 0}
 
         if mode == MRPAutoMode.REVIEW:
             # No auto-processing in review mode
@@ -89,6 +113,13 @@ class MRPAutoService:
                 )
                 if not action or action.processed or action.result_po_id or action.result_wo_id:
                     continue
+                # Never draft supply, or send an expedite, for a customer-supplied part (owner
+                # decision 2026-11-22). A fresh run raises no action for one; this catches an action
+                # minted before the part was flagged, so an AUTO_DRAFT pass never drafts supply for
+                # material the customer furnishes. Recorded on the action like any other refusal.
+                part = self.db.query(Part).filter(Part.id == action.part_id, Part.company_id == self.company_id).first()
+                if part is not None and is_customer_supplied(part):
+                    raise ValueError(CUSTOMER_SUPPLIED_SUPPLY_DETAIL)
                 if action.action_type == PlanningAction.ORDER:
                     # Create purchase order
                     po = self._create_po_from_action(action, mode, user_id)
@@ -99,13 +130,10 @@ class MRPAutoService:
                         action.result_po_id = po.id
 
                 elif action.action_type == PlanningAction.MANUFACTURE:
-                    # Create work order
-                    wo = self._create_wo_from_action(action, mode, user_id)
-                    if wo:
-                        results["wos_created"] += 1
-                        action.processed = True
-                        action.processed_at = datetime.utcnow()
-                        action.result_wo_id = wo.id
+                    # Never drafted automatically: a work order is a person's click through the
+                    # MRP supply review (MRPSupplyService), which numbers it and copies the routing.
+                    results["manufacture_left_for_review"] += 1
+                    continue
 
                 elif action.action_type == PlanningAction.EXPEDITE:
                     # Flag for manual expedite
@@ -131,16 +159,13 @@ class MRPAutoService:
         # Get preferred vendor
         vendor = self._get_preferred_vendor(action.part_id)
         if not vendor:
-            raise ValueError(f"No vendor found for part {part.part_number}")
+            raise ValueError(NO_SOURCING_DETAIL)
 
         # Generate PO number
         po_number = self._generate_po_number()
 
-        # Determine status based on mode
-        if mode == MRPAutoMode.AUTO_SUBMIT:
-            status = POStatus.SENT
-        else:
-            status = POStatus.DRAFT
+        # Always a draft: sending is a buyer's action.
+        status = POStatus.DRAFT
 
         # Create PO (scoped to this tenant)
         po = PurchaseOrder(
@@ -186,49 +211,6 @@ class MRPAutoService:
 
         logger.info(f"Created PO {po_number} from MRP action {action.id}")
         return po
-
-    def _create_wo_from_action(self, action: MRPAction, mode: str, user_id: int = None) -> WorkOrder:
-        """Create work order from MRP action"""
-
-        part = self.db.query(Part).filter(Part.id == action.part_id, Part.company_id == self.company_id).first()
-        if not part:
-            raise ValueError(f"Part {action.part_id} not found")
-
-        # Generate WO number
-        wo_number = self._generate_wo_number()
-
-        # Determine status based on mode
-        if mode == MRPAutoMode.AUTO_SUBMIT:
-            status = WorkOrderStatus.RELEASED
-        else:
-            status = WorkOrderStatus.DRAFT
-
-        # Create WO (scoped to this tenant)
-        wo = WorkOrder(
-            company_id=self.company_id,
-            wo_number=wo_number,
-            part_id=action.part_id,
-            quantity_ordered=action.quantity,
-            due_date=action.required_date,
-            status=status,
-            priority=action.priority,
-            created_by=user_id,
-            notes=f"Auto-created by MRP run {action.mrp_run_id}",
-        )
-        self.db.add(wo)
-        self.db.flush()
-
-        # Audit log
-        self._create_audit_log(
-            action="CREATE_WO",
-            entity_type="WorkOrder",
-            entity_id=wo.id,
-            details={"mrp_action_id": action.id, "mode": mode, "auto_created": True},
-            user_id=user_id,
-        )
-
-        logger.info(f"Created WO {wo_number} from MRP action {action.id}")
-        return wo
 
     def _flag_for_expedite(self, action: MRPAction, user_id: int = None):
         """Flag action for manual expedite and notify Purchasing.
@@ -312,7 +294,9 @@ class MRPAutoService:
         Lookup priority:
         1. Check SupplierPartMapping for vendor associations
         2. Check recent purchase order history for most-used vendor
-        3. Fall back to first active vendor -- only for a part with NO sourcing
+        There is no third priority. A part with no mapping and no history returns ``None`` and its
+        ORDER action is left with ``NO_SOURCING_DETAIL`` -- the old "first active vendor" fallback
+        (no ORDER BY, no scope) put an arbitrary supplier on a normal-looking draft.
 
         No priority ever picks a vendor Disqualified on the Approved Supplier List. A part whose
         only suppliers (by mapping or history) are Disqualified raises
@@ -322,7 +306,7 @@ class MRPAutoService:
             part_id: The part ID to find a vendor for
 
         Returns:
-            Vendor object or None if no active vendors exist
+            Vendor object, or None when the part has no usable sourcing
         """
         # Priority 1: Check supplier part mappings for this part (scoped to this tenant)
         mapping = (
@@ -339,11 +323,9 @@ class MRPAutoService:
             # selectable here is the highest-consequence path in the vendor sweep. is_active
             # was only masking it -- delete_vendor happens to clear that flag.
             #
-            # Do not over-read the risk, though: the only SCHEDULED caller is the 6 AM
-            # ``run_mrp_auto_draft_job`` cron, which PINS ``mode="AUTO_DRAFT"``. AUTO_SUBMIT
-            # does issue POs as SENT with no human in the loop, but no endpoint constructs
-            # this service and nothing in the repo enqueues that mode, so the worst artifact
-            # actually reachable through here is a DRAFT PO awaiting a buyer's Send.
+            # No cron reaches this any more (the 6 AM job is REVIEW-only) and AUTO_SUBMIT is
+            # gone, so the worst artifact reachable through here is a DRAFT PO from an
+            # explicitly enqueued AUTO_DRAFT run, awaiting a buyer's Send.
             .filter(
                 Vendor.is_active == True,
                 Vendor.is_deleted == False,
@@ -385,12 +367,8 @@ class MRPAutoService:
             logger.debug(f"Found vendor {vendor.name} from PO history for part {part_id}")
             return vendor
 
-        # The part HAS sourcing, and every live supplier of it is Disqualified. Priority 3 is an
-        # arbitrary "first active vendor" (no ORDER BY, no scope or approval filter), so falling
-        # through would silently re-route the part to an unrelated supplier -- a normal-looking
-        # draft nobody asked for, where before the disqualification the draft went to the real
-        # supplier and the issue gate stopped it. Refuse instead: the error lands on the MRP
-        # action, and a buyer chooses the supplier on the MRP supply review.
+        # The part HAS sourcing, and every live supplier of it is Disqualified: say so, rather than
+        # the generic no-sourcing text, so the buyer knows which supplier the ASL stopped.
         disqualified = self._disqualified_sourcing_vendor(part_id)
         if disqualified is not None:
             raise DisqualifiedSourcingError(
@@ -398,21 +376,7 @@ class MRPAutoService:
                 "this part is sourced from (supplier-part mapping or purchase history); MRP does not pick "
                 "another supplier for it. Choose one on the MRP supply review."
             )
-
-        # Priority 3: Fall back to first active vendor -- only for a part with no sourcing at all.
-        logger.debug(f"No specific vendor found for part {part_id}, using first active vendor")
-        vendor = (
-            self.db.query(Vendor)
-            .filter(
-                Vendor.is_active == True,
-                Vendor.is_deleted == False,
-                Vendor.company_id == self.company_id,
-                # Never auto-pick a vendor Disqualified on the Approved Supplier List.
-                not_disqualified_clause(),
-            )
-            .first()
-        )
-        return vendor
+        return None
 
     def _disqualified_sourcing_vendor(self, part_id: int) -> Optional[Vendor]:
         """A live, active supplier of this part -- by supplier-part mapping, else by purchase
@@ -512,36 +476,13 @@ class MRPAutoService:
 
         return f"{prefix}{new_num:03d}"
 
-    def _generate_wo_number(self) -> str:
-        """Generate WO number"""
-        today = datetime.now().strftime("%Y%m%d")
-        prefix = f"WO-{today}-"
-
-        last_wo = (
-            self.db.query(WorkOrder)
-            .filter(WorkOrder.company_id == self.company_id, WorkOrder.wo_number.like(f"{prefix}%"))
-            .order_by(WorkOrder.wo_number.desc())
-            .first()
-        )
-
-        if last_wo:
-            last_num = int(last_wo.wo_number.split("-")[-1])
-            new_num = last_num + 1
-        else:
-            new_num = 1
-
-        return f"{prefix}{new_num:03d}"
-
     def _create_audit_log(self, action: str, entity_type: str, entity_id: int, details: Dict, user_id: int = None):
         """Create audit log entry"""
         user = None
         if user_id is not None:
             user = self.db.query(User).filter(User.id == user_id).first()
 
-        resource_type_map = {
-            "PurchaseOrder": "purchase_order",
-            "WorkOrder": "work_order",
-        }
+        resource_type_map = {"PurchaseOrder": "purchase_order"}
         resource_type = resource_type_map.get(entity_type, entity_type)
         description = f"{action} {resource_type} {entity_id}"
 

@@ -407,7 +407,13 @@ IMPORT_TEMPLATES: Dict[str, ImportTemplateSpec] = {
                     "supervisor",
                     "operator",
                 ),
-                _col("department", "Optional free text.", "Machining", "Welding", ""),
+                _col(
+                    "department",
+                    "Optional. One of: Purchasing, Inventory, Sales, Quality, Maintenance, Shipping, Production, Other.",
+                    "Production",
+                    "Quality",
+                    "",
+                ),
             ),
         ),
         ImportTemplateSpec(

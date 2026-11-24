@@ -175,7 +175,7 @@ AI-external token bound to a **Viewer** user.
 ### Credential policy for judgment writes
 
 A few writes record a **person's judgment** — not just a permitted action — and some of them are
-restricted to certain *credentials*, on top of the role gate. The restrictions have eleven sources,
+restricted to certain *credentials*, on top of the role gate. The restrictions have fifteen sources,
 and each row below names its own: owner ruling 3 of 2026-11-05 (the two AI rows), the owner's
 decision of 2026-11-07 (a standing API token may not declare scrap or close work short), this
 PR's extensions of that decision (scrap reasons, the re-stamp short close and the other count
@@ -193,7 +193,15 @@ its re-verification, and a CAR's effectiveness verification), the floor-PIN chan
 PIN policy, is credential administration, a person's act), and the restricted document viewing
 change of 2026-11-19 (migration `131`: a document's access level and a user's export authorization),
 and the owner's decision of 2026-11-20 that a standing API token may file a maintenance log entry
-(an MCP agent on a person's own JWT too, a half not separately put to the owner).
+(an MCP agent on a person's own JWT too, a half not separately put to the owner), the in-process
+inspection sign-off change of 2026-11-23 (signing that an inspection was performed is a person's
+judgment, as an FAI final disposition is; a default taken from the improvement plan, not an owner
+ruling), the Labor Review build of 2026-11-23 (approving labor, clearing an approval and setting
+another person's clock-out are a person's judgment; the plan's recommended defaults, not owner
+rulings), the self-service password change of 2026-11-23 (a person changes their own password in
+their own session; its design, not an owner ruling), and the shipping/2 change of 2026-11-23
+(accepting open quality items at ship and issuing a Certificate of Conformance are a named person's
+conformance judgment).
 This section is the **one list** of those credential rules — what refuses a credential,
 what is deliberately left open (and who decided each), and what is deliberately not refused —
 across the AI governance (ruling 3), floor-gates (ruling 2) and short-count (ruling 1) changes;
@@ -216,7 +224,7 @@ list of credential predicates.
 Writes that apply them — each refused before any write and before any audit row (the 403 texts
 live in `ai_action_applier.py` and `operation_action_gates.py`, for the quality judgments in
 `quality_record_service.py` and `fai_service.py`, for export control
-`app/api/endpoints/customers.py`, for the egress switches, the comment writes, the floor-PIN writes and the document-access writes `app/core/credentials.py`, and for the supplier-approval rows
+`app/api/endpoints/customers.py`, for the egress switches, the comment writes, the floor-PIN writes, the document-access writes, the inspection sign-off and the password change `app/core/credentials.py`, for the labor judgments `app/services/labor_review_service.py`, for the Certificate of Conformance `app/services/shipment_release_service.py`, and for the supplier-approval rows
 `app/services/supplier_approval_service.py` and `app/api/endpoints/purchasing.py`, for the maintenance
 checklist `app/services/maintenance_checklist.py`; where each sits in its route's
 check order is in `docs/API.md` → Work Orders → "Short count at completion" and → AI
@@ -249,8 +257,13 @@ Recommendations):
 | **Posting, editing or deleting a comment, or watching / unwatching a record** — `POST /comments`, `PATCH /comments/{comment_id}`, `DELETE /comments/{comment_id}`, `POST /watchers`, `DELETE /watchers`. Refused in the route's first dependency, before the body is validated or anything is read or written. None of the five is an MCP tool (`catalog.COMMENT_WRITE_OPERATIONS`, part of `EXCLUDED_OPERATIONS`), so a person's own JWT cannot reach them through an agent either. The reads (`GET /comments`, `GET /watchers`, `GET /users/mention-search`) stay open to a token the read gates admit | `is_api_token_credential`, in the `comment_writer` dependency (`app/api/endpoints/comments.py`) | **403** `API_TOKEN_COMMENT_WRITE` (`A comment is a person's own words: an API token cannot post, edit or delete comments or change who is watching a record. Sign in to the app.`) — any token, whatever its role or scope (a read-only or AI-external token meets its own gate's 403 first) | Owner decision 2026-11-16 (work-order comments): a comment is a person's own words, and a watch a person's own preference |
 | **Setting, clearing or unlocking a user's floor PIN, or turning the company's badge sign-in PIN policy on or off** — `PUT /users/{user_id}/floor-pin`, `DELETE /users/{user_id}/floor-pin`, `POST /users/{user_id}/floor-pin/unlock` (Admin, or a Manager for Operator / Supervisor / Shipping / Viewer accounts; see [Users](#users)) and `PUT /companies/me/floor-pin-policy` (Admin). Refused at the top of each route (after the role gate), before the target user or the company is read. None of the four is an MCP tool (`catalog.FLOOR_PIN_OPERATIONS`, part of `EXCLUDED_OPERATIONS`), so a person's own JWT cannot reach them through an agent either. Reading a user's PIN state (`has_floor_pin` on the user record) and the policy (`require_floor_pin` on `GET /companies/me`) is unchanged. The PIN writes' `FLOOR_PIN_SET` / `FLOOR_PIN_CLEARED` / `FLOOR_PIN_UNLOCKED` rows and the policy flip's UPDATE and STATUS_CHANGE rows are **required** evidence (**503**, nothing saved, when one cannot be written) | `is_api_token_credential`, inline at the top of each route | **403** `API_TOKEN_FLOOR_PIN_ADMIN` (`"A floor PIN, and the company's badge-sign-in PIN policy, are set by a person signed in to the app, not an API token: credential administration is a person's act."`) — any token, whatever its role or scope (a read-only or AI-external token meets its own gate's 403 first). A crew-station badge token never reaches these routes (its path fence keeps it on the shop floor) | The floor-PIN change's design (AS9100D 8.5.2, migration `130`, 2026-11-19); not an owner ruling |
 | **Posting a note through Hank** — the `add_note` task, a work-order comment, at `POST /hank/tasks` (prepare) and `POST /hank/tasks/{id}/execute`. Refused before the generic role check and before anything is written, and `GET /hank/capabilities` never offers the kind to a token. **At the MCP door the rule looks past the credential**: `prepare_task` with kind `add_note`, and `execute_task` on an `add_note` task (read first as the caller), answer **403** `"A note is a person's own words: post it from the app, not through an agent."` to an agent on **any** credential, a person's own JWT included (a pre-read that cannot complete is **503**, nothing executed) — `app/mcp/people_only.py` | `is_api_token_credential`, in `hank_task_service._refuse_api_token_for_people_only` over `credentials.PEOPLE_ONLY_HANK_TASK_KINDS` (the MCP package reads the same set) | **403** `API_TOKEN_COMMENT_WRITE` (`A comment is a person's own words: an API token cannot post, edit or delete comments or change who is watching a record. Sign in to the app.`) — any token, whatever its role or scope | Owner decision 2026-11-16 (work-order comments): a comment is a person's own words, so Hank's note takes the comment routes' rule |
+| **Accepting open quality items at ship** — `POST /shipping/{id}/ship` with `acknowledge_exceptions: true` (shipping/2). The acceptance names the person who shipped over an open NCR, a first article not passed or a quality hold. The MCP tool `mark_shipped` is a convenience tool that sends no acknowledgment, so an agent on a person's own JWT gets the 409 list instead | `is_api_token_credential` | **403** `API_TOKEN_RELEASE_ACK` (`"A standing API token cannot accept open quality items. A person signed in to the app must accept them."`). A token shipping a job with nothing open is unchanged | shipping/2 build default (2026-11-23), not an owner ruling: decision D1 (does an open NCR stop shipping) was not answered, so the recommended default is built |
+| **Issuing a Certificate of Conformance** — `POST /shipping/{id}/coc`, with or without open quality items (the certificate states the parts conform). Refused before the shipment is read, even when a certificate already exists. Not an MCP tool (`catalog.EXCLUDED_OPERATIONS`). The automatic issue at ship is unchanged | `is_api_token_credential` | **403** `API_TOKEN_COC_ISSUE` (`"A standing API token cannot issue a Certificate of Conformance. A person signed in to the app must issue it."`) | shipping/2 build default (2026-11-23), not an owner ruling |
 | **Changing a document's access level** — `POST /documents/{id}/access-level` (`standard` / `restricted` / `export_controlled`, applied to the document's whole revision history). Refused before anything is read. Not an MCP tool (`catalog.DOCUMENT_ACCESS_OPERATIONS`, part of `EXCLUDED_OPERATIONS`), so a person's own JWT cannot reach it through an agent either: an agent must not lower an export-controlled drawing to `standard`. The access review (`GET /documents/access-review`, the MCP tool `get_document_access_review`) and every document read stay open to a token the read gates admit | `is_api_token_credential`, inline at the top of the route (after the Admin / Quality role gate) | **403** `API_TOKEN_DOCUMENT_ACCESS_LEVEL` (`A document's access level is changed by an Admin or Quality user signed in to the app, not an API token: deciding who may open a controlled document is a person's judgment.`) — any token, whatever its role or scope (a read-only or AI-external token meets its own gate's 403 first) | Design decision of the restricted document viewing change (2026-11-19, migration `131`), applying the egress-switch reasoning of 2026-11-15; not an owner ruling |
 | **Granting or revoking a user's export authorization** — `PUT /users/{id}/export-authorization`, the only thing that opens an `export_controlled` document. Refused before anything is read. Not an MCP tool (`catalog.DOCUMENT_ACCESS_OPERATIONS`): an agent on a person's JWT must not grant export access, its own user's included. Reading a user's authorization (the user record) stays open | `is_api_token_credential`, inline at the top of the route (after the Admin role gate) | **403** `API_TOKEN_EXPORT_AUTHORIZATION` (`Export authorization is granted or revoked by an Admin signed in to the app, not an API token: deciding who may open export-controlled documents is a person's judgment.`) — any token, whatever its role or scope | The same 2026-11-19 design decision; not an owner ruling |
+| **Changing your own password** — `POST /users/change-password` (any signed-in person, My Settings → Password). Refused before the body's passwords are read. Not an MCP tool (`catalog.PASSWORD_OPERATIONS`, part of `EXCLUDED_OPERATIONS`): an agent on a person's own JWT must not change that person's password. The change, its `password_changed_at` stamp and the `PASSWORD_CHANGE` audit row are one transaction — the audit row is **required** evidence (**503**, nothing saved). It does not end the person's other signed-in sessions (refresh does not read `password_changed_at`; they last until sign-out or the 7-day idle window) | `is_interactive_person`, inline at the top of the route | **403** `PASSWORD_CHANGE_PEOPLE_ONLY` (`Your password is changed by you, signed in to the app: an API token or a shop-floor badge or station token cannot change a password.`) — every API token whatever its role or scope, and every crew-station badge or station token | The self-service password change's design (2026-11-23); not an owner ruling |
+| **Signing off an in-process inspection** — `POST /shop-floor/operations/{operation_id}/inspection`, the only writer of `WorkOrderOperation.inspection_complete` (the generic `PUT /work-orders/operations/{id}` refuses the field **422**). It records that an inspection was performed, under the signer's name, as a **required** `MARK_OPERATION_INSPECTED` audit row (**503**, nothing signed, when it cannot be written). Refused after the role gate and before the operation is read, so a token cannot probe whether an id exists. Not an MCP tool (`catalog.INSPECTION_SIGN_OFF_OPERATIONS`, part of `EXCLUDED_OPERATIONS`), so a person's own JWT cannot reach it through an agent either. A crew-station badge token, which passes `is_api_token_credential`, is refused **403** by the kiosk path fence instead (`deps._is_kiosk_scope_allowed_path`), as labor approval is, whatever badge was scanned. The operation reads carrying `requires_inspection` / `inspection_complete` / `inspection_type` stay open | `is_api_token_credential`, inline at the top of the route (after the role gate) | **403** `API_TOKEN_INSPECTION_SIGN_OFF` (`An inspection is signed off by a person signed in to the app, not an API token: recording that an inspection was performed is a person's judgment.`) — any token, whatever its role or scope (a read-only or AI-external token meets its own gate's 403 first) | The inspection sign-off change (2026-11-23): the improvement plan's recommended default, matching the FAI final disposition; not an owner ruling. Fencing the badge token off is the same change's review follow-up |
+| **Approving labor, clearing an approval, and setting another person's clock-out** — `POST /shop-floor/time-entries/{id}/approve`, `POST /shop-floor/time-entries/{id}/unapprove` and `POST /shop-floor/time-entries/{id}/set-clock-out` (Labor Review). Refused before the entry is read. None of the three is an MCP tool (`catalog.LABOR_JUDGMENT_OPERATIONS`, part of `EXCLUDED_OPERATIONS`), so a person's own JWT cannot reach them through an agent either; the list read `GET /shop-floor/time-entries` stays a tool. A **crew-station badge token is refused too** — the kiosk path fence denies the whole `/shop-floor/time-entries` subtree (`deps.KIOSK_TOKEN_DENIED_PREFIXES`), and each route re-checks the token scope | `is_api_token_credential`, then the kiosk scope, in `shop_floor._refuse_labor_judgment_credential` | **403** `LABOR_JUDGMENT_API_TOKEN_DETAIL` (`Approving labor, clearing an approval and setting a clock-out are a person's judgment: an API token cannot do them. Sign in to the app.`) — any token, whatever its role or scope; a badge token gets the path fence's 403 | Labor Review build (2026-11-23), applying the plan's recommended answer to the open owner question (labor_review/2: an API token may not approve or unapprove labor) and the recommended default for the unanswered decision D5 (the clock-out verb is for Admin / Manager / Supervisor signed in as themselves); not an owner ruling |
 
 Deliberately **not** refused:
 
@@ -258,7 +271,8 @@ Deliberately **not** refused:
   passes every `is_api_token_credential` rule above. For declaring scrap and closing work short that
   is the owner's decision (it names the crew badge: "kiosk, crew badge, desk"); for the count-judgment
   and scrap-reason rows it is this PR's reading. (`is_interactive_person` refuses it, and its path
-  fence keeps it on `/api/v1/shop-floor` anyway.)
+  fence keeps it on `/api/v1/shop-floor` anyway.) The in-process inspection sign-off is the one
+  shop-floor row above it cannot reach: the path fence denies that route to every badge token.
 - An agent presenting a **person's own interactive access JWT** (an MCP client signed in as that
   person) is that person's session to both predicates and is not refused — current behavior, not an
   owner decision. The 2026-11-07 decision
@@ -345,11 +359,33 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 | Hold / resume operation (shop-floor verb) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Resolve / dismiss the blocker behind a hold | ✓ | ✓ | ✓ | | | | |
 | Approve labor (TimeEntry) | ✓ | ✓ | ✓ | | ✓ | | |
+| Labor Review list (`GET /shop-floor/time-entries`) | ✓ | ✓ | ✓ | | ✓ | | |
+| Set another person's clock-out (`POST /shop-floor/time-entries/{id}/set-clock-out`) | ✓ | ✓ | ✓ | | | | |
 | View material ties | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Tie / edit / untie material | ✓ | ✓ | ✓ | | | | |
+| View untied laser nests, tie coverage, the untied-sheet report and a job's tie summary (`GET /laser-nests/untied`, `/untied/coverage`, `/untied/sheet-report`, `/laser-nests/work-orders/{id}/tie-summary`) | ✓ | ✓ | ✓ | | | | |
+| **Untied Laser Nests page** (`/laser-nests/untied`) — nav entry + route, `work_orders:edit` | ✓ | ✓ | ✓ | | | | |
 | View work order templates | ✓ | ✓ | ✓ | | | | |
 | Save / rename / delete a work order template | ✓ | ✓ | ✓ | | | | |
 | Use a work order template (creates DRAFT WOs — up to 20 per call) | ✓ | ✓ | ✓ | | | | |
+| View the Sheet Gaps list (`GET /work-orders/process-sheet-gaps`) | ✓ | ✓ | | | ✓ | | |
+
+> **Sheet Gaps — endpoint mapping (wo_change/2).** `GET /api/v1/work-orders/process-sheet-gaps`
+> lists live work orders whose part's released routing carries process sheets but whose operations
+> hold none of the sheet steps. It is gated `require_role([ADMIN, MANAGER, QUALITY])` — **narrower
+> than View**, and Supervisor is deliberately not in it — and scoped to the active company through
+> `get_current_company_id`. It is a pure read, so it is open to an API token holding one of those
+> roles and is the ordinary MCP tool `list_process_sheet_gaps` (in the read-only catalog). The
+> Quality page's **Sheet Gaps** tab and its `?tab=sheetgaps` deep link use the same set (Admin,
+> Manager, Quality, superuser); any other role stays on the NCR tab. Superuser / Platform Admin bypass
+> the role check, as elsewhere.
+>
+> **New Work Order keeps process sheets — no role change.** `POST /api/v1/work-orders/` stays Admin /
+> Manager / Supervisor; the new optional `routing_operation_id` on each supplied operation changes
+> what the create snapshots, not who may create. `GET /api/v1/work-orders/preview-operations/{part_id}`
+> stays open to any authenticated user in the active company. Neither route gained a credential
+> refusal (the MCP `create_work_order` convenience tool sends no operations, so it always takes the
+> routed path). See `docs/API.md` → Work Orders → "Process sheets on supplied operations".
 
 > **Delete — code now matches the matrix (Admin + Manager).** `DELETE /api/v1/work-orders/{id}`
 > (`app/api/endpoints/work_orders.py`) was previously gated **stricter than this matrix** —
@@ -389,7 +425,26 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > addition to the role gate, **self-approval is
 > forbidden**: a user cannot approve or unapprove their **own** TimeEntry (segregation of duties for
 > the labor-cost gate) — that returns **403** even for an approver-role user. A cross-tenant id returns
-> **404**. Both actions are audited (`time_entry_approve` / `time_entry_unapprove`).
+> **404**. Both actions are audited (`time_entry_approve` / `time_entry_unapprove`). Since Labor Review
+> (2026-11-23): approve refuses **409** an entry that is still clocked in (close the clock first;
+> unapprove stays open); both take an optional body `{"version": n}` and refuse **409** when the entry
+> changed since the approver read it; and both refuse every standing API token and every kiosk badge
+> **403** and are no longer MCP tools — see the Credential policy row above.
+>
+> **Labor Review — endpoint mapping (2026-11-23).** `GET /api/v1/shop-floor/time-entries` (the list
+> behind the `/labor-review` page) is `require_role([ADMIN, MANAGER, SUPERVISOR, QUALITY])`, the same set
+> as approval; a kiosk badge is **403** (the path fence denies the whole `/shop-floor/time-entries`
+> subtree), while a full API token may read it (MCP tool `list_time_entries`).
+> `POST /api/v1/shop-floor/time-entries/{id}/set-clock-out` is `require_role([ADMIN, MANAGER, SUPERVISOR])`
+> — **Quality may review and approve labor but not set a clock-out** — and, like approval, forbids the
+> caller's **own** entry (**403**), refuses an **approved** entry (**409**), and refuses every API token
+> and kiosk badge (**403**). It changes hours only; when the work order has a job cost it also rebuilds
+> that job cost's time-entry labor lines with a required `RECALCULATE` audit row, a deliberate exception
+> to job-cost writes otherwise being Admin / Manager only. The SPA gates the `/labor-review` route and
+> its nav entry (Production → Shop Floor → Labor Review) on `quality:inspect`, which the default role
+> map grants to exactly that set; the Close clock / Correct actions appear only where the server's
+> `can_set_clock_out` says so, and the dashboard's Live Shop Activity **Close clock** link is shown to
+> Admin / Manager / Supervisor (a client-side copy of the server's role set) on someone else's entry.
 
 > **Start operation — both start verbs are role-gated** (the office verb since `feat/work-center-op-pool`,
 > the shop-floor verb since owner decision P0.4, 2026-11-13).
@@ -811,6 +866,27 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > drawing — read-only and still tenant-scoped (a cross-tenant or soft-deleted nest → **404**). All
 > writes are audited; nests are soft-deleted, never hard-deleted. See `docs/API.md` → Laser Nests.
 
+> **Untied laser nests — endpoint mapping.** The four untied-nest reads —
+> `GET /api/v1/laser-nests/untied`, `GET /api/v1/laser-nests/untied/coverage`,
+> `GET /api/v1/laser-nests/untied/sheet-report` and
+> `GET /api/v1/laser-nests/work-orders/{work_order_id}/tie-summary` — are
+> `require_role([ADMIN, MANAGER, SUPERVISOR])`, the same trio that may tie a sheet
+> (`work_order_materials` `WRITE_ROLES`), so every **Tie this sheet** button a reader sees is one the
+> server will accept. Quality, Operator, Shipping and Viewer get **403**; a kiosk station token is
+> refused on all four. They are pure reads (no audit, ledger or event row) and tenant-scoped; the
+> tie summary answers **404** for another company's or a deleted work order. The page that uses them,
+> **Untied Laser Nests** (`/laser-nests/untied`), and its Production nav entry are both gated on
+> `work_orders:edit` (`frontend/src/utils/routeAccess.ts` rule `{ prefix: '/laser-nests', permission:
+> 'work_orders:edit' }`), which is exactly that trio plus a platform admin; the Work Order Detail
+> "N of M nests have no sheet tied" line and the Release warning fetch the summary only for the same
+> permission. Its two actions add **no new write**: **Tie this sheet** is the existing
+> `POST /api/v1/work-orders/{id}/material-allocations` (Tie / edit / untie material row) and **Start
+> cycle count** is the existing `POST /api/v1/inventory/cycle-counts`, each with its own gate and
+> refusals. The four reads are ordinary MCP tools (`list_untied_laser_nests`,
+> `get_laser_nest_tie_coverage`, `get_untied_sheet_report`, `get_work_order_nest_tie_summary`), so a
+> standing API token held by one of the three roles may call them; nothing about them is a judgment
+> write. Floor screens (dispatch board, kiosk, crew station) never call them.
+
 > **Dispatch run order — endpoint mapping.** Setting the order operators see work in is a planner
 > act, gated to the Work Orders **Edit** row above —
 > `require_role([ADMIN, MANAGER, SUPERVISOR])`, tenant-scoped:
@@ -1106,6 +1182,7 @@ v1 (2026-11-16): comment threads, @mentions and watchers on **work orders only**
 | Create | ✓ | ✓ | ✓ | | | | |
 | Edit | ✓ | ✓ | ✓ | | | | |
 | **Arm automatic BOM backflush** (`backflush_components`) | ✓ | ✓ | ✓ | | | | |
+| **Mark customer-supplied** (`customer_supplied`) | ✓ | ✓ | ✓ | | | | |
 | View backflush readiness / dry-run preview | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | **Deactivate / reactivate** (`POST /parts/{id}/deactivate` · `/activate`) | ✓ | ✓ | | | | | |
 | Delete | ✓ | | | | | | |
@@ -1155,6 +1232,17 @@ v1 (2026-11-16): comment threads, @mentions and watchers on **work orders only**
 > (any authenticated user in the tenant) and are **pure reads: they write nothing**, not even an audit
 > row. See `docs/API.md` → Parts → Part Schema, and
 > [docs/MATERIAL_CONSUMPTION_PLAN.md](MATERIAL_CONSUMPTION_PLAN.md) → "Exposing the flag (PR 4.5)".
+
+> **The customer-supplied row is the ordinary Edit row too** (migration `134`). `Part.customer_supplied`
+> marks a part the customer furnishes, and MRP then creates no demand for it and refuses to turn any
+> older action for it into supply (owner decision 2026-11-22; see
+> [API.md → MRP → Customer-supplied parts](API.md#customer-supplied-parts-mrp)). It is set or cleared
+> as an ordinary field on `PUT /parts/{id}` / `PUT /materials/{id}`, so its tier is those routes'
+> `require_role([ADMIN, MANAGER, SUPERVISOR])`: no gate, refusal or reason of its own, and the change
+> is recorded on the handler's `log_update` row (`resource_type="part"` through either door). Like
+> `backflush_components` it is absent from `PartBase` / `PartCreate` and from both CSV importers, so a
+> part is always created unflagged. Neither route refuses an API token: a full token bound to one of
+> those roles can set it, and a read-only or AI-external token is refused by the read-only gate.
 
 > **Deactivate / reactivate a part — ADMIN / MANAGER, deliberately narrower than the Edit row.**
 > `POST /parts/{id}/deactivate` and `POST /parts/{id}/activate` (shipped with the Combine/Merge SKUs
@@ -2253,9 +2341,10 @@ contract; they do not bypass tenant scoping or the read-only context fence.
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
 |------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
-| View | ✓ | ✓ | ✓ | | | ✓ | ✓ |
+| View | ✓ | ✓ | ✓ | | ✓ | ✓ | ✓ |
 | Create | ✓ | ✓ | ✓ | | | ✓ | |
-| Complete | ✓ | ✓ | ✓ | | | ✓ | |
+| Complete | ✓ | ✓ | ✓ | | ⊕ | ✓ | |
+| Ship over open quality items (acknowledgment + reason) | ✓ | ✓ | | | ✓ | | |
 | Rate-shop / validate address (`shipping:rate`) | ✓ | ✓ | ✓ | | | ✓ | |
 | Buy label / BOL / schedule pickup (`shipping:label`) | ✓ | ✓ | ✓ | | | ✓ | |
 | Void / refund label (`shipping:void`) | ✓ | ✓ | ✓ | | | ✓ | |
@@ -2299,6 +2388,33 @@ contract; they do not bypass tenant scoping or the read-only context fence.
 > tenant-scoped (cross-tenant `shipment_id` → **404**). A CoC is also **auto-issued on ship** when
 > required; the auto-issue runs in the ship handler's context and is not separately role-gated beyond
 > the existing ship permission.
+>
+> **Shipping over open quality items (shipping/2, 2026-11-23).** A shipment's
+> `release_exceptions` (`quality_gate_service.shipment_release_exceptions`: an NCR on the job not
+> dispositioned, or dispositioned and not CLOSED; the latest first article per part not passed; an
+> open `quality_hold` blocker) change three routes. `POST /shipping/{id}/ship` answers **409**
+> listing them unless the body carries `acknowledge_exceptions: true` and a `reason` (3+ characters)
+> from **Admin, Manager or Quality**; the acceptance is required audit evidence
+> (`SHIPPED_OVER_QUALITY_EXCEPTIONS`, **503** and nothing shipped when it cannot be written), and
+> the required CoC is then **withheld** (`COC_WITHHELD`, also required) for Quality to issue. The
+> ship route's role gate admits **QUALITY** for this purpose only (⊕): a Quality user shipping a job
+> with nothing open is refused **403**. Supervisor and Shipping still ship a clean job and get the
+> 409 list on one with open items. `POST /shipping/{id}/coc` answers **409** until the shipment is
+> SHIPPED or DELIVERED, and over open items needs the same acknowledgment
+> (`COC_ISSUED_OVER_EXCEPTIONS`, required; the accepted items are frozen into the certificate's
+> snapshot). Quality's frontend permission set carries `shipping:view` (read only, no create or
+> complete) so the Shipping list, where the withheld certificate is issued, and the packing slip
+> are reachable; the server's shipping reads were already open to any authenticated tenant user.
+> The backend default (`role_permission.DEFAULT_ROLE_PERMISSIONS`) gains it too, so Quality also
+> gets what reads `shipping:view` there: the Shipping section of Hank's shift briefing and Hank's
+> shipping packet, plus, in the SPA, the Shipping Outlook dashboard widget, the Warehouse and
+> Shipping navigation and the packing-slip / shipping-label print pages. A company whose Quality role
+> carries a **stored** permission override keeps that override unchanged; add `shipping:view` to it
+> in role administration for Quality to reach the Shipping list.
+> Both writes refuse a standing API token (see
+> [Credential policy for judgment writes](#credential-policy-for-judgment-writes)); issuing the CoC
+> is not an MCP tool, and the `mark_shipped` MCP tool is a convenience tool that never sends an
+> acknowledgment.
 
 ### Quality
 
@@ -2325,6 +2441,15 @@ contract; they do not bypass tenant scoping or the read-only context fence.
 > `require_role([ADMIN, MANAGER, SUPERVISOR, QUALITY])` (`app/api/endpoints/shop_floor.py`,
 > `mark_operation_inspected`). The role set matches the matrix exactly — this repo has no separate
 > `INSPECTOR` role, so operation inspection is performed by Admin / Manager / Supervisor / Quality.
+> It is the flag's **only** writer: `PUT /work-orders/operations/{id}` refuses `inspection_complete`
+> **422**. On top of the role gate, only a person may sign: any standing API token is **403**
+> (`API_TOKEN_INSPECTION_SIGN_OFF`, see
+> [Credential policy for judgment writes](#credential-policy-for-judgment-writes)), a crew-station
+> badge token is **403** by the kiosk path fence whatever its role, and the route is not an MCP
+> tool. The `MARK_OPERATION_INSPECTED` audit row is required evidence (**503**, nothing signed). The
+> app offers **Sign off** on Work Order Detail operation rows and Shop Floor operation cards to the
+> same four roles (plus Platform Admin and superusers, whom `require_role` admits); every other role
+> sees the "Inspection required" / "Inspected" chip only.
 >
 > **FAI evidence has separate authoring and final-disposition gates.** Every FAI/characteristic
 > write, including prefill, requires Admin / Manager / Supervisor / Quality. Setting a final status
@@ -2689,6 +2814,7 @@ UI controls do not grant API authority. See [API: Documents](API.md#documents).
 | Edit | ✓ | | | | | | |
 | Delete | ✓ | | | | | | |
 | Roles | ✓ | | | | | | |
+| Department pick list + users whose stored Department is off it (`GET /users/departments`; read-only) | ✓ | | | | | | |
 | Floor PIN — set / reset / clear / unlock (`PUT` / `DELETE /users/{user_id}/floor-pin`, `POST …/floor-pin/unlock`; signed in — any API token 403). Manager: Operator / Supervisor / Shipping / Viewer accounts only | ✓ | ✓ | | | | | |
 | Grant / revoke export authorization (`PUT /users/{id}/export-authorization`; reason required; no API token) | ✓ | | | | | | |
 | Own profile + notification settings (`/users/me/*`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -2804,7 +2930,9 @@ UI controls do not grant API authority. See [API: Documents](API.md#documents).
 > fields when it only cleared residual state — an expired lock or attempts short of 5 — and the
 > endpoint is idempotent: a no-op unlock writes no row); the self-service
 > `POST /users/change-password` likewise records a `PASSWORD_CHANGE` audit event (mirroring
-> `reset-password`; the password/hash is never included).
+> `reset-password`; the password/hash is never included) as **required** evidence in the same
+> transaction as the change (**503**, nothing saved, on audit loss), and is refused **403** to every
+> API token and badge / station token (see [Credential policy for judgment writes](#credential-policy-for-judgment-writes)).
 >
 > Creation, update, approval, password reset, activation, deactivation and unlock commit their
 > required evidence atomically (**503** and rollback on audit loss). Deactivation includes every
@@ -2831,10 +2959,12 @@ UI controls do not grant API authority. See [API: Documents](API.md#documents).
 > Public `/auth/register-public` chooses roles server-side: the empty-install bootstrap creates
 > an active Platform Admin/superuser; later signups create inactive Viewers without superuser
 > authority. Accepted creation requires an atomic registration audit (**503** on loss); ordinary
-> duplicate/refusal responses remain uniform. Both company-onboarding routes create a tenant
-> Admin without superuser authority and atomically record company/user creation. Platform company
-> updates, including activation, require a target-company audit in the same transaction (**503**
-> and rollback on loss). See [API: onboarding](API.md#company-onboarding-and-platform-administration).
+> duplicate/refusal responses remain uniform. **No route creates a company**: both
+> company-creation routes — public `POST /companies/register` and platform-admin
+> `POST /platform/companies` — were removed on 2026-11-23, so a Platform Admin can no longer
+> onboard a tenant. The only `Company` constructor is that empty-install bootstrap in
+> `POST /auth/register-public`. Platform company updates, including activation, still require a
+> target-company audit in the same transaction (**503** and rollback on loss). See [API: onboarding](API.md#company-onboarding-and-platform-administration).
 >
 > **Password-strength policy.** A password set on any of these paths — `POST /users/` (create),
 > `POST /users/{id}/reset-password`, and self-service `POST /users/change-password` — must satisfy
@@ -2842,9 +2972,9 @@ UI controls do not grant API authority. See [API: Documents](API.md#documents).
 > blocklist in `app/schemas/user.py`), the **same policy** as `POST /auth/register`. There are **no
 > character-class requirements**: the uppercase / lowercase / number / special-char rules were removed
 > on 2026-07-29 in favor of length + blocklist per NIST SP 800-63B §5.1.1.2, and the blocklist was
-> expanded in the same change. The same policy also governs
-> the **first-admin `admin_password`** on the two company-creation paths — the unauthenticated
-> `POST /companies/register` (company self-registration) and platform-admin `POST /platform/companies`.
+> expanded in the same change. There is no first-admin `admin_password` path any more: both
+> company-creation routes (`POST /companies/register` and `POST /platform/companies`) were removed
+> on 2026-11-23.
 > The user CSV import applies it per row to user-supplied passwords; operator auto-generated (badge)
 > passwords are exempt. See `docs/API.md` → Users.
 >
@@ -2895,7 +3025,7 @@ role permissions:
 | Open CARs and Pending FAIs tiles, Quality Pulse panel | `quality:view` | Admin, Manager, Supervisor, Quality, Viewer |
 | Overdue / Due Today work-order lists, Late Jobs, Blocked Jobs, Today's Output, Active Downtime, Maintenance Due | `work_orders:view` | All |
 | Inspection Queue | `receiving:view` | Admin, Manager, Supervisor, Quality, Viewer |
-| Shipping Outlook | `shipping:view` | Admin, Manager, Supervisor, Shipping, Viewer |
+| Shipping Outlook | `shipping:view` | Admin, Manager, Supervisor, Quality, Shipping, Viewer |
 | Delivery & Yield KPIs, Visitors On Site | Admin, Manager or Supervisor **role** (mirrors the endpoints' `require_role`, so a permission override cannot widen it) | Admin, Manager, Supervisor |
 
 Superusers pass every rule; Platform Admins pass every rule except Setup progress, which checks for
@@ -3623,6 +3753,7 @@ and writes an `EXPORT` audit row through `AuditService`:
 | API tokens for bots / MCP clients (`/api-tokens` issue/list/revoke) | ✓ | | | | | | |
 | Visitor sign-in stations (`/visitor-logs/stations` create/list/revoke/reset-pin) | ✓ | ✓ | | | | | |
 | Crew kiosk stations (`/shop-floor/kiosk-stations` create/list/revoke/reset-pin) | ✓ | ✓ | | | | | |
+| System Health (`GET /admin/system-health`; read-only; a full Admin API token reads it, read-only / AI-external tokens refused; a cron's last-run `counts` are install-wide, so only a platform administrator gets them -- a tenant Admin sees outcome and timing with `counts` `{}`) | ✓ | | | | | | |
 | System | ✓ | | | | | | |
 
 > **Badge sign-in PIN policy (AS9100D 8.5.2, migration `130`).** `PUT /companies/me/floor-pin-policy`

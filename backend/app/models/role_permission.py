@@ -181,6 +181,9 @@ DEFAULT_ROLE_PERMISSIONS = {
         'inventory:view',
         'receiving:view',
         'receiving:inspect',
+        # Read only (shipping/2): Quality accepts open quality items at ship and issues a
+        # withheld CoC from the Shipping list; it gets no create or complete permission.
+        'shipping:view',
         'quality:view',
         'quality:inspect',
         'quality:approve',

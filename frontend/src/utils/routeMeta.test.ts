@@ -44,6 +44,12 @@ describe('getRouteTitle', () => {
     expect(getBreadcrumbParent('/fabrication-quotes')).toBeNull();
   });
 
+  it('titles Labor Review regardless of its filter params', () => {
+    expect(getRouteTitle(loc('/labor-review'))).toBe('Labor Review');
+    expect(getRouteTitle(loc('/labor-review', '?status=open&flag=overlap&page=2'))).toBe('Labor Review');
+    expect(getBreadcrumbParent('/labor-review')).toBeNull();
+  });
+
   it('resolves the BOM unit-mismatch sub-route ahead of the bare /bom title', () => {
     expect(getRouteTitle(loc('/bom'))).toBe('Bill of Materials');
     expect(getRouteTitle(loc('/bom/uom-mismatches'))).toBe('BOM Unit Mismatches');
@@ -215,5 +221,12 @@ describe('formatTabTitle', () => {
   it('keeps the generic fallback as the bare app name — never doubled', () => {
     expect(formatTabTitle('Werco ERP')).toBe('Werco ERP');
     expect(formatTabTitle('Werco ERP')).not.toBe('Werco ERP · Werco ERP');
+  });
+});
+
+describe('getRouteTitle — Untied Laser Nests', () => {
+  it('titles the worklist and its sheet-report view', () => {
+    expect(getRouteTitle(loc('/laser-nests/untied'))).toBe('Untied Laser Nests');
+    expect(getRouteTitle(loc('/laser-nests/untied', '?view=sheets'))).toBe('Untied Laser Nests');
   });
 });

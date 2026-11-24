@@ -213,6 +213,7 @@ from app.services.completion_inventory_service import (
 )
 from app.services.material_tie_part_gate import PART_NOT_TIEABLE_REASON, part_is_tieable_material
 from app.services.operational_event_service import OperationalEventService
+from app.services.owned_property_service import COMPANY_OWNED_ITEM_CLAUSES
 
 logger = logging.getLogger(__name__)
 
@@ -417,9 +418,13 @@ def is_auto_drawable_item(item: InventoryItem) -> bool:
 # readiness, the sheet-stock matcher and Hank's same-part stock. Deliberately NOT folded
 # into ``CONSUMABLE_ITEM_CLAUSES``: that tuple (and ``is_consumable_item``) also gates
 # what may be PINNED, combined and checked out, and an owned lot must stay pinnable.
+#
+# The ownership half is ``owned_property_service.COMPANY_OWNED_ITEM_CLAUSES``, shared with
+# MRP, the low-stock / reorder readers and valuation, which count the company's own stock
+# but keep their own status rules.
 AUTO_DRAW_ITEM_CLAUSES = (
     *CONSUMABLE_ITEM_CLAUSES,
-    InventoryItem.ownership == OwnershipType.COMPANY.value,
+    *COMPANY_OWNED_ITEM_CLAUSES,
 )
 
 

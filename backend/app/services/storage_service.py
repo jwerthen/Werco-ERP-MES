@@ -33,7 +33,7 @@ import uuid
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator, Optional, Tuple
+from typing import Any, Dict, Iterator, Optional, Tuple
 
 from app.core.config import settings
 
@@ -392,3 +392,132 @@ def ref_exists(ref: str) -> bool:
 def new_object_name(filename: Optional[str]) -> str:
     """A unique, never-user-controlled object name preserving a sanitized extension."""
     return f"{uuid.uuid4()}{sanitize_ext(filename)}"
+
+
+# ---------------------------------------------------------------------------
+# Configuration summary for health output. Pure read of settings and the local
+# filesystem: it builds no backend, makes no network call and creates no directory.
+# ---------------------------------------------------------------------------
+
+DEFAULT_UPLOAD_DIR = "/app/uploads"
+
+STORAGE_WARNING_EPHEMERAL = (
+    "Documents are stored on local disk with no mounted volume found. Files uploaded to this "
+    "service are lost on the next redeploy. Set STORAGE_BACKEND=s3 on the API and the worker."
+)
+STORAGE_WARNING_UNKNOWN = (
+    "Documents are stored on local disk and the mount state could not be read. Confirm a "
+    "persistent volume is attached, or set STORAGE_BACKEND=s3 on the API and the worker."
+)
+
+
+#: Reported as ``endpoint_host`` when ``S3_ENDPOINT_URL`` is set but yields no hostname
+#: (no scheme, or malformed), so a custom endpoint never reads as the AWS default.
+UNPARSEABLE_ENDPOINT_HOST = "(unparseable endpoint)"
+
+
+def _endpoint_hostname(endpoint_url: Optional[str]) -> Optional[str]:
+    """Hostname only: ``urlparse().hostname`` drops scheme, userinfo, port, path and query.
+
+    ``None`` only when no endpoint is configured (the AWS default); a configured URL
+    with no parseable hostname is ``UNPARSEABLE_ENDPOINT_HOST``, never ``None``.
+    """
+    if not endpoint_url:
+        return None
+    try:
+        from urllib.parse import urlparse
+
+        return urlparse(endpoint_url).hostname or UNPARSEABLE_ENDPOINT_HOST
+    except ValueError:
+        return UNPARSEABLE_ENDPOINT_HOST
+
+
+def _path_on_mounted_volume(path: str) -> Optional[bool]:
+    """True when ``path`` or an ancestor other than ``/`` is a mount point.
+
+    Starts from the nearest EXISTING ancestor, since the configured directory may not
+    have been created yet. ``None`` when the filesystem cannot be read.
+    """
+    try:
+        current = os.path.realpath(path)
+        while current and not os.path.exists(current):
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+        root = os.path.abspath(os.sep)
+        while current and current != root:
+            if os.path.ismount(current):
+                return True
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+        return False
+    except OSError:
+        return None
+
+
+def describe_storage_configuration(*, include_location: bool = True) -> Dict[str, Any]:
+    """Which document-storage backend new writes use, and where it points -- no secrets.
+
+    Returns a dict shaped as ``app.schemas.storage.StorageStatus``. Reads
+    ``settings.STORAGE_BACKEND`` (not ``get_storage()``) so it never instantiates the
+    S3 client, and never reports credentials, a full endpoint URL or a filesystem path.
+
+    ``include_location=False`` nulls ``bucket`` / ``endpoint_host`` / ``region``: the
+    unauthenticated ``/health/detailed`` passes it, so the document store's address is
+    served only on the authenticated ``/api/v1/setup/health``.
+
+    For local storage it describes the directory writes actually use: an unset
+    ``UPLOAD_DIR`` is ``/app/uploads``, while a SET-but-empty one makes
+    ``resolve_upload_dir`` fall back to ``UPLOAD_DIR_FALLBACK``, so that is what is
+    checked. It does not repeat the fallback taken when the preferred directory cannot
+    be created (that needs ``makedirs``, and this is a pure read).
+    """
+    backend = (settings.STORAGE_BACKEND or "local").lower()
+    if backend == "s3":
+        return {
+            "backend": "s3",
+            "durability": "durable",
+            "bucket": (settings.S3_BUCKET_NAME or None) if include_location else None,
+            "endpoint_host": _endpoint_hostname(settings.S3_ENDPOINT_URL) if include_location else None,
+            "region": (settings.AWS_REGION or None) if include_location else None,
+            "upload_dir_configured": None,
+            "upload_dir_exists": None,
+            "upload_dir_on_mounted_volume": None,
+            "warning": None,
+        }
+
+    configured = os.getenv("UPLOAD_DIR")
+    if configured is None:
+        upload_dir = DEFAULT_UPLOAD_DIR
+    elif configured:
+        upload_dir = configured
+    else:
+        # Set but empty: makedirs("") fails in resolve_upload_dir, so writes go to the fallback.
+        upload_dir = os.path.abspath(os.getenv("UPLOAD_DIR_FALLBACK", "./uploads"))
+    try:
+        exists: Optional[bool] = os.path.isdir(upload_dir)
+    except OSError:
+        exists = None
+    mounted = _path_on_mounted_volume(upload_dir)
+    durability: str
+    warning: Optional[str]
+    if mounted is True:
+        durability, warning = "volume", None
+    elif mounted is False:
+        durability, warning = "ephemeral", STORAGE_WARNING_EPHEMERAL
+    else:
+        durability, warning = "unknown", STORAGE_WARNING_UNKNOWN
+    return {
+        "backend": "local",
+        "durability": durability,
+        "bucket": None,
+        "endpoint_host": None,
+        "region": None,
+        "upload_dir_configured": bool(configured),
+        "upload_dir_exists": exists,
+        "upload_dir_on_mounted_volume": mounted,
+        "warning": warning,
+    }

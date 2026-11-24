@@ -10,7 +10,6 @@ from sqlalchemy import func, or_, tuple_
 
 from app.db.locks import acquire_generator_lock
 from app.models.company import Company
-from app.models.inventory import InventoryItem
 from app.models.mrp import MRPAction, MRPRun, MRPRunStatus, PlanningAction
 from app.models.operations_inbox import OperationalInboxState
 from app.models.part import Part
@@ -22,6 +21,7 @@ from app.models.work_order import WorkOrder, WorkOrderStatus
 from app.models.work_order_blocker import WorkOrderBlocker
 from app.schemas.operations_inbox import InboxAssignee, OperationalInboxItem, OperationalInboxResponse
 from app.schemas.work_order_blocker import WorkOrderBlockerUpdate
+from app.services.low_stock_service import low_stock_query
 from app.services.work_order_blocker_service import WorkOrderBlockerService
 
 # Every category is gated by the same module permission used by ERP navigation.
@@ -92,17 +92,6 @@ class OperationalInboxService:
     def _queries(self):
         cid = self.company_id
         active_wo = [WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS, WorkOrderStatus.ON_HOLD]
-        stock = (
-            self.db.query(
-                InventoryItem.part_id.label('part_id'),
-                func.coalesce(func.sum(InventoryItem.quantity_on_hand), 0).label('quantity'),
-                func.max(InventoryItem.updated_at).label('updated'),
-            )
-            .filter(InventoryItem.company_id == cid, InventoryItem.is_active.is_(True))
-            .group_by(InventoryItem.part_id)
-            .subquery()
-        )
-        qty = func.coalesce(stock.c.quantity, 0)
         po_due = func.coalesce(
             PurchaseOrder.supplier_confirmed_date,
             PurchaseOrder.expected_date,
@@ -167,18 +156,9 @@ class OperationalInboxService:
                     WorkOrderBlocker.status.in_(['open', 'acknowledged']),
                 ),
             ),
-            'low_stock': (
-                Part,
-                self.db.query(Part, qty, stock.c.updated)
-                .outerjoin(stock, Part.id == stock.c.part_id)
-                .filter(
-                    Part.company_id == cid,
-                    Part.is_active.is_(True),
-                    Part.is_deleted.is_(False),
-                    Part.reorder_point > 0,
-                    qty < Part.reorder_point,
-                ),
-            ),
+            # The one low-stock rule (app.services.low_stock_service): at or below the reorder
+            # point, company-owned stock only -- the same parts GET /inventory/low-stock lists.
+            'low_stock': (Part, low_stock_query(self.db, cid)),
             'quality_ncr': (
                 NonConformanceReport,
                 self.db.query(NonConformanceReport).filter(
@@ -289,7 +269,7 @@ class OperationalInboxService:
             severity = 'high' if record.severity in ('critical', 'high') else 'medium'
         elif kind == 'low_stock':
             _, quantity, changed = row
-            title = f'{record.part_number} below reorder point'
+            title = f'{record.part_number} at or below reorder point'
             detail = f'{float(quantity):g} on hand; reorder point {record.reorder_point:g}. Includes active stock in all inventory statuses.'
             href, action = '/warehouse?tab=inventory&filter=low_stock', 'Review stock, allocations and replenishment'
             facts += [quantity, changed, record.reorder_point]

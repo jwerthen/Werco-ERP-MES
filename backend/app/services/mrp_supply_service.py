@@ -21,9 +21,9 @@ from app.models.work_center import WorkCenter
 from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.schemas.mrp import MRPSupplyDraftRequest, MRPSupplyDraftResponse
 from app.schemas.purchasing import POCreate, POLineCreate
-from app.schemas.work_order import WorkOrderCreate, WorkOrderOperationCreate
+from app.schemas.work_order import WorkOrderCreate, WorkOrderCreateOperation
 from app.services.audit_service import AuditService
-from app.services.mrp_service import MRPService
+from app.services.mrp_service import CUSTOMER_SUPPLIED_SUPPLY_DETAIL, MRPService, is_customer_supplied
 from app.services.operational_event_service import OperationalEventService
 from app.services.supplier_approval_service import (
     approval_warnings,
@@ -187,7 +187,12 @@ class MRPSupplyService:
             .all()
         )
         blocked_reason = None
-        if not latest or latest.id != run.id:
+        if is_customer_supplied(part):
+            # First, so the planner reads why -- otherwise the empty recomputed demand would read
+            # as "inventory covers this shortage". Also what refuses the purchase batch, which
+            # reviews each line through here.
+            blocked_reason = CUSTOMER_SUPPLIED_SUPPLY_DETAIL
+        elif not latest or latest.id != run.id:
             blocked_reason = 'A newer MRP run is available. Review its current recommendation before creating supply.'
         elif quantity <= 0:
             blocked_reason = (
@@ -448,7 +453,7 @@ class MRPSupplyService:
             if not center:
                 raise HTTPException(422, 'Choose an active work center in this workspace.')
             operations = [
-                WorkOrderOperationCreate(
+                WorkOrderCreateOperation(
                     sequence=10, operation_number='10', name='Supply production', work_center_id=center.id
                 )
             ]
@@ -479,7 +484,11 @@ class MRPSupplyService:
         if operations:
             for operation in operations:
                 self.db.add(
-                    WorkOrderOperation(company_id=self.company_id, work_order_id=wo.id, **operation.model_dump())
+                    WorkOrderOperation(
+                        company_id=self.company_id,
+                        work_order_id=wo.id,
+                        **operation.model_dump(exclude={'routing_operation_id'}),
+                    )
                 )
         else:
             snapshots = create_routing_operations_for_work_order(

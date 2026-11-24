@@ -2,11 +2,16 @@
 Platform administration endpoints for Werco oversight.
 All endpoints require PLATFORM_ADMIN role.
 Provides read-only cross-company browsing and company management.
+
+There is deliberately no route here that creates a company: Werco is the only company
+on this system (owner decision 2026-11-23, which also deleted public company
+self-registration). The one company row is made by the empty-install first-user
+bootstrap in ``POST /auth/register-public``.
 """
 
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -17,10 +22,9 @@ from app.models.part import Part
 from app.models.user import User
 from app.models.work_center import WorkCenter
 from app.models.work_order import WorkOrder, WorkOrderStatus
-from app.schemas.company import CompanyCreate, CompanyListResponse, CompanyResponse, CompanyUpdate
+from app.schemas.company import CompanyListResponse, CompanyResponse, CompanyUpdate
 from app.schemas.user import UserResponse
 from app.services.audit_service import AuditService
-from app.services.company_onboarding import onboard_company
 from app.services.user_provisioning import atomic_security_write
 
 router = APIRouter()
@@ -60,39 +64,6 @@ def list_companies(db: Session = Depends(get_db), _: User = Depends(require_plat
         )
 
     return results
-
-
-@router.post("/companies", response_model=CompanyResponse, summary="Create a company")
-def create_company(
-    request: Request,
-    payload: CompanyCreate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_platform_admin),
-):
-    """Create a new company with initial admin user."""
-    # Check email uniqueness
-    if db.query(User).filter(User.email == payload.admin_email).first():
-        raise HTTPException(status_code=400, detail="Admin email already registered")
-
-    company, admin_user = onboard_company(
-        db=db,
-        name=payload.name,
-        slug=payload.slug,
-        admin_email=payload.admin_email,
-        admin_first_name=payload.admin_first_name,
-        admin_last_name=payload.admin_last_name,
-        admin_password=payload.admin_password,
-        parent_company_id=payload.parent_company_id,
-        logo_url=payload.logo_url,
-        timezone=payload.timezone,
-        actor=current_user,
-        request=request,
-    )
-
-    user_count = db.query(User).filter(User.company_id == company.id).count()
-    response = CompanyResponse.model_validate(company)
-    response.user_count = user_count
-    return response
 
 
 @router.get("/companies/{company_id}", response_model=CompanyResponse, summary="Get company details")

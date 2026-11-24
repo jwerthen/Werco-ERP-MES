@@ -1,3 +1,4 @@
+import logging
 from typing import Dict, List, Optional, Set
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -6,6 +7,7 @@ from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_company_id, get_current_user
+from app.core.credentials import is_interactive_person
 from app.db.database import get_db
 from app.models.bom import BOM, BOMItem
 from app.models.customer import Customer
@@ -13,9 +15,13 @@ from app.models.inventory import InventoryItem
 from app.models.part import Part, PartType
 from app.models.purchasing import Vendor
 from app.models.routing import Routing, RoutingOperation
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import WorkOrder, WorkOrderStatus
+from app.schemas.storage import StorageStatus
+from app.services.storage_service import describe_storage_configuration
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -108,6 +114,9 @@ class SetupHealthResponse(BaseModel):
     counts: Dict[str, int]
     steps: List[SetupStep]
     issues: List[MasterDataIssue]
+    #: Where uploaded documents are stored (the same summary as ``/health/detailed``).
+    #: Null only when the configuration could not be read; never blocks the page.
+    storage: Optional[StorageStatus] = None
 
 
 class ReadinessResponse(BaseModel):
@@ -149,6 +158,26 @@ def _active_make_part_query(db: Session, company_id: int):
         Part.is_deleted == False,
         Part.part_type.in_([PartType.MANUFACTURED, PartType.ASSEMBLY]),
     )
+
+
+def _may_see_storage_location(user: User) -> bool:
+    """The bucket, endpoint host and region address the store EVERY tenant's documents live in.
+
+    This route answers any authenticated role, so the location goes only to an Admin signed in to
+    the app in their own session; everyone else (and every API token) gets the backend and its
+    durability with the location nulled, the same shape ``/health/detailed`` serves.
+    """
+    is_admin = bool(user.is_superuser) or user.role in (UserRole.ADMIN, UserRole.PLATFORM_ADMIN)
+    return is_admin and is_interactive_person(user)
+
+
+def _storage_status(include_location: bool) -> Optional[StorageStatus]:
+    """Install-wide storage configuration, not tenant data; a read failure yields None."""
+    try:
+        return StorageStatus(**describe_storage_configuration(include_location=include_location))
+    except Exception:
+        logger.warning("Setup health: could not read the storage configuration", exc_info=True)
+        return None
 
 
 @router.get("/health", response_model=SetupHealthResponse)
@@ -387,6 +416,7 @@ def get_setup_health(
         counts=counts,
         steps=steps,
         issues=[issue for issue in issues if issue.count > 0],
+        storage=_storage_status(_may_see_storage_location(current_user)),
     )
 
 

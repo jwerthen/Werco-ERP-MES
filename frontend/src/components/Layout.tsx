@@ -68,6 +68,7 @@ import {
   UserGroupIcon,
   QueueListIcon,
   ScaleIcon,
+  ScissorsIcon,
   LightBulbIcon,
   KeyIcon,
 } from '@heroicons/react/24/outline';
@@ -126,6 +127,9 @@ const navSections: NavSection[] = [
           { name: 'Time Clock', href: '/shop-floor', icon: WrenchScrewdriverIcon },
           { name: 'Operations', href: '/shop-floor/operations', icon: ClipboardDocumentListIcon },
           { name: 'Downtime', href: '/downtime', icon: StopIcon },
+          // Same gate as the route (routeAccess: quality:inspect = Admin / Manager /
+          // Supervisor / Quality), the GET /shop-floor/time-entries role set.
+          { name: 'Labor Review', href: '/labor-review', icon: ClipboardDocumentCheckIcon, permission: 'quality:inspect' },
         ],
       },
       { name: 'Scheduling', href: '/scheduling', icon: CalendarDaysIcon },
@@ -133,6 +137,14 @@ const navSections: NavSection[] = [
       // operator/kiosk navs are already streamlined below.
       { name: 'Dispatch Board', href: '/dispatch', icon: QueueListIcon },
       { name: 'Work Orders', href: '/work-orders', icon: ClipboardDocumentListIcon },
+      // Laser nests with no sheet tied. Same gate as the route and the endpoints
+      // (laser_nests.py -> ADMIN / MANAGER / SUPERVISOR = work_orders:edit).
+      {
+        name: 'Untied Laser Nests',
+        href: '/laser-nests/untied',
+        icon: ScissorsIcon,
+        permission: 'work_orders:edit',
+      },
       { name: 'Maintenance', href: '/maintenance', icon: WrenchIcon2 },
       { name: 'Continuous Improvement', href: '/continuous-improvement', icon: LightBulbIcon },
       { name: 'Tool Management', href: '/tool-management', icon: WrenchScrewdriverIcon },
@@ -808,6 +820,15 @@ export default function Layout({ children }: LayoutProps) {
                 {user?.role?.replace('_', ' ')}
               </p>
             </div>
+            {/* My Settings (password, text alerts) — self-scoped, every signed-in role. */}
+            <Link
+              to="/settings"
+              className="p-1.5 rounded-[3px] text-fd-mute hover:text-fd-ink hover:bg-white/5 transition-all duration-150"
+              title="My Settings"
+              aria-label="My Settings"
+            >
+              <Cog6ToothIcon className="h-[18px] w-[18px]" aria-hidden="true" />
+            </Link>
             <button
               onClick={() => {
                 if (isShopFloorKiosk) {

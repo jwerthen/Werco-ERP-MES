@@ -15,7 +15,7 @@ from datetime import date, datetime, timedelta
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import (
@@ -75,14 +75,18 @@ from app.schemas.purchasing import (
 )
 from app.services.audit_service import AuditService
 from app.services.operational_event_service import OperationalEventService
-from app.services.owned_property_service import recorded_owner
+from app.services.owned_property_service import ownership_key, ownership_match_clauses, recorded_owner
 from app.services.print_service import PrintEgressDisabledError, PrintService
 from app.services.proxybox_client import ProxyBoxError
 from app.services.receiving_commands import (
     _add_to_inventory,
     _receive_material,
+    blank_to_none,
 )
 from app.services.receiving_commands import generate_receipt_number as _generate_receipt_number
+from app.services.receiving_commands import (
+    receipt_traceability,
+)
 
 router = APIRouter()
 
@@ -622,6 +626,8 @@ def inspect_receipt(
             # The owner recorded at receipt time (AS9100D 8.5.3): accepted material lands on a
             # stock row of that owner, never merged into another owner's lot.
             owner=recorded_owner(db, company_id, receipt),
+            # Heat, cert and supplier follow the accepted material onto the stock row.
+            traceability=receipt_traceability(receipt, po),
         )
         result.inventory_created = True
         result.inventory_item_id = inv_item.id if inv_item else None
@@ -857,6 +863,147 @@ def _receipt_stock_row(
     if inv_item is None:
         raise HTTPException(status_code=409, detail=_RECEIPT_STOCK_ROW_UNRESOLVED)
     return inv_item
+
+
+# Receipt column -> stock-row column for the traceability the receipt hands to stock.
+_RECEIPT_TO_STOCK_TRACE_FIELDS = (("heat_number", "heat_lot"), ("cert_number", "cert_number"))
+
+
+def _sync_receipt_traceability_to_stock(
+    db: Session,
+    receipt: POReceipt,
+    po_line: PurchaseOrderLine,
+    old_receipt_values: dict,
+    *,
+    company_id: int,
+    audit: AuditService,
+) -> List[int]:
+    """Carry a corrected heat / cert from a dock-to-stock receipt onto the stock row it placed.
+
+    The receipt and its stock row both hold the heat and cert (``_add_to_inventory`` stamps
+    them), so a Correct that changed only the receipt would leave the two disagreeing. A stock
+    row field follows the correction when it is blank, or when it still holds the receipt's
+    OLD value and no other receipt put material on that row. A row another receipt also fed
+    keeps its value -- the merge rule is "first value wins", and overwriting it would rewrite
+    the other receipt's traceability. A receipt whose stock row cannot be resolved (the
+    legacy ambiguity ``_receipt_stock_row`` refuses) changes the receipt only, as before;
+    the trace page then reads the receipt's value wherever the row is blank.
+
+    Known limit: a row that ``POST /inventory/transfer`` CREATED from the placed row copied its
+    heat and cert, and is not rewritten here -- the transfer ledger row names only its source
+    row, and a destination that existed before the move holds other material too. Those rows
+    (same part, lot and owner at a location the placed row was transferred to, still holding
+    the receipt's OLD value) are returned instead, so the correction's audit row names them
+    for a person to correct by hand. One hop only: a second transfer onward is not followed.
+    """
+    changed = [
+        (receipt_col, stock_col)
+        for receipt_col, stock_col in _RECEIPT_TO_STOCK_TRACE_FIELDS
+        if blank_to_none(old_receipt_values.get(receipt_col)) != blank_to_none(getattr(receipt, receipt_col))
+    ]
+    if not changed:
+        return []
+    location_code = receipt.location.code if receipt.location else "RECV-01"
+    # Flush first: the session does not autoflush, and ``_receipt_stock_row`` reloads the row
+    # with ``populate_existing`` -- unflushed, the quantity the reconcile just moved on that
+    # same row would be overwritten by its stale database value.
+    db.flush()
+    try:
+        inv_item = _receipt_stock_row(db, receipt, po_line, company_id=company_id, location_code=location_code)
+    except HTTPException:
+        return []
+    shared = (
+        db.query(InventoryTransaction.id)
+        .filter(
+            InventoryTransaction.company_id == company_id,
+            InventoryTransaction.inventory_item_id == inv_item.id,
+            InventoryTransaction.transaction_type == TransactionType.RECEIVE,
+            or_(
+                InventoryTransaction.reference_number.is_(None),
+                InventoryTransaction.reference_number != receipt.receipt_number,
+            ),
+        )
+        .first()
+        is not None
+    )
+    old_values: dict = {}
+    new_values: dict = {}
+    for receipt_col, stock_col in changed:
+        current = blank_to_none(getattr(inv_item, stock_col))
+        target = blank_to_none(getattr(receipt, receipt_col))
+        follows = current is None or (current == blank_to_none(old_receipt_values.get(receipt_col)) and not shared)
+        if follows and current != target:
+            old_values[stock_col] = getattr(inv_item, stock_col)
+            setattr(inv_item, stock_col, target)
+            new_values[stock_col] = target
+    copied_row_ids = _transfer_copies_holding_old_trace(
+        db, inv_item, receipt, changed, old_receipt_values, company_id=company_id
+    )
+    if new_values:
+        audit.log_update(
+            "inventory",
+            inv_item.id,
+            f"{inv_item.part_id}/{inv_item.lot_number}@{inv_item.location}",
+            old_values=old_values,
+            new_values=new_values,
+            description=f"Traceability corrected from receipt {receipt.receipt_number}",
+        )
+    return copied_row_ids
+
+
+def _transfer_copies_holding_old_trace(
+    db: Session,
+    inv_item: InventoryItem,
+    receipt: POReceipt,
+    changed: list,
+    old_receipt_values: dict,
+    *,
+    company_id: int,
+) -> List[int]:
+    """Stock rows a transfer out of ``inv_item`` may have copied the receipt's OLD heat / cert to.
+
+    Read-only: rows of the same company, part, lot and owner at a location ``inv_item`` was
+    transferred to, whose changed column still holds the receipt's old value. See the known
+    limit in ``_sync_receipt_traceability_to_stock``.
+    """
+    to_locations = {
+        row[0]
+        for row in db.query(InventoryTransaction.to_location).filter(
+            InventoryTransaction.company_id == company_id,
+            InventoryTransaction.inventory_item_id == inv_item.id,
+            InventoryTransaction.transaction_type == TransactionType.TRANSFER,
+            InventoryTransaction.to_location.isnot(None),
+        )
+    }
+    if not to_locations:
+        return []
+    lot_clause = (
+        InventoryItem.lot_number.is_(None)
+        if inv_item.lot_number is None
+        else InventoryItem.lot_number == inv_item.lot_number
+    )
+    candidates = (
+        db.query(InventoryItem)
+        .filter(
+            InventoryItem.company_id == company_id,
+            InventoryItem.id != inv_item.id,
+            InventoryItem.part_id == inv_item.part_id,
+            lot_clause,
+            InventoryItem.location.in_(to_locations),
+            *ownership_match_clauses(ownership_key(inv_item)),
+        )
+        .order_by(InventoryItem.id)
+        .all()
+    )
+    drifted: List[int] = []
+    for row in candidates:
+        for receipt_col, stock_col in changed:
+            old = blank_to_none(old_receipt_values.get(receipt_col))
+            current = blank_to_none(getattr(row, stock_col))
+            if old is not None and current == old and current != blank_to_none(getattr(receipt, receipt_col)):
+                drifted.append(row.id)
+                break
+    return drifted
 
 
 def _reconcile_receipt_quantity(
@@ -1166,14 +1313,25 @@ def correct_receipt(
         new_lot = payload.lot_number.strip()
         if new_lot:
             receipt.lot_number = new_lot
+    # Stored trimmed, as the stock row stores them (``blank_to_none``): a cleared value is
+    # NULL on both records, never '' on one and NULL on the other.
     if payload.heat_number is not None:
-        receipt.heat_number = payload.heat_number
+        receipt.heat_number = blank_to_none(payload.heat_number)
     if payload.cert_number is not None:
-        receipt.cert_number = payload.cert_number
+        receipt.cert_number = blank_to_none(payload.cert_number)
     if payload.serial_numbers is not None:
         receipt.serial_numbers = payload.serial_numbers
     if payload.notes is not None:
         receipt.notes = payload.notes
+
+    # Dock-to-stock (or cleared-hold) material already sits on a stock row carrying the
+    # receipt's heat and cert; keep that row in step with the corrected receipt. A held
+    # receipt has no stock row yet -- its accept or clear stamps the corrected values.
+    stale_copy_row_ids: List[int] = []
+    if inventory_placed:
+        stale_copy_row_ids = _sync_receipt_traceability_to_stock(
+            db, receipt, po_line, old_values, company_id=company_id, audit=audit
+        )
 
     new_values = {
         "quantity_received": receipt.quantity_received,
@@ -1190,7 +1348,14 @@ def correct_receipt(
         receipt.receipt_number,
         old_values=old_values,
         new_values=new_values,
-        description=f"Corrected receipt: {payload.reason}",
+        description=f"Corrected receipt: {payload.reason}"
+        + (
+            "; stock rows transferred from this receipt's row still hold the old heat/cert: "
+            + ", ".join(str(row_id) for row_id in stale_copy_row_ids)
+            if stale_copy_row_ids
+            else ""
+        ),
+        extra_data={"stale_traceability_stock_row_ids": stale_copy_row_ids} if stale_copy_row_ids else None,
     )
 
     db.commit()
@@ -1454,6 +1619,8 @@ def clear_receipt_inspection(
         notes=(f"Inspection hold cleared on receipt {receipt.receipt_number} " f"(not required): {payload.reason}"),
         # The owner recorded at receipt time (AS9100D 8.5.3).
         owner=recorded_owner(db, company_id, receipt),
+        # Heat, cert and supplier follow the released material onto the stock row.
+        traceability=receipt_traceability(receipt, po),
     )
 
     # Audit (tamper-evident hash chain via the request-scoped AuditService). The

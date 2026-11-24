@@ -64,6 +64,9 @@ export default function EmailRecipientsTab() {
     id => data.users.find(user => user.id === id)?.name ?? `Unavailable user #${id}`
   );
 
+  const nobodyCount = data.events.filter(item => item.reaches_nobody).length;
+  const reachNames = event.reaches_user_ids.map(id => data.users.find(user => user.id === id)?.name ?? `User #${id}`);
+
   const toggle = (id: number, checked: boolean) => {
     const ids = selected ?? [];
     setDrafts(previous => ({ ...previous, [eventKey]: checked ? [...ids, id] : ids.filter(value => value !== id) }));
@@ -80,6 +83,17 @@ export default function EmailRecipientsTab() {
           the recipients’ own actions. In-app alerts and SMS keep their existing settings.
         </p>
       </div>
+
+      {nobodyCount > 0 && (
+        <p role="status" className="text-sm text-amber-700">
+          {nobodyCount === 1 ? '1 email type reaches nobody' : `${nobodyCount} email types reach nobody`}:{' '}
+          {data.events
+            .filter(item => item.reaches_nobody)
+            .map(item => item.label)
+            .join(', ')}
+          .
+        </p>
+      )}
 
       <div className="max-w-xl">
         <label htmlFor="email-notification-type" className="block text-sm font-medium text-surface-700 mb-1">
@@ -103,6 +117,7 @@ export default function EmailRecipientsTab() {
                 .map(item => (
                   <option key={item.event_key} value={item.event_key}>
                     {item.label}
+                    {item.reaches_nobody ? ' (reaches nobody)' : ''}
                     {drafts[item.event_key] ? ' (unsaved)' : ''}
                   </option>
                 ))}
@@ -115,6 +130,30 @@ export default function EmailRecipientsTab() {
         <div>
           <h3 className="font-semibold text-surface-900">{event.label}</h3>
           <p className="text-sm text-surface-500 mt-1">{event.description}</p>
+        </div>
+        <div className="border border-surface-200 p-3 text-sm" data-testid="email-reach">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-medium text-surface-800">Reaches now</span>
+            <span className="text-xs text-surface-500">
+              {event.audience_source === 'selected'
+                ? 'saved recipient list'
+                : 'chosen automatically by role and department'}
+            </span>
+            {event.reaches_nobody && (
+              <span className="inline-flex items-center border border-red-300 bg-red-50 px-2 py-0.5 text-xs font-semibold text-red-700">
+                Reaches nobody
+              </span>
+            )}
+          </div>
+          <p className="mt-1 text-surface-700">
+            {reachNames.length ? reachNames.join(', ') : 'No one with a deliverable email address'}
+            {event.depends_on_record && <span className="text-surface-500"> — plus the record’s own people</span>}
+          </p>
+          {dirty && (
+            <p className="mt-1 text-xs text-surface-500">
+              Shows the saved settings; save to see who your changes reach.
+            </p>
+          )}
         </div>
         {event.missing_default_emails.length > 0 && !event.is_custom && (
           <p role="status" className="text-sm text-amber-700">

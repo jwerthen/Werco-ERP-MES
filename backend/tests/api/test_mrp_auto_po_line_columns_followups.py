@@ -108,7 +108,19 @@ def _make_order_action(
 
 def test_auto_draft_creates_po_line_with_correct_columns(db_session: Session):
     part = _make_part(db_session)
-    _make_vendor(db_session)  # _get_preferred_vendor falls back to first active vendor
+    vendor = _make_vendor(db_session)
+    # Sourcing is required: an AUTO_DRAFT pass never falls back to "the first active vendor".
+    from app.models.supplier_part import SupplierPartMapping
+
+    db_session.add(
+        SupplierPartMapping(
+            company_id=COMPANY_A,
+            part_id=part.id,
+            vendor_id=vendor.id,
+            supplier_part_number=f"MRP-SP-{_next()}",
+            is_active=True,
+        )
+    )
     run = _make_run(db_session)
     action = _make_order_action(db_session, run, part, qty=8)
     db_session.commit()

@@ -28,6 +28,7 @@ import { useInFlightIds } from '../hooks/useInFlightIds';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { AISuggestionCard, ConfidenceBadge, FeedbackButtons, WhyThisSuggestion } from '../components/ai';
 import { AIRecommendation, recommendationAcceptMode } from '../types/aiLearning';
+import type { SetupHealthResponse } from '../types/setup';
 import { formatCentralDateTime, toDate } from '../utils/centralTime';
 import { useToast } from '../components/ui/Toast';
 import { apiErrorDetail, apiErrorStatus } from '../utils/apiError';
@@ -35,32 +36,6 @@ import { apiErrorDetail, apiErrorStatus } from '../utils/apiError';
 type Severity = 'high' | 'medium' | 'low' | 'info';
 type ItemSource = 'setup' | 'master-data' | 'ai';
 type FilterKey = 'open' | 'high' | 'ai' | 'master-data' | 'setup' | 'dismissed';
-
-interface SetupStep {
-  key: string;
-  label: string;
-  status: 'complete' | 'missing';
-  count: number;
-  required_count: number;
-  href: string;
-  reason?: string;
-}
-
-interface MasterDataIssue {
-  key: string;
-  severity: Severity;
-  title: string;
-  detail: string;
-  count: number;
-  href: string;
-}
-
-interface SetupHealth {
-  progress: number;
-  counts: Record<string, number>;
-  steps: SetupStep[];
-  issues: MasterDataIssue[];
-}
 
 interface InboxItem {
   id: string;
@@ -190,19 +165,21 @@ export function OperationalQueue({ scope }: { scope: string }) {
       return next;
     });
   };
-  const filtered = (data?.items ?? []).filter(item => {
-    if (Boolean(item.snoozed_until) !== snoozed) return false;
-    if (ownerFilter === 'mine' && item.owner_id !== userId) return false;
-    if (ownerFilter === 'unassigned' && item.owner_id !== null) return false;
-    return `${item.title} ${item.detail} ${item.owner_name ?? ''} ${item.next_action}`
-      .toLowerCase()
-      .includes(search.trim().toLowerCase());
-  }).sort((left, right) => {
-    const assignmentOrder = Number(left.owner_id !== null) - Number(right.owner_id !== null);
-    // The API has no per-issue timestamp. Keep its source ordering for ties
-    // rather than treating IDs from unrelated source tables as global recency.
-    return assignmentOrder || operationalSeverityOrder[left.severity] - operationalSeverityOrder[right.severity];
-  });
+  const filtered = (data?.items ?? [])
+    .filter(item => {
+      if (Boolean(item.snoozed_until) !== snoozed) return false;
+      if (ownerFilter === 'mine' && item.owner_id !== userId) return false;
+      if (ownerFilter === 'unassigned' && item.owner_id !== null) return false;
+      return `${item.title} ${item.detail} ${item.owner_name ?? ''} ${item.next_action}`
+        .toLowerCase()
+        .includes(search.trim().toLowerCase());
+    })
+    .sort((left, right) => {
+      const assignmentOrder = Number(left.owner_id !== null) - Number(right.owner_id !== null);
+      // The API has no per-issue timestamp. Keep its source ordering for ties
+      // rather than treating IDs from unrelated source tables as global recency.
+      return assignmentOrder || operationalSeverityOrder[left.severity] - operationalSeverityOrder[right.severity];
+    });
   const lastPage = Math.max(0, Math.ceil(filtered.length / 20) - 1);
   const currentPage = Math.min(page, lastPage);
   const visible = filtered.slice(currentPage * 20, currentPage * 20 + 20);
@@ -332,7 +309,17 @@ export function OperationalQueue({ scope }: { scope: string }) {
           {visible.map(item => (
             <article key={item.key} aria-label={item.title} className="rounded border border-fd-line p-3 min-w-0">
               <div className="flex flex-wrap items-center gap-2 text-xs text-fd-body">
-                <span className={item.source_kind === 'late_work_order' ? 'rounded border border-red-400/60 bg-red-500/15 px-2 py-1 font-semibold text-red-200' : undefined}>{item.source_kind === 'late_work_order' ? 'Past due · still late' : operationalLabels[item.source_kind]}</span>
+                <span
+                  className={
+                    item.source_kind === 'late_work_order'
+                      ? 'rounded border border-red-400/60 bg-red-500/15 px-2 py-1 font-semibold text-red-200'
+                      : undefined
+                  }
+                >
+                  {item.source_kind === 'late_work_order'
+                    ? 'Past due · still late'
+                    : operationalLabels[item.source_kind]}
+                </span>
                 <span className={item.severity === 'high' ? 'text-red-200' : 'text-amber-200'}>
                   {item.severity === 'high' ? 'High priority' : 'Needs review'}
                 </span>
@@ -356,7 +343,10 @@ export function OperationalQueue({ scope }: { scope: string }) {
                 </p>
               )}
               <div className="flex flex-wrap gap-2 mt-3">
-                <Link to={item.href} className={item.can_manage && item.owner_id == null ? 'btn-secondary' : 'btn-primary'}>
+                <Link
+                  to={item.href}
+                  className={item.can_manage && item.owner_id == null ? 'btn-secondary' : 'btn-primary'}
+                >
                   Open workflow
                 </Link>
                 {item.can_manage && (
@@ -489,7 +479,7 @@ export default function ActionInbox() {
     }
   })();
   const dismissedKey = `actionInboxDismissed:${userScope}`;
-  const [health, setHealth] = useState<SetupHealth | null>(null);
+  const [health, setHealth] = useState<SetupHealthResponse | null>(null);
   const [aiRecommendations, setAiRecommendations] = useState<AIRecommendation[]>([]);
   const [aiAvailable, setAiAvailable] = useState(true);
   const [loading, setLoading] = useState(true);

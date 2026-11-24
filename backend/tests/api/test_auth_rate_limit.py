@@ -93,29 +93,11 @@ def test_employee_login_rate_limited_after_ten_attempts(client: TestClient, test
     _assert_rate_limited(client.post(EMPLOYEE_LOGIN, json=payload))
 
 
-def test_company_registration_rate_limited_after_three_attempts(client: TestClient):
-    """POST /companies/register allows 3 requests/min, then 429.
-
-    This endpoint is unauthenticated and a single successful call mints a whole
-    TENANT plus an ACTIVE ADMIN user with live access and refresh tokens, so
-    before this entry existed anyone on the internet could create unlimited
-    companies at only the global 100/min default. Sends a schema-invalid body so
-    the budget is consumed without creating any company rows — the limiter is
-    middleware and counts the request before routing or validation.
-    """
-    payload = {"company_name": "x"}  # missing required admin fields -> 422
-
-    for i in range(3):
-        r = client.post(COMPANY_REGISTER, json=payload)
-        assert r.status_code == 422, f"attempt {i} unexpectedly {r.status_code}: {r.text}"
-
-    _assert_rate_limited(client.post(COMPANY_REGISTER, json=payload))
-
-
-def test_company_registration_rate_limit_is_registered():
-    """Config-level assertion: the map entry itself is the security control, so
-    it must fail loudly if dropped, even where the limiter is switched off."""
-    assert app_main.AUTH_RATE_LIMITS[COMPANY_REGISTER] == "3/minute"
+def test_deleted_company_registration_route_has_no_rate_limit_entry():
+    """The unauthenticated company self-registration route was deleted (2026-11-23,
+    Werco is the only company on this system), so its rate-limit entry went with it:
+    a limit on a path nothing serves would read as a door that still exists."""
+    assert COMPANY_REGISTER not in app_main.AUTH_RATE_LIMITS
 
 
 def test_unrated_endpoint_not_limited_at_auth_threshold(client: TestClient):

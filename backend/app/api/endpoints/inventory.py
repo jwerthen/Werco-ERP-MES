@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Sequence
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field
-from sqlalchemy import DateTime, and_, func, or_
+from sqlalchemy import DateTime, and_, or_
 from sqlalchemy.orm import Session, joinedload
 
 from app.api.audit_guard import required_audit
@@ -52,6 +52,7 @@ from app.services.cycle_count_workspace_service import (
     workspace_list,
 )
 from app.services.inventory_combine_service import build_combine_preview, combine_inventory
+from app.services.low_stock_service import low_stock_parts
 from app.services.operational_event_service import OperationalEventService
 from app.services.owned_property_service import (
     COMPANY,
@@ -66,6 +67,7 @@ from app.services.owned_property_service import (
     ownership_match_clauses,
     resolve_owner,
 )
+from app.services.receiving_commands import blank_to_none, merge_traceability_into_row
 
 logger = logging.getLogger(__name__)
 
@@ -318,68 +320,35 @@ def get_low_stock_alerts(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Get parts with inventory below reorder point.
+    """Get parts at or below their reorder point -- the one low-stock rule.
 
-    Filter is applied in SQL so we don't load the full parts catalog into
-    memory. A hard limit bounds the response size (``ge=1`` so a negative value
-    cannot reach ``.limit()`` -- PostgreSQL rejects a negative LIMIT and SQLite
-    silently treats it as "unbounded"); the frontend paginates display in any case.
+    ``app.services.low_stock_service.low_stock_parts`` decides: a live part with a reorder
+    point above zero whose COMPANY-OWNED on-hand, summed per part over every active row in any
+    status, is at or below it. A part with no stock row at all reads 0 on hand and is listed
+    (``out_of_stock: true``), so the Inventory low-stock view can show parts that have no stock
+    row to filter. Customer- and supplier-owned property held here (AS9100D 8.5.3) is not the
+    shop's supply, so it never keeps a part off this list; ``GET /inventory/summary`` still
+    reports the physical total. The ``stock.low`` alert, the operations inbox and the AI
+    inventory sensor read the same rule, so their counts agree with this list.
+
+    Critical first (at or below safety stock), then by shortage. ``limit`` bounds the response
+    (``ge=1`` so a negative value cannot reach ``.limit()``).
     """
-    # Subquery: sum of on-hand quantity per active inventory row, by part.
-    # Tenant-scoped so the aggregate can never sum another company's stock into
-    # this company's on-hand figure.
-    qty_subq = (
-        db.query(
-            InventoryItem.part_id.label("pid"),
-            func.coalesce(func.sum(InventoryItem.quantity_on_hand), 0).label("total_qty"),
-        )
-        .filter(InventoryItem.company_id == company_id, InventoryItem.is_active == True)
-        .group_by(InventoryItem.part_id)
-        .subquery()
-    )
-
-    total_qty_col = func.coalesce(qty_subq.c.total_qty, 0)
-
-    rows = (
-        db.query(Part, total_qty_col.label("total_qty"))
-        .outerjoin(qty_subq, Part.id == qty_subq.c.pid)
-        .filter(
-            Part.company_id == company_id,
-            # Part is the one SoftDeleteMixin model this module touches. Deleting a
-            # part also clears is_active, so the predicate below is belt-and-braces
-            # today -- but is_active is an operational flag anyone can toggle back,
-            # while is_deleted is the deletion record. Filter on the real one too, so
-            # a restored-to-active-but-still-deleted part can't reappear as a
-            # purchasing signal.
-            Part.is_deleted == False,
-            Part.is_active == True,
-            Part.reorder_point > 0,
-            total_qty_col <= Part.reorder_point,
-        )
-        .limit(limit)
-        .all()
-    )
-
-    alerts = []
-    for part, total_qty in rows:
-        total_qty = float(total_qty or 0)
-        alerts.append(
-            {
-                "part_id": part.id,
-                "part_number": part.part_number,
-                "part_name": part.name,
-                "quantity_on_hand": total_qty,
-                "reorder_point": part.reorder_point,
-                "reorder_quantity": part.reorder_quantity,
-                "safety_stock": part.safety_stock,
-                "shortage": part.reorder_point - total_qty,
-                "is_critical": total_qty <= (part.safety_stock or 0),
-            }
-        )
-
-    # Sort by critical first, then by shortage
-    alerts.sort(key=lambda x: (not x["is_critical"], -x["shortage"]))
-    return alerts
+    return [
+        {
+            "part_id": row.part.id,
+            "part_number": row.part.part_number,
+            "part_name": row.part.name,
+            "quantity_on_hand": row.quantity_on_hand,
+            "reorder_point": row.part.reorder_point,
+            "reorder_quantity": row.part.reorder_quantity,
+            "safety_stock": row.part.safety_stock,
+            "shortage": row.shortage,
+            "is_critical": row.is_critical,
+            "out_of_stock": row.out_of_stock,
+        }
+        for row in low_stock_parts(db, company_id, limit=limit)
+    ]
 
 
 # Pydantic schemas
@@ -762,11 +731,20 @@ def receive_inventory(
     )
 
     old_quantity_on_hand = existing.quantity_on_hand if existing else None
+    # Heat / cert typed on a receive that merges into an existing row: first value wins (a blank
+    # column is filled, as the PO-receipt merge does), and a heat or cert that DIFFERS from the
+    # row's is named on the ledger row and the audit row rather than dropped.
+    trace_old: Dict[str, object] = {}
+    trace_new: Dict[str, object] = {}
+    trace_mismatches: List[str] = []
 
     with atomic_transaction(db):
         if existing:
             existing.quantity_on_hand += receive_in.quantity
             existing.quantity_available = existing.quantity_on_hand - existing.quantity_allocated
+            trace_old, trace_new, trace_mismatches = merge_traceability_into_row(
+                existing, {"heat_lot": receive_in.heat_lot, "cert_number": receive_in.cert_number}
+            )
             inv_item = existing
         else:
             inv_item = InventoryItem(
@@ -803,7 +781,11 @@ def receive_inventory(
             reference_number=receive_in.po_number,
             unit_cost=receive_in.unit_cost,
             total_cost=receive_in.quantity * receive_in.unit_cost,
-            notes=receive_in.notes,
+            notes=(
+                "; ".join([n for n in [blank_to_none(receive_in.notes)] if n] + trace_mismatches)
+                if trace_mismatches
+                else receive_in.notes
+            ),
             created_by=current_user.id,
         )
         db.add(txn)
@@ -845,9 +827,10 @@ def receive_inventory(
                 "inventory",
                 inv_item.id,
                 f"{part.part_number} @ {receive_in.location_code}",
-                old_values={"quantity_on_hand": old_quantity_on_hand},
-                new_values={"quantity_on_hand": inv_item.quantity_on_hand},
-                description=f"Receive: stock for part {part.part_number} at {receive_in.location_code}",
+                old_values={"quantity_on_hand": old_quantity_on_hand, **trace_old},
+                new_values={"quantity_on_hand": inv_item.quantity_on_hand, **trace_new},
+                description=f"Receive: stock for part {part.part_number} at {receive_in.location_code}"
+                + "".join(f"; {note}" for note in trace_mismatches),
             )
 
     return {"message": "Inventory received", "inventory_item_id": inv_item.id, "quantity": receive_in.quantity}
@@ -977,7 +960,8 @@ def transfer_inventory(
     Ownership travels with the material: the destination row is matched on the source
     row's owner as well as its lot (customer-owned stock never lands in a company row at
     the destination, nor the reverse), and a newly created destination row carries the
-    source's ownership.
+    source's ownership. It carries the source's heat, cert, PO number and supplier too;
+    an existing destination row keeps its own.
     """
     # FOR UPDATE (no-op on SQLite): both the source decrement and the destination
     # increment below are read-modify-writes racing the consumption engine.
@@ -1051,6 +1035,13 @@ def transfer_inventory(
                 serial_number=inv_item.serial_number,
                 unit_cost=inv_item.unit_cost,
                 received_date=inv_item.received_date,
+                # Traceability travels with the material, as the SKU combine carries it
+                # (inventory_combine_service): a move to a new bin must not strip the heat,
+                # cert, PO and supplier the source row recorded.
+                cert_number=inv_item.cert_number,
+                heat_lot=inv_item.heat_lot,
+                supplier_id=inv_item.supplier_id,
+                po_number=inv_item.po_number,
                 ownership=source_owner[0],
                 owner_customer_id=source_owner[1],
                 owner_vendor_id=source_owner[2],

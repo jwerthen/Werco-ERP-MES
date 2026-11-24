@@ -83,19 +83,27 @@ when `ENVIRONMENT=production` — or when pointed at the Supabase production dat
 anywhere — because it would plant the well-known `admin123` / `password123` demo accounts. The schema itself is created automatically on first app boot
 (`Base.metadata.create_all`), so no seed step is needed here.
 
-Create the first company and its admin through the sanctioned company-onboarding flow
-(`POST /api/v1/companies/register`), which enforces the password-strength policy on the admin
-password (≥12 chars, and not containing a common weak substring — there are no character-class
-requirements; a long passphrase is preferred. See `docs/API.md` → Users).
-Choose a strong password you control — **do not** reuse the demo credentials:
+There is no public company self-registration route (removed 2026-11-23: Werco is the only
+company on this system). On an **empty** database, create the first account through the
+empty-install first-user registration (`POST /api/v1/auth/register-public`). When the install has
+**zero users**, that call creates the Werco company (slug `werco`, or reuses it if it already
+exists) and makes the registrant an active **Platform Admin with superuser authority**; once any
+user exists the same route only creates an inactive Viewer pending approval, so run it once,
+immediately after the first deploy. It enforces the password-strength policy (≥12 chars, and not
+containing a common weak substring — there are no character-class requirements; a long passphrase
+is preferred. See `docs/API.md` → Users). Choose a strong password you control — **do not** reuse
+the demo credentials:
 
 ```powershell
 # Set a strong admin password you control (NOT the demo credentials).
 curl.exe -X POST `
-  https://werco-api-production-xxxx.up.railway.app/api/v1/companies/register `
+  https://werco-api-production-xxxx.up.railway.app/api/v1/auth/register-public `
   -H "Content-Type: application/json" `
-  -d '{ "company_name": "Werco Manufacturing", "admin_email": "admin@yourco.com", "admin_first_name": "Site", "admin_last_name": "Admin", "admin_password": "<strong-password>" }'
+  -d '{ "email": "admin@yourco.com", "first_name": "Site", "last_name": "Admin", "password": "<strong-password>" }'
+# Expected: {"message":"Admin account created successfully","is_first_user":true}
 ```
+
+Then sign in at `/login`. Further people are added by an Admin from Users (`POST /users/`).
 
 ## Verification
 
@@ -108,7 +116,7 @@ curl https://werco-api-production-xxxx.up.railway.app/health
 ### Access Application
 Open browser to: https://werco-frontend-production-xxxx.up.railway.app
 
-Log in with the admin account you created via company-onboarding in step 6.
+Log in with the admin account you created through the empty-install first-user registration in step 6.
 
 > **Not the demo seed.** The `admin@werco.com` / `admin123` (and `password123`) accounts come
 > from `scripts/seed_data.py` and are for **local / dev / demo / CI / E2E only** — seeding is

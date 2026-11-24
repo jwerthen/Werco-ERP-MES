@@ -8,7 +8,7 @@ The Action Inbox now starts with permission-scoped operational issues, shared ow
 |---|---|---|
 | Late work orders | Released, in progress or held; due before the active company's local day. Completed/cancelled/closed/deleted jobs are excluded. | The affected work order |
 | Work-order blockers | Open or acknowledged blockers on active jobs, including operator-reported missing material. | The affected work order |
-| Low stock | Active, nondeleted parts below their reorder point, using active on-hand inventory; held/rejected inventory is explicitly included, matching the existing stock signal. This is not an available-to-promise calculation. | Warehouse low-stock view |
+| Low stock | Active, nondeleted parts below their reorder point, using active, company-owned on-hand inventory (customer- and supplier-owned stock is not counted, migration `129`); held/rejected inventory is explicitly included, matching the existing stock signal. This is not an available-to-promise calculation. | Warehouse low-stock view |
 | Quality | Open, under-review or pending-disposition NCRs; closed/void/deleted records are excluded. | The selected NCR investigation |
 | Overdue purchasing | Sent/partially received orders with an open, unreceived line; line required date takes precedence, then expected/header required date. | The selected purchase order |
 | Projected MRP shortage | Unprocessed order/manufacture/expedite recommendations in the latest completed company run. The card explicitly identifies a planning snapshot. Failed/new incomplete runs do not replace it. | Selected MRP run/action |

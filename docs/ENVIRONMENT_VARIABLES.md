@@ -339,9 +339,10 @@ ALLOWED_HOSTS=api.werco.com,erp.werco.com,*.up.railway.app,healthcheck.railway.a
 E2E. **It is hard-disabled against a production database** so weak credentials never land in a
 CUI environment (CMMC/AS9100D): the CLI seeder exits with an error when `ENVIRONMENT=production`
 **or when the resolved database URL targets the Supabase production Postgres** (so a local shell
-with `DATABASE_URL` pointed at prod refuses too), unless the override below is set. Production tenants are bootstrapped through the
-company-onboarding flow (`POST /api/v1/companies/register`), which enforces the
-password-strength policy on the admin password.
+with `DATABASE_URL` pointed at prod refuses too), unless the override below is set. A production install is bootstrapped through the
+empty-install first-user registration (`POST /api/v1/auth/register-public` on a database with
+zero users, which creates the Werco company and an active Platform Admin), which enforces the
+password-strength policy. There is no public company self-registration route.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
@@ -524,8 +525,8 @@ variables to claim physical verification or bypass the explicit observation work
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `WORKER_CRON_JOBS` | No | all | Which scheduled jobs the worker registers. Unset or `all` → every cron (15 of them). `none` → no crons; the worker still drains enqueue-driven jobs (notifications, webhooks, labels, completion signals, Hank PDF intake). A comma-separated list of job names arms **exactly** those (allowlist). A `-` prefix **excludes** a job from the full set (denylist): `all,-run_mrp_auto_draft_job`. The two shapes may not be mixed. **An unrecognised name is a hard startup error, not a silent skip — a negated one included.** `none` is the correct value for a first-ever boot — several crons write or email in bulk on their first run. Full syntax below |
-| `TZ` | No | UTC | Container timezone. ARQ resolves cron times in the container's local zone, so unset means `hour=6` fires at **06:00 UTC = 01:00 Central**. Set `TZ=America/Chicago` for shop-local schedules |
+| `WORKER_CRON_JOBS` | No | all | Which scheduled jobs the worker registers. Unset or `all` → every cron (15 of them). `none` → no crons; the worker still drains enqueue-driven jobs (notifications, webhooks, labels, completion signals, Hank PDF intake). A comma-separated list of job names arms **exactly** those (allowlist). A `-` prefix **excludes** a job from the full set (denylist): `all,-run_mrp_review_job`. The two shapes may not be mixed. **An unrecognised name is a hard startup error, not a silent skip — a negated one included.** `none` is the correct value for a first-ever boot — several crons write or email in bulk on their first run. Full syntax below |
+| `TZ` | No | UTC | Container timezone. **Does not move any cron**: since 2026-11-23 `WorkerSettings.timezone` pins arq's cron zone to America/Chicago in code (`app.core.worker_schedule.SHOP_TIMEZONE`), so `hour=6` fires at 06:00 Central, daylight saving included, whatever `TZ` is. `TZ` affects only log timestamps and other local-time reads in the process |
 
 #### `WORKER_CRON_JOBS` syntax
 
@@ -540,9 +541,9 @@ everything and subtract the ones you don't (denylist, `-` prefix).
 | unset / empty / `all` | Every cron in `ALL_CRON_JOBS`. **The default — it changes nothing about what was declared.** |
 | `none` | No crons. The worker still drains enqueue-driven jobs. |
 | `check_low_stock_job,poll_tracking_job` | **Only** those two, in the order listed. |
-| `all,-run_mrp_auto_draft_job` | Every cron **except** the MRP auto-draft pass. |
-| `-run_mrp_auto_draft_job` | Identical — a spec made only of exclusions implies `all` as its base. |
-| `-cron:run_mrp_auto_draft_job` | Identical again. Both spellings work for exclusions exactly as they already do for inclusions: arq names crons `cron:<coroutine name>` and the startup log prints **that** form, so whichever one you copied has to work. |
+| `all,-run_mrp_review_job` | Every cron **except** the MRP review pass. |
+| `-run_mrp_review_job` | Identical — a spec made only of exclusions implies `all` as its base. |
+| `-cron:run_mrp_review_job` | Identical again. Both spellings work for exclusions exactly as they already do for inclusions: arq names crons `cron:<coroutine name>` and the startup log prints **that** form, so whichever one you copied has to work. |
 | `-a,-b` | Subtracts both. Excluding every cron is legal and simply means `none`. |
 
 **Why the `-` form exists.** Turning one cron off with an allowlist means listing all the
@@ -556,7 +557,7 @@ subtracts from whatever the release declares, so new crons arrive armed.
 - **An unknown name — positive *or* negated.** Excluding a cron that does not exist means the
   exclusion is not doing what you think and the job you meant to silence is **still armed**, so
   it is refused for the same reason an unknown inclusion is. The message lists every known job.
-- **Mixing inclusions with exclusions** — `poll_tracking_job,-run_mrp_auto_draft_job` reads
+- **Mixing inclusions with exclusions** — `poll_tracking_job,-run_mrp_review_job` reads
   either as "only the tracking poll" or as "everything except MRP", and those differ by most of
   the schedule. It is refused rather than guessed. `all` is the one positive token allowed
   alongside exclusions, because there it is the explicit base.
@@ -577,17 +578,18 @@ case-insensitively; **job names are case-sensitive** (`-CHECK_LOW_STOCK_JOB` is 
 error, not a match). Duplicates collapse rather than erroring — the same name twice, or once in
 each spelling (`-<job>` together with `-cron:<job>`), excludes it once.
 
-**Turning the MRP auto-draft cron off** — the motivating case, and a supported permanent
+**Turning the MRP review cron off** — the motivating case, and a supported permanent
 configuration:
 
 ```
-WORKER_CRON_JOBS=all,-run_mrp_auto_draft_job
+WORKER_CRON_JOBS=all,-run_mrp_review_job
 ```
 
-This disables the **schedule**, not the capability: `run_mrp_auto_draft_job` stays in
+This disables the **schedule**, not the capability: `run_mrp_review_job` stays in
 `WorkerSettings.functions` and can still be enqueued for a one-off run. Note also that the
-crons fire on **container-local time, which is UTC unless `TZ` is set**, so the 06:00 MRP cron
-is 01:00 Central. See `docs/WORKER_DEPLOYMENT_RUNBOOK.md` §6.4 for the full procedure and what
+crons fire on **shop time (America/Chicago), pinned in code**, so the 06:00 MRP cron is 06:00
+Central whatever `TZ` is. Admin Settings → System Health (`GET /admin/system-health`) shows which
+crons the running worker armed under the current value. See `docs/WORKER_DEPLOYMENT_RUNBOOK.md` §6.4 for the full procedure and what
 MRP does and does not still do with the cron off.
 
 The worker also needs the API's `DATABASE_URL`, `SECRET_KEY`, `REFRESH_TOKEN_SECRET_KEY`,
@@ -729,6 +731,12 @@ PO source documents** — go through the shared storage service
 > are **not** copied to the bucket automatically; on hosts where local files are already
 > ephemeral, only documents written after the switch are durable.
 
+> **Which backend is the API actually using?** The Setup Wizard's **Document Storage**
+> panel (`/setup`) and `GET /health/detailed` → `checks.storage` report the API process's
+> backend and, for `local`, whether `UPLOAD_DIR` sits on a mounted volume. Neither
+> describes the worker. See [API.md → Detailed health](API.md#detailed-health-document-storage)
+> and [DATABASE_BACKUP.md → Uploaded documents](DATABASE_BACKUP.md#uploaded-documents).
+
 **Railway bucket example** (S3-compatible; the CLI provides the endpoint + keys):
 ```bash
 railway bucket create werco-erp-documents
@@ -813,7 +821,7 @@ AWS_REGION=us-east-1
 >      `json_body`, `request_body`, `content`, which hold the body as a repr string such as
 >      `b'{"employee_id": "0042", "pin": "2580"}'`) and any variable whose repr is an object
 >      carrying a credential field (a request model such as `UserCreate(..., password='...')` on
->      `POST /users/` or `CompanyRegister(..., admin_password='...')` on the public signup), and
+>      `POST /users/`), and
 >      replaces any variable holding a bcrypt hash with `[Filtered]`;
 >    - every remaining string, in the frame variables, the exception values, the top-level
 >      message, `logentry` (message, formatted string and params), every breadcrumb's message and
@@ -829,8 +837,8 @@ AWS_REGION=us-east-1
 >    and the visitor-tablet and crew-station PIN sign-ins and PIN writes): the event loses **every**
 >    frame variable and the request data entirely.
 >
-> Layers 2 and 3 are what cover the password **create** routes too (`POST /users/`,
-> `POST /companies/register`), which are not on the credential-route list. The application's own
+> Layers 2 and 3 are what cover the password **create** route too (`POST /users/`), which is not
+> on the credential-route list. The application's own
 > log lines that can carry a database error (the audit writer, the auth event logger) log only the
 > exception's class and, for a database error, the driver error's class and SQLSTATE
 > (`describe_exception`), never its text, so a logged failure cannot reach Sentry as a breadcrumb

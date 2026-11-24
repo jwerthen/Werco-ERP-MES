@@ -255,7 +255,6 @@ def _fail_after_validation(monkeypatch: pytest.MonkeyPatch) -> None:
         raise RuntimeError("provisioning store unavailable")
 
     monkeypatch.setattr("app.api.endpoints.users.create_tenant_user", boom)
-    monkeypatch.setattr("app.api.endpoints.companies.onboard_company", boom)
 
 
 def _post_user(client: TestClient, headers: Dict[str, str]):
@@ -273,27 +272,12 @@ def _post_user(client: TestClient, headers: Dict[str, str]):
     )
 
 
-def _post_company_signup(client: TestClient):
-    return client.post(
-        "/api/v1/companies/register",
-        json={
-            "company_name": "Signup Probe Co",
-            "admin_email": "owner@signup-probe.com",
-            "admin_first_name": "Owner",
-            "admin_last_name": "Probe",
-            "admin_password": PASSWORD,
-        },
-        headers={"X-Requested-With": "XMLHttpRequest"},
-    )
-
-
-@pytest.mark.parametrize("route", ["users_create", "company_signup"])
 def test_a_password_create_route_error_event_carries_no_password(
-    sentry_events, real_client, admin_headers, monkeypatch, route
+    sentry_events, real_client, admin_headers, monkeypatch
 ):
     _fail_after_validation(monkeypatch)
 
-    response = _post_user(real_client, admin_headers) if route == "users_create" else _post_company_signup(real_client)
+    response = _post_user(real_client, admin_headers)
 
     assert response.status_code == 500, response.text
     serialized = _serialized(sentry_events)
@@ -301,17 +285,14 @@ def test_a_password_create_route_error_event_carries_no_password(
     assert "$2b$" not in serialized
 
 
-@pytest.mark.parametrize("route", ["users_create", "company_signup"])
-def test_control_without_before_send_the_password_does_leak(
-    sentry_events, real_client, admin_headers, monkeypatch, route
-):
+def test_control_without_before_send_the_password_does_leak(sentry_events, real_client, admin_headers, monkeypatch):
     """Non-vacuity: the same requests with only the key scrubber leak the password."""
     sentry_sdk.get_client().close()
     monkeypatch.setattr(observability, "scrub_sentry_event", lambda event, hint=None: event)
     app_main.init_sentry()
     _fail_after_validation(monkeypatch)
 
-    _post_user(real_client, admin_headers) if route == "users_create" else _post_company_signup(real_client)
+    _post_user(real_client, admin_headers)
 
     assert PASSWORD in _serialized(sentry_events)
 

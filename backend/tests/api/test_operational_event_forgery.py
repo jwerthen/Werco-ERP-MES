@@ -139,6 +139,8 @@ class TestRefusedSetComposition:
             ("services/operational_event_service.py", "event_type"),
             # The relay sweeper reads exactly the catalog, which is refused wholesale.
             ("jobs/notification_jobs.py", "list(SOURCE_EVENT_TYPE_TO_KEY.keys())"),
+            # Admin Settings -> System Health counts the relay backlog over the same catalog set.
+            ("services/system_health_service.py", "list(SOURCE_EVENT_TYPE_TO_KEY.keys())"),
         }
 
         def is_event_type_column(node: ast.AST) -> bool:

@@ -48,6 +48,7 @@ import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import { useAuth } from '../context/AuthContext';
 import { hasPermission } from '../utils/permissions';
+import type { LowStockAlert } from '../types/lowStock';
 
 // Ownership (AS9100D 8.5.3) rides on every row: `ownership` + the one owner id that
 // matches it, and the tenant-resolved `owner_name`. Absent = company-owned.
@@ -62,6 +63,10 @@ interface InventoryItem extends OwnershipInfo {
   quantity_available: number;
   lot_number?: string;
   serial_number?: string;
+  // Mill heat and cert on the stock row. PO receipts stamp them on the row they
+  // create; a blank here is still filled on the Traceability page from the receipt.
+  heat_lot?: string | null;
+  cert_number?: string | null;
   status: string;
   unit_cost: number;
 }
@@ -105,6 +110,30 @@ const stockQuantity = (quantity: number) => quantity < 0 ? (
   <span className="text-red-300 font-semibold">{formatStockQuantity(quantity)} <span className="text-xs">Negative stock</span></span>
 ) : formatStockQuantity(quantity);
 
+/**
+ * A summary-shaped row for a low-stock part that has no stock row at all, so the
+ * low-stock view can list it. Its figures are the low-stock payload's company-owned
+ * on hand (zero or below); there is nothing allocated and no location.
+ */
+const lowStockOnlySummaryRow = (alert: LowStockAlert): InventorySummary => ({
+  part_id: alert.part_id,
+  part_number: alert.part_number,
+  part_name: alert.part_name,
+  total_on_hand: alert.quantity_on_hand,
+  total_allocated: 0,
+  available: alert.quantity_on_hand,
+  locations: [],
+});
+
+/** OUT OF STOCK / LOW STOCK flag under a part, with its reorder point; null when not low. */
+const lowStockLabel = (alert: LowStockAlert | undefined) =>
+  alert ? (
+    <span className="block text-xs text-red-600 font-medium">
+      {alert.out_of_stock ? 'OUT OF STOCK' : 'LOW STOCK'}
+      <span className="font-normal text-slate-400"> · reorder at {formatStockQuantity(alert.reorder_point)}</span>
+    </span>
+  ) : null;
+
 export default function InventoryPage({ embedded }: { embedded?: boolean }) {
   const { showToast } = useToast();
   const [actionBusy, setActionBusy] = useState(false);
@@ -144,7 +173,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
   });
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
   const [summary, setSummary] = useState<InventorySummary[]>([]);
-  const [lowStockItems, setLowStockItems] = useState<any[]>([]);
+  const [lowStockItems, setLowStockItems] = useState<LowStockAlert[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [parts, setParts] = useState<any[]>([]);
@@ -174,6 +203,8 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
     lot_number: '',
     serial_number: '',
     po_number: '',
+    heat_lot: '',
+    cert_number: '',
     unit_cost: 0,
   });
   const [receiveOwnership, setReceiveOwnership] = useState<OwnershipSelection>(COMPANY_OWNERSHIP);
@@ -183,7 +214,11 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
     to_location_code: '',
     notes: '',
   });
-  const lowStockPartIds = useMemo(() => new Set(lowStockItems.map((item: any) => item.part_id)), [lowStockItems]);
+  const lowStockByPart = useMemo(
+    () => new Map(lowStockItems.map(item => [item.part_id, item] as const)),
+    [lowStockItems]
+  );
+  const lowStockPartIds = useMemo(() => new Set(lowStockByPart.keys()), [lowStockByPart]);
   const partsById = useMemo(() => new Map(parts.map((p: any) => [p.id, p])), [parts]);
   const getPartType = useCallback(
     (partId: number) => {
@@ -200,15 +235,34 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
     },
     [groupFilter]
   );
+  const summaryPartIds = useMemo(() => new Set(summary.map(item => item.part_id)), [summary]);
   const filteredSummary = useMemo(() => {
-    const base = showLowStockOnly ? summary.filter(item => lowStockPartIds.has(item.part_id)) : summary;
+    // The low-stock list is the server's one rule (GET /inventory/low-stock). A part with no
+    // stock row at all is on it but has no summary row to filter, so it is listed from the
+    // low-stock payload itself — otherwise a completely out-of-stock part would vanish from
+    // the very view meant to surface it, and the chip count would disagree with the rows.
+    const base = showLowStockOnly
+      ? [
+          ...summary.filter(item => lowStockPartIds.has(item.part_id)),
+          ...lowStockItems.filter(item => !summaryPartIds.has(item.part_id)).map(lowStockOnlySummaryRow),
+        ]
+      : summary;
     const grouped = base.filter(item => filterByGroup(getPartType(item.part_id)));
     if (!debouncedFilterText) return grouped;
     const term = debouncedFilterText.toLowerCase();
     return grouped.filter(
       item => item.part_number?.toLowerCase().includes(term) || item.part_name?.toLowerCase().includes(term)
     );
-  }, [debouncedFilterText, filterByGroup, getPartType, lowStockPartIds, showLowStockOnly, summary]);
+  }, [
+    debouncedFilterText,
+    filterByGroup,
+    getPartType,
+    lowStockItems,
+    lowStockPartIds,
+    showLowStockOnly,
+    summary,
+    summaryPartIds,
+  ]);
   const groupSummary = useMemo(
     () => summary.filter(item => filterByGroup(getPartType(item.part_id))),
     [filterByGroup, getPartType, summary]
@@ -241,7 +295,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
     );
   }, [filteredSummary]);
   const lowStockCount = useMemo(() => {
-    return lowStockItems.filter((item: any) => filterByGroup(getPartType(item.part_id))).length;
+    return lowStockItems.filter(item => filterByGroup(getPartType(item.part_id))).length;
   }, [filterByGroup, getPartType, lowStockItems]);
 
   useEffect(() => {
@@ -304,7 +358,16 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
     setActionBusy(true);
     setActionError('');
     try {
-      await api.receiveInventory({ ...receiveForm, ...ownershipPayload(receiveOwnership) });
+      // Heat and cert are traceability evidence: send them trimmed, and omit a blank
+      // one rather than store an empty string the trace would read as a value.
+      const heatLot = receiveForm.heat_lot.trim();
+      const certNumber = receiveForm.cert_number.trim();
+      await api.receiveInventory({
+        ...receiveForm,
+        heat_lot: heatLot || undefined,
+        cert_number: certNumber || undefined,
+        ...ownershipPayload(receiveOwnership),
+      });
       setShowReceiveModal(false);
       setReceiveOwnership(COMPANY_OWNERSHIP);
       setReceiveForm({
@@ -314,6 +377,8 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
         lot_number: '',
         serial_number: '',
         po_number: '',
+        heat_lot: '',
+        cert_number: '',
         unit_cost: 0,
       });
       loadData();
@@ -475,12 +540,11 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
         accessor: item => item.part_number,
         csv: item => `${item.part_number} ${item.part_name}`.trim(),
         render: item => {
-          const isLowStock = lowStockPartIds.has(item.part_id);
           return (
             <div>
               <div className="font-medium">{item.part_number}</div>
               <div className="text-sm text-slate-400">{item.part_name}</div>
-              {isLowStock && <span className="text-xs text-red-600 font-medium">LOW STOCK</span>}
+              {lowStockLabel(lowStockByPart.get(item.part_id))}
             </div>
           );
         },
@@ -533,7 +597,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
         render: renderLocations,
       },
     ],
-    [lowStockPartIds, getPartType, renderLocations]
+    [lowStockByPart, getPartType, renderLocations]
   );
 
   // ---- Detail tab (by location) columns ----
@@ -573,6 +637,14 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
         className: 'text-sm',
         accessor: item => item.lot_number ?? '',
         render: item => item.lot_number || '-',
+      },
+      {
+        key: 'heat',
+        header: 'Heat',
+        sortable: true,
+        className: 'font-mono text-sm',
+        accessor: item => item.heat_lot ?? '',
+        render: item => item.heat_lot || '-',
       },
       {
         // Company stock renders nothing — only property that is NOT the company's is
@@ -692,11 +764,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
           },
           {
             label: 'Status',
-            value: isLowStock ? (
-              <span className="text-xs text-red-600 font-medium">LOW STOCK</span>
-            ) : (
-              <span className="text-slate-400">—</span>
-            ),
+            value: lowStockLabel(lowStockByPart.get(item.part_id)) ?? <span className="text-slate-400">—</span>,
           },
           {
             label: 'Locations',
@@ -728,6 +796,10 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
         {
           label: 'Lot #',
           value: item.lot_number || '-',
+        },
+        {
+          label: 'Heat',
+          value: <span className="font-mono">{item.heat_lot || '-'}</span>,
         },
         ...(ownershipLabel(item) ? [{ label: 'Ownership', value: <OwnershipChip record={item} />, fullWidth: true }] : []),
         {
@@ -1237,6 +1309,38 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
               )}
             </FormField>
           </div>
+          <div className="grid grid-cols-2 gap-4">
+            <FormField label="Heat" help="Mill heat number from the cert.">
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={receiveForm.heat_lot}
+                  onChange={e => setReceiveForm({ ...receiveForm, heat_lot: e.target.value })}
+                  className="input font-mono"
+                  maxLength={100}
+                  autoComplete="off"
+                />
+              )}
+            </FormField>
+            <FormField label="Cert" help="Mill cert or CoC number.">
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={receiveForm.cert_number}
+                  onChange={e => setReceiveForm({ ...receiveForm, cert_number: e.target.value })}
+                  className="input font-mono"
+                  maxLength={100}
+                  autoComplete="off"
+                />
+              )}
+            </FormField>
+          </div>
+          <p className="text-xs text-slate-400">
+            Heat and cert are recorded on a new stock record. Receiving into a lot already at this location fills
+            a blank heat or cert and keeps any it already has; a different heat or cert is noted on the movement.
+          </p>
           <FormField label="Unit Cost">
             {field => (
               <input

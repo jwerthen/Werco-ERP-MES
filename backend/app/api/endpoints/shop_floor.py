@@ -6,11 +6,10 @@ import os
 from collections import defaultdict
 from dataclasses import replace
 from datetime import date, datetime, timezone
-from typing import Optional, Sequence, Union
+from typing import Literal, Optional, Sequence, Union
 
-from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Request, Response, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, aliased, defaultload, joinedload, selectinload
@@ -30,7 +29,13 @@ from app.api.deps import (
 )
 from app.core.cache import invalidate_work_centers_cache
 from app.core.config import settings
-from app.core.credentials import is_api_token_credential, is_narrowed_api_token
+from app.core.credentials import (
+    API_TOKEN_INSPECTION_SIGN_OFF,
+    KIOSK_TOKEN_SCOPE,
+    is_api_token_credential,
+    is_interactive_person,
+    is_narrowed_api_token,
+)
 from app.core.observability import report_absorbed_exception
 from app.core.realtime import safe_broadcast
 from app.core.time_utils import CENTRAL_TIME_ZONE, to_utc_iso
@@ -77,6 +82,13 @@ from app.schemas.kiosk_station import (
     KioskWorkCenterListResponse,
     KioskWorkCenterSelection,
 )
+from app.schemas.labor_review import (
+    LaborReviewFlag,
+    LaborReviewListResponse,
+    SetClockOutRequest,
+    SetClockOutResponse,
+    TimeEntryApprovalRequest,
+)
 from app.schemas.process_sheet import (
     OperationStepRecordCreate,
     OperationStepRecordResponse,
@@ -86,13 +98,20 @@ from app.schemas.process_sheet import (
     QualityHoldResponse,
     StepAttachmentResponse,
 )
-from app.schemas.shop_floor_commands import OperationCompleteRequest, OperationHoldRequest, ProductionReportRequest
+from app.schemas.shop_floor_commands import (
+    OperationCompleteRequest,
+    OperationHoldRequest,
+    OperationInspectionRequest,
+    OperationInspectionResponse,
+    ProductionReportRequest,
+)
 from app.schemas.time_entry import ClockIn, ClockOut, ProductionReductionRequest, TimeEntryResponse
 from app.schemas.wallboard import WallboardResponse
 from app.services import (
     dispatch_plan_service,
     dispatch_service,
     kiosk_station_service,
+    labor_review_service,
     operation_hold_view,
     process_sheet_service,
 )
@@ -124,6 +143,14 @@ from app.services.document_access import (
     visible_documents_clause,
 )
 from app.services.labor_cost_service import is_labor_cost_rollup_enabled
+from app.services.labor_review_service import (
+    LABOR_JUDGMENT_API_TOKEN_DETAIL,
+    LABOR_REVIEW_KIOSK_DETAIL,
+    LABOR_REVIEW_ROLES,
+    OPEN_ENTRY_APPROVAL_DETAIL,
+    SET_CLOCK_OUT_ROLES,
+    STALE_TIME_ENTRY_DETAIL,
+)
 from app.services.laser_nest_service import active_laser_nest, sync_laser_nest_from_operation
 from app.services.material_tie_view import MaterialTieView, tie_views_for_operations
 from app.services.operation_action_gates import (
@@ -209,19 +236,6 @@ from app.services.work_order_state_service import (
     upstream_figures_by_operation,
     validate_operation_quantity,
 )
-
-
-class OperationInspectionRequest(BaseModel):
-    """Record an operation as inspected (QG-2 writer).
-
-    ``inspection_type`` optionally records WHICH inspection cleared the gate
-    (first_article / in_process / final); ``notes`` carries inspector commentary.
-    Both land in the audit row so the inspection sign-off is traceable.
-    """
-
-    inspection_type: Optional[str] = Field(default=None, max_length=100)
-    notes: Optional[str] = Field(default=None, max_length=2000)
-
 
 router = APIRouter()
 
@@ -2582,6 +2596,7 @@ def _set_time_entry_approval(
     current_user: User,
     company_id: int,
     audit: AuditService,
+    expected_version: Optional[int] = None,
 ) -> TimeEntry:
     """Shared approve/unapprove body (G5-A).
 
@@ -2601,6 +2616,12 @@ def _set_time_entry_approval(
     if time_entry.user_id == current_user.id:
         raise HTTPException(status_code=403, detail="You cannot approve or unapprove your own time entry")
 
+    # The approver's read: when the caller says which version it saw, an entry changed since
+    # (a supervisor's clock-out correction, say) is refused 409 rather than approved on hours
+    # the approver never saw. version_id_col only catches a write concurrent with the flush.
+    if expected_version is not None and int(time_entry.version or 1) != int(expected_version):
+        raise HTTPException(status_code=409, detail=STALE_TIME_ENTRY_DETAIL)
+
     old_approved = time_entry.approved
     old_approved_by = time_entry.approved_by
 
@@ -2608,6 +2629,11 @@ def _set_time_entry_approval(
         if time_entry.approved is not None:
             # Idempotent: already approved -> return current state (no second audit row).
             return time_entry
+        # labor_review/2 step 1: an entry that is still clocked in cannot be signed off --
+        # its owner's later clock-out would rewrite approved labor. Unapprove stays open
+        # for an open entry approved before this rule, so it can be cleaned up.
+        if time_entry.clock_out is None:
+            raise HTTPException(status_code=409, detail=OPEN_ENTRY_APPROVAL_DETAIL)
         time_entry.approved = datetime.utcnow()
         time_entry.approved_by = current_user.id
         action = "time_entry_approve"
@@ -2646,15 +2672,113 @@ def _set_time_entry_approval(
         db.rollback()
         raise HTTPException(
             status_code=409,
-            detail="This time entry was modified concurrently. Refresh and retry.",
+            detail=STALE_TIME_ENTRY_DETAIL,
         ) from exc
     db.refresh(time_entry)
     return time_entry
 
 
+def _refuse_labor_judgment_credential(current_user: User) -> None:
+    """Approve, unapprove and set-clock-out are a person's judgment, made at the desk.
+
+    A standing API token is refused 403 (any role, any scope), and so is a badge-minted
+    kiosk token (the path fence in ``deps.get_current_user`` refuses it first; this is the
+    second layer, so the rule does not rest on a path string alone).
+    """
+    if is_api_token_credential(current_user):
+        raise HTTPException(status_code=403, detail=LABOR_JUDGMENT_API_TOKEN_DETAIL)
+    _refuse_kiosk_badge(current_user)
+    # Backstop: the shared "a person signed in as themselves" rule, so a credential scope
+    # added there later is refused here too even if the two texts above do not name it.
+    if not is_interactive_person(current_user):
+        raise HTTPException(status_code=403, detail=LABOR_JUDGMENT_API_TOKEN_DETAIL)
+
+
+def _refuse_kiosk_badge(current_user: User) -> None:
+    if getattr(current_user, "_token_scope", None) == KIOSK_TOKEN_SCOPE:
+        raise HTTPException(status_code=403, detail=LABOR_REVIEW_KIOSK_DETAIL)
+
+
+@router.get("/time-entries", response_model=LaborReviewListResponse)
+def list_time_entries(
+    start_date: Optional[date] = Query(None, description="First production day (inclusive)."),
+    end_date: Optional[date] = Query(None, description="Last production day (inclusive)."),
+    user_id: Optional[int] = Query(None, description="Only this employee's entries."),
+    work_center_id: Optional[int] = Query(None),
+    work_order_id: Optional[int] = Query(None),
+    status: Optional[Literal["open", "closed"]] = Query(None, description="open = still clocked in."),
+    approved: Optional[bool] = Query(None),
+    flag: Optional[LaborReviewFlag] = Query(None, description="Only entries carrying this review flag."),
+    flagged_only: bool = Query(False, description="Only entries carrying at least one review flag."),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(LABOR_REVIEW_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+):
+    """List time entries for Labor Review, newest clock-in first, with review flags.
+
+    Entries are attributed to PRODUCTION days by the company's production calendar (an entry
+    belongs to the shift it overlaps most). No dates reads the last 7 production days, or,
+    with ``status=open``, every entry still clocked in whenever it started; a range is at most
+    62 production days (422 above it, or when reversed). Flags: ``open_past_shift_end`` (still
+    clocked in after the shift it started in ended), ``long_entry`` (over 12 hours),
+    ``overlap`` (the same person has another labor entry at the same time), ``open_on_closed_work``
+    (still clocked in on a completed operation or a finished work order), ``long_zero_pieces``
+    (a run or rework entry of 4 hours or more that booked no pieces and no scrap) and
+    ``backfill`` (a paper back-entry or import). Admin, Manager, Supervisor and Quality.
+    Read-only: writes nothing.
+    """
+    _refuse_kiosk_badge(current_user)
+    return labor_review_service.list_time_entries(
+        db,
+        company_id,
+        current_user,
+        start_date=start_date,
+        end_date=end_date,
+        user_id=user_id,
+        work_center_id=work_center_id,
+        work_order_id=work_order_id,
+        status=status,
+        approved=approved,
+        flag=flag,
+        flagged_only=flagged_only,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.post("/time-entries/{time_entry_id}/set-clock-out", response_model=SetClockOutResponse)
+def set_time_entry_clock_out(
+    time_entry_id: int,
+    payload: SetClockOutRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(SET_CLOCK_OUT_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Set another person's clock-out on an unapproved time entry, with a reason (hours only).
+
+    Closes an entry left clocked in, or corrects a closed one, at the time the person actually
+    stopped. It never changes pieces, scrap or reasons. Admin, Manager and Supervisor, signed in
+    to the app as themselves: an API token and a kiosk badge are refused 403. Refused, before
+    anything is written: 404 not found; 403 the caller's own entry; 409 an approved entry
+    (clear its approval first); 409 a stale ``version``; 422 a clock-out at or before the
+    clock-in, or in the future. The operation's and work order's stored hours move by the
+    change in this entry's hours when they came from time entries, and are left alone when
+    they did not (``hours.applied`` / ``hours.skipped_reason`` say which); an existing job
+    cost's labor lines are regenerated. The audit row (old and new clock-out, duration,
+    hours, the reason) is required: 503 and nothing saved when it cannot be written. Not an
+    MCP tool.
+    """
+    _refuse_labor_judgment_credential(current_user)
+    return labor_review_service.set_clock_out(db, company_id, current_user, audit, time_entry_id, payload)
+
+
 @router.post("/time-entries/{time_entry_id}/approve", response_model=TimeEntryResponse)
 def approve_time_entry(
     time_entry_id: int,
+    payload: Optional[TimeEntryApprovalRequest] = Body(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(_TIME_ENTRY_APPROVAL_ROLES)),
     company_id: int = Depends(get_current_company_id),
@@ -2665,8 +2789,12 @@ def approve_time_entry(
     Sets ``approved`` (now) + ``approved_by`` (the approver). Role-gated to
     ADMIN / MANAGER / SUPERVISOR / QUALITY; forbids self-approval; tenant-scoped; respects the
     optimistic-lock ``version`` column; audited. Approval is what the opt-in
-    ``REQUIRE_APPROVED_LABOR_FOR_COST`` flag keys on for the labor-cost legs.
+    ``REQUIRE_APPROVED_LABOR_FOR_COST`` flag keys on for the labor-cost legs. An entry still
+    clocked in is refused 409 (close the clock first). An optional body ``{"version": n}``
+    refuses 409 when the entry changed since the approver read it. A standing API token and a kiosk badge
+    are refused 403: approval is a person's judgment. Not an MCP tool.
     """
+    _refuse_labor_judgment_credential(current_user)
     return _set_time_entry_approval(
         time_entry_id,
         approve=True,
@@ -2674,12 +2802,14 @@ def approve_time_entry(
         current_user=current_user,
         company_id=company_id,
         audit=audit,
+        expected_version=payload.version if payload is not None else None,
     )
 
 
 @router.post("/time-entries/{time_entry_id}/unapprove", response_model=TimeEntryResponse)
 def unapprove_time_entry(
     time_entry_id: int,
+    payload: Optional[TimeEntryApprovalRequest] = Body(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(_TIME_ENTRY_APPROVAL_ROLES)),
     company_id: int = Depends(get_current_company_id),
@@ -2688,8 +2818,10 @@ def unapprove_time_entry(
     """Clear approval on a shop-floor TimeEntry (G5-A).
 
     Clears ``approved`` + ``approved_by``. Same role gate / self-approval ban /
-    tenant scope / optimistic-lock handling / audit as approve.
+    tenant scope / optimistic-lock handling / audit and credential refusals as approve. An
+    entry still clocked in may be unapproved (an approval made before that was refused).
     """
+    _refuse_labor_judgment_credential(current_user)
     return _set_time_entry_approval(
         time_entry_id,
         approve=False,
@@ -2697,6 +2829,7 @@ def unapprove_time_entry(
         current_user=current_user,
         company_id=company_id,
         audit=audit,
+        expected_version=payload.version if payload is not None else None,
     )
 
 
@@ -3584,6 +3717,9 @@ def shop_floor_dashboard(
         nest = active_laser_nest(entry.operation) if entry.operation else None
         assignment = {
             "time_entry_id": entry.id,
+            # Labor Review: the entry's optimistic-lock version, so the Live Shop Activity
+            # "Close clock" link can send POST /time-entries/{id}/set-clock-out without a re-read.
+            "time_entry_version": int(entry.version or 1),
             "clock_in": to_utc_iso(entry.clock_in),
             "entry_type": entry.entry_type.value if hasattr(entry.entry_type, "value") else entry.entry_type,
             "user": {
@@ -4176,6 +4312,14 @@ def get_all_operations(
                 "setup_instructions": op.setup_instructions,
                 "run_instructions": op.run_instructions,
                 "requires_inspection": op.requires_inspection,
+                # Whether the in-process inspection has been signed off (the audited
+                # POST /shop-floor/operations/{id}/inspection is its only writer), so the
+                # desk row can show "Inspection required" vs "Inspected" without a
+                # per-row detail read.
+                "inspection_complete": bool(op.inspection_complete),
+                # The planned inspection kind (a routing inspection point stamps "final"), so
+                # the sign-off dialog can keep it rather than relabel it.
+                "inspection_type": op.inspection_type,
                 # Present on ON_HOLD rows only (see above); the key is absent
                 # everywhere else rather than sent as null.
                 **({"hold": hold_payload} if hold_payload is not None else {}),
@@ -5820,7 +5964,12 @@ def resume_operation(
     }
 
 
-@router.post("/operations/{operation_id}/inspection")
+INSPECTION_AUDIT_UNAVAILABLE = (
+    "The audit record for this inspection sign-off could not be saved; nothing was signed off. Retry."
+)
+
+
+@router.post("/operations/{operation_id}/inspection", response_model=OperationInspectionResponse)
 def mark_operation_inspected(
     operation_id: int,
     inspection_data: OperationInspectionRequest,
@@ -5832,90 +5981,103 @@ def mark_operation_inspected(
     # Request-scoped (B8): the chain row must carry the caller's ip/user_agent.
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Record an operation's inspection as complete (QG-2 writer).
+    """Sign off an operation's in-process inspection (QG-2 writer).
 
-    Before Batch 4 NOTHING set ``WorkOrderOperation.inspection_complete = True``, so
-    the inspection quality gate (QG-1) could warn but never CLEAR -- the warning was
-    not actionable. This audited writer closes that loop: it flips
-    ``inspection_complete`` true, records who/when, and writes a tamper-evident
-    ``audit_log`` row, so a subsequent completion stops raising the
-    ``inspection_incomplete`` exception.
+    The ONLY writer of ``WorkOrderOperation.inspection_complete`` (the generic operation
+    ``PUT`` refuses the field). Flips it true and writes a REQUIRED ``MARK_OPERATION_INSPECTED``
+    audit row in the same transaction -- the audit row is the record of who signed and when,
+    since the operation carries no inspected-by / inspected-at column -- so a later completion
+    stops raising the ``inspection_incomplete`` exception. If the audit row cannot be written
+    nothing is saved (503).
 
-    Tenant-scoped (operation must belong to the active company) and RBAC-gated to
-    ADMIN / MANAGER / SUPERVISOR / QUALITY -- the roles that perform / sign off
-    inspection in this repo's role model (there is no separate INSPECTOR role).
+    Tenant-scoped (the operation must belong to the active company, on a work order that is not
+    deleted -- 404 otherwise) and RBAC-gated to ADMIN / MANAGER / SUPERVISOR / QUALITY, the roles
+    that perform or sign off inspection (there is no separate INSPECTOR role). A standing API
+    token is refused 403 before anything is read: signing an inspection is a person's judgment,
+    as an FAI final disposition is. Signing an operation that is already signed is allowed and
+    records a further audit row; nothing ever clears the flag.
 
     FAI-pass auto-wire is DEFERRED: the FAI/NCR tables carry no ``operation_id`` FK,
     so an FAI passing cannot be linked back to a specific operation without a schema
-    change (database-migration-specialist). In warn-and-record mode the manual writer
-    is sufficient (nothing is blocked); the auto-wire is flagged as a follow-up.
+    change. In warn-and-record mode the manual writer is sufficient (nothing is blocked).
     """
+    if is_api_token_credential(current_user):
+        raise HTTPException(status_code=403, detail=API_TOKEN_INSPECTION_SIGN_OFF)
+
     operation = (
         db.query(WorkOrderOperation)
         .options(joinedload(WorkOrderOperation.work_order))
         .filter(WorkOrderOperation.id == operation_id, WorkOrderOperation.company_id == company_id)
         .first()
     )
-    if not operation:
+    work_order = operation.work_order if operation else None
+    # A deleted work order's operations are not signable: the tombstone hides the job everywhere
+    # else, and a sign-off on it would be evidence for work nobody can see.
+    if not operation or not work_order or work_order.is_deleted:
         raise HTTPException(status_code=404, detail="Operation not found")
 
-    work_order = operation.work_order
     was_complete = bool(operation.inspection_complete)
+    old_type = operation.inspection_type
     operation.inspection_complete = True
     if inspection_data.inspection_type:
         operation.inspection_type = inspection_data.inspection_type
     operation.updated_at = datetime.utcnow()
 
-    # Tamper-evident audit row for the inspection sign-off (who/when/what). Flushed
-    # (not committed) by AuditService.log so it commits atomically with the flag below.
+    # Tamper-evident audit row for the inspection sign-off (who/when/what). REQUIRED: flushed
+    # (not committed) so it commits atomically with the flag, and a failure rolls both back.
     note_suffix = f". Notes: {inspection_data.notes}" if inspection_data.notes else ""
     type_suffix = f" ({inspection_data.inspection_type})" if inspection_data.inspection_type else ""
-    audit.log(
-        action="MARK_OPERATION_INSPECTED",
-        resource_type="work_order_operation",
-        resource_id=operation.id,
-        resource_identifier=operation.operation_number,
-        description=(
-            f"Recorded inspection complete{type_suffix} for operation {operation.operation_number}"
-            + (f" on WO {work_order.work_order_number}" if work_order else "")
-            + note_suffix
-        ),
-        new_values={"inspection_complete": True},
-        old_values={"inspection_complete": was_complete},
-    )
+    with required_audit(db, INSPECTION_AUDIT_UNAVAILABLE):
+        entry = audit.log_required(
+            action="MARK_OPERATION_INSPECTED",
+            resource_type="work_order_operation",
+            resource_id=operation.id,
+            resource_identifier=operation.operation_number,
+            description=(
+                f"Recorded inspection complete{type_suffix} for operation {operation.operation_number}"
+                f" on WO {work_order.work_order_number}" + note_suffix
+            ),
+            new_values={"inspection_complete": True, "inspection_type": operation.inspection_type},
+            old_values={"inspection_complete": was_complete, "inspection_type": old_type},
+            extra_data={
+                "work_order_id": work_order.id,
+                "work_order_number": work_order.work_order_number,
+                "notes": inspection_data.notes,
+            },
+        )
+    signed_off_at = entry.timestamp or datetime.utcnow()
 
-    if work_order:
-        # Read before the emit, so reporting a failed emit never touches the session again.
-        signal_context = {
-            "company_id": company_id,
-            "user_id": current_user.id,
-            "work_order_id": work_order.id,
-            "operation_id": operation.id,
-        }
-        try:
-            OperationalEventService(db).emit(
-                company_id=company_id,
-                event_type="operation_inspected",
-                source_module="shop_floor",
-                entity_type="work_order_operation",
-                entity_id=operation.id,
-                work_order_id=work_order.id,
-                operation_id=operation.id,
-                user_id=current_user.id,
-                severity="info",
-                event_payload={
-                    "work_order_number": work_order.work_order_number,
-                    "operation_name": operation.name,
-                    "inspection_type": inspection_data.inspection_type,
-                },
-            )
-        except Exception as exc:  # signal emission must not break the write -- but it must be seen
-            report_absorbed_exception(
-                logger,
-                "operation_inspected signal emit failed; the inspection sign-off continues",
-                exc,
-                context=signal_context,
-            )
+    # Read before the emit, so reporting a failed emit never touches the session again.
+    signal_context = {
+        "company_id": company_id,
+        "user_id": current_user.id,
+        "work_order_id": work_order.id,
+        "operation_id": operation.id,
+    }
+    try:
+        OperationalEventService(db).emit(
+            company_id=company_id,
+            event_type="operation_inspected",
+            source_module="shop_floor",
+            entity_type="work_order_operation",
+            entity_id=operation.id,
+            work_order_id=work_order.id,
+            operation_id=operation.id,
+            user_id=current_user.id,
+            severity="info",
+            event_payload={
+                "work_order_number": work_order.work_order_number,
+                "operation_name": operation.name,
+                "inspection_type": inspection_data.inspection_type,
+            },
+        )
+    except Exception as exc:  # signal emission must not break the write -- but it must be seen
+        report_absorbed_exception(
+            logger,
+            "operation_inspected signal emit failed; the inspection sign-off continues",
+            exc,
+            context=signal_context,
+        )
 
     db.commit()
     db.refresh(operation)
@@ -5926,18 +6088,23 @@ def mark_operation_inspected(
             operation.work_center_id,
             {
                 "event": "operation_inspected",
-                "work_order_id": work_order.id if work_order else None,
+                "work_order_id": work_order.id,
                 "operation_id": operation.id,
             },
             company_id=company_id,
         )
 
-    return {
-        "message": "Operation inspection recorded",
-        "operation_id": operation.id,
-        "inspection_complete": operation.inspection_complete,
-        "inspection_type": operation.inspection_type,
-    }
+    return OperationInspectionResponse(
+        message="Operation inspection recorded",
+        operation_id=operation.id,
+        work_order_id=work_order.id,
+        requires_inspection=bool(operation.requires_inspection),
+        inspection_complete=bool(operation.inspection_complete),
+        inspection_type=operation.inspection_type,
+        signed_off_by_id=current_user.id,
+        signed_off_by_name=current_user.full_name,
+        signed_off_at=signed_off_at,
+    )
 
 
 # ============================================================================

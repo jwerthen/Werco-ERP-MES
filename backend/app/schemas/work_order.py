@@ -1,7 +1,7 @@
 import json
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Annotated, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
@@ -16,6 +16,12 @@ from app.core.validation import (
 from app.models.laser_nest import MAX_PLANNED_RUNS
 from app.models.work_order import OperationStatus, WorkOrderStatus, WorkOrderType
 from app.schemas.base import UTCModel
+
+# Answered (422) to a generic operation update that sends ``inspection_complete``.
+INSPECTION_COMPLETE_NOT_UPDATABLE = (
+    "inspection_complete cannot be set by an operation update. Sign off the inspection with "
+    "POST /api/v1/shop-floor/operations/{operation_id}/inspection, which records who signed and when."
+)
 
 
 def _serialize_decimal_as_number(value: Optional[Decimal]) -> Optional[float]:
@@ -472,6 +478,26 @@ class WorkOrderOperationCreate(WorkOrderOperationBase):
     pass
 
 
+class WorkOrderCreateOperation(WorkOrderOperationCreate):
+    """One operation SUPPLIED on ``POST /work-orders`` (``operations`` non-empty).
+
+    ``routing_operation_id`` links the row to the routing step it was copied from, which
+    is what keeps that step's process sheet: the create path snapshots the sheet family's
+    released revision onto the new operation exactly as the routed path does. The link is
+    matched BY ID, never by sequence or name, and must name an operation on the part's
+    released routing (or a BOM component's, with ``component_part_id`` agreeing) -- else
+    409 ``ROUTING_OPERATION_UNMATCHED``. Omit it for a step the planner added by hand.
+    Not a column: it is read at creation and recorded on the creation audit row only.
+    """
+
+    routing_operation_id: Optional[int] = Field(
+        None,
+        gt=0,
+        description="Routing operation this step was copied from (GET /work-orders/preview-operations "
+        "routing_operation_id). Keeps the step's process-sheet checks. Omit for a hand-added step.",
+    )
+
+
 class WorkOrderOperationUpdate(BaseModel):
     version: int = Field(..., ge=0, description="Version for optimistic locking")
     work_center_id: Optional[int] = Field(
@@ -498,7 +524,17 @@ class WorkOrderOperationUpdate(BaseModel):
         description="Reason for scrapped parts; required when quantity_scrapped > 0, ignored otherwise.",
     )
     requires_inspection: Optional[bool] = None
-    inspection_complete: Optional[bool] = None
+    # ``inspection_complete`` is deliberately NOT a field: the audited sign-off
+    # ``POST /shop-floor/operations/{id}/inspection`` is its only writer (who signed and when lives
+    # in that verb's required audit row). A body that still sends it is refused below rather than
+    # silently ignored, so a caller that thinks it signed an inspection is told it did not.
+
+    @model_validator(mode="before")
+    @classmethod
+    def _refuse_inspection_complete(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "inspection_complete" in data:
+            raise ValueError(INSPECTION_COMPLETE_NOT_UPDATABLE)
+        return data
 
     @model_validator(mode="after")
     def _require_scrap_reason(self) -> "WorkOrderOperationUpdate":
@@ -740,7 +776,7 @@ class WorkOrderBase(UTCModel):
 
 
 class WorkOrderCreate(WorkOrderBase):
-    operations: List[WorkOrderOperationCreate] = Field(default_factory=list)
+    operations: List[WorkOrderCreateOperation] = Field(default_factory=list)
     # PR 4 (process sheets): per-unit serial numbers for a serialized work order.
     # Stored to the existing JSON-in-Text ``WorkOrder.serial_numbers`` column; the
     # shop-floor capture endpoints then key step records per serial end-to-end.
@@ -1110,6 +1146,43 @@ class WorkOrderDuplicateResponse(UTCModel):
         description="Source material ties not copied — the planner must re-tie these by hand or the job "
         "will run without the material demand the source had. Empty on a clean duplicate.",
     )
+
+
+class WorkOrderProcessSheetGapStep(UTCModel):
+    """A sheet-bearing routing step the work order would carry if created from its routing today."""
+
+    routing_operation_id: int
+    operation_number: str
+    operation_sequence: int
+    name: str
+    component_part_id: Optional[int] = None
+    component_part_number: Optional[str] = None
+    process_sheet_id: Optional[int] = None
+    sheet_number: Optional[str] = None
+
+
+class WorkOrderProcessSheetGap(UTCModel):
+    """One live work order whose part's released routing carries process sheets, holding none."""
+
+    work_order_id: int
+    work_order_number: str
+    status: str
+    part_id: int
+    part_number: str
+    part_name: Optional[str] = None
+    quantity_ordered: float
+    due_date: Optional[date] = None
+    customer_name: Optional[str] = None
+    created_at: Optional[datetime] = None
+    operation_count: int
+    expected_process_sheet_steps: List[WorkOrderProcessSheetGapStep] = Field(default_factory=list)
+
+
+class WorkOrderProcessSheetGapResponse(UTCModel):
+    """``GET /work-orders/process-sheet-gaps`` -- a pure read for Quality's job-by-job review."""
+
+    total: int = Field(..., description="Every matching work order, before ``limit``.")
+    items: List[WorkOrderProcessSheetGap] = Field(default_factory=list)
 
 
 class WorkOrderRestoreSkippedAllocation(UTCModel):

@@ -105,6 +105,19 @@ API_TOKEN_FLOOR_PIN_ADMIN = (
     "not an API token: credential administration is a person's act."
 )
 
+# Self-service password change (``POST /users/change-password``). A person changes their own
+# password signed in to the app in their own session -- never through a standing API token, and
+# never from a crew-station badge token or station token. The route refuses every credential that
+# is not ``is_interactive_person`` 403 with this text before it reads the body's passwords. (A
+# badge token is already turned away by its shop-floor path fence in ``get_current_user``; the
+# explicit check keeps the rule in one place rather than resting on a fence elsewhere.) Not an MCP
+# tool (``app.mcp.catalog.PASSWORD_OPERATIONS``): a person's own JWT would otherwise let an agent
+# change that person's password.
+PASSWORD_CHANGE_PEOPLE_ONLY = (
+    "Your password is changed by you, signed in to the app: an API token or a shop-floor badge or station "
+    "token cannot change a password."
+)
+
 # Restricted document viewing (AS9100D 7.5.3.1 / 7.5.3.2, migration 131). Deciding who may open a
 # document (``POST /documents/{document_id}/access-level``) and who may open export-controlled ones
 # (``PUT /users/{user_id}/export-authorization``) are a person's judgment, so both routes refuse ANY
@@ -118,6 +131,20 @@ API_TOKEN_DOCUMENT_ACCESS_LEVEL = (
 API_TOKEN_EXPORT_AUTHORIZATION = (
     "Export authorization is granted or revoked by an Admin signed in to the app, not an API token: deciding "
     "who may open export-controlled documents is a person's judgment."
+)
+
+# In-process inspection sign-off (``POST /shop-floor/operations/{operation_id}/inspection``,
+# AS9100D 8.6). Signing that an inspection was performed is quality evidence someone has to have
+# done, the same judgment as an FAI final disposition, so the route refuses ANY API token,
+# whatever its role or scope, with this text before it reads or writes anything. It is not an MCP
+# tool (``app.mcp.catalog.INSPECTION_SIGN_OFF_OPERATIONS``). A crew-station badge token is a
+# person, not an API token, but the sign-off is a desk verb: the kiosk path fence
+# (``deps._is_kiosk_scope_allowed_path``) refuses this path to every badge token, as it does labor
+# approval, so no crew-station badge of any role can sign off. Pinned by
+# ``tests/api/test_inspection_sign_off.py``.
+API_TOKEN_INSPECTION_SIGN_OFF = (
+    "An inspection is signed off by a person signed in to the app, not an API token: recording that an "
+    "inspection was performed is a person's judgment."
 )
 
 # Comments and watchers (docs/NOTIFICATIONS_PLAN.md section 3.6; owner decision for work-order

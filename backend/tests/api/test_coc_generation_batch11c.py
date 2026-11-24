@@ -444,7 +444,7 @@ def test_post_coc_allows_quality_role(client: TestClient, db_session: Session):
     quality = make_user(db_session, role=UserRole.QUALITY)
     part = make_part(db_session)
     wo = make_wo(db_session, part)
-    shipment = make_shipment(db_session, wo)
+    shipment = make_shipment(db_session, wo, status_=ShipmentStatus.SHIPPED, ship_date=date.today())
     db_session.commit()
 
     resp = client.post(f"/api/v1/shipping/{shipment.id}/coc", headers=headers_for(quality))
@@ -481,7 +481,7 @@ def test_post_coc_is_idempotent_via_endpoint(client: TestClient, db_session: Ses
     manager = make_user(db_session, role=UserRole.MANAGER)
     part = make_part(db_session)
     wo = make_wo(db_session, part)
-    shipment = make_shipment(db_session, wo)
+    shipment = make_shipment(db_session, wo, status_=ShipmentStatus.SHIPPED, ship_date=date.today())
     db_session.commit()
 
     first = client.post(f"/api/v1/shipping/{shipment.id}/coc", headers=headers_for(manager))
@@ -509,7 +509,7 @@ def test_get_coc_returns_metadata_after_issue(client: TestClient, db_session: Se
     viewer = make_user(db_session, role=UserRole.OPERATOR)  # GET is open to any active user
     part = make_part(db_session)
     wo = make_wo(db_session, part)
-    shipment = make_shipment(db_session, wo)
+    shipment = make_shipment(db_session, wo, status_=ShipmentStatus.SHIPPED, ship_date=date.today())
     db_session.commit()
 
     client.post(f"/api/v1/shipping/{shipment.id}/coc", headers=headers_for(admin))
@@ -522,7 +522,7 @@ def test_get_coc_pdf_returns_pdf_bytes(client: TestClient, db_session: Session):
     admin = make_user(db_session, role=UserRole.ADMIN)
     part = make_part(db_session)
     wo = make_wo(db_session, part, serial_numbers=json.dumps(["SN-A", "SN-B"]))
-    shipment = make_shipment(db_session, wo, ship_date=date.today())
+    shipment = make_shipment(db_session, wo, status_=ShipmentStatus.SHIPPED, ship_date=date.today())
     db_session.commit()
 
     client.post(f"/api/v1/shipping/{shipment.id}/coc", headers=headers_for(admin))

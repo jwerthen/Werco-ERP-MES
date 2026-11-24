@@ -485,9 +485,12 @@ crowd actionable work off the top of the board.
     *assembly's own* routing operations with exactly that shape, carrying the **whole order
     quantity restated once per operation**, and the New Work Order wizard posts it verbatim.
     Summing those would render a 10-piece job as `0/50` then `50/50`. Four guards, in order:
-    For these anonymous line items, **(1)** the WO's part has an active **BOM** → never sum (that impostor is emitted only for
-    BOM'd parts, and conversely a pool WO's hand-set targets only survive on a part with no BOM,
-    since `_reconcile_operation_component_quantities` overwrites them on every WO GET);
+    For these anonymous line items, **(1)** the WO's part has an active **BOM** → never sum (that impostor
+    is emitted mostly for BOM'd parts, and conversely a pool WO's hand-set targets only survive on a part
+    with no BOM, since `_reconcile_operation_component_quantities` overwrites them on every WO GET; since
+    wo_change/2 the preview also emits it for a part with no BOM, and the wizard posts it for an
+    **assembly-type part with no BOM** when the planner edits a routed row — that case has no BOM, so
+    guard 4 is what catches it);
     **(2)** operations backing a **soft-deleted laser nest** are dropped (the tombstone keeps its
     `component_quantity` while the header is recomputed over live nests);
     **(3)** **all or nothing** — one operation without a target sends the whole WO back to the

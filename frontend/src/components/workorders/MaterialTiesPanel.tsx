@@ -106,6 +106,12 @@ export interface MaterialTiesPanelProps {
    * Optional: with no operations passed the flag simply does not render.
    */
   operations?: readonly WorkOrderOperation[];
+  /**
+   * Optional strip rendered under the panel header — Work Order Detail passes the
+   * untied-nest marker ("N of M nests have no sheet tied") here. Office screens
+   * only; the panel itself adds nothing for an untied work order.
+   */
+  notice?: React.ReactNode;
 }
 
 /**
@@ -228,6 +234,7 @@ export default function MaterialTiesPanel({
   refreshToken,
   canEdit,
   operations,
+  notice,
 }: MaterialTiesPanelProps) {
   const { showToast } = useToast();
   const [ties, setTies] = useState<MaterialAllocation[]>([]);
@@ -740,6 +747,8 @@ export default function MaterialTiesPanel({
           </span>
         )}
       </div>
+
+      {notice}
 
       <DataTable<MaterialAllocation>
         columns={columns}

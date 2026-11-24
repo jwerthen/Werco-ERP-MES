@@ -24,6 +24,7 @@ import {
   EnvelopeIcon,
   CalendarDaysIcon,
   IdentificationIcon,
+  HeartIcon,
 } from '@heroicons/react/24/outline';
 import CarrierIntegrationsTab from '../components/admin/CarrierIntegrationsTab';
 import PrintIntegrationsTab from '../components/admin/PrintIntegrationsTab';
@@ -35,9 +36,10 @@ import FloorPinPolicyTab from '../components/admin/FloorPinPolicyTab';
 import EmailRecipientsTab from '../components/admin/EmailRecipientsTab';
 import DisplayTokensTab from '../components/admin/DisplayTokensTab';
 import ProductionCalendarTab from '../components/admin/ProductionCalendarTab';
+import SystemHealthTab from '../components/admin/SystemHealthTab';
 import { ConfirmDialog, EmptyState, ErrorState, FormField, useToast } from '../components/ui';
 
-type TabKey = 'workcenters' | 'workcentertypes' | 'calendar' | 'employees' | 'roles' | 'carriers' | 'printing' | 'performance' | 'aiusage' | 'aiprivacy' | 'smsprivacy' | 'floorpin' | 'emails' | 'displays' | 'audit';
+type TabKey = 'workcenters' | 'workcentertypes' | 'calendar' | 'employees' | 'roles' | 'carriers' | 'printing' | 'performance' | 'aiusage' | 'aiprivacy' | 'smsprivacy' | 'floorpin' | 'emails' | 'displays' | 'health' | 'audit';
 
 
 const tabs: { key: TabKey; label: string; icon: React.ComponentType<any> }[] = [
@@ -55,6 +57,7 @@ const tabs: { key: TabKey; label: string; icon: React.ComponentType<any> }[] = [
   { key: 'smsprivacy', label: 'SMS Privacy', icon: ChatBubbleLeftRightIcon },
   { key: 'floorpin', label: 'Badge Sign-in', icon: IdentificationIcon },
   { key: 'displays', label: 'Wallboard Displays', icon: TvIcon },
+  { key: 'health', label: 'System Health', icon: HeartIcon },
   { key: 'audit', label: 'Audit Log', icon: ClockIcon },
 ];
 
@@ -334,7 +337,7 @@ export default function AdminSettings() {
           <div className="flex items-center justify-center py-12">
             <div className="spinner h-8 w-8"></div>
           </div>
-        ) : loadError && !['calendar', 'carriers', 'printing', 'performance', 'aiusage', 'aiprivacy', 'smsprivacy', 'floorpin', 'displays'].includes(activeTab) ? (
+        ) : loadError && !['calendar', 'carriers', 'printing', 'performance', 'aiusage', 'aiprivacy', 'smsprivacy', 'floorpin', 'displays', 'health'].includes(activeTab) ? (
           <ErrorState
             message="Could not load this settings tab."
             onRetry={() => loadTabData(activeTab)}
@@ -372,6 +375,7 @@ export default function AdminSettings() {
             {activeTab === 'floorpin' && <FloorPinPolicyTab />}
             {activeTab === 'emails' && <EmailRecipientsTab />}
             {activeTab === 'displays' && <DisplayTokensTab />}
+            {activeTab === 'health' && <SystemHealthTab />}
             {activeTab === 'audit' && <AuditLogTable data={auditLog} />}
           </>
         )}

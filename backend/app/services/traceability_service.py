@@ -25,7 +25,7 @@ from app.db.ledger_filter import (
 )
 from app.models.inventory import InventoryItem, InventoryTransaction, TransactionType
 from app.models.part import Part
-from app.models.purchasing import POReceipt, PurchaseOrder, PurchaseOrderLine
+from app.models.purchasing import POReceipt, PurchaseOrder, PurchaseOrderLine, Vendor
 from app.models.quality import NonConformanceReport
 from app.models.work_order import WorkOrder, WorkOrderOperation
 from app.schemas.base import UTCModel
@@ -79,6 +79,10 @@ class LotTraceResponse(UTCModel):
     received_date: Optional[datetime] = None
     cert_number: Optional[str] = None
     heat_lot: Optional[str] = None
+    # The mill cert / CoC file attached at receiving (a ``documents`` row id), from the
+    # lot's earliest live PO receipt for this part that carries one. Stock rows hold no
+    # document, so this only ever comes from the receipt.
+    certificate_document_id: Optional[int] = None
 
     # Current status
     current_quantity: float = 0
@@ -96,6 +100,24 @@ class LotTraceResponse(UTCModel):
 
     # Full history
     history: List[LotHistoryItem] = []
+
+
+def _text(value: Optional[str]) -> bool:
+    """True when a traceability string carries a value (not None, not whitespace)."""
+    return bool(value and value.strip())
+
+
+def _stock_row_supplier_name(db: Session, inv_items: List[InventoryItem], company_id: int) -> Optional[str]:
+    """The supplier the lot's first stock row names (``supplier_id``), for a lot no receipt covers.
+
+    Vendor deliberately unfiltered on soft delete, as on the receipt join above: the supplier
+    of record is history and must not vanish when the relationship ends (invariant 5).
+    """
+    supplier_id = next((i.supplier_id for i in inv_items if i.supplier_id), None)
+    if supplier_id is None:
+        return None
+    vendor = db.query(Vendor).filter(Vendor.id == supplier_id, Vendor.company_id == company_id).first()
+    return vendor.name if vendor else None
 
 
 def trace_lot(
@@ -220,8 +242,19 @@ def trace_lot(
         .all()
     )
 
+    # Lot numbers are not unique across parts, so the receipts that speak for THIS lot's
+    # header are the ones for the traced part. With no stock row or ledger row to name the
+    # part (a receipt still held for inspection), the receipts name it when they agree.
+    receipt_part_ids = {r.po_line.part_id for r in receipts if r.po_line is not None}
+    if part is None and len(receipt_part_ids) == 1:
+        part = next(r.po_line.part for r in receipts if r.po_line is not None)
+    header_receipts = sorted(
+        (r for r in receipts if part is not None and r.po_line is not None and r.po_line.part_id == part.id),
+        key=lambda r: (r.received_at or datetime.min, r.id),
+    )
+
     for r in receipts:
-        if r.po_line and r.po_line.purchase_order:
+        if r in header_receipts and r.po_line.purchase_order:
             po = r.po_line.purchase_order
             po_number = po.po_number
             if po.vendor:
@@ -236,12 +269,29 @@ def trace_lot(
                 location=None,
                 reference=r.receipt_number,
                 details={
+                    "heat_number": r.heat_number,
                     "cert_number": r.cert_number,
+                    "certificate_document_id": r.certificate_document_id,
                     "packing_slip": r.packing_slip_number,
                     "inspection_status": r.status.value if r.status else None,
                 },
             )
         )
+
+    # The receipt is the record of what arrived. A stock row placed before heat and cert
+    # rode to stock (or a lot still in inspection, with no row at all) is blank, so the
+    # header falls back to the earliest matching receipt that carries each value.
+    if not _text(heat_lot):
+        heat_lot = next((r.heat_number for r in header_receipts if _text(r.heat_number)), heat_lot)
+    if not _text(cert_number):
+        cert_number = next((r.cert_number for r in header_receipts if _text(r.cert_number)), cert_number)
+    certificate_document_id = next(
+        (r.certificate_document_id for r in header_receipts if r.certificate_document_id), None
+    )
+    if received_date is None and header_receipts:
+        received_date = header_receipts[0].received_at
+    if supplier_name is None and inv_items and part is not None:
+        supplier_name = _stock_row_supplier_name(db, [i for i in inv_items if i.part_id == part.id], company_id)
 
     # Check NCRs with this lot (exclude voided -- a voided NCR must not show in the active trace)
     ncrs = (
@@ -290,6 +340,7 @@ def trace_lot(
         received_date=received_date,
         cert_number=cert_number,
         heat_lot=heat_lot,
+        certificate_document_id=certificate_document_id,
         current_quantity=current_qty,
         current_location=current_loc,
         status=status,
@@ -557,10 +608,13 @@ def search_lots(
         .all()
     )
 
+    # Lot hits are keyed on (lot, part): lot numbers repeat across parts, so part A's stock
+    # row must not hide part B's receipt of the same lot number.
     seen = set()
+    seen_lots: set = set()
     for item in items:
-        if item.lot_number and item.lot_number not in seen:
-            seen.add(item.lot_number)
+        if item.lot_number and (item.lot_number, item.part_id) not in seen_lots:
+            seen_lots.add((item.lot_number, item.part_id))
             results.append(
                 {
                     "type": "lot",
@@ -569,6 +623,8 @@ def search_lots(
                     "part_name": item.part.name if item.part else None,
                     "quantity": item.quantity_on_hand,
                     "location": item.location,
+                    "heat_lot": item.heat_lot,
+                    "cert_number": item.cert_number,
                 }
             )
         if item.serial_number and item.serial_number not in seen:
@@ -582,5 +638,60 @@ def search_lots(
                     "location": item.location,
                 }
             )
+
+    # The receipt holds the heat and cert for every PO-received lot, so a mill heat number
+    # finds its lot even where the stock row is blank, or where no stock row exists yet
+    # (a lot still held for inspection). Voided receipts are left out, as in ``trace_lot``.
+    receipts = (
+        db.query(POReceipt)
+        .options(joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.part))
+        .filter(
+            POReceipt.company_id == company_id,
+            POReceipt.is_deleted == False,  # noqa: E712
+            or_(
+                POReceipt.lot_number.ilike(f"%{q}%"),
+                POReceipt.heat_number.ilike(f"%{q}%"),
+                POReceipt.cert_number.ilike(f"%{q}%"),
+            ),
+        )
+        .order_by(POReceipt.received_at.desc(), POReceipt.id.desc())
+        .limit(50)
+        .all()
+    )
+    new_receipts = []
+    for receipt in receipts:
+        lot_key = (receipt.lot_number, receipt.po_line.part_id if receipt.po_line else None)
+        if receipt.lot_number and lot_key not in seen_lots:
+            seen_lots.add(lot_key)
+            new_receipts.append(receipt)
+    # On hand is the lot's stock for that receipt's part (lot AND part: lot numbers repeat
+    # across parts); zero for a lot that has not reached stock. One batched read.
+    stock_by_key: dict = {}
+    if new_receipts:
+        stock_rows = (
+            db.query(InventoryItem)
+            .filter(
+                InventoryItem.company_id == company_id,
+                InventoryItem.lot_number.in_({r.lot_number for r in new_receipts}),
+            )
+            .all()
+        )
+        for row in stock_rows:
+            stock_by_key.setdefault((row.lot_number, row.part_id), []).append(row)
+    for receipt in new_receipts:
+        receipt_part = receipt.po_line.part if receipt.po_line else None
+        on_hand = stock_by_key.get((receipt.lot_number, receipt.po_line.part_id if receipt.po_line else None), [])
+        results.append(
+            {
+                "type": "lot",
+                "number": receipt.lot_number,
+                "part_number": receipt_part.part_number if receipt_part else None,
+                "part_name": receipt_part.name if receipt_part else None,
+                "quantity": sum(i.quantity_on_hand or 0 for i in on_hand),
+                "location": on_hand[0].location if on_hand else None,
+                "heat_lot": receipt.heat_number,
+                "cert_number": receipt.cert_number,
+            }
+        )
 
     return results

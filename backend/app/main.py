@@ -575,14 +575,6 @@ if settings.RATE_LIMIT_ENABLED:
             "/api/v1/auth/login": "5/minute",  # Prevent brute force
             "/api/v1/auth/register": "3/minute",  # Prevent mass registration
             "/api/v1/auth/register-public": "3/minute",  # Prevent mass self-registration
-            # Company self-registration. Unauthenticated, and a single call mints a
-            # whole TENANT plus an ACTIVE ADMIN user with live access+refresh tokens
-            # (app/services/company_onboarding.py), so it is the sharpest
-            # unauthenticated write surface in the app — it had no entry here at all
-            # and ran at only the global per-IP default. Same 3/minute as the sibling
-            # register routes; whether self-service tenant creation should be
-            # feature-flagged off in production entirely is a separate, open decision.
-            "/api/v1/companies/register": "3/minute",
             "/api/v1/auth/refresh": "30/minute",  # Allow reasonable token refreshes
             # Employee ID kiosk login. 10/min (was 3) so a shift change can cycle
             # several badges through ONE shared station within a minute. On its own
@@ -770,7 +762,7 @@ if settings.RATE_LIMIT_ENABLED:
         )
         logger.info(
             "Auth rate limits enforced: login=5/min, register=3/min, register-public=3/min, "
-            "companies-register=3/min, refresh=30/min, employee-login=10/min, employee-logout=30/min, "
+            "refresh=30/min, employee-login=10/min, employee-logout=30/min, "
             "station-login=5/min, "
             "kiosk-station-login=5/min, kiosk-badge-token=30/min, display-token-claim=10/min"
         )
@@ -1284,6 +1276,19 @@ async def detailed_health_check():
             "status": "healthy",
             "stats": cache.stats,
         }
+
+    # Document storage: which backend NEW uploads go to (for local, whether the upload
+    # path sits on a mounted volume). This endpoint is unauthenticated, so the summary
+    # carries no credential, no full endpoint URL, no filesystem path and -- unlike the
+    # authenticated /api/v1/setup/health -- no bucket, endpoint host or region, so it
+    # never publishes the document store's address. Informational: it never degrades the
+    # overall status, and a failure to read it is reported rather than 500ing the probe.
+    try:
+        from app.services.storage_service import describe_storage_configuration
+
+        checks["storage"] = describe_storage_configuration(include_location=False)
+    except Exception as e:
+        checks["storage"] = {"status": "unknown", "error": type(e).__name__}
 
     overall_status = "healthy" if checks.get("database", {}).get("status") == "healthy" else "degraded"
 

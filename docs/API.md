@@ -945,19 +945,23 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 
 > **Path fence.** A `scope="kiosk"` operator token is honored only on `/api/v1/shop-floor/*` and
 > `POST /api/v1/auth/employee-logout`; `get_current_user` rejects it with **403** everywhere else
-> (the token is valid — it just cannot reach the resource). Three shop-floor carve-outs are also
+> (the token is valid — it just cannot reach the resource). Four shop-floor carve-outs are also
 > **denied** to kiosk-scoped tokens regardless of role: `/shop-floor/kiosk-stations/*` (station
-> lifecycle admin), `/shop-floor/time-entries/{id}/approve|unapprove` (G5-A labor approval), and the
+> lifecycle admin), `/shop-floor/time-entries/{id}/approve|unapprove` (G5-A labor approval), the
 > manager dispatch tools — `GET /shop-floor/dispatch-board` and everything under it (a **prefix**
 > rule, so the three work-order-plan routes under `/shop-floor/dispatch-board/…` are denied too)
 > plus `PUT /shop-floor/work-centers/{id}/run-order` (a shared crew terminal must not read the whole
-> shop's board or dictate what every machine runs next). Operators keep **reading** their `RUN`
+> shop's board or dictate what every machine runs next) — and the in-process inspection sign-off
+> `POST /shop-floor/operations/{id}/inspection` (a desk verb, like labor approval: a 5-minute badge
+> token left live on a shared terminal must not let the next person sign an inspection in a Quality
+> or Supervisor's name). The other operation verbs (start, complete, detail) stay allowed. Operators keep **reading** their `RUN`
 > chips and the planner's dispatch notice: the work-center-queue and my-active-job endpoints are
 > different paths and stay allowed.
 >
 > **`PUT /shop-floor/operations/{id}/resume` is allowed, and that now matters.** It is inside the
 > fence prefix, matches none of the deny rules (the `kiosk-stations` / `dispatch-board` prefixes, the
-> `/time-entries/…/approve|unapprove` suffixes, the `/work-centers/…/run-order` suffix), and the
+> `/time-entries/…/approve|unapprove` suffixes, the `/work-centers/…/run-order` and
+> `/operations/…/inspection` suffixes), and the
 > endpoint carries no `require_role` — so a badge-scanned **Operator** can take a job off hold from
 > the shared terminal. That was incidental until the queue read began surfacing held work (see Shop
 > Floor → "Held work"): the kiosk can *place* a hold and had no way back, so an accidental hold had
@@ -1084,7 +1088,7 @@ reference) claim: `["badge", "pin"]` when a PIN was verified, `["badge"]` otherw
 `employee-login`, in the access and the refresh token). A `["badge", "pin"]` session also carries
 **`pst`**, the verified PIN's `floor_pin_set_at` as integer epoch-microseconds, which binds the
 session to that PIN (below). Both are written **only** by badge sign-on: `POST /auth/login`
-(password, including an employee ID plus password), registration and company onboarding mint exactly
+(password, including an employee ID plus password) and registration mint exactly
 the claims they always did. `get_current_user` copies `amr` onto `user._auth_methods`, and
 `AuditService` folds it into every row the session writes (see [Audit Log](#audit-log) →
 `extra_data.auth_methods`).
@@ -1309,8 +1313,10 @@ company-scoped.
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
 | GET | `/work-orders/` | List all work orders (`skip` ≥ 0, `limit` 1–5000 default 100 — the standard list tier, see [Pagination](#pagination)). `deleted_only=true` returns **only** this company's soft-deleted work orders — the restore view, **Admin / Manager**, and the only read in the API that can see one; see "Seeing a deleted work order" below | Yes (`deleted_only=true`: Admin / Manager) |
-| GET | `/work-orders/browse` | **The bounded, server-filtered page behind the Work Orders list screen.** Returns an **envelope**, not a bare array. Query: `skip` ≥ 0 (default 0; a `skip` past the last page is clamped to that page's start, and the response's `skip` reports the clamped value), `limit` **1–100** (default 50); `status` (one `WorkOrderStatus`; omitted = every status except complete / closed / cancelled); `search` (≤ 200 chars, a **literal** case-insensitive substring — `%` / `_` are not wildcards — over WO number, customer name, customer PO, lot, unit #, part number and part name); `customer` (≤ 255, exact customer name); `hide_cots` (default `true`: hides work orders whose part is purchased / hardware / raw material; part-less ones stay); `scope` (`overdue` \| `due_today`, open work orders against the **Central** date); `work_order_type` (`production` \| `laser_cutting`, unknown → **422**; `laser_cutting` = nest packages — standalone laser work orders and the laser children a nest import hangs off a production job); `sort` (`work_order_number` \| `part` \| `customer` \| `due_date` \| `priority` (default) \| `status`, nulls last, ID tiebreaker) with `direction` (`asc` default \| `desc`); `group` (`none` default \| `customer` \| `part` \| `status`, rows ordered by group first). Response: `items` (`WorkOrderSummary` rows with operation progress), `total` (the full filtered count), `skip`, `limit`, `has_next`, `stats` (`overdue` / `in_progress` / `due_today` over the filtered set), `customers` (distinct customer names under every filter **except** `customer` — it honors `work_order_type` — capped at 1000, with `customers_truncated`), `group_totals` (full counts for only the groups on this page; `{}` when `group=none`), and `type_counts` (`{production, laser_cutting}`, both always present, zero-filled: rows per type under every **other** filter, `customer` included, deliberately **ignoring** `work_order_type` so each type chip shows its own count). A pure read sent `Cache-Control: no-store`: it **never reconciles on read** — no completion evidence, READY promotion or inventory effect — so loading the list does not heal a stranded work order the way `GET /work-orders/{id}` does (see "A read heals a stranded work order" below) | Effective `work_orders:view` in the active company (every role by default; **403** when a company role override removes it) |
-| POST | `/work-orders/` | Create work order. `work_order_type` is validated against the `WorkOrderType` vocabulary (**422** on an unknown value), and `'laser_cutting'` is **refused on create** (422) — nest-dispatch WOs are minted only by the laser nest import paths (see note below). Body accepts `sequential_operations` (**default `true`** — a sequenced routing; see "READY promotion" below) and the optional `unit_number` (≤ 50 chars — see "Unit #" below) | Yes |
+| GET | `/work-orders/browse` | **The bounded, server-filtered page behind the Work Orders list screen.** Returns an **envelope**, not a bare array. Query: `skip` ≥ 0 (default 0; a `skip` past the last page is clamped to that page's start, and the response's `skip` reports the clamped value), `limit` **1–100** (default 50); `status` (one `WorkOrderStatus`; omitted = every status except complete / closed / cancelled); `search` (≤ 200 chars, a **literal** case-insensitive substring — `%` / `_` are not wildcards — over WO number, customer name, customer PO, lot, unit #, part number and part name); `customer` (≤ 255, exact customer name); `hide_cots` (default `true`: hides work orders whose part is purchased / hardware / raw material; part-less ones stay); `scope` (`overdue` \| `due_today`, open work orders by `due_date` against the **Central** date; or `late`, the daily `wo.late` summary's own rule: a released / in-progress / on-hold work order past its promise date — `must_ship_by`, else `due_date` — drafts never late); `work_order_type` (`production` \| `laser_cutting`, unknown → **422**; `laser_cutting` = nest packages — standalone laser work orders and the laser children a nest import hangs off a production job); `sort` (`work_order_number` \| `part` \| `customer` \| `due_date` \| `priority` (default) \| `status`, nulls last, ID tiebreaker) with `direction` (`asc` default \| `desc`); `group` (`none` default \| `customer` \| `part` \| `status`, rows ordered by group first). Response: `items` (`WorkOrderSummary` rows with operation progress), `total` (the full filtered count), `skip`, `limit`, `has_next`, `stats` (`overdue` / `in_progress` / `due_today` over the filtered set), `customers` (distinct customer names under every filter **except** `customer` — it honors `work_order_type` — capped at 1000, with `customers_truncated`), `group_totals` (full counts for only the groups on this page; `{}` when `group=none`), and `type_counts` (`{production, laser_cutting}`, both always present, zero-filled: rows per type under every **other** filter, `customer` included, deliberately **ignoring** `work_order_type` so each type chip shows its own count). A pure read sent `Cache-Control: no-store`: it **never reconciles on read** — no completion evidence, READY promotion or inventory effect — so loading the list does not heal a stranded work order the way `GET /work-orders/{id}` does (see "A read heals a stranded work order" below) | Effective `work_orders:view` in the active company (every role by default; **403** when a company role override removes it) |
+| POST | `/work-orders/` | Create work order. `work_order_type` is validated against the `WorkOrderType` vocabulary (**422** on an unknown value), and `'laser_cutting'` is **refused on create** (422) — nest-dispatch WOs are minted only by the laser nest import paths (see note below). Body accepts `sequential_operations` (**default `true`** — a sequenced routing; see "READY promotion" below) and the optional `unit_number` (≤ 50 chars — see "Unit #" below). Each supplied `operations[]` row accepts an optional `routing_operation_id` that keeps that routing step's process sheet; a link that is not on the part's released routing is **409** `ROUTING_OPERATION_UNMATCHED`, and a create that leaves a sheet-bearing step off the job is **503** (nothing saved) when its required audit row cannot be written — see "Process sheets on supplied operations" below | Admin / Manager / Supervisor |
+| GET | `/work-orders/preview-operations/{part_id}` | The operations `POST /work-orders/` would copy from the part's released routing (query `quantity`, default 1). `operations_preview` rows carry `routing_operation_id`, the `sequence` / `operation_number` the routed create would assign, and `process_sheet_id` / `process_sheet_number` / `process_sheet_released` (`false` = creating from this routing would be **409** `PROCESS_SHEET_UNAVAILABLE`; `null` = no sheet). Rows are returned for every part type, not only parts with a BOM. **404** for a part outside the active company. Pure read. See "Process sheets on supplied operations" below | Yes |
+| GET | `/work-orders/process-sheet-gaps` | **Quality's Sheet Gaps list** — live work orders whose part's released routing (or a BOM component's) carries process sheets but whose operations hold no snapshotted process-sheet step. Query `limit` 1–500 (default 200); response `{total, items}` with `total` counting every match. Pure read, writes nothing. MCP tool `list_process_sheet_gaps`. See "Process sheets on supplied operations" below | Admin / Manager / Quality |
 | GET | `/work-orders/{id}` | Get work order by ID. Also carries the job's cost by element (`job_cost_actuals`), the inventory-ledger material figure (`issued_material_cost`) and, per operation, where its actual hours come from (`hours_source`, `recorded_setup_hours`, `recorded_run_hours`, `hours_include_backfill`) — see "Cost and actual hours on the work-order read" below | Yes |
 | GET | `/work-orders/by-number/{wo_number}` | Get work order by number: the **same body** as by ID (every computed field included). A soft-deleted work order is **404**, as by ID. Unlike the read by ID it does **not** reconcile on read — it writes nothing | Yes |
 | GET | `/work-orders/{id}/timeline` | Chronological job history with category, actor and time filters; opaque cursor, `limit` 1–100 (default 30). Returns business events and source links, not raw audit payloads. Each item a single operation owns (its start / finish, production receipts, process-step evidence, labor, a blocker filed against it) carries `operation_id`; the job's own items carry `null` | Yes |
@@ -1324,7 +1330,7 @@ company-scoped.
 | POST | `/work-orders/{id}/complete` | Force-complete a work order (privileged override), booking `quantity_complete` as its finished count — the header is **set** to it. **409** if the WO is CANCELLED or an open operation is on hold. **403** for an API token sending a `quantity_scrapped` above the header's recorded scrap (owner decision 2026-11-07: only a person declares scrap), and first among the quantity refusals for an API token completing short or above what the floor recorded. **409** when `quantity_complete` exceeds what the floor recorded (naming the binding operation) unless `quantity_override_reason` is sent, and **400** above what can still exist once declared shorts and covered scrap are out, even with a reason; **409** when the shortfall below the order is not covered by floor-reported scrap or `quantity_scrapped` (with a reason); **503** (nothing saved) when the required audit row cannot be written. See "Short count at completion" below | Admin / Manager / Supervisor / Quality |
 | POST | `/work-orders/{id}/duplicate` | **Duplicate a work order** — copy its *plan* (operations, laser nests, open material ties, re-snapshotted process-sheet steps) onto a new **DRAFT** WO. Body `{quantity_ordered, due_date}`; **201** returning an **envelope**, not a bare work order. See "Duplicating a work order" below | Admin / Manager / Supervisor |
 | POST | `/work-orders/{id}/operations` | Add an operation to a work order | Admin / Manager / Supervisor |
-| PUT | `/work-orders/operations/{id}` | Update an operation (body now also accepts `work_center_id` — move the operation to another work center; see note below). **409** if it sets `status` to COMPLETE on a not-yet-complete operation — completion goes through the completion endpoints (see "Terminal-state lock"). **409** with the start gate's text if it sets `status` to IN_PROGRESS on an operation of a draft, on-hold or complete / closed / cancelled work order, and **409** "release first" if it sets `status` to READY on a draft — both before any field is written; re-sending the operation's current status is not a transition. **409** with the same text when it **raises** `quantity_complete` on an operation that is (or this write leaves) PENDING / READY of a draft or on-hold work order. These start-gate refusals answer **before** the open-operation count 409s below, so a not-started operation of a draft or held job always gets "release first" / "Resume Work Order", never a count text naming doors that job keeps shut. **404** `Work order not found` when the operation's work order is soft-deleted (see "Draft and on-hold work orders refuse every start"). **On a COMPLETE operation, changing `quantity_complete` or `status`, or lowering `quantity_scrapped`, returns 409** — those are the completion record; correct the good count with `…/reduce-production`, which can reopen the operation (re-sending the stored values, and every other field, is still accepted; scrap found after the close may be **added** with a reason, as required audit evidence, but only into units still unaccounted — a rise past that is 409). On an open operation, raising `quantity_complete` above the good ceiling or the floor's labor record returns 409; an API token may not change the counts or the scrap reason (403 — a `quantity_scrapped` rise or a reason change gets the scrap text, owner decision 2026-11-07). See "Short count at completion" | Admin / Manager / Supervisor |
+| PUT | `/work-orders/operations/{id}` | Update an operation (body now also accepts `work_center_id` — move the operation to another work center; see note below). **409** if it sets `status` to COMPLETE on a not-yet-complete operation — completion goes through the completion endpoints (see "Terminal-state lock"). **409** with the start gate's text if it sets `status` to IN_PROGRESS on an operation of a draft, on-hold or complete / closed / cancelled work order, and **409** "release first" if it sets `status` to READY on a draft — both before any field is written; re-sending the operation's current status is not a transition. **409** with the same text when it **raises** `quantity_complete` on an operation that is (or this write leaves) PENDING / READY of a draft or on-hold work order. These start-gate refusals answer **before** the open-operation count 409s below, so a not-started operation of a draft or held job always gets "release first" / "Resume Work Order", never a count text naming doors that job keeps shut. **404** `Work order not found` when the operation's work order is soft-deleted (see "Draft and on-hold work orders refuse every start"). **On a COMPLETE operation, changing `quantity_complete` or `status`, or lowering `quantity_scrapped`, returns 409** — those are the completion record; correct the good count with `…/reduce-production`, which can reopen the operation (re-sending the stored values, and every other field, is still accepted; scrap found after the close may be **added** with a reason, as required audit evidence, but only into units still unaccounted — a rise past that is 409). On an open operation, raising `quantity_complete` above the good ceiling or the floor's labor record returns 409; an API token may not change the counts or the scrap reason (403 — a `quantity_scrapped` rise or a reason change gets the scrap text, owner decision 2026-11-07). See "Short count at completion". **`inspection_complete` is not an updatable field:** a body that contains the key, with any value (`true`, `false`, `null`), is refused **422** (`inspection_complete cannot be set by an operation update. Sign off the inspection with POST /api/v1/shop-floor/operations/{operation_id}/inspection, which records who signed and when.`) rather than silently ignored — the sign-off verb is the flag's only writer (Shop Floor → "Inspection Schema"). `requires_inspection` is still accepted, and setting it signs nothing | Admin / Manager / Supervisor |
 | POST | `/work-orders/operations/{id}/start` | Start an operation (**office** verb — operators start work through `PUT /shop-floor/operations/{id}/start` and the kiosk, which stay operator-open). Refused before any write, in the shop-floor twin's order: **400** already complete / already in progress (it never re-opens or re-stamps one), **404** work order missing or soft-deleted, **409** draft / on-hold / terminal work order, **409** operation on hold (starting does not lift a hold), **400** predecessors | Admin / Manager / Supervisor / Quality |
 | POST | `/work-orders/operations/{id}/complete` | Record an operation's good and scrap **totals** from the office. It **closes only when good + scrap cover every unit that reached the operation**; otherwise it saves progress and stays open (a submit that changes nothing is a **200** "No change" that writes nothing). 409 if the parent WO is terminal; **409 for a READY operation on a draft or on-hold WO** — completing it would start it. Query params `quantity_scrapped` (a total that never lowers), `scrap_reason` / `scrap_reason_code_id`, `quantity_override_reason`, `acknowledge_open_entries` — see "Short count at completion" below. **403** for an API token raising the scrap total (owner decision 2026-11-07: only a person declares scrap). **Office** verb — the shop-floor twin is the operator path | Admin / Manager / Supervisor / Quality |
 | POST | `/work-orders/operations/{id}/reduce-production` | Supervisor/office over-count correction — walk back good-count across **any** operator's **unapproved** labor on the operation (an operation nobody ever clocked in to has its desk-entered good lowered directly, up to that count); **a COMPLETE operation is correctable here** (unlike the operator's twin), a terminal WO is not; no clock-in required. A correction that would leave a COMPLETE operation short is **409** unless the body sends `reopen_operation: true`, which returns it to in progress (see note below). A standing API token is **403** on every correction | Admin / Manager / Supervisor |
@@ -3086,6 +3092,72 @@ company-scoped.
 > is deliberately **outside** `_job_guidance_fields` — see Shop Floor → "Unit # on operator and
 > display reads" for where it appears and why the five-key guidance contract was not widened.
 
+> **Process sheets on supplied operations (wo_change/2).** `POST /work-orders/` builds a job's
+> operations one of two ways. With `auto_routing` on and no `operations`, it copies the part's
+> released routing and snapshots every attached process sheet (`wo_operation_steps`), as it always
+> has. When the request **supplies** `operations` — which New Work Order does as soon as the planner
+> edits a routed row, and always for a restored form draft — those rows used to get **no snapshot**,
+> so the routing's required checks never reached the kiosk and the completion gate passed freely.
+> Supplied rows now keep their sheets through a link:
+>
+> - **`routing_operation_id`** (optional, > 0, per `operations[]` row) names the routing operation
+>   the row was copied from — the value `GET /work-orders/preview-operations/{part_id}` returns on
+>   each row. It is matched **by id, never by sequence or name**, so an edited, renamed or
+>   re-sequenced row keeps its sheet. Omit it for a step the planner added by hand; that row
+>   snapshots nothing. It is not stored on the operation; it is read at creation and recorded on
+>   the creation audit row.
+> - A valid link names an **active** operation on a **released**, active, non-deleted routing of the
+>   job's part, or of one of its BOM components, and the row's `component_part_id` must agree: the
+>   component's id for a component step, `null` or the job part's id for the part's own step. That is
+>   the same set the routed create copies (one shared reader); on a duplicate release the lowest
+>   routing id wins. An id only on an older routing revision counts as stale.
+> - **409 `ROUTING_OPERATION_UNMATCHED`**, nothing written, when any link fails. `detail` is an
+>   object: `{code, detail, operations: [{sequence, operation_number, routing_operation_id,
+>   reason}]}`, every bad row named, `reason` one of `not_found` (missing, or another company's —
+>   the two read the same), `not_on_released_routing`, `component_mismatch`. A stale link from a
+>   restored draft is refused, never dropped and never re-matched.
+> - Linked rows go through the **same** snapshot as the routed path
+>   (`process_sheet_service.snapshot_steps_for_work_order`), so a sheet family with no released
+>   revision is the existing **409 `PROCESS_SHEET_UNAVAILABLE`** and rolls the whole creation back.
+> - **Leaving a sheet-bearing step off is allowed** (a default, not an owner ruling). On the
+>   supplied path the creation audit row adds `operations_supplied: true`,
+>   `linked_routing_operation_ids` and `removed_process_sheet_steps` (each `{routing_operation_id,
+>   operation_number, operation_sequence, name, component_part_id, component_part_number,
+>   process_sheet_id, sheet_number}`). When that list is non-empty the row is **required evidence**:
+>   it is written through `log_required` inside `required_audit`, and if it cannot be written the
+>   request answers **503** and no work order is created. Every other create keeps the best-effort
+>   `log_create`, and the routed path's audit row is unchanged.
+> - **A linked row keeps its step's inspection plan.** An unset `inspection_type` takes the routed
+>   path's value (`"final"` for an inspection operation), so inspection sign-off opens at the planned
+>   type; a supplied `inspection_type` stands. A routing inspection point sent with
+>   `requires_inspection: false` is allowed but named under `dropped_inspection_points` (the
+>   `removed_process_sheet_steps` shape plus `work_order_operation_sequence`), and a non-empty list
+>   makes the creation row required evidence exactly as above (503, nothing created).
+> - `auto_routing: false` with no `operations` is an empty job by request; no link check runs and no
+>   supplied-path keys are written.
+>
+> **The preview** (`GET /work-orders/preview-operations/{part_id}?quantity=N`) now reads from that
+> same shared reader. Each row adds `routing_operation_id`, `sequence`, `operation_number` (for an
+> assembly, or any part with an active BOM: 10, 20, … with `operation_number` = `str(sequence)`, own
+> inspection steps last; for any other part: the routing's own sequence and operation number,
+> verbatim), `process_sheet_id`, `process_sheet_number` and `process_sheet_released`. It now also
+> returns rows for a part with no BOM (its own released routing); `bom_found` and
+> `component_routings` are unchanged. Rows with a null `component_part_id` carry the whole order
+> quantity as `component_quantity`, as the assembly's own rows always have.
+>
+> **The Sheet Gaps list** (`GET /work-orders/process-sheet-gaps`, Admin / Manager / Quality) finds
+> the jobs that already went out without their sheets. A row is a work order that is not deleted,
+> not complete / closed / cancelled (drafts included), not a laser-cutting job, whose part's
+> released routing — or a BOM component's, at any depth — carries a process sheet today, and whose
+> operations hold **no** snapshotted step at all. A job holding some but not all of its sheet steps
+> is not listed (its creation audit row names what was left off). The routing is read as it is now,
+> so a job created before a sheet was attached is listed too. Each item: `work_order_id`,
+> `work_order_number`, `status`, `part_id`, `part_number`, `part_name`, `quantity_ordered`,
+> `due_date`, `customer_name`, `created_at` (UTC `Z`), `operation_count`, and
+> `expected_process_sheet_steps` (same shape as `removed_process_sheet_steps`). Ordered by due date,
+> undated last. Tenant-scoped pure read: no write, no audit row, no event; an API token may read it.
+> There is no fix-up verb: re-snapshotting sheets onto an existing job is not built.
+
 > **Duplicating a work order (`POST /work-orders/{id}/duplicate`).** Re-runs a job's **plan** without
 > re-entering it — the motivating case is a 40-nest laser package confirmed once through the import
 > wizard and run again next month, without re-uploading the PDFs or re-confirming a single row. Body:
@@ -4041,6 +4113,10 @@ mixed**:
 | GET | `/laser-nests/{id}/document` | Serve the attached PDF **inline** for operator preview | Yes (any authenticated user) |
 | DELETE | `/laser-nests/{id}` | Soft-delete the nest; its operation goes `ON_HOLD` | Admin / Manager / Supervisor |
 | POST | `/laser-nests/{id}/restore` | Restore a cancelled nest and its planned runs, retaining the original operation and drawing | Admin / Manager / Supervisor |
+| GET | `/laser-nests/untied` | Nests with no sheet tied: open nests plus nests completed in a window, each with its job, program number, sheet descriptor, the sheet matcher's answer and, when it is safe to offer, the exact body for the existing tie endpoint. Pure read. See "Untied nests" below | Admin / Manager / Supervisor |
+| GET | `/laser-nests/untied/coverage` | Per company-local month: completed nests and how many had a sheet tied. Pure read | Admin / Manager / Supervisor |
+| GET | `/laser-nests/untied/sheet-report` | Completed untied nests grouped by sheet spec, with sheets burned, the matched stock part and any open cycle count on it. Pure read | Admin / Manager / Supervisor |
+| GET | `/laser-nests/work-orders/{work_order_id}/tie-summary` | "N of M nests have no sheet tied" for one job (its own nests plus its laser child jobs'). **404** `Work order not found` for a missing, deleted or other-company job. Pure read | Admin / Manager / Supervisor |
 
 Restoration returns `LaserNestManualResponse`. The work-order operation response includes
 `cancelled_nest_id` on a held, cancelled nest (otherwise null), allowing Operations / Routing to show **Nest cancelled**
@@ -4683,6 +4759,90 @@ environment variable or deployment configuration change is needed.
 > per-row toil this feature exists to remove, and the same planner is already looking at the one
 > sheet they are describing — adding a proposal there would spend the safety budget of an
 > auto-fill to save a single search.
+
+> **Untied nests (`/laser-nests/untied…`, `…/work-orders/{id}/tie-summary`).** A nest can still be
+> imported or keyed with no sheet tied, and then its operation completes with no stock deducted.
+> Four GET routes make that visible to the office. All four are **pure reads**
+> (`services/untied_nest_service.py`): no ledger row, no audit row, no event, no tie, no cycle count —
+> a test counts `audit_log`, `inventory_transactions` and `operational_events` before and after. All
+> four are `require_role([ADMIN, MANAGER, SUPERVISOR])`, the same trio that may tie a sheet, and
+> tenant-scoped. The dispatch board, the kiosk and the crew station never call them and show no
+> untied marker (the floor payloads' `material_tie` stays `null` for an untied row, unchanged).
+>
+> Definitions, shared by every route:
+>
+> - **nest operation** — a `work_order_operations` row a live (not soft-deleted) `laser_nests` row
+>   points at, on a non-deleted work order;
+> - **tied** — an operation-scoped `work_order_material_allocations` row names it in any status
+>   but `cancelled` (`open`, or the reserved `closed`, which nothing writes today). A
+>   **work-order-scoped** tie on the same laser job does **not** make a nest tied; it is reported as
+>   `job_level_tie_count`, because tying the nest as well could draw the sheet twice;
+> - **open** — the operation is not COMPLETE and its work order is not terminal;
+> - **completed** — the operation is COMPLETE; its instant is `actual_end`, or `updated_at` when no
+>   `actual_end` was stamped.
+>
+> **`GET /laser-nests/untied`** — query `status` (`open` | `completed` | `all`, default `all`),
+> `work_order_id` (the laser job itself, or an assembly job's `laser_cutting` children),
+> `work_center_id`, `completed_from` / `completed_to` (company-local dates, **422** `Start date must
+> be on or before end date` when reversed; with neither given the completed window is the **last 90
+> days**, except that a `work_order_id` filter applies **no** default window, so the list counts the
+> same nests as that job's tie summary), `limit` (1–500, default 100), `offset`. Response
+> `UntiedNestListResponse` `{items, total, limit, offset, completed_from, completed_to,
+> matcher_available}`; open rows first (job number, sequence, nest), then completed rows newest first.
+> Each row carries the job and its parent, operation, work center, `nest_name`, `cnc_number` (the
+> program number), the three descriptors plus a display `sheet_descriptor`, `planned_runs`,
+> `runs_complete`, `runs_scrapped`, `completed_at` (null while open), `is_completed`,
+> `job_level_tie_count`, and:
+>
+> | Field | Meaning |
+> |---|---|
+> | `suggestion` | The sheet matcher's answer (`services/sheet_stock_matcher.py`, the same matcher as the import preview): `{status: matched \| ambiguous \| unmatched, candidate, candidates (up to 5), diagnostic}`; each candidate carries its own `on_hand` / `on_hand_known`. The package-level stock projection is left out (a running total across jobs means nothing). `null` only when the matcher failed, and then the response's `matcher_available` is `false`; the matcher runs inside a savepoint, so its failure never costs the read its rows |
+> | `tieable` / `tie_blocked_reason` | `false` with `Work order {n} is {status}; a sheet can no longer be tied to it.` when the laser job is in a terminal status, because the tie endpoint refuses a finished job. A completed nest on a still-open job **is** tieable |
+> | `proposed_tie` | Set only when the matcher picked exactly one part **and** the row is tieable: `{work_order_id, part_id, work_order_operation_id, source: "nest", qty_per_run: 1.0, qty_planned: planned_runs}`, the nest import's tie shape with no lot pinned. Drop `work_order_id` into the path and post the rest to the existing `POST /work-orders/{work_order_id}/material-allocations`; that route's own gates and refusals apply unchanged. Never set for an ambiguous match |
+> | `counted_since_completion_part_ids` | Candidate parts with a cycle count **completed** after this nest completed (one batched read). That count already corrected on-hand for the sheets the nest burned, so tying the nest to one of these parts would deduct them again when the job completes. A warning for the client, never a refusal |
+>
+> A tie on a nest whose operation is already COMPLETE is consumed by the work-order completion
+> reconcile (the self-heal), since the operation's own completion has passed.
+>
+> **`GET /laser-nests/untied/coverage`** — query `months` (1–24, default 6). Response
+> `{months: [{month: "YYYY-MM", completed_nests, tied_nests, untied_nests, tied_percent}],
+> completed_nests, tied_nests, tied_percent}`: company-local calendar months, oldest first, the
+> current month included, empty months included with `tied_percent: null`.
+>
+> **`GET /laser-nests/untied/sheet-report`** — query `completed_from` / `completed_to` (company-local
+> dates; default the last 90 days). Groups the completed untied nests by the matcher's spec key
+> (grade, thickness, size), so `48x96` and `96 X 48` share a group; the group's label is its most
+> common normalized spelling. **The grouping is approximate**: it reads free-text descriptors. Each
+> group: `spec_key`, the descriptors and `sheet_descriptor`, `nest_count`, `sheets_burned` (good plus
+> scrapped runs, assuming one sheet per run), `tieable_nest_count` / `tieable_sheets_burned` (the
+> part on still-open jobs, which a tie from the worklist still corrects), `work_order_count`,
+> `work_order_numbers` (up to 10), `first_completed_at` / `last_completed_at`, `suggestion`, and
+> `open_cycle_counts` (`scheduled` or `in_progress` counts already scoped to the matched part, or to
+> the top shortlist part when the match was ambiguous). Totals `nest_count`, `sheets_burned`,
+> `tieable_sheets_burned`; groups most sheets burned first. At most 5,000 nests are read, and
+> `truncated: true` says so. **Only `sheets_burned − tieable_sheets_burned` is correctable by a count
+> alone**: counting the tieable sheets and then tying them deducts them twice. Starting a count is
+> the existing `POST /inventory/cycle-counts` (one `part_id` per count). Nothing here posts a
+> back-dated ledger row; attributing a sheet to a nest after its job closed is not built.
+>
+> **`GET /laser-nests/work-orders/{work_order_id}/tie-summary`** — `{work_order_id,
+> work_order_number, nest_count, tied_count, untied_count, job_level_tie_count, message, untied}`,
+> counting the job's own nests plus those of its `laser_cutting` children. `message` is `N of M nests
+> have no sheet tied` (`1 of 1 nest has no sheet tied` in the singular), or `null` when none is
+> untied; a job with no nests answers `nest_count: 0`, not an error. `untied` lists up to 200 rows
+> `{laser_nest_id, work_order_operation_id, work_order_id, work_order_number, operation_number,
+> cnc_number, nest_name, operation_status}`. **404** `Work order not found` for a missing, deleted or
+> other-company job.
+>
+> **In the app.** Work Order Detail's Material Ties panel shows the summary's `message` (Admin,
+> Manager, Supervisor only), and **Release warns and never refuses**: clicking Release re-reads the
+> summary and, when a nest is untied, asks "Release with untied nests?" (**Release anyway** / **Not
+> yet**). A failed re-read releases as before. `POST /work-orders/{id}/release` itself is unchanged.
+> The office page **Untied Laser Nests** (`/laser-nests/untied`, Production section, gated on
+> `work_orders:edit`) shows the coverage tiles, the worklist with **Tie this sheet** (posting
+> `proposed_tie`) or **Choose sheet** (the planner picks a shortlist part; nothing preselected), and
+> the sheet report with **Start cycle count**. Ties and counts are non-optimistic: the list reloads
+> after a success, and a refusal is shown verbatim in the dialog.
 >
 > **Manual nest edit (`PATCH /laser-nests/{id}`).** All-optional body (`cnc_number`, `nest_name`,
 > `planned_runs`, `material`, `thickness`, `sheet_size`). A `planned_runs` change **reverse-syncs**
@@ -4789,7 +4949,7 @@ environment variable or deployment configuration change is needed.
 | GET | `/parts/` | List all parts | Yes |
 | POST | `/parts/` | Create part | Yes |
 | GET | `/parts/{id}` | Get part by ID | Yes |
-| PUT | `/parts/{id}` | Update part — resolves **any** part in the company, engineering or material/supply. (**409** when it turns `backflush_components` on and the part's readiness check reports blockers, and **409** when it reclassifies a material part into a produced one while an **unfinished** work order still ties it — see below). Also sets `supply_scope` (see [Part Schema](#part-schema)) | Admin / Manager / Supervisor |
+| PUT | `/parts/{id}` | Update part — resolves **any** part in the company, engineering or material/supply. (**409** when it turns `backflush_components` on and the part's readiness check reports blockers, and **409** when it reclassifies a material part into a produced one while an **unfinished** work order still ties it — see below). Also sets `supply_scope` and `customer_supplied` (see [Part Schema](#part-schema)) | Admin / Manager / Supervisor |
 | DELETE | `/parts/{id}` | Delete part (soft delete — restorable). `hard_delete=true` is refused **400** while work orders, BOMs or BOM lines reference the part, or while a CAR names it (`Cannot hard delete: Part is named on N corrective action report(s); soft delete it instead`; `DELETE /materials/{id}?hard_delete=true` applies the same CAR check) | Admin |
 | POST | `/parts/{id}/restore` | Restore a soft-deleted part, **returning it to the `is_active` it had when it was deleted** — not an unconditional re-activate, and an unknowable prior value comes back **inactive**. **400** if it is not actually deleted. See note below | Admin / Manager |
 | POST | `/parts/{id}/deactivate` | Take a part out of use — `is_active=false` + `status='obsolete'`. **Not** a delete; `is_deleted` is never written. Reason required. **409** if it still has stock and `acknowledge_remaining_stock` was not set | **Admin / Manager** |
@@ -5093,6 +5253,7 @@ environment variable or deployment configuration change is needed.
   "unit_of_measure": "EA",
   "material_type": "ST-304",
   "backflush_components": false,
+  "customer_supplied": false,
   "is_active": true,
   "created_at": "2024-01-01T10:00:00Z"
 }
@@ -5219,6 +5380,21 @@ environment variable or deployment configuration change is needed.
 > by a create. Either the scope slug (`raw_material_metallics`) or the QL 7.4 label (*Raw Material -
 > Metallics*) is accepted and stored as the slug; anything else is **422** (a row error on the import).
 > An explicit `null` clears it. No screen edits it yet.
+
+> **`customer_supplied` — the customer furnishes this part** (`parts.customer_supplied`, migration
+> `134_part_customer_supplied`; boolean, default `false`; AS9100D 8.5.3). When it is `true`, MRP
+> creates no demand for the part (owner decision 2026-11-22): see
+> [MRP → Customer-supplied parts](#customer-supplied-parts-mrp). `PartResponse` returns it on every
+> part and material read, the list helper included. Like `backflush_components` it is on `PartUpdate`
+> and `PartResponse` only: `POST /parts/` and `POST /materials/` drop the key, neither CSV importer
+> reads it, and a part is always created `false`. It is set or cleared through `PUT /parts/{id}` or
+> `PUT /materials/{id}` under those routes' existing Admin / Manager / Supervisor gate, with no gate or
+> refusal of its own, and the handler's `log_update` row records the change (`resource_type="part"`
+> through either door). An explicit `null` is **422**. It is never inferred from stock ownership:
+> who owns a stock row is still that row's `ownership` (see
+> [Customer- and supplier-owned property](#customer--and-supplier-owned-property)), so flagging a part
+> changes no stock row, and receiving customer-owned stock does not flag its part. In the app it is
+> the **Customer-supplied** checkbox on the Part and Materials edit forms (edit mode only).
 
 ### BOM (Bill of Materials)
 
@@ -6154,9 +6330,9 @@ uploads go through text extraction + LLM. See
 >   cannot disagree. `GET /maintenance/work-orders/overdue` and the QMS evidence card
 >   (`auto_evidence_service`) keep their own overdue reads.
 > - **Due and overdue alerts (owner decisions 2026-11-20).** A daily worker cron,
->   `check_maintenance_due_job`, runs at hour 12, minute 15 in the **worker container's** zone:
->   12:15 UTC (6:15 AM Central, 7:15 in summer) while `TZ` is unset, 12:15 PM Central with
->   `TZ=America/Chicago`. Whatever the hour, it judges each active company on the company's own
+>   `check_maintenance_due_job`, runs at 06:15 **shop time** (America/Chicago, pinned in code by
+>   `WorkerSettings.timezone` since 2026-11-23, so `TZ` does not move it; it ran at 12:15 UTC
+>   before). Whatever the hour, it judges each active company on the company's own
 >   calendar day, and sends two catalog events, both direct-dispatched (`docs/NOTIFICATIONS.md`):
 >   - **`maintenance.overdue`** for every item the overdue tiles count: an active PM schedule past its
 >     `next_due_date` that no `scheduled` / `overdue` / `in_progress` work order covers (a PM whose
@@ -6707,7 +6883,7 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 |--------|----------|-------------|---------------|
 | GET | `/shop-floor/dashboard` | Shop floor dashboard | Yes |
 | GET | `/shop-floor/my-active-job` | Get current user's active job, incl. the job's written guidance (WO notes/special instructions + the operation's description/setup/run text). Top-level **`dispatch_notices`** (always present, `[]` when not clocked in): the newest planner dispatch notice per work center where the caller holds an open **labor** entry — see "Floor dispatch notices" below | Yes |
-| GET | `/shop-floor/operations` | List not-complete/cancelled operations for the desktop shop-floor pages (paginated, max 200/page; filters `work_center_id` / `status` / `search` / `due_today` — work orders due on the **company's calendar date**, not the server's UTC date, since 2026-11-13) — rows in the **canonical dispatch order**, each carrying the advisory `run_order` display rank (see "Desktop parity" under the Dispatch run order note below). An **`ON_HOLD` row additionally carries `hold`** — `{ held_at, held_by_user_id, held_by_name, blocker }`, from the same batched pure-read `operation_hold_view` the kiosk `held` list uses, so the desk page and the floor cannot tell two stories about one hold. The key is **absent on every other row** (unheld payloads stay byte-identical), every field inside is nullable, and `blocker: null` covers ordinary nest holds (including a category or note saved on the hold event) and bare holds, which still carries `held_by_name` / `held_at`: reason and attribution are INDEPENDENT. **Free text (`title` / `note`) rides this response** — every caller is an identified `get_current_user` session, never a crew-station principal, so the station withholding rule does not apply and `free_text_withheld` is `false`. **Only when filtered to one `work_center_id`**, the envelope also carries `dispatch_notices` (0- or 1-item list, that machine's newest dispatch notice) and `server_time` (UTC `Z`); an unfiltered list carries neither key — see "Floor dispatch notices" below. Every row also carries **`start_blocked_reason`** (the work-order start refusal text for a draft / on-hold / terminal work order, else `null`) and **`work_order_status`**; `can_check_in` is `false` whenever `start_blocked_reason` is set, and `blocked_by_previous_operations` is unchanged. `null` is not a "startable" claim — the write verb decides at the moment of the action. `GET /shop-floor/operations/{id}` carries the same two keys on `operation` and on each `all_operations[]` entry (see Work Orders → "Draft and on-hold work orders refuse every start") | Yes |
+| GET | `/shop-floor/operations` | List not-complete/cancelled operations for the desktop shop-floor pages (paginated, max 200/page; filters `work_center_id` / `status` / `search` / `due_today` — work orders due on the **company's calendar date**, not the server's UTC date, since 2026-11-13) — rows in the **canonical dispatch order**, each carrying the advisory `run_order` display rank (see "Desktop parity" under the Dispatch run order note below). An **`ON_HOLD` row additionally carries `hold`** — `{ held_at, held_by_user_id, held_by_name, blocker }`, from the same batched pure-read `operation_hold_view` the kiosk `held` list uses, so the desk page and the floor cannot tell two stories about one hold. The key is **absent on every other row** (unheld payloads stay byte-identical), every field inside is nullable, and `blocker: null` covers ordinary nest holds (including a category or note saved on the hold event) and bare holds, which still carries `held_by_name` / `held_at`: reason and attribution are INDEPENDENT. **Free text (`title` / `note`) rides this response** — every caller is an identified `get_current_user` session, never a crew-station principal, so the station withholding rule does not apply and `free_text_withheld` is `false`. **Only when filtered to one `work_center_id`**, the envelope also carries `dispatch_notices` (0- or 1-item list, that machine's newest dispatch notice) and `server_time` (UTC `Z`); an unfiltered list carries neither key — see "Floor dispatch notices" below. Every row also carries **`start_blocked_reason`** (the work-order start refusal text for a draft / on-hold / terminal work order, else `null`) and **`work_order_status`**; `can_check_in` is `false` whenever `start_blocked_reason` is set, and `blocked_by_previous_operations` is unchanged. `null` is not a "startable" claim — the write verb decides at the moment of the action. `GET /shop-floor/operations/{id}` carries the same two keys on `operation` and on each `all_operations[]` entry (see Work Orders → "Draft and on-hold work orders refuse every start"). Every row also carries the in-process inspection state: `requires_inspection`, **`inspection_complete`** (whether the sign-off below has been recorded) and **`inspection_type`** (the planned kind, e.g. `final` from a routing inspection point, or `null`) — the desk row reads them to show "Inspection required" / "Inspected" without a per-row detail read | Yes |
 | GET | `/shop-floor/operations/{id}/documents` | Kiosk doc-viewer discovery: the operation's controlled part drawing, live nest reference PDF, nest material, and critical SPC characteristics (see note below) | Yes |
 | GET | `/shop-floor/documents/{id}/inline` | Serve a kiosk-viewable document PDF inline — DRAWING-type or live-nest-referenced only, tenant-scoped, uniform **404** on any miss (see note below) | Yes |
 | POST | `/shop-floor/clock-in` | Clock in to operation (starts a PENDING / READY one). Refusal order, all before any write: **400** already clocked in, **404** operation, **400** operation not on that work order, **400** wrong work center, **404** work order missing or soft-deleted, **409** draft / on-hold / terminal work order, **400** `Operation is not ready to start` (incl. an operation-level hold), **400** predecessors. A back-entry (`source = "backfill"`) is refused exactly like a live clock-in | Yes |
@@ -6718,9 +6894,11 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 | POST | `/shop-floor/operations/{id}/complete` | **Close** an operation at the good count the floor already recorded — there is no partial branch, so a **200** always means COMPLETE. Viewer / Shipping get **403** `Insufficient permissions` before the operation is read or the body validated (owner decision P0.4, 2026-11-13). Refused **409**, writing nothing, while recorded good + scrap leave any received unit unaccounted (declare the lost pieces with `quantity_scrapped` + a reason, or leave it open), **403** for an API token declaring scrap (owner decision 2026-11-07: only a person declares scrap) or closing short, **409** for a READY operation on a draft or on-hold work order (completing it would start it); an IN_PROGRESS one stays completable under the same rules. See "Floor completion contract" below | Admin / Manager / Supervisor / Operator / Quality |
 | PUT | `/shop-floor/operations/{id}/hold` | Put an operation on hold and close open time entries. For a live laser nest, optional category/severity/note are saved on the hold event and **do not create a blocker**; Resume/Clear Hold is sufficient. Non-nest categorized holds retain their structured blocker behavior. Cancelled nests return **409** and must be restored first | Yes |
 | PUT | `/shop-floor/operations/{id}/resume` | Take an operation **off** hold. **Restores, never promotes**: `IN_PROGRESS` if it ever started, else `PENDING` — lifted to `READY` only where the shared promotion rule would grant it (parent WO released and non-terminal, no incomplete predecessor — which predecessors count is the work order's `sequential_operations` setting: cross-work-center only on a pool, any earlier-sequence operation on a routing), so `pending` is a normal success status. **409** if the operation backs a **cancelled (soft-deleted) laser nest** — that is a tombstone, not a hold; **400** if it is not `ON_HOLD`; cross-tenant id → **404**. Deliberately does **not** resolve the blocker that caused the hold (that stays with the blocker resolve/dismiss flow); the response carries `open_blockers` so the caller can warn (BLK-4) — each `{ id, category, severity, status, has_note, free_text_withheld }`, plus the caller-supplied `title` **only** for a non-station caller (withheld from a badge-minted crew-station token, same rule as `held`). Each `PENDING → READY` flip it does cause emits `operation_ready` (`user_id: null`). Audited **`STATUS_CHANGE`** (old→new status; `extra_data.transition = "resume_operation"`). Reachable by a badge-minted kiosk token — see "Held work" below | Yes |
-| POST | `/shop-floor/operations/{id}/inspection` | Record operation inspection complete (sets `inspection_complete`) | Admin / Manager / Supervisor / Quality |
-| POST | `/shop-floor/time-entries/{id}/approve` | Approve a TimeEntry (sets `approved` / `approved_by`) | Admin / Manager / Supervisor / Quality |
-| POST | `/shop-floor/time-entries/{id}/unapprove` | Clear approval on a TimeEntry | Admin / Manager / Supervisor / Quality |
+| POST | `/shop-floor/operations/{id}/inspection` | Sign off an operation's in-process inspection — the **only** writer of `inspection_complete`. A person only: any standing API token is **403** before anything is read, and a crew-station badge token is **403** by the kiosk path fence. **404** for a missing or other-company operation, or one whose work order is soft-deleted. The `MARK_OPERATION_INSPECTED` audit row is required evidence (**503**, nothing signed, when it cannot be written). Not an MCP tool. See "Inspection Schema" below | Admin / Manager / Supervisor / Quality |
+| GET | `/shop-floor/time-entries` | Labor Review list: time entries by production day with review flags, server-paged (see "Labor Review" below). Pure read. A kiosk badge is **403** | Admin / Manager / Supervisor / Quality |
+| POST | `/shop-floor/time-entries/{id}/set-clock-out` | Close or correct another person's **unapproved** entry at a stated time with a reason (hours only; see "Labor Review" below). An API token and a kiosk badge are **403**; not an MCP tool | Admin / Manager / Supervisor |
+| POST | `/shop-floor/time-entries/{id}/approve` | Approve a **closed** TimeEntry (sets `approved` / `approved_by`); **409** while still clocked in; optional body `{"version": n}` → **409** when stale. An API token and a kiosk badge are **403** | Admin / Manager / Supervisor / Quality |
+| POST | `/shop-floor/time-entries/{id}/unapprove` | Clear approval on a TimeEntry; optional body `{"version": n}` as approve. An API token and a kiosk badge are **403** | Admin / Manager / Supervisor / Quality |
 | GET | `/shop-floor/work-center-queue/{id}` | Get work center queue, each row carrying the live crew `roster` and the manager-set `run_order`, **plus a separate `held` list** of the work center's `ON_HOLD` operations (`held_truncated` when capped). Every row also carries the job's written guidance — see "Written job guidance on operator reads" for the five keys and the station-disclosure decision (see notes below). Top-level **`dispatch_notice`**: this machine's newest planner dispatch notice (12 h window) or `null` — see "Floor dispatch notices" below. Rows in **both** `queue` and `held` carry **`work_order_status`** and **`start_blocked_reason`** (static server text, so a crew-station token gets it too). A READY operation of an on-hold work order stays in `queue` with the reason — a work-order hold does not move rows onto `held` | User **or** kiosk station token |
 | GET | `/shop-floor/dispatch-board` | Manager dispatch board, **machine view** — every **active** work center with its live queue, including work centers with an **empty** queue, plus any **deactivated** work center still holding queued work, flagged `is_active: false`. Rows carry the work order's plan position (`dispatch_position`) for the work-order bands; columns carry `queued_hours` (see note below) | Admin / Manager / Supervisor |
 | GET | `/shop-floor/dispatch-board/work-orders` | Manager dispatch board, **work-order view** — every live work order (DRAFT included) as a lane with all its operations, the planned lanes first in plan order. Pure read (see "Work-order dispatch plan" below) | Admin / Manager / Supervisor |
@@ -8088,7 +8266,10 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > the system records a tamper-evident `audit_log` row (action `COMPLETED_WITH_QUALITY_EXCEPTION`) plus
 > a warning operational event for each. The gates are: `inspection_incomplete` (operation requires
 > inspection but `inspection_complete` is not set), `open_ncr` (an unresolved NCR on the work order),
-> `fai_not_passed` (a First Article Inspection on the work order that is not `PASSED`), `open_blocker`
+> `fai_not_passed` (the **latest** First Article Inspection per part on the work order -- newest
+> `created_at`, `id` breaking ties -- is not accepted: `PASSED`, or `CONDITIONAL` with the customer's
+> approval recorded through `POST /quality/fai/{id}/customer-approval`; an earlier FAILED or open FAI
+> superseded by a newer one for the same part no longer fires, since 2026-11-23), `open_blocker`
 > (an open/acknowledged work-order blocker), and `no_labor_recorded` (severity `medium`: a work order
 > completed with one or more operations that recorded **zero** labor — no time entry, or only
 > zero-duration entries — so its cost/hour actuals may be understated; helps surface missed clock-ins),
@@ -8163,10 +8344,16 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 
 #### Inspection Schema
 
-`POST /shop-floor/operations/{id}/inspection` records an operation's inspection as complete. It sets
-`inspection_complete = True` (clearing the `inspection_incomplete` gate above), records who/when in a
-tamper-evident audit row, and is **tenant-scoped** + role-gated to **Admin / Manager / Supervisor /
-Quality** (there is no separate Inspector role). Both fields are optional:
+`POST /shop-floor/operations/{id}/inspection` signs off an operation's in-process inspection. It sets
+`inspection_complete = True` (clearing the `inspection_incomplete` gate above) and is the **only**
+writer of that flag: `PUT /work-orders/operations/{id}` refuses the field (below). It is
+**tenant-scoped** and role-gated to **Admin / Manager / Supervisor / Quality** (there is no separate
+Inspector role). In the app the control is the **Sign off** button beside the "Inspection required"
+chip on Work Order Detail operation rows and on the Shop Floor (`/shop-floor/operations`) operation
+cards, offered to those four roles only where `requires_inspection` is true and the inspection is not
+yet signed.
+
+Both fields are optional; `{}` is a valid sign-off:
 
 ```json
 {
@@ -8174,6 +8361,57 @@ Quality** (there is no separate Inspector role). Both fields are optional:
   "notes": "All critical characteristics within tolerance"
 }
 ```
+
+`inspection_type` is free text (≤ 100 characters; the app offers `in_process` / `first_article` /
+`final`). When it is omitted the operation keeps the type it already has — a routing inspection point
+stamps `final` — so the app sends it only when the signer picks a different one. `notes` is ≤ 2000
+characters. Over-length fields are **422** and sign nothing.
+
+Refusals, in the order they are checked, each before anything is written:
+
+- **403** for a crew-station badge token (`scope="kiosk"`), of any role: the kiosk path fence denies
+  `/shop-floor/operations/{id}/inspection`, as it does labor approval (see Authentication → Path fence).
+- **403** (role gate) for Operator / Shipping / Viewer.
+- **403** for any standing API token, whatever its role or scope, before the operation is read (so a
+  token cannot probe whether an id exists): `An inspection is signed off by a person signed in to the
+  app, not an API token: recording that an inspection was performed is a person's judgment.`
+  (`API_TOKEN_INSPECTION_SIGN_OFF`; see
+  [RBAC → Credential policy for judgment writes](RBAC_PERMISSIONS.md#credential-policy-for-judgment-writes)).
+- **404** `Operation not found` for a missing or other-company operation, and for one whose work order
+  is soft-deleted.
+- **503** `The audit record for this inspection sign-off could not be saved; nothing was signed off.
+  Retry.` — the `MARK_OPERATION_INSPECTED` audit row is **required** evidence, written in the same
+  transaction (old / new `inspection_complete` and `inspection_type`, plus `extra_data`
+  `{work_order_id, work_order_number, notes}`); if it cannot be written the flag is not saved.
+
+On success it also emits the `operation_inspected` operational event and a shop-floor websocket
+broadcast `{event: "operation_inspected", work_order_id, operation_id}`, and bumps the operation's
+`version` (a later operation `PUT` carrying the pre-sign-off version gets the usual **409**). The
+**200** body:
+
+```json
+{
+  "message": "Operation inspection recorded",
+  "operation_id": 412,
+  "work_order_id": 87,
+  "requires_inspection": true,
+  "inspection_complete": true,
+  "inspection_type": "final",
+  "signed_off_by_id": 15,
+  "signed_off_by_name": "Dana Reyes",
+  "signed_off_at": "2026-11-23T15:04:05.123456Z"
+}
+```
+
+`signed_off_by_*` / `signed_off_at` describe **this** sign-off and come from the audit row it just
+wrote. The operation has no inspected-by / inspected-at column, so no operation read carries them; the
+app shows who signed and when only in the session that signed, and the audit log is the lasting record.
+
+Signing an operation that is already signed is accepted and writes a further audit row (old
+`inspection_complete: true`); nothing clears the flag. The verb also accepts an operation that is not
+an inspection point (`requires_inspection: false`) and any operation or work-order status; the app
+offers it on neither a signed operation nor a non-inspection-point one (nor, on Work Order Detail, on a
+cancelled laser nest's operation).
 
 #### Time-entry approval
 
@@ -8190,7 +8428,16 @@ let a supervisor sign off on shop-floor labor (G5-A). Approve sets `approved` (t
 >   is a no-op that returns the current state with **no second audit row**);
 > - respect the TimeEntry's optimistic-lock `version` column — a concurrent stale write returns
 >   **409 Conflict** (`"This time entry was modified concurrently. Refresh and retry."`);
-> - write **one** tamper-evident `audit_log` row (action `time_entry_approve` / `time_entry_unapprove`).
+> - write **one** tamper-evident `audit_log` row (action `time_entry_approve` / `time_entry_unapprove`);
+> - take an optional body `{"version": n}`: the entry's version as the approver read it. When given and
+>   the entry has changed since (a supervisor's clock-out correction, say), **409** with the same text,
+>   so an approval never lands on hours the approver did not see. No body keeps the old behavior;
+> - **refuse a standing API token and a kiosk badge (403)** — approval is a person's judgment (see
+>   `docs/RBAC_PERMISSIONS.md` → Credential policy for judgment writes); neither is an MCP tool.
+>
+> Approve additionally refuses **409** an entry that is still clocked in (`"This time entry is still
+> clocked in. Close the clock before approving it."`); unapprove stays open for one approved before
+> that rule.
 >
 > Both return the updated `TimeEntryResponse` (now carrying `approved` / `approved_by`; these also
 > surface on `GET /shop-floor/my-active-job`). Approval is what the opt-in
@@ -8198,6 +8445,39 @@ let a supervisor sign off on shop-floor labor (G5-A). Approve sets `approved` (t
 > feed the labor-cost legs (job costing, completion cost rollup, and the analytics OEE/labor leg).
 > When the flag is **off** (the default), approval is recorded but does not affect costing. See
 > `docs/ENVIRONMENT_VARIABLES.md`.
+
+#### Labor Review
+
+`GET /shop-floor/time-entries` (Admin / Manager / Supervisor / Quality; a kiosk badge is **403**) lists
+time entries attributed to **production days** by the company's production calendar, newest clock-in
+first. Query: `start_date` / `end_date` (production days, inclusive; none = the last 7 production days,
+or with `status=open` every entry still clocked in whenever it started; at most 62 days, **422** above
+it or when reversed), `user_id`, `work_center_id`, `work_order_id`, `status` (`open` / `closed`),
+`approved`, `flag`, `flagged_only`, `page`, `page_size` (≤ 200). Each item carries the entry, its
+`version`, `production_day`, `shift_name`, `shift_end` (end of the shift it started in), `flags`
+(`open_past_shift_end`, `long_entry` > 12 h, `overlap`, `open_on_closed_work`, `long_zero_pieces` — a
+run / rework entry ≥ 4 h with no pieces or scrap — and `backfill`) and the viewer's `can_approve` /
+`can_unapprove` / `can_set_clock_out`. `flag_counts` are per-flag totals over every page of the
+result **before** `flag` / `flagged_only` narrow it, so the chips stay stable when one is selected.
+Pure read: no audit row, no event, no write.
+
+`POST /shop-floor/time-entries/{id}/set-clock-out` (Admin / Manager / Supervisor, signed in to the app
+as themselves; an API token and a kiosk badge are **403**; not an MCP tool) closes another person's
+forgotten clock, or corrects a closed entry's clock-out, on an **unapproved** entry. Body
+`{"clock_out": "<UTC>", "reason": "...", "version": n}`. Refused before any write: **404** not found
+(tenant-scoped), **403** your own entry, **409** an approved entry, **409** a stale `version`, **422** a
+clock-out at or before the clock-in or in the future. It changes **hours only**, never pieces or scrap.
+The operation's and work order's stored hours move by this entry's change in hours when they came from
+time entries and are left alone otherwise (`hours.applied` / `hours.skipped_reason`). When the work
+order has a job cost, its time-entry labor lines are rebuilt under a lock on the job cost and a
+required `RECALCULATE` `job_cost` audit row records the before/after lines; a soft-deleted work order's
+job cost is not touched (`job_cost_skipped_reason: "work_order_deleted"` on the time-entry audit row).
+The required `time_entry_set_clock_out` audit row carries the old and new clock-out, duration, hours
+and the reason; **503** and nothing saved when it cannot be written. Re-sending the stored clock-out
+is a no-op (`changed: false`, no audit row).
+
+`GET /shop-floor/dashboard`'s `active_assignments[]` carry `time_entry_version`, which the dashboard's
+Live Shop Activity **Close clock** link sends as `version`.
 
 #### Clock Out Schema
 
@@ -10624,8 +10904,8 @@ when an estimate is approved and handed off in Fabrication Quoting (`/fabricatio
 > **The selection reads that only *looked* right now really are.** `GET /po-upload/search-vendors`
 > and the PO-extraction vendor matcher filtered `is_active` alone — which excluded deleted vendors
 > only because `DELETE` happens to clear that flag — and so did global search and the MRP auto-PO
-> vendor picker (which chooses a supplier for `AUTO_DRAFT` / `AUTO_SUBMIT` orders with no human in
-> the loop). All four now filter `is_deleted` for real. Result sets are unchanged unless a vendor was
+> vendor picker (which chooses a supplier for an explicitly enqueued `AUTO_DRAFT` run's draft orders;
+> no cron runs it and `AUTO_SUBMIT` was removed 2026-11-23). All four now filter `is_deleted` for real. Result sets are unchanged unless a vendor was
 > already in the `is_deleted=true` + `is_active=true` state the `PUT` above could produce.
 >
 > **What still names — and still accepts — a deleted vendor, deliberately:** anything that is a
@@ -11029,19 +11309,20 @@ that creates a PO:
   offers a plan the gate would refuse.
 - `POST /po-upload/create-from-upload`, before any part is created.
 - `POST /mrp/actions/{action_id}/supply-draft` (purchase) and `POST /mrp/purchase-batch/drafts`. The
-  MRP supply review's supplier list, and the MRP auto-PO vendor picker (`AUTO_DRAFT` / `AUTO_SUBMIT`),
+  MRP supply review's supplier list, and the MRP auto-PO vendor picker (`AUTO_DRAFT` only, never scheduled),
   never offer or choose a Disqualified vendor. The picker does not **re-route** either: a part whose
   only supplier on record (supplier-part mapping or purchase history) is Disqualified is not handed to
-  the "first active vendor" fallback, which would draft it to an unrelated supplier. The auto-PO job
-  writes no purchase order for it and records the reason on the MRP action (*"{Vendor} is Disqualified
+  another vendor. The auto-PO pass writes no purchase order for it and records the reason on the MRP action (*"{Vendor} is Disqualified
   on the Approved Supplier List and is the only supplier this part is sourced from …; MRP does not pick
-  another supplier for it. Choose one on the MRP supply review."*). The fallback stays for a part with
-  no sourcing at all.
+  another supplier for it. Choose one on the MRP supply review."*). There is no "first active vendor"
+  fallback any more (removed 2026-11-23): a part with no sourcing at all gets no draft either, and its
+  action records *"This part has no supplier-part mapping and no purchase history, so MRP does not pick a
+  supplier for it. Choose one on the MRP supply review."*
 - The open-PO Excel loader (`POST /purchasing/purchase-orders/import`), as that purchase order's row
   error with the same text.
 
-**An existing PO cannot move toward issue either.** A PO raised before its vendor was Disqualified (the
-6 AM MRP auto-draft, a buyer's draft) is refused **409** *"{Vendor} is Disqualified on the Approved
+**An existing PO cannot move toward issue either.** A PO raised before its vendor was Disqualified (an
+MRP AUTO_DRAFT pass, a buyer's draft) is refused **409** *"{Vendor} is Disqualified on the Approved
 Supplier List; purchase order {PO} {cannot be sent | cannot be approved | cannot be submitted for
 approval | cannot have lines added or changed | cannot be emailed}. Cancel it, or record a new approval
 decision for the supplier first."* on `POST .../send`, a `PUT` to `approved` / `pending_approval`, a
@@ -11572,6 +11853,9 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 >   optional `lot_number` / `heat_number` / `cert_number` / `serial_numbers` / `notes`, and the
 >   required `reason`. Gate **Admin / Manager / Supervisor** (the receive-tier — the same roles that
 >   `POST /receiving/receive` and post inventory adjustments). Response: the updated `ReceiptResponse`.
+>   A changed `heat_number` / `cert_number` is stored trimmed (blank → NULL) and, on a dock-to-stock
+>   or cleared-hold receipt, carried onto the stock row it placed under the rule in
+>   [Heat number and mill cert on stock rows](#heat-number-and-mill-cert-on-stock-rows).
 > - **Void** — body: `reason` only. Gate **Admin / Manager** (tighter — void is delete authority).
 >   **Terminal: there is no restore** — to redo, re-receive.
 >
@@ -11830,7 +12114,7 @@ stock balance. See [Consumables setup and operation](CONSUMABLES.md).
 | Method | Endpoint | Behavior | Server access |
 |---|---|---|---|
 | GET | `/consumables/metadata` | `can_manage`, `can_export`, and a minimal employee list (`id`, `name`, `department`, `is_active`). Includes active employees and inactive historical recipients for filtering. | Authenticated, active company |
-| GET | `/consumables/stock` | `{items, total}` by consumable/location/lot, with on-hand, available quantity, unit, reorder threshold, low-stock and checkout eligibility. Filters `q`, `low_stock`; `skip` ≥ 0, `limit` 1–250 (default 100). Items without stock remain visible. | Authenticated, active company |
+| GET | `/consumables/stock` | `{items, total}` by consumable/location/lot, with on-hand, available quantity, unit, reorder threshold, low-stock and checkout eligibility. Filters `q`, `low_stock`; `skip` ≥ 0, `limit` 1–250 (default 100). Items without stock remain visible. The reorder judgment (the `low_stock` filter, `part_quantity_on_hand`, `is_low_stock`) counts the company's own active stock only; customer- and supplier-owned rows, supplier consignment stock for example, are still listed (see [Customer- and supplier-owned property](#customer--and-supplier-owned-property)). | Authenticated, active company |
 | POST | `/consumables/checkouts` | Record one employee issue atomically; returns 201 and the saved receipt. | Admin, Manager, Supervisor |
 | GET | `/consumables/checkouts` | `{items, total}`, ordered `issued_at DESC, id DESC`; filters `q`, `employee_id`, `part_id`, `date_from`, `date_to`; `skip` ≥ 0, `limit` 1–250 (default 100). | Authenticated, active company |
 | GET | `/consumables/checkouts/export.csv` | Same history filters, all matching rows up to 10,000; 422 if exceeded. CSV includes Central timestamp and `CC-` checkout reference. Audited export. | Admin, Manager |
@@ -11888,13 +12172,13 @@ environment variables are required.
 |--------|----------|-------------|---------------|
 | GET | `/inventory/` | List inventory items (`part_id`, `warehouse`, `location_code`, `has_quantity` — `has_quantity` filters **nonzero**, not positive, so driven-negative lots stay visible; see note below — and `ownership`, `owner_customer_id`, `owner_vendor_id`). Each row carries `ownership`, the owner id and `owner_name` (see [Customer- and supplier-owned property](#customer--and-supplier-owned-property)). Bounded: `limit` **1–10000, default 10000**, `offset` ≥ 0 | Yes |
 | GET | `/inventory/summary` | On-hand summary by part, with per-location breakdown (every active row with **nonzero** on-hand, negatives included). `total_on_hand` is physical stock whoever owns it; `owned_by_others_on_hand` is the customer- and supplier-owned part of it, and each location entry carries its row's `ownership`. Bounded with the identical `limit`/`offset` as `/inventory/` — see note below | Yes |
-| GET | `/inventory/low-stock` | Parts at/below reorder point (on-hand summed per part) | Yes |
+| GET | `/inventory/low-stock` | Live parts with a reorder point above zero whose on-hand is at or below it -- the one low-stock rule (`low_stock_service`), shared with the `stock.low` alert, the operations inbox and the AI inventory sensor. Sorted critical first (on hand at or below safety stock), then by largest shortage, then part number. Each row also carries `out_of_stock` (a part with no stock row at all is listed at 0 on hand). `quantity_on_hand` is the **company's own** on-hand, summed per part over active rows in any status; customer- and supplier-owned stock is not counted, so a part whose only stock is owned reads 0 and is listed (see [Customer- and supplier-owned property](#customer--and-supplier-owned-property)) | Yes |
 | GET | `/inventory/locations` | List warehouse locations / bins | Yes |
 | POST | `/inventory/locations` | Create a location | Admin / Manager |
 | GET | `/inventory/transactions` | Inventory transaction (ledger) history, newest first. Filters: `part_id`, `transaction_type`, `reference_type`, `reference_id`, `work_order_id`, `lot_number`, `start_date`, `end_date`. Offset-paged (`limit` 1–500 default 100, `offset` ≥ 0), **no total count** — see note below | Yes |
-| POST | `/inventory/receive` | Receive inventory into stock. Optional `ownership` / `owner_customer_id` / `owner_vendor_id` (default company stock) | Admin / Manager / Supervisor |
+| POST | `/inventory/receive` | Receive inventory into stock. Optional `ownership` / `owner_customer_id` / `owner_vendor_id` (default company stock), and `heat_lot` / `cert_number` (see [Heat number and mill cert on stock rows](#heat-number-and-mill-cert-on-stock-rows)) | Admin / Manager / Supervisor |
 | POST | `/inventory/issue` | Issue inventory manually (**deprecated** — see below; **400** if `work_order_number` is sent) | Admin / Manager / Supervisor |
-| POST | `/inventory/transfer` | Transfer inventory between locations. The destination row matches, or is created with, the source row's owner | Admin / Manager / Supervisor |
+| POST | `/inventory/transfer` | Transfer inventory between locations. The destination row matches, or is created with, the source row's owner. A newly created destination row also copies the source's `heat_lot`, `cert_number`, `po_number` and `supplier_id`; an existing one keeps its own | Admin / Manager / Supervisor |
 | POST | `/inventory/adjust` | Adjust inventory | Admin / Manager / Supervisor |
 | POST | `/inventory/items/{item_id}/ownership` | Change who owns one stock row (company, a customer or a supplier). `reason` required; required audit; no ledger row | Admin / Manager / Supervisor |
 | POST | `/inventory/combine/preview` | What folding one SKU onto another would do — blockers, advisories, per-lot lines, the cost delta. **Pure read (writes nothing)** | Admin / Manager / **Supervisor** |
@@ -12306,6 +12590,52 @@ what the draw will take use the same predicate: the backflush preview, the tie o
 dispatch board and kiosk, material readiness, the nest sheet-stock suggestions and Hank's same-part
 stock check.
 
+<a id="owned-stock-planning-and-reorder"></a>
+**Planning and reorder count the company's stock only.** A customer's or supplier's material is
+physically there but is not the shop's supply, so it covers no MRP demand and keeps no reorder
+signal quiet. These readers count company-owned rows only:
+
+* MRP netting, `MRPService.get_inventory_summary` (on hand and allocated): every MRP run, so a
+  requirement's `quantity_on_hand` / `quantity_allocated` / `quantity_available` /
+  `quantity_shortage` and the actions built from them, and the supply review's current-shortage
+  recheck and review fingerprint. See [Material Requirements Planning](#material-requirements-planning-mrp).
+* `GET /inventory/low-stock` (a part whose only stock is owned reads 0 on hand and is listed).
+* The `stock.low` cron (`check_low_stock_task`), through the shared `low_stock_service` rule.
+* The operations inbox's `low_stock` source, which Hank's shift briefing also reads.
+* The AI `inventory_risk` sensor.
+* The reorder judgment on `GET /consumables/stock` (owned rows are still listed).
+* `current_stock` on `GET /analytics/predict/inventory-demand`.
+
+All of them, and the valuation readers below, use one clause,
+`owned_property_service.COMPANY_OWNED_ITEM_CLAUSES` (`ownership = 'company'`), which is also the
+ownership half of `AUTO_DRAW_ITEM_CLAUSES`. Each reader keeps its own status rule: MRP's on-hand
+counts `available` rows, while the low-stock and reorder readers count every status (`on_hold`,
+`quarantine` and `rejected` included) as they always did. So a company with no owned stock sees
+exactly what it saw before. MRP's open PO and
+work-order supply (`quantity_on_order`) is unchanged, since ownership is recorded at receipt, not on
+a PO line. The physical readers (`GET /inventory/`, `total_on_hand` on `GET /inventory/summary`, the
+inventory export) still count every row.
+
+<a id="owned-stock-customer-supplied-parts"></a>
+<a id="owned-stock-mrp-demand-open-decision"></a>
+> **Customer-supplied parts create no MRP demand (owner decision 2026-11-22).** A part the customer
+> furnishes is identified on the **part**, by `parts.customer_supplied` (migration `134`, set on
+> `PUT /parts/{id}` / `PUT /materials/{id}`; see [Part Schema](#part-schema)), never inferred from who
+> owns its stock. MRP raises no requirement or action for a flagged component, and no MRP supply door
+> turns an older action for it into a purchase order, a work order or an expedite. See
+> [MRP → Customer-supplied parts](#customer-supplied-parts-mrp).
+>
+> **The flag and the netting rule are separate.** Netting is unchanged: an **unflagged** part still
+> nets against company-owned stock only. So a part the customer furnishes that nobody has flagged
+> still shows a shortage and an action even with the customer's material on the rack, and a buyer
+> could still draft supply from it on the MRP supply review. (The 06:00 MRP cron is REVIEW-only since
+> 2026-11-23 and drafts nothing.) Flagging the part is what stops it.
+>
+> **Not changed:** nothing outside MRP reads the flag. The low-stock and reorder readers above, the
+> AI `inventory_risk` sensor included, treat a flagged part like any other, so a flagged part with a
+> reorder point can still be reported low. That is a deliberate scope limit, pending an owner
+> decision.
+
 **Changing ownership: `POST /inventory/items/{item_id}/ownership` — Admin / Manager / Supervisor**
 (`STOCK_MUTATOR_ROLES`).
 
@@ -12365,11 +12695,15 @@ stock rows, tools or PO receipts cannot be hard-deleted**: see [Customers](#cust
 >   company's, a customer's or a supplier's, and which one, under database CHECKs. The Inventory and Tool Management screens
 >   show a `Customer: <name>` / `Supplier: <name>` chip and filter on it, the receive forms on
 >   Inventory and Receiving take the owner when material arrives, and the inventory list, export and
->   tool list carry the owner's name.
+>   tool list carry the owner's name. A part the customer furnishes is identified per part, by its
+>   **Customer-supplied** flag (`customer_supplied`), and creates no MRP demand
+>   ([Customer-supplied parts](#owned-stock-customer-supplied-parts)).
 > * **Kept apart.** Owned stock never merges into a company row or the reverse, a combine refuses
 >   to mix owners in one location and lot, automatic consumption never draws it, the finished-goods
 >   decrement at shipment takes only the company's row, a receipt correction or void unwinds only
->   the exact row the receipt stocked, and valuation leaves it out.
+>   the exact row the receipt stocked, and valuation leaves it out. MRP does not count it as supply,
+>   and the low-stock and reorder checks do not count it as on hand, so it can neither suppress a
+>   purchase suggestion nor keep a reorder alert quiet.
 > * **Recorded.** The receipt records whose property it is, and every later change of ownership is
 >   a reasoned, required-audited act naming who changed it, from what, to what, and why. A customer
 >   that owns stock, tools or PO receipts cannot be hard-deleted, and the database refuses a
@@ -12382,16 +12716,60 @@ stock rows, tools or PO receipts cannot be hard-deleted**: see [Customers](#cust
 >
 > **Not yet done:**
 >
-> * **MRP still counts owned stock as supply.** `mrp_service.get_inventory_summary` nets demand
->   against every active, available stock row, owned or not, so customer or supplier stock can
->   suppress a purchase suggestion.
->   `GET /inventory/low-stock` likewise sums it into on-hand.
 > * **Shortage disclosures do not mention owned stock.** When the FIFO draw comes up short, the
 >   shortage record names held lots it skipped (`held_stock_summary`) but not owned lots it
 >   skipped, so a shortage on a part with customer stock on the rack reads as a bare shortage.
 > * **Nothing reports loss or damage to the owner.** Nothing in the system reports lost, damaged or
 >   unsuitable customer or supplier property to its owner, as the 8.5.3 note requires. Record it on
 >   an NCR and notify the owner outside the system.
+
+#### Heat number and mill cert on stock rows
+
+A stock row (`inventory_items`) has `heat_lot`, `cert_number`, `supplier_id` and `po_number`
+columns. These writes fill them, forward only (existing rows are not backfilled; the lot trace
+covers them through its receipt fallback, see [Traceability](#traceability)):
+
+* **PO receipt to stock.** Every path that puts a PO receipt's material on a stock row stamps the
+  receipt's `heat_number` (as `heat_lot`), its `cert_number`, and the PO's vendor as `supplier_id`:
+  dock-to-stock (`POST /receiving/receive` and each line of `POST /receiving/deliveries`), the
+  inspection accept (`POST /receiving/inspect/{receipt_id}`) and the cleared hold
+  (`POST /receiving/receipt/{receipt_id}/clear-inspection`). Values are stored trimmed, a blank one
+  as NULL. `supplier_id` is the PO's vendor even when that vendor is soft-deleted (the supplier of
+  record). The row's `po_number` still holds the receipt number, as before. Request and response
+  bodies are unchanged.
+* **`POST /inventory/receive`** takes optional `heat_lot` and `cert_number`. A new row stores them.
+* **`POST /inventory/transfer`** copies `heat_lot`, `cert_number`, `po_number` and `supplier_id`
+  onto a destination row it creates, as a combine does. An existing destination row keeps its own.
+
+**Merging into an existing row: the first value wins.** When a PO receipt or `/inventory/receive`
+adds to an existing row (same part, location, lot and owner), a value the row already holds is never
+overwritten; a blank one is filled, and the fill is recorded on the merge's audit row. An incoming
+heat, cert or (PO receipt only) supplier that **differs** from the row's value is not dropped: it is
+named on the `RECEIVE` ledger row's `notes` and in the audit description (for example
+`heat received H-2 differs from stock row heat H-1`), so a lot holding two heats says so on record.
+
+**Correcting a receipt keeps its stock row in step.** On a dock-to-stock or cleared-hold receipt,
+`PATCH /receiving/receipt/{receipt_id}` also writes a changed `heat_number` / `cert_number` to the
+stock row the receipt placed (found through its `RECEIVE` ledger row) when that row's value is
+blank, or when it still equals the receipt's **old** value and no other `RECEIVE` row (another
+receipt, or a manual receive) points at the row. A row another receipt also fed keeps its value, so
+the receipt and the row can then differ deliberately rather than one receipt rewriting another's
+traceability. The change writes an `inventory` audit row `Traceability corrected from receipt
+<number>`. The correction now stores `heat_number` / `cert_number` trimmed, and a cleared value as
+NULL. Limits:
+
+* If the receipt's stock row cannot be resolved (the legacy ambiguity that answers **409** for a
+  quantity change), the heat / cert correction saves to the receipt only.
+* A held receipt has no stock row; the later accept or clear stamps the corrected values.
+* Rows a transfer **created** from the placed row are not rewritten (the transfer ledger row names
+  only its source row, and a destination that existed before the move holds other material too).
+  Instead, rows of the same part, lot and owner at a location the placed row was transferred to that
+  still hold the old value are named on the correction's `receipt` audit row
+  (`extra_data.stale_traceability_stock_row_ids` and the description) for a person to correct. One
+  transfer hop only.
+
+Route gates are unchanged. `GET /inventory/` rows already serialize `heat_lot`, `cert_number`,
+`supplier_id` and `po_number`; the Inventory page shows Heat on its lot rows.
 
 #### Combining two SKUs
 
@@ -12637,12 +13015,95 @@ deliberately **not** registered in `notification_catalog.py` — neither are `in
 `get_current_company_id`. Another company's part id behaves as **404**, and its location codes and
 lot numbers are unreachable.
 
+### Material Requirements Planning (MRP)
+
+The `/mrp` routes are not yet listed in this file; the interactive reference at `/docs` (tag
+*Material Requirements Planning*) has them. This section covers how a run counts supply and which
+parts it plans.
+
+**Supply is the company's own stock (migration `129`, AS9100D 8.5.3).** A run nets each part's
+demand against `MRPService.get_inventory_summary`, the one netting seam, which the supply review's
+current-shortage recheck and review fingerprint also read. Its on-hand counts active, `available`,
+**company-owned** rows and its allocated counts active company-owned rows. So on every requirement,
+`quantity_on_hand`, `quantity_allocated` and `quantity_available` (on hand less allocated) are the
+company's own stock, and `quantity_shortage` and the ORDER / MANUFACTURE / EXPEDITE actions follow
+from them. A customer's or supplier's material on the rack covers no demand, so a part whose only
+stock is owned shows its full demand as a shortage. `quantity_on_order` (open PO lines, released and
+in-progress work orders that make the part, and drafts linked to an MRP action) is unchanged, because
+ownership is recorded at receipt, not on a PO line. A company with no owned stock gets the same run
+as before. See
+[Inventory → Customer- and supplier-owned property](#customer--and-supplier-owned-property).
+
+<a id="customer-supplied-parts-mrp"></a>
+**Customer-supplied parts create no demand (owner decision 2026-11-22, migration `134`).** A part
+whose `customer_supplied` flag is set (see [Part Schema](#part-schema)) is one the customer
+furnishes, so MRP plans no supply for it:
+
+* **No demand.** The BOM explosion (`MRPService.explode_bom_for_mrp`) skips a flagged component. It
+  gets no requirement, so no shortage and no ORDER / MANUFACTURE / EXPEDITE action, and MRP does not
+  recurse into its own BOM, so a customer-furnished subassembly's children create nothing either.
+  The flag is read where the part is a component: a work order *for* a flagged part still explodes
+  that part's BOM.
+* **No supply from an older action.** A fresh run raises no action for a flagged part. An action
+  minted before the part was flagged can still be open, so every door that turns an MRP action into
+  supply refuses a flagged part with one text, `mrp_service.CUSTOMER_SUPPLIED_SUPPLY_DETAIL`:
+  *"This part is customer-supplied: the customer furnishes it, so MRP does not plan supply for it.
+  Clear the part's customer-supplied flag first if the shop now buys or makes it."*
+  * An AUTO_DRAFT pass (`MRPAutoService.process_actions`; explicitly enqueued only -- the 06:00
+    cron is REVIEW-only) creates no purchase order and sends no `mrp.expedite_required` for it. It
+    writes the text to the action's `error_message`, counts it among the job's errors and leaves the
+    action unprocessed. (No automatic pass drafts a work order at all.)
+  * The reviewed supply draft: `GET /mrp/actions/{action_id}/supply-review` returns the text as
+    `blocked_reason` (checked before the newer-run and covered-shortage reasons), and
+    `POST /mrp/actions/{action_id}/supply-draft` refuses **409**
+    `{"message": "<the text>", "code": "MRP_REVIEW_STALE"}`.
+  * The purchase batch (`GET /mrp/purchase-batch/review`, `POST /mrp/purchase-batch/drafts`)
+    reviews each line through the same path, so a flagged line carries the same `blocked_reason`
+    and the batch is refused **409** with the same body before any draft is created.
+
+  Until a newer run replaces it, such an action is still listed (the run's actions,
+  `GET /mrp/shortages`, the operations inbox's `mrp_shortage` source). Marking it reviewed
+  (`POST /mrp/actions/{action_id}/process`) is unchanged.
+
+Netting is unchanged for an unflagged part: a part the customer furnishes that nobody has flagged
+still shows its demand as a shortage against company stock, which is why the flag exists. See
+[Customer- and supplier-owned property](#owned-stock-customer-supplied-parts) for how the flag
+relates to stock ownership and what it does not change.
+
 ### Traceability
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| GET | `/traceability/lot/{lot_number}` | Full lot trace (source, usage, as-built genealogy, history) | Yes |
+| GET | `/traceability/lot/{lot_number}` | Full lot trace (source, usage, as-built genealogy, history). Header carries `heat_lot`, `cert_number` and `certificate_document_id` — see "Heat, cert and the certificate file" below | Yes |
 | GET | `/traceability/serial/{serial_number}` | Serial trace (transactions, work orders, NCRs) | Yes |
+| GET | `/traceability/search?q=` | Lot and serial search (`q` ≥ 1 char). Matches stock-row lot / serial numbers **and** live PO receipts' lot, heat and cert numbers; see below | Yes |
+
+> **Heat, cert and the certificate file.** The lot trace header reads `heat_lot` and `cert_number`
+> from the lot's stock row first. Where the stock row is blank (a row placed before heat and cert
+> rode to stock, or a lot still held for inspection with no row at all), each falls back to the
+> **earliest live PO receipt of this lot for the traced part** that carries a value, and so does
+> `received_date`. Lot numbers are not unique across parts, so the receipts are matched on lot
+> **and** part; `po_number` and `supplier_name` also come only from that part's receipts (before
+> this, any receipt with the same lot number could supply them, another part's included).
+> `supplier_name` falls back to the stock row's `supplier_id` vendor when no receipt names one. For
+> a lot with no stock row and no ledger row, `part_id` / `part_number` / `part_name` come from the
+> receipts when they all name one part; when they name two parts, none is named.
+> `certificate_document_id` (int or null) is the `documents` row id of the mill cert / CoC attached
+> at receiving, from the first such receipt that carries one (stock rows hold no document); it is
+> the same id `GET /receiving/receipt/{receipt_id}` returns, and the Traceability page links the file
+> by it. Each `history` item with `event_type` `received` carries `details.heat_number`,
+> `details.cert_number`, `details.certificate_document_id`, `details.packing_slip` and
+> `details.inspection_status`. Voided receipts stay out of the trace; a soft-deleted vendor is still
+> read through as the supplier of record. Both reads write nothing.
+>
+> **Search.** `GET /traceability/search` returns `{type: "lot" | "serial", number, part_number,
+> part_name, quantity?, location?, heat_lot?, cert_number?}`. Lot hits carry `heat_lot` and
+> `cert_number`; serial hits do not. Besides stock rows, it searches live (not voided) PO receipts on
+> `lot_number`, `heat_number` and `cert_number`, so a mill heat number finds its lot, including a lot
+> still held for inspection: such a receipt-only hit has `quantity` = on hand for that lot **and**
+> part (`0` when none) and `location` null when no stock exists. Lot hits are de-duplicated on
+> (lot, part), stock-row hits first, so a lot number two parts share is listed once per part.
+> Opening a hit still traces by lot number only.
 
 > **As-built genealogy (`consumed_components`).** `GET /traceability/lot/{lot_number}` returns a
 > `consumed_components` array (default `[]`). When the traced lot is a finished-goods lot **produced by
@@ -12680,10 +13141,13 @@ lot numbers are unreachable.
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| GET | `/shipping/` | List shipments | Yes |
+| GET | `/shipping/` | List shipments (each row carries `coc_number`, `coc_issued_at`, `coc_withheld`) | Yes |
+| GET | `/shipping/ready-to-ship` | Completed work not yet allocated to a shipment, with each job's `release_exceptions` | Yes |
+| GET | `/shipping/{shipment_id}` | One shipment with the packing-slip order facts, `coc_number` / `coc_issued_at` / `coc_withheld` and `release_exceptions` | Yes |
 | POST | `/shipping/` | Create shipment | Yes |
-| POST | `/shipping/{shipment_id}/ship` | Mark as shipped (decrements FG, closes WO, auto-issues CoC when required) | Admin / Manager / Supervisor / Shipping |
-| POST | `/shipping/{shipment_id}/coc` | Issue / generate the Certificate of Conformance (idempotent) | Admin / Manager / Quality |
+| PUT | `/shipping/{shipment_id}` | Edit a pending / packed shipment, or mark a shipped one delivered (same CoC fields as the list) | Admin / Manager / Supervisor / Shipping |
+| POST | `/shipping/{shipment_id}/ship` | Mark as shipped (decrements FG, closes WO, auto-issues CoC when required). **409** listing open quality items unless acknowledged; see below | Admin / Manager / Supervisor / Shipping; Quality only to ship over open items |
+| POST | `/shipping/{shipment_id}/coc` | Issue / generate the Certificate of Conformance (idempotent). **409** until shipped; acknowledgment over open items; never an API token | Admin / Manager / Quality |
 | GET | `/shipping/{shipment_id}/coc` | Get CoC metadata (404 if none issued) | Yes |
 | GET | `/shipping/{shipment_id}/coc/pdf` | Download the rendered CoC PDF (`application/pdf`) | Yes |
 
@@ -12775,7 +13239,12 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 > `certificates_of_conformance` row stores the immutable certified facts at issue time and the PDF is
 > rendered **deterministically on download** (there is no filesystem blob). CoC content is an AS9100D
 > conformance statement + part/revision + WO# / customer-PO + quantity + lot/serial table +
-> signature/issuer block. All three endpoints are **tenant-scoped** (a cross-tenant `shipment_id`
+> signature/issuer block. Since 2026-11-23 the PDF also carries the issuing company's letterhead (name,
+> address, phone from the `Company` record), the PO line and the unit number, and prints the issue
+> date as a company-local date. A certificate issued from then on freezes those facts into its
+> snapshot; an older one falls back to the live `Company` row for the letterhead when rendered. The
+> packing slip's "Print certificate" opens this issued PDF (the browser-drawn look-alike certificate
+> page is gone). All three endpoints are **tenant-scoped** (a cross-tenant `shipment_id`
 > returns **404**):
 > - `POST /shipping/{shipment_id}/coc` — issue or return the existing CoC. **Idempotent**: at most one
 >   CoC per shipment, DB-enforced (`uq_coc_company_shipment`); re-issuing returns the same CoC with no
@@ -12794,6 +13263,40 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 > `coc_generation_failed` warning operational event (mirrors the warn-and-record posture of the FG /
 > over-ship guards). A successful auto-issue commits atomically with the ship and sets the shipment's
 > `cert_of_conformance` flag.
+>
+> **Open quality items (shipping/2, 2026-11-23).** `release_exceptions` is a read-only list of
+> `{code, severity, message, reference_type, reference_id}`: `open_ncr` (an NCR on the job that is
+> not dispositioned, or dispositioned -- scrap and return-to-vendor included -- and not CLOSED;
+> VOID never counts), `fai_not_passed` (the latest first article per work order and part is not
+> PASSED, nor CONDITIONAL with the customer's approval on record) and `open_blocker` (an OPEN / ACKNOWLEDGED `quality_hold` blocker). An
+> unsigned inspection point is information only, not an exception (it stays so now that the
+> in-process inspection sign-off exists; promoting it to a ship-time exception is an open decision).
+> With items open:
+> - `POST /shipping/{shipment_id}/ship` answers **409** with `detail = {code:
+>   "release_exceptions_open", message, release_exceptions}` unless the JSON body is
+>   `{"acknowledge_exceptions": true, "reason": "..."}` (reason 3–1000 characters, no other keys)
+>   from Admin, Manager or Quality. A standing API token gets **403** `API_TOKEN_RELEASE_ACK`; any
+>   other role **403**. The acceptance writes a required `SHIPPED_OVER_QUALITY_EXCEPTIONS` audit row
+>   (**503**, nothing shipped, when it cannot be written). The automatic CoC is then **not** issued:
+>   a required `COC_WITHHELD` audit row and a `coc_withheld` event record why, the 200 body carries
+>   `coc_withheld: true`, and the shipment reads `coc_withheld: true` until Quality issues it.
+>   Quality on a job with nothing open is refused **403** (Quality ships only to accept items).
+> - `POST /shipping/{shipment_id}/coc` answers **409** before the shipment is SHIPPED or DELIVERED,
+>   refuses any standing API token **403** `API_TOKEN_COC_ISSUE` (even when a certificate exists),
+>   and over open items needs the same acknowledgment; the accepted items are frozen into the
+>   certificate's snapshot (never printed) and a required `COC_ISSUED_OVER_EXCEPTIONS` audit row
+>   records the reason. If a concurrent issuer won, the existing certificate is returned and no
+>   acceptance row is written for the caller.
+> - The `coc_withheld` state is read from the `COC_WITHHELD` audit rows, so it depends on audit-log
+>   retention until a column replaces it (planned with certificate reissue).
+> - Response shapes. `POST /shipping/{shipment_id}/ship` returns `{message, shipment_number,
+>   coc_withheld, release_exceptions}` (the already-shipped answer is unchanged). `GET /shipping/`,
+>   `POST /shipping/` and `PUT /shipping/{shipment_id}` rows carry `coc_number`, `coc_issued_at`
+>   (UTC `Z`) and `coc_withheld`, read in batch. `GET /shipping/{shipment_id}` carries those three,
+>   `release_exceptions`, and the packing slip's order facts: `po_line_item`, `unit_number`,
+>   `part_revision`, `serial_numbers` (a list), `ship_to_city`, `ship_to_state`, `ship_to_zip`. The
+>   list rows do **not** carry `release_exceptions`; the ready-to-ship rows and the detail do.
+>   Every read is pure: no audit row, event, certificate or ledger row.
 
 ### Reports
 
@@ -12837,10 +13340,12 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 > is left out of every inventory value figure: all three figures of `GET /reports/inventory-value`,
 > `summary.total_inventory_value` and each part's average inventory value (the turnover
 > denominator) on `GET /analytics/inventory-turnover`, and the average inventory value behind the
-> `inventory_turnover` KPI on `GET /analytics/kpis`. On-hand quantities are physical and still
-> include it (`GET /inventory/summary` reports it separately as `owned_by_others_on_hand`), and the
-> inventory export keeps every row's `total_value` beside its `ownership`. A company with no owned
-> stock sees the same figures as before. See
+> `inventory_turnover` KPI on `GET /analytics/kpis`. Physical on-hand quantities still include it
+> (`GET /inventory/summary` reports it separately as `owned_by_others_on_hand`), and the inventory
+> export keeps every row's `total_value` beside its `ownership`; the planning and reorder figures do
+> not ([Planning and reorder count the company's stock only](#owned-stock-planning-and-reorder)). These
+> figures and those readers share one clause, `owned_property_service.COMPANY_OWNED_ITEM_CLAUSES`. A
+> company with no owned stock sees the same figures as before. See
 > [Inventory → Customer- and supplier-owned property](#customer--and-supplier-owned-property).
 
 > **`GET /reports/ship-otd` (Lean Phase 1).** The customer-experienced delivery report: measures
@@ -12984,7 +13489,9 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 >   `predicted_stockout_date`, `days_until_stockout`, `open_po_quantity`, `next_po_due` and
 >   `urgency` (`critical` ≤ 7 days, `warning` ≤ 14, else `ok`, de-escalated one step when an open PO
 >   lands before the stockout date), plus `critical_count` / `warning_count`. Considers active,
->   non-deleted `purchased` / `raw_material` parts only.
+>   non-deleted `purchased` / `raw_material` parts only. `current_stock` is the company's own
+>   on-hand (active rows, any status): customer- and supplier-owned stock does not push a stockout
+>   date out (see [Planning and reorder](#owned-stock-planning-and-reorder)).
 >
 > **Refusals on `/predict/delivery/{work_order_id}` (new).** A work order belonging to **another
 > company** now returns **404 `{"detail": "Work order not found"}` — byte-identical to the response
@@ -13657,12 +14164,21 @@ There is no delete endpoint.
 
 ### Users (Admin)
 
+> **Department is a pick list (2026-11-23).** `department` on `POST /users/`, `PUT /users/{id}`,
+> `POST /users/{id}/approve`, `POST /auth/register` and the user import must be one of Purchasing,
+> Inventory, Sales, Quality, Maintenance, Shipping, Production, Other (any case or spacing; the
+> canonical spelling is stored) or blank -- else **422** *"Department must be one of: Purchasing,
+> Inventory, Sales, Quality, Maintenance, Shipping, Production, Other (or left blank)."* Notifications
+> match departments by exact name, which is why. A `PUT` that re-sends a user's existing legacy value
+> unchanged is accepted; `GET /users/departments` lists those values for correction. No migration.
+
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
 | GET | `/users/` | List all users | Admin / Manager |
 | POST | `/users/` | Create user | Admin |
 | POST | `/auth/register` | Alternate tenant-user creation path with the same role policy | Admin |
-| POST | `/users/import-csv` | Import CSV/XLSX users; existing dry-run and per-row error contracts apply | Admin |
+| POST | `/users/import-csv` | Import CSV/XLSX users; existing dry-run and per-row error contracts apply. A `department` not on the pick list is that row's error | Admin |
+| GET | `/users/departments` | The fixed Department pick list and every user whose stored Department is not on it: `{"departments": ["Purchasing", "Inventory", "Sales", "Quality", "Maintenance", "Shipping", "Production", "Other"], "unlisted": [{"id", "name", "employee_id", "is_active", "department"}]}`. Writes nothing | Admin |
 | PUT | `/users/{id}` | Update user. `is_active: false` also revokes every live API token the user holds (reason `user deactivated`, audited) — see [API tokens](#api-tokens-bots-and-mcp-clients) — and the user's export authorization (one `EXPORT_AUTHORIZATION_REVOKE` row). A role change into Admin, Manager or Quality from any other role clears the user's floor PIN and, if they had one, requires a new one from an Admin (see the floor PIN note below) | Admin |
 | POST | `/users/{id}/approve` | Approve a pending tenant account with a tenant role. Approving into Admin, Manager or Quality clears any floor PIN the account carried and, if it had one, requires a new one from an Admin | Admin |
 | POST | `/users/{id}/reset-password` | Reset another account's password | Admin |
@@ -13830,14 +14346,24 @@ There is no delete endpoint.
 > minimum is unchanged and is additionally enforced as `Field(min_length=12)` on the request schemas.
 > The **same policy** — the shared `validate_password_strength` (`app/schemas/user.py`) —
 > also governs `POST /auth/register` (admin create), public self-registration
-> `POST /auth/register-public`, and the **first-admin `admin_password`** on the two company-creation
-> paths: the **unauthenticated** `POST /companies/register` (company self-registration) and
-> platform-admin `POST /platform/companies`. (`POST /companies/register` previously skipped the
-> common-substring check and `POST /platform/companies` had **no** strength check at all — both now
-> enforce the full policy, so no first-admin can be seeded with a weak password.) The user CSV import
+> `POST /auth/register-public`. Both company-creation routes were **removed** on 2026-11-23: the
+> unauthenticated self-registration route `POST /companies/register` (now 404) and platform-admin
+> `POST /platform/companies` (now 405), so no first-admin `admin_password` path remains. The user CSV import
 > (`POST /users/import-csv`) applies the same check to **user-supplied** passwords **per row** (a weak
 > password fails only that row, `reason` = `"Weak password: …"`); operator **auto-generated**
 > passwords (for badge/employee-ID logins) satisfy the policy by construction and are **exempt**.
+
+> **Changing your own password — `POST /users/change-password`** (body `current_password`,
+> `new_password`; any signed-in person, on My Settings → Password). People only: every API token
+> and every crew-station badge or station token is refused **403** `PASSWORD_CHANGE_PEOPLE_ONLY`
+> before the body's passwords are read, and the route is not an MCP tool (`EXCLUDED_OPERATIONS`).
+> **400** `Current password is incorrect`; **422** on the policy above. The new hash,
+> `password_changed_at` (also stamped by the admin `POST /users/{id}/reset-password`) and the
+> `PASSWORD_CHANGE` audit row (`extra_data.source = "self_service"`, no password or hash) commit
+> as one transaction: an audit write that fails rolls the change back (**503**
+> `Unable to save audit record`). The change does **not** end other signed-in sessions:
+> `POST /auth/refresh` does not read `password_changed_at`, so another session keeps refreshing
+> until it signs out or sits unused for the 7-day idle window.
 
 ### User self-service (My Settings)
 
@@ -13853,6 +14379,7 @@ roles). See [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#sms-channel-twilio).
 | GET | `/users/me/notification-preferences` | Your **effective** per-event channel matrix | Any authenticated user (self) |
 | PUT | `/users/me/notification-preferences` | Save your **SMS** opt-ins (audited) | Any authenticated user (self) |
 | POST | `/users/me/test-sms` | Send a test SMS to your own number — **`3/minute` per IP + `3/hour` per user** | Any authenticated user (self) |
+| POST | `/users/change-password` | Change your own password (My Settings → Password). Required audit; does not end other sessions — see [Changing your own password](#users-admin) above | Any signed-in person (self). Every API token and badge / station token **403**; not an MCP tool |
 
 > **`PUT /users/me/phone`** — body `{ "phone": "512-555-0100" }` (or `{ "phone": null }` / `""` to
 > clear); `phone` is `max_length` 32. The number is parsed against `SMS_DEFAULT_REGION` (default
@@ -14053,7 +14580,7 @@ table and no environment variable.
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
 | GET | `/admin/settings/audit-log` | Settings/quote-config change history (filterable, up to 1yr) | Admin |
-| GET | `/admin/settings/email-recipients` | Email types, selections, missing defaults and the company's user directory | Admin |
+| GET | `/admin/settings/email-recipients` | Email types, selections, missing defaults and the company's user directory. Each event also carries who it **actually reaches** today: `audience_source` (`selected` = the saved or shipped list, exclusive; `automatic` = the catalog's roles or departments with each person's own email choice applied), `reaches_user_ids` (deliverable addresses only), `depends_on_record` (the event also reaches people derived from the record, e.g. its creator) and `reaches_nobody` | Admin |
 | PUT | `/admin/settings/email-recipients/{event_key}` | Set one email type's recipients (`{"user_ids": [...]}`; `null` restores the default). **400** on an unknown email type, or on a user who is not an active user of this company with a deliverable address | Admin |
 | GET | `/admin/settings/work-center-rates` | Work centers with their hourly rates (`include_inactive` default false) | Admin |
 | PUT | `/admin/settings/work-center-rates/{work_center_id}` | Set a work center's hourly (labor costing) rate. **404** on another company's work center | Admin |
@@ -14063,6 +14590,7 @@ table and no environment variable.
 | GET | `/admin/settings/role-permissions/{role}` | One role's effective permissions and `is_customized` | Admin |
 | PUT | `/admin/settings/role-permissions/{role}` | Replace a role's permissions with a company override (body: JSON array of permission keys). **400** on an unknown role or permission; **503** if its required audit row cannot be written (see note) | Admin |
 | POST | `/admin/settings/role-permissions/{role}/reset` | Drop the company override so the role reverts to its defaults; a role with no override is a no-op. **503** as above | Admin |
+| GET | `/admin/system-health` | Read-only System Health: worker alive (heartbeat age), every cron job with armed / off (`null` = unknown), schedule in shop time (America/Chicago), next run, last run and result (`success` / `failed` / `running` -- `running` long after its start means the run was cut off), plus the active company's un-notified event backlog, queued digest items and failed emails (7 days). A cron's last-run outcome and timing are install-wide; its `counts` (what the job returned, summed over every company) are returned only to a platform administrator and are `{}` for a tenant Admin. Writes nothing; Redis unavailable reads as `unknown`, never an error. Crons are armed only by the worker's `WORKER_CRON_JOBS` | Admin |
 
 > **Settings-audit tenancy:** `GET /admin/settings/audit-log` reads the `SettingsAuditLog` trail
 > (admin / quote-config changes) and is **scoped to the caller's active company**
@@ -14124,8 +14652,8 @@ The active company's own profile and self-managed settings. Mounted under `/comp
 > (Claude-plugin brief P0.3, 2026-11-13). While it is OFF, such a token is refused **403** on every
 > API route and at the MCP door, `initialize` and `tools/list` included. Turning it ON therefore
 > also opens that connector: do it only once the empowered official has cleared it
-> ([docs/EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md)). New companies are
-> created **OFF**; existing companies were grandfathered **ON**. The toggle is **Admin-only**
+> ([docs/EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md)). A new company row
+> (only the empty-install bootstrap creates one) starts **OFF**; existing companies were grandfathered **ON**. The toggle is **Admin-only**
 > (`require_role([ADMIN])`), matching the sibling `allow_carrier_egress` / `allow_print_egress`
 > controls. It is exposed in the UI at
 > **Admin Settings → AI Privacy** (`/admin/settings?tab=aiprivacy`) — interactive for Admin
@@ -14187,13 +14715,24 @@ The active company's own profile and self-managed settings. Mounted under `/comp
 
 ### Company onboarding and platform administration
 
-`POST /companies/register` remains unauthenticated company onboarding;
-`POST /platform/companies` requires a stored Platform Admin/superuser. Both create a new company
-and its initial **tenant Admin**, explicitly without superuser authority. Company, seeded setup,
-initial account, and required company/user `CREATE` audit rows commit together; audit failure
-returns **503** and rolls back the whole onboarding transaction. The public flow attributes the
-creation to the new initial Admin; platform creation attributes it to the initiating platform user.
-The separate empty-install `/auth/register-public` bootstrap is documented under Authentication.
+There is **no public company self-registration**. Werco is the only company on this system
+(owner decision 2026-11-23), so the former unauthenticated `POST /companies/register` route, its
+`CompanyRegister` request schema, its rate-limit entry and the SPA page `/register-company` were
+deleted; the path now answers **404** and is absent from OpenAPI and the MCP catalog.
+
+There is **no platform-admin company creation** either (owner decision 2026-11-23, "Delete it
+too"). `POST /platform/companies`, its `CompanyCreate` request schema and
+`services/company_onboarding.py` (`onboard_company`) were deleted, along with the Platform Overview
+**Add Company** button and the `create_company` MCP tool. A `POST` to that path now answers **405**;
+`GET /platform/companies` at the same path still lists companies, and every other `/platform` route
+(get, update, users, dashboard, overview) and platform-admin company context switching are unchanged.
+
+The **only** code path that constructs a `Company` row is the empty-install first-user bootstrap
+in `POST /auth/register-public` (documented under Authentication): only when the install has
+**zero users**, it creates the `werco` company (or reuses it if it already exists) and makes the
+registrant an active **Platform Admin with superuser authority**. Once any user exists, the same
+route only creates an inactive VIEWER in the Werco company, pending approval.
+`backend/tests/test_company_creation_doors_guard.py` pins that single door and fails CI on a new one.
 
 `PUT /platform/companies/{company_id}` requires platform authority and records changed fields,
 including activation/deactivation, in a required `UPDATE` audit row scoped to the **target company**.
@@ -16143,7 +16682,6 @@ the global default applied):
 | `POST /auth/login` | 5/minute |
 | `POST /auth/register` | 3/minute |
 | `POST /auth/register-public` | 3/minute |
-| `POST /companies/register` | 3/minute |
 | `POST /auth/refresh` | 30/minute |
 | `POST /auth/employee-login` | 10/minute |
 | `POST /auth/employee-logout` | 30/minute |
@@ -16158,10 +16696,6 @@ the global default applied):
 (`POST /users/me/test-sms` is authenticated and self-targeted, but it is the one route that spends
 real carrier money per call, so it is capped well below anything a human would click. The two
 standalone laser-nest routes carry their own **10/minute** caps — see Laser Nests.)
-
-`POST /companies/register` is **unauthenticated**, and one successful call mints a whole tenant
-plus an **active admin** user with live access/refresh tokens — so it is capped like the sibling
-register routes. It previously had no per-path entry and ran at only the global 100/minute default.
 
 > **These caps assume a correctly configured edge proxy.** Every per-IP limit on this page is keyed
 > on the forwarded client IP, so it is only as trustworthy as the proxy configuration in front of
@@ -16662,6 +17196,54 @@ exposed here — `config_warnings` is a **count**, and the messages themselves g
 log. `unconfigured` means every enqueue will fail and no background job or cron can run. See
 [`WORKER_SERVICE.md`](WORKER_SERVICE.md).
 
+### Detailed health: document storage
+
+```http
+GET /health/detailed
+```
+
+Unauthenticated. Besides `checks.application` (with the deployed commit at `release`),
+`checks.database` and the Redis checks, it carries `checks.storage`: where **new** document
+uploads go, as this API process sees it. It reads configuration only — no S3 client, no
+network call, no directory created — and never changes the top-level `status`. If it cannot
+be read, `checks.storage` is `{"status": "unknown", "error": "<ExceptionClassName>"}` and the
+response is still 200.
+
+```json
+{
+  "backend": "local",
+  "durability": "ephemeral",
+  "bucket": null,
+  "endpoint_host": null,
+  "region": null,
+  "upload_dir_configured": false,
+  "upload_dir_exists": true,
+  "upload_dir_on_mounted_volume": false,
+  "warning": "Documents are stored on local disk with no mounted volume found. ..."
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `backend` | `local` or `s3` (`STORAGE_BACKEND`) |
+| `durability` | `durable` (s3), `volume` (local, the upload path or a directory above it other than `/` is a mount point), `ephemeral` (local, no mount found: lost on redeploy), `unknown` (local, mount state unreadable) |
+| `bucket`, `endpoint_host`, `region` | s3 only, and **always `null` on this unauthenticated route** — the document store's address is served only on `GET /api/v1/setup/health`, and only to an interactive Admin. `endpoint_host` is the hostname of `S3_ENDPOINT_URL` alone (no scheme, port, path or credentials); `null` there means the AWS default endpoint, and `"(unparseable endpoint)"` means one is set but has no parseable hostname |
+| `upload_dir_configured` | local only: `UPLOAD_DIR` was set to a non-empty value. A set-but-empty `UPLOAD_DIR` is described by its fallback, `UPLOAD_DIR_FALLBACK` |
+| `upload_dir_exists`, `upload_dir_on_mounted_volume` | local only; the second is `null` when the mount state cannot be read |
+| `warning` | A fixed advisory text for `ephemeral` and `unknown`, else `null` |
+
+The volume test is a heuristic: it says a mount exists (a `tmpfs` or a local bind mount
+counts), not that the volume survives a redeploy. No credential, full URL or filesystem path
+is ever returned. The worker reads its own environment and is not described.
+
+**Setup Wizard health.** `GET /api/v1/setup/health` (any signed-in user, company-scoped, as
+before) adds `storage`: the same object. `bucket`, `endpoint_host` and `region` are filled in
+for s3 **only for an Admin (or platform administrator) signed in to the app in their own session**;
+every other role and every API token (full or read-only) gets them `null`, exactly as on
+`/health/detailed`, because they address the store every tenant's documents live in. It is `null` only when the configuration could not be read; the rest of the
+response is unaffected. The Setup Wizard renders it as the **Document Storage** panel. See
+[DATABASE_BACKUP.md → Uploaded documents](DATABASE_BACKUP.md#uploaded-documents).
+
 ## Error Codes
 
 | Status Code | Description |
@@ -16698,7 +17280,7 @@ What matters from this file's point of view:
 - **The catalog is this API.** 779 tools are generated from `app.openapi()` at startup — every
   secured operation except the `Authentication`, `Carrier Webhooks`, `Error Logging` (and its router-level `errors` twin) and `WebSocket` tags, the
   unauthenticated health/station-login routes (named one by one in `catalog.PUBLIC_OPERATIONS`) and
-  the twenty-six operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders
+  the twenty-seven operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders
   (`POST /work-orders/import`, `POST /purchasing/purchase-orders/import` — they mint work orders
   RELEASED / IN_PROGRESS and POs SENT, a record of a past system rather than a user action),
   AI Accept & apply (`POST /ai/recommendations/{recommendation_id}/apply` — owner ruling 3: only a
@@ -16721,8 +17303,18 @@ What matters from this file's point of view:
   `PUT /companies/me/floor-pin-policy` — a badge sign-on credential is a person's act; the routes
   also refuse API tokens) and the two document-access writes (`PUT /users/{user_id}/export-authorization`,
   `POST /documents/{document_id}/access-level` — deciding who may open a controlled document is a
-  person's judgment; the routes also refuse API tokens, and the access review stays a tool) — plus 15 fixed-name convenience tools that shadow 16
-  raw routes (`POST /work-orders/`, `PUT /work-orders/{id}`, `POST /work-orders/{id}/release`, the two
+  person's judgment; the routes also refuse API tokens, and the access review stays a tool), the
+  self-service password change (`POST /users/change-password` — a person's act in their own session;
+  the route also refuses API tokens), the in-process inspection sign-off
+  (`POST /shop-floor/operations/{operation_id}/inspection` — recording that an inspection was performed
+  is a person's judgment; the route also refuses API tokens, and the operation reads carrying
+  `inspection_complete` stay tools), the three labor judgments (`POST /shop-floor/time-entries/{id}/approve`,
+  `/unapprove` and `/set-clock-out` — the routes also refuse API tokens, and `list_time_entries` stays a
+  tool) and issuing a Certificate of Conformance (`POST /shipping/{shipment_id}/coc` — the route also
+  refuses API tokens) — plus 16 fixed-name convenience tools that shadow 17 raw routes
+  (`POST /shipping/{shipment_id}/ship` among them, fronted by `mark_shipped`, which never sends the
+  acknowledgment that accepts open quality items; `POST /work-orders/`, `PUT /work-orders/{id}`,
+  `POST /work-orders/{id}/release`, the two
   nest-package imports, the manual nest add, `GET /search/`, …) to enforce agent rules the routes do
   not: create/duplicate always land DRAFT, release is a separate explicit tool and the generic update
   refuses `status: released` / `in_progress`, a nest-package import or manual nest add is set back to

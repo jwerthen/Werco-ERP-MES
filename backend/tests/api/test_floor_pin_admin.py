@@ -942,7 +942,7 @@ class TestPromotionClearsThePin:
         target = make_user(db_session, role=UserRole.OPERATOR, pin=OTHER_PIN)
         before = pin_state(db_session, target)
 
-        response = client.put(f"{API}/users/{target.id}", json={"department": "Weld"}, headers=admin_headers)
+        response = client.put(f"{API}/users/{target.id}", json={"department": "Production"}, headers=admin_headers)
 
         assert response.status_code == 200, response.text
         assert pin_state(db_session, target) == before

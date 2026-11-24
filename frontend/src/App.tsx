@@ -18,7 +18,6 @@ import { lazyWithRetry } from './utils/lazyWithRetry';
 // Eagerly loaded - critical path
 import Login from './pages/Login';
 import Register from './pages/Register';
-import CompanyRegister from './pages/CompanyRegister';
 import Dashboard from './pages/Dashboard';
 import Unauthorized from './pages/Unauthorized';
 import NotFound from './pages/NotFound';
@@ -41,6 +40,7 @@ const PartDetail = lazyWithRetry(() => import('./pages/PartDetail'));
 const PartEdit = lazyWithRetry(() => import('./pages/PartEdit'));
 const BOM = lazyWithRetry(() => import('./pages/BOM'));
 const BOMUomMismatches = lazyWithRetry(() => import('./pages/BOMUomMismatches'));
+const UntiedLaserNests = lazyWithRetry(() => import('./pages/UntiedLaserNests'));
 const Routing = lazyWithRetry(() => import('./pages/Routing'));
 const ProcessSheets = lazyWithRetry(() => import('./pages/ProcessSheets'));
 const SetupWizard = lazyWithRetry(() => import('./pages/SetupWizard'));
@@ -72,6 +72,7 @@ const Traceability = lazyWithRetry(() => import('./pages/Traceability'));
 const PrintPackingSlip = lazyWithRetry(() => import('./pages/PrintPackingSlip'));
 const PrintShippingLabel = lazyWithRetry(() => import('./pages/PrintShippingLabel'));
 const AuditLog = lazyWithRetry(() => import('./pages/AuditLog'));
+const LaborReview = lazyWithRetry(() => import('./pages/LaborReview'));
 const FabricationQuoting = lazyWithRetry(() => import('./pages/FabricationQuoting'));
 const AdminSettings = lazyWithRetry(() => import('./pages/AdminSettings'));
 const ApiTokens = lazyWithRetry(() => import('./pages/ApiTokens'));
@@ -277,7 +278,6 @@ function AppRoutes() {
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/register" element={<Register />} />
-        <Route path="/register-company" element={<CompanyRegister />} />
         <Route path="/unauthorized" element={<Unauthorized />} />
 
         {/* TV wallboard (A0.5) — full-screen, NO Layout chrome, NO PrivateRoute.
@@ -524,6 +524,20 @@ function AppRoutes() {
               <Layout>
                 <LazyRoute>
                   <BOMUomMismatches />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        {/* Office worklist of laser nests with no sheet tied. Gated on work_orders:edit
+          (routeAccess.ts) to match the endpoints' ADMIN / MANAGER / SUPERVISOR gate. */}
+        <Route
+          path="/laser-nests/untied"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <UntiedLaserNests />
                 </LazyRoute>
               </Layout>
             </PrivateRoute>
@@ -1057,6 +1071,22 @@ function AppRoutes() {
               <Layout>
                 <LazyRoute>
                   <Traceability />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+
+        {/* Labor Review — time-entry review / approval / close a forgotten clock.
+            Gated in routeAccess on quality:inspect = Admin / Manager / Supervisor / Quality,
+            the GET /shop-floor/time-entries role set. */}
+        <Route
+          path="/labor-review"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <LaborReview />
                 </LazyRoute>
               </Layout>
             </PrivateRoute>

@@ -71,6 +71,7 @@ SHADOWED_OPERATIONS: FrozenSet[Tuple[str, str]] = frozenset(
         ("GET", f"{API}/purchasing/purchase-orders"),
         ("GET", f"{API}/quality/ncr"),
         ("GET", f"{API}/parts/"),
+        ("POST", f"{API}/shipping/{{shipment_id}}/ship"),
     }
 )
 
@@ -724,6 +725,32 @@ async def _release_work_order(ctx: ToolContext, args: Dict[str, Any]) -> types.C
     return ctx.finish(result, tool="release_work_order", method="POST", path=path)
 
 
+# --------------------------------------------------------------------------- mark_shipped
+
+
+_MARK_SHIPPED_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "shipment_id": {"type": "integer", "minimum": 1},
+        "tracking_number": {"type": "string", "minLength": 1, "maxLength": 100},
+    },
+    "required": ["shipment_id"],
+}
+
+
+async def _mark_shipped(ctx: ToolContext, args: Dict[str, Any]) -> types.CallToolResult:
+    """Ship with NO acknowledgment body, ever (shipping/2).
+
+    Shipping over open quality items accepts them with a reason, a named person's quality
+    judgment: the route refuses every standing API token, and a person's own JWT would
+    still reach the acknowledgment through a tool call. So this door never sends one, and
+    a job with open items comes back as the route's 409 listing them, verbatim.
+    """
+    path = f"{API}/shipping/{int(args['shipment_id'])}/ship"
+    result = await ctx.call("POST", path, query=_present(args, "tracking_number") or None)
+    return ctx.finish(result, tool="mark_shipped", method="POST", path=path)
+
+
 # --------------------------------------------------------------------------- import_laser_nest_package
 
 
@@ -1352,6 +1379,16 @@ CONVENIENCE_TOOLS: Tuple[ConvenienceTool, ...] = (
         _release_work_order,
     ),
     ConvenienceTool(
+        "mark_shipped",
+        "POST /api/v1/shipping/{id}/ship — Mark a shipment shipped (closes the work order once fully shipped). "
+        "Never accepts open quality items: when the job has any (an open NCR, a first article not passed, a "
+        "quality hold) the route answers 409 listing them, and shipping over them is a person's acknowledged "
+        "decision in the app, not a tool. [Shipping]",
+        _strict(_MARK_SHIPPED_SCHEMA),
+        _MUTATE,
+        _mark_shipped,
+    ),
+    ConvenienceTool(
         "import_laser_nest_package",
         "POST /api/v1/work-orders/laser-nest-packages/standalone/import or /{id}/laser-nest-packages/import — Import a "
         "nest package (ZIP or nest PDF) into a laser work order. The route creates it RELEASED with its nest "
@@ -1470,6 +1507,7 @@ CONVENIENCE_TOOL_ROUTES: Mapping[str, FrozenSet[Tuple[str, str]]] = {
     "list_purchase_orders": frozenset({("GET", f"{API}/purchasing/purchase-orders")}),
     "list_quality_ncrs": frozenset({("GET", f"{API}/quality/ncr")}),
     "list_parts": frozenset({("GET", f"{API}/parts/")}),
+    "mark_shipped": frozenset({("POST", f"{API}/shipping/{{shipment_id}}/ship")}),
 }
 
 

@@ -340,6 +340,27 @@ class TestPackageProse:
         assert "reduce_operation_production_office" in by_name["work_orders_update_operation"].description
 
 
+# --------------------------------------------------------------------------- MCP.md headline count
+
+_HEADLINE = re.compile(
+    r"gets \*\*(\d+) tools\*\* — (\d+) hand-written \*convenience\* tools plus\s+\*\*(\d+) generated\*\*"
+)
+
+
+class TestHeadlineCount:
+    def test_mcp_doc_headline_matches_the_live_catalog(self):
+        """The runbook's opening tool count is the full catalog: a route added or deleted moves it."""
+        match = _HEADLINE.search(MCP_DOC.read_text(encoding="utf-8"))
+        assert match, "docs/MCP.md lost its 'gets **N tools** — C ... plus **G generated**' headline"
+        total, convenience, generated = (int(group) for group in match.groups())
+        catalog = build_catalog(app.openapi(), shadowed=SHADOWED_OPERATIONS, reserved_names=CONVENIENCE_TOOL_NAMES)
+        assert convenience == len(CONVENIENCE_TOOL_NAMES)
+        assert generated == len(
+            catalog
+        ), f"docs/MCP.md says {generated} generated tools; the catalog has {len(catalog)}"
+        assert total == convenience + generated
+
+
 # --------------------------------------------------------------------------- .cursor/mcp.json.example
 
 

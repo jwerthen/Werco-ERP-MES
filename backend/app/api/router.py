@@ -75,6 +75,7 @@ from app.api.endpoints import (
     spc,
     stock_piece,
     supplier_scorecards,
+    system_health,
     tool_management,
     traceability,
     user_workspaces,
@@ -158,6 +159,7 @@ api_router.include_router(scanner.router, prefix="/scanner", tags=["Scanner"])
 api_router.include_router(traceability.router, prefix="/traceability", tags=["Traceability"])
 api_router.include_router(audit.router, prefix="/audit", tags=["Audit"])
 api_router.include_router(admin_settings.router, prefix="/admin/settings", tags=["Admin Settings"])
+api_router.include_router(system_health.router, prefix="/admin", tags=["Admin Settings"])
 api_router.include_router(integrations.router, prefix="/admin/settings", tags=["Carrier Integrations"])
 api_router.include_router(carrier_webhooks.router, prefix="/webhooks", tags=["Carrier Webhooks"])
 api_router.include_router(receiving.router, prefix="/receiving", tags=["Receiving & Inspection"])

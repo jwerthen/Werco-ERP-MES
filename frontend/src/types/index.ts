@@ -146,6 +146,22 @@ export interface Part {
    * reports blockers) — so any UI for it must stay NON-optimistic.
    */
   backflush_components: boolean;
+  /**
+   * The customer furnishes this part (customer property, AS9100D 8.5.3), so MRP
+   * creates NO demand for it: no requirement, no ORDER / MANUFACTURE / EXPEDITE
+   * action, no draft purchase order or work order, and its own BOM is not
+   * exploded. Not inferred from stock ownership (a stock row's `ownership` is a
+   * separate fact).
+   *
+   * Like `backflush_components` it is on every part read and on `PartUpdate`, and
+   * NOT on create — so it is settable only from the Materials and PartEdit EDIT
+   * forms. Unlike `backflush_components` it is OPTIONAL here, on purpose: the SPA
+   * and the API deploy separately, so a response from an API that predates the
+   * column does not carry it. Absent means UNKNOWN, never false — the edit forms
+   * hide their checkbox and never send the key rather than risk writing `false`
+   * over a flag set elsewhere.
+   */
+  customer_supplied?: boolean;
   is_active: boolean;
   status: string;
   customer_name?: string;
@@ -263,6 +279,57 @@ export type OperationHoursSource = 'time_entries' | 'manual' | 'standard' | 'non
 export type WorkOrderStatus = 'draft' | 'released' | 'in_progress' | 'on_hold' | 'complete' | 'closed' | 'cancelled';
 
 /**
+ * Body of `POST /shop-floor/operations/{id}/inspection` — the in-process inspection
+ * sign-off (backend `OperationInspectionRequest`). Every field is optional; `{}` is a
+ * valid sign-off. `inspection_type` is free text on the server (≤100 chars), `notes`
+ * ≤2000 chars.
+ */
+export interface OperationInspectionRequest {
+  inspection_type?: string;
+  notes?: string;
+}
+
+/**
+ * 200 body of the sign-off (backend `OperationInspectionResponse`). Who signed and
+ * when is read by the server from the audit row the call just wrote — the operation
+ * rows carry no inspected-by / inspected-at, so this response is the only place the
+ * UI can show them. `signed_off_at` is UTC ISO with `Z`.
+ */
+export interface OperationInspectionResponse {
+  message: string;
+  operation_id: number;
+  work_order_id: number;
+  requires_inspection: boolean;
+  inspection_complete: boolean;
+  inspection_type: string | null;
+  signed_off_by_id: number;
+  signed_off_by_name: string;
+  signed_off_at: string;
+}
+
+/**
+ * Body of `PUT /work-orders/operations/{id}` (backend `WorkOrderOperationUpdate`).
+ * `inspection_complete` is deliberately absent: the server refuses it 422 — the audited
+ * sign-off above is its only writer.
+ */
+export interface WorkOrderOperationUpdatePayload {
+  version: number;
+  work_center_id?: number;
+  name?: string;
+  description?: string;
+  setup_instructions?: string;
+  run_instructions?: string;
+  setup_time_hours?: number;
+  run_time_hours?: number;
+  run_time_per_piece?: number;
+  status?: OperationStatus;
+  quantity_complete?: number;
+  quantity_scrapped?: number;
+  scrap_reason?: string;
+  requires_inspection?: boolean;
+}
+
+/**
  * Office operation rows (`GET /work-orders/{id}`) carry the floor's short-count
  * figures (see `OperationShortCountFields`) plus the declaration column itself:
  * `quantity_short_declared` — what an explicit close declared short (received − good,
@@ -313,6 +380,8 @@ export interface WorkOrderOperation extends OperationShortCountFields {
   quantity_scrapped: number;
   requires_inspection: boolean;
   inspection_complete: boolean;
+  /** Planned inspection kind (`final` from a routing inspection point); kept by the sign-off unless changed. */
+  inspection_type?: string | null;
   scheduled_start?: string;
   scheduled_end?: string;
   actual_start?: string;
@@ -1652,6 +1721,12 @@ export interface SignedInUserStatus {
 
 export interface ActiveAssignment {
   time_entry_id: number;
+  /**
+   * The time entry's optimistic-lock version, for the Live Shop Activity "Close clock"
+   * action (POST /shop-floor/time-entries/{id}/set-clock-out). Optional for deploy skew:
+   * an older API omits it, and the action is then not offered.
+   */
+  time_entry_version?: number;
   clock_in: string;
   entry_type: TimeEntryType;
   user: {

@@ -29,6 +29,7 @@ import { EmptyState, ErrorState, FormField, useToast } from '../components/ui';
 import { formatCentralDate, getCentralDateStamp, getCentralTodayISODate } from '../utils/centralTime';
 import type { ProductionCalendar } from '../types/productionCalendar';
 import { patternForWorkCenter } from '../utils/productionCalendar';
+import OeeJobStatusNote from '../components/oee/OeeJobStatusNote';
 
 // ============== Types ==============
 
@@ -499,10 +500,7 @@ export default function OEE() {
             sample. Automatic calculation runs nightly for the previous day; work centers without recorded activity are
             skipped.
           </p>
-          <p className="text-sm text-slate-300">
-            Check the selected dates and the work center links on completed time-clock and downtime entries. If those
-            entries exist but samples remain missing, ask an administrator to check the nightly OEE job.
-          </p>
+          <OeeJobStatusNote />
           <div className="flex flex-wrap gap-2 pt-1">
             <Link className="btn btn-primary btn-sm" to="/shop-floor">
               Review time clock

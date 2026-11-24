@@ -208,13 +208,9 @@ docker compose --env-file .env.prod -f docker-compose.prod.yml logs --tail=100 b
 
 ### Database Backup
 
-```bash
-# Create backup from the configured Supabase DATABASE_URL
-DATABASE_URL="$DATABASE_URL" python scripts/backup_database.py
-
-# Restore backup with psql using the Supabase connection string
-psql "$DATABASE_URL" < backup.sql
-```
+The database is Supabase Postgres, backed up by Supabase. See
+[DATABASE_BACKUP.md](DATABASE_BACKUP.md) for backups and the restore drill. Never restore
+by piping a dump into the production `DATABASE_URL`.
 
 ### Update Deployment
 

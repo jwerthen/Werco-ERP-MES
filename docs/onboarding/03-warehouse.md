@@ -73,7 +73,7 @@ To add stock that isn't tied to a purchase order receipt, click **Receive Invent
 
 1. **Part** — pick it from the list.
 2. **Quantity** and **Location**.
-3. **Lot Number** and **PO Number** if you have them.
+3. **Lot Number** and **PO Number** if you have them, and the **Heat** and **Cert** numbers from the material cert. If the stock lands on a lot that already exists at that location, the lot keeps its own heat and cert: a blank one is filled in, and a different one is noted on the movement.
 4. **Unit Cost** if you know it.
 
 Then click **Receive**.
@@ -91,7 +91,7 @@ To move stock from one shelf to another:
 5. Enter the **Quantity to Transfer**, pick the **To Location**, add any **Notes**.
 6. Click **Transfer**.
 
-You can't transfer more than the available quantity — the box won't let you.
+You can't transfer more than the available quantity — the box won't let you. When the move creates a new row at the destination, that row keeps the batch's heat, cert, PO number and supplier.
 
 ---
 
@@ -229,15 +229,15 @@ The new shipment appears in **Recent Shipments** with a **pending** status.
 
 1. In **Recent Shipments**, find your pending shipment.
 2. Click **Ship** in the **Actions** column.
-3. When prompted, enter the **tracking number** (or leave it blank if there isn't one) and confirm.
+3. A confirmation box opens. If the job has open quality items (an open NCR, a first article not passed, or a quality hold), they are listed there. With nothing open, click **Mark shipped**. With items open, only Admin, Manager or Quality can ship: they tick the box to accept the items and give a reason, then click **Accept and ship**. Anyone else sees the list and a note to get one of them.
 
-The status changes to **shipped**.
+The status changes to **shipped**. When the customer needs a Certificate of Conformance it is issued at that moment and its number appears in the **CoC** column. If quality items were accepted to ship, the column reads **CoC withheld, Quality to issue** instead, and Quality issues it from the row with **Issue CoC**.
 
 ### Print the packing slip
 
 In the **Recent Shipments** row, click the **printer icon** in the **Actions** column. The packing slip opens in a new tab, ready to print and put in the box.
 
-> Tip: You can print the packing slip before or after marking it shipped — the printer icon is always available on the row.
+> Tip: You can print the packing slip before or after marking it shipped — the printer icon is always available on the row. The certificate is different: it exists only after **Ship**, so mark the shipment shipped, then reopen the packing slip and use **Print certificate** (or click the CoC number on the row) to print it.
 
 ---
 

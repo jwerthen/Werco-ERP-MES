@@ -20,12 +20,13 @@ healthy one. Three things counter that, all wired below:
 CRON EXPOSURE
 -------------
 Every cron in ``WorkerSettings.cron_jobs`` fires the moment a worker process runs -- there
-is no separate enable step. Several of them WRITE (``run_mrp_auto_draft_job`` creates draft
-POs and work orders; ``check_late_work_orders_job`` emails one message per late WO to every
-supervisor and manager, with no age cap). ``WORKER_CRON_JOBS`` exists so a first boot can
+is no separate enable step. Several of them WRITE (``aggregate_ai_learning_job`` writes
+recommendations; the alert jobs email). No cron creates supply: the MRP cron
+(``run_mrp_review_job``) computes a run in REVIEW mode and tells the planners, and a guard test
+fails if any cron path constructs a purchase order or a work order. ``WORKER_CRON_JOBS`` exists so a first boot can
 drain the enqueue-driven queue with no scheduled work at all; it defaults to "everything",
 i.e. exactly today's behavior. To switch ONE cron off without freezing the rest into an
-allowlist, exclude it: ``WORKER_CRON_JOBS=all,-run_mrp_auto_draft_job``. See
+allowlist, exclude it: ``WORKER_CRON_JOBS=all,-run_mrp_review_job``. See
 ``select_cron_jobs`` for every accepted shape.
 """
 
@@ -40,6 +41,14 @@ from arq.cron import CronJob
 from app.core.config import settings
 from app.core.observability import init_sentry
 from app.core.queue import RedisProfile, assert_redis_configured, get_redis_settings, redis_config_warnings
+from app.core.worker_schedule import (
+    SHOP_TIMEZONE,
+    SHOP_TIMEZONE_NAME,
+    keep_cron_results,
+    publish_cron_registry,
+    record_cron_run,
+    record_cron_start,
+)
 
 # Import for side effects: attaches the transactional-outbox SQLAlchemy Session listeners
 # in the worker process so operational events committed here (e.g. cron writes) also tee
@@ -143,14 +152,17 @@ async def run_mrp_job(ctx, mode: str = "REVIEW", company_id: int = None):
     return await run_mrp_task(mode, company_id=company_id)
 
 
-async def run_mrp_auto_draft_job(ctx):
-    """Cron entrypoint for the daily MRP AUTO_DRAFT pass.
+async def run_mrp_review_job(ctx):
+    """Cron entrypoint for the daily MRP pass -- REVIEW mode only.
 
-    ARQ fires cron coroutines with only ``ctx``, so the schedule can't pass
-    ``mode`` through ``cron()``. This thin wrapper pins ``mode="AUTO_DRAFT"``
-    (the request default is "REVIEW") and fans out over every active company.
+    ARQ fires cron coroutines with only ``ctx``, so the schedule can't pass ``mode`` through
+    ``cron()``; this thin wrapper pins ``mode="REVIEW"`` and fans out over every active company.
+    It computes a fresh run and sends ``mrp.review_needed``; every draft stays a person's click
+    on the MRP supply review (standing ruling: nothing executes without a named person's Accept).
+    It replaced ``run_mrp_auto_draft_job`` (2026-11-23), so a ``WORKER_CRON_JOBS`` value naming
+    the old job must be updated -- an unknown name refuses to boot.
     """
-    return await run_mrp_job(ctx, mode="AUTO_DRAFT")
+    return await run_mrp_job(ctx, mode="REVIEW")
 
 
 async def generate_report_job(ctx, report_type: str, filters: dict = None):
@@ -392,23 +404,23 @@ async def dispatch_notification_direct_job(
 # ============================================================================
 
 # Every entry here fires automatically once a worker process is running. The comment on each
-# line is the schedule in the CONTAINER's local timezone -- arq defaults to
-# `datetime.now().astimezone().tzinfo`, which on Railway is UTC unless TZ is set, so "6 AM"
-# means 06:00 UTC (01:00 Central) until somebody sets TZ. See docs/WORKER_SERVICE.md.
+# line is the schedule in SHOP time: WorkerSettings.timezone pins arq to America/Chicago
+# (app.core.worker_schedule.SHOP_TIMEZONE), so "6 AM" is 6 AM at the shop whatever the
+# container's TZ, daylight saving included. See docs/WORKER_SERVICE.md.
 ALL_CRON_JOBS: List[CronJob] = [
-    cron(run_mrp_auto_draft_job, hour=6, minute=0),  # 6 AM daily (MRP AUTO_DRAFT) -- WRITES draft POs/WOs
+    cron(run_mrp_review_job, hour=6, minute=0),  # 6 AM daily (MRP REVIEW) -- writes the run, drafts nothing
     cron(send_daily_digest_job, hour=8, minute=0),  # 8 AM daily -- sends email
     cron(check_calibrations_job, hour=7, minute=0),  # 7 AM daily -- sends email
-    # Hour 12 in the CONTAINER's zone (above): 12:15 UTC = 6:15 AM Central (7:15 in summer) while TZ
-    # is unset. Which day it judges is the company's (company_today), whatever the hour. In-app only.
-    cron(check_maintenance_due_job, hour=12, minute=15),
+    # 6:15 AM shop time (it ran at 12:15 UTC before the zone was pinned). Which day it judges is the
+    # company's (company_today), whatever the hour. In-app only.
+    cron(check_maintenance_due_job, hour=6, minute=15),
     cron(check_late_work_orders_job, hour=8, minute=0),  # 8 AM daily -- sends email, no age cap
     cron(check_low_stock_job, hour=7, minute=30),  # 7:30 AM daily -- sends email (aggregated)
     cron(check_quote_expiring_job, hour=9, minute=0),  # 9 AM daily -- sends email
     cron(aggregate_ai_learning_job, hour=5, minute=30),  # 5:30 AM daily -- WRITES recommendations/events
     cron(run_oee_auto_calc_job, hour=2, minute=30),  # 2:30 AM daily (previous production day's OEE, P1.2)
     cron(cleanup_runtime_metrics_job, hour=2, minute=15),
-    cron(cleanup_old_logs_job, weekday=0, hour=2, minute=0),  # Sunday 2 AM -- physical DELETEs (not audit)
+    cron(cleanup_old_logs_job, weekday=0, hour=2, minute=0),  # Monday 2 AM (weekday 0) -- physical DELETEs (not audit)
     cron(archive_aged_audit_logs_job, day=1, hour=3, minute=0),  # 1st of month, 3 AM -- needs a durable volume
     cron(poll_tracking_job, minute={0, 30}),  # every 30 min (tracking poll fallback) -- carrier egress
     # Notification relay sweeper: every 5 min re-enqueue catalog-mapped events whose
@@ -416,6 +428,7 @@ ALL_CRON_JOBS: List[CronJob] = [
     cron(relay_pending_notifications_job, minute=set(range(0, 60, 5))),
     cron(check_hank_watches_job, minute=set(range(0, 60, 5))),
 ]
+keep_cron_results(ALL_CRON_JOBS)  # arq.cron() keeps no result; record_cron_run reads it back
 
 
 def select_cron_jobs(spec: str = None, available: Sequence[CronJob] = None) -> List[CronJob]:
@@ -435,10 +448,10 @@ def select_cron_jobs(spec: str = None, available: Sequence[CronJob] = None) -> L
       * ``"check_low_stock_job,poll_tracking_job"`` -> ONLY those two, in the order listed.
 
     DENYLIST -- a ``-`` prefix EXCLUDES that cron from the full set:
-      * ``"all,-run_mrp_auto_draft_job"``  -> every cron EXCEPT the MRP auto-draft pass.
-      * ``"-run_mrp_auto_draft_job"``      -> identical. A spec made only of exclusions
+      * ``"all,-run_mrp_review_job"``  -> every cron EXCEPT the MRP review pass.
+      * ``"-run_mrp_review_job"``      -> identical. A spec made only of exclusions
         implies ``all`` as its base; there is nothing else it could mean.
-      * ``"-cron:run_mrp_auto_draft_job"`` -> identical again. arq names crons
+      * ``"-cron:run_mrp_review_job"`` -> identical again. arq names crons
         ``cron:<coroutine name>`` and the startup log prints that form, so BOTH spellings
         are accepted for exclusions exactly as they already are for inclusions -- whichever
         one the operator copied has to work.
@@ -460,10 +473,10 @@ def select_cron_jobs(spec: str = None, available: Sequence[CronJob] = None) -> L
       * An unknown name, INCLUDING an unknown exclusion. Excluding a cron that does not exist
         means the exclusion is not doing what you think and the job you meant to silence is
         still armed -- so it is refused for the same reason an unknown inclusion is.
-      * Mixing inclusions with exclusions, e.g. ``"poll_tracking_job,-run_mrp_auto_draft_job"``.
+      * Mixing inclusions with exclusions, e.g. ``"poll_tracking_job,-run_mrp_review_job"``.
         That reads either as "only the tracking poll" or as "everything except the MRP pass",
-        and those differ by most of the schedule -- including crons that write draft POs and
-        work orders and crons that email every supervisor. Nothing in the string says which
+        and those differ by most of the schedule -- including crons that write records and
+        crons that email every supervisor. Nothing in the string says which
         was meant, so it is refused. ``all`` is the ONE positive token allowed alongside
         exclusions, because there it is the explicit base rather than an inclusion.
       * ``"none"`` together with an exclusion: there is nothing to subtract from.
@@ -523,7 +536,7 @@ def select_cron_jobs(spec: str = None, available: Sequence[CronJob] = None) -> L
 
         Tokens are already stripped at their edges, but that happens BEFORE the '-' is
         peeled, so a space the operator left after the dash for legibility -- ``"all, -
-        run_mrp_auto_draft_job"`` -- stays glued to the front of the name and turns a
+        run_mrp_review_job"`` -- stays glued to the front of the name and turns a
         correct exclusion into a bogus "unknown cron job" crash loop. The docstring promises
         whitespace is ignored everywhere; this is what makes that true rather than
         almost-true. Used by BOTH the validation below and the subtraction at the end -- they
@@ -555,7 +568,7 @@ def select_cron_jobs(spec: str = None, available: Sequence[CronJob] = None) -> L
     # is being armed or silenced, and it is the most actionable thing to report. Deliberately
     # ahead of the keyword error below: in "all,<mistyped>" the mistyped name is the defect,
     # so it must be what the message leads with. The realistic case is an en-dash paste --
-    # "all,–run_mrp_auto_draft_job" copied out of a doc that auto-substituted the hyphen --
+    # "all,–run_mrp_review_job" copied out of a doc that auto-substituted the hyphen --
     # where the en-dash token is not an exclusion at all and 'all' is merely collateral.
     unknown = [t for t in included_tokens if t not in by_name]
     unknown += [t for t in excluded_tokens if excluded_job_name(t) not in by_name]
@@ -565,7 +578,7 @@ def select_cron_jobs(spec: str = None, available: Sequence[CronJob] = None) -> L
             f"WORKER_CRON_JOBS names unknown cron job(s): {', '.join(sorted(set(unknown)))}. "
             f"Known jobs: {', '.join(known)}. Use 'all', 'none', or a comma-separated subset "
             f"to arm exactly those; prefix a name with '-' to exclude it from the full set "
-            f"(e.g. 'all,-run_mrp_auto_draft_job'). An excluded name must be a known job too: "
+            f"(e.g. 'all,-run_mrp_review_job'). An excluded name must be a known job too: "
             f"excluding one that does not exist means the cron you meant to silence is still armed."
         )
 
@@ -640,13 +653,13 @@ def describe_cron_schedule(jobs: Sequence[CronJob], now: datetime = None) -> Lis
     """One ``name -> next run`` line per registered cron, for the startup log.
 
     Computed with arq's own ``next_cron`` against COPIES of each job's schedule fields; the
-    ``CronJob`` objects are never mutated, so arq's own scheduling is untouched. ``now`` is
-    timezone-aware in the container's local zone, matching how arq itself resolves its
-    default timezone -- so the printed times are the times that will actually happen.
+    ``CronJob`` objects are never mutated, so arq's own scheduling is untouched. ``now``
+    defaults to the current time in the shop zone arq is pinned to (``WorkerSettings.timezone``)
+    -- so the printed times are the times that will actually happen.
     """
     from arq.cron import next_cron
 
-    reference = now or datetime.now().astimezone()
+    reference = now or datetime.now(SHOP_TIMEZONE)
     lines: List[str] = []
     for job in jobs:
         try:
@@ -704,8 +717,7 @@ async def startup(ctx):
             ", ".join(sorted(suppressed)),
         )
     if registered:
-        local_zone = datetime.now().astimezone().tzname()
-        logger.info("ARQ worker cron: %d job(s) armed, times in %s", len(registered), local_zone)
+        logger.info("ARQ worker cron: %d job(s) armed, times in %s", len(registered), SHOP_TIMEZONE_NAME)
         for line in describe_cron_schedule(registered):
             logger.info("ARQ worker cron:   %s", line)
     else:
@@ -714,6 +726,9 @@ async def startup(ctx):
     from app.core.worker_runtime import start_runtime_heartbeat
 
     await start_runtime_heartbeat(ctx)
+    # A SEPARATE key from the pinned heartbeat: which crons are armed and their schedules, for
+    # GET /admin/system-health. Best-effort -- never fails startup.
+    await publish_cron_registry(ctx.get("redis"), ALL_CRON_JOBS, registered)
     logger.info("ARQ worker ready (%d job functions registered)", len(WorkerSettings.functions))
 
 
@@ -758,7 +773,7 @@ class WorkerSettings:
         send_sms_overflow_job,
         send_webhook_job,
         run_mrp_job,
-        run_mrp_auto_draft_job,
+        run_mrp_review_job,
         generate_report_job,
         run_scheduling_job,
         send_daily_digest_job,
@@ -789,6 +804,12 @@ class WorkerSettings:
     # Lifecycle
     on_startup = startup
     on_shutdown = shutdown
+    # Records each cron run's start, finish, outcome and counts for GET /admin/system-health.
+    on_job_start = record_cron_start
+    after_job_end = record_cron_run
+
+    # Cron hours are shop time (America/Chicago), not the container's zone.
+    timezone = SHOP_TIMEZONE
 
     # Worker settings
     max_jobs = 10

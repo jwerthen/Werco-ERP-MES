@@ -2,8 +2,8 @@
 
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
-(Cursor, Claude Code, a chat bot) gets **795 tools** — 15 hand-written *convenience* tools plus
-**780 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+(Cursor, Claude Code, a chat bot) gets **797 tools** — 16 hand-written *convenience* tools plus
+**781 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
 as the same request from the web app. A **read-only** API token is shown fewer tools, and an
 **AI-external** one fewer still (§4.1, §4.2).
 
@@ -121,6 +121,77 @@ confirmed with them. See
 [API.md → Maintenance](API.md#maintenance-pm-schedules-maintenance-work-orders-event-log), *Maintenance
 log entries*.
 
+**Re-checked again on 2026-11-23 after Department became a pick list added one Users tool**,
+`list_user_departments` (`GET /users/departments`, Admin only; no existing name shifted): 15
+convenience + **781** generated, 16 shadowed. It is a read, but it sits under `Users`, which the
+read-only deny list carries, so the read-only catalog is unchanged at 8 convenience + **304**
+generated, and it is not on the AI-external allowlist. See
+[API.md → Users (Admin)](API.md#users-admin).
+
+**Re-checked again on 2026-11-23 after platform-admin company creation was deleted.**
+`create_company` (`POST /platform/companies`) is gone with its route; no other name shifted:
+15 convenience + **780** generated, 16 shadowed, one fewer than the 781 above. It was a write, so the
+read-only catalog is unchanged at 8 convenience + **304** generated, and it was never on the
+AI-external allowlist.
+
+**Re-checked again on 2026-11-23 after the self-service password change left the catalog**:
+the tool generated from `POST /users/change-password` (named after its route function, change own
+password) is gone: the route joined `EXCLUDED_OPERATIONS` (§6.1) as a
+people-only write, so 15 convenience + **779** generated (one fewer than the 780 above), 16 shadowed. It was a write, so the
+read-only catalog is unchanged at 8 convenience + **304** generated.
+
+**Re-checked again on 2026-11-23 after the in-process inspection sign-off left the catalog.**
+`POST /shop-floor/operations/{operation_id}/inspection` joined `EXCLUDED_OPERATIONS` (§6.1), so the
+tool generated from it (named after its route function, mark operation inspected) is gone:
+15 convenience + **778** generated, 16 shadowed, one fewer
+than the 779 above. No other name shifted. The route is a write, so the read-only catalog is
+unchanged, and it was not on the AI-external allowlist. The same change removed `inspection_complete`
+from `WorkOrderOperationUpdate`, so `work_orders_update_operation` no longer takes that argument
+(sending it is a 422). The reads that carry `inspection_complete` (`get_work_order`, the
+shop-floor operation reads) are unchanged. See
+[API.md → Inspection Schema](API.md#inspection-schema).
+
+**Re-checked again on 2026-11-23 after the Sheet Gaps list added one Work Orders tool**,
+`list_process_sheet_gaps` (`GET /work-orders/process-sheet-gaps`, Admin / Manager / Quality; no
+existing name shifted): 15 convenience + **779** generated, 16 shadowed, one more than the 778
+above. It is a read, so the read-only catalog is 8 convenience + **305** generated. It is not on the AI-external allowlist. The
+same change added an optional routing-operation link to each supplied operation on
+`POST /work-orders/`; `create_work_order` sends no operations, so the convenience tool is unchanged
+and always takes the routed path. See
+[API.md → Work Orders](API.md#work-orders), "Process sheets on supplied operations".
+
+**Re-checked again on 2026-11-23 after the untied laser-nest reads added four Laser Nests tools**
+(`list_untied_laser_nests`, `get_laser_nest_tie_coverage`, `get_untied_sheet_report`,
+`get_work_order_nest_tie_summary`; no existing name shifted): 15 convenience + **783** generated, 16
+shadowed, four more than the 779 above. All four are reads, so the read-only catalog is 8 convenience +
+**309** generated. None is
+on the AI-external allowlist (`AI_EXTERNAL_ALLOWED_ROUTES` was not extended). They stay
+tools because nothing about them is a judgment write; tying a sheet from their `proposed_tie` is the
+existing `create_material_allocation`. See
+[API.md → Laser Nests](API.md#laser-nests), *Untied nests*.
+
+**Re-checked again on 2026-11-23 after Admin Settings → System Health added one tool**,
+`get_system_health` (`GET /admin/system-health`, Admin only, a pure read; no existing name shifted):
+15 convenience + **784** generated, 16 shadowed, one more than the 783 above. It carries the denied `Admin Settings` tag, so the
+read-only catalog is unchanged at 8 convenience + **309** generated, and it is not on the
+AI-external allowlist.
+
+**Re-checked again on 2026-11-23 after Labor Review.** It adds one Shop Floor tool,
+`list_time_entries` (`GET /shop-floor/time-entries`, the Labor Review list), and takes two away: the
+labor approve and unapprove routes (`POST /shop-floor/time-entries/{time_entry_id}/approve` and
+`…/unapprove`) joined `EXCLUDED_OPERATIONS` (§6.1) together with the new set-clock-out write, so
+approving labor is no longer an agent action. No existing name shifted: 15 convenience + **783**
+generated, 16 shadowed, one fewer than the 784 above. `list_time_entries` is a read, so the
+read-only catalog is 8 convenience + **310** generated. It is not on the AI-external allowlist. See
+[API.md → Labor Review](API.md#labor-review).
+
+**Re-checked again on 2026-11-23 after shipping over open quality items (shipping/2)**: issuing a
+Certificate of Conformance (`POST /shipping/{id}/coc`) left the catalog (`EXCLUDED_OPERATIONS`,
+§6.1), and `mark_shipped` became a **convenience** tool under the same name (§7), shadowing its raw
+route (§8), so an agent can ship but can never send the acknowledgment that accepts open quality
+items: 16 convenience + **781** generated, 17 shadowed, two fewer generated than the 783 above. No existing name shifted. Both routes are
+writes, so the read-only catalog is unchanged at 8 convenience + **310** generated.
+
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
 `backend/tests/test_mcp_docs_names.py` checks every tool name this file, `CLAUDE.md` and `API.md`
@@ -202,7 +273,7 @@ backend/app/mcp/
   auth.py         AuthContext; TokenSource (static -> refresh -> password login); ErpTokenVerifier
                   (an access JWT by signature, an API token by its api_tokens row)
   executor.py     InProcessExecutor (httpx.ASGITransport into app) / RemoteExecutor (HTTPS)
-  convenience.py  the 15 hand-written tools + SHADOWED_OPERATIONS (16 raw routes they replace)
+  convenience.py  the 16 hand-written tools + SHADOWED_OPERATIONS (17 raw routes they replace)
   people_only.py  people_only_refusal(): Hank task kinds an agent never runs, on any credential (§4.3)
   server.py       build_server(): registry, per-call auth, jsonschema validation, dispatch
   http.py         McpDoor + mount_mcp(app): the Streamable HTTP door at WERCO_MCP_HTTP_PATH
@@ -314,7 +385,7 @@ routes authenticate every call; in IN-PROCESS mode it uses the real `ErpTokenVer
  "generated_tools":   [{"name": "...", "method": "GET", "path": "/api/v1/...", "tag": "...",
                         "function": "...", "annotations": {...}, "deprecated": false}],
  "shadowed_operations": [["GET", "/api/v1/inventory/"], ...],
- "counts": {"convenience": 15, "generated": 779, "shadowed": 16}
+ "counts": {"convenience": 15, "generated": 781, "shadowed": 16}
 }
 ```
 
@@ -759,12 +830,14 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `Dashboard` (`/`) | Dashboard, Shop Floor, Scheduling, Calibration, Inventory, Quality Management | `get_shop_floor_dashboard`★, `get_capacity_heatmap`, `get_equipment_due_soon`, `get_low_stock_alerts`, `get_quality_summary`, `get_my_dashboard_layout`, `save_my_dashboard_layout`, `reset_my_dashboard_layout` (the caller's own saved layout; an API token reads it but is refused **403** on save / reset — [API.md → Personal dashboard layout](API.md#personal-dashboard-layout)) |
 | `ActionInbox` (`/action-inbox`) | AI Learning, Setup & Readiness | `list_ai_recommendations`, `accept_ai_recommendation` (record-only; on an action card it needs a role that could apply the action and is refused for an API token), `dismiss_ai_recommendation`, `snooze_ai_recommendation`, `get_setup_health` — **Accept & apply is not a tool**: `POST /ai/recommendations/{recommendation_id}/apply` is in `EXCLUDED_OPERATIONS` (§6.1) |
 | `Notifications` (`/notifications`) | Notifications | `list_notifications`, `get_unread_count`, `mark_notification_read`, `mark_all_read` |
-| `MySettings` (`/settings`) | Users (self-service) | `get_current_user_info`, `get_my_notification_preferences`, `update_my_notification_preferences`, `update_my_phone`, `send_test_sms`, `change_own_password` |
+| `MySettings` (`/settings`) | Users (self-service) | `get_current_user_info`, `get_my_notification_preferences`, `update_my_notification_preferences`, `update_my_phone`, `send_test_sms` — **changing your own password is not a tool**: `POST /users/change-password` is in `EXCLUDED_OPERATIONS` (§6.1) and refuses every API token and badge / station token |
 | `SetupWizard` (`/setup`) | Setup & Readiness | `get_setup_health`, `get_part_readiness` |
 | `WorkOrders` (`/work-orders`) | Work Orders, Work Order Templates | `work_orders_list_work_orders`, `get_work_order_by_number`, `update_work_order_priority`, `work_orders_delete_work_order`, `work_orders_restore_work_order`, `list_work_order_templates`, `use_work_order_template`, `release_work_order`★ — **bulk release is not a tool**: `POST /work-orders/bulk-release` is in `EXCLUDED_OPERATIONS` (§6.1), so release one job per call |
 | `WorkOrderNew` (`/work-orders/new`) | Work Orders, Parts, Bill of Materials, Routing, Customers, Setup & Readiness, Work Centers | `create_work_order`★, `preview_work_order_operations`, `get_routing_by_part`, `list_customer_names`, `get_part_readiness`, `list_work_centers`★ |
 | `WorkOrderDetail` (`/work-orders/:id`) | Work Orders, Work Order Materials, Laser Nests, Work Order Blockers, Documents, Shop Floor, Comments, Users | `get_work_order`★, `add_operation`★, `update_work_order`★, `release_work_order`★, `duplicate_work_order`★, `add_laser_nest`★, `work_orders_start_work_order`, `work_orders_resume_work_order`, `work_orders_complete_work_order`, `work_orders_complete_operation`, `work_orders_update_operation`, `update_laser_nest`, `delete_laser_nest`, `list_material_allocations`, `create_work_order_blocker`, `attach_document_to_work_order`, `list_record_comments`, `get_record_watch_state`, `search_mentionable_users` (the Comments panel's reads; **posting, editing or deleting a comment and watching are not tools**: the five writes are in `EXCLUDED_OPERATIONS`, §6.1) |
+| `UntiedLaserNests` (`/laser-nests/untied`) | Laser Nests, Work Order Materials, Inventory | `list_untied_laser_nests`, `get_laser_nest_tie_coverage`, `get_untied_sheet_report`, `create_material_allocation` (Tie this sheet), `create_cycle_count` (Start cycle count); Work Order Detail's untied-nest line and Release warning read `get_work_order_nest_tie_summary` |
 | `ShopFloor` (`/shop-floor`) | Shop Floor, Work Order Blockers, Work Centers, Work Orders | `get_shop_floor_dashboard`★, `get_all_operations`, `get_active_shop_users`, `list_work_order_blockers`, `resolve_work_order_blocker` |
+| `LaborReview` (`/labor-review`) | Shop Floor | `list_time_entries` — **Approve, Unapprove and Close clock are not tools**: the three labor judgments are in `EXCLUDED_OPERATIONS` (§6.1) and refuse **403** to every API token |
 | `ShopFloorSimple` (`/shop-floor/operations`) | Shop Floor, Scanner, Work Centers, Work Orders | `get_all_operations`, `shop_floor_start_operation`, `shop_floor_complete_operation`, `put_operation_on_hold`, `shop_floor_resume_operation`, `lookup_barcode`, `resolve_action` |
 | `OperatorKiosk` (`/kiosk`) | Shop Floor | `clock_in`, `clock_out`, `get_my_active_job`, `get_work_center_queue`, `get_operation_steps`, `record_operation_step`, `report_operation_production`, `shop_floor_complete_operation` — under the caller's own user token (kiosk badge tokens are refused) |
 | `CrewStationKiosk` (`/kiosk?station=`) | Shop Floor | Same routes as above; station administration is `create_kiosk_station`, `list_kiosk_stations`, `revoke_kiosk_station`, `reset_kiosk_station_pin`. The station PIN login itself is unauthenticated plumbing and is not a tool |
@@ -791,7 +864,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `Inventory` (`/inventory`) | Inventory, Parts | `list_inventory`★, `receive_inventory`, `adjust_inventory`, `transfer_inventory`, `change_inventory_item_ownership`, `list_transactions`, `preview_inventory_combine`, `combine_inventory`, `list_cycle_counts` |
 | `Materials` (`/materials`) | Materials & Supplies | `list_materials`, `get_material`, `create_material`, `update_material`, `import_materials_csv` |
 | `Receiving` (`/receiving`) | Receiving & Inspection, Purchasing | `get_open_purchase_orders`, `receive_material`, `get_inspection_queue`, `inspect_receipt`, `correct_receipt`, `void_receipt`, `print_receiving_label` |
-| `Shipping` (`/shipping`) | Shipping | `get_ready_to_ship`, `create_shipment`, `mark_shipped`, `rate_shop`, `buy_label`, `get_tracking`, `issue_certificate_of_conformance` |
+| `Shipping` (`/shipping`) | Shipping | `get_ready_to_ship`, `create_shipment`, `mark_shipped`, `rate_shop`, `buy_label`, `get_tracking`, `get_certificate_of_conformance`, `download_certificate_of_conformance_pdf` (issuing a certificate is a person's act in the app, not a tool) |
 | `MRP` (`/mrp`) | Material Requirements Planning | `create_mrp_run`, `get_latest_mrp_run`, `get_mrp_actions`, `get_current_shortages`, `process_mrp_action` |
 | `Purchasing` (`/purchasing`) | Purchasing, Parts, Documents | `list_purchase_orders`★, `get_purchase_order`, `create_purchase_order`, `add_po_line`, `send_purchase_order`, `list_vendors`, `create_vendor`, `restore_vendor`, `check_supplier_approval` (the Create PO screen's Approved Supplier List check); the Quality flow-down tab: `get_po_flowdown_profile`, `update_po_flowdown_profile`, `list_po_quality_clauses`, `create_po_quality_clause`, `update_po_quality_clause` (a PO's own clause choice is a field of `create_purchase_order` / `update_purchase_order`) |
 | `POUpload` (`/po-upload`) | PO Upload | `upload_and_extract_po`, `upload_and_extract_quote`, `upload_and_extract_invoice`, `create_po_from_upload`, `search_vendors` |
@@ -817,13 +890,13 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `PrintShippingLabel` (`/print/shipping-label/:id`) | Shipping, Documents | `get_shipment`, `download_document` |
 | `PrintBadges` (`/print/badges`) | Users | `list_users` |
 | `ImportCenter` (`/import-center`) | Import Kit, Purchasing, Users, Work Orders | `get_import_templates`, `download_import_template`, `import_users_csv` — the two Excel-cutover loaders (`POST /work-orders/import`, `POST /purchasing/purchase-orders/import`) are deliberately **not** tools (§6.1) |
-| `Users` (`/users`) | Users | `list_users`, `create_user`, `update_user`, `deactivate_user`, `reset_user_password`, `approve_user`, `unlock_user` — `list_users` shows each user's floor-PIN state and export authorization; **setting, clearing or unlocking a floor PIN is not a tool**: `PUT` / `DELETE /users/{user_id}/floor-pin` and `POST /users/{user_id}/floor-pin/unlock` are in `EXCLUDED_OPERATIONS` (§6.1) and refuse **403** to every API token; **nor is granting or revoking export authorization** (`PUT /users/{user_id}/export-authorization` is in `EXCLUDED_OPERATIONS`, §6.1, and refuses **403** to every API token) |
+| `Users` (`/users`) | Users | `list_users`, `create_user`, `update_user`, `deactivate_user`, `reset_user_password`, `approve_user`, `unlock_user`, `list_user_departments` (the Department pick list and the users whose value is off it) — `list_users` shows each user's floor-PIN state and export authorization; **setting, clearing or unlocking a floor PIN is not a tool**: `PUT` / `DELETE /users/{user_id}/floor-pin` and `POST /users/{user_id}/floor-pin/unlock` are in `EXCLUDED_OPERATIONS` (§6.1) and refuse **403** to every API token; **nor is granting or revoking export authorization** (`PUT /users/{user_id}/export-authorization` is in `EXCLUDED_OPERATIONS`, §6.1, and refuses **403** to every API token) |
 | `AuditLog` (`/audit-log`) | Audit | `list_audit_logs`, `get_audit_summary`, `verify_audit_integrity`, `get_integrity_status` |
 | `VisitorLog` (`/visitor-log`) | Visitor Logs | `list_visitors`, `manual_entry`, `sign_out`, `export_visitors_csv`, `create_station`, `revoke_station` |
 | `VisitorSignIn` (`/visitor-signin`) | Visitor Logs | `sign_in`, `sign_out` (under the caller's own role; the tablet's shared-PIN station login is unauthenticated plumbing and is not a tool) |
-| `AdminSettings` (`/admin/settings`) | Admin Settings, Users, Production Calendar, Company Management | `list_work_center_rates`, `update_work_center_rate`, `list_work_center_types_admin`, `update_work_center_types_admin`, `get_email_recipients`, `update_email_recipients`, `get_role_permissions`, `update_role_permissions`, `get_audit_log`, `list_users`; Production Calendar tab: `get_production_calendar`, `save_production_calendar_document` (Admin only), `sync_working_calendars_from_shifts` (dry run by default; Admin / Manager / Supervisor), `resolve_production_moment` (which production day and shift an instant belongs to); Badge Sign-in tab: `get_my_company` reads the policy, but **turning it on or off is not a tool** (`PUT /companies/me/floor-pin-policy` is in `EXCLUDED_OPERATIONS`, §6.1, and refuses **403** to every API token) |
+| `AdminSettings` (`/admin/settings`) | Admin Settings, Users, Production Calendar, Company Management | `list_work_center_rates`, `update_work_center_rate`, `list_work_center_types_admin`, `update_work_center_types_admin`, `get_email_recipients`, `update_email_recipients`, `get_role_permissions`, `update_role_permissions`, `get_audit_log`, `list_users`; System Health tab: `get_system_health` (Admin only, read-only); Production Calendar tab: `get_production_calendar`, `save_production_calendar_document` (Admin only), `sync_working_calendars_from_shifts` (dry run by default; Admin / Manager / Supervisor), `resolve_production_moment` (which production day and shift an instant belongs to); Badge Sign-in tab: `get_my_company` reads the policy, but **turning it on or off is not a tool** (`PUT /companies/me/floor-pin-policy` is in `EXCLUDED_OPERATIONS`, §6.1, and refuses **403** to every API token) |
 | `PlatformOverview` (`/platform`) | Platform Administration | `platform_overview`, `list_companies`, `company_dashboard`, `browse_company_users` (platform admins only — the route decides) |
-| `CompanyRegister` (`/register-company`) | Company Management | `get_my_company`, `update_my_company` — the public registration form itself is unauthenticated and has no tool; **the AI and SMS egress kill switches are not tools**: `PUT /companies/me/ai-egress` and `PUT /companies/me/sms-egress` are in `EXCLUDED_OPERATIONS` (§6.1) and refuse **403** to every API token, as do the carrier and label-print switches' profile writes (`PUT /admin/settings/shipping-profile`, `PUT /receiving/print-profile`; their `get_shipping_profile` / `get_print_profile` reads stay tools) |
+| Company settings (Admin Settings → AI / SMS privacy tabs; there is no company self-registration page) | Company Management | `get_my_company`, `update_my_company` — **the AI and SMS egress kill switches are not tools**: `PUT /companies/me/ai-egress` and `PUT /companies/me/sms-egress` are in `EXCLUDED_OPERATIONS` (§6.1) and refuse **403** to every API token, as do the carrier and label-print switches' profile writes (`PUT /admin/settings/shipping-profile`, `PUT /receiving/print-profile`; their `get_shipping_profile` / `get_print_profile` reads stay tools) |
 | `ApiTokens` (`/admin/api-tokens`) | API Tokens | `create_api_token`, `list_api_tokens`, `revoke_api_token` (Admin only; a call authenticated **by** an API token gets the route's 403 fence — §4) |
 | `Login` (`/login`), `Register` (`/register`) | Authentication | *No tool* — excluded on purpose; identity comes from the JWT (§4) |
 | `NotFound`, `Unauthorized` | — | No API calls |
@@ -848,7 +921,7 @@ minus two further, named sets:
   They are listed **by name** rather than skipped silently, so a new route that forgets its
   `security` dependency — even under a tag that already has tools — fails the coverage guard
   (`catalog.unaccounted_operations`, §14) until it is either secured or named there.
-- **`EXCLUDED_OPERATIONS`** — twenty-six operations, none with a convenience twin:
+- **`EXCLUDED_OPERATIONS`** — thirty-two operations, none with a convenience twin:
   - The two Excel-cutover loaders, `POST /work-orders/import` and
     `POST /purchasing/purchase-orders/import` (`migration_import_service`). They record a *past*
     system's state rather than perform a user action: the work-order loader mints work orders
@@ -929,6 +1002,37 @@ minus two further, named sets:
     The reads stay tools: `get_document_access_review`, the `access_level` on every document read,
     and each user's export authorization on `list_users`. See
     [API.md → Restricted and export-controlled documents](API.md#restricted-and-export-controlled-documents-as9100d-7531).
+  - The **self-service password change** (`catalog.PASSWORD_OPERATIONS`, 2026-11-23):
+    `POST /users/change-password`. Changing your own password is a person's act in their own
+    session. The route refuses every API token and every badge / station token **403**
+    (`app.core.credentials.PASSWORD_CHANGE_PEOPLE_ONLY`), and the exclusion closes the door a
+    person's own JWT would leave open: an agent, possibly following text injected through ERP data,
+    changing the person's password and locking them out. See
+    [RBAC_PERMISSIONS.md → Credential policy for judgment writes](RBAC_PERMISSIONS.md#credential-policy-for-judgment-writes).
+  - The **in-process inspection sign-off** (`catalog.INSPECTION_SIGN_OFF_OPERATIONS`; AS9100D
+    8.6): `POST /shop-floor/operations/{operation_id}/inspection`. Recording that an inspection was
+    performed is a person's judgment, as an FAI final disposition is. The route refuses every API
+    token **403** (`app.core.credentials.API_TOKEN_INSPECTION_SIGN_OFF`), and the exclusion closes
+    the door a person's own JWT would leave open: an agent signing an inspection nobody did. The
+    operation reads that carry `requires_inspection` / `inspection_complete` stay tools. See
+    [API.md → Inspection Schema](API.md#inspection-schema).
+  - The three **labor judgments** (`catalog.LABOR_JUDGMENT_OPERATIONS`; Labor Review, 2026-11-23):
+    `POST /shop-floor/time-entries/{time_entry_id}/approve`, `…/unapprove` and `…/set-clock-out`.
+    Approving a time entry, clearing its approval and setting another person's clock-out are a
+    person's judgment at the desk. The routes refuse every API token **403**
+    (`app.services.labor_review_service.LABOR_JUDGMENT_API_TOKEN_DETAIL`) and every kiosk badge, and
+    the exclusion closes the door a person's own JWT would leave open. Approve and unapprove were
+    tools before this change and are not any more. The read stays a tool: `list_time_entries`. See
+    [API.md → Labor Review](API.md#labor-review).
+  - **Issuing a Certificate of Conformance**, `POST /shipping/{shipment_id}/coc` (shipping/2,
+    2026-11-23). The certificate states that the shipped parts conform, and over open quality
+    items it accepts them with a reason: a named person's quality judgment. The route refuses every
+    API token **403** (`shipment_release_service.API_TOKEN_COC_ISSUE`), and the exclusion closes the
+    door a person's own JWT would leave open. The reads stay tools:
+    `get_certificate_of_conformance` and `download_certificate_of_conformance_pdf`. Its sibling,
+    shipping over open items, is handled the other way: the ship route is **shadowed** by the
+    `mark_shipped` convenience tool, which never sends the acknowledgment (§7, §8). See
+    [API.md → Shipping](API.md#shipping).
 
 The `Import Batches` tag also excludes the recoverable Import Center review, receipt,
 correction and commit routes. These wrap the same cutover loaders, including their
@@ -945,7 +1049,13 @@ three report-template routes then made it **770 generated tools**, and on 2026-1
 re-verification and CAR effectiveness verbs **772**, the five PO quality flow-down routes
 **777**, the inventory ownership route (migration 129) **778**, and the document access review
 (migration 131) **779**; the four floor-PIN writes and the two document-access writes joined the
-exclusions (twenty-six) without changing the count.
+exclusions (twenty-six) without changing the count. On 2026-11-20 maintenance log entries made it
+**780**; on 2026-11-23 the self-service password change and the inspection sign-off joined the
+exclusions (twenty-eight) and company creation was deleted with its route, while Department pick
+list, the Sheet Gaps list, the four untied laser-nest reads and System Health were added (**784**);
+then Labor Review added one read and moved the two labor-approval tools into the exclusions with the
+new set-clock-out write (thirty-one): **783**; the CoC issue then joined the exclusions
+(thirty-two) and the ship route was shadowed by `mark_shipped` (17 shadowed): **781 generated tools**.
 
 ### 6.2 Naming and the collision policy (`app/mcp/naming.py`)
 
@@ -1045,7 +1155,7 @@ function name containing `delete`/`void`/`cancel`/`purge`/`reset`/`hard`; `idemp
 
 ## 7. The convenience tools (fixed names)
 
-Fifteen hand-written tools, listed **first** in `tools/list` (then the generated catalog sorted by
+Sixteen hand-written tools, listed **first** in `tools/list` (then the generated catalog sorted by
 name). Each one reaches data exactly like a generated tool — an HTTP request through the executor
 as the caller — and each **shadows** the raw route(s) it fronts (§8), so there is exactly one door
 to those routes and the rules below cannot be bypassed by calling the raw twin. Every convenience
@@ -1069,6 +1179,7 @@ with a 422 that names it, never accepted-and-ignored.
 | `list_purchase_orders` | `GET /purchasing/purchase-orders` | `status`, `vendor_id`, `deleted_only`, `limit` (default 200), `offset` | |
 | `list_quality_ncrs` | `GET /quality/ncr` | `status`, `part_id`, `skip`, `limit` (default 100) | |
 | `list_parts` | `GET /parts/` | `search`, `part_type`, `item_group` (default `engineering`), `active_only`, `include_bom_components`, `include_deleted` (admin), `skip`, `limit` (default 100, max 500) | |
+| `mark_shipped` | `POST /shipping/{id}/ship` | `shipment_id` (required), `tracking_number` | Ships with **no request body, ever**: the acknowledgment that accepts open quality items (an open NCR, a first article not passed, a quality hold) is a person's decision in the app. A job with open items comes back as the route's **409** listing them, as an `is_error` result |
 
 **Operation-name guard (`add_operation`).** An operation is a short shop-floor step (`Laser`,
 `Brake`, `Weld`, `Deburr`), never a file. A name is refused — **422, not rewritten** — when it
@@ -1080,7 +1191,7 @@ contains `/` or `\`, ends with `.dxf` / `.dwg` / `.nc` / `.pdf` (case-insensitiv
 
 ## 8. Shadowed raw operations
 
-These 16 `(METHOD, path)` pairs are **dropped from the generated catalog**; the convenience tool is
+These 17 `(METHOD, path)` pairs are **dropped from the generated catalog**; the convenience tool is
 the only door to them (`convenience.SHADOWED_OPERATIONS`):
 
 | Raw operation | Replaced by |
@@ -1101,6 +1212,7 @@ the only door to them (`convenience.SHADOWED_OPERATIONS`):
 | `GET /api/v1/purchasing/purchase-orders` | `list_purchase_orders` |
 | `GET /api/v1/quality/ncr` | `list_quality_ncrs` |
 | `GET /api/v1/parts/` | `list_parts` |
+| `POST /api/v1/shipping/{shipment_id}/ship` | `mark_shipped` |
 
 Every other operation stays generated — including the neighbours of the shadowed ones
 (`work_orders_start_work_order`, `work_orders_update_operation`, `preview_laser_nest_package_import`,

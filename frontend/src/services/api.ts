@@ -1,6 +1,8 @@
 import type { BOMExploded } from '../types/engineering';
 import type { MaterialPriceHistoryParams, MaterialPriceHistoryResponse, MaterialPriceHistoryDetailParams, MaterialPriceHistoryDetail } from '../types/materialPriceHistory';
 import type { EmailRecipientsSettings } from '../types/emailRecipients';
+import type { LowStockAlert } from '../types/lowStock';
+import type { UserDepartments } from '../types/userDepartments';
 import type {
   CustomReportRequest,
   CustomReportResult,
@@ -22,6 +24,14 @@ import type {
   CustomerExportControl,
 } from '../types/exportControl';
 import type { InventoryOwnershipChange, InventoryOwnershipChangeResult, OwnershipType } from '../types/ownership';
+import type {
+  NestTieCoverageResponse,
+  ProposedNestTie,
+  UntiedNestListParams,
+  UntiedNestListResponse,
+  UntiedSheetReportResponse,
+  WorkOrderNestTieSummary,
+} from '../types/untiedNests';
 import {
   normalizeDocumentAccessReview,
   type DocumentAccessChangeRequest,
@@ -104,6 +114,9 @@ import {
   ShopFloorCompleteOperationRequest,
   OfficeOperationCompleteOptions,
   OfficeOperationCompleteResult,
+  OperationInspectionRequest,
+  OperationInspectionResponse,
+  WorkOrderOperationUpdatePayload,
 } from '../types';
 import { ScanResolveRequest, ScanResolveResult } from '../types/scan';
 import type {
@@ -190,10 +203,18 @@ import {
   CopilotStreamHandlers,
 } from '../types/copilot';
 import type { HankBriefing } from '../types/hank';
+import type {
+  LaborReviewListParams,
+  LaborReviewListResponse,
+  SetClockOutRequest,
+  SetClockOutResponse,
+  TimeEntryApprovalResult,
+} from '../types/laborReview';
 import type { HankCapabilities, HankTask, HankTaskCreate, HankTaskCommand, HankTaskList } from '../types/hankTasks';
 import type { HankWatchCreate } from '../types/hankWatches';
 import type { HankPreferencesCommand, HankPreferencesResponse, HankPreferencesUpdate } from '../types/hankPreferences';
 import type { DashboardLayoutCommand, DashboardLayoutResponse, DashboardLayoutSave } from '../types/dashboardLayout';
+import type { ChangeOwnPasswordRequest, ChangeOwnPasswordResponse } from '../types/password';
 import type { HankEvidence, HankHandoff, HankHandoffCreate, HankHandoffList, HankRoutine, HankRoutineValues, HankRoutineRun, HankRoutineAdvance, HankWorkQueue, HankWorkState } from '../types/hankWork';
 import type { HankIntakeBatch, HankIntakeBatchList, HankIntakeFile, HankIntakePlan, HankIntakeReceivingDraft, HankIntakePurchaseOrderDraft, HankSourcePreview } from '../types/hankIntake';
 import {
@@ -204,6 +225,8 @@ import {
   WorkOrderImportResponse,
 } from '../types/importKit';
 import { RoutingImportResponse } from '../types/engineering';
+import type { LotTraceResponse, SerialTraceResponse, TraceSearchResult } from '../types/traceability';
+import type { ReceiveInventoryRequest } from '../types/inventoryReceive';
 import {
   NotificationCatalogEntry,
   NotificationItem,
@@ -226,6 +249,12 @@ import {
   CarrierConnectionTestResult,
   CompanyShippingProfile,
   CompanyShippingProfileUpdate,
+  CertificateOfConformance,
+  MarkShippedResult,
+  ReadyToShipRow,
+  ReleaseExceptionAcknowledgment,
+  ShipmentDetail,
+  ShipmentSummary,
   RateQuote,
   RateShopRequest,
   SchedulePickupRequest,
@@ -246,6 +275,7 @@ import {
   VisitorLogResponse,
   VisitorManualEntryRequest,
 } from '../types/visitor';
+import type { WorkOrderOperationsPreview, WorkOrderProcessSheetGapResponse } from '../types/workOrderProcessSheet';
 import {
   KioskStationCreate,
   KioskStationListResponse,
@@ -314,6 +344,11 @@ class ApiService {
   async request<T>(config: AxiosRequestConfig): Promise<T> {
     const response = await this.api.request<T>(config);
     return response.data;
+  }
+
+  /** Admin > System Health: worker heartbeat, cron jobs and the notification backlog (Admin only, read-only). */
+  async getSystemHealth(): Promise<import('../types/systemHealth').SystemHealth> {
+    return (await this.api.get('/admin/system-health')).data;
   }
 
   async getRuntimeMetricSummary(params: { days?: number; page?: number; device?: string; release?: string; route?: string }): Promise<import('../types/runtimeMetrics').RuntimeMetricSummary> {
@@ -1742,6 +1777,57 @@ class ApiService {
     return window.URL.createObjectURL(new Blob([response.data], { type: 'application/pdf' }));
   }
 
+  // --- Untied laser nests (office reads) --------------------------------------
+  // Nest operations with no OPEN sheet tie. All four are PURE READS gated to
+  // ADMIN / MANAGER / SUPERVISOR server-side (`work_orders:edit` client-side).
+  // Office screens only: the dispatch board, kiosk and crew station must never
+  // call these — an untied operation renders nothing on a floor screen, by
+  // recorded contract. Date params are company-local YYYY-MM-DD days.
+
+  /** The untied-nest worklist: open nests, plus nests completed in the window. */
+  async getUntiedLaserNests(params: UntiedNestListParams = {}): Promise<UntiedNestListResponse> {
+    const response = await this.api.get<UntiedNestListResponse>('/laser-nests/untied', { params });
+    return response.data;
+  }
+
+  /** Per company-local month: completed nests and how many carried a sheet tie. */
+  async getLaserNestTieCoverage(months?: number): Promise<NestTieCoverageResponse> {
+    const response = await this.api.get<NestTieCoverageResponse>('/laser-nests/untied/coverage', {
+      params: months ? { months } : undefined,
+    });
+    return response.data;
+  }
+
+  /** Completed untied nests grouped by (approximate) sheet spec, with sheets burned. */
+  async getUntiedSheetReport(
+    params: { completed_from?: string; completed_to?: string } = {}
+  ): Promise<UntiedSheetReportResponse> {
+    const response = await this.api.get<UntiedSheetReportResponse>('/laser-nests/untied/sheet-report', { params });
+    return response.data;
+  }
+
+  /** 'N of M nests have no sheet tied' for one job (its own nests plus its laser child jobs'). */
+  async getWorkOrderNestTieSummary(workOrderId: number): Promise<WorkOrderNestTieSummary> {
+    const response = await this.api.get<WorkOrderNestTieSummary>(
+      `/laser-nests/work-orders/${workOrderId}/tie-summary`
+    );
+    return response.data;
+  }
+
+  /**
+   * "Tie this sheet": post a worklist row's tie through the EXISTING
+   * `POST /work-orders/{id}/material-allocations` — no new write route. The
+   * body is `proposed_tie` minus `work_order_id` (the path parameter), with
+   * `part_id` optionally replaced by the planner's own shortlist pick.
+   * Server-gated: callers stay non-optimistic and refetch after a 201.
+   */
+  async tieNestSheet(tie: ProposedNestTie): Promise<MaterialAllocation> {
+    const { work_order_id: workOrderId, ...body } = tie;
+    const created = await this.createMaterialAllocation(workOrderId, body);
+    this.invalidateCache('/laser-nests');
+    return created;
+  }
+
   // --- Material ties (work-order material allocations) ----------------------
   // The OPTIONAL tie between a work order (or one of its operations) and stock
   // material: /work-orders/{id}/material-allocations[/{allocation_id}].
@@ -2084,7 +2170,11 @@ class ApiService {
     return response.data;
   }
 
-  async updateOperation(operationId: number, data: any) {
+  /**
+   * Generic operation edit. The payload type has no `inspection_complete`: the server
+   * refuses it 422 — sign an inspection off with `signOffOperationInspection`.
+   */
+  async updateOperation(operationId: number, data: WorkOrderOperationUpdatePayload) {
     const response = await this.api.put(`/work-orders/operations/${operationId}`, data);
     return response.data;
   }
@@ -2167,6 +2257,56 @@ class ApiService {
 
   async clockOut(timeEntryId: number, data: { quantity_produced: number; quantity_scrapped?: number; scrap_reason?: string; scrap_reason_code_id?: number; notes?: string; source?: string }) {
     const response = await this.api.post(`/shop-floor/clock-out/${timeEntryId}`, data);
+    this.invalidateDashboardCache();
+    return response.data;
+  }
+
+  // --- Labor Review (/shop-floor/time-entries) -------------------------------
+
+  /**
+   * GET /shop-floor/time-entries — time entries by production day with review flags,
+   * server-paged. Admin / Manager / Supervisor / Quality. Pure read.
+   */
+  async listLaborReviewEntries(params: LaborReviewListParams = {}): Promise<LaborReviewListResponse> {
+    const response = await this.api.get<LaborReviewListResponse>('/shop-floor/time-entries', { params });
+    return response.data;
+  }
+
+  /**
+   * POST /shop-floor/time-entries/{id}/approve — sign off a CLOSED time entry (not your own).
+   * Admin / Manager / Supervisor / Quality; 409 while the entry is still clocked in. With
+   * `version`, 409 when the entry changed since it was read.
+   */
+  async approveTimeEntry(timeEntryId: number, version?: number): Promise<TimeEntryApprovalResult> {
+    const response = await this.api.post<TimeEntryApprovalResult>(
+      `/shop-floor/time-entries/${timeEntryId}/approve`,
+      version === undefined ? undefined : { version }
+    );
+    this.invalidateCache('/shop-floor/time-entries');
+    return response.data;
+  }
+
+  /** POST /shop-floor/time-entries/{id}/unapprove — clear an approval (not your own); `version` as approve. */
+  async unapproveTimeEntry(timeEntryId: number, version?: number): Promise<TimeEntryApprovalResult> {
+    const response = await this.api.post<TimeEntryApprovalResult>(
+      `/shop-floor/time-entries/${timeEntryId}/unapprove`,
+      version === undefined ? undefined : { version }
+    );
+    this.invalidateCache('/shop-floor/time-entries');
+    return response.data;
+  }
+
+  /**
+   * POST /shop-floor/time-entries/{id}/set-clock-out — close or correct another person's
+   * UNAPPROVED entry at a stated time with a reason (hours only). Admin / Manager /
+   * Supervisor; version-checked (409 stale).
+   */
+  async setTimeEntryClockOut(timeEntryId: number, data: SetClockOutRequest): Promise<SetClockOutResponse> {
+    const response = await this.api.post<SetClockOutResponse>(
+      `/shop-floor/time-entries/${timeEntryId}/set-clock-out`,
+      data
+    );
+    this.invalidateCache('/shop-floor/time-entries');
     this.invalidateDashboardCache();
     return response.data;
   }
@@ -2309,8 +2449,8 @@ class ApiService {
     this.invalidateDashboardCache();
   }
 
-  async getSetupHealth() {
-    const response = await this.api.get('/setup/health');
+  async getSetupHealth(): Promise<import('../types/setup').SetupHealthResponse> {
+    const response = await this.api.get<import('../types/setup').SetupHealthResponse>('/setup/health');
     return response.data;
   }
 
@@ -2861,6 +3001,25 @@ class ApiService {
     return response.data;
   }
 
+  /**
+   * In-process inspection sign-off — the ONLY writer of `inspection_complete`.
+   * ADMIN/MANAGER/SUPERVISOR/QUALITY, a person only (a standing API token is 403),
+   * and its audit row is required evidence (503, nothing signed, when it cannot be
+   * written). Server-gated, so callers stay NON-optimistic: show "Inspected" only
+   * after this resolves, then re-read.
+   */
+  async signOffOperationInspection(
+    operationId: number,
+    data: OperationInspectionRequest = {}
+  ): Promise<OperationInspectionResponse> {
+    const response = await this.api.post<OperationInspectionResponse>(
+      `/shop-floor/operations/${operationId}/inspection`,
+      data
+    );
+    this.invalidateDashboardCache();
+    return response.data;
+  }
+
   async holdOperation(operationId: number, data?: { category?: string; severity?: string; note?: string; source?: string }) {
     // Body is optional and backward-compatible: when present the backend also
     // records a WorkOrderBlocker (category/severity/note) alongside the hold.
@@ -2994,9 +3153,25 @@ class ApiService {
     return response.data;
   }
 
-  async previewWorkOrderOperations(partId: number, quantity: number = 1) {
-    const response = await this.api.get(`/work-orders/preview-operations/${partId}`, {
+  /**
+   * The operations `POST /work-orders` would copy from the part's released routing.
+   * Each row carries `routing_operation_id` (send it back on the supplied operation so
+   * the step keeps its process sheet) and the attached sheet. Pure read.
+   */
+  async previewWorkOrderOperations(partId: number, quantity: number = 1): Promise<WorkOrderOperationsPreview> {
+    const response = await this.api.get<WorkOrderOperationsPreview>(`/work-orders/preview-operations/${partId}`, {
       params: { quantity }
+    });
+    return response.data;
+  }
+
+  /**
+   * Quality's worklist: live work orders whose part's released routing carries process
+   * sheets but whose operations hold no snapshotted step. ADMIN/MANAGER/QUALITY. Pure read.
+   */
+  async getProcessSheetGaps(limit: number = 200): Promise<WorkOrderProcessSheetGapResponse> {
+    const response = await this.api.get<WorkOrderProcessSheetGapResponse>('/work-orders/process-sheet-gaps', {
+      params: { limit },
     });
     return response.data;
   }
@@ -3445,8 +3620,8 @@ class ApiService {
     return response.data;
   }
 
-  async getLowStockAlerts() {
-    const response = await this.api.get('/inventory/low-stock');
+  async getLowStockAlerts(): Promise<LowStockAlert[]> {
+    const response = await this.api.get<LowStockAlert[]>('/inventory/low-stock');
     return response.data;
   }
 
@@ -3471,7 +3646,7 @@ class ApiService {
     return response.data;
   }
 
-  async receiveInventory(data: any) {
+  async receiveInventory(data: ReceiveInventoryRequest) {
     const response = await this.api.post('/inventory/receive', data);
     return response.data;
   }
@@ -4053,22 +4228,22 @@ class ApiService {
   }
 
   // Shipping
-  async getShipments(params?: { status?: string }) {
-    const rows: any[] = [];
+  async getShipments(params?: { status?: string }): Promise<ShipmentSummary[]> {
+    const rows: ShipmentSummary[] = [];
     for (let skip = 0; ; skip += 500) {
-      const response = await this.api.get('/shipping/', { params: { ...params, skip, limit: 500 } });
+      const response = await this.api.get<ShipmentSummary[]>('/shipping/', { params: { ...params, skip, limit: 500 } });
       rows.push(...response.data);
       if (response.data.length < 500) return rows;
     }
   }
 
-  async getShipment(shipmentId: number) {
-    const response = await this.api.get(`/shipping/${shipmentId}`);
+  async getShipment(shipmentId: number): Promise<ShipmentDetail> {
+    const response = await this.api.get<ShipmentDetail>(`/shipping/${shipmentId}`);
     return response.data;
   }
 
-  async getReadyToShip() {
-    const response = await this.api.get('/shipping/ready-to-ship');
+  async getReadyToShip(): Promise<ReadyToShipRow[]> {
+    const response = await this.api.get<ReadyToShipRow[]>('/shipping/ready-to-ship');
     return response.data;
   }
 
@@ -4081,11 +4256,52 @@ class ApiService {
     return (await this.api.put(`/shipping/${shipmentId}`, data)).data;
   }
 
-  async markShipped(shipmentId: number, trackingNumber?: string) {
-    const response = await this.api.post(`/shipping/${shipmentId}/ship`, null, {
+  /**
+   * Mark a shipment shipped. Send no acknowledgment first: while the job has open
+   * quality items the server answers 409 with a structured ``detail``
+   * (``releaseExceptionsConflict``); Admin, Manager or Quality then resends with
+   * ``acknowledge_exceptions`` and a reason.
+   */
+  async markShipped(
+    shipmentId: number,
+    trackingNumber?: string,
+    acknowledgment?: ReleaseExceptionAcknowledgment
+  ): Promise<MarkShippedResult> {
+    const response = await this.api.post<MarkShippedResult>(`/shipping/${shipmentId}/ship`, acknowledgment ?? null, {
       params: { tracking_number: trackingNumber }
     });
     return response.data;
+  }
+
+  /**
+   * Issue (or return the existing) numbered Certificate of Conformance for a shipped
+   * shipment. Admin, Manager or Quality. Same open-quality-items 409 and
+   * acknowledgment as ``markShipped``; a plain-string 409 before the shipment ships.
+   */
+  async issueCoc(
+    shipmentId: number,
+    acknowledgment?: ReleaseExceptionAcknowledgment
+  ): Promise<CertificateOfConformance> {
+    const response = await this.api.post<CertificateOfConformance>(
+      `/shipping/${shipmentId}/coc`,
+      acknowledgment ?? null
+    );
+    return response.data;
+  }
+
+  /** The issued certificate's metadata (404 when none has been issued). */
+  async getCoc(shipmentId: number): Promise<CertificateOfConformance> {
+    const response = await this.api.get<CertificateOfConformance>(`/shipping/${shipmentId}/coc`);
+    return response.data;
+  }
+
+  /**
+   * The issued certificate PDF as an object URL (the route needs the JWT, so a bare
+   * ``src`` would not authenticate). The caller revokes the URL.
+   */
+  async fetchCocPdf(shipmentId: number): Promise<string> {
+    const response = await this.api.get(`/shipping/${shipmentId}/coc/pdf`, { responseType: 'blob' });
+    return window.URL.createObjectURL(new Blob([response.data], { type: 'application/pdf' }));
   }
 
   // Multi-carrier shipping (rate-shop / labels / freight / pickups / tracking).
@@ -4380,6 +4596,12 @@ class ApiService {
     return response.data;
   }
 
+  /** The Department pick list and the users whose stored value is not on it (Admin only). */
+  async getUserDepartments(): Promise<UserDepartments> {
+    const response = await this.api.get<UserDepartments>('/users/departments');
+    return response.data;
+  }
+
   async getPendingUserApprovals() {
     const response = await this.api.get('/users/pending-approvals');
     return response.data;
@@ -4417,6 +4639,12 @@ class ApiService {
 
   async approveUser(userId: number, data: { role: string; department?: string }) {
     const response = await this.api.post(`/users/${userId}/approve`, data);
+    return response.data;
+  }
+
+  /** Change the signed-in person's own password. Never optimistic: the server may refuse (400/403/422/503). */
+  async changeOwnPassword(data: ChangeOwnPasswordRequest): Promise<ChangeOwnPasswordResponse> {
+    const response = await this.api.post<ChangeOwnPasswordResponse>('/users/change-password', data);
     return response.data;
   }
 
@@ -4597,18 +4825,20 @@ class ApiService {
   }
 
   // Traceability
-  async traceLot(lotNumber: string) {
-    const response = await this.api.get(`/traceability/lot/${encodeURIComponent(lotNumber)}`);
+  async traceLot(lotNumber: string): Promise<LotTraceResponse> {
+    const response = await this.api.get<LotTraceResponse>(`/traceability/lot/${encodeURIComponent(lotNumber)}`);
     return response.data;
   }
 
-  async traceSerial(serialNumber: string) {
-    const response = await this.api.get(`/traceability/serial/${encodeURIComponent(serialNumber)}`);
+  async traceSerial(serialNumber: string): Promise<SerialTraceResponse> {
+    const response = await this.api.get<SerialTraceResponse>(
+      `/traceability/serial/${encodeURIComponent(serialNumber)}`
+    );
     return response.data;
   }
 
-  async searchLots(query: string) {
-    const response = await this.api.get('/traceability/search', { params: { q: query } });
+  async searchLots(query: string): Promise<TraceSearchResult[]> {
+    const response = await this.api.get<TraceSearchResult[]>('/traceability/search', { params: { q: query } });
     return response.data;
   }
 
@@ -6227,26 +6457,10 @@ class ApiService {
     return response.data;
   }
 
-  async registerCompany(data: {
-    company_name: string;
-    admin_email: string;
-    admin_first_name: string;
-    admin_last_name: string;
-    admin_password: string;
-  }): Promise<any> {
-    const response = await this.api.post('/companies/register', data);
-    return response.data;
-  }
-
   // ============ Platform Administration ============
 
   async getPlatformCompanies(): Promise<any[]> {
     const response = await this.api.get('/platform/companies');
-    return response.data;
-  }
-
-  async createCompany(data: any): Promise<any> {
-    const response = await this.api.post('/platform/companies', data);
     return response.data;
   }
 

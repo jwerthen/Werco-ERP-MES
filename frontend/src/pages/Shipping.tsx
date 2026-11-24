@@ -22,43 +22,26 @@ import { Modal } from '../components/ui/Modal';
 import usePermissions from '../hooks/usePermissions';
 import ScheduleShipmentModal, { ScheduleShipmentTarget } from '../components/shipping/ScheduleShipmentModal';
 import ShipmentTrackingPanel from '../components/shipping/ShipmentTrackingPanel';
+import CocPdfPreviewModal from '../components/shipping/CocPdfPreviewModal';
+import ReleaseExceptionChips from '../components/shipping/ReleaseExceptionChips';
+import ReleaseExceptionsDialog, {
+  ReleaseExceptionsDialogTarget,
+} from '../components/shipping/ReleaseExceptionsDialog';
+import type { ReadyToShipRow, ShipmentSummary } from '../types/shipping';
 import {
   TruckIcon,
   PaperAirplaneIcon,
   PrinterIcon,
   ChevronDownIcon,
   ChevronRightIcon,
+  DocumentCheckIcon,
 } from '@heroicons/react/24/outline';
 
-interface Shipment {
-  id: number;
-  shipment_number: string;
-  work_order_id: number;
-  work_order_number?: string;
-  customer_name?: string;
-  part_number?: string;
-  status: string;
-  ship_to_name?: string;
-  carrier?: string;
-  tracking_number?: string;
-  tracking_status?: string;
-  quantity_shipped: number;
-  ship_date?: string;
-  created_at: string;
-}
+type Shipment = ShipmentSummary;
+type ReadyToShip = ReadyToShipRow;
 
-interface ReadyToShip {
-  work_order_id: number;
-  work_order_number: string;
-  part_number?: string;
-  part_name?: string;
-  customer_name?: string;
-  quantity_complete: number;
-  quantity_remaining: number;
-  quantity_reserved: number;
-  quantity_shipped: number;
-  due_date?: string;
-}
+/** A certificate is issued only once the shipment has left (POST /coc 409s before). */
+const SHIPPED_STATUSES = ['shipped', 'delivered'];
 
 export default function Shipping({ embedded }: { embedded?: boolean }) {
   const { showToast } = useToast();
@@ -76,15 +59,24 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
   useEffect(() => setShipmentPage(0), [search, shippingStatus, shippingFrom, shippingTo]);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState('');
-  const [actingId, setActingId] = useState<number | null>(null);
   const [editTarget, setEditTarget] = useState<Shipment | null>(null);
   const [editQuantity, setEditQuantity] = useState('');
   const [editError, setEditError] = useState('');
-  const { can } = usePermissions();
+  const { can, role, isAdmin } = usePermissions();
   // Carrier writes (rate-shop / buy-label / void) are gated server-side to the
   // ADMIN / MANAGER / SUPERVISOR / SHIPPING set -- the frontend equivalent is the
   // shipping:complete permission, held by exactly that role set.
   const canSchedule = can('shipping:complete');
+  // Issuing a CoC and accepting open quality items: ADMIN / MANAGER / QUALITY on the
+  // server (POST /coc and shipment_release_service.RELEASE_ACK_ROLES); a superuser or
+  // platform admin passes there too.
+  const canActOnQuality = isAdmin || role === 'manager' || role === 'quality' || role === 'platform_admin';
+  // Quality is on POST /ship only to accept open items on a job (403 with nothing open).
+  const qualityOnly = !canSchedule && role === 'quality';
+  const canOpenShip = canSchedule || qualityOnly;
+  const [shipTarget, setShipTarget] = useState<ReleaseExceptionsDialogTarget | null>(null);
+  const [issueTarget, setIssueTarget] = useState<ReleaseExceptionsDialogTarget | null>(null);
+  const [cocPreview, setCocPreview] = useState<{ shipmentId: number; cocNumber: string } | null>(null);
 
   const [shipments, setShipments] = useState<Shipment[]>([]);
   const [readyToShip, setReadyToShip] = useState<ReadyToShip[]>([]);
@@ -170,19 +162,11 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
     }
   };
 
-  const handleShip = async (shipmentId: number) => {
-    if (actingId !== null) return;
-    setActingId(shipmentId);
-    try {
-      await api.markShipped(shipmentId);
-      showToast('success', 'Shipment marked as shipped');
-      loadData();
-    } catch (err: any) {
-      showToast('error', err.response?.data?.detail || 'Failed to mark as shipped');
-    } finally {
-      setActingId(null);
-    }
-  };
+  const dialogTarget = (s: Shipment): ReleaseExceptionsDialogTarget => ({
+    id: s.id,
+    shipment_number: s.shipment_number,
+    work_order_number: s.work_order_number,
+  });
 
   // Schedule a carrier shipment for an existing shipment row.
   const scheduleForShipment = (s: Shipment) => {
@@ -305,6 +289,18 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
         ),
       },
       {
+        key: 'quality',
+        header: 'Quality',
+        accessor: wo => (wo.release_exceptions ?? []).length,
+        csv: wo => (wo.release_exceptions ?? []).map(exc => exc.message).join('; '),
+        render: wo => (
+          <ReleaseExceptionChips
+            exceptions={wo.release_exceptions}
+            emptyLabel={<span className="text-xs text-slate-400">Nothing open</span>}
+          />
+        ),
+      },
+      {
         key: 'due',
         header: 'Due',
         sortable: true,
@@ -336,6 +332,11 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
         {
           label: 'Due',
           value: wo.due_date ? formatCentralDate(wo.due_date, { year: undefined }) : '-',
+        },
+        {
+          label: 'Quality',
+          value: <ReleaseExceptionChips exceptions={wo.release_exceptions} emptyLabel="Nothing open" />,
+          fullWidth: true,
         },
       ]}
       actions={<div className="flex flex-wrap gap-2 justify-end">{renderReadyActions(wo)}</div>}
@@ -426,31 +427,89 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
           <PaperAirplaneIcon className="h-5 w-5 inline" /> Schedule
         </button>
       )}
-      {['pending', 'packed'].includes(s.status) && canSchedule && (
+      {['pending', 'packed'].includes(s.status) && canOpenShip && (
         <button
+          type="button"
           onClick={e => {
             e.stopPropagation();
-            handleShip(s.id);
+            setShipTarget(dialogTarget(s));
           }}
           className="text-green-600 hover:text-emerald-300 text-sm"
-          disabled={actingId !== null}
-          title="Mark shipped (manual)"
+          title={qualityOnly ? 'Ship over open quality items' : 'Mark shipped (manual)'}
         >
           <TruckIcon className="h-5 w-5 inline" /> Ship
         </button>
       )}
+      {canActOnQuality && SHIPPED_STATUSES.includes(s.status) && !s.coc_number && (
+        <button
+          type="button"
+          onClick={e => {
+            e.stopPropagation();
+            setIssueTarget(dialogTarget(s));
+          }}
+          className="text-werco-primary hover:text-blue-300 text-sm"
+          title="Issue the numbered Certificate of Conformance"
+        >
+          <DocumentCheckIcon className="h-5 w-5 inline" /> Issue CoC
+        </button>
+      )}
       <button
+        type="button"
         onClick={e => {
           e.stopPropagation();
           window.open(`/print/packing-slip/${s.id}`, '_blank');
         }}
         className="text-blue-600 hover:text-blue-300 text-sm"
         title="Print Packing Slip"
+        aria-label={`Print packing slip ${s.shipment_number}`}
       >
         <PrinterIcon className="h-5 w-5 inline" />
       </button>
     </>
   );
+
+  // The issued certificate (number + Download), or why there is none yet.
+  const renderCoc = (s: Shipment) => {
+    if (s.coc_number) {
+      const cocNumber = s.coc_number;
+      return (
+        <div>
+          <button
+            type="button"
+            onClick={e => {
+              e.stopPropagation();
+              setCocPreview({ shipmentId: s.id, cocNumber });
+            }}
+            className="font-mono text-sm text-werco-primary underline"
+            title="View, download or print the issued certificate"
+            aria-label={`Download CoC ${cocNumber}`}
+          >
+            {cocNumber}
+          </button>
+          {s.coc_issued_at && (
+            <div className="text-xs text-slate-400">Issued {formatCentralDate(s.coc_issued_at)}</div>
+          )}
+        </div>
+      );
+    }
+    if (s.coc_withheld) {
+      return <span className="text-xs font-medium text-amber-300">CoC withheld, Quality to issue</span>;
+    }
+    return <span className="text-slate-400">-</span>;
+  };
+
+  const afterShipped = (shipmentNumber: string, cocWithheld: boolean) => {
+    setShipTarget(null);
+    if (cocWithheld) {
+      showToast(
+        'warning',
+        `${shipmentNumber} shipped. The Certificate of Conformance was withheld for open quality items; Quality to issue.`
+      );
+    } else {
+      showToast('success', 'Shipment marked as shipped');
+    }
+    loadData();
+  };
 
   const renderTrackingBadge = (s: Shipment) =>
     s.tracking_number ? (
@@ -482,6 +541,7 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
             { label: 'Qty', value: <span className="tabular-nums">{s.quantity_shipped}</span> },
             { label: 'Carrier', value: s.carrier || '-' },
             { label: 'Tracking', value: renderTrackingBadge(s), fullWidth: true },
+            { label: 'CoC', value: renderCoc(s), fullWidth: true },
           ]}
           actions={<div className="flex flex-wrap gap-3 justify-end">{renderShipmentActions(s)}</div>}
         />
@@ -659,6 +719,7 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
                   <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">Carrier</th>
                   <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">Tracking</th>
                   <th className="px-4 py-2 text-right text-xs font-medium text-slate-400 uppercase">Qty</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">CoC</th>
                   <th className="px-4 py-2 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
                 </tr>
               </thead>
@@ -702,13 +763,14 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
                         <td className="px-4 py-2">{s.carrier || '-'}</td>
                         <td className="px-4 py-2">{renderTrackingBadge(s)}</td>
                         <td className="px-4 py-2 text-right tabular-nums">{s.quantity_shipped}</td>
+                        <td className="px-4 py-2">{renderCoc(s)}</td>
                         <td className="px-4 py-2 text-center space-x-2 whitespace-nowrap">
                           {renderShipmentActions(s)}
                         </td>
                       </tr>
                       {expanded && (
                         <tr>
-                          <td colSpan={9} className="p-0">
+                          <td colSpan={10} className="p-0">
                             <ShipmentTrackingPanel shipmentId={s.id} />
                           </td>
                         </tr>
@@ -792,6 +854,36 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
           </div>
         </div>
       </Modal>
+      {shipTarget && (
+        <ReleaseExceptionsDialog
+          mode="ship"
+          target={shipTarget}
+          canAccept={canActOnQuality}
+          qualityOnly={qualityOnly}
+          onClose={() => setShipTarget(null)}
+          onShipped={result => afterShipped(result.shipment_number, !!result.coc_withheld)}
+        />
+      )}
+      {issueTarget && (
+        <ReleaseExceptionsDialog
+          mode="coc"
+          target={issueTarget}
+          canAccept={canActOnQuality}
+          onClose={() => setIssueTarget(null)}
+          onIssued={certificate => {
+            setIssueTarget(null);
+            showToast('success', `Certificate of Conformance ${certificate.coc_number} issued`);
+            loadData();
+          }}
+        />
+      )}
+      {cocPreview && (
+        <CocPdfPreviewModal
+          shipmentId={cocPreview.shipmentId}
+          cocNumber={cocPreview.cocNumber}
+          onClose={() => setCocPreview(null)}
+        />
+      )}
       {/* Carrier Schedule-Shipment wizard */}
       {scheduleTarget && (
         <ScheduleShipmentModal

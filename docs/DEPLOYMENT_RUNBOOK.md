@@ -294,9 +294,23 @@ statement, writes no row, and adds no environment variable, secret, cron or work
   under, and the migration will not pick which company's record to change.
   See [API.md → Customer Complaints & RMA](API.md#customer-complaints--rma).
 
+**Customer-supplied parts.** Apply **134_part_customer_supplied** after
+**133_maintenance_log_provenance** through the normal API boot migration path. It adds
+`parts.customer_supplied` (`boolean NOT NULL`, server default `false`; no backfill on PostgreSQL, so
+every existing part reads `false` and no MRP run changes until a person flags a part). A flagged part
+creates no MRP demand (owner decision 2026-11-22). Under `SET LOCAL lock_timeout = '5s'` the column
+add is metadata-only but briefly takes ACCESS EXCLUSIVE on `parts`; a timeout leaves the database at
+`133`. No environment variable, secret, cron or worker job is added. Deploy the worker with or after
+the API (new code selects the column on every part load) and the API before the frontend (an older
+API drops the field the new **Customer-supplied** checkbox sends). On an application rollback keep
+the migration: from a checkout of this release run `railway run --service werco-api alembic stamp
+133_maintenance_log_provenance` before redeploying a pre-134 image. The **downgrade is lossy**: it drops
+every flag. Full notes and verification are in
+[Customer-supplied parts](DEPLOYMENT.md#customer-supplied-parts-migration-134).
+
 **PM due and overdue alerts.** This release adds the worker cron **`check_maintenance_due_job`**
-(12:15 daily in the container's zone: 12:15 UTC while `TZ` is unset; it judges each company's own
-day), which sends `maintenance.due` (once per cycle within 7 days of the due date; a cycle restarts
+(06:15 daily shop time, America/Chicago, pinned in code since 2026-11-23; it judges each
+company's own day), which sends `maintenance.due` (once per cycle within 7 days of the due date; a cycle restarts
 when the record changes) and `maintenance.overdue` (recurring), in-app only, to each company's
 Maintenance department plus its Admins.
 No migration, secret or environment variable is added. **Owner action at deploy:** production runs
@@ -641,9 +655,6 @@ cd frontend; railway up --service werco-frontend . --path-as-root
 railway logs --service werco-api
 railway logs --service werco-frontend
 
-# Database backup
-.\scripts\db-backup.ps1
-
 # Health check
 curl https://werco-api-production.up.railway.app/health/ready
 ```
@@ -785,14 +796,14 @@ SHA to `backend/RELEASE` yourself before `railway up` (the commands below do) or
       0 human approvals are required — merge-when-green)
 - [ ] Git status clean (no uncommitted changes)
 - [ ] Current branch is `main`
-- [ ] Database backup taken (for DB changes)
+- [ ] Restore point confirmed (for DB changes) — see [DATABASE_BACKUP.md → Before a risky change](DATABASE_BACKUP.md#before-a-risky-change)
 - [ ] Team notified of deployment
 
 ### For Database Migrations
 
 - [ ] Migration tested locally
 - [ ] Rollback migration available
-- [ ] Backup taken before migration
+- [ ] Restore point confirmed before migration ([DATABASE_BACKUP.md](DATABASE_BACKUP.md#before-a-risky-change))
 - [ ] Deployment window scheduled (if needed)
 
 ### Verification Commands
@@ -1314,33 +1325,13 @@ If both backend and frontend need rollback:
 
 ## Database Operations
 
-### Backup Database
-```powershell
-cd C:\Users\jmw\Desktop\Werco-ERP\scripts
+### Backup and Restore
 
-# Create backup
-.\db-backup.ps1
-
-# List available backups
-.\db-backup-utils.ps1 list
-
-# Verify backup integrity
-.\db-backup-utils.ps1 verify
-```
-
-### Restore Database
-
-**WARNING: This replaces ALL data. Use with extreme caution.**
-
-```powershell
-cd C:\Users\jmw\Desktop\Werco-ERP\scripts
-
-# List backups to find the one to restore
-.\db-backup-utils.ps1 list
-
-# Restore (requires typing "RESTORE" to confirm)
-.\db-restore.ps1 -BackupFile "..\backups\database\werco_erp_backup_20260109_120000.sql.gz"
-```
+Production's database is Supabase Postgres, backed up by Supabase. The backup options,
+the restore drill into a scratch project, how to check the copy, and what a database
+restore does not bring back (uploaded documents, Redis) are in
+[DATABASE_BACKUP.md](DATABASE_BACKUP.md). The PowerShell `db-backup` / `db-restore`
+scripts are retired; do not use them.
 
 ### Run Database Migrations
 
@@ -1390,7 +1381,7 @@ psql "postgresql://..."
 | `/health` | Basic liveness | 200, `{"status": "healthy"}` |
 | `/health/live` | Container alive | 200, `{"status": "alive"}` |
 | `/health/ready` | Ready for traffic | 200 (or 503 if unhealthy) |
-| `/health/detailed` | Full system info | 200, includes versions and the deployed commit (`checks.application.release`) |
+| `/health/detailed` | Full system info | 200, includes versions, the deployed commit (`checks.application.release`) and the document storage backend (`checks.storage`, see [DATABASE_BACKUP.md → Uploaded documents](DATABASE_BACKUP.md#uploaded-documents)) |
 
 > **"Is commit X actually deployed?" — one call.** The CI deploy job stamps the commit
 > SHA into the artifact (see [Change Control](#change-control--production-deploy-model)),

@@ -320,3 +320,62 @@ describe('API Tokens navigation', () => {
     expect(within(sidebar()).queryByRole('link', { name: 'API Tokens' })).not.toBeInTheDocument();
   });
 });
+
+describe('Layout sidebar — Untied Laser Nests', () => {
+  // Every /laser-nests/untied* read is require_role([ADMIN, MANAGER, SUPERVISOR]),
+  // which is exactly work_orders:edit. The nav entry and the route agree on it.
+  const UNTIED = 'Untied Laser Nests';
+
+  afterEach(() => {
+    mockUser.value = null;
+  });
+
+  it.each(['admin', 'manager', 'supervisor'])('shows the entry to %s, and the route lets them in', role => {
+    renderLayout(role, '/work-orders');
+    expect(hasNavEntry(UNTIED)).toBe(true);
+    const perms = getPermissionsForRole(role as any);
+    expect(canAccessPath('/laser-nests/untied', p => perms.includes(p))).toBe(true);
+  });
+
+  it.each(['quality', 'viewer', 'shipping'])('hides the entry from %s, and the route refuses them', role => {
+    renderLayout(role, '/work-orders');
+    expect(hasNavEntry(UNTIED)).toBe(false);
+    expect(hasNavEntry('Work Orders')).toBe(true);
+    const perms = getPermissionsForRole(role as any);
+    expect(canAccessPath('/laser-nests/untied?view=sheets', p => perms.includes(p))).toBe(false);
+  });
+});
+
+describe('Labor Review navigation (GET /shop-floor/time-entries role set)', () => {
+  // The list endpoint is require_role([ADMIN, MANAGER, SUPERVISOR, QUALITY]) (+ platform admin and
+  // superuser via require_role). Route and nav share `quality:inspect`, which is exactly that set.
+  afterEach(() => {
+    mockUser.value = null;
+  });
+
+  const allows = (role: string) =>
+    canAccessPath('/labor-review?status=open', permission => getPermissionsForRole(role as any).includes(permission));
+
+  it('quality:inspect is exactly the Labor Review roles', () => {
+    const roles = ['platform_admin', 'admin', 'manager', 'supervisor', 'operator', 'quality', 'shipping', 'viewer'];
+    expect(roles.filter(r => getPermissionsForRole(r as any).includes('quality:inspect'))).toEqual([
+      'platform_admin',
+      'admin',
+      'manager',
+      'supervisor',
+      'quality',
+    ]);
+  });
+
+  it.each(['admin', 'manager', 'supervisor', 'quality'])('offers Labor Review to %s', role => {
+    renderLayout(role, '/labor-review');
+    expect(within(sidebar()).getByRole('link', { name: 'Labor Review' })).toHaveAttribute('href', '/labor-review');
+    expect(allows(role)).toBe(true);
+  });
+
+  it.each(['operator', 'shipping', 'viewer'])('hides Labor Review from %s and refuses the deep link', role => {
+    renderLayout(role, '/shop-floor');
+    expect(within(sidebar()).queryByRole('link', { name: 'Labor Review' })).not.toBeInTheDocument();
+    expect(allows(role)).toBe(false);
+  });
+});

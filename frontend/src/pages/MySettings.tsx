@@ -7,6 +7,9 @@
  * digest preference matrix and digest scheduling — by adding sections alongside
  * it rather than rewriting it.
  *
+ * The Password section (`<PasswordSettingsSection>`) lets each person change their
+ * own password through `POST /users/change-password`.
+ *
  * Auth-only: every authenticated role manages their own settings here; nothing on
  * this page reads or writes another user's data.
  */
@@ -14,6 +17,7 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
 import { BellIcon, Cog6ToothIcon } from '@heroicons/react/24/outline';
+import PasswordSettingsSection from '../components/settings/PasswordSettingsSection';
 import SmsSettingsSection from '../components/settings/SmsSettingsSection';
 import { Button } from '../components/ui';
 
@@ -25,7 +29,7 @@ export default function MySettings() {
           <Cog6ToothIcon className="h-8 w-8 text-werco-primary mr-3" aria-hidden="true" />
           <div>
             <h1 className="text-2xl font-bold text-white">My Settings</h1>
-            <p className="text-sm text-slate-400">How and where Werco reaches you</p>
+            <p className="text-sm text-slate-400">How and where Werco reaches you, and your password</p>
           </div>
         </div>
         <Link to="/notifications">
@@ -37,6 +41,8 @@ export default function MySettings() {
       </div>
 
       <SmsSettingsSection />
+
+      <PasswordSettingsSection />
     </div>
   );
 }

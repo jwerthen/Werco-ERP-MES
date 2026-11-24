@@ -876,10 +876,18 @@ class TestNullPartSerialization:
 
         service = EmailService()
 
-        # --- work_order_late: CUI-safe (identifier + days-late only) ---
+        # --- work_order_late: CUI-safe (identifier + days-late only). Since the late alert became one
+        # summary per recipient (notification_jobs, 2026-11-23) the template takes the job list the
+        # summary sends: ``total``, ``jobs`` (work order number, days late, critical) and ``more``.
         late_html = service._render_template(
             "work_order_late",
-            {"work_order_number": "WO-000123", "days_late": 3, "critical": False, "base_url": "http://erp.test"},
+            {
+                "total": 1,
+                "jobs": [{"work_order_number": "WO-000123", "days_late": 3, "critical": False}],
+                "more": 0,
+                "critical": False,
+                "base_url": "http://erp.test",
+            },
         )
         assert "WO-000123" in late_html
         assert "3 day" in late_html
@@ -890,7 +898,13 @@ class TestNullPartSerialization:
         # critical=True renders the CRITICAL banner (still no part detail).
         critical_html = service._render_template(
             "work_order_late",
-            {"work_order_number": "WO-000999", "days_late": 10, "critical": True, "base_url": "http://erp.test"},
+            {
+                "total": 1,
+                "jobs": [{"work_order_number": "WO-000999", "days_late": 10, "critical": True}],
+                "more": 0,
+                "critical": True,
+                "base_url": "http://erp.test",
+            },
         )
         assert "CRITICAL" in critical_html
         assert "WO-000999" in critical_html

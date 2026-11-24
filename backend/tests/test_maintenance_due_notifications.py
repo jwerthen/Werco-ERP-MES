@@ -45,8 +45,8 @@ pytestmark = [pytest.mark.requires_db]
 COMPANY_A = 1
 COMPANY_B = 2
 DUE, OVERDUE = "maintenance.due", "maintenance.overdue"
-# The morning the cron runs: hour 12, minute 15 in the worker container's zone -- 12:15 UTC while TZ is
-# unset, which is 6:15 AM Central, the same calendar day.
+# The morning the cron runs: 6:15 AM shop time (America/Chicago) -- 12:15 UTC in winter, the same
+# calendar day.
 D = date(2026, 12, 9)
 
 
@@ -669,9 +669,9 @@ def test_the_cron_is_registered_once_and_selectable_alone():
 
     matches = [job for job in ALL_CRON_JOBS if job.coroutine is check_maintenance_due_job]
     assert len(matches) == 1
-    # Hour 12, minute 15 in the worker container's zone (12:15 UTC while TZ is unset). The day it judges
-    # is each company's own (company_today), whatever the hour.
-    assert (matches[0].hour, matches[0].minute) == (12, 15)
+    # 6:15 AM shop time (WorkerSettings.timezone = America/Chicago; it ran at 12:15 UTC before the zone
+    # was pinned). The day it judges is each company's own (company_today), whatever the hour.
+    assert (matches[0].hour, matches[0].minute) == (6, 15)
     assert WorkerSettings.functions.count(check_maintenance_due_job) == 1
 
     selected = select_cron_jobs("check_maintenance_due_job")

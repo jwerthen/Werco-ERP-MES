@@ -68,8 +68,8 @@ QUALITY_FAI_DETAIL = "/quality?tab=fai&fai={fai_id}"
 QUALITY_NCR_LIST = "/quality?tab=ncr"
 QUALITY_CAR_LIST = "/quality?tab=car"
 # Deliberately UNFILTERED, and this is load-bearing. `?filter=due` looks more helpful and is
-# provably empty: the calibration.due cron selects `Equipment.status == ACTIVE`
-# (jobs/notification_jobs.py), while `GET /calibration/equipment?status=due` filters on the
+# provably empty: the calibration cron selects in-service gauges by DATE whatever their stored
+# status (jobs/notification_jobs.py), while `GET /calibration/equipment?status=due` filters on the
 # PERSISTED status column BEFORE `update_equipment_status` recomputes it
 # (api/endpoints/calibration.py) — so the very rows that trigger a notification are the rows
 # that filter excludes. The unfiltered list orders by `next_calibration_date` ascending (due
@@ -84,7 +84,17 @@ CALIBRATION_LIST = "/calibration"
 MAINTENANCE_SCHEDULES = "/maintenance?tab=schedules"
 MAINTENANCE_WORK_ORDERS = "/maintenance?tab=work_orders"
 DOWNTIME_LIST = "/downtime"
+# Record-less: the Work Orders list with its "Late" scope (``WorkOrders.tsx`` reads ``?scope=late``),
+# where the daily late-jobs summary (``wo.late``) lands. ``scope=late`` is the summary's own predicate
+# (``work_order_browse_service.late_work_order_clause``) and ``cots=1`` keeps the list from hiding
+# purchased/hardware jobs the summary counted. Its Supervisor and Manager audience holds
+# ``work_orders:view``.
+WORK_ORDERS_LATE = "/work-orders?scope=late&cots=1"
 INVENTORY_LIST = "/inventory"
+# Record-less: the Warehouse page's Inventory tab with the low-stock filter on (``Inventory.tsx``
+# reads ``?filter=low_stock``); the same list ``GET /inventory/low-stock`` serves and the
+# ``stock.low`` alert counts. The operations inbox's low-stock items land here too.
+INVENTORY_LOW_STOCK = "/warehouse?tab=inventory&filter=low_stock"
 MRP_LIST = "/mrp"
 SCHEDULING_LIST = "/scheduling"
 # Record-less: a dispatch notice names a work center, and the operations page shows that
@@ -111,7 +121,9 @@ ALL_LINK_TEMPLATES: tuple[str, ...] = (
     MAINTENANCE_SCHEDULES,
     MAINTENANCE_WORK_ORDERS,
     DOWNTIME_LIST,
+    WORK_ORDERS_LATE,
     INVENTORY_LIST,
+    INVENTORY_LOW_STOCK,
     MRP_LIST,
     SCHEDULING_LIST,
     SHOP_FLOOR_OPERATIONS,

@@ -90,6 +90,18 @@ FLOOR_PIN_OPERATIONS: FrozenSet[Tuple[str, str]] = frozenset(
     }
 )
 
+# And the self-service password change (``POST /users/change-password``): changing a password is a
+# person's act in their own session. The route refuses every credential that is not an interactive
+# person (``app.core.credentials.PASSWORD_CHANGE_PEOPLE_ONLY``) -- API tokens and badge / station
+# tokens -- and a person's own JWT would still reach it through a tool call (an agent, possibly
+# following text injected through ERP data, changing the person's password and locking them out),
+# so it is not a tool. Named on its own so the credential tests walk exactly this route.
+PASSWORD_OPERATIONS: FrozenSet[Tuple[str, str]] = frozenset(
+    {
+        ("POST", "/api/v1/users/change-password"),
+    }
+)
+
 # And restricted document viewing (AS9100D 7.5.3.1 / 7.5.3.2, migration 131): granting or revoking
 # a user's export authorization -- the only thing that opens an export_controlled document -- and
 # changing a document's access level. Both are a person's judgment about who may open controlled
@@ -122,6 +134,32 @@ COMMENT_WRITE_OPERATIONS: FrozenSet[Tuple[str, str]] = frozenset(
     }
 )
 
+# And the in-process inspection sign-off (AS9100D 8.6): recording that an inspection was
+# performed is a person's judgment, like an FAI final disposition. The route refuses every API
+# token (``app.core.credentials.API_TOKEN_INSPECTION_SIGN_OFF``), and a person's own JWT would
+# still reach it through a tool call -- an agent signing an inspection nobody did -- so it is not
+# a tool. The operation reads (``requires_inspection`` / ``inspection_complete``) stay tools.
+# Named on its own so the credential tests walk exactly this route.
+INSPECTION_SIGN_OFF_OPERATIONS: FrozenSet[Tuple[str, str]] = frozenset(
+    {
+        ("POST", "/api/v1/shop-floor/operations/{operation_id}/inspection"),
+    }
+)
+
+# And the labor judgments (Labor Review, 2026-11-23): approving a time entry, clearing its
+# approval, and setting another person's clock-out are a person's judgment at the desk. The
+# routes refuse every API token (``app.services.labor_review_service.LABOR_JUDGMENT_API_TOKEN_DETAIL``)
+# and every kiosk badge, and a person's own JWT would still reach them through a tool call, so
+# none is a tool. The list read ``GET /shop-floor/time-entries`` stays a tool. Named on their
+# own so the credential tests walk exactly these routes.
+LABOR_JUDGMENT_OPERATIONS: FrozenSet[Tuple[str, str]] = frozenset(
+    {
+        ("POST", "/api/v1/shop-floor/time-entries/{time_entry_id}/approve"),
+        ("POST", "/api/v1/shop-floor/time-entries/{time_entry_id}/unapprove"),
+        ("POST", "/api/v1/shop-floor/time-entries/{time_entry_id}/set-clock-out"),
+    }
+)
+
 # And the Approved Supplier List writes (AS9100D 8.4): recording a supplier-approval
 # decision and loading the controlled QL 7.4 list are a named person's judgment, so they
 # are app actions only (the routes also refuse API tokens). The import preview goes with
@@ -149,12 +187,22 @@ EXCLUDED_OPERATIONS: FrozenSet[Tuple[str, str]] = (
             # work on the floor. Excluded rather than shadowed, because no convenience tool
             # calls this route.
             ("POST", "/api/v1/work-orders/bulk-release"),
+            # Issuing a Certificate of Conformance states that the shipped parts conform, and
+            # over open quality items it accepts them with a reason: a named person's quality
+            # judgment (shipping/2). The route refuses every API token
+            # (``shipment_release_service.API_TOKEN_COC_ISSUE``); a person's own JWT would
+            # still reach it through a tool call. Reading and downloading the certificate stay
+            # tools.
+            ("POST", "/api/v1/shipping/{shipment_id}/coc"),
         }
     )
     | EGRESS_SWITCH_OPERATIONS
     | FLOOR_PIN_OPERATIONS
+    | PASSWORD_OPERATIONS
     | DOCUMENT_ACCESS_OPERATIONS
     | COMMENT_WRITE_OPERATIONS
+    | INSPECTION_SIGN_OFF_OPERATIONS
+    | LABOR_JUDGMENT_OPERATIONS
 )
 
 # Every operation in the document that declares NO ``security`` block, BY NAME. None
@@ -180,7 +228,6 @@ PUBLIC_OPERATIONS: FrozenSet[Tuple[str, str]] = frozenset(
         ("POST", "/api/v1/auth/reset-database"),
         ("POST", "/api/v1/shop-floor/kiosk-stations/station-login"),
         ("POST", "/api/v1/webhooks/carriers/{provider}"),
-        ("POST", "/api/v1/companies/register"),
         ("POST", "/api/v1/visitor-logs/station-login"),
         ("POST", "/api/v1/errors/log"),
         ("GET", "/api/v1/errors/health"),
