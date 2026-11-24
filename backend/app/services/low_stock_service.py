@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional
 
-from sqlalchemy import func
+from sqlalchemy import case, func
 from sqlalchemy.orm import Query, Session
 
 from app.models.inventory import InventoryItem
@@ -59,14 +59,18 @@ def low_stock_query(db: Session, company_id: int) -> Query:
     return (
         db.query(Part, on_hand.label("on_hand"), stock.c.updated.label("last_stock_change"))
         .outerjoin(stock, Part.id == stock.c.part_id)
-        .filter(
-            Part.company_id == company_id,
-            Part.is_active.is_(True),
-            # The deletion record, not just the mask a delete happens to clear (invariant 3).
-            Part.is_deleted.is_(False),
-            Part.reorder_point > 0,
-            on_hand <= Part.reorder_point,
-        )
+        .filter(*_low_stock_clauses(company_id, on_hand))
+    )
+
+
+def _low_stock_clauses(company_id: int, on_hand) -> tuple:
+    return (
+        Part.company_id == company_id,
+        Part.is_active.is_(True),
+        # The deletion record, not just the mask a delete happens to clear (invariant 3).
+        Part.is_deleted.is_(False),
+        Part.reorder_point > 0,
+        on_hand <= Part.reorder_point,
     )
 
 
@@ -95,16 +99,30 @@ class LowStockPart:
 
 
 def low_stock_parts(db: Session, company_id: int, *, limit: Optional[int] = None) -> List[LowStockPart]:
-    """Every low part of the company, critical first, then by largest shortage, then part number."""
-    query = low_stock_query(db, company_id).order_by(Part.part_number, Part.id)
+    """Every low part of the company, critical first, then by largest shortage, then part number.
+
+    The order is applied in SQL BEFORE ``limit``, so a bounded read (the endpoint, the AI sensor)
+    returns the most urgent parts, never the first N by part number."""
+    stock = company_owned_stock_subquery(db, company_id)
+    on_hand = func.coalesce(stock.c.quantity, 0)
+    # The same expressions ``low_stock_query`` filters on, rebuilt over its own subquery.
+    query = (
+        db.query(Part, on_hand.label("on_hand"), stock.c.updated.label("last_stock_change"))
+        .outerjoin(stock, Part.id == stock.c.part_id)
+        .filter(*_low_stock_clauses(company_id, on_hand))
+        .order_by(
+            case((on_hand <= func.coalesce(Part.safety_stock, 0), 0), else_=1),
+            (Part.reorder_point - on_hand).desc(),
+            Part.part_number,
+            Part.id,
+        )
+    )
     if limit is not None:
         query = query.limit(limit)
-    parts = [
+    return [
         LowStockPart(part=part, quantity_on_hand=float(on_hand or 0), last_stock_change=changed)
         for part, on_hand, changed in query.all()
     ]
-    parts.sort(key=lambda row: (not row.is_critical, -row.shortage))
-    return parts
 
 
 def low_stock_count(db: Session, company_id: int) -> int:

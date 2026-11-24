@@ -616,7 +616,7 @@ export default function WorkOrders() {
   // An unknown `?type=` (hand-edited URL, stale bookmark) reads as "all types"
   // rather than reaching the server, whose enum would 422 the whole list.
   const typeFilter = parseTypeFilter(searchParams.get('type'));
-  const dashboardScope = ['overdue', 'due_today'].includes(searchParams.get('scope') || '') ? searchParams.get('scope') : null;
+  const dashboardScope = ['overdue', 'due_today', 'late'].includes(searchParams.get('scope') || '') ? searchParams.get('scope') : null;
   const hideCOTS = searchParams.get('cots') !== '1';
   const groupParam = searchParams.get('group');
   const groupBy: GroupBy =
@@ -645,7 +645,7 @@ export default function WorkOrders() {
     status: statusFilter || undefined, search: debouncedSearch || undefined,
     customer: customerFilter || undefined, hide_cots: hideCOTS,
     work_order_type: typeFilter || undefined,
-    scope: dashboardScope as 'overdue' | 'due_today' | undefined || undefined,
+    scope: dashboardScope as WorkOrderBrowseParams['scope'] || undefined,
     sort: (browseSort?.key || 'priority') as WorkOrderBrowseParams['sort'],
     direction: browseSort?.dir || 'asc', group: groupBy,
   });
@@ -1890,7 +1890,7 @@ export default function WorkOrders() {
         />
       </MiniStatStrip>
 
-      {dashboardScope && <div className="flex flex-wrap items-center gap-3 text-sm text-slate-300" role="status"><span>Dashboard: {dashboardScope === 'overdue' ? 'Overdue' : 'Due today'} work orders · Central time</span><button className="text-blue-300 underline" onClick={() => setFilterParam('scope', '')}>Clear dashboard filter</button></div>}
+      {dashboardScope && <div className="flex flex-wrap items-center gap-3 text-sm text-slate-300" role="status"><span>{dashboardScope === 'late' ? 'Late work orders (past ship-by date, else due date)' : `Dashboard: ${dashboardScope === 'overdue' ? 'Overdue' : 'Due today'} work orders`} · Central time</span><button className="text-blue-300 underline" onClick={() => setFilterParam('scope', '')}>Clear dashboard filter</button></div>}
       {/* Filters */}
       <div className="card rounded-sm border-fd-line p-2.5 sm:p-3" data-tour="wo-filters">
         {/* Type quick filter. Counts come from the server and ignore the type filter

@@ -418,4 +418,11 @@ describe('Dashboard work-order drill-down scope', () => {
     expect(await screen.findAllByRole('link', { name: 'WO-1002' })).toHaveLength(1); // Only the active responsive list mounts.
     expect(locationSearch()).toBe('?cots=1');
   });
+  it('passes the late-jobs summary scope to the server and labels it', async () => {
+    mockRows.mockResolvedValue([workOrders[0]]);
+    renderAt('/work-orders?scope=late&cots=1');
+    await waitForLoadedList();
+    expect(mockedApi.browseWorkOrders).toHaveBeenCalledWith(expect.objectContaining({ scope: 'late', hide_cots: false }));
+    expect(screen.getByText(/Late work orders \(past ship-by date, else due date\)/)).toBeInTheDocument();
+  });
 });

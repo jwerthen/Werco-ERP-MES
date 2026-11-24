@@ -339,31 +339,27 @@ async def check_late_work_orders_task():
 
     The summary carries the total, the ten most overdue jobs (work order number and days late --
     no part numbers or customer names, docs/NOTIFICATIONS.md section 11.1) and a link to the Work
-    Orders list's overdue view. Recipients are the ``wo.late`` catalog audience (the Supervisor and
+    Orders list's late view (``scope=late``, the same predicate). Recipients are the ``wo.late`` catalog audience (the Supervisor and
     Manager roles) plus anyone an Admin selected under Email Recipients. Dedupe key: the company
     day per recipient; a second run the same day sends nothing."""
     db = SessionLocal()
     try:
-        from sqlalchemy import func
-
-        from app.models.work_order import WorkOrder, WorkOrderStatus
+        from app.models.work_order import WorkOrder
         from app.services.company_time import company_today
         from app.services.notification_dispatch import catalog_audience_for
+        from app.services.work_order_browse_service import late_promise_date, late_work_order_clause
 
-        late_statuses = [WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS, WorkOrderStatus.ON_HOLD]
         total_late = 0
         summaries = 0
 
         for cid in _active_company_ids(db):
             try:
                 today = company_today(db, cid)
-                promise = func.coalesce(WorkOrder.must_ship_by, WorkOrder.due_date)
+                promise = late_promise_date()
                 late = db.query(WorkOrder).filter(
                     WorkOrder.company_id == cid,
                     WorkOrder.is_deleted == False,  # noqa: E712
-                    WorkOrder.status.in_(late_statuses),
-                    promise.isnot(None),
-                    promise < today,
+                    late_work_order_clause(today),
                 )
                 count = late.count()
                 if not count:
@@ -402,14 +398,14 @@ async def check_late_work_orders_task():
                     related_id=related_id,
                     title=f"Late work orders: {count}",
                     body="\n".join(lines),
-                    link=links.WORK_ORDERS_OVERDUE,
+                    link=links.WORK_ORDERS_LATE,
                     template="work_order_late",
                     context={
                         "total": count,
                         "jobs": jobs,
                         "more": more,
                         "critical": any(job["critical"] for job in jobs),
-                        "link_path": links.WORK_ORDERS_OVERDUE,
+                        "link_path": links.WORK_ORDERS_LATE,
                     },
                 )
                 summaries += 1

@@ -216,7 +216,14 @@ async def send_daily_digest_task():
         digest_count = 0
 
         for queued_company_id, queued_user_id in queued:
-            pref = db.query(NotificationPreference).filter(NotificationPreference.user_id == queued_user_id).first()
+            pref = (
+                db.query(NotificationPreference)
+                .filter(
+                    NotificationPreference.company_id == queued_company_id,
+                    NotificationPreference.user_id == queued_user_id,
+                )
+                .first()
+            )
             if _digest_opted_out(pref):
                 continue
             user = (

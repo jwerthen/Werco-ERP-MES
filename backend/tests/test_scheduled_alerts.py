@@ -42,7 +42,7 @@ from app.models.calibration import CalibrationStatus, Equipment
 from app.models.user import UserRole
 from app.services import notification_links as links
 from app.services.ai_sensors.inventory import run_inventory_risk_sensor
-from app.services.low_stock_service import low_stock_count
+from app.services.low_stock_service import low_stock_count, low_stock_parts
 from tests.api.test_backflush_lot_policy import make_user
 from tests.api.test_owned_property_planning import (
     _inbox_low_stock,
@@ -225,6 +225,28 @@ def test_every_low_stock_reader_names_the_same_parts(client, db_session: Session
         assert part.part_number not in call["title"] + call["body"], "section 11.1: the alert names no part"
 
 
+def test_a_bounded_low_stock_read_keeps_the_most_urgent_parts(db_session: Session):
+    """The order is applied before the limit: an out-of-stock critical part whose number sorts last
+    is not cut from the endpoint's or the AI sensor's bounded read."""
+    mild = []
+    for i in range(3):
+        part = _reorder_part(db_session, reorder_point=10, safety_stock=1)
+        part.part_number = f"AA-LOW-{i}"
+        _lot(db_session, part, 8 - i)  # shortage 2, 3, 4; above safety stock
+        mild.append(part)
+    urgent = _reorder_part(db_session, reorder_point=10, safety_stock=2)  # empty bin: critical
+    urgent.part_number = "ZX-900"
+    db_session.commit()
+
+    everything = low_stock_parts(db_session, COMPANY_A)
+    ids = [row.part.id for row in everything]
+    assert ids.index(urgent.id) < min(ids.index(part.id) for part in mild)
+    assert [ids.index(part.id) for part in reversed(mild)] == sorted(ids.index(part.id) for part in mild)
+    for n in (1, 2, len(everything)):
+        assert [row.part.id for row in low_stock_parts(db_session, COMPANY_A, limit=n)] == ids[:n]
+    assert low_stock_parts(db_session, COMPANY_A, limit=1)[0].is_critical
+
+
 # ---------------------------------------------------------------------------
 # Low stock reaches the bell; the digest reaches the people it queued for
 # ---------------------------------------------------------------------------
@@ -365,7 +387,16 @@ def test_the_late_summary_is_one_daily_notice_judged_on_the_promise_date(db_sess
     assert listed == [wo.work_order_number for wo in reversed(many)], "the ten most overdue, worst first"
     assert lines[11] == "And 2 more."
     assert call["context"]["total"] == total and len(call["context"]["jobs"]) == 10
-    assert call["link"] == links.WORK_ORDERS_OVERDUE
+    assert call["link"] == links.WORK_ORDERS_LATE == "/work-orders?scope=late&cots=1"
+    # The link opens exactly the set the email counts: the Work Orders list's ``scope=late`` reads
+    # the same predicate (ship-by else due, released / in progress / held, drafts never late).
+    from app.services.work_order_browse_service import browse_work_orders
+
+    page = browse_work_orders(db_session, COMPANY_A, scope="late", hide_cots=False, today=TODAY, limit=100)
+    assert page["total"] == total
+    assert {row.work_order_number for row in page["items"]} == {
+        wo.work_order_number for wo in [late_by_ship, held, *many]
+    }
     ids = {u.id for u in call["recipients"]}
     assert {supervisor.id, manager.id} <= ids and operator.id not in ids
     assert "Fictional Aero Customer" not in call["title"] + call["body"]

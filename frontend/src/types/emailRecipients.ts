@@ -22,7 +22,7 @@ export interface EmailRecipientEvent {
   audience_source: 'selected' | 'automatic';
   /** Sorted user ids with a deliverable address; map through `EmailRecipientsSettings.users`. */
   reaches_user_ids: number[];
-  /** Also reaches people derived from each record (e.g. its creator) that no preview can list. */
+  /** Also reaches people derived from each record (e.g. its creator, or the host a visitor names) that no preview can list. */
   depends_on_record: boolean;
   /** True only when `reaches_user_ids` is empty and `depends_on_record` is false. */
   reaches_nobody: boolean;

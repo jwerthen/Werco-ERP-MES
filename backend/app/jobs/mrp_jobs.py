@@ -97,28 +97,29 @@ async def _run_mrp_for_company(db, company_id: int, mode: str, planning_horizon_
             f"{results['errors']} errors"
         )
 
-        # Notify planners (scoped to this tenant) via the notification dispatcher.
+        # Notify planners (scoped to this tenant) via the notification dispatcher. Dispatched even
+        # with no Manager: an Admin-selected Email Recipients list is delivered by dispatch_direct
+        # itself, and the Email Recipients preview promises it.
         planners = get_notification_recipients(db, role="manager", company_id=company_id)
 
-        if planners:
-            await dispatch_direct(
-                db,
-                event_key="mrp.completed",
-                company_id=company_id,
-                recipients=planners,
-                related_type="MRPRun",
-                related_id=mrp_run.id,
-                title=f"MRP Run {mrp_run.run_number} Completed",
-                body=f"MRP run {mrp_run.run_number} completed with {mrp_run.total_actions} action(s).",
-                link=links.MRP_LIST,
-                template="mrp_complete",
-                context={
-                    "run_number": mrp_run.run_number,
-                    "total_actions": mrp_run.total_actions,
-                    "mode": mode,
-                    "link_path": links.MRP_LIST,
-                },
-            )
+        await dispatch_direct(
+            db,
+            event_key="mrp.completed",
+            company_id=company_id,
+            recipients=planners,
+            related_type="MRPRun",
+            related_id=mrp_run.id,
+            title=f"MRP Run {mrp_run.run_number} Completed",
+            body=f"MRP run {mrp_run.run_number} completed with {mrp_run.total_actions} action(s).",
+            link=links.MRP_LIST,
+            template="mrp_complete",
+            context={
+                "run_number": mrp_run.run_number,
+                "total_actions": mrp_run.total_actions,
+                "mode": mode,
+                "link_path": links.MRP_LIST,
+            },
+        )
 
         return {
             "company_id": company_id,
@@ -130,26 +131,26 @@ async def _run_mrp_for_company(db, company_id: int, mode: str, planning_horizon_
 
     # Review mode - just notify about actions
     if mrp_run.total_actions > 0:
+        # No ``if planners`` guard, as above: a selected recipient list must still be mailed.
         planners = get_notification_recipients(db, role="manager", company_id=company_id)
 
-        if planners:
-            await dispatch_direct(
-                db,
-                event_key="mrp.review_needed",
-                company_id=company_id,
-                recipients=planners,
-                related_type="MRPRun",
-                related_id=mrp_run.id,
-                title=f"MRP Run {mrp_run.run_number}: {mrp_run.total_actions} Actions Need Review",
-                body=f"MRP run {mrp_run.run_number} produced {mrp_run.total_actions} action(s) needing review.",
-                link=links.MRP_LIST,
-                template="mrp_review_needed",
-                context={
-                    "run_number": mrp_run.run_number,
-                    "total_actions": mrp_run.total_actions,
-                    "link_path": links.MRP_LIST,
-                },
-            )
+        await dispatch_direct(
+            db,
+            event_key="mrp.review_needed",
+            company_id=company_id,
+            recipients=planners,
+            related_type="MRPRun",
+            related_id=mrp_run.id,
+            title=f"MRP Run {mrp_run.run_number}: {mrp_run.total_actions} Actions Need Review",
+            body=f"MRP run {mrp_run.run_number} produced {mrp_run.total_actions} action(s) needing review.",
+            link=links.MRP_LIST,
+            template="mrp_review_needed",
+            context={
+                "run_number": mrp_run.run_number,
+                "total_actions": mrp_run.total_actions,
+                "link_path": links.MRP_LIST,
+            },
+        )
 
     return {
         "company_id": company_id,

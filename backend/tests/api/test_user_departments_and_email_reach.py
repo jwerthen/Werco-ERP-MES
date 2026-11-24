@@ -197,3 +197,38 @@ def test_an_event_with_a_record_derived_audience_is_never_flagged_reaches_nobody
     for key in derived:
         if result[key]["audience_source"] == "automatic":
             assert result[key]["depends_on_record"] is True and result[key]["reaches_nobody"] is False
+
+
+def test_an_event_whose_caller_names_the_recipient_is_never_flagged_reaches_nobody(client, db_session, admin_user):
+    """``visitor.check_in`` has no roles, departments or resolver: the visitor log names the host.
+    Flagging it 'reaches nobody' would invite an Admin to tick people, and a selected list is
+    exclusive -- the named host would stop getting the email."""
+    entry = CATALOG["visitor.check_in"]
+    assert not entry.roles and not entry.departments and entry.resolver is None
+    visitor = events(client.get(EMAIL_URL, headers=headers(admin_user)))["visitor.check_in"]
+    assert visitor["audience_source"] == "automatic"
+    assert visitor["depends_on_record"] is True and visitor["reaches_nobody"] is False
+
+
+def test_the_preview_audience_is_catalog_audience(client, db_session, admin_user):
+    """The preview filters the directory in memory; it must name exactly ``catalog_audience``'s people
+    (roles OR departments, active only) for every automatic event."""
+    from app.services.notification_dispatch import catalog_audience
+
+    mine = {
+        make_user(db_session, "qual-dept@example.test", department="Quality").id,
+        make_user(db_session, "qual-role@example.test", role=UserRole.QUALITY).id,
+        make_user(db_session, "buyer-dept@example.test", department="Purchasing").id,
+        make_user(db_session, "sup-aud@example.test", role=UserRole.SUPERVISOR).id,
+        make_user(db_session, "gone-mgr@example.test", role=UserRole.MANAGER, active=False).id,
+    }
+
+    result = events(client.get(EMAIL_URL, headers=headers(admin_user)))
+    checked = 0
+    for key, event in result.items():
+        if event["audience_source"] != "automatic":
+            continue
+        expected = sorted(user.id for user in catalog_audience(db_session, CATALOG[key], 1) if user.id in mine)
+        assert sorted(i for i in event["reaches_user_ids"] if i in mine) == expected, key
+        checked += 1
+    assert checked

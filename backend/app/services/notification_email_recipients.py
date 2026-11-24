@@ -136,12 +136,16 @@ def _email_reach(db: Session, company_id: int, users: list):
     Mirrors ``notification_dispatch._fan_out``'s email leg: a selected list (saved, or Werco's
     shipped default) is exclusive and ignores personal preferences; otherwise the automatic
     audience is the catalog entry's roles OR departments (``catalog_audience``), each person's
-    saved channel choice applied, and only deliverable addresses count. An entry with a
-    record-derived resolver (e.g. the work order's creator) can also reach people this preview
-    cannot list without a record: ``depends_on_record`` says so, and such an event is never
-    flagged ``reaches_nobody``. Reads only; one query per table."""
+    saved channel choice applied, and only deliverable addresses count. Some events also reach
+    people this preview cannot list without a record: an entry with a record-derived resolver
+    (e.g. the work order's creator), and an entry with no roles, departments or resolver at all,
+    whose caller names the recipient itself (``visitor.check_in`` mails the host the visitor
+    named). ``depends_on_record`` says so, and such an event is never flagged ``reaches_nobody``
+    -- ticking people to "fix" it would replace the named host, since a selected list is exclusive.
+    Reads only: the audience is filtered in memory from ``users`` (the same rule as
+    ``catalog_audience``), so the whole matrix costs one preference query."""
     from app.models.notification import NotificationPreference
-    from app.services.notification_dispatch import catalog_audience, channels_from_pref
+    from app.services.notification_dispatch import channels_from_pref
 
     by_id = {user.id: user for user in users}
     prefs = {
@@ -154,14 +158,19 @@ def _email_reach(db: Session, company_id: int, users: list):
             people = [by_id[i] for i in selected_ids if i in by_id and by_id[i].is_active]
             source = "selected"
         else:
+            # ``catalog_audience``'s rule, in memory: active, and holding one of the entry's roles
+            # OR sitting in one of its departments.
             people = [
                 user
-                for user in catalog_audience(db, entry, company_id)
-                if CHANNEL_EMAIL in channels_from_pref(prefs.get(user.id), entry, email_deliverable=deliverable(user))
+                for user in users
+                if user.is_active
+                and (user.role in entry.roles or (user.department is not None and user.department in entry.departments))
+                and CHANNEL_EMAIL in channels_from_pref(prefs.get(user.id), entry, email_deliverable=deliverable(user))
             ]
             source = "automatic"
         reaches = sorted(user.id for user in people if deliverable(user))
-        depends_on_record = selected_ids is None and entry.resolver is not None
+        caller_named = entry.resolver is not None or (not entry.roles and not entry.departments)
+        depends_on_record = selected_ids is None and caller_named
         return {
             "audience_source": source,
             "reaches_user_ids": reaches,

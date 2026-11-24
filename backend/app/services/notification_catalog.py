@@ -859,7 +859,7 @@ _ENTRIES: List[CatalogEntry] = [
     CatalogEntry(
         event_key="mrp.completed",
         label="MRP run completed",
-        description="An MRP run finished and auto-processed actions.",
+        description="An MRP run finished.",
         category=Category.PURCHASING,
         severity="info",
         default_channels=frozenset({CHANNEL_EMAIL}),

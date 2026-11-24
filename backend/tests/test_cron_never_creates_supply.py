@@ -141,6 +141,31 @@ def test_the_mrp_cron_writes_the_run_and_constructs_no_supply(db_session: Sessio
     assert all(r.get("mode") == "REVIEW" for r in result["runs"])
 
 
+def test_the_review_notice_is_dispatched_even_with_no_active_manager(db_session: Session, monkeypatch):
+    """An Admin-selected Email Recipients list is delivered inside ``dispatch_direct``; the cron must
+    still call it when the automatic (Manager) audience is empty, as the preview promises."""
+    import app.worker as worker
+    from app.models.user import User
+
+    _shortage_fixture(db_session)
+    db_session.query(User).filter(User.role == UserRole.MANAGER).update(
+        {User.is_active: False}, synchronize_session=False
+    )
+    db_session.commit()
+    seen: list = []
+
+    async def _fake_dispatch_direct(db_, *, event_key, company_id, recipients, **kwargs):
+        seen.append((event_key, company_id, list(recipients)))
+        return 0
+
+    monkeypatch.setattr(mrp_jobs, "SessionLocal", lambda: _UnclosableSession(db_session))
+    monkeypatch.setattr(mrp_jobs, "dispatch_direct", _fake_dispatch_direct)
+
+    asyncio.run(worker.run_mrp_review_job({"job_id": "no-manager"}))
+
+    assert ("mrp.review_needed", COMPANY_A, []) in seen
+
+
 def test_positive_control_auto_draft_on_the_same_fixture_drafts_a_po_and_still_no_work_order(
     db_session: Session, monkeypatch, constructions
 ):
