@@ -53,6 +53,8 @@ export interface PartCreate {
   customer_name?: string;
   customer_part_number?: string;
   drawing_number?: string;
+  // No `customer_supplied`: the server's PartCreate does not carry it and silently drops
+  // the key, so a value sent on create would be lost. It is set through PartUpdate only.
 }
 
 export interface PartUpdate {
@@ -64,6 +66,12 @@ export interface PartUpdate {
   standard_cost?: number;
   is_critical?: boolean;
   requires_inspection?: boolean;
+  /**
+   * Customer-supplied part: MRP creates no demand for it. A real boolean or absent —
+   * an explicit `null` is a 422. The edit forms send it only when the person changed
+   * it, so an unrelated save can never overwrite a flag set elsewhere.
+   */
+  customer_supplied?: boolean;
   // No `is_active` / `status`: the server's PartUpdate does not carry them. Retiring or
   // re-activating a part is POST /parts/{id}/deactivate | /activate (PartActivationDialog).
   customer_name?: string;

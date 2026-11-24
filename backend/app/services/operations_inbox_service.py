@@ -22,6 +22,7 @@ from app.models.work_order import WorkOrder, WorkOrderStatus
 from app.models.work_order_blocker import WorkOrderBlocker
 from app.schemas.operations_inbox import InboxAssignee, OperationalInboxItem, OperationalInboxResponse
 from app.schemas.work_order_blocker import WorkOrderBlockerUpdate
+from app.services.owned_property_service import COMPANY_OWNED_ITEM_CLAUSES
 from app.services.work_order_blocker_service import WorkOrderBlockerService
 
 # Every category is gated by the same module permission used by ERP navigation.
@@ -98,7 +99,9 @@ class OperationalInboxService:
                 func.coalesce(func.sum(InventoryItem.quantity_on_hand), 0).label('quantity'),
                 func.max(InventoryItem.updated_at).label('updated'),
             )
-            .filter(InventoryItem.company_id == cid, InventoryItem.is_active.is_(True))
+            # Company-owned stock only (AS9100D 8.5.3): a customer's or supplier's material
+            # keeps no ``low_stock`` item quiet. Only that source reads this subquery.
+            .filter(InventoryItem.company_id == cid, InventoryItem.is_active.is_(True), *COMPANY_OWNED_ITEM_CLAUSES)
             .group_by(InventoryItem.part_id)
             .subquery()
         )

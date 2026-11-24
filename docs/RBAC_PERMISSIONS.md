@@ -1106,6 +1106,7 @@ v1 (2026-11-16): comment threads, @mentions and watchers on **work orders only**
 | Create | ✓ | ✓ | ✓ | | | | |
 | Edit | ✓ | ✓ | ✓ | | | | |
 | **Arm automatic BOM backflush** (`backflush_components`) | ✓ | ✓ | ✓ | | | | |
+| **Mark customer-supplied** (`customer_supplied`) | ✓ | ✓ | ✓ | | | | |
 | View backflush readiness / dry-run preview | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | **Deactivate / reactivate** (`POST /parts/{id}/deactivate` · `/activate`) | ✓ | ✓ | | | | | |
 | Delete | ✓ | | | | | | |
@@ -1155,6 +1156,17 @@ v1 (2026-11-16): comment threads, @mentions and watchers on **work orders only**
 > (any authenticated user in the tenant) and are **pure reads: they write nothing**, not even an audit
 > row. See `docs/API.md` → Parts → Part Schema, and
 > [docs/MATERIAL_CONSUMPTION_PLAN.md](MATERIAL_CONSUMPTION_PLAN.md) → "Exposing the flag (PR 4.5)".
+
+> **The customer-supplied row is the ordinary Edit row too** (migration `134`). `Part.customer_supplied`
+> marks a part the customer furnishes, and MRP then creates no demand for it and refuses to turn any
+> older action for it into supply (owner decision 2026-11-22; see
+> [API.md → MRP → Customer-supplied parts](API.md#customer-supplied-parts-mrp)). It is set or cleared
+> as an ordinary field on `PUT /parts/{id}` / `PUT /materials/{id}`, so its tier is those routes'
+> `require_role([ADMIN, MANAGER, SUPERVISOR])`: no gate, refusal or reason of its own, and the change
+> is recorded on the handler's `log_update` row (`resource_type="part"` through either door). Like
+> `backflush_components` it is absent from `PartBase` / `PartCreate` and from both CSV importers, so a
+> part is always created unflagged. Neither route refuses an API token: a full token bound to one of
+> those roles can set it, and a read-only or AI-external token is refused by the read-only gate.
 
 > **Deactivate / reactivate a part — ADMIN / MANAGER, deliberately narrower than the Edit row.**
 > `POST /parts/{id}/deactivate` and `POST /parts/{id}/activate` (shipped with the Combine/Merge SKUs

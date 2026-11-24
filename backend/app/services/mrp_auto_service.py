@@ -19,6 +19,7 @@ from app.models.supplier_part import SupplierPartMapping
 from app.models.user import User
 from app.models.work_order import WorkOrder, WorkOrderStatus
 from app.services.audit_service import AuditService
+from app.services.mrp_service import CUSTOMER_SUPPLIED_SUPPLY_DETAIL, is_customer_supplied
 from app.services.supplier_approval_service import approval_warnings, not_disqualified_clause
 
 logger = logging.getLogger(__name__)
@@ -89,6 +90,14 @@ class MRPAutoService:
                 )
                 if not action or action.processed or action.result_po_id or action.result_wo_id:
                     continue
+                # Never draft supply, or send an expedite, for a customer-supplied part (owner
+                # decision 2026-11-22). A fresh run raises no action for one; this catches an action
+                # minted before the part was flagged, so the auto-draft cron can never fall through
+                # to ``_get_preferred_vendor``'s first-active-vendor fallback for material the
+                # customer furnishes. Recorded on the action like any other refusal.
+                part = self.db.query(Part).filter(Part.id == action.part_id, Part.company_id == self.company_id).first()
+                if part is not None and is_customer_supplied(part):
+                    raise ValueError(CUSTOMER_SUPPLIED_SUPPLY_DETAIL)
                 if action.action_type == PlanningAction.ORDER:
                     # Create purchase order
                     po = self._create_po_from_action(action, mode, user_id)

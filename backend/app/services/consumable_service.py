@@ -23,7 +23,7 @@ from app.services.audit_service import AuditWriteError
 from app.services.export_safety import sanitize_csv_row
 from app.services.inventory_combine_service import source_reservations
 from app.services.material_consumption_service import is_consumable_item
-from app.services.owned_property_service import COMPANY, ownership_key
+from app.services.owned_property_service import COMPANY, COMPANY_OWNED_ITEM_CLAUSES, ownership_key
 
 MANAGE_ROLES = (UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR)
 EXPORT_ROLES = (UserRole.ADMIN, UserRole.MANAGER)
@@ -138,9 +138,13 @@ def list_stock(db, company_id, *, q=None, low_stock=False, skip=0, limit=100):
                 InventoryItem.lot_number.ilike(term),
             )
         )
+    # The reorder judgment (the ``low_stock`` filter here, ``part_quantity_on_hand`` and
+    # ``is_low_stock`` below) counts COMPANY-OWNED stock only (AS9100D 8.5.3): a customer's
+    # or supplier's material in the crib -- consignment stock, say -- keeps no part off the
+    # low-stock list. The rows themselves are still listed whoever owns them.
     totals = (
         db.query(InventoryItem.part_id, func.sum(InventoryItem.quantity_on_hand).label("on_hand"))
-        .filter(InventoryItem.company_id == company_id, InventoryItem.is_active.is_(True))
+        .filter(InventoryItem.company_id == company_id, InventoryItem.is_active.is_(True), *COMPANY_OWNED_ITEM_CLAUSES)
         .group_by(InventoryItem.part_id)
         .subquery()
     )
@@ -154,7 +158,10 @@ def list_stock(db, company_id, *, q=None, low_stock=False, skip=0, limit=100):
         if part.id not in pictures:
             rows = stock_rows_query(db, company_id, part.id).all()
             pictures[part.id] = _stock_picture(db, company_id, part, rows)
-            part_totals[part.id] = sum(float(row.quantity_on_hand or 0) for row in rows if row.is_active)
+            # The Python twin of the ``totals`` subquery above: active, company-owned rows.
+            part_totals[part.id] = sum(
+                float(row.quantity_on_hand or 0) for row in rows if row.is_active and ownership_key(row)[0] == COMPANY
+            )
     items = []
     for part, item in selected:
         available, reason = pictures[part.id][item.id] if item else (0.0, "No stock received")

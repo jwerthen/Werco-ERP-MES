@@ -356,6 +356,14 @@ in `notification_jobs.py`, since 2026-11-20); `mrp.completed`, `mrp.review_neede
 > allowlist must add `check_maintenance_due_job` (see `docs/DEPLOYMENT.md` → PM due and overdue
 > alerts).
 
+> **`stock.low` counts company-owned stock rows only (migration `129`, AS9100D 8.5.3).**
+> `check_low_stock_task` counts, per company, the stock rows at or below their part's
+> `reorder_point`, and leaves out customer- and supplier-owned rows
+> (`owned_property_service.COMPANY_OWNED_ITEM_CLAUSES`): someone else's material is not the shop's to
+> reorder. The digest counts rows, not parts, so a part whose only stock is owned has no row to count
+> and is not in it, although `GET /inventory/low-stock` lists that part at 0 on hand. See
+> [API.md → Customer- and supplier-owned property](API.md#customer--and-supplier-owned-property).
+
 > **`material.allocation_shortage` — added with the material-consumption engine.** Not part of the
 > original notification build; it is registered by the same change that introduced the tied-material
 > consumption path, so no release exists in which the shortage fires with no catalog entry.

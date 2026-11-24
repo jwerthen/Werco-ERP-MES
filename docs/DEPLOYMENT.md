@@ -221,6 +221,45 @@ rollback step; it does not undo documents, receipts, production or shipments
 already created by completed actions. Intake-linked Documents cannot be deleted
 through the application because the saved source and receipt must remain valid.
 
+### Customer-supplied parts (migration 134)
+
+Apply **134_part_customer_supplied** after **133_maintenance_log_provenance** through the normal API
+boot migration path. No environment variable, secret, cron or worker job is added.
+
+- **What it does.** Adds `parts.customer_supplied` (`boolean NOT NULL`, server default `false`). A
+  flagged part creates no MRP demand (owner decision 2026-11-22; see
+  [API.md → MRP → Customer-supplied parts](API.md#customer-supplied-parts-mrp)). **No backfill on
+  PostgreSQL**: every existing part reads `false`, which is how MRP treats every part today, so no
+  run changes until a person flags a part. Nothing is inferred from customer-owned stock. It creates
+  no table, so there is no RLS change. The column add is guarded, so a re-run is a no-op.
+- **Locks.** `SET LOCAL lock_timeout = '5s'`. The column add is metadata-only on PostgreSQL 11+ (no
+  rewrite, no NOT NULL scan) but takes a brief ACCESS EXCLUSIVE lock on `parts`, which most part,
+  BOM, work-order, inventory and MRP reads join. A timeout fails the boot with the database back at
+  `133`; redeploying is safe.
+- **Order.** Run the migration before or with the code that maps the column (the API boot does).
+  Old code is safe on the new schema: it never selects the column, and its part inserts take the
+  default. New code on an un-migrated database fails every part load, so deploy the **worker with or
+  after the API**. Deploy the **API before the frontend**: an older API ignores the unknown field on
+  `PUT`, so a **Customer-supplied** checkbox ticked against it would appear to save and be dropped.
+- **Behavior change to tell planners and buyers.** Flag each part the customer furnishes (the
+  **Customer-supplied** checkbox on the Part or Materials edit form; Admin / Manager / Supervisor).
+  Until a part is flagged, MRP still shows its demand as a shortage against company-owned stock, and
+  the 06:00 auto-draft cron can still draft supply for it. A flagged part can still be reported low
+  against its reorder point, since the low-stock and reorder readers do not read the flag.
+- **Verify** after the deploy, read-only: `SELECT is_nullable, column_default FROM
+  information_schema.columns WHERE table_name = 'parts' AND column_name = 'customer_supplied';`
+  returns `NO` and `false`, and `SELECT count(*) FROM parts WHERE customer_supplied;` returns 0 until
+  someone flags a part. Then, in a test company with invented data: flag a purchased component on the
+  BOM of an open work order, run MRP and confirm the component has no requirement or action; clear
+  the flag, run again and confirm they return.
+- **Rollback.** Keep the column on an ordinary application rollback: from a checkout of this release
+  run `railway run --service werco-api alembic stamp 133_maintenance_log_provenance` before redeploying
+  a pre-134 image. While the old code runs it plans demand for flagged parts again, and the auto-draft
+  cron can draft supply for them; the flags stay, and the next forward deploy re-runs `134` as a
+  guarded no-op that keeps them. The **downgrade is lossy** and not a rollback step: it drops the
+  column and every flag (the `log_update` audit rows still record who flagged which part, but nothing
+  re-derives the column from them).
+
 ### PM due and overdue alerts
 
 This release adds one worker cron, **`check_maintenance_due_job`**, at 12:15 in the worker

@@ -346,6 +346,7 @@ async def check_low_stock_task():
     try:
         from app.models.inventory import InventoryItem
         from app.models.part import Part
+        from app.services.owned_property_service import COMPANY_OWNED_ITEM_CLAUSES
 
         total_low_stock = 0
 
@@ -359,6 +360,9 @@ async def check_low_stock_task():
                         Part.company_id == cid,
                         Part.is_deleted == False,
                         InventoryItem.quantity_on_hand <= Part.reorder_point,
+                        # A customer's or supplier's stock row is not the shop's to reorder
+                        # (AS9100D 8.5.3): only company-owned rows are counted.
+                        *COMPANY_OWNED_ITEM_CLAUSES,
                     )
                     .all()
                 )

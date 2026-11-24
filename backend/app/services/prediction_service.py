@@ -28,6 +28,7 @@ from app.schemas.analytics import (
     WorkCenterForecast,
 )
 from app.services.material_readiness_service import material_readiness
+from app.services.owned_property_service import COMPANY_OWNED_ITEM_CLAUSES
 from app.services.scheduling_projection import _project_work_order_schedule
 from app.services.working_calendar_service import load_working_calendars, working_hours
 
@@ -578,13 +579,16 @@ class PredictionService:
         # tenancy fix. Revisit before this endpoint is put in front of a large catalogue.
         for part in parts:
             # Current stock. ``InventoryItem`` carries ``TenantMixin`` (no soft delete;
-            # ``is_active`` is the existing liveness filter and is unchanged).
+            # ``is_active`` is the existing liveness filter and is unchanged). The shop's OWN
+            # stock only (AS9100D 8.5.3): a customer's or supplier's material on the rack does
+            # not push this part's stockout date out.
             current_stock = (
                 self.db.query(func.sum(InventoryItem.quantity_on_hand))
                 .filter(
                     InventoryItem.part_id == part.id,
                     InventoryItem.company_id == self.company_id,
                     InventoryItem.is_active == True,
+                    *COMPANY_OWNED_ITEM_CLAUSES,
                 )
                 .scalar()
                 or 0

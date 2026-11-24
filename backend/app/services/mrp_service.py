@@ -20,6 +20,25 @@ from app.models.mrp import MRPAction, MRPRequirement, MRPRun, MRPRunStatus, Plan
 from app.models.part import Part, is_material_supply_part_type
 from app.models.purchasing import POStatus, PurchaseOrder, PurchaseOrderLine
 from app.models.work_order import WorkOrder, WorkOrderStatus
+from app.services.owned_property_service import COMPANY_OWNED_ITEM_CLAUSES
+
+
+def is_customer_supplied(part) -> bool:
+    """THE customer-supplied predicate for planning (owner decision 2026-11-22).
+
+    A customer-supplied (customer-furnished) part creates no MRP demand: the BOM explosion
+    skips it, and every door that turns an MRP action into supply -- the auto-draft cron
+    (``MRPAutoService.process_actions``) and the reviewed draft / purchase batch
+    (``MRPSupplyService.review``) -- refuses it with ``CUSTOMER_SUPPLIED_SUPPLY_DETAIL``. It
+    reads the part's own flag only, never stock ownership.
+    """
+    return bool(getattr(part, "customer_supplied", False))
+
+
+CUSTOMER_SUPPLIED_SUPPLY_DETAIL = (
+    "This part is customer-supplied: the customer furnishes it, so MRP does not plan supply for it. "
+    "Clear the part's customer-supplied flag first if the shop now buys or makes it."
+)
 
 
 class MRPService:
@@ -61,8 +80,19 @@ class MRPService:
         return str(value).strip().lower()
 
     def get_inventory_summary(self, part_id: int) -> Tuple[float, float, float]:
-        """Get inventory quantities for a part: (on_hand, allocated, on_order)"""
-        # On hand from inventory (scoped to this tenant)
+        """Get inventory quantities for a part: (on_hand, allocated, on_order).
+
+        ``on_hand`` and ``allocated`` count COMPANY-OWNED stock only
+        (``COMPANY_OWNED_ITEM_CLAUSES``, AS9100D 8.5.3). A customer's or supplier's
+        material on the rack is not the shop's supply: automatic consumption never draws
+        it, so netting demand against it would suppress the purchase or make action the
+        shop actually needs. Demand for a part whose only stock is owned therefore shows as
+        a shortage. With no owned stock both figures are what they were before migration
+        129. This is the one netting seam: the MRP run and the reviewed supply draft's
+        fingerprint (``mrp_supply_service``) both read it.
+        """
+        # On hand from inventory (scoped to this tenant). The status rule is MRP's own,
+        # kept as it was; only the ownership clause is new.
         on_hand_result = (
             self.db.query(func.sum(InventoryItem.quantity_on_hand))
             .filter(
@@ -70,18 +100,21 @@ class MRPService:
                 InventoryItem.part_id == part_id,
                 InventoryItem.is_active == True,
                 InventoryItem.status == "available",
+                *COMPANY_OWNED_ITEM_CLAUSES,
             )
             .scalar()
             or 0.0
         )
 
-        # Allocated from inventory (scoped to this tenant)
+        # Allocated from inventory (scoped to this tenant). Same ownership rule as on hand:
+        # a reservation on someone else's material does not reduce the shop's own supply.
         allocated_result = (
             self.db.query(func.sum(InventoryItem.quantity_allocated))
             .filter(
                 InventoryItem.company_id == self.company_id,
                 InventoryItem.part_id == part_id,
                 InventoryItem.is_active == True,
+                *COMPANY_OWNED_ITEM_CLAUSES,
             )
             .scalar()
             or 0.0
@@ -217,6 +250,11 @@ class MRPService:
 
             part = item.component_part
             if not part:
+                continue
+            # A customer-supplied component creates no demand (owner decision 2026-11-22): no
+            # requirement, so no shortage and no action, and no recursion -- if the customer
+            # furnishes a subassembly, the shop neither buys nor makes what is inside it.
+            if is_customer_supplied(part):
                 continue
 
             # Calculate extended quantity with scrap
