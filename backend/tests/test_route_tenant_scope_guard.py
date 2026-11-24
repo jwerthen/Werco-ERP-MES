@@ -197,7 +197,6 @@ GLOBAL_ROUTES: Dict[RouteKey, str] = {
         "require_platform_admin context switch: the target company is the explicit path id (active only)."
     ),
     ("GET", "/api/v1/platform/companies"): _PLATFORM,
-    ("POST", "/api/v1/platform/companies"): _PLATFORM,
     ("GET", "/api/v1/platform/companies/{company_id}"): _PLATFORM,
     ("PUT", "/api/v1/platform/companies/{company_id}"): _PLATFORM,
     ("GET", "/api/v1/platform/companies/{company_id}/users"): _PLATFORM,

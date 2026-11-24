@@ -1,40 +1,19 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, Field
 
 from app.schemas.base import UTCModel
-from app.schemas.user import validate_password_strength
 
 
 class CompanyBase(UTCModel):
     name: str = Field(..., min_length=1, max_length=255, description="Company name")
-    slug: Optional[str] = Field(
-        None, max_length=100, description="URL-safe identifier (auto-generated if not provided)"
-    )
+    slug: Optional[str] = Field(None, max_length=100, description="URL-safe identifier")
     logo_url: Optional[str] = Field(None, max_length=500)
     timezone: str = Field(default="America/Chicago", max_length=50)
     address: Optional[str] = None
     phone: Optional[str] = Field(None, max_length=50)
     website: Optional[str] = Field(None, max_length=255)
-
-
-class CompanyCreate(CompanyBase):
-    """Platform admin creates a company + initial admin"""
-
-    admin_email: EmailStr
-    admin_first_name: str = Field(..., min_length=1, max_length=50)
-    admin_last_name: str = Field(..., min_length=1, max_length=50)
-    admin_password: str = Field(..., min_length=12, max_length=128)
-    parent_company_id: Optional[int] = None
-
-    @field_validator('admin_password')
-    @classmethod
-    def validate_password(cls, v: str) -> str:
-        # Platform-admin company creation must meet the canonical first-admin strength
-        # policy (schemas.user); without this the POST /platform/companies path
-        # accepted any 12-char password (no complexity check at all).
-        return validate_password_strength(v)
 
 
 class CompanyUpdate(BaseModel):

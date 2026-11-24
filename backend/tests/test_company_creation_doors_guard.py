@@ -1,26 +1,26 @@
 """Every door that can create a ``Company`` row is named here, with its guard.
 
-Owner decision 2026-11-23: Werco is the only company on this system, so the
-unauthenticated ``POST /api/v1/companies/register`` self-registration route was
-deleted. This file is the tripwire that keeps it deleted in spirit, not just by path:
+Owner decision 2026-11-23: Werco is the only company on this system, so BOTH company
+creation routes were deleted -- the unauthenticated ``POST /api/v1/companies/register``
+self-registration route and then the platform-admin ``POST /api/v1/platform/companies``
+("Delete it too"), together with the ``company_onboarding`` service only they called.
+This file is the tripwire that keeps them deleted in spirit, not just by path:
 
-* a STATIC scan of ``app/`` pins every place that constructs a ``Company(...)`` or
-  calls ``onboard_company(...)``. A new site fails CI until it is added below with a
-  reason, so a second public company-creation door cannot appear quietly under a
-  different path;
-* a ROUTE scan pins which mounted routes reach those sites and what guards them:
-  ``POST /platform/companies`` must depend on ``require_platform_admin``, and the one
-  unauthenticated site, the first-user bootstrap in ``POST /auth/register-public``,
-  must stay confined to an empty install (proved over HTTP below).
+* a STATIC scan of ``app/`` pins every place that constructs a ``Company(...)``. The one
+  site left is the first-user bootstrap in ``POST /auth/register-public``; a new site
+  fails CI until it is added below with a reason, so a company-creation door cannot
+  reappear quietly under a different path;
+* a ROUTE scan pins that neither deleted route is mounted, and the bootstrap is proved
+  over HTTP to stay confined to an empty install.
 """
 
 import ast
+import importlib.util
 from pathlib import Path
 
 import pytest
 from fastapi.routing import APIRoute
 
-from app.api.deps import require_platform_admin
 from app.core.security import get_password_hash
 from app.main import app
 from app.models.audit_log import AuditLog
@@ -31,11 +31,7 @@ APP_DIR = Path(__file__).resolve().parents[1] / "app"
 
 # (path relative to backend/app, enclosing function) -> why it is allowed.
 EXPECTED_COMPANY_CONSTRUCTORS = {
-    ("services/company_onboarding.py", "onboard_company"): "the one onboarding service",
     ("api/endpoints/auth.py", "register_public"): "empty-install bootstrap, zero users only",
-}
-EXPECTED_ONBOARD_CALLERS = {
-    ("api/endpoints/platform.py", "create_company"): "POST /platform/companies, platform admin only",
 }
 
 
@@ -67,15 +63,6 @@ def _sites(target: str) -> set[tuple[str, str]]:
     return found
 
 
-def _dependency_calls(dependant) -> set:
-    calls = set()
-    for dep in dependant.dependencies:
-        if dep.call is not None:
-            calls.add(dep.call)
-        calls |= _dependency_calls(dep)
-    return calls
-
-
 def _routes_for(endpoint_name: str, module_suffix: str) -> list[APIRoute]:
     return [
         r
@@ -92,15 +79,29 @@ def test_every_company_constructor_is_known():
 
 
 @pytest.mark.unit
-def test_every_onboard_company_caller_is_known():
-    assert _sites("onboard_company") == set(EXPECTED_ONBOARD_CALLERS)
+def test_the_onboarding_service_is_deleted_and_nothing_calls_it():
+    assert not (APP_DIR / "services" / "company_onboarding.py").exists()
+    assert importlib.util.find_spec("app.services.company_onboarding") is None
+    assert _sites("onboard_company") == set()
 
 
 @pytest.mark.unit
-def test_platform_company_create_is_the_only_route_onboarding_and_requires_platform_admin():
-    routes = _routes_for("create_company", "endpoints.platform")
-    assert [(r.path, sorted(r.methods)) for r in routes] == [("/api/v1/platform/companies", ["POST"])]
-    assert require_platform_admin in _dependency_calls(routes[0].dependant)
+def test_platform_company_create_route_is_deleted():
+    """``GET /platform/companies`` (the list) stays; nothing answers ``POST`` there any more."""
+    served = {(r.path, m) for r in app.routes if isinstance(r, APIRoute) for m in r.methods}
+    assert ("/api/v1/platform/companies", "GET") in served
+    assert ("/api/v1/platform/companies", "POST") not in served
+    assert _routes_for("create_company", "endpoints.platform") == []
+    assert "post" not in app.openapi()["paths"]["/api/v1/platform/companies"]
+
+
+@pytest.mark.unit
+def test_company_creation_request_schemas_are_deleted():
+    """Neither deleted route's request body survives as a schema a new route could reuse."""
+    import app.schemas.company as company_schemas
+
+    assert not hasattr(company_schemas, "CompanyRegister")
+    assert not hasattr(company_schemas, "CompanyCreate")
 
 
 @pytest.mark.unit
@@ -117,7 +118,7 @@ def test_companies_module_docstring_names_only_served_company_creation_doors():
     from app.api.endpoints import companies
 
     named = set(re.findall(r"``POST (/[^`]+)``", companies.__doc__ or ""))
-    assert named == {"/platform/companies", "/auth/register-public"}
+    assert named == {"/auth/register-public"}
     served = {(r.path, m) for r in app.routes if isinstance(r, APIRoute) for m in r.methods}
     for path in named:
         assert (f"/api/v1{path}", "POST") in served, path

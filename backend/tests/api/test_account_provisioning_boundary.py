@@ -267,30 +267,14 @@ def test_account_mutations_are_tenant_scoped_and_fail_closed_on_audit_loss(
     assert db_session.query(AuditLog).count() == 0
 
 
-def test_company_provisioning_never_grants_platform_authority_and_is_audited(client, db_session):
-    # POST /platform/companies is the one company-creation door left (the public
-    # /companies/register self-registration route was deleted 2026-11-23).
-    actor = make_user(db_session, UserRole.PLATFORM_ADMIN)
-    body = dict(
-        name="New Company",
-        admin_email="newadmin@example.com",
-        admin_first_name="New",
-        admin_last_name="Admin",
-        admin_password=PASSWORD,
-        role="platform_admin",
-        is_superuser=True,
-    )
-    response = client.post("/api/v1/platform/companies", headers=headers(actor), json=body)
-    assert response.status_code == 200, response.text
-    db_session.rollback()
-    user = db_session.query(User).filter_by(email="newadmin@example.com").one()
-    assert user.role == UserRole.ADMIN and user.is_superuser is False and user.company_id != actor.company_id
-    assert db_session.query(AuditLog).filter_by(company_id=user.company_id).count() == 2
+@pytest.mark.parametrize("role", [UserRole.PLATFORM_ADMIN, UserRole.ADMIN])
+def test_no_principal_can_create_a_company(client, db_session, role):
+    """``POST /platform/companies`` was deleted 2026-11-23 (owner: Werco is the only company).
 
-
-def test_tenant_admin_cannot_create_a_company(client, db_session):
-    """A tenant Admin (not a platform principal) is refused at the only company-creation door."""
-    actor = make_user(db_session)
+    A platform admin, who used to be able to call it, now gets 405 like everyone else, and
+    nothing is written. Listing companies at the same path stays.
+    """
+    actor = make_user(db_session, role)
     body = dict(
         name="New Company",
         admin_email="newadmin@example.com",
@@ -299,10 +283,11 @@ def test_tenant_admin_cannot_create_a_company(client, db_session):
         admin_password=PASSWORD,
     )
     response = client.post("/api/v1/platform/companies", headers=headers(actor), json=body)
-    assert response.status_code == 403, response.text
+    assert response.status_code == 405, response.text
     db_session.rollback()
     assert db_session.query(Company).count() == 1
     assert db_session.query(User).filter_by(email="newadmin@example.com").count() == 0
+    assert db_session.query(AuditLog).count() == 0
 
 
 def test_anonymous_company_self_registration_route_is_gone(client, db_session):
@@ -430,28 +415,6 @@ def test_public_registration_ignores_caller_platform_and_company_claims(client, 
     user = db_session.query(User).filter_by(email=body["email"]).one()
     assert user.role == UserRole.VIEWER and user.is_superuser is False and user.is_active is False
     assert user.company_id == 1
-
-
-def test_company_onboarding_rolls_back_even_when_second_audit_fails(client, db_session, monkeypatch):
-    actor = make_user(db_session, UserRole.PLATFORM_ADMIN)
-    original = AuditService.log
-
-    def lose_user_audit(self, *args, **kwargs):
-        return None if kwargs.get("resource_type") == "user" else original(self, *args, **kwargs)
-
-    monkeypatch.setattr(AuditService, "log", lose_user_audit)
-    body = dict(
-        admin_email="newadmin@example.com",
-        admin_first_name="New",
-        admin_last_name="Admin",
-        admin_password=PASSWORD,
-        name="New Company",
-    )
-    response = client.post("/api/v1/platform/companies", headers=headers(actor), json=body)
-    assert response.status_code == 503, response.text
-    db_session.rollback()
-    assert db_session.query(Company).count() == 1 and db_session.query(User).count() == 1
-    assert db_session.query(AuditLog).count() == 0
 
 
 @pytest.mark.parametrize("verb,body", [("delete", {}), ("put", {"is_active": False})])

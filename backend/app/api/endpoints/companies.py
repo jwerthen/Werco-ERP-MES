@@ -1,11 +1,10 @@
 """
 Company self-management endpoints (the caller's own active company).
 
-There is deliberately no public company self-registration route: Werco is the only
-company on this system (owner decision 2026-11-23). A company is created only by a
-platform admin (``POST /platform/companies``) or by the empty-install first-user
-bootstrap in ``POST /auth/register-public`` (zero users install-wide only; reuses the
-'werco' company if present).
+There is deliberately no route that creates a company, public or platform-admin: Werco
+is the only company on this system (owner decision 2026-11-23). The one company row is
+made by the empty-install first-user bootstrap in ``POST /auth/register-public`` (zero
+users install-wide only; reuses the 'werco' company if present).
 """
 
 from fastapi import APIRouter, Depends, HTTPException, status
