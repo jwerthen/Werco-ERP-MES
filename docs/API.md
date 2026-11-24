@@ -1084,7 +1084,7 @@ reference) claim: `["badge", "pin"]` when a PIN was verified, `["badge"]` otherw
 `employee-login`, in the access and the refresh token). A `["badge", "pin"]` session also carries
 **`pst`**, the verified PIN's `floor_pin_set_at` as integer epoch-microseconds, which binds the
 session to that PIN (below). Both are written **only** by badge sign-on: `POST /auth/login`
-(password, including an employee ID plus password), registration and company onboarding mint exactly
+(password, including an employee ID plus password) and registration mint exactly
 the claims they always did. `get_current_user` copies `amr` onto `user._auth_methods`, and
 `AuditService` folds it into every row the session writes (see [Audit Log](#audit-log) →
 `extra_data.auth_methods`).
@@ -13961,11 +13961,9 @@ There is no delete endpoint.
 > minimum is unchanged and is additionally enforced as `Field(min_length=12)` on the request schemas.
 > The **same policy** — the shared `validate_password_strength` (`app/schemas/user.py`) —
 > also governs `POST /auth/register` (admin create), public self-registration
-> `POST /auth/register-public`, and the **first-admin `admin_password`** on the two company-creation
-> paths: the **unauthenticated** `POST /companies/register` (company self-registration) and
-> platform-admin `POST /platform/companies`. (`POST /companies/register` previously skipped the
-> common-substring check and `POST /platform/companies` had **no** strength check at all — both now
-> enforce the full policy, so no first-admin can be seeded with a weak password.) The user CSV import
+> `POST /auth/register-public`. Both company-creation routes were **removed** on 2026-11-23: the
+> unauthenticated self-registration route `POST /companies/register` (now 404) and platform-admin
+> `POST /platform/companies` (now 405), so no first-admin `admin_password` path remains. The user CSV import
 > (`POST /users/import-csv`) applies the same check to **user-supplied** passwords **per row** (a weak
 > password fails only that row, `reason` = `"Weak password: …"`); operator **auto-generated**
 > passwords (for badge/employee-ID logins) satisfy the policy by construction and are **exempt**.
@@ -14255,8 +14253,8 @@ The active company's own profile and self-managed settings. Mounted under `/comp
 > (Claude-plugin brief P0.3, 2026-11-13). While it is OFF, such a token is refused **403** on every
 > API route and at the MCP door, `initialize` and `tools/list` included. Turning it ON therefore
 > also opens that connector: do it only once the empowered official has cleared it
-> ([docs/EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md)). New companies are
-> created **OFF**; existing companies were grandfathered **ON**. The toggle is **Admin-only**
+> ([docs/EXPORT_CONTROL_AI_EGRESS.md](EXPORT_CONTROL_AI_EGRESS.md)). A new company row
+> (only the empty-install bootstrap creates one) starts **OFF**; existing companies were grandfathered **ON**. The toggle is **Admin-only**
 > (`require_role([ADMIN])`), matching the sibling `allow_carrier_egress` / `allow_print_egress`
 > controls. It is exposed in the UI at
 > **Admin Settings → AI Privacy** (`/admin/settings?tab=aiprivacy`) — interactive for Admin
@@ -14318,13 +14316,24 @@ The active company's own profile and self-managed settings. Mounted under `/comp
 
 ### Company onboarding and platform administration
 
-`POST /companies/register` remains unauthenticated company onboarding;
-`POST /platform/companies` requires a stored Platform Admin/superuser. Both create a new company
-and its initial **tenant Admin**, explicitly without superuser authority. Company, seeded setup,
-initial account, and required company/user `CREATE` audit rows commit together; audit failure
-returns **503** and rolls back the whole onboarding transaction. The public flow attributes the
-creation to the new initial Admin; platform creation attributes it to the initiating platform user.
-The separate empty-install `/auth/register-public` bootstrap is documented under Authentication.
+There is **no public company self-registration**. Werco is the only company on this system
+(owner decision 2026-11-23), so the former unauthenticated `POST /companies/register` route, its
+`CompanyRegister` request schema, its rate-limit entry and the SPA page `/register-company` were
+deleted; the path now answers **404** and is absent from OpenAPI and the MCP catalog.
+
+There is **no platform-admin company creation** either (owner decision 2026-11-23, "Delete it
+too"). `POST /platform/companies`, its `CompanyCreate` request schema and
+`services/company_onboarding.py` (`onboard_company`) were deleted, along with the Platform Overview
+**Add Company** button and the `create_company` MCP tool. A `POST` to that path now answers **405**;
+`GET /platform/companies` at the same path still lists companies, and every other `/platform` route
+(get, update, users, dashboard, overview) and platform-admin company context switching are unchanged.
+
+The **only** code path that constructs a `Company` row is the empty-install first-user bootstrap
+in `POST /auth/register-public` (documented under Authentication): only when the install has
+**zero users**, it creates the `werco` company (or reuses it if it already exists) and makes the
+registrant an active **Platform Admin with superuser authority**. Once any user exists, the same
+route only creates an inactive VIEWER in the Werco company, pending approval.
+`backend/tests/test_company_creation_doors_guard.py` pins that single door and fails CI on a new one.
 
 `PUT /platform/companies/{company_id}` requires platform authority and records changed fields,
 including activation/deactivation, in a required `UPDATE` audit row scoped to the **target company**.
@@ -16274,7 +16283,6 @@ the global default applied):
 | `POST /auth/login` | 5/minute |
 | `POST /auth/register` | 3/minute |
 | `POST /auth/register-public` | 3/minute |
-| `POST /companies/register` | 3/minute |
 | `POST /auth/refresh` | 30/minute |
 | `POST /auth/employee-login` | 10/minute |
 | `POST /auth/employee-logout` | 30/minute |
@@ -16289,10 +16297,6 @@ the global default applied):
 (`POST /users/me/test-sms` is authenticated and self-targeted, but it is the one route that spends
 real carrier money per call, so it is capped well below anything a human would click. The two
 standalone laser-nest routes carry their own **10/minute** caps — see Laser Nests.)
-
-`POST /companies/register` is **unauthenticated**, and one successful call mints a whole tenant
-plus an **active admin** user with live access/refresh tokens — so it is capped like the sibling
-register routes. It previously had no per-path entry and ran at only the global 100/minute default.
 
 > **These caps assume a correctly configured edge proxy.** Every per-IP limit on this page is keyed
 > on the forwarded client IP, so it is only as trustworthy as the proxy configuration in front of

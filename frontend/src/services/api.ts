@@ -6235,26 +6235,10 @@ class ApiService {
     return response.data;
   }
 
-  async registerCompany(data: {
-    company_name: string;
-    admin_email: string;
-    admin_first_name: string;
-    admin_last_name: string;
-    admin_password: string;
-  }): Promise<any> {
-    const response = await this.api.post('/companies/register', data);
-    return response.data;
-  }
-
   // ============ Platform Administration ============
 
   async getPlatformCompanies(): Promise<any[]> {
     const response = await this.api.get('/platform/companies');
-    return response.data;
-  }
-
-  async createCompany(data: any): Promise<any> {
-    const response = await this.api.post('/platform/companies', data);
     return response.data;
   }
 

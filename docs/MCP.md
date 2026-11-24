@@ -2,8 +2,8 @@
 
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
-(Cursor, Claude Code, a chat bot) gets **796 tools** — 15 hand-written *convenience* tools plus
-**781 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+(Cursor, Claude Code, a chat bot) gets **795 tools** — 15 hand-written *convenience* tools plus
+**780 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
 as the same request from the web app. A **read-only** API token is shown fewer tools, and an
 **AI-external** one fewer still (§4.1, §4.2).
 
@@ -127,6 +127,12 @@ convenience + **781** generated, 16 shadowed. It is a read, but it sits under `U
 read-only deny list carries, so the read-only catalog is unchanged at 8 convenience + **304**
 generated, and it is not on the AI-external allowlist. See
 [API.md → Users (Admin)](API.md#users-admin).
+
+**Re-checked again on 2026-11-23 after platform-admin company creation was deleted.**
+`create_company` (`POST /platform/companies`) is gone with its route; no other name shifted:
+15 convenience + **780** generated, 16 shadowed, one fewer than the 781 above. It was a write, so the
+read-only catalog is unchanged at 8 convenience + **304** generated, and it was never on the
+AI-external allowlist.
 
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
@@ -830,7 +836,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `VisitorSignIn` (`/visitor-signin`) | Visitor Logs | `sign_in`, `sign_out` (under the caller's own role; the tablet's shared-PIN station login is unauthenticated plumbing and is not a tool) |
 | `AdminSettings` (`/admin/settings`) | Admin Settings, Users, Production Calendar, Company Management | `list_work_center_rates`, `update_work_center_rate`, `list_work_center_types_admin`, `update_work_center_types_admin`, `get_email_recipients`, `update_email_recipients`, `get_role_permissions`, `update_role_permissions`, `get_audit_log`, `list_users`; Production Calendar tab: `get_production_calendar`, `save_production_calendar_document` (Admin only), `sync_working_calendars_from_shifts` (dry run by default; Admin / Manager / Supervisor), `resolve_production_moment` (which production day and shift an instant belongs to); Badge Sign-in tab: `get_my_company` reads the policy, but **turning it on or off is not a tool** (`PUT /companies/me/floor-pin-policy` is in `EXCLUDED_OPERATIONS`, §6.1, and refuses **403** to every API token) |
 | `PlatformOverview` (`/platform`) | Platform Administration | `platform_overview`, `list_companies`, `company_dashboard`, `browse_company_users` (platform admins only — the route decides) |
-| `CompanyRegister` (`/register-company`) | Company Management | `get_my_company`, `update_my_company` — the public registration form itself is unauthenticated and has no tool; **the AI and SMS egress kill switches are not tools**: `PUT /companies/me/ai-egress` and `PUT /companies/me/sms-egress` are in `EXCLUDED_OPERATIONS` (§6.1) and refuse **403** to every API token, as do the carrier and label-print switches' profile writes (`PUT /admin/settings/shipping-profile`, `PUT /receiving/print-profile`; their `get_shipping_profile` / `get_print_profile` reads stay tools) |
+| Company settings (Admin Settings → AI / SMS privacy tabs; there is no company self-registration page) | Company Management | `get_my_company`, `update_my_company` — **the AI and SMS egress kill switches are not tools**: `PUT /companies/me/ai-egress` and `PUT /companies/me/sms-egress` are in `EXCLUDED_OPERATIONS` (§6.1) and refuse **403** to every API token, as do the carrier and label-print switches' profile writes (`PUT /admin/settings/shipping-profile`, `PUT /receiving/print-profile`; their `get_shipping_profile` / `get_print_profile` reads stay tools) |
 | `ApiTokens` (`/admin/api-tokens`) | API Tokens | `create_api_token`, `list_api_tokens`, `revoke_api_token` (Admin only; a call authenticated **by** an API token gets the route's 403 fence — §4) |
 | `Login` (`/login`), `Register` (`/register`) | Authentication | *No tool* — excluded on purpose; identity comes from the JWT (§4) |
 | `NotFound`, `Unauthorized` | — | No API calls |

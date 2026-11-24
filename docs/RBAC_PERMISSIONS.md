@@ -2844,10 +2844,12 @@ UI controls do not grant API authority. See [API: Documents](API.md#documents).
 > Public `/auth/register-public` chooses roles server-side: the empty-install bootstrap creates
 > an active Platform Admin/superuser; later signups create inactive Viewers without superuser
 > authority. Accepted creation requires an atomic registration audit (**503** on loss); ordinary
-> duplicate/refusal responses remain uniform. Both company-onboarding routes create a tenant
-> Admin without superuser authority and atomically record company/user creation. Platform company
-> updates, including activation, require a target-company audit in the same transaction (**503**
-> and rollback on loss). See [API: onboarding](API.md#company-onboarding-and-platform-administration).
+> duplicate/refusal responses remain uniform. **No route creates a company**: both
+> company-creation routes — public `POST /companies/register` and platform-admin
+> `POST /platform/companies` — were removed on 2026-11-23, so a Platform Admin can no longer
+> onboard a tenant. The only `Company` constructor is that empty-install bootstrap in
+> `POST /auth/register-public`. Platform company updates, including activation, still require a
+> target-company audit in the same transaction (**503** and rollback on loss). See [API: onboarding](API.md#company-onboarding-and-platform-administration).
 >
 > **Password-strength policy.** A password set on any of these paths — `POST /users/` (create),
 > `POST /users/{id}/reset-password`, and self-service `POST /users/change-password` — must satisfy
@@ -2855,9 +2857,9 @@ UI controls do not grant API authority. See [API: Documents](API.md#documents).
 > blocklist in `app/schemas/user.py`), the **same policy** as `POST /auth/register`. There are **no
 > character-class requirements**: the uppercase / lowercase / number / special-char rules were removed
 > on 2026-07-29 in favor of length + blocklist per NIST SP 800-63B §5.1.1.2, and the blocklist was
-> expanded in the same change. The same policy also governs
-> the **first-admin `admin_password`** on the two company-creation paths — the unauthenticated
-> `POST /companies/register` (company self-registration) and platform-admin `POST /platform/companies`.
+> expanded in the same change. There is no first-admin `admin_password` path any more: both
+> company-creation routes (`POST /companies/register` and `POST /platform/companies`) were removed
+> on 2026-11-23.
 > The user CSV import applies it per row to user-supplied passwords; operator auto-generated (badge)
 > passwords are exempt. See `docs/API.md` → Users.
 >

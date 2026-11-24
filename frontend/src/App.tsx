@@ -18,7 +18,6 @@ import { lazyWithRetry } from './utils/lazyWithRetry';
 // Eagerly loaded - critical path
 import Login from './pages/Login';
 import Register from './pages/Register';
-import CompanyRegister from './pages/CompanyRegister';
 import Dashboard from './pages/Dashboard';
 import Unauthorized from './pages/Unauthorized';
 import NotFound from './pages/NotFound';
@@ -277,7 +276,6 @@ function AppRoutes() {
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/register" element={<Register />} />
-        <Route path="/register-company" element={<CompanyRegister />} />
         <Route path="/unauthorized" element={<Unauthorized />} />
 
         {/* TV wallboard (A0.5) — full-screen, NO Layout chrome, NO PrivateRoute.

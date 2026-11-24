@@ -4,9 +4,7 @@ import { BuildingOffice2Icon, UsersIcon, ClipboardDocumentListIcon } from '@hero
 import api from '../services/api';
 import { useCompany } from '../context/CompanyContext';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
-import { Modal } from '../components/ui/Modal';
 import { EmptyState, ErrorState, useToast } from '../components/ui';
-import { FormField } from '../components/ui/FormField';
 
 interface CompanyOverview {
   id: number;
@@ -28,7 +26,6 @@ export default function PlatformOverview() {
   const [overview, setOverview] = useState<OverviewData | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
-  const [showCreateModal, setShowCreateModal] = useState(false);
   const { switchCompany } = useCompany();
   const navigate = useNavigate();
   const { showToast } = useToast();
@@ -77,12 +74,6 @@ export default function PlatformOverview() {
           <h1 className="text-xl font-bold text-base-content truncate">Platform Overview</h1>
           <p className="text-xs text-fd-mute mt-0.5">Monitor all companies across the platform</p>
         </div>
-        <button
-          onClick={() => setShowCreateModal(true)}
-          className="btn btn-primary btn-sm flex-shrink-0"
-        >
-          Add Company
-        </button>
       </div>
 
       {loadError ? (
@@ -126,8 +117,7 @@ export default function PlatformOverview() {
           <EmptyState
             icon={BuildingOffice2Icon}
             title="No companies yet"
-            description="Companies you create will appear here."
-            action={{ label: 'Add Company', onClick: () => setShowCreateModal(true) }}
+            description="The company is created when the first user registers on an empty install."
           />
         ) : (
         <div className="divide-y divide-fd-line">
@@ -159,146 +149,7 @@ export default function PlatformOverview() {
       </CockpitPanel>
         </>
       )}
-
-      {/* Create Company Modal */}
-      <CreateCompanyModal
-        open={showCreateModal}
-        onClose={() => setShowCreateModal(false)}
-        onCreated={() => {
-          setShowCreateModal(false);
-          loadOverview();
-        }}
-      />
     </div>
   );
 }
 
-
-function CreateCompanyModal({
-  open,
-  onClose,
-  onCreated,
-}: {
-  open: boolean;
-  onClose: () => void;
-  onCreated: () => void;
-}) {
-  const [form, setForm] = useState({
-    name: '',
-    admin_email: '',
-    admin_first_name: '',
-    admin_last_name: '',
-    admin_password: '',
-  });
-  const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
-
-  // The shared <Modal> keeps this component mounted while closed, so reset the
-  // form (clearing the typed admin password) and error whenever it closes —
-  // otherwise the next open would prefill the previous credentials/error.
-  useEffect(() => {
-    if (!open) {
-      setForm({ name: '', admin_email: '', admin_first_name: '', admin_last_name: '', admin_password: '' });
-      setError('');
-      setLoading(false);
-    }
-  }, [open]);
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError('');
-    setLoading(true);
-
-    try {
-      await api.createCompany(form);
-      onCreated();
-    } catch (e: any) {
-      setError(e.response?.data?.detail || 'Failed to create company');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <Modal open={open} onClose={onClose} size="md" ariaLabelledBy="create-company-title">
-      <h3 id="create-company-title" className="font-bold text-lg mb-4">Add New Company</h3>
-      <form onSubmit={handleSubmit} className="space-y-3">
-          <FormField label="Company Name" required labelClassName="text-sm">
-            {(field) => (
-              <input
-                {...field}
-                type="text"
-                className="input input-bordered input-sm w-full"
-                value={form.name}
-                onChange={(e) => setForm({ ...form, name: e.target.value })}
-                required
-              />
-            )}
-          </FormField>
-          <div className="grid grid-cols-2 gap-3">
-            <FormField label="Admin First Name" required labelClassName="text-sm">
-              {(field) => (
-                <input
-                  {...field}
-                  type="text"
-                  className="input input-bordered input-sm w-full"
-                  value={form.admin_first_name}
-                  onChange={(e) => setForm({ ...form, admin_first_name: e.target.value })}
-                  required
-                />
-              )}
-            </FormField>
-            <FormField label="Admin Last Name" required labelClassName="text-sm">
-              {(field) => (
-                <input
-                  {...field}
-                  type="text"
-                  className="input input-bordered input-sm w-full"
-                  value={form.admin_last_name}
-                  onChange={(e) => setForm({ ...form, admin_last_name: e.target.value })}
-                  required
-                />
-              )}
-            </FormField>
-          </div>
-          <FormField label="Admin Email" required labelClassName="text-sm">
-            {(field) => (
-              <input
-                {...field}
-                type="email"
-                className="input input-bordered input-sm w-full"
-                value={form.admin_email}
-                onChange={(e) => setForm({ ...form, admin_email: e.target.value })}
-                required
-              />
-            )}
-          </FormField>
-          <FormField label="Admin Password" required labelClassName="text-sm">
-            {(field) => (
-              <>
-                <input
-                  {...field}
-                  type="password"
-                  className="input input-bordered input-sm w-full"
-                  value={form.admin_password}
-                  onChange={(e) => setForm({ ...form, admin_password: e.target.value })}
-                  required
-                  minLength={12}
-                />
-                <p className="text-xs text-base-content/50 mt-1">Min 12 chars, uppercase, lowercase, number, special char</p>
-              </>
-            )}
-          </FormField>
-
-          {error && <div className="text-error text-sm">{error}</div>}
-
-          <div className="flex justify-end gap-2 pt-2">
-            <button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>Cancel</button>
-            <button type="submit" className="btn btn-primary btn-sm" disabled={loading}>
-              {loading ? <span className="loading loading-spinner loading-xs"></span> : 'Create Company'}
-            </button>
-          </div>
-      </form>
-    </Modal>
-  );
-}

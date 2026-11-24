@@ -77,12 +77,10 @@ exception** -- all three seams that call these walks do (``auth.register_public`
 unchanged, ``is_taken`` remains the caller's to define, and an uncaught exception here is
 a 500 on sign-in or a mid-import abort rather than a refusal.
 
-**The extraction is NOT complete.** ``services/company_onboarding.py`` still carries its
-own inline badge-from-email copy, and that one has neither a dedup walk nor the length
-cap below -- so an admin address with a 51+ character local part still overruns
-``employee_id String(50)`` and 500s company creation, invisibly under SQLite. It was left
-alone deliberately (it is a different route, on a different change), not overlooked. Route
-it through here when that route is next touched, rather than adding a fifth copy.
+The last inline badge-from-email copy outside this module lived in the company onboarding
+service, which was deleted with ``POST /platform/companies`` (owner decision 2026-11-23:
+Werco is the only company on this system). A new caller that derives a badge from an
+address routes through here rather than adding another copy.
 """
 
 import re

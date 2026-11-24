@@ -58,7 +58,6 @@
   "/quotes",
   "/quotes/:quoteId",
   "/receiving",
-  "/register-company",
   "/reports",
   "/rfq-packages/new",
   "/routing",
