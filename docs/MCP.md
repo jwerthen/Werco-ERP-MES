@@ -150,6 +150,15 @@ from `WorkOrderOperationUpdate`, so `work_orders_update_operation` no longer tak
 shop-floor operation reads) are unchanged. See
 [API.md → Inspection Schema](API.md#inspection-schema).
 
+**Re-checked again on 2026-11-23 after the Sheet Gaps list added one Work Orders tool**,
+`list_process_sheet_gaps` (`GET /work-orders/process-sheet-gaps`, Admin / Manager / Quality; no
+existing name shifted): 15 convenience + **779** generated, 16 shadowed, one more than the 778
+above. It is a read, so the read-only catalog is 8 convenience + **305** generated. It is not on the AI-external allowlist. The
+same change added an optional routing-operation link to each supplied operation on
+`POST /work-orders/`; `create_work_order` sends no operations, so the convenience tool is unchanged
+and always takes the routed path. See
+[API.md → Work Orders](API.md#work-orders), "Process sheets on supplied operations".
+
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
 `backend/tests/test_mcp_docs_names.py` checks every tool name this file, `CLAUDE.md` and `API.md`
@@ -343,7 +352,7 @@ routes authenticate every call; in IN-PROCESS mode it uses the real `ErpTokenVer
  "generated_tools":   [{"name": "...", "method": "GET", "path": "/api/v1/...", "tag": "...",
                         "function": "...", "annotations": {...}, "deprecated": false}],
  "shadowed_operations": [["GET", "/api/v1/inventory/"], ...],
- "counts": {"convenience": 15, "generated": 779, "shadowed": 16}
+ "counts": {"convenience": 15, "generated": 781, "shadowed": 16}
 }
 ```
 

@@ -1314,7 +1314,9 @@ company-scoped.
 |--------|----------|-------------|---------------|
 | GET | `/work-orders/` | List all work orders (`skip` ≥ 0, `limit` 1–5000 default 100 — the standard list tier, see [Pagination](#pagination)). `deleted_only=true` returns **only** this company's soft-deleted work orders — the restore view, **Admin / Manager**, and the only read in the API that can see one; see "Seeing a deleted work order" below | Yes (`deleted_only=true`: Admin / Manager) |
 | GET | `/work-orders/browse` | **The bounded, server-filtered page behind the Work Orders list screen.** Returns an **envelope**, not a bare array. Query: `skip` ≥ 0 (default 0; a `skip` past the last page is clamped to that page's start, and the response's `skip` reports the clamped value), `limit` **1–100** (default 50); `status` (one `WorkOrderStatus`; omitted = every status except complete / closed / cancelled); `search` (≤ 200 chars, a **literal** case-insensitive substring — `%` / `_` are not wildcards — over WO number, customer name, customer PO, lot, unit #, part number and part name); `customer` (≤ 255, exact customer name); `hide_cots` (default `true`: hides work orders whose part is purchased / hardware / raw material; part-less ones stay); `scope` (`overdue` \| `due_today`, open work orders by `due_date` against the **Central** date; or `late`, the daily `wo.late` summary's own rule: a released / in-progress / on-hold work order past its promise date — `must_ship_by`, else `due_date` — drafts never late); `work_order_type` (`production` \| `laser_cutting`, unknown → **422**; `laser_cutting` = nest packages — standalone laser work orders and the laser children a nest import hangs off a production job); `sort` (`work_order_number` \| `part` \| `customer` \| `due_date` \| `priority` (default) \| `status`, nulls last, ID tiebreaker) with `direction` (`asc` default \| `desc`); `group` (`none` default \| `customer` \| `part` \| `status`, rows ordered by group first). Response: `items` (`WorkOrderSummary` rows with operation progress), `total` (the full filtered count), `skip`, `limit`, `has_next`, `stats` (`overdue` / `in_progress` / `due_today` over the filtered set), `customers` (distinct customer names under every filter **except** `customer` — it honors `work_order_type` — capped at 1000, with `customers_truncated`), `group_totals` (full counts for only the groups on this page; `{}` when `group=none`), and `type_counts` (`{production, laser_cutting}`, both always present, zero-filled: rows per type under every **other** filter, `customer` included, deliberately **ignoring** `work_order_type` so each type chip shows its own count). A pure read sent `Cache-Control: no-store`: it **never reconciles on read** — no completion evidence, READY promotion or inventory effect — so loading the list does not heal a stranded work order the way `GET /work-orders/{id}` does (see "A read heals a stranded work order" below) | Effective `work_orders:view` in the active company (every role by default; **403** when a company role override removes it) |
-| POST | `/work-orders/` | Create work order. `work_order_type` is validated against the `WorkOrderType` vocabulary (**422** on an unknown value), and `'laser_cutting'` is **refused on create** (422) — nest-dispatch WOs are minted only by the laser nest import paths (see note below). Body accepts `sequential_operations` (**default `true`** — a sequenced routing; see "READY promotion" below) and the optional `unit_number` (≤ 50 chars — see "Unit #" below) | Yes |
+| POST | `/work-orders/` | Create work order. `work_order_type` is validated against the `WorkOrderType` vocabulary (**422** on an unknown value), and `'laser_cutting'` is **refused on create** (422) — nest-dispatch WOs are minted only by the laser nest import paths (see note below). Body accepts `sequential_operations` (**default `true`** — a sequenced routing; see "READY promotion" below) and the optional `unit_number` (≤ 50 chars — see "Unit #" below). Each supplied `operations[]` row accepts an optional `routing_operation_id` that keeps that routing step's process sheet; a link that is not on the part's released routing is **409** `ROUTING_OPERATION_UNMATCHED`, and a create that leaves a sheet-bearing step off the job is **503** (nothing saved) when its required audit row cannot be written — see "Process sheets on supplied operations" below | Admin / Manager / Supervisor |
+| GET | `/work-orders/preview-operations/{part_id}` | The operations `POST /work-orders/` would copy from the part's released routing (query `quantity`, default 1). `operations_preview` rows carry `routing_operation_id`, the `sequence` / `operation_number` the routed create would assign, and `process_sheet_id` / `process_sheet_number` / `process_sheet_released` (`false` = creating from this routing would be **409** `PROCESS_SHEET_UNAVAILABLE`; `null` = no sheet). Rows are returned for every part type, not only parts with a BOM. **404** for a part outside the active company. Pure read. See "Process sheets on supplied operations" below | Yes |
+| GET | `/work-orders/process-sheet-gaps` | **Quality's Sheet Gaps list** — live work orders whose part's released routing (or a BOM component's) carries process sheets but whose operations hold no snapshotted process-sheet step. Query `limit` 1–500 (default 200); response `{total, items}` with `total` counting every match. Pure read, writes nothing. MCP tool `list_process_sheet_gaps`. See "Process sheets on supplied operations" below | Admin / Manager / Quality |
 | GET | `/work-orders/{id}` | Get work order by ID. Also carries the job's cost by element (`job_cost_actuals`), the inventory-ledger material figure (`issued_material_cost`) and, per operation, where its actual hours come from (`hours_source`, `recorded_setup_hours`, `recorded_run_hours`, `hours_include_backfill`) — see "Cost and actual hours on the work-order read" below | Yes |
 | GET | `/work-orders/by-number/{wo_number}` | Get work order by number: the **same body** as by ID (every computed field included). A soft-deleted work order is **404**, as by ID. Unlike the read by ID it does **not** reconcile on read — it writes nothing | Yes |
 | GET | `/work-orders/{id}/timeline` | Chronological job history with category, actor and time filters; opaque cursor, `limit` 1–100 (default 30). Returns business events and source links, not raw audit payloads. Each item a single operation owns (its start / finish, production receipts, process-step evidence, labor, a blocker filed against it) carries `operation_id`; the job's own items carry `null` | Yes |
@@ -3089,6 +3091,66 @@ company-scoped.
 > **It is identity, not guidance.** On the operator payloads it rides beside `work_order_number` and
 > is deliberately **outside** `_job_guidance_fields` — see Shop Floor → "Unit # on operator and
 > display reads" for where it appears and why the five-key guidance contract was not widened.
+
+> **Process sheets on supplied operations (wo_change/2).** `POST /work-orders/` builds a job's
+> operations one of two ways. With `auto_routing` on and no `operations`, it copies the part's
+> released routing and snapshots every attached process sheet (`wo_operation_steps`), as it always
+> has. When the request **supplies** `operations` — which New Work Order does as soon as the planner
+> edits a routed row, and always for a restored form draft — those rows used to get **no snapshot**,
+> so the routing's required checks never reached the kiosk and the completion gate passed freely.
+> Supplied rows now keep their sheets through a link:
+>
+> - **`routing_operation_id`** (optional, > 0, per `operations[]` row) names the routing operation
+>   the row was copied from — the value `GET /work-orders/preview-operations/{part_id}` returns on
+>   each row. It is matched **by id, never by sequence or name**, so an edited, renamed or
+>   re-sequenced row keeps its sheet. Omit it for a step the planner added by hand; that row
+>   snapshots nothing. It is not stored on the operation; it is read at creation and recorded on
+>   the creation audit row.
+> - A valid link names an **active** operation on a **released**, active, non-deleted routing of the
+>   job's part, or of one of its BOM components, and the row's `component_part_id` must agree: the
+>   component's id for a component step, `null` or the job part's id for the part's own step. That is
+>   the same set the routed create copies (one shared reader); on a duplicate release the lowest
+>   routing id wins. An id only on an older routing revision counts as stale.
+> - **409 `ROUTING_OPERATION_UNMATCHED`**, nothing written, when any link fails. `detail` is an
+>   object: `{code, detail, operations: [{sequence, operation_number, routing_operation_id,
+>   reason}]}`, every bad row named, `reason` one of `not_found` (missing, or another company's —
+>   the two read the same), `not_on_released_routing`, `component_mismatch`. A stale link from a
+>   restored draft is refused, never dropped and never re-matched.
+> - Linked rows go through the **same** snapshot as the routed path
+>   (`process_sheet_service.snapshot_steps_for_work_order`), so a sheet family with no released
+>   revision is the existing **409 `PROCESS_SHEET_UNAVAILABLE`** and rolls the whole creation back.
+> - **Leaving a sheet-bearing step off is allowed** (a default, not an owner ruling). On the
+>   supplied path the creation audit row adds `operations_supplied: true`,
+>   `linked_routing_operation_ids` and `removed_process_sheet_steps` (each `{routing_operation_id,
+>   operation_number, operation_sequence, name, component_part_id, component_part_number,
+>   process_sheet_id, sheet_number}`). When that list is non-empty the row is **required evidence**:
+>   it is written through `log_required` inside `required_audit`, and if it cannot be written the
+>   request answers **503** and no work order is created. Every other create keeps the best-effort
+>   `log_create`, and the routed path's audit row is unchanged.
+> - `auto_routing: false` with no `operations` is an empty job by request; no link check runs and no
+>   supplied-path keys are written.
+>
+> **The preview** (`GET /work-orders/preview-operations/{part_id}?quantity=N`) now reads from that
+> same shared reader. Each row adds `routing_operation_id`, `sequence`, `operation_number` (for an
+> assembly, or any part with an active BOM: 10, 20, … with `operation_number` = `str(sequence)`, own
+> inspection steps last; for any other part: the routing's own sequence and operation number,
+> verbatim), `process_sheet_id`, `process_sheet_number` and `process_sheet_released`. It now also
+> returns rows for a part with no BOM (its own released routing); `bom_found` and
+> `component_routings` are unchanged. Rows with a null `component_part_id` carry the whole order
+> quantity as `component_quantity`, as the assembly's own rows always have.
+>
+> **The Sheet Gaps list** (`GET /work-orders/process-sheet-gaps`, Admin / Manager / Quality) finds
+> the jobs that already went out without their sheets. A row is a work order that is not deleted,
+> not complete / closed / cancelled (drafts included), not a laser-cutting job, whose part's
+> released routing — or a BOM component's, at any depth — carries a process sheet today, and whose
+> operations hold **no** snapshotted step at all. A job holding some but not all of its sheet steps
+> is not listed (its creation audit row names what was left off). The routing is read as it is now,
+> so a job created before a sheet was attached is listed too. Each item: `work_order_id`,
+> `work_order_number`, `status`, `part_id`, `part_number`, `part_name`, `quantity_ordered`,
+> `due_date`, `customer_name`, `created_at` (UTC `Z`), `operation_count`, and
+> `expected_process_sheet_steps` (same shape as `removed_process_sheet_steps`). Ordered by due date,
+> undated last. Tenant-scoped pure read: no write, no audit row, no event; an API token may read it.
+> There is no fix-up verb: re-snapshotting sheets onto an existing job is not built.
 
 > **Duplicating a work order (`POST /work-orders/{id}/duplicate`).** Re-runs a job's **plan** without
 > re-entering it — the motivating case is a 40-nest laser package confirmed once through the import

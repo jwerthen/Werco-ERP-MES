@@ -75,6 +75,7 @@ from app.schemas.work_order import (
     WorkOrderOperationCreate,
     WorkOrderOperationResponse,
     WorkOrderOperationUpdate,
+    WorkOrderProcessSheetGapResponse,
     WorkOrderResponse,
     WorkOrderRestoreResponse,
     WorkOrderResumeResponse,
@@ -82,7 +83,12 @@ from app.schemas.work_order import (
     WorkOrderUpdate,
 )
 from app.schemas.work_order_timeline import TimelineCategory, WorkOrderTimelineResponse
-from app.services import dispatch_service, process_sheet_service, work_order_release_service
+from app.services import (
+    dispatch_service,
+    process_sheet_service,
+    work_order_process_sheet_service,
+    work_order_release_service,
+)
 from app.services.audit_service import AuditService, AuditWriteError
 from app.services.comment_service import comment_counts_for_record
 from app.services.completion_cost_service import (
@@ -2470,7 +2476,15 @@ def preview_work_order_operations(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Preview what operations would be generated for a part (for debugging)"""
+    """Preview the operations ``POST /work-orders`` would copy from the part's released routing.
+
+    Each ``operations_preview`` row carries ``routing_operation_id`` (send it back on the
+    matching supplied operation so the step keeps its process sheet), the ``sequence`` and
+    ``operation_number`` the routed create would assign, and the attached
+    ``process_sheet_id`` / ``process_sheet_number`` with ``process_sheet_released`` (false =
+    creating from this routing would be refused 409 PROCESS_SHEET_UNAVAILABLE). Rows with no
+    sheet carry nulls. Pure read.
+    """
     part = db.query(Part).filter(Part.id == part_id, Part.company_id == company_id).first()
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
@@ -2544,68 +2558,69 @@ def preview_work_order_operations(
                     previewed_component_part_ids.add(component.id)
                     for op in sorted(routing.operations, key=lambda operation: operation.sequence):
                         if op.is_active:
-                            work_center = op.work_center
                             comp_info["routing_operations"].append(
                                 {"sequence": op.sequence, "name": op.name, "work_center_id": op.work_center_id}
-                            )
-                            result["operations_preview"].append(
-                                {
-                                    "name": f"{component.part_number} - {op.name}",
-                                    "work_center_id": op.work_center_id,
-                                    "work_center_name": work_center.name if work_center else "Unknown",
-                                    "setup_hours": op.setup_hours,
-                                    "run_hours_per_unit": op.run_hours_per_unit,
-                                    "setup_instructions": op.setup_instructions,
-                                    "run_instructions": op.work_instructions,
-                                    "requires_inspection": op.is_inspection_point,
-                                    "component_part_id": component.id,
-                                    "component_part_number": component.part_number,
-                                    "component_quantity": total_component_qty,
-                                    "operation_group": get_work_center_group(work_center) if work_center else None,
-                                }
                             )
 
                 result["component_routings"].append(comp_info)
 
-            assembly_routing = (
-                db.query(Routing)
-                .options(selectinload(Routing.operations).selectinload(RoutingOperation.work_center))
-                .filter(
-                    Routing.company_id == company_id,
-                    Routing.part_id == part_id,
-                    Routing.is_active == True,
-                    Routing.status == "released",
-                )
-                .first()
-            )
-
-            if assembly_routing:
-                active_assembly_ops = [
-                    op for op in sorted(assembly_routing.operations, key=lambda op: op.sequence) if op.is_active
-                ]
-                non_inspection_ops = [op for op in active_assembly_ops if not _is_inspection_operation(op)]
-                inspection_ops = [op for op in active_assembly_ops if _is_inspection_operation(op)]
-
-                for op in non_inspection_ops + inspection_ops:
-                    work_center = op.work_center
-                    result["operations_preview"].append(
-                        {
-                            "name": op.name,
-                            "work_center_id": op.work_center_id,
-                            "work_center_name": work_center.name if work_center else "Unknown",
-                            "setup_hours": op.setup_hours,
-                            "run_hours_per_unit": op.run_hours_per_unit,
-                            "setup_instructions": op.setup_instructions,
-                            "run_instructions": op.work_instructions,
-                            "requires_inspection": op.is_inspection_point,
-                            "component_part_id": None,
-                            "component_part_number": part.part_number,
-                            "component_quantity": quantity,
-                            "operation_group": get_work_center_group(work_center) if work_center else None,
-                        }
-                    )
+    # wo_change/2: the rows come from the SAME reader the create path validates a supplied
+    # ``routing_operation_id`` against, so every row the planner is shown carries the id the
+    # form sends back and the sheet it keeps. A part with no BOM now previews too (its own
+    # released routing, at the routing's own sequence and operation number).
+    for step in work_order_process_sheet_service.released_routing_steps(db, part, company_id, float(quantity or 0)):
+        rop = step.routing_operation
+        work_center = step.work_center
+        component = step.component_part
+        result["operations_preview"].append(
+            {
+                "name": step.name,
+                "work_center_id": rop.work_center_id,
+                "work_center_name": work_center.name if work_center else "Unknown",
+                "setup_hours": rop.setup_hours,
+                "run_hours_per_unit": rop.run_hours_per_unit,
+                "setup_instructions": rop.setup_instructions,
+                "run_instructions": rop.work_instructions,
+                "requires_inspection": rop.is_inspection_point,
+                "component_part_id": component.id if component is not None else None,
+                "component_part_number": component.part_number if component is not None else part.part_number,
+                "component_quantity": step.component_quantity,
+                "operation_group": get_work_center_group(work_center) if work_center else None,
+                "routing_operation_id": step.routing_operation_id,
+                "sequence": step.sequence,
+                "operation_number": step.operation_number,
+                "process_sheet_id": step.process_sheet_id,
+                "process_sheet_number": step.process_sheet_number,
+                "process_sheet_released": step.process_sheet_released,
+            }
+        )
 
     return result
+
+
+@router.get(
+    "/process-sheet-gaps",
+    response_model=WorkOrderProcessSheetGapResponse,
+    summary="Live work orders created without their process sheets",
+)
+def list_process_sheet_gaps(
+    limit: int = Query(200, ge=1, le=500, description="Most rows returned; ``total`` counts them all."),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Quality's job-by-job worklist: live work orders whose part's released routing carries
+    process sheets but whose operations hold no snapshotted process-sheet step, so the
+    kiosk shows none of the required checks and the completion gate does not apply.
+
+    "Live" = not deleted and not complete, closed or cancelled; laser-cutting work orders
+    are left out (their operations are nests). The routing is read as it is TODAY, so a job
+    created before a sheet was attached is listed too. Each row names the sheet-bearing
+    steps the job would carry if created from its routing now. Ordered by due date (none
+    last). Pure read: writes nothing, no audit row.
+    """
+    items = work_order_process_sheet_service.process_sheet_gaps(db, company_id)
+    return WorkOrderProcessSheetGapResponse(total=len(items), items=items[:limit])
 
 
 def _is_inspection_operation(operation: RoutingOperation) -> bool:
@@ -2629,6 +2644,12 @@ def _is_inspection_operation(operation: RoutingOperation) -> bool:
         (work_center.work_center_type or "").upper(),
     )
     return any(token in field for field in wc_fields for token in inspection_tokens)
+
+
+MSG_REMOVED_SHEET_STEPS_AUDIT_UNAVAILABLE = (
+    "The audit record of the process-sheet steps left off this work order could not be saved; "
+    "the work order was not created. Retry."
+)
 
 
 @router.post("/", response_model=WorkOrderResponse, status_code=status.HTTP_201_CREATED)
@@ -2667,6 +2688,7 @@ def create_work_order(
     # Auto-generate operations from routing if enabled and no operations provided
 
     process_sheet_snapshot: list[dict] = []
+    supplied_link: Optional[work_order_process_sheet_service.SuppliedLinkResult] = None
     if auto_routing and not work_order_in.operations:
         # Copies routed operations AND snapshots attached process sheets (PR 3) in this
         # same pre-commit unit of work — a family with no released revision raises a
@@ -2676,12 +2698,31 @@ def create_work_order(
         )
     else:
         # Create operations from input
+        supplied_rows: list[tuple[WorkOrderOperation, Optional[int]]] = []
         for op_data in work_order_in.operations:
             # Tenancy: the work center is caller-supplied, so it must be proven to
             # belong to the active company before it is written onto the row.
             _assert_work_center_in_company(db, op_data.work_center_id, company_id)
-            operation = WorkOrderOperation(work_order_id=work_order.id, company_id=company_id, **op_data.model_dump())
+            operation = WorkOrderOperation(
+                work_order_id=work_order.id,
+                company_id=company_id,
+                **op_data.model_dump(exclude={"routing_operation_id"}),
+            )
             db.add(operation)
+            supplied_rows.append((operation, op_data.routing_operation_id))
+        # wo_change/2: a supplied row linked to its routing operation (by id, never by
+        # sequence or name) keeps that step's process sheet -- the SAME snapshot the routed
+        # path runs, so a family with no released revision is the same 409 and rolls the
+        # whole creation back. A stale or foreign link is refused 409 before the snapshot.
+        # Only when rows were actually supplied: ``auto_routing=false`` with no operations
+        # is an empty job by request, not a planner who removed every routed step.
+        if supplied_rows:
+            supplied_link = work_order_process_sheet_service.link_supplied_operations(
+                db, part, company_id, float(work_order_in.quantity_ordered), supplied_rows
+            )
+            process_sheet_snapshot = process_sheet_service.snapshot_steps_for_work_order(
+                db, company_id, supplied_link.operation_sheet_pairs
+            )
 
     work_order_id = work_order.id
 
@@ -2712,21 +2753,44 @@ def create_work_order(
     db.flush()
     db.expire_all()
     work_order = load_created_work_order()
-    audit.log_create(
-        resource_type="work_order",
-        resource_id=work_order.id,
-        resource_identifier=work_order.work_order_number,
-        new_values=work_order,
-        extra_data={
-            "part_number": part.part_number,
-            "quantity": float(work_order.quantity_ordered),
-            "auto_routing": auto_routing,
-            "operation_count": len(work_order.operations),
-            # PR 3 traceability: which sheet families resolved to which released
-            # revisions at snapshot time (empty when no operation carries a sheet).
-            "process_sheet_snapshot": process_sheet_snapshot,
-        },
-    )
+    creation_extra: dict[str, Any] = {
+        "part_number": part.part_number,
+        "quantity": float(work_order.quantity_ordered),
+        "auto_routing": auto_routing,
+        "operation_count": len(work_order.operations),
+        # PR 3 traceability: which sheet families resolved to which released
+        # revisions at snapshot time (empty when no operation carries a sheet).
+        "process_sheet_snapshot": process_sheet_snapshot,
+    }
+    if supplied_link is not None:
+        # Supplied-operations path only, so the routed path's audit row is unchanged.
+        # ``removed_process_sheet_steps`` names every sheet-bearing routing step this job
+        # does NOT carry (owner default: allowed, warned on screen, recorded here).
+        creation_extra["operations_supplied"] = True
+        creation_extra["linked_routing_operation_ids"] = supplied_link.linked_routing_operation_ids
+        creation_extra["removed_process_sheet_steps"] = supplied_link.removed_process_sheet_steps
+    if supplied_link is not None and supplied_link.removed_process_sheet_steps:
+        # This row is the ONLY record that the job was created without some of its routing's
+        # required checks (the Sheet Gaps list shows only jobs that hold none at all), so it
+        # is REQUIRED evidence: the work order and the row commit together, or neither does.
+        with required_audit(db, MSG_REMOVED_SHEET_STEPS_AUDIT_UNAVAILABLE):
+            audit.log_required(
+                action=audit.ACTIONS["CREATE"],
+                resource_type="work_order",
+                resource_id=work_order.id,
+                resource_identifier=work_order.work_order_number,
+                description=f"Created work_order: {work_order.work_order_number}",
+                new_values=audit._model_to_dict(work_order),
+                extra_data=creation_extra,
+            )
+    else:
+        audit.log_create(
+            resource_type="work_order",
+            resource_id=work_order.id,
+            resource_identifier=work_order.work_order_number,
+            new_values=work_order,
+            extra_data=creation_extra,
+        )
     db.commit()
 
     # Defensive reconcile, in its OWN transaction after the work order and its audit row are
@@ -2924,18 +2988,11 @@ def _create_assembly_routing_operations(
 
         routings_by_part_id = {}
         if component_ids:
-            routings = (
-                db.query(Routing)
-                .options(selectinload(Routing.operations).selectinload(RoutingOperation.work_center))
-                .filter(
-                    Routing.company_id == company_id,
-                    Routing.part_id.in_(set(component_ids)),
-                    Routing.is_active == True,
-                    Routing.status == "released",
-                )
-                .all()
+            # ONE routing-selection rule, shared with the preview and the supplied-row link
+            # validation (wo_change/2), so what is shown, validated and copied cannot differ.
+            routings_by_part_id = work_order_process_sheet_service.released_routings_by_part(
+                db, company_id, component_ids
             )
-            routings_by_part_id = {routing.part_id: routing for routing in routings}
 
         quantity_by_component_id: dict[int, float] = {}
         for _, component_for_qty, qty_per_assembly in component_items:
@@ -2992,17 +3049,9 @@ def _create_assembly_routing_operations(
                 operation_sheet_pairs.append((wo_op, rop.process_sheet_id))
                 sequence += 10
 
-    assembly_routing = (
-        db.query(Routing)
-        .options(selectinload(Routing.operations).selectinload(RoutingOperation.work_center))
-        .filter(
-            Routing.company_id == company_id,
-            Routing.part_id == work_order.part_id,
-            Routing.is_active == True,
-            Routing.status == "released",
-        )
-        .first()
-    )
+    assembly_routing = work_order_process_sheet_service.released_routings_by_part(
+        db, company_id, [work_order.part_id]
+    ).get(int(work_order.part_id))
 
     if not assembly_routing:
         return operation_sheet_pairs
@@ -3069,16 +3118,8 @@ def create_routing_operations_for_work_order(
         )
         return process_sheet_service.snapshot_steps_for_work_order(db, company_id, operation_sheet_pairs)
 
-    routing = (
-        db.query(Routing)
-        .options(selectinload(Routing.operations).selectinload(RoutingOperation.work_center))
-        .filter(
-            Routing.company_id == company_id,
-            Routing.part_id == work_order.part_id,
-            Routing.is_active == True,
-            Routing.status == "released",
-        )
-        .first()
+    routing = work_order_process_sheet_service.released_routings_by_part(db, company_id, [work_order.part_id]).get(
+        int(work_order.part_id)
     )
     if not routing:
         return []

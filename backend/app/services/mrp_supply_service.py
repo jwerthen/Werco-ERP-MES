@@ -21,7 +21,7 @@ from app.models.work_center import WorkCenter
 from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.schemas.mrp import MRPSupplyDraftRequest, MRPSupplyDraftResponse
 from app.schemas.purchasing import POCreate, POLineCreate
-from app.schemas.work_order import WorkOrderCreate, WorkOrderOperationCreate
+from app.schemas.work_order import WorkOrderCreate, WorkOrderCreateOperation
 from app.services.audit_service import AuditService
 from app.services.mrp_service import CUSTOMER_SUPPLIED_SUPPLY_DETAIL, MRPService, is_customer_supplied
 from app.services.operational_event_service import OperationalEventService
@@ -453,7 +453,7 @@ class MRPSupplyService:
             if not center:
                 raise HTTPException(422, 'Choose an active work center in this workspace.')
             operations = [
-                WorkOrderOperationCreate(
+                WorkOrderCreateOperation(
                     sequence=10, operation_number='10', name='Supply production', work_center_id=center.id
                 )
             ]
@@ -484,7 +484,11 @@ class MRPSupplyService:
         if operations:
             for operation in operations:
                 self.db.add(
-                    WorkOrderOperation(company_id=self.company_id, work_order_id=wo.id, **operation.model_dump())
+                    WorkOrderOperation(
+                        company_id=self.company_id,
+                        work_order_id=wo.id,
+                        **operation.model_dump(exclude={'routing_operation_id'}),
+                    )
                 )
         else:
             snapshots = create_routing_operations_for_work_order(

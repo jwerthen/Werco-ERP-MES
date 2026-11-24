@@ -36,6 +36,7 @@ import useUnsavedChanges from '../hooks/useUnsavedChanges';
 import type { FAIPrefillResult } from '../types/processSheet';
 import { ScrapReasonCode, SCRAP_CATEGORIES } from '../types/scrapReason';
 import { QualityFlowdownSettings } from '../components/purchasing/QualityFlowdownSettings';
+import ProcessSheetGapsPanel from '../components/quality/ProcessSheetGapsPanel';
 import {
   PlusIcon,
   ExclamationTriangleIcon,
@@ -43,15 +44,16 @@ import {
   DocumentMagnifyingGlassIcon,
   ShieldCheckIcon,
   TagIcon,
+  ListBulletIcon,
   XMarkIcon,
   XCircleIcon,
 } from '@heroicons/react/24/outline';
 
-type TabType = 'ncr' | 'car' | 'fai' | 'scrap' | 'flowdown';
+type TabType = 'ncr' | 'car' | 'fai' | 'scrap' | 'flowdown' | 'sheetgaps';
 
-// The tabs every Quality reader gets. 'flowdown' (PO Flow-down) is deliberately NOT here: it
-// is role-gated, so its `?tab=flowdown` deep link is honored by its own effect, which checks
-// the gate first.
+// The tabs every Quality reader gets. 'flowdown' (PO Flow-down) and 'sheetgaps' (work orders
+// missing process sheets) are deliberately NOT here: they are role-gated, so their `?tab=`
+// deep links are honored by their own effects, which check the gate first.
 const TAB_IDS: readonly TabType[] = ['ncr', 'car', 'fai', 'scrap'];
 
 const isTabType = (value: string | null): value is TabType =>
@@ -341,6 +343,14 @@ export default function QualityPage() {
       setFlowdownVisited(true);
     }
   }, [searchParams, activeTab, canManageFlowdown]);
+  // Work orders missing process sheets: GET /work-orders/process-sheet-gaps is
+  // require_role([ADMIN, MANAGER, QUALITY]) — the same set as the flow-down gate.
+  const canReviewSheetGaps = canManageFlowdown;
+  useEffect(() => {
+    if (searchParams.get('tab') === 'sheetgaps' && canReviewSheetGaps && activeTab !== 'sheetgaps') {
+      setActiveTab('sheetgaps');
+    }
+  }, [searchParams, activeTab, canReviewSheetGaps]);
   // Inspections (the working list) or the FAI log of record — URL-backed like the tab.
   const faiView: FaiView = searchParams.get('fai_view') === 'log' ? 'log' : 'inspections';
   const selectFaiView = (view: FaiView) => {
@@ -1159,6 +1169,7 @@ export default function QualityPage() {
             { id: 'car', label: 'CAR', icon: ClipboardDocumentCheckIcon },
             { id: 'fai', label: 'FAI', icon: DocumentMagnifyingGlassIcon },
             { id: 'scrap', label: 'Scrap Codes', icon: TagIcon },
+            ...(canReviewSheetGaps ? [{ id: 'sheetgaps', label: 'Sheet Gaps', icon: ListBulletIcon }] : []),
             ...(canManageFlowdown ? [{ id: 'flowdown', label: 'PO Flow-down', icon: ShieldCheckIcon }] : []),
           ].map(tab => (
             <button
@@ -1426,6 +1437,8 @@ export default function QualityPage() {
             )}
           </>
         )}
+        {/* Work orders missing process sheets (wo_change/2) — a pure read. */}
+        {activeTab === 'sheetgaps' && canReviewSheetGaps && <ProcessSheetGapsPanel />}
         {/* Scrap Codes Tab (Lean Phase 1) — the vocabulary behind every scrap
             picker. Deactivate-not-delete; writes are ADMIN/MANAGER/QUALITY. */}
         {activeTab === 'scrap' && (
