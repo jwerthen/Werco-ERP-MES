@@ -165,7 +165,7 @@ def get_laser_nest_tie_coverage(
 def get_untied_sheet_report(
     completed_from: Optional[date] = Query(
         None,
-        description=f"{LOCAL_DATE_FROM_DESCRIPTION}. Default: the last 90 days, or no window when work_order_id is set",
+        description=f"{LOCAL_DATE_FROM_DESCRIPTION}. Default (neither date given): the last 90 days",
     ),
     completed_to: Optional[date] = Query(None, description=LOCAL_DATE_TO_DESCRIPTION),
     db: Session = Depends(get_db),

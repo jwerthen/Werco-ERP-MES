@@ -2,8 +2,8 @@
 
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
-(Cursor, Claude Code, a chat bot) gets **795 tools** — 15 hand-written *convenience* tools plus
-**780 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+(Cursor, Claude Code, a chat bot) gets **799 tools** — 15 hand-written *convenience* tools plus
+**784 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
 as the same request from the web app. A **read-only** API token is shown fewer tools, and an
 **AI-external** one fewer still (§4.1, §4.2).
 
@@ -120,6 +120,15 @@ credential (§6.1, §4.3). That half was not separately put to the owner and is 
 confirmed with them. See
 [API.md → Maintenance](API.md#maintenance-pm-schedules-maintenance-work-orders-event-log), *Maintenance
 log entries*.
+
+**Re-checked again on 2026-11-23 after the untied laser-nest reads added four Laser Nests tools**
+(`list_untied_laser_nests`, `get_laser_nest_tie_coverage`, `get_untied_sheet_report`,
+`get_work_order_nest_tie_summary`; no existing name shifted): 15 convenience + **784** generated, 16
+shadowed. All four are reads, so the read-only catalog is 8 convenience + **308** generated. None is
+on the AI-external allowlist (`AI_EXTERNAL_ALLOWED_ROUTES` was not extended). They stay
+tools because nothing about them is a judgment write; tying a sheet from their `proposed_tie` is the
+existing `create_material_allocation`. See
+[API.md → Laser Nests](API.md#laser-nests), *Untied nests*.
 
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
@@ -764,6 +773,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `WorkOrders` (`/work-orders`) | Work Orders, Work Order Templates | `work_orders_list_work_orders`, `get_work_order_by_number`, `update_work_order_priority`, `work_orders_delete_work_order`, `work_orders_restore_work_order`, `list_work_order_templates`, `use_work_order_template`, `release_work_order`★ — **bulk release is not a tool**: `POST /work-orders/bulk-release` is in `EXCLUDED_OPERATIONS` (§6.1), so release one job per call |
 | `WorkOrderNew` (`/work-orders/new`) | Work Orders, Parts, Bill of Materials, Routing, Customers, Setup & Readiness, Work Centers | `create_work_order`★, `preview_work_order_operations`, `get_routing_by_part`, `list_customer_names`, `get_part_readiness`, `list_work_centers`★ |
 | `WorkOrderDetail` (`/work-orders/:id`) | Work Orders, Work Order Materials, Laser Nests, Work Order Blockers, Documents, Shop Floor, Comments, Users | `get_work_order`★, `add_operation`★, `update_work_order`★, `release_work_order`★, `duplicate_work_order`★, `add_laser_nest`★, `work_orders_start_work_order`, `work_orders_resume_work_order`, `work_orders_complete_work_order`, `work_orders_complete_operation`, `work_orders_update_operation`, `update_laser_nest`, `delete_laser_nest`, `list_material_allocations`, `create_work_order_blocker`, `attach_document_to_work_order`, `list_record_comments`, `get_record_watch_state`, `search_mentionable_users` (the Comments panel's reads; **posting, editing or deleting a comment and watching are not tools**: the five writes are in `EXCLUDED_OPERATIONS`, §6.1) |
+| `UntiedLaserNests` (`/laser-nests/untied`) | Laser Nests, Work Order Materials, Inventory | `list_untied_laser_nests`, `get_laser_nest_tie_coverage`, `get_untied_sheet_report`, `create_material_allocation` (Tie this sheet), `create_cycle_count` (Start cycle count); Work Order Detail's untied-nest line and Release warning read `get_work_order_nest_tie_summary` |
 | `ShopFloor` (`/shop-floor`) | Shop Floor, Work Order Blockers, Work Centers, Work Orders | `get_shop_floor_dashboard`★, `get_all_operations`, `get_active_shop_users`, `list_work_order_blockers`, `resolve_work_order_blocker` |
 | `ShopFloorSimple` (`/shop-floor/operations`) | Shop Floor, Scanner, Work Centers, Work Orders | `get_all_operations`, `shop_floor_start_operation`, `shop_floor_complete_operation`, `put_operation_on_hold`, `shop_floor_resume_operation`, `lookup_barcode`, `resolve_action` |
 | `OperatorKiosk` (`/kiosk`) | Shop Floor | `clock_in`, `clock_out`, `get_my_active_job`, `get_work_center_queue`, `get_operation_steps`, `record_operation_step`, `report_operation_production`, `shop_floor_complete_operation` — under the caller's own user token (kiosk badge tokens are refused) |
@@ -945,7 +955,8 @@ three report-template routes then made it **770 generated tools**, and on 2026-1
 re-verification and CAR effectiveness verbs **772**, the five PO quality flow-down routes
 **777**, the inventory ownership route (migration 129) **778**, and the document access review
 (migration 131) **779**; the four floor-PIN writes and the two document-access writes joined the
-exclusions (twenty-six) without changing the count.
+exclusions (twenty-six) without changing the count. On 2026-11-20 the maintenance log read made it
+**780**, and on 2026-11-23 the four untied laser-nest reads **784**.
 
 ### 6.2 Naming and the collision policy (`app/mcp/naming.py`)
 

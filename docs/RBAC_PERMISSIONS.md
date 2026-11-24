@@ -347,6 +347,8 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 | Approve labor (TimeEntry) | ✓ | ✓ | ✓ | | ✓ | | |
 | View material ties | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Tie / edit / untie material | ✓ | ✓ | ✓ | | | | |
+| View untied laser nests, tie coverage, the untied-sheet report and a job's tie summary (`GET /laser-nests/untied`, `/untied/coverage`, `/untied/sheet-report`, `/laser-nests/work-orders/{id}/tie-summary`) | ✓ | ✓ | ✓ | | | | |
+| **Untied Laser Nests page** (`/laser-nests/untied`) — nav entry + route, `work_orders:edit` | ✓ | ✓ | ✓ | | | | |
 | View work order templates | ✓ | ✓ | ✓ | | | | |
 | Save / rename / delete a work order template | ✓ | ✓ | ✓ | | | | |
 | Use a work order template (creates DRAFT WOs — up to 20 per call) | ✓ | ✓ | ✓ | | | | |
@@ -810,6 +812,27 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > which is open to **any authenticated user** (`get_current_user`) so operators can view the shop
 > drawing — read-only and still tenant-scoped (a cross-tenant or soft-deleted nest → **404**). All
 > writes are audited; nests are soft-deleted, never hard-deleted. See `docs/API.md` → Laser Nests.
+
+> **Untied laser nests — endpoint mapping.** The four untied-nest reads —
+> `GET /api/v1/laser-nests/untied`, `GET /api/v1/laser-nests/untied/coverage`,
+> `GET /api/v1/laser-nests/untied/sheet-report` and
+> `GET /api/v1/laser-nests/work-orders/{work_order_id}/tie-summary` — are
+> `require_role([ADMIN, MANAGER, SUPERVISOR])`, the same trio that may tie a sheet
+> (`work_order_materials` `WRITE_ROLES`), so every **Tie this sheet** button a reader sees is one the
+> server will accept. Quality, Operator, Shipping and Viewer get **403**; a kiosk station token is
+> refused on all four. They are pure reads (no audit, ledger or event row) and tenant-scoped; the
+> tie summary answers **404** for another company's or a deleted work order. The page that uses them,
+> **Untied Laser Nests** (`/laser-nests/untied`), and its Production nav entry are both gated on
+> `work_orders:edit` (`frontend/src/utils/routeAccess.ts` rule `{ prefix: '/laser-nests', permission:
+> 'work_orders:edit' }`), which is exactly that trio plus a platform admin; the Work Order Detail
+> "N of M nests have no sheet tied" line and the Release warning fetch the summary only for the same
+> permission. Its two actions add **no new write**: **Tie this sheet** is the existing
+> `POST /api/v1/work-orders/{id}/material-allocations` (Tie / edit / untie material row) and **Start
+> cycle count** is the existing `POST /api/v1/inventory/cycle-counts`, each with its own gate and
+> refusals. The four reads are ordinary MCP tools (`list_untied_laser_nests`,
+> `get_laser_nest_tie_coverage`, `get_untied_sheet_report`, `get_work_order_nest_tie_summary`), so a
+> standing API token held by one of the three roles may call them; nothing about them is a judgment
+> write. Floor screens (dispatch board, kiosk, crew station) never call them.
 
 > **Dispatch run order — endpoint mapping.** Setting the order operators see work in is a planner
 > act, gated to the Work Orders **Edit** row above —
