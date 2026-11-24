@@ -64,6 +64,7 @@ import {
 } from '../utils/shortCount';
 import { ScanResolveResult } from '../types/scan';
 import { useAuth } from '../context/AuthContext';
+import { InspectionSignOffControl, canSignOffInspection } from '../components/quality/InspectionSignOff';
 import { useCompany } from '../context/CompanyContext';
 import { usePhoneLayout } from '../hooks/usePhoneLayout';
 import { useShopFloorWorkspace, ShopFloorView } from '../hooks/useShopFloorWorkspace';
@@ -111,6 +112,12 @@ interface Operation extends OperationShortCountFields {
   setup_instructions: string | null;
   run_instructions: string | null;
   requires_inspection: boolean;
+  /**
+   * Whether the in-process inspection has been signed off (the audited
+   * `POST /shop-floor/operations/{id}/inspection` is its only writer). Optional
+   * because the SPA and the API deploy independently: absent reads as unsigned.
+   */
+  inspection_complete?: boolean;
   can_check_in?: boolean;
   blocked_by_previous_operations?: boolean;
   /**
@@ -656,6 +663,8 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
     return Boolean(dueDate && isDateTodayInCentral(dueDate));
   };
   const canEditPriority = can('work_orders:edit');
+  // POST /shop-floor/operations/{id}/inspection: ADMIN/MANAGER/SUPERVISOR/QUALITY.
+  const canSignOff = canSignOffInspection(user);
 
 
 
@@ -2340,6 +2349,22 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
                   {op.laser_nest && (
                     <div className="mt-2">
                       <LaserNestOperatorPanel nest={op.laser_nest} size="compact" />
+                    </div>
+                  )}
+                  {/* In-process inspection point. Sign off is a desk action for
+                      ADMIN/MANAGER/SUPERVISOR/QUALITY (the route's roles); every
+                      other role sees the chip only. NON-optimistic: the chip reads
+                      "Inspected" from the re-read list (or the sign-off's own 200). */}
+                  {(op.requires_inspection || op.inspection_complete) && (
+                    <div className="mt-2" data-testid={`shop-floor-inspection-${op.id}`}>
+                      <InspectionSignOffControl
+                        operationId={op.id}
+                        operationLabel={`${op.work_order_number} \u00b7 ${formatOperationLabel(op.operation_number)} \u2014 ${op.operation_name}`}
+                        requiresInspection={Boolean(op.requires_inspection)}
+                        inspectionComplete={Boolean(op.inspection_complete)}
+                        canSignOff={canSignOff}
+                        onSignedOff={() => loadOperations()}
+                      />
                     </div>
                   )}
                 </div>

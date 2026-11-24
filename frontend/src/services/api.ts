@@ -104,6 +104,9 @@ import {
   ShopFloorCompleteOperationRequest,
   OfficeOperationCompleteOptions,
   OfficeOperationCompleteResult,
+  OperationInspectionRequest,
+  OperationInspectionResponse,
+  WorkOrderOperationUpdatePayload,
 } from '../types';
 import { ScanResolveRequest, ScanResolveResult } from '../types/scan';
 import type {
@@ -2084,7 +2087,11 @@ class ApiService {
     return response.data;
   }
 
-  async updateOperation(operationId: number, data: any) {
+  /**
+   * Generic operation edit. The payload type has no `inspection_complete`: the server
+   * refuses it 422 — sign an inspection off with `signOffOperationInspection`.
+   */
+  async updateOperation(operationId: number, data: WorkOrderOperationUpdatePayload) {
     const response = await this.api.put(`/work-orders/operations/${operationId}`, data);
     return response.data;
   }
@@ -2858,6 +2865,25 @@ class ApiService {
 
   async getOperationDetails(operationId: number) {
     const response = await this.api.get(`/shop-floor/operations/${operationId}`);
+    return response.data;
+  }
+
+  /**
+   * In-process inspection sign-off — the ONLY writer of `inspection_complete`.
+   * ADMIN/MANAGER/SUPERVISOR/QUALITY, a person only (a standing API token is 403),
+   * and its audit row is required evidence (503, nothing signed, when it cannot be
+   * written). Server-gated, so callers stay NON-optimistic: show "Inspected" only
+   * after this resolves, then re-read.
+   */
+  async signOffOperationInspection(
+    operationId: number,
+    data: OperationInspectionRequest = {}
+  ): Promise<OperationInspectionResponse> {
+    const response = await this.api.post<OperationInspectionResponse>(
+      `/shop-floor/operations/${operationId}/inspection`,
+      data
+    );
+    this.invalidateDashboardCache();
     return response.data;
   }
 

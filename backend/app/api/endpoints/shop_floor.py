@@ -4168,6 +4168,11 @@ def get_all_operations(
                 "setup_instructions": op.setup_instructions,
                 "run_instructions": op.run_instructions,
                 "requires_inspection": op.requires_inspection,
+                # Whether the in-process inspection has been signed off (the audited
+                # POST /shop-floor/operations/{id}/inspection is its only writer), so the
+                # desk row can show "Inspection required" vs "Inspected" without a
+                # per-row detail read.
+                "inspection_complete": bool(op.inspection_complete),
                 # Present on ON_HOLD rows only (see above); the key is absent
                 # everywhere else rather than sent as null.
                 **({"hold": hold_payload} if hold_payload is not None else {}),

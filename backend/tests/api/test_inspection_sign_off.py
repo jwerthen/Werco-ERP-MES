@@ -196,3 +196,23 @@ def test_generic_operation_update_schema_has_no_inspection_complete():
     schema = app.openapi()["components"]["schemas"]["WorkOrderOperationUpdate"]
     assert "inspection_complete" not in schema["properties"]
     assert "requires_inspection" in schema["properties"]
+
+
+def test_shop_floor_list_row_reports_whether_the_inspection_is_signed(client: TestClient, db_session: Session):
+    """The Shop Floor desk rows show "Inspection required" / "Inspected" from the list read alone."""
+    quality = make_user(db_session, role=UserRole.QUALITY)
+    _, op = _inspection_point(db_session)
+
+    def _row():
+        resp = client.get("/api/v1/shop-floor/operations", headers=headers_for(quality))
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        return next(r for r in resp.json()["operations"] if r["id"] == op.id)
+
+    before = _row()
+    assert before["requires_inspection"] is True
+    assert before["inspection_complete"] is False
+
+    signed = client.post(URL.format(op_id=op.id), json={}, headers=headers_for(quality))
+    assert signed.status_code == status.HTTP_200_OK, signed.text
+
+    assert _row()["inspection_complete"] is True
