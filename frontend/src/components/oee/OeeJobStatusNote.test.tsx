@@ -4,7 +4,7 @@
  * other role, and any unknown state, keeps the static advice.
  */
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import OeeJobStatusNote from './OeeJobStatusNote';
 import api from '../../services/api';
@@ -99,3 +99,55 @@ test('an admin with an unknown state keeps the static advice', async () => {
   expect(await screen.findByText(/ask an administrator/)).toBeInTheDocument();
   expect(screen.queryByText('switched off')).not.toBeInTheDocument();
 });
+
+test('an admin whose request fails keeps the static advice', async () => {
+  asRole('admin');
+  mockApi.getSystemHealth.mockRejectedValue(new Error('boom'));
+  renderNote();
+  await waitFor(() => expect(mockApi.getSystemHealth).toHaveBeenCalledTimes(1));
+  expect(screen.getByText(/ask an administrator to check the nightly OEE job/)).toBeInTheDocument();
+  expect(screen.queryByRole('link', { name: 'View System Health' })).not.toBeInTheDocument();
+});
+
+test('an armed job whose last run failed says so, in Central time', async () => {
+  asRole('admin');
+  mockApi.getSystemHealth.mockResolvedValue(
+    health({
+      cron_jobs: [
+        {
+          name: 'run_oee_auto_calc_job',
+          armed: true,
+          schedule: 'Daily 02:30',
+          next_run_at: '2026-11-24T08:30:00Z',
+          last_run: {
+            started_at: '2026-11-23T08:30:00Z',
+            finished_at: '2026-11-23T08:30:04Z',
+            outcome: 'failed',
+            error_type: 'OperationalError',
+            counts: {},
+          },
+        },
+      ],
+    })
+  );
+  renderNote();
+  expect(await screen.findByText('switched on')).toBeInTheDocument();
+  // 08:30 UTC on 2026-11-23 is 2:30 AM Central (CST).
+  expect(screen.getByText(/its last run failed at .*2:30/)).toBeInTheDocument();
+});
+
+test('a superuser is treated as an admin, matching AdminRoute', async () => {
+  mockUseAuth.mockReturnValue({ user: { role: 'manager', is_superuser: true } as User } as ReturnType<typeof useAuth>);
+  mockApi.getSystemHealth.mockResolvedValue(health());
+  renderNote();
+  expect(await screen.findByText('switched off')).toBeInTheDocument();
+});
+
+test.each(['supervisor', 'operator', 'quality', 'viewer'] as const)(
+  'a %s never calls the admin-only endpoint',
+  role => {
+    asRole(role as User['role']);
+    renderNote();
+    expect(mockApi.getSystemHealth).not.toHaveBeenCalled();
+  }
+);

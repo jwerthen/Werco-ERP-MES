@@ -7,7 +7,7 @@
  * renders the error state with Retry.
  */
 import React from 'react';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import SystemHealthTab, { armedState, formatAge, humanizeJobName } from './SystemHealthTab';
 import api from '../../services/api';
@@ -176,4 +176,37 @@ test('a failed request shows the error state and Retry re-reads', async () => {
   fireEvent.click(screen.getByRole('button', { name: /retry/i }));
   await waitFor(() => expect(mockApi.getSystemHealth).toHaveBeenCalledTimes(2));
   expect(await screen.findByText('Running')).toBeInTheDocument();
+});
+
+test('a company switch (auth-token change) re-reads the active company health', async () => {
+  mockApi.getSystemHealth.mockResolvedValue(healthy());
+  renderTab();
+  expect(await screen.findByText('Running')).toBeInTheDocument();
+  expect(mockApi.getSystemHealth).toHaveBeenCalledTimes(1);
+
+  window.dispatchEvent(new Event('werco:auth-token-changed'));
+  await waitFor(() => expect(mockApi.getSystemHealth).toHaveBeenCalledTimes(2));
+});
+
+test('an unset WORKER_CRON_JOBS with a live worker reads as every job armed', async () => {
+  mockApi.getSystemHealth.mockResolvedValue(healthy({ cron_spec: null }));
+  renderTab();
+  expect(await screen.findByText('Not set (every job armed)')).toBeInTheDocument();
+});
+
+test('a stale response never overwrites a newer one', async () => {
+  let resolveFirst: (value: SystemHealth) => void = () => undefined;
+  mockApi.getSystemHealth
+    .mockImplementationOnce(() => new Promise<SystemHealth>(resolve => (resolveFirst = resolve)))
+    .mockResolvedValueOnce(healthy({ cron_spec: 'relay_pending_notifications_job' }));
+  renderTab();
+  window.dispatchEvent(new Event('werco:auth-token-changed'));
+  expect(await screen.findByText('relay_pending_notifications_job', { selector: 'dd span' })).toBeInTheDocument();
+
+  await act(async () => {
+    resolveFirst(healthy({ cron_spec: 'none' }));
+  });
+  expect(mockApi.getSystemHealth).toHaveBeenCalledTimes(2);
+  expect(screen.queryByText('none')).not.toBeInTheDocument();
+  expect(screen.getByText('relay_pending_notifications_job', { selector: 'dd span' })).toBeInTheDocument();
 });
