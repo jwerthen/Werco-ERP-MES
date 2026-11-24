@@ -84,6 +84,10 @@ CALIBRATION_LIST = "/calibration"
 MAINTENANCE_SCHEDULES = "/maintenance?tab=schedules"
 MAINTENANCE_WORK_ORDERS = "/maintenance?tab=work_orders"
 DOWNTIME_LIST = "/downtime"
+# Record-less: the Work Orders list with its dashboard "Overdue" scope (``WorkOrders.tsx`` reads
+# ``?scope=overdue``), where the daily late-jobs summary (``wo.late``) lands. Its Supervisor and
+# Manager audience holds ``work_orders:view``.
+WORK_ORDERS_OVERDUE = "/work-orders?scope=overdue"
 INVENTORY_LIST = "/inventory"
 # Record-less: the Warehouse page's Inventory tab with the low-stock filter on (``Inventory.tsx``
 # reads ``?filter=low_stock``); the same list ``GET /inventory/low-stock`` serves and the
@@ -115,6 +119,7 @@ ALL_LINK_TEMPLATES: tuple[str, ...] = (
     MAINTENANCE_SCHEDULES,
     MAINTENANCE_WORK_ORDERS,
     DOWNTIME_LIST,
+    WORK_ORDERS_OVERDUE,
     INVENTORY_LIST,
     INVENTORY_LOW_STOCK,
     MRP_LIST,

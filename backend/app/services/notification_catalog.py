@@ -367,13 +367,15 @@ _ENTRIES: List[CatalogEntry] = [
     ),
     CatalogEntry(
         event_key="wo.late",
-        label="Work order late",
-        description="A released work order passed its due date.",
+        label="Late work orders",
+        description="Once a day: how many released work orders are past their promise date, and the ten most overdue.",
         category=Category.PRODUCTION,
         severity="warning",
         default_channels=frozenset({CHANNEL_IN_APP, CHANNEL_EMAIL}),
+        # One summary per recipient per company day: the summary is keyed on the DAY
+        # (related_type "LateWorkOrderSummary", related_id YYYYMMDD), not on a work order.
         recurring=True,
-        source_event_types=(),  # cron-driven via dispatch_direct
+        source_event_types=(),  # cron-driven via dispatch_direct (check_late_work_orders_job)
         roles=(UserRole.SUPERVISOR, UserRole.MANAGER),
     ),
     CatalogEntry(

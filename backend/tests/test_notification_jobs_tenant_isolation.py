@@ -211,6 +211,8 @@ def _install(monkeypatch, db_session, recorder):
                 "recipients": list(recipients),
                 "related_type": related_type,
                 "related_id": related_id,
+                "title": title,
+                "body": body,
             }
         )
         return 0
@@ -286,20 +288,21 @@ def test_late_work_orders_digest_is_tenant_scoped(db_session: Session, monkeypat
     result = asyncio.run(notification_jobs.check_late_work_orders_task())
     assert result["late_work_orders"] >= 2
 
-    by_related = {(c["related_type"], c["related_id"]): c for c in recorder.calls}
-    assert ("WorkOrder", wo_a.id) in by_related
-    assert ("WorkOrder", wo_b.id) in by_related
-
-    call_a = by_related[("WorkOrder", wo_a.id)]
-    call_b = by_related[("WorkOrder", wo_b.id)]
-    assert call_a["company_id"] == COMPANY_A and call_a["event_key"] == "wo.late"
-    assert call_b["company_id"] == COMPANY_B
+    # One daily summary per company (keyed on the day), not one dispatch per late work order.
+    by_company = {}
+    for c in recorder.calls:
+        assert c["event_key"] == "wo.late" and c["related_type"] == "LateWorkOrderSummary"
+        assert c["company_id"] not in by_company, "one summary per company per run"
+        by_company[c["company_id"]] = c
+    call_a = by_company[COMPANY_A]
+    call_b = by_company[COMPANY_B]
     assert _company_of_users(db_session, call_a["recipients"]) == {COMPANY_A}
     assert _company_of_users(db_session, call_b["recipients"]) == {COMPANY_B}
     a_ids = {u.id for u in call_a["recipients"]}
     b_ids = {u.id for u in call_b["recipients"]}
     assert b_super.id not in a_ids and b_mgr.id not in a_ids
     assert a_super.id not in b_ids and a_mgr.id not in b_ids
+    assert wo_a.work_order_number in call_a["body"] and wo_b.work_order_number not in call_a["body"]
 
 
 # ---------------------------------------------------------------------------
@@ -409,10 +412,10 @@ def test_one_company_failure_does_not_abort_others(db_session: Session, monkeypa
     # Companies are iterated in id order (COMPANY_A first). Blow up only on company A's WO.
     seen = []
 
-    async def _flaky_dispatch(db, *, related_id=None, **kwargs):
-        if related_id == wo_a.id:
+    async def _flaky_dispatch(db, *, company_id=None, **kwargs):
+        if company_id == COMPANY_A:
             raise RuntimeError("boom for company A")
-        seen.append(related_id)
+        seen.append(company_id)
         return 0
 
     monkeypatch.setattr(notification_jobs, "dispatch_direct", _flaky_dispatch, raising=True)
@@ -420,7 +423,7 @@ def test_one_company_failure_does_not_abort_others(db_session: Session, monkeypa
     # The job swallows the per-company error and returns normally.
     result = asyncio.run(notification_jobs.check_late_work_orders_task())
 
-    # Company B still got notified despite company A failing.
-    assert wo_b.id in seen
+    # Company B still got its summary despite company A failing.
+    assert COMPANY_B in seen
     # The aggregate count still credits company B's processed WO (A's count is skipped on error).
     assert result["late_work_orders"] >= 1

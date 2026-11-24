@@ -296,68 +296,130 @@ async def check_calibrations_task():
         db.close()
 
 
+LATE_SUMMARY_EVENT = "wo.late"
+LATE_SUMMARY_RELATED_TYPE = "LateWorkOrderSummary"
+LATE_SUMMARY_LIST_LIMIT = 10
+LATE_CRITICAL_DAYS = 7
+
+
+def late_summary_related_id(day) -> int:
+    """The summary's dedupe key: the company-local day as ``YYYYMMDD``. Together with
+    ``LATE_SUMMARY_RELATED_TYPE`` and the recipient it makes one summary per person per day."""
+    return day.year * 10000 + day.month * 100 + day.day
+
+
+def _late_summary_already_sent(db, company_id: int, related_id: int) -> bool:
+    """A summary for this company day already exists (in-app row or email log): a second run of
+    the job the same day sends nothing."""
+    from app.models.notification import Notification, NotificationLog
+
+    for model, key_column in ((Notification, Notification.event_key), (NotificationLog, NotificationLog.event_type)):
+        hit = (
+            db.query(model.id)
+            .filter(
+                model.company_id == company_id,
+                key_column == LATE_SUMMARY_EVENT,
+                model.related_type == LATE_SUMMARY_RELATED_TYPE,
+                model.related_id == related_id,
+            )
+            .first()
+        )
+        if hit is not None:
+            return True
+    return False
+
+
 async def check_late_work_orders_task():
-    """Check for late work orders and notify supervisors/managers (per tenant)."""
+    """One daily late-jobs summary per Supervisor and Manager, per tenant (plan alerts_health/2 step 4).
+
+    Late means past the PROMISE date -- ``must_ship_by`` when set, else ``due_date`` -- against the
+    company's own day (``company_today``), for a released, in-progress or held work order that is
+    not deleted. Replaces the old per-job dispatch (one in-app row and one email per late job to
+    every supervisor and manager, judged on the due date and the UTC day).
+
+    The summary carries the total, the ten most overdue jobs (work order number and days late --
+    no part numbers or customer names, docs/NOTIFICATIONS.md section 11.1) and a link to the Work
+    Orders list's overdue view. Recipients are the ``wo.late`` catalog audience (the Supervisor and
+    Manager roles) plus anyone an Admin selected under Email Recipients. Dedupe key: the company
+    day per recipient; a second run the same day sends nothing."""
     db = SessionLocal()
     try:
-        from app.models.work_order import WorkOrder
+        from sqlalchemy import func
 
-        today = datetime.utcnow().date()
+        from app.models.work_order import WorkOrder, WorkOrderStatus
+        from app.services.company_time import company_today
+        from app.services.notification_dispatch import catalog_audience_for
+
+        late_statuses = [WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS, WorkOrderStatus.ON_HOLD]
         total_late = 0
+        summaries = 0
 
         for cid in _active_company_ids(db):
             try:
-                late_wos = (
-                    db.query(WorkOrder)
-                    .filter(
-                        WorkOrder.company_id == cid,
-                        WorkOrder.is_deleted == False,
-                        WorkOrder.due_date < today,
-                        WorkOrder.status.in_(["RELEASED", "IN_PROGRESS"]),
-                    )
-                    .all()
+                today = company_today(db, cid)
+                promise = func.coalesce(WorkOrder.must_ship_by, WorkOrder.due_date)
+                late = db.query(WorkOrder).filter(
+                    WorkOrder.company_id == cid,
+                    WorkOrder.is_deleted == False,  # noqa: E712
+                    WorkOrder.status.in_(late_statuses),
+                    promise.isnot(None),
+                    promise < today,
                 )
+                count = late.count()
+                if not count:
+                    continue
+                total_late += count
 
-                if not late_wos:
+                related_id = late_summary_related_id(today)
+                if _late_summary_already_sent(db, cid, related_id):
                     continue
 
-                supervisors = get_notification_recipients(db, role="supervisor", company_id=cid)
-                managers = get_notification_recipients(db, role="manager", company_id=cid)
-                recipients = supervisors + managers
-
-                for wo in late_wos:
-                    days_late = (today - wo.due_date).days
-                    is_critical = days_late > 7
-                    await dispatch_direct(
-                        db,
-                        event_key="wo.late",
-                        company_id=cid,
-                        recipients=recipients,
-                        related_type="WorkOrder",
-                        related_id=wo.id,
-                        title=(
-                            f"{'CRITICAL: ' if is_critical else ''}"
-                            f"Work Order {wo.work_order_number} is {days_late} days late"
-                        ),
-                        body="This work order is past its due date.",
-                        link=links.work_order_detail(wo.id),
-                        template="work_order_late",
-                        context={
+                worst = late.order_by(promise.asc(), WorkOrder.work_order_number.asc()).limit(LATE_SUMMARY_LIST_LIMIT)
+                jobs = []
+                for wo in worst.all():
+                    promised = wo.must_ship_by or wo.due_date
+                    days_late = (today - promised).days
+                    jobs.append(
+                        {
                             "work_order_number": wo.work_order_number,
                             "days_late": days_late,
-                            "critical": is_critical,
-                            "link_path": links.work_order_detail(wo.id),
-                        },
+                            "critical": days_late > LATE_CRITICAL_DAYS,
+                        }
                     )
+                more = count - len(jobs)
+                noun = "work order is" if count == 1 else "work orders are"
+                lines = [f"{count} {noun} past the promise date (ship-by date, else due date)."]
+                lines += [f"{job['work_order_number']}: {_days_word(job['days_late'])} late" for job in jobs]
+                if more > 0:
+                    lines.append(f"And {more} more.")
 
-                total_late += len(late_wos)
+                await dispatch_direct(
+                    db,
+                    event_key=LATE_SUMMARY_EVENT,
+                    company_id=cid,
+                    recipients=catalog_audience_for(db, LATE_SUMMARY_EVENT, cid),
+                    related_type=LATE_SUMMARY_RELATED_TYPE,
+                    related_id=related_id,
+                    title=f"Late work orders: {count}",
+                    body="\n".join(lines),
+                    link=links.WORK_ORDERS_OVERDUE,
+                    template="work_order_late",
+                    context={
+                        "total": count,
+                        "jobs": jobs,
+                        "more": more,
+                        "critical": any(job["critical"] for job in jobs),
+                        "link_path": links.WORK_ORDERS_OVERDUE,
+                    },
+                )
+                summaries += 1
             except Exception as e:
-                logger.error(f"Late work order digest failed for company {cid}: {e}")
+                logger.error(f"Late work order summary failed for company {cid}: {e}")
                 # Reset the shared session, or every later tenant inherits this one's failed transaction.
-                reset_session_after_failure(db, f"the late work order digest for company {cid}")
+                reset_session_after_failure(db, f"the late work order summary for company {cid}")
 
-        logger.info(f"Checked late work orders: {total_late} late")
-        return {"late_work_orders": total_late}
+        logger.info(f"Checked late work orders: {total_late} late, {summaries} summary dispatch(es)")
+        return {"late_work_orders": total_late, "summaries": summaries}
 
     except Exception as e:
         logger.error(f"Late work order check job failed: {e}")

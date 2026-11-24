@@ -23,6 +23,11 @@ Arrival (step 3): ``stock.low`` has an in-app default so it reaches the bell (``
 is deliberately unchanged, digest-only). The daily digest mails every active, deliverable user
 with queued items -- no saved preference row means the defaults -- honours a saved opt-out, and
 renders title, body and link for any catalog key.
+
+Late jobs (step 4): one ``wo.late`` summary per company day for the Supervisor and Manager roles
+-- total, the ten most overdue (work order number and days late only) and a link to the overdue
+list. Late means ``must_ship_by``, else ``due_date``, before ``company_today``, for a released,
+in-progress or held job; a second run the same day sends nothing.
 """
 
 import asyncio
@@ -302,3 +307,99 @@ def test_the_digest_mails_everyone_with_queued_items_and_renders_any_catalog_key
     assert "Low stock: 3 parts at or below reorder point" in html
     assert "1 out of stock" in html
     assert f'href="https://erp.example.test{links.INVENTORY_LOW_STOCK}"'.replace("&", "&amp;") in html
+
+
+# ---------------------------------------------------------------------------
+# Late jobs: one summary a day
+# ---------------------------------------------------------------------------
+
+
+def _wo(db: Session, *, due=None, ship_by=None, status=None, number=None):
+    from app.models.work_order import WorkOrder, WorkOrderStatus
+    from tests.test_notification_jobs_tenant_isolation import _make_part
+
+    n = _next()
+    wo = WorkOrder(
+        work_order_number=number or f"LATE-{n:05d}",
+        part_id=_make_part(db, company_id=COMPANY_A).id,
+        customer_name="Fictional Aero Customer",
+        quantity_ordered=1,
+        status=status or WorkOrderStatus.RELEASED,
+        priority=5,
+        due_date=due,
+        must_ship_by=ship_by,
+        company_id=COMPANY_A,
+    )
+    db.add(wo)
+    db.commit()
+    db.refresh(wo)
+    return wo
+
+
+def test_the_late_summary_is_one_daily_notice_judged_on_the_promise_date(db_session: Session, monkeypatch):
+    from app.models.work_order import WorkOrderStatus
+
+    supervisor = _make_user(db_session, company_id=COMPANY_A, role=UserRole.SUPERVISOR)
+    manager = _make_user(db_session, company_id=COMPANY_A, role=UserRole.MANAGER)
+    operator = _make_user(db_session, company_id=COMPANY_A, role=UserRole.OPERATOR)
+    late_by_ship = _wo(db_session, due=TODAY + timedelta(days=5), ship_by=TODAY - timedelta(days=3))
+    not_late_by_ship = _wo(db_session, due=TODAY - timedelta(days=9), ship_by=TODAY)  # ship-by wins
+    held = _wo(db_session, due=TODAY - timedelta(days=1), status=WorkOrderStatus.ON_HOLD)
+    draft = _wo(db_session, due=TODAY - timedelta(days=30), status=WorkOrderStatus.DRAFT)
+    done = _wo(db_session, due=TODAY - timedelta(days=30), status=WorkOrderStatus.COMPLETE)
+    many = [_wo(db_session, due=TODAY - timedelta(days=10 + i)) for i in range(10)]
+    _pin_today(monkeypatch)
+    calls = _record(monkeypatch, db_session)
+
+    result = asyncio.run(notification_jobs.check_late_work_orders_task())
+
+    (call,) = [c for c in calls if c["company_id"] == COMPANY_A]
+    assert call["event_key"] == "wo.late"
+    assert call["related_type"] == "LateWorkOrderSummary" and call["related_id"] == 20310312
+    total = 12  # late_by_ship, held and the ten in `many`
+    assert result["late_work_orders"] >= total
+    assert call["title"] == f"Late work orders: {total}"
+    lines = call["body"].split("\n")
+    assert lines[0].startswith(f"{total} work orders are past the promise date")
+    listed = [line.split(":")[0] for line in lines[1:11]]
+    assert listed == [wo.work_order_number for wo in reversed(many)], "the ten most overdue, worst first"
+    assert lines[11] == "And 2 more."
+    assert call["context"]["total"] == total and len(call["context"]["jobs"]) == 10
+    assert call["link"] == links.WORK_ORDERS_OVERDUE
+    ids = {u.id for u in call["recipients"]}
+    assert {supervisor.id, manager.id} <= ids and operator.id not in ids
+    assert "Fictional Aero Customer" not in call["title"] + call["body"]
+    body_and_title = call["title"] + call["body"]
+    for quiet in (not_late_by_ship, draft, done):
+        assert quiet.work_order_number not in body_and_title
+    assert late_by_ship.work_order_number not in listed  # 3 days late: outside the worst ten here
+    assert held.work_order_number not in listed
+
+
+def test_a_second_run_the_same_day_sends_no_second_summary(db_session: Session, monkeypatch):
+    from app.models.notification import Notification
+
+    user = _make_user(db_session, company_id=COMPANY_A, role=UserRole.MANAGER)
+    _wo(db_session, due=TODAY - timedelta(days=2))
+    db_session.add(
+        Notification(
+            company_id=COMPANY_A,
+            user_id=user.id,
+            event_key="wo.late",
+            severity="warning",
+            title="Late work orders: 1",
+            related_type="LateWorkOrderSummary",
+            related_id=notification_jobs.late_summary_related_id(TODAY),
+        )
+    )
+    db_session.commit()
+    _pin_today(monkeypatch)
+    calls = _record(monkeypatch, db_session)
+    asyncio.run(notification_jobs.check_late_work_orders_task())
+    assert [c for c in calls if c["company_id"] == COMPANY_A] == []
+
+    # The next company day is a new summary.
+    _pin_today(monkeypatch, TODAY + timedelta(days=1))
+    calls = _record(monkeypatch, db_session)
+    asyncio.run(notification_jobs.check_late_work_orders_task())
+    assert [c["related_id"] for c in calls if c["company_id"] == COMPANY_A] == [20310313]
