@@ -16662,6 +16662,52 @@ exposed here — `config_warnings` is a **count**, and the messages themselves g
 log. `unconfigured` means every enqueue will fail and no background job or cron can run. See
 [`WORKER_SERVICE.md`](WORKER_SERVICE.md).
 
+### Detailed health: document storage
+
+```http
+GET /health/detailed
+```
+
+Unauthenticated. Besides `checks.application` (with the deployed commit at `release`),
+`checks.database` and the Redis checks, it carries `checks.storage`: where **new** document
+uploads go, as this API process sees it. It reads configuration only — no S3 client, no
+network call, no directory created — and never changes the top-level `status`. If it cannot
+be read, `checks.storage` is `{"status": "unknown", "error": "<ExceptionClassName>"}` and the
+response is still 200.
+
+```json
+{
+  "backend": "local",
+  "durability": "ephemeral",
+  "bucket": null,
+  "endpoint_host": null,
+  "region": null,
+  "upload_dir_configured": false,
+  "upload_dir_exists": true,
+  "upload_dir_on_mounted_volume": false,
+  "warning": "Documents are stored on local disk with no mounted volume found. ..."
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `backend` | `local` or `s3` (`STORAGE_BACKEND`) |
+| `durability` | `durable` (s3), `volume` (local, the upload path or a directory above it other than `/` is a mount point), `ephemeral` (local, no mount found: lost on redeploy), `unknown` (local, mount state unreadable) |
+| `bucket`, `endpoint_host`, `region` | s3 only, and **always `null` on this unauthenticated route** — the document store's address is served only on `GET /api/v1/setup/health`. `endpoint_host` is the hostname of `S3_ENDPOINT_URL` alone (no scheme, port, path or credentials); `null` there means the AWS default endpoint, and `"(unparseable endpoint)"` means one is set but has no parseable hostname |
+| `upload_dir_configured` | local only: `UPLOAD_DIR` was set to a non-empty value. A set-but-empty `UPLOAD_DIR` is described by its fallback, `UPLOAD_DIR_FALLBACK` |
+| `upload_dir_exists`, `upload_dir_on_mounted_volume` | local only; the second is `null` when the mount state cannot be read |
+| `warning` | A fixed advisory text for `ephemeral` and `unknown`, else `null` |
+
+The volume test is a heuristic: it says a mount exists (a `tmpfs` or a local bind mount
+counts), not that the volume survives a redeploy. No credential, full URL or filesystem path
+is ever returned. The worker reads its own environment and is not described.
+
+**Setup Wizard health.** `GET /api/v1/setup/health` (any signed-in user, company-scoped, as
+before) adds `storage`: the same object, **with** `bucket`, `endpoint_host` and `region` filled
+in for s3. It is `null` only when the configuration could not be read; the rest of the
+response is unaffected. The Setup Wizard renders it as the **Document Storage** panel. See
+[DATABASE_BACKUP.md → Uploaded documents](DATABASE_BACKUP.md#uploaded-documents).
+
 ## Error Codes
 
 | Status Code | Description |
