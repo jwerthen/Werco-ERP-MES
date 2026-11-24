@@ -33,7 +33,7 @@ import uuid
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator, Optional, Tuple
+from typing import Any, Dict, Iterator, Optional, Tuple
 
 from app.core.config import settings
 
@@ -392,3 +392,107 @@ def ref_exists(ref: str) -> bool:
 def new_object_name(filename: Optional[str]) -> str:
     """A unique, never-user-controlled object name preserving a sanitized extension."""
     return f"{uuid.uuid4()}{sanitize_ext(filename)}"
+
+
+# ---------------------------------------------------------------------------
+# Configuration summary for health output. Pure read of settings and the local
+# filesystem: it builds no backend, makes no network call and creates no directory.
+# ---------------------------------------------------------------------------
+
+DEFAULT_UPLOAD_DIR = "/app/uploads"
+
+STORAGE_WARNING_EPHEMERAL = (
+    "Documents are stored on local disk with no mounted volume found. Files uploaded to this "
+    "service are lost on the next redeploy. Set STORAGE_BACKEND=s3 on the API and the worker."
+)
+STORAGE_WARNING_UNKNOWN = (
+    "Documents are stored on local disk and the mount state could not be read. Confirm a "
+    "persistent volume is attached, or set STORAGE_BACKEND=s3 on the API and the worker."
+)
+
+
+def _endpoint_hostname(endpoint_url: Optional[str]) -> Optional[str]:
+    """Hostname only: ``urlparse().hostname`` drops scheme, userinfo, port, path and query."""
+    if not endpoint_url:
+        return None
+    try:
+        from urllib.parse import urlparse
+
+        return urlparse(endpoint_url).hostname or None
+    except ValueError:
+        return None
+
+
+def _path_on_mounted_volume(path: str) -> Optional[bool]:
+    """True when ``path`` or an ancestor other than ``/`` is a mount point.
+
+    Starts from the nearest EXISTING ancestor, since the configured directory may not
+    have been created yet. ``None`` when the filesystem cannot be read.
+    """
+    try:
+        current = os.path.realpath(path)
+        while current and not os.path.exists(current):
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+        root = os.path.abspath(os.sep)
+        while current and current != root:
+            if os.path.ismount(current):
+                return True
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+        return False
+    except OSError:
+        return None
+
+
+def describe_storage_configuration() -> Dict[str, Any]:
+    """Which document-storage backend new writes use, and where it points -- no secrets.
+
+    Returns a dict shaped as ``app.schemas.storage.StorageStatus``. Reads
+    ``settings.STORAGE_BACKEND`` (not ``get_storage()``) so it never instantiates the
+    S3 client, and never reports credentials, a full endpoint URL or a filesystem path.
+    """
+    backend = (settings.STORAGE_BACKEND or "local").lower()
+    if backend == "s3":
+        return {
+            "backend": "s3",
+            "durability": "durable",
+            "bucket": settings.S3_BUCKET_NAME or None,
+            "endpoint_host": _endpoint_hostname(settings.S3_ENDPOINT_URL),
+            "region": settings.AWS_REGION or None,
+            "upload_dir_configured": None,
+            "upload_dir_exists": None,
+            "upload_dir_on_mounted_volume": None,
+            "warning": None,
+        }
+
+    configured = os.getenv("UPLOAD_DIR")
+    upload_dir = configured or DEFAULT_UPLOAD_DIR
+    try:
+        exists: Optional[bool] = os.path.isdir(upload_dir)
+    except OSError:
+        exists = None
+    mounted = _path_on_mounted_volume(upload_dir)
+    durability: str
+    warning: Optional[str]
+    if mounted is True:
+        durability, warning = "volume", None
+    elif mounted is False:
+        durability, warning = "ephemeral", STORAGE_WARNING_EPHEMERAL
+    else:
+        durability, warning = "unknown", STORAGE_WARNING_UNKNOWN
+    return {
+        "backend": "local",
+        "durability": durability,
+        "bucket": None,
+        "endpoint_host": None,
+        "region": None,
+        "upload_dir_configured": bool(configured),
+        "upload_dir_exists": exists,
+        "upload_dir_on_mounted_volume": mounted,
+        "warning": warning,
+    }

@@ -1,3 +1,4 @@
+import logging
 from typing import Dict, List, Optional, Set
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -16,6 +17,10 @@ from app.models.routing import Routing, RoutingOperation
 from app.models.user import User
 from app.models.work_center import WorkCenter
 from app.models.work_order import WorkOrder, WorkOrderStatus
+from app.schemas.storage import StorageStatus
+from app.services.storage_service import describe_storage_configuration
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -108,6 +113,9 @@ class SetupHealthResponse(BaseModel):
     counts: Dict[str, int]
     steps: List[SetupStep]
     issues: List[MasterDataIssue]
+    #: Where uploaded documents are stored (the same summary as ``/health/detailed``).
+    #: Null only when the configuration could not be read; never blocks the page.
+    storage: Optional[StorageStatus] = None
 
 
 class ReadinessResponse(BaseModel):
@@ -149,6 +157,15 @@ def _active_make_part_query(db: Session, company_id: int):
         Part.is_deleted == False,
         Part.part_type.in_([PartType.MANUFACTURED, PartType.ASSEMBLY]),
     )
+
+
+def _storage_status() -> Optional[StorageStatus]:
+    """Install-wide storage configuration, not tenant data; a read failure yields None."""
+    try:
+        return StorageStatus(**describe_storage_configuration())
+    except Exception:
+        logger.warning("Setup health: could not read the storage configuration", exc_info=True)
+        return None
 
 
 @router.get("/health", response_model=SetupHealthResponse)
@@ -387,6 +404,7 @@ def get_setup_health(
         counts=counts,
         steps=steps,
         issues=[issue for issue in issues if issue.count > 0],
+        storage=_storage_status(),
     )
 
 
