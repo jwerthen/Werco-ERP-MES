@@ -2650,6 +2650,10 @@ MSG_REMOVED_SHEET_STEPS_AUDIT_UNAVAILABLE = (
     "The audit record of the process-sheet steps left off this work order could not be saved; "
     "the work order was not created. Retry."
 )
+MSG_DROPPED_INSPECTION_AUDIT_UNAVAILABLE = (
+    "The audit record of the inspection points left off this work order could not be saved; "
+    "the work order was not created. Retry."
+)
 
 
 @router.post("/", response_model=WorkOrderResponse, status_code=status.HTTP_201_CREATED)
@@ -2769,11 +2773,21 @@ def create_work_order(
         creation_extra["operations_supplied"] = True
         creation_extra["linked_routing_operation_ids"] = supplied_link.linked_routing_operation_ids
         creation_extra["removed_process_sheet_steps"] = supplied_link.removed_process_sheet_steps
-    if supplied_link is not None and supplied_link.removed_process_sheet_steps:
+        # Routing inspection points a linked row was sent without (``requires_inspection``
+        # false): the job never reaches inspection sign-off for them, so they are named here.
+        creation_extra["dropped_inspection_points"] = supplied_link.dropped_inspection_points
+    if supplied_link is not None and (
+        supplied_link.removed_process_sheet_steps or supplied_link.dropped_inspection_points
+    ):
         # This row is the ONLY record that the job was created without some of its routing's
         # required checks (the Sheet Gaps list shows only jobs that hold none at all), so it
         # is REQUIRED evidence: the work order and the row commit together, or neither does.
-        with required_audit(db, MSG_REMOVED_SHEET_STEPS_AUDIT_UNAVAILABLE):
+        unavailable = (
+            MSG_REMOVED_SHEET_STEPS_AUDIT_UNAVAILABLE
+            if supplied_link.removed_process_sheet_steps
+            else MSG_DROPPED_INSPECTION_AUDIT_UNAVAILABLE
+        )
+        with required_audit(db, unavailable):
             audit.log_required(
                 action=audit.ACTIONS["CREATE"],
                 resource_type="work_order",

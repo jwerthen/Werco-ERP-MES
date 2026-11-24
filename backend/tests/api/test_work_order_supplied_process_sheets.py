@@ -959,3 +959,97 @@ class TestGapListBomWalk:
         row = items[response.json()["id"]]
         assert [s["sheet_number"] for s in row["expected_process_sheet_steps"]] == [sheet.sheet_number]
         assert row["operation_count"] == 1
+
+
+def _inspection_part(db: Session):
+    """A two-step part whose Op 20 is a routing inspection point (named so the keyword rule agrees)."""
+    part, sheet, op10, op20 = _two_step_part(db)
+    op20.is_inspection_point = True
+    op20.name = "Final inspect"
+    db.commit()
+    return part, op10, op20
+
+
+def _op_at(db: Session, wo_id: int, sequence: int) -> WorkOrderOperation:
+    return (
+        db.query(WorkOrderOperation)
+        .filter(WorkOrderOperation.work_order_id == wo_id, WorkOrderOperation.sequence == sequence)
+        .one()
+    )
+
+
+class TestLinkedRowsKeepTheirInspection:
+    """A linked row IS its routing step for inspection too (#390 x #386): the planned type is
+    not lost on the supplied path, and a dropped inspection point is recorded, not silent."""
+
+    def test_a_linked_inspection_step_keeps_its_planned_final_type(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        part, op10, op20 = _inspection_part(db_session)
+        response = client.post(
+            CREATE_URL,
+            # What New Work Order sends: requires_inspection, never inspection_type.
+            json={
+                "part_id": part.id,
+                "quantity_ordered": 2,
+                "operations": [_row(op10), _row(op20, requires_inspection=True)],
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == status.HTTP_201_CREATED, response.text
+        wo_id = response.json()["id"]
+        inspected = _op_at(db_session, wo_id, 20)
+        assert inspected.requires_inspection is True and inspected.inspection_type == "final"
+        assert _op_at(db_session, wo_id, 10).inspection_type is None
+        assert _creation_extra(db_session, wo_id)["dropped_inspection_points"] == []
+
+    def test_a_supplied_inspection_type_stands(self, client: TestClient, auth_headers: dict, db_session: Session):
+        part, op10, op20 = _inspection_part(db_session)
+        response = client.post(
+            CREATE_URL,
+            json={
+                "part_id": part.id,
+                "quantity_ordered": 2,
+                "operations": [_row(op10), _row(op20, requires_inspection=True, inspection_type="in_process")],
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == status.HTTP_201_CREATED, response.text
+        assert _op_at(db_session, response.json()["id"], 20).inspection_type == "in_process"
+
+    def test_a_linked_inspection_point_sent_without_inspection_is_recorded(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        part, op10, op20 = _inspection_part(db_session)
+        response = client.post(
+            CREATE_URL,
+            json={
+                "part_id": part.id,
+                "quantity_ordered": 2,
+                "operations": [_row(op10), _row(op20, requires_inspection=False)],
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == status.HTTP_201_CREATED, response.text
+        dropped = _creation_extra(db_session, response.json()["id"])["dropped_inspection_points"]
+        assert [(d["routing_operation_id"], d["work_order_operation_sequence"]) for d in dropped] == [(op20.id, 20)]
+
+    def test_a_failed_audit_write_for_a_dropped_inspection_point_creates_nothing(
+        self, client: TestClient, auth_headers: dict, db_session: Session, monkeypatch
+    ):
+        from app.services.audit_service import AuditService
+
+        part, op10, op20 = _inspection_part(db_session)
+        before = _wo_count(db_session)
+        monkeypatch.setattr(AuditService, "log", lambda self, *args, **kwargs: None)
+        response = client.post(
+            CREATE_URL,
+            json={
+                "part_id": part.id,
+                "quantity_ordered": 2,
+                "operations": [_row(op10), _row(op20, requires_inspection=False)],
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE, response.text
+        assert _wo_count(db_session) == before

@@ -31,7 +31,7 @@ Nothing here writes outside the caller's unit of work, commits, or writes audit 
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from fastapi import HTTPException
@@ -259,6 +259,8 @@ class SuppliedLinkResult:
     linked_routing_operation_ids: List[int]
     # Sheet-bearing routing steps the routed path would have copied that no supplied row links to.
     removed_process_sheet_steps: List[Dict[str, Any]]
+    # Routing inspection points whose linked row was sent with ``requires_inspection`` false.
+    dropped_inspection_points: List[Dict[str, Any]] = field(default_factory=list)
 
 
 def link_supplied_operations(
@@ -277,12 +279,22 @@ def link_supplied_operations(
     creation is refused 409 ``ROUTING_OPERATION_UNMATCHED`` naming every bad row -- a
     stale id from a restored draft is never silently dropped and never re-matched by
     sequence or name. Raised BEFORE the snapshot, so nothing about the job is kept.
+
+    A linked row IS that routing step for inspection too, under the routed path's rule: an
+    unset ``inspection_type`` takes the step's planned one (``"final"`` for an inspection
+    operation), and a routing inspection point sent with ``requires_inspection`` false is
+    allowed (the planner's call, as for a removed sheet step) but named in
+    ``dropped_inspection_points`` so the creation audit row records it.
     """
+    # Lazy: the router imports this module at load time.
+    from app.api.endpoints.work_orders import _is_inspection_operation
+
     expected = released_routing_steps(db, part, company_id, quantity, resolve_release=False)
     expected_by_id: Dict[int, RoutedStep] = {step.routing_operation_id: step for step in expected}
 
     problems: List[Dict[str, Any]] = []
     pairs: List[Tuple[WorkOrderOperation, Optional[int]]] = []
+    linked_steps: List[Tuple[WorkOrderOperation, RoutedStep]] = []
     linked_ids: List[int] = []
     unknown_ids = {int(rop_id) for _, rop_id in supplied if rop_id is not None and int(rop_id) not in expected_by_id}
     resolvable_unknown: set = set()
@@ -322,6 +334,7 @@ def link_supplied_operations(
             continue
         linked_ids.append(rop_id)
         pairs.append((operation, step.process_sheet_id))
+        linked_steps.append((operation, step))
 
     if problems:
         names = ", ".join(problem["operation_number"] for problem in problems)
@@ -338,6 +351,16 @@ def link_supplied_operations(
             },
         )
 
+    dropped_inspection: List[Dict[str, Any]] = []
+    for operation, step in linked_steps:
+        rop = step.routing_operation
+        if operation.inspection_type is None and _is_inspection_operation(rop):
+            operation.inspection_type = "final"
+        if rop.is_inspection_point and not operation.requires_inspection:
+            entry = _removed_step_entry(step)
+            entry["work_order_operation_sequence"] = operation.sequence
+            dropped_inspection.append(entry)
+
     linked = set(linked_ids)
     removed = [
         _removed_step_entry(step)
@@ -348,6 +371,7 @@ def link_supplied_operations(
         operation_sheet_pairs=pairs,
         linked_routing_operation_ids=linked_ids,
         removed_process_sheet_steps=removed,
+        dropped_inspection_points=dropped_inspection,
     )
 
 
