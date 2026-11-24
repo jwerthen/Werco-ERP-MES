@@ -347,26 +347,44 @@ def _link_for_event(event) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
-def _recipients_for_entry(db: Session, entry: CatalogEntry, event, company_id: int) -> List[User]:
-    """Resolve the recipient set for a catalog entry, tenant-scoped & active-filtered.
+def catalog_audience(db: Session, entry: CatalogEntry, company_id: int) -> List[User]:
+    """The catalog entry's declared audience: the company's ACTIVE users holding one of
+    ``entry.roles`` OR sitting in one of ``entry.departments``, each once, ordered by id.
 
-    (roles ∪ departments ∪ entity-derived resolver) − actor. De-duplicated by user id.
-    Every source filters by ``company_id`` and ``User.is_active`` (§8).
-    """
+    The one reading of "who does this event reach by default". The outbox path adds the
+    entry's record-derived resolver on top; the scheduled jobs (calibration, low stock, late
+    jobs, maintenance) call this directly, so a Quality-ROLE user hears about a gauge whatever
+    their Department says, and the Admin Email Recipients preview shows the same people."""
     from sqlalchemy import or_
-
-    by_id: Dict[int, User] = {}
 
     conditions = []
     if entry.roles:
         conditions.append(User.role.in_(list(entry.roles)))
     if entry.departments:
         conditions.append(User.department.in_(list(entry.departments)))
-    if conditions:
-        for user in (
-            db.query(User).filter(User.company_id == company_id, User.is_active.is_(True), or_(*conditions)).all()
-        ):
-            by_id[user.id] = user
+    if not conditions:
+        return []
+    return (
+        db.query(User)
+        .filter(User.company_id == company_id, User.is_active.is_(True), or_(*conditions))
+        .order_by(User.id)
+        .all()
+    )
+
+
+def catalog_audience_for(db: Session, event_key: str, company_id: int) -> List[User]:
+    """``catalog_audience`` by event key; an uncataloged key reaches nobody."""
+    entry = get_entry(event_key)
+    return catalog_audience(db, entry, company_id) if entry is not None else []
+
+
+def _recipients_for_entry(db: Session, entry: CatalogEntry, event, company_id: int) -> List[User]:
+    """Resolve the recipient set for a catalog entry, tenant-scoped & active-filtered.
+
+    (roles ∪ departments ∪ entity-derived resolver) − actor. De-duplicated by user id.
+    Every source filters by ``company_id`` and ``User.is_active`` (§8).
+    """
+    by_id: Dict[int, User] = {user.id: user for user in catalog_audience(db, entry, company_id)}
 
     if entry.resolver is not None:
         for user in entry.resolver(db, event, company_id) or []:

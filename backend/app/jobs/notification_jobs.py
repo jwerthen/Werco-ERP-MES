@@ -172,96 +172,122 @@ async def dispatch_notification_direct_task(
 # ---------------------------------------------------------------------------
 
 
+CALIBRATION_DUE_EVENT = "calibration.due"
+CALIBRATION_OVERDUE_EVENT = "calibration.overdue"
+CALIBRATION_DUE_WINDOW_DAYS = 7
+
+
+def calibration_alert_recipients(db, company_id: int) -> list:
+    """Who hears about due and overdue gauges: the catalog entry's audience -- the Quality ROLE
+    plus the Quality department -- not only users whose free-text Department reads "Quality"."""
+    from app.services.notification_dispatch import catalog_audience_for
+
+    return catalog_audience_for(db, CALIBRATION_DUE_EVENT, company_id)
+
+
 async def check_calibrations_task():
-    """Check for calibrations due soon and notify Quality (per tenant)."""
+    """Alert Quality about gauges coming due and gauges already overdue, per tenant, on the
+    company's own calendar day (``company_today``).
+
+    In service means ``is_active`` and a status other than out-of-service / retired (both are
+    deliberate states a person set; the stored ACTIVE / DUE / OVERDUE status is a date-derived
+    label that may be stale, so the date decides). Per gauge, at most one alert a run:
+
+    * ``calibration.overdue`` -- next calibration date before today. Recurring: one unread inbox
+      row per person while it stays overdue, re-raised once read.
+    * ``calibration.due`` -- due today or within the next 7 days; "URGENT" when due today or
+      tomorrow. A gauge due today used to fall through both passes (each required a date after
+      today), and one overdue gauge was never mentioned again.
+    """
     db = SessionLocal()
     try:
         from app.models.calibration import CalibrationStatus, Equipment
+        from app.services.company_time import company_today
 
-        today = datetime.utcnow().date()
-        due_7day = today + timedelta(days=7)
-        due_1day = today + timedelta(days=1)
-
-        total_7day = 0
-        total_1day = 0
+        in_service = (CalibrationStatus.ACTIVE, CalibrationStatus.DUE, CalibrationStatus.OVERDUE)
+        totals = {"calibrations_due": 0, "calibrations_overdue": 0}
 
         for cid in _active_company_ids(db):
             try:
-                calibrations_7day = (
+                today = company_today(db, cid)
+                gauges = (
                     db.query(Equipment)
                     .filter(
                         Equipment.company_id == cid,
-                        Equipment.next_calibration_date <= due_7day,
-                        Equipment.next_calibration_date > today,
-                        Equipment.status == CalibrationStatus.ACTIVE,
+                        Equipment.is_active.is_(True),
+                        Equipment.status.in_(in_service),
+                        Equipment.next_calibration_date.isnot(None),
+                        Equipment.next_calibration_date <= today + timedelta(days=CALIBRATION_DUE_WINDOW_DAYS),
                     )
+                    .order_by(Equipment.next_calibration_date, Equipment.id)
                     .all()
                 )
-                calibrations_1day = (
-                    db.query(Equipment)
-                    .filter(
-                        Equipment.company_id == cid,
-                        Equipment.next_calibration_date <= due_1day,
-                        Equipment.next_calibration_date > today,
-                        Equipment.status == CalibrationStatus.ACTIVE,
-                    )
-                    .all()
-                )
-
-                if not calibrations_7day and not calibrations_1day:
+                if not gauges:
                     continue
 
-                quality_users = get_notification_recipients(db, department="Quality", company_id=cid)
+                recipients = calibration_alert_recipients(db, cid)
+                if not recipients:
+                    continue
 
-                for cal in calibrations_7day:
+                for cal in gauges:
                     days = (cal.next_calibration_date - today).days
+                    if days < 0:
+                        await dispatch_direct(
+                            db,
+                            event_key=CALIBRATION_OVERDUE_EVENT,
+                            company_id=cid,
+                            recipients=recipients,
+                            related_type="Equipment",
+                            related_id=cal.id,
+                            title=f"OVERDUE: Calibration of {cal.name} is {_days_word(-days)} overdue",
+                            body=(
+                                f"Was due {_alert_date(cal.next_calibration_date)}. Take the gauge out of use "
+                                "until it is calibrated."
+                            ),
+                            link=links.CALIBRATION_LIST,
+                            template="calibration_due",
+                            context={
+                                "equipment_name": cal.name,
+                                "days_overdue": -days,
+                                "overdue": True,
+                                "urgent": True,
+                                "link_path": links.CALIBRATION_LIST,
+                            },
+                        )
+                        totals["calibrations_overdue"] += 1
+                        continue
+
+                    urgent = days <= 1
+                    when = "today" if days == 0 else "tomorrow" if days == 1 else f"in {_days_word(days)}"
                     await dispatch_direct(
                         db,
-                        event_key="calibration.due",
+                        event_key=CALIBRATION_DUE_EVENT,
                         company_id=cid,
-                        recipients=quality_users,
+                        recipients=recipients,
                         related_type="Equipment",
                         related_id=cal.id,
-                        title=f"Calibration due soon: {cal.name}",
-                        body=f"Calibration is due in {days} day(s).",
+                        title=f"{'URGENT: ' if urgent else ''}Calibration due {when}: {cal.name}",
+                        body=f"Calibration is due {_alert_date(cal.next_calibration_date)}.",
                         link=links.CALIBRATION_LIST,
                         template="calibration_due",
                         context={
                             "equipment_name": cal.name,
                             "days_until_due": days,
+                            "urgent": urgent,
                             "link_path": links.CALIBRATION_LIST,
                         },
                     )
-
-                for cal in calibrations_1day:
-                    await dispatch_direct(
-                        db,
-                        event_key="calibration.due",
-                        company_id=cid,
-                        recipients=quality_users,
-                        related_type="Equipment",
-                        related_id=cal.id,
-                        title=f"URGENT: Calibration due tomorrow: {cal.name}",
-                        body="Calibration is due within 1 day.",
-                        link=links.CALIBRATION_LIST,
-                        template="calibration_due",
-                        context={
-                            "equipment_name": cal.name,
-                            "days_until_due": 1,
-                            "urgent": True,
-                            "link_path": links.CALIBRATION_LIST,
-                        },
-                    )
-
-                total_7day += len(calibrations_7day)
-                total_1day += len(calibrations_1day)
+                    totals["calibrations_due"] += 1
             except Exception as e:
-                logger.error(f"Calibration digest failed for company {cid}: {e}")
+                logger.error(f"Calibration alerts failed for company {cid}: {e}")
                 # Reset the shared session, or every later tenant inherits this one's failed transaction.
-                reset_session_after_failure(db, f"the calibration digest for company {cid}")
+                reset_session_after_failure(db, f"the calibration alerts for company {cid}")
 
-        logger.info(f"Checked calibrations: {total_7day} due in 7 days, {total_1day} due tomorrow")
-        return {"calibrations_7day": total_7day, "calibrations_1day": total_1day}
+        logger.info(
+            f"Checked calibrations: {totals['calibrations_overdue']} overdue, {totals['calibrations_due']} due "
+            f"within {CALIBRATION_DUE_WINDOW_DAYS} days"
+        )
+        return totals
 
     except Exception as e:
         logger.error(f"Calibration check job failed: {e}")
@@ -481,17 +507,9 @@ def maintenance_alert_recipients(db, company_id: int) -> list:
     """Who hears about due and overdue PM: the company's active users in the catalog entry's departments
     (Maintenance) plus its active users in the entry's roles (Admin) -- owner decision 2026-11-20, held in
     ONE place, ``notification_catalog`` -- each once."""
-    from app.services.notification_catalog import get_entry
+    from app.services.notification_dispatch import catalog_audience_for
 
-    entry = get_entry(MAINTENANCE_DUE_EVENT)
-    recipients: dict = {}
-    for department in entry.departments:
-        for user in get_notification_recipients(db, department=department, company_id=company_id):
-            recipients.setdefault(user.id, user)
-    for role in entry.roles:
-        for user in get_notification_recipients(db, role=role, company_id=company_id):
-            recipients.setdefault(user.id, user)
-    return list(recipients.values())
+    return catalog_audience_for(db, MAINTENANCE_DUE_EVENT, company_id)
 
 
 def _alert_date(value) -> str:

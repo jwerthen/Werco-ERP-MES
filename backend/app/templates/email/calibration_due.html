@@ -2,11 +2,16 @@
 
 {# CUI-safe: equipment identifier + due window only. #}
 {% block content %}
-<h2>Calibration Due</h2>
+<h2>{% if overdue %}Calibration Overdue{% else %}Calibration Due{% endif %}</h2>
 
 <div class="alert {% if urgent %}alert-danger{% else %}alert-warning{% endif %}">
+    {% if overdue %}
+    <strong>{{ equipment_name }}</strong> is {{ days_overdue }} day(s) past its calibration due date.
+    Take it out of use until it is calibrated.
+    {% else %}
     <strong>{{ equipment_name }}</strong> is due for calibration
-    {% if days_until_due is not none %}in {{ days_until_due }} day(s){% else %}soon{% endif %}.
+    {% if days_until_due == 0 %}today{% elif days_until_due is not none %}in {{ days_until_due }} day(s){% else %}soon{% endif %}.
+    {% endif %}
 </div>
 
 <p>Log in to Werco to review and schedule the calibration.</p>

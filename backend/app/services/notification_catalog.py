@@ -570,6 +570,20 @@ _ENTRIES: List[CatalogEntry] = [
         departments=("Quality",),
     ),
     CatalogEntry(
+        event_key="calibration.overdue",
+        label="Calibration overdue",
+        description="A gauge in service is past its calibration due date.",
+        category=Category.QUALITY,
+        severity="critical",
+        default_channels=frozenset({CHANNEL_IN_APP, CHANNEL_DIGEST}),
+        # A standing overdue gauge is ONE unread inbox row per person (re-raised once read, while
+        # still overdue), plus the digest line -- not a fresh push every morning.
+        recurring=True,
+        source_event_types=(),  # cron-driven via dispatch_direct (check_calibrations_job)
+        roles=(UserRole.QUALITY,),
+        departments=("Quality",),
+    ),
+    CatalogEntry(
         event_key="cert.expiring",
         label="Certification expiring",
         description="An operator certification is expiring.",

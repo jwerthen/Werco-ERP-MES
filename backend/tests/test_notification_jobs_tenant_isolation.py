@@ -244,7 +244,7 @@ def test_calibrations_digest_runs_and_is_tenant_scoped(db_session: Session, monk
 
     # (a) Runs to completion without raising -- the model/field fix means it no longer crashes.
     result = asyncio.run(notification_jobs.check_calibrations_task())
-    assert result["calibrations_7day"] >= 2
+    assert result["calibrations_due"] >= 2
 
     by_related = {(c["related_type"], c["related_id"]): c for c in recorder.calls}
     assert ("Equipment", eq_a.id) in by_related
