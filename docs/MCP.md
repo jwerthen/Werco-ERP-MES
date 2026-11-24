@@ -2,8 +2,8 @@
 
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
-(Cursor, Claude Code, a chat bot) gets **798 tools** — 15 hand-written *convenience* tools plus
-**783 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+(Cursor, Claude Code, a chat bot) gets **799 tools** — 15 hand-written *convenience* tools plus
+**784 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
 as the same request from the web app. A **read-only** API token is shown fewer tools, and an
 **AI-external** one fewer still (§4.1, §4.2).
 
@@ -168,6 +168,12 @@ on the AI-external allowlist (`AI_EXTERNAL_ALLOWED_ROUTES` was not extended). Th
 tools because nothing about them is a judgment write; tying a sheet from their `proposed_tie` is the
 existing `create_material_allocation`. See
 [API.md → Laser Nests](API.md#laser-nests), *Untied nests*.
+
+**Re-checked again on 2026-11-23 after Admin Settings → System Health added one tool**,
+`get_system_health` (`GET /admin/system-health`, Admin only, a pure read; no existing name shifted):
+15 convenience + **784** generated, 16 shadowed, one more than the 783 above. It carries the denied `Admin Settings` tag, so the
+read-only catalog is unchanged at 8 convenience + **309** generated, and it is not on the
+AI-external allowlist.
 
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
@@ -870,7 +876,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `AuditLog` (`/audit-log`) | Audit | `list_audit_logs`, `get_audit_summary`, `verify_audit_integrity`, `get_integrity_status` |
 | `VisitorLog` (`/visitor-log`) | Visitor Logs | `list_visitors`, `manual_entry`, `sign_out`, `export_visitors_csv`, `create_station`, `revoke_station` |
 | `VisitorSignIn` (`/visitor-signin`) | Visitor Logs | `sign_in`, `sign_out` (under the caller's own role; the tablet's shared-PIN station login is unauthenticated plumbing and is not a tool) |
-| `AdminSettings` (`/admin/settings`) | Admin Settings, Users, Production Calendar, Company Management | `list_work_center_rates`, `update_work_center_rate`, `list_work_center_types_admin`, `update_work_center_types_admin`, `get_email_recipients`, `update_email_recipients`, `get_role_permissions`, `update_role_permissions`, `get_audit_log`, `list_users`; Production Calendar tab: `get_production_calendar`, `save_production_calendar_document` (Admin only), `sync_working_calendars_from_shifts` (dry run by default; Admin / Manager / Supervisor), `resolve_production_moment` (which production day and shift an instant belongs to); Badge Sign-in tab: `get_my_company` reads the policy, but **turning it on or off is not a tool** (`PUT /companies/me/floor-pin-policy` is in `EXCLUDED_OPERATIONS`, §6.1, and refuses **403** to every API token) |
+| `AdminSettings` (`/admin/settings`) | Admin Settings, Users, Production Calendar, Company Management | `list_work_center_rates`, `update_work_center_rate`, `list_work_center_types_admin`, `update_work_center_types_admin`, `get_email_recipients`, `update_email_recipients`, `get_role_permissions`, `update_role_permissions`, `get_audit_log`, `list_users`; System Health tab: `get_system_health` (Admin only, read-only); Production Calendar tab: `get_production_calendar`, `save_production_calendar_document` (Admin only), `sync_working_calendars_from_shifts` (dry run by default; Admin / Manager / Supervisor), `resolve_production_moment` (which production day and shift an instant belongs to); Badge Sign-in tab: `get_my_company` reads the policy, but **turning it on or off is not a tool** (`PUT /companies/me/floor-pin-policy` is in `EXCLUDED_OPERATIONS`, §6.1, and refuses **403** to every API token) |
 | `PlatformOverview` (`/platform`) | Platform Administration | `platform_overview`, `list_companies`, `company_dashboard`, `browse_company_users` (platform admins only — the route decides) |
 | Company settings (Admin Settings → AI / SMS privacy tabs; there is no company self-registration page) | Company Management | `get_my_company`, `update_my_company` — **the AI and SMS egress kill switches are not tools**: `PUT /companies/me/ai-egress` and `PUT /companies/me/sms-egress` are in `EXCLUDED_OPERATIONS` (§6.1) and refuse **403** to every API token, as do the carrier and label-print switches' profile writes (`PUT /admin/settings/shipping-profile`, `PUT /receiving/print-profile`; their `get_shipping_profile` / `get_print_profile` reads stay tools) |
 | `ApiTokens` (`/admin/api-tokens`) | API Tokens | `create_api_token`, `list_api_tokens`, `revoke_api_token` (Admin only; a call authenticated **by** an API token gets the route's 403 fence — §4) |
@@ -1004,7 +1010,7 @@ re-verification and CAR effectiveness verbs **772**, the five PO quality flow-do
 exclusions (twenty-six) without changing the count. On 2026-11-20 maintenance log entries made it
 **780**; on 2026-11-23 the self-service password change and the inspection sign-off joined the
 exclusions (twenty-eight) and company creation was deleted with its route, while Department pick
-list, the Sheet Gaps list and the four untied laser-nest reads were added: **783**.
+list, the Sheet Gaps list, the four untied laser-nest reads and System Health were added: **784**.
 
 ### 6.2 Naming and the collision policy (`app/mcp/naming.py`)
 

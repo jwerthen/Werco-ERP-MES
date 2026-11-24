@@ -34,6 +34,14 @@ jest.mock('../services/api', () => ({
   default: { get: jest.fn(), post: jest.fn(), getProductionCalendar: jest.fn() },
 }));
 
+// The empty-state's job-status note reads the signed-in role; a Manager sees the static
+// advice and never calls the Admin-only GET /admin/system-health (OeeJobStatusNote.test.tsx
+// covers the Admin path).
+jest.mock('../context/AuthContext', () => ({
+  __esModule: true,
+  useAuth: () => ({ user: { role: 'manager', is_superuser: false } }),
+}));
+
 const mockedApi = api as jest.Mocked<typeof api>;
 
 // Real GET /oee/dashboard shape (oee.py ~L557). Plant A/P/Q are NOT in the response —

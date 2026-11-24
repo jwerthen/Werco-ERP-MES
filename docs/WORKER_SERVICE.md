@@ -20,7 +20,7 @@ selected cron plus active release/heartbeat. See [the current rollout procedure]
 WORKER_DEPLOYMENT_RUNBOOK.md#current-hank-follow-up-release-procedure).
 
 **PM due and overdue alerts (2026-11-20):** the fifteenth cron, `check_maintenance_due_job`
-(daily at 12:15 container time: 12:15 UTC while `TZ` is unset), sends `maintenance.due` /
+(daily at 06:15 shop time, America/Chicago), sends `maintenance.due` /
 `maintenance.overdue`, in-app only. An allowlist does not pick up a
 new cron, so a worker on the Hank-only allowlist above never runs it: the owner adds it,
 **`WORKER_CRON_JOBS=check_hank_watches_job,check_maintenance_due_job`** (13 of 15 suppressed). The
@@ -171,9 +171,20 @@ and destroys the parity guard outright. Named here, deliberately not fixed.
 ## 2. The blast radius — read before arming any cron
 
 **Every cron in `WorkerSettings.cron_jobs` fires the moment a worker process runs.** There
-is no separate enable step. Fifteen are declared. Times are the container's local zone —
-arq defaults to `datetime.now().astimezone().tzinfo`, which on Railway is **UTC unless `TZ`
-is set**, so "6 AM" means 06:00 UTC = **01:00 Central**.
+is no separate enable step. Fifteen are declared. **Times are shop time (America/Chicago),
+daylight saving included**: `WorkerSettings.timezone` pins arq to
+`app.core.worker_schedule.SHOP_TIMEZONE` in code, so the container's `TZ` no longer moves the
+schedule. (Until 2026-11-23 arq used the container's zone — UTC on Railway — so "6 AM" fired at
+01:00 Central; `check_maintenance_due_job`'s 12:15 was that UTC hour and is now 06:15.)
+
+Daylight-saving nights: on the spring-forward night the 02:00–02:30 jobs fire at 03:00 CDT and
+the every-5-minute crons catch up the skipped hour in a quick burst (each run is idempotent);
+on the fall-back night the every-5-minute crons pause for the repeated hour.
+
+Admin Settings → **System Health** (`GET /admin/system-health`) shows which of these the
+running worker armed, each one's next run and how its last run went. A run is marked `running`
+when it starts and replaced by its result when it ends; one still `running` long after its start was
+cut off (worker stopped or redeployed mid-run, which arq fails without an end-of-job hook).
 
 **This is the one authoritative table** of what each cron does and whether it is safe to arm
 (revised 2026-11-23 with plans mrp/6 step 1 and alerts_health/2 steps 1-5). Nothing is armed
@@ -181,7 +192,7 @@ by this change: production runs `WORKER_CRON_JOBS=none`, and arming is the owner
 sections and `WORKER_DEPLOYMENT_RUNBOOK.md` give the procedure; where they disagree with this
 table, this table wins.
 
-| Cron | When (container zone) | What it does | Safe to arm now? | What it needs first |
+| Cron | When (shop time, America/Chicago) | What it does | Safe to arm now? | What it needs first |
 |---|---|---|---|---|
 | `relay_pending_notifications_job` | every 5 min | Re-enqueues catalog events whose after-commit enqueue was lost (`notified_at IS NULL`). Bounded: 24 h floor, 2 min grace, 500 a pass. | **Yes** | Nothing. |
 | `check_hank_watches_job` | every 5 min | Checks at most 100 saved personal watches; a match is one private in-app notice. No email, no business write. | **Yes** | Migration 109 (already applied). |
@@ -189,15 +200,15 @@ table, this table wins.
 | `cleanup_runtime_metrics_job` | 02:15 daily | Physically deletes anonymous browser performance samples older than 30 days. | **Yes** | Nothing. |
 | `poll_tracking_job` | every 30 min | Carrier tracking poll; does nothing while `allow_carrier_egress` is off (the default). | **Yes** | Carrier egress on, for it to do anything. |
 | `check_calibrations_job` | 07:00 daily | Per in-service gauge, on the company's day (`company_today`): `calibration.overdue` once past its date (recurring: one unread row per person), else `calibration.due` when due today or within 7 days (URGENT today/tomorrow). Reaches the **Quality role and the Quality department** (catalog audience). In-app + digest. | **Yes** | Quality people set up (role Quality, or Department "Quality"). |
-| `check_maintenance_due_job` | 12:15 daily | `maintenance.overdue` / `maintenance.due` on the company's day to the Maintenance department + Admins. In-app only. | **Yes** | Run the overdue counts in `DEPLOYMENT.md` → PM due and overdue alerts. |
+| `check_maintenance_due_job` | 06:15 daily (12:15 UTC before the zone was pinned) | `maintenance.overdue` / `maintenance.due` on the company's day to the Maintenance department + Admins. In-app only. | **Yes** | Run the overdue counts in `DEPLOYMENT.md` → PM due and overdue alerts. |
 | `check_low_stock_job` | 07:30 daily | One `stock.low` count per company: parts (not rows) at or below a reorder point above zero, company-owned stock only -- the same list as `GET /inventory/low-stock` and the Inventory low-stock view, which it links to. Names no part. In-app (the bell) + digest, to the Purchasing and Inventory departments. | **Yes** | Reorder points maintained on the parts that matter, or it counts little; buyers' Department set to Purchasing / Inventory. |
 | `check_late_work_orders_job` | 08:00 daily | **One `wo.late` summary per Supervisor / Manager per company day**: total, the ten most overdue (WO number + days late) and a link to the Work Orders list's late view (`/work-orders?scope=late&cots=1`). Late = `must_ship_by`, else `due_date`, before `company_today`, for released / in-progress / held jobs -- one predicate (`work_order_browse_service.late_work_order_clause`) shared with that view, so the summary's total and the list agree. In-app + email. A second run the same day sends nothing. | **Yes** | Nothing blocking. Known gap: a person added to the audience after the day's run gets their first summary the next day (the same-day check is per company, not per recipient). The dashboard's Overdue tile still uses `scope=overdue` (`due_date` only, drafts included), so it can show a different number. |
 | `send_daily_digest_job` | 08:00 daily | One email per **active, deliverable user with queued digest items** (no saved preference row = defaults; a saved opt-out is honoured). Lists each event's label, title, body and link. | **After an owner decision** | Owner accepts that people who never opted in now get it (they have queued items because the catalog defaults include the digest). Set `FRONTEND_BASE_URL` so its links work. |
 | `check_quote_expiring_job` | 09:00 daily | One `quote.expiring` per SENT quote expiring within 7 days, to the Sales department, digest-only. Unchanged. | **Leave off** | Quoting is not in use; harmless if armed. |
 | `aggregate_ai_learning_job` | 05:30 daily | Writes recommend-only `AIRecommendation` rows (incl. low-stock ones, now on the one low-stock rule) and `work_order_blocker_escalated` events; never applies anything, no LLM call. | **Not reviewed in this change** | Review the recommendation volume before arming. |
-| `cleanup_old_logs_job` | Sun 02:00 | Physically deletes completed jobs, notification logs and read notifications older than 90 days. Never audit logs. | **After an owner decision** | Confirm the 90-day windows. |
+| `cleanup_old_logs_job` | Mon 02:00 (`weekday=0` is Monday in arq) | Physically deletes completed jobs, notification logs and read notifications older than 90 days. Never audit logs. | **After an owner decision** | Confirm the 90-day windows. |
 | `archive_aged_audit_logs_job` | 1st of month 03:00 | Exports aged audit rows to NDJSON in `AUDIT_ARCHIVE_DIR`; never deletes. | **No** | A durable volume or object storage for `AUDIT_ARCHIVE_DIR` (see §8). |
-| `run_mrp_review_job` | 06:00 daily | MRP in **REVIEW mode only**: a new `MRPRun` per company and `mrp.review_needed` to Managers when it has actions. **Creates no purchase order and no work order** -- a guard test fails if any cron path constructs either. Replaced `run_mrp_auto_draft_job` (2026-11-23); a `WORKER_CRON_JOBS` value naming the old job now refuses to boot. | **Not yet** | Review state carrying over between runs (plan mrp/6 step 2) -- today "reviewed" marks and inbox items reset with each morning's run -- and the MRP demand / netting fixes, or the morning list is wrong. Set `TZ` (06:00 is 01:00 Central while the container runs UTC). |
+| `run_mrp_review_job` | 06:00 daily | MRP in **REVIEW mode only**: a new `MRPRun` per company and `mrp.review_needed` to Managers when it has actions. **Creates no purchase order and no work order** -- a guard test fails if any cron path constructs either. Replaced `run_mrp_auto_draft_job` (2026-11-23); a `WORKER_CRON_JOBS` value naming the old job now refuses to boot. | **Not yet** | Review state carrying over between runs (plan mrp/6 step 2) -- today "reviewed" marks and inbox items reset with each morning's run -- and the MRP demand / netting fixes, or the morning list is wrong. (06:00 is shop time: the zone is pinned in code, so `TZ` does not move it.) |
 
 Hank checks run through `asyncio.to_thread`; their database sessions are created and
 closed in that thread, keeping synchronous database work off ARQ's event loop.
@@ -308,7 +319,8 @@ here is a step for you.
    `allow_print_egress` — all default off, but confirm.
 9. **Has migration `072` applied in prod?** If not, the `notified_at` backfill that excludes
    pre-072 history has not happened.
-10. **Is `TZ` set on any service?** If not, every "6 AM" cron is 01:00 Central.
+10. ~~**Is `TZ` set on any service?**~~ No longer matters for the schedule: cron hours are
+    pinned to America/Chicago in code (2026-11-23).
 11. **Has `backend/Dockerfile.worker` ever been built?** No — see §5.1b. Build it once
     locally before creating the service.
 
@@ -430,7 +442,7 @@ block was the starting point; the ones marked ★ are additional and were missin
 | `ANTHROPIC_*` | `process_hank_intake_file_job` (saved Hank PDF intake). `aggregate_ai_learning_job` makes no LLM calls. |
 | ★ `AUDIT_ARCHIVE_DIR` | Only if you arm the monthly archive cron — see §8. |
 | `TWILIO_*`, `SMS_DEFAULT_REGION` | Only if SMS is in use. |
-| ★ `TZ` | Decide deliberately. Unset ⇒ UTC ⇒ "6 AM" is 01:00 Central. |
+| `TZ` | Not needed for the schedule: cron hours are pinned to America/Chicago in code. |
 
 ### 5.4 Confirm the two traps are closed
 
@@ -562,7 +574,7 @@ wrote. No cron creates purchase orders or work orders any more.
   ephemeral disk they vanish with the container. Attach a volume or point it at object
   storage **before** arming that cron. It only exports, never deletes, so a lost export is
   a lost archive, not lost audit data — but it is still a compliance artifact.
-- **`TZ`.** Decide whether the crons should run on Central or UTC.
+- ~~**`TZ`.**~~ Decided 2026-11-23: crons run on shop time (America/Chicago), set in code.
 - **Two replicas would double every cron.** `numReplicas = 1` is in the config; do not raise
   it. Two processes each run the full schedule — two MRP runs a morning, and every alert job
   racing its own dedupe.

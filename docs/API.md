@@ -6324,9 +6324,9 @@ uploads go through text extraction + LLM. See
 >   cannot disagree. `GET /maintenance/work-orders/overdue` and the QMS evidence card
 >   (`auto_evidence_service`) keep their own overdue reads.
 > - **Due and overdue alerts (owner decisions 2026-11-20).** A daily worker cron,
->   `check_maintenance_due_job`, runs at hour 12, minute 15 in the **worker container's** zone:
->   12:15 UTC (6:15 AM Central, 7:15 in summer) while `TZ` is unset, 12:15 PM Central with
->   `TZ=America/Chicago`. Whatever the hour, it judges each active company on the company's own
+>   `check_maintenance_due_job`, runs at 06:15 **shop time** (America/Chicago, pinned in code by
+>   `WorkerSettings.timezone` since 2026-11-23, so `TZ` does not move it; it ran at 12:15 UTC
+>   before). Whatever the hour, it judges each active company on the company's own
 >   calendar day, and sends two catalog events, both direct-dispatched (`docs/NOTIFICATIONS.md`):
 >   - **`maintenance.overdue`** for every item the overdue tiles count: an active PM schedule past its
 >     `next_due_date` that no `scheduled` / `overdue` / `in_progress` work order covers (a PM whose
@@ -14495,6 +14495,7 @@ table and no environment variable.
 | GET | `/admin/settings/role-permissions/{role}` | One role's effective permissions and `is_customized` | Admin |
 | PUT | `/admin/settings/role-permissions/{role}` | Replace a role's permissions with a company override (body: JSON array of permission keys). **400** on an unknown role or permission; **503** if its required audit row cannot be written (see note) | Admin |
 | POST | `/admin/settings/role-permissions/{role}/reset` | Drop the company override so the role reverts to its defaults; a role with no override is a no-op. **503** as above | Admin |
+| GET | `/admin/system-health` | Read-only System Health: worker alive (heartbeat age), every cron job with armed / off (`null` = unknown), schedule in shop time (America/Chicago), next run, last run and result (`success` / `failed` / `running` -- `running` long after its start means the run was cut off), plus the active company's un-notified event backlog, queued digest items and failed emails (7 days). Writes nothing; Redis unavailable reads as `unknown`, never an error. Crons are armed only by the worker's `WORKER_CRON_JOBS` | Admin |
 
 > **Settings-audit tenancy:** `GET /admin/settings/audit-log` reads the `SettingsAuditLog` trail
 > (admin / quote-config changes) and is **scoped to the caller's active company**

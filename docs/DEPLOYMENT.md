@@ -261,11 +261,40 @@ boot migration path. No environment variable, secret, cron or worker job is adde
   column and every flag (the `log_update` audit rows still record who flagged which part, but nothing
   re-derives the column from them).
 
+### System Health and shop-time cron schedule
+
+This release adds the read-only Admin Settings → **System Health** tab (`GET /admin/system-health`,
+Admin only; see [API.md](API.md) → Admin Settings) and pins the worker's cron zone to
+America/Chicago in code (`WorkerSettings.timezone`). No migration, secret or environment variable is
+added, and **nothing is armed**: `WORKER_CRON_JOBS` stays exactly as the owner set it. Deploy the
+matching API, worker and frontend as usual.
+
+- **Every armed cron moves to shop time.** Each job keeps its written hour, now read in Central
+  (daylight saving included) instead of the container's zone (UTC on Railway): a cron that fired at
+  06:00 UTC now fires at 06:00 Central. `check_maintenance_due_job` is the one hour that changed in
+  code, 12:15 → 06:15, so it still runs at 6:15 AM Central. Setting or clearing `TZ` no longer
+  moves any cron. Read `WORKER_CRON_JOBS` on `werco-worker` → Variables first to know which jobs
+  this affects; the every-5-minute and every-30-minute crons are unaffected.
+- **Redeploy the worker, not just the API.** The tab's job list comes from a registry the worker
+  writes to Redis at startup (`werco:worker:cron_registry`) and per-run records its job hooks write
+  (`werco:worker:cron_last_run`, no expiry). Until a worker on this release starts, the tab shows
+  no scheduled jobs; until each cron has run once, it shows no last run. Only scheduled runs are
+  recorded, not a job enqueued by hand.
+- **Verify** after the worker redeploy: the startup log reads
+  `ARQ worker cron: N job(s) armed, times in America/Chicago` (or
+  `ARQ worker cron: none armed; draining enqueue-driven jobs only` when `WORKER_CRON_JOBS=none`), and Admin Settings → System Health shows the worker as **Running**, the
+  `WORKER_CRON_JOBS` value, and every cron as on or off matching it. If Redis cannot be read, the
+  tab shows the worker and jobs as unknown rather than failing.
+- **Rollback.** An ordinary application rollback returns crons to the container's zone (UTC) and the
+  maintenance check to 12:15 UTC. The two Redis keys are inert to older code and may be left.
+  Details: [WORKER_SERVICE.md §2](WORKER_SERVICE.md).
+
 ### PM due and overdue alerts
 
-This release adds one worker cron, **`check_maintenance_due_job`**, at 12:15 in the worker
-container's zone: 12:15 UTC (6:15 AM Central, 7:15 in summer) while `TZ` is unset, 12:15 PM Central
-with `TZ=America/Chicago`; whatever the hour, it judges each company's own day. It sends
+This release adds one worker cron, **`check_maintenance_due_job`**, at 06:15 shop time
+(America/Chicago; it ran at 12:15 UTC until the zone was pinned in code, see
+[System Health and shop-time cron schedule](#system-health-and-shop-time-cron-schedule)); whatever
+the hour, it judges each company's own day. It sends
 `maintenance.due` (once per cycle when a PM item comes within 7 days of its due date; a cycle restarts
 when the record changes) and `maintenance.overdue` (recurring: one unread row per user per item) to
 each company's Maintenance department plus its Admins, **in-app only**; see
@@ -305,7 +334,7 @@ worker and frontend as usual.
   If the overdue counts are large, close out or reschedule stale PM first.
 - **Verify** after the worker redeploy: its startup log lists
   `ARQ worker cron:   cron:check_maintenance_due_job -> next run …` (and, for the two-job allowlist,
-  `13 of 15 cron jobs SUPPRESSED`). After the first 12:15 run (container time) the log reads `Checked preventive
+  `13 of 15 cron jobs SUPPRESSED`). After the first 06:15 run (shop time) the log reads `Checked preventive
   maintenance: N overdue and M due alert(s) across K company(ies)`, and a Maintenance-department user
   or an Admin sees the alerts in the bell, each opening the Maintenance page's Schedules or Work
   Orders tab. A heartbeat alone does not prove the cron ran.

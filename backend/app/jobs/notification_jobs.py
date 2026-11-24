@@ -70,6 +70,22 @@ async def dispatch_notification_task(event_id: int) -> dict:
         db.close()
 
 
+def relay_pending_filters(now: datetime) -> list:
+    """The sweeper's own predicate for "still waiting to be notified", as filter clauses.
+
+    Cataloged event types only, ``notified_at IS NULL``, older than the grace window (a normal
+    after-commit enqueue may still be in flight) and newer than the max-age floor. Shared with
+    ``GET /admin/system-health``'s outbox backlog count so the screen and the sweeper cannot
+    disagree about what is pending. ``now`` is naive UTC, as ``created_at`` is compared here.
+    """
+    return [
+        OperationalEvent.event_type.in_(list(SOURCE_EVENT_TYPE_TO_KEY.keys())),
+        OperationalEvent.notified_at.is_(None),
+        OperationalEvent.created_at < now - timedelta(minutes=_RELAY_GRACE_MINUTES),
+        OperationalEvent.created_at >= now - timedelta(hours=_RELAY_MAX_AGE_HOURS),
+    ]
+
+
 async def relay_pending_notifications_task(limit: int = _RELAY_BATCH_LIMIT) -> dict:
     """Re-enqueue catalog-mapped OperationalEvents that never got dispatched.
 
@@ -84,17 +100,9 @@ async def relay_pending_notifications_task(limit: int = _RELAY_BATCH_LIMIT) -> d
 
     db = SessionLocal()
     try:
-        now = datetime.utcnow()
-        cutoff = now - timedelta(minutes=_RELAY_GRACE_MINUTES)
-        floor = now - timedelta(hours=_RELAY_MAX_AGE_HOURS)
         rows = (
             db.query(OperationalEvent.id)
-            .filter(
-                OperationalEvent.event_type.in_(list(SOURCE_EVENT_TYPE_TO_KEY.keys())),
-                OperationalEvent.notified_at.is_(None),
-                OperationalEvent.created_at < cutoff,
-                OperationalEvent.created_at >= floor,
-            )
+            .filter(*relay_pending_filters(datetime.utcnow()))
             .order_by(OperationalEvent.id.asc())
             .limit(limit)
             .all()

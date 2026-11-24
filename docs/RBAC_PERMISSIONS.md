@@ -3696,6 +3696,7 @@ and writes an `EXPORT` audit row through `AuditService`:
 | API tokens for bots / MCP clients (`/api-tokens` issue/list/revoke) | ✓ | | | | | | |
 | Visitor sign-in stations (`/visitor-logs/stations` create/list/revoke/reset-pin) | ✓ | ✓ | | | | | |
 | Crew kiosk stations (`/shop-floor/kiosk-stations` create/list/revoke/reset-pin) | ✓ | ✓ | | | | | |
+| System Health (`GET /admin/system-health`; read-only; a full Admin API token reads it, read-only / AI-external tokens refused) | ✓ | | | | | | |
 | System | ✓ | | | | | | |
 
 > **Badge sign-in PIN policy (AS9100D 8.5.2, migration `130`).** `PUT /companies/me/floor-pin-policy`
