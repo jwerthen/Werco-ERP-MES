@@ -977,7 +977,8 @@ def transfer_inventory(
     Ownership travels with the material: the destination row is matched on the source
     row's owner as well as its lot (customer-owned stock never lands in a company row at
     the destination, nor the reverse), and a newly created destination row carries the
-    source's ownership.
+    source's ownership. It carries the source's heat, cert, PO number and supplier too;
+    an existing destination row keeps its own.
     """
     # FOR UPDATE (no-op on SQLite): both the source decrement and the destination
     # increment below are read-modify-writes racing the consumption engine.
@@ -1051,6 +1052,13 @@ def transfer_inventory(
                 serial_number=inv_item.serial_number,
                 unit_cost=inv_item.unit_cost,
                 received_date=inv_item.received_date,
+                # Traceability travels with the material, as the SKU combine carries it
+                # (inventory_combine_service): a move to a new bin must not strip the heat,
+                # cert, PO and supplier the source row recorded.
+                cert_number=inv_item.cert_number,
+                heat_lot=inv_item.heat_lot,
+                supplier_id=inv_item.supplier_id,
+                po_number=inv_item.po_number,
                 ownership=source_owner[0],
                 owner_customer_id=source_owner[1],
                 owner_vendor_id=source_owner[2],
